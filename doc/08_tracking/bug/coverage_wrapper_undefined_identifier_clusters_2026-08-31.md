@@ -1,7 +1,10 @@
 # Coverage-wrapper `Undefined("undefined identifier: X")` — root-cause grouping
 
 Date: 2026-08-31
-Status: PARTIALLY FIXED (cause B fixed at 5 sites; causes A, C, D, E filed here)
+Status: PARTIALLY FIXED (cause B fixed at 5 sites; causes C, D, E, F open)
+Correction 2026-08-31: cause A ("stale deployed seed") is RETRACTED as factually
+wrong — see that section. The cause-B fixes stand and are now verified against
+the exact binary that produced the log.
 Evidence base: `/tmp/suite3.log` (1365 PASS / ~220 FAIL), 69 wrapper compile
 failures across 26 distinct symbol names, 100 unique (symbol, spec) pairs.
 
@@ -19,16 +22,46 @@ Crucially, the failures are LAYERED: one module can hide several. Fixing
 had never appeared in the log at all. The 26 names in the log are therefore a
 LOWER BOUND, not the population.
 
-## Cause A — stale deployed seed (NOT a live bug)
+## Cause A — RETRACTED 2026-08-31: "stale deployed seed" was WRONG
 
-The `simple` binary used for the suite3 run is dated **2026-08-26**. The
-`panic` builtin was registered in the seed typechecker by **777f3c99583**
-(2026-08-30), whose own comment names this exact symptom. On that stale binary
-even a root-module `panic("x")` fails; on a seed built from `origin/main`
-(b0be388ec46) it compiles.
+**This section originally claimed the suite3 census was produced by a seed
+predating the `panic` builtin fix `777f3c99583`, and advised a redeploy. That is
+false and the advice would have wasted the next person's time. Retracted in
+full; the reasoning error is kept below so it is not repeated.**
 
-Action: **redeploy the seed.** No source change is warranted. Any future
-triage of this log must use a freshly built binary as the discriminator.
+Actual binary identity:
+
+| binary | size | mtime (UTC) | built from |
+|---|---|---|---|
+| `/mnt/data/wt-suite/bin/release/x86_64-unknown-linux-gnu/simple` — **this is the one suite3 used** | 60976360 | 2026-08-31 10:45:20 | `b0be388ec46`, built that morning |
+| `/mnt/data/worktrees/simple-main/bin/simple` — the one I inspected | 60744944 | 2026-08-26 01:16:25 | older |
+
+suite3 ran `./bin/simple test --no-cover-check` with cwd `/mnt/data/wt-suite`,
+so it used the first. That binary already contained everything on `main` through
+`#157`, including `777f3c99583` (2026-08-30). **The seed was current.** I read
+the mtime of a binary in a different worktree and never checked which one the run
+actually used — the whole cause was an artifact of that.
+
+Two independent facts confirm the retraction:
+
+- `panic` appears **zero** times in suite3's symbol census. Had the run used a
+  seed predating `777f3c99583`, `panic` would have been the dominant symbol —
+  its absence is positive evidence the fix was present.
+- Re-running the probes directly on `/mnt/data/wt-suite`'s binary in its own tree
+  reproduces the cause-B symbols exactly (see below). Nothing needed a redeploy.
+
+Consequences for the rest of this document:
+
+- "an unknown fraction of the 69 is already fixed at origin" — **withdrawn**, not
+  supported by anything.
+- Symbols parked under cause A on the strength of "probably already fixed" are
+  re-classified into **cause F** below. None of them were shown to be fixed.
+
+**What survives, and is worth keeping:** use a binary built from the revision
+under test as the discriminator, and record its identity (path, size, mtime,
+source commit) alongside any timing or verdict — not the mtime of whatever
+`bin/simple` happens to point at in some other worktree. That advice is right; it
+simply was not violated by the suite3 run.
 
 ## Cause B — undeclared cross-file use (FIXED, 5 sites)
 
@@ -48,6 +81,23 @@ Before/after proof, fresh seed, `use std.nogc_sync_mut.env.variables`:
 - before: `Undefined("undefined identifier: io_runtime")`
 - after: no `Undefined`; fails later on the pre-existing, unrelated
   "cannot compile to standalone SMF: 32 function(s) require the interpreter".
+
+### Reproduced on the exact binary that produced the log (added 2026-08-31)
+
+After the cause-A retraction the fixes were re-verified against
+`/mnt/data/wt-suite/bin/release/x86_64-unknown-linux-gnu/simple` — the binary
+suite3 actually ran — invoked in its own unmodified tree at `b0be388ec46`:
+
+| probe | result on the suite3 binary |
+|---|---|
+| `use std.nogc_sync_mut.env.variables` | `Undefined("undefined identifier: io_runtime")` |
+| `use std.nogc_sync_mut.lsp.lsp_protocol` | `Undefined("undefined identifier: io_runtime")` |
+| `use os.crypto.aes256_gcm` | `Undefined("undefined identifier: rt_tls13_aes256_gcm_encrypt")` |
+| `use std.nogc_sync_mut.compression.gzip.compress` | `Undefined("undefined identifier: gzip_stream_compress")` |
+
+So cause B is a genuine latent defect on the log-producing binary, established
+without reference to any redeploy story. This is stronger evidence than the
+original write-up had.
 
 ### Scope of this proof — read before quoting a cluster size
 
@@ -136,16 +186,48 @@ Probes already run on the fresh seed, recorded so they are not repeated:
 
 | probe | result | reading |
 |---|---|---|
-| `use lib.sdn` | clean (no `Undefined`) | `String` (8) / `Dict` (6) / `value` (6) do **not** come from `src/lib/sdn/__init__.spl`'s unqualified `case String(s)` / `case Dict(entries)` patterns, which was the leading hypothesis. Most likely cause A. |
+| `use lib.sdn` | clean on **both** my seed and the suite3 binary | `String` (8) / `Dict` (6) / `value` (6) do **not** come from `src/lib/sdn/__init__.spl`'s unqualified `case String(s)` / `case Dict(entries)` patterns, which was the leading hypothesis. With cause A retracted these are **unlocated**, not fixed — see cause F. |
 | `use std.nogc_sync_mut.package.dist` | clean | `Platform` not reproduced from this side |
 | `use compiler.backend.linker.smf_enums` | clean | `Platform` not reproduced from this side either |
 | `use std.nogc_sync_mut.composition.codec` | clean | — |
 | `use std.nogc_sync_mut.compression.gzip.compress` | `Undefined("undefined identifier: gzip_stream_compress")` | live cause B — **now fixed** |
 
-Still unclassified: `String` (8), `Dict` (6), `value` (6), `NativeTensor`, `Node`,
-`fs`, `temp_dir`, `float`, `raise`, `alloc`, `shared_examples`, `context_def`,
-`async_mode`, `mul_scalar`, `_b64_index`. Full (symbol, spec) map extracted from
-suite3 is reproducible with:
+## Cause F — real in suite3, not reproducible by any probe (OPEN, needs the wrapper)
+
+`String` (8), `Dict` (6), `value` (6), `NativeTensor`, `Node`, `fs`, `temp_dir`,
+`float`, `raise`, `alloc`, `shared_examples`, `context_def`, `async_mode`,
+`mul_scalar`, `_b64_index`.
+
+These were previously parked under cause A on the assumption they were already
+fixed. **That assumption is withdrawn and nothing replaces it.** What is known:
+
+- They appear in suite3's log, produced by a `b0be388ec46` binary.
+- Probing their most likely owning modules with that same binary compiles clean.
+- Two specs drawn from the log's failing set (`scilib/linalg_norm_spec.spl`,
+  `lib/mcp/handler_registry_spec.spl`) now PASS under
+  `SIMPLE_MCDC_MODE=on ... --coverage --force-rebuild`, with and without the
+  cause-B fix.
+
+So the failures are real but **not reproducible outside the suite3 run** by any
+method available here. Candidate explanations, none of which is established and
+none of which should be written up as fact until a wrapper is in hand:
+
+1. The generated wrapper's compile closure genuinely differs from a plain
+   `use <module>` probe's closure (the flat `fn main()` restructuring in
+   `spipe_*` moves declarations between scopes).
+2. Run-state not replicated: the suite3 run's `SIMPLE_MCDC_MODE` value, its
+   concurrency, its cwd, or its `TMPDIR` contents.
+3. Cross-run interference in the shared temp dir — every wrapper is written to
+   `_tp_get_temp_dir()` (here `/mnt/data/tmp`) under a spec-derived name, with no
+   per-run isolation. Wrappers from other concurrent sessions were observed
+   appearing there during this investigation.
+
+**The blocker is the same in all three cases: no failing wrapper is retained.**
+See the retention gap filed alongside this document. Until one can be captured,
+these symbols should not be worked — locating them by grep alone is what produced
+the retracted cause A.
+
+Full (symbol, spec) map extracted from suite3 is reproducible with:
 
 ```
 grep -oE 'spipe_wrapped__[A-Za-z0-9_]+_spec_native\.spl\): semantic: [^ ]+ Undefined\("undefined identifier: [A-Za-z_0-9]+' /tmp/suite3.log
