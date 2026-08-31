@@ -147,3 +147,117 @@ rejection.env                 493 bytes, Sep  1 07:45  (reason=stage2-struct-rec
 
 # no build/w/stage2-admitted/ directory — admission was NOT reached.
 ```
+
+## RESOLVED 2026-09-01 — root cause found, none of the four capabilities faults
+
+Bisected the fixture into four single-capability `.spl` files (class field
+write, tuple index, `text.len()`, struct-value copy) and a plain two-line
+`print("hello"); return 0` control. **All five crash identically** (rc=139,
+same faulting address) under the probe's exact `native-build` invocation.
+This rules out every "which capability" theory from the earlier draft of
+this doc — the fault is not in receiver/struct-copy codegen at all, and
+fires before any user code runs.
+
+### The fault, disassembled
+
+`cdb -c "g; k; r; u; q"` on the reproduced binary shows the SEGV at
+`rip = ImageBase + 0` (the loaded module's own DOS/PE header bytes,
+`4d 5a` = "MZ", executed as code) with return address `probe+0xa0010`.
+`llvm-objdump -d` on that return address resolves to:
+
+```
+1400a0003: 4c 8b c7        movq   %rdi, %r8      ; envp
+1400a0006: 48 8b d3        movq   %rbx, %rdx     ; argv
+1400a0009: 8b 08           movl   (%rax), %ecx   ; argc
+1400a000b: e8 f0 ff f5 ff  callq  0x140000000    ; == ImageBase exactly
+1400a0010: 8b d8           movl   %eax, %ebx      ; <- return address, matches cdb frame
+```
+
+Three-argument cdecl call `(argc, argv, envp)` from inside CRT startup
+(`__scrt_common_main_seh`'s `invoke_main()`, ~0x80 bytes before
+`AddressOfEntryPoint`) is the classic MSVC `wmain(argc, argv, envp)`
+invocation. **The linker resolved the `wmain` call target to RVA 0** — a
+direct E8 near call, so this was baked in at LINK time, not corrupted by a
+missing base relocation at load time.
+
+### Root cause: default clang-cl link path silently no-ops symbol resolution failures
+
+`linker.rs`'s `link_objects` (~line 1811-1834), when
+`SIMPLE_NO_STUB_FALLBACK` is *not* set (the default — and what the probe's
+first `native-build` invocation used), appends to the clang-cl link line:
+
+```
+/WHOLEARCHIVE            (bare -- no `:lib` qualifier, forces every
+                           input archive fully in)
+/FORCE:MULTIPLE,UNRESOLVED
+```
+
+The code's own pre-existing comment already flagged the bare `/WHOLEARCHIVE`
+as pulling in duplicate import descriptors ("Narrowing that is a linker-
+contract change and is deliberately left for its own commit") but had not
+been connected to a crash. Combined with `/FORCE:MULTIPLE,UNRESOLVED`
+(which suppresses both LNK2005 duplicate-definition and LNK2019 unresolved-
+external as hard errors), the MSVC linker picks a bogus resolution for the
+generated `wmain` and emits it anyway — RVA 0 rather than the real function
+in `_main_stub.o` — with **zero diagnostic output** (`build.log` for the
+failing run has no `LNK4xxx`/`LNK2xxx` lines at all). Binary size is a
+strong corroborating signal: 2,440,704 bytes with the default/broken path
+vs **165,376 bytes** for the identical source built with
+`SIMPLE_NO_STUB_FALLBACK=1` — a ~15x blowup from whole-archiving every
+input, consistent with the pre-existing comment's prediction.
+
+**Confirmed by A/B**: the exact `bootstrap_struct_receiver_guard.spl`
+fixture, unchanged, run through the identical `native-build` command,
+only with `SIMPLE_NO_STUB_FALLBACK=1` added:
+
+```
+build_rc=0
+bootstrap struct receiver guard
+run_rc=0
+```
+
+### Why the earlier "value-transport/ABI" prior (task item 3) is dead
+
+Every one of the four capabilities, and even code that exercises none of
+them, faults identically. This is not a struct-copy, tuple-access, or
+receiver-ABI defect. It is a link-time symbol-resolution failure that
+happens to manifest as a crash during the CRT's call into user `wmain`,
+before `spl_main`/`main` — and therefore before struct receivers,
+tuples, text methods, or aggregate copies are ever reached.
+
+### Fix
+
+`scripts/check/check-bootstrap-stage2-struct-receiver.shs`'s first probe
+(the one that builds and runs this fixture) was missing
+`SIMPLE_NO_STUB_FALLBACK=1` on the MSVC lane — the *second* probe further
+down the same file (the positional Stage-3 route check) already carries it
+unconditionally, for this exact reason, and was not affected. Fixed by
+setting it, scoped to `*windows-msvc*` targets only so the Linux/macOS
+lanes this same script also runs under are byte-for-byte unaffected
+(verified only on Windows here; commits `64b50bb5d61`, `0cb65d3078f`).
+
+### Unix impact
+
+None expected, and the scoping makes this provable rather than assumed:
+the added `case "$stage2_target" in *windows-msvc*)` guard means
+`SIMPLE_NO_STUB_FALLBACK` resolves to the empty string (== unset, per the
+Rust side's `Ok("1")` check) on every non-MSVC target, so Linux/macOS
+invocations of this script take a byte-identical code path to before.
+The underlying `linker.rs` defect (bare `/WHOLEARCHIVE` +
+`/FORCE:MULTIPLE,UNRESOLVED` silently no-oping real link errors) is not
+Windows-specific in principle -- the same code path exists for other
+`is_clang_cl`/`is_msvc` targets -- but was not touched or re-tested here;
+narrowing that flag pair generally is the still-open, deliberately
+deferred linker-contract change the pre-existing comment in `linker.rs`
+already calls out.
+
+### Remaining work
+
+The struct-receiver gate itself now passes
+(`bootstrap_stage2_struct_receiver=PASS`, measured by hand). The *second*
+probe in the same script (positional Stage-3 route) then failed with
+`Error: --threads requires a positive integer` (worker `native-build`
+invocation, exit code 2) — a distinct, pre-existing issue unrelated to
+this bug and not touched by this fix. Full stage2 admission is still
+blocked on that. Not investigated further here; needs its own bug record
+if it reproduces on a clean end-to-end run.
