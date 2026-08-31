@@ -6,18 +6,34 @@ use super::core::{Tensor, compute_strides};
 impl Tensor {
     /// Matrix multiplication (2D tensors)
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor, CompileError> {
-        if self.ndim() != 2 || other.ndim() != 2 {
+        // NumPy `@` semantics: a 1D operand is promoted for the duration of the
+        // product and the promoted axis is dropped from the result. A 1D left
+        // operand becomes a row (1, k); a 1D right operand becomes a column
+        // (k, 1). Without this, `m{ A @ x }` for a matrix A and a vector x --
+        // the ordinary matrix-times-vector case -- failed outright.
+        if self.ndim() > 2 || other.ndim() > 2 || self.ndim() == 0 || other.ndim() == 0 {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_OPERATION)
-                .with_help("matmul requires both arguments to be 2D tensors");
+                .with_help("matmul requires 1D or 2D tensors");
             return Err(CompileError::semantic_with_context(
                 "matmul requires 2D tensors".to_string(),
                 ctx,
             ));
         }
 
-        let (m, k1) = (self.shape[0], self.shape[1]);
-        let (k2, n) = (other.shape[0], other.shape[1]);
+        let left_is_vector = self.ndim() == 1;
+        let right_is_vector = other.ndim() == 1;
+
+        let (m, k1) = if left_is_vector {
+            (1, self.shape[0])
+        } else {
+            (self.shape[0], self.shape[1])
+        };
+        let (k2, n) = if right_is_vector {
+            (other.shape[0], 1)
+        } else {
+            (other.shape[0], other.shape[1])
+        };
 
         if k1 != k2 {
             return Err(crate::error::factory::tensor_shape_mismatch(
@@ -37,7 +53,14 @@ impl Tensor {
             }
         }
 
-        Tensor::new(result, vec![m, n])
+        // Drop the axes that only existed because an operand was promoted.
+        let shape = match (left_is_vector, right_is_vector) {
+            (true, true) => vec![],
+            (true, false) => vec![n],
+            (false, true) => vec![m],
+            (false, false) => vec![m, n],
+        };
+        Tensor::new(result, shape)
     }
 
     /// Dot product of 1D tensors
