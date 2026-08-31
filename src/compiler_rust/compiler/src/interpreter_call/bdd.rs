@@ -1257,17 +1257,16 @@ pub(super) fn eval_bdd_builtin(
                 }
             }
         }
-        // Suite-scoped hooks. This runner has no separate collect-then-execute
-        // phase (a `describe` body EXECUTES as it is read), so `before_all`
-        // runs the block immediately at its declaration point -- which, being
-        // written above the group's examples, is exactly "once, before the
-        // first `it`". `after_all` is deferred to the enclosing group's end.
+        // Suite-scoped `after_all`. `before_all` is deliberately NOT intercepted
+        // here: `std.spec`'s own `before_all` already runs its block at the
+        // declaration point and that half worked, whereas intercepting it here
+        // ran the block against a different env and cost the LATER `after_all`
+        // hook its write-back to the module global.
+        //
+        // This runner has no separate collect-then-execute phase (a `describe`
+        // body EXECUTES as it is read), so `after_all` is deferred onto a
+        // per-group stack and drained when the enclosing group's body ends.
         // Same contract as `std.spec` (src/lib/nogc_sync_mut/spec.spl).
-        "before_all" => {
-            let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            exec_block_value(block, env, functions, classes, enums, impl_methods)?;
-            Ok(Some(Value::Nil))
-        }
         "after_all" => {
             let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             BDD_AFTER_ALL.with(|cell| {
