@@ -851,7 +851,7 @@ int main(int argc, char** argv) {
         temp_dir: &Path,
         object_paths: &[PathBuf],
         symbol_cache: Option<&mut HashMap<PathBuf, Vec<String>>>,
-    ) -> Result<Option<PathBuf>, String> {
+    ) -> Result<(Option<PathBuf>, Vec<String>), String> {
         let mut init_names = Vec::new();
         let mut local_cache = HashMap::new();
         let cache = match symbol_cache {
@@ -1015,7 +1015,7 @@ int main(int argc, char** argv) {
         if !status.success() {
             return Err(format!("compile init_all.cpp failed ({})", cxx));
         }
-        Ok(Some(init_o))
+        Ok((Some(init_o), init_names))
     }
 
     /// Compile C runtime sources to object files (currently disabled).
@@ -1049,7 +1049,7 @@ int main(int argc, char** argv) {
         let object_paths = link_object_paths.as_slice();
 
         let main_o = self.compile_main_stub(temp_dir)?;
-        let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
+        let (init_o, init_names) = self.generate_init_caller(temp_dir, object_paths, None)?;
         let extra_link_objects = configured_extra_link_objects()?;
         let selected_runtime = self.selected_runtime_library(temp_dir)?;
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
@@ -1380,9 +1380,39 @@ int main(int argc, char** argv) {
                 }
                 #[cfg(target_os = "windows")]
                 {
+                    // MSVC's `/ALTERNATENAME` (emitted by `generate_init_caller`
+                    // for every `__module_init_*` name, to emulate ELF/Mach-O
+                    // weak symbols) does not behave as a fallback-if-still-
+                    // undefined the way `__attribute__((weak))` does: link.exe
+                    // substitutes the alternate at the point the referencing
+                    // object (`_init_all.o`) is processed, which happens BEFORE
+                    // this archive -- appended after `_init_all.o` in the
+                    // deferred `/link` group for clang-cl, or immediately after
+                    // it here for plain MSVC -- is even scanned for its real
+                    // definitions. The archive member holding the true
+                    // `__module_init_<prefix>` then never gets pulled in, the
+                    // empty stub silently wins, and module init never runs
+                    // (doc/08_tracking/bug/windows_msvc_module_init_alternatename_link_order_2026-08-31.md).
+                    //
+                    // Force resolution the same way `runtime_retention_symbols`
+                    // already does for the runtime archive: `/INCLUDE:<name>`
+                    // pulls the archive member with that DEFINED symbol into the
+                    // link's root set regardless of ALTERNATENAME's rewrite.
+                    // Every name in `init_names` was scanned as a global symbol
+                    // out of exactly the object files this archive is built
+                    // from, so each one is guaranteed to have a real definition
+                    // here -- `/INCLUDE` on a name with no definition anywhere
+                    // is a hard unresolved-external link error, which is why
+                    // this is safe only because of that provenance.
                     if is_clang_cl {
+                        for name in &init_names {
+                            clang_cl_link_args.push(format!("/INCLUDE:{name}"));
+                        }
                         clang_cl_link_args.push(clang_cl_whole_archive_arg(&archive_path));
                     } else if is_msvc {
+                        for name in &init_names {
+                            cmd.arg(format!("-Wl,/INCLUDE:{name}"));
+                        }
                         cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
                     } else {
                         cmd.arg("-Wl,--whole-archive")
@@ -1882,7 +1912,7 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         }
         let object_paths = link_object_paths.as_slice();
         let mut symbol_cache = HashMap::new();
-        let init_o = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
+        let (init_o, _init_names) = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
         let cc = find_c_compiler();
 
         let compiler_rt_builtins = find_compiler_rt_builtins(triple);
