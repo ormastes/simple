@@ -87,3 +87,45 @@ because `build/` is gitignored (`lines=4`); a non-executable binary (`rc=126`); 
 build; and `corrupted_ids=0` on a fixture that never had corrupted ids. **Every run
 must be checked for non-vacuity (line count, rc, and an actual artifact) before its
 number is read as a result.**
+
+## Isolation narrowed 2026-08-31 (all measured on the Stage-2 candidate)
+
+| case | result |
+|---|---|
+| `["a", "b"].join("/")` — literal used DIRECTLY as a receiver | **BUILDS**, binary produced (and needs no `rt_array_new`) |
+| `var parts = ["a", "b"]` — bound to a local, NO annotation | fails, `use of undefined value` |
+| `var parts: [text] = ["a", "b"]` — bound to a local, annotated | fails, byte-identical |
+| `var parts: [text] = []` — empty, annotated | fails, byte-identical |
+
+Two conclusions:
+
+1. **The type annotation is NOT the trigger** — annotated and unannotated fail
+   identically. The earlier framing ("declared aggregate annotation") is wrong.
+2. **The split is BOUND-TO-A-LOCAL vs USED-DIRECTLY.** An array literal consumed
+   in place lowers and links fine; the same literal bound to a local loses its
+   Aggregate. That moves the search decisively into the Let handler, and off
+   `lower_array_lit`, which is common to both paths.
+
+## Prime remaining suspect: the Let handler's stale builder snapshot
+
+`mir_lowering_stmts.spl` takes `var b2 = self.builder` at :1206, calls
+`b2.emit_copy(local, init_local)` at :1228, and writes back `self.builder = b2`
+at :1260. `MirBuilder` is a STRUCT (`mir_data.spl:113`) with value semantics, so
+**any instruction emitted into `self.builder` between :1206 and :1260 is silently
+discarded by that write-back**. This is the same aliasing hazard the file works
+around elsewhere, applied over a much wider window than the idiom intends.
+NOT yet confirmed: it must be shown that the Aggregate (or a re-emission of it)
+actually lands inside that window.
+
+## The two defects are separable, and now separately diagnosable
+
+`var t = (1, 2)` — a TUPLE bound to a local — does not produce the undefined-value
+error at all. It raises the new `E-MIR-TYPE-ZeroKind` instead, i.e. the *other*
+defect (a well-formed HirType whose `kind` is raw 0). So:
+
+- array literal bound to a local -> Aggregate absent (this bug)
+- tuple literal bound to a local -> ZeroKind (the type-layer bug)
+
+The `E-MIR-TYPE-ZeroKind` diagnostic added in `a32bccaf866a` is what makes these
+two distinguishable at a glance; previously both surfaced as the same opaque
+`disc=-1: 0`.
