@@ -312,3 +312,42 @@ inst130 (v168 = icmp_imm.f32 eq v164, 3): has an invalid controlling type f32
 backend bug. The build does not abort — it installs a STUB for the affected
 function — so an ELF produced this way silently carries non-functional bodies.
 That failure mode deserves its own attention independent of this lane.
+
+### Root cause found and FIXED: the offload path's guest half was clobbered, not merely unbuildable
+
+The x86_64 WM ELF build failed on three files. Two were in the host-GPU offload
+path itself, and both were missing **declarations**, not missing logic —
+casualties of the tree-wipe/merge-restore chain this branch exists to repair
+(base: `91b6b9f28dd`, "restore merge-clobbered src/os declarations"):
+
+1. **`struct HostGpuIvshmemDrawIrResult` was declared NOWHERE in `src/`.** It is
+   constructed at `host_gpu_ivshmem.spl:291,293,295,299`, returned by
+   `host_gpu_ivshmem_submit_draw_ir_retained`, and **exported** at line 344 —
+   but `grep -rn "struct HostGpuIvshmemDrawIrResult" src/` returned nothing.
+   Hence the compiler's `struct 'ANY' field 'sent_resources'` while lowering
+   `Engine2dWmFrameExecutor._render_host_gpu`. Exactly two fields are ever used
+   (`receipt`, `sent_resources` — `engine2d_wm_frame_executor.spl:253-254`), and
+   the parameter type at line 288 pins the element type, so the restore is
+   unambiguous rather than inferred.
+
+2. **`HostGpuIvshmemHelloReceipt.capability_mask` was missing from the struct**
+   (11 declared fields) while 2 of its 3 constructors pass `capability_mask: 0`
+   (lines 183, 208). The wire protocol independently confirms the field is real:
+   `SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK: i64 = 288`, exported from
+   `simpleos_host_gpu_protocol.spl:73,416`. The success-path constructor
+   (line 210) had also lost its read, so the field was restored **and** wired to
+   its protocol offset.
+
+Both restored in `src/os/lib/gpu_bridge/host_gpu_ivshmem.spl`. After the fix the
+rebuild shows **zero `hir:`/`codegen:` errors** in the offload path. This is a
+restore, not a design change: every element is evidenced by a surviving call
+site, export, or protocol constant.
+
+The third failure is the cranelift `icmp_imm.f32` verifier bug in
+`dom_color.spl::parse_pct_value` recorded above — unrelated to the offload path,
+and NOT worked around with `SIMPLE_ALLOW_STUB_FALLBACK` (which the compiler
+itself flags as "unsafe — binary will silently misbehave").
+
+**Consequence for the earlier "53 undefined symbols" finding:** that was the
+HOST daemon. This is the GUEST half. They are independent, and the guest half is
+now fixed.
