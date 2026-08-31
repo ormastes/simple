@@ -1756,6 +1756,9 @@ bootstrap_stage3_git_state() {
     bootstrap_stage3_git_untracked="${bootstrap_stage3_git_output}.untracked.$$"
     bootstrap_stage3_git_untracked_sorted="${bootstrap_stage3_git_output}.untracked.sorted.$$"
     bootstrap_stage3_git_records="${bootstrap_stage3_git_output}.records.$$"
+    bootstrap_stage3_git_template="${bootstrap_stage3_git_output}.template.$$"
+    bootstrap_stage3_git_files_only="${bootstrap_stage3_git_output}.files-only.$$"
+    bootstrap_stage3_git_file_shas="${bootstrap_stage3_git_output}.file-shas.$$"
     bootstrap_stage3_jj_stderr="${bootstrap_stage3_git_output}.jj-stderr.$$"
     if ! (
         cd "$bootstrap_stage3_git_root" &&
@@ -1812,6 +1815,24 @@ bootstrap_stage3_git_state() {
         printf 'tracked-diff-sha256=%s\n' \
             "$(bootstrap_stage3_hash_file "$bootstrap_stage3_git_diff")" \
             >>"$bootstrap_stage3_git_records" || exit 1
+        # First pass: classify each untracked path in sorted order without
+        # spawning a hash-tool process per regular file. Symlinks keep the
+        # original per-item treatment (readlink + hash_stream on a short
+        # in-memory string; symlinks are a small minority of this
+        # population, and no batched multi-target primitive exists), so a
+        # symlink record is written to the template immediately, in place.
+        # A regular file instead gets a "pending" placeholder carrying every
+        # field except its content hash, plus its path appended to a
+        # files-only list; the second pass below hashes ALL of those paths
+        # in one (or a handful of) batched invocations instead of one
+        # sha256sum+awk spawn pair per file, which is the change that
+        # collapses the dominant cost of this loop. `else -> exit 1` (fail
+        # closed on anything that is neither a symlink nor a regular file)
+        # is unchanged.
+        : >"$bootstrap_stage3_git_template" || exit 1
+        : >"$bootstrap_stage3_git_files_only" || exit 1
+        exec 8>>"$bootstrap_stage3_git_template" \
+            9>>"$bootstrap_stage3_git_files_only" || exit 1
         while IFS= read -r bootstrap_stage3_git_path; do
             [ -n "$bootstrap_stage3_git_path" ] || continue
             if [ -L "$bootstrap_stage3_git_path" ]; then
@@ -1825,24 +1846,79 @@ bootstrap_stage3_git_state() {
                 printf 'untracked-link:%s:%s:%s:%s\n' \
                     "${#bootstrap_stage3_git_path}" "$bootstrap_stage3_git_path" \
                     "${#bootstrap_stage3_git_target}" \
-                    "$bootstrap_stage3_git_target_sha" \
-                    >>"$bootstrap_stage3_git_records" || exit 1
+                    "$bootstrap_stage3_git_target_sha" >&8 || exit 1
             elif [ -f "$bootstrap_stage3_git_path" ]; then
-                bootstrap_stage3_git_file_sha=$(
-                    bootstrap_stage3_hash_file "$bootstrap_stage3_git_path"
-                ) || exit 1
                 bootstrap_stage3_git_executable=0
                 [ ! -x "$bootstrap_stage3_git_path" ] ||
                     bootstrap_stage3_git_executable=1
-                printf 'untracked-file:%s:%s:%s:%s\n' \
+                printf 'untracked-file-pending:%s:%s:%s:\n' \
                     "${#bootstrap_stage3_git_path}" "$bootstrap_stage3_git_path" \
-                    "$bootstrap_stage3_git_executable" \
-                    "$bootstrap_stage3_git_file_sha" \
-                    >>"$bootstrap_stage3_git_records" || exit 1
+                    "$bootstrap_stage3_git_executable" >&8 || exit 1
+                printf '%s\n' "$bootstrap_stage3_git_path" >&9 || exit 1
             else
                 exit 1
             fi
         done <"$bootstrap_stage3_git_untracked_sorted"
+        exec 8>&- 9>&- || exit 1
+        # Second pass: hash every regular file's contents in one batched
+        # pass via bootstrap_stage3_hash_path_list (which itself resolves
+        # the hash tool once and, when xargs -0 is available, invokes
+        # sha256sum/shasum across the whole list in large multi-file
+        # batches instead of once per file). Only the first
+        # whitespace-delimited field of each output line is kept — exactly
+        # what bootstrap_stage3_hash_file already extracts per file via
+        # `awk '{print $1}'` — so a path that trips sha256sum's
+        # backslash-escaping convention is handled identically to the
+        # un-batched code path; the escaped filename text itself is never
+        # parsed back out, since the path is already known from
+        # bootstrap_stage3_git_files_only. Order is preserved: xargs without
+        # -P issues its batches strictly in argument order and strictly
+        # sequentially, and each underlying sha256sum/shasum invocation
+        # emits one output line per input file in the order given, so output
+        # line N corresponds to input line N.
+        if [ -s "$bootstrap_stage3_git_files_only" ]; then
+            bootstrap_stage3_hash_path_list "$bootstrap_stage3_git_files_only" \
+                >"${bootstrap_stage3_git_file_shas}.raw" || exit 1
+            awk '{print $1}' "${bootstrap_stage3_git_file_shas}.raw" \
+                >"$bootstrap_stage3_git_file_shas" || exit 1
+            rm -f "${bootstrap_stage3_git_file_shas}.raw"
+            bootstrap_stage3_git_sha_count=$(
+                wc -l <"$bootstrap_stage3_git_file_shas"
+            ) || exit 1
+            bootstrap_stage3_git_path_count=$(
+                wc -l <"$bootstrap_stage3_git_files_only"
+            ) || exit 1
+            [ "$bootstrap_stage3_git_sha_count" -eq \
+                "$bootstrap_stage3_git_path_count" ] || exit 1
+        else
+            : >"$bootstrap_stage3_git_file_shas" || exit 1
+        fi
+        # Third pass: replay the template in the exact sorted order from
+        # the first pass, substituting each pending file record's batched
+        # sha256 in turn. Line N of the sha list corresponds to the Nth
+        # "untracked-file-pending:" template line, by construction above.
+        # NOTE: this deliberately compares FILENAME rather than using the
+        # common `FNR == NR` "am I still in the first file" idiom. That
+        # idiom silently breaks when the first file (the sha list) has ZERO
+        # lines -- e.g. an untracked tree with no regular files, only
+        # symlinks -- because NR then advances in lock-step with the second
+        # file's FNR from its very first line, so `FNR == NR` reads true for
+        # every line of the template and the whole merge is swallowed with
+        # no error. Reproduced directly against this host's awk before this
+        # fix landed.
+        awk -v bootstrap_stage3_awk_shafile="$bootstrap_stage3_git_file_shas" '
+            FILENAME == bootstrap_stage3_awk_shafile {
+                bootstrap_stage3_awk_sha[FNR] = $0
+                next
+            }
+            sub(/^untracked-file-pending:/, "untracked-file:") {
+                bootstrap_stage3_awk_n++
+                print $0 bootstrap_stage3_awk_sha[bootstrap_stage3_awk_n]
+                next
+            }
+            { print }
+        ' "$bootstrap_stage3_git_file_shas" "$bootstrap_stage3_git_template" \
+            >>"$bootstrap_stage3_git_records" || exit 1
         bootstrap_stage3_git_dirty=$(
             bootstrap_stage3_hash_file "$bootstrap_stage3_git_records"
         ) || exit 1
@@ -1852,12 +1928,16 @@ bootstrap_stage3_git_state() {
         rm -f "${bootstrap_stage3_git_output}.tmp.$$" \
             "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_untracked" \
             "$bootstrap_stage3_git_untracked_sorted" \
-            "$bootstrap_stage3_git_records"
+            "$bootstrap_stage3_git_records" \
+            "$bootstrap_stage3_git_template" "$bootstrap_stage3_git_files_only" \
+            "$bootstrap_stage3_git_file_shas" "${bootstrap_stage3_git_file_shas}.raw"
         return 1
     }
     rm -f "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_untracked" \
         "$bootstrap_stage3_git_untracked_sorted" \
-        "$bootstrap_stage3_git_records"
+        "$bootstrap_stage3_git_records" \
+        "$bootstrap_stage3_git_template" "$bootstrap_stage3_git_files_only" \
+        "$bootstrap_stage3_git_file_shas" "${bootstrap_stage3_git_file_shas}.raw"
     mv "${bootstrap_stage3_git_output}.tmp.$$" "$bootstrap_stage3_git_output"
 }
 
