@@ -150,6 +150,46 @@ describe "gc boundary semantic checker":
         expect(violations.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(violations[0].reason).to_equal("higher_layer_runtime_family")
 
+    it "exempts family-mirror re-export shims from the layer-rank rule":
+        step("Verify: exempts family-mirror re-export shims from the layer-rank rule")
+        # @req: REQ-COMPILER-SEMANTICS-001
+        # All 49 files under src/lib/nogc_async_mut/test_runner/ are one-line
+        # `export use std.nogc_sync_mut.test_runner.<same-name>.*` shims. They
+        # exist because a bare `use std.X` resolves nogc_async_mut-first, so a
+        # nogc_sync_mut module importing its own sibling round-trips through
+        # the alias directory. The shim declares nothing and runs nothing, so
+        # ranking it against the module it forwards to is not a real crossing.
+        val mirrored = check_runtime_family_import_violations(
+            "std.nogc_async_mut.test_runner.test_db_core",
+            ["std.nogc_sync_mut.test_runner.test_db_core"]
+        )
+        expect(mirrored.len()).to_equal(0)  # oracle: 0 — mirror facade is the alias mechanism, not a violation
+
+    it "still rejects a non-mirrored lower-to-higher import":
+        step("Verify: still rejects a non-mirrored lower-to-higher import")
+        # @req: REQ-COMPILER-SEMANTICS-001
+        # Guards the exemption above from over-reaching: the subpaths differ,
+        # so this is a genuine hosted-adapter crossing and must still fail.
+        val violations = check_runtime_family_import_violations(
+            "std.nogc_async_mut.test_runner.test_db_core",
+            ["std.nogc_sync_mut.io.file_ops"]
+        )
+        expect(violations.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(violations[0].reason).to_equal("higher_layer_runtime_family")
+
+    it "keeps the gc boundary hard even for a family-mirror shim":
+        step("Verify: keeps the gc boundary hard even for a family-mirror shim")
+        # @req: REQ-COMPILER-SEMANTICS-001
+        # The exemption is scoped to the layer-rank rule only. GC and no-alloc
+        # rules constrain what the forwarded-to code may DO, not where it sits,
+        # so a mirror that also crosses those boundaries still hard-fails.
+        val violations = check_runtime_family_import_violations(
+            "std.nogc_async_mut.test_runner.test_db_core",
+            ["std.gc_async_mut.test_runner.test_db_core"]
+        )
+        expect(violations.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(violations[0].reason).to_equal("nogc_imports_gc_family")
+
     it "warns when nogc module imports std.gpu alias (gc-backed shim)":
         step("Verify: warns when nogc module imports std.gpu alias (gc-backed shim)")
         # std.gpu is exposed via nogc_async_mut/gpu/__init__.spl which does
