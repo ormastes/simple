@@ -5503,24 +5503,39 @@ __attribute__((weak)) const char* spl_get_arg(int64_t idx) {
     return rt_core_argv && rt_core_argv[idx] ? rt_core_argv[idx] : "";
 }
 
-/* Not weak: on this repo's Windows GNU (MinGW/binutils) toolchain, a
- * PE/COFF weak-external function symbol never resolves against a caller
- * in a different translation unit -- verified directly (binutils 2.42,
- * gcc 15.2.0): `__attribute__((weak)) void foo(void){}` in one .o/.a and
- * `foo();` in another fails to link with "undefined reference to `foo'"
- * even with the object linked directly (not through an archive), with
- * `-Wl,-u,foo`, and with `-Wl,--whole-archive` -- unlike ELF, where a weak
- * archive member is pulled normally. `rt_set_args` is the only rt_* weak
- * function used as a retention root (see `runtime_retention_symbols` in
+/* Windows-only: NOT weak there. On this repo's Windows GNU (MinGW/
+ * binutils) toolchain, a PE/COFF weak-external function symbol never
+ * resolves against a caller in a different translation unit -- verified
+ * directly (binutils 2.42, gcc 15.2.0): `__attribute__((weak)) void
+ * foo(void){}` in one .o/.a and `foo();` in another fails to link with
+ * "undefined reference to `foo'" even with the object linked directly
+ * (not through an archive), with `-Wl,-u,foo`, and with
+ * `-Wl,--whole-archive` -- unlike ELF, where a weak archive member is
+ * pulled normally. `rt_set_args` is the only rt_* weak function used as a
+ * retention root (see `runtime_retention_symbols` in
  * compiler/src/pipeline/native_project/linker.rs); the other roots
  * (`rt_function_not_found`, `rt_string_bytes`, `__simple_runtime_init`)
- * are plain strong definitions and link fine. `rt_set_args` has exactly
- * one C definition in this tree (here), so nothing needs the weak
- * fallback; lanes that link a second runtime archive already pass
- * `--allow-multiple-definition`/`/FORCE:MULTIPLE` for exactly this kind
- * of overlap. See the Windows bootstrap rt_set_args unresolved-reference
- * investigation, 2026-09-01. */
+ * are plain strong definitions and link fine.
+ *
+ * Kept weak on non-Windows deliberately: the Stage4 dual-capsule Linux/
+ * FreeBSD/macOS path (linker.rs ~1444-1461, `exact_stage4`) can link this
+ * C runtime archive alongside the Rust runtime capsule
+ * (`compiler_rust/runtime/src/value/args.rs` also defines `rt_set_args`)
+ * WITHOUT `-Wl,-z,muldefs` (that flag is only added when `!exact_stage4`,
+ * lines ~1280-1283) and without `--allow-multiple-definition` on that
+ * lazy-resolution path, so a strong definition here could collide with
+ * the Rust capsule's strong definition on exactly that lane -- the same
+ * "archive members resolve at OBJECT granularity" duplicate-symbol class
+ * documented a few hundred lines below in this file's own git history
+ * (8ca87866c6, ~475 collisions). ELF/Mach-O extract a weak archive member
+ * normally (unlike the Windows GNU case above), so keeping it weak there
+ * costs nothing and avoids that risk. See the Windows bootstrap
+ * rt_set_args unresolved-reference investigation, 2026-09-01. */
+#if defined(_WIN32)
 void rt_set_args(int argc, char** argv) {
+#else
+__attribute__((weak)) void rt_set_args(int argc, char** argv) {
+#endif
     spl_init_args(argc, argv);
 }
 
