@@ -347,6 +347,15 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
         "runtime_legacy_core.c",
+        // Groups F/G/I-rest/J of stage2_windows_unresolved_inventory_2026-08-31:
+        // the 12 io/system externs (rt_stdin_read{,_all}, rt_term_{write,flush},
+        // rt_file_modified{,_time}, rt_list_dir_recursive, rt_path_normalize,
+        // rt_shell, rt_process_output, rt_string_{to,from}_byte_array) had NO
+        // native definition anywhere -- Simple-side `extern fn` only. This TU
+        // defines exactly those twelve, self-contained, all helpers static
+        // (same shape as the group-E TU; adding runtime.c wholesale collides
+        // on 53/69 symbols, same class as the disproved runtime_native.c fix).
+        "runtime_core_io_exports.c",
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
@@ -380,6 +389,14 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // tolerated-undefined-then-SIGSEGV class as rt_unwrap_or_trap
         // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
         "runtime_terminal.c",
+        // Group E of stage2_windows_unresolved_inventory_2026-08-31: the only
+        // definitions of rt_mkdir / rt_random_i64 / rt_readdir{,_count,_entry,
+        // _free} / rt_shell_output live in runtime.c, which is NOT in this list
+        // and cannot be added wholesale (measured: 53 symbol collisions with
+        // this archive, 69 with the Rust runtime libs -- same class as the
+        // disproved runtime_native.c wholesale fix, 475 collisions). This TU
+        // carries exactly those seven, self-contained, all helpers static.
+        "runtime_core_exports.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_packed_span.h",
