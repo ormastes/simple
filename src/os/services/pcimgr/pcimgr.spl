@@ -444,6 +444,14 @@ fn pcimgr_config_write(dev_idx: u64, offset: u8, value: u32):
 # BAR Mapping
 # ============================================================================
 
+fn pcimgr_bar_is_64bit(raw: u32) -> bool:
+    """True when `raw` is a MEMORY BAR whose type field (bits 2:1) says 64-bit.
+
+    A 64-bit BAR occupies TWO consecutive config dwords: the low half at
+    0x10+n*4 and the upper 32 address bits at 0x10+(n+1)*4. Treating it as a
+    single 32-bit register silently truncates the address."""
+    (raw & 1u32) == 0u32 and ((raw >> 1) & 0x3u32) == 0x2u32
+
 fn pcimgr_bar_size(dev_idx: u64, bar_num: u8) -> u64:
     """Probe the size of a BAR by writing all-ones and reading back.
 
@@ -452,6 +460,9 @@ fn pcimgr_bar_size(dev_idx: u64, bar_num: u8) -> u64:
       2. Write 0xFFFFFFFF.
       3. Read back — set address bits are the mask; complement + 1 = size.
       4. Restore original value.
+    For a 64-bit memory BAR the algorithm spans BOTH dwords: the mask is a
+    64-bit quantity and the upper dword must be probed and restored too, or a
+    BAR above 4 GiB reports a nonsense size.
     Returns 0 if the BAR is unimplemented or the device index is invalid.
     """
     if dev_idx >= dev_count:
@@ -465,6 +476,19 @@ fn pcimgr_bar_size(dev_idx: u64, bar_num: u8) -> u64:
     val func = pcimgr_target_func(target)
     val offset = (0x10 + bar_num.to_u32() * 4).to_u8()
     val original = pci_read_bar(bus, dev, func, bar_num)
+    if pcimgr_bar_is_64bit(original):
+        val offset_hi = (0x10 + (bar_num.to_u32() + 1u32) * 4).to_u8()
+        val original_hi = pci_read_config(bus, dev, func, offset_hi)
+        pci_write_config(bus, dev, func, offset, 0xFFFFFFFF)
+        pci_write_config(bus, dev, func, offset_hi, 0xFFFFFFFF)
+        val readback_lo = pci_read_bar(bus, dev, func, bar_num)
+        val readback_hi = pci_read_config(bus, dev, func, offset_hi)
+        pci_write_config(bus, dev, func, offset, original)
+        pci_write_config(bus, dev, func, offset_hi, original_hi)
+        val mask64 = ((readback_hi.to_u64() << 32) | (readback_lo & 0xFFFFFFF0).to_u64())
+        if mask64 == 0u64:
+            return 0
+        return (mask64 ^ 0xFFFFFFFFFFFFFFFFu64) + 1u64
     pci_write_config(bus, dev, func, offset, 0xFFFFFFFF)
     val readback = pci_read_bar(bus, dev, func, bar_num)
     pci_write_config(bus, dev, func, offset, original)
@@ -496,8 +520,18 @@ fn pcimgr_get_bar(dev_idx: u64, bar_num: u8) -> PciBar:
     val is_mmio = (raw & 1) == 0
     # Bit 3 (memory BARs only): prefetchable
     val is_prefetchable = is_mmio and ((raw & 0x8) != 0)
+    # A 64-bit memory BAR carries its upper 32 address bits in the NEXT config
+    # dword. Masking only `raw` truncates e.g. the OVMF/q35 NVMe BAR at
+    # 0xC000004000 down to 0x00004000 — a valid-looking but wrong address that
+    # lands in identity-mapped RAM, so every MMIO register read returns RAM
+    # bytes instead of device values.
     val phys_addr = if is_mmio:
-        (raw & 0xFFFFFFF0).to_u64()
+        if pcimgr_bar_is_64bit(raw):
+            val offset_hi = (0x10 + (bar_num.to_u32() + 1u32) * 4).to_u8()
+            val raw_hi = pci_read_config(bus, dev, func, offset_hi)
+            (raw_hi.to_u64() << 32) | (raw & 0xFFFFFFF0).to_u64()
+        else:
+            (raw & 0xFFFFFFF0).to_u64()
     else:
         (raw & 0xFFFFFFFC).to_u64()
     val size = pcimgr_bar_size(dev_idx, bar_num)
