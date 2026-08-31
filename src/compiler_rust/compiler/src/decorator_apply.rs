@@ -164,6 +164,20 @@ pub fn apply_runtime_decorators(
             }
         };
 
+        // A name that resolves but is not callable is an annotation that merely
+        // collides with an in-scope binding, not a decorator. `@logged fn f()`
+        // beside `var logged = false` (test/feature/usage/aop_spec.spl's
+        // `attr(logged)` pointcut) resolved the bool and then died with
+        // "cannot call value of type bool". Block-level callers already treat an
+        // UNRESOLVABLE annotation as metadata (`strict == false`, see the
+        // doc comment above); a resolvable-but-not-callable one is the same
+        // situation and gets the same treatment. Strict (module-level) callers
+        // keep reporting it, since there the collision is with a module global
+        // and is much more likely to be a real mistake.
+        if !strict && !is_callable(&decorator_fn) {
+            continue;
+        }
+
         // `@dec(args)` — call the factory first to obtain the real decorator.
         let actual_decorator = if let Some(args) = &decorator.args {
             let mut arg_values = Vec::with_capacity(args.len());
@@ -203,4 +217,16 @@ pub fn apply_runtime_decorators(
     }
 
     Ok(if applied { Some(decorated) } else { None })
+}
+
+/// Whether `value` can be applied as a runtime decorator.
+///
+/// Mirrors the arms `crate::interpreter::call_value_with_args`
+/// (`interpreter_eval.rs:168`) actually accepts: lambdas, functions, native
+/// functions, and objects implementing the `__call__` protocol.
+fn is_callable(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Lambda { .. } | Value::Function { .. } | Value::NativeFunction(_) | Value::Object { .. }
+    )
 }

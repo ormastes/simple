@@ -4,6 +4,7 @@ mod bdd;
 mod block_execution;
 mod builtins;
 mod core;
+pub(crate) use core::aop_runtime;
 mod mock;
 
 // Re-export public items
@@ -581,6 +582,14 @@ pub(crate) fn evaluate_call(
 
         // Priority 5: Check regular functions (user-defined) — most common case
         if let Some(func) = functions.get(name).cloned() {
+            // AOP join point. `has_advice()` is a thread-local emptiness check,
+            // so a program with no `on pc{...}` declaration pays nothing.
+            if core::aop_runtime::has_advice() {
+                core::aop_runtime::run_before(&func, env, functions, classes, enums, impl_methods)?;
+                let result = core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None)?;
+                core::aop_runtime::run_after(&func, &result, env, functions, classes, enums, impl_methods)?;
+                return Ok(result);
+            }
             return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
 
