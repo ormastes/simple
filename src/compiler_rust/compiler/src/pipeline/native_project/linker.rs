@@ -765,6 +765,18 @@ extern "C" {
     void rt_set_args_wide(int argc, const wchar_t** argv);
     void __simple_runtime_init(void);
     void __simple_runtime_shutdown(void);
+    // generate_init_caller() ALWAYS emits a concrete (non-weak) definition
+    // of this symbol -- even when init_names is empty -- so it is safe to
+    // declare and call directly here with no /ALTERNATENAME fallback,
+    // exactly like the non-MSVC `main()` stub below does (guarded there by
+    // a weak-symbol null check instead, since MSVC/clang-cl has no
+    // __attribute__((weak))). Omitting this call was the actual bug: every
+    // module-level global that needs a heap-boxed initializer
+    // (codegen/llvm/backend_core.rs, `__module_init[_<prefix>]`) never ran
+    // its initializer on Windows, leaving the global's storage at its
+    // PE-loader-zeroed BSS default (null) -- see
+    // doc/08_tracking/bug/windows_msvc_module_init_alternatename_link_order_2026-08-31.md.
+    void __simple_call_module_inits(void);
 }
 #pragma comment(linker, "/ALTERNATENAME:spl_main=_spl_main_stub")
 #pragma comment(linker, "/ALTERNATENAME:__simple_runtime_init=___simple_runtime_init_stub")
@@ -774,6 +786,7 @@ extern "C" void ___simple_runtime_init_stub(void) {}
 extern "C" void ___simple_runtime_shutdown_stub(void) {}
 int wmain(int argc, wchar_t** argv) {
     __simple_runtime_init();
+    __simple_call_module_inits();
     rt_set_args_wide(argc, const_cast<const wchar_t**>(argv));
     int r = spl_main();
     __simple_runtime_shutdown();
