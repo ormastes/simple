@@ -34,6 +34,10 @@ var _rt_net_next_fd: i64 = 1000
 var _rt_net_port_inited: bool = false
 var _rt_net_last_plain_payload: [u8] = []
 var _rt_net_last_plain_payload_len_value: u64 = 0
+var _rt_net_bound_listener_fd: i64 = -1
+var _rt_net_bound_listener_port: u16 = 0u16
+
+val RT_NET_READ_EXACT_MAX: u64 = 35016u64
 
 val RT_NET_SSH_ENCRYPTED_BODY_MAX: u32 = 35000u32
 val RT_NET_SSH_GCM_TAG_BYTES: u64 = 16u64
@@ -139,6 +143,8 @@ fn _rt_net_transport_close(fd: i64) -> i64:
         rt_boot_tcp_close(fd)
 
 fn _rt_net_bind_and_listen_impl(sock_fd: i64, port_num: i64) -> i64:
+    if port_num < 0 or port_num > 65535:
+        return -1
     val entry = _rt_net_find(sock_fd)
     val current = match entry:
         Some(found):
@@ -147,6 +153,8 @@ fn _rt_net_bind_and_listen_impl(sock_fd: i64, port_num: i64) -> i64:
             return -1
     if not _rt_net_ensure_ready():
         return -1
+    _rt_net_bound_listener_fd = sock_fd
+    _rt_net_bound_listener_port = port_num.to_u16()
     var os_fd = current.os_fd
     if os_fd < 0:
         val bind_addr =
@@ -154,12 +162,14 @@ fn _rt_net_bind_and_listen_impl(sock_fd: i64, port_num: i64) -> i64:
                 "0.0.0.0:22"
             else:
                 "0.0.0.0:0"
-        os_fd = rt_boot_tcp_bind(bind_addr).to_i32()
-        if os_fd < 0:
+        val raw_os_fd = unsafe(capabilities: [ffi]):
+            rt_boot_tcp_bind(bind_addr)
+        if raw_os_fd < 0:
             return -1
+        os_fd = raw_os_fd
     val updated = RtNetSocketEntry(
         fd: current.fd,
-        port: port_num.to_u16(),
+        port: _rt_net_bound_listener_port,
         os_fd: os_fd,
         listening: true
     )
@@ -224,11 +234,15 @@ fn _rt_net_remove(fd: i64):
     _rt_net_sockets = next
 
 fn _rt_net_read_exact(os_fd: i64, want: u64) -> [u8]:
-    if os_fd < 0:
+    if os_fd < 0 or want > RT_NET_READ_EXACT_MAX:
         return []
     var out: [u8] = []
+    var empty_reads: u64 = 0
     while out.len() < want:
-        val chunk = rt_boot_tcp_read_bytes_for_fd(os_fd, (want - out.len()).to_i64())
+        val chunk = unsafe(capabilities: [ffi]):
+            rt_boot_tcp_read_bytes_for_fd(os_fd, (want - out.len()).to_i64())
+        if chunk.len() > want - out.len():
+            return []
         if chunk.len() == 0:
             empty_reads = empty_reads + 1
             if empty_reads > 1000:
@@ -548,10 +562,10 @@ fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]:
 fn rt_net_recv_ssh_encrypted_packet(sock_fd: i64) -> [u8]:
     serial_println("[rt-net] encrypted recv fn sock_fd={sock_fd}")
     val entry = _rt_net_find(sock_fd)
-    val os_fd =
+    val owner =
         if entry == nil:
             if sock_fd == 200:
-                sock_fd
+                RtNetSocketReadOwner(socket_fd: 200, os_fd: 200)
             else:
                 return []
         else:

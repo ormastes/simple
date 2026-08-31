@@ -28,6 +28,8 @@ struct TaskCapRecord:
     caps: CapabilitySet
     unveil_paths: [UnveilEntry]     # Allowed paths after unveil()
     is_unveiled: bool               # Once unveiled, no new paths can be added
+    session_id: u64                 # Owning privilege session (0 = none / legacy) — S1
+    session_epoch: u64              # Session epoch captured at bind time — S3 O(1) revoke
 
 struct UnveilEntry:
     """A single unveil path restriction."""
@@ -353,7 +355,9 @@ impl CapabilityManager:
             task_id: task,
             caps: caps,
             unveil_paths: [],
-            is_unveiled: false
+            is_unveiled: false,
+            session_id: 0u64,
+            session_epoch: 0u64
         )
         self.records.push(record)
 
@@ -363,7 +367,9 @@ impl CapabilityManager:
             task_id: task,
             caps: caps,
             unveil_paths: [],
-            is_unveiled: false
+            is_unveiled: false,
+            session_id: 0u64,
+            session_epoch: 0u64
         )
         self.records.push(record)
 
@@ -447,7 +453,9 @@ impl CapabilityManager:
             task_id: task,
             caps: pledged,
             unveil_paths: [],
-            is_unveiled: false
+            is_unveiled: false,
+            session_id: 0u64,
+            session_epoch: 0u64
         )
         self.records.push(record)
         true
@@ -483,7 +491,9 @@ impl CapabilityManager:
             task_id: task,
             caps: CapabilitySet.empty(),
             unveil_paths: [],
-            is_unveiled: false
+            is_unveiled: false,
+            session_id: 0u64,
+            session_epoch: 0u64
         )
         self.records.push(record)
 
@@ -497,6 +507,11 @@ fn capability_set_from_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text
     """
     var caps: [CapabilityToken] = []
     var generation = 1u64
+    # Local token-id counter described by the docstring above. It was used at
+    # the NetworkEndpoint grant below but never declared, so this body failed
+    # codegen with "unresolved identifier 'local_tid'" and was silently replaced
+    # by an empty stub — a capability function returning an empty set.
+    var local_tid = 1u64
     if sandbox_lowering_sdn.contains("ReadFile") or sandbox_lowering_sdn.contains("ReadDir"):
         caps.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/"), generation: generation, owner: task.id))
         generation = generation + 1
