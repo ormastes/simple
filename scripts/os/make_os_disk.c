@@ -572,8 +572,8 @@ int main(int argc, char **argv)
     put_dot_entries(usr, &usr_n, usr_cluster, 0);
     put_dot_entries(usr_bin, &usr_bin_n, usr_bin_cluster, usr_cluster);
     put_dot_entries(usr_lib, &usr_lib_n, usr_lib_cluster, usr_cluster);
-    unsigned char usr_share[DIR_SIZE] = {0}; size_t usr_share_n = 0;
-    unsigned char usr_share_simpleos[DIR_SIZE] = {0}; size_t usr_share_simpleos_n = 0;
+    unsigned char usr_share[DIRECTORY_BYTES] = {0}; int usr_share_n = 0;
+    unsigned char usr_share_simpleos[DIRECTORY_BYTES] = {0}; int usr_share_simpleos_n = 0;
     put_dot_entries(usr_share, &usr_share_n, usr_share_cluster, usr_cluster);
     put_dot_entries(usr_share_simpleos, &usr_share_simpleos_n,
                     usr_share_simpleos_cluster, usr_share_cluster);
