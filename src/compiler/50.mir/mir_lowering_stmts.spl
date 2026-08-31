@@ -2253,6 +2253,20 @@ impl MirLowering:
 # Control Flow Lowering
 # ============================================================================
 
+    me mcdc_is_enabled() -> bool:
+        """POSITIVE whitelist: instrument only for a mode we actually emit.
+
+        Every guard here used to test `self.mcdc_mode == 0` -- a NEGATIVE test,
+        which cannot screen a value that is neither 0 nor a valid mode. Measured
+        consequence: the bootstrap lane emitted `mcdc_static_probe_mask_range`
+        calls even though the driver config says "off", and no runtime in this
+        tree defines that symbol (grep of src/runtime finds nothing), so every
+        native link failed with "Undefined symbols for architecture arm64".
+        Same shape as the `!= nil` guards that could not screen a raw-0 slot
+        elsewhere in this branch: only an affirmative test is safe.
+        """
+        self.mcdc_mode == 1 or self.mcdc_mode == 2
+
     me configure_mcdc_mode(mode: i64, owner_bytes: i64 = 1048576, global_bytes: i64 = 67108864, include_csv: text = "", exclude_csv: text = ""):
         """Select MC/DC lowering: 0 off, 1 static recorder, 2 dynamic aspect."""
         if mode >= 0 and mode <= 2:
@@ -2265,7 +2279,7 @@ impl MirLowering:
 
     me emit_mcdc_runtime_configuration():
         """Emit the one cold recorder configuration call in the program entry."""
-        if self.mcdc_mode == 0: return
+        if not self.mcdc_is_enabled(): return
         var b = self.builder
         val global_local = b.emit_const_int(self.mcdc_global_bytes)
         val owner_local = b.emit_const_int(self.mcdc_owner_bytes)
@@ -2295,7 +2309,7 @@ impl MirLowering:
                 )))
             ))
             b.emit_call(rt_hal_hook, [], MirType.bool())
-        if self.mcdc_mode == 0:
+        if not self.mcdc_is_enabled():
             self.builder = b
             return
         val hook_name = if self.mcdc_mode == 2:
@@ -2315,7 +2329,7 @@ impl MirLowering:
         mcdc_authored_path_v1(span.file)
 
     me emit_mcdc_condition_probe(cond: HirExpr, result: LocalId):
-        if self.mcdc_mode == 0 or self.mcdc_active_decision_id == 0:
+        if not self.mcdc_is_enabled() or self.mcdc_active_decision_id == 0:
             return
         val ordinal = self.mcdc_next_condition_ordinal
         self.mcdc_next_condition_ordinal = ordinal + 1
@@ -2342,7 +2356,7 @@ impl MirLowering:
         self.builder = b
 
     me emit_mcdc_mask_range(start: i64, end: i64, result: LocalId, mask_when_true: bool):
-        if self.mcdc_mode == 0 or start >= end: return
+        if not self.mcdc_is_enabled() or start >= end: return
         var b = self.builder
         val start_local = b.emit_const_int(start)
         val end_local = b.emit_const_int(end)
@@ -2365,7 +2379,7 @@ impl MirLowering:
 
     me lower_mcdc_decision(cond: HirExpr) -> LocalId:
         """Lower one control decision without changing evaluation order."""
-        if self.mcdc_mode == 0:
+        if not self.mcdc_is_enabled():
             return self.lower_cond_expr(cond)
         if not mcdc_path_in_instrumentation_scope(
                 cond.span.file, self.mcdc_include_csv, self.mcdc_exclude_csv):
@@ -2432,7 +2446,7 @@ impl MirLowering:
         result
 
     me emit_mcdc_abort_if_active():
-        if self.mcdc_mode == 0 or self.mcdc_active_tokens.len() == 0: return
+        if not self.mcdc_is_enabled() or self.mcdc_active_tokens.len() == 0: return
         var b = self.builder
         val abort_name = if self.mcdc_mode == 2:
             "mcdc_dynamic_probe_abort"

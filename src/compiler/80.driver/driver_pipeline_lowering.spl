@@ -17,10 +17,21 @@ use std.common.convert.{try_parse_int}
 extern fn rt_env_get(key: text) -> text
 
 fn _driver_mcdc_mir_mode(ctx: CompileContext) -> i64:
-    match ctx.config["mcdc_mode"] ?? "off":
-        "on" | "static" | "static-on" => 1
-        "dynamic" | "dynamic-aspect" => 2
-        _ => 0
+    # EXPLICIT COMPARISONS, not `match`. The default is "off" -> 0, yet the
+    # bootstrap lane emitted `mcdc_static_probe_mask_range` calls -- a symbol no
+    # runtime in this tree defines (grep of src/runtime finds nothing), so every
+    # native link failed with "Undefined symbols for architecture arm64". That
+    # means this function returned 1 while the config said "off": the `match`
+    # arms mis-dispatched, selecting a value arm over the `_` catch-all. Same
+    # staged-lane match hazard already worked around with explicit discriminant
+    # dispatch elsewhere in the backend. Equality tests do not depend on match
+    # arm binding, so the "off" default is honoured.
+    val mcdc_requested = ctx.config["mcdc_mode"] ?? "off"
+    if mcdc_requested == "on" or mcdc_requested == "static" or mcdc_requested == "static-on":
+        return 1
+    if mcdc_requested == "dynamic" or mcdc_requested == "dynamic-aspect":
+        return 2
+    0
 
 fn _driver_mcdc_budget(ctx: CompileContext, key: text, fallback: i64) -> i64:
     if val raw = ctx.config[key]:

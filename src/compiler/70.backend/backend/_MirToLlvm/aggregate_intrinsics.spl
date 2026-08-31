@@ -78,7 +78,7 @@ fn llvm_c_abi_clobbers(arch: text) -> [text]:
 # ============================================================================
 
 impl MirToLlvm:
-    me translate_gep(dest: LocalId, base: MirOperand, indices: [MirOperand]):
+    me llvm_gep_impl(dest: LocalId, base: MirOperand, indices: [MirOperand]):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val base_val = self.translate_operand(base)
@@ -238,7 +238,7 @@ impl MirToLlvm:
             self.builder.emit_store(elem_ty, elem_val, elem_ptr)
         self.builder.emit_load(dest_name, agg_ty, agg_ptr)
 
-    me translate_get_field(dest: LocalId, base: MirOperand, field: i64):
+    me llvm_get_field_impl(dest: LocalId, base: MirOperand, field: i64):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val raw_base_val = self.translate_operand(base)
@@ -309,7 +309,7 @@ impl MirToLlvm:
         else:
             self.builder.emit_load(dest_name, nit, field_ptr)
 
-    me translate_set_field(base: MirOperand, field: i64, value: MirOperand):
+    me llvm_set_field_impl(base: MirOperand, field: i64, value: MirOperand):
         val raw_base_val = self.translate_operand(base)
         # Same hoist as translate_get_field -- see the comment there.
         val set_base_as_ptr = self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr")
@@ -394,7 +394,7 @@ impl MirToLlvm:
 
     # === Overrides: casts ===
 
-    me translate_cast(dest: LocalId, operand: MirOperand, target: MirType):
+    me llvm_cast_impl(dest: LocalId, operand: MirOperand, target: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
@@ -430,7 +430,7 @@ impl MirToLlvm:
             else:
                 self.builder.emit("  {dest_name} = add {target_ty} {casted}, 0  ; cast")
 
-    me translate_bitcast(dest: LocalId, operand: MirOperand, target: MirType):
+    me llvm_bitcast_impl(dest: LocalId, operand: MirOperand, target: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
@@ -455,7 +455,7 @@ impl MirToLlvm:
 
     # === Overrides: indirect calls / intrinsics ===
 
-    me translate_call_indirect(dest: LocalId?, ptr: MirOperand, args: [MirOperand], sig: MirSignature):
+    me llvm_call_indirect_impl(dest: LocalId?, ptr: MirOperand, args: [MirOperand], sig: MirSignature):
         # Guard (#138 Wall #1): a CallIndirect whose callee operand carries a
         # nil local means the frontend lowered an unresolved callee
         # (HirExprKind.Error -> CallIndirect(func=Copy(nil))). Reading `.id`
@@ -536,7 +536,7 @@ impl MirToLlvm:
         self.builder.emit("  {dest_name} = phi {phi_ty} [ {then_val}, %bb{then_id} ], [ {else_val}, %bb{else_id} ]")
         true
 
-    me translate_intrinsic(dest: LocalId?, name: text, args: [MirOperand]):
+    me llvm_intrinsic_impl(dest: LocalId?, name: text, args: [MirOperand]):
         # Dispatch cipher intrinsics to real LLVM x86 intrinsics.
         # Falls back to __simple_intrinsic_<name> for unknown names.
         match name:
@@ -586,7 +586,7 @@ impl MirToLlvm:
                 else:
                     self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
 
-    me translate_inline_asm(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text], clobber_abis: [text], options: [text]):
+    me llvm_inline_asm_impl(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text], clobber_abis: [text], options: [text]):
         """Translate inline assembly to LLVM inline asm call."""
         var constraint_parts: [text] = []
         var arg_values: [text] = []
@@ -675,7 +675,7 @@ impl MirToLlvm:
 
     # === Overrides: pipeline operators ===
 
-    me translate_pipe_forward(dest: LocalId, value: MirOperand, func: MirOperand):
+    me llvm_pipe_forward_impl(dest: LocalId, value: MirOperand, func: MirOperand):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val value_val = self.translate_operand(value)
@@ -683,7 +683,7 @@ impl MirToLlvm:
         val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
         self.builder.emit("  {dest_name} = call {ret_ty} {func_val}(i64 {value_val})  ; pipe forward")
 
-    me translate_compose(dest: LocalId, f: MirOperand, g: MirOperand, forward: bool):
+    me llvm_compose_impl(dest: LocalId, f: MirOperand, g: MirOperand, forward: bool):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val f_val = self.translate_operand(f)
@@ -692,14 +692,14 @@ impl MirToLlvm:
         self.mark_ptr_local(dest_id)
         self.builder.emit("  {dest_name} = call ptr @__simple_runtime_compose(ptr {f_val}, ptr {g_val})  ; compose ({dir})")
 
-    me translate_parallel(dest: LocalId, funcs: [MirOperand]):
+    me llvm_parallel_impl(dest: LocalId, funcs: [MirOperand]):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val count = funcs.len()
         self.mark_ptr_local(dest_id)
         self.builder.emit("  {dest_name} = call ptr @__simple_runtime_parallel(i64 {count})  ; parallel ({count} functions)")
 
-    me translate_layer_connect(dest: LocalId, l1: MirOperand, l2: MirOperand):
+    me llvm_layer_connect_impl(dest: LocalId, l1: MirOperand, l2: MirOperand):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val l1_val = self.translate_operand(l1)
@@ -709,7 +709,7 @@ impl MirToLlvm:
 
     # === Overrides: borrow checking ===
 
-    me translate_ref(dest: LocalId, kind: MirBorrowKind, place: MirPlace):
+    me llvm_ref_impl(dest: LocalId, kind: MirBorrowKind, place: MirPlace):
         # A borrow lowers to the identity on the borrowed place's value, so the
         # emitted instruction must carry the PLACE's actual LLVM type. It used
         # to hardcode `native_int()`, which is correct only when the place
