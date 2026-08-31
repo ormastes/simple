@@ -348,3 +348,61 @@ is a lower bound on the population, never the population.
 - Causes C (`_append_bytes` 11 conflicting defs, `Platform` 2 enums), D
   (`folded_global_scalar_type`), E (`_pmm_reset_contiguous_registry`) — unchanged,
   still need an owner decision, as filed above.
+
+### Addendum — `Dict` is now REPRODUCIBLE; `print_raw` is NOT #154's defect
+
+**`Dict` (6): reproduced in one command, root cause not yet located.**
+
+The round-1 probes were clean because they used the **bare** module form. The
+failing form is the **selective** one, and the difference is the whole finding:
+
+```
+rc=0 use std.gc_sync_mut.db                      <- clean (what round 1 probed)
+rc=1 use std.gc_sync_mut.db.{RowBitmap}          :: undefined identifier: Dict
+rc=1 use std.gc_sync_mut.db.{ScanPredicate}      :: undefined identifier: Dict
+rc=1 ... all 6 of the spec's named imports, identically
+rc=1 bin/simple compile test/01_unit/lib/gc_sync_mut/db/db_init_facade_spec.spl :: Dict
+```
+
+All six names fail identically, so **no individual symbol is responsible** —
+`use M` and `use M.{x}` build *different compile closures*, and only the
+selective form reaches whatever defines/uses `Dict` badly. Adding `use std.spec`
+changes nothing, so the spec harness is not involved either.
+
+`Dict` does not occur **anywhere** in `src/lib/gc_sync_mut/db/` (checked: zero
+hits, including as a pattern or constructor), so the owner is elsewhere in the
+selective closure. Not guessed further.
+
+Two consequences worth acting on:
+1. The selective-vs-bare closure divergence is plausibly a compiler defect in its
+   own right, and it is the reason this class evaded probing for two rounds.
+   **Any future probe of this class must use the selective form**, or it will
+   report a false clean.
+2. `test/feature/usage/minimal_spec.spl` compiles with rc=1 but reports **no**
+   undefined identifier — it fails for an unrelated reason and should be dropped
+   from the `Dict` cluster's count.
+
+**`print_raw` (8): NOT the same defect as PR #154, on present evidence.**
+
+`fn print_raw` at `src/lib/nogc_sync_mut/sffi/diag.spl:45` still exists after
+#154 (which added `@always_inline` and an `unsafe` block, not a rename), and it
+collides with `extern fn print_raw` declared with differing signatures at
+`mcp/handlers/api_handler.spl:10`, `nogc_async_mut/mcp/protocol.spl:15`
+(`-> i64`) and `nogc_async_mut/mcp/handlers/api_handler.spl:10` — plus 7 more in
+`src/app/`. That is **cause C** (colliding module-private names with differing
+signatures), not #154's shadowing.
+
+But it is not yet demonstrated, and is recorded as unproven:
+```
+rc=0 use std.nogc_sync_mut.sffi.diag                     :: (clean)
+rc=1 use std.nogc_sync_mut.mcp.handlers.api_handler      :: (no undefined identifier — fails for another reason)
+```
+So neither probe reproduces `print_raw` yet. Re-probe with the **selective**
+form per the `Dict` finding above before concluding.
+
+**Dropped-thread note:** `src/compiler_rust/lib/std/src/testing/fuzz.spl:37` is a
+16th `String.from_char_code(ch_code)` site. It was deliberately NOT sed-fixed
+with the other 10: its argument is a runtime `i64`, not the constant 123/125, so
+the `"{{"`/`"}}"` substitution does not apply and it needs a real char-code
+helper. Same nonexistent-symbol defect (cause E); will resurface as a `String`
+failure in whatever closure pulls `fuzz.spl`.
