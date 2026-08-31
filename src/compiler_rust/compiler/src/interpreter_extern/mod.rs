@@ -2866,6 +2866,29 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
             io::print::print(&resolved)
         }) as ExternHandler,
     );
+    // `rt_print` is the raw runtime primitive `print`/`print_raw` desugar to
+    // (see codegen/instr/calls.rs:3111 `"rt_print" => Some("rt_print_value")`
+    // and runtime/src/value/sffi/io_print.rs `#[export_name = "rt_print"]`,
+    // a no-newline alias for `rt_print_value`). It was never registered in
+    // this interpreter dispatch table -- only the builtin names `print` /
+    // `print_raw` were -- because ordinary Simple source calls `print_raw`,
+    // never `rt_print` directly. That stopped being true once
+    // `src/lib/nogc_sync_mut/sffi/diag.spl` started wrapping it
+    // (`fn print_raw(msg): unsafe: rt_print(msg)`) as one of the rt_*
+    // migration aliases: that wrapper globally SHADOWS the builtin
+    // `print_raw` (Simple's interpreter function table is name-keyed and
+    // program-wide), so as soon as any transitively-imported module pulls in
+    // diag.spl, every call to `print_raw` anywhere in the program routes to
+    // this wrapper, which calls the still-unregistered `rt_print` and dies
+    // with "unknown extern function: rt_print" -- observed breaking
+    // `src/app/mcp/main.spl` (JSON-RPC response) and the interpreted test
+    // runner. See
+    // doc/08_tracking/bug/interpreter_rt_print_unregistered_diag_shadow_2026-08-31.md.
+    m.insert(
+        "rt_print",
+        (|evaluated, _env, _functions, _classes, _enums, _impl_methods| io::print::print_raw(evaluated))
+            as ExternHandler,
+    );
     m.insert(
         "print_raw",
         (|evaluated, env, functions, classes, enums, impl_methods| {
