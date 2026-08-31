@@ -905,6 +905,52 @@ pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
     }
 }
 
+/// Find the compiler-rt builtins archive for a HOSTED clang/clang-cl Windows
+/// MSVC link (`.lib`, not the freestanding ELF/Mach-O archive
+/// `find_compiler_rt_builtins` above resolves).
+///
+/// GCC-style CPU-dispatch code (`__builtin_cpu_init`/`__builtin_cpu_supports`,
+/// used by `src/runtime/runtime_simd_dispatch.c`) lowers to references to
+/// `__cpu_model`/`__cpu_indicator_init`. On the GNU/mingw lane these are
+/// resolved automatically because g++/gcc always link libgcc; on Linux/macOS
+/// clang also links its own compiler-rt/libclang_rt.builtins by default. On
+/// Windows MSVC, `--rtlib` is NOT applied by default the same way, so nothing
+/// pulls in `clang_rt.builtins-<arch>.lib` and these symbols are genuinely
+/// unresolved (LNK2019) -- this was previously masked only because the linker
+/// fabricated a stub definition for them (removed in
+/// `is_compiler_rt_builtin_symbol`, since that stub collided with the real
+/// definition on the GNU lane). Measured 2026-08-31: `clang --target=
+/// x86_64-pc-windows-msvc -print-libgcc-file-name` alone reports the bare
+/// name `libgcc.a` (not found on disk, MSVC has no libgcc); `-print-file-name=
+/// clang_rt.builtins-<arch>.lib` resolves the real path under the clang
+/// resource directory (`.../lib/clang/<ver>/lib/windows/`) for both `clang`
+/// and `clang-cl`. Only clang-family drivers understand this flag -- a
+/// straight `cl.exe` MSVC_C_COMPILERS entry (last resort, behind clang-cl and
+/// clang) is skipped, since it never provides these GCC-ABI symbols either
+/// and querying it for `-print-file-name` is not meaningful.
+pub(crate) fn find_msvc_compiler_rt_builtins(cc: &str, arch_name: &str) -> Option<PathBuf> {
+    if !cc.contains("clang") {
+        return None;
+    }
+    let output = std::process::Command::new(cc)
+        .arg(format!("-print-file-name=clang_rt.builtins-{arch_name}.lib"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if path.exists() && path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// Find an objcopy tool that can handle the host object format.
 ///
 /// Prefer the NEWEST llvm-objcopy (same rationale as `nm_command`): LLVM 18's

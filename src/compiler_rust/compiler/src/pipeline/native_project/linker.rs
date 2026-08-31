@@ -13,7 +13,8 @@ use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
-    find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib, find_objcopy_tool,
+    find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
+    find_msvc_compiler_rt_builtins, find_objcopy_tool,
     is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
     validate_stage4_cli_c_provider_archive_disjointness,
 };
@@ -1749,6 +1750,20 @@ int main(int argc, char** argv) {
             #[cfg(target_os = "linux")]
             {
                 cmd.arg("-Wl,--no-as-needed");
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if is_msvc {
+            // __builtin_cpu_init/__builtin_cpu_supports (runtime_simd_dispatch.c)
+            // lower to references to __cpu_model/__cpu_indicator_init, owned by
+            // the compiler runtime -- never fabricated as stubs (see
+            // is_compiler_rt_builtin_symbol). The GNU/mingw lane gets these for
+            // free because g++/gcc always link libgcc; the MSVC lane does not
+            // link compiler-rt by default, so they were genuinely unresolved
+            // (LNK2019) the moment stub fabrication for them was correctly
+            // removed. Link clang's own builtins archive explicitly.
+            if let Some(builtins) = find_msvc_compiler_rt_builtins(&cc, cross_target.arch.name()) {
+                cmd.arg(&builtins);
             }
         }
         #[cfg(target_os = "macos")]
