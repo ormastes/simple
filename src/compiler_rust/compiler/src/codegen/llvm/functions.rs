@@ -2726,6 +2726,31 @@ impl LlvmBackend {
                     "split" => Some("rt_string_split"),
                     "bytes" => Some("rt_string_bytes"),
                     "chars" => Some("rt_string_chars"),
+                    // Text methods below mirror the Cranelift table in
+                    // codegen/instr/calls.rs (same alias groups, same runtime
+                    // entry points). They were missing HERE — text method
+                    // calls arrive as MethodCallStatic, which never consults
+                    // the qualified_rt_redirect table in functions/calls.rs —
+                    // so `report.lines()` etc. fell through to the fail-closed
+                    // suffix scan and surfaced as undefined `str.lines` /
+                    // `str.partition` / `str.is_*` symbols at the Stage 2 link
+                    // (Windows was merely the first lane to link this way; the
+                    // gap is backend-wide, not platform-specific).
+                    "lines" | "split_lines" => Some("rt_string_lines"),
+                    // TEXT-ONLY by contract, loud on any other receiver —
+                    // matches the Cranelift comment: the array `partition`
+                    // takes a predicate and has a different shape.
+                    "partition" => Some("rt_string_partition"),
+                    "rpartition" => Some("rt_string_rpartition"),
+                    // Character-class predicates: seven spellings, four
+                    // runtime entry points, exactly as in the interpreter
+                    // (interpreter_method/string.rs) and Cranelift. All return
+                    // i64 0/1 — deliberately NOT in `returns_bool` below,
+                    // same as `starts_with`.
+                    "is_digit" | "is_numeric" => Some("rt_string_is_digit"),
+                    "is_alpha" | "is_alphabetic" => Some("rt_string_is_alpha"),
+                    "is_alphanumeric" | "is_alnum" => Some("rt_string_is_alnum"),
+                    "is_whitespace" => Some("rt_string_is_whitespace"),
                     "replace" => Some("rt_string_replace"),
                     "to_upper" | "upper" => Some("rt_string_to_upper"),
                     "to_lower" | "lower" => Some("rt_string_to_lower"),

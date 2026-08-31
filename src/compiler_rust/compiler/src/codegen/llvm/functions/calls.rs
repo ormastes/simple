@@ -83,6 +83,10 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_string_bytes"
         | "rt_string_chars"
         | "rt_string_lines"
+        | "rt_string_is_digit"
+        | "rt_string_is_alpha"
+        | "rt_string_is_alnum"
+        | "rt_string_is_whitespace"
         | "rt_array_pop"
         | "rt_array_sort"
         | "rt_array_reverse"
@@ -98,6 +102,8 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_string_split"
         | "rt_string_concat"
         | "rt_string_rfind"
+        | "rt_string_partition"
+        | "rt_string_rpartition"
         | "rt_array_push"
         | "rt_index_get"
         | "rt_index_set"
@@ -2227,6 +2233,16 @@ impl LlvmBackend {
                 "bytes" => Some("rt_string_bytes"),
                 "chars" => Some("rt_string_chars"),
                 "lines" | "split_lines" => Some("rt_string_lines"),
+                // Same alias groups as the Cranelift table and the
+                // MethodCallStatic table in functions.rs. `partition` is
+                // TEXT-ONLY (the array partition takes a predicate — different
+                // arity and shape); the predicates return i64 0/1.
+                "partition" => Some("rt_string_partition"),
+                "rpartition" => Some("rt_string_rpartition"),
+                "is_digit" | "is_numeric" => Some("rt_string_is_digit"),
+                "is_alpha" | "is_alphabetic" => Some("rt_string_is_alpha"),
+                "is_alphanumeric" | "is_alnum" => Some("rt_string_is_alnum"),
+                "is_whitespace" => Some("rt_string_is_whitespace"),
                 "trim" => Some("rt_string_trim"),
                 "trim_start" => Some("rt_string_trim_start"),
                 "trim_end" => Some("rt_string_trim_end"),
