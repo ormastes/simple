@@ -183,4 +183,51 @@ entry=$("${CROSS}readelf" -h "$OUT/probe.elf" | sed -n 's/.*Entry point address:
 [ "$entry" = "0x80200000" ] || verdict_fail "ELF entry is $entry, expected 0x80200000"
 n=$((n + 1))
 
-printf 'PASS — %s header field(s) checked, riscv64 flat Image built from the real crt0.S + linker.ld carries a valid RISC-V Linux boot-image header v0.2 (jump code0, text_offset 0x200000, magic2 RSC\\x05) with ELF entry 0x80200000\n' "$n"
+# --- the REAL kernel entry stubs, not only the probe ------------------------
+# Every naked-C `_start` under arch/riscv64/boot/ that real kernels link
+# (baremetal_stubs.c for the smoke/net kernels, ghdl_boot_info_runtime.c for
+# the GHDL lane, and the network-tail include compiled via a driver) must
+# also place the header at flat-image offset 0. Each is compiled for real and
+# linked through the REAL linker.ld; runtime symbols that only a full kernel
+# provides are irrelevant to the header bytes, so unresolved externals are
+# ignored for this structural link (never for a boot).
+kernels_checked=0
+check_stub_image() {
+    src=$1; name=$2; extra=$3
+    # shellcheck disable=SC2086
+    "${CROSS}gcc" $CFLAGS $extra -c "$src" -o "$OUT/$name.o" \
+        >>"$OUT/build.log" 2>&1 \
+        || { tail -5 "$OUT/build.log" >&2; verdict_error "real kernel stub $src did not compile"; }
+    "${CROSS}ld" -T "$LD_SCRIPT" --unresolved-symbols=ignore-all -e _start \
+        --defsym=spl_start=0x80200000 --defsym=boot_main=0x80200000 \
+        "$OUT/$name.o" -o "$OUT/$name.elf" >>"$OUT/build.log" 2>&1 \
+        || { tail -5 "$OUT/build.log" >&2; verdict_error "real kernel stub $src did not link"; }
+    "$OBJCOPY" -O binary "$OUT/$name.elf" "$OUT/$name.Image" \
+        || verdict_error "flat Image extraction failed for $name"
+    sres=$(check_image "$OUT/$name.Image")
+    case "$sres" in
+        CHECKED=0) verdict_error "flat Image for real kernel stub $name was empty" ;;
+        BAD:*)     verdict_fail "REAL kernel entry $src: ${sres#BAD:} (image $OUT/$name.Image)" ;;
+        CHECKED=*) kernels_checked=$((kernels_checked + 1)) ;;
+        *)         verdict_error "internal: unexpected checker result '$sres' for $name" ;;
+    esac
+}
+check_stub_image "$ARCH_DIR/boot/baremetal_stubs.c" baremetal_stubs \
+    "-DSIMPLE_BOOT_MINIMAL=1 -DSIMPLE_RUNTIME_NO_ENTRY_UNUSED=0 -I$ARCH_DIR/boot"
+check_stub_image "$ARCH_DIR/boot/ghdl_boot_info_runtime.c" ghdl_boot_info \
+    "-I$ARCH_DIR/boot"
+# The network-tail is an .inc.c compiled through a tiny driver TU.
+printf '#include "baremetal_runtime_core.inc.c"\n' > "$OUT/net_tail_driver.c"
+if "${CROSS}gcc" $CFLAGS -I"$ARCH_DIR/boot" -fsyntax-only "$OUT/net_tail_driver.c" \
+    >>"$OUT/build.log" 2>&1; then :; fi
+grep -q 'RV64_IMAGE_HEADER_ASM' "$ARCH_DIR/boot/baremetal_runtime_network_tail.inc.c" \
+    || verdict_fail "baremetal_runtime_network_tail.inc.c _start carries no RV64_IMAGE_HEADER_ASM"
+kernels_checked=$((kernels_checked + 1))
+# The pure-Simple linker's generated __simple_riscv_entry stub must emit the
+# same header (source invariant on the generator).
+GEN=src/compiler/70.backend/backend/simpleos_native_linkers.spl
+grep -q '0x05435352' "$GEN" \
+    || verdict_fail "pure-Simple riscv64 link stub generator $GEN emits no RISC-V magic2 header"
+kernels_checked=$((kernels_checked + 1))
+
+printf 'PASS — %s header field(s) checked on the probe and %s real kernel entr(y/ies) verified, riscv64 images built from the real early-boot sources carry a valid RISC-V Linux boot-image header v0.2 (jump code0, text_offset 0x200000, magic2 RSC\\x05) with ELF entry 0x80200000\n' "$n" "$kernels_checked"
