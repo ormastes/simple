@@ -30,6 +30,7 @@ pub(crate) mod di_injection;
 
 // AOP around advice support
 pub(crate) mod aop_advice;
+pub(crate) mod aop_runtime;
 
 // Re-export public interface for backward compatibility
 pub(crate) use arg_binding::{bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named};

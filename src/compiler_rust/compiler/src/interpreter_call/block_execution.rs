@@ -359,6 +359,9 @@ pub(super) fn exec_block_closure_into(
     }
 
     let mut local_env = out_env;
+    // Advice declared by an `on pc{...}` statement in this block is scoped to
+    // the block, like the const/immutable name sets this executor restores.
+    let _aop_scope = super::core::aop_runtime::AdviceScope::enter();
     let mut last_value = Value::Nil;
 
     for node in nodes {
@@ -1356,6 +1359,14 @@ pub(super) fn exec_block_closure_into(
                 local_env.insert(uf.name.clone(), Value::Nil);
                 last_value = Value::Nil;
             }
+            // `on pc{...} use advice <kind>` inside a block (an `it`/`describe`
+            // body, a function body). Registers the advice with the runtime
+            // registry; without this the declaration was swallowed by the
+            // catch-all below and no advice ever ran.
+            Node::AopAdvice(advice) => {
+                super::core::aop_runtime::register_advice(advice, functions)?;
+                last_value = Value::Nil;
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -1392,6 +1403,9 @@ fn exec_block_closure_mut_inner(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Advice declared by an `on pc{...}` statement in this block is scoped to
+    // the block, like the const/immutable name sets this executor restores.
+    let _aop_scope = super::core::aop_runtime::AdviceScope::enter();
     let mut last_value = Value::Nil;
 
     for node in nodes {
@@ -2045,6 +2059,14 @@ fn exec_block_closure_mut_inner(
             Node::UnitFamily(uf) => {
                 register_unit_family_locals(uf);
                 local_env.insert(uf.name.clone(), Value::Nil);
+                last_value = Value::Nil;
+            }
+            // `on pc{...} use advice <kind>` inside a block (an `it`/`describe`
+            // body, a function body). Registers the advice with the runtime
+            // registry; without this the declaration was swallowed by the
+            // catch-all below and no advice ever ran.
+            Node::AopAdvice(advice) => {
+                super::core::aop_runtime::register_advice(advice, functions)?;
                 last_value = Value::Nil;
             }
             _ => {

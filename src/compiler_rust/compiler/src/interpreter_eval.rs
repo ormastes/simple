@@ -1842,6 +1842,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 }
                 // External module declarations (no body) are handled by the module resolver
             }
+            // `on pc{...} use advice <kind> priority N` — register the advice
+            // so the call path can run it. Previously listed in the no-op arm
+            // below, which is why no advice ever executed.
+            Node::AopAdvice(advice) => {
+                super::interpreter_call::aop_runtime::register_advice(advice, &functions)?;
+            }
             Node::MultiUse(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
@@ -1849,7 +1855,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::AutoImportStmt(_)
             | Node::RequiresCapabilities(_)
             | Node::HandlePool(_)
-            | Node::AopAdvice(_)
             | Node::DiBinding(_)
             | Node::InjectGraph(_)
             | Node::SecurityPolicy(_)
