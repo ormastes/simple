@@ -178,3 +178,54 @@ is known to be on the executed path. This is the same class of mistake as the
 `SIMPLE_BOOTSTRAP_DEBUG` probe recorded above: **a probe that cannot fire proves
 nothing.** Any future work here must first establish that its probe is capable of
 producing output.
+
+## DECISIVE 2026-08-31 (round 2): the backend RECEIVES the Aggregate and emits nothing
+
+A narrow probe at the top of the backend's instruction dispatch, firing only on an
+Aggregate discriminant (so it survives the worker's stderr cap):
+
+```
+MIRB-AGG backend-sees-aggregate index=16
+```
+
+So the instruction is NOT lost between MIR and the backend. It arrives at dispatch.
+
+And yet the emitted module contains **neither `rt_array_new` NOR `rt_alloc`**
+(both measured 0). That matters because `translate_aggregate`
+(`_MirToLlvm/aggregate_intrinsics.spl:95`) emits `rt_array_new` on its `Array`
+arm, `rt_alloc` on its `Struct`/`Tuple` arms, AND `rt_alloc` again on the generic
+fall-through after the `case _: ()`. Every path through that function emits
+something. Zero of them appear.
+
+This also RECONCILES the earlier "byte-identical IR" result that made the added
+Aggregate fast path look inert: the fast path DID fire and DID call
+`translate_aggregate` — which emits nothing either way, so the IR could not
+change. That earlier result was evidence about `translate_aggregate`, not about
+dispatch, and was misread at the time.
+
+## Value semantics is now ruled out on BOTH sides
+
+- `MirToLlvm` is a **class** (`_MirToLlvm/class_def.spl:26`) — reference semantics.
+- `LlvmIRBuilder` is a **class** (`llvm_ir_builder.spl:36`) — reference semantics.
+
+So backend emissions propagate by construction. Combined with the MIR-side
+refutation recorded above (a bare `self.builder.switch_to_block()` sits
+unconditionally on the main `if`-lowering path, so if bare mutations were lost the
+compiler could not compile itself), the entire value-semantics line of
+investigation is closed. Three separate fixes were written against it; all three
+were measured inert and reverted.
+
+## Current state of the search
+
+| hop | Aggregate present? | evidence |
+|---|---|---|
+| after `lower_expr` | YES | `[mir-let-instcount] count=1` |
+| after the Let's copy write-back | YES | `count=2` |
+| block flush / `end_function` | flush path sound | `pending_len=12` -> `b0_insts=12` |
+| backend instruction dispatch | YES | `MIRB-AGG backend-sees-aggregate` |
+| emitted LLVM | **NO** | 0 `rt_array_new`, 0 `rt_alloc` |
+
+The defect is inside `translate_aggregate` or in what it reads before its `match
+kind:`. Note it computes `self.local_id_value(dest)` and `self.get_local(dest_id)`
+BEFORE the match; a failure there would explain silence on every arm including the
+fallback.
