@@ -2217,3 +2217,336 @@ void simd_crypto_init(void) {
 }
 
 #endif
+
+/* ============================================================================
+ * Generic rt_simd_<op>_<lanes> family -- scalar C backing for the stdlib
+ * vector externs in src/lib/nogc_sync_mut/simd.spl and simd_crypto.spl.
+ *
+ * These 32 symbols existed only as interpreter shims
+ * (src/compiler_rust/compiler/src/interpreter_extern/simd.rs), so every
+ * native link left them unresolved (stage2 Windows link, LNK2019 -- see
+ * doc/08_tracking/bug/stage2_windows_unresolved_inventory_2026-08-31.md,
+ * group C). Scalar implementations are deliberate: correctness unblocks the
+ * link; SIMD codegen for this surface can come later.
+ *
+ * ABI (reverse-engineered from the generated objects, mod_814.o/mod_815.o,
+ * and the seed codegen's i64-everything extern lowering in
+ * codegen/llvm/functions.rs):
+ *   - Every parameter and return is int64_t.
+ *   - A vector value is a TAG_HEAP handle: (v & 7) == 1, payload
+ *     (v & ~7) points at N contiguous 8-byte lane slots (one slot per
+ *     declared struct field; Vec16u8 = 16 slots = 128 bytes).
+ *   - Float lanes (Vec4f/Vec8f/Vec4d -- including the f32 types) hold a raw
+ *     f64 bit pattern whose low 3 bits are tag noise: the generated
+ *     from_array/constructor stores (tagged_float & ~7). Read by masking the
+ *     low 3 bits and bitcasting to double; write back with the low 3 bits
+ *     cleared (the canonical form the generated code itself stores).
+ *   - Integer lanes (Vec4i64/Vec4u32/Vec4u64/Vec16u8) hold raw integers
+ *     (the generated from_array calls rt_value_unbox_int before storing).
+ *   - Scalar parameters (shift counts, lane indices) arrive raw.
+ *   - A scalar f32 RESULT (hadd/hmax/hmin) crosses the boundary as an
+ *     inline tagged float: (f64_bits & ~7) | 2 -- the exact encoding the
+ *     codegen's inline box/unbox (>>3 <<3 | TAG_FLOAT) round-trips.
+ *   - Struct results are freshly allocated with rt_alloc (same allocator the
+ *     generated wrappers use) and returned as (ptr | 1).
+ *   - An argument that is not a valid heap handle is treated as an all-zero
+ *     vector -- mirroring the generated wrappers' own cmove-zero defensive
+ *     copy, not an invented fallback. rt_alloc failure returns 0 (OOM only).
+ *
+ * Semantics mirror the interpreter shims exactly: f32 families compute in
+ * float precision, integer families wrap, shifts mask to 0..63, FMA is
+ * fused (fmaf/fma), shuffle_u8x16 is PSHUFB (bit7 => 0, idx 0-15 from a,
+ * 16-31 from b).
+ * ========================================================================== */
+
+#include <math.h>
+#include <string.h>
+
+static const int64_t* rt_simd_vec_payload(int64_t v) {
+    if ((((uint64_t)v) & 0x7ULL) != 0x1ULL) return NULL;
+    return (const int64_t*)(uintptr_t)(((uint64_t)v) & ~0x7ULL);
+}
+
+static double rt_simd_lane_f64(const int64_t* p, int i) {
+    uint64_t bits;
+    double d;
+    if (!p) return 0.0;
+    bits = ((uint64_t)p[i]) & ~0x7ULL;
+    memcpy(&d, &bits, sizeof d);
+    return d;
+}
+
+static int64_t rt_simd_f64_slot(double d) {
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof bits);
+    return (int64_t)(bits & ~0x7ULL);
+}
+
+static int64_t rt_simd_box_f64(double d) {
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof bits);
+    return (int64_t)((bits & ~0x7ULL) | 0x2ULL); /* inline TAG_FLOAT */
+}
+
+static int64_t rt_simd_result_vec(const int64_t* slots, int n) {
+    int64_t* out = (int64_t*)rt_alloc((int64_t)n * 8);
+    if (!out) return 0; /* OOM only */
+    memcpy(out, slots, (size_t)n * 8);
+    return (int64_t)((uint64_t)(uintptr_t)out | 0x1ULL);
+}
+
+static uint64_t rt_simd_lane_u64(const int64_t* p, int i) {
+    return p ? (uint64_t)p[i] : 0ULL;
+}
+
+/* ---- f32x4 (Vec4f) ---- */
+
+#define RT_SIMD_F32X4_BINOP(NAME, EXPR)                                     \
+    int64_t NAME(int64_t a, int64_t b) {                                    \
+        const int64_t* pa = rt_simd_vec_payload(a);                         \
+        const int64_t* pb = rt_simd_vec_payload(b);                         \
+        int64_t out[4];                                                     \
+        int i;                                                              \
+        for (i = 0; i < 4; i++) {                                           \
+            float x = (float)rt_simd_lane_f64(pa, i);                       \
+            float y = (float)rt_simd_lane_f64(pb, i);                       \
+            out[i] = rt_simd_f64_slot((double)(EXPR));                      \
+        }                                                                   \
+        return rt_simd_result_vec(out, 4);                                  \
+    }
+
+RT_SIMD_F32X4_BINOP(rt_simd_add_f32x4, x + y)
+RT_SIMD_F32X4_BINOP(rt_simd_sub_f32x4, x - y)
+RT_SIMD_F32X4_BINOP(rt_simd_mul_f32x4, x * y)
+RT_SIMD_F32X4_BINOP(rt_simd_div_f32x4, x / y)
+
+int64_t rt_simd_fma_f32x4(int64_t a, int64_t b, int64_t c) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    const int64_t* pc = rt_simd_vec_payload(c);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++) {
+        float x = (float)rt_simd_lane_f64(pa, i);
+        float y = (float)rt_simd_lane_f64(pb, i);
+        float z = (float)rt_simd_lane_f64(pc, i);
+        out[i] = rt_simd_f64_slot((double)fmaf(x, y, z));
+    }
+    return rt_simd_result_vec(out, 4);
+}
+
+int64_t rt_simd_hadd_f32x4(int64_t a) {
+    const int64_t* p = rt_simd_vec_payload(a);
+    float s = (float)rt_simd_lane_f64(p, 0) + (float)rt_simd_lane_f64(p, 1)
+            + (float)rt_simd_lane_f64(p, 2) + (float)rt_simd_lane_f64(p, 3);
+    return rt_simd_box_f64((double)s);
+}
+
+int64_t rt_simd_hmax_f32x4(int64_t a) {
+    const int64_t* p = rt_simd_vec_payload(a);
+    float m = (float)rt_simd_lane_f64(p, 0);
+    int i;
+    for (i = 1; i < 4; i++) {
+        float v = (float)rt_simd_lane_f64(p, i);
+        if (v > m) m = v;
+    }
+    return rt_simd_box_f64((double)m);
+}
+
+int64_t rt_simd_hmin_f32x4(int64_t a) {
+    const int64_t* p = rt_simd_vec_payload(a);
+    float m = (float)rt_simd_lane_f64(p, 0);
+    int i;
+    for (i = 1; i < 4; i++) {
+        float v = (float)rt_simd_lane_f64(p, i);
+        if (v < m) m = v;
+    }
+    return rt_simd_box_f64((double)m);
+}
+
+/* ---- f32x8 (Vec8f) ---- */
+
+#define RT_SIMD_F32X8_BINOP(NAME, EXPR)                                     \
+    int64_t NAME(int64_t a, int64_t b) {                                    \
+        const int64_t* pa = rt_simd_vec_payload(a);                         \
+        const int64_t* pb = rt_simd_vec_payload(b);                         \
+        int64_t out[8];                                                     \
+        int i;                                                              \
+        for (i = 0; i < 8; i++) {                                           \
+            float x = (float)rt_simd_lane_f64(pa, i);                       \
+            float y = (float)rt_simd_lane_f64(pb, i);                       \
+            out[i] = rt_simd_f64_slot((double)(EXPR));                      \
+        }                                                                   \
+        return rt_simd_result_vec(out, 8);                                  \
+    }
+
+RT_SIMD_F32X8_BINOP(rt_simd_add_f32x8, x + y)
+RT_SIMD_F32X8_BINOP(rt_simd_sub_f32x8, x - y)
+RT_SIMD_F32X8_BINOP(rt_simd_mul_f32x8, x * y)
+RT_SIMD_F32X8_BINOP(rt_simd_div_f32x8, x / y)
+
+int64_t rt_simd_fma_f32x8(int64_t a, int64_t b, int64_t c) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    const int64_t* pc = rt_simd_vec_payload(c);
+    int64_t out[8];
+    int i;
+    for (i = 0; i < 8; i++) {
+        float x = (float)rt_simd_lane_f64(pa, i);
+        float y = (float)rt_simd_lane_f64(pb, i);
+        float z = (float)rt_simd_lane_f64(pc, i);
+        out[i] = rt_simd_f64_slot((double)fmaf(x, y, z));
+    }
+    return rt_simd_result_vec(out, 8);
+}
+
+/* ---- f64x4 (Vec4d) ---- */
+
+#define RT_SIMD_F64X4_BINOP(NAME, EXPR)                                     \
+    int64_t NAME(int64_t a, int64_t b) {                                    \
+        const int64_t* pa = rt_simd_vec_payload(a);                         \
+        const int64_t* pb = rt_simd_vec_payload(b);                         \
+        int64_t out[4];                                                     \
+        int i;                                                              \
+        for (i = 0; i < 4; i++) {                                           \
+            double x = rt_simd_lane_f64(pa, i);                             \
+            double y = rt_simd_lane_f64(pb, i);                             \
+            out[i] = rt_simd_f64_slot(EXPR);                                \
+        }                                                                   \
+        return rt_simd_result_vec(out, 4);                                  \
+    }
+
+RT_SIMD_F64X4_BINOP(rt_simd_add_f64x4, x + y)
+RT_SIMD_F64X4_BINOP(rt_simd_sub_f64x4, x - y)
+RT_SIMD_F64X4_BINOP(rt_simd_mul_f64x4, x * y)
+RT_SIMD_F64X4_BINOP(rt_simd_div_f64x4, x / y)
+
+int64_t rt_simd_fma_f64x4(int64_t a, int64_t b, int64_t c) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    const int64_t* pc = rt_simd_vec_payload(c);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++) {
+        out[i] = rt_simd_f64_slot(fma(rt_simd_lane_f64(pa, i),
+                                      rt_simd_lane_f64(pb, i),
+                                      rt_simd_lane_f64(pc, i)));
+    }
+    return rt_simd_result_vec(out, 4);
+}
+
+/* ---- i64x4 (Vec4i64): raw i64 lanes, wrapping arithmetic ---- */
+
+int64_t rt_simd_add_i64x4(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++)
+        out[i] = (int64_t)(rt_simd_lane_u64(pa, i) + rt_simd_lane_u64(pb, i));
+    return rt_simd_result_vec(out, 4);
+}
+
+int64_t rt_simd_sub_i64x4(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++)
+        out[i] = (int64_t)(rt_simd_lane_u64(pa, i) - rt_simd_lane_u64(pb, i));
+    return rt_simd_result_vec(out, 4);
+}
+
+/* ---- u32x4 (Vec4u32): raw lanes, wrapping u32, stored zero-extended ---- */
+
+#define RT_SIMD_U32X4_BINOP(NAME, EXPR)                                     \
+    int64_t NAME(int64_t a, int64_t b) {                                    \
+        const int64_t* pa = rt_simd_vec_payload(a);                         \
+        const int64_t* pb = rt_simd_vec_payload(b);                         \
+        int64_t out[4];                                                     \
+        int i;                                                              \
+        for (i = 0; i < 4; i++) {                                           \
+            uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);                 \
+            uint32_t y = (uint32_t)rt_simd_lane_u64(pb, i);                 \
+            out[i] = (int64_t)(uint64_t)(uint32_t)(EXPR);                   \
+        }                                                                   \
+        return rt_simd_result_vec(out, 4);                                  \
+    }
+
+RT_SIMD_U32X4_BINOP(rt_simd_add_u32x4, x + y)
+RT_SIMD_U32X4_BINOP(rt_simd_sub_u32x4, x - y)
+RT_SIMD_U32X4_BINOP(rt_simd_and_u32x4, x & y)
+RT_SIMD_U32X4_BINOP(rt_simd_or_u32x4,  x | y)
+RT_SIMD_U32X4_BINOP(rt_simd_xor_u32x4, x ^ y)
+
+/* ---- u64x4 (Vec4u64): raw lanes; shifts mask to 0..63 (interpreter parity) */
+
+#define RT_SIMD_U64X4_BINOP(NAME, EXPR)                                     \
+    int64_t NAME(int64_t a, int64_t b) {                                    \
+        const int64_t* pa = rt_simd_vec_payload(a);                         \
+        const int64_t* pb = rt_simd_vec_payload(b);                         \
+        int64_t out[4];                                                     \
+        int i;                                                              \
+        for (i = 0; i < 4; i++) {                                           \
+            uint64_t x = rt_simd_lane_u64(pa, i);                           \
+            uint64_t y = rt_simd_lane_u64(pb, i);                           \
+            out[i] = (int64_t)(EXPR);                                       \
+        }                                                                   \
+        return rt_simd_result_vec(out, 4);                                  \
+    }
+
+RT_SIMD_U64X4_BINOP(rt_simd_and_u64x4, x & y)
+RT_SIMD_U64X4_BINOP(rt_simd_or_u64x4,  x | y)
+RT_SIMD_U64X4_BINOP(rt_simd_xor_u64x4, x ^ y)
+
+int64_t rt_simd_shl_u64x4(int64_t a, int64_t shift) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned s = (unsigned)(((uint64_t)shift) & 63ULL);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++)
+        out[i] = (int64_t)(rt_simd_lane_u64(pa, i) << s);
+    return rt_simd_result_vec(out, 4);
+}
+
+int64_t rt_simd_shr_u64x4(int64_t a, int64_t shift) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned s = (unsigned)(((uint64_t)shift) & 63ULL);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++)
+        out[i] = (int64_t)(rt_simd_lane_u64(pa, i) >> s);
+    return rt_simd_result_vec(out, 4);
+}
+
+int64_t rt_simd_vec4u64_get(int64_t v, int64_t index) {
+    const int64_t* p = rt_simd_vec_payload(v);
+    /* The interpreter shim raises a runtime error for index >= 4; a C
+     * runtime function cannot. 0 is the least-wrong answer and is what an
+     * absent/invalid vector already yields on every other path here. */
+    if (!p || index < 0 || index > 3) return 0;
+    return p[index];
+}
+
+/* ---- u8x16 (Vec16u8): 16 raw byte lanes, one 8-byte slot each ---- */
+
+int64_t rt_simd_shuffle_u8x16(int64_t a, int64_t b, int64_t mask) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    const int64_t* pm = rt_simd_vec_payload(mask);
+    int64_t out[16];
+    int i;
+    for (i = 0; i < 16; i++) {
+        uint8_t m = (uint8_t)rt_simd_lane_u64(pm, i);
+        uint8_t r;
+        if (m & 0x80u) {
+            r = 0;
+        } else {
+            unsigned idx = m & 0x1fu;
+            r = (idx < 16u) ? (uint8_t)rt_simd_lane_u64(pa, (int)idx)
+                            : (uint8_t)rt_simd_lane_u64(pb, (int)(idx - 16u));
+        }
+        out[i] = (int64_t)(uint64_t)r;
+    }
+    return rt_simd_result_vec(out, 16);
+}
