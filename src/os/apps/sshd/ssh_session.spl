@@ -22,6 +22,7 @@ use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.kernel.log.klog_api.{log_info}
 use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_send_ssh_banner, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_ssh_encrypted_packet, rt_net_ssh_encrypted_read_plan, rt_net_recv_version_text, rt_net_recv_version_bytes, rt_net_close}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
+use os.apps.sshd.arm64_ssh_request_context_owner.{Arm64SshRequestContextOwnerV1, ssh_session_arm64_request_context_owner_v1}
 use os.apps.sshd.ssh_identification.{ssh_identification_text_to_bytes_stable, ssh_identification_bytes_start_ssh2, ssh_identification_bytes_trim_crlf}
 
 pub fn ssh_recv_ring_u32_be(ring: SshRecvRing, offset: u64) -> u32:
@@ -135,6 +136,14 @@ pub struct SshShellLaunchReport:
     smf_backed: bool
     shell_exec_path: bool
 
+pub struct SshExecTxV1:
+    """One channel-owned stdout suffix awaiting peer window credit."""
+    local_id: u32
+    remote_id: u32
+    bytes: [u8]
+    head: u64
+    exit_status: u32
+
 class SshSession:
     """Per-client SSH session.
 
@@ -144,6 +153,12 @@ class SshSession:
     state: SshSessionState
     cipher: SshCipher
     channels: ChannelTable
+    arm64_request_contexts: Arm64SshRequestContextOwnerV1?
+    # Ordered SFTP response bytes retained while the peer's channel window is
+    # exhausted. ssh_session_channel is the sole writer/drainer.
+    sftp_tx_pending: [u8]
+    sftp_tx_head: u64
+    exec_tx: [SshExecTxV1]
     user_db: SshUserDb
     session_id: [u8]
     authenticated_user: text
@@ -178,11 +193,15 @@ class SshSession:
     host_ed25519_public: [u8]
     ctr_counter_c2s: [u8]
     ctr_counter_s2c: [u8]
+    rekey_in_progress: bool
+    rekey_count: u32
     active_remote_channel_id: u32
     pending_ring3_exec: bool   # set by exec dispatch; consumed by the shallow accept loop
     pending_ring3_exec_exit_code: u32  # exit code from ring-3; set by accept loop after spawn
     pending_ring3_exec_stdout: [u8]    # bounded bytes captured by the process-console owner
     pending_ring3_exec_stdout_truncated: bool
+    pending_ring3_exec_admitted: bool
+    pending_ring3_exec_want_reply: bool
     pending_ring3_exec_remote_id: u32  # SSH channel remote_id for exit-status response
     pending_ring3_exec_local_id: u32   # SSH channel local_id for cleanup
     pending_ring3_exec_command: text   # intact decoded exec command text (Phase 2e Inc 2); tokenized by the
@@ -229,6 +248,10 @@ impl SshSession:
             state: SshSessionState.VersionExchange,
             cipher: SshCipher.new(),
             channels: ChannelTable.new(),
+            arm64_request_contexts: ssh_session_arm64_request_context_owner_v1(socket_fd),
+            sftp_tx_pending: [],
+            sftp_tx_head: 0u64,
+            exec_tx: [],
             user_db: user_db,
             session_id: [],
             authenticated_user: "",
@@ -263,11 +286,15 @@ impl SshSession:
             host_ed25519_public: host_ed25519_public,
             ctr_counter_c2s: [],
             ctr_counter_s2c: [],
+            rekey_in_progress: false,
+            rekey_count: 0u32,
             active_remote_channel_id: 0,
             pending_ring3_exec: false,
             pending_ring3_exec_exit_code: 0,
             pending_ring3_exec_stdout: [],
             pending_ring3_exec_stdout_truncated: false,
+            pending_ring3_exec_admitted: false,
+            pending_ring3_exec_want_reply: false,
             pending_ring3_exec_remote_id: 0,
             pending_ring3_exec_local_id: 0,
             pending_ring3_exec_command: "",

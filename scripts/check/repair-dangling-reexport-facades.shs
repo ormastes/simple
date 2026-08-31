@@ -1,0 +1,46 @@
+#!/bin/sh
+# repair-dangling-reexport-facades.shs [--apply] — restore facade files whose
+# `export use <mod>_partN.*` re-exports name modules that do not exist, from the
+# pre-clobber revision.
+#
+# Dry-run by default: prints, per facade, the both-direction diff summary so the
+# "never overwrite work HEAD legitimately added" rule can be checked BEFORE
+# anything is written. Only facades where the base is a strict superset (0
+# HEAD-only insertions) are restored even with --apply; anything with HEAD-side
+# additions is reported as NEEDS-HAND-MERGE and left alone.
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+BASE="${CLOBBER_BASE:-e274cd33719^1}"
+APPLY=0
+[ "${1:-}" = "--apply" ] && APPLY=1
+
+FACADES=$(/usr/bin/grep -rlE '^[[:space:]]*(pub )?export use [A-Za-z_0-9.]*_part[0-9]+' src --include='*.spl' 2>/dev/null | sort -u)
+[ -n "$FACADES" ] || { echo "ERROR — nothing was checked: no _partN facades found"; exit 2; }
+
+RESTORED=0; SKIPPED=0; MISSING=0
+for f in $FACADES; do
+    if ! git cat-file -e "$BASE:$f" 2>/dev/null; then
+        echo "MISSING-AT-BASE  $f"
+        MISSING=$((MISSING + 1))
+        continue
+    fi
+    ins=$(git diff "$BASE" HEAD -- "$f" | grep -c '^+[^+]' || true)
+    del=$(git diff "$BASE" HEAD -- "$f" | grep -c '^-[^-]' || true)
+    # A facade is safe to restore when EVERY HEAD-only insertion is itself one of
+    # the dangling `_partN` export lines — i.e. HEAD added only the defect. Any
+    # other insertion is real work and must be hand-merged instead.
+    other=$(git diff "$BASE" HEAD -- "$f" | grep '^+[^+]' \
+            | grep -vcE '^\+[[:space:]]*(pub )?export use [A-Za-z_0-9.]*_part[0-9]+' || true)
+    if [ "$other" -gt 0 ]; then
+        echo "NEEDS-HAND-MERGE $f (HEAD-only insertions=$ins, of which non-_partN=$other, deletions=$del)"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+    echo "RESTORE          $f (HEAD added only $ins dangling _partN line(s); base restores $del real re-export(s))"
+    RESTORED=$((RESTORED + 1))
+    [ "$APPLY" -eq 1 ] && git show "$BASE:$f" > "$f"
+done
+
+echo "--- $RESTORED restorable, $SKIPPED need hand-merge, $MISSING absent at $BASE"
+[ "$APPLY" -eq 1 ] && echo "--- applied" || echo "--- dry run; re-run with --apply"
