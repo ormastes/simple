@@ -13,8 +13,10 @@
 #   - spl_thread_cpu_count returns 1 (single-core baremetal).
 #   - spl_thread_sleep busy-waits using the fake timer.
 #   - spl_thread_yield is a no-op.
-#   - Mutex/condvar stubs provide single-threaded semantics:
-#     locks always succeed, waits return immediately.
+#   - Mutexes use one bounded boot-created word per handle and an
+#     architecture acquire/release CAS.  Handles are scalar addresses, so
+#     copied MutexHandle values still contend on the same canonical word.
+#   - Condition variables retain single-threaded immediate-return semantics.
 
 use os.kernel.log.klog_api.{log_raw_println}
 
@@ -94,52 +96,323 @@ fn spl_thread_cpu_count() -> i64:
     1
 
 # ============================================================================
-# Mutex Stubs (single-threaded: always succeed)
+# Bare-metal Mutex Owner
 # ============================================================================
 
-var g_next_mutex_handle: i64 = 1
+val SIMPLEOS_MUTEX_CAPACITY: i64 = 256
+val SIMPLEOS_MUTEX_WORD_BYTES: i64 = 4
+val SIMPLEOS_MUTEX_UNLOCKED: u32 = 0
+val SIMPLEOS_MUTEX_DESTROYED: u32 = 0xFFFFFFFF
+val SIMPLEOS_MUTEX_SPIN_LIMIT: i64 = 65536
+
+# Creation and destruction are control-plane operations.  Creation is allowed
+# only during serialized boot, before secondary cores or interrupts can enter
+# code using this shim.  The fixed arena is never freed: published scalar
+# handles may have been copied, so recycling a word would create an ABA lock.
+var g_mutex_words_base: i64 = 0
+var g_mutex_words_issued: i64 = 0
+
+extern fn calloc(count: i64, size: i64) -> i64
+@unsafe(reason: "mutex arena word is bounds-checked and boot-owner initialized", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+
+# One compare/exchange boundary is kept here because ordinary Simple loads and
+# stores cannot establish cross-core exclusion.  Each implementation returns
+# true only for the transition expected -> desired.  Successful acquisition is
+# acquire ordered; unlock/destroy publication is release ordered.
+@cfg(x86_64)
+@naked
+fn _mutex_word_cas(addr: u64, expected: u32, desired: u32) -> bool:
+    asm volatile:
+        "mov eax, esi"
+        "lock cmpxchg dword ptr [rdi], edx"
+        "sete al"
+        "movzx eax, al"
+        "ret"
+
+@cfg(x86)
+@naked
+fn _mutex_word_cas(addr: u32, expected: u32, desired: u32) -> bool:
+    asm volatile:
+        "mov ecx, dword ptr [esp + 4]"
+        "mov eax, dword ptr [esp + 8]"
+        "mov edx, dword ptr [esp + 12]"
+        "lock cmpxchg dword ptr [ecx], edx"
+        "sete al"
+        "movzx eax, al"
+        "ret"
+
+@cfg(arm64)
+@naked
+fn _mutex_word_cas(addr: u64, expected: u32, desired: u32) -> bool:
+    asm volatile:
+        ".Lsimpleos_mutex_arm64_retry:"
+        "ldaxr w3, [x0]"
+        "cmp w3, w1"
+        "b.ne .Lsimpleos_mutex_arm64_miss"
+        "stlxr w4, w2, [x0]"
+        "cbnz w4, .Lsimpleos_mutex_arm64_retry"
+        "mov w0, #1"
+        "ret"
+        ".Lsimpleos_mutex_arm64_miss:"
+        "clrex"
+        "mov w0, #0"
+        "ret"
+
+@cfg(arm32)
+@naked
+fn _mutex_word_cas(addr: u32, expected: u32, desired: u32) -> bool:
+    asm volatile:
+        ".Lsimpleos_mutex_arm32_retry:"
+        "ldrex r3, [r0]"
+        "cmp r3, r1"
+        "bne .Lsimpleos_mutex_arm32_miss"
+        "dmb ish"
+        "strex r3, r2, [r0]"
+        "cmp r3, #0"
+        "bne .Lsimpleos_mutex_arm32_retry"
+        "dmb ish"
+        "mov r0, #1"
+        "bx lr"
+        ".Lsimpleos_mutex_arm32_miss:"
+        "clrex"
+        "mov r0, #0"
+        "bx lr"
+
+@cfg(riscv64)
+@naked
+fn _mutex_word_cas(addr: u64, expected: u32, desired: u32) -> bool:
+    asm volatile:
+        ".Lsimpleos_mutex_rv64_retry:"
+        "lr.w.aq t0, (a0)"
+        "bne t0, a1, .Lsimpleos_mutex_rv64_miss"
+        "sc.w.rl t1, a2, (a0)"
+        "bnez t1, .Lsimpleos_mutex_rv64_retry"
+        "li a0, 1"
+        "ret"
+        ".Lsimpleos_mutex_rv64_miss:"
+        "li a0, 0"
+        "ret"
+
+@cfg(riscv32)
+@naked
+fn _mutex_word_cas(addr: u32, expected: u32, desired: u32) -> bool:
+    asm volatile:
+        ".Lsimpleos_mutex_rv32_retry:"
+        "lr.w.aq t0, (a0)"
+        "bne t0, a1, .Lsimpleos_mutex_rv32_miss"
+        "sc.w.rl t1, a2, (a0)"
+        "bnez t1, .Lsimpleos_mutex_rv32_retry"
+        "li a0, 1"
+        "ret"
+        ".Lsimpleos_mutex_rv32_miss:"
+        "li a0, 0"
+        "ret"
+
+# Lock words retain cpu_id + 1.  Zero remains unlocked and all-ones remains
+# destroyed, so a core that did not acquire the mutex cannot release it.
+@cfg(x86_64)
+@naked
+fn _mutex_cpu_id() -> u32:
+    asm volatile:
+        "push rbx"
+        "xor eax, eax"
+        "cpuid"
+        "cmp eax, 0xb"
+        "jb .Lsimpleos_mutex_x64_legacy_apic"
+        "mov eax, 0xb"
+        "xor ecx, ecx"
+        "cpuid"
+        "test ebx, ebx"
+        "jz .Lsimpleos_mutex_x64_legacy_apic"
+        "mov eax, edx"
+        "pop rbx"
+        "ret"
+        ".Lsimpleos_mutex_x64_legacy_apic:"
+        "mov eax, 1"
+        "cpuid"
+        "shr ebx, 24"
+        "movzx eax, bl"
+        "pop rbx"
+        "ret"
+
+@cfg(x86)
+@naked
+fn _mutex_cpu_id() -> u32:
+    asm volatile:
+        "push ebx"
+        "xor eax, eax"
+        "cpuid"
+        "cmp eax, 0xb"
+        "jb .Lsimpleos_mutex_x86_legacy_apic"
+        "mov eax, 0xb"
+        "xor ecx, ecx"
+        "cpuid"
+        "test ebx, ebx"
+        "jz .Lsimpleos_mutex_x86_legacy_apic"
+        "mov eax, edx"
+        "pop ebx"
+        "ret"
+        ".Lsimpleos_mutex_x86_legacy_apic:"
+        "mov eax, 1"
+        "cpuid"
+        "shr ebx, 24"
+        "movzx eax, bl"
+        "pop ebx"
+        "ret"
+
+@cfg(arm64)
+@naked
+fn _mutex_cpu_id() -> u32:
+    asm volatile:
+        "mrs x1, mpidr_el1"
+        "and x0, x1, #0xffffff"
+        "ubfx x1, x1, #32, #8"
+        "orr x0, x0, x1, lsl #24"
+        "ret"
+
+@cfg(arm32)
+@naked
+fn _mutex_cpu_id() -> u32:
+    asm volatile:
+        "mrc p15, 0, r0, c0, c0, 5"
+        "bic r0, r0, #0xff000000"
+        "bx lr"
+
+@cfg(riscv64)
+@naked
+fn _mutex_cpu_id() -> u32:
+    asm volatile:
+        "mv a0, tp"
+        "ret"
+
+@cfg(riscv32)
+@naked
+fn _mutex_cpu_id() -> u32:
+    asm volatile:
+        "mv a0, tp"
+        "ret"
+
+fn _mutex_owner_word() -> u32:
+    val cpu_id = _mutex_cpu_id()
+    if cpu_id >= SIMPLEOS_MUTEX_DESTROYED - 1:
+        return 0
+    cpu_id + 1
+
+fn _mutex_handle_valid(handle: i64) -> bool:
+    if handle <= 0 or g_mutex_words_base <= 0 or g_mutex_words_issued <= 0:
+        return false
+    val offset = handle - g_mutex_words_base
+    if offset < 0 or offset % SIMPLEOS_MUTEX_WORD_BYTES != 0:
+        return false
+    offset < g_mutex_words_issued * SIMPLEOS_MUTEX_WORD_BYTES
+
+@cfg(x86_64)
+fn _mutex_cas(handle: i64, expected: u32, desired: u32) -> bool:
+    if not _mutex_handle_valid(handle):
+        return false
+    _mutex_word_cas(handle as u64, expected, desired)
+
+@cfg(arm64)
+fn _mutex_cas(handle: i64, expected: u32, desired: u32) -> bool:
+    if not _mutex_handle_valid(handle):
+        return false
+    _mutex_word_cas(handle as u64, expected, desired)
+
+@cfg(riscv64)
+fn _mutex_cas(handle: i64, expected: u32, desired: u32) -> bool:
+    if not _mutex_handle_valid(handle):
+        return false
+    _mutex_word_cas(handle as u64, expected, desired)
+
+@cfg(x86)
+fn _mutex_cas(handle: i64, expected: u32, desired: u32) -> bool:
+    if not _mutex_handle_valid(handle) or handle > 0xFFFFFFFF:
+        return false
+    _mutex_word_cas(handle as u32, expected, desired)
+
+@cfg(arm32)
+fn _mutex_cas(handle: i64, expected: u32, desired: u32) -> bool:
+    if not _mutex_handle_valid(handle) or handle > 0xFFFFFFFF:
+        return false
+    _mutex_word_cas(handle as u32, expected, desired)
+
+@cfg(riscv32)
+fn _mutex_cas(handle: i64, expected: u32, desired: u32) -> bool:
+    if not _mutex_handle_valid(handle) or handle > 0xFFFFFFFF:
+        return false
+    _mutex_word_cas(handle as u32, expected, desired)
 
 @export("C")
 fn spl_mutex_create() -> i64:
     """Create a mutex.
 
-    Baremetal stub: allocates a handle number. No real locking needed.
+    Allocate one word from the bounded boot-lifetime arena.  This operation is
+    deliberately not a concurrent allocator; callers must create locks during
+    serialized boot.  Exhaustion fails closed with handle zero.
     """
-    val handle = g_next_mutex_handle
-    g_next_mutex_handle = g_next_mutex_handle + 1
+    if g_mutex_words_issued >= SIMPLEOS_MUTEX_CAPACITY:
+        return 0
+    if g_mutex_words_base == 0:
+        g_mutex_words_base = calloc(SIMPLEOS_MUTEX_CAPACITY, SIMPLEOS_MUTEX_WORD_BYTES)
+        if g_mutex_words_base == 0:
+            return 0
+    val handle = g_mutex_words_base + (g_mutex_words_issued * SIMPLEOS_MUTEX_WORD_BYTES)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_write_i32(handle, 0, SIMPLEOS_MUTEX_UNLOCKED as i32)
+    g_mutex_words_issued = g_mutex_words_issued + 1
     handle
 
 @export("C")
 fn spl_mutex_lock(handle: i64) -> bool:
     """Lock a mutex (blocking).
 
-    Baremetal stub: always succeeds (single-threaded, no contention).
+    Spin for a fixed budget.  Interrupt handlers must use try_lock: blocking
+    while the interrupted context owns the same mutex cannot make progress.
     """
-    true
+    val owner = _mutex_owner_word()
+    if owner == 0:
+        return false
+    var spins: i64 = 0
+    while spins < SIMPLEOS_MUTEX_SPIN_LIMIT:
+        if _mutex_cas(handle, SIMPLEOS_MUTEX_UNLOCKED, owner):
+            return true
+        spins = spins + 1
+    false
 
 @export("C")
 fn spl_mutex_try_lock(handle: i64) -> bool:
     """Try to lock a mutex (non-blocking).
 
-    Baremetal stub: always succeeds.
+    Performs exactly one acquire CAS and reports contention, invalid handles,
+    and destroyed handles as false.
     """
-    true
+    val owner = _mutex_owner_word()
+    if owner == 0:
+        return false
+    _mutex_cas(handle, SIMPLEOS_MUTEX_UNLOCKED, owner)
 
 @export("C")
 fn spl_mutex_unlock(handle: i64) -> bool:
     """Unlock a mutex.
 
-    Baremetal stub: always succeeds.
+    Fail-stop on unlocked/destroyed/invalid handles: only the exact locked to
+    unlocked transition succeeds.  This catches double-unlock and stale-copy
+    misuse instead of silently publishing success.
     """
-    true
+    val owner = _mutex_owner_word()
+    if owner == 0:
+        return false
+    _mutex_cas(handle, owner, SIMPLEOS_MUTEX_UNLOCKED)
 
 @export("C")
 fn spl_mutex_destroy(handle: i64):
     """Destroy a mutex.
 
-    Baremetal stub: no-op.
+    Mark an unlocked word terminal.  Locked and already-destroyed handles are
+    left unchanged.  Arena words are intentionally never recycled.
     """
-    pass_dn
+    _ = _mutex_cas(handle, SIMPLEOS_MUTEX_UNLOCKED, SIMPLEOS_MUTEX_DESTROYED)
 
 # ============================================================================
 # Condition Variable Stubs (single-threaded: immediate return)
