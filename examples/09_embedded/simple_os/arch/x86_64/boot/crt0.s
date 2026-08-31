@@ -132,6 +132,24 @@ _entry32:
     orl  $0x03, %eax
     movl %eax, 2048(%edi)      /* PDPT[256] */
 
+    /* ALSO alias the same 1 GiB window at the higher-half kernel VA
+     * 0xFFFFC00000000000.  The identity map above is what this code has
+     * always installed, but the early NVMe C path in baremetal_stubs.c
+     * translates BAR0 to NVME_BAR_VIRT_BASE (0xFFFFC00000000000) before any
+     * user address space exists, so it dereferenced an unmapped VA and the
+     * kernel page-faulted forever at BAR0+CSTS instead of reaching L3.
+     * 0xFFFFC00000000000 decodes to PML4[384], PDPT[0]; both aliases share
+     * boot_high_pd, so this costs no extra page-table memory. */
+    movl $boot_pml4, %edi
+    movl $boot_high_pdpt, %eax
+    orl  $0x03, %eax
+    movl %eax, 3072(%edi)      /* PML4[384] */
+
+    movl $boot_high_pdpt, %edi
+    movl $boot_high_pd, %eax
+    orl  $0x03, %eax
+    movl %eax, 0(%edi)         /* PDPT[0] */
+
     movl $boot_high_pd, %edi
     movl $0x00000083, %eax     /* low 32 bits: 0xC000000000 | PS | RW | P */
     movl $0x000000c0, %edx     /* high 32 bits */
