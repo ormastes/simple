@@ -23,18 +23,48 @@
 #
 # Scope note (documented deviation, not a silent gap): full §3.5.1 also
 # specifies snapshot authorization rechecks, receipt-bound edge evidence, a
-# frozen continuation/cursor handle, and work budgets up to 500,000. This
-# slice implements the traversal core — bounded BOTH-direction BFS to depth
-# exactly 3 by default, deterministic tie-breaks, `source_k` truncation —
-# over an already-accepted edge list the caller supplies. `snapshot_id`,
-# `scope_digest`, and `source_digest` are caller-supplied opaque identity
-# fields threaded straight into `SourceRankingV1`, exactly as
-# `fusion_rrf_spec.spl`'s own test fixtures pass literal
-# `snapshot_id: "snap-1"` / `scope_digest: "sha256:0"` — this module does not
-# invent a second digest scheme. Authorization rechecks, receipt evidence,
-# and the continuation/cursor handle are NOT implemented here; a caller
-# needing resumable paging or receipt-bound evidence must add that as an
-# additive layer in front of `build_graph_ranking`.
+# frozen continuation/cursor handle, and work budgets up to 500,000. The
+# original slice implemented only the traversal core — bounded BOTH-direction
+# BFS to depth exactly 3 by default, deterministic tie-breaks, `source_k`
+# truncation — over an already-accepted edge list the caller supplies, via
+# `build_graph_ranking`, kept unchanged below for backward compatibility.
+#
+# `build_graph_ranking_v2` is the additive layer this scope note called for.
+# It adds, still over `edges`/`roots`/`max_depth`/`source_k`/`snapshot_id`/
+# `scope_digest`/`source_digest` (unchanged meaning):
+#   - per-node authorization rechecks against a caller-supplied
+#     `IdentityRegistryV1` (§3.5.1 "authorization-filtered pinned snapshot").
+#     Every UID that appears as a root or as an edge endpoint is looked up
+#     EXACTLY ONCE, in ascending UID order, before any edge participates in
+#     traversal. A registry with zero records cannot support a recheck at
+#     all and collapses the whole call to `SnapshotUnavailable` rather than
+#     silently authorizing or silently denying real content.
+#   - receipt-bound edge evidence: `edge_receipts` maps `edge_uid ->
+#     authority_receipt_uid`. An edge without a receipt entry is dropped
+#     before traversal (never contributes a path), and every edge that DOES
+#     contribute is echoed back as a `{ edge_uid, authority_receipt_uid }`
+#     pair in `accepted_edge_evidence` — pair-based, so one receipt
+#     authorizing many edges is represented faithfully (never inferred from
+#     two same-length arrays).
+#   - a single-use paging cursor (`GraphCursorV1`). This module has no
+#     JS-style null-prototype/`WeakMap` primitive, so the "frozen handle with
+#     no enumerable state" contract is approximated with a `class` instance
+#     (reference-typed, per this language's class/struct split) whose only
+#     mutable field is a `consumed` bit flipped by `_try_consume`; a second
+#     resume on the same instance fails with `CursorAlreadyConsumed`. Traversal
+#     itself is NOT re-run incrementally on resume — the full authorized BFS
+#     result is computed once and the cursor holds an immutable slice of that
+#     already-deterministic ordering plus an offset, so paging is exact
+#     (`(distance asc, uid asc)` order, no duplicates, no gaps) without
+#     reimplementing frontier-level incremental resumption. This is a
+#     documented simplification of "backed by factory-local WeakMap state
+#     that owns the frontier/best-paths/counters", not that exact mechanism;
+#     it satisfies the observable contract (single-use, resumes exactly where
+#     it left off, GC-eligible once abandoned since it is an ordinary
+#     reference value) without inventing unneeded frontier machinery for data
+#     this small. Work-budget ceilings above `GRAPH_MAX_SOURCE_K`/
+#     `GRAPH_MAX_DEPTH_CEILING` (up to the design's 500,000) are still not
+#     implemented — same scope boundary as before.
 #
 # COW-alias hazard (`.claude/rules/code-style.md`): BFS frontiers and visited
 # maps are mutated only through their single owning `var`, never via a
@@ -43,6 +73,7 @@
 
 use app.spipe.model.types.{EdgeRecord, EdgeStatus}
 use app.spipe.graph.reverse_index.{ReverseIndexV1, build_reverse_index}
+use app.spipe.identity.registry.{IdentityRegistryV1, IdentityRecordV1}
 use lib.common.search.fusion_types.{FusionSourceV1, SourceCandidateV1, SourceRankingV1}
 
 pub val GRAPH_SOURCE_CONTRACT: text = "graph-bfs-v1"
@@ -50,11 +81,15 @@ pub val GRAPH_DEFAULT_MAX_DEPTH: i64 = 3
 pub val GRAPH_MAX_DEPTH_CEILING: i64 = 3
 pub val GRAPH_DEFAULT_SOURCE_K: i64 = 1000
 pub val GRAPH_MAX_SOURCE_K: i64 = 1000
+pub val GRAPH_CURSOR_FACTORY_BRAND: text = "graph-bfs-v1-cursor"
 
 pub enum GraphSourceErrorV1:
     InvalidMaxDepth
     InvalidSourceK
     NoRoots
+    InvalidPageSize
+    SnapshotUnavailable
+    CursorAlreadyConsumed
 
 # One discovered node with its shortest BFS distance from any root. Roots
 # themselves are distance 0 and are never emitted as candidates -- they are
@@ -304,3 +339,244 @@ pub fn build_graph_ranking(
         complete: visits.len() <= source_k,
         source_digest: source_digest,
     ))
+
+# --- v2: authorization rechecks, receipt-bound evidence, cursor paging -----
+
+# One receipt-bound accepted edge that actually contributed to traversal
+# (design §3.5.1: "pair-based evidence -- not two equal-length independently
+# unique arrays -- is authoritative"). One receipt may legitimately appear
+# against multiple pairs.
+pub struct GraphEdgeEvidenceV1:
+    edge_uid: text
+    authority_receipt_uid: text
+
+# A single-use paging handle. See the module header's v2 scope note for why
+# this is a `class` (reference-typed) with one mutable `consumed` bit rather
+# than a lazily re-expanded frontier.
+pub class GraphCursorV1:
+    var consumed: bool
+    var offset: i64
+    val factory_brand: text
+    val snapshot_digest: text
+    val scope_digest: text
+    val all_ids: [text]
+
+    static fn make(factory_brand: text, snapshot_digest: text, scope_digest: text,
+                   all_ids: [text], offset: i64) -> GraphCursorV1:
+        GraphCursorV1(consumed: false, offset: offset, factory_brand: factory_brand,
+            snapshot_digest: snapshot_digest, scope_digest: scope_digest, all_ids: all_ids)
+
+    fn is_consumed() -> bool:
+        self.consumed
+
+    # Atomically consumes the handle: returns `true` and flips `consumed` the
+    # first time, `false` (no mutation) on every call after.
+    me _try_consume() -> bool:
+        if self.consumed:
+            false
+        else:
+            self.consumed = true
+            true
+
+pub struct GraphRankingResultV1:
+    ranking: SourceRankingV1
+    accepted_edge_evidence: [GraphEdgeEvidenceV1]
+    cursor: Option<GraphCursorV1>
+
+pub struct GraphPageV1:
+    candidates: [SourceCandidateV1]
+    cursor: Option<GraphCursorV1>
+
+fn _registry_lookup(registry: IdentityRegistryV1, uid: text) -> Option<IdentityRecordV1>:
+    var i = 0
+    while i < registry.records.len():
+        if registry.records[i].uid == uid:
+            return Some(registry.records[i])
+        i = i + 1
+    None
+
+# Every UID that could possibly enter the traversal: all roots plus both
+# endpoints of every (still unfiltered-by-authorization) accepted edge.
+# Sorted + deduplicated so the authorization recheck below runs in a fixed,
+# deterministic UID order exactly once per node (design §3.5.1).
+fn _canonical_node_uids(edges: [EdgeRecord], roots: [text]) -> [text]:
+    var raw: [text] = []
+    var i = 0
+    while i < roots.len():
+        raw.push(roots[i])
+        i = i + 1
+    var j = 0
+    while j < edges.len():
+        raw.push(edges[j].from_uid)
+        raw.push(edges[j].to_uid)
+        j = j + 1
+    val sorted = _sorted_uids(raw)
+    var out: [text] = []
+    var seen: {text: bool} = {}
+    var k = 0
+    while k < sorted.len():
+        if not seen.has(sorted[k]):
+            seen[sorted[k]] = true
+            out.push(sorted[k])
+        k = k + 1
+    out
+
+# Exactly one authorization recheck per declared canonical node, in UID
+# order, before any edge is inspected. A registry that carries zero records
+# cannot support a real recheck of anything -- every node's check would be a
+# rubber stamp in either direction -- so that case collapses the whole call
+# to `SnapshotUnavailable` (design: "failures are accumulated ... and
+# collapse to snapshot_unavailable") instead of silently authorizing or
+# silently denying real content. A node with no matching record in a
+# non-empty registry is a real, resolvable denial (fail closed: not
+# authorized), not a snapshot failure.
+fn _authorize_nodes(registry: IdentityRegistryV1, node_uids: [text]) -> Result<{text: bool}, GraphSourceErrorV1>:
+    if registry.records.len() == 0 and node_uids.len() > 0:
+        return Err(GraphSourceErrorV1.SnapshotUnavailable)
+    var authorized: {text: bool} = {}
+    var i = 0
+    while i < node_uids.len():
+        val uid = node_uids[i]
+        match _registry_lookup(registry, uid):
+            Some(rec):
+                authorized[uid] = rec.authorized
+            None:
+                authorized[uid] = false
+        i = i + 1
+    Ok(authorized)
+
+# Keeps only accepted edges whose BOTH endpoints are authorized AND which
+# carry a receipt in `edge_receipts`. An edge failing either check cannot
+# contribute a path -- this is what makes an unauthorized node's traversal
+# reach a dead end instead of leaking through it (design: "an unauthorized
+# node must not appear in results NOR be counted").
+fn _authorized_and_receipted(
+    edges: [EdgeRecord],
+    authorized: {text: bool},
+    edge_receipts: {text: text},
+) -> [EdgeRecord]:
+    var out: [EdgeRecord] = []
+    var i = 0
+    while i < edges.len():
+        val e = edges[i]
+        val from_ok = authorized.has(e.from_uid) and authorized[e.from_uid]
+        val to_ok = authorized.has(e.to_uid) and authorized[e.to_uid]
+        if from_ok and to_ok and edge_receipts.has(e.uid):
+            out.push(e)
+        i = i + 1
+    out
+
+fn _edge_evidence(edges: [EdgeRecord], edge_receipts: {text: text}) -> [GraphEdgeEvidenceV1]:
+    var out: [GraphEdgeEvidenceV1] = []
+    var i = 0
+    while i < edges.len():
+        val e = edges[i]
+        out.push(GraphEdgeEvidenceV1(edge_uid: e.uid, authority_receipt_uid: edge_receipts[e.uid]))
+        i = i + 1
+    out
+
+# Builds the source-local graph candidate ranking PLUS §3.5.1's authorization
+# rechecks, receipt-bound edge evidence, and first paging cursor. See the
+# module header's v2 scope note for the exact contract each piece implements.
+#
+# `page_size` bounds how many candidates this call returns directly; the rest
+# (up to the `source_k`-bounded pool) are reachable via `resume_graph_page_v2`
+# using the returned `cursor`. Pass `page_size >= source_k` for "no paging".
+pub fn build_graph_ranking_v2(
+    edges: [EdgeRecord],
+    roots: [text],
+    max_depth: i64,
+    source_k: i64,
+    snapshot_id: text,
+    scope_digest: text,
+    source_digest: text,
+    registry: IdentityRegistryV1,
+    edge_receipts: {text: text},
+    page_size: i64,
+) -> Result<GraphRankingResultV1, GraphSourceErrorV1>:
+    match _validate(max_depth, source_k, roots):
+        Err(e):
+            return Err(e)
+        Ok(_):
+            ()
+    if page_size < 1:
+        return Err(GraphSourceErrorV1.InvalidPageSize)
+
+    val accepted = _accepted_only(edges)
+    val node_uids = _canonical_node_uids(accepted, roots)
+    val authorized = _authorize_nodes(registry, node_uids)?
+    val safe_edges = _authorized_and_receipted(accepted, authorized, edge_receipts)
+
+    val forward = _forward_adjacency(safe_edges)
+    val reverse = build_reverse_index(safe_edges)
+    val visits = _bfs(forward, reverse, roots, max_depth)
+
+    val limit = if visits.len() < source_k: visits.len() else: source_k
+    var all_ids: [text] = []
+    var i = 0
+    while i < limit:
+        all_ids.push(visits[i].uid)
+        i = i + 1
+
+    val evidence = _edge_evidence(safe_edges, edge_receipts)
+
+    val page_limit = if all_ids.len() < page_size: all_ids.len() else: page_size
+    var page_candidates: [SourceCandidateV1] = []
+    var p = 0
+    while p < page_limit:
+        page_candidates.push(SourceCandidateV1(
+            document_id: all_ids[p],
+            source_rank: p + 1,
+            source_score_milli: 0,
+        ))
+        p = p + 1
+
+    val cursor = if page_limit < all_ids.len():
+        Some(GraphCursorV1.make(GRAPH_CURSOR_FACTORY_BRAND, snapshot_id, scope_digest, all_ids, page_limit))
+    else:
+        None
+
+    Ok(GraphRankingResultV1(
+        ranking: SourceRankingV1(
+            source: FusionSourceV1.Graph,
+            source_contract: GRAPH_SOURCE_CONTRACT,
+            snapshot_id: snapshot_id,
+            scope_digest: scope_digest,
+            candidates: page_candidates,
+            complete: page_limit == all_ids.len() and all_ids.len() <= source_k,
+            source_digest: source_digest,
+        ),
+        accepted_edge_evidence: evidence,
+        cursor: cursor,
+    ))
+
+# Resumes exactly where a prior page left off. `cursor` is single-use: a
+# second call against an already-consumed handle fails with
+# `CursorAlreadyConsumed` rather than silently re-serving or double-counting
+# the same page.
+pub fn resume_graph_page_v2(cursor: GraphCursorV1, page_size: i64) -> Result<GraphPageV1, GraphSourceErrorV1>:
+    if page_size < 1:
+        return Err(GraphSourceErrorV1.InvalidPageSize)
+    if not cursor._try_consume():
+        return Err(GraphSourceErrorV1.CursorAlreadyConsumed)
+
+    val start = cursor.offset
+    val total = cursor.all_ids.len()
+    val end = if start + page_size < total: start + page_size else: total
+
+    var page_candidates: [SourceCandidateV1] = []
+    var i = start
+    while i < end:
+        page_candidates.push(SourceCandidateV1(
+            document_id: cursor.all_ids[i],
+            source_rank: i + 1,
+            source_score_milli: 0,
+        ))
+        i = i + 1
+
+    val next_cursor = if end < total:
+        Some(GraphCursorV1.make(cursor.factory_brand, cursor.snapshot_digest, cursor.scope_digest, cursor.all_ids, end))
+    else:
+        None
+
+    Ok(GraphPageV1(candidates: page_candidates, cursor: next_cursor))
