@@ -394,3 +394,39 @@ against **its own** `src/lib`, regardless of this build's `--source src/lib`
 Operational rule for anyone continuing this lane: **always export
 `SIMPLE_LIB="$PWD/src"` when driving a compiler binary that lives in another
 worktree**, and re-verify any prior result that did not.
+
+### RETRACTION: the "borrowed compiler read stdlib from its own tree" section above is WRONG
+
+That section inferred a wrong-worktree stdlib read from a `grep -c` coincidence
+(1 here vs 3 in `phase1-rerun`). It is incorrect, and is retained above only so
+the reasoning error is visible rather than quietly deleted.
+
+Two things disprove it:
+
+1. **The compiler's own error message names THIS worktree's path**, in both the
+   before and after runs:
+   `/mnt/data/.../agent-a432e642da13971df/src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl`.
+   It was reading the edited file all along.
+2. The `1 vs 3` count is fully explained without any wrong-tree read: the
+   original function contained two `!= nil` sites plus one unrelated site at
+   line 423. Removing the two leaves one. `phase1-rerun`'s unedited copy still
+   has all three.
+
+**The real cause of the repeat failure was that the workaround itself did not
+work** — see the CORRECTION in
+`doc/08_tracking/bug/cranelift_optional_float_nil_check_icmp_imm_2026-08-31.md`.
+The `icmp_imm.f32` trigger is an optional-float unwrap inside a branch with an
+early `return`, so rewriting `!= nil` to `?? 0.0` while keeping the
+early-returning shape changed nothing.
+
+**Consequently the doubt cast on the 53-symbol daemon finding is also
+withdrawn**: that build was not reading another tree's stdlib either. The
+finding reverts to its earlier, weaker-but-honest status — those 53 names are
+undefined in this tree, the daemon did not link with either compiler available
+here, and the referenced set remains compiler-dependent in principle (the
+`RT_OPTIONAL_SYMBOLS` mechanism), but there is no longer any evidence of a
+cross-tree artefact.
+
+The operational advice to pin `SIMPLE_LIB="$PWD/src"` when driving a compiler
+binary from another worktree is still sound hygiene; it simply was not the
+problem here.
