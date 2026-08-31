@@ -79,6 +79,15 @@ fn record_flattened_import_binding(marker: &str) {
                 entries.insert(name.clone(), binding.clone());
             }
         }
+        // ALSO record the glob edge itself under the "*" key. The expansion
+        // above only sees the source module's GLOBALS and already-recorded
+        // bindings -- its plain functions are in neither table, so a facade
+        // like `src/lib/platform.spl` (`export use nogc_sync_mut.platform.*`)
+        // used to record NO binding for `host_os` at all, and an importer's
+        // `use std.platform.{host_os}` binding dead-ended at the facade.
+        // `import_bound_candidate` (interpreter_call/mod.rs) follows this "*"
+        // edge to the declaring module when the per-name lookup misses.
+        entries.insert("*".to_owned(), (Arc::clone(&source_owner), "*".to_owned()));
     } else {
         let binding = crate::interpreter::owner_bindings(&source_owner)
             .and_then(|source_bindings| source_bindings.get(source_name).cloned())
