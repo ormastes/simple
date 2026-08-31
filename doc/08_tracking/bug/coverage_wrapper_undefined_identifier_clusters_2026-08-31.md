@@ -260,3 +260,91 @@ grep -oE 'spipe_wrapped__[A-Za-z0-9_]+_spec_native\.spl\): semantic: [^ ]+ Undef
 
 These must be re-censused against a freshly built seed before any are worked:
 Cause A means an unknown fraction of them are already fixed at origin.
+
+---
+
+## Cause F — RESOLVED 2026-08-31 (round 2). It was never a wrapper-only effect.
+
+Status: the three largest clusters (`value` 14, `String` 8, `js_nan` latent) are
+**located and fixed**. Cause F was not a distinct cause at all: it is ordinary
+cause B/E in modules **nobody had probed**. The previous round probed `lib.sdn`,
+`package.dist` and `smf_enums` — guesses — got clean results, and concluded the
+failures were unreproducible. They reproduce on the first try against the
+correct modules.
+
+### What made them findable: containment, computed before theorising
+
+| symbol | count | containment |
+|---|---|---|
+| `value` | 14 | **100%** JS-engine subtree (`browser_engine/*`, `lib/js/*`, `js_engine/*`) |
+| `String` | 8 | **100%** `test/00_formal_verification/compiler/` |
+| `Dict` | 6 | 5/6 `lib/gc_sync_mut/db/` |
+
+100% containment refutes a global cause (a wrapper-generator defect would be
+spread across the suite). That single computation redirected the search from the
+generator to the subtrees, and each subtree's own module then failed a plain
+`use <module>` probe immediately.
+
+### Discriminator (unchanged, and it is the whole method)
+
+`bin/simple compile <probe>.spl`, exit status read into a variable on the **next
+line**, never through a pipe. Probes bisect the import closure mechanically —
+every `*.spl` in the subtree is probed as `use <module>` + `fn main()`, and only
+modules whose output contains the exact symbol are HITs.
+
+### Sites fixed
+
+| site | symbol | defect | fix |
+|---|---|---|---|
+| `src/lib/nogc_sync_mut/js/engine/interpreter_async.spl:587` | `value` | **stray orphaned statement.** `me _filter_request_headers(headers_text: text) -> text` ends with the real return `kept.join("\n")` followed by a leftover `js_to_string(value)`. The method has no `value` in scope. Being last, the stray line was also the actual return value — so this was a live behavioural bug, not only a compile error. | delete the stray line |
+| `src/lib/nogc_sync_mut/js/engine/interpreter_types.spl` | `js_nan` | calls `js_nan()` with no `use`; the `common/` sibling has `use std.common.js.engine.js_error.{js_nan, ...}` at line 6. Textbook cause B. | add the matching `use` |
+| `verification/lean/{functions,types,memory_safety}.spl` (10 sites) | `String` | `String.from_char_code(123/125)`. **No `String` type exists in Simple** (`text` does), and no `from_char_code` is defined on it anywhere — cause E, not a resolution bug. The author's intent was a literal `{` / `}`. | `"{{"` / `"}}"`, verified by running a probe: they render `{` and `}` |
+
+Before/after, same binary (built from `79126c25822`, this worktree):
+
+```
+before: rc=1 std.nogc_sync_mut.js.engine.runtime :: undefined identifier: value
+after:  rc=1 std.nogc_sync_mut.js.engine.runtime :: [requires the interpreter]   <- pre-existing, unrelated
+before: rc=1 verification.lean.codegen :: undefined identifier: String
+after:  rc=1 verification.lean.codegen :: undefined identifier: fs               <- layered, see below
+```
+
+### Layering is confirmed again — the census is a LOWER BOUND
+
+Fixing `String` immediately exposed `fs` in the same closure, exactly as fixing
+`io_runtime` exposed `text_byte_len` in round 1. Any count taken from a suite log
+is a lower bound on the population, never the population.
+
+### Hypotheses eliminated (so they are not re-run)
+
+- **Poison-directory (#170).** Ruled out: `#170` is already contained in
+  `4b4e2a304b4`, the commit suite4's binary was built from — only six commits
+  (#173-#178) sit between it and `origin/main`, none of them #170. suite4's
+  cause-F evidence is therefore post-fix, and the clusters survived the fix.
+- **Wrapper-generator defect (doc hypothesis 1).** Refuted by containment above,
+  and directly by the fact that plain `use <module>` probes with no wrapper
+  involved reproduce every one of them.
+- **Run-state / whole-suite invocation (hypothesis 2).** Not needed: the failures
+  reproduce from a single `bin/simple compile` of a four-line probe. Recorded for
+  completeness — suite4's real command line is
+  `SIMPLE_TIMEOUT_SECONDS=0 ./bin/simple test --no-cover-check` from
+  `/mnt/data/wt-suite` (read from `ps`, not assumed), and it passes **no**
+  `--coverage`, which is one of the two variables the round-1 repro changed at
+  once.
+- **Cross-run temp interference (hypothesis 3).** Not needed, same reason.
+
+### Still open after this round
+
+- `fs` (2) — surfaced behind `String` in the verification closure. **Not the
+  obvious candidate:** `regenerate/module_resolution.spl` matches a naive
+  `fs\.` grep 7 times, but every hit is inside a **Lean source string literal**,
+  not Simple code. Needs a real bisect, not a grep.
+- `Dict` (6) — `std.gc_sync_mut.db` and `db.dbfs_engine` both probe CLEAN, so the
+  owning module is elsewhere in those specs' closure.
+- `print_raw` (8) — four specs (`host/io/stdio_async`, `mcp_jj/tools/git_branch_args_extraction`,
+  `mcp/handler_registry`, `mcp/integration`). PR #154 fixed `sffi/diag.spl`
+  shadowing the prelude builtin; whether this is the same defect at a second
+  site is **unverified** and must not be assumed.
+- Causes C (`_append_bytes` 11 conflicting defs, `Platform` 2 enums), D
+  (`folded_global_scalar_type`), E (`_pmm_reset_contiguous_registry`) — unchanged,
+  still need an owner decision, as filed above.
