@@ -90,13 +90,33 @@ fn mcp_component_row() -> i64:
     # i.e. the ENTRY's required path must sit under the TOKEN's path. The token
     # minted by AuthorityToken.root_for(p) carries "id." + p.id, so the entry's
     # requirement is registered one segment below it.
+    # BISECT PROBES (2026-08-31): the mcp row traps before any [mcp] line
+    # reaches serial, so the trap site is one of the five constructor calls
+    # below. Each is fenced by a marker so the serial log names the last call
+    # that completed. These are diagnostics only — they add no rung and gate no
+    # verdict; the gate still requires the response-content rungs below.
+    serial_println("[mcp] probe m0 entering row")
     val required = id_path_intern("id.mcp.echo")
+    serial_println("[mcp] probe m1 id_path_intern ok")
     val entry = DispatchEntry.echo(required, AuthorityLevel.Write)
+    serial_println("[mcp] probe m2 DispatchEntry.echo ok")
     var reg = DispatchRegistry.new_for_test()
+    serial_println("[mcp] probe m3 DispatchRegistry.new_for_test ok")
+    # `DispatchRegistry.register` is `self.entries = self.entries + [entry]`, an
+    # ARRAY CONCATENATION on a struct field. Probe the same shape on a plain
+    # local first so the serial log distinguishes "array + array traps" from
+    # "assigning the result back into a struct field traps".
+    var probe_a = ["a"]
+    val probe_b = probe_a + ["b"]
+    serial_println("[mcp] probe m3a local array concat returned")
+    for q in probe_b:
+        serial_println("[mcp] probe m3b elem=" + q)
     reg.register(entry)
+    serial_println("[mcp] probe m4 register ok")
 
     val token = AuthorityToken.root_for(
         Principal(id: "mcp", kind: PrincipalKind.Anonymous))
+    serial_println("[mcp] probe m5 AuthorityToken.root_for ok")
 
     val hit = dispatch_wrap(reg, "echo", ["MCP_RTT_PAYLOAD"], token)
     serial_println("[mcp] request  tool=echo args=[MCP_RTT_PAYLOAD]")
@@ -163,6 +183,19 @@ fn caret_component_row() -> i64:
     serial_println("[caret] extracted content=" + content)
 
     val secret_bearing = "key AKIAIOSFODNN7EXAMPLE trails CARET_KEEPME"
+    # DIAGNOSTIC (2026-08-31): redact() came back EMPTY in-guest while the same
+    # call on the host returns "key [REDACTED:aws_access_key_id:MPLE] trails
+    # CARET_KEEPME". These probes narrow which text primitive redact leans on
+    # is broken under freestanding riscv64 codegen. Diagnostics only; no rung.
+    serial_println("[caret] probe c0 input: " + secret_bearing)
+    serial_println("[caret] probe c1 substring(0,3)=" + secret_bearing.substring(0, 3))
+    var acc = ""
+    var ci = 0
+    while ci < 5:
+        acc = acc + secret_bearing[ci]
+        ci = ci + 1
+    serial_println("[caret] probe c2 charloop5=" + acc)
+    serial_println("[caret] probe c3 redact-of-plain=" + redact("plain CARET_KEEPME"))
     val redacted = redact(secret_bearing)
     serial_println("[caret] redacted: " + redacted)
 
@@ -189,13 +222,24 @@ fn caret_component_row() -> i64:
 
 fn testrunner_component_row() -> i64:
     """Feed a real spec transcript to the REAL test-runner output parser."""
+    # GATE-FIXTURE DEFECT, fixed 2026-08-31: the previous literal here was a
+    # RUST cargo-test summary ("test result: FAILED. 2 passed; 1 failed"), a
+    # format `parse_test_output` was never written to read. Its grammar is the
+    # Simple runner's own: "Passed:/Failed:" summary lines, or an
+    # "N examples, M failures" line. Measured on the HOST with the very same
+    # std.nogc_sync_mut.test_runner.test_executor_parsing.parse_test_output the
+    # guest links, the old literal returned (0, 0, 0, 0) — so this rung could
+    # not pass on ANY target and measured nothing about riscv64. The rung, its
+    # literals and the gate's must-FAIL fixtures are unchanged; only the INPUT
+    # was corrected to a transcript the real parser actually accepts, which the
+    # host confirms yields passed=2 / failed=1.
     val transcript =
-        "running 3 tests\n" +
-        "test arithmetic adds ... ok\n" +
-        "test arithmetic subtracts ... ok\n" +
-        "test arithmetic divides by zero ... FAILED\n" +
+        "running 3 examples\n" +
+        "  arithmetic adds ... ok\n" +
+        "  arithmetic subtracts ... ok\n" +
+        "  arithmetic divides by zero ... FAILED\n" +
         "\n" +
-        "test result: FAILED. 2 passed; 1 failed; 0 ignored\n"
+        "3 examples, 1 failure\n"
     serial_println("[testrun] feeding a 3-example spec transcript to the real parser")
     val counts = parse_test_output(transcript)
     val passed = counts.0
