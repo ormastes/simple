@@ -1190,6 +1190,25 @@ impl Lowerer {
         if args.is_empty() {
             match method {
                 "unwrap" => {
+                    // `.unwrap()` on an optional over a BoxInt-family scalar
+                    // (`i64?`): the JIT-lane value is a TAGGED word (raw
+                    // migration form), not necessarily an enum, so it must go
+                    // through `rt_unwrap_or_self` (which handles both forms) —
+                    // NOT `rt_enum_payload`, which returns nil for a non-enum.
+                    // Typed as the raw inner scalar, the name-keyed unbox in
+                    // mir `lower_builtin_call_expr` decodes it; before this,
+                    // `f().unwrap() + 1` computed 337 (== (42<<3)+1) on the
+                    // JIT lane while the interpreter said 43.
+                    // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+                    if let Some(inner) = self.optional_boxint_scalar_inner(receiver.ty) {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_self".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: inner,
+                        }));
+                    }
                     if let Some(payload_ty) = self.enum_payload_type_for_builtin_method(receiver.ty) {
                         return Ok(Some(HirExpr {
                             kind: HirExprKind::BuiltinCall {
