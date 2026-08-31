@@ -1468,3 +1468,670 @@ RuntimeValue rt_native_cmp(RuntimeValue left, RuntimeValue right)
     if (a > b) return (RuntimeValue)(int64_t)1;
     return 0;
 }
+
+/* ===========================================================================
+ * FOURTH TRANCHE — hosted-ABI ports for the in-guest INTERPRETER row.
+ *
+ * Same status as the three tranches above: these are PORTS of symbols that
+ * already exist in the hosted runtime (src/runtime/runtime_native.c,
+ * src/runtime/runtime.c) and in the x86_64 baremetal siblings
+ * (arch/x86_64/boot/{baremetal_stubs,rt_extras,auto_stubs,
+ * runtime_service_owners}.c). Not one new rt_* symbol is invented here.
+ *
+ * WHY THEY LIVE IN THIS FILE rather than a new translation unit: every one of
+ * them needs the bump heap (rv_alloc), the tag macros, and the RuntimeString /
+ * RuntimeArray layouts, all of which are `static` or file-local here. A
+ * separate TU would need a second heap, and two heaps in one image is the
+ * defect, not the fix.
+ *
+ * THE ABI IS TAKEN FROM CODEGEN, NOT FROM THE SIBLINGS. The authority is
+ * src/compiler_rust/compiler/src/codegen/runtime_sffi.rs's RuntimeFuncSpec
+ * table, which is what cranelift actually emits calls against. Where a sibling
+ * disagrees with that table the table wins, and the disagreements are real:
+ *
+ *   - rt_dict_new   : table (I64)->(I64); x86_64 baremetal declares `(void)`.
+ *   - rt_env_get    : table (I64,I64)->(I64) i.e. RAW ptr+len, matching
+ *                     runtime_native.c; x86_64 baremetal takes one tagged
+ *                     RuntimeValue.
+ *   - rt_value_float / rt_value_as_float : the table says (F64)->(I64) and
+ *                     (I64)->(F64). On riscv64 an F64 travels in fa0, an I64
+ *                     in a0 — they are DIFFERENT REGISTER FILES. x86_64's
+ *                     rt_extras.c declares both sides as RuntimeValue, which
+ *                     happens to be survivable nowhere and is simply drift.
+ *                     Getting this wrong here reads an untouched fa0.
+ *
+ * That is the same failure class as the rt_value_int identity body documented
+ * at line 951: a signature that merely links is not a signature that works.
+ * =========================================================================== */
+
+/* --- float boxing ---------------------------------------------------------
+ * f64_to_bits (line 182) established this file's legacy TAG_FLOAT form as
+ * `(bits << 3) | TAG_FLOAT`, which DISCARDS the top 3 bits of the double —
+ * the sign and two exponent bits. That is lossy enough to turn a negative
+ * number positive, so rt_value_float must not use it. Floats are boxed in a
+ * heap cell instead, which is exact. f64_to_bits itself is left untouched --
+ * it is reached only by spl_f64_to_bits and predates this pair -- and
+ * rt_value_as_float below still decodes the legacy shifted form, so values
+ * produced by either scheme read back correctly. */
+#define HEAP_FLOAT 10U
+
+typedef struct {
+    HeapHeader hdr;
+    double value;
+} RuntimeFloat;
+
+RuntimeValue rt_value_float(double f)
+{
+    RuntimeFloat *cell = (RuntimeFloat *)rv_alloc(sizeof(RuntimeFloat));
+    if (!cell) return NIL_VALUE;
+    cell->hdr.type = HEAP_FLOAT;
+    cell->hdr.size = (uint32_t)sizeof(RuntimeFloat);
+    cell->value = f;
+    return ENCODE_PTR(cell);
+}
+
+double rt_value_as_float(RuntimeValue value)
+{
+    if (IS_HEAP(value)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
+        if (h && h->type == HEAP_FLOAT) return ((RuntimeFloat *)h)->value;
+        return 0.0;
+    }
+    /* Legacy shifted TAG_FLOAT, and plain integers, both round-trip. */
+    if (((uintptr_t)value & TAG_MASK) == TAG_FLOAT) {
+        uint64_t bits = (uint64_t)value >> 3;
+        double out;
+        __builtin_memcpy(&out, &bits, sizeof(out));
+        return out;
+    }
+    return (double)(int64_t)simpleos_raw_or_encoded_int(value);
+}
+
+RuntimeValue rt_value_as_int(RuntimeValue value)
+{
+    if (IS_HEAP(value)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
+        if (h && h->type == HEAP_FLOAT) return (RuntimeValue)(int64_t)((RuntimeFloat *)h)->value;
+        return 0;
+    }
+    return (RuntimeValue)(int64_t)simpleos_raw_or_encoded_int(value);
+}
+
+/* --- diagnostics and traps ------------------------------------------------ */
+
+static void simpleos_serial_put_i64(int64_t v)
+{
+    serial_put_dec(v);
+}
+
+static void simpleos_serial_put_string_value(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) { serial_put_dec((int64_t)simpleos_raw_or_encoded_int(v)); return; }
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
+    if (!h) { serial_puts("<nil>"); return; }
+    if (h->type == HEAP_STRING) {
+        RuntimeString *s = (RuntimeString *)h;
+        for (uint64_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+        return;
+    }
+    if (h->type == HEAP_FLOAT) {
+        /* Integral part plus three fractional digits: enough to be readable
+         * without dragging a full dtoa into a freestanding image. */
+        double d = ((RuntimeFloat *)h)->value;
+        if (d < 0) { serial_putchar('-'); d = -d; }
+        int64_t whole = (int64_t)d;
+        serial_put_dec(whole);
+        serial_putchar('.');
+        double frac = d - (double)whole;
+        for (int i = 0; i < 3; i++) {
+            frac *= 10.0;
+            int digit = (int)frac;
+            serial_putchar((char)('0' + digit));
+            frac -= (double)digit;
+        }
+        return;
+    }
+    RuntimeValue as_text = rt_value_to_string(v);
+    if (as_text != v && IS_HEAP(as_text)) { simpleos_serial_put_string_value(as_text); return; }
+    serial_puts("<value>");
+}
+
+void rt_print_value(RuntimeValue value)
+{
+    simpleos_serial_put_string_value(value);
+}
+
+void rt_println_value(RuntimeValue value)
+{
+    simpleos_serial_put_string_value(value);
+    serial_putchar('\r');
+    serial_putchar('\n');
+}
+
+void rt_eprint_value(RuntimeValue value)
+{
+    /* One UART, so stderr and stdout share it; the tag is what distinguishes
+     * them in a transcript. */
+    serial_puts("[stderr] ");
+    simpleos_serial_put_string_value(value);
+    serial_putchar('\r');
+    serial_putchar('\n');
+}
+
+RuntimeValue rt_raw_i64_to_string(RuntimeValue raw)
+{
+    /* RAW (untagged) int in, string out — the "raw" in the name is the whole
+     * contract, so it must NOT go through simpleos_raw_or_encoded_int. */
+    char buf[24];
+    int64_t v = (int64_t)raw;
+    int neg = v < 0;
+    uint64_t mag = neg ? (uint64_t)(-(v + 1)) + 1U : (uint64_t)v;
+    int i = (int)sizeof(buf);
+    buf[--i] = 0;
+    if (mag == 0) buf[--i] = '0';
+    while (mag > 0 && i > 0) { buf[--i] = (char)('0' + (mag % 10U)); mag /= 10U; }
+    if (neg && i > 0) buf[--i] = '-';
+    return rt_string_from_cstr(&buf[i]);
+}
+
+void rt_panic(RuntimeValue msg_ptr, uint64_t msg_len)
+{
+    /* RAW ptr + len per the codegen table, matching runtime_native.c. */
+    serial_puts("\r\n[PANIC] ");
+    const char *p = (const char *)(uintptr_t)msg_ptr;
+    if (p) {
+        for (uint64_t i = 0; i < msg_len && i < 512U; i++) serial_putchar(p[i]);
+    }
+    serial_puts("\r\n");
+    rt_qemu_exit_failure();
+    for (;;) { __asm__ volatile("wfi"); }
+}
+
+RuntimeValue rt_function_not_found(RuntimeValue name_ptr, uint64_t name_len)
+{
+    serial_puts("[WARN] unresolved fn: ");
+    const char *p = (const char *)(uintptr_t)name_ptr;
+    if (p) {
+        for (uint64_t i = 0; i < name_len && i < 128U; i++) serial_putchar(p[i]);
+    }
+    serial_puts("\r\n");
+    return NIL_VALUE;
+}
+
+/* rt_unwrap_or_trap MUST TRAP. This is the symbol behind the 2026-08-18
+ * NULL-GOT SIGSEGV: codegen emitted the call, nothing defined it, the link
+ * tolerated the undefined symbol, and the NULL GOT slot became a jump to
+ * address 0. A body that quietly returns NIL_VALUE would be strictly worse
+ * than that crash, because it would convert a hard failure into a silently
+ * wrong value that propagates. Unwrapping a nil is a program defect, so it
+ * halts the guest loudly and non-zero. */
+RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
+{
+    if (value == NIL_VALUE) {
+        serial_puts("\r\n[TRAP] rt_unwrap_or_trap: unwrapped a nil optional\r\n");
+        rt_qemu_exit_failure();
+        for (;;) { __asm__ volatile("wfi"); }
+    }
+    return value;
+}
+
+/* --- generic collection operations ---------------------------------------
+ * Receivers are TAGGED handles, exactly as rt_len / rt_contains above take
+ * them. Indices returned to Simple are RAW, matching rt_array_len. */
+
+static RuntimeArray *simpleos_array_from_handle(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(v);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    return a;
+}
+
+RuntimeValue rt_push(RuntimeValue receiver, RuntimeValue value)
+{
+    return rt_array_push_handle(receiver, value);
+}
+
+RuntimeValue rt_pop(RuntimeValue receiver)
+{
+    RuntimeArray *a = simpleos_array_from_handle(receiver);
+    if (a) return rt_array_pop(receiver);
+    if (IS_HEAP(receiver)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(receiver);
+        if (s && s->hdr.type == HEAP_STRING) {
+            if (s->len == 0) return rt_string_new(0, 0);
+            return rt_string_new((RuntimeValue)(uintptr_t)(s->data + s->len - 1), 1);
+        }
+    }
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_clear(RuntimeValue receiver)
+{
+    RuntimeArray *a = simpleos_array_from_handle(receiver);
+    if (a) {
+        RuntimeValue *items = runtime_array_items(a);
+        for (uint64_t i = 0; i < a->len; i++) items[i] = NIL_VALUE;
+        a->len = 0;
+        return receiver;
+    }
+    if (IS_HEAP(receiver)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(receiver);
+        if (s && s->hdr.type == HEAP_STRING) return rt_string_new(0, 0);
+    }
+    return receiver;
+}
+
+RuntimeValue rt_index_of(RuntimeValue receiver, RuntimeValue needle)
+{
+    RuntimeArray *a = simpleos_array_from_handle(receiver);
+    if (a) {
+        RuntimeValue *items = runtime_array_items(a);
+        for (uint64_t i = 0; i < a->len; i++) {
+            if (items[i] == needle) return (RuntimeValue)(int64_t)i;
+            if (rt_string_eq(items[i], needle)) return (RuntimeValue)(int64_t)i;
+        }
+        return (RuntimeValue)(int64_t)-1;
+    }
+    if (IS_HEAP(receiver) && IS_HEAP(needle)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(receiver);
+        RuntimeString *n = (RuntimeString *)DECODE_PTR(needle);
+        if (s && n && s->hdr.type == HEAP_STRING && n->hdr.type == HEAP_STRING) {
+            if (n->len == 0) return 0;
+            if (n->len <= s->len) {
+                for (uint64_t i = 0; i + n->len <= s->len; i++) {
+                    uint64_t j = 0;
+                    while (j < n->len && s->data[i + j] == n->data[j]) j++;
+                    if (j == n->len) return (RuntimeValue)(int64_t)i;
+                }
+            }
+        }
+    }
+    /* Fails CLOSED: -1, never a plausible 0. */
+    return (RuntimeValue)(int64_t)-1;
+}
+
+RuntimeValue rt_sort(RuntimeValue receiver)
+{
+    RuntimeArray *a = simpleos_array_from_handle(receiver);
+    if (!a || a->len < 2) return receiver;
+    RuntimeValue *items = runtime_array_items(a);
+    for (uint64_t i = 1; i < a->len; i++) {
+        RuntimeValue key = items[i];
+        int64_t j = (int64_t)i - 1;
+        while (j >= 0 && (int64_t)rt_native_cmp(items[j], key) > 0) {
+            items[j + 1] = items[j];
+            j--;
+        }
+        items[j + 1] = key;
+    }
+    return receiver;
+}
+
+RuntimeValue rt_collection_remove(RuntimeValue receiver, RuntimeValue key)
+{
+    RuntimeArray *a = simpleos_array_from_handle(receiver);
+    if (!a) return NIL_VALUE;
+    int64_t index = (int64_t)simpleos_raw_or_encoded_int(key);
+    if (index < 0 || (uint64_t)index >= a->len) return NIL_VALUE;
+    RuntimeValue *items = runtime_array_items(a);
+    RuntimeValue removed = items[index];
+    for (uint64_t i = (uint64_t)index; i + 1U < a->len; i++) items[i] = items[i + 1U];
+    a->len--;
+    items[a->len] = NIL_VALUE;
+    return removed;
+}
+
+RuntimeValue rt_array_copy(RuntimeValue arr)
+{
+    RuntimeArray *a = simpleos_array_from_handle(arr);
+    if (!a) return NIL_VALUE;
+    RuntimeValue out = rt_array_new(ENCODE_INT((int64_t)(a->len ? a->len : 16U)));
+    if (out == NIL_VALUE) return NIL_VALUE;
+    RuntimeValue *src = runtime_array_items(a);
+    for (uint64_t i = 0; i < a->len; i++) out = rt_array_push_handle(out, src[i]);
+    return out;
+}
+
+/* The bump heap (g_heap / rv_alloc) never reclaims — `free` above is already a
+ * documented no-op — so freeing one array is a no-op too. Stated rather than
+ * silently omitted: the hosted contract is "this array may be reused", and
+ * doing nothing satisfies it; doing something would be a use-after-free. */
+void rt_array_free(RuntimeValue arr)
+{
+    (void)arr;
+}
+
+int8_t rt_array_extend_i64(int64_t dst, int64_t src, int64_t count)
+{
+    RuntimeArray *d = simpleos_array_from_handle((RuntimeValue)dst);
+    RuntimeArray *s = simpleos_array_from_handle((RuntimeValue)src);
+    if (!d || !s || count < 0) return 0;
+    if ((uint64_t)count > s->len) return 0;
+    RuntimeValue *si = runtime_array_items(s);
+    RuntimeValue handle = (RuntimeValue)dst;
+    for (int64_t i = 0; i < count; i++) {
+        if (rt_array_push_handle(handle, si[i]) == NIL_VALUE) return 0;
+    }
+    return 1;
+}
+
+/* Transient-array scopes are a hosted arena optimisation: the hosted runtime
+ * opens a scope, lets short-lived arrays be reclaimed wholesale at its close,
+ * and promotes anything that outlives it. This runtime's heap is a pure bump
+ * allocator with no reclamation at all, so every array is already effectively
+ * promoted and every scope boundary is a no-op that legitimately SUCCEEDS —
+ * this is not a stub standing in for missing work, it is the correct answer
+ * for an allocator that never frees. Returning 0 (failure) here would be the
+ * wrong answer, since nothing failed. */
+int8_t rt_transient_array_scope_begin(void) { return 1; }
+int8_t rt_transient_array_scope_pause(void) { return 1; }
+int8_t rt_transient_array_scope_end(void)   { return 1; }
+int8_t rt_transient_heap_promote(int64_t value) { (void)value; return 1; }
+
+/* --- dictionaries ---------------------------------------------------------
+ * No dict existed in this arch tree at all. The four entry points below are
+ * the ones the interpreter closure actually references; rt_dict_set /
+ * rt_dict_get are deliberately NOT defined here because nothing in this link
+ * calls them, and writing an entry point no caller has pinned down is how ABI
+ * drift gets introduced rather than removed. If a later link reports them
+ * undefined, they are a four-line addition over this same layout. */
+#define HEAP_DICT 11U
+
+typedef struct {
+    HeapHeader hdr;
+    uint64_t len;
+    uint64_t cap;
+    RuntimeValue *keys;
+    RuntimeValue *vals;
+} RuntimeDict;
+
+RuntimeValue rt_dict_new(int64_t cap_hint)
+{
+    uint64_t cap = (uint64_t)(cap_hint > 0 ? cap_hint : 16);
+    if (cap < 16U) cap = 16U;
+    if (cap > 1024U) cap = 1024U;
+    RuntimeDict *d = (RuntimeDict *)rv_alloc(sizeof(RuntimeDict) + cap * 2U * sizeof(RuntimeValue));
+    if (!d) return NIL_VALUE;
+    d->hdr.type = HEAP_DICT;
+    d->hdr.size = (uint32_t)(sizeof(RuntimeDict) + cap * 2U * sizeof(RuntimeValue));
+    d->len = 0;
+    d->cap = cap;
+    d->keys = (RuntimeValue *)((unsigned char *)d + sizeof(RuntimeDict));
+    d->vals = d->keys + cap;
+    for (uint64_t i = 0; i < cap; i++) { d->keys[i] = NIL_VALUE; d->vals[i] = NIL_VALUE; }
+    return ENCODE_PTR(d);
+}
+
+static RuntimeDict *simpleos_dict_from_handle(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return 0;
+    RuntimeDict *d = (RuntimeDict *)DECODE_PTR(v);
+    if (!d || d->hdr.type != HEAP_DICT) return 0;
+    return d;
+}
+
+int8_t rt_dict_contains(int64_t dict, int64_t key)
+{
+    RuntimeDict *d = simpleos_dict_from_handle((RuntimeValue)dict);
+    if (!d) return 0;
+    for (uint64_t i = 0; i < d->len; i++) {
+        if (d->keys[i] == (RuntimeValue)key) return 1;
+        if (rt_string_eq(d->keys[i], (RuntimeValue)key)) return 1;
+    }
+    return 0;
+}
+
+int64_t rt_dict_keys(int64_t dict)
+{
+    RuntimeDict *d = simpleos_dict_from_handle((RuntimeValue)dict);
+    RuntimeValue out = rt_array_new(ENCODE_INT(16));
+    if (!d || out == NIL_VALUE) return (int64_t)out;
+    for (uint64_t i = 0; i < d->len; i++) out = rt_array_push_handle(out, d->keys[i]);
+    return (int64_t)out;
+}
+
+int64_t rt_dict_values(int64_t dict)
+{
+    RuntimeDict *d = simpleos_dict_from_handle((RuntimeValue)dict);
+    RuntimeValue out = rt_array_new(ENCODE_INT(16));
+    if (!d || out == NIL_VALUE) return (int64_t)out;
+    for (uint64_t i = 0; i < d->len; i++) out = rt_array_push_handle(out, d->vals[i]);
+    return (int64_t)out;
+}
+
+/* --- process environment --------------------------------------------------
+ * A baremetal guest has no process environment: there is no exec, no envp, and
+ * nothing that could have set a variable. These therefore report ABSENCE
+ * honestly (nil / the caller's default / failure), which is a true answer, not
+ * a placeholder. Reporting success from rt_env_set would be a lie, and
+ * returning an empty STRING from rt_env_get — as the x86_64 sibling does —
+ * makes "set to empty" indistinguishable from "not set". */
+RuntimeValue rt_env_get(RuntimeValue key_ptr, uint64_t key_len)
+{
+    (void)key_ptr; (void)key_len;
+    return NIL_VALUE;
+}
+
+int64_t rt_env_get_i64(RuntimeValue key_ptr, uint64_t key_len, int64_t default_value)
+{
+    (void)key_ptr; (void)key_len;
+    return default_value;
+}
+
+int8_t rt_env_set(RuntimeValue key_ptr, uint64_t key_len, RuntimeValue value_ptr, uint64_t value_len)
+{
+    (void)key_ptr; (void)key_len; (void)value_ptr; (void)value_len;
+    return 0;
+}
+
+int8_t rt_env_remove(RuntimeValue key_ptr, uint64_t key_len)
+{
+    (void)key_ptr; (void)key_len;
+    return 0;
+}
+
+RuntimeValue rt_platform_name(void)
+{
+    return rt_string_from_cstr("riscv64-baremetal-simpleos");
+}
+
+int8_t rt_is_debug_mode_enabled(void)
+{
+    /* Gated by the environment on hosted; no environment here, so: off. */
+    return 0;
+}
+
+/* --- filesystem -----------------------------------------------------------
+ * This arch's only filesystem support is the read-only FAT32 reader in
+ * arch/common/riscv_common.h, which resolves 8.3 names inside /SYS/APPS and
+ * nothing else — it has no generic path resolution and no write path at all.
+ * So these fail CLOSED rather than pretend. That distinction matters: an
+ * rt_file_exists that returned 1 would send the caller down a read path that
+ * cannot work, and an rt_file_write_text that returned success would silently
+ * discard the caller's data. Wiring a general VFS is a real piece of work with
+ * its own lane; inventing one inside a runtime port would not be a port. */
+int8_t rt_file_exists(RuntimeValue path_ptr, uint64_t path_len)
+{
+    (void)path_ptr; (void)path_len;
+    return 0;
+}
+
+int8_t rt_file_is_regular_no_follow(RuntimeValue path_ptr, uint64_t path_len)
+{
+    (void)path_ptr; (void)path_len;
+    return 0;
+}
+
+int8_t rt_file_remove(RuntimeValue path_ptr, uint64_t path_len)
+{
+    (void)path_ptr; (void)path_len;
+    return 0;
+}
+
+int8_t rt_file_write_text(RuntimeValue path_ptr, uint64_t path_len,
+                          RuntimeValue content_ptr, uint64_t content_len)
+{
+    (void)path_ptr; (void)path_len; (void)content_ptr; (void)content_len;
+    return 0;
+}
+
+RuntimeValue rt_file_read_text_rv(RuntimeValue path_value)
+{
+    (void)path_value;
+    return NIL_VALUE;
+}
+
+/* The hosted probe pair counts rt_file_exists calls so a caller can assert it
+ * did not stat in a hot loop. Begin hands back the current count as a token;
+ * end returns how many happened since. With rt_file_exists failing closed the
+ * counter never advances, so the honest answer is a genuine zero rather than a
+ * fabricated one. */
+static int64_t g_file_exists_probe_calls = 0;
+
+int64_t rt_file_exists_probe_begin(void)
+{
+    return g_file_exists_probe_calls;
+}
+
+int64_t rt_file_exists_probe_end(int64_t token)
+{
+    int64_t delta = g_file_exists_probe_calls - token;
+    return delta < 0 ? 0 : delta;
+}
+
+/* --- time -----------------------------------------------------------------
+ * The `time` CSR is the architectural wall clock on RV64 and QEMU's virt board
+ * drives it at 10 MHz, which is also what OpenSBI reports in the device tree
+ * as timebase-frequency. */
+#define RV64_TIMEBASE_HZ 10000000ULL
+
+static uint64_t rv64_read_time(void)
+{
+    uint64_t t;
+    __asm__ volatile("rdtime %0" : "=r"(t));
+    return t;
+}
+
+int64_t rt_time_now_monotonic_ms(void)
+{
+    return (int64_t)(rv64_read_time() / (RV64_TIMEBASE_HZ / 1000ULL));
+}
+
+/* No RTC and no NTP in this guest, so there is no way to know the Unix epoch.
+ * Returning microseconds SINCE BOOT would be a wrong wall-clock answer dressed
+ * as a right one — a caller differencing two of them still gets a correct
+ * elapsed time, but a caller formatting one gets 1970. Zero is the unambiguous
+ * "unknown", and it is what a caller can actually test for. */
+int64_t rt_time_now_unix_micros(void)
+{
+    return 0;
+}
+
+/* --- string -> float ------------------------------------------------------
+ * Returns a BOXED value (codegen unboxes it with rt_value_as_float right
+ * after the call — see codegen/instr/closures_structs.rs:1711), so the return
+ * type is I64, not F64. */
+RuntimeValue rt_string_to_float(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return NIL_VALUE;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(value);
+    if (!s || s->hdr.type != HEAP_STRING || s->len == 0) return NIL_VALUE;
+
+    uint64_t i = 0;
+    while (i < s->len && (s->data[i] == ' ' || s->data[i] == '\t' ||
+                          s->data[i] == '\n' || s->data[i] == '\r')) i++;
+    int neg = 0;
+    if (i < s->len && (s->data[i] == '+' || s->data[i] == '-')) {
+        neg = (s->data[i] == '-');
+        i++;
+    }
+    double whole = 0.0;
+    int any_digit = 0;
+    while (i < s->len && s->data[i] >= '0' && s->data[i] <= '9') {
+        whole = whole * 10.0 + (double)(s->data[i] - '0');
+        any_digit = 1;
+        i++;
+    }
+    if (i < s->len && s->data[i] == '.') {
+        i++;
+        double scale = 0.1;
+        while (i < s->len && s->data[i] >= '0' && s->data[i] <= '9') {
+            whole += (double)(s->data[i] - '0') * scale;
+            scale *= 0.1;
+            any_digit = 1;
+            i++;
+        }
+    }
+    if (!any_digit) return NIL_VALUE;
+    /* Decimal exponent, so "1e3" and "2.5E-2" parse as they do hosted. */
+    if (i < s->len && (s->data[i] == 'e' || s->data[i] == 'E')) {
+        uint64_t save = i;
+        i++;
+        int eneg = 0;
+        if (i < s->len && (s->data[i] == '+' || s->data[i] == '-')) {
+            eneg = (s->data[i] == '-');
+            i++;
+        }
+        int edigits = 0;
+        int exp = 0;
+        while (i < s->len && s->data[i] >= '0' && s->data[i] <= '9' && exp < 4096) {
+            exp = exp * 10 + (s->data[i] - '0');
+            edigits = 1;
+            i++;
+        }
+        if (!edigits) {
+            i = save; /* a trailing 'e' with no digits is not an exponent */
+        } else {
+            for (int k = 0; k < exp; k++) whole = eneg ? whole * 0.1 : whole * 10.0;
+        }
+    }
+    return rt_value_float(neg ? -whole : whole);
+}
+
+/* --- weak-FFI integer call thunk -----------------------------------------
+ * Direct port of runtime_native.c:7493. Not an rt_* symbol, but the same kind
+ * of thing: the compiler's sugar-registry path (apply_rule_ast) emits a call
+ * to it, and it had no freestanding definition.
+ *
+ * `args_value` is a TAGGED array handle and each element is decoded on the way
+ * out, exactly as the hosted body decodes with rt_core_as_int — passing tagged
+ * values straight through to a native callee would hand it 8x the intended
+ * integer. Guarded identically to hosted: a null pointer, a negative or >8
+ * argument count, or an array shorter than nargs all return 0 rather than
+ * jumping through an unvalidated pointer. */
+int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs)
+{
+    typedef int64_t (*Fn0)(void);
+    typedef int64_t (*Fn1)(int64_t);
+    typedef int64_t (*Fn2)(int64_t, int64_t);
+    typedef int64_t (*Fn3)(int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn4)(int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn5)(int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn6)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn7)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    typedef int64_t (*Fn8)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+    if (fptr == 0 || nargs < 0 || nargs > 8) return 0;
+    int64_t raw[8] = {0};
+    if (nargs > 0) {
+        RuntimeArray *args = simpleos_array_from_handle((RuntimeValue)args_value);
+        if (!args || (uint64_t)nargs > args->len) return 0;
+        RuntimeValue *items = runtime_array_items(args);
+        for (int64_t i = 0; i < nargs; i++) {
+            raw[i] = (int64_t)simpleos_raw_or_encoded_int(items[i]);
+        }
+    }
+    switch (nargs) {
+        case 0: return ((Fn0)(uintptr_t)fptr)();
+        case 1: return ((Fn1)(uintptr_t)fptr)(raw[0]);
+        case 2: return ((Fn2)(uintptr_t)fptr)(raw[0], raw[1]);
+        case 3: return ((Fn3)(uintptr_t)fptr)(raw[0], raw[1], raw[2]);
+        case 4: return ((Fn4)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3]);
+        case 5: return ((Fn5)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4]);
+        case 6: return ((Fn6)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
+        case 7: return ((Fn7)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]);
+        case 8: return ((Fn8)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
+        default: return 0;
+    }
+}
