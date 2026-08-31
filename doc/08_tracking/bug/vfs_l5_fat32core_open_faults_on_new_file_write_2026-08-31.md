@@ -61,11 +61,80 @@ system payload on this same volume without incident, and NOT in the NVMe driver.
 - **Not a flush-timing artifact.** L8 would be the symptom of that; here the
   write never completes at all.
 
-## Next step for whoever picks this up
-Read `Fat32Core.open`'s create path and `resolve_path`/`read_dir_entries` for a
-non-existent leaf under a directory-cluster chain authored by
-`scripts/os/make_os_disk.c`. The most likely shapes, in order: an unterminated
-directory scan running off the end of the root cluster chain (the boot reader
-walks the same clusters with its own, simpler code and survives), or an
-out-of-range cluster read when the scan reaches the free-space region. Compare
-the two readers' chain-termination conditions before changing either.
+## Next step — READ THIS BEFORE CHASING CLUSTER CHAINS
+An earlier draft of this record led with directory-scan/cluster-chain theories.
+**The disassembly contradicts them.** The FAULTs are printed by a handler that
+RESUMES, so they are chronological and the FIRST one is the real site; the rest
+is cascade noise. That first site is `Fat32Core.open+0x20`, which is reached
+BEFORE any disk read:
+
+```
+801cba8:  mov    %rdi,%rax                ; rax = self
+801cbab:  and    $0xfffffffffffffff8,%rax ; strip the 3 tag bits
+801cbaf:  mov    %rdi,%r15
+801cbb2:  movzbq 0x48(%rax),%rdi          ; <-- FAULTS: load a byte field of self
+801cbb7:  test   %rdi,%rdi
+801cbba:  je     ...
+801cbc3:  call   Fat32Core.resolve_path   ; only reached AFTER the faulting load
+```
+
+So this is **not** a filesystem-structure bug at all. `open` faults on its very
+first field access on its own receiver, before it touches the block device. The
+receiver pointer it was handed is bad.
+
+### Hypothesis ELIMINATED by experiment (2026-08-31, run 3) — do not re-chase
+The first hypothesis was that `.unwrap()` on a class-valued Option returned the
+BOX ADDRESS, the same defect PR #178 fixed for `pcimgr_nth_target().unwrap()`.
+**It was tested and is WRONG.** A diagnostic was added inside
+`_vfsrt_ensure_generic_root_fat32` that calls the identical stdlib entry point,
+`root.open(path, flags)`, on the LOCAL `root` — the object before it is ever
+wrapped in `Some(...)`, so no Option is involved on that route at all:
+
+```
+[vfsrt] vfs_boot_init_production ok=true
+[vfsrt] generic FAT32 mount ok (arbitrary paths writable)
+<no DIAG line ever printed -- the probe died here>
+FAIL — 8 check(s) checked, missing: L4 L5 L6 L7 L8
+```
+
+The diagnostic faulted too. (L4 shows as missing in that run ONLY because the
+probe now died before printing the `fs-server up` line; it is not a regression,
+and run 2 with the same source minus the diagnostic has L3+L4 green. The
+diagnostic has been reverted for exactly that reason.)
+
+**Conclusion: the Option round-trip is exonerated.** `Fat32Core.open` faults on
+its first field load of its receiver even when handed a plain local. Either the
+receiver `Fat32Core.new(g_adapter)` produces is itself malformed under this
+build, or `open`'s compiled field layout disagrees with the object's. Note that
+`root.mount("", "")` on the SAME object SUCCEEDS immediately before — so the
+object is usable by one method and not by another, which points at a per-method
+layout/ABI disagreement rather than a dead pointer.
+
+### Superseded first hypothesis (kept so it is not re-derived)
+The call chain is `g_vfs_write_file_text` ->
+`_g_vfs_write_file_bytes_unsealed_v1` (`src/os/services/vfs/vfs_write_ops.spl:213`)
+-> `g_vfs_root_write_file_bytes(g_root_fat32.unwrap(), ...)`. `g_root_fat32` is
+set to `Some(root)` by `_vfsrt_ensure_generic_root_fat32` in the probe entry and
+is nil on the production path, so this `.unwrap()` on a class-valued Option is
+the ONLY way the receiver is produced.
+
+That is precisely the defect class PR #178 fixed for
+`pcimgr_nth_target().unwrap()`, which returned the BOX ADDRESS instead of the
+value and made the PCI scan miss the NVMe. The tag-masking `and $~7` in the
+prologue says codegen expects a tagged value here; a box address masked and
+dereferenced at +0x48 lands on unmapped memory, which is exactly what is
+observed. #178 may have fixed one call site rather than the lowering.
+
+### How to confirm cheaply, in order
+1. Serial-probe the receiver: print the raw pointer at the `g_root_fat32.unwrap()`
+   call site and again on entry to `Fat32Core.open`, and compare against the
+   address of the object `Some(root)` wrapped. A constant 8/16-byte offset
+   between them confirms the box hypothesis outright.
+2. If they match, the bug is instead in `SharedFat32Driver`'s delegation to the
+   stdlib `Fat32Core` — check what receiver it forwards.
+3. Only if BOTH are clean should anyone look at FAT32 structures. The same
+   volume's payloads all read correctly seconds earlier, so the volume is
+   already strong evidence against a structure bug.
+
+A fix ships with a failing-pre-fix reproduce spec plus defect-class neighbours
+(every other class-valued `Option.unwrap()` on a hot path), per the repo rule.
