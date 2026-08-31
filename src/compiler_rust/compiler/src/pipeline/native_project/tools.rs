@@ -2650,6 +2650,21 @@ pub(crate) fn is_compiler_rt_builtin_symbol(sym: &str) -> bool {
     if !sym.starts_with("__") && !name.starts_with("__") {
         return false;
     }
+    // GCC's x86 CPU-feature-dispatch support symbols, defined with real
+    // bodies/data in libgcc's `cpuinfo.o` (`__cpu_indicator_init` a function,
+    // `__cpu_model`/`__cpu_features2` `.bss` data) and referenced whenever
+    // generated code uses `__builtin_cpu_supports`/`__builtin_cpu_init`. An
+    // exact-name check (not a prefix) avoids swallowing an unrelated
+    // application symbol that merely starts with "__cpu". Weak-stubbing
+    // `__cpu_model` here fabricated a *function* returning a nil sentinel
+    // under the same name as libgcc's *data* symbol, which collided at final
+    // link as "multiple definition of `__cpu_model`" (Windows/MinGW GNU
+    // lane, `windows_mingw()` in link_config.rs, whose `system_scan_libs` is
+    // empty so this stub generator never sees libgcc's real definition).
+    let cpu_dispatch_exact = ["__cpu_model", "__cpu_indicator_init", "__cpu_features2"];
+    if cpu_dispatch_exact.contains(&sym) || cpu_dispatch_exact.contains(&name) {
+        return true;
+    }
     let builtin_prefixes = [
         "__add",
         "__sub",

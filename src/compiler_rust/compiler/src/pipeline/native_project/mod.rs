@@ -1197,7 +1197,8 @@ impl NativeProjectBuilder {
         let link_start = Instant::now();
         let mut final_object_paths = object_paths;
         if self.config.emit_archive {
-            if let Some(init_o) = self.generate_init_caller(&temp_dir_path, &final_object_paths, None)? {
+            let (init_o, _init_names) = self.generate_init_caller(&temp_dir_path, &final_object_paths, None)?;
+            if let Some(init_o) = init_o {
                 final_object_paths.push(init_o);
             }
         }
