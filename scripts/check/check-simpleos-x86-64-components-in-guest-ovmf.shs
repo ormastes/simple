@@ -266,6 +266,23 @@ for COMP in $ROWS; do
     # to the boot error stub so a runtime silence is diagnosable from evidence
     # rather than guessed at.
     readelf -sW "$KERNEL" 2>/dev/null | grep -E 'spl_handle_' > "$CDIR/shims.txt" 2>/dev/null || true
+    # Same failure mode one level down, and the one that actually bit this lane:
+    # a runtime entry point that resolved to a TINY WEAK definition is a
+    # synthesized nil-returning stub, not the real implementation. It links
+    # clean and then faults or silently returns nil at run time. `mcp` is the
+    # live example: rt_closure_func_ptr resolves GLOBAL (real, rt_extras.c)
+    # while rt_closure_new resolves WEAK/8 bytes, so the dispatcher's closure is
+    # nil and the guest triple-faults inside _start. baremetal_stubs.c
+    # deliberately leaves rt_closure_new unresolved for exactly this reason;
+    # something else supplies the weak stub and defeats that. Recorded, not
+    # stubbed over — this file is the first thing to read when a row that linked
+    # green misbehaves in-guest.
+    readelf -sW "$KERNEL" 2>/dev/null \
+        | awk '$4=="FUNC" && $5=="WEAK" && $3+0 <= 16 && $8 ~ /^rt_/ {print $3" "$5" "$8}' \
+        | sort -u > "$CDIR/weak_rt_stubs.txt" 2>/dev/null || true
+    if [ -s "$CDIR/weak_rt_stubs.txt" ]; then
+        echo "  [note] runtime entries resolved to tiny WEAK stubs (see $CDIR/weak_rt_stubs.txt): $(awk '{printf "%s ", $3}' "$CDIR/weak_rt_stubs.txt")"
+    fi
 
     # ESP packaging — the boot rule lives in the builder, not here.
     set +e
