@@ -9,6 +9,9 @@
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_read_bytes, file_exists}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+extern fn rt_env_get(key: text) -> text
 
 # ============================================================================
 # Portable Tool Finder (shared helper)
@@ -39,31 +42,78 @@ pub fn tool_probe_locations(base_name: text) -> [text]:
         out.push("{prefix}/bin/{base_name}")
     out
 
-fn _find_tool(candidates: [text]) -> text:
-    """Find a tool using platform-appropriate detection.
+fn _tool_runs(cmd: text) -> bool:
+    """Execute the candidate and require exit 0 from `--version`.
 
-    On Unix: `command -v`
-    On Windows: `where`
-    Falls back to known Homebrew keg-only install locations on macOS.
+    Existence on PATH is NOT proof a tool can run: on MSYS2 Windows the
+    mingw64 `llc.exe` exists and is found by `where`, but exits 127 with
+    "error while loading shared libraries" the moment it is executed
+    (2026-08-31). Any probe here must run the binary, never just stat it.
+    Uses process_run directly (no shell) to avoid cmd.exe quoting issues.
+    """
+    val (out, err, code) = process_run(cmd, ["--version"])
+    code == 0
+
+fn _env_tool_dirs() -> [text]:
+    """Explicit LLVM bin dirs from the environment, highest priority.
+
+    SIMPLE_LLVM_BIN points at a bin directory; LLVM_SYS_180_PREFIX (the
+    var the Windows MSVC bootstrap lane already sets for the known-good
+    LLVM 18 toolchain) points at an install prefix whose bin/ is used.
+    Both unset => empty list => no behavior change (Unix no-op).
+    """
+    var dirs: [text] = []
+    val explicit = rt_env_get("SIMPLE_LLVM_BIN") ?? ""
+    if explicit != "":
+        dirs.push(explicit)
+    val prefix = rt_env_get("LLVM_SYS_180_PREFIX") ?? ""
+    if prefix != "":
+        dirs.push(prefix + "/bin")
+    dirs
+
+fn _find_tool(candidates: [text]) -> text:
+    """Find a WORKING tool using platform-appropriate detection.
+
+    Priority: env-provided LLVM bin dirs (SIMPLE_LLVM_BIN,
+    LLVM_SYS_180_PREFIX/bin) -> /usr/bin -> `command -v` (Unix) ->
+    `where` (Windows, every listed path tried in order) -> Homebrew
+    keg-only prefixes (macOS). Every hit is verified by EXECUTING the
+    candidate (`--version`, exit 0) before it is returned — a bare
+    existence probe selected a DLL-broken mingw64 llc on Windows and
+    produced "Bootstrap LLVM llc failed" far downstream.
     Bootstrap-safe.
     """
-    # Detect Windows by trying `where` first on failure of `command -v`
+    # Env-provided dirs first (see _env_tool_dirs docstring).
+    for dir in _env_tool_dirs():
+        for candidate in candidates:
+            for path in [dir + "/" + candidate, dir + "/" + candidate + ".exe"]:
+                if file_exists(path) and _tool_runs(path):
+                    return path
     for candidate in candidates:
-        if file_exists("/usr/bin/{candidate}"):
+        if file_exists("/usr/bin/{candidate}") and _tool_runs("/usr/bin/{candidate}"):
             return "/usr/bin/{candidate}"
         val (out, err, code) = backend_shell_tuple("command -v {candidate} >/dev/null 2>&1")
-        if code == 0:
+        if code == 0 and _tool_runs(candidate):
             return candidate
-        # Windows fallback
+        # Windows fallback: `where` can list several installs and the FIRST
+        # can be broken (mingw64 llc missing its own DLLs) while a later one
+        # works (e.g. an LLVM MSVC release install). Try each resolved path
+        # and return the first that actually executes. Note: paths with
+        # spaces (e.g. C:\Program Files\LLVM) would need quoting at the
+        # invocation sites that build shell strings from this result.
         val (wout, werr, wcode) = backend_shell_tuple("where {candidate} 2>NUL")
-        if wcode == 0 and wout.trim() != "":
-            return candidate
+        if wcode == 0:
+            for line in wout.split("\n"):
+                # `where` output is CRLF-terminated; strip \r explicitly.
+                val p = line.replace("\r", "").trim()
+                if p != "" and _tool_runs(p):
+                    return p
     # Homebrew keg-only fallback (macOS): probe absolute prefixes for the
     # unversioned tool name (last candidate in the fallback chain).
     if candidates.len() > 0:
         val base_name = candidates[candidates.len() - 1]
         for path in tool_probe_locations(base_name):
-            if file_exists(path):
+            if file_exists(path) and _tool_runs(path):
                 return path
     ""
 
