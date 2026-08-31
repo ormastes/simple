@@ -1,0 +1,42 @@
+# @tag:unit, spec
+"""
+# `after_all` Drains at the End of Its Own Group
+
+Reproduce spec for the lifecycle-hook defect where `after_all` hooks were
+registered but never run under the interpreter's builtin BDD runner.
+
+`describe`/`context` are intercepted by the builtin runner
+(`interpreter_call/bdd.rs`), so `std.spec`'s pure-Simple `describe` -- the
+only code that drained `after_all_hooks` -- never executed. Registration
+therefore parked the hook in a list nothing read and it silently never fired.
+
+Oracle: a nested `context`'s `after_all` must fire when THAT context ends
+(before the enclosing describe's own `after_all`), and the enclosing
+describe's `after_all` must fire when the describe ends. A later top-level
+describe observes the full marker sequence.
+"""
+
+use std.nogc_async_mut.spipe
+
+var marks: [text] = []
+
+describe "outer group with a nested context":
+    after_all:
+        marks.push("outer_after_all")
+
+    context "inner context":
+        after_all:
+            marks.push("inner_after_all")
+
+        it "runs with no after_all fired yet":
+            assert_equal(marks.len(), 0)
+
+    it "sees the inner context's after_all already drained":
+        assert_equal(marks.len(), 1)
+        assert_equal(marks[0], "inner_after_all")
+
+describe "drain point declared after the group above":
+    it "observes both after_all hooks in innermost-first order":
+        assert_equal(marks.len(), 2)
+        assert_equal(marks[0], "inner_after_all")
+        assert_equal(marks[1], "outer_after_all")
