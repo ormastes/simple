@@ -1196,6 +1196,78 @@ spl_i64 rt_contains(spl_i64 collection, spl_i64 value) {
     return 0;
 }
 
+/* Port of the hosted rt_find (src/runtime/runtime_native.c:8328) into the
+ * freestanding aarch64 runtime. NOT a new rt_* — the name and its contract
+ * already exist in the hosted C runtime; this lane only lacked an aarch64
+ * definition, which is what made the in-guest dev-tool kernel fail to link
+ * ("ld.lld: error: undefined symbol: rt_find", referenced from the real
+ * compiler.tools.lint os_freestanding_lints module).
+ *
+ * The hosted version's RETURN SHAPE DIFFERS BY RECEIVER and that is preserved
+ * here: a text receiver yields a RAW byte index (rt_string_find), -1 when
+ * absent, which is the branch the lint rules actually take.
+ *
+ * DIVERGENCE, stated rather than papered over: the hosted array branch takes a
+ * CLOSURE predicate and yields the matching ELEMENT. This runtime has neither
+ * rt_closure_func_ptr nor rt_array_find — a freestanding image has no closure
+ * support at all — so the array branch here answers the only question it can
+ * answer honestly: the INDEX of the first element equal to `value` under
+ * rt_native_eq, mirroring rt_contains directly above, and -1 when absent. -1
+ * for "absent" is load-bearing: callers branch on `< 0`, so returning 0 would
+ * read as "found at the start". A closure argument reaches the text branch and
+ * returns -1 rather than silently matching.
+ */
+spl_i64 rt_find(spl_i64 collection, spl_i64 value) {
+    RtString *text = rt_as_string(collection);
+    RtString *needle = rt_as_string(value);
+    if (text && needle) {
+        return rt_string_find(collection, value);
+    }
+    RtArray *array = rt_as_array(collection);
+    if (array) {
+        spl_i64 len = rt_array_len(collection);
+        for (spl_i64 i = 0; i < len; i = i + 1) {
+            if (rt_native_eq(rt_array_get(collection, rt_int(i)), value) > 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+/* Port of the hosted rt_value_unbox_int (src/runtime/runtime_native.c:2497)
+ * into the freestanding aarch64 runtime. NOT a new rt_* — the name and its
+ * contract already exist in the hosted C runtime and the Rust seed
+ * (runtime/src/value/sffi/value_ops.rs); this lane only lacked an aarch64
+ * definition, which is what made the in-guest caret and test-runner kernels
+ * fail to link ("ld.lld: error: undefined symbol: rt_value_unbox_int").
+ *
+ * The Cranelift UnboxInt lowering emits a call to this for EVERY unbox site,
+ * so totality is the contract, not a nicety:
+ *   TAG_INT scalar      -> value >> 3;
+ *   tagged true/false   -> 1 / 0;
+ *   anything else       -> passed through VERBATIM, so a heap enum/string
+ *                          handle is not >>3-mangled.
+ * The literals 11 and 19 are rt_special(RT_VALUE_SPECIAL_TRUE/FALSE) under
+ * this file's own tag scheme ((payload << 3) | TAG_SPECIAL), i.e. the same two
+ * constants the hosted twin hard-codes — written out rather than computed so
+ * the two implementations can be diffed by eye.
+ *
+ * DIVERGENCE, stated rather than papered over: the hosted twin first checks for
+ * a heap-boxed WIDE int and returns its full i64. This runtime has no wide-int
+ * heap object at all (its heap types are STRING/ARRAY/TUPLE/ENUM only), so
+ * there is nothing to check for and no value is lost; a wide int cannot exist
+ * here to be mis-decoded.
+ */
+spl_i64 rt_value_unbox_int(spl_i64 value) {
+    if ((((spl_u64)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_INT) {
+        return value >> 3;
+    }
+    if (value == 11) return 1;  /* TAG_SPECIAL | SPECIAL_TRUE  */
+    if (value == 19) return 0;  /* TAG_SPECIAL | SPECIAL_FALSE */
+    return value;
+}
+
 spl_i64 rt_string_ends_with(spl_i64 value, spl_i64 suffix_value) {
     RtString *string = rt_as_string(value);
     RtString *suffix = rt_as_string(suffix_value);
