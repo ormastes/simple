@@ -215,6 +215,15 @@ an enclosing conditional.
 | gated-only names that do have some Simple body | 24 |
 | gated-only names covered by `simple_core` specifically | **0** |
 
+**REFUTED 2026-08-31 — do not cite the 90.** Independently re-derived with a
+three-valued preprocessor evaluator (not a "platform macro appears in an
+enclosing conditional" text test): only **9** names have no Windows-reachable C
+definition, and **0** of those are referenced from Simple. The 90 counted the
+POSIX half of `#if !defined(_WIN32) ... #else ... #endif` pairs whose OTHER
+branch also defines the symbol. Cross-checked against the real Windows stage-2
+link log: 0 of its 68 undefined names are POSIX-gated. See
+`doc/08_tracking/bug/posix_gated_runtime_symbols_invisible_on_windows_2026-08-31.md`.
+
 **Flag:** those **90** names are referenced from Simple, have their only C
 definition behind a POSIX gate, and have no pure-Simple fallback. On Windows they
 resolve to nothing. This is the most concrete portability finding in this census,
@@ -349,7 +358,13 @@ dismissed as over-capture.
 record.** The gap is 13 symbols against a written contract with a red test
 already pointing at it — a finishing task, not a program of work.
 
-### Secondary, and genuinely unfiled: the 90 POSIX-gated symbols
+### Secondary — the 90 POSIX-gated symbols (REFUTED: the set is EMPTY)
+
+Re-derived 2026-08-31: the count is **0**, not 90. The real target-specific
+absence is FILE selection (`hosted_win32.c` is compiled only when the target is
+NOT Windows), not `#if` gating. Record:
+`doc/08_tracking/bug/posix_gated_runtime_symbols_invisible_on_windows_2026-08-31.md`.
+
 
 §4's 90 names (referenced, C definition POSIX-gated only, no Simple fallback) are
 a real portability hole on Windows that no existing guard detects, because
