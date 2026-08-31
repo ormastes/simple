@@ -192,3 +192,74 @@ a live retest of `compile`/`native-build` on a hello world reaching step 6/6).
 Whoever picks this up: rebuild Stage 2, re-run the `cdb` repro above, confirm
 `rax` at `simple_exe+0x15b474`-equivalent is non-null, and confirm hello-world
 compiles end to end.
+
+## Update 2026-08-31 (later session): fix (b) applied, measured, REFUTED
+
+Fix direction (b) from above was implemented in `linker.rs` (commit
+`a5266266e3d`, "fix(link/msvc): force real __module_init_* resolution ahead
+of /ALTERNATENAME"): for every name in `init_names`, when `is_clang_cl`,
+`clang_cl_link_args.push(format!("/INCLUDE:{name}"))` is pushed ahead of the
+`/WHOLEARCHIVE`-equivalent archive arg, inside the
+`object_paths.len() > 100` branch that the real Stage 2 self-build always
+takes (818 objects). `cargo check --release --bin simple` was clean, and the
+Rust seed was rebuilt with this change in the working tree at the time
+(`rust-seed-build.log`, seed timestamp 22:32, after the 22:15 edit to
+`linker.rs` and before the 22:51 commit — content-fingerprinted caching means
+the seed used in the very next Stage 2 run already carried the fix, confirmed
+by `git log -1` on `linker.rs` predating the seed-build timestamp).
+
+**Direct evidence the fix reaches the linker:** re-ran the exact Stage 2
+`native-build` command (extracted from
+`build/w/stage3/x86_64-pc-windows-msvc/stage2-command.transcript`) by hand
+with `--verbose` added, using the freshly-built seed as both the running
+binary and `SIMPLE_BINARY`. The captured "Link command:" line contains
+**132** distinct `/INCLUDE:__module_init_*` directives, including
+`/INCLUDE:__module_init_compiler__driver__source_pipeline_parsing` (the exact
+module diagnosed above as never initializing `_driver_parse_shard_memo`).
+This is authoritative: it is the actual argv passed to `clang-cl`, not an
+inference from source.
+
+**Result: no change, at all, in either build.**
+
+- Binary size: **108,218,368 bytes** — byte-identical to the pre-fix Stage 2
+  binary size recorded in this same document and in the two prior builds
+  referenced by the handoff note ("byte-identical size (108,218,368) ... same
+  SEGV" x2). A real Stage 2 build (`INIT2.log`) and an independent hand-run
+  reproduction with `--verbose` (`/tmp/verify_link/simple.exe`) both produced
+  this exact byte count.
+- Crash: unchanged. Both the real Stage 2 rejected binary and the hand-built
+  verbose reproduction SEGV (rc=139) at the same point in the same repro
+  (`compile` a 2-line hello world), stopping after the same
+  `[build] parse 0/1 ...` log line, before any further build-step output.
+
+Forcing `/INCLUDE:__module_init_<X>` on all 132 names — including the exact
+name theorized to be the culprit — measurably reaches `clang-cl`/`link.exe`
+and produces a **bit-for-bit identical binary** to the one built without it.
+That is only possible if either (a) `link.exe` was already including those
+archive members regardless of `/ALTERNATENAME` order (i.e. the "stub wins"
+link-order theory in this document is wrong), or (b) `/INCLUDE` has no effect
+in this specific configuration (e.g. superseded by `/FORCE:MULTIPLE,UNRESOLVED`
+or the `/WHOLEARCHIVE` semantics already forcing every archive member in,
+making `/INCLUDE` redundant either way — which would also mean the *original*
+diagnosis of "the archive member is never pulled in" needs re-examination,
+since a `/WHOLEARCHIVE:libspl_objects.a` should already force-include every
+object in that archive, real `__module_init_<prefix>` bodies included, with
+or without `/INCLUDE`).
+
+**Fix (b) is REFUTED as the cause of this SEGV.** The `/INCLUDE` directives
+are cheap and harmless (confirmed: link still succeeds, symbol table only
+grows never shrinks) but do not fix the crash and can stay or be reverted
+without effect either way. The uninitialized-global / null-BSS-read
+mechanism established via `cdb` disassembly earlier in this document is
+still believed accurate; what is refuted is specifically the "ALTERNATENAME
+link-order" *explanation* for why that initializer never ran. Root cause is
+still open. Next: re-run the `cdb` repro against the current binary to
+confirm the same fault address/instruction pattern still reproduces (not yet
+done this session — no `cdb`/`gdb`/`windbg` was available in this shell), and
+investigate candidate (a) (reorder so the archive precedes `_init_all.o`) or
+whether `__module_init_<prefix>` is even being *emitted into the object* for
+this module in the first place (i.e. the object never defines the symbol at
+all, so no amount of link-order/`/INCLUDE` massaging can help — check via
+`llvm-nm` on the specific `driver_source_pipeline_parsing.spl` object file
+for a defined `__module_init_compiler__driver__source_pipeline_parsing`
+symbol).
