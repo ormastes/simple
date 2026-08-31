@@ -543,6 +543,23 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         # copy) is what failed, rather than the spec itself -- the fallback
         # below reports a REAL pass/fail from the unwrapped source, so it
         # cannot mask a genuine defect.
+        # FAIL CLOSED (2026-08-31): see the twin in
+        # src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl. A coverage
+        # run whose instrumented wrapper will not compile never executed the
+        # requested path, so it is an ERROR, not a pass. Opt in explicitly with
+        # SIMPLE_COVERAGE_FALLBACK=interpreter to keep the (loud, non-evidence)
+        # degrade.
+        if options.coverage and wrapper_active and (env_get("SIMPLE_COVERAGE_FALLBACK") ?? "") != "interpreter":
+            if cleanup_path != "" and not options.keep_artifacts:
+                if file_exists(cleanup_path):
+                    file_delete(cleanup_path)
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
+                error: "ABORTED BEFORE EXECUTION — coverage instrumentation wrapper failed to compile; the spec was NEVER run under the requested coverage path, so this is NOT a test result. (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)",
+                timed_out: false, cached: false,
+                mcdc_skip_reason: "coverage-abort: wrapper failed to compile"
+            )
         if (mcdc_enabled and not options.coverage and uncompilable_construct) or (options.coverage and wrapper_active):
             if cleanup_path != "" and not options.keep_artifacts:
                 if file_exists(cleanup_path):
@@ -561,7 +578,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             val fb_duration_ms = (fb_end - fb_start) / 1000
             val fb_tag = if options.coverage: "coverage-fallback" else: "mcdc-fallback"
             val fb_reason = if options.coverage:
-                "Coverage instrumentation skipped: wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source."
+                "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source."
             else:
                 "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution."
             print "[{fb_tag}] {file_path}: {fb_reason}"
