@@ -435,3 +435,109 @@ structurally valid filesystem whose files are simply invisible.
 NOTE for whoever fixes it: `text` here is documented as `.len()` counts BYTES
 while `[]` indexes CHARS. Preserve that contract; do not resolve this by
 redefining either.
+
+---
+
+## B9 RESOLVED, B10 RESOLVED, B11 OPEN — L1..L5 now green
+
+### B9 — RESOLVED: heap-boxed u64 rejected as an index (runtime, general)
+Root cause was NOT `text`-specific and NOT the `as u8` cast. `rt_index_get` /
+`rt_index_set` gated every non-dict receiver on `RuntimeValue::is_int()`, i.e.
+`tag() == TAG_INT`, the **inline 61-bit signed** form only. But
+`RuntimeValue::from_u64` **always heap-boxes** into `HeapObjectType::UInt`
+(`core.rs:387`), a `TAG_HEAP` value. So any `u64`/`usize`-typed index failed the
+test and the function silently returned `NIL`; the index expression produced
+nil and `as u8` on nil gave 0.
+
+Narrowing table that pinned it:
+
+| shape | result |
+|---|---|
+| `s[0]` literal | 70 OK |
+| `s[i64var]` | 70 OK |
+| `s[u32var]` | 70 OK |
+| `s[u64var]` (var AND val) | **nil** BROKEN |
+| `s[u64var].to_text()` | `nil` — the char itself is nil, not a cast bug |
+| `arr[u64var]` | 11 OK — a typed MIR fast path bypasses `rt_index_get` and MASKED the defect |
+
+The array/tuple generic paths were equally broken; arrays only *looked* fine.
+Fix adds `RuntimeValue::as_index_i64()` (inline `TAG_INT`, heap `HeapInt`, heap
+`HeapUInt` via `i64::try_from`) as the single shared decode point, used by both
+functions. Negative indices, the tuple `idx >= 0` guard, `char_at` string
+behaviour and the `.len()`=bytes / `[]`=chars contract are all unchanged.
+`cargo test -p simple-runtime`: 1225 passed, 1 pre-existing/flaky failure
+(`value::sffi::file_io::…fail_closed`, passes in isolation with and without the
+change, fails only under the full parallel suite).
+
+Effect: 8.3 names are now written correctly — `strings` on the image shows
+`HELLO   SPL`, `FSEXEC  ELF`, `BIN`, `USR`, `ETC`, `TMP`, `HOME`.
+**L4 went green**: `[hello] /FSEXEC.ELF read size=6888 buf=0x1209897344`.
+**L5 went green**: `[hello] entering ring 3 ...`
+
+Suspected sibling defect, NOT fixed, needs its own reproducer:
+`compile_slice_op` (`codegen/instr/collections.rs:~380`) passes slice
+start/end/step as raw i64 vreg values to `rt_slice`, so a `u64`-typed slice
+bound would hand a boxed pointer through as a raw integer.
+
+### B10 — RESOLVED: payload segments shared a page, so W^X admission refused it
+`[spawn] FAIL raw ELF admission rejected`. The kernel maps one frame per page
+and UNIONS the permissions of every segment covering that page, so
+`_admit_raw_elf64` rejects an image where an executable and a writable segment
+share a page — the PTE would silently become W+X. `user.ld` had no alignment
+between groups, so `.text` (RX, ending `0x4004b0`) and `.bss` (RW, starting
+`0x400500`) both landed in page `0x400000`. Byte ranges disjoint, same page,
+correctly refused.
+
+`ALIGN(0x1000)` before `.rodata` and `.data` gives
+`0x400000 RX / 0x401000 R / 0x402000 RW`. Admission now passes:
+`[spawn] parsed entry=0x4194304`.
+
+Note this is the payload's linker script only; the kernel's check was right and
+is unchanged.
+
+### B11 — OPEN: `vmm_clone_kernel_low_private` refuses the new user AS
+Now the only blocker for L6/L7. Serial:
+```
+[VMM] PML4 at physical 0x335609856
+[VMM] Identity-mapped 4GB with 2MB pages (2048 entries)
+[hello] pmm+vmm online
+[hello] entering ring 3 ...
+[spawn] parsed entry=0x4194304
+[spawn] FAIL clone kernel low private root=335634432
+[hello] native program exited rc=-1
+```
+`vmm_clone_kernel_low_private` (`src/os/kernel/memory/vmm_address_space.spl:147`)
+has exactly three refusal branches: `vmm_kernel_pml4_phys() == 0`; the kernel's
+PML4[0] not present; or `_clone_table` failing its page allocation. The function
+returns a bare bool, so the serial line cannot distinguish them. Lane-local
+diagnostics added to the entry (printing `kpml4` and PML4[0]) to settle it in
+one rebuild; result not yet available.
+
+Relevant context: this lane boots via GRUB multiboot1, so there is no Limine
+HHDM (`[BOOT] WARNING: No HHDM response from Limine`), and `_phys_to_virt` is
+`phys + _vmm_hhdm_offset`. The earlier fault frames showed `cr3=0x819e000`
+(crt0's `boot_pml4`) while the Simple VMM built its own PML4 at `0x14024000`
+— worth checking whether `_vmm_pml4_phys` refers to the table the CPU is
+actually on.
+
+### Rung status (real OVMF pflash; never `-kernel`, never isa-debug-exit)
+| rung | | status |
+|---|---|---|
+| L1 | `[grub-uefi] multiboot loading` | **OK** |
+| L2 | `SimpleOS x86_64 hello-world in-guest` | **OK** |
+| L3 | `[hello] nvme online` | **OK** |
+| L4 | `[hello] /FSEXEC.ELF read size=` | **OK** |
+| L5 | `[hello] entering ring 3` | **OK** |
+| L6 | `HELLO_NATIVE_SIMPLEOS_X86_64_OK` | MISS — blocked by B11 |
+| L7 | `[hello] native program exited rc=0` | MISS |
+
+Gate verdict, honestly RED:
+`FAIL — 1 program(s) staged, 7 rung(s) checked, missing: L6 L7;`
+`interpreter row ADVISORY/RED: no in-guest Simple interpreter exists in this tree`
+
+### Note on the two seed defects
+B8 and B9 are **general Rust-seed defects surfaced by this lane**, not
+SimpleOS-specific. Both fail SILENTLY — B8 wrote 3 garbage bytes and returned
+true; B9 yielded nil and then 0. Any Simple program doing the same operations
+was equally affected. That is why they survived until something as demanding as
+booting an OS surfaced them.
