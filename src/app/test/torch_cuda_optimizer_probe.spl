@@ -63,7 +63,18 @@ fn main() -> i64:
         emit("torch_cuda_optimizer_probe_reason", "parameter_not_cuda")
         return 1
 
-    val before = parameter_cuda.sum()
+    var before = 0.0
+    match parameter_cuda.sum():
+        case Ok(value): before = value
+        case Err(reason):
+            emit("torch_cuda_optimizer_probe_blocked_gate", "parameter_sum")
+            emit("torch_cuda_optimizer_probe_status", "fail")
+            emit("torch_cuda_optimizer_probe_reason", reason)
+            return 1
+        case _("fail closed if Result gains another variant"):
+            emit("torch_cuda_optimizer_probe_status", "fail")
+            emit("torch_cuda_optimizer_probe_reason", "invalid_parameter_sum_result")
+            return 1
     emit_f64("torch_cuda_optimizer_probe_before_sum", before)
 
     val loss = parameter_cuda.mul(parameter_cuda)
@@ -77,14 +88,36 @@ fn main() -> i64:
         emit("torch_cuda_optimizer_probe_reason", "missing_gradient")
         return 1
 
-    val grad_sum = Tensor.from_handle(grad_handle).sum()
+    var grad_sum = 0.0
+    match Tensor.from_handle(grad_handle).sum():
+        case Ok(value): grad_sum = value
+        case Err(reason):
+            emit("torch_cuda_optimizer_probe_blocked_gate", "gradient_sum")
+            emit("torch_cuda_optimizer_probe_status", "fail")
+            emit("torch_cuda_optimizer_probe_reason", reason)
+            return 1
+        case _("fail closed if Result gains another variant"):
+            emit("torch_cuda_optimizer_probe_status", "fail")
+            emit("torch_cuda_optimizer_probe_reason", "invalid_gradient_sum_result")
+            return 1
     emit_f64("torch_cuda_optimizer_probe_grad_sum", grad_sum)
 
     val optimizer = SGDOptimizer.create([parameter_cuda_handle], 1.0, 0.0)
     emit_bool("torch_cuda_optimizer_probe_optimizer_step_attempted", true)
     val updated_params = optimizer.step()
 
-    val after = Tensor.from_handle(updated_params[0]).sum()
+    var after = 0.0
+    match Tensor.from_handle(updated_params[0]).sum():
+        case Ok(value): after = value
+        case Err(reason):
+            emit("torch_cuda_optimizer_probe_blocked_gate", "updated_parameter_sum")
+            emit("torch_cuda_optimizer_probe_status", "fail")
+            emit("torch_cuda_optimizer_probe_reason", reason)
+            return 1
+        case _("fail closed if Result gains another variant"):
+            emit("torch_cuda_optimizer_probe_status", "fail")
+            emit("torch_cuda_optimizer_probe_reason", "invalid_updated_parameter_sum_result")
+            return 1
     emit_f64("torch_cuda_optimizer_probe_after_sum", after)
 
     if after < before:

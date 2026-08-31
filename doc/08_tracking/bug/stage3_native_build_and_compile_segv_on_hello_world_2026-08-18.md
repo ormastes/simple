@@ -1,8 +1,56 @@
 # bootstrap/stage3/simple SEGVs on both of its two commands (hello world)
 
+> **2026-08-31:** The rc=139 SEGV documented here no longer reproduces anywhere;
+> the bare stage paths now hold darwin Mach-O blobs (a deploy clobber, rc=2 exec
+> failure — a DIFFERENT defect class). Root cause + fix:
+> `doc/08_tracking/bug/darwin_stage_binaries_clobber_bare_paths_2026-08-31.md`.
+> Residual real failure: `bootstrap/stage3/x86_64-unknown-linux-gnu/simple`
+> fails `native-build` with rc=1.
+
 - **Filed:** 2026-08-18
 - **Severity:** HIGH — the tracked stage3 artifact is non-functional
 - **Status:** OPEN (found while verifying an unrelated documented claim)
+
+> **STATUS UPDATE 2026-08-31 (re-measured at `origin/main` @ `28ca075c2c7`,
+> linux-x86_64 host) — the SEGV itself is GONE; the gate is still RED for two
+> DIFFERENT reasons.** No tracked stage binary returns rc=139 any more. Probing
+> every ELF blob with the standard three-line hello world:
+> `bootstrap/simple_stage1|2|3` and
+> `bootstrap/stage3/x86_64-unknown-linux-gnu/simple` all answer
+> `--version` rc=0 and `compile` rc=0. Root cause was closed by the
+> fail-closed link work in
+> `c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md` (all 84
+> symbols implemented or NAMED-trapped;
+> `check-no-unresolved-runtime-symbols.shs` now reads
+> `PASS — 196 symbol(s) checked across 0 binary(ies) + archive, 0 unresolved`
+> on the main tree, and a probe extern to a nonexistent `rt_*` symbol makes
+> hosted `native-build` FAIL at link — `ld.lld: error: undefined symbol` plus
+> the frontend's `declared but not implemented anywhere` — with no binary
+> produced, while a clean hello world links and runs rc=0; that PASS was
+> measured 2026-08-31 against the `/mnt/data/worktrees/simple-main` working
+> tree, which currently tracks no bootstrap binaries — hence
+> `0 binary(ies)` vs the `4 binary(ies)` quoted in that record). The absence
+> of SEGVs is CONSISTENT WITH that fix; note the original 3,464,072-byte
+> SEGVing stage3 blob was replaced, not proven fixed in place. What keeps
+> `check-stage-binaries-runnable.shs` at
+> `FAIL — 15 invocation(s) executed across 5 binary(ies), 13 crashed/failed`
+> (`--rev origin/main`, 2026-08-31) is:
+> 1. Two distinct sub-classes, do not conflate them:
+>    (a) `bootstrap/stage1/simple`, `stage2/simple`, `stage3/simple` are now
+>    **Mach-O arm64 darwin** blobs committed at the bare (historically
+>    Linux) stage paths — they cannot exec on this host at all (rc=2 on
+>    every command, `--version` included; exec failure, not a crash).
+>    Either the Linux artifacts were clobbered by a darwin session's deploy
+>    or the bare stage paths need per-triple scoping like `stage3/<triple>/`.
+>    (b) `stage3/aarch64-apple-darwin-macho/simple` is a Mach-O blob at its
+>    CORRECT darwin-triple-scoped path; its failure is a gate limitation —
+>    the gate executes foreign-triple artifacts on a Linux host instead of
+>    skipping/cross-probing them.
+> 2. `stage3/x86_64-unknown-linux-gnu/simple` `native-build` exits 1 with the
+>    deliberate `bootstrap_main cannot emit a seed-wrapper fallback` refusal —
+>    it was built without real Simple lowering/codegen and needs the (separately
+>    blocked) bootstrap redeploy; `compile` is rc=0.
+> The historical SEGV text below is kept for context only.
 - **Artifact:** `bootstrap/stage3/simple`, 3,464,072 bytes, mtime 2026-08-11 22:10:05 UTC
 - **Tracked in git:** yes (`git ls-files bootstrap/stage3` lists it)
 

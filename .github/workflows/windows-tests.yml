@@ -41,9 +41,32 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Setup bootstrap runtime
+    # `bin/simple` is NOT tracked in git -- it is a symlink created locally by
+    # `scripts/setup/setup.shs`. A fresh CI checkout therefore never has it, so
+    # the old `chmod +x bin/simple` step failed 100% of the time on every
+    # branch. Build the bootstrap seed and deploy the symlink instead; the
+    # steps below genuinely need a working binary, so guarding/removing the
+    # chmod would only have made this job pass without testing anything.
+    - name: Cache cargo + bootstrap target
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          src/compiler_rust/target
+        key: windows-tests-bootstrap-${{ runner.os }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+        restore-keys: |
+          windows-tests-bootstrap-${{ runner.os }}-
+
+    - name: Build and deploy bin/simple (bootstrap seed)
       run: |
-        chmod +x bin/simple
+        cd src/compiler_rust
+        cargo build --profile bootstrap -p simple-driver
+        test -x target/bootstrap/simple
+        cd "$GITHUB_WORKSPACE"
+        mkdir -p bin
+        ln -sfn "$(pwd)/src/compiler_rust/target/bootstrap/simple" bin/simple
+        bin/simple --version
         echo "✓ Bootstrap runtime ready"
 
     - name: Test Simple platform detection
@@ -140,9 +163,29 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Setup bootstrap runtime
+    # See the note in `linux-validation`: `bin/simple` is untracked and cannot
+    # exist on a fresh checkout, so the previous `chmod +x bin/simple` here
+    # failed unconditionally.
+    - name: Cache cargo + bootstrap target
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          src/compiler_rust/target
+        key: windows-tests-bootstrap-${{ runner.os }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+        restore-keys: |
+          windows-tests-bootstrap-${{ runner.os }}-
+
+    - name: Build and deploy bin/simple (bootstrap seed)
       run: |
-        chmod +x bin/simple
+        cd src/compiler_rust
+        cargo build --profile bootstrap -p simple-driver
+        test -x target/bootstrap/simple
+        cd "$GITHUB_WORKSPACE"
+        mkdir -p bin
+        ln -sfn "$(pwd)/src/compiler_rust/target/bootstrap/simple" bin/simple
+        bin/simple --version
         echo "✓ Bootstrap runtime ready"
 
     - name: Install mold

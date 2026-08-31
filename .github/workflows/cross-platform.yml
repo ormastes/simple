@@ -273,9 +273,36 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Setup bootstrap runtime
+    # `bin/release/simple` IS tracked, but it is only a wrapper: it execs
+    # `bin/release/<triple>/simple`, which is a build artifact and never exists
+    # on a fresh checkout. So `chmod +x bin/release/simple` succeeded while the
+    # wrapper's bounded identity probe then failed on every run:
+    #   error: deployed Simple runtime failed its bounded identity probe:
+    #          .../bin/release/x86_64-unknown-linux-gnu/simple
+    # Deploying the Rust seed at that path would NOT be a fix: the wrapper
+    # deliberately refuses any runtime whose --version says "Rust-built" /
+    # "bootstrap seed only" (it guards the production tool path), and the seed
+    # says exactly that. The probe is right; the wrapper is simply the wrong
+    # entrypoint for a seed-only CI lane. So build the seed and invoke it
+    # directly. Nothing about the probe is weakened or skipped.
+    - name: Cache cargo + bootstrap target
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          src/compiler_rust/target
+        key: cross-platform-bootstrap-${{ runner.os }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+        restore-keys: |
+          cross-platform-bootstrap-${{ runner.os }}-
+
+    - name: Build bootstrap runtime (Rust seed)
       run: |
-        chmod +x bin/release/simple
+        cd src/compiler_rust
+        cargo build --profile bootstrap -p simple-driver
+        test -x target/bootstrap/simple
+        cd "$GITHUB_WORKSPACE"
+        ./src/compiler_rust/target/bootstrap/simple --version
         echo "✓ Bootstrap runtime ready"
 
     - name: Install compiler
@@ -292,8 +319,13 @@ jobs:
 
     - name: Run native compile spec tests
       run: |
-        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        bin/release/simple test test/unit/compiler/native/native_compile_spec.spl
+        # Put the seed FIRST on PATH. `$PWD/bin/release` contains a file also
+        # named `simple` -- the production wrapper -- so leaving it ahead would
+        # make any inner `simple` lookup (the driver's external-compile
+        # delegation resolves the tool by name) re-enter the wrapper and hit
+        # the very identity probe this lane cannot satisfy.
+        export PATH="$PWD/src/compiler_rust/target/bootstrap:$PWD/bin:$PWD/bin/release:$PATH"
+        ./src/compiler_rust/target/bootstrap/simple test test/unit/compiler/native/native_compile_spec.spl
 
   # ============================================================================
   # Windows MinGW Cross-Compilation

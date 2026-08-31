@@ -89,6 +89,21 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
 # Config / environment backend selection
 # ============================================================================
 
+pub fn engine2d_vulkan_font_batch_admits(status: text, quad_count: i64,
+                                         dispatch_count: i64, batch_quads: i64) -> bool:
+    """Admission predicate for a Vulkan font-batch attempt.
+
+    The packed frame-batching lane records ONE compute dispatch that covers
+    every quad in the batch (dispatch groups on X, quads on Y), so success is
+    judged by quad coverage, never by dispatch count equalling quad count —
+    A "failed" status is never admitted, even when the fence was waited (oracle-parity or cleanup failures set status="failed" with device_executed=true). The older predicate rejected every multi-glyph packed batch and silently
+    demoted vulkan font execution to cpu (gui-vulkan-window gate red,
+    2026-08-31). dispatch_count must still be positive: zero dispatches means
+    nothing was recorded.
+    """
+    (status == "executed" or status == "recorded") and
+        quad_count == batch_quads and dispatch_count > 0
+
 fn engine2d_env_backend_override() -> text:
     """Config/environment override for the auto-selected 2D backend.
 
@@ -1693,8 +1708,8 @@ class Engine2D with DrawIrRenderTarget:
                         self.last_vulkan_font_evidence = evidence
                         quad_index = 0
                         continue
-                    if ((evidence.device_executed or evidence.status == "recorded") and
-                        evidence.dispatch_count == batch.quads.len()):
+                    if engine2d_vulkan_font_batch_admits(evidence.status,
+                                evidence.quad_count, evidence.dispatch_count, batch.quads.len()):
                         quad_index = batch.quads.len()
                         winner = "vulkan"
                 else:

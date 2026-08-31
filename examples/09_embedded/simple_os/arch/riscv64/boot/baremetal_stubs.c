@@ -1496,9 +1496,15 @@ RuntimeValue rt_net_recv_version_text(int64_t sock_fd)
     return rt_string_from_cstr(line);
 }
 
+#include "rv64_image_header.inc.h"
 __attribute__((naked, section(".text.entry"))) void _start(void)
 {
     __asm__ volatile(
+        /* RISC-V Linux boot-image header v0.2 (64 bytes, code0 jumps over
+         * it) so this kernel is loadable by any Image-protocol chain while
+         * a direct OpenSBI handover executes it unchanged. Contract gated
+         * by check-simpleos-riscv64-image-header-contract.shs. */
+        RV64_IMAGE_HEADER_ASM
         "la sp, _stack_top\n"
         /* Zero .bss BEFORE any C code runs. Real DDR powers up as garbage;
          * un-zeroed .bss => g_heap_off trash => every alloc fails (proven on

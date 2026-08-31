@@ -14,7 +14,22 @@ RUNTIME_LIB="$ROOT/src/compiler_rust/target/release/libsimple_runtime.so"
 
 mkdir -p "$BUILD_DIR"
 if [ ! -f "$ICD" ]; then echo "engine2d_vulkan_evidence_status=blocked reason=missing-icd"; exit 2; fi
+# Rebuild when the lib is missing OR was built without the vulkan feature.
+# A featureless build leaves every rt_vulkan_* as an identical return-0 stub
+# (rt_vulkan_init silently fails, bench exits 3 with no output) — detected by
+# stub symbols sharing one address (2026-08-31 incident: merge-day rebuild
+# shipped a non-vulkan libsimple_runtime.so and this gate died with no verdict).
+need_build=0
 if [ ! -f "$RUNTIME_LIB" ]; then
+    need_build=1
+elif command -v nm >/dev/null 2>&1; then
+    addr_a=$(nm -D "$RUNTIME_LIB" | awk '$3=="rt_vulkan_init_window_present"{print $1}')
+    addr_b=$(nm -D "$RUNTIME_LIB" | awk '$3=="rt_vulkan_init_headless_present"{print $1}')
+    if [ -z "$addr_a" ] || { [ -n "$addr_b" ] && [ "$addr_a" = "$addr_b" ]; }; then
+        need_build=1
+    fi
+fi
+if [ "$need_build" = 1 ]; then
     (cd "$ROOT/src/compiler_rust" && cargo build -p simple-runtime --release \
         --no-default-features --features vulkan)
 fi

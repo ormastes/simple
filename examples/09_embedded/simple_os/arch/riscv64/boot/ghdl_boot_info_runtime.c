@@ -51,9 +51,13 @@ static uintptr_t g_heap_off = 0;
 extern RuntimeValue spl_start(void);
 extern char _stack_top[];
 
+#include "rv64_image_header.inc.h"
 __attribute__((naked, section(".text.entry"))) void _start(void)
 {
     __asm__ volatile(
+        /* RISC-V Linux boot-image header v0.2 — see rv64_image_header.inc.h;
+         * gated by check-simpleos-riscv64-image-header-contract.shs. */
+        RV64_IMAGE_HEADER_ASM
         "la sp, _stack_top\n"
         "call spl_start\n"
         "1: wfi\n"
