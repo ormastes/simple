@@ -249,3 +249,148 @@ compiling another worktree's source. Detection is a one-liner:
 - Harness: `scripts/check/run-riscv64-text-probe-opensbi.shs`
 - Serial transcript: `build/os/riscv64_probe/probe.serial.log`
 - Build log with the five compile failures: `build/os/riscv64_probe/probe.build.log`
+
+---
+
+## RESOLVED 2026-08-31 — root cause found, fixed, verified in-guest
+
+### The stated hypothesis is DISPROVED. Do not pursue it.
+
+The "BoxInt pass-through guard" theory above — that
+`codegen/instr/mod.rs:1495-1515` skips tagging because the for-loop's induction
+vreg is typed `ANY` or `TypeId >= 16` — is **wrong, and the guard never fires
+for this shape**. Evidence, in the order it kills the theory:
+
+- MIR lowering emits the induction load as
+  `MirInst::Load { dest: current_idx, ty: TypeId::I64 }`
+  (`mir/lower/lowering_stmt.rs:1899-1903`) and then a real
+  `MirInst::BoxInt { value: current_idx }` (`:1908-1911`). The `for` path is
+  **not** missing a BoxInt.
+- `build_vreg_types` (`codegen/instr/body.rs:78`, arm
+  `MirInst::Load { dest, ty, .. } => types_map.insert(*dest, *ty)`) therefore
+  stamps `current_idx` as `I64`. `I64` is neither `ANY` nor `>= 16`, so
+  `matches!(src_ty, Some(t) if t == TypeId::ANY || t.0 >= 16)` is false and the
+  pass-through branch is not taken. The same is true of the second copy of the
+  guard in `codegen/cranelift_emitter.rs:715`.
+- Confirmed in the shipped artifact: cranelift emitted the tagging call. The
+  producer side was innocent all along.
+
+### The actual root cause: an identity `rt_value_int` in the freestanding runtime
+
+`examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:956`
+defined
+
+```c
+/* This runtime has no separate boxed-integer representation ... */
+RuntimeValue rt_value_int(RuntimeValue value)
+{
+    return value;
+}
+```
+
+That premise was false. The same link contains `baremetal_stubs.c:495`, whose
+`rt_index_get` opens `if (!IS_INT(index)) return NIL_VALUE;` — using the very
+`TAG_MASK 0x7` / `TAG_INT 0x0` / `ENCODE_INT` macros that `core.inc.c` itself
+defines at lines 22-32 and then declined to use.
+
+Cranelift lowers `MirInst::BoxInt` to `call rt_value_int`, so the identity body
+handed `rt_index_get` a **raw** index:
+
+| raw index | `index & 7` | `IS_INT` | result |
+|---|---|---|---|
+| 0 | 0 | true | element 0 — **correct** |
+| 1..6 | 1..6 | false | **NIL_VALUE** |
+
+Exactly the observed "correct on iteration 1, nil on 2..7" signature. The
+arithmetic in the disproved hypothesis was right; only its location was wrong —
+the tag was never dropped, it was **never applied**, by the runtime, not the
+compiler.
+
+**Proven at the instruction level in the linked ELF, not by source reading**
+(`llvm-objdump -d --disassemble-symbols=... build/os/riscv64_probe/probe.elf`):
+
+```
+00000000802017e0 <rt_value_int>:            # BEFORE — identity, no tag
+802017e8: sd   a0, -0x18(s0)
+802017ec: ld   a0, -0x18(s0)
+802017f6: ret
+
+000000008020098a <rt_index_get>:            # strict consumer, from baremetal_stubs.c
+8020099a: lbu  a0, -0x28(s0)
+8020099e: andi a0, a0, 0x7
+802009a0: beqz a0, 0x802009ac              # else -> NIL_VALUE
+```
+
+Why the `while` / explicit-`cs[i]` rows were green throughout: `rt_index_get`
+takes a **TAGGED** index and `DECODE_INT`s before delegating, whereas
+`rt_array_get` (`baremetal_stubs.c:379`) takes a **RAW** one (`int64_t i =
+(int64_t)idx;`). That split is the hosted contract too — `runtime_native.c:4951`
+calls `rt_array_get(arr, i)` with a bare loop counter. Only the strict
+`rt_index_get` entry point was reachable with an untagged index.
+
+### Fix
+
+`rt_value_int` in `baremetal_runtime_core.inc.c` now returns
+`ENCODE_INT(value)`, aligning it with the strict consumer in the same link and
+with the hosted ABI. The unbox side needed no change: `rt_value_unbox_int`
+routes through `simpleos_raw_or_encoded_int`, which accepts either form.
+
+No `.spl` call site was touched, and no compiler behaviour was changed.
+
+### Two claims in this record that are empirically FALSE and are corrected here
+
+1. **"`baremetal_runtime_core.inc.c` reaches no binary at all"** — false on
+   `origin/main` today. `nm -a build/os/riscv64_probe/probe.elf` lists
+   `baremetal_runtime_core.inc.c` as a STT_FILE symbol, and the `rt_value_int`
+   body linked into the ELF is verbatim that file's. It IS compiled, as a
+   standalone TU, by the same autodiscovery the record criticises. This matters
+   operationally: **do not implement the record's "suggested next step 1"
+   (`*.inc.c` exclusion from boot-source autodiscovery) on its own** — doing so
+   would delete `rt_value_int` and dozens of sibling definitions from the link
+   and make the lane strictly worse. The exclusion is only safe together with
+   wiring the fragment into a real TU.
+2. **PR #179 is therefore not dead code for this lane.** The record's own scope
+   note already flagged its "reaches no binary" conclusion as unresolved; it is
+   now resolved in the negative.
+
+Still genuinely open, unchanged by this fix: 5 `.inc.c`-shaped TUs fail to
+compile and the build only WARNs (`linker.rs:1960-2110`); and
+`examples/09_embedded/simple_os/arch/riscv64/boot/full_networking_runtime.c`
+still `#include`s an absolute path into another checkout.
+
+### In-guest evidence, real OpenSBI `-bios fw_payload` (no `-kernel`, no `isa-debug-exit`)
+
+`sh scripts/check/run-riscv64-text-probe-opensbi.shs`, freshly built Rust seed.
+Transcripts: `build/os/riscv64_probe/probe.serial.{PREFIX,POSTFIX}.log`.
+Diff of the two runs — every changed line, nothing else moved:
+
+```
+9d accumulated =  "            ->  "user"}
+9c accumulated =  Q            ->  QuserQ}
+9e ch/acc      =  6x empty     ->  u s e r " }   (acc builds to "user"})
+9e accumulated =  "            ->  "user"}
+9h accumulated =  "            ->  "user"}
+9k ch.len      =  6x WRONG     ->  6x EXPECTED
+```
+
+Rows that were already green stayed green — `9f`, `9i`, `9j` (the while-loop and
+explicit-index rows) are byte-identical across the two runs, so the fix
+introduced no regression on the tolerant path.
+
+`9c`'s `Q` where a `"` is expected is a **separate, pre-existing** defect (`Q` in
+both runs); this fix corrected only its truncation, not the character. `step 1
+len-decoded-as-1 = WRONG` is likewise unchanged and out of scope — that is
+`freestanding_string_len_u32_vs_codegen_i64_abi_2026-08-31.md`.
+
+### Regression guard
+
+`scripts/check/check-freestanding-rt-value-int-tags.shs` — fail-closed, 6
+fatal selftest fixtures, `PASS/FAIL/ERROR` verdict as the last stdout line, 0
+definitions scanned is ERROR not PASS. Verified genuinely red-before:
+
+```
+# pre-fix source
+FAIL — 5 definition(s) checked, untagged rt_value_int in: examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c
+# post-fix source
+PASS — 5 definition(s) checked, 0 untagged
+```
