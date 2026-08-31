@@ -1,0 +1,159 @@
+#!/bin/sh
+# build-simpleos-riscv64-interpreter-kernel.shs
+#
+# Build the riscv64 in-guest INTERPRETER and BUILD-AND-RUN kernels from tracked
+# Simple source:
+#
+#   build/os/riscv64_interp/interp/kernel.{elf,Image}     row 1 (interpreter)
+#   build/os/riscv64_interp/buildrun/kernel.{elf,Image}   row 2 (build-and-run)
+#
+# ONE KERNEL PER ROW, on purpose. The components lane
+# (build-simpleos-riscv64-components-kernel.shs) learned this the hard way: a
+# combined entry's --entry-closure union leaves ~500 rt_* symbols undefined, so
+# one row's closure must not hold the other's hostage. Building them separately
+# also means a failure is attributable to one row.
+#
+# COMPILER: the Rust bootstrap SEED, on purpose and stated loudly. The
+# pure-Simple self-hosted compiler cannot compile anything in this tree yet, so
+# every artifact this lane produces is seed-built and the gate says so in its
+# verdict rather than implying self-hosting.
+#
+# SIMPLE_BIN must point at a FRESHLY BUILT seed
+# (`cargo build --release --bin simple` in src/compiler_rust): the checked-in
+# bin/simple is stale and manufactures phantom PARSE failures.
+#
+# --timeout 1200 is passed to native-build deliberately: the 300s default makes
+# modules that compile fine "fail". A timeout is not a compile error.
+#
+# THE NONCE (this is the anti-vacuity mechanism, not a convenience)
+# ----------------------------------------------------------------
+# A fresh nonce is generated HERE, outside the guest, and written into
+# build/os/generated/rv64_interp_nonce.spl, which both entries import. The nonce
+# reaches the serial console only by being embedded in the interpreted program's
+# SOURCE TEXT and then printed by that program while the in-guest interpreter
+# evaluates it. Consequently a stale kernel Image, a replayed serial transcript,
+# or a guest that merely boots and prints a banner cannot satisfy the gate: the
+# gate knows the nonce this script just generated and accepts no other.
+# NONCE may be supplied by the caller (the gate does exactly that, so it can
+# check for the value it chose); otherwise one is generated here.
+#
+# NOT-A-STUB CHECK: each kernel must contain its own row symbol AND the real
+# interpreter entry point. --gc-sections has previously discarded an unrooted
+# but reachable graph and still reported a successful link, and this tree has
+# separately seen a WEAK 8-byte nil stub satisfy a link that was meant to fail
+# closed — so a size check, or even a clean link, is not evidence. The gate
+# additionally `nm`s these ELFs for weak-nil stubs before booting them.
+#
+# Exit status: 0 = both kernels are non-empty RISC-V ELFs with .text, carry
+# their row symbol and the interpreter symbol, and yielded non-empty flat
+# Images; non-zero = nothing usable. There is no partial success.
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT"
+
+OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/riscv64_interp}
+SIMPLE_BIN=${SIMPLE_BIN:-$REPO_ROOT/src/compiler_rust/target/release/simple}
+ARCH_DIR=$REPO_ROOT/examples/09_embedded/simple_os/arch/riscv64
+LDS=$ARCH_DIR/linker.ld
+GEN_DIR=$REPO_ROOT/build/os/generated
+NB_TIMEOUT=${NATIVE_BUILD_TIMEOUT:-1200}
+
+fail() { printf 'build-riscv64-interpreter-kernel: ERROR — %s\n' "$*" >&2; exit 1; }
+
+[ -x "$SIMPLE_BIN" ] || fail "no compiler at $SIMPLE_BIN (build the seed: cargo build --release --bin simple in src/compiler_rust)"
+[ -f "$LDS" ] || fail "missing linker script $LDS"
+
+# --- the nonce ---------------------------------------------------------------
+if [ -z "${NONCE:-}" ]; then
+    NONCE=$( (od -An -N8 -tx1 /dev/urandom 2>/dev/null || date +%s%N) | tr -d ' \n' )
+fi
+case "$NONCE" in
+    '') fail "empty nonce — refusing to build an unanchored image" ;;
+esac
+
+mkdir -p "$GEN_DIR"
+printf 'pub fn rv64_interp_nonce() -> text:\n    "%s"\n' "$NONCE" \
+    > "$GEN_DIR/rv64_interp_nonce.spl"
+printf 'build-riscv64-interpreter-kernel: nonce %s -> %s\n' "$NONCE" "$GEN_DIR/rv64_interp_nonce.spl"
+
+OBJCOPY=
+for c in riscv64-unknown-elf-objcopy riscv64-linux-gnu-objcopy llvm-objcopy objcopy; do
+    command -v "$c" >/dev/null 2>&1 && { OBJCOPY=$c; break; }
+done
+[ -n "$OBJCOPY" ] || fail "no objcopy available to extract the flat Image"
+
+# The real interpreter body must be present in BOTH kernels: this is the symbol
+# whose absence would mean the row "ran" without an interpreter in the image.
+INTERP_SYM=interpret_hir_module
+
+# build_row <subdir> <entry-file> <row-symbol>
+build_row() {
+    row_dir=$OUT_DIR/$1
+    row_entry=$ARCH_DIR/$2
+    row_sym=$3
+    row_kernel=$row_dir/kernel.elf
+    row_image=$row_dir/kernel.Image
+    row_log=$row_dir/kernel-build.log
+
+    [ -f "$row_entry" ] || fail "missing entry $row_entry"
+    mkdir -p "$row_dir"
+    rm -f "$row_kernel" "$row_image"
+
+    # Exit status read DIRECTLY into a variable on the next line — never through
+    # a pipe, whose $? is the last pipeline element's status.
+    #
+    # `set +e` around the invocation is load-bearing, not sloppiness: under
+    # `set -e` a failing native-build aborts the whole script AT the invocation,
+    # so the `rc=$?` line below never runs and the diagnostic block never
+    # prints. That is exactly what happened on this lane's first run — a real
+    # link failure surfaced as a silent exit 1 with an empty stderr, which reads
+    # like an environment glitch rather than the honest compile failure it was.
+    set +e
+    "$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
+        --timeout "$NB_TIMEOUT" \
+        --source "$GEN_DIR" \
+        --entry "$row_entry" \
+        --target riscv64gc-unknown-none-elf \
+        --linker-script "$LDS" \
+        -o "$row_kernel" >"$row_log" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || { tail -60 "$row_log" >&2; fail "native-build failed for $1 (rc=$rc), log: $row_log"; }
+
+    [ -s "$row_kernel" ] || fail "native-build reported success but $row_kernel is missing or empty"
+
+    hdr=$(readelf -h "$row_kernel" 2>/dev/null) || fail "readelf could not parse $row_kernel"
+    case "$hdr" in
+        *RISC-V*) ;;
+        *) fail "$row_kernel is not a RISC-V ELF" ;;
+    esac
+    readelf -SW "$row_kernel" 2>/dev/null | grep -q ' \.text ' \
+        || fail "$row_kernel has no .text section (empty-link false success)"
+
+    syms=$(readelf -sW "$row_kernel" 2>/dev/null) || fail "readelf could not list symbols in $row_kernel"
+    for want in "$row_sym" "$INTERP_SYM"; do
+        case "$syms" in
+            *"$want"*) ;;
+            *) fail "$row_kernel contains no $want symbol (it was garbage-collected out, or never linked in)" ;;
+        esac
+    done
+
+    # The nonce must be physically present in the image. If it is not, the
+    # interpreted program cannot possibly print it and the gate would be
+    # measuring something other than this build.
+    grep -aqF "$NONCE" "$row_kernel" \
+        || fail "$row_kernel does not contain the build nonce — the generated nonce module was not linked in"
+
+    "$OBJCOPY" -O binary "$row_kernel" "$row_image" || fail "flat Image extraction failed for $1"
+    [ -s "$row_image" ] || fail "flat Image $row_image is empty"
+
+    printf 'build-riscv64-interpreter-kernel: %s OK — %s (%s bytes ELF) + %s (%s bytes Image, has %s + %s + nonce)\n' \
+        "$1" "$row_kernel" "$(wc -c <"$row_kernel")" "$row_image" "$(wc -c <"$row_image")" "$row_sym" "$INTERP_SYM"
+}
+
+build_row interp   interpreter_hello_entry.spl interpreter_hello_row
+build_row buildrun buildrun_sanity_entry.spl   buildrun_sanity_row
+
+printf 'PASS — riscv64 interpreter + build-and-run kernels built by the RUST SEED (%s), nonce %s, out %s\n' \
+    "$SIMPLE_BIN" "$NONCE" "$OUT_DIR"
