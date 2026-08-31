@@ -16,6 +16,8 @@
  *   result in rax
  */
 
+#include "include/errno.h"   /* ENOSYS/EINVAL/... were used undeclared: this file never compiled */
+
 /*
  * When cross-compiled (-target x86_64-unknown-none-elf -I include), our
  * freestanding headers provide all types. When analyzed by clangd on

@@ -50,6 +50,12 @@ char  *strcasestr(const char *haystack, const char *needle);
 char  *strtok(char *str, const char *delim);
 char  *strtok_r(char *str, const char *delim, char **saveptr);
 size_t strspn(const char *s, const char *accept);
+/* strpbrk was missing while src/runtime/runtime_native.c:9899 calls it — the
+ * implicit declaration made it return int, so the result was then assigned to a
+ * `const char *` ("incompatible integer to pointer conversion"), which on a
+ * 64-bit target truncates a pointer to 32 bits. That is a miscompile waiting to
+ * happen, not merely a warning; it blocked the SimpleOS runtime cross-compile. */
+char  *strpbrk(const char *s, const char *accept);
 size_t strcspn(const char *s, const char *reject);
 
 /* Reverse memory search */

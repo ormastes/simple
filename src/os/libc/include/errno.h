@@ -65,6 +65,12 @@ extern int errno;
 
 /* Alias */
 #define EWOULDBLOCK EAGAIN
+/* EINPROGRESS was missing while src/runtime/runtime_native.c:9937 uses it on the
+ * non-blocking connect() path ("use of undeclared identifier 'EINPROGRESS'"),
+ * blocking the SimpleOS runtime cross-compile. 115 is the Linux value, matching
+ * every other number in this header (ENOTCONN 107, ETIMEDOUT 110,
+ * ECONNREFUSED 111). */
+#define EINPROGRESS 115  /* Operation now in progress */
 
 #ifdef __cplusplus
 }

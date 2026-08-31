@@ -19,6 +19,36 @@ extern "C" {
 #define PTHREAD_COND_INITIALIZER  { { 0 } }
 #define PTHREAD_ONCE_INIT         0
 
+/* pthread_rwlock_* was implemented in src/os/libc/simpleos_pthread_rwlock.c but
+ * NEVER DECLARED here, while src/runtime/runtime_native.c:5611+ uses
+ * pthread_rwlock_t, PTHREAD_RWLOCK_INITIALIZER and the rd/wr/unlock calls —
+ * "unknown type name 'pthread_rwlock_t'" plus implicit-declaration errors, which
+ * blocked the SimpleOS runtime cross-compile.
+ *
+ * The type is declared HERE and the .c file includes this header, so there is
+ * exactly one definition; it previously carried a private copy of the typedef,
+ * which would have become a conflicting redefinition the moment anything
+ * included both. The layout is the same opaque single-int placeholder that file
+ * already used, so the ABI is unchanged.
+ *
+ * Note the implementation returns ENOSYS by design: SimpleOS has no kernel-owned
+ * atomic rwlock/futex handoff yet, and that file's header states that reporting
+ * unsupported is deliberate because "success without serialization is unsafe".
+ * Declaring these does not claim they work — it only makes the tree compile and
+ * lets callers see the honest ENOSYS instead of an implicit-declaration guess. */
+#define PTHREAD_RWLOCK_INITIALIZER { 0 }
+
+typedef struct { int _opaque; } pthread_rwlock_t;
+typedef int pthread_rwlockattr_t;
+
+int pthread_rwlock_init(pthread_rwlock_t *rwlock, const pthread_rwlockattr_t *attr);
+int pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
+int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+
 /* Thread management */
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg);

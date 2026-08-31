@@ -335,6 +335,38 @@ impl NativeProjectBuilder {
         // (doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md);
         // it used to be let past this check and then have its explicit `hosted`
         // request silently re-routed to core-C by resolve_runtime_lane.
+        // CROSS BARE-METAL: never inject the core-C runtime archive.
+        //
+        // build_c_runtime_library() compiles src/runtime/*.c with
+        // target_c_compiler(), which resolves to the plain host `cc` when no
+        // hosted-Linux cross compiler matches — and it passes no `--target=`.
+        // For a bare-metal CROSS target that silently produces HOST-arch
+        // objects, and the freestanding link then dies with dozens of
+        //   ld.lld: error: .../libsimple_runtime.a(runtime_memory.o) is
+        //   incompatible with .../_boot_freestanding_runtime.o
+        // (verified 2026-08-31 on aarch64-unknown-none-elf: the boot object was
+        // ARM aarch64 while every core_c_runtime member was x86-64). This is why
+        // scripts/os/build-simpleos-aarch64-limine-kernel.shs cannot be
+        // reproduced from source with a freshly built seed.
+        //
+        // The core-C archive is also wrong on the merits here, not merely
+        // mis-targeted: it carries runtime_process.c, runtime_fork.c,
+        // runtime_thread.c, runtime_terminal.c and friends, which assume a
+        // hosted libc that a bare-metal image does not have. A freestanding
+        // build supplies its own runtime through the boot-object autodiscovery
+        // path (the `boot/freestanding_runtime.c` sibling of the --entry file),
+        // which is exactly the substitute for this archive.
+        //
+        // Deliberately scoped to NON-HOST bare-metal so the x86_64-on-x86_64
+        // SimpleOS lanes — where host == target and the archive links fine —
+        // keep their current behaviour byte for byte. Cross bare-metal is
+        // 100% broken today, so this cannot regress a working configuration.
+        {
+            let t = super::effective_target();
+            if t.os == simple_common::target::TargetOS::None && !t.is_host() {
+                return Ok(None);
+            }
+        }
         let bootstrap_hosted = is_bootstrap_main_entry(&self.entry_file);
         if self.runtime_bundle_requests_removed_hosted() && !bootstrap_hosted {
             return Err(

@@ -1,0 +1,77 @@
+#!/bin/sh
+# build-simpleos-aarch64-hello-kernel.shs
+#
+# Build build/os/aarch64_hello/kernel.elf — the aarch64 hello-world in-guest
+# kernel — from tracked Simple source.
+#
+# COMPILER: the Rust bootstrap SEED, on purpose and stated loudly. The
+# pure-Simple self-hosted compiler cannot compile anything in this tree yet
+# (two located bugs), so every artifact this lane produces is seed-built and
+# the gate says so in its verdict rather than implying self-hosting.
+#
+# The checked-in seed at bin/simple is STALE and manufactures ~34 phantom
+# PARSE failures that vanish with zero source changes, so SIMPLE_BIN must
+# point at a freshly built seed
+# (`cargo build --release --bin simple` in src/compiler_rust). Default below
+# is src/compiler_rust/target/release/simple; override with SIMPLE_BIN.
+#
+# --timeout 1200 is passed to native-build deliberately: the 300s default makes
+# modules that compile fine "fail". A timeout is not a compile error.
+#
+# Exit status: 0 = a non-empty AArch64 ELF with .text was produced and the
+# hello-world program symbol is present; non-zero = nothing usable. There is no
+# partial success.
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT"
+
+OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/aarch64_hello}
+SIMPLE_BIN=${SIMPLE_BIN:-$REPO_ROOT/src/compiler_rust/target/release/simple}
+ENTRY=$REPO_ROOT/examples/09_embedded/simple_os/arch/aarch64/hello_world_efi_entry.spl
+LDS=$REPO_ROOT/examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld
+KERNEL=$OUT_DIR/kernel.elf
+LOG=$OUT_DIR/kernel-build.log
+NB_TIMEOUT=${NATIVE_BUILD_TIMEOUT:-1200}
+
+fail() { printf 'build-aarch64-hello-kernel: ERROR — %s\n' "$*" >&2; exit 1; }
+
+[ -x "$SIMPLE_BIN" ] || fail "no compiler at $SIMPLE_BIN (build the seed: cargo build --release --bin simple in src/compiler_rust)"
+[ -f "$ENTRY" ] || fail "missing entry $ENTRY"
+[ -f "$LDS" ] || fail "missing linker script $LDS"
+
+mkdir -p "$OUT_DIR"
+rm -f "$KERNEL"
+
+# Exit status read DIRECTLY into a variable on the next line — never through a
+# pipe, whose $? is the last pipeline element's status.
+"$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
+    --timeout "$NB_TIMEOUT" \
+    --entry "$ENTRY" \
+    --target aarch64-unknown-none-elf \
+    --linker-script "$LDS" \
+    -o "$KERNEL" >"$LOG" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { tail -40 "$LOG" >&2; fail "native-build failed (rc=$rc), log: $LOG"; }
+
+[ -s "$KERNEL" ] || fail "native-build reported success but $KERNEL is missing or empty"
+
+# Structural read-back: a link that silently emitted a host-arch or empty image
+# must not report success (this exact false-green cost a day on the Limine lane).
+hdr=$(readelf -h "$KERNEL" 2>/dev/null) || fail "readelf could not parse $KERNEL"
+case "$hdr" in
+    *AArch64*) ;;
+    *) fail "$KERNEL is not an AArch64 ELF" ;;
+esac
+readelf -SW "$KERNEL" 2>/dev/null | grep -q ' \.text ' \
+    || fail "$KERNEL has no .text section (empty-link false success)"
+
+# Real-not-stub check: the hello-world program function must actually be in the
+# image. --gc-sections has previously discarded an unrooted reachable graph and
+# still reported a successful link.
+readelf -sW "$KERNEL" 2>/dev/null | grep -q 'hello_world_program' \
+    || fail "$KERNEL contains no hello_world_program symbol (the program was garbage-collected out)"
+
+size=$(wc -c <"$KERNEL")
+printf 'PASS — aarch64 hello-world kernel built by the RUST SEED (%s): %s (%s bytes, AArch64 ELF with .text and hello_world_program)\n' \
+    "$SIMPLE_BIN" "$KERNEL" "$size"
