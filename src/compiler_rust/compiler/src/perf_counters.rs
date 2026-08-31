@@ -149,6 +149,12 @@ pub fn bump(counter: &AtomicU64, by: u64) {
 /// is set, so the default path is unchanged. The handler allocates, which is
 /// not async-signal-safe in general; that is acceptable for an opt-in
 /// diagnostic whose next action is to terminate the process anyway.
+// `libc` is a cfg(unix)-only dependency of this crate, and the only call
+// sites (the `libc::signal` installs above) are already `#[cfg(unix)]`.
+// Without the same gate here the definition itself is compiled on Windows
+// and fails with E0433 `unresolved module or unlinked crate libc`, which
+// breaks the Rust seed build for the whole MSVC bootstrap lane.
+#[cfg(unix)]
 extern "C" fn dump_on_signal(sig: libc::c_int) {
     dump_at_exit();
     unsafe { libc::_exit(128 + sig) };
