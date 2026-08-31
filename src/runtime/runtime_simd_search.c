@@ -39,9 +39,20 @@ static int64_t scalar_str_search_local(const uint8_t* haystack, uint64_t hlen,
         const uint8_t* p = (const uint8_t*)memchr(haystack, needle[0], hlen);
         return p ? (int64_t)(p - haystack) : -1;
     }
+#ifdef _WIN32
+    /* memmem is a GNU/BSD extension absent from the Windows CRTs. */
+    for (uint64_t i = 0; i + nlen <= hlen; i++) {
+        if (haystack[i] == needle[0] &&
+            memcmp(haystack + i, needle, (size_t)nlen) == 0) {
+            return (int64_t)i;
+        }
+    }
+    return -1;
+#else
     const void* result = memmem(haystack, hlen, needle, nlen);
     if (!result) return -1;
     return (int64_t)((const uint8_t*)result - haystack);
+#endif
 }
 
 /* Scalar reverse search */
