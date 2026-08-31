@@ -131,6 +131,37 @@ the actual milestone lives under `doc/08_tracking/bug/`.
 
 ## riscv64 findings (lane R3, 2026-08-11)
 
+**Addendum 2026-08-31 — riscv64 guest-under-real-firmware is now PROVEN
+(boot-contract layer), guest boot gap closed at the protocol level.** Two new
+gates, both GREEN on this host:
+
+- `scripts/check/check-simpleos-riscv64-image-header-contract.shs` — measured:
+  `PASS — 8 header field(s) checked, riscv64 flat Image built from the real
+  crt0.S + linker.ld carries a valid RISC-V Linux boot-image header v0.2 (jump
+  code0, text_offset 0x200000, magic2 RSC\x05) with ELF entry 0x80200000`.
+  The new `arch/riscv64/boot/crt0.S` carries the standard RISC-V Linux
+  boot-image header (mirror of the arm64 `Image`-header contract).
+- `scripts/check/check-simpleos-riscv64-opensbi-guest-boot.shs` — measured:
+  `PASS — 8 marker(s) checked, riscv64 guest kernel (real crt0.S + linker.ld)
+  booted under real OpenSBI v1.4 firmware via -bios fw_payload (no -kernel, no
+  isa-debug-exit; live SBI ecall + FDT handover verified; serial:
+  build/verify/simpleos-riscv64-opensbi-guest-boot/serial.log)`. Chain:
+  OpenSBI v1.4 (pinned `a2b255b8891`) built with the guest as `FW_PAYLOAD`,
+  booted via `-bios` ONLY — the firmware, not QEMU, performs the S-mode
+  handover, exactly the board flash-image configuration. Serial log carries
+  the `OpenSBI v1.4` banner plus 7 probe markers including a live SBI ecall
+  answered by the firmware and an FDT (`0xd00dfeed`) in `a1`.
+  Why fw_payload, not fw_dynamic+loader or EFI: fw_dynamic's next-stage comes
+  from QEMU's `-kernel` machinery (the banned pass semantics), and this host
+  has no EDK2 RiscVVirtQemu, no U-Boot qemu-riscv64_smode, and no vendored
+  BOOTRISCV64.EFI — see the gate's header.
+
+Still open (honest scope): existing riscv64 kernels take `_start` from
+naked-C stubs in `arch/riscv64/boot/*.c` with no Image header — migrating
+them onto `boot/crt0.S`, and `scripts/os/check_riscv_linux_qemu.shs`'s
+`-kernel` usage, remain follow-up. Vulkan-relevant riscv64 guest work is
+unchanged by this addendum.
+
 Ground-truth re-verification of the riscv64 half of this bug, done
 independently of lane L6's summary:
 
