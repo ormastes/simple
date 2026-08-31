@@ -78,8 +78,73 @@ is therefore NOT established** — the earlier hypothesis (index `i` becoming
 by 9i/9j taking the same path successfully. It is recorded here as disproved,
 not as the answer.
 
-The two things unique to the `for` shape and absent from the working `while`
-shape are `rt_for_iterable` and `rt_pool_safepoint`. Neither has been excluded.
+### Excluded by disassembly (not by argument)
+
+- **`rt_pool_safepoint`** — the linked body is `li a0,0; ret`. A no-op. Excluded.
+- **`rt_for_iterable`** — the linked body tag-checks the handle, routes
+  `hdr.type == 1` (HEAP_STRING) to `rt_string_chars`, and otherwise returns the
+  collection verbatim (`ld a0,-32(s0); sd a0,-24(s0)`). For an array it is an
+  identity function. Excluded.
+
+### The remaining lead: the two loop shapes take DIFFERENT codegen paths
+
+MIR for a fixture holding both shapes over the same `array<text>` parameter:
+
+```
+# shape_while  (WORKS in-guest)
+Load   { dest: VReg(8),  addr: VReg(9), ty: TypeId(5) }
+BoxInt { dest: VReg(10), value: VReg(8) }
+Call   { dest: VReg(11), target: Pure("rt_index_get"), args: [VReg(6), VReg(10)] }
+
+# shape_for    (FAILS in-guest)
+Load    { dest: VReg(10), addr: VReg(9), ty: TypeId(5) }
+BoxInt  { dest: VReg(11), value: VReg(10) }
+IndexGet{ dest: VReg(12), collection: VReg(2), index: VReg(11) }
+```
+
+The working shape emits an explicit **`Call Pure("rt_index_get")`**; the failing
+shape emits **`MirInst::IndexGet`**. Both nominally reach `rt_index_get`
+(cranelift `compile_index_get`,
+`src/compiler_rust/compiler/src/codegen/instr/collections.rs:338`), but they are
+different lowering paths, and only one of them is wrong in-guest.
+
+**Prime hypothesis (specific, testable, not yet confirmed).** Cranelift's
+`MirInst::BoxInt` lowering
+(`src/compiler_rust/compiler/src/codegen/instr/mod.rs:1495-1515`) does NOT tag
+when the source vreg's type is `ANY` or `TypeId >= 16`:
+
+```rust
+let src_ty = ctx.vreg_types.get(value).copied();
+if matches!(src_ty, Some(t) if t == TypeId::ANY || t.0 >= 16) {
+    // pass the handle through verbatim, no `<< 3`
+}
+```
+
+If the for-loop's induction vreg is typed `ANY` (or >= 16) in `vreg_types` while
+the while-loop's is `I64`, then the for-loop hands `rt_index_get` a **raw**
+index. The freestanding `rt_index_get` (`baremetal_stubs.c:495`) opens with
+`if (!IS_INT(index)) return NIL_VALUE;`, i.e. `(index & 7) == 0`:
+
+| raw index | `index & 7` | `IS_INT` | result |
+|---|---|---|---|
+| 0 | 0 | true | decodes to 0 → **element 0, correct** |
+| 1..6 | 1..6 | false | **NIL_VALUE** |
+
+That is exactly the observed signature — correct on iteration 1, nil on every
+later iteration — and it explains why explicit `cs[i]` (9i/9j) works: that path
+emits a real `Call` whose index vreg is typed `I64`, so `BoxInt` tags it. The
+earlier note in this record that the tagged-index theory was "disproved" was
+wrong about the mechanism, not the arithmetic: the tag is dropped on the
+*producer* side, not misread on the consumer side.
+
+**How to confirm, without a boot:** print `ctx.vreg_types` for the BoxInt source
+vreg in both shapes (or add a temporary `eprintln!` in the BoxInt arm and
+rebuild the seed), and check whether the for-loop's index takes the pass-through
+branch. If it does, the fix is in the compiler: either type the for-loop
+induction variable as `I64` at MIR lowering
+(`mir/lower/lowering_stmt.rs:1906`), or make the BoxInt pass-through guard not
+apply to a value the MIR itself declares `ty: TypeId::I64`. Then re-run the
+probe: steps 9d/9e/9h/9k must all go green before any real row is claimed.
 
 ## The finding that blocked further progress, and matters on its own
 
@@ -122,6 +187,17 @@ Two consequences, both verified:
    `.len()` ABI fix in
    `freestanding_string_len_u32_vs_codegen_i64_abi_2026-08-31.md`. Both were
    correct changes to a file that is never built.
+
+   **Scope note, so this is not overread:** `rt_string_builder_new/push/finish`
+   ARE present as real `T` symbols in the linked probe ELF, even though riscv64
+   `baremetal_stubs.c` does not define them (verified by direct grep) and
+   `core.inc.c` is not compiled. Their provenance was not identified before this
+   record was filed. So the accurate claim is: **`core.inc.c` is not compiled and
+   is included by nothing** (proven twice by `objdump -d` showing injected
+   instrumentation absent, the second time after clearing
+   `.simple/native_cache` and `.simple/native-objects-*`). Whether PR #179's
+   builder fix has any effect on the shipped binary is therefore **unknown**, not
+   proven-dead. Resolve the provenance before acting on that PR.
 2. Missing symbols are then satisfied at link time (`_stubs_freestanding.o`
    appears in the object dir), so the link is green and the binary runs on a
    partial runtime. This is precisely the "a clean link is not evidence" hazard.
@@ -142,9 +218,11 @@ compiling another worktree's source. Detection is a one-liner:
 
 ## What is still open
 
-- Which of `rt_for_iterable` / `rt_pool_safepoint` / a stubbed symbol actually
-  corrupts the bound element. Not determined. Do NOT assume the tagged-index
-  theory; 9i/9j disprove it.
+- Confirm or kill the BoxInt pass-through hypothesis above. That is the single
+  next experiment and it needs no boot.
+- Identify where the linked `rt_string_builder_*` and `rt_for_iterable` bodies
+  actually come from (not riscv64 `baremetal_stubs.c`, not the uncompiled
+  `core.inc.c`, not `stubs.rs` — whose synthesized stubs carry no such logic).
 - Whether repairing the build (below) fixes the row on its own. Untested.
 - The same `for`-over-array shape should be re-probed on x86_64 and aarch64
   before assuming the three arches share this cause. The reported x86_64
