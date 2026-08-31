@@ -4563,31 +4563,19 @@ pub extern "C" fn rt_for_iterable(collection: RuntimeValue) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
     match collection.heap_type() {
-        Some(HeapObjectType::Array) => {
-            if index.is_int() {
-                rt_array_get(collection, index.as_int())
-            } else {
-                RuntimeValue::NIL
-            }
-        }
-        Some(HeapObjectType::Tuple) => {
-            if index.is_int() {
-                let idx = index.as_int();
-                if idx < 0 {
-                    RuntimeValue::NIL
-                } else {
-                    rt_tuple_get(collection, idx as u64)
-                }
-            } else {
-                RuntimeValue::NIL
-            }
-        }
+        Some(HeapObjectType::Array) => match index.as_index_i64() {
+            Some(idx) => rt_array_get(collection, idx),
+            None => RuntimeValue::NIL,
+        },
+        Some(HeapObjectType::Tuple) => match index.as_index_i64() {
+            Some(idx) if idx >= 0 => rt_tuple_get(collection, idx as u64),
+            _ => RuntimeValue::NIL,
+        },
         Some(HeapObjectType::String) => {
             // String indexing returns a single-char string (consistent with char_at)
-            if index.is_int() {
-                rt_string_char_at(collection, index.as_int())
-            } else {
-                RuntimeValue::NIL
+            match index.as_index_i64() {
+                Some(idx) => rt_string_char_at(collection, idx),
+                None => RuntimeValue::NIL,
             }
         }
         Some(HeapObjectType::Dict) => super::dict::rt_dict_get(collection, index),
@@ -4600,13 +4588,10 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
 #[no_mangle]
 pub extern "C" fn rt_index_set(collection: RuntimeValue, index: RuntimeValue, value: RuntimeValue) -> bool {
     match collection.heap_type() {
-        Some(HeapObjectType::Array) => {
-            if index.is_int() {
-                rt_array_set(collection, index.as_int(), value)
-            } else {
-                false
-            }
-        }
+        Some(HeapObjectType::Array) => match index.as_index_i64() {
+            Some(idx) => rt_array_set(collection, idx, value),
+            None => false,
+        },
         Some(HeapObjectType::Dict) => super::dict::rt_dict_set(collection, index, value),
         _ => false,
     }
