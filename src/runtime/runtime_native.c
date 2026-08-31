@@ -2300,6 +2300,44 @@ int64_t stdin_read_char(void) {
     return rt_string_new(&byte, 1);
 }
 
+#if defined(_WIN32)
+/*
+ * Windows CRT stdio defaults to TEXT mode, which rewrites every '
+' written to
+ * stdout into "
+" (and strips '' on read). That silently corrupts any
+ * byte-counted protocol carried over stdio: a JSON-RPC / MCP "Content-Length"
+ * frame terminated by CRLFCRLF leaves the process as CR CR LF CR CR LF, so the
+ * header separator no longer matches and the announced byte count no longer
+ * describes the bytes on the wire. Measured 2026-08-31 on the deployed native
+ * bin/release/x86_64-pc-windows-msvc/simple_lsp_mcp_server.exe: it emitted
+ * "Content-Length: 381
+
+{...}". The Rust seed does not have this
+ * defect because Rust's std never translates, which is exactly why the same
+ * server answers correctly when run from source and corruptly when built native.
+ *
+ * The guard is _WIN32 rather than _MSC_VER on purpose: text-mode translation is
+ * a property of the Windows C RUNTIME, not of the compiler, so a MinGW/UCRT
+ * build is affected identically. Only the constructor-registration mechanism
+ * below differs per compiler.
+ */
+static void rt_win_set_binary_stdio(void) {
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((constructor))
+static void rt_win_set_binary_stdio_ctor(void) { rt_win_set_binary_stdio(); }
+#elif defined(_MSC_VER)
+#pragma section(".CRT$XCU", read)
+static void __cdecl rt_win_set_binary_stdio_ctor(void) { rt_win_set_binary_stdio(); }
+__declspec(allocate(".CRT$XCU"))
+void (__cdecl *rt_win_set_binary_stdio_ptr)(void) = rt_win_set_binary_stdio_ctor;
+#endif
+#endif /* _WIN32 */
+
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;
     int64_t len = (int64_t)strlen(s);
