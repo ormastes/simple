@@ -354,6 +354,11 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // (same shape as the group-E TU; adding runtime.c wholesale collides
         // on 53/69 symbols, same class as the disproved runtime_native.c fix).
         "runtime_core_io_exports.c",
+        // Time/timestamp/uuid/cpu-count host services. Registered by
+        // bb397d8d147; the line was lost in a later merge with main while
+        // the .c file itself survived, which silently reintroduced 18
+        // LNK2019 unresolved externals at the Stage 2 link.
+        "runtime_core_host_services.c",
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
