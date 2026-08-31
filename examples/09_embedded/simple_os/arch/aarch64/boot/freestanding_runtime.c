@@ -818,11 +818,35 @@ spl_i64 rt_array_set_text(spl_i64 collection, spl_i64 index_value, spl_i64 value
     return rt_index_set(collection, index_value, value);
 }
 
+/* rt_slice takes its three index arguments RAW, NOT tagged.
+ *
+ * This is the canonical ABI, not a local choice: the hosted twin
+ * src/runtime/runtime_native.c:3816 uses `start`/`end`/`step` verbatim with no
+ * decode, and the x86_64 freestanding sibling says so explicitly at
+ * arch/x86_64/boot/rt_extras.c:1241 ("Cranelift bare-metal slice lowering
+ * passes raw indices, not boxed ints"). Compiler-side, `substring` lowers to
+ * rt_slice(text, start, end, 1) in mir/lower/lowering_expr_method.rs:1324-1360,
+ * where `step` is a bare ConstInt.
+ *
+ * These arguments MUST NOT go through rt_index_arg. Because RT_VALUE_TAG_INT is
+ * 0x0, that helper cannot tell a tagged int from a raw int whose low three bits
+ * are zero, so it silently divides every raw index that is a multiple of 8 by 8.
+ * That is a live corruption here: json_find (app/llm_caret/json_helpers.spl:128)
+ * probes with s.substring(i, i + nlen), and for the key "role" in
+ * {"role":"user",...} the sole matching probe is substring(1, 8) — end = 8 was
+ * read as tagged and returned as 1, making end == start, so rt_slice answered
+ * the empty string, the one matching position was invisible, json_find returned
+ * -1, and extract_json_string returned "". The second key "content" matched at
+ * substring(15, 25), where neither bound is a multiple of 8, and worked — which
+ * is exactly the "first key empty, second key correct" symptom recorded in
+ * doc/08_tracking/bug/simpleos_aarch64_rt_slice_misdecodes_raw_indices_2026-08-31.md
+ * (and why PR #173's .len() u32/i64 fix changed the serial output not at all).
+ */
 spl_i64 rt_slice(spl_i64 value, spl_i64 start_value, spl_i64 end_value, spl_i64 step_value) {
     RtString *string = rt_as_string(value);
-    spl_i64 start = rt_index_arg(start_value);
-    spl_i64 end = rt_index_arg(end_value);
-    spl_i64 step = rt_index_arg(step_value);
+    spl_i64 start = start_value;
+    spl_i64 end = end_value;
+    spl_i64 step = step_value;
     if (!string) {
         return rt_nil();
     }
