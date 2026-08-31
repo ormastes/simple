@@ -281,3 +281,34 @@ used: it yields a NULL GOT slot per name and a SEGV on first call, which is the
 
 No framebuffer evidence is claimed for the offload path. The gate exists so that
 the claim can be made honestly the moment the daemon builds.
+
+### Scope caveat on the 53-symbol finding
+
+The compiler reports these as "referenced by **generated code**", so the
+referenced set is a function of the COMPILER's codegen and its
+`RT_OPTIONAL_SYMBOLS` allowlist (`pipeline/native_project/stubs.rs`), not of the
+daemon source alone. A different compiler build may reference a smaller or
+different set — which is the likeliest explanation for how this lane's
+`run_pinned_native_build` (note: *pinned*) ever went green.
+
+What is proven: those 53 names are defined **nowhere in this tree** (`grep` over
+`src/compiler_rust/runtime/src/` and `src/runtime/`, plus `nm` on the built
+101 MB archive), and the daemon links with **neither** compiler available here.
+What is NOT proven: that no compiler can build it. The fix is likely a pinned
+compiler, not new runtime symbols.
+
+### Third compiler gap: cranelift verifier rejects f32 icmp_imm
+
+While building `arch/x86_64/gui_entry_desktop.spl`, codegen emitted an integer
+compare against an f32 value and cranelift's verifier rejected it:
+
+```
+inst130 (v168 = icmp_imm.f32 eq v164, 3): has an invalid controlling type f32
+[CODEGEN-STUB-FALLBACK] body compilation failed for 'parse_pct_value':
+    ModuleError("Compilation error in 'parse_pct_value': Verifier errors")
+```
+
+`icmp_imm` is integer-only; emitting it with an `f32` controlling type is a
+backend bug. The build does not abort — it installs a STUB for the affected
+function — so an ELF produced this way silently carries non-functional bodies.
+That failure mode deserves its own attention independent of this lane.
