@@ -104,3 +104,84 @@ Rewriting the affected specs to avoid nested-`fn` recorders was NOT done: it
 would be a workaround that hides a real language/runtime defect, and for the AOP
 specs the recorder *is* the observation mechanism, so removing it would make the
 specs vacuous.
+
+## 2026-08-31 re-measurement and design ruling needed (round-3 R1)
+
+Re-measured on origin/main (`1d4aafe3914`, Rust seed). STOPPED without a code
+fix per the bugfix recipe: correcting this requires a language-design ruling,
+not a mechanical repair.
+
+### Measurements (supersede the round-3 R1 wording)
+
+- The round-3 literal repro `var f = false; fn s(): f = true; s()` at module
+  top level **PASSES** (`f=true`). Module-global write-back through
+  `sync_owned_captured_globals` works.
+- The loss is confined to enclosing **function-local** `var`s: the same shape
+  inside `fn outer():` prints `f=false`, and a two-call counter stays `0`.
+  `it`-block vars hit it only because the spec runner wraps the tree into a
+  generated `fn main():`, turning them into function locals.
+- A write in a lambda body is not even parseable: `val lam = \: g = true`
+  fails `expected expression, found Assign` — assignment is not expressible
+  in a lambda, consistent with limitation-by-design.
+
+### Why this is a design question, not a bug fix
+
+Evidence that by-value / read-only capture is the *specified* semantics:
+
+- `.claude/rules/language.md:22` — "Nested closure capture — can READ outer
+  vars, CANNOT MODIFY (module closures work fine)".
+- `doc/06_spec/feature/language/functions_spec.md:38` — "Lambdas and closures
+  (capture by value)".
+- MIR lowering implements a bind-time by-value snapshot
+  (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:3930`,
+  "matching the oracle's by-value capture"), and
+  `doc/06_spec/01_unit/compiler/mir/native_capturing_lambda_closure_conversion_spec.md`
+  pins **by-value capture with interpreter parity** as an oracle. Flipping the
+  interpreter alone breaks that green oracle and manufactures interpreter/JIT
+  divergence (the R2 defect class).
+- ~8 product files are deliberately coded around the limitation
+  (`src/os/crypto/mgf1.spl:73`, `src/os/kernel/acpi/rsdt.spl:100`,
+  `src/app/desugar/context_params.spl:7`, `src/app/play/wm_daemon.spl:216`,
+  `src/lib/nogc_sync_mut/concurrent/thread.spl:10`, etc.).
+
+Evidence of internal contradiction (why a ruling is required):
+
+- `interpreter/expr/control.rs:49-50` claims regular closures "share the
+  environment reference", yet the call path clones (`control.rs:146`;
+  `captured_env_with_live_globals` clones at
+  `interpreter_call/core/function_exec.rs:174ff`, and
+  `sync_owned_captured_globals` skips overlay entries where
+  `local_env.is_local(name)` — there is NO local write-back channel at all,
+  regardless of whether the empty-env (`function_exec.rs:945/1557`,
+  `interpreter_method/special/execution.rs:206/341`) or real-captured-env
+  (`function_exec.rs:1014`) site is taken).
+- `doc/06_spec/feature/usage/metaprogramming_spec.md:984` claims by-reference
+  default with `move` opting into by-value — contradicting functions_spec.
+- Large spec clusters (aop_pointcut, aop_spec, hook counters) are written
+  assuming write-through and currently give no signal either way.
+
+### The fork to rule on
+
+(a) Keep by-value capture and make the silent loss **loud** — diagnose an
+assignment to a captured non-global inside a nested fn/lambda (same
+philosophy as the implicit-self-field guard, R6); update metaprogramming_spec
+and the aop/hook specs to use module globals or returned state. Or
+(b) adopt by-reference (cell) capture for `var` — a coordinated change across
+interpreter, MIR by-value snapshot machinery, native closure conversion, the
+parity oracle spec, functions_spec, and language.md, done together to avoid
+lane divergence.
+
+Until ruled, any one-sided interpreter change is wrong.
+
+### Relation to after_all global-write-loss (round-3 R5)
+
+Different root cause. R5
+(`after_all_hook_module_global_write_lost_after_in_group_mutation_2026-08-31.md`)
+concerns a **module global**, and module-global write-back demonstrably works
+(first measurement above); its defect is in the global sync/publish path, and
+is fixable within by-value semantics. Note `Env` writes clear the
+`refreshed_globals` mark (`value.rs:621-624, 770-781`), so a
+"refreshed-entry-not-published" theory is insufficient as stated. Also, on
+origin/main `1d4aafe3914` the R5 repros do not fire the hook at all (no
+`HOOK RAN`, final len=1 in both variants) — R5 is only observable atop the
+unlanded after_all drain fix referenced in its record.
