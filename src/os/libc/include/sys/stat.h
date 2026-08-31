@@ -64,6 +64,8 @@ int fstat(int fd, struct stat *buf);
 int lstat(const char *path, struct stat *buf);
 int mkdir(const char *path, mode_t mode);
 int chmod(const char *path, mode_t mode);
+/* fchmod was missing while src/runtime/runtime_native.c:10536 calls it. */
+int fchmod(int fd, mode_t mode);
 
 #ifdef __cplusplus
 }
