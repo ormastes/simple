@@ -430,3 +430,59 @@ cross-tree artefact.
 The operational advice to pin `SIMPLE_LIB="$PWD/src"` when driving a compiler
 binary from another worktree is still sound hygiene; it simply was not the
 problem here.
+
+### The corrected cranelift fix WORKED; the build now reaches LINK and fails on a stale linker script
+
+With `parse_pct_value` rewritten to the single-tail-unwrap shape, the codegen
+failure is gone and the x86_64 WM desktop build advances all the way to the
+**link** stage — further than any earlier attempt. It now fails there:
+
+```
+ld.lld: error: examples/09_embedded/simple_os/arch/x86_64/linker.ld:127:
+    symbol not found: kernel__abi__syscall_shim__spl_handle_mprotect
+  ... :128 spl_handle_spawn_binary
+  ... :129 spl_handle_ipc_send      ... :130 spl_handle_ipc_recv
+  ... :131 spl_handle_ipc_create_port ... :132 spl_handle_ipc_connect
+ld.lld: error: too many errors emitted, stopping now
+```
+
+**This is a stale contract, not missing code.** All six handlers exist:
+
+| handler | actual module |
+|---|---|
+| `spl_handle_mprotect`, `spl_handle_spawn_binary` | `src/os/kernel/abi/syscall_shim_process.spl` (lines 286, 307) |
+| `spl_handle_ipc_*` (4) | `src/os/kernel/abi/syscall_shim_ipc.spl` (line 29 ff.) |
+
+`linker.ld` aliases **66** symbols through the `kernel__abi__syscall_shim__`
+prefix, and only these 6 fail — the rest (`spl_handle_mmap`, `munmap`,
+`list_tasks`, `signal`, …) resolve, so they are still in `syscall_shim.spl`.
+The six were evidently moved into `syscall_shim_*` submodules by a refactor and
+the linker script was never updated; it carries **no** submodule-prefixed
+reference anywhere (`grep -o "kernel__abi__syscall_shim_[a-z]*__"` returns
+nothing). Note also that all six are declared `fn`, not `pub fn`.
+
+**Deliberately NOT fixed here.** The plausible repair is to repoint those six
+lines at the submodule-mangled names (or re-export the handlers from
+`syscall_shim.spl`), but `linker.ld` is shared by **every** x86_64 SimpleOS
+kernel, so a speculative edit has a far larger blast radius than the two
+`src/os` restores above — those merely restored declarations proven missing by
+grep. Verifying a linker-script change costs another full ~1 hour build, and
+even a successful ELF yields no Vulkan pixels while the host daemon remains
+blocked. Whoever picks this up should confirm the submodule mangling convention
+first (no example of it exists in this file to copy).
+
+This also means the x86_64 `gui_entry_desktop.spl` kernel has been unbuildable
+for some time, independently of anything in this session.
+
+### Final state of the x86_64 WM build chain
+
+| defect | status |
+|---|---|
+| `HostGpuIvshmemDrawIrResult` declared nowhere | **fixed** |
+| `HelloReceipt.capability_mask` missing | **fixed** |
+| cranelift `icmp_imm.f32` on early-returning optional-float unwrap | **worked around + filed** |
+| `linker.ld` stale syscall-shim aliases (6) | **open, characterised above** |
+| host GPU daemon: 53 undefined `rt_*` | **open** |
+
+Four of five understood; two fixed outright. No framebuffer evidence was
+produced, and none is claimed.
