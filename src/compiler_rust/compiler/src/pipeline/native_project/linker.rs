@@ -827,34 +827,51 @@ int main(int argc, char** argv) {
         std::fs::write(&main_cpp, stub_code).map_err(|e| format!("write main stub: {e}"))?;
 
         let main_o = temp_dir.join("_main_stub.o");
-        let output = if is_clang_cl {
-            std::process::Command::new(&cxx)
-                .arg("/c")
-                .arg(format!("/Fo{}", main_o.display()))
-                .arg("/Gy")
-                .arg(&main_cpp)
-                .output()
-                .map_err(|e| format!("compile main stub: {e}"))?
-        } else {
-            std::process::Command::new(&cxx)
-                .args([
-                    "-c",
-                    "-Os",
-                    "-ffunction-sections",
-                    "-fdata-sections",
-                    "-fno-asynchronous-unwind-tables",
-                    "-fno-unwind-tables",
-                    "-fno-stack-protector",
-                    "-o",
-                ])
-                .arg(&main_o)
-                .arg(&main_cpp)
-                .output()
-                .map_err(|e| format!("compile main stub: {e}"))?
-        };
+        let clang_cl_args: Vec<String> = vec![
+            "/c".to_string(),
+            format!("/Fo{}", main_o.display()),
+            "/Gy".to_string(),
+            main_cpp.display().to_string(),
+        ];
+        let other_args: Vec<String> = vec![
+            "-c".to_string(),
+            "-Os".to_string(),
+            "-ffunction-sections".to_string(),
+            "-fdata-sections".to_string(),
+            "-fno-asynchronous-unwind-tables".to_string(),
+            "-fno-unwind-tables".to_string(),
+            "-fno-stack-protector".to_string(),
+            "-o".to_string(),
+            main_o.display().to_string(),
+            main_cpp.display().to_string(),
+        ];
+        let argv: &[String] = if is_clang_cl { &clang_cl_args } else { &other_args };
+        let output = std::process::Command::new(&cxx)
+            .args(argv)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "compile main stub: failed to spawn `{} {}`: {e}",
+                    cxx,
+                    argv.join(" ")
+                )
+            })?;
         if !output.status.success() {
+            // clang-cl (like cl.exe) writes diagnostics to STDOUT, not stderr --
+            // capturing only stderr here previously produced a message ending
+            // in ": " with nothing after it. Capture both streams plus the
+            // exact argv invoked so the failure is diagnosable without a
+            // manual reproduction.
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Failed to compile main stub ({}): {}", cxx, stderr));
+            return Err(format!(
+                "Failed to compile main stub ({} {}): exit={:?} stdout=[{}] stderr=[{}]",
+                cxx,
+                argv.join(" "),
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            ));
         }
         Ok(main_o)
     }
