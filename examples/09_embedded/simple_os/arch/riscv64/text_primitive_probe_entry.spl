@@ -26,6 +26,36 @@ fn _say_num(label: text, n: i64, expect: i64):
     else:
         serial_println(label + " = WRONG")
 
+# Minimal stand-in for CoreLexer's character cursor: a [text] field, an i64
+# position, and a `me advance() -> text` whose result is the tail expression
+# after an if/else — the exact shape scan_string reads characters through.
+var g_probe_text: text = ""
+var g_probe_text_slot: [text] = [""]
+var g_probe_num: i64 = 0
+
+fn probe_globals_write():
+    g_probe_text = "GLOBAL_OK"
+    g_probe_text_slot[0] = "SLOT_OK"
+    g_probe_num = 4242
+
+fn probe_globals_read() -> text:
+    g_probe_text
+
+struct ProbeLexer:
+    chars: [text]
+    pos: i64
+
+    me advance() -> text:
+        if self.pos >= self.chars.len():
+            return ""
+        val c: text = self.chars[self.pos]
+        self.pos = self.pos + 1
+        if c == "\n":
+            self.pos = self.pos
+        else:
+            self.pos = self.pos
+        c
+
 fn spl_start():
     serial_println("")
     serial_println("[probe] SimpleOS riscv64 text primitive probe (OpenSBI fw_payload)")
@@ -249,6 +279,64 @@ fn spl_start():
         ci = ci + 1
     _say_num("[probe] 10c parts.len", p10c.len(), 4)
     serial_println("[probe] 10c join = " + p10c.join(""))
+
+    # --- Step 11 (added 2026-08-31): scan_string's STRUCTURAL shape ----------
+    # Step 10 proved local-[text]-push + join("") is correct in straight-line
+    # code, so Defect A is not that primitive. What scan_string additionally
+    # does, and 10 does not, is:
+    #   * read the characters through a STRUCT METHOD (`me advance() -> text`)
+    #     whose returned value is the tail expression of an if/else, and
+    #   * push into a LOCAL accumulator from inside a `while true:` loop with
+    #     `break`, i.e. a loop-carried local across a non-trivial CFG.
+    # 11 reproduces exactly that. If 11 is empty while 10 is right, the defect
+    # is in one of those two axes, not in push/join.
+    serial_println("[probe] step 11: struct-method advance() + while/break push")
+    var lx = ProbeLexer(chars: "abcd".chars(), pos: 0)
+    var lparts: [text] = []
+    while true:
+        val pc = lx.advance()
+        if pc == "":
+            break
+        lparts.push(pc)
+    _say_num("[probe] 11 parts.len", lparts.len(), 4)
+    serial_println("[probe] 11 join = " + lparts.join(""))
+
+    # --- Step 12 (added 2026-08-31): MODULE-LEVEL storage, text vs i64 -------
+    # The in-guest parser error reports `kind 3 text '' ... path ''` at
+    # `line 3:3`: every i64 (kind, line, col) round-trips correctly while EVERY
+    # text field reads back empty — including `path`, which is a plain literal
+    # the entry passes in and never touches. That pattern points at text held in
+    # MODULE-LEVEL state (module_state.spl's lexer_core_cur_text slot family and
+    # lexer_struct.spl's core_last_token_text_slot), not at the lexer.
+    # 12a/12b/12c write then read back a plain text global, a one-slot [text]
+    # global (the core_last_token_*_slot shape exactly), and an i64 global as
+    # the control. If the text ones come back empty while the i64 is right,
+    # Defect A is global text storage under freestanding riscv64.
+    serial_println("[probe] step 12: module-level globals, text vs i64")
+    probe_globals_write()
+    serial_println("[probe] 12a plain text global = " + g_probe_text)
+    serial_println("[probe] 12b [text] slot global = " + g_probe_text_slot[0])
+    _say_num("[probe] 12c i64 global", g_probe_num, 4242)
+    serial_println("[probe] 12d read via fn = " + probe_globals_read())
+
+    # --- Step 13 (added 2026-08-31): flat-Optional decode --------------------
+    # A parallel freestanding lane proved text.to_int() broken in-guest while
+    # starts_with/contains/trim/split are correct, and isolated it to the
+    # flat-optional in-band-sentinel decode. If token text extraction crosses an
+    # Optional anywhere, an Optional that decodes as ABSENT yields empty text
+    # while the token KIND — which never crosses an Optional — still prints
+    # fine: exactly Defect A's signature. 13a tests the reported defect
+    # directly, 13b tests an Optional carrying TEXT rather than an integer,
+    # which is the shape that would produce Defect A.
+    serial_println("[probe] step 13a: to_int() through a flat Optional")
+    _say_num("[probe] 13a to_int", "2".to_int() ?? 0, 2)
+    _say_num("[probe] 13a to_int 4242", "4242".to_int() ?? 0, 4242)
+
+    serial_println("[probe] step 13b: Optional<text> decode")
+    val opt_present: text? = "PRESENT"
+    serial_println("[probe] 13b present = " + (opt_present ?? "EMPTY"))
+    val opt_absent: text? = nil
+    serial_println("[probe] 13b absent = " + (opt_absent ?? "EMPTY"))
 
     serial_println("PROBE_TEXT_PRIMITIVES_SIMPLEOS_RISCV64_DONE")
     serial_println("[probe] parking")

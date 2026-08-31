@@ -319,3 +319,71 @@ baseline to compare against — the image never linked before — so attribution
 to be established by inspection rather than by bisection.
 
 Neither defect is a runtime-symbol gap, and neither is fixed by this change.
+
+---
+
+## 2026-08-31 (later) — Defect B FIXED; the gate now reports FAIL, not ERROR
+
+**Defect B is closed.** `FW_PAYLOAD_PATH` is a make VARIABLE and OpenSBI
+`.incbin`s the payload into `fw_payload.o`, so make cannot see that the file the
+variable names has changed. Deleting the payload objects before each row's
+`make` forces the re-embed. Because a clean make is no more evidence than a
+clean link, the gate now also asserts POSITIVELY that the built
+`fw_payload.bin` embeds THAT row's `kernel.Image` at `FW_PAYLOAD_OFFSET`
+(0x200000), and `fail`s if it does not.
+
+Measured after the fix — the two payloads now differ, where they were
+byte-identical before:
+
+    d3d2301e059ba1bbae14f9dc98c68741  buildrun-fw_payload.bin
+    dfb5a1ad5afbf9bf8a9d8182c12f2915  interp-fw_payload.bin
+
+and the buildrun guest prints its OWN banners, which it never did before:
+
+    [buildrun] SimpleOS riscv64 in-guest build-and-run sanity (OpenSBI fw_payload)
+    [buildrun] serial up, building then running a Simple program
+    [buildrun] lowering source through the real frontend
+
+The identical hazard existed in `scripts/check/run-riscv64-text-probe-opensbi.shs`
+— a diagnostic harness that would silently have measured a PREVIOUS run's
+firmware — and is fixed there the same way. The gate's `--selftest` still passes
+all 23 fixtures; nothing was weakened.
+
+### The verdict moved ERROR -> FAIL
+
+    FAIL — 2 row(s) checked in-guest under real OpenSBI v1.4 firmware
+    (nonce fc88b15622213918), offender(s): interpreter row: the interpreted
+    hello world did not print its own nonce-carrying output; build-and-run row:
+    the program was not built and run to a correct result
+
+Both rows now BOOT, reach their entry, and are evaluated. Neither is green.
+Both fail on Defect A alone, which they now hit independently.
+
+### Defect A — three hypotheses tested in-guest, two DISPROVED
+
+Probe: `examples/09_embedded/simple_os/arch/riscv64/text_primitive_probe_entry.spl`
+via `run-riscv64-text-probe-opensbi.shs`, real OpenSBI `-bios fw_payload`.
+
+**DISPROVED — `rt_slice` raw-vs-tagged indices.** The aarch64 divide-by-8 fix
+(`6c57b45105c`) is already in this base and riscv64's `rt_slice` takes RAW
+indices correctly. In-guest: `substring(0,6)` = `{"role`, `substring(1,5)` =
+`"rol`, `substring(8)` = `"user"}`, explicit `chars()` indexing, `trim`,
+`starts_with`, equality and the bounded json_find scan are all EXPECTED.
+
+**DISPROVED — the `[text]` push + `join("")` accumulator.** `scan_string`
+builds token text as `var parts: [text] = []` / `parts.push(...)` /
+`parts.join("")`, which is a different mechanism from every previously probed
+step (all of which accumulate with `+`). New probe step 10 reproduces it
+exactly. In-guest: `10a join = abc`, `10b join = a-b-c`,
+`10c join = "use` (runtime-produced pushes) — all correct, `parts.len()`
+EXPECTED in both cases. The earlier loop-variable-append defect is also gone:
+9c/9d/9e/9f/9h/9j all accumulate `"user"}` correctly.
+
+**Still live, being measured (steps 11-13):** the struct-method `advance()` /
+`while true:` loop-carried-local axis; MODULE-LEVEL text storage (the strongest
+remaining lead — the error line reports `path ''` empty too, and `path` is a
+plain literal the entry passes in and never touches, while every i64 in the same
+line — kind 3, line 3, col 3 — round-trips correctly); and the flat-Optional
+in-band-sentinel decode, which a parallel freestanding lane proved broken for
+`text.to_int()` in-guest and which would produce exactly this signature if the
+token->text path crosses an Optional.
