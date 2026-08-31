@@ -429,11 +429,20 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         dest: VReg,
         src: VReg,
         byte_size: u32,
-        type_name: Option<&str>,
+        _type_name: Option<&str>,
+        owner_has_vtable: Option<bool>,
         deep_fields: &[crate::mir::AggregateFieldCopy],
     ) -> Result<(), String> {
         self.backend
-            .compile_aggregate_copy(dest, src, byte_size, deep_fields, self.vreg_map, self.builder)
+            .compile_aggregate_copy(
+                dest,
+                src,
+                byte_size,
+                owner_has_vtable,
+                deep_fields,
+                self.vreg_map,
+                self.builder,
+            )
             .map_err(|e| e.to_string())
     }
 

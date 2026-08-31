@@ -61,6 +61,11 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         src: VReg,
         byte_size: u32,
         type_name: Option<&str>,
+        // Cranelift's own worker resolves vtable-bearing-ness itself from
+        // `type_name` via `ctx.vtable_data_ids` (see
+        // `instr::closures_structs::emit_aggregate_block_copy`); this
+        // MIR-level resolution exists for the LLVM backend and is unused here.
+        _owner_has_vtable: Option<bool>,
         deep_fields: &[crate::mir::AggregateFieldCopy],
     ) -> Result<(), String> {
         super::instr::closures_structs::compile_aggregate_copy(

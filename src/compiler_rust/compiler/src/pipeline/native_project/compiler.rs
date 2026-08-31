@@ -1829,6 +1829,27 @@ fn qualify_native_struct_layouts(
                         // collision-free.
                         *owner_has_vtable = Some(false);
                     }
+                    MirInst::AggregateCopy {
+                        type_name,
+                        owner_has_vtable,
+                        deep_fields,
+                        ..
+                    } => {
+                        *owner_has_vtable = Some(resolve_owner_has_vtable(
+                            type_name.as_deref(),
+                            &resolve_exact_owner,
+                            ambiguous_names,
+                            all_mangled,
+                            vtable_type_owners,
+                        ));
+                        resolve_deep_field_vtables(
+                            deep_fields,
+                            &resolve_exact_owner,
+                            ambiguous_names,
+                            all_mangled,
+                            vtable_type_owners,
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -1836,4 +1857,81 @@ fn qualify_native_struct_layouts(
     }
 
     Ok(())
+}
+
+/// Shared resolution used for `MirInst::AggregateCopy::owner_has_vtable` and
+/// each `AggregateFieldCopy::owner_has_vtable` — the same three-way owner
+/// resolution `qualify_native_struct_layouts` already applies to
+/// `FieldGet`/`FieldSet::owner_has_vtable` above, factored out so the
+/// (top-level, nested-recursive) call sites share one implementation rather
+/// than diverging copies of the ambiguous-name tie-break logic.
+fn resolve_owner_has_vtable(
+    type_name: Option<&str>,
+    resolve_exact_owner: &impl Fn(&str) -> Option<(String, bool)>,
+    ambiguous_names: &std::collections::HashSet<String>,
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    vtable_type_owners: &std::collections::HashSet<String>,
+) -> bool {
+    let Some(name) = type_name else {
+        // No statically-known type name — no proof of a header.
+        return false;
+    };
+    if let Some((owner, _)) = resolve_exact_owner(name) {
+        return vtable_type_owners.contains(&owner);
+    }
+    if ambiguous_names.contains(name) {
+        let suffix = format!("__{name}");
+        let mut candidate_layouts: Vec<bool> = all_mangled
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|candidate| candidate.ends_with(&suffix))
+            .map(|candidate| vtable_type_owners.contains(candidate))
+            .collect();
+        candidate_layouts.sort_unstable();
+        candidate_layouts.dedup();
+        // Unlike the FieldGet/FieldSet arm above, an ambiguous owner with
+        // incompatible header layouts here does NOT hard-fail the build.
+        // AggregateCopy's byte-block copy is only WRONG when it should have
+        // shifted and didn't (the defect this fix closes); guessing `false`
+        // on a genuinely ambiguous name reproduces that same pre-existing
+        // shallow-copy behavior rather than turning a previously-successful
+        // build into a hard compile error over a byte-copy shift decision.
+        // A real header/field-offset mismatch for an ambiguous name is still
+        // caught — by the FieldGet/FieldSet arm, which every field of a
+        // struct with any accessed field will also traverse.
+        return matches!(candidate_layouts.as_slice(), [true]);
+    }
+    // Unresolved builtin/generic/imported-but-unlowered owner: no proof of a
+    // native object header, same fail-closed default as FieldGet/FieldSet.
+    false
+}
+
+/// Recursively resolve `owner_has_vtable` for every `AggregateFieldCopy` in
+/// a deep-copy descriptor tree, using each field's OWN `type_name` — a
+/// field's header-bearing-ness is a property of its own declared type, not
+/// of the enclosing struct.
+fn resolve_deep_field_vtables(
+    deep_fields: &mut [crate::mir::AggregateFieldCopy],
+    resolve_exact_owner: &impl Fn(&str) -> Option<(String, bool)>,
+    ambiguous_names: &std::collections::HashSet<String>,
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    vtable_type_owners: &std::collections::HashSet<String>,
+) {
+    for field in deep_fields.iter_mut() {
+        field.owner_has_vtable = Some(resolve_owner_has_vtable(
+            field.type_name.as_deref(),
+            resolve_exact_owner,
+            ambiguous_names,
+            all_mangled,
+            vtable_type_owners,
+        ));
+        resolve_deep_field_vtables(
+            &mut field.nested,
+            resolve_exact_owner,
+            ambiguous_names,
+            all_mangled,
+            vtable_type_owners,
+        );
+    }
 }

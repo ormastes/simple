@@ -581,3 +581,202 @@ No source was changed this session (read-only investigation; the one
 interpreter-run attempt used a throwaway fixture outside the repo, and
 failed before compiling anything of the repo's own code). Zero behavior
 change on any target.
+
+## Follow-up #2 (2026-08-31, same day) — precondition (1) checked: FALSE. Lead dead for THIS symptom, but a real adjacent bug found and fixed.
+
+Picked up exactly where Follow-up #1 left off: "Confirm `CompilerConfig` is
+actually vtable-bearing in the native lane... Measure or trace it; do not
+infer from 'it has methods'."
+
+**`CompilerConfig` is NOT vtable-bearing. Measured, not inferred.**
+
+`vtable_type_owners` (consumed by `qualify_native_struct_layouts`,
+`pipeline/native_project/compiler.rs:1749`) is populated in exactly one place,
+`pipeline/native_project/imports.rs:930-935`, gated on
+`pending_vtable_impls`, which is itself populated at `imports.rs:591-596`
+**only** when an `HirImpl` carries `Some(trait_name)` — i.e. an explicit
+`impl SomeTrait for Type` block. The MIR-lowering-side twin
+(`mir/lower/lowering_core.rs:1870`, `if let Some(ref trait_name) =
+hir_impl.trait_name`) gates identically. An inherent `impl Type:` block (no
+`for Trait`) never sets `trait_name`, so it can never reach either vtable
+set — "has methods" was never sufficient, and the codebase agrees with itself
+on this in two independent places.
+
+```
+$ grep -n "impl.*for CompilerConfig\|impl CompilerConfig" src/compiler/00.common/config.spl
+88:impl CompilerConfig:                     # inherent — no `for X`
+$ grep -rn "for CompilerConfig" src/ --include=*.spl
+(zero matches, whole tree)
+```
+
+`CompilerConfig` (`struct CompilerConfig:`, `config.spl:67`) has exactly one
+`impl` block and it is inherent. It implements no trait anywhere in the tree.
+Its one nested struct field, `type_inference: TypeInferenceConfig`
+(`config.spl:362,375`), is the same: `struct TypeInferenceConfig:` with one
+inherent `impl TypeInferenceConfig:` block, zero `for TypeInferenceConfig`
+hits. So `owner_has_vtable` resolves to `Some(false)` for `CompilerConfig`
+at BOTH the outer-copy level and the one nested-struct-field level that
+exists — the vtable-header-omission mechanism this and the prior session
+converged on cannot fire for this specific struct's own copy.
+
+**Verdict on task items 1-2: item 1 is FALSE, measured by exhaustive grep
+against the actual gating condition (not inferred from method count).**
+Per the task's own instruction ("If the lead dies, that is a fine outcome —
+say so with evidence"): this lead is DEAD for explaining the reported
+`CompilerConfig`/`mcdc_global_bytes` corruption specifically. Item 2 (is the
+`AggregateCopy` path reached for `CompilerConfig.default()`/`.from_env()`) is
+moot given item 1 is false — the copy path is very likely reached (`struct`
+by-value binding is exactly `copy_if_value_type`'s target), but the SPECIFIC
+defect this lead named cannot be the cause because there is no header to omit.
+
+**The mechanism itself is real and was independently confirmed as a live,
+UNFIXED defect — landed anyway, scoped honestly.** While tracing this,
+`codegen/llvm/functions.rs:1002-1013` (pre-fix) carried a standing
+`TODO(sj-segv-2026-08-27)` stating verbatim: "this arm has the same
+truncation defect the Cranelift arm just had... Unfixed and unverified on
+this lane." Cranelift's sibling
+(`codegen/instr/closures_structs.rs::emit_aggregate_block_copy`) already
+carries the fix, keyed off `ctx.vtable_data_ids.contains_key(type_name)` — a
+Cranelift-local mechanism. The LLVM backend had no equivalent lookup and the
+TODO explicitly says so. `MirInst::AggregateCopy` and `AggregateFieldCopy`
+also already documented the exact gap in their own doc comments
+(`mir/inst_enum.rs`) referencing this same bug id, but no field carried the
+resolved answer.
+
+**Fix landed this session** (Task 3/4/5 from the newest task brief, executed
+despite item-1 being false, because the mechanism is real and independent of
+whether it explains THIS symptom):
+- Added `owner_has_vtable: Option<bool>` to `MirInst::AggregateCopy` and to
+  `AggregateFieldCopy` (`mir/inst_enum.rs`), set to `None` at construction
+  (`mir/lower/lowering_core.rs`, both the top-level and
+  `struct_deep_fields` sites) — mirrors exactly how `FieldGet`/`FieldSet`
+  already carry `owner_has_vtable`, resolved later once the whole-project
+  vtable owner set is known.
+- `qualify_native_struct_layouts` (`pipeline/native_project/compiler.rs`)
+  now resolves it for `AggregateCopy`, recursively over the whole
+  `deep_fields` tree (`resolve_owner_has_vtable` /
+  `resolve_deep_field_vtables`, new helpers), reusing the identical
+  three-way owner-resolution the existing `FieldGet`/`FieldSet` arm uses
+  (exact-owner / ambiguous-name tie-break / fail-closed-false).
+- `codegen/llvm/functions/objects.rs::emit_aggregate_block_copy` now applies
+  the header shift the Cranelift sibling already applies: `byte_size += 8`
+  and every `word_index` (including nested, keyed on that field's OWN
+  `owner_has_vtable`) shifts by one word when the block being copied carries
+  a header. `compile_aggregate_copy`/`emit_aggregate_block_copy` gained the
+  new parameter; call sites in `codegen/llvm/functions.rs`,
+  `codegen/llvm/emitter.rs` (the `CodegenEmitter` trait's LLVM impl),
+  `codegen/emitter_trait.rs`, `codegen/dispatch.rs`, `codegen/mir_interpreter.rs`
+  (ignored — the interpreter has no heap layout) and
+  `codegen/cranelift_emitter.rs` (ignored — Cranelift keeps its own
+  `type_name`-keyed lookup unchanged, to avoid an unreviewed behavior change
+  on a lane this session did not verify) were all updated to thread or
+  intentionally ignore the new parameter.
+- Other callers of `emit_aggregate_block_copy`/`compile_aggregate_copy`
+  audited: only the recursive self-call (now passes
+  `field.owner_has_vtable` instead of nothing) and the one dispatch call
+  site in `compile_emitter_simd_instruction` (SIMD fallback, not the
+  primary `AggregateCopy` path — that's handled directly in
+  `functions.rs`'s main match arm before dispatch is ever reached for this
+  instruction).
+- **Blast-radius correction made after first landing this fix (advisor
+  review caught it before commit):** `resolve_owner_has_vtable`'s ambiguous-
+  name-with-incompatible-layouts branch initially mirrored
+  `FieldGet`/`FieldSet`'s hard `Err` exactly, which meant `AggregateCopy`
+  could newly turn a previously-successful whole-project compile into a hard
+  error purely over a byte-copy header-shift decision — a new failure mode
+  `AggregateCopy` never had before this fix, on a code path
+  (`resolve_owner_has_vtable`/`resolve_deep_field_vtables`) that had not
+  actually executed against any real vtable-bearing struct in this session
+  (the regression test constructs `owner_has_vtable: Some(true)` by hand and
+  never calls the resolver). Changed the ambiguous branch to resolve `false`
+  (no header assumed) instead of erroring — `resolve_owner_has_vtable` is now
+  infallible (`bool`, not `Result<bool, String>`); a genuine header/offset
+  mismatch for an ambiguous name is still caught by the pre-existing
+  `FieldGet`/`FieldSet` arm, which any struct with an accessed field also
+  traverses. This keeps the "can only improve, never break" property the
+  rest of the change already had.
+- **Negative control run** (advisor-requested, in-file rather than via
+  `git stash` — stashing `objects.rs` alone breaks its call signature
+  against `functions.rs` and fails to compile rather than failing the
+  assertion): temporarily hardcoded `let has_vtable = false;` in
+  `emit_aggregate_block_copy`, reran the one regression test — it FAILED,
+  with the printed IR showing `%aggcopy_alloc = tail call i64
+  @rt_alloc(i64 16)` (the pre-fix under-allocation) instead of the required
+  `i64 24`. Restored the real line
+  (`let has_vtable = owner_has_vtable == Some(true);`), reran — PASSED. The
+  test discriminates the fix, not just exercises the code path.
+
+**Verified:**
+- `cargo check -p simple-compiler --features llvm` — clean (only 3
+  pre-existing unrelated warnings).
+- `cargo check --bin simple --features llvm` — clean, same warnings.
+- `cargo check -p simple-compiler` (no `llvm` feature, Cranelift-only) —
+  clean, confirming the Cranelift lane's untouched behavior still compiles.
+- New regression test
+  `codegen::llvm::functions::tests::aggregate_copy_of_vtable_bearing_struct_shifts_for_header`
+  (`codegen/llvm/functions.rs`): builds a 2-field vtable-bearing `Owner`
+  struct (`byte_size: 16`, `owner_has_vtable: Some(true)`), emits
+  `AggregateCopy`, and asserts the emitted `rt_alloc` call for the copy
+  allocates `i64 24` (`words = (16+8)/8 = 3`), not `i64 16` — the pre-fix
+  under-allocation that would drop the last field and shift every other
+  field into its neighbour's slot. `cargo test -p simple-compiler --features
+  llvm --lib codegen::llvm::functions::tests::aggregate_copy_of_vtable_bearing_struct_shifts_for_header`
+  → `1 passed`. (Running it required TWO throwaway, uncommitted
+  `#[cfg(unix)]` gates on unrelated pre-existing defects, both reverted
+  before committing and neither touched by this session's actual fix:
+  `interpreter_extern::memory::ptr_read_u8_tests::maps_protects_and_unmaps_host_memory`
+  (test-only, `libc::PROT_READ` etc. used outside any `cfg(unix)` gate) and
+  `perf_counters::dump_on_signal` (NOT test-only —
+  `extern "C" fn dump_on_signal(sig: libc::c_int)`, `perf_counters.rs:152`,
+  uses `libc` unconditionally even though `libc` is a
+  `[target.'cfg(unix)'.dependencies]`-only crate per
+  `compiler/Cargo.toml:131-132`, and even though the ONE call site that
+  references this function, three lines above at `init()`, is already
+  correctly `#[cfg(unix)]`-gated with a comment explaining exactly why
+  — "`libc` is a cfg(unix)-only dependency of this crate, so the call
+  above cannot compile on Windows" — yet the function signature/body one
+  page down was missed. This one is graver than the test-only one: it
+  broke `cargo check -p simple-compiler --features llvm` outright once
+  this session's edits invalidated cargo's incremental cache for that
+  file — an earlier `cargo check` in this same session had reported clean
+  only because a stale cached artifact for `perf_counters.rs` was being
+  reused; `git stash`-ing this session's own changes back out reproduced
+  the SAME `E0433` on the unmodified base tree, confirming it is
+  pre-existing and target-independent of this session's fix, not caused
+  by it. Neither gate was filed as a separate bug record this session —
+  flagging both here so the next session doesn't have to rediscover them,
+  and so a future `cargo check` failure in either file is not mistaken for
+  a regression from this change.)
+- Did NOT run the full bootstrap (`run_s2final.sh`) — another bootstrap
+  build was already running concurrently in this tree
+  (`Get-CimInstance Win32_Process` matched 4 `bootstrap-from-scratch`
+  processes at the time), and the task's own guidance says not to start a
+  competing one. The fix therefore has LLVM-IR-level and unit-test proof,
+  not an end-to-end Stage 2 admission proof.
+
+**Windows-specific vs general, for the mechanism that WAS fixed:** general,
+not Windows-specific — nothing in `emit_aggregate_block_copy`,
+`compile_struct_init`, or `qualify_native_struct_layouts` branches on target
+OS or triple. Any vtable-bearing `struct` copied by value
+(`var x = y_of_trait_implementing_struct_type`) under the LLVM backend on
+ANY target was hitting this same under-allocation before today; Cranelift
+was already immune via its own independent mechanism. This confirms and
+closes the open half of `sj_segv_struct_param_field_extract_2026-08-27.md`
+for the LLVM lane specifically (that record's own text already named the
+Cranelift fix and flagged the LLVM side as the unfixed twin).
+
+**What remains open for THIS bug's actual symptom:** the
+`CompilerConfig`/`mcdc_global_bytes` corruption is still unexplained. Per
+Follow-up #1's own priority list, item 2 is next and still untraced this
+session: `struct_deep_fields` / the nested-field deep-copy descriptor
+(`lowering_core.rs:963-996`) for whether `Dict<text,text>`
+(`CompilerConfig.values`) or the nested `TypeInferenceConfig` field somehow
+desyncs the flat word-copy loop's `word_index` against the outer struct's
+own field offsets — a mechanism unrelated to vtables, since neither
+`CompilerConfig` nor `TypeInferenceConfig` has one. A fresh session with a
+working build+run loop (this one deliberately avoided racing the concurrent
+bootstrap) should pick that up directly, or instrument
+`copy_if_value_type`/`emit_aggregate_block_copy` with the
+`SIMPLE_PERF_COUNTERS`-style level-gated tracing this repo already favors
+(see `.claude/rules/commands.md`) to observe the real `byte_size`/`words`
+values `CompilerConfig`'s own copy computes at runtime.
