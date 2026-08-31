@@ -3229,6 +3229,14 @@ fn exec_method_body(
     for (k, v) in fields {
         local_env.mark_local(k.clone());
         local_env.insert(k.clone(), v.clone());
+        // Flag the binding as a field PRE-BIND. Without this the field looks
+        // like an ordinary local to `env.contains_key`, so the bare
+        // `field = value` guard in `exec_assignment` saw
+        // `is_first_assignment == false` and never fired for plain `fn`
+        // methods -- the write landed on the doomed local and `self.field`
+        // was silently unchanged.
+        // doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+        local_env.mark_field_prebind(k.clone());
     }
     let mut bound = HashMap::from([("self".to_string(), receiver.clone())]);
     for (index, param) in method.params.iter().filter(|p| p.name != "self").enumerate() {
@@ -5398,5 +5406,51 @@ mod if_val_binding_locality_tests {
         env.insert("get_value".to_string(), Value::Int(7));
         assert!(env.is_local("get_value"));
         assert!(matches!(env.get("get_value"), Some(Value::Int(7))));
+    }
+
+    /// Reproduce for
+    /// doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+    ///
+    /// `exec_method_body` pre-binds every receiver field as a frame local, so
+    /// `contains_key` (which is all `is_first_assignment` in
+    /// `interpreter/node_exec.rs` ever consulted) reports the field as ALREADY
+    /// bound and the bare-`field = ...` trap was skipped for plain `fn`
+    /// methods. `is_field_prebind` is the discriminator that restores it.
+    /// Before the fix this assertion fails: the pre-bind was indistinguishable
+    /// from an ordinary local.
+    #[test]
+    fn field_prebind_is_distinguishable_from_an_ordinary_local() {
+        let mut env = Env::new();
+        env.mark_local("flag".to_string());
+        env.insert("flag".to_string(), Value::Bool(false));
+        env.mark_field_prebind("flag".to_string());
+        assert!(env.contains_key("flag"), "the pre-bind is a real binding");
+        assert!(
+            env.is_field_prebind("flag"),
+            "a method-entry field pre-bind must be recognisable, or the bare \
+             `field = ...` guard stays dead for plain `fn` methods"
+        );
+    }
+
+    /// The discriminator must not fire for a genuine local that merely shares a
+    /// field's name — otherwise the fix trades a silent no-op for a false
+    /// rejection of legal shadowing.
+    #[test]
+    fn a_genuine_local_declaration_clears_the_field_prebind_flag() {
+        let mut env = Env::new();
+        env.mark_local("flag".to_string());
+        env.insert("flag".to_string(), Value::Bool(false));
+        env.mark_field_prebind("flag".to_string());
+        // `val flag = ...` inside the method body re-declares the name.
+        env.mark_local("flag".to_string());
+        env.insert("flag".to_string(), Value::Int(1));
+        assert!(!env.is_field_prebind("flag"));
+
+        // Loop variables take the block-local path instead.
+        let mut env2 = Env::new();
+        env2.mark_local("flag".to_string());
+        env2.mark_field_prebind("flag".to_string());
+        env2.enter_block_local("flag".to_string());
+        assert!(!env2.is_field_prebind("flag"));
     }
 }

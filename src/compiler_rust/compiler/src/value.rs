@@ -531,6 +531,13 @@ pub struct CowEnv {
     /// unallocated empty `HashSet` when `SIMPLE_STRICT_MEM` is unset — no
     /// off-path cost beyond the field itself.
     uninit_names: FrameSet<String>,
+    /// Field names this frame pre-bound as locals on entry to a method body
+    /// (see `exec_method_body`). They look like ordinary locals to
+    /// `contains_key`, which is exactly what made the implicit-self field
+    /// assignment guard dead for plain `fn` methods. Cleared by `mark_local`
+    /// / `enter_block_local` so a genuine user declaration that shadows a
+    /// field name is not misreported.
+    field_prebinds: FrameSet<String>,
 }
 
 impl CowEnv {
@@ -586,6 +593,7 @@ impl CowEnv {
             global_bindings: CowEnv::shared_empty_global_bindings(),
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
+            field_prebinds: FrameSet::default(),
         }
     }
 
@@ -644,8 +652,24 @@ impl CowEnv {
         self.uninit_names.contains(name)
     }
 
+    /// Record `name` as a method-entry field pre-bind. Call AFTER
+    /// `mark_local`/`insert`, which clear the flag.
+    pub fn mark_field_prebind(&mut self, name: impl Into<String>) {
+        self.field_prebinds.insert(name.into());
+    }
+
+    /// True if `name` is currently only a method-entry field pre-bind, i.e.
+    /// a bare `name = ...` here would write a doomed local instead of the
+    /// receiver's field.
+    pub fn is_field_prebind(&self, name: &str) -> bool {
+        self.field_prebinds.contains(name) && !self.block_local_bindings.contains_key(name)
+    }
+
     pub fn mark_local(&mut self, name: impl Into<String>) {
         let name = name.into();
+        if !self.field_prebinds.is_empty() {
+            self.field_prebinds.remove(&name);
+        }
         if self.global_bindings.contains_key(&name) {
             Arc::make_mut(&mut self.global_bindings).remove(&name);
         }
@@ -653,7 +677,11 @@ impl CowEnv {
     }
 
     pub fn enter_block_local(&mut self, name: impl Into<String>) {
-        *self.block_local_bindings.entry(name.into()).or_default() += 1;
+        let name = name.into();
+        if !self.field_prebinds.is_empty() {
+            self.field_prebinds.remove(&name);
+        }
+        *self.block_local_bindings.entry(name).or_default() += 1;
     }
 
     pub fn exit_block_local(&mut self, name: &str) {
@@ -1122,6 +1150,7 @@ impl CowEnv {
             global_bindings: CowEnv::shared_empty_global_bindings(),
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
+            field_prebinds: FrameSet::default(),
         }
     }
 
@@ -1139,6 +1168,7 @@ impl CowEnv {
             global_bindings: CowEnv::shared_empty_global_bindings(),
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
+            field_prebinds: FrameSet::default(),
         }
     }
 
@@ -1206,6 +1236,7 @@ impl Clone for CowEnv {
             global_bindings: self.global_bindings.clone(),
             dirty_names: self.dirty_names.clone(),
             uninit_names: self.uninit_names.clone(),
+            field_prebinds: self.field_prebinds.clone(),
         }
     }
 }
