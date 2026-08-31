@@ -102,6 +102,14 @@ build_row() {
 
     # Exit status read DIRECTLY into a variable on the next line — never through
     # a pipe, whose $? is the last pipeline element's status.
+    #
+    # `set +e` around the invocation is load-bearing, not sloppiness: under
+    # `set -e` a failing native-build aborts the whole script AT the invocation,
+    # so the `rc=$?` line below never runs and the diagnostic block never
+    # prints. That is exactly what happened on this lane's first run — a real
+    # link failure surfaced as a silent exit 1 with an empty stderr, which reads
+    # like an environment glitch rather than the honest compile failure it was.
+    set +e
     "$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
         --timeout "$NB_TIMEOUT" \
         --source "$GEN_DIR" \
@@ -110,6 +118,7 @@ build_row() {
         --linker-script "$LDS" \
         -o "$row_kernel" >"$row_log" 2>&1
     rc=$?
+    set -e
     [ "$rc" -eq 0 ] || { tail -60 "$row_log" >&2; fail "native-build failed for $1 (rc=$rc), log: $row_log"; }
 
     [ -s "$row_kernel" ] || fail "native-build reported success but $row_kernel is missing or empty"
