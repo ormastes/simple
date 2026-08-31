@@ -214,3 +214,71 @@ whether the survivors are a prefix or a scattered subset.
 Three root-cause stories have been adopted and two discarded in this
 investigation. Each was discarded by a measurement, not by argument, and each
 discard is recorded above rather than edited away.
+
+## ROOT CAUSE (2026-09-01) — `char_code_at` is char-indexed, `len()`/slicing are byte-indexed
+
+`_driver_line_end` (`80.driver/driver_source_loading.spl:492`) walked source lines with
+
+```
+while end < content.len() and content.char_code_at(end) != 10:
+```
+
+`rt_string_char_code_at` (`src/runtime/runtime_native.c:2882`) is **character**-indexed —
+it decodes UTF-8 — while `text.len()` returns the **byte** length (`s->len`) and text
+slicing is byte-based (`_driver_text_index_of` derives its index from
+`split(needle)[0].len()`, so it agrees with slicing, not with `char_code_at`).
+
+Inside an ASCII prefix a character index IS a byte index, so the mix is invisible.
+At the first multi-byte character the two diverge, `_driver_line_end` returns an
+offset in the wrong unit, and every line after that point is sliced from the wrong
+place and silently dropped by the import scanner.
+
+### Evidence
+
+Contingency over all 538 files scanned in one Stage-3 closure:
+
+|  | imports LOST | imports COMPLETE |
+|---|---|---|
+| file contains non-ASCII | **90** | 120 |
+| file is pure ASCII | **1** | 248 |
+
+`hir_definitions.spl` extracted exactly the 6 imports on lines <= 28 and dropped the
+3 on lines 37-39 — a clean split at **line 34, byte 2009**, the file's first
+non-ASCII byte (an em dash `\xe2\x80\x94` in a comment). Line 39 is
+`export use compiler.hir.hir_operators.{...}`, which is why that module never
+entered the closure and 200 files then failed on `HirBinOp`/`HirUnaryOp`/`HirAssignOp`.
+
+The 120 non-ASCII-but-complete files are consistent with the mechanism: their first
+non-ASCII byte falls after their last import line.
+
+### Fix
+
+`content.byte_at(end)` instead of `content.char_code_at(end)` — the byte-indexed
+accessor that pairs with `len()` (canonical pairing at
+`src/app/compiler_schema/fold_gen.spl:426`). `_driver_import_path_is_valid` carried
+the identical mix (`char_code_at` under a `len()` bound) and was fixed with it.
+
+### Correction: the "compiled extractor" claim above was WRONG
+
+The previous section concluded that `hir_codec.spl` has 12 `use` lines but the
+compiler extracted 1, and inferred that the compiled extractor did not match its
+source. That inference was false, and no codegen defect exists. There are **two**
+files:
+
+- `src/compiler/20.hir/hir_codec.spl` — 4,641 bytes, a facade with 4 imports
+- `src/compiler/20.hir/generated/hir_codec.spl` — 230,011 bytes, the generated codec
+
+The trace's `content_len=4641` matches the facade **exactly**; the closure loaded the
+facade, which is correct, and nothing was truncated. The comparison was against the
+wrong file. The 512-byte-boundary coincidence noted earlier was likewise a red
+herring and is withdrawn.
+
+Only `hir_definitions.spl` (`content_len=29609`, the full file, 9 use lines, 6
+extracted) was ever real evidence, and that is fully explained by the em dash.
+
+### Method note
+
+Four root-cause stories were adopted in this investigation and three discarded, each
+by a measurement rather than an argument. The step that resolved it was printing
+`content_len` next to the import count — the one datum that separates a short READ
+from a short PARSE. All discarded stories are retained above rather than edited away.
