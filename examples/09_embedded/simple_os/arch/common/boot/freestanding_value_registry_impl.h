@@ -137,8 +137,26 @@ RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
 {
     if (!IS_HEAP(value)) return value;
     uintptr_t raw = (uintptr_t)DECODE_PTR(value);
-    if (!simpleos_fv_contains(simpleos_fv_enums, &simpleos_fv_enum_count,
-                              raw, sizeof(SimpleOsFreestandingEnumV1))) return value;
+    if (!raw) return value;
+    /* Identify the enum by its heap header, NOT by membership in
+     * simpleos_fv_enums. Gating on the registry made `.unwrap()` a silent
+     * NO-OP for the entire x86_64 freestanding kernel: nothing ever calls
+     * simpleos_fv_register_enum (rt_enum_new in arch/x86_64/boot/
+     * baremetal_stubs.c mallocs a RuntimeEnum and never registers it), so
+     * simpleos_fv_enum_count is permanently 0, simpleos_fv_contains always
+     * returned 0, and every `.unwrap()` fell through returning the WRAPPER
+     * instead of the payload. Downstream that hands a Some-box where a class
+     * receiver is expected, and the first field load off it faults -- which is
+     * exactly the L5 VFS blocker (g_root_fat32.unwrap() -> Fat32Core.open+0x20,
+     * `movzbq 0x48(%rax)`). See doc/08_tracking/bug/
+     * vfs_l5_fat32core_open_faults_on_new_file_write_2026-08-31.md.
+     *
+     * The header check is the same identification the sibling accessors
+     * rt_enum_id / rt_enum_discriminant / rt_enum_payload already use on this
+     * exact class of value, so this makes `.unwrap()` consistent with them
+     * rather than uniquely broken. It is safe: `value` is heap-tagged, so raw
+     * is a real allocation, and only hdr.type (offset 0) is read before the
+     * HEAP_ENUM tag proves the object really is a 24-byte RuntimeEnum. */
     SimpleOsFreestandingEnumV1 *e = (SimpleOsFreestandingEnumV1 *)raw;
     if (e->hdr.type != HEAP_ENUM) return value;
     const uint32_t ok = 2405352012u, err = 4200179024u;

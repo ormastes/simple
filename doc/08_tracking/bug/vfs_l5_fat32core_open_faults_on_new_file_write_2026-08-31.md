@@ -138,3 +138,107 @@ observed. #178 may have fixed one call site rather than the lowering.
 
 A fix ships with a failing-pre-fix reproduce spec plus defect-class neighbours
 (every other class-valued `Option.unwrap()` on a hot path), per the repo rule.
+
+---
+
+## ROOT CAUSE FOUND (2026-08-31, later the same day) — `.unwrap()` is a NO-OP in the x86_64 freestanding kernel
+
+**Both prior hypotheses in this record are wrong, and so is the "per-method
+receiver-layout/ABI disagreement" conclusion above.** The receiver forwarding is
+byte-for-byte correct at BOTH call sites; the bad pointer is manufactured earlier,
+by `.unwrap()` itself.
+
+### Re-measured on current `origin/main` (ea48917812b, post-#198) FIRST
+`#198` (`-> ()` compiled to a trap) does **not** move L5. Zero `-> ()` annotations
+exist in any file on this path. Verbatim, with a freshly built seed:
+
+```
+FAIL — 8 check(s) checked, missing: L5 L6 L7 L8 (nonce=20260831225313229105, ...)
+[vfsrt] server write begin path=/VFSRT.TXT bytes=32
+FAULT @ 0x000000000801cef2
+```
+
+`Fat32Core.open` is at `0x801ced2` in that image, so the first fault is
+`Fat32Core.open+0x20` — identical to the original report. The record was accurate.
+
+### What the disassembly actually proves
+`Fat32Core.open+0x20` is `movzbq 0x48(%rax)` = `if not self.mounted` (`mounted` is
+the 10th of Fat32Core's 26 fields, 9*8 = 0x48). `Fat32Core.new` allocates `$0xd0`
+= 26*8, so the object is correctly sized — offset 0x48 is well inside it.
+
+Both delegation sites in `SharedFat32Driver` load `self.inner` **identically**:
+
+```
+mount:  mov %rdi,%rdx ; and $~7,%rdx ; mov (%rdx),%rdi ; call Fat32Core.mount
+open:   mov %r13,%rdi ; and $~7,%rdi ; mov (%rdi),%rdi ; call Fat32Core.open
+```
+
+So arity/arg-order clobber and `me fn` writeback corruption are both ELIMINATED.
+`mount` differs only in that it runs on the LOCAL `root`, while `open` runs on
+`g_root_fat32.unwrap()`. `Fat32Core.mount` also never dereferences `self` in its
+own body (it tail-calls `read_boot_sector(self)`, which touches offset 0x00 only),
+which is why a bad receiver survived it silently.
+
+### The defect
+`_g_vfs_write_file_text_unsealed_v1` lowers `g_root_fat32.unwrap()` to:
+
+```
+movabs $0x807910c,%rsi ; mov (%rsi),%rdi   ; the Option slot
+movabs $0x8000970,%rsi ; call *%rsi        ; rt_unwrap_or_trap
+mov    %rax,%r12       ; ... ; mov %r12,%rdi ; call g_vfs_root_write_file_text
+```
+
+`rt_unwrap_or_trap` for x86_64 comes from
+`examples/09_embedded/simple_os/arch/common/boot/freestanding_value_registry_impl.h`
+(the only includer is `arch/x86_64/boot/freestanding_value_registry.c`). It gated
+enum identification on **registry membership**:
+
+```c
+if (!simpleos_fv_contains(simpleos_fv_enums, &simpleos_fv_enum_count,
+                          raw, sizeof(SimpleOsFreestandingEnumV1))) return value;
+```
+
+**Nothing ever calls `simpleos_fv_register_enum`.** `/usr/bin/grep -rn` over the
+whole tree returns exactly two lines: its own definition and its prototype — zero
+call sites. `rt_enum_new` (`arch/x86_64/boot/baremetal_stubs.c:14902`) mallocs a
+`RuntimeEnum`, stamps `hdr.type = HEAP_ENUM`, and returns without registering.
+
+So `simpleos_fv_enum_count` is permanently `0`, `simpleos_fv_contains` always
+returns `0`, and **every `.unwrap()` in the x86_64 freestanding kernel silently
+returns the WRAPPER instead of the payload** — from the very first call, not after
+some threshold.
+
+Downstream that is exactly the observed fault. `g_root_fat32.unwrap()` yields the
+`Some`-box; `SharedFat32Driver.open` reads box+0x20 (garbage-but-truthy, so the
+`self.mounted` guard passes rather than returning `Err`), loads `(box+0)` — the
+enum header word — and passes THAT as the `Fat32Core` receiver, which faults on
+`movzbq 0x48(%rax)`.
+
+This also retires the record's run-3 counter-evidence: that diagnostic printed no
+DIAG line and its fault addresses were never resolved, and every `.unwrap()` on
+its own path (flags, Results) was equally broken, so it could not have discriminated.
+
+Note this is the same `rt_unwrap_or_trap` named in `.claude/rules/vcs.md` under
+`check-no-unresolved-runtime-symbols.shs` — there it was UNDEFINED and SEGV'd via a
+NULL GOT slot; here it is defined but unconditionally fails open.
+
+### The fix
+Identify the enum by its heap header instead of by registry membership — the same
+check the sibling accessors `rt_enum_id`, `rt_enum_discriminant` and
+`rt_enum_payload` already use on this exact class of value, on x86_64 and on every
+other arch (cf. `arch/arm64/boot/baremetal_stubs.c:1936-1942`). This makes x86_64's
+`.unwrap()` consistent with the rest of the runtime rather than uniquely broken.
+It is safe: `value` is heap-tagged so `raw` is a real allocation, and only
+`hdr.type` (offset 0) is read before the `HEAP_ENUM` tag proves the object is a
+24-byte `RuntimeEnum`.
+
+Scope is contained: `freestanding_value_registry_impl.h` has exactly one includer,
+the x86_64 TU. Other arches were already correct.
+
+### Follow-up (NOT fixed here, filed deliberately)
+`simpleos_fv_register` silently returns `0` when a table reaches
+`SIMPLEOS_FV_REGISTRY_CAP` (4096, never freed, monotonic), and
+`simpleos_fv_contains` is an O(n) linear scan under a spinlock. The
+still-registry-gated `rt_struct_receiver_valid` therefore has the same fail-open
+shape waiting for it once `simpleos_fv_structs` fills. That is a separate defect
+from the one fixed here and is left open on purpose.
