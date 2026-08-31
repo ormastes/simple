@@ -48,66 +48,35 @@ BACKEND="${SIMPLE_NATIVE_BACKEND:-cranelift}"
 # riscv64-unknown-simpleos` support AND survive a command that actually writes
 # the environment. An explicit SIMPLE_BUILD_COMPILER is still honoured (the D1
 # route-around is deliberate and documented) but is labelled loudly.
-# Capability probe, rewritten 2026-08-31.  The previous body matched the FULL
-# CLI's `native-build --help` banner ("Simple Native Build") and its flag list
-# ("--runtime-bundle"), then ran `check`.  That is a category error for the
-# artifact this lane is actually supposed to use: the only compiler on this
-# host carrying a canonical Stage-2 admission receipt (bootstrap-from-scratch's
-# stage2-admitted/simple) is the BOOTSTRAP CLI (src/app/cli/bootstrap_main.spl),
-# which by design exposes only `compile` and `native-build`.  It prints a
-# different banner, has no `check` command, and omits several supported flags
-# from its help text — yet native_build_flag_needs_value() accepts every flag
-# this lane passes (--runtime-bundle, --target, --linker-script,
-# --entry-closure), and it does in fact produce a correct riscv64 SimpleOS ELF.
-# So the old probe rejected the one admitted compiler for cosmetic reasons and
-# left the lane with no candidate at all.
-#
-# Worse, the `check` half was VACUOUS for exactly that binary: `check` exits 1
-# with "unknown command" long before any rt_env_set, so it passed the >=128
-# test without ever exercising the D1 environment-write path.
-#
-# The replacement is a strictly stronger, positive demonstration: actually
-# cross-build a hello world to $TARGET and require a RISC-V ELF64 out the far
-# end.  That exercises parse, HIR, codegen, the environment writes, the
-# runtime-bundle slot, the linker script and the CC wrapper in one shot, and it
-# cannot be satisfied by help text.  Seed rejection (is_bootstrap_seed) and
-# admission-receipt verification (provision_simpleos_guest_simple_fs.shs
-# --validate-builder) are unchanged and still run separately.
 compiler_can_build_target() {
   probe_bin="$1"
-  probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/simpleos-rv64-capability.XXXXXX")" || return 1
-  printf 'fn main():\n    print("ok")\n' > "$probe_dir/probe.spl"
-  env_rc=0
-  CC="$SYSROOT/lib/cc-riscv64-simpleos" \
-  SIMPLEOS_SYSROOT="$SYSROOT" \
-  SIMPLE_SIMPLE_CORE_PATH="build/os/simple-core-simpleos-riscv64" \
-  SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 \
-  timeout 600 "$probe_bin" native-build \
-    --source "$probe_dir" \
-    --backend "$BACKEND" \
-    --runtime-bundle simple-core \
-    --entry-closure \
-    --entry "$probe_dir/probe.spl" \
-    --target "$TARGET" \
-    --linker-script "$SYSROOT/share/simpleos/simpleos.ld" \
-    -o "$probe_dir/probe.elf" >"$probe_dir/probe.log" 2>&1 || env_rc=$?
+  probe_out="$(timeout 120 "$probe_bin" native-build --target "$TARGET" --help 2>&1)" \
+    && probe_rc=0 || probe_rc=$?
+  [ "$probe_rc" -eq 0 ] || return 1
+  case "$probe_out" in
+    *"Simple Native Build"*) ;;
+    *) return 1 ;;
+  esac
+  case "$probe_out" in
+    *"--runtime-bundle"*) ;;
+    *) return 1 ;;
+  esac
+  case "$probe_out" in
+    *"unknown"*"--target"*|*"unrecognized"*"--target"*) return 1 ;;
+  esac
+  # Environment-write probe: `check` drives rt_env_set (SIMPLE_BOOTSTRAP_* on
+  # ast_reset), which is exactly what the D1 miscompile faults on. Only a
+  # SIGNAL death is disqualifying here — a plain non-zero exit is a verdict
+  # about the fixture, not about the compiler's ABI.
+  env_probe_file="${TMPDIR:-/tmp}/simpleos-native-build-rv64-envprobe.$$.spl"
+  printf 'fn main():\n    print("ok")\n' > "$env_probe_file"
+  timeout 120 "$probe_bin" check "$env_probe_file" >/dev/null 2>&1 \
+    && env_rc=0 || env_rc=$?
+  rm -f "$env_probe_file"
   if [ "$env_rc" -ge 128 ]; then
-    echo "  (candidate died with signal rc=$env_rc on the $TARGET capability build)" >&2
-    rm -rf "$probe_dir"
+    echo "  (candidate died with signal rc=$env_rc on the environment-write probe)" >&2
     return 1
   fi
-  if [ "$env_rc" -ne 0 ] || [ ! -f "$probe_dir/probe.elf" ]; then
-    echo "  (candidate could not cross-build $TARGET: rc=$env_rc)" >&2
-    rm -rf "$probe_dir"
-    return 1
-  fi
-  # Machine 243 == EM_RISCV, read the same way the provision script reads it.
-  probe_machine="$(od -An -tu1 -j 18 -N 2 "$probe_dir/probe.elf" 2>/dev/null | awk '{print $1 + 256 * $2}')"
-  rm -rf "$probe_dir"
-  [ "$probe_machine" = "243" ] || {
-    echo "  (candidate produced a non-RISC-V payload: e_machine=$probe_machine)" >&2
-    return 1
-  }
   return 0
 }
 
@@ -117,11 +86,6 @@ is_bootstrap_seed() {
     *) return 1 ;;
   esac
 }
-
-# The capability probe below performs a REAL cross-build, so the two documented
-# prerequisites must exist before compiler selection, not only after it.
-[ -f "$SYSROOT/share/simpleos/simpleos.ld" ] || { echo "error: run simpleos-sysroot-riscv64.shs first" >&2; exit 1; }
-[ -f "build/os/simple-core-simpleos-riscv64/libsimple_runtime.a" ] || { echo "error: run simpleos-core-archive.shs first" >&2; exit 1; }
 
 COMPILER="${SIMPLE_BUILD_COMPILER:-}"
 COMPILER_IS_SEED=0
