@@ -242,3 +242,67 @@ the x86_64 TU. Other arches were already correct.
 still-registry-gated `rt_struct_receiver_valid` therefore has the same fail-open
 shape waiting for it once `simpleos_fv_structs` fills. That is a separate defect
 from the one fixed here and is left open on purpose.
+
+---
+
+## RESOLVED for L5 (and L8). Next blocker is L6 — the READ path returns empty.
+
+**Status: L5 FIXED.** Two commits, both in
+`examples/09_embedded/simple_os/arch/common/boot/freestanding_value_registry_impl.h`
+(sole includer: `arch/x86_64/boot/freestanding_value_registry.c`):
+
+1. `rt_unwrap_or_trap` identified enums by registry membership; nothing ever
+   registers an enum, so `.unwrap()` was a total no-op returning the wrapper.
+   Now identified by the `HEAP_ENUM` heap header, matching the sibling
+   accessors and every other arch. **This is the L5 root cause.**
+2. The other two fixed-cap monotonic registries in the same file, same class:
+   `rt_value_u64` PANICKED once `simpleos_fv_wide` filled (it boxes every u64,
+   so any real workload exhausts 4096), and `rt_struct_alloc` returned NULL for
+   every allocation once `simpleos_fv_structs` filled. The wide box already
+   carries `magic`/`abi_version`/`kind` and that is now its identity (registry
+   and its 64KB of .bss deleted); struct registration is best-effort bookkeeping
+   and can no longer fail the allocation.
+
+Measured in-guest under real OVMF pflash (no `-kernel`, no `isa-debug-exit`),
+each line a separate full gate run on a freshly built seed:
+
+| tree | verdict |
+|---|---|
+| `origin/main` ea48917812b | `FAIL — 8 check(s) checked, missing: L5 L6 L7 L8` |
+| + fix 1 | `FAIL — ... missing: L5 L6 L7 L8` (FAULT cascade GONE; now a clean `[PANIC] ... wide-value registry exhausted`) |
+| + fix 2 | `FAIL — 8 check(s) checked, missing: L6 L7` |
+
+**L5 and L8 are GREEN.** The `FAULT @` cascade is gone entirely. Verbatim:
+
+```
+[vfsrt] server write begin path=/VFSRT.TXT bytes=32
+[vfsrt] server write path=/VFSRT.TXT ok=true        <- L5 GREEN
+[vfsrt] server stat exists=true
+[vfsrt] server read-back=                            <- L6 RED: EMPTY
+[vfsrt] PROBE FAILED: read-back differs from write
+```
+
+L8 green independently proves the nonce bytes physically reached the raw NVMe
+image, so the WRITE path is correct end to end.
+
+### Next blocker (L6/L7) — a distinct defect, not this one
+`g_vfs_read_file_text(VFSRT_PATH)` returns an **empty** text for a file that
+demonstrably exists on disk (`server stat exists=true`, and L8 finds the bytes
+in the raw image). L7 is only "write and read-back are identical", so it falls
+out of L6 for free — L6 is the single remaining blocker on goal item 5.
+
+Not a printing artifact: the preceding line
+`[vfsrt] server write begin path={VFSRT_PATH} bytes={payload.len()}` uses the
+same `{}` interpolation and rendered `path=/VFSRT.TXT bytes=32` correctly, and
+the `got != payload` comparison is made on the value, not on the rendered text.
+The read genuinely returns "".
+
+Investigation should start at `g_vfs_read_file_text` and the `Fat32Core` read
+path, which — unlike `open` — has never actually executed to completion in this
+lane before now, since everything downstream of `open` was unreachable.
+
+### Also noted, deliberately NOT fixed
+`simpleos_fv_register_enum` now has zero callers AND zero purpose (its table is
+no longer consulted). It is still exported from `freestanding_value_registry.h`,
+so it was left in place rather than changing that header's surface in a fix
+commit.
