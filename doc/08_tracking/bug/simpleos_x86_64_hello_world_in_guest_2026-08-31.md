@@ -239,3 +239,133 @@ Promote from ADVISORY to MANDATORY when all of the following hold:
 3. All 7 serial rungs go green, L6 being the program's own output
    `HELLO_NATIVE_SIMPLEOS_X86_64_OK`.
 4. The interpreter row is either green or still explicitly ADVISORY via B3.
+
+---
+
+## 2026-08-31 (later session): B1 confirmed fixed; five further blockers found
+
+Base: `goal/simpleos-b1-merge-clobber-restore-20260831` @ `91b6b9f28dd`.
+Compiler for every artifact below: the **Rust seed**, rebuilt from that base at
+`/mnt/data/.cargo-target-hello-lane/release/simple` (60,949,888 bytes,
+`Simple Language v1.0.0-rc.1`). The pure-Simple self-hosted compiler is still
+unusable (`hir codec: no Visibility arm for tag -1`), so it produced nothing.
+
+**Recovery note.** None of this lane had ever been committed. The gate, both
+builder scripts, the two entry sources and this record existed only in an
+unpushed worktree; they are absent from `origin/main`, from the base branch,
+and from `git log --all`. They are now committed.
+
+### B1 is fixed
+`SIMPLE_ALLOW_STUB_FALLBACK=0` now yields **zero Simple-module compile
+failures** (was "18 file(s) failed to compile"). The build reaches the link
+stage. Everything below is a *different* bug that B1 was masking.
+
+### B4 — linker script named a module layout that no longer exists (FIXED)
+All 66 assignments in `linker_128mb.ld` pointed at
+`kernel__abi__syscall_shim__spl_handle_*`. The shims were long ago split into
+`syscall_shim_{process,ipc,file,net,device,...}` and the seed emits a `src__os__`
+prefix, so the real names are e.g.
+`src__os__kernel__abi__syscall_shim_process__spl_handle_exit`. Every RHS
+resolved to nothing and `ld.lld` failed the link outright. Same staleness class
+as the B1 facade re-exports, but in the linker script — which is why the
+previous lane never got past it.
+Regenerated mechanically from `nm` over the kernel objects: **88 aliases are
+actually referenced, all 88 resolve unambiguously, 0 missing, 0 ambiguous.**
+Switched to `PROVIDE()`, because a plain `foo = missing;` is a hard error even
+when nothing references `foo` — that made the script brittle against
+`--entry-closure` pruning. `spl_x86_dispatch_installed_syscall_abi` is
+referenced by nothing in this closure and is no longer force-assigned.
+NOTE: this script is shared with the SSH lane, which carried the same latent
+link failure.
+
+### B5 — FAT32 image writer used a stale paren-less accessor (FIXED)
+`scripts/os/fsexec_mkimg_simple.spl:44` used `s.length` on a builtin text. The
+seed refuses it under `SIMPLE_JIT_STRICT`:
+`cannot infer field type while lowering _pad_ascii: struct 'String' field 'length'`.
+That aborted the gate with ERROR before any VM started. Fixed to `s.len()`;
+the padding is ASCII-only FAT32 8.3, so bytes-vs-chars does not bite.
+
+### B6 — one-word typo dropped 3,600 lines of weak stubs (FIXED)
+`baremetal_stubs.c:3662` called `x86_64_collector_nonce_slot_line_length`,
+declared nowhere; line 3649 calls the real `x86_64_nonce_slot_line_length` with
+the same arguments. The whole file therefore failed to compile, dropping every
+weak stub it defines; their references resolved to 0 and the kernel booted to
+`[BOOT64] idt` then faulted repeatedly at low addresses. After the fix the
+kernel grew 438,392 -> 2,062,448 bytes and **L2 went green**.
+
+### B7 — high-MMIO window never mapped at its higher-half VA (FIXED)
+`crt0.s` identity-maps the 1 GiB PCIe MMIO window at `0xC000000000` via
+PML4[1]/PDPT[256]. But `baremetal_stubs.c:1937` translates BAR0 to
+`NVME_BAR_VIRT_BASE + (phys - NVME_BAR_PHYS_BASE)` = `0xFFFFC00000000000 + off`.
+Nothing maps that VA at NVMe-init time: the comment claims "present under user
+cr3", but NVMe init runs long before `create_user_address_space`, on crt0's own
+`boot_pml4`. Literal evidence:
+
+```
+[nvme-c] BAR0=0xffffc00000004000 (phys=0xc000004000)
+[fault] rip=0x0000000008004cbe
+[fault] cr2=0xffffc0000000401c        <- BAR0 + 0x1c (CSTS)
+[fault] cr3=0x000000000819e000        <- = boot_pml4, inside the kernel image
+[fault] *** END FRAME (recovering) ***   (forever)
+```
+
+`0xFFFFC00000000000` decodes to PML4[384], PDPT[0]. Added exactly those two
+entries, aliasing the same `boot_high_pd` — no extra page-table memory, identity
+map untouched. **L3 went green**: NVMe now reports CAP, admin queues, and
+`NS1: sectors=1833, sector_size=512`.
+
+### B8 — `rt_file_write_bytes` writes 3 bytes and returns true (OPEN)
+Blocking L4. The gate builds the guest FAT32 volume by concatenating a
+structural prefix with the payload. The writer reports
+`prefix_bytes=381440` but `build/os/elfexec_simple/fat32-simple-prefix.bin` is
+**3 bytes** on disk, so sector 0 of the guest disk is `08 00 00` followed by the
+raw ELF instead of a FAT32 boot sector:
+
+```
+[nvme-c] Sector 0 read OK, first bytes: 08 00 00 7F 45 4C 46 02 01 01 00 00 00 00 00 00
+[nvme-c] FAT32 signature at offset 510: 0x0x0
+[hello] FAIL fat32 open /FSEXEC.ELF rc=-1
+```
+
+Minimal reproducer (interpreter path, `simple run`): a 4-element array built by
+`push` and an 8-element array from `rt_byte_array_new_len` both write the SAME
+3 bytes `08 00 00`, while the arrays themselves read back correctly
+(`c len=8 c0=235 c7=170`) and the call returns `true`. So the arrays are fine
+and the defect is in `rt_file_write_bytes` argument marshalling/dispatch, not in
+the caller. Ruled out by inspection: the handler body
+(`interpreter_extern/file_io.rs:1540`), `value.rs:1838 byte_array_view`, and
+`extract_path`. Strong lead: `codegen/runtime_sffi.rs:2045` declares
+`rt_file_write_bytes` with FOUR i64 params (ptr,len,ptr,len) while the
+interpreter handler expects TWO `Value`s — an arity/marshalling mismatch that
+would explain a 3-byte payload.
+
+### Still-open C defects (pre-existing, all OFF the hello call path)
+Not fixed; none is reachable from this entry.
+- `tls13_aes256_gcm_helper.c:86,94,101` — `x86_aes_repack_bytes` used 3x,
+  defined and declared nowhere. Same class as the `rt_unwrap_or_trap` incident.
+- `runtime_service_owners.c:65` — `no member named 'gc_flags' in 'HeapHeader'`
+  and `use of undeclared identifier 'BAREMETAL_GC_BYTE_PACKED'`.
+- `up2_dci_uefi_loader.c:1` — `efi.h` not found; external gnu-efi SDK is not
+  installed here. Legitimate SKIP, not a defect.
+
+### Rung status (real OVMF pflash boot; never `-kernel`, never isa-debug-exit)
+| rung | | status |
+|---|---|---|
+| L1 | `[grub-uefi] multiboot loading` | **OK** |
+| L2 | `SimpleOS x86_64 hello-world in-guest` | **OK** |
+| L3 | `[hello] nvme online` | **OK** |
+| L4 | `[hello] /FSEXEC.ELF read size=` | MISS — blocked by B8 |
+| L5 | `[hello] entering ring 3` | MISS |
+| L6 | `HELLO_NATIVE_SIMPLEOS_X86_64_OK` | MISS |
+| L7 | `[hello] native program exited rc=0` | MISS |
+
+Gate verdict, honestly RED:
+`FAIL — 1 program(s) staged, 7 rung(s) checked, missing: L4 L5 L6 L7;`
+`interpreter row ADVISORY/RED: no in-guest Simple interpreter exists in this tree`
+
+### Interpreter row — still ADVISORY/RED
+`bin/release/x86_64-unknown-simpleos/simple` exists nowhere on this host and
+`build/os/sysroot/lib/` is absent. Producing it needs the LLVM sysroot plus a
+full `simpleos-native-build.shs` of `src/compiler`+`src/lib`+`src/app`, behind a
+Stage2 admission-receipt check. Not attempted this session; L6-equivalent for
+the interpreter row was NOT reached and must not be claimed.
