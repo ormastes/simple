@@ -1302,11 +1302,21 @@ static RuntimeClosure *as_closure(RuntimeValue value)
     return c;
 }
 
-RuntimeValue rt_closure_new(RuntimeValue func_ptr, RuntimeValue capture_count)
+/* PARAMETER WIDTHS ARE NOT FREE CHOICES — they are the codegen ABI, declared in
+ * src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:678-681:
+ *   rt_closure_new         (I64, I32)      -> I64
+ *   rt_closure_set_capture (I64, I32, I64) -> I8
+ *   rt_closure_get_capture (I64, I32)      -> I64
+ *   rt_closure_func_ptr    (I64)           -> I64
+ * and matched by the Rust runtime (value/objects.rs:177,198,213,227), whose
+ * index/count parameters are `u32`. Declaring these as 64-bit RuntimeValue —
+ * as this port first did — leaves the upper half of the register undefined, so
+ * the count/index read as garbage, the capture lookup falls out of range, and
+ * the indirect call goes through a NULL func_ptr. That is a trap, and it is
+ * exactly what the mcp row did in-guest. */
+RuntimeValue rt_closure_new(RuntimeValue func_ptr, uint32_t capture_count)
 {
-    /* Same raw-or-encoded tolerance every other arity-taking entry in this
-     * file uses: codegen hands some of these raw and some tag-encoded. */
-    int64_t count = (int64_t)simpleos_raw_or_encoded_int(capture_count);
+    int64_t count = (int64_t)capture_count;
     if (!func_ptr || count < 0) return NIL_VALUE;
     /* Bounded like every other allocation in this file: the arena is 1 MiB. */
     if (count > 4096) return NIL_VALUE;
@@ -1321,21 +1331,20 @@ RuntimeValue rt_closure_new(RuntimeValue func_ptr, RuntimeValue capture_count)
     return ENCODE_PTR(c);
 }
 
-RuntimeValue rt_closure_set_capture(RuntimeValue closure, RuntimeValue index, RuntimeValue value)
+/* Returns I8 per the codegen spec, not a tagged RuntimeValue. */
+int8_t rt_closure_set_capture(RuntimeValue closure, uint32_t index, RuntimeValue value)
 {
     RuntimeClosure *c = as_closure(closure);
-    int64_t i = (int64_t)simpleos_raw_or_encoded_int(index);
-    if (!c || i < 0 || (uint64_t)i >= c->capture_count) return ENCODE_INT(0);
-    c->captures[i] = value;
-    return ENCODE_INT(1);
+    if (!c || (uint64_t)index >= c->capture_count) return 0;
+    c->captures[index] = value;
+    return 1;
 }
 
-RuntimeValue rt_closure_get_capture(RuntimeValue closure, RuntimeValue index)
+RuntimeValue rt_closure_get_capture(RuntimeValue closure, uint32_t index)
 {
     RuntimeClosure *c = as_closure(closure);
-    int64_t i = (int64_t)simpleos_raw_or_encoded_int(index);
-    if (!c || i < 0 || (uint64_t)i >= c->capture_count) return NIL_VALUE;
-    return c->captures[i];
+    if (!c || (uint64_t)index >= c->capture_count) return NIL_VALUE;
+    return c->captures[index];
 }
 
 RuntimeValue rt_closure_func_ptr(RuntimeValue closure)

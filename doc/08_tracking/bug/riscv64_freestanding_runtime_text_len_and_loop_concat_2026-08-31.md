@@ -185,3 +185,59 @@ ports of the existing hosted ABI in `src/runtime/runtime_native.c`, not new
 symbols). MCP additionally needs `rt_closure_new` / `rt_closure_func_ptr`
 (closure support, required by `DispatchEntry.handler`), which is the deepest of
 the remaining items.
+
+## Update 2026-08-31 — measured on the PR #173 base (u64 `.len()` ABI fix)
+
+All evidence below is in-guest on SimpleOS riscv64 under real OpenSBI v1.4
+`fw_payload` (`-bios` only; no `-kernel`, no `isa-debug-exit`), seed-built.
+
+### #173 DOES clear the stalls
+Caret and the test runner no longer hang. Both rows now run to completion and
+reach `[components] parking`. The failure moved from a hang to a wrong answer.
+
+### Two further defects found and FIXED here
+1. **`rt_string_builder_push` had the wrong signature.** The riscv64 port took
+   `(builder, data, len)` and cast argument 2 to `const char *`. The hosted
+   contract (`runtime.h:405`), the codegen ABI
+   (`runtime_sffi.rs:515`, `rt_string_builder_push(I64, I64) -> I64`) and the
+   aarch64 sibling (`freestanding_runtime.c:408`) all say TWO arguments whose
+   second is a tagged string HANDLE. Codegen's 2-argument call therefore copied
+   the string object's HEADER bytes with a garbage length. Probe step 9a printed
+   32 NUL-ish bytes and step 9b hung; after the fix they print `xxxxxxx` and
+   `yyyyy` and the probe reaches `PROBE_TEXT_PRIMITIVES_SIMPLEOS_RISCV64_DONE`.
+2. **The closure ports had the wrong parameter widths.**
+   `runtime_sffi.rs:678-681` declares `rt_closure_new(I64, I32)`,
+   `rt_closure_set_capture(I64, I32, I64) -> I8`,
+   `rt_closure_get_capture(I64, I32)`; the Rust runtime agrees (`u32` index,
+   `value/objects.rs:177,198,213`). The port had used 64-bit parameters, leaving
+   the upper register half undefined. Corrected to `uint32_t` / `int8_t`.
+
+### STILL OPEN — appending a `chars()` element ends the loop after one iteration
+Probe step 9d was added specifically to separate the two variables that step 9c
+confounds (a branch, and a loop-variable append). It appends the loop variable
+with NO branch:
+
+    var acc_d = ""
+    for ch in tail.chars():
+        acc_d = acc_d + ch
+
+With `tail` = `"user"}` this must print `"user"}`. It prints a single `"` —
+the first character only. Step 9c (same append, with an `if`) likewise yields
+one character. Meanwhile 9a and 9b, which append a LITERAL in the same loop
+shapes, are byte-correct. So the defect is **not** branch/phi lowering: it is
+that appending a runtime-produced string (a `chars()` element) inside the loop
+that is iterating that same `chars()` array stops the loop after one pass.
+
+This is the remaining cause of both red rows: caret's `extract_json_string` and
+the test runner's `parse_test_output` are exactly this pattern, which is why
+caret reports `extracted content=` (empty) and the runner reports neither
+`passed=2` nor `failed=1`.
+
+### STILL OPEN — the mcp row traps
+The mcp row traps before its first `println`, inside
+`id_path_intern` / `DispatchRegistry` / `dispatch_wrap`. The CPU re-enters the
+guest entry: across 373,249 serial lines the OpenSBI banner appears exactly
+ONCE, so this is a trap re-entry, not a firmware reset. The closure ABI fix
+above was necessary but not sufficient — the trap survives it. Ruled out:
+defect C1 (no module-level `val`/`var` initialised from a call exists in
+`id_path.spl`, `authority_token.spl` or `mcp/dispatch.spl`).
