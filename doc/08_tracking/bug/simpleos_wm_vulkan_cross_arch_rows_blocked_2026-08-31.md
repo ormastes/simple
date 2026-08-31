@@ -157,3 +157,78 @@ boots OpenSBI with **no guest payload** and proves nothing Vulkan-relevant.
 | riscv64 | not done | METAL-hardcoded entry, no producer, no ivshmem lane — new feature work |
 
 No vacuous gate was authored for any row.
+
+## x86_64 update (measured after the first daemon build attempts)
+
+The earlier "no defect found — needs wall time" line above is **superseded**.
+The daemon build fails for real reasons, reproduced twice with the prior lane's
+exact signature. Two defects, in order:
+
+### 1. `unknown extern function: rt_heap_ref_wellformed` — FIXED
+
+Recovering the dropped middle of the worker's truncated stderr gave exactly one
+cause. The symbol is defined in `src/runtime/runtime_native.c:7975`,
+`src/runtime/simple_core/core_enum.spl:103`, `runtime/src/value/objects.rs:363`
+and `common/src/runtime_symbols.rs:658`, but `interpreter_extern/mod.rs` is a
+THIRD, independent registry that lacked it. Registered it there; the repo's own
+`check-interpreter-extern-registry-gap.shs` went from `1 new` to `0 new`. The
+build then advanced from failing in *semantic* to reaching *HIR 95/96*.
+
+### 2. 772 `unresolved type` HIR errors — OPEN, and the row's real blocker
+
+Phase 3 then failed behind
+`phase 3 FAILED (diagnostics unreadable: error array did not survive transport)`
+— a deliberate degradation in `driver_orchestration.spl:257-259`, where
+`self.errors` at offset `0xb8` faults because an aggregate-returning method
+receives a zeroed `self`, so the driver declines to read diagnostics rather than
+SEGV. Registering `rt_heap_ref_wellformed` is what makes that guard *work*: it
+converted a silent corruption into a detected one.
+
+`SIMPLE_BOOTSTRAP_DEBUG=1` (`driver_orchestration.spl:220`) unlocks the real
+list. There are **772** errors, all of one kind:
+
+    [bootstrap-phase3-errors] count=772
+    HIR lowering error in src/app/simpleos_gpu_host/daemon_runner.spl:
+        unresolved type: BackendCapability
+    ... FramePacingCounters, Engine2DFontOwner, ComputeDispatchResult,
+        BaremetalBackend, VirtioGpuBackend, BackendProbeResult
+
+**The file attribution is wrong and must not be chased.** `daemon_runner.spl`
+and `platform_all.spl` reference every one of those type names **zero** times
+textually. The types are defined under `src/lib/gc_async_mut/gpu/engine2d/`
+(`backend_capability.spl`, `wm_frame_pacing.spl`, `font_owner.spl`,
+`compute_dispatch.spl`, `backend_baremetal.spl`, `backend_virtio_gpu.spl`,
+`backend_probe.spl`) and are referenced by
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl`, which IS in the closure and DOES
+import them (`engine.spl:35,36,57,58,60`). Their defining modules are NOT in the
+closure — only 3 of the `gc_async_mut/gpu/engine2d/*` modules appear in it.
+
+So the defect is in **entry-closure pruning**, not in the import paths: the
+closure walker does not follow `engine.spl`'s `use std.gpu.engine2d.<mod>`
+imports. Note `src/lib/gpu/` does not exist — `std.gpu.*` is served by the
+`surface_alias` step (111 aliases), and **91 files** repo-wide import in that
+style, so the style is an established convention rather than breakage.
+
+### Disproved lead: PR #198 (`-> ()` compiles to a trap)
+
+Worth recording because the hypothesis was reasonable and is now closed.
+PR #198 fixes `Type::Tuple(vec![])` resolving to a non-`VOID` TypeId, so
+`-> ()` emitted `ud2` with no `ret`. The hypothesis was that the same
+return-type misclassification drove the sret/receiver ABI and explained the
+zeroed `self` above. **Measured, not assumed:** `type_resolver.rs` from
+`0f8ff6aa96e` applied cleanly, the seed rebuilt clean, and the daemon build was
+rerun from a deliberately cleared cache. The failure is **byte-identical** —
+same 772 unresolved-type errors. #198 does not touch this path. Its own
+evidence was a freestanding-guest SIGILL; this is a host-side unresolved-type
+failure with no trap. Two bugs that rhyme, not one.
+
+### Status
+
+x86_64 kernel: **built** (`KERNEL_RC=0`), 8.1 MB x86-64 ELF, statically linked.
+`nm`: `rt_undefined=0 rt_weak=29 rt_text_defined=407` — the unverified
+"53 undefined rt_*" figure measures **0**. Absent `rt_vulkan_provider_*` in the
+guest is correct: there is no in-guest Vulkan.
+
+x86_64 daemon: **not built**. No `simpleos_gpu_host` binary exists anywhere on
+this host, so the gate cannot run and the row is honestly RED at its
+`host GPU daemon missing` precondition. No vacuous pass was manufactured.
