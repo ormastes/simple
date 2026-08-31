@@ -620,6 +620,38 @@ fn initialize_profiling(options: &TestOptions, quiet: bool) {
     }
 }
 
+/// Verdict text for a coverage run that never reached an instrumented
+/// execution path. Mirrors the repo-wide `ERROR — nothing was checked`
+/// convention: a run that did not execute what the operator asked for is an
+/// ERROR, never a pass.
+pub const COVERAGE_NOT_INSTRUMENTED_ERROR: &str =
+    "ABORTED BEFORE EXECUTION — --coverage was requested but this runner's \
+interpreter mode never builds or runs the instrumented (MIR-probe) artifact, \
+so no coverage evidence exists for this spec. This is NOT a test result. \
+Re-run with an instrumented execution mode, or set \
+SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED \
+run (which is still not counted as coverage evidence).";
+
+/// True only when the operator explicitly opted in to the uninstrumented
+/// degrade via `SIMPLE_COVERAGE_FALLBACK=interpreter`. Any other value — and
+/// the unset case — fails closed.
+pub fn coverage_interpreter_fallback_opted_in() -> bool {
+    matches!(
+        std::env::var("SIMPLE_COVERAGE_FALLBACK").as_deref(),
+        Ok("interpreter")
+    )
+}
+
+/// Decide whether an interpreter-mode run may proceed under `--coverage`.
+/// Returns `Err(reason)` when the run must be reported as an ERROR instead of
+/// being executed and counted.
+pub fn coverage_interpreter_gate(coverage_requested: bool, opted_in: bool) -> Result<(), &'static str> {
+    if coverage_requested && !opted_in {
+        return Err(COVERAGE_NOT_INSTRUMENTED_ERROR);
+    }
+    Ok(())
+}
+
 /// Initialize coverage tracking if enabled
 fn initialize_coverage(options: &TestOptions, quiet: bool) {
     if options.coverage {
@@ -989,7 +1021,43 @@ fn execute_test_files(
                     }
                 }
             }
+            TestExecutionMode::Interpreter if coverage_interpreter_gate(
+                options.coverage,
+                coverage_interpreter_fallback_opted_in(),
+            )
+            .is_err() =>
+            {
+                // FAIL CLOSED: `--coverage` asked for instrumented execution.
+                // Interpreter mode never builds the instrumented artifact
+                // (coverage probes are MIR-owned; the HIR tree interpreter
+                // never executes them), so a green verdict here would be
+                // evidence of nothing. Report an ERROR naming the reason
+                // rather than a pass. See
+                // .claude/rules/vcs.md on the `ERROR — nothing was checked`
+                // convention.
+                if !quiet {
+                    eprintln!("[coverage-abort] {}: {}", path.display(), COVERAGE_NOT_INSTRUMENTED_ERROR);
+                }
+                TestFileResult {
+                    path: path.to_path_buf(),
+                    passed: 0,
+                    failed: 1,
+                    skipped: 0,
+                    ignored: 0,
+                    duration_ms: 0,
+                    error: Some(COVERAGE_NOT_INSTRUMENTED_ERROR.to_string()),
+                    individual_results: vec![],
+                }
+            }
             TestExecutionMode::Interpreter => {
+                if options.coverage && !quiet {
+                    // Explicitly opted-in degrade: loud, every spec, and never
+                    // presented as coverage evidence.
+                    eprintln!(
+                        "[coverage-uninstrumented] {}: SIMPLE_COVERAGE_FALLBACK=interpreter — running WITHOUT coverage instrumentation; this run produces NO coverage evidence.",
+                        path.display()
+                    );
+                }
                 // TODO(P2/driver): port this Rust test-runner file to pure Simple.
                 // Per CLAUDE.md, all code must live in .spl/.shs — the Rust
                 // driver is the bootstrap seed only. The production binary is
@@ -1747,6 +1815,31 @@ fn handle_run_management_with_db(options: &TestOptions, db_path: &Path) -> TestR
 
 #[cfg(test)]
 mod tests {
+
+    // Regression: a coverage run that never reaches an instrumented execution
+    // path must be an ERROR, never a pass.
+    // Bug: silent interpreter fallback under --coverage.
+    #[test]
+    fn coverage_gate_fails_closed_when_not_opted_in() {
+        let verdict = super::coverage_interpreter_gate(true, false);
+        assert!(verdict.is_err(), "--coverage in interpreter mode must fail closed");
+        let reason = verdict.unwrap_err();
+        assert!(reason.contains("ABORTED BEFORE EXECUTION"));
+        assert!(reason.contains("NOT a test result"));
+        assert!(reason.contains("SIMPLE_COVERAGE_FALLBACK=interpreter"));
+    }
+
+    #[test]
+    fn coverage_gate_allows_explicit_opt_in() {
+        assert!(super::coverage_interpreter_gate(true, true).is_ok());
+    }
+
+    #[test]
+    fn coverage_gate_does_not_cry_wolf_without_coverage() {
+        assert!(super::coverage_interpreter_gate(false, false).is_ok());
+        assert!(super::coverage_interpreter_gate(false, true).is_ok());
+    }
+
     use std::fs;
     use std::path::PathBuf;
 

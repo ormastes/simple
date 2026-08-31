@@ -951,16 +951,45 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
         mcdc_skip_reason: reason
     )
 
+# --- coverage fail-closed gate (2026-08-31) -------------------------------
+# A coverage run whose instrumented wrapper will not compile has NOT executed
+# what the operator asked for. Reporting the unwrapped interpreter run as a
+# normal pass made every green `--coverage` verdict unevidenced. Per the
+# repo-wide `ERROR — nothing was checked` convention that is an ERROR, not a
+# pass. Both helpers are pure so the behaviour can be pinned by a spec without
+# driving a real native build.
+
+# Only the exact opt-in value re-enables the (loud, non-evidence) degrade.
+# Unset, empty, "1", "true" and every other value fail closed.
+pub fn coverage_interpreter_fallback_opted_in(env_value: text) -> bool:
+    env_value == "interpreter"
+
+pub fn coverage_wrapper_abort_error(diagnostic: text) -> text:
+    "ABORTED BEFORE EXECUTION — coverage instrumentation wrapper failed to compile; the spec was NEVER run under the requested coverage path, so this is NOT a test result. Compiler diagnostic: " + diagnostic + " (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)"
+
 # First NON-EMPTY line. `compile_output` is `stdout + "\n" + stderr`, so when
 # the compiler wrote nothing to stdout the string starts with "\n" and a
 # naive first-line take yields an empty diagnostic (observed: the printed
 # "Compiler diagnostic:" was blank for every real fallback).
 fn first_line(text_value: text) -> text:
+    # Prefer the first line that actually names an error; the compile output is
+    # dominated by seed banners and lint warnings, and taking line 1 verbatim
+    # masked the real diagnostic in every fail-closed/degrade message.
+    var first_non_noise = ""
     for line in text_value.split("\n"):
         val trimmed = line.trim()
-        if trimmed != "":
+        # The seed binary prints a two-line "bootstrap seed only" banner on
+        # every invocation. Taking it as "the compiler diagnostic" masked the
+        # real error in every fail-closed/degrade message.
+        if trimmed == "" or
+            trimmed.starts_with("WARNING: this Rust-built Simple binary") or
+            trimmed.starts_with("Build and use the pure-Simple"):
+            continue
+        if trimmed.contains("error") or trimmed.contains("Error"):
             return trimmed
-    ""
+        if first_non_noise == "":
+            first_non_noise = trimmed
+    first_non_noise
 
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
@@ -1021,6 +1050,30 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
             val reason = "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + first_line(compile_output)
             return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-fallback", reason)
+        # FAIL CLOSED (2026-08-31): a coverage run whose instrumented wrapper
+        # will not compile has NOT executed what the operator asked for. The
+        # old behaviour ran the unwrapped spec on the interpreter and returned
+        # its pass counts as a normal pass, so `--coverage` reported green over
+        # a build that never happened. Per the repo-wide
+        # `ERROR — nothing was checked` convention that is an ERROR, not a
+        # pass. The degrade stays available, but only when the operator asks
+        # for it explicitly via SIMPLE_COVERAGE_FALLBACK=interpreter, and even
+        # then it is loudly tagged and never presented as coverage evidence.
+        if options.coverage and wrapper_active and not coverage_interpreter_fallback_opted_in(env_get("SIMPLE_COVERAGE_FALLBACK") ?? ""):
+            val end_abort = time_now_unix_micros()
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (end_abort - start) / 1000, setup_ms: 0,
+                error: coverage_wrapper_abort_error(first_line(compile_output)),
+                timed_out: false, cached: false,
+                compile_ms: compile_ms, resource_usage: compile_scoped.usage,
+                resource_class: test_resource_class(file_path),
+                cohort_id: test_execution_cohort_id(file_path, options),
+                budget_status: compile_scoped.budget_status,
+                anomaly_status: "incomplete",
+                mcdc_skip_reason: "coverage-abort: wrapper failed to compile"
+            )
         if options.coverage and wrapper_active:
             # The coverage wrapper (build_coverage_wrapper) writes an
             # instrumented copy of the spec to a fresh temp file and compiles
@@ -1032,7 +1085,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             # below runs the REAL, unwrapped spec and reports its real
             # pass/fail, so this cannot mask a genuine defect.
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
-            val reason = "Coverage instrumentation skipped: wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + first_line(compile_output)
+            val reason = "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + first_line(compile_output)
             return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "coverage-fallback", reason)
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
