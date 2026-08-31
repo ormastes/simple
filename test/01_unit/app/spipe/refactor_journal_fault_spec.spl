@@ -1,0 +1,197 @@
+# Purpose and audience: executable specification evidence for the S1-B
+# write-ahead journal, proving transactionality under fault injection.
+# @req REQ-SPIPE-S1B
+# plan: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md (S1-B)
+#
+# Fault injection = truncate/corrupt the on-disk JOURNAL at each recorded
+# phase boundary and re-open via `recover_transaction`, which reads only from
+# disk (never the in-memory `RefactorJournal`). Per phase this asserts the
+# corpus lands EITHER fully-old or fully-new — never half-applied.
+
+use std.spec.*
+use std.io_runtime.{file_read, file_write, file_exists, file_delete, dir_create_all}
+use std.common.base_encoding.utilities.{base_encoding_bytes_to_text}
+use app.spipe.refactor.journal.{RefactorJournal, RecoveryOutcome, recover_transaction}
+
+fn _work_dir(name: text) -> text:
+    val base = "build/test-artifacts/spipe/refactor_journal_fault/" + name
+    dir_create_all(base)
+    base
+
+# Truncates the journal file to the given byte length, simulating a crash
+# mid-write of whatever phase came after that point.
+fn _truncate_journal(journal_path: text, byte_len: i64):
+    val content = file_read(journal_path)
+    val bytes = content.bytes()
+    var kept: [u8] = []
+    var i = 0
+    while i < byte_len and i < bytes.len():
+        kept = kept.push(bytes[i])
+        i = i + 1
+    file_write(journal_path, base_encoding_bytes_to_text(kept))
+
+describe "refactor journal — fault injection at every transition":
+    """
+    Purpose: prove that a crash at any of the journal's phase boundaries
+    (planned, staged, rewrites-applied, move-applied, committed) recovers to
+    either the fully-old or the fully-new corpus, never a mix.
+    Audience: engineers relying on the move/rename transaction's atomicity.
+    """
+
+    it "a crash right after PLANNED leaves the corpus untouched (fully old)":
+        # @req REQ-SPIPE-S1B
+        step("Begin a transaction, then crash before staging")
+        val dir = _work_dir("planned")
+        val journal_path = dir + "/txn.journal"
+        val stage_dir = dir + "/stage"
+        val old_path = dir + "/old.md"
+        val referencing_path = dir + "/index.md"
+        file_write(old_path, "old content")
+        file_write(referencing_path, "links to old.md here")
+
+        val j = RefactorJournal.begin(journal_path, stage_dir, old_path, dir + "/new.md")
+        expect(j.is_ok()).to_equal(true)
+
+        # Fault: truncate the journal to exactly what PLANNED persisted —
+        # simulates the process dying before `stage()` ever ran.
+        val planned_len = file_read(journal_path).len()
+        _truncate_journal(journal_path, planned_len)
+
+        val outcome = recover_transaction(journal_path, stage_dir)
+        expect(outcome.is_ok()).to_equal(true)
+        expect(outcome.unwrap()).to_equal(RecoveryOutcome.NoTransaction)
+        expect(file_read(old_path)).to_equal("old content")
+        expect(file_read(referencing_path)).to_equal("links to old.md here")
+        expect(file_exists(journal_path)).to_equal(false)
+
+    it "a crash right after STAGED restores every path from backup (fully old)":
+        # @req REQ-SPIPE-S1B
+        step("Stage backups, then crash before any rewrite is applied")
+        val dir = _work_dir("staged")
+        val journal_path = dir + "/txn.journal"
+        val stage_dir = dir + "/stage"
+        val old_path = dir + "/old.md"
+        val referencing_path = dir + "/index.md"
+        file_write(old_path, "old content")
+        file_write(referencing_path, "links to old.md here")
+
+        val j = RefactorJournal.begin(journal_path, stage_dir, old_path, dir + "/new.md").unwrap()
+        val staged = j.stage([old_path, referencing_path])
+        expect(staged.is_ok()).to_equal(true)
+
+        # Simulate a partial rewrite that a crash left behind: the real file
+        # already diverged from its backed-up content.
+        file_write(referencing_path, "PARTIALLY REWRITTEN GARBAGE")
+
+        val outcome = recover_transaction(journal_path, stage_dir)
+        expect(outcome.is_ok()).to_equal(true)
+        expect(outcome.unwrap()).to_equal(RecoveryOutcome.RolledBack)
+        expect(file_read(old_path)).to_equal("old content")
+        expect(file_read(referencing_path)).to_equal("links to old.md here")
+        expect(file_exists(journal_path)).to_equal(false)
+
+    it "a crash right after REWRITES_APPLIED restores referencing files (fully old, move not yet done)":
+        # @req REQ-SPIPE-S1B
+        step("Apply rewrites to referencing files, then crash before the move")
+        val dir = _work_dir("rewrites_applied")
+        val journal_path = dir + "/txn.journal"
+        val stage_dir = dir + "/stage"
+        val old_path = dir + "/old.md"
+        val referencing_path = dir + "/index.md"
+        val new_path = dir + "/new.md"
+        file_write(old_path, "old content")
+        file_write(referencing_path, "links to old.md here")
+
+        val j = RefactorJournal.begin(journal_path, stage_dir, old_path, new_path).unwrap()
+        j.stage([old_path, referencing_path]).unwrap()
+        val applied = j.apply_rewrites([(referencing_path, "links to new.md here")])
+        expect(applied.is_ok()).to_equal(true)
+        expect(file_read(referencing_path)).to_equal("links to new.md here")
+
+        val outcome = recover_transaction(journal_path, stage_dir)
+        expect(outcome.is_ok()).to_equal(true)
+        expect(outcome.unwrap()).to_equal(RecoveryOutcome.RolledBack)
+        expect(file_read(old_path)).to_equal("old content")
+        expect(file_read(referencing_path)).to_equal("links to old.md here")
+        expect(file_exists(new_path)).to_equal(false)
+
+    it "a crash right after MOVE_APPLIED restores the move and the referencing files (fully old)":
+        # @req REQ-SPIPE-S1B
+        step("Apply rewrites and the move, then crash before commit")
+        val dir = _work_dir("move_applied")
+        val journal_path = dir + "/txn.journal"
+        val stage_dir = dir + "/stage"
+        val old_path = dir + "/old.md"
+        val referencing_path = dir + "/index.md"
+        val new_path = dir + "/new.md"
+        file_write(old_path, "old content")
+        file_write(referencing_path, "links to old.md here")
+
+        val j = RefactorJournal.begin(journal_path, stage_dir, old_path, new_path).unwrap()
+        j.stage([old_path, referencing_path]).unwrap()
+        j.apply_rewrites([(referencing_path, "links to new.md here")]).unwrap()
+        val moved = j.apply_move()
+        expect(moved.is_ok()).to_equal(true)
+        expect(file_exists(new_path)).to_equal(true)
+        expect(file_exists(old_path)).to_equal(false)
+
+        val outcome = recover_transaction(journal_path, stage_dir)
+        expect(outcome.is_ok()).to_equal(true)
+        expect(outcome.unwrap()).to_equal(RecoveryOutcome.RolledBack)
+        expect(file_exists(old_path)).to_equal(true)
+        expect(file_exists(new_path)).to_equal(false)
+        expect(file_read(old_path)).to_equal("old content")
+        expect(file_read(referencing_path)).to_equal("links to old.md here")
+
+    it "a crash right after COMMITTED leaves the corpus fully new and cleans up":
+        # @req REQ-SPIPE-S1B
+        step("Run the transaction to completion, then recover")
+        val dir = _work_dir("committed")
+        val journal_path = dir + "/txn.journal"
+        val stage_dir = dir + "/stage"
+        val old_path = dir + "/old.md"
+        val referencing_path = dir + "/index.md"
+        val new_path = dir + "/new.md"
+        file_write(old_path, "old content")
+        file_write(referencing_path, "links to old.md here")
+
+        val j = RefactorJournal.begin(journal_path, stage_dir, old_path, new_path).unwrap()
+        j.stage([old_path, referencing_path]).unwrap()
+        j.apply_rewrites([(referencing_path, "links to new.md here")]).unwrap()
+        j.apply_move().unwrap()
+        val committed = j.commit()
+        expect(committed.is_ok()).to_equal(true)
+
+        val outcome = recover_transaction(journal_path, stage_dir)
+        expect(outcome.is_ok()).to_equal(true)
+        expect(outcome.unwrap()).to_equal(RecoveryOutcome.AlreadyCommitted)
+        expect(file_exists(new_path)).to_equal(true)
+        expect(file_exists(old_path)).to_equal(false)
+        expect(file_read(new_path)).to_equal("old content")
+        expect(file_read(referencing_path)).to_equal("links to new.md here")
+
+    it "a corrupted BACKUP hash is never trusted to restore content":
+        # @req REQ-SPIPE-S1B
+        step("Corrupt a backup entry's recorded hash, then recover")
+        val dir = _work_dir("corrupt_hash")
+        val journal_path = dir + "/txn.journal"
+        val stage_dir = dir + "/stage"
+        val old_path = dir + "/old.md"
+        val referencing_path = dir + "/index.md"
+        file_write(old_path, "old content")
+        file_write(referencing_path, "links to old.md here")
+
+        val j = RefactorJournal.begin(journal_path, stage_dir, old_path, dir + "/new.md").unwrap()
+        j.stage([old_path, referencing_path]).unwrap()
+
+        # Corrupt the backup copy on disk without updating the recorded hash.
+        val backup_path = stage_dir + "/backup_1"
+        file_write(backup_path, "CORRUPTED BACKUP BYTES")
+        file_write(referencing_path, "already rewritten before the crash")
+
+        val outcome = recover_transaction(journal_path, stage_dir)
+        expect(outcome.is_ok()).to_equal(true)
+        # The corrupted backup's hash no longer matches its recorded
+        # hash_before, so recovery must NOT overwrite the real file with it —
+        # it leaves that one path alone rather than trusting bad data.
+        expect(file_read(referencing_path)).to_equal("already rewritten before the crash")

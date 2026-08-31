@@ -1,0 +1,185 @@
+# S1-B — write-ahead journal for the move/rename transaction.
+#
+# State machine: planned -> staged -> rewrites_applied -> move_applied ->
+# committed. Recovery is TYPED STATE REPLAY (`Result`/`?`, no exceptions):
+# `recover_transaction` reads the journal fresh from disk (never trusting an
+# in-memory `RefactorJournal` instance) and either finds `STATE COMMITTED`
+# (new state is already whole, nothing to do) or rolls every backed-up path
+# back to its pre-transaction content (old state restored). There is no
+# forward-replay path — rollback-to-old is sufficient to satisfy "fully-old or
+# fully-new, never half-applied" because every phase before COMMITTED only
+# ever *adds* a backup or overwrites a path whose backup already exists.
+#
+# Journal format: plain UTF-8 text, one directive per line (no embedded
+# newlines in any field — paths never contain them), so a fault-injection
+# harness can truncate the file at an arbitrary byte offset and this module
+# must still parse whatever whole lines survived.
+
+use std.io_runtime.{file_read, file_read_result, file_write, file_exists, file_delete, file_rename, dir_create_all}
+use std.common.crypto.sha256.{sha256_text}
+
+struct BackupEntry:
+    path: text
+    backup_name: text
+    hash_before: text
+
+enum RecoveryOutcome:
+    RolledBack
+    AlreadyCommitted
+    NoTransaction
+
+class RefactorJournal:
+    var journal_path: text
+    var stage_dir: text
+    var old_path: text
+    var new_path: text
+    var lines: [text]
+
+    me _persist() -> Result<(), text>:
+        val content = self.lines.join("\n") + "\n"
+        if file_write(self.journal_path, content):
+            Ok(())
+        else:
+            Err("journal_write_failed")
+
+    me _append(line: text) -> Result<(), text>:
+        self.lines = self.lines.push(line)
+        self._persist()
+
+    static fn begin(journal_path: text, stage_dir: text, old_path: text,
+                     new_path: text) -> Result<RefactorJournal, text>:
+        if not dir_create_all(stage_dir):
+            return Err("stage_dir_create_failed")
+        val j = RefactorJournal(journal_path: journal_path, stage_dir: stage_dir,
+            old_path: old_path, new_path: new_path, lines: [])
+        j._append("V1")?
+        j._append("OLD " + old_path)?
+        j._append("NEW " + new_path)?
+        j._append("STATE PLANNED")?
+        Ok(j)
+
+    # Phase 2 (staging): back up the pre-transaction content of every path
+    # that will be touched (the moved file itself plus every referencing
+    # file) BEFORE any of them is modified. A crash here never modifies a
+    # real target file — only journal lines and staging-dir copies exist.
+    me stage(paths: [text]) -> Result<(), text>:
+        var idx = 0
+        for p in paths:
+            if file_exists(p):
+                val content = file_read(p)
+                val backup_name = "backup_" + idx.to_text()
+                val backup_path = self.stage_dir + "/" + backup_name
+                if not file_write(backup_path, content):
+                    return Err("backup_write_failed:" + p)
+                val h = sha256_text(content)
+                self._append("BACKUP " + p + " " + backup_name + " " + h)?
+            idx = idx + 1
+        self._append("STATE STAGED")
+
+    # Phase 3 (first rewrite / link rewrite): overwrite each referencing
+    # file's content with the already-computed rewritten text. Every path
+    # here MUST already have a BACKUP entry from `stage`.
+    me apply_rewrites(rewritten: [(text, text)]) -> Result<(), text>:
+        for pair in rewritten:
+            val path = pair.0
+            val new_content = pair.1
+            if not file_write(path, new_content):
+                return Err("rewrite_write_failed:" + path)
+            self._append("REWRITTEN " + path)?
+        self._append("STATE REWRITES_APPLIED")
+
+    # Phase 4 (file move).
+    me apply_move() -> Result<(), text>:
+        if not file_rename(self.old_path, self.new_path):
+            return Err("move_failed")
+        self._append("MOVED " + self.old_path + " " + self.new_path)?
+        self._append("STATE MOVE_APPLIED")
+
+    # Phase 6 (commit receipt): finalize and drop the staging backups.
+    me commit() -> Result<(), text>:
+        self._append("STATE COMMITTED")?
+        _cleanup_stage_dir(self.stage_dir)
+        Ok(())
+
+export BackupEntry, RecoveryOutcome, RefactorJournal
+
+fn _cleanup_stage_dir(stage_dir: text):
+    var i = 0
+    while i < 4096:
+        val backup_path = stage_dir + "/backup_" + i.to_text()
+        if file_exists(backup_path):
+            file_delete(backup_path)
+            i = i + 1
+        else:
+            i = 4096
+
+fn _line_value(line: text, prefix: text) -> text:
+    line.substring(prefix.len(), line.len())
+
+fn _split_lines(content: text) -> [text]:
+    content.split("\n")
+
+# Reads the journal from disk (never an in-memory instance) and either
+# confirms the transaction already committed, or rolls every backed-up path
+# back to its recorded pre-transaction content — restoring the move if it had
+# been applied. Idempotent: safe to call twice, and safe to call on a journal
+# that never progressed past `STATE PLANNED` (zero backups, no-op restore).
+fn recover_transaction(journal_path: text, stage_dir: text) -> Result<RecoveryOutcome, text>:
+    if not file_exists(journal_path):
+        return Ok(RecoveryOutcome.NoTransaction)
+    val raw = file_read(journal_path)
+    val lines = _split_lines(raw)
+
+    var old_path = ""
+    var new_path = ""
+    var backups: [BackupEntry] = []
+    var moved = false
+    var committed = false
+
+    for line in lines:
+        if line.starts_with("OLD "):
+            old_path = _line_value(line, "OLD ")
+        else if line.starts_with("NEW "):
+            new_path = _line_value(line, "NEW ")
+        else if line.starts_with("BACKUP "):
+            val rest = _line_value(line, "BACKUP ")
+            val parts = rest.split(" ")
+            if parts.len() >= 3:
+                backups = backups.push(BackupEntry(path: parts[0],
+                    backup_name: parts[1], hash_before: parts[2]))
+        else if line.starts_with("MOVED "):
+            moved = true
+        else if line == "STATE COMMITTED":
+            committed = true
+
+    if committed:
+        _cleanup_stage_dir(stage_dir)
+        if file_exists(journal_path):
+            file_delete(journal_path)
+        return Ok(RecoveryOutcome.AlreadyCommitted)
+
+    if backups.len() == 0 and not moved:
+        # Never reached STAGED — nothing on disk was ever touched.
+        if file_exists(journal_path):
+            file_delete(journal_path)
+        return Ok(RecoveryOutcome.NoTransaction)
+
+    # Undo the move first (if it was ever applied) so the moved file's
+    # content lands back at old_path before backups are restored onto it.
+    if moved and old_path != "" and new_path != "":
+        if file_exists(new_path) and not file_exists(old_path):
+            file_rename(new_path, old_path)
+
+    for entry in backups:
+        val backup_path = stage_dir + "/" + entry.backup_name
+        if file_exists(backup_path):
+            val content = file_read(backup_path)
+            if sha256_text(content) == entry.hash_before:
+                file_write(entry.path, content)
+
+    _cleanup_stage_dir(stage_dir)
+    if file_exists(journal_path):
+        file_delete(journal_path)
+    Ok(RecoveryOutcome.RolledBack)
+
+export recover_transaction
