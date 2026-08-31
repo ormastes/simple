@@ -1,0 +1,203 @@
+# ============================================================================
+# common/search/explain_build.spl — §14.14 explanation completion (P3)
+#
+# Builds the closed `SearchExplanationV1`/`FieldExplanationV1`/
+# `TermContributionV1` records (frozen in `explain.spl`) from the checked
+# `Bm25TermTrace` that `ranking.spl`'s `bm25_term_checked_trace` already
+# produces. This module owns no BM25 arithmetic of its own — every scored
+# number here comes straight out of a `Bm25TermTrace`; the only work done in
+# this file is assembly, ordering, checked summation, and the decimal-string
+# / hex encodings the wire format requires.
+#
+# Reconciliation contract: `internal_total` is the checked sum of every
+# field's `field_total`, `public_score_milli` is the one-time conversion of
+# `internal_total` to milli scale, and `tie_key_utf8_hex` is the lowercase hex
+# of `document_id`'s UTF-8 bytes. A caller (the spec) must be able to recompute
+# every one of these independently from the term contributions and get the
+# exact same values (plan hazard: "an explanation whose term contributions do
+# not sum to the reported score is worse than no explanation").
+#
+# Fixed point only (hazard #1): every accumulator here is i64, and every
+# `Bm25TermTrace.weighted` reaches the wire as a decimal STRING
+# (`I128Decimal`, hazard #10) — never converted to a JSON number or re-typed
+# as int once it fits.
+# ============================================================================
+
+use std.common.search.explain.{FieldExplanationV1, SearchExplanationV1, TermContributionV1}
+use std.common.search.corpus_stats.{FieldStatsV1, BM25_FIELD_NAMES, BM25_FIELD_WEIGHTS}
+use std.common.search.ranking.{bm25_term_checked_trace}
+
+# `ranking.spl`'s internal->milli conversion divisor (its `SCALE_TO_MILLI`,
+# not `pub`). Frozen by the `bm25-fixed-v1` identity (`BM25_SCALE` = 1e6,
+# public `Score` milli scale = 1e3) — re-declared here as a plain literal
+# rather than a re-derivation, since P3 owns no BM25 arithmetic.
+val EXPLAIN_SCALE_TO_MILLI: i64 = 1000
+
+val EXPLAIN_BUILD_UNKNOWN_FIELD: text = "unknown_field"
+val EXPLAIN_BUILD_INVALID_FIELD_ORDER: text = "invalid_field_order"
+val EXPLAIN_BUILD_INVALID_TERM_ORDER: text = "invalid_term_order"
+val EXPLAIN_BUILD_OVERFLOW: text = "score_overflow"
+
+val I64_MAX_VALUE: i64 = 9223372036854775807
+val I64_MIN_VALUE: i64 = -9223372036854775807 - 1
+
+fn _checked_add(a: i64, b: i64) -> Result<i64, text>:
+    if b > 0 and a > I64_MAX_VALUE - b:
+        return Err(EXPLAIN_BUILD_OVERFLOW)
+    if b < 0 and a < I64_MIN_VALUE - b:
+        return Err(EXPLAIN_BUILD_OVERFLOW)
+    Ok(a + b)
+
+fn _field_ordinal(field: text) -> i64:
+    var i = 0
+    while i < BM25_FIELD_NAMES.len():
+        if BM25_FIELD_NAMES[i] == field:
+            return i
+        i = i + 1
+    0 - 1
+
+fn _utf8_lt(a: text, b: text) -> bool:
+    val ab = a.bytes()
+    val bb = b.bytes()
+    var i = 0
+    while i < ab.len() and i < bb.len():
+        val av = ab[i].to_i64()
+        val bv = bb[i].to_i64()
+        if av < bv:
+            return true
+        if av > bv:
+            return false
+        i = i + 1
+    ab.len() < bb.len()
+
+val _HEX_DIGITS: text = "0123456789abcdef"
+
+fn utf8_hex(s: text) -> text:
+    """Lowercase hex encoding of `s`'s raw UTF-8 bytes (`tie_key_utf8_hex`)."""
+    val data = s.bytes()
+    var out = ""
+    var i = 0
+    while i < data.len():
+        val v = data[i].to_i64()
+        val hi = v / 16
+        val lo = v % 16
+        out = out + _HEX_DIGITS[hi] + _HEX_DIGITS[lo]
+        i = i + 1
+    out
+
+# One query term's occurrence in one field of one document, prepared for
+# explanation. `term_frequency == 0` means the term is absent from this field
+# and must produce the exact absent-record zeros/nulls (§14.14).
+struct FieldTermInputV1:
+    term: text
+    term_frequency: i64
+    document_frequency: i64
+
+impl FieldTermInputV1:
+    static fn of(term: text, term_frequency: i64, document_frequency: i64) -> FieldTermInputV1:
+        FieldTermInputV1(term: term, term_frequency: term_frequency, document_frequency: document_frequency)
+
+# One authorized field of one document, prepared for explanation. `terms`
+# must already be in ascending unsigned UTF-8 order (validated here, not
+# assumed) and carry every query term whose analyzed form could occur in this
+# field, present or absent.
+struct FieldInputV1:
+    field: text
+    document_length: i64
+    stats: FieldStatsV1
+    terms: [FieldTermInputV1]
+
+impl FieldInputV1:
+    static fn of(field: text, document_length: i64, stats: FieldStatsV1,
+                 terms: [FieldTermInputV1]) -> FieldInputV1:
+        FieldInputV1(field: field, document_length: document_length, stats: stats, terms: terms)
+
+# Build one term's closed contribution record plus its weighted i64 value
+# (kept alongside the record so callers sum the *number*, never re-parsing
+# the decimal-string wire form back into an integer).
+fn build_term_contribution(field: text, weight_milli: i64, document_length: i64,
+                           stats: FieldStatsV1,
+                           input: FieldTermInputV1) -> Result<(TermContributionV1, i64), text>:
+    if input.term_frequency <= 0:
+        return Ok((TermContributionV1.absent(input.term, field), 0))
+    val trace = bm25_term_checked_trace(
+        input.term_frequency, document_length, stats.total_length,
+        stats.num_docs, input.document_frequency, weight_milli)?
+    val record = TermContributionV1.of(
+        input.term, field, input.term_frequency, input.document_frequency,
+        trace.idf_scaled.to_text(), trace.tf_scaled.to_text(), weight_milli,
+        trace.weighted.to_text())
+    Ok((record, trace.weighted))
+
+# Build one field's closed explanation record plus its ordered term
+# contributions and the field's checked weighted total.
+fn build_field_explanation(input: FieldInputV1) -> Result<(FieldExplanationV1, [TermContributionV1], i64), text>:
+    val ordinal = _field_ordinal(input.field)
+    if ordinal < 0:
+        return Err(EXPLAIN_BUILD_UNKNOWN_FIELD)
+    val weight_milli = BM25_FIELD_WEIGHTS[ordinal]
+    var contributions: [TermContributionV1] = []
+    var field_total: i64 = 0
+    var i = 0
+    while i < input.terms.len():
+        if i > 0:
+            if not _utf8_lt(input.terms[i - 1].term, input.terms[i].term):
+                return Err(EXPLAIN_BUILD_INVALID_TERM_ORDER)
+        val built = build_term_contribution(
+            input.field, weight_milli, input.document_length, input.stats,
+            input.terms[i])?
+        contributions.push(built.0)
+        field_total = _checked_add(field_total, built.1)?
+        i = i + 1
+    val record = FieldExplanationV1(
+        field: input.field,
+        document_count: input.stats.num_docs,
+        total_length: input.stats.total_length,
+        average_length_scaled: input.stats.average_length_scaled.to_text(),
+        document_length: input.document_length,
+        weight_milli: weight_milli,
+        field_total: field_total.to_text(),
+    )
+    Ok((record, contributions, field_total))
+
+# Build the full closed `SearchExplanationV1` for one document. `fields` must
+# already be in canonical authorized order (strictly ascending ordinal); a
+# caller may pass a strict subset but never out of order or duplicated.
+fn build_explanation(analyzer: text, logical_index: text, scope_digest: text,
+                     logical_root: text, document_id: text,
+                     fields: [FieldInputV1]) -> Result<SearchExplanationV1, text>:
+    var field_records: [FieldExplanationV1] = []
+    var term_contributions: [TermContributionV1] = []
+    var internal_total: i64 = 0
+    var prior_ordinal: i64 = 0 - 1
+    var i = 0
+    while i < fields.len():
+        val ordinal = _field_ordinal(fields[i].field)
+        if ordinal < 0:
+            return Err(EXPLAIN_BUILD_UNKNOWN_FIELD)
+        if ordinal <= prior_ordinal:
+            return Err(EXPLAIN_BUILD_INVALID_FIELD_ORDER)
+        prior_ordinal = ordinal
+        val built = build_field_explanation(fields[i])?
+        field_records.push(built.0)
+        var j = 0
+        while j < built.1.len():
+            term_contributions.push(built.1[j])
+            j = j + 1
+        internal_total = _checked_add(internal_total, built.2)?
+        i = i + 1
+    val public_score_milli = internal_total / EXPLAIN_SCALE_TO_MILLI
+    Ok(SearchExplanationV1(
+        contract: "bm25-explain-v1",
+        analyzer: analyzer,
+        score_contract: "bm25-fixed-v1",
+        logical_index: logical_index,
+        scope_digest: scope_digest,
+        logical_root: logical_root,
+        document_id: document_id,
+        fields: field_records,
+        term_contributions: term_contributions,
+        internal_total: internal_total.to_text(),
+        public_score_milli: public_score_milli,
+        tie_key_utf8_hex: utf8_hex(document_id),
+    ))

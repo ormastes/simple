@@ -1,0 +1,201 @@
+# Purpose and audience: executable specification evidence for P4 of the
+# SPipe search-providers slice — deterministic `rrf-fixed-v1` fusion over
+# already-ordered source rankings (design §3.5, frozen plan §5.5).
+# @req REQ-SSPEC-LIB
+# plan: doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md
+
+use std.spec
+
+use lib.common.search.fusion_types.{FusionSourceV1, SourceCandidateV1, SourceRankingV1, MatchTierV1, RRF_MAX_SOURCE_K}
+use app.spipe.fusion.rrf.{RRF_SCALE, FusionErrorV1, fuse, fuse_raw, remove_document_from_sources, max_possible_raw_scaled}
+use app.spipe.fusion.adjustments.{AdjustmentV1, ADJUSTMENT_ACCEPTED_TRACE_PROXIMITY_BOOST, ADJUSTMENT_STALE_DEPRECATED_PENALTY, apply_adjustments}
+use app.spipe.fusion.explanation.{build_fusion_explanation}
+
+fn ranking(source: FusionSourceV1, ids: [text]) -> SourceRankingV1:
+    var candidates: [SourceCandidateV1] = []
+    var i = 0
+    while i < ids.len():
+        candidates.push(SourceCandidateV1(document_id: ids[i], source_rank: i + 1, source_score_milli: 0))
+        i = i + 1
+    SourceRankingV1(source: source, source_contract: "test", snapshot_id: "snap-1",
+        scope_digest: "sha256:0", candidates: candidates, complete: true, source_digest: "sha256:0")
+
+describe "rrf-fixed-v1 core fusion":
+    it "sums fixed-point contributions across sources and ranks by adjusted desc then document ID":
+        step("Fuse a lexical-only ranking of three documents with default k")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-a", "doc-b", "doc-c"])]
+        val fused = fuse(sources, 60, 1000, 1).unwrap()
+
+        step("Verify each row's raw score equals the exact fixed-point RRF term")
+        expect(fused.len()).to_equal(3)
+        expect(fused[0].document_id).to_equal("doc-a")
+        expect(fused[0].rrf_raw_scaled).to_equal(RRF_SCALE / 61)
+        expect(fused[1].rrf_raw_scaled).to_equal(RRF_SCALE / 62)
+        expect(fused[2].rrf_raw_scaled).to_equal(RRF_SCALE / 63)
+        expect(fused[0].final_rank).to_equal(1)
+        expect(fused[2].final_rank).to_equal(3)
+
+    it "sums contributions across multiple sources for the same document, never comparing raw provider scores":
+        step("Rank doc-x first in lexical and second in graph")
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-x", "doc-y"]),
+            ranking(FusionSourceV1.Graph, ["doc-y", "doc-x"]),
+        ]
+        val fused = fuse(sources, 60, 1000, 1).unwrap()
+
+        step("Both documents receive the sum of their per-source contributions")
+        val expected = (RRF_SCALE / 61) + (RRF_SCALE / 62)
+        expect(fused.len()).to_equal(2)
+        expect(fused[0].rrf_raw_scaled).to_equal(expected)
+        expect(fused[1].rrf_raw_scaled).to_equal(expected)
+        # Equal raw sums: tie-break is ascending document ID.
+        expect(fused[0].document_id).to_equal("doc-x")
+        expect(fused[1].document_id).to_equal("doc-y")
+
+    it "treats an absent source as simply not contributing (never a zero-score participant)":
+        step("Fuse a document present only in the graph source")
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-only-graph-not-here"]),
+            ranking(FusionSourceV1.Graph, ["doc-solo"]),
+        ]
+        val fused = fuse(sources, 60, 1000, 1).unwrap()
+        val solo = fused[1]
+        expect(solo.document_id).to_equal("doc-solo")
+        expect(solo.rrf_raw_scaled).to_equal(RRF_SCALE / 61)
+
+    it "numbers fused ranks starting at the caller-supplied start_rank (2 when identity is pinned)":
+        step("Fuse two documents starting at rank 2")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-1", "doc-2"])]
+        val fused = fuse(sources, 60, 1000, 2).unwrap()
+        expect(fused[0].final_rank).to_equal(2)
+        expect(fused[1].final_rank).to_equal(3)
+        expect(fused[0].match_tier).to_equal(MatchTierV1.Fused)
+
+    it "rejects k outside [1, 10000]":
+        step("Call fuse with k = 0")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-1"])]
+        val result = fuse(sources, 0, 1000, 1)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(FusionErrorV1.InvalidK)
+
+        step("Call fuse with k = 10001")
+        val over = fuse(sources, 10001, 1000, 1)
+        expect(over.unwrap_err()).to_equal(FusionErrorV1.InvalidK)
+
+    it "rejects source_k outside [1, 1000]":
+        step("Call fuse with source_k = 0")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-1"])]
+        val result = fuse(sources, 60, 0, 1)
+        expect(result.unwrap_err()).to_equal(FusionErrorV1.InvalidSourceK)
+
+        step("Call fuse with source_k above the frozen maximum")
+        val over = fuse(sources, 60, RRF_MAX_SOURCE_K + 1, 1)
+        expect(over.unwrap_err()).to_equal(FusionErrorV1.InvalidSourceK)
+
+    it "rejects duplicate source IDs (two rankings claiming the same FusionSourceV1)":
+        step("Supply two lexical rankings")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-1"]), ranking(FusionSourceV1.Lexical, ["doc-2"])]
+        val result = fuse(sources, 60, 1000, 1)
+        expect(result.unwrap_err()).to_equal(FusionErrorV1.DuplicateSource)
+
+    it "rejects a duplicate document ID within one source's candidate list":
+        step("Build a lexical ranking with the same document ID twice")
+        val dup = SourceRankingV1(source: FusionSourceV1.Lexical, source_contract: "test", snapshot_id: "snap-1",
+            scope_digest: "sha256:0",
+            candidates: [SourceCandidateV1(document_id: "doc-1", source_rank: 1, source_score_milli: 0),
+                         SourceCandidateV1(document_id: "doc-1", source_rank: 2, source_score_milli: 0)],
+            complete: true, source_digest: "sha256:0")
+        val result = fuse([dup], 60, 1000, 1)
+        expect(result.unwrap_err()).to_equal(FusionErrorV1.DuplicateDocumentId)
+
+    it "produces byte-identical output across repeated runs (determinism)":
+        step("Fuse the same three-source input twice")
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-a", "doc-b"]),
+            ranking(FusionSourceV1.Graph, ["doc-b", "doc-a"]),
+            ranking(FusionSourceV1.Semantic, ["doc-a", "doc-b"]),
+        ]
+        val first = fuse(sources, 60, 1000, 1).unwrap()
+        val second = fuse(sources, 60, 1000, 1).unwrap()
+        expect(first.len()).to_equal(second.len())
+        var i = 0
+        while i < first.len():
+            expect(first[i].document_id).to_equal(second[i].document_id)
+            expect(first[i].rrf_raw_scaled).to_equal(second[i].rrf_raw_scaled)
+            expect(first[i].final_rank).to_equal(second[i].final_rank)
+            i = i + 1
+
+describe "bounded deterministic adjustments":
+    it "caps total positive boost at 25% of the max possible raw score":
+        step("Compute the max raw for two sources at k=60")
+        val max_raw = max_possible_raw_scaled(60, 2)
+        val cap = (max_raw * 250) / 1000
+        step("Apply a single boost far larger than the cap")
+        val adjustments = [AdjustmentV1(name: ADJUSTMENT_ACCEPTED_TRACE_PROXIMITY_BOOST, delta_scaled: max_raw)]
+        val result = apply_adjustments(1000, adjustments, max_raw).unwrap()
+        expect(result.boost_cap_scaled).to_equal(cap)
+        expect(result.adjusted_scaled).to_equal(1000 + cap)
+
+    it "scales multiple positive adjustments down proportionally when their sum exceeds the cap":
+        step("Apply two equal boosts whose sum is 4x the cap")
+        val max_raw = max_possible_raw_scaled(60, 1)
+        val cap = (max_raw * 250) / 1000
+        val half = cap * 2
+        val adjustments = [
+            AdjustmentV1(name: ADJUSTMENT_ACCEPTED_TRACE_PROXIMITY_BOOST, delta_scaled: half),
+            AdjustmentV1(name: ADJUSTMENT_ACCEPTED_TRACE_PROXIMITY_BOOST, delta_scaled: half),
+        ]
+        val result = apply_adjustments(0, adjustments, max_raw).unwrap()
+
+        step("The total never exceeds the cap, within integer-truncation rounding of the two equal shares")
+        expect(result.adjusted_scaled).to_be_less_than(cap + 1)
+        expect(result.adjusted_scaled).to_be_greater_than(cap - 3)
+
+        step("The sum of the individually recorded applied deltas equals the total adjustment")
+        expect(result.applied_deltas_scaled[0] + result.applied_deltas_scaled[1]).to_equal(result.adjusted_scaled)
+
+    it "applies penalties in full but floors the adjusted score at zero":
+        step("Apply a penalty larger than the raw score")
+        val adjustments = [AdjustmentV1(name: ADJUSTMENT_STALE_DEPRECATED_PENALTY, delta_scaled: 0 - 5000)]
+        val result = apply_adjustments(1000, adjustments, 1000000).unwrap()
+        expect(result.adjusted_scaled).to_equal(0)
+
+    it "rejects an adjustment with an unnamed/unversioned identifier":
+        step("Apply an adjustment whose name is not one of the four frozen adjustments")
+        val adjustments = [AdjustmentV1(name: "totally_made_up_boost", delta_scaled: 100)]
+        val result = apply_adjustments(1000, adjustments, 1000000)
+        expect(result.is_err()).to_equal(true)
+
+describe "fusion explanation":
+    it "records exact per-source contributions and lets the reader recompute the sum":
+        step("Fuse and then explain a two-source document")
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-a"]),
+            ranking(FusionSourceV1.Graph, ["doc-a"]),
+        ]
+        val rows = fuse_raw(sources, 60, 1000).unwrap()
+        val row = rows[0]
+        val adj = apply_adjustments(row.raw_scaled, [], max_possible_raw_scaled(60, 2)).unwrap()
+        val explanation = build_fusion_explanation(row, ["lexical", "graph", "semantic"], 60, 1000, adj)
+
+        step("Recompute raw_sum_scaled from the recorded per-source contributions")
+        var recomputed = 0
+        var i = 0
+        while i < explanation.source_contributions_scaled.len():
+            recomputed = recomputed + explanation.source_contributions_scaled[i]
+            i = i + 1
+        expect(recomputed).to_equal(explanation.raw_sum_scaled)
+        expect(explanation.source_ranks[2]).to_equal(0 - 1)
+        expect(explanation.contract).to_equal("rrf-fixed-v1")
+        expect(explanation.tie_break_document_id).to_equal("doc-a")
+
+describe "removing a pinned identity from source lists preserves remaining ranks":
+    it "keeps the untouched candidates' source_rank values unchanged (no renumbering)":
+        step("Remove doc-pinned from a three-document lexical ranking")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-pinned", "doc-second", "doc-third"])]
+        val filtered = remove_document_from_sources(sources, "doc-pinned")
+        expect(filtered[0].candidates.len()).to_equal(2)
+        expect(filtered[0].candidates[0].document_id).to_equal("doc-second")
+        expect(filtered[0].candidates[0].source_rank).to_equal(2)
+        expect(filtered[0].candidates[1].source_rank).to_equal(3)
+

@@ -1,0 +1,159 @@
+# Purpose and audience: executable specification evidence for P4 of the
+# SPipe search-providers slice — exact-identity dominance as a tier OUTSIDE
+# RRF (design §3.5, frozen plan §5.5, hazard §6.11).
+# @req REQ-SSPEC-LIB
+# plan: doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md
+
+use std.spec
+
+use lib.common.search.fusion_types.{FusionSourceV1, SourceCandidateV1, SourceRankingV1, MatchTierV1}
+use app.spipe.identity.registry.{registry_of, identity_record, accepted_alias, pending_alias, rejected_alias}
+use app.spipe.identity.resolve.{IdentityErrorV1, resolve, search_with_identity_dominance}
+
+fn ranking(source: FusionSourceV1, ids: [text]) -> SourceRankingV1:
+    var candidates: [SourceCandidateV1] = []
+    var i = 0
+    while i < ids.len():
+        candidates.push(SourceCandidateV1(document_id: ids[i], source_rank: i + 1, source_score_milli: 0))
+        i = i + 1
+    SourceRankingV1(source: source, source_contract: "test", snapshot_id: "snap-1",
+        scope_digest: "sha256:0", candidates: candidates, complete: true, source_digest: "sha256:0")
+
+describe "resolve(value) — the identity dominance tier stops before providers/graph/RRF":
+    it "returns the one authorized unambiguous match by UID":
+        step("Resolve a value that matches a record's UID directly")
+        val registry = registry_of(3, [identity_record("uid-1", "key-1", [], true)])
+        val result = resolve(registry, "uid-1").unwrap()
+        expect(result.resolved_uid).to_equal("uid-1")
+        expect(result.pinned_rank).to_equal(1)
+        expect(result.registry_generation).to_equal(3)
+
+    it "returns the one authorized unambiguous match by key":
+        step("Resolve a value that matches a record's key, not its UID")
+        val registry = registry_of(1, [identity_record("uid-2", "the-key", [], true)])
+        val result = resolve(registry, "the-key").unwrap()
+        expect(result.resolved_uid).to_equal("uid-2")
+
+    it "returns the one authorized unambiguous match by ACCEPTED alias":
+        step("Resolve a value that matches only an accepted alias")
+        val registry = registry_of(1, [identity_record("uid-3", "key-3", [accepted_alias("nickname", "curator")], true)])
+        val result = resolve(registry, "nickname").unwrap()
+        expect(result.resolved_uid).to_equal("uid-3")
+        expect(result.alias_authority).to_equal("curator")
+        expect(result.alias_status).to_equal("accepted")
+
+    it "returns not_found when no record matches":
+        step("Resolve a value with no matching UID, key, or alias")
+        val registry = registry_of(1, [identity_record("uid-4", "key-4", [], true)])
+        val result = resolve(registry, "nothing-matches-this")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(IdentityErrorV1.NotFound)
+
+    it "returns typed ambiguous_identity when multiple authorized records match":
+        step("Register two authorized records sharing the same accepted alias")
+        val registry = registry_of(1, [
+            identity_record("uid-5", "key-5", [accepted_alias("shared", "team-a")], true),
+            identity_record("uid-6", "key-6", [accepted_alias("shared", "team-b")], true),
+        ])
+        val result = resolve(registry, "shared")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(IdentityErrorV1.AmbiguousIdentity)
+
+    it "never counts an unauthorized record toward found or ambiguous":
+        step("One authorized and one unauthorized record share the same key")
+        val registry = registry_of(1, [
+            identity_record("uid-7", "shared-key", [], true),
+            identity_record("uid-8", "shared-key", [], false),
+        ])
+        val result = resolve(registry, "shared-key").unwrap()
+        step("The unauthorized record does not create an ambiguity")
+        expect(result.resolved_uid).to_equal("uid-7")
+
+    it "does not match a PENDING alias":
+        step("Resolve a value that is only a pending (not yet accepted) alias")
+        val registry = registry_of(1, [identity_record("uid-9", "key-9", [pending_alias("proposed", "team")], true)])
+        val result = resolve(registry, "proposed")
+        expect(result.unwrap_err()).to_equal(IdentityErrorV1.NotFound)
+
+    it "does not match a REJECTED alias":
+        step("Resolve a value that is a rejected alias")
+        val registry = registry_of(1, [identity_record("uid-10", "key-10", [rejected_alias("stale", "team")], true)])
+        val result = resolve(registry, "stale")
+        expect(result.unwrap_err()).to_equal(IdentityErrorV1.NotFound)
+
+describe "search(query) — identity dominance pins rank 1 and removes the ID from every source":
+    it "pins the exact match at final rank 1 with match_tier=exact_identity and starts fused ranks at 2":
+        step("Register doc-pinned as an authorized identity and rank it in two sources too")
+        val registry = registry_of(1, [identity_record("doc-pinned", "doc-pinned", [], true)])
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-pinned", "doc-other"]),
+            ranking(FusionSourceV1.Graph, ["doc-other", "doc-pinned"]),
+        ]
+        val result = search_with_identity_dominance(registry, "doc-pinned", sources, 60, 1000).unwrap()
+
+        step("The pinned artifact is not present among the fused hits")
+        expect(result.identity_ambiguity).to_equal(false)
+        val pinned = result.pinned
+        expect(pinned.resolved_uid).to_equal("doc-pinned")
+        expect(pinned.pinned_rank).to_equal(1)
+
+        step("Fused ranks begin at 2, and doc-pinned's ID was removed from every source before fusion")
+        expect(result.hits.len()).to_equal(1)
+        expect(result.hits[0].document_id).to_equal("doc-other")
+        expect(result.hits[0].final_rank).to_equal(2)
+        expect(result.hits[0].match_tier).to_equal(MatchTierV1.Fused)
+
+    it "does not pin a guessed artifact on ambiguous identity — plain fused results are returned instead":
+        step("Two authorized records share the same alias used as the query")
+        val registry = registry_of(1, [
+            identity_record("uid-a", "key-a", [accepted_alias("ambiguous-term", "team-a")], true),
+            identity_record("uid-b", "key-b", [accepted_alias("ambiguous-term", "team-b")], true),
+        ])
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-1", "doc-2"])]
+        val result = search_with_identity_dominance(registry, "ambiguous-term", sources, 60, 1000).unwrap()
+
+        step("identity_ambiguity is reported and no artifact is pinned")
+        expect(result.identity_ambiguity).to_equal(true)
+        expect(result.pinned == nil).to_equal(true)
+        step("Ordinary fused discovery results are still returned, numbered from rank 1")
+        expect(result.hits.len()).to_equal(2)
+        expect(result.hits[0].final_rank).to_equal(1)
+        expect(result.hits[0].match_tier).to_equal(MatchTierV1.Fused)
+
+    it "runs plain fusion with no ambiguity flag when identity resolves to not_found":
+        step("Query a value with no identity match at all")
+        val registry = registry_of(1, [])
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-x"])]
+        val result = search_with_identity_dominance(registry, "no-such-identity", sources, 60, 1000).unwrap()
+        expect(result.identity_ambiguity).to_equal(false)
+        expect(result.pinned == nil).to_equal(true)
+        expect(result.hits[0].final_rank).to_equal(1)
+
+    it "the pinned identity never receives an RRF rank, contribution, raw score, or adjusted score":
+        step("Search with an exact identity match present among fused candidates")
+        val registry = registry_of(1, [identity_record("doc-pinned-2", "doc-pinned-2", [], true)])
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-pinned-2", "doc-other-2", "doc-other-3"])]
+        val result = search_with_identity_dominance(registry, "doc-pinned-2", sources, 60, 1000).unwrap()
+        step("Every remaining fused hit excludes the pinned document ID entirely")
+        var i = 0
+        while i < result.hits.len():
+            expect(result.hits[i].document_id).to_start_with("doc-other")
+            i = i + 1
+        expect(result.hits.len()).to_equal(2)
+
+describe "sabotage: exact identity must not be encoded as a score boost (hazard §6.11)":
+    it "the pinned artifact's rank is independent of fused scores — even a huge fused raw score cannot displace it":
+        step("Give the non-pinned document a very strong multi-source signal")
+        val registry = registry_of(1, [identity_record("doc-pinned-3", "doc-pinned-3", [], true)])
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-pinned-3", "doc-strong"]),
+            ranking(FusionSourceV1.Graph, ["doc-strong", "doc-pinned-3"]),
+            ranking(FusionSourceV1.Semantic, ["doc-strong", "doc-pinned-3"]),
+        ]
+        val result = search_with_identity_dominance(registry, "doc-pinned-3", sources, 60, 1000).unwrap()
+        step("doc-pinned-3 is still the identity pin at rank 1; doc-strong is fused at rank 2 regardless of its raw score")
+        expect(result.pinned != nil).to_equal(true)
+        val pinned3 = result.pinned
+        expect(pinned3.resolved_uid).to_equal("doc-pinned-3")
+        expect(result.hits[0].document_id).to_equal("doc-strong")
+        expect(result.hits[0].final_rank).to_equal(2)

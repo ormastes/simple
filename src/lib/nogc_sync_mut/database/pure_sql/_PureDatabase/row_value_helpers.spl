@@ -19,6 +19,7 @@ use nogc_sync_mut.db.dbfs_engine.mvcc.{
 use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
 use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
 use nogc_sync_mut.db.page_summary.{PageSummaryIndex}
+use std.common.search.ranking.{bm25_score_default_checked}
 
 # ── Full-text search types ──────────────────────────────────────────────────
 
@@ -31,6 +32,45 @@ struct PureSearchResult:
     row: DbRow
     score: f64
     row_index: i64
+
+# ── Search cache-key identity (§6.2 / §5.1) ─────────────────────────────────
+# The cache key must distinguish every input that changes the result set or
+# its scoring contract. `table|query|limit` alone collides whenever two calls
+# differ only in `columns` or `algorithm` (e.g. Contains vs Bm25 on the same
+# table/query/limit) or when the underlying MVCC snapshot / FTS build differs
+# — a stale or wrong-contract result would otherwise be served from cache.
+
+fn _search_algorithm_key(algorithm: PureSearchAlgorithm) -> text:
+    match algorithm:
+        PureSearchAlgorithm.Contains:
+            "contains"
+        PureSearchAlgorithm.TermFrequency:
+            "term_frequency"
+        PureSearchAlgorithm.Bm25:
+            "bm25"
+
+fn _search_columns_key(columns: [text]) -> text:
+    """Ordered, delimiter-safe join of the selected columns so ["ab","c"] and
+    ["a","bc"] never collide (each column is length-prefixed)."""
+    var out = ""
+    var i: i32 = 0
+    while i < columns.len() as i32:
+        out = out + columns[i].len().to_text() + ":" + columns[i] + ","
+        i = i + 1
+    out
+
+fn build_search_cache_key(db_path: text, table: text, columns: [text], query: text,
+                     algorithm: PureSearchAlgorithm, limit: i64,
+                     snapshot_xmin: i64, snapshot_xmax: i64,
+                     fts_generation: i64) -> text:
+    """Full cache-key identity: DB instance, table, ordered selected columns,
+    query, algorithm, bounded limit, MVCC snapshot, and FTS generation. Two
+    different snapshots/analyzers/score contracts must never collide on one
+    cache entry."""
+    db_path + "|" + table + "|" + _search_columns_key(columns) + "|" + query +
+        "|" + _search_algorithm_key(algorithm) + "|" + limit.to_text() +
+        "|" + snapshot_xmin.to_text() + "|" + snapshot_xmax.to_text() +
+        "|" + fts_generation.to_text()
 
 # ── Module-level helpers ─────────────────────────────────────────────────────
 
@@ -761,27 +801,29 @@ fn _fts_match_value(value: text, query: text) -> bool:
     false
 
 fn _bm25_score(docs: [[text]], doc_index: i32, terms: [text], total_len: i64) -> f64:
+    """BM25 scoring routed through the common checked fixed-point scorer
+    (`std.common.search.ranking.bm25_score_default_checked`) — the design
+    freezes BM25 as fixed-point for determinism (f64 is unreliable across
+    this repo's backends). `f64` here is only the return type of this legacy
+    facade (matched by Contains/TermFrequency, which are genuinely additive
+    counts); no BM25 arithmetic itself is computed in floating point."""
     val doc = docs[doc_index]
-    val doc_count = docs.len() as f64
-    if doc_count <= 0.0:
+    val doc_count = docs.len() as i64
+    if doc_count <= 0:
         return 0.0
-    var avg_len = (total_len as f64) / doc_count
-    if avg_len <= 0.0:
-        avg_len = 1.0
-    val k1 = 1.2
-    val b = 0.75
-    val doc_len = doc.len() as f64
-    var score = 0.0
+    val avg_len_scaled = (total_len * 1000000) / doc_count
+    val doc_len = doc.len() as i64
+    var tfs: [i64] = []
+    var doc_freqs: [i64] = []
     var i: i32 = 0
     while i < terms.len() as i32:
-        val tf = _count_term(doc, terms[i]) as f64
-        if tf > 0.0:
-            val df = _document_frequency(docs, terms[i]) as f64
-            val idf = (((doc_count - df + 0.5) / (df + 0.5)) + 1.0).log()
-            val denom = tf + k1 * (1.0 - b + b * (doc_len / avg_len))
-            score = score + idf * ((tf * (k1 + 1.0)) / denom)
+        tfs.push(_count_term(doc, terms[i]))
+        doc_freqs.push(_document_frequency(docs, terms[i]))
         i = i + 1
-    score
+    val result = bm25_score_default_checked(tfs, doc_freqs, doc_len, avg_len_scaled, doc_count)
+    if result.is_err():
+        return 0.0
+    (result.unwrap().raw_value() as f64) / 1000.0
 
 fn _search_score(docs: [[text]], doc_index: i32, terms: [text], algorithm: PureSearchAlgorithm, total_len: i64) -> f64:
     val doc = docs[doc_index]

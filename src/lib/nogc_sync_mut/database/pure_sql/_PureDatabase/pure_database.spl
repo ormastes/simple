@@ -1461,7 +1461,16 @@ class PureDatabase:
         val col_names = self._tbl_cols[ti]
         var results: [PureSearchResult] = []
         # ── Search result cache: return immediately on identical query ──
-        val search_cache_key = table + "|" + query + "|" + limit.to_text()
+        # Key includes DB instance, table, ordered selected columns, query,
+        # algorithm, limit, MVCC snapshot, and FTS generation (§5.1/§6.2) —
+        # `table|query|limit` alone collided across columns/algorithm/snapshot.
+        val cache_snap = self._txn.snapshot()
+        var fts_generation: i64 = 0
+        if self._fts_valid[ti]:
+            fts_generation = self._tbl_fts_next_doc_id[ti] + 1
+        val search_cache_key = build_search_cache_key(
+            self._path, table, columns, query, algorithm, limit,
+            cache_snap.xmin, cache_snap.xmax, fts_generation)
         if ti >= 0 and ti < self._fts_search_key.len() as i32:
             if self._fts_search_key[ti] == search_cache_key and search_cache_key != "":
                 self._last_changes = 0

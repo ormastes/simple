@@ -1,0 +1,306 @@
+# Graph fusion source — bounded, deterministic BFS candidate ranking over the
+# ACCEPTED typed artifact graph (design §3.5 / §3.5.1; plan §7 debt item 8,
+# "P4's graph source needs the accepted typed edge graph").
+#
+# Package the plan did not allocate: `rrf-fixed-v1` (P4, `fusion/rrf.spl`)
+# fuses `lexical`, `graph`, and `semantic` sources, but until this file only
+# `lexical` could feed it. This module produces the missing `graph` source
+# ranking by traversing `ReverseIndexV1` (S1-A, `graph/reverse_index.spl`)
+# plus a forward adjacency built from the same accepted edge list.
+#
+# Contract discipline (design §3.5 / §3.5.1):
+#   - Returns a SOURCE-LOCAL candidate ranking only. It never fuses, never
+#     assigns a final rank, and never applies a boost/penalty — that
+#     authority belongs to SPipe's fusion tier (`fusion/rrf.spl`,
+#     `fusion/adjustments.spl`), not to a source.
+#   - Ranks only over ACCEPTED edges (`EdgeStatus.Accepted`). Candidate and
+#     rejected edges are filtered out before traversal ever sees them, so
+#     they cannot silently contribute a path.
+#   - Traversal is bounded (`max_depth`, `source_k`) and deterministic: a
+#     fixed root order, sorted-uid tie-breaks at every expansion step, and a
+#     final `(distance asc, uid asc)` sort applied to the whole visited set
+#     — never a dict-iteration-order-dependent sequence.
+#
+# Scope note (documented deviation, not a silent gap): full §3.5.1 also
+# specifies snapshot authorization rechecks, receipt-bound edge evidence, a
+# frozen continuation/cursor handle, and work budgets up to 500,000. This
+# slice implements the traversal core — bounded BOTH-direction BFS to depth
+# exactly 3 by default, deterministic tie-breaks, `source_k` truncation —
+# over an already-accepted edge list the caller supplies. `snapshot_id`,
+# `scope_digest`, and `source_digest` are caller-supplied opaque identity
+# fields threaded straight into `SourceRankingV1`, exactly as
+# `fusion_rrf_spec.spl`'s own test fixtures pass literal
+# `snapshot_id: "snap-1"` / `scope_digest: "sha256:0"` — this module does not
+# invent a second digest scheme. Authorization rechecks, receipt evidence,
+# and the continuation/cursor handle are NOT implemented here; a caller
+# needing resumable paging or receipt-bound evidence must add that as an
+# additive layer in front of `build_graph_ranking`.
+#
+# COW-alias hazard (`.claude/rules/code-style.md`): BFS frontiers and visited
+# maps are mutated only through their single owning `var`, never via a
+# `val t = self.x; t.push(...)` alias. `.keys()` calls are hoisted above
+# loops (see `_sorted_neighbors`, `_finalize`).
+
+use app.spipe.model.types.{EdgeRecord, EdgeStatus}
+use app.spipe.graph.reverse_index.{ReverseIndexV1, build_reverse_index}
+use lib.common.search.fusion_types.{FusionSourceV1, SourceCandidateV1, SourceRankingV1}
+
+pub val GRAPH_SOURCE_CONTRACT: text = "graph-bfs-v1"
+pub val GRAPH_DEFAULT_MAX_DEPTH: i64 = 3
+pub val GRAPH_MAX_DEPTH_CEILING: i64 = 3
+pub val GRAPH_DEFAULT_SOURCE_K: i64 = 1000
+pub val GRAPH_MAX_SOURCE_K: i64 = 1000
+
+pub enum GraphSourceErrorV1:
+    InvalidMaxDepth
+    InvalidSourceK
+    NoRoots
+
+# One discovered node with its shortest BFS distance from any root. Roots
+# themselves are distance 0 and are never emitted as candidates -- they are
+# the seeds the caller already has, not newly discovered evidence.
+struct _Visit:
+    uid: text
+    distance: i64
+
+fn _validate(max_depth: i64, source_k: i64, roots: [text]) -> Result<bool, GraphSourceErrorV1>:
+    if max_depth < 1 or max_depth > GRAPH_MAX_DEPTH_CEILING:
+        return Err(GraphSourceErrorV1.InvalidMaxDepth)
+    if source_k < 1 or source_k > GRAPH_MAX_SOURCE_K:
+        return Err(GraphSourceErrorV1.InvalidSourceK)
+    if roots.len() == 0:
+        return Err(GraphSourceErrorV1.NoRoots)
+    Ok(true)
+
+# Only ACCEPTED edges may contribute to traversal (design §3.5.1: "Strict
+# accepted edges"). Candidate/rejected edges are dropped here, before either
+# adjacency structure is built, so nothing downstream can accidentally see
+# them.
+fn _accepted_only(edges: [EdgeRecord]) -> [EdgeRecord]:
+    var out: [EdgeRecord] = []
+    var i = 0
+    while i < edges.len():
+        if edges[i].status == EdgeStatus.Accepted:
+            out.push(edges[i])
+        i = i + 1
+    out
+
+# Forward adjacency (from_uid -> [to_uid]) over already-accepted edges.
+#
+# Wrapped in a tiny class (mirroring `ReverseIndexV1`'s `_insert` pattern)
+# rather than a bare local `{text: [text]}` var: a plain local dict variable
+# has a measured interpreter engine bug where `d[k].push(v)` on a
+# *pre-existing* key silently fails to persist the mutation (reproduced in
+# isolation: two `.push()` calls into the same local-dict-var list slot leave
+# the list at length 1, while the identical pattern through a class field
+# `self.m[k].push(v)` — exactly `ReverseIndexV1._insert`'s shape — persists
+# both). This is a distinct hazard from the COW-alias rule in
+# `.claude/rules/code-style.md` (no `val t = d[k]` alias exists here in
+# either version) and is worked around, not routed around, by using the same
+# class-field-owned shape `ReverseIndexV1` already relies on.
+class _ForwardIndex:
+    var by_source: {text: [text]}
+
+    static fn empty() -> _ForwardIndex:
+        _ForwardIndex(by_source: {})
+
+    me _insert(from_uid: text, to_uid: text):
+        if self.by_source.has(from_uid):
+            self.by_source[from_uid].push(to_uid)
+        else:
+            self.by_source[from_uid] = [to_uid]
+
+    fn outgoing(from_uid: text) -> [text]:
+        if self.by_source.has(from_uid):
+            self.by_source[from_uid]
+        else:
+            []
+
+fn _forward_adjacency(edges: [EdgeRecord]) -> _ForwardIndex:
+    var idx = _ForwardIndex.empty()
+    var i = 0
+    while i < edges.len():
+        idx._insert(edges[i].from_uid, edges[i].to_uid)
+        i = i + 1
+    idx
+
+fn _uid_less(a: text, b: text) -> bool:
+    val ab = a.bytes()
+    val bb = b.bytes()
+    var i = 0
+    while i < ab.len() and i < bb.len():
+        if ab[i] != bb[i]:
+            return ab[i] < bb[i]
+        i = i + 1
+    ab.len() < bb.len()
+
+# Insertion sort, ascending, on a small neighbor/visit list. Bounded by
+# `max_depth`/`source_k`/the caller's edge count, so O(n^2) is acceptable and
+# avoids a general-purpose sort dependency (mirrors `rrf.spl`'s `_sort_rows`).
+fn _sorted_uids(uids: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < uids.len():
+        out.push(uids[i])
+        i = i + 1
+    var a = 1
+    while a < out.len():
+        var b = a
+        while b > 0 and _uid_less(out[b], out[b - 1]):
+            val tmp = out[b]
+            out[b] = out[b - 1]
+            out[b - 1] = tmp
+            b = b - 1
+        a = a + 1
+    out
+
+# Both-direction neighbors of `uid`: forward edges plus reverse (incoming)
+# edges, deduplicated and sorted ascending so expansion order never depends
+# on dict/list iteration order.
+fn _neighbors(uid: text, forward: _ForwardIndex, reverse: ReverseIndexV1) -> [text]:
+    var raw: [text] = []
+    val outs = forward.outgoing(uid)
+    var i = 0
+    while i < outs.len():
+        raw.push(outs[i])
+        i = i + 1
+    val incoming = reverse.incoming(uid)
+    var j = 0
+    while j < incoming.len():
+        raw.push(incoming[j].from_uid)
+        j = j + 1
+
+    val sorted = _sorted_uids(raw)
+    var deduped: [text] = []
+    var seen: {text: bool} = {}
+    var k = 0
+    while k < sorted.len():
+        if not seen.has(sorted[k]):
+            seen[sorted[k]] = true
+            deduped.push(sorted[k])
+        k = k + 1
+    deduped
+
+# Root order is preserved as given (design §3.5.1: exact root precedence is
+# a caller-owned tuple -- lexical roots carry `(seedTier=1, seedRank=...)`;
+# this function trusts the caller's ordering and only deduplicates).
+fn _deduped_roots(roots: [text]) -> [text]:
+    var out: [text] = []
+    var seen: {text: bool} = {}
+    var i = 0
+    while i < roots.len():
+        if not seen.has(roots[i]):
+            seen[roots[i]] = true
+            out.push(roots[i])
+        i = i + 1
+    out
+
+fn _visit_less(left: _Visit, right: _Visit) -> bool:
+    if left.distance != right.distance:
+        return left.distance < right.distance
+    _uid_less(left.uid, right.uid)
+
+fn _sort_visits(visits: [_Visit]) -> [_Visit]:
+    var out: [_Visit] = []
+    var i = 0
+    while i < visits.len():
+        out.push(visits[i])
+        i = i + 1
+    var a = 1
+    while a < out.len():
+        var b = a
+        while b > 0 and _visit_less(out[b], out[b - 1]):
+            val tmp = out[b]
+            out[b] = out[b - 1]
+            out[b - 1] = tmp
+            b = b - 1
+        a = a + 1
+    out
+
+# Bounded both-direction BFS to `max_depth`, over accepted edges only. Each
+# node's distance is the shortest number of hops from ANY root -- ties within
+# a layer are broken by ascending UID at every expansion step, and the whole
+# visited set is re-sorted `(distance asc, uid asc)` at the end so multi-root
+# interleaving cannot introduce nondeterminism (design §3.5.1: "same-distance
+# improved tuples replace and re-expand a state").
+fn _bfs(forward: _ForwardIndex, reverse: ReverseIndexV1, roots: [text], max_depth: i64) -> [_Visit]:
+    val ordered_roots = _deduped_roots(roots)
+    var distance: {text: i64} = {}
+    var r = 0
+    while r < ordered_roots.len():
+        distance[ordered_roots[r]] = 0
+        r = r + 1
+
+    var frontier: [text] = ordered_roots
+    var d = 1
+    while d <= max_depth and frontier.len() > 0:
+        val sorted_frontier = _sorted_uids(frontier)
+        var next_frontier: [text] = []
+        var f = 0
+        while f < sorted_frontier.len():
+            val nbrs = _neighbors(sorted_frontier[f], forward, reverse)
+            var n = 0
+            while n < nbrs.len():
+                if not distance.has(nbrs[n]):
+                    distance[nbrs[n]] = d
+                    next_frontier.push(nbrs[n])
+                n = n + 1
+            f = f + 1
+        frontier = _sorted_uids(next_frontier)
+        d = d + 1
+
+    var visits: [_Visit] = []
+    val roots_set = distance
+    val visited_uids = distance.keys()
+    var i = 0
+    while i < visited_uids.len():
+        val u = visited_uids[i]
+        if roots_set[u] > 0:
+            visits.push(_Visit(uid: u, distance: roots_set[u]))
+        i = i + 1
+    _sort_visits(visits)
+
+# Builds the source-local graph candidate ranking (design §3.5 / §3.5.1).
+# `edges` need not be pre-filtered -- non-accepted edges are dropped here.
+# `roots` are the seed UIDs to expand from (e.g. lexical hit document IDs, in
+# lexical-rank order); they are never themselves returned as candidates.
+pub fn build_graph_ranking(
+    edges: [EdgeRecord],
+    roots: [text],
+    max_depth: i64,
+    source_k: i64,
+    snapshot_id: text,
+    scope_digest: text,
+    source_digest: text,
+) -> Result<SourceRankingV1, GraphSourceErrorV1>:
+    match _validate(max_depth, source_k, roots):
+        Err(e):
+            return Err(e)
+        Ok(_):
+            ()
+
+    val accepted = _accepted_only(edges)
+    val forward = _forward_adjacency(accepted)
+    val reverse = build_reverse_index(accepted)
+    val visits = _bfs(forward, reverse, roots, max_depth)
+
+    val limit = if visits.len() < source_k: visits.len() else: source_k
+    var candidates: [SourceCandidateV1] = []
+    var i = 0
+    while i < limit:
+        candidates.push(SourceCandidateV1(
+            document_id: visits[i].uid,
+            source_rank: i + 1,
+            source_score_milli: 0,
+        ))
+        i = i + 1
+
+    Ok(SourceRankingV1(
+        source: FusionSourceV1.Graph,
+        source_contract: GRAPH_SOURCE_CONTRACT,
+        snapshot_id: snapshot_id,
+        scope_digest: scope_digest,
+        candidates: candidates,
+        complete: visits.len() <= source_k,
+        source_digest: source_digest,
+    ))

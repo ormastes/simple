@@ -1,0 +1,64 @@
+# Minimal identity/alias registry (plan §4 P4 "seam flag": slice 1 has no
+# identity/alias registry — P4 owns creating the minimal one).
+#
+# UID/key/accepted-alias -> artifact resolution. Authority + status let
+# `resolve.spl` filter out stale, rejected, or unauthorized aliases before
+# matching (design §3.5: "Stale, rejected, or unauthorized aliases do not
+# dominate").
+#
+# This is deliberately minimal: no persistence, no mutation API beyond
+# construction. A later package may add durable storage/versioning behind
+# the same field shape without changing this contract.
+
+pub enum AliasStatusV1:
+    Accepted
+    Pending
+    Rejected
+
+pub struct IdentityAliasV1:
+    value: text
+    status: AliasStatusV1
+    authority: text
+
+pub struct IdentityRecordV1:
+    uid: text
+    key: text
+    aliases: [IdentityAliasV1]
+    authorized: bool
+
+pub struct IdentityRegistryV1:
+    generation: i64
+    records: [IdentityRecordV1]
+
+fn empty_registry() -> IdentityRegistryV1:
+    IdentityRegistryV1(generation: 0, records: [])
+
+fn registry_of(generation: i64, records: [IdentityRecordV1]) -> IdentityRegistryV1:
+    IdentityRegistryV1(generation: generation, records: records)
+
+fn identity_record(uid: text, key: text, aliases: [IdentityAliasV1], authorized: bool) -> IdentityRecordV1:
+    IdentityRecordV1(uid: uid, key: key, aliases: aliases, authorized: authorized)
+
+fn accepted_alias(value: text, authority: text) -> IdentityAliasV1:
+    IdentityAliasV1(value: value, status: AliasStatusV1.Accepted, authority: authority)
+
+fn pending_alias(value: text, authority: text) -> IdentityAliasV1:
+    IdentityAliasV1(value: value, status: AliasStatusV1.Pending, authority: authority)
+
+fn rejected_alias(value: text, authority: text) -> IdentityAliasV1:
+    IdentityAliasV1(value: value, status: AliasStatusV1.Rejected, authority: authority)
+
+# True when `value` matches this record's UID, key, or an ACCEPTED alias.
+# Pending/rejected aliases never match (design §3.5: they "do not dominate").
+fn record_matches(record: IdentityRecordV1, value: text) -> bool:
+    if record.uid == value:
+        return true
+    if record.key == value:
+        return true
+    var i = 0
+    while i < record.aliases.len():
+        val alias = record.aliases[i]
+        if alias.value == value and alias.status == AliasStatusV1.Accepted:
+            return true
+        i = i + 1
+    false
