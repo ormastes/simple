@@ -4,9 +4,10 @@ Investigates the convergence of PR #182's `Dict` cluster ("`use M` compiles clea
 but `use M.{x}` fails — they build different closures") and PR #183's R2/R3
 ("`use m.{X}` where `m` does not provide `X` is silently erased to ANY").
 
-**Verdict: TWO independent defects. Neither is "selective imports resolve
-differently from whole-module imports."** Both halves of the shared hypothesis
-are refuted by fixture, below.
+**Verdict: TWO independent defects.** Finding 2's framing is refuted by fixture
+(Defect A is import-independent). Finding 1 is CONFIRMED, on the real module,
+with a mechanism of its own (Defect B: a whole-module `use M` does not load a
+package's closure). They share no mechanism.
 
 Seed built from `origin/main` @ `46f15eae6ff` in an isolated worktree,
 `CARGO_TARGET_DIR=/mnt/data/cargo-targets-imports2`. Every rc read into a
@@ -48,37 +49,57 @@ The import is incidental. The mechanism is the general unknown-type fallback:
 imports a hard error is therefore not a warning-to-error flip; it requires
 whole-program (not per-file) lowering. Owner decision.
 
-## Defect B — single-segment relative `use p` binds nothing (contained)
+## Defect B — whole-module `use M` does not load a PACKAGE's closure
 
-`use p` where `p.spl` sits beside the importer is a **no-op**: it binds neither
-bare names nor a `p.` namespace, and — critically — never loads the module's
-closure, so a module containing a hard error still compiles green.
+**CORRECTED 2026-08-31 after probing the real module.** An earlier revision of
+this doc scoped this to the single-segment relative form. That was wrong: the
+discriminating variable is **package vs file**, not segment count.
+
+`use M` is a no-op — it binds neither bare names nor an `M.` namespace, and never
+loads the module's closure, so a module containing a hard error still compiles
+green — whenever `M` resolves to a package (`M/__init__.spl`), and also for the
+single-segment relative file form. Dotted *file* imports are unaffected.
+
+| module shape | `use M` | `use M.{x}` |
+|---|---|---|
+| single-segment file (`p.spl`) | **rc=0 vacuous** | rc=1 loads |
+| dotted file (`d/p.spl`) | rc=1 loads | rc=1 loads |
+| dotted package (`d/pkg/__init__.spl`) | **rc=0 vacuous** | rc=1 loads |
+
+Fixture, identical `__init__.spl` body carrying `totally_undefined_symbol_xyz()`:
 
 ```
-# p.spl: pub fn boom() -> i64: return totally_undefined_symbol_xyz()
-use p                 -> rc=0   (module never loaded — vacuous)
-use p.{boom}          -> rc=1   Undefined("undefined identifier: totally_undefined_symbol_xyz")
-use p / p.only_in_file() -> rc=1 Undefined("undefined identifier: p")
+use d.pkg           -> rc=0
+use d.pkg.{boom}    -> rc=1   Undefined("undefined identifier: totally_undefined_symbol_xyz")
 ```
 
-**This is the whole of Finding 1, and it is contained to the single-segment
-form.** With a dotted path the two forms are identical:
+`use p` / `p.only_in_file()` additionally gives `Undefined("undefined identifier: p")`,
+so no namespace is bound either.
+
+**This reproduces on the real module from PR #182.** `std.gc_sync_mut.db` is
+package-only (`db/__init__.spl`, no `db.spl`), and at `46f15eae6ff`:
 
 ```
-# d/p.spl carries the same error
-use d.p               -> rc=1   Undefined("undefined identifier: totally_undefined_symbol_xyz")
-use d.p.{boom}        -> rc=1   Undefined("undefined identifier: totally_undefined_symbol_xyz")
+use std.gc_sync_mut.db        -> rc=0   (module never loaded)
+use std.gc_sync_mut.db.{...}  -> rc=1
 ```
 
-So `use M` and `use M.{x}` do **not** build different closures for dotted module
-paths, which is every real stdlib/app import. PR #182's probes were dotted and
-were therefore **not** vacuous; its `Dict` cluster is not explained by this.
-Population of the affected form: **259** single-segment bare `use M` statements
-and 351 single-segment `use M.{...}` across `src/` + `test/`.
+So **Finding 1 is real** and its mechanism is this, not the ANY-erasure of
+Defect A. It also means every `use M` probe against a package module in the
+PR #163 / #182 investigations was **vacuous** — a green from such a probe is not
+evidence the module's closure is clean. That invalidates a class of prior
+"probes clean" evidence, including PR #182's "`std.gc_sync_mut.db` and
+`db.dbfs_engine` both probe clean".
 
-Not fixed here: no failing real-code repro exists, and the fix (make bare `use M`
-bind the module's surface or a namespace) is a semantic change over 22,778 bare
-`use M` statements in 16,103 files. Owner decision.
+Population floor: **42** bare `use M` statements resolve to a package under a
+scanner that handles only `std.`-rooted and `src/`-relative paths; 560 resolve to
+a file (unaffected) and 22,187 use roots the scanner cannot resolve, so 42 is a
+floor, not the population.
+
+Not fixed here: the fix (make a whole-module `use M` load and bind a package's
+surface) is a semantic change whose true population is unmeasured, and would
+newly surface every latent error in those closures — the same class of decision
+as the blast radius below. Owner decision.
 
 ## Blast radius — if unsatisfied selective imports became an error
 
