@@ -1014,10 +1014,18 @@ fn handle_method_call_with_self_update_inner(
             // Promote the store's handle into the overlay (one Arc clone) so the
             // ownership-gated in-place path below applies; the generic path's own
             // write-back (`calls.rs`) ends in exactly this overlay state anyway.
-            if env.get(obj_name).is_none()
-                && !env.is_local(obj_name)
-                && ARRAY_MUTATING_METHODS.contains(&method.as_str())
-            {
+            // The store -- not this frame -- is authoritative for a non-local
+            // module-global name: identifier READS already prefer
+            // MODULE_GLOBALS over `env` (interpreter/expr/literals.rs). The
+            // frame's own copy can be an older generation (a `describe` body
+            // env captured before a `before_all` hook in the same group
+            // republished the global), and mutating THAT copy silently
+            // discarded the intervening writes: the hook read `[before_all]`
+            // through the store but pushed onto a stale `[]`, publishing
+            // `[after_all]`. Re-seeding the receiver from the store first makes
+            // the mutation path agree with the read path.
+            // doc/08_tracking/bug/after_all_hook_module_global_write_lost_after_in_group_mutation_2026-08-31.md
+            if !env.is_local(obj_name) && ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
                 let global_arr = MODULE_GLOBALS.with(|cell| match cell.borrow().get(obj_name) {
                     Some(v @ Value::Array(_)) => Some(v.clone()),
                     _ => None,
