@@ -93,10 +93,38 @@ impl MirToLlvm:
     # === Overrides: aggregates ===
 
     me translate_aggregate(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
+        """Trait-named entry point. Delegates to the uniquely-named impl below.
+
+        Keep this delegation: `translate_aggregate` is ALSO declared on the
+        MirTextCodegen trait (common/mir_text_codegen.spl:190) with a body of
+        `()` -- a silent no-op. On the staged lane a call through the trait name
+        reaches that default instead of this override, so the instruction is
+        consumed and NOTHING is emitted, with no diagnostic anywhere. Measured:
+        the Aggregate arrives at backend dispatch, the discriminant matches and
+        collides with nothing, the call "succeeds", and yet no probe inside this
+        method fires and the emitted module skips the aggregate's dest entirely
+        (%l1 -> %l4) while the Copy consuming it IS emitted -> llc "use of
+        undefined value".
+        """
+        self.llvm_emit_aggregate_impl(dest, kind, operands)
+
+    me llvm_emit_aggregate_impl(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
+        """Real aggregate emission. Named so the trait cannot shadow it."""
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
+        # PROBE (2026-08-31), default OFF (SIMPLE_MIRB_TRACE=1). Narrow by
+        # construction -- one line per aggregate -- so it survives the
+        # native-build worker's stderr cap. Measured context: the backend DOES
+        # receive the Aggregate, yet the emitted module shows the Let's copy
+        # reading an undefined %lN and the id sequence skipping the aggregate's
+        # dest entirely (%l1 -> %l4). Every arm below emits something, so
+        # whichever arm is taken must be reported to find the silent path.
+        if mir_trace_enabled():
+            eprint("MIRB-AGG enter dest={dest_id} name={dest_name} operands={operands.len()}\n")
         match kind:
             case Array(_):
+                if mir_trace_enabled():
+                    eprint("MIRB-AGG arm=array dest={dest_id}\n")
                 self.mark_ptr_local(dest_id)
                 self.value_types[dest_name] = "ptr"
                 self.remember_function_return_type("rt_array_new", "ptr")
@@ -193,7 +221,11 @@ impl MirToLlvm:
                 self.value_types[dest_name] = "ptr"
                 self.builder.emit("  {dest_name} = getelementptr i8, ptr {tup_agg}, {tup_nit} 0  ; tuple ptr")
                 return
-            case _: ()
+            case _:
+                if mir_trace_enabled():
+                    eprint("MIRB-AGG arm=fallthrough dest={dest_id}\n")
+        if mir_trace_enabled():
+            eprint("MIRB-AGG generic-path dest={dest_id}\n")
         val agg_ty = self.valid_llvm_type(self.get_local_type(dest_id))
         val agg_ptr = self.builder.fresh_local()
         self.builder.emit_alloca(agg_ptr, agg_ty)

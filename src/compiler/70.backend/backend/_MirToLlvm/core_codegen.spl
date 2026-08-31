@@ -756,7 +756,47 @@ impl MirTextCodegen for MirToLlvm:
             val agg_bk_disc = _sffi_enum_discriminant(
                 MirInstKind.Aggregate(LocalId(id: 0), AggregateKind.Array(MirType.i64()), []))
             if _sffi_enum_discriminant(inst_kind) == agg_bk_disc:
-                eprint("MIRB-AGG backend-sees-aggregate index={index}\n")
+                # Print the fast-path discriminants alongside the Aggregate's.
+                # translate_aggregate is NEVER entered (four probes inside it,
+                # all silent) even though the instruction reaches here, so one
+                # of the fast paths below must be matching it and returning.
+                # A COLLISION between these values is the mechanism; this line
+                # shows it directly instead of costing a build per suspect.
+                val d_copy = _sffi_enum_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
+                val d_const = _sffi_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
+                eprint("MIRB-AGG discs agg={agg_bk_disc} copy={d_copy} const={d_const} inst={_sffi_enum_discriminant(inst_kind)} index={index}\n")
+
+        # AGGREGATE FAST PATH (2026-08-31). Same mechanism, and the same reason,
+        # as the Const/Copy/GlobalAddr fast paths around it: on the staged lane
+        # the trailing `match inst_kind:` mis-dispatches, so `case Aggregate(...)`
+        # never fires. Measured, not inferred:
+        #   - the instruction reaches this point (MIRB-AGG probe fires here);
+        #   - its discriminant is correct and collides with nothing
+        #     (agg=2910978388, copy=1088245615, const=190163898, inst==agg);
+        #   - translate_aggregate is NEVER entered (four probes inside it, at
+        #     entry and on every arm, all silent);
+        #   - the emitted module skips the aggregate's dest entirely (%l1 -> %l4)
+        #     while the Copy that consumes it IS emitted, so llc fails with
+        #     "use of undefined value".
+        # Dispatching on the discriminant bypasses the arm binding, exactly as
+        # the neighbouring fast paths do for the same reason.
+        val aggregate_disc = _sffi_enum_discriminant(
+            MirInstKind.Aggregate(LocalId(id: 0), AggregateKind.Array(MirType.i64()), []))
+        if _sffi_enum_discriminant(inst_kind) == aggregate_disc:
+            val agg_payload = _sffi_enum_payload(inst_kind)
+            val agg_dest: LocalId = _sffi_tuple_get(agg_payload, 0)
+            val agg_kind: AggregateKind = _sffi_tuple_get(agg_payload, 1)
+            val agg_operands: [MirOperand] = _sffi_tuple_get(agg_payload, 2)
+            if mir_trace_enabled():
+                eprint("MIRB-AGG fastpath-fired dest={agg_dest.id} operands={agg_operands.len()}\n")
+            # Call the uniquely-named impl, NOT the trait name: the trait
+            # declares translate_aggregate with a `()` body, and a call through
+            # the trait name reaches that silent no-op on this lane.
+            self.llvm_emit_aggregate_impl(agg_dest, agg_kind, agg_operands)
+            # Mirror the trailing bookkeeping of the fall-through dispatch,
+            # same invariant as the Const/Copy fast paths above.
+            self.mark_instruction_dest_defined_at(instructions, index)
+            return
 
         val copy_disc = _sffi_enum_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
         if bootstrap_debug:
