@@ -1064,6 +1064,13 @@ or set {}=1 to bypass at your own risk.",
         })
         .filter(|s| !is_optional_weak_hook_symbol(s))
         .filter(|s| !is_compiler_provided_runtime_symbol(s))
+        // libgcc/compiler-rt owned names (arithmetic builtins, and GCC's
+        // __cpu_model/__cpu_indicator_init/__cpu_features2 CPU-dispatch
+        // support symbols) are resolved by the compiler runtime the final
+        // link already pulls in, never by our own fabricated stubs -- see
+        // is_compiler_rt_builtin_symbol's doc comment for the incident this
+        // filter fixes (Windows/MinGW "multiple definition of `__cpu_model`").
+        .filter(|s| !is_compiler_rt_builtin_symbol(s))
         // Inline-asm blocks are concrete compiler output, never optional
         // application functions. Weak-stubbing a block after target-specific
         // asm compilation failed turns a missing instruction path into a
