@@ -206,3 +206,44 @@ LOGICAL module names, so `module_logical_name_from_path` is on this path — two
 physical files that normalise to one logical name would also mark the second as
 already satisfied.
 
+# SECOND FAILURE SIGNATURE 2026-08-31 — full-bootstrap run CRASHES, does not compile-fail
+
+A full-pipeline run (`--full-bootstrap --backend=llvm` with a `//bootstrap:stage4`
+receipt, reason `self-host-convergence-check`) produced a DIFFERENT Stage-3
+failure from the `--stop-after-stage3` run recorded above:
+
+```
+warning: stage3 self-host was KILLED by signal 127 (unknown), not a compile
+         failure; Stage 4 unavailable
+Stage 3 unavailable — no provenance-verified compiler for Stage 4
+```
+
+and in the native-build log:
+
+```
+error: native-build worker exited with code 4294967295.
+  interpreter: build/bootstrap/stage3/<triple>/stage2-admitted/simple
+```
+
+`4294967295` is -1 as unsigned 32-bit: the worker died abnormally rather than
+exiting with a diagnostic. The scheduler's own wording is explicit that this is
+**not** a compile failure, which distinguishes it from the 796 `unresolved type`
+fatals documented above.
+
+Differences between the two runs, neither yet shown to be causal:
+- target/flags: `--stop-after-stage3` (compile errors) vs `--full-bootstrap`
+  (crash)
+- native build jobs: 5 vs 10 (host CPUs: 10); self-host jobs 2 in both
+
+Ruled out: disk exhaustion (19 GiB free at the time of the crash; `build/bootstrap`
+is 48 GB but the filesystem had headroom).
+
+**Do not assume the two signatures share a cause.** The closure defect (Root A)
+is a compile-time resolution failure; a signal-127/-1 worker death is a process
+abort. It is possible the crash happens EARLIER than the resolution errors and
+merely hides them, or that it is an independent resource/stability problem at
+jobs=10. Establishing which requires re-running the full pipeline at reduced
+parallelism and comparing, which has not been done.
+
+Stage 2 admitted cleanly in this run (third independent admission), so nothing
+upstream of Stage 3 regressed.
