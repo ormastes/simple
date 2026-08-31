@@ -42,7 +42,27 @@ so it used the first. That binary already contained everything on `main` through
 the mtime of a binary in a different worktree and never checked which one the run
 actually used — the whole cause was an artifact of that.
 
-Two independent facts confirm the retraction:
+**Strongest evidence, found last:** the suite3 pipeline was still running during
+this correction, and its own command line settles it — the seed is built and
+installed *in the same shell pipeline as the test run*, immediately before it:
+
+```
+cd /mnt/data/wt-suite/src/compiler_rust && CARGO_TARGET_DIR=/mnt/data/cargo-targets-suite \
+  cargo build --release --bin simple \
+  && cp /mnt/data/cargo-targets-suite/release/simple \
+        /mnt/data/wt-suite/bin/release/x86_64-unknown-linux-gnu/simple.new \
+  && mv /mnt/data/wt-suite/bin/release/x86_64-unknown-linux-gnu/simple.new \
+        /mnt/data/wt-suite/bin/release/x86_64-unknown-linux-gnu/simple \
+  && cd /mnt/data/wt-suite && SIMPLE_TIMEOUT_SECONDS=0 ./bin/simple test --no-cover-check
+```
+
+That is a build-then-run pipeline over `/mnt/data/wt-suite`, so the seed cannot
+have been stale relative to that tree by construction — no mtime comparison is
+even needed. It also shows `--no-cover-check` and `SIMPLE_TIMEOUT_SECONDS=0`,
+neither of which I replicated when trying to reproduce (relevant to cause F
+hypothesis 2 below).
+
+Two further facts confirm the retraction:
 
 - `panic` appears **zero** times in suite3's symbol census. Had the run used a
   seed predating `777f3c99583`, `panic` would have been the dominant symbol —
@@ -215,8 +235,13 @@ none of which should be written up as fact until a wrapper is in hand:
 1. The generated wrapper's compile closure genuinely differs from a plain
    `use <module>` probe's closure (the flat `fn main()` restructuring in
    `spipe_*` moves declarations between scopes).
-2. Run-state not replicated: the suite3 run's `SIMPLE_MCDC_MODE` value, its
-   concurrency, its cwd, or its `TMPDIR` contents.
+2. Run-state not replicated. The suite3 command line (captured above) is
+   `SIMPLE_TIMEOUT_SECONDS=0 ./bin/simple test --no-cover-check` from cwd
+   `/mnt/data/wt-suite` — a whole-suite run. My reproduction attempts passed
+   two explicit spec paths with `--coverage` from a different worktree and set
+   neither `--no-cover-check` nor `SIMPLE_TIMEOUT_SECONDS`. Whole-suite vs.
+   two-spec invocation is itself an unexcluded difference, on top of cwd,
+   concurrency and `TMPDIR` contents.
 3. Cross-run interference in the shared temp dir — every wrapper is written to
    `_tp_get_temp_dir()` (here `/mnt/data/tmp`) under a spec-derived name, with no
    per-run isolation. Wrappers from other concurrent sessions were observed
