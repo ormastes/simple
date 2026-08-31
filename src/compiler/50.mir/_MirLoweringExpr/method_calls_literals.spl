@@ -27,6 +27,9 @@ use std.io_runtime.{env_get_opt}
 # cannot resolve it — declare the runtime extern directly.
 @unsafe(reason: "raw tagged HIR type discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
+# Formation probe: true only for a well-formed heap object. Screens a ZEROED
+# slot (raw 0), which `== nil` cannot -- the nil sentinel here is raw 3.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 
 @always_inline
 fn _sffi_method_hir_type_discriminant(value: Any) -> i64:
@@ -1342,7 +1345,37 @@ impl MirLowering:
         val maybe_receiver_type_for_call = receiver.type_
         if maybe_receiver_type_for_call != nil:
             val found_receiver_type = maybe_receiver_type_for_call
-            if found_receiver_type != nil:
+            # `!= nil` CANNOT screen this slot, and the doubled guard above is a
+            # tell that the hazard was already suspected here. The nil sentinel
+            # in this runtime is raw 3, so a ZEROED `receiver.type_` -- raw 0 --
+            # passes both nil tests and reaches lower_type as a dead object.
+            # Measured on the Stage-2 self-hosted lane (SIMPLE_MIRB_TRACE=1):
+            # `[mir-method-call] gpu-owner` -> `[mir-lower-type-probe] seq=6
+            # disc=-1 kindzero=true kindnil=false` -> `[mir-method-call]
+            # receiver-type`, raising "E-MIR-TYPE-Unknown: unreachable
+            # HirTypeKind disc=-1: 0". kindzero=true with kindnil=false is the
+            # signature of a raw-0 slot, not of a nil one.
+            # rt_heap_ref_wellformed is the formation probe for exactly this
+            # raw-0-vs-sentinel class; it reads only the object header, never a
+            # field of the suspect object. An untyped receiver simply keeps the
+            # MirType.i64() default already initialised above -- the same
+            # outcome the nil path takes.
+            # The screen must test the KIND FIELD, not the object. Measured:
+            # rt_heap_ref_wellformed(found_receiver_type) returns TRUE here in
+            # 10/10 failing runs -- the HirType is a well-formed heap object; it
+            # is `.kind` that is raw 0. A header-only formation probe therefore
+            # cannot screen this, and `!= nil` cannot either (nil is raw 3).
+            # `kind == 0` is exactly what the in-tree [mir-lower-type-probe]
+            # measures as `kindzero`, and kindzero=true is the signature that
+            # accompanies every disc=-1 raise here.
+            # A receiver whose kind was never populated is effectively untyped,
+            # so it keeps the MirType.i64() default initialised above -- the same
+            # outcome the nil path already takes.
+            # NOTE: this is a CONSUMER screen. It stops the raise, but the
+            # producer that hands out a HirType with an unwritten kind is a
+            # separate defect and is still open; see
+            # doc/08_tracking/bug/self_hosted_symbol_table_hirtype_garbage_at_rest_2026-08-31.md
+            if found_receiver_type.kind != 0:
                 receiver_type = self.lower_type(found_receiver_type)
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] receiver-type method={method}\n")

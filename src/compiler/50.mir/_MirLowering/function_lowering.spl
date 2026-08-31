@@ -39,6 +39,9 @@ use compiler.mir.mir_types.{MirConstant}
 
 @unsafe(reason: "raw tagged HIR type discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
+# Formation probe: true only for a well-formed heap object. Distinguishes a
+# ZEROED slot (raw 0) from the nil sentinel (raw 3), which `== nil` cannot.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 
 @always_inline
 fn _sffi_hir_type_discriminant(value: Any) -> i64:
@@ -1082,6 +1085,26 @@ impl MirLowering:
             "<no-function-context>"
         if type_ == nil:
             self.error_fatal("E-MIR-TYPE-NilType: lower_type received a NIL HirType (not an unknown kind) while lowering '{fn_ctx}' -- the CALLER needs a nil guard", nil)
+            return MirType.i64()
+        # `== nil` above is NOT sufficient, and that gap is the whole reason this
+        # diagnostic has stayed ambiguous. The nil sentinel in this runtime is raw
+        # 3, so a ZEROED heap slot -- raw 0 -- passes the nil test and lands here
+        # rendering as "disc=-1: 0", indistinguishable from a genuine unhandled
+        # variant. Those two have opposite fixes (repair the producer of a dead
+        # object vs add a lower_type arm), which is exactly the guess this comment
+        # block says costs a full bootstrap per attempt. rt_heap_ref_wellformed is
+        # the formation probe for precisely this raw-0-vs-sentinel class; it reads
+        # only the header, never a field of the suspect object, which is what made
+        # round 2's five extra field reads unsafe.
+        # MEASURED 2026-08-31, and it refutes the obvious reading: the object is
+        # NOT malformed. rt_heap_ref_wellformed(type_) returns TRUE in 10/10
+        # failing runs, so a header-only formation probe cannot separate these
+        # cases. What is zero is the KIND FIELD -- `kindzero=true kindnil=false`
+        # on every raise. Report on that instead, which is the distinction that
+        # actually has two opposite fixes (repair the producer that left kind
+        # unwritten vs add a lower_type arm for a real variant).
+        if type_.kind == 0:
+            self.error_fatal("E-MIR-TYPE-ZeroKind: lower_type received a well-formed HirType whose `kind` field is raw 0 (never written) while lowering '{fn_ctx}' -- fix the PRODUCER that left kind unset, not lower_type", nil)
             return MirType.i64()
         # Round 2 REVERTED (2026-08-30). This block briefly read five MORE
         # fields off `type_.span` -- including `.file`, a `text` -- to localise
