@@ -1221,7 +1221,12 @@ impl Lowerer {
 
             // Context statement: context obj: body
             // Requires expression-level context tracking - mark as unsupported for native codegen
-            Node::Context(_) if !self.lenient_types => Err(LowerError::Unsupported(
+            // Unsupported in LENIENT mode too: the lenient catch-all below is
+            // `_ => Ok(vec![])`, which silently DELETED the whole block, so a
+            // `context obj:` body inside a function never ran on the JIT/native
+            // path (test/feature/usage/classes_spec.spl). Failing here makes the
+            // caller fall back to the interpreter, which implements it.
+            Node::Context(_) => Err(LowerError::Unsupported(
                 "Context statements require interpreter mode. Native codegen support is planned.".to_string(),
             )),
 
