@@ -565,6 +565,20 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        // Priority 4.5: a function rebound by a user-defined decorator. The
+        // decorated closure lives in `env` under `name`, but the undecorated
+        // definition is still in `functions` (the original body needs it to
+        // recurse), and Priority 5 below would therefore shadow the wrapper.
+        // The sentinel is written by crate::decorator_apply and is scoped to
+        // the same Env as the binding.
+        if env.get(&crate::decorator_apply::decorated_fn_key(name)).is_some() {
+            if let Some(val) = env.get(name).cloned() {
+                if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
+                    return Ok(result);
+                }
+            }
+        }
+
         // Priority 5: Check regular functions (user-defined) — most common case
         if let Some(func) = functions.get(name).cloned() {
             return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);

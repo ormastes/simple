@@ -843,14 +843,30 @@ pub(super) fn exec_block_closure_into(
                 functions.insert(f.name.clone(), Arc::clone(&arc_f));
 
                 // Also add to local_env as a Function value with captured environment
-                local_env.insert(
-                    f.name.clone(),
-                    Value::Function {
-                        name: f.name.clone(),
-                        def: arc_f,
-                        captured_env: Arc::new(local_env.clone()), // Capture current scope
-                    },
-                );
+                let plain = Value::Function {
+                    name: f.name.clone(),
+                    def: arc_f,
+                    captured_env: Arc::new(local_env.clone()), // Capture current scope
+                };
+                local_env.insert(f.name.clone(), plain.clone());
+                // A user-defined (non-directive) decorator rebinds the name to
+                // `dec(original)`.
+                if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                    f,
+                    plain,
+                    false,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    // Keep the plain definition in `functions` so the original
+                    // body can still recurse; the sentinel makes `evaluate_call`
+                    // prefer the wrapper for calls from outside it.
+                    local_env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
+                    local_env.insert(f.name.clone(), decorated);
+                }
                 last_value = Value::Nil;
             }
             Node::Class(class_def) => {
@@ -1888,14 +1904,30 @@ fn exec_block_closure_mut_inner(
                 functions.insert(f.name.clone(), Arc::clone(&arc_f));
 
                 // Also add to local_env as a Function value with captured environment
-                local_env.insert(
-                    f.name.clone(),
-                    Value::Function {
-                        name: f.name.clone(),
-                        def: arc_f,
-                        captured_env: Arc::new(local_env.clone()), // Capture current scope
-                    },
-                );
+                let plain = Value::Function {
+                    name: f.name.clone(),
+                    def: arc_f,
+                    captured_env: Arc::new(local_env.clone()), // Capture current scope
+                };
+                local_env.insert(f.name.clone(), plain.clone());
+                // A user-defined (non-directive) decorator rebinds the name to
+                // `dec(original)`.
+                if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                    f,
+                    plain,
+                    false,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    // Keep the plain definition in `functions` so the original
+                    // body can still recurse; the sentinel makes `evaluate_call`
+                    // prefer the wrapper for calls from outside it.
+                    local_env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
+                    local_env.insert(f.name.clone(), decorated);
+                }
                 last_value = Value::Nil;
             }
             Node::While(while_stmt) => {

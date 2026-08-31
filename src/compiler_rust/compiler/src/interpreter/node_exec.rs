@@ -393,14 +393,30 @@ pub(crate) fn exec_node(
         Node::Function(f) => {
             // Nested function definition - treat as a closure that captures the current scope
             // Store as a Function with the captured env embedded for closure semantics
-            env.insert(
-                f.name.clone(),
-                Value::Function {
-                    name: f.name.clone(),
-                    def: Arc::new(f.clone()),
-                    captured_env: Arc::new(env.clone()), // Capture current scope
-                },
-            );
+            let plain = Value::Function {
+                name: f.name.clone(),
+                def: Arc::new(f.clone()),
+                captured_env: Arc::new(env.clone()), // Capture current scope
+            };
+            env.insert(f.name.clone(), plain.clone());
+            // A user-defined (non-directive) decorator rebinds the name to
+            // `dec(original)`.
+            if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                f,
+                plain,
+                false,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                // Keep the plain definition in `functions` so the original body
+                // can still recurse; the sentinel makes `evaluate_call` prefer
+                // the wrapper for calls from outside it.
+                env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
+                env.insert(f.name.clone(), decorated);
+            }
             Ok(Control::Next)
         }
         Node::LiteralFunction(lit_fn) => {

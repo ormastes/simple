@@ -197,6 +197,9 @@ pub(crate) use interpreter_types::get_type_name;
 #[path = "../interpreter_eval.rs"]
 mod interpreter_eval;
 pub use interpreter_eval::PRELUDE_UNSHADOWABLE;
+// Re-exported so crate::decorator_apply can invoke a Value as a callable when
+// applying runtime function decorators.
+pub(crate) use interpreter_eval::call_value_with_args;
 
 #[path = "../interpreter_method/mod.rs"]
 mod interpreter_method;
