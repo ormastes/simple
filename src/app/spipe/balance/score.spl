@@ -11,6 +11,7 @@
 use app.spipe.balance.score_types.ScopeInput
 use app.spipe.model.types.{ComponentScore, Deduction, ScoreReport}
 use std.common.sdn.value.{SdnValue, sdn_value_to_text}
+use app.spipe.model.canonical.{CanonicalValue, canonical_json, cfield}
 use app.spipe.balance.config.{BalanceConfig, default_config}
 use app.spipe.balance.components.cohesion.cohesion_raw
 use app.spipe.balance.components.trace_alignment.trace_alignment_raw
@@ -131,34 +132,50 @@ fn score_report_with_config(input: ScopeInput, config: BalanceConfig) -> ScoreRe
 
 # --- Canonical serialization (determinism proof) --------------------------
 #
-# No dict/hash-map traversal anywhere in this module — every collection here
-# is an array in a fixed, explicitly-sorted order — so a plain fixed-field-
-# order text join is already byte-identical across runs/platforms. S1-E's
-# `model/canonical.spl` now exists but its `CanonicalValue`/`canonical_json`
-# explicitly does not implement object/dict canonicalization yet (see that
-# file's header) — `ScoreReport` is exactly that shape, so this local
-# fixed-order encoder stays the right tool until dict support lands there;
-# revisit then.
-fn canonical_component(c: ComponentScore) -> text:
-    val body = "name:{c.name},weight:{c.weight},raw_permille:{c.raw_permille},points_tenths:{c.points_tenths}"
-    "(" + body + ")"
+# Delegates to model/canonical.spl, the single canonical encoder. This module
+# previously carried its own local fixed-order text join, written when
+# CanonicalValue had no object shape; that made two independent definitions of
+# "canonical bytes" in one codebase, which is precisely how cross-platform
+# determinism diverges without anyone noticing. CDict now exists, so the local
+# encoder is gone. Field ORDER here no longer matters -- CDict sorts keys by
+# byte order at emission -- but every collection below is still emitted in its
+# own explicitly-sorted order, which is what makes the report deterministic.
+fn canonical_component(c: ComponentScore) -> CanonicalValue:
+    CanonicalValue.CDict([
+        cfield("name", CanonicalValue.CText(c.name)),
+        cfield("weight", CanonicalValue.CInt(c.weight)),
+        cfield("raw_permille", CanonicalValue.CInt(c.raw_permille)),
+        cfield("points_tenths", CanonicalValue.CInt(c.points_tenths)),
+    ])
 
-fn canonical_deduction(d: Deduction) -> text:
-    val evidence_text = sdn_value_to_text(d.evidence)
-    val body = "code:{d.code},component:{d.component},points_tenths:{d.points_tenths},evidence:{evidence_text}"
-    "(" + body + ")"
+fn canonical_deduction(d: Deduction) -> CanonicalValue:
+    CanonicalValue.CDict([
+        cfield("code", CanonicalValue.CText(d.code)),
+        cfield("component", CanonicalValue.CText(d.component)),
+        cfield("points_tenths", CanonicalValue.CInt(d.points_tenths)),
+        cfield("evidence", CanonicalValue.CText(sdn_value_to_text(d.evidence))),
+    ])
+
+fn canonical_value_of(report: ScoreReport) -> CanonicalValue:
+    var components = []
+    for c in report.components:
+        components.push(canonical_component(c))
+    var deductions = []
+    for d in report.deductions:
+        deductions.push(canonical_deduction(d))
+    var scopes = []
+    for s in report.scopes:
+        scopes.push(canonical_value_of(s))
+    CanonicalValue.CDict([
+        cfield("schema", CanonicalValue.CText(report.schema)),
+        cfield("scope", CanonicalValue.CText(report.scope)),
+        cfield("score_tenths", CanonicalValue.CInt(report.score_tenths)),
+        cfield("components", CanonicalValue.CList(components)),
+        cfield("deductions", CanonicalValue.CList(deductions)),
+        cfield("scopes", CanonicalValue.CList(scopes)),
+    ])
 
 fn canonical_bytes(report: ScoreReport) -> text:
-    var components_text = ""
-    for c in report.components:
-        components_text = components_text + canonical_component(c)
-    var deductions_text = ""
-    for d in report.deductions:
-        deductions_text = deductions_text + canonical_deduction(d)
-    var scopes_text = ""
-    for s in report.scopes:
-        scopes_text = scopes_text + canonical_bytes(s)
-    val head = "schema:{report.schema},scope:{report.scope},score_tenths:{report.score_tenths}"
-    "(" + head + ",components:[" + components_text + "],deductions:[" + deductions_text + "],scopes:[" + scopes_text + "])"
+    canonical_json(canonical_value_of(report))
 
 export score_scope, score_report, score_report_with_config, canonical_bytes, tenths_half_up, sorted_children, scope_text_less

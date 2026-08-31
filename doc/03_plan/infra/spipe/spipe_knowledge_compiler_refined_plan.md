@@ -640,14 +640,24 @@ mutation-red evidence.
 
 ### 8.1 Open seams (real work, not cosmetics)
 
-1. **Duplicate canonical encoders.** `model/canonical.spl`
-   (`canonical_bytes(CanonicalValue) -> [u8]`, no dict support) and
-   `balance/score.spl` (`canonical_bytes(ScoreReport) -> text`, local). S1-C had
-   cause — it needs the dict/object shape `CanonicalValue` lacks — but two
-   definitions of "canonical bytes" is how cross-platform determinism silently
-   diverges, and determinism is the score engine's entire product. Fix: add dict
-   support to `model/canonical.spl`, collapse S1-C onto it. Do this before a
-   third package picks a side.
+1. ~~**Duplicate canonical encoders.**~~ **RESOLVED 2026-08-31.**
+   `model/canonical.spl` gained `CDict([CanonicalField])` + `cfield()`, emitting
+   fields in **byte-sorted** key order (`_key_less` over `.bytes()`, deliberately
+   not `<` on `text`: char-oriented comparison can order non-ASCII keys
+   differently per host, which is the exact failure this encoder exists to
+   prevent). `balance/score.spl`'s local encoder is deleted and now builds a
+   `CanonicalValue`; its public signature is unchanged. Both header comments were
+   rewritten — the originals justified the fork by the *absence* of dict support,
+   and leaving that text standing would have invited a third encoder.
+   `model/canonical.spl` is now the ONE encoder; add new shapes there.
+   New spec `test/01_unit/app/spipe/model_canonical_dict_spec.spl` (8 examples):
+   sorted-not-construction order, byte-order sorting (`é` 0xC3 after `z` 0x7A),
+   non-ASCII value round-trip, nesting, quote escaping in keys as well as values.
+   Verified 8/8 + score 11/11 + identity 11/11 green; mutation-red by disabling
+   the key sort → 4/8 fail; restored byte-identical.
+   Settled in passing: `_json_escape`'s `while i < s.len()` + `substring(i, i+1)`
+   is **not** a bytes/chars bug — the non-ASCII cases exercise that path directly
+   and pass, so `len()` and `substring` agree here.
 2. **S1-A ↛ S1-B integration.** S1-B started before `model/types.spl` existed and
    designed `plan.spl` around pre-resolved `FileRewrite`/`RewriteEdit` data, so it
    never imports the frozen types. S1-A produces a reverse index S1-B cannot yet
