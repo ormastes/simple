@@ -949,6 +949,9 @@ impl<'a> MirLowerer<'a> {
                 src,
                 byte_size,
                 type_name: Some(name),
+                // Resolved later by `qualify_native_struct_layouts` once the
+                // whole-project vtable owner set is known.
+                owner_has_vtable: None,
                 deep_fields,
             });
             dest
@@ -999,6 +1002,8 @@ impl<'a> MirLowerer<'a> {
                 word_index: i as u32,
                 byte_size: (inner.len() as u32) * 8,
                 type_name: Some(fname_ty),
+                // Resolved later by `qualify_native_struct_layouts`.
+                owner_has_vtable: None,
                 nested,
             });
         }

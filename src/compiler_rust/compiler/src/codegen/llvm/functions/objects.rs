@@ -118,6 +118,7 @@ impl LlvmBackend {
         dest: crate::mir::VReg,
         src: crate::mir::VReg,
         byte_size: u32,
+        owner_has_vtable: Option<bool>,
         deep_fields: &[crate::mir::AggregateFieldCopy],
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
@@ -130,7 +131,7 @@ impl LlvmBackend {
             return Ok(());
         };
 
-        let tagged = self.emit_aggregate_block_copy(src_tagged, byte_size, deep_fields, builder)?;
+        let tagged = self.emit_aggregate_block_copy(src_tagged, byte_size, owner_has_vtable, deep_fields, builder)?;
         vreg_map.insert(dest, tagged.into());
         Ok(())
     }
@@ -141,17 +142,38 @@ impl LlvmBackend {
     /// Recursion is bounded by the descriptor tree built at lowering with a
     /// cycle guard, so termination is unconditional. Branch-free: a slot not
     /// holding a live tagged heap handle keeps its original word via select.
+    ///
+    /// A struct that implements a trait carries an 8-byte vtable pointer at
+    /// offset 0: `compile_struct_init` above allocates `struct_size + 8` and
+    /// shifts every field offset by `header_size`, and `compile_field_get`/
+    /// `compile_field_set` mirror that shift via `owner_has_vtable`. The MIR
+    /// `byte_size`/`word_index` values are the UNSHIFTED field-only layout,
+    /// so this copy must apply the identical correction — mirroring the
+    /// Cranelift lowering in `codegen/instr/closures_structs.rs` — or it
+    /// starts the copy at the vtable word instead of after it: every field
+    /// shifts by one slot and the last field falls outside the allocation.
+    /// See doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
+    /// and doc/08_tracking/bug/windows_msvc_stage2_compilerconfig_by_value_return_corruption_2026-08-31.md
     #[cfg(feature = "llvm")]
     fn emit_aggregate_block_copy(
         &self,
         src_tagged: inkwell::values::IntValue<'static>,
         byte_size: u32,
+        owner_has_vtable: Option<bool>,
         deep_fields: &[crate::mir::AggregateFieldCopy],
         builder: &Builder<'static>,
     ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
         let i8_type = self.context_ref().i8_type();
         let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let i64_type = self.runtime_int_type();
+
+        let has_vtable = owner_has_vtable == Some(true);
+        let byte_size = if has_vtable { byte_size + 8 } else { byte_size };
+        // `word_index` indexes THIS block's field-only layout, so it shifts
+        // by one word when THIS block carries a vtable header (independent
+        // of each field's own type, which is why deep_fields' own recursion
+        // is keyed on `field.owner_has_vtable`, not this one).
+        let field_word_shift: u32 = u32::from(has_vtable);
 
         let words = byte_size.div_ceil(8).max(1);
         let alloc_bytes = u64::from(words) * 8;
@@ -240,20 +262,19 @@ impl LlvmBackend {
 
         let words_total = words;
         for field in deep_fields {
-            if field.word_index >= words_total {
+            let word_index = field.word_index + field_word_shift;
+            if word_index >= words_total {
                 continue; // descriptor out of range — fail closed, keep shallow
             }
-            let off = self
-                .context_ref()
-                .i32_type()
-                .const_int(u64::from(field.word_index) * 8, false);
+            let off = self.context_ref().i32_type().const_int(u64::from(word_index) * 8, false);
             let slot = unsafe { builder.build_gep(i8_type, new_ptr, &[off], "aggcopy_deep_slot") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep deep slot", &e))?;
             let word = builder
                 .build_load(i64_type, slot, "aggcopy_deep_word")
                 .map_err(|e| crate::error::factory::llvm_build_failed("load deep word", &e))?
                 .into_int_value();
-            let inner = self.emit_aggregate_block_copy(word, field.byte_size, &field.nested, builder)?;
+            let inner =
+                self.emit_aggregate_block_copy(word, field.byte_size, field.owner_has_vtable, &field.nested, builder)?;
             // Replace only a live tagged heap handle; nil (0) and non-handle
             // words keep their original value.
             let tag_bit = builder

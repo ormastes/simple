@@ -1025,6 +1025,30 @@ pub(super) fn eval_collection_expr(
                     }
                     Ok(Value::text_from_bytes(sliced))
                 }
+                Value::StrBytes(b) => {
+                    // Same BYTE-indexed slicing as the `Value::Str` arm above,
+                    // just over an already-raw-bytes text value (produced by
+                    // that very arm, or by any other mid-codepoint-preserving
+                    // path -- see `Value::text_from_bytes`). Before this arm
+                    // existed, a second step-slice applied to the result of a
+                    // first one (e.g. any expression that step-slices twice)
+                    // fell into the `_` arm below and errored
+                    // "cannot slice value of type str with step" -- a
+                    // confusing message since `StrBytes::type_name()` is also
+                    // "str", right below a working `Str` arm. Reproduced by a
+                    // one-line hello-world `native-build` on this checkout.
+                    let sliced = slice_collection(b.as_slice(), start_idx, end_idx, step_val);
+                    if simple_runtime::text_slice_audit::enabled() {
+                        simple_runtime::text_slice_audit::note(
+                            simple_runtime::text_slice_audit::site::INTERP_BRACKET,
+                            start_idx,
+                            end_idx,
+                            b.as_slice(),
+                            &sliced,
+                        );
+                    }
+                    Ok(Value::text_from_bytes(sliced))
+                }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
                 Value::LabeledTuple { values, .. } => {
                     Ok(Value::Tuple(slice_collection(&values, start_idx, end_idx, step_val)))
