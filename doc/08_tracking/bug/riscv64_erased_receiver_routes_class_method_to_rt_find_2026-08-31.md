@@ -213,16 +213,39 @@ layout — the same provenance question as `rt_find`.
 
 Fix direction 1 in the list above named
 `hir/lower/expr/simd.rs::lower_static_method_call` as the site that erases the
-local to ANY. **That is wrong and was measured wrong**: an instrumented build
-(`SIMPLE_DEBUG_STATIC_RET`) shows that function is **never entered** during this
-compile — zero probe lines. The MIR emits
+local to ANY. That is **not established**, and the first attempt to disprove it
+was itself invalid — see the instrumentation warning below. The MIR emits
 `Call Pure("lib__nogc_async_mut__mcp__dispatch__DispatchRegistry_dot_new_for_test")`,
 a fully module-qualified symbol, not the `"{class}.{method}"` shape that
 function builds, so an IMPORTED static method takes a different lowering path.
 A candidate fix that consulted `resolve_type`'s `global_struct_defs` fallback
-there was written, compiled, and **reverted after measuring it had no effect** —
-it was dead code for this path. Finding the import-aware static-call lowering
-site is the first task for whoever picks this up.
+there was written, compiled, and **reverted after measuring it had no effect**.
+Valid file-based instrumentation later explained why it could not help: for every
+class `lower_static_method_call` actually sees, `module.types.lookup` and
+`globals` ALREADY succeed (135 probe rows, e.g.
+`qualified=BinaryReader.new resolve_type=Some(TypeId(87)) types.lookup=Some(TypeId(87))
+globals=Some(TypeId(87))`), so an extra `resolve_type` fallback is unreachable.
+
+**Where the erasure is NOT.** Two lowering paths were instrumented and cleared:
+`hir/lower/expr/mod.rs::call_return_type` runs 8,372 times in this compile and
+**not once** with a callee whose `Debug` mentions `DispatchRegistry` or
+`new_for_test`; `lower_static_method_call` runs 135 times, all for stdlib
+classes, and never for `DispatchRegistry`/`DispatchEntry`/`AuthorityToken`. So
+the ENTRY module's own statements are lowered by a pass neither probe covers.
+Locating that pass is the first task for whoever picks this up.
+
+### Instrumentation warning — this cost two wrong conclusions
+
+**Environment variables do NOT reach the process that performs HIR lowering for
+this lane, and its stderr is not forwarded either.** An `eprintln!` guarded by
+`std::env::var("SIMPLE_DEBUG_...").is_ok()` produces **zero output even from code
+that provably runs thousands of times**. `SIMPLE_DUMP_MIR` works only because it
+is read later, in `codegen/common_backend.rs:2155`, in a process that does see
+the variable. An earlier revision of this record concluded from such a silent
+probe that `lower_static_method_call` is "never entered"; an UNGUARDED probe
+writing to a FILE proved it is entered 135 times. Instrument this pipeline by
+appending to an absolute path with no env guard, and never read silence as
+evidence.
 
 So closing all four rows needs **both**:
 
