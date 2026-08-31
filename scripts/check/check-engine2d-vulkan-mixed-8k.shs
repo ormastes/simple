@@ -9,7 +9,20 @@ LINES="${ENGINE2D_VULKAN_LINES:-16}"
 RUNTIME_LIB="$ROOT/src/compiler_rust/target/release/libsimple_runtime.so"
 mkdir -p "$BUILD_DIR"
 if [ ! -f "$ICD" ]; then echo "engine2d_vulkan_mixed_status=blocked reason=missing-icd"; exit 2; fi
+# Rebuild when the lib is missing OR was built without the vulkan feature
+# (featureless build = identical return-0 stubs; rt_vulkan_init silently fails
+# and this gate dies with no verdict — 2026-08-31 incident).
+need_build=0
 if [ ! -f "$RUNTIME_LIB" ]; then
+    need_build=1
+elif command -v nm >/dev/null 2>&1; then
+    addr_a=$(nm -D "$RUNTIME_LIB" | awk '$3=="rt_vulkan_init_window_present"{print $1}')
+    addr_b=$(nm -D "$RUNTIME_LIB" | awk '$3=="rt_vulkan_init_headless_present"{print $1}')
+    if [ -z "$addr_a" ] || { [ -n "$addr_b" ] && [ "$addr_a" = "$addr_b" ]; }; then
+        need_build=1
+    fi
+fi
+if [ "$need_build" = 1 ]; then
     (cd "$ROOT/src/compiler_rust" && cargo build -p simple-runtime --release --no-default-features --features vulkan)
 fi
 for shader in clear rect_filled image_copy font_atlas_packed; do
