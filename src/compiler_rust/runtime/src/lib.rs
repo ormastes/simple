@@ -665,6 +665,28 @@ pub extern "C" fn rt_store_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
 }
 
+/// Optimization barrier for constant-time code -- returns its argument.
+///
+/// Contract: `extern fn rt_black_box(value: i64) -> i64`
+/// (`src/os/crypto/scram_common.spl:17`; `src/lib/common/crypto/constant_time.spl:7`
+/// spells the return `i64?`, which is a Simple-side nullability annotation
+/// over the same raw-i64 C ABI -- cf. `extern fn rt_free(ptr: i64) -> i64?`
+/// against `void rt_free(void*)`).
+///
+/// Semantically the identity function, but the optimizer must not be able
+/// to see that: callers (`ct_eq`, HTTP Basic auth, SCRAM) XOR-accumulate a
+/// difference and test it once, and without a barrier the compiler may
+/// rewrite that into an early-exit branch, reintroducing exactly the
+/// data-dependent timing the accumulate loop removes.
+///
+/// The C runtime defines this symbol WEAKLY (`runtime_native.c`, next to
+/// `rt_memory_barrier`) so this strong definition wins in any link that
+/// carries both -- same precedence rule as `rt_heap_live_bytes`.
+#[no_mangle]
+pub extern "C" fn rt_black_box(value: i64) -> i64 {
+    std::hint::black_box(value)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_volatile_read_u8(addr: i64) -> i64 {
     (addr as usize as *const u8).read_volatile() as i64

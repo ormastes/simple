@@ -164,6 +164,28 @@ pub extern "C" fn rt_host_gpu_lane_last_phase() -> i64 {
     LAST_PHASE.load(Ordering::Relaxed)
 }
 
+/// Handle of the GPU backend currently bound to the host/GPU lane.
+///
+/// Contract: `extern fn rt_host_gpu_active_backend_handle() -> i64`
+/// (`src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:22`).
+/// Its only caller (:230) passes the result straight into
+/// `rt_host_gpu_queue_emit`'s `backend_handle` parameter, so it shares that
+/// parameter's handle space exactly: `0` == no backend, `> 0` == a real
+/// backend, and a negative value is rejected by the emit guard
+/// (`backend_handle < 0`). `complete_packet` maps a GPU-lane packet
+/// carrying handle `0` to `RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE`, which is
+/// precisely the "no GPU here" outcome.
+///
+/// Nothing in this tree registers an *active* backend -- every non-zero
+/// `backend_handle` the queue has ever seen arrived as a caller-supplied
+/// argument. So this returns an honest `0` (no backend), not a fabricated
+/// one, and deliberately does NOT report `last_backend_handle`, which is
+/// queue history rather than a bound backend.
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_active_backend_handle() -> i64 {
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn rt_host_gpu_queue_reset() {
     if let Ok(mut state) = queue_state().lock() {

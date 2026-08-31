@@ -74,8 +74,22 @@ pub fn enabled() -> bool {
 fn init() -> bool {
     let on = std::env::var("SIMPLE_PERF_COUNTERS").is_ok_and(|v| !v.is_empty() && v != "0");
     if on && !ATEXIT_REGISTERED.swap(true, Ordering::Relaxed) {
+        #[cfg(unix)]
         unsafe {
             libc::atexit(dump_at_exit);
+        }
+        // `libc` is a cfg(unix)-only dependency of this crate, so the call
+        // above cannot compile on Windows. atexit itself is standard C and the
+        // MSVC CRT exports it, so declare it directly rather than dropping the
+        // feature: SIMPLE_PERF_COUNTERS is a documented debugging tool
+        // (.claude/rules/commands.md) and a silently-inert counter dump would
+        // be worse than none.
+        #[cfg(not(unix))]
+        unsafe {
+            extern "C" {
+                fn atexit(cb: extern "C" fn()) -> i32;
+            }
+            atexit(dump_at_exit);
         }
     }
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);

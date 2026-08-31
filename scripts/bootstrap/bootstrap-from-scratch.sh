@@ -811,6 +811,9 @@ echo "Platform: ${PLATFORM}"
 exe_suffix=""
 archive_prefix="lib"
 archive_suffix=".a"
+# Empty off Windows: the expansion below then contributes no arguments at all,
+# leaving the Linux/macOS/FreeBSD invocations byte-identical.
+bootstrap_windows_abi_env=""
 if [ "${os}" = "windows" ]; then
   exe_suffix=".exe"
   case "${SIMPLE_LINKER_FLAVOR:-${PLATFORM_ABI}}" in
@@ -825,6 +828,17 @@ if [ "${os}" = "windows" ]; then
   SIMPLE_WINDOWS_ABI="${PLATFORM_ABI}"
   SIMPLE_LINKER_FLAVOR="${windows_linker_abi}"
   export SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR
+  # Stage 2/3 run the compiler under a HERMETIC env that forwards only an
+  # explicit allowlist. `Target` carries arch+os but NO abi field, so
+  # `x86_64-pc-windows-msvc` and `...-gnu` parse identically and
+  # `Target::linker_flavor()` (common/src/target.rs:744) decides Windows flavor
+  # from the ENVIRONMENT: SIMPLE_LINKER_FLAVOR first, else an `MSYSTEM`
+  # heuristic. Dropping the variable therefore did not fall back to the
+  # requested target -- it fell back to MSYSTEM, which is always set under Git
+  # Bash, so an explicit `--target x86_64-pc-windows-msvc` silently built with
+  # GNU flavour and invoked `g++` for the main stub (measured 2026-08-30:
+  # "Failed to compile main stub (g++)"). Forward the explicit choice.
+  bootstrap_windows_abi_env="SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI} SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR}"
   if [ "${PLATFORM_ABI}" = "msvc" ]; then
     archive_prefix=""
     archive_suffix=".lib"
@@ -1600,7 +1614,19 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"
   windows_libpath="${LIBPATH:-}"
-  windows_system_root="${SystemRoot:-}"
+  # MSYS / Git Bash exports the Windows names in UPPER CASE (SYSTEMROOT,
+  # SYSTEMDRIVE, PROGRAMDATA); the mixed-case spellings a native cmd shell has
+  # are absent, so reading only those captured EMPTY and the hermetic `env -i`
+  # below handed the toolchain a Windows-less environment.
+  windows_system_root="${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}"
+  # SystemDrive is REQUIRED for the MSVC lane. Without it every drive-rooted
+  # LIB entry fails to resolve and link.exe reports `LNK1181: cannot open
+  # input file 'kernel32.lib'` even though LIB is correct and the file exists
+  # (bisected 2026-08-24: adding SystemDrive alone flips the identical rustc
+  # invocation from exit 1 to exit 0). ProgramData is forwarded for the same
+  # class of drive-rooted resolution.
+  windows_system_drive="${SystemDrive:-${SYSTEMDRIVE:-}}"
+  windows_program_data="${ProgramData:-${PROGRAMDATA:-}}"
   windows_temp="${TEMP:-${rust_authority_tmp}}"
   rust_llvm_authority=$(
     bootstrap_stage3_resolve_llvm_build_authority \
@@ -1703,7 +1729,7 @@ run_rust_authority_cargo() {
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
-        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
         "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
@@ -1721,7 +1747,7 @@ run_rust_authority_cargo() {
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
-        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
         "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
@@ -1740,7 +1766,7 @@ run_rust_authority_cargo() {
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
-      LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+      LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" \
       CARGO_PROFILE_BOOTSTRAP_LTO=off "${cargo_abs}" "$@"
   else
@@ -1754,7 +1780,7 @@ run_rust_authority_cargo() {
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
-      LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+      LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" \
       "${cargo_abs}" "$@"
   fi
@@ -2330,6 +2356,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
+    ${bootstrap_windows_abi_env} \
     SIMPLE_BINARY="${stage2_seed_absolute}" -- \
     "${stage2_seed_absolute}" native-build \
     --target "${PLATFORM}" \
@@ -2637,6 +2664,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_NATIVE_BUILD_CACHE_DIR="${stage3_cache_absolute}" \
     SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
+    ${bootstrap_windows_abi_env} \
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
     ${stage3_diagnostic_env} -- \
     "${stage2_admitted_absolute}" native-build \

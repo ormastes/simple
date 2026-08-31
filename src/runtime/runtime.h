@@ -1178,7 +1178,12 @@ int64_t     rt_heap_live_bytes(void);
 int64_t     rt_heap_peak_bytes(void);
 int64_t     rt_push(int64_t receiver, int64_t value);
 int64_t     rt_file_stat(const uint8_t* path_ptr, uint64_t path_len);
-const char* rt_shell_output(const char* cmd);
+/* Native extern ABI (2026-08-31): `rt_shell_output` is absent from
+ * text_arg_indices (50.mir/text_extern_abi.spl + codegen/instr/calls.rs),
+ * so generated code passes the command as ONE tagged text value and reads
+ * the return as a tagged text value. The old `const char*` shape never
+ * matched any caller that actually linked. */
+int64_t     rt_shell_output(int64_t cmd_value);
 SplArray*   rt_cli_get_args(void);
 int64_t     rt_cli_arg_count(void);
 #if defined(SPL_LEGACY_VALUE_RUNTIME)

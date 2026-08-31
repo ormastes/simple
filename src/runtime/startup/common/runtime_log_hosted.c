@@ -15,7 +15,17 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
+#if defined(_MSC_VER) || defined(SPL_TOOLCHAIN_CLANGCL)
+    /* MSVC ships no <unistd.h>. The only POSIX surface this file uses is
+     * write(2, ...) and ssize_t, both of which the Windows SDK provides under
+     * different names -- same split platform_win.h already makes. */
+    #include <io.h>
+    #include <basetsd.h>
+    typedef SSIZE_T ssize_t;
+    #define write _write
+#else
+    #include <unistd.h>
+#endif
 
 /*
  * Level-gated emission probe -- DEFAULT OFF, costs one getenv on first use.

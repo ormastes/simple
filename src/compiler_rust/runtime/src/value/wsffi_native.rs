@@ -288,7 +288,12 @@ pub extern "C" fn spl_dlsym_process_checked(name_rv: RuntimeValue, out_symbol: *
     {
         use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
         let process = unsafe { GetModuleHandleW(std::ptr::null()) };
-        if process == 0 {
+        // windows-sys models HMODULE as `*mut c_void` (it was `isize` in older
+        // releases), so the `== 0` this used to do no longer type-checks. This
+        // whole block is `#[cfg(windows)]`, so the break was invisible to every
+        // Linux and macOS build and only surfaces when the seed is compiled on
+        // Windows -- which is exactly the lane that had not been reachable.
+        if process.is_null() {
             return 3;
         }
         let result = unsafe { GetProcAddress(process, buf.as_ptr()) };

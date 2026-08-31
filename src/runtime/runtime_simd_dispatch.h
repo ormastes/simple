@@ -56,9 +56,33 @@ int64_t   rt_mlkem_modq_avx2_selfcheck(void);
 #endif
 
 /* x86_64 AVX2 — runtime-detected via cpuid */
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !(defined(__clang__) && defined(_MSC_VER))
 #  define SIMD_CAN_AVX2 1
 #else
+/* clang-cl (__clang__ AND _MSC_VER) is excluded deliberately.
+ *
+ * The AVX2 routines rely on per-function `__attribute__((target("avx2")))` so
+ * the rest of the translation unit stays at the baseline ISA and
+ * `simd_detect_avx2()` chooses at runtime. Under -fms-compatibility clang-cl
+ * does not honour that attribute for enabling intrinsics, so the AVX2 bodies
+ * fail to compile: `use of undeclared identifier '__m256i'`
+ * (runtime_simd_utf8.c) and `unknown type name '__m256i'`
+ * (runtime_simd_dispatch.c).
+ *
+ * `/arch:AVX2` would fix the compile and is NOT used: it licenses the compiler
+ * to emit AVX2 anywhere in the TU, including the scalar fallbacks that exist
+ * precisely for CPUs without AVX2, converting a clean runtime-dispatch design
+ * into a crash on pre-Haswell hardware.
+ *
+ * Real MSVC cl.exe is NOT excluded -- it permits AVX2 intrinsics irrespective
+ * of /arch -- and neither is the GNU-driver clang, which honours the attribute.
+ * Only the clang-cl combination is affected.
+ *
+ * Cost: Windows MSVC-lane builds take the scalar UTF-8 paths
+ * (scalar_utf8_count_codepoints / _validate / _find_invalid). Correct, slower.
+ * Recorded rather than silently accepted:
+ * doc/08_tracking/bug/windows_clang_cl_avx2_target_attribute_2026-08-31.md
+ */
 #  define SIMD_CAN_AVX2 0
 #endif
 
@@ -76,10 +100,17 @@ int64_t   rt_mlkem_modq_avx2_selfcheck(void);
  * ================================================================ */
 
 #if SIMD_HAS_X86
-#  if defined(__GNUC__) || defined(__clang__)
-#    include <cpuid.h>
-#  elif defined(_MSC_VER)
+/* _MSC_VER FIRST: clang-cl defines __clang__ *and* _MSC_VER, so testing the
+ * GNU branch first pulled in GCC's <cpuid.h>, whose 5-argument `__cpuid` macro
+ * then collided with the 2-argument `__cpuid` function that MSVC's <intrin.h>
+ * declares ("too few arguments provided to function-like macro invocation").
+ * runtime_native.c's own cpuid guard already orders these correctly; this one
+ * did not. On GCC/real-clang _MSC_VER is never defined, so those builds are
+ * byte-identical. */
+#  if defined(_MSC_VER)
 #    include <intrin.h>
+#  elif defined(__GNUC__) || defined(__clang__)
+#    include <cpuid.h>
 #  endif
 #endif
 
@@ -94,7 +125,7 @@ static inline int simd_detect_avx2(void) {
 #if defined(SIMPLE_RUNTIME_FORCE_NO_AVX2)
     return 0;
 #elif SIMD_CAN_AVX2
-#  if defined(__GNUC__) || defined(__clang__)
+#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     unsigned int eax, ebx, ecx, edx;
     /* AVX2 requires AVX plus OS-managed XMM/YMM state. */
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
@@ -219,7 +250,7 @@ void simd_crypto_init(void);
 
 static inline int simd_detect_aesni(void) {
 #if SIMD_HAS_X86
-#  if defined(__GNUC__) || defined(__clang__)
+#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     unsigned int eax, ebx, ecx, edx;
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
     return (ecx & (1U << 25)) ? 1 : 0;
@@ -237,7 +268,7 @@ static inline int simd_detect_aesni(void) {
 
 static inline int simd_detect_sha_ni(void) {
 #if SIMD_HAS_X86
-#  if defined(__GNUC__) || defined(__clang__)
+#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     unsigned int eax, ebx, ecx, edx;
     if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) return 0;
     return (ebx & (1U << 29)) ? 1 : 0;
@@ -255,7 +286,7 @@ static inline int simd_detect_sha_ni(void) {
 
 static inline int simd_detect_pclmulqdq(void) {
 #if SIMD_HAS_X86
-#  if defined(__GNUC__) || defined(__clang__)
+#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     unsigned int eax, ebx, ecx, edx;
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
     return (ecx & (1U << 1)) ? 1 : 0;

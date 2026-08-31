@@ -33,7 +33,27 @@
 #include <time.h>
 #include <stdatomic.h>
 #include <fcntl.h>
+#if defined(_MSC_VER)
+/* MSVC ships no <unistd.h>. MinGW DOES, and the GNU-ABI Windows lane includes
+ * it, so this is gated on _MSC_VER and not on _WIN32 -- widening it to _WIN32
+ * would drop the header out from under the MinGW build. The heavier POSIX
+ * headers are already `#if !defined(_WIN32)` below.
+ *
+ * Without this the file failed to compile under clang-cl with
+ * `fatal error: 'unistd.h' file not found`, so it never reached the core-C
+ * archive -- which is why the Stage 2 MSVC link reported ~72 undefined rt_*
+ * symbols that this very file defines. */
+#include <basetsd.h>
+/* ssize_t is one of the things <unistd.h> was supplying. The Windows SDK
+ * spells it SSIZE_T; _SSIZE_T_DEFINED is the guard the CRT headers use, so
+ * respect it rather than risk a conflicting typedef. */
+#if !defined(_SSIZE_T_DEFINED)
+typedef SSIZE_T ssize_t;
+#define _SSIZE_T_DEFINED
+#endif
+#else
 #include <unistd.h>
+#endif
 #include <sys/types.h>
 #include <sys/stat.h>
 #if defined(_WIN32)
@@ -41,6 +61,69 @@
 #include <io.h>
 #include <malloc.h>
 #include <windows.h>
+#endif
+
+#if defined(_MSC_VER)
+/* POSIX entry points this file calls that MSVC does not provide. MinGW HAS all
+ * of them, so every shim is gated on _MSC_VER, never _WIN32 -- widening would
+ * shadow MinGW's real implementations. */
+#define popen  _popen
+#define pclose _pclose
+
+/* MSVC has no ftruncate; _chsize_s is the CRT equivalent. */
+static int rt_msvc_ftruncate(int fd, long long length) {
+    return _chsize_s(fd, length) == 0 ? 0 : -1;
+}
+#define ftruncate rt_msvc_ftruncate
+
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+#endif
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+/* CLOCK_REALTIME from the system clock (FILETIME's 1601 epoch rebased to
+ * 1970); CLOCK_MONOTONIC from QueryPerformanceCounter, the only genuinely
+ * monotonic Windows source. Any other clock id is refused rather than silently
+ * answered with the wrong timebase. */
+static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
+    if (!ts) return -1;
+    if (clock_id == CLOCK_REALTIME) {
+        FILETIME ft;
+        ULARGE_INTEGER t;
+        GetSystemTimeAsFileTime(&ft);
+        t.LowPart = ft.dwLowDateTime;
+        t.HighPart = ft.dwHighDateTime;
+        t.QuadPart -= 116444736000000000ULL;
+        ts->tv_sec = (time_t)(t.QuadPart / 10000000ULL);
+        ts->tv_nsec = (long)((t.QuadPart % 10000000ULL) * 100ULL);
+        return 0;
+    }
+    if (clock_id == CLOCK_MONOTONIC) {
+        LARGE_INTEGER freq, now;
+        if (!QueryPerformanceFrequency(&freq) || freq.QuadPart == 0) return -1;
+        if (!QueryPerformanceCounter(&now)) return -1;
+        ts->tv_sec = (time_t)(now.QuadPart / freq.QuadPart);
+        ts->tv_nsec = (long)(((now.QuadPart % freq.QuadPart) * 1000000000LL) / freq.QuadPart);
+        return 0;
+    }
+    return -1;
+}
+#define clock_gettime rt_msvc_clock_gettime
+#endif
+/* Deprecated in C17 and REMOVED in C23; MinGW's <stdatomic.h> no longer
+ * defines it, while glibc/libc++ still do. Defining it only when absent keeps
+ * every existing call site and every non-Windows build byte-identical.
+ * `(value)` is exactly the semantics C11 gave it for static initializers.
+ *
+ * This guard existed at 8ca87866c61 and is ABSENT from origin/main: pristine
+ * main fails `gcc -fsyntax-only` on this file with 6 ATOMIC_VAR_INIT errors
+ * under MinGW gcc 15.2.0 (measured 2026-08-30). It was almost certainly lost
+ * to the same "snapshot current development state" commit that deleted
+ * doc/08_tracking/bug/bootstrap_stage2_windows_link_unresolved_rt_and_dup_kernel32_2026-08-24.md
+ * -- the clobber pattern .claude/rules/vcs.md warns about. Restored. */
+#ifndef ATOMIC_VAR_INIT
+#define ATOMIC_VAR_INIT(value) (value)
 #endif
 #if !defined(_WIN32)
 #include <dirent.h>
@@ -710,6 +793,26 @@ int64_t rt_host_gpu_lane_begin_count(void) { return rt_host_gpu_lane_begin_total
 int64_t rt_host_gpu_lane_end_count(void) { return rt_host_gpu_lane_end_total; }
 int64_t rt_host_gpu_lane_last_lane(void) { return rt_host_gpu_lane_last_lane_code; }
 int64_t rt_host_gpu_lane_last_phase(void) { return rt_host_gpu_lane_last_phase_code; }
+
+/*
+ * Handle of the GPU backend currently bound to the host/GPU lane.
+ *
+ * Contract (src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:22):
+ *     extern fn rt_host_gpu_active_backend_handle() -> i64
+ * Its single caller (:230) feeds the result straight into
+ * rt_host_gpu_queue_emit's `backend_handle` parameter, so it lives in the
+ * SAME handle space as that parameter: 0 == no backend, >0 == a real
+ * backend, and a NEGATIVE value is rejected outright by the emit path
+ * (see the `backend_handle < 0` guard below). Completion maps a GPU-lane
+ * packet carrying handle 0 to RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE, which
+ * is exactly the "no GPU here" outcome we want reported.
+ *
+ * The core C runtime binds no GPU backend, and nothing anywhere in this
+ * tree registers an "active" one -- every real backend_handle observed by
+ * the queue arrives as a caller-supplied argument. So this is an honest
+ * no-backend answer, not a placeholder: it returns 0.
+ */
+int64_t rt_host_gpu_active_backend_handle(void) { return 0; }
 
 void rt_host_gpu_queue_reset(void) {
     rt_host_gpu_queue_next_packet_id = 1;
@@ -5876,6 +5979,63 @@ void rt_volatile_write_u64(int64_t addr, int64_t value) {
 void rt_memory_barrier(void) {
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
+
+/*
+ * rt_black_box -- optimization barrier for constant-time code.
+ *
+ * Contract: `extern fn rt_black_box(value: i64) -> i64`
+ *   - src/os/crypto/scram_common.spl:17           (-> i64)
+ *   - src/lib/common/crypto/constant_time.spl:7   (-> i64?)
+ * The two spellings are the SAME C ABI: an `i64?` extern return is a
+ * Simple-side nullability annotation, not a tagged value (cf.
+ * `extern fn rt_free(ptr: i64) -> i64?` against `void rt_free(void*)` at
+ * :5816, and `rt_io_tcp_set_read_timeout(fd: i64, ms: i64?)` against
+ * `int64_t rt_io_tcp_set_read_timeout(int64_t, int64_t)` at :11338).
+ * The Simple wrapper's `?? value` merely supplies a fallback.
+ *
+ * Semantically the identity function; the whole point is that the
+ * optimizer must not be able to prove that. Callers are constant-time
+ * comparisons (ct_eq / HTTP Basic auth / SCRAM) that XOR-accumulate a
+ * difference and then test it once -- without a barrier the compiler is
+ * free to rewrite that into an early-exit branch and reintroduce the
+ * data-dependent timing the loop exists to remove.
+ *
+ * A bare `return value;` is NOT sufficient: it is opaque only until
+ * someone enables LTO or inlines across the TU. The inline-asm form below
+ * forces the value through a register the compiler must treat as
+ * clobbered, which is what makes it a real barrier.
+ *
+ * WEAK on GNUC/clang for the same reason as rt_heap_live_bytes in
+ * runtime_memtrack.c: the Rust runtime (lib.rs) defines this symbol
+ * strongly via std::hint::black_box, and two strong definitions are a hard
+ * lld duplicate-symbol error in any link that carries both. Weak means
+ * standalone C links keep this fallback and mixed links get Rust's, which
+ * is the correct precedence. MSVC has no weak attribute; Windows builds do
+ * not whole-archive this file into the Rust cdylib, so a strong definition
+ * is fine there.
+ */
+#if defined(_MSC_VER)
+/* MSVC (incl. clang-cl in MS mode) rejects GNU inline asm. A volatile
+ * round-trip cannot be elided or constant-folded, so it is a genuine
+ * barrier here. MinGW is deliberately NOT routed here -- it has the GNU
+ * asm and takes the branch below, exactly like Linux/macOS/FreeBSD. */
+static volatile int64_t rt_black_box_sink;
+int64_t rt_black_box(int64_t value) {
+    rt_black_box_sink = value;
+    return rt_black_box_sink;
+}
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) int64_t rt_black_box(int64_t value) {
+    __asm__ __volatile__("" : "+r"(value) : : "memory");
+    return value;
+}
+#else
+static volatile int64_t rt_black_box_sink;
+int64_t rt_black_box(int64_t value) {
+    rt_black_box_sink = value;
+    return rt_black_box_sink;
+}
+#endif
 
 double rt_math_pow(double base, double exponent) {
     return pow(base, exponent);
@@ -11730,11 +11890,24 @@ int64_t rt_kqueue_close(int64_t h) { return rt_event_loop_close(h); }
 
 int64_t rt_iocp_create(void) { return -1; }
 int64_t rt_iocp_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+/* Omitted when this family was written: create/register/poll/close were all
+ * present but deregister was not, while the kqueue family above defines all
+ * five. The gap is invisible until a NATIVE link -- the interpreter resolves
+ * externs by name at call time -- so it first surfaced as an undefined symbol
+ * at the Windows Stage 2 link, referenced from
+ * src/lib/nogc_async_mut/io/platform_event.spl:364.
+ * Returns -1 (failure) to match every other entry point in this
+ * unavailable-backend family; it must NOT report success. */
+int64_t rt_iocp_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
 int64_t rt_iocp_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
 int64_t rt_iocp_close(int64_t h) { (void)h; return -1; }
 
 int64_t rt_event_ports_create(void) { return -1; }
 int64_t rt_event_ports_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+/* Same omission as the IOCP family above; referenced from
+ * src/lib/nogc_async_mut/io/platform_event.spl:365. Returns -1 to match the
+ * rest of this unavailable-backend family. */
+int64_t rt_event_ports_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
 int64_t rt_event_ports_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
 int64_t rt_event_ports_close(int64_t h) { (void)h; return -1; }
 
