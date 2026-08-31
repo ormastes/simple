@@ -44,8 +44,13 @@ $ grep -oE '__attribute__\(\(weak\)\) [A-Za-z_]+ rt_[A-Za-z0-9_]+' $S | wc -l
 1554
 ```
 
-Sibling `auto_stubs.c` files exist for arm64, riscv64, arm32, x86_32 and riscv32
-and were not measured here; assume the same shape until checked.
+**Measured, not assumed: this file exists for x86_64 ONLY.** There is no
+`auto_stubs.c` under the `arm64`, `riscv64`, `arm32`, `x86_32` or `riscv32` boot
+directories — checked all five. So this fail-open is specific to the x86_64
+freestanding link and does not currently affect the other arches' kernels. That
+also means the x86_64 kernel is the one carrying 1554 nil-returning entry points
+while the others are not, which is worth knowing before treating x86_64 as the
+"most mature" arch lane.
 
 ## Correction to a prior finding
 
@@ -72,3 +77,34 @@ fail any push that adds a weak nil `rt_*` stub, then burn the list down by
 implementing or removing the callers. A trap body (`rt_trap()`/`__builtin_trap`)
 instead of `return NIL_VALUE` would also convert silent-nil into a loud runtime
 failure without changing link behaviour.
+
+---
+
+# Addendum: seed `run` returns EMPTY for a text step-slice, with no error
+
+Separate defect, found in the same session, recorded here so it is not lost.
+
+Under the Rust seed's `run` path, a step-slice of a text value evaluates to the
+empty string and reports **no error**:
+
+```
+$ cat /tmp/g2_r2.spl
+fn main() -> i64:
+    val s = "abcdefghij"
+    val once = s[::2]
+    print("once=[{once}]\n")
+    val twice = once[::2]
+    print("twice=[{twice}]\n")
+    0
+
+$ ./simple run /tmp/g2_r2.spl
+once=[]
+twice=[]
+```
+
+Expected `once=[acegi]`, `twice=[aei]`. Silently returning empty is worse than
+erroring: a caller cannot distinguish "no matching characters" from "this
+operation is not wired". This is NOT the same bug as the StrBytes length-match
+gap fixed in `f3762655e06` — that one raised a loud error on the native-build
+frontend path; this one is silent on the `run` path and survives that fix. Not
+diagnosed further; the two may or may not share a root cause.
