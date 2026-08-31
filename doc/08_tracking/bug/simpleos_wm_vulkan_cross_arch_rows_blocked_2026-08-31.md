@@ -304,3 +304,25 @@ x86_64 WM row: **RED, not done.** The kernel half is complete and verified; the
 host daemon does not build, so the gate stops at its `host GPU daemon missing`
 precondition and no pixel evidence exists. No gate was run to a green verdict,
 no classifier or fixture was weakened, and no vacuous row was produced.
+
+### Scoping the daemon failure: hosted native-build itself is FINE
+
+The obvious next question is whether every hosted `native-build` on this seed
+fails phase 3, or only the daemon's import chain. Measured, using the **exact
+daemon invocation shape** — same env (`SIMPLE_LINK_OBJECTS`, `SIMPLE_LIB`,
+`SIMPLE_NO_STUB_FALLBACK=1`), same `--runtime-bundle core-c-bootstrap`, same
+`--runtime-path`, same `--source src/app --source src/lib --entry-closure`:
+
+    fn main():
+        print "ok"
+
+    HELLO_RC=0  ->  build/hellorepro/h.bin, 8.5 MB, runs and prints `ok`
+    unresolved-type errors: 0
+
+So the seed's hosted native-build pipeline, the core-c-bootstrap runtime bundle
+and the vulkan/cuda archive link are all working. The failure is **specific to
+the daemon's import closure**, not general. That narrows the next lane's search
+to what `src/app/simpleos_gpu_host/main.spl` pulls in — and, given `Option`,
+`Result` and `Mutex` are among the unresolved types, most likely to a module in
+that closure whose failure cascades into the shared type environment, rather
+than to the engine2d types the error messages name.
