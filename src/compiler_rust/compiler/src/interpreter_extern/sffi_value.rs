@@ -341,3 +341,56 @@ pub fn rt_is_error_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rv = RuntimeValue::from_raw(raw as u64);
     Ok(Value::Bool(rt_is_error(rv)))
 }
+
+// ============================================================================
+// Formation probe: rt_heap_ref_wellformed
+// ============================================================================
+
+/// Interpreter adapter for `extern fn rt_heap_ref_wellformed(value: Any) -> bool`.
+///
+/// The compiled lane's probe (`simple_runtime::value::objects::rt_heap_ref_wellformed`,
+/// mirrored in `src/runtime/runtime_native.c` and
+/// `src/runtime/simple_core/core_enum.spl`) asks one question of a raw tagged
+/// word: is this a heap-tagged pointer outside the zero page? That question is
+/// meaningless here — the interpreter has no tagged words, it has `Value`, and
+/// every composite `Value` is well-formed by construction.
+///
+/// So this adapter answers the SAME question in the interpreter's own terms:
+/// nil and the scalar variants are not heap references and report `false` (the
+/// compiled probe reports 0 for them "by design"); everything else is a live,
+/// well-formed composite and reports `true`.
+///
+/// Deliberately written as a negative match on nil + scalars rather than a
+/// positive match on the heap variants: a `Value` variant added later then
+/// defaults to `true`, which preserves the compiled probe's load-bearing
+/// guarantee that it "can never false-reject a live object". A positive match
+/// would silently start rejecting new composites, and since every call site is
+/// `if not rt_heap_ref_wellformed(x): <fail closed>`, that would turn a new
+/// variant into a spurious hard failure.
+///
+/// NOT registered before this change: the seed's `interpreter_extern` registry
+/// is a third registry, independent of `common/src/runtime_symbols.rs` and of
+/// the C/Rust runtimes, so the symbol was defined and exported everywhere else
+/// and still unknown here — `error: semantic: unknown extern function:
+/// rt_heap_ref_wellformed`. Fenced by
+/// `scripts/check/check-interpreter-extern-registry-gap.shs`.
+pub fn rt_heap_ref_wellformed_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let value = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_heap_ref_wellformed expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+
+    let is_heap_formed = !matches!(
+        value,
+        Value::Nil
+            | Value::Int(_)
+            | Value::UInt { .. }
+            | Value::Float(_)
+            | Value::Float32(_)
+            | Value::Bool(_)
+    );
+
+    Ok(Value::Bool(is_heap_formed))
+}

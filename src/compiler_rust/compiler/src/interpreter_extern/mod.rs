@@ -1685,6 +1685,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_is_interpreter_runtime", system::rt_is_interpreter_runtime);
     insert_simple!("rt_is_jit_runtime", system::rt_is_jit_runtime);
     insert_simple!("rt_is_error", sffi_value::rt_is_error_fn);
+    insert_simple!(
+        "rt_heap_ref_wellformed",
+        sffi_value::rt_heap_ref_wellformed_fn
+    );
     insert_simple!("rt_is_macro_trace_enabled", system::rt_is_macro_trace_enabled);
     #[cfg(not(doctest))]
     {
