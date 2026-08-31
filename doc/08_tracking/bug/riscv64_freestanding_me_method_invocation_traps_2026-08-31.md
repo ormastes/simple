@@ -1,4 +1,4 @@
-# riscv64 freestanding: a `me` method storing back into its own `self` field traps
+# riscv64 freestanding: invoking a `me` method on a class instance traps
 
 Status: OPEN
 Filed: 2026-08-31
@@ -41,9 +41,25 @@ me register(entry: DispatchEntry) -> ():
 
 Every ingredient of that line is independently proven working in-guest by the
 probes above: array literals of the class element type, array concatenation of
-that type, and reading a field off an element. What is NOT covered by any
-passing probe is the remaining operation — **storing the resulting array back
-into a `var` field on `self` from inside a `me` method**.
+that type, and reading a field off an element.
+
+**A second, discriminating probe settles which remaining operation is at
+fault.** `probe m3f` was placed immediately before `register` and calls
+`reg.find("no_such_tool_at_all")` — a `me` method on the same instance that
+only READS `self.entries` (`for e in self.entries`) and stores nothing. It
+prints nothing: `m3f` traps too, exactly like `register`.
+
+So the defect is **invoking a `me` method on a class instance at all**, not the
+field store. Note that no row of this gate had ever successfully called a `me`
+method in-guest: devtool, caret and testrun reach their evidence through free
+functions, static constructors, array `.len()` and plain field reads. The
+static constructors (`DispatchEntry.echo`, `DispatchRegistry.new_for_test`) do
+work (m2/m3) — those are `static fn`, which take no `self`. The failing shape
+is specifically the `self`-receiving method call.
+
+The original title of this record named the self-field STORE; that was the
+leading suspect before `m3f` existed, and it is wrong. Kept here so the wrong
+inference is not silently re-derived.
 
 ## What this rules out
 
@@ -51,6 +67,8 @@ into a `var` field on `self` from inside a `me` method**.
   live in this kernel (`slli a0,a0,0x3` in the linked `rt_value_int`).
 * Not the `rt_index_get` text-subscript defect fixed alongside this record.
 * Not array concatenation, in general or for this element type (m3a/m3d).
+* Not the self-field STORE specifically — a read-only `me` method traps too (m3f).
+* Not `static fn` constructors on the same classes, which work (m2/m3).
 * Not entry construction, interning, or registry construction (m1/m2/m3).
 * Previously ruled out by earlier lanes: defect C1 (module-global initialized
   from a call expression staying nil) and the closure ABI.
@@ -61,8 +79,13 @@ There is no runtime helper to inspect: a grep of the whole riscv64 boot runtime
 (`examples/09_embedded/simple_os/arch/riscv64/boot/*.c`, `*.inc.c`) for
 `rt_field_set` / `rt_struct_set` / `rt_class_set` / `rt_field_get` returns
 nothing, so class field access is direct-offset codegen. That places the next
-step in the compiler's freestanding codegen for a `me`-method self field store,
-not in the C runtime.
+step in the compiler's freestanding codegen for the `me`-method calling
+convention — how the `self` receiver is passed — not in the C runtime.
+
+Suggested next probe: the smallest possible reproduction, a two-line class with
+one `me` method that only calls `serial_println` and touches no field. If that
+traps, the receiver ABI is the whole story and the reproduction is small enough
+to disassemble.
 
 ## Reproduce
 
