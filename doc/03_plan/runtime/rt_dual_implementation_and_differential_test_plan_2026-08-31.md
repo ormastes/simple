@@ -1,3 +1,50 @@
+# CORRECTION (2026-08-31, after the C-vs-Simple census)
+
+**Waves 2 and 3 below are WITHDRAWN. Dual C + pure-Simple implementation is not the
+architecture, so implementing 1454 symbols in C and "all" in Simple would have been
+fabricated work against the design.**
+
+Evidence, from three primary sources rather than inference:
+
+- `doc/02_requirements/runtime/simple_core_runtime_completeness_2026-06-02.md`:
+  `simple_core` REPLACES `runtime_native.c` for the core lane, realizing "runtime in
+  pure Simple, **C only where required**". Duality is a transitional frontier.
+- The C-only family profile IS "where required": sdl2 66, glfw 49, audio 41, rocm 31,
+  sqlite 27, opencl 26, opengl, font, win32 — C library bindings with no meaningful
+  Simple body.
+- `doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md`:
+  `simple-core` and `core-c-bootstrap` are ALTERNATIVE lanes, each linking one
+  archive; `rust-hosted` is removed and fails closed.
+
+Measured buckets (C vs pure-Simple): both 282, C-only 1,357 (by design),
+Simple-only 241, neither 1,605 (feature-gated FFI, already ratcheted).
+
+Methodology point that makes those numbers trustworthy: `extern fn rt_X(...)` is a
+BINDING, not an implementation — **3,106 declarations vs 523 real Simple bodies**.
+Counting declarations as implementations would have inflated the Simple side 6x and
+produced a plausible, entirely wrong backlog.
+
+## What replaces waves 2 and 3
+
+**Gap A — finish the machine-checked contract.** `CORE_REQUIRED_RUNTIME_SYMBOLS`
+(`src/compiler_rust/common/src/runtime_symbols.rs:118`) names 88 symbols; 75 exist,
+**13 do not**. Ranks 1-8 are filed as
+`simple_core_lane_missing_heap_registry_abi_2026-08-22.md`; 9-13 should be appended.
+A finishing task with a defined end. Ranks 1-4 are unreferenced from `.spl` because
+CODEGEN emits them — measured, and it inverted the census's own initial ranking.
+
+**Gap B — the Windows-invisible 90.** 90 symbols are referenced, have their only C
+definition inside a POSIX conditional, and have no Simple fallback. Absent on
+Windows, and the ratchet CANNOT see them: it asks "backed anywhere?" not "backed on
+this target?". Unfiled, and precisely the class this Windows lane keeps
+rediscovering one link error at a time.
+
+**Wave 1 (differential corpus) stands** — reusing the 1557 existing Rust tests
+distinguishes a correct implementation from one that merely links, which matters
+regardless of how many implementations exist.
+
+---
+
 # Plan: dual C + pure-Simple `rt_*` implementation, driven by a differential test corpus
 
 **Date:** 2026-08-31
