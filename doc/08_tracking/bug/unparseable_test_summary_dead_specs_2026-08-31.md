@@ -1,6 +1,6 @@
 # Unparseable pass/fail summary: specs that execute nothing (2026-08-31)
 
-Suite run `/tmp/suite4.log` (binary from `4b4e2a304b4`) produced 6 occurrences of
+Suite run `/tmp/suite4.log` (ephemeral; binary from `4b4e2a304b4`, identified durably as the 60914128-byte binary dated 2026-08-31 13:46 — see Method note) produced 6 occurrences of
 `Error: no parseable pass/fail summary in test output; refusing synthetic pass`.
 
 **The refusal is correct and must not be weakened.** In every reproduced case the
@@ -86,8 +86,28 @@ separate, lower-priority concern.
 ## Residual: docstring-swallowed spec code elsewhere
 
 A scan for files whose LEADING `"""` docstring closes only after a `describe`/`it`
-line found 19 candidates (scanner: `/tmp/parse-work/scan2.py`, attach before
-acting). Only the mixin spec above is confirmed and fixed; the "UNCLOSED" entries
+line found 19 candidates. Rule: the file's first line is a bare `"""`; find its
+closing partner (the next bare `"""`); report the file if any line between them
+matches `^(describe|it)\s+["']`. Scanner, kept here so the finding stays
+reproducible:
+
+```python
+import os, re
+for root, _, fs in os.walk('test'):
+    for fn in fs:
+        if not fn.endswith('.spl'): continue
+        p = os.path.join(root, fn)
+        lines = open(p, encoding='utf-8', errors='replace').read().split('\n')
+        if not lines or lines[0].strip() != '"""': continue
+        close = next((i for i in range(1, len(lines))
+                      if lines[i].strip() == '"""'), None)
+        if close is None:
+            print('UNCLOSED', p); continue
+        bad = [(i + 1, lines[i].strip()[:45]) for i in range(1, close)
+               if re.match(r'^(describe|it)\s+["\']', lines[i].strip())]
+        if bad: print(p, bad[0], 'n=', len(bad))
+```
+ Only the mixin spec above is confirmed and fixed; the "UNCLOSED" entries
 may be scanner artifacts (a closing `"""` with trailing content on the line is not
 matched) and each needs spot-checking before any edit. An earlier count of 1139
 was a scanner artifact from naive triple-quote parity and is retracted.
