@@ -1077,14 +1077,15 @@ impl Lowerer {
             match hir_ty {
                 HirType::Array { element, .. } => Ok(*element),
                 HirType::Simd { element, .. } => Ok(*element),
-                HirType::Tuple(types) => types
-                    .first()
-                    .copied()
-                    .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string())),
-                HirType::LabeledTuple(fields) => fields
-                    .first()
-                    .map(|(_, ty)| *ty)
-                    .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string())),
+                // A bare `tuple` annotation (`fn f() -> tuple:`) lowers to a
+                // Tuple with NO element types, so there is nothing to infer
+                // from — indexing it is dynamic, exactly like `HirType::Any`
+                // below, which is what the interpreter already does. Erroring
+                // here instead made every `-> tuple` helper uncompilable in
+                // native codegen (ml_kem `kpke_keygen_params`, ml_dsa
+                // `power2round_poly`).
+                HirType::Tuple(types) => Ok(types.first().copied().unwrap_or(TypeId::ANY)),
+                HirType::LabeledTuple(fields) => Ok(fields.first().map(|(_, ty)| *ty).unwrap_or(TypeId::ANY)),
                 HirType::Pointer { inner, .. } => self.get_index_element_type(*inner),
                 // String type - indexing returns a single-char string
                 HirType::String => Ok(TypeId::STRING),
