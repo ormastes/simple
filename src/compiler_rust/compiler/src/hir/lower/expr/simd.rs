@@ -333,6 +333,25 @@ impl Lowerer {
             .iter()
             .find(|f| f.name == qualified_name)
             .map(|f| f.return_type)
+            // An IMPORTED `impl` block has no entry in `module.functions` -- only
+            // a `method_return_types["Type.method"]` row, recorded from the
+            // declared return type by `import_loader.rs`'s `Node::Impl` branch.
+            // Without this the lookup fell straight through to the
+            // "ClassName.factory() returns ClassName" GUESS below, which yields
+            // ANY whenever the class itself is not in `module.types`/`globals`.
+            // That ANY is what erased `var compiler_config =
+            // CompilerConfig.from_env()` in `CompileContext.create`, sending
+            // `compiler_config.mcdc_owner_bytes` through the receiver-blind
+            // "most fields wins" fallback to MirLowering's index 26 (0xd0)
+            // instead of CompilerConfig's 10 (0x50) -- an out-of-bounds read on
+            // a 112-byte object. The declared return type is also strictly more
+            // precise than the factory guess (`Foo.parse() -> text` is not Foo).
+            .or_else(|| {
+                self.method_return_types
+                    .get(&qualified_name)
+                    .copied()
+                    .filter(|ty| *ty != TypeId::ANY)
+            })
             .unwrap_or_else(|| {
                 // If not found as a function, check if class_name is a known type
                 // (constructor pattern: ClassName.factory() returns ClassName)

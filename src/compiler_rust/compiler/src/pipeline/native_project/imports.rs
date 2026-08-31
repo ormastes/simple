@@ -601,7 +601,32 @@ pub(crate) fn build_import_map(
                                     let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, type_name, m.name));
                                     fn_arities.insert(mangled.clone(), method_arity(m));
                                     raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                    raw_to_mangled.entry(raw).or_default().push(mangled);
+                                    raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
+                                    // Declared return type of an `impl` method, keyed
+                                    // `Type.method`. Without this row the whole-program
+                                    // map had nothing for a static factory such as
+                                    // `CompilerConfig.from_env`, so
+                                    // `lower_static_method_call` fell through to its
+                                    // "ClassName.factory() returns ClassName" guess,
+                                    // which is ANY when the class is not registered in
+                                    // the IMPORTING module. Qualified keys share no
+                                    // namespace with the bare function names recorded
+                                    // above, so they cannot collide with them; a genuine
+                                    // cross-module clash is marked ambiguous exactly as
+                                    // the `Node::Function` arm does and is dropped by the
+                                    // `retain` before this map is returned.
+                                    if let Some(captured) = m.return_type.clone() {
+                                        match fn_return_types.entry(raw) {
+                                            std::collections::hash_map::Entry::Occupied(mut e) => {
+                                                if e.get() != &captured {
+                                                    e.insert(simple_parser::Type::Simple(String::new()));
+                                                }
+                                            }
+                                            std::collections::hash_map::Entry::Vacant(e) => {
+                                                e.insert(captured);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

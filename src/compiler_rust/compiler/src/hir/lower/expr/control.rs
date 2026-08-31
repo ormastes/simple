@@ -3219,6 +3219,7 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
         | Expr::ExistsCheck(expr)
         | Expr::Spread(expr)
         | Expr::DictSpread(expr)
+        | Expr::StructSpread(expr)
         | Expr::OptionalChain { expr, .. } => {
             collect_identifiers_recursive(expr, bound, identifiers);
         }

@@ -184,6 +184,8 @@ pub fn clear_module_cache() {
     super::interpreter_module::reset_resolve_stats();
     // And the compile-pipeline directory-listing cache
     crate::pipeline::module_loader::clear_pipeline_dir_listing_cache();
+    // And the module-resolver numbered-directory memos
+    crate::module_resolver::clear_numbered_dir_cache();
 }
 
 /// Clear module cache selectively — preserve stdlib modules (src/lib/) between tests.

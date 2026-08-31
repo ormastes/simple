@@ -436,12 +436,28 @@ impl MirLowering:
         nil
 
     fn local_is_runtime_array(local: LocalId) -> bool:
+        # EXPLICIT DISCRIMINANTS, not `match` -- mirrors local_is_runtime_dict
+        # just below, which already uses this form.
+        # Measured on the Stage-2 native lane: `q + s` where both are text
+        # lowered to `call i8 @rt_array_extend_i64(...)` instead of
+        # `rt_strcat_tagged`, and the runtime then reported "rejected invalid
+        # array handle before dereference; probable compiler/FFI ABI mismatch".
+        # A literal operand (`p + "X"`) lowered correctly to rt_strcat_tagged,
+        # which is why concat appeared to work only for literals and why every
+        # char-accumulation loop silently produced "".
+        # The array-concat branch is tested BEFORE the string-concat branch, so
+        # a text local mis-answering this predicate hijacks the whole
+        # expression. The `match` arms mis-dispatch on this lane (four other
+        # instances fixed today), letting a Str kind reach `case Array`.
+        # Comparing discriminants does not depend on arm binding.
         if self.runtime_array_locals.contains(local.id): return true
         if val type_ = self.builder.local_type(local):
-            match type_.kind:
-                case MirTypeKind.Array(_, _): return true
-                case MirTypeKind.Slice(_): return true
-                case _: return false
+            val lira_disc = _sffi_enum_discriminant(type_.kind)
+            if lira_disc == _sffi_enum_discriminant(MirTypeKind.Array(MirType.i64(), 0)):
+                return true
+            if lira_disc == _sffi_enum_discriminant(MirTypeKind.Slice(MirType.i64())):
+                return true
+            return false
         false
 
     fn local_is_runtime_dict(local: LocalId) -> bool:
@@ -2884,10 +2900,39 @@ impl MirLowering:
                 var bin_is_str_concat = false
                 match op:
                     case Add:
+                        # Consult the HIR type as well as the MIR local type.
+                        # Measured on the Stage-2 native lane: concat works ONLY
+                        # when an operand is a LITERAL --
+                        #   p + "X"                -> "X"   correct
+                        #   q + s   (s: text var)  -> ""    EMPTY
+                        #   r + s.substring(1, 2)  -> ""    EMPTY
+                        #   t + s.char_at(1)       -> ""    EMPTY
+                        # A literal's MIR local is typed str, so local_is_str
+                        # says true and the concat path is taken. A text
+                        # VARIABLE's MIR local is frequently typed i64 on this
+                        # lane -- the Let handler falls back to MirType.i64()
+                        # whenever the declared HirType is unusable, which is
+                        # exactly the kind==0 condition screened elsewhere in
+                        # this branch. local_is_str then says false for BOTH
+                        # operands, bin_is_str_concat stays false, and the add
+                        # lowers as arithmetic, silently yielding an empty
+                        # string instead of a concatenation.
+                        # That single miss emptied every char-accumulation loop,
+                        # which is what made module_logical_name_from_path
+                        # return "" and failed the Stage-2 positional route.
+                        # local_hir_type_is_str is the same fallback the
+                        # char_code_at path already uses for its receiver check.
                         if self.local_is_str(left_local) or self.local_is_str(right_local):
+                            bin_is_str_concat = true
+                        elif self.local_hir_type_is_str(left_local) or self.local_hir_type_is_str(right_local):
                             bin_is_str_concat = true
                     case _:
                         ()
+                # PROBE (2026-08-31), default OFF (SIMPLE_MIRB_TRACE=1). Two
+                # fixes on this defect were measured inert; stop inferring which
+                # predicate is false and print all four.
+                if mir_trace_enabled():
+                    eprint("[bin-concat] add={bin_is_str_concat} l_mir={self.local_is_str(left_local)} r_mir={self.local_is_str(right_local)} l_hir={self.local_hir_type_is_str(left_local)} r_hir={self.local_hir_type_is_str(right_local)}\n")
                 if bin_is_str_concat:
                     # strconcat2: one operand may be a non-str scalar
                     # (`"n=" + 5`) -- stringify it via

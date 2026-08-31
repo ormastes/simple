@@ -789,6 +789,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             add_reason(reasons, FallbackReason::CollectionOps);
         }
 
+        Expr::StructSpread(inner) => {
+            analyze_expr(inner, reasons, mode);
+            add_reason(reasons, FallbackReason::CollectionOps);
+        }
+
         Expr::DictSpread(inner) => {
             analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::CollectionOps);

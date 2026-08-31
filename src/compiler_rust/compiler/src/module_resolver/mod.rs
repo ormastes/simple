@@ -17,6 +17,8 @@ mod resolution;
 mod types;
 pub(crate) mod var_overlay;
 
+pub(crate) use resolution::clear_numbered_dir_cache;
+
 // Re-export public types
 pub use types::{
     ChildModule, DirectoryManifest, ModuleLifecycle, ModuleResolver, ModuleState, ResolveResult, ResolvedModule,

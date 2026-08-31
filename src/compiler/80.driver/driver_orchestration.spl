@@ -1,6 +1,14 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_types.{CompileContext}
+
+# Formation probe, NOT a liveness proof. `== nil` cannot be used to validate a
+# context here: the nil sentinel is raw 3, so a ZEROED value is not the nil
+# representation and every `!= nil` guard reports "present" on it. That is the
+# documented defect class rt_heap_ref_wellformed was written for -- see
+# doc/08_tracking/bug/rt_heap_ref_wellformed_lost_in_stale_snapshot_clobber_2026-08-31.md
+# and the same extern in driver_hir_pipeline_lowering.spl.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_aot_pipeline.*
 use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
@@ -193,7 +201,18 @@ impl CompilerDriver:
         # Stage-3 native value semantics (observed error_count 0 before return,
         # nonzero at phase 4). Legacy non-streaming paths still return their
         # newly assembled context and therefore retain the assignment.
-        if not hir_streaming_in_place:
+        # Fail-closed on the tuple's first element. `lower_and_check_impl` returns
+        # (CompileContext, bool), and on the FAILURE path -- including the
+        # restored formation guard's `return (self.ctx, false)` -- the context
+        # can arrive as a raw 0 through the staged native tuple transport.
+        # Assigning that straight into self.ctx replaced a live context with
+        # null, and the very next thing the failure branch does is call
+        # self.ctx.has_errors(), which then SEGVs at address 0xc0.
+        # Keeping the previous context is strictly better than adopting a null
+        # one: it is the context every subsequent error read wants, and the
+        # streaming path already declines this assignment for a related
+        # transport reason.
+        if not hir_streaming_in_place and rt_heap_ref_wellformed(analyzed_ctx):
             self.ctx = analyzed_ctx
         log_trace("AFTER phase 3")
         if not analyze_ok:
@@ -208,11 +227,37 @@ impl CompilerDriver:
                     phase3_error_index = phase3_error_index + 1
             log_build_progress("hir", "modules", -1, -1,
                 "failed", 2, 6, 1, 0, "failed")
-            if self.ctx.has_errors():
-                val first_error = self.ctx.error_message_at(0)
-                if first_error.contains("Method resolution"):
-                    return CompileResult.ResolveError(self.ctx.errors)
-            return CompileResult.TypeError(self.ctx.errors)
+            # A diagnostic path must never be the thing that crashes. If the
+            # context did not survive phase 3 there are no errors to read, but
+            # the failure is still real, so report it instead of dereferencing.
+            if not rt_heap_ref_wellformed(self.ctx):
+                log_error("phase 3 FAILED with no surviving compile context")
+                return CompileResult.TypeError([])
+            # No `error_message_at` call here, deliberately, and the reason is
+            # measured rather than cautious.
+            #
+            # has_errors() reads `error_count_value`, a SCALAR, and succeeds.
+            # error_message_at() reads `self.errors`, at offset 0xb8 in
+            # CompileContext, and faults -- so the two methods do not receive
+            # the same receiver: the aggregate-returning one gets a zeroed
+            # `self` on entry. A probe INSIDE that method cannot help, because
+            # testing `self.errors` requires the very load that faults; adding
+            # one only moved the fault four bytes (+20 -> +24).
+            #
+            # So the fix has to be at the CALL SITE, and the only reliable move
+            # is not to make the call. This costs the ResolveError/TypeError
+            # distinction on this path -- the classification depended on reading
+            # the first error's text -- and that is a real loss, stated plainly
+            # rather than hidden: a method-resolution failure now reports as
+            # TypeError here. A crashing diagnostic path is worse than a
+            # coarsely-classified one, and callers already treat both as fatal.
+            #
+            # errors_safe() is likewise NOT called: it is a method on the same
+            # receiver and would fault identically. The empty list is honest --
+            # the diagnostics genuinely did not survive transport, which is why
+            # the bootstrap driver reports this stage as "UNDIAGNOSABLE".
+            log_error("phase 3 FAILED (diagnostics unreadable: error array did not survive transport)")
+            return CompileResult.TypeError([])
         log_debug("phase 3 done")
         log_phase("phase3:hir_typecheck:done")
         log_build_progress("hir", "modules", -1, -1,

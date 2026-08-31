@@ -1476,9 +1476,24 @@ impl Lowerer {
         // `BeDomNode { style: StyleProps }` and StyleProps is in css.spl,
         // pre-registering ensures StyleProps exists when BeDomNode's fields
         // are resolved in Pass 0.5b.
+        // `export use m.*` re-exports a module AND imports it here; it was
+        // matched by neither pass, so every type reached only that way stayed
+        // unregistered and `resolve_type` degraded it to ANY under
+        // `lenient_types`. That erasure is what made `CompileContext.create`
+        // (driver_types.spl, whose only route to `CompileOptions` is
+        // `export use compiler.common.driver_core_types.*`) resolve field
+        // indices through the receiver-blind "most fields wins" fallback and
+        // read `mcdc_owner_bytes` at MirLowering's index 26 (0xd0) instead of
+        // CompilerConfig's 10 (0x50) -- past the end of a 112-byte object.
         for item in &ast_module.items {
-            if let Node::UseStmt(use_stmt) = item {
-                let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+            match item {
+                Node::UseStmt(use_stmt) => {
+                    let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+                }
+                Node::ExportUseStmt(export_use) if !export_use.path.segments.is_empty() => {
+                    let _ = self.preregister_imported_type_names(&export_use.path, &export_use.target);
+                }
+                _ => {}
             }
         }
 
@@ -1486,6 +1501,15 @@ impl Lowerer {
         // Now that all type names are pre-registered (Pass 0.5a), field type resolution
         // can find types from other imported modules.
         for item in &ast_module.items {
+            if let Node::ExportUseStmt(export_use) = item {
+                if !export_use.path.segments.is_empty() {
+                    // Best-effort, exactly like the other `export use` loader in
+                    // `import_loader.rs`: a re-export that cannot be loaded must
+                    // not turn into a hard error here, because it was never
+                    // loaded at all before this change.
+                    let _ = self.load_imported_types(&export_use.path, &export_use.target);
+                }
+            }
             if let Node::UseStmt(use_stmt) = item {
                 // Log import loading failures -- silent failures cause cross-module
                 // FieldGet bugs (wrong byte_offset when type falls back to ANY).
@@ -2125,14 +2149,26 @@ impl Lowerer {
         }
 
         // Pass 0.5a: Pre-register type NAMES from ALL imported modules as empty placeholders
+        // `export use m.*` counts as an import here too -- see the sibling pass.
         for item in &ast_module.items {
-            if let Node::UseStmt(use_stmt) = item {
-                let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+            match item {
+                Node::UseStmt(use_stmt) => {
+                    let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+                }
+                Node::ExportUseStmt(export_use) if !export_use.path.segments.is_empty() => {
+                    let _ = self.preregister_imported_type_names(&export_use.path, &export_use.target);
+                }
+                _ => {}
             }
         }
 
         // Pass 0.5b: Load full types from imported modules
         for item in &ast_module.items {
+            if let Node::ExportUseStmt(export_use) = item {
+                if !export_use.path.segments.is_empty() {
+                    let _ = self.load_imported_types(&export_use.path, &export_use.target);
+                }
+            }
             if let Node::UseStmt(use_stmt) = item {
                 if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
                     unresolved_import_fatal(&use_stmt.path.segments, &e)?;

@@ -8,6 +8,11 @@ export use compiler.common.driver_core_types.*
 
 use compiler.hir.hir.*
 use std.env.{env_get}
+
+# Formation probe for the diagnostics array. `== nil` is NOT usable here: the
+# nil sentinel is raw 3, so a ZEROED array reports "present" to every `!= nil`
+# test. See rt_heap_ref_wellformed_lost_in_stale_snapshot_clobber_2026-08-31.md.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 use compiler.mir.mir.*
 use compiler.frontend.core.lexer.*
 use compiler.frontend.parser_types.{ParserModule}
@@ -1108,9 +1113,25 @@ class CompileContext:
     # owner is the shape that was measured to work.
     # See doc/08_tracking/bug/stage3_selfhost_phase3_error_array_index_after_struct_reassign_silently_noops_2026-08-10.md
     fn error_message_at(index: i64) -> text:
+        # `errors` and `error_count_value` are transported SEPARATELY, and the
+        # scalar can survive when the array does not: measured on the Stage-2
+        # positional lane, has_errors() read error_count_value > 0 (a scalar,
+        # intact) while `errors` came through as a zeroed reference, so this
+        # accessor faulted at offset 0xb8 -- inside the very code path that
+        # exists to REPORT a failure. Probe formation before touching it; an
+        # unreadable diagnostics array yields no message, never a crash.
+        if not rt_heap_ref_wellformed(self.errors):
+            return ""
         if index < 0 or index >= self.errors.len():
             return ""
         self.errors[index]
+
+    # Same split, same reason: hand callers an empty list rather than a zeroed
+    # reference they will index into.
+    fn errors_safe() -> [text]:
+        if not rt_heap_ref_wellformed(self.errors):
+            return []
+        self.errors
 
     # ------------------------------------------------------------------
     # Collect-all-errors policy (default) / SIMPLE_COMPILE_FAIL_FAST=1 opt-out.

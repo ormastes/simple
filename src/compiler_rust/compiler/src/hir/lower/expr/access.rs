@@ -698,12 +698,31 @@ impl Lowerer {
     fn try_resolve_receiver_struct_name_from_expr(&mut self, receiver: &Expr, ctx: &FunctionContext) -> Option<String> {
         match receiver {
             Expr::Identifier(name) => {
-                let ty = if let Some(idx) = ctx.lookup(name) {
-                    ctx.locals.get(idx).map(|local| local.ty)
-                } else {
-                    self.globals.get(name).copied()
-                }?;
-                self.try_named_struct_name_for_type(ty)
+                let local = ctx.lookup(name).and_then(|idx| ctx.locals.get(idx));
+                let ty = match local {
+                    Some(local) => local.ty,
+                    None => self.globals.get(name).copied()?,
+                };
+                if let Some(struct_name) = self.try_named_struct_name_for_type(ty) {
+                    return Some(struct_name);
+                }
+                // The TypeId erased to ANY, but a PARAMETER still carries its
+                // AUTHORED type name (`LocalVar::type_name_hint`, set from
+                // `param.ty` in module_lowering/function.rs). Using it here is
+                // what keeps a declared-type receiver off the receiver-blind
+                // "most fields wins" fallback: `CompileContext.create(options:
+                // CompileOptions)` was resolving `options.mcdc_owner_bytes`
+                // through that fallback to MirLowering's index 26 (0xd0, past
+                // the end of the object) instead of CompileOptions' 22 (0xb0).
+                // Purely additive -- an unusable hint simply fails the caller's
+                // subsequent field lookup and falls back to today's behaviour.
+                if let Some(hint) = local.and_then(|local| local.type_name_hint.clone()) {
+                    return Some(hint);
+                }
+                // Last resort: a local with no annotation still has the declared
+                // return type NAME of the static call that initialized it,
+                // recorded by `stmt_lowering.rs` when the TypeId erased to ANY.
+                ctx.static_call_type_hints.get(name).cloned()
             }
             Expr::FieldAccess { receiver: base, field } => {
                 let base_struct_name = self.try_resolve_receiver_struct_name_from_expr(base, ctx)?;

@@ -50,6 +50,7 @@ use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 extern fn rt_stdout_flush()
 
 fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
@@ -108,9 +109,31 @@ impl CompilerDriver:
         # can preserve the readiness scalar while losing a raw class handle;
         # validate absence first, then unwrap. Never dereference a value merely
         # because the adjacent scalar says it is ready.
-        val surfaces = self.streaming_module_surfaces_owner.unwrap()
-        if surfaces == nil:
+        # `??`, NOT `.unwrap()`. This line used the bare method and it is the
+        # reason the guard below fired on every self-hosted build: any module
+        # publishing a bare `unwrap` (Poll, FailSafeResult) steals every
+        # `Option.unwrap` binding, so `.unwrap()` here returned raw 0 -- the same
+        # keystone defect recorded for the Stage-4 macOS lane. The owner was
+        # never malformed; the unwrap was. `??`, `if val` and `match` are immune
+        # to that binding, which is why the sibling guard at :437 already uses
+        # `??`.
+        #
+        # Presence is checked with `.?` FIRST and separately, because `== nil`
+        # cannot do it: the nil sentinel is raw 3, so a zeroed value reports
+        # "present" to every `== nil` test. Absence and malformation are
+        # different questions and keep different answers.
+        if not self.streaming_module_surfaces_owner.?:
             self.ctx.add_error("Streaming module surface owner payload missing after phase 2")
+            return (self.ctx, false)
+        val surfaces = self.streaming_module_surfaces_owner ?? ModuleSurfacesByName.empty()
+        # Fail closed on a malformed payload, never on a valid one. A
+        # heap-typed payload must be a tagged pointer outside the zero page;
+        # the 2026-08-22 incident read back a Some-tagged Option with payload
+        # word 0 and SIGSEGV'd on the first field load below. This is a
+        # formation probe (rt_heap_ref_wellformed), not a liveness proof, so
+        # it cannot false-reject a live owner.
+        if not rt_heap_ref_wellformed(surfaces):
+            self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
             return (self.ctx, false)
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         if driver_hir_explicit_semantic_policy(self.ctx):
@@ -362,7 +385,16 @@ impl CompilerDriver:
         self.ctx.bootstrap_entry_hir = phase_entry_hir
         # Poisoned/error-bearing HIR is deliberately excluded from every
         # downstream aggregate pass. Validate layouts only for a clean phase.
-        if self.ctx.has_errors():
+        # DIRECT FIELD READ, not `self.ctx.has_errors()`. Measured: the probe
+        # one line above reads self.ctx.error_count_value successfully, and the
+        # method call on the SAME receiver one line later faulted at
+        # 0x1000000000c0 -- a garbage-but-nonzero `self`. So the field read is
+        # sound and the method call mis-passes the receiver; has_errors() is a
+        # one-line accessor (`self.error_count_value > 0`) so inlining it loses
+        # nothing and removes the faulting call entirely. Same receiver-transport
+        # defect that split has_errors() from error_message_at() in
+        # driver_orchestration.spl.
+        if (self.ctx.error_count_value > 0):
             return (self.ctx, false)
         var validation_error_count: i64 = 0
         for validation_error in driver_validate_value_struct_layouts(
@@ -377,7 +409,7 @@ impl CompilerDriver:
             if validation_errors_shown > 10:
                 validation_errors_shown = 10
             eprint("[post-hir-validation-fatal-count] count={validation_error_count} shown={validation_errors_shown}")
-        if self.ctx.has_errors():
+        if (self.ctx.error_count_value > 0):
             return (self.ctx, false)
         ast_reset()
         self.ctx.modules = {}
@@ -416,8 +448,26 @@ impl CompilerDriver:
         # creating a fresh array near the terminal module can fail registry
         # growth under peak AST+HIR pressure and leave `errors` invalid.
         dtrace("[DRV] lac-canary=module-surfaces-before")
+        # Same fail-closed formation probe as the streaming entry: a
+        # heap-typed owner payload must be a tagged pointer outside the zero
+        # page (2026-08-22 zeroed-payload incident class).
+        # NOTE (2026-08-31): the probe argument uses `??`, not `.unwrap()`.
+        # `.unwrap()` is itself stolen by `Poll.unwrap` on this lane
+        # (poll_unwrap_second_bind_site_lower_and_check_impl_2026-08-25.md),
+        # so an `.unwrap()`-fed probe measures the stolen 0 rather than the
+        # field, and would fail closed on every build including healthy ones.
+        if self.ctx.module_surfaces != nil and not rt_heap_ref_wellformed(self.ctx.module_surfaces ?? ModuleSurfacesByName.empty()):
+            self.ctx.add_error("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry (heap-typed payload word is 0 or in the zero page)")
+            return (self.ctx, false)
+        # NEVER `.unwrap()` here. Under the seed's native codegen a BARE
+        # `unwrap` is rebound by name to whichever module in the entry closure
+        # publishes one (`Poll.unwrap`, `FailSafeResult.unwrap`, ...); that
+        # method's match falls through and returns raw 0, so this val became a
+        # null registry and Stage 2 SEGV'd three frames later inside
+        # `module_surface_registry_index`. `??` (and `if val` / `match`) are not
+        # affected. doc/08_tracking/bug/stage2_positional_entry_segv_module_surfaces_null_2026-08-31.md
         val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces != nil:
-            self.ctx.module_surfaces.unwrap()
+            self.ctx.module_surfaces ?? ModuleSurfacesByName.empty()
         elif self.ctx.sources.len() > 0:
             match module_surfaces_from_modules(self.ctx.modules, self.ctx.sources):
                 case Ok(value): value
