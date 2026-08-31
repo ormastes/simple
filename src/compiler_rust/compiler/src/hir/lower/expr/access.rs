@@ -287,9 +287,10 @@ impl Lowerer {
                         candidate_struct_names.push(inferred_struct_name);
                     }
                 }
-                let has_known_method = candidate_struct_names
-                    .iter()
-                    .any(|name| self.has_known_method_for_struct_name(name, field));
+                let has_known_method = candidate_struct_names.iter().any(|name| {
+                    self.has_known_method_for_struct_name(name, field)
+                        || Self::is_builtin_methodful_struct_name(name)
+                });
                 // Try to resolve field type via struct name lookup before falling back.
                 // This preserves the real TypeId for self.field.method() chains — without
                 // this, the field node gets ty=ANY which causes MIR to mangle the wrong
@@ -469,6 +470,9 @@ impl Lowerer {
                         } else {
                             eprintln!("[FIELD-FAIL]   global_struct_defs=None");
                         }
+                    }
+                    if let Some(projected) = self.try_lower_dynamic_result_projection(&recv_hir, field) {
+                        return Ok(projected);
                     }
                     if let Some(func_name) = &self.current_function_name {
                         return Err(LowerError::Unsupported(format!(
@@ -758,6 +762,25 @@ impl Lowerer {
         matches!(struct_name, "ANY" | "Any" | "wildcard") || struct_name.starts_with("TypeId(")
     }
 
+    /// Builtin receiver types that have NO user-declarable fields: every
+    /// `recv.name` on one of them is a paren-less method call (`xs.len`,
+    /// `s.trim`, `xs.first`), never a field read.
+    ///
+    /// Without this, a paren-less builtin method call reached the
+    /// `cannot infer field type while lowering ...: struct 'Array' field 'len'`
+    /// hard error, because `has_known_method_for_struct_name` only consults
+    /// `method_return_types` (user-declared methods) and builtin methods are
+    /// never registered there. The interpreter accepts these calls, so native
+    /// lowering rejecting them was a native-only divergence — it broke the
+    /// coverage wrappers for `no_paren_test.spl`, `exists_check_spec.spl`,
+    /// `generics_spec.spl` and friends.
+    fn is_builtin_methodful_struct_name(struct_name: &str) -> bool {
+        matches!(
+            struct_name,
+            "Array" | "String" | "Text" | "Dict" | "Map" | "Set" | "List"
+        )
+    }
+
     fn named_struct_name_from_type(ty: &simple_parser::Type) -> Option<String> {
         match ty {
             simple_parser::Type::Simple(name) => Some(name.clone()),
@@ -778,10 +801,34 @@ impl Lowerer {
             _ => return None,
         };
         let payload_ty = self.enum_variant_payload_type(recv_hir.ty, "Result", variant)?;
+        Some(self.build_result_projection(recv_hir, variant, payload_ty))
+    }
+
+    /// Last-resort `.ok` / `.err` projection for a receiver whose type never
+    /// got propagated (`TypeId::ANY`, e.g. the result of a call whose return
+    /// type was erased). Only reachable AFTER every field-resolution attempt
+    /// has failed, so it cannot hijack a real struct field named `ok`/`err`;
+    /// the payload type is unknown, so it is ANY and dispatch stays dynamic.
+    /// The discriminant check itself is a runtime call, identical to the
+    /// typed path — this only removes a native-only hard error the
+    /// interpreter never raised.
+    fn try_lower_dynamic_result_projection(&self, recv_hir: &HirExpr, field: &str) -> Option<HirExpr> {
+        if recv_hir.ty != TypeId::ANY {
+            return None;
+        }
+        let variant = match field {
+            "ok" => "Ok",
+            "err" => "Err",
+            _ => return None,
+        };
+        Some(self.build_result_projection(recv_hir, variant, TypeId::ANY))
+    }
+
+    fn build_result_projection(&self, recv_hir: &HirExpr, variant: &str, payload_ty: TypeId) -> HirExpr {
         let expected_disc = self.enum_variant_discriminant(variant);
         let subject_for_check = recv_hir.clone();
         let subject_for_payload = recv_hir.clone();
-        Some(HirExpr {
+        HirExpr {
             kind: HirExprKind::If {
                 condition: Box::new(HirExpr {
                     kind: HirExprKind::BuiltinCall {
@@ -809,7 +856,7 @@ impl Lowerer {
                 })),
             },
             ty: payload_ty,
-        })
+        }
     }
 
     fn enum_variant_payload_type(&self, ty: TypeId, enum_name: &str, variant_name: &str) -> Option<TypeId> {
