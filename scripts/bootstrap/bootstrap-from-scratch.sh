@@ -1303,12 +1303,41 @@ bootstrap_stage_sanity() (
     SIMPLE_LINKER_FLAVOR=${sanity_linker_flavor}
     export SIMPLE_LINKER_FLAVOR
   fi
-  [ -n "${sanity_include}" ] && { INCLUDE=${sanity_include}; export INCLUDE; }
-  [ -n "${sanity_lib}" ] && { LIB=${sanity_lib}; export LIB; }
-  [ -n "${sanity_libpath}" ] && { LIBPATH=${sanity_libpath}; export LIBPATH; }
-  [ -n "${sanity_system_root}" ] && { SystemRoot=${sanity_system_root}; export SystemRoot; }
-  [ -n "${sanity_system_drive}" ] && { SystemDrive=${sanity_system_drive}; export SystemDrive; }
-  [ -n "${sanity_program_data}" ] && { ProgramData=${sanity_program_data}; export ProgramData; }
+  # Written as `if ... fi`, not a bare `[ -n ... ] && { ...; }` list. This
+  # function runs under the top-level `set -eu` (subshells inherit shell
+  # options), and on every non-Windows platform every one of these six
+  # variables is genuinely empty by design, so the `[ -n ... ]` test always
+  # fails there. POSIX exempts a non-last command of an AND-OR list from
+  # errexit, so a bare `[ -n ... ] && { ...; }` does NOT actually abort the
+  # subshell (verified directly against this host's `sh`) -- but relying on
+  # that exemption rule to hold for every future edit to this block (e.g. an
+  # accidental reorder that makes the test the last statement) is exactly
+  # the kind of shell subtlety that has already bitten this file once. `if`
+  # removes the question entirely at zero cost.
+  if [ -n "${sanity_include}" ]; then
+    INCLUDE=${sanity_include}
+    export INCLUDE
+  fi
+  if [ -n "${sanity_lib}" ]; then
+    LIB=${sanity_lib}
+    export LIB
+  fi
+  if [ -n "${sanity_libpath}" ]; then
+    LIBPATH=${sanity_libpath}
+    export LIBPATH
+  fi
+  if [ -n "${sanity_system_root}" ]; then
+    SystemRoot=${sanity_system_root}
+    export SystemRoot
+  fi
+  if [ -n "${sanity_system_drive}" ]; then
+    SystemDrive=${sanity_system_drive}
+    export SystemDrive
+  fi
+  if [ -n "${sanity_program_data}" ]; then
+    ProgramData=${sanity_program_data}
+    export ProgramData
+  fi
   if [ -n "${sanity_win_temp}" ]; then
     TEMP=${sanity_win_temp}
     TMP=${sanity_win_temp}
