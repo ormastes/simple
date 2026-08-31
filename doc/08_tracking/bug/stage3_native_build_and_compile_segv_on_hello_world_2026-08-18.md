@@ -1,5 +1,12 @@
 # bootstrap/stage3/simple SEGVs on both of its two commands (hello world)
 
+> **2026-08-31:** The rc=139 SEGV documented here no longer reproduces anywhere;
+> the bare stage paths now hold darwin Mach-O blobs (a deploy clobber, rc=2 exec
+> failure — a DIFFERENT defect class). Root cause + fix:
+> `doc/08_tracking/bug/darwin_stage_binaries_clobber_bare_paths_2026-08-31.md`.
+> Residual real failure: `bootstrap/stage3/x86_64-unknown-linux-gnu/simple`
+> fails `native-build` with rc=1.
+
 - **Filed:** 2026-08-18
 - **Severity:** HIGH — the tracked stage3 artifact is non-functional
 - **Status:** OPEN (found while verifying an unrelated documented claim)
