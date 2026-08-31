@@ -1,111 +1,163 @@
-# 342 `SIMPLE_JIT_STRICT` suite failures: bare-root imports (`os.`, `common.`, `lib.`, `nogc_sync_mut.`) do not resolve on the native/HIR path
+# 342 `SIMPLE_JIT_STRICT` suite failures — root cause: a stray tracked `test/01_unit/lib/src/` poisons project-root detection
 
-Filed 2026-08-31. Status: OPEN. Class: compiler / module resolution.
-Verdict: **the gate is working correctly** — it surfaced a real, large, pre-existing defect.
+Filed 2026-08-31. **Root cause CORRECTED 2026-08-31 (same day).** Status: OPEN,
+fix in flight on `fix/cov-wrapper-import-resolution`.
 
-## Summary
+> **Filename notice.** The path still says `bare_root_imports_unresolvable_on_native_path`.
+> That was the *retracted* hypothesis. The path is retained deliberately so the
+> cross-references in PR #169 and the retraction below stay resolvable. Read the
+> title, not the filename.
 
-A full-suite run (`SIMPLE_TIMEOUT_SECONDS=0 ./bin/simple test --no-cover-check`,
-binary built from `b0be388ec46`) produced **342 `SIMPLE_JIT_STRICT` occurrences
-across 339 distinct specs**. All 342 are one class: `cannot resolve import`.
-None are the tail-return, receiver-mutation, or cross-module private-symbol
-collision classes fixed/known today — the `$dupN` collision text appears in the
-log only as *warnings*, never among the failures.
+---
 
-The root cause is not the coverage lane and not the JIT. It is that the module
-resolver used on the **native/HIR compile path** does not accept the bare source
-roots (`os.`, `common.`, `lib.`, `nogc_sync_mut.`, `serialization.`) that the
-**interpreter accepts**. The coverage/MC/DC lane is merely the only lane that
-forces a spec through the native compile path, so it is the only lane that sees
-it.
+## RETRACTION — what this record originally claimed, and why it was wrong
 
-## Minimal reproducer (no test runner, no coverage, no wrapper)
+The first version of this record claimed the root cause was a **global gap in the
+module resolver**: that bare source roots (`os.`, `common.`, `lib.`,
+`nogc_sync_mut.`) had no mapping on the native/HIR path, and that consequently
+**~11,000 import sites** would need re-pointing. It recommended a reviewed change
+to `module_resolver/resolution.rs`.
+
+**That root cause is retracted. It is wrong.** So is the ~11,000-site conclusion
+drawn from it. (The 11,000 *census* is still an accurate count of bare-root
+import sites; it simply is not a count of broken ones, and nothing needs
+re-pointing.)
+
+### The reasoning error, left legible on purpose
+
+The retracted conclusion rested on this A/B:
 
 ```
-$ cat zz_std.spl
-use std.os.crypto.blake2b.{blake2b}
-fn main():
-    print("ok")
-$ simple compile zz_std.spl ; echo $?
-0                              # std-prefixed form: resolves
-
-$ cat zz_bare.spl
-use os.crypto.blake2b.{blake2b}
-fn main():
-    print("ok")
-$ simple compile zz_bare.spl ; echo $?
-error: cannot resolve import `os.crypto.blake2b`:
-  module path segment `os` not found  [E1034]
-1                              # bare-root form: does NOT resolve
+use std.os.crypto.blake2b.{blake2b}  → simple compile → rc=0
+use os.crypto.blake2b.{blake2b}      → simple compile → rc=1
 ```
 
-Both name the same file, `src/os/crypto/blake2b.spl`.
+Both forms name the same file, so the split looked like proof that the bare form
+had no mapping. It was not. **The A/B varied the import spelling but held the
+file's location fixed**, and location was the actual variable:
 
-Note the in-tree control: `simple compile test/01_unit/lib/crypto/blake2_rfc7693_kat_spec.spl`
-fails identically **at its real repo path**. This is *not* an artifact of the
-wrapper being copied to `/mnt/data/tmp` — a hypothesis this investigation tested
-and refuted.
+- `use std.*` routes through the **stdlib-root** strategy, which does not consult
+  `source_root` and therefore dodges the corruption entirely.
+- `use os.*` routes through **Strategy 4** (`source_root/<seg0>`), which does.
 
-## Scale
+Run anywhere inside the poisoned subtree, those two strategies produce exactly
+the rc=0 / rc=1 split observed. The observation was real and reproducible; the
+inference from it was not. A single-variable experiment was needed and a
+two-variable one was run.
 
-Bare-root import sites (`grep -rhoE "^use (os|common|lib|nogc_sync_mut|serialization)\."`):
+The record also reported that the spec "fails `compile` in-tree too", offered as
+evidence against a tmp-copy artifact. That observation is still true, but it was
+over-read: it ruled out `/mnt/data/tmp` specifically while leaving *every other*
+location-dependent explanation standing — including the real one.
 
-| root | `test/01_unit/` | `src/` |
+---
+
+## Actual root cause
+
+A stray **tracked** directory `test/01_unit/lib/src/` (plus siblings under
+`test/{01_unit,unit}/lib/{gc,nogc}_*/src/`, **44 files** total) poisons project-root
+detection.
+
+`module_resolver/types.rs:394 find_project_root` walks ancestors and returns the
+first one containing a `src/` directory. For any spec under `test/01_unit/lib/**`
+that ancestor is `test/01_unit/lib` itself, so:
+
+- project root becomes `test/01_unit/lib`
+- `source_root` becomes `test/01_unit/lib/src`
+- Strategy 4 (`source_root/<seg0>`) can no longer reach the real `src/os`,
+  `src/lib/common`, …
+
+Hence `cannot resolve import` for `os.*`, `common.*`, etc. — but **only inside
+that one subtree**.
+
+## Discriminating evidence (verified independently in a detached worktree at `origin/main`)
+
+**1. Same import, two locations — the single-variable experiment.**
+
+| file | import | rc |
 |---|---|---|
-| `os` | 2328 | 5455 |
-| `common` | 1282 | 1499 |
-| `lib` | 479 | 288 |
-| `nogc_sync_mut` | 71 | 242 |
-| `serialization` | 5 | — |
+| `test/tmpprobe/a.spl` | `use os.crypto.blake2b.{blake2b}` | **0** |
+| `test/01_unit/lib/crypto/zz_probe.spl` | *byte-identical* | **1** |
 
-~11,000 call sites. Every one is interpreter-only today.
+Identical source, identical spelling; only the directory differs. A global
+bare-root gap cannot produce this.
 
-## Why it surfaced now
+**2. Move the poison away and back — flips in both directions**, recompiling the
+**unmodified** `blake2_rfc7693_kat_spec.spl` at its real in-repo path:
 
-`b0be388ec46` (PR #157) made "a coverage run whose wrapper won't compile is an
-ERROR, not a pass". Before it, these degraded silently to the interpreter and
-reported PASS. The suite binary was built from *exactly that tree*, so the 342
-failures are the direct, intended consequence of #157 doing its job.
+```
+poison present:    rc=1
+poison moved away: rc=0      # mv test/01_unit/lib/src /mnt/data/tmp/...
+poison restored:   rc=1
+```
 
-Separately, `exec_core.rs:1457-1465` escalates the `cannot resolve import`
-class **unconditionally** — it is not gated on the env var and merely reuses the
-`SIMPLE_JIT_STRICT:` prefix in its message. `SIMPLE_JIT_STRICT` was never set by
-the operator. The escape hatch for this class is `SIMPLE_ALLOW_UNRESOLVED_IMPORTS=1`
-(read at `hir/lower/module_lowering/module_pass.rs:43`), which must NOT be used
-to silence this — it restores warn-and-continue and re-hides the defect.
+**3. Containment.** 466 of 466 specs with `cannot resolve import` on `origin/main`
+are under `test/01_unit/lib/`; **zero** outside it. A global resolver gap would
+fail everywhere.
 
-## Failing specs by directory (339 distinct)
+Credit: root cause found by the sibling agent on the `cannot resolve import`
+class; independently reproduced here (all three flips above) before this
+correction was written.
 
-| dir | count |
-|---|---|
-| `test/01_unit/lib/common` | 275 |
-| `test/01_unit/lib/crypto` | 24 |
-| `test/01_unit/lib/nogc_sync_mut` | 14 |
-| `test/01_unit/lib/hardware` | 10 |
-| others | 16 |
+---
 
-## Where the fix belongs
+## Findings that SURVIVE the correction
 
-`src/compiler_rust/compiler/src/module_resolver/resolution.rs`. It knows
-`std`, `std_lib`, `lib`, and `src.std` (lines 498, 505, 518, 670, 733) but has
-no mapping for a bare `os.`/`common.`/`nogc_sync_mut.` root onto `src/os/…` and
-`src/lib/common/…`.
+These were established independently of the retracted root cause and remain
+valid.
 
-Deliberately **not** fixed in this change: the edit is one resolver function but
-it re-points ~11,000 import sites onto a path they have never been compiled
-through, so it needs its own reviewed change with a spec corpus behind it, not a
-drive-by. Filing beats a rushed resolver edit.
+### `SIMPLE_JIT_STRICT` is not an env gate for this class
 
-## Not to be done
+Nobody set `SIMPLE_JIT_STRICT`. For the `cannot resolve import` class,
+`driver/src/exec_core.rs:1457-1465` returns a string that merely **reuses** the
+`SIMPLE_JIT_STRICT:` prefix, with **no env-var check at all**. The genuinely
+env-gated branch is further down at `:1486`. The code comment gives the reasoning:
+an import naming a nonexistent module can never be satisfied by de-JITing — it
+only defers the failure to the first call, surfacing as an unrelated "function
+not found".
 
-Do not weaken or disable the escalation, and do not set
-`SIMPLE_ALLOW_UNRESOLVED_IMPORTS=1` in any lane. Both re-hide a real defect that
-#157 was written to expose.
+The escape hatch for this class is `SIMPLE_ALLOW_UNRESOLVED_IMPORTS=1`
+(`hir/lower/module_lowering/module_pass.rs:43`). **Do not set it in any lane** —
+it restores warn-and-continue and re-hides the defect.
 
-## Overlap
+### The serious branch is ruled out
 
-Four sibling branches work the coverage-wrapper class:
-`fix/cov-wrapper-hir-lowering` (#164), `fix/cov-wrapper-optional-lteq` (#156),
-`fix/cov-wrapper-rbracket-val` (#155), `fix/cov-wrapper-undefined-identifiers`
-(#163). **None touches module resolution** — this class is unaddressed by all
-four.
+All 342 occurrences are the single `cannot resolve import` class. **Zero** are
+tail-return corruption, receiver-mutation, or cross-module private-symbol
+collision. The `$dupN` collision text appears in the suite log only as
+*warnings*, never among the failures. The silent-wrong-dispatch worry does not
+apply here.
+
+### The gate is working correctly
+
+Verdict **(a)** stands, on a corrected causal story. The suite binary was built
+from exactly `b0be388ec46` (#157), which made a non-compiling coverage wrapper an
+ERROR instead of a silent pass. These specs previously reported PASS. #157 did
+its job; what it exposed was the poisoned project root, not a resolver gap.
+
+### Distribution (unchanged)
+
+339 distinct specs: `test/01_unit/lib/common` 275, `.../lib/crypto` 24,
+`.../lib/nogc_sync_mut` 14, `.../lib/hardware` 10, others 16 — all inside the
+poisoned subtree, consistent with the containment evidence above.
+
+---
+
+## Fix
+
+In flight on **`fix/cov-wrapper-import-resolution`** (sibling agent). The
+direction is to remove/relocate the 44 stray tracked files so no `src/` dir sits
+above a spec, and/or harden `find_project_root` so a `src/` under `test/` cannot
+be mistaken for a project root.
+
+**Do not** attempt the retracted `module_resolver/resolution.rs` bare-root change.
+There is nothing to fix there.
+
+## Related
+
+Four sibling branches work other coverage-wrapper failure classes and are
+unrelated to this one: `fix/cov-wrapper-hir-lowering` (#164),
+`fix/cov-wrapper-optional-lteq` (#156), `fix/cov-wrapper-rbracket-val` (#155),
+`fix/cov-wrapper-undefined-identifiers` (#163).
+
+Original (retracted) filing: PR #169.
