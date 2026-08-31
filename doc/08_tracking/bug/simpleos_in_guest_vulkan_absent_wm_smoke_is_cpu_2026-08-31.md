@@ -173,3 +173,111 @@ The arm64 and riscv64 gates call no admission verifier
 `check-simpleos-arm64-qmp-input-evidence.shs`) and need only a kernel artifact
 that any working compiler can produce — which is why riscv64 reached a real PASS
 this session and arm64 got as far as a link error rather than an admission wall.
+
+## Follow-up (2026-08-31, same session): wiring the WM to the host-Vulkan offload
+
+Objective: make the WM genuinely Vulkan-backed via the ivshmem host-GPU offload
+and capture real WM pixels. Result: **the gate is built, proven by selftest, and
+blocked on artifacts** — not on design. Findings below, in the order they bind.
+
+### The WM-over-host-Vulkan lane already exists, and already asserts Vulkan
+
+`check-simpleos-qemu-host-gpu-2d.shs` has an aarch64 "production" lane (lines
+3002-3011) that builds the real WM desktop entry
+(`arch/arm64/gui_entry_desktop_linux_qemu.spl` -> `simpleos_arm64_desktop_engine2d.elf`),
+boots it with ivshmem plus the host Vulkan daemon, and asserts a correlated
+receipt chain: `HOST_GPU_NEGOTIATION_DONE scope=production ... backend=vulkan`,
+`[wm-frame] host-gpu-ready backend=vulkan generation=N`,
+`[wm-frame] host-gpu-presented`, `[desktop-gui-arm64] desktop-ready`, with
+generation continuity against the probe lane (`arm64_production_evidence_valid`,
+line 1386).
+
+So the WM **is** already Vulkan-backed via host offload. The gap this task
+targets is narrower than "wire it up": that lane runs `-nographic` and asserts
+**serial markers only** — it never captures a framebuffer, so there is no pixel
+evidence, and it boots via `-kernel`.
+
+### New gate
+
+`scripts/check/check-simpleos-x86-64-wm-host-vulkan-pixel-evidence.shs` (new).
+x86_64 rather than aarch64, because `arch/x86_64/gui_entry_desktop.spl` is
+already wired to the offload at line 598 and needs no cross-compile:
+
+- boots **OVMF pflash -> GRUB -> multiboot** (never `-kernel`, never
+  `isa-debug-exit`), with the argv **self-scanned** immediately before QEMU is
+  started, so a later edit cannot reintroduce either flag;
+- adds `-object memory-backend-file` + `-device ivshmem-plain` beside the
+  firmware chain — the offload transport is orthogonal to boot method, which is
+  why the `-kernel` in the existing lane was never actually required;
+- captures a real framebuffer via QMP screendump into a PPM;
+- asserts real pixel CONTENT by delegating to the existing
+  `screen_ppm_distinct_colors.spl` (exit 0 only when >1 distinct colour), so a
+  blank or single-colour frame cannot pass;
+- labels the renderer **only on a dual receipt**: `renderer=host-vulkan`
+  requires the guest's `[wm-frame] host-gpu-ready backend=vulkan` AND
+  `host-gpu-presented` AND the host daemon's `HOST_GPU_PROCESS_OK isa=x86_64
+  backend=vulkan`. Either side alone, or a daemon that merely started and found
+  a device, yields `renderer=cpu`. This matters because
+  `gui_entry_desktop.spl:598` passes `backend_required: false`, so the WM
+  silently falls back to the CPU rasteriser — a pretty screenshot proves nothing
+  about the renderer on its own.
+
+`--selftest` is fatal and runs before anything else. **Measured: `PASS — 12
+selftest fixture(s) checked`**, including the two the task required — a
+blank/single-colour frame must FAIL, and a device-present-with-`readback_bytes=0`
+daemon log must classify as `cpu`, not `host-vulkan` (a direct replay of the
+filed `engine2d_vulkan_window_8k` fail-open).
+
+`scripts/check/qmp_screendump.spl` (new) does the QMP turn in pure Simple on the
+existing `std.nogc_sync_mut.qemu` client. The older WM lifecycle gate shells out
+to `python3` for this (line 110), which the repo's .spl/.shs rule forbids; this
+does not copy that.
+
+### Blocker: the host GPU daemon cannot be built from this tree
+
+The gate is ERROR (correctly, fail-closed) because no daemon binary exists. The
+`vulkan,cuda,runtime-symbol-table` runtime archive builds green (101,309,322
+bytes, 2056 defined `rt_*` symbols), but the daemon link fails:
+
+```
+Build failed: 53 runtime symbol(s) referenced by generated code have no
+definition in any linked object, runtime archive, or system library:
+rt_cpu_arch_name, rt_engine2d_download_pixels, rt_path_normalize, rt_stdin_read,
+rt_term_write, rt_string_to_byte_array, rt_vulkan_api_version, rt_webgpu_*, ...
+```
+
+These are **not** missing from my link line — they are defined nowhere in the
+tree: `grep -rn "fn rt_stdin_read\b|fn rt_vulkan_api_version\b|fn rt_path_normalize\b"`
+over `src/compiler_rust/runtime/src/` and `src/runtime/` returns nothing, and
+`nm` on the built archive confirms their absence. So
+`check-simpleos-qemu-host-gpu-2d.shs` — the one genuinely non-fail-open Vulkan
+lane — **cannot currently produce its own daemon on this tree**. Its green
+history must predate whatever removed or renamed these symbols.
+
+The documented `SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1` bypass was deliberately NOT
+used: it yields a NULL GOT slot per name and a SEGV on first call, which is the
+2026-08-21 `rt_unwrap_or_trap` failure mode.
+
+### Compiler gaps hit on the way (both real, both reproducible)
+
+- **Rust seed cannot parse the WM entries.** `gui_entry_desktop.spl:433:17`
+  fails with `Unexpected token: expected expression, found Case` on
+  `case WmAction.FocusWindow(idx: surface_index):` — enum-variant destructuring.
+  The seed is bootstrap-only by rule; noted because it means these lanes require
+  a pure-Simple compiler, not just "a compiler".
+- **Seed also rejects the daemon:** `semantic: invalid operation: cannot slice
+  value of type str with step`.
+
+### Honest status of this objective
+
+| step | status |
+|---|---|
+| WM already wired to host-Vulkan offload | yes, pre-existing (`gui_entry_desktop.spl:598`) |
+| pixel-capturing gate with dual-receipt labelling | **written, selftest green (12 fixtures)** |
+| real-firmware boot (OVMF, no `-kernel`) | designed in and argv-enforced; not yet executed |
+| host daemon built | **blocked — 53 symbols undefined tree-wide** |
+| WM pixels captured | not reached |
+| `renderer=host-vulkan` demonstrated | **not demonstrated — and not claimed** |
+
+No framebuffer evidence is claimed for the offload path. The gate exists so that
+the claim can be made honestly the moment the daemon builds.
