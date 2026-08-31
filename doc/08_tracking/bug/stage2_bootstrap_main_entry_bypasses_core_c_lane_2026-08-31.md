@@ -90,3 +90,56 @@ The 18 `LNK2005` duplicate import descriptors are a **separate** blocker with
 its own record (`windows_whole_archive_duplicate_import_descriptors_2026-08-30.md`)
 and its own cause (unconditional `/WHOLEARCHIVE`). Fixing either does not fix
 the other; both must clear before Stage 2 links.
+
+## Verification appendix — spl_* / _abi_timestamp_* / _fltused group (2026-08-31, second pass)
+
+The C-runtime symbol group flagged before the two-archive supplement landed
+(`c83d2325deb` supplement, `45fdcd42cf0` clang-cl compile fixes,
+`c41a37c3f73` /FORCE:MULTIPLE layering) was re-verified per symbol with
+`llvm-nm --defined-only` against the archives the Stage 2 link actually
+consumes (`stage2-runtime-authority/simple_native_all.lib`, 343,351 defined
+symbols; `core_c_bootstrap_supplement/simple_runtime.lib`, 2,228 defined
+symbols; both nm exits 0), and against the 2026-08-31 08:27 Stage 2 link log
+(`build/w/logs/x86_64-pc-windows-msvc/stage2-native-build.log`), which reaches
+LNK1120 with 98 unresolved — none of them in this group:
+
+| symbol (referenced by libspl_objects.a) | defining .c | native_all | core-C supplement |
+|---|---|---|---|
+| spl_dlopen_checked / spl_dlsym / spl_dlsym_checked / spl_dlsym_process_checked / spl_dlclose | runtime_native.c fallback copy (`!SIMPLE_RUNTIME_DYNLOAD_OWNER`, :7240) | yes | yes |
+| spl_dynlib_snapshot_linux | runtime_native.c:7283 | no | **yes** (sole provider) |
+| spl_str_ptr | runtime_native.c:11721 | yes | yes |
+| spl_thread_cpu_count | runtime_legacy_core.c:126 | yes | yes |
+| spl_wffi_* (6 referenced: call_i64, call_i64_checked, call_bool0/1_checked, try_call_i64_out, i64_checked_result) | runtime_native.c | yes | yes |
+| spl_backend_plugin_run_v1 | runtime_backend_plugin.c (list 3 / build.rs) | **yes** | no — deliberately not added |
+| _abi_timestamp_* (9) | none — Simple codegen weak defs (`W`) in libspl_objects.a from src/lib/common/time_utils.spl:185-210 `@export` wrappers | n/a | n/a |
+| _fltused | none — MSVC CRT data symbol, `D` in msvcrt.lib (14.38.33130), pulled by /MD defaultlib directives | n/a | n/a |
+
+Deliberate NON-additions, each because adding would duplicate an existing
+provider (the 8ca87866c6 collision class):
+
+- `runtime_dynload.c` to the core-C list: runtime_native.c's fallback copies
+  already ship in the same archive; adding it without also defining
+  `SIMPLE_RUNTIME_DYNLOAD_OWNER` duplicates spl_dlopen/dlsym/dlclose INSIDE
+  one archive.
+- `runtime_backend_plugin.c` to the core-C list: native_all already defines
+  `spl_backend_plugin_run_v1` (measured `T`).
+- `runtime.c` to the core-C list: would intra-archive-duplicate `spl_str_ptr`
+  (runtime.c:1268 vs runtime_native.c:11721) among others.
+- A source definition for `_fltused`: it is a CRT symbol; its earlier
+  appearance as unresolved means that link ran without CRT defaultlibs, a
+  link-flags condition, not a missing source.
+- `spl_dlclose_checked`: zero references anywhere in the tree — nothing to fix.
+
+`SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT` (runtime/build.rs) is the seed-side C
+compat for the `rt_timestamp_*` ABI and is unrelated to the `_abi_timestamp_*`
+names, which exist only as the internal names of time_utils' exported wrappers.
+
+**Status update: partially fixed.** The supplement resolves every symbol in
+this group and every rt_* that HAS a C definition in a core-C member. The
+residual 98 unresolved at 08:27 are a different class — e.g. `rt_cpu_count`,
+`rt_time_now`, `rt_uuid_v4`, `rt_simd_add_f32x4`, `rt_iocp_deregister` are
+defined in NEITHER archive and have no C definition anywhere non-test
+(interpreter-only shims in `src/compiler_rust/compiler/src/interpreter_extern/*.rs`);
+`rt_readdir` et al. live only in `runtime.c` (list-2-only). This matches the
+31-build-config / 37-implement split of `8a740c40f9` and is owned by the
+sibling lanes, not this record.
