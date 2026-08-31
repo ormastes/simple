@@ -1,8 +1,10 @@
 # An `after_all` hook's write to a module global is LOST when that global was already mutated inside the same group
 
 **Date:** 2026-08-31
-**Status:** OPEN (blocks the last example of
-`test/01_unit/std/spipe_before_all_after_all_spec.spl`)
+**Status:** FIXED 2026-08-31 (branch `fix/after-all-global-write`). Both
+`test/01_unit/std/spipe_before_all_after_all_spec.spl` and
+`test/01_unit/std/spec_after_all_drains_at_group_end_spec.spl` now report
+`outcome=OK ... passed=3 failed=0`.
 **Severity:** medium (silent data-loss class; the hook runs, reads the right
 value, and its write vanishes with no diagnostic)
 
@@ -82,3 +84,40 @@ template that is no longer the live global.
 `after_all` marker and still sees `len == 1`). Same for the third example of
 `test/01_unit/std/spec_after_all_drains_at_group_end_spec.spl`, where the
 inner hook's push is the earlier in-group mutation.
+
+
+## Root cause (measured 2026-08-31) — the write was never lost; the READ BASE was
+
+The title's framing is wrong and is kept only for searchability. Printing the
+array instead of its length is what exposed it:
+
+```
+IT sees   [before_all]
+HOOK sees [before_all]      # hook reads the LIVE store, correctly
+POST      [after_all]       # <-- pushed onto a stale [], not onto [before_all]
+final     [after_all]
+```
+
+The hook's write propagates fine. What was stale was the value it mutated.
+Identifier READS of a non-local name prefer the module-global stores over the
+frame (`interpreter/expr/literals.rs`), but the mutating method-call path
+(`interpreter_helpers/patterns.rs`, identifier-receiver array branch) re-seeded
+the receiver from the store ONLY when the frame had no copy at all
+(`if env.get(obj_name).is_none() && !env.is_local(obj_name)`). A frame that
+already held an OLDER generation of the global — a `describe` body env captured
+before a `before_all` hook in the same group republished it — mutated that older
+copy, and the write-through then published it over the newer value. With a
+single writer the frame's copy happened to still be current, which is why that
+case looked healthy.
+
+Fix: drop the `env.get(obj_name).is_none()` condition, so the store is
+authoritative for any non-local module-global receiver and the mutation path
+agrees with the read path. One condition, in
+`src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs`.
+
+Reproduce spec:
+`test/01_unit/std/after_all_global_write_after_in_group_mutation_spec.spl`
+(fails pre-fix with `passed=1 failed=1`, passes after).
+
+Not the same defect as the mutable-closure-capture bug (R1): the sync machinery
+here exists and runs; it was fed a stale base value.
