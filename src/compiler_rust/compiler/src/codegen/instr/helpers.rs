@@ -79,10 +79,29 @@ pub(crate) fn inline_runtime_len_value(
     // dropping a synthesized `main` during in-guest HIR lowering (the SimpleOS
     // interpreter then reports "module has no main function").
     let is_spldict = builder.ins().icmp_imm(IntCC::Equal, object_type, 6);
+    // The riscv64/SimpleOS BAREMETAL runtime tags its dict with 11, not 3 or 6
+    // (examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c:48,
+    // `#define HEAP_DICT 11U`). Without this case an ANY-erased
+    // `Dict<SymbolId, HirFunction>` fell through to the -1 sentinel below, and
+    // -1 is the worst possible answer: `x.len() == 0` is FALSE while
+    // `while i < x.len()` runs ZERO times, so an emptiness guard cannot fire
+    // AND every loop over the dict silently does nothing. Measured in-guest
+    // under real OpenSBI: `hir.functions.len()` answered -1, HIR lowering
+    // dropped `main`, and the interpreter reported "module has no main
+    // function" -- exactly the failure the 6-tag comment above describes, from
+    // a third tag nobody had covered.
+    // See doc/08_tracking/bug/riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01.md
+    //
+    // Its layout is {HeapHeader hdr(8), uint64 len, uint64 cap, keys, vals}
+    // (baremetal_runtime_core.inc.c:2060-2068), so len sits at offset 8 -- the
+    // SAME offset as strings and arrays, and NOT SplDict's offset 16. It
+    // therefore joins the offset-8 group, not the spldict branch.
+    let is_bm_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 11);
     // RuntimeString, RuntimeArray and RuntimeDict store len at offset 8.
     let has_len_str_arr = builder.ins().bor(is_string, is_array);
     let has_len_rt = builder.ins().bor(has_len_str_arr, is_dict);
-    let has_len = builder.ins().bor(has_len_rt, is_spldict);
+    let has_len_rt2 = builder.ins().bor(has_len_rt, is_bm_dict);
+    let has_len = builder.ins().bor(has_len_rt2, is_spldict);
     builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
     builder.seal_block(type_block);
 
