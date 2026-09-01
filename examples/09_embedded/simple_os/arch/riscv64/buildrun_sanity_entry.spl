@@ -78,26 +78,54 @@ fn buildrun_source() -> text:
         "    else:\n" +
         "        print \"BUILDRUN_SIMPLEOS_RISCV64_BAD_SUM\"\n"
 
+fn probe_parse(tag: text, src: text):
+    """Parse one source variant and announce survival."""
+    serial_println("[bisect] begin " + tag)
+    val m = parse_and_build_module(_pp_preprocess_conditionals(src), "src/os/probe.spl")
+    serial_println("[bisect] ok " + tag)
+
+fn buildrun_bisect():
+    """Parse increasingly complex variants; the boot dies at the guilty one."""
+    probe_parse("y1-typed-param-ret-printbody", "fn f(a: i64) -> i64:\n    print \"x\"\n")
+    probe_parse("y2-ret-literal-body", "fn f() -> i64:\n    1\n")
+    probe_parse("y3-untyped-param-ident-body", "fn f(a):\n    a\n")
+    probe_parse("y4-typed-param-ident-body-noret", "fn f(a: i64):\n    a\n")
+    probe_parse("y5-typed-param-ret-literal-body", "fn f(a: i64) -> i64:\n    1\n")
+    probe_parse("y6-repro", "fn f(a: i64) -> i64:\n    a\n")
+    serial_println("[bisect] all variants survived")
+
 fn buildrun_sanity_row() -> i64:
     """Build (frontend + MIR) then run the program, in-guest."""
     val path = "src/os/rv64_buildrun_sanity.spl"
     val source = buildrun_source()
 
+    buildrun_bisect()
     serial_println("[buildrun] lowering source through the real frontend")
-    var parsed = parse_and_build_module(_pp_preprocess_conditionals(source), path)
+    serial_println("[probe] a-pp-begin")
+    val pped = _pp_preprocess_conditionals(source)
+    serial_println("[probe] b-pp-ok")
+    var parsed = parse_and_build_module(pped, path)
+    serial_println("[probe] c-parse-ok")
     parsed = desugar_module(parsed)
+    serial_println("[probe] d-desugar-ok")
     desugar_collections_static(0, 0)
+    serial_println("[probe] e-collections-ok")
 
     var lowering: HirLowering = HirLowering.with_filename(path)
+    serial_println("[probe] f-lowering-new-ok")
     val hir: HirModule = lowering.lower_module(parsed)
+    serial_println("[probe] g-lower-module-ok")
     if lowering.errors.len() > 0:
         serial_println("[buildrun] FAIL hir lowering error: " + lowering.errors[0].message)
         return 1
     serial_println("[buildrun] phase=hir-ok")
 
     # --- the BUILD half: real MIR lowering, in-guest -------------------------
+    serial_println("[probe] h-mir-new-begin")
     var mir_lowering = MirLowering.new(hir.symbols)
+    serial_println("[probe] i-mir-new-ok")
     val mir = mir_lowering.lower_module(hir)
+    serial_println("[probe] j-mir-lower-ok")
     if mir_lowering.errors.len() > 0:
         serial_println("[buildrun] FAIL mir lowering error: " + mir_lowering.errors[0].message)
         return 1

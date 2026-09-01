@@ -8,7 +8,7 @@
  *   0x80200000 - onwards    : Kernel image
  *
  * Stack: 8 MB (Simple code uses large stack frames)
- * Heap: 64 MB (bump allocator for runtime objects)
+ * Heap: 384 MB (bump allocator for runtime objects; see __heap_size below)
  *
  * Sections are 4KB-aligned for page table compatibility (Sv39).
  * Shared SECTIONS block: ../../common/linker_riscv_common.ld
@@ -20,5 +20,11 @@ ENTRY(_start)
 MEMORY {
     RAM (rwx) : ORIGIN = 0x80200000, LENGTH = 510M
 }
+
+/* Heap size for this target. QEMU virt gives 512M; OpenSBI holds the first 2M,
+ * so RAM here is 510M. The kernel image is ~6M and the stack 8M, leaving ample
+ * room. 384M (192M per TU after the two-TU halving) replaces the 64M default,
+ * which the build-and-run row exhausted inside the parser. */
+__heap_size = 384M;
 
 INCLUDE "examples/09_embedded/simple_os/arch/common/linker_riscv_common.ld"
