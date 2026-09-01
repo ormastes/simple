@@ -6,8 +6,15 @@
 #
 # Backend helpers for module compilation and backend resolution
 use compiler.common.diagnostics.span.{Span}
-use std.io_runtime.{dir_create, file_copy, file_exists, hash_text}
-use std.file_system.{file_write_text, file_read_text}
+use std.io_runtime.{dir_create, file_copy, file_exists, hash_text,
+    file_write_exact, file_read_nullable}
+# NOT `std.file_system` -- that module is a MOCK ("Mock implementations for
+# pure Simple demonstration"): its `file_write_text` writes nothing and returns
+# `true`, and its `file_read_text` consults `file_exists_mock`. Binding the
+# capsule-receipt writer to it produced a receipt that was never on disk while
+# reporting success, surfacing later as `native-capsule-receipt-invalid`.
+# `file_write_exact`/`file_read_nullable` are uniquely named and rt-backed, so
+# they cannot be captured by the same-arity `file_write_text` overload set.
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend,
     compile_module_with_backend_target_cpu_storage_bindings, get_effective_backend_name}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
@@ -127,12 +134,12 @@ fn driver_native_shadow_sort(lines: [text]) -> [text]:
 @always_inline
 fn _sffi_file_write_text(path: text, content: text) -> bool:
     unsafe(capabilities: [ffi]):
-        file_write_text(path, content)
+        file_write_exact(path, content)
 
 @always_inline
 fn _sffi_file_read_text(path: text) -> text?:
     unsafe(capabilities: [ffi]):
-        file_read_text(path)
+        file_read_nullable(path)
 
 @always_inline
 fn _sffi_file_exists(path: text) -> bool:
@@ -1487,6 +1494,14 @@ fn _compile_frozen_module_capsule(
                 receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
             if not _sffi_file_write_text(receipt_path, receipt):
                 return Err("AOT compile error in {name}: capsule-receipt-write-failed")
+            # Do not trust the write's own bool. A `file_write_text` name
+            # collision (a same-arity stdlib shadow returning `()`) once made
+            # this call a silent no-op that still read as success, so the
+            # receipt was never on disk and the failure surfaced far away as an
+            # opaque `native-capsule-receipt-invalid`. Read the receipt back and
+            # fail at the write site with a name that says what happened.
+            if (_sffi_file_read_text(receipt_path) ?? "") != receipt:
+                return Err("AOT compile error in {name}: capsule-receipt-write-unverified")
             Ok(object_path)
 
 fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64,
