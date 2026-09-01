@@ -51,10 +51,43 @@ unsigned long g_rv64_boot_dtb;
  * link, so this plain declaration resolves to the lane's own entry function. */
 void spl_start(void);
 
+/* Runs every module's `__module_init_*` (heap-typed module globals: array,
+ * string and struct-literal initializers, which cannot be static .data and
+ * must be built at runtime via rt_array_new/rt_string_new/rt_alloc).
+ * Synthesized by the linker's init-caller aggregator
+ * (pipeline/native_project/linker.rs `generate_init_caller`).
+ *
+ * The HOSTED link gets this call for free from the generated `main` stub
+ * (linker.rs:802-806). A freestanding `--entry-closure` link has no such stub:
+ * its entry is the Simple entry function itself, so the call must come from
+ * the target's own boot path. x86_64 does it in crt0.s
+ * (arch/x86_64/boot/crt0.s, `.skip_module_inits`); riscv64 had NO caller
+ * anywhere -- crt0.S does not call it and the entry .spl files do not declare
+ * it -- so nothing referenced the aggregator, --gc-sections dropped it along
+ * with every `__module_init_*`, and every module-level `var g: [T] = [...]`
+ * stayed a null/zero handle in-guest. Measured before this fix on
+ * build/os/riscv64_interp/interp/kernel.elf: 7167 symbols, ZERO
+ * `__module_init_*`, no `__simple_call_module_inits`.
+ *
+ * Weak so a link that genuinely has no aggregator still boots. Placed here
+ * rather than in crt0.S because boot_entry.c is already the per-lane-neutral
+ * shim every riscv64 entry passes through, and C gets the weak-symbol
+ * null-check without hand-written HI20/LO12 relocations.
+ *
+ * Ordering: after the firmware handover capture and before `spl_start`, i.e.
+ * the same "heap up, before the entry point" slot the rv64 kernel uses
+ * (src/os/kernel/arch/riscv64/boot.spl:89). The freestanding rv64 runtime
+ * brings its heap up lazily on first allocation, so no explicit heap-init
+ * call is required at this point. */
+void __attribute__((weak)) __simple_call_module_inits(void);
+
 void boot_entry(unsigned long hartid, unsigned long dtb)
 {
     g_rv64_boot_hartid = hartid;
     g_rv64_boot_dtb = dtb;
+    if (__simple_call_module_inits) {
+        __simple_call_module_inits();
+    }
     spl_start();
     /* crt0.S parks in `wfi` when this returns, so there is nothing to do here.
      * Returning is the normal path for an entry that completes. */
