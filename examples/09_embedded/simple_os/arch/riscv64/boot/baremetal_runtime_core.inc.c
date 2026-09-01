@@ -1151,6 +1151,11 @@ RuntimeValue rt_string_byte_at(RuntimeValue str, RuntimeValue index)
 
 /* Substring containment for text; element containment for an array. The hosted
  * rt_contains is polymorphic over both, so this is too. */
+/* Forward declaration: rt_contains's dict arm delegates here, but the dict
+ * section (and the RuntimeDict type) is defined later in this TU. Signature
+ * matches src/runtime/runtime.h:746 and the definition below. */
+int8_t rt_dict_contains(int64_t dict, int64_t key);
+
 RuntimeValue rt_contains(RuntimeValue collection, RuntimeValue value)
 {
     if (!IS_HEAP(collection)) return 0;
@@ -1203,16 +1208,16 @@ RuntimeValue rt_contains(RuntimeValue collection, RuntimeValue value)
      * no. resolve_function_by_name then fail-closed on has_fn_index and never
      * ran the linear scan that would have found it.
      *
-     * Key rule is identical to rt_dict_contains below -- raw handle identity
-     * first, then rt_string_eq for text keys. Spelled inline rather than
-     * calling that function because it is defined later in this TU. */
+     * Key rule is delegated to rt_dict_contains (defined at the dict section
+     * below) so the two cannot drift. It is CALLED, not spelled inline: the
+     * RuntimeDict type is not declared until line ~2101, well after this
+     * function, so an inline `RuntimeDict *d = ...` here is an undeclared-type
+     * error that fails this whole TU and cascades into the link. (Measured --
+     * that is exactly what the first attempt at this fix did.) A file-scope
+     * forward declaration is placed immediately above rt_contains; its
+     * signature matches src/runtime/runtime.h:746 and the definition below. */
     if (h->type == HEAP_DICT) {
-        RuntimeDict *d = (RuntimeDict *)h;
-        for (uint64_t i = 0; i < d->len; i++) {
-            if (d->keys[i] == value) return 1;
-            if (rt_string_eq(d->keys[i], value)) return 1;
-        }
-        return 0;
+        return rt_dict_contains((int64_t)collection, (int64_t)value) ? 1 : 0;
     }
     return 0;
 }
