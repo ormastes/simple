@@ -465,7 +465,32 @@ impl<'a> Parser<'a> {
                             FStringPart::Literal(s) => text.push_str(s),
                             FStringPart::Expr(e) | FStringPart::ExprWithFormat(e, _) => {
                                 match Self::render_asm_placeholder(e) {
-                                    Some(rendered) => text.push_str(&rendered),
+                                    // `{name}` / `{0}` in an asm template is an OPERAND
+                                    // placeholder, not an interpolation — the same contract
+                                    // `expect_string_value` documents for the parenthesized
+                                    // form. The braces MUST survive parsing so MIR lowering
+                                    // can rewrite them to LLVM's `$N`
+                                    // (mir/asm_operands.rs::rewrite_asm_placeholders) and so
+                                    // the C sidecar, which cannot bind operands, can
+                                    // RECOGNISE an operand-bearing line and skip it.
+                                    //
+                                    // Flattening to the bare rendered token is what emitted
+                                    // `csrr 0, mcause`, `mv out, tp` and `invlpg [addr]`
+                                    // into the riscv64 WM translation unit — the assembler
+                                    // sees an operand INDEX or a Simple local name where a
+                                    // register belongs. See
+                                    // doc/08_tracking/bug/rv64_wm_inline_asm_blocks_arch_mixed_and_operands_unsubstituted_2026-09-01.md
+                                    //
+                                    // `render_asm_placeholder` is still called (and still
+                                    // rejects unrenderable expressions loudly) so the
+                                    // 2026-08-17 `Identifier("stack_top")` Debug-format leak
+                                    // stays fixed: the key inside the braces is a plain
+                                    // token, never a `{:?}` rendering.
+                                    Some(rendered) => {
+                                        text.push('{');
+                                        text.push_str(&rendered);
+                                        text.push('}');
+                                    }
                                     None => {
                                         return Err(ParseError::syntax_error_with_span(
                                             format!(
@@ -665,12 +690,17 @@ mod tests {
     /// Rust's Debug formatting, so `"ldr r0, ={stack_top}"` emitted
     /// `ldr r0, =Identifier("stack_top")` into the assembler, which fails with
     /// `unknown token in expression`.
+    ///
+    /// The anti-regression property is that the AST is never Debug-formatted
+    /// into the template. The braces themselves are RETAINED (2026-09-01): a
+    /// `{...}` in an asm template is an operand placeholder, so the marker must
+    /// reach MIR lowering. `Identifier("stack_top")` must still never appear.
     #[test]
     fn test_asm_template_placeholder_renders_bare_identifier() {
         let asm = parse_first_asm("fn test():\n    asm volatile:\n        \"ldr r0, ={stack_top}\"\n");
         assert_eq!(asm.instructions.len(), 1);
         let instr = &asm.instructions[0];
-        assert!(instr.contains("=stack_top"), "expected bare identifier, got {instr:?}");
+        assert_eq!(instr, "ldr r0, ={stack_top}");
         assert!(
             !instr.contains("Identifier("),
             "Debug-formatted AST leaked into asm: {instr:?}"
@@ -680,7 +710,43 @@ mod tests {
     #[test]
     fn test_asm_template_placeholder_renders_integer_literal() {
         let asm = parse_first_asm("fn test():\n    asm volatile:\n        \"mov r0, #{7}\"\n");
-        assert_eq!(asm.instructions, vec!["mov r0, #7".to_string()]);
+        assert_eq!(asm.instructions, vec!["mov r0, #{7}".to_string()]);
+    }
+
+    /// Reproduce for
+    /// `doc/08_tracking/bug/rv64_wm_inline_asm_blocks_arch_mixed_and_operands_unsubstituted_2026-09-01.md`
+    /// defect 2. RED before the fix: the block form flattened the operand
+    /// placeholder to its bare token, so `src/lib/.../riscv/startup.spl`'s
+    /// `"csrr {0}, mcause"` reached the riscv64 assembler as `csrr 0, mcause`
+    /// ("invalid operand for instruction") and `src/os/kernel/arch/x86_32/
+    /// paging.spl`'s `"invlpg [{addr}]"` as `invlpg [addr]` ("unknown
+    /// operand"). Keeping the braces is what lets MIR bind them (`$N`) or the
+    /// C sidecar skip them.
+    #[test]
+    fn test_asm_block_form_keeps_operand_placeholder_braces() {
+        let asm = parse_first_asm(
+            "fn test():\n    asm volatile:\n        \"csrr {0}, mcause\"\n        \"invlpg [{addr}]\"\n        \"call {3}\"\n",
+        );
+        assert_eq!(
+            asm.instructions,
+            vec![
+                "csrr {0}, mcause".to_string(),
+                "invlpg [{addr}]".to_string(),
+                "call {3}".to_string(),
+            ]
+        );
+    }
+
+    /// The parenthesized form already preserved braces; the block form must now
+    /// agree with it. A single contract, not two.
+    #[test]
+    fn test_asm_block_and_paren_forms_agree_on_placeholder_spelling() {
+        let block = parse_first_asm("fn test():\n    asm volatile:\n        \"csrr {v}, mepc\"\n");
+        let paren = parse_first_asm(
+            "fn test(x: u64):\n    asm volatile(\n        \"csrr {v}, mepc\",\n        v = out(reg) x\n    )\n",
+        );
+        assert_eq!(block.instructions, paren.instructions);
+        assert_eq!(block.instructions, vec!["csrr {v}, mepc".to_string()]);
     }
 
     /// A placeholder the assembler has no spelling for must be a loud parse
