@@ -1,0 +1,75 @@
+#!/bin/sh
+# Executable reproduce for `native-capsule-receipt-invalid` (2026-09-01).
+#
+# A clean hello world clears HIR and emits NO binary, failing every module with
+#   reason: native-capsule-receipt-invalid:app.repro_hello.hw
+# because the AOT driver's receipt writer was bound to the MOCK
+# `std.file_system.file_write_text`, which writes nothing and returns `true`.
+#
+# The defect is SEED-DEPENDENT: which of six same-arity `file_write_text`
+# definitions a call site binds to is decided by the seed's co-compiled-collision
+# fallback ("last definition wins"), so a seed whose ordering happens to pick a
+# real implementation builds green over the same source. Point SEED= at the seed
+# that reproduces it. Measured RED/GREEN on the branch fix commit:
+#   parent : BUILD_RC=1, native-capsule-receipt-invalid, no binary, no receipt
+#   fixed  : BUILD_RC=0, binary runs, object.*.o.capsule-receipt on disk
+#
+# Usage: SEED=/path/to/simple RUNTIME_PATH=/path/to/dir-with-libsimple_runtime.a \
+#            sh scripts/check/repro-native-capsule-receipt-invalid.shs
+#
+# Verdict is the LAST line of stdout. Exit codes are captured DIRECTLY into a
+# variable, never through a pipe. No SIMPLE_ALLOW_* escape is set.
+
+set -u
+ROOT=${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+SEED=${SEED:-$ROOT/bin/simple}
+RUNTIME_PATH=${RUNTIME_PATH:-$ROOT/build/simple-core}
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+[ -x "$SEED" ] || { echo "ERROR — nothing was checked (no seed at $SEED)"; exit 2; }
+[ -f "$RUNTIME_PATH/libsimple_runtime.a" ] || {
+    echo "ERROR — nothing was checked (no libsimple_runtime.a under $RUNTIME_PATH)"; exit 2; }
+
+ENTRY=$ROOT/src/app/repro_hello/hw.spl
+[ -f "$ENTRY" ] || { echo "ERROR — nothing was checked (missing $ENTRY)"; exit 2; }
+
+OUT=$WORK/hw_bin
+LOG=$WORK/build.log
+CACHE=$WORK/cache
+
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd $ROOT)"; exit 2; }
+SIMPLE_BINARY="$SEED" SIMPLE_BIN="$SEED" SIMPLE_BOOTSTRAP_DRIVER="$SEED" \
+SIMPLE_FRONTEND_DELEGATE="$SEED" SIMPLE_FRONTEND_DELEGATED=1 \
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT/src" \
+SIMPLE_LINK_OBJECTS="$RUNTIME_PATH/libsimple_runtime.a" \
+    timeout -k 10s 1200s "$SEED" native-build \
+        --backend cranelift --source src/app --source src/lib --entry-closure \
+        --entry src/app/repro_hello/hw.spl \
+        --runtime-bundle core-c-bootstrap --runtime-path "$RUNTIME_PATH" \
+        --cache-dir "$CACHE" --timeout 1200 --output "$OUT" > "$LOG" 2>&1
+BUILD_RC=$?
+
+RECEIPTS=$(find "$CACHE" -name '*.capsule-receipt' 2>/dev/null | grep -c .)
+
+if grep -q 'native-capsule-receipt-invalid' "$LOG"; then
+    echo "FAIL — 1 build executed, native-capsule-receipt-invalid (BUILD_RC=$BUILD_RC, receipts=$RECEIPTS)"
+    exit 1
+fi
+if grep -q 'capsule-receipt-write-unverified' "$LOG"; then
+    echo "FAIL — 1 build executed, capsule-receipt-write-unverified: the receipt write reported success but wrote nothing (BUILD_RC=$BUILD_RC)"
+    exit 1
+fi
+if [ "$BUILD_RC" -ne 0 ]; then
+    echo "FAIL — 1 build executed, BUILD_RC=$BUILD_RC (log: $(tail -1 "$LOG"))"
+    exit 1
+fi
+[ -x "$OUT" ] || { echo "FAIL — 1 build executed, BUILD_RC=0 but no binary at $OUT"; exit 1; }
+[ "$RECEIPTS" -gt 0 ] || { echo "FAIL — 1 build executed, binary produced but 0 capsule receipts on disk"; exit 1; }
+
+"$OUT" > "$WORK/run.out" 2>&1
+RUN_RC=$?
+[ "$RUN_RC" -eq 0 ] || { echo "FAIL — 1 build executed, binary produced but exited $RUN_RC"; exit 1; }
+
+echo "PASS — 1 build executed, BUILD_RC=0, $RECEIPTS capsule receipt(s) on disk, binary ran (rc=0)"
+exit 0
