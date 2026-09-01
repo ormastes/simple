@@ -1,0 +1,82 @@
+"""
+# `_ensure_initialized` must tolerate UNSET logging env vars
+
+Reproduce spec for the defect that blocked every `native-build` on this lane.
+
+`src/lib/nogc_sync_mut/log.spl` imports `env_get` from
+`std.nogc_sync_mut.env.variables`, which returns nil / `Option::None` for an
+UNSET variable -- unlike `io_runtime.env_get`, which normalizes absent to "".
+`_ensure_initialized()` called `.len()` on three such results
+(`SIMPLE_LOG_FILE_PATH`, `SIMPLE_LOG_DIR`, `SIMPLE_LOG`) with no guard.
+
+Pre-fix, the first `log_debug` on a process with those variables unset aborts:
+
+    error: semantic: method `len` not found on type `enum`
+           (receiver value: Option::None)
+
+Because `_ensure_initialized` runs from the interpreted compiler driver's own
+`log_debug` during `parse_all_impl` (step 1 of 6), this killed the build long
+before HIR -- measured frame:
+
+    main -> cli_native_build -> compiler_driver_run_compile -> compile
+      -> parse_all_committing_impl -> parse_all_impl -> log_debug -> debug
+      -> _ensure_initialized
+
+## Honesty note on RED-before
+
+This spec does NOT go RED with the fix reverted -- measured, not assumed:
+reverting only `log.spl` and re-running it still reports
+`2 total, 2 passed, 0 failed`. Under `simple test` the name `env_get` resolves
+to `io_runtime`'s definition, which normalizes an unset variable to "", so the
+nil never reaches `.len()`. That is the same collision the compiler warns about:
+
+    warning: public function `env_get` has 4 co-compiled definitions with 2
+    differing signatures ((text)->Optional(text) vs (text)->text); JIT call
+    sites resolve by exact arg-type match, falling back to the LAST definition
+    when types are ambiguous  [compiler_cross_module_private_symbol_collision]
+
+Which definition wins is closure- and load-order-dependent, which is exactly
+why the abort appears in the `native-build` worker's closure and not here.
+
+The real RED-before/GREEN-after evidence is the native-build ladder, measured
+with a fresh seed on this worktree:
+
+    pre-fix : rc=1, aborts in step 1/6 (parse), `method `len` not found on
+              type `enum` (receiver value: Option::None)`, receiver `file_env`
+    post-fix: advances to step 2/6 and reaches HIR
+
+This file is therefore a REGRESSION GUARD for the guard's semantics, not a
+reproduce. It is kept because it fails loudly if the three normalizations are
+removed under any closure where the nil-returning `env_get` wins.
+
+Defect class: unguarded access on an optional whose declared contract says
+non-optional. Same class as the two MIR-lowering defects recorded in
+doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.md
+("Defect 2 -- nil `finally_stack`").
+"""
+
+use std.nogc_sync_mut.log.{log_debug, log_info, log_error}
+use std.nogc_sync_mut.env.variables.{env_remove}
+
+describe "log._ensure_initialized with unset environment", fn():
+
+    it "does not abort when SIMPLE_LOG_FILE_PATH / SIMPLE_LOG_DIR / SIMPLE_LOG are unset", fn():
+        # Clearing all three drives every one of the three previously
+        # unguarded `.len()` receivers to nil. Pre-fix this call aborts the
+        # whole process; post-fix it returns normally.
+        env_remove("SIMPLE_LOG_FILE_PATH")
+        env_remove("SIMPLE_LOG_DIR")
+        env_remove("SIMPLE_LOG")
+        log_debug("reproduce: unset logging environment must not abort")
+        expect(true).to_be(true)
+
+    it "keeps the other severities callable with the environment unset", fn():
+        # The same lazy-init path is reached from every severity entry point,
+        # so a guard applied to only one of them would still leave the build
+        # dead on whichever ran first.
+        env_remove("SIMPLE_LOG_FILE_PATH")
+        env_remove("SIMPLE_LOG_DIR")
+        env_remove("SIMPLE_LOG")
+        log_info("reproduce: info path")
+        log_error("reproduce: error path")
+        expect(true).to_be(true)
