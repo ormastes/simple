@@ -191,6 +191,55 @@ fn candidate_declared_by(
         .find(|candidate| function_module_owner(candidate).is_some_and(|o| *o == *owner))
 }
 
+/// Resolve a recorded import binding `(source_owner, source_name)` to the
+/// function it names, walking re-export facades to the module that actually
+/// DECLARES the function. Mirrors the bounded chain walk HIR lowering performs
+/// in `collect_flattened_import_aliases`. At each hop, a candidate declared by
+/// the current owner wins; otherwise follow the owner's own binding for the
+/// symbol, or its recorded glob edge ("*" -- `export use m.*`), whose per-name
+/// expansion cannot see plain functions. A hop that lands back on
+/// `refuse_owner` (the importing module) is refused: a poisoned facade binding
+/// pointing at the importer's own wrapper is exactly the recursion trap the
+/// aliased-import fallback in `evaluate_call` documents. Bounded so a cyclic
+/// facade graph cannot hang.
+pub(crate) fn owner_bound_function(
+    source_owner: &Arc<str>,
+    source_name: &str,
+    refuse_owner: Option<&Arc<str>>,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Option<Arc<FunctionDef>> {
+    let mut source_owner = Arc::clone(source_owner);
+    let mut source_name = source_name.to_owned();
+    let mut target: Option<Arc<FunctionDef>> = None;
+    for _ in 0..16 {
+        target = functions
+            .get(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name))
+            .cloned()
+            .or_else(|| candidate_declared_by(&source_owner, &source_name, functions));
+        if target.is_some() {
+            break;
+        }
+        let hop = crate::interpreter::owner_bindings(&source_owner).and_then(|bindings| {
+            bindings.get(&source_name).cloned().filter(|next| {
+                *next.0 != *source_owner || next.1 != source_name
+            }).or_else(|| {
+                bindings.get("*").map(|glob| (Arc::clone(&glob.0), source_name.clone()))
+            })
+        });
+        match hop {
+            Some((next_owner, next_name))
+                if refuse_owner.map_or(true, |refuse| *next_owner != **refuse)
+                    && (*next_owner != *source_owner || next_name != source_name) =>
+            {
+                source_owner = next_owner;
+                source_name = next_name;
+            }
+            _ => break,
+        }
+    }
+    target
+}
+
 /// Explicit-import dispatch for a bare call of a MULTIPLY-defined name.
 ///
 /// `use m.{f}` records an owner binding (`record_flattened_import_binding` /
@@ -231,45 +280,9 @@ fn import_bound_candidate(
         eprintln!("[dupdispatch] probe name={name} current={current} has_table={} entry={:?}",
             b.is_some(), b.as_ref().and_then(|t| t.get(name).cloned()));
     }
-    let (mut source_owner, mut source_name) = crate::interpreter::owner_bindings(&current)
+    let (source_owner, source_name) = crate::interpreter::owner_bindings(&current)
         .and_then(|bindings| bindings.get(name).cloned())?;
-    // Walk re-export facades to the module that actually DECLARES the
-    // function, mirroring the bounded chain walk HIR lowering performs in
-    // `collect_flattened_import_aliases`. At each hop, a candidate declared
-    // by the current owner wins; otherwise follow the owner's own binding for
-    // the symbol, or its recorded glob edge ("*" -- `export use m.*`), whose
-    // per-name expansion cannot see plain functions. A hop that lands back on
-    // the CALLING module is refused: a poisoned facade binding pointing at the
-    // caller's own wrapper is exactly the recursion trap the aliased-import
-    // fallback below documents. Bounded so a cyclic facade graph cannot hang.
-    let mut target: Option<Arc<FunctionDef>> = None;
-    for _ in 0..16 {
-        target = functions
-            .get(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name))
-            .cloned()
-            .or_else(|| candidate_declared_by(&source_owner, &source_name, functions));
-        if target.is_some() {
-            break;
-        }
-        let hop = crate::interpreter::owner_bindings(&source_owner).and_then(|bindings| {
-            bindings.get(&source_name).cloned().filter(|next| {
-                *next.0 != *source_owner || next.1 != source_name
-            }).or_else(|| {
-                bindings.get("*").map(|glob| (Arc::clone(&glob.0), source_name.clone()))
-            })
-        });
-        match hop {
-            Some((next_owner, next_name))
-                if *next_owner != *current
-                    && (*next_owner != *source_owner || next_name != source_name) =>
-            {
-                source_owner = next_owner;
-                source_name = next_name;
-            }
-            _ => break,
-        }
-    }
-    let target = target?;
+    let target = owner_bound_function(&source_owner, &source_name, Some(&current), functions)?;
     if debug_dupdispatch() {
         eprintln!(
             "[dupdispatch] import-bound name={name} current={current} source_owner={source_owner} source_name={source_name} target_owner={:?}",

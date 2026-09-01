@@ -1418,6 +1418,45 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             }
             Node::Const(marker) if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) => {
                 record_flattened_import_binding(&marker.name);
+                // An ALIASED selective import (`use m.{f as g}`) binds a name
+                // that exists nowhere in the flattened unit: `g` is not a
+                // function, class, enum, or global, so a VALUE-position use of
+                // it (e.g. `val ns = {"f": g}`, the stdlib's namespace-dict
+                // idiom in src/lib/nogc_sync_mut/shell/mod.spl) died with
+                // `variable \`g\` not found` even though the binding above
+                // records exactly which module's `f` it names. Materialize the
+                // alias as a first-class function value, resolved by module
+                // OWNER through the same facade walk calls use
+                // (`owner_bound_function`), never by bare name. Only fires
+                // when the alias name is otherwise unbound, so a real
+                // declaration of the name always wins.
+                if let Some((_importer, local_name, source_owner, source_name)) =
+                    crate::interpreter::decode_import_binding_marker(&marker.name)
+                {
+                    if local_name != "*"
+                        && source_name != "*"
+                        && local_name != source_name
+                        && env.get(local_name).is_none()
+                        && !functions.contains_key(local_name)
+                    {
+                        let owner: Arc<str> = Arc::from(source_owner);
+                        if let Some(def) = crate::interpreter_call::owner_bound_function(
+                            &owner,
+                            source_name,
+                            None,
+                            &functions,
+                        ) {
+                            env.insert(
+                                local_name.to_owned(),
+                                Value::Function {
+                                    name: source_name.to_owned(),
+                                    def,
+                                    captured_env: Arc::new(Env::new()),
+                                },
+                            );
+                        }
+                    }
+                }
             }
             Node::Let(let_stmt) => {
                 use super::Control;

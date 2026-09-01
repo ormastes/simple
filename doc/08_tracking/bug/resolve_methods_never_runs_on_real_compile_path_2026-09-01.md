@@ -151,3 +151,147 @@ lines 332/368/407/481/514). Do not trust the location without checking.
 
 **No source fixes were applied to MCP**, deliberately: rewriting idiomatic Simple
 to dodge a compiler bug is prohibited by CLAUDE.md and would hide the defect.
+
+## Fix scoping (2026-09-01, second session)
+
+Scoped as directed: what a correct fix requires, with the subset that was
+already computed-and-discarded plumbed behind `SIMPLE_RESOLVE_METHODS=1`
+(default OFF, landed `260a923ad3b` + follow-up).
+
+### 1. Provenance table — where `HirExpr.type_` could come from
+
+| provenance | type available at HIR construction? | where | status |
+|---|---|---|---|
+| `val`/`var` with declared type | YES — lowered and stored on the `Let` stmt AND in `Symbol.type_` (`statements.spl:390-401` `symbols.define(...)`) | `20.hir/hir_lowering/statements.spl` | already stored, never consulted by resolution — now consulted (quiet mode) |
+| function parameters + `self` | YES — `define(p_name, SymbolKind.Parameter, p_type, ...)` (`_Items/declaration_lowering.spl:119,350`) | symbol table | already stored — now consulted via `infer_symbol_value_type` |
+| `Var` read | derivable — `symbols.get_symbol_raw(sym).type_` | resolver | `infer_expr_type` Var arm (pre-existing, was dead) |
+| `Let` with inferred type from a call | derivable — callee's symbol type is `Function(params, ret, ...)`: same-module fns predeclared with `declared_callable_type` (`module_declarations_bootstrap.spl:139`), IMPORTED fns too (`module_import_registration.spl:512`, `declared_imported_surface_callable_type`) | resolver | now recorded per-function in `local_value_types` (quiet mode); placeholder `Infer` returns filtered out |
+| method-call chain result | YES within a resolved chain — `resolve_call_result_type_raw` (`resolve.spl:483` call site) | resolver | pre-existing; only fires once resolution succeeds |
+| `StructLit` / `EnumLit` | YES — the lit carries `type_` | `infer_expr_type` StructLit arm | pre-existing |
+| `Index` on typed base | derivable (Array/Slice/Dict element) | `infer_expr_type` Index arm | pre-existing |
+| field access (`a.b.method()`) | NOT covered — `infer_expr_type` has NO `Field` arm; needs struct-def field-type lookup | gap | listed, not extended |
+| match bindings | NOT covered — no binding registration in resolver | gap | listed, not extended |
+| tuple-index / assignment-flow / narrowing | NOT covered | gap | listed, not extended |
+| constants | YES — `HirConst.type_` | resolve_module | pre-existing |
+
+99 `type_: nil` construction sites exist under `20.hir/hir_lowering/**`; they
+do NOT each need fixing — the resolver-side attach (below) types receivers at
+resolution time from the symbol table + binding env, which is the contained
+alternative to touching construction sites.
+
+### 2. Does `30.types` already compute what is needed? — TWO-TIER verdict
+
+**Full HM inference: NO, not "computed and merely discarded" — it is not even
+run.** `run_typecheck_warn_pass` (`driver_hir_pipeline_passes.spl:175`) is the
+only real-path caller of `HmInferContext.infer_module`, and it is gated at
+`driver_hir_pipeline_lowering.spl:1023` on `SIMPLE_TYPECHECK_WARN=1` or a
+non-Advisory profile — the DEFAULT is Advisory, so the pass does not execute
+at all on a default build. When it does run it returns diagnostics only; the
+per-expression types live in its internal `Substitution` and die with it.
+Writing them back is not plumbing: `HirExpr` has NO node id (fields: `kind`,
+`has_type_`, `type_`, `span` — `hir_definitions.spl:533`), so a side table
+keyed by expression identity is impossible; writeback means a rebuilding
+traversal of every function body.
+
+**Declared/structural types: YES — computed, stored, and never consulted.**
+Three pieces were already built and dead:
+- `Symbol.type_` populated for params, `self`, annotated locals, constants,
+  same-module fns AND imported fns (full `Function` signatures) — nothing on
+  the resolution path ever read it for a receiver.
+- `MethodResolver.attach_inferred_type` + `infer_expr_type` +
+  `infer_symbol_value_type` (`resolve_lookup_helpers.spl:25-71`):
+  a complete structural typing helper covering Var/NamedVar/Call/StructLit/
+  Index — with **zero call sites** (grep: only its definition and the
+  `__init__.spl` re-export). Same shape as `resolve_methods_impl`: built,
+  exported, wired to nothing.
+
+So step 5's condition held for the subset, and the plumbing was attempted.
+
+### 3. What was landed (env-gated, default OFF)
+
+`SIMPLE_RESOLVE_METHODS=1` runs `run_resolve_methods_quiet_gated`
+(`driver_hir_pipeline_passes.spl`) from `compile()` orchestration AFTER phase
+3 — deliberately after both the streaming and non-streaming lowering branches
+converge (`driver_orchestration.spl`, after "phase 3 done"), and after every
+`hir_cache` store/load, so the HIR cache carries unresolved modules on both
+flag settings and cannot be poisoned by the flag.
+
+Quiet mode (`MethodResolver.quiet`, `resolve_methods_quiet`):
+- `add_error` is a no-op — resolution failure degrades to exactly today's
+  `Unresolved`, making the experiment MONOTONE: a call either becomes
+  genuinely resolved or reaches MIR unchanged. This also absorbs the builtin
+  problem: `Dict`/`[T]`/`text` receivers have no type symbol
+  (`get_type_symbol` returns nil), so all three strategies legitimately miss
+  — in loud mode that would have been an error per call.
+- receivers get `attach_inferred_type` before `resolve_method`, and the TYPED
+  receiver is stored in the rebuilt `MethodCall`, so MIR's type-directed
+  fallbacks (`maybe_receiver_type_for_call`, `receiver_is_dict`, etc.) see
+  the type even when resolution stays Unresolved — this is where the for-in
+  cascade wins are expected, independent of resolution proper.
+- unannotated `Let`s are backfilled into a per-function
+  `local_value_types: Dict<i64, HirType>` consulted ahead of the symbol
+  table; `Error`/`Infer` placeholders are refused at both the backfill and
+  the attach (a stamped `Infer` would pass the nil guard while carrying no
+  dispatch identity).
+
+Two latent defects found and fixed on the way:
+- `create_trait_solver_for_resolution` (`resolve.spl`) partially constructed
+  `TraitSolver` WITHOUT `trait_methods` — nil field, crashing
+  `try_trait_method_with_solver` the first time a typed receiver reached it.
+  It never fired before precisely because the pass never ran with types.
+- (spec-harness observation) a symbol-table `Function` type can carry an
+  `Infer` return on the direct-lowering path; the driver path predeclares the
+  real signature. Hence the placeholder filters.
+
+Pinned by `test/01_unit/compiler/semantics/resolve_methods_quiet_typed_spec.spl`
+— 5/5 green: loud pass errors on the untyped receiver (Gap B baseline); quiet
+pass records ZERO errors on the same module; annotated-Let receiver is typed
+`Dict` after the quiet pass; placeholder types are never stamped; the default
+(loud/bootstrap) walk leaves receiver nodes byte-identical.
+
+### 4. Blast radius of turning resolution on
+
+- MIR's `lower_method_call` handles a positive resolution in its terminal
+  `match resolution` (`method_calls_literals.spl:2715+` InstanceMethod arm =
+  direct `emit_call` with the callee's real return type). The `resolution_is_unresolved`-gated fallbacks (17 uses in gating/condition position; 15 boolean-condition sites, measured) stop firing ONLY for calls that
+  became resolved — by construction those are calls the resolver proved to be
+  user-type instance/trait/static methods.
+- The dict-name and predicate probes deliberately DISTRUST positive
+  resolutions (the "Dict `.has` resolved to unrelated `DiContainer.has`"
+  incident is documented in that file) and re-probe the lowered receiver —
+  they remain as backstop and are safe to leave in place.
+- Residual risk is exactly one class: a WRONG positive resolution (same-named
+  method on an unrelated owner). Mitigated by type-directed owner-scoped
+  lookup and contained by the flag; this is the thing to watch in the flag-on
+  error-count measurement.
+
+### 5. Estimate: CONTAINED for the declared/structural tier; the rest is real work
+
+- Tier 1 (landed): resolver-side attach + Let backfill + quiet wiring — 6
+  files, ~150 lines, no construction-site changes, default-off. Evidence it
+  is contained: it is done, green on its spec, and flag-off is byte-identical
+  (`resolve_nil_guard_spec` 6 passed / 5 failed both before and after — the 5
+  are pre-existing host failures, identical at pristine HEAD).
+- Tier 2 (bounded, days not weeks): `Field` arm in `infer_expr_type` (struct
+  field-type lookup), match-binding registration, tuple-index — each extends
+  the same helper + env, no new pass.
+- Tier 3 (the genuine refactor, weeks): full inference-backed writeback —
+  requires either HM writeback via a rebuilding traversal (no node ids) or
+  running resolution inside inference; touches `30.types` + `20.hir`
+  contracts. NOT needed to un-block the MCP error families if measurement
+  shows tiers 1-2 cover the receiver provenances actually failing.
+
+### Measurement status (honest)
+
+- Mechanism-level measurement: done (the 5-scenario spec above; loud pass =
+  errors on the repro, quiet pass = 0 errors + typed receiver).
+- End-to-end MCP error count flag-on vs flag-off: **BLOCKED ON THIS HOST.**
+  The fresh Windows seed SEGVs (rc=139, after `[engine-demotion]
+  hybrid-interp-splice`) merely LOADING the full driver module graph
+  (`use compiler.driver.driver` from a 5-line file) — reproduced at pristine
+  HEAD with all five edited files restored to `git show HEAD:`, so it is
+  pre-existing and not caused by this change. The same graph loads fine via
+  `simple test` on unit specs that stop at frontend+HIR+semantics. Whoever
+  holds a Linux lane should run the same MCP native-build used for the
+  133-error baseline with `SIMPLE_RESOLVE_METHODS=1` and diff the counts;
+  the `[resolve-methods-quiet]` receipt line proves the pass ran.

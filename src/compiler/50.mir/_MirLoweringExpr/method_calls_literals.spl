@@ -1197,6 +1197,49 @@ impl MirLowering:
         # this for static custom methods; predicate fallbacks also need it
         # before they consider lowering the receiver as a text value.
         var static_receiver_name = static_receiver_name_hint
+        # Owner id accompanying static_receiver_name for the Unresolved arm's
+        # exact lookup_method_in_type path. Initialized from the caller's hint
+        # so behaviour is unchanged when the recovery below does not fire.
+        var static_receiver_owner_id: i64 = static_receiver_symbol_hint
+        # Recover the static owner from a bare type-name receiver
+        # (cross_module_static_new_name_collision_2026-09-01). expr_dispatch
+        # passes an EMPTY hint for every MethodCall, so an Unresolved static
+        # call could previously resolve only through
+        # lookup_unique_static_method, which fail-closes the moment TWO types
+        # anywhere in the compilation closure expose the same static leaf --
+        # `new` collides first, always. The receiver then fell through to
+        # value lowering: "undefined variable {Class}" + "unresolved method
+        # call: new" (14 of the MCP build's 133 errors). Prefer the receiver
+        # NamedVar's ATTACHED symbol id when it names a Class/Struct (exact,
+        # collision-proof); fall back to a scope-walk name lookup only when
+        # the attached id is absent or names something else. A receiver that
+        # resolves to a lowerable local stays a value receiver.
+        if static_receiver_name == "":
+            match receiver.kind:
+                case NamedVar(srn_sym, srn_name):
+                    if srn_name != "":
+                        val srn_sym_id = mir_expr_symbol_id_value(srn_sym)
+                        val srn_is_local_value = srn_sym_id >= 0 and self.find_local(srn_sym_id).id >= 0
+                        if not srn_is_local_value:
+                            var srn_owner_id: i64 = -1
+                            if srn_sym_id >= 0:
+                                if val srn_attached = self.symbols.get_symbol_raw(srn_sym_id):
+                                    match srn_attached.kind:
+                                        case Class | Struct:
+                                            srn_owner_id = srn_sym_id
+                                        case _: ()
+                            if srn_owner_id < 0:
+                                val srn_by_name = self.symbols.lookup_or_invalid(srn_name)
+                                if srn_by_name.is_valid():
+                                    if val srn_named_sym = self.symbols.get_symbol_raw(srn_by_name.id):
+                                        match srn_named_sym.kind:
+                                            case Class | Struct:
+                                                srn_owner_id = srn_by_name.id
+                                            case _: ()
+                            if srn_owner_id >= 0:
+                                static_receiver_name = srn_name
+                                static_receiver_owner_id = srn_owner_id
+                case _: ()
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] static-owner method={method}\n")
 
@@ -2878,8 +2921,8 @@ impl MirLowering:
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
                 val static_method_key = "static::{static_receiver_name}::{method}"
-                val static_receiver_symbol: SymbolId? = if static_receiver_symbol_hint >= 0:
-                    Some(SymbolId(id: static_receiver_symbol_hint))
+                val static_receiver_symbol: SymbolId? = if static_receiver_owner_id >= 0:
+                    Some(SymbolId(id: static_receiver_owner_id))
                 else:
                     nil
                 var static_method_id: SymbolId? = nil
