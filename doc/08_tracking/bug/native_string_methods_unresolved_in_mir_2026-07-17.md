@@ -184,3 +184,48 @@ Cranelift import ABI were removed.
 C9 now checks valid nonzero, valid zero, invalid text, and trailing junk while
 retaining the existing result `42`. Rebuilt LLVM/Cranelift execution remains
 pending.
+
+## Three more method names found missing, distinct from the ones above (2026-09-01)
+
+Measured while triaging the MCP MCP native-build's 120 MIR-lowering errors
+(`src/app/mcp/main.spl` via `native_build_worker.spl`). These are **not**
+`to_upper`/`parse_f64` under a different name — they are separate method
+names, still with zero dispatch arm anywhere under `src/compiler/50.mir/`
+(`grep -rn '"upper"\|"to_float"\|"chars"' src/compiler/50.mir/` returns
+nothing):
+
+| method | text call site (real repo usage) |
+|---|---|
+| `.upper()` (not `.to_upper()`) | `src/lib/common/text_advanced.spl:811` |
+| `.chars()` used as a plain expression, not inside `for x in s.chars()` | `src/lib/common/text_advanced.spl:670`, `src/lib/common/text.spl:30`, and 15+ other call sites across `src/lib/**` |
+| `.to_float()` (not `.parse_f64()`) | `src/std/common/json/parser.spl:455` |
+
+Each independently reproduces MIR-lowering ERROR with a **directly-typed
+`text` receiver** (no `any`/erasure involved, so this is not the cross-module
+receiver-type-loss class tracked separately) — e.g.:
+
+```simple
+fn conv(s: text) -> f64:
+    s.to_float()
+```
+
+```
+[ERROR] [default] MIR error: MIR lowering error: unresolved method call: to_float at repro5.spl:2:15
+```
+
+Same shape for `.upper()` and `.chars()` (the latter also throws a companion
+`char_code_at receiver is not text` when a `.chars()[i]` result is fed into
+another method call, since the placeholder value from the failed `chars()`
+lowering isn't text either). `.chars()` used *inside* a `for x in s.chars():`
+loop is handled separately by desugaring
+(`src/compiler/10.frontend/desugar/collection_desugar.spl:281,294`) and was
+not tested here — only the plain-expression form
+(`val cs = s.chars()`) is confirmed missing.
+
+Not attempted as a same-file fix: adding real MIR dispatch arms belongs next
+to the existing `to_lower`/`to_upper`/`parse_f64` arms in
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` (the file
+this doc's Symptom 2 section already names), which is compiler-internals
+territory outside the stdlib-leaf-file slice this triage covered. Filed here
+as a scoped addendum rather than a new doc since it is the same Task #145
+mechanism and the same investigation lineage.
