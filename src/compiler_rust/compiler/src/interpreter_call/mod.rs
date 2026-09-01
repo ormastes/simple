@@ -253,7 +253,7 @@ fn import_bound_candidate(
         }
         let hop = crate::interpreter::owner_bindings(&source_owner).and_then(|bindings| {
             if debug_dupdispatch() {
-                eprintln!("[dupdispatch] HOP-TRY owner={source_owner} name={source_name} has_name={} has_star={}", bindings.contains_key(source_name.as_str()), bindings.contains_key("*"));
+                eprintln!("[dupdispatch] HOP-TRY owner={source_owner} name={source_name} has_name={} has_star={}", bindings.get(source_name.as_str()).is_some(), bindings.get("*").is_some());
             }
             bindings.get(&source_name).cloned().filter(|next| {
                 *next.0 != *source_owner || next.1 != source_name
