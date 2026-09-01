@@ -152,3 +152,98 @@ Engine2D gate):
 3. `test/01_unit/os/qemu_runner_extended_spec.spl:301` and
    `test/03_system/gui/arm64_wm_qemu_contract_spec.spl:156` — expect
    `gui_entry_desktop.spl`. Their `target.output` assertions stay valid.
+
+## Verified: rebuilding the seed clears the whole parse wall
+
+Rebuilt `cargo build --release --bin simple` from `origin/main`
+(`1b12bd36bc8`) into a lane-private `CARGO_TARGET_DIR`; the shared seed at
+`/mnt/data/worktrees/simple-main/bin/release/...` was NOT overwritten.
+
+RED-before / GREEN-after, same five inputs, same command
+(`simple compile <f> -o /dev/null`), exit status captured directly:
+
+| input | deployed seed (2026-08-26) | rebuilt seed (2026-09-01) |
+|---|---|---|
+| inline `unsafe(capabilities: [ffi]):` fixture | `parse: expected Newline, found Identifier` | **rc=0** |
+| `src/lib/common/encoding/utf8.spl` | `parse: expected Newline, found Identifier` | no parse error |
+| `src/os/userlib/fs.spl` | `parse: expected Newline, found Identifier` | no parse error |
+| `src/os/apps/dbd/dbd.spl` | `parse: expected Indent, found Self_` | no parse error |
+
+Residual, narrower gap (reported, not fixed): the **capability-less** inline
+form `unsafe: expr` still fails with `expected Newline, found Identifier` on
+the rebuilt seed. `unsafe_inline_body_test.rs` only covers the
+`unsafe(capabilities: [...])` spelling. Worth a follow-up fixture.
+
+## Where the arm64 build now stands
+
+With the rebuilt seed (`SIMPLE_BUILD_COMPILER=<rebuilt>`), plus
+`scripts/os/simpleos-core-archive.shs --backend cranelift` (parts_built=19,
+parts_failed=0) and `scripts/os/simpleos-sysroot-aarch64.shs` (clean, `crt0.o`
++ core objects present), `simple os build --scenario=arm64-desktop-engine2d
+--timeout 1200` gets **all the way through discovery and parsing** and now
+fails at CODEGEN, on two files, with the kernel ELF still not produced:
+
+```
+FAILED FILES (2):
+  - src/os/apps/dbd/dbd.spl: codegen: 1 function body/bodies failed to
+    compile: [DbdLiveClientSessionV1.create]
+  - src/os/apps/dbd/dbd_provisioning.spl: codegen: 1 function body/bodies
+    failed to compile: [DbdProvisioningOwnerV1.ready]
+Build failed: native-build aborted: 2 file(s) failed to compile
+```
+
+`SIMPLE_ALLOW_STUB_FALLBACK` was NOT set.
+
+Both are **source** defects (case (b)), pre-existing and
+**architecture-independent** — they were simply unreachable behind the parse
+wall. Neither is arm64-owned; `src/os/apps/dbd/` is the shared server payload.
+
+1. **`dbd_provisioning.spl:113` `ready()` omits `self.` on five field reads.**
+   It mixes qualified and bare access in one expression:
+   ```
+   pub fn ready() -> bool:
+       self.state == DbdProvisioningStateV1.Admitted and provider.configured and
+           credential.len() == 0u64 and credential_wiped and
+           cert_chain.len() > 0u64 and private_key.len() > 0u64
+   ```
+   `self.state` is qualified; `provider`, `credential`, `credential_wiped`,
+   `cert_chain`, `private_key` are not. Every other method in the file uses
+   `self.`. Codegen is right to say `unresolved identifier 'provider'`.
+   Fix: qualify all five.
+
+2. **`DbdTransactionOwnerV1` is imported and used but DEFINED NOWHERE.**
+   `dbd.spl:45` imports it from `os.apps.dbd.dbd_protocol`; it is used as a
+   field type at `:197` and constructed at `:208` via `.new()`; `:226` calls
+   `.clear()` on it. A repo-wide scan finds **only those three references and
+   no definition**:
+   ```
+   /usr/bin/grep -rn 'DbdTransactionOwnerV1' src/ --include=*.spl
+     src/os/apps/dbd/dbd.spl:45    (import)
+     src/os/apps/dbd/dbd.spl:197   (field type)
+     src/os/apps/dbd/dbd.spl:208   (DbdTransactionOwnerV1.new())
+   ```
+   This is a **half-landed change** of exactly the shape PR #249 fixed for
+   `SimpleOsPlatformBuildTarget`: the consumer half landed, the class half
+   never did. Not fixed here — the intended API (`new()`, `clear()`, and its
+   role in `DbdTransactionQueueStatusV1`) needs the owning lane's design
+   intent, and inventing it in a shared server payload mid-lane risks
+   clobbering that work.
+
+## Answer to "is a bootstrap redeploy the real fix?"
+
+**Not for the parse blocker** — that was purely a stale deployed binary, and a
+`cargo build` of the seed already in the tree clears it. A redeploy IS still
+required for the separate, filed stage-binary SEGV
+(`stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`): all four
+tracked stage binaries still report `skip (failed native-build --target probe)`,
+so nothing but the seed can serve this lane, and
+`scripts/lib/simple-compiler-select.shs:301` deliberately refuses the seed
+unless `SIMPLE_BUILD_COMPILER` names it explicitly.
+
+## Gate status
+
+Unchanged and still honest — the kernel does not exist, so the gate cannot run:
+`ERROR — nothing was checked: arm64 desktop/WM kernel missing:
+build/os/simpleos_arm64_desktop_engine2d.elf`.
+The `protocol: linux` AAVMF -> BOOTAA64.EFI -> kernel.elf handover therefore
+remains **UNPROVEN**. Do not record it as proven.
