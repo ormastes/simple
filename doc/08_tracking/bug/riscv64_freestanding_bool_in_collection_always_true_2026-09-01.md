@@ -437,3 +437,55 @@ Guard: `scripts/check/check-baremetal-tagged-bool-decode.shs` — judges each
 definition body separately, so a good sibling cannot excuse a bad one. RED
 before the fix (naming `baremetal_runtime_core.inc.c:1093`), GREEN after, fatal
 6-fixture `--selftest` including the duplicate-definition case itself.
+
+---
+
+# VERIFIED IN-GUEST (2026-09-01) — the parser hang is FIXED; row 2 now fails further downstream
+
+Full gate run under real OpenSBI v1.4 `-bios fw_payload`, nonce
+`631998c976589a0e`, gate selftest OK (23 fixtures), rows checked = 2.
+Row 1 (interpreter) PASSES. Row 2 still FAILS, but for a **different reason**.
+
+| measurement | before this fix | after |
+|---|---|---|
+| OpenSBI banners (machine resets) | 1 | 1 |
+| `[buildrun]` guest re-entries | **67** | **1** |
+| `[rv64] FATAL bump heap exhausted` | present | **0** |
+| `[buildrun] phase=hir-ok` | never reached | reached |
+| `[buildrun] phase=mir-ok functions lowered` | never reached | reached |
+| terminal state | reboot-loop until arena gone | `FAIL run error: module has no main function` |
+
+The unbounded allocation, the guest restart loop and the arena exhaustion are
+**gone**. The parser terminates. `parse_and_build_module` completes, HIR is
+built, MIR lowering runs, and control reaches the run stage. That is the whole
+of the defect this record tracks, and it is fixed.
+
+## Status of this record
+
+**FIXED** for the tagged-bool defect. Row 2 as a whole is **still RED**, so goal
+item 1 row 2 is not green — the honest statement is that this defect is closed
+and the next one is now the blocker, not that the row is done.
+
+## What blocks row 2 now — it is the OTHER open record, not a regression
+
+`[buildrun] FAIL run error: module has no main function` is verbatim the
+downstream symptom already described in
+`riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01.md`, which states
+that the `hir.functions.len() == 0` fail-open "let a functionless module through
+to `interpret_hir_module`, which then reported 'module has no main function' — a
+correct but far downstream symptom that cost two sessions of investigation aimed
+at the wrong phase."
+
+So the two records are now in sequence rather than in competition: the tagged
+bool was hiding the `.len()` defect behind an infinite loop, and fixing it has
+exposed the `.len()` defect as the next blocker. Note that the `.len()` record's
+own measurements ruled `.len()` innocent on plain arrays, so the remaining
+question — whether the module genuinely has no functions, or has them and the
+guard/lookup misreads — is NOT yet settled and must be measured, not assumed.
+
+## Next step
+
+Probe, in-guest, the actual function count of the built HIR module immediately
+before `interpret_hir_module`, and print the raw value rather than a comparison
+result. Do not assume the module is empty: `phase=mir-ok functions lowered`
+printed, which is weak evidence that lowering saw something.
