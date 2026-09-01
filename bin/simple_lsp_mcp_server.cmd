@@ -40,23 +40,5 @@ exit /b %ERRORLEVEL%
 if "%SIMPLE_LIB%"=="" set "SIMPLE_LIB=%~dp0..\src"
 if "%SIMPLE_LOG%"=="" set "SIMPLE_LOG=error"
 if "%RUST_LOG%"=="" set "RUST_LOG=error"
-rem Load-bearing: inherited by the query_visibility child; dropping it
-rem regressed lsp_symbols from 3.68s to 7.96s (see .mcp.json _info).
-if "%SIMPLE_EXECUTION_MODE%"=="" set "SIMPLE_EXECUTION_MODE=interpreter"
-rem Pick the runtime directly. Do NOT go through bin\simple.cmd: its
-rem release-candidate order prefers bin\release\x86_64-pc-windows-msvc\simple.exe,
-rem which (Apr 23 build) exits 127 silently on any `run` (measured 2026-09-01).
-set "RUNTIME="
-if not "%SIMPLE_BINARY%"=="" if exist "%SIMPLE_BINARY%" set "RUNTIME=%SIMPLE_BINARY%"
-if not defined RUNTIME if exist "%~dp0simple.exe" set "RUNTIME=%~dp0simple.exe"
-if not defined RUNTIME if exist "%~dp0..\src\compiler_rust\target\release\simple.exe" set "RUNTIME=%~dp0..\src\compiler_rust\target\release\simple.exe"
-if not defined RUNTIME if exist "%~dp0..\src\compiler_rust\target\bootstrap\simple.exe" set "RUNTIME=%~dp0..\src\compiler_rust\target\bootstrap\simple.exe"
-if not defined RUNTIME (
-    echo error: no Simple runtime found for simple_lsp_mcp_server source mode 1>&2
-    exit /b 127
-)
-set "SIMPLE_BINARY=%RUNTIME%"
-set "LOG_DIR=%~dp0..\.simple\logs"
-if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>&1
-"%RUNTIME%" run "%~dp0..\src\app\simple_lsp_mcp\main.spl" %* 2>>"%LOG_DIR%\simple_lsp_mcp_stderr.log"
+call "%~dp0simple.cmd" run "%~dp0..\src\app\simple_lsp_mcp\main.spl" %*
 exit /b %ERRORLEVEL%
