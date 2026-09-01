@@ -30,7 +30,23 @@ Measured: `Results: 2 total, 2 passed, 0 failed`.
 operator correctly says `nil == false` is `false`. `to_equal(false)` on the
 same `nil` says they are equal.
 
-The mirror case is the same defect: `expect(1).to_equal(true)` also passes,
+**CORRECTION (2026-09-01, measured):** the mirror case does NOT reproduce.
+`expect(1).to_equal(true)` correctly FAILS. Measured on a seed built from
+origin/main, both cases in one spec file:
+
+```
+  OK  nil vs false      <- expect(d.get("b").?).to_equal(false)  PASSES (the real defect)
+  X   int vs true       <- expect(1).to_equal(true)              FAILS (correct)
+  2 examples, 1 failure
+```
+
+So the defect is specific to a `nil`/absent-optional left-hand side being
+treated as equal to `false`, NOT a general "any value equals any bool"
+looseness. Scoping this correctly matters for the fix: a sweep written for the
+broader claim would change behaviour that is already right. The original
+sentence follows, retained so the overstatement stays visible:
+
+> The mirror case is the same defect: `expect(1).to_equal(true)` also passes,
 while `1 == true` is `false`.
 
 ## Why this matters
