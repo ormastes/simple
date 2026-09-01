@@ -2,7 +2,13 @@
 
 - **Date:** 2026-09-01
 - **Lane:** goal item 2, x86_64 WM host-Vulkan pixel evidence
-- **Status:** OPEN — root cause located, not yet fixed
+- **Status:** OPEN — root cause located 2026-09-01, but **UNCONFIRMED AT TIP**: a
+  re-measurement the same day on PR #252 (`3b62ae06871`), with `src/compiler`,
+  `src/lib`, `src/app` and the seed binary all verified byte-identical to the
+  reporting worktree, could NOT reproduce it (all 12 modules lowered, zero
+  field-access errors). Read the "Re-measurement" section at the bottom BEFORE
+  acting on the root cause above. The live blocker on this lane is the
+  diagnostics-transport drop, which is now fixed.
 - **Blocks:** `scripts/check/check-simpleos-x86-64-wm-host-vulkan-pixel-evidence.shs`
   (the host GPU daemon cannot be built, so the gate cannot boot)
 
