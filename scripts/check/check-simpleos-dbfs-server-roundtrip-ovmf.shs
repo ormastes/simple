@@ -96,6 +96,7 @@ BUILD="$OUT/uefi"
 ESP="$BUILD/esp"
 EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
 NONCE_SPL="build/os/generated/dbfs_roundtrip_nonce.spl"
+PARAMS_SPL="build/os/generated/dbfsrt_stage_params.spl"
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 OVMF_VARS="$BUILD/OVMF_VARS_4M.fd"
@@ -323,14 +324,30 @@ echo "[dbfsrt] nonce=$NONCE token=$TOKEN -> $NONCE_SPL"
 # production contract is relaxed to make this gate pass; the VOLUME is built to
 # satisfy it.
 rm -f "$IMG"
+# Parameters reach the builder through a GENERATED MODULE, not argv. Measured
+# 2026-09-01: a `main(args: [text])` entry never receives argv from
+# `simple run <file> -- <args>` on the freshly built seed — it dies with
+# `error: semantic: function expects argument for parameter 'args', but none
+# was provided`. The unmodified src/os/port/mkfs_dbfs.spl fails byte-identically
+# at the invocation scripts/os/mkfs-dbfs.shs:11 itself uses, so this is a
+# pre-existing repo-wide blocker, not something this lane introduced. Routing
+# per-run values through build/os/generated is the same mechanism already used
+# for the nonce, so nothing here is hardcoded.
+printf 'pub fn dbfsrt_stage_output() -> text:\n    "%s"\n\npub fn dbfsrt_stage_token() -> text:\n    "%s"\n\npub fn dbfsrt_stage_sectors() -> u64:\n    %su64\n' \
+    "$IMG" "$TOKEN" "${DBFSRT_VOLUME_SECTORS:-65536}" > "$PARAMS_SPL"
+
 # Exit status is captured DIRECTLY into a variable, never through a pipe — a
 # pipeline's $? is the last stage's status and has produced false greens here.
 # `|| MKFS_RC=$?` is required because `set -e` would otherwise abort before any
 # assignment could run, losing the diagnostic.
 MKFS_RC=0
-"$SEED" run src/os/port/mkfs_dbfsrt.spl -- "$IMG" "$TOKEN" "${DBFSRT_VOLUME_SECTORS:-65536}" \
-    > "$OUT/mkfs.log" 2>&1 || MKFS_RC=$?
-[ "$MKFS_RC" -eq 0 ] || nothing "mkfs.dbfsrt failed (rc=$MKFS_RC): $(tail -3 "$OUT/mkfs.log" 2>/dev/null)"
+"$SEED" run src/os/port/mkfs_dbfsrt.spl > "$OUT/mkfs.log" 2>&1 || MKFS_RC=$?
+[ "$MKFS_RC" -eq 0 ] || nothing "mkfs.dbfsrt failed (rc=$MKFS_RC): $(grep -v 'gc-warning' "$OUT/mkfs.log" 2>/dev/null | tail -3)"
+# rc 0 is not sufficient: process.exit is unavailable in this builder (it fails
+# codegen), so a build error is reported on stdout and still exits 0. The
+# success line is the authority, and a FAILED line is fatal.
+grep -qF 'mkfs.dbfsrt: FAILED' "$OUT/mkfs.log" && nothing "mkfs.dbfsrt reported failure: $(grep -F 'mkfs.dbfsrt: FAILED' "$OUT/mkfs.log" | tail -1)"
+grep -qF "mkfs.dbfsrt: wrote $IMG" "$OUT/mkfs.log" || nothing "mkfs.dbfsrt did not report writing $IMG (see $OUT/mkfs.log)"
 [ -f "$IMG" ] || nothing "mkfs.dbfsrt produced no $IMG"
 
 # Three pre-boot assertions. The first two are what make every nonce byte found
