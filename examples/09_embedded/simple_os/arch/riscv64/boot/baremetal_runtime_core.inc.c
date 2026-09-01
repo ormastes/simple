@@ -1451,12 +1451,29 @@ RuntimeValue rt_string_bytes(RuntimeValue str)
     if (s && s->hdr.type != HEAP_STRING) s = 0;
     RuntimeValue arr = rt_array_new(ENCODE_INT(s ? (int64_t)s->len : 0));
     if (!s) return arr;
-    /* RAW byte, deliberately NOT ENCODE_INT — same reason as the hosted BUGFIX
-     * note at runtime_native.c:2757: `.bytes()` is `[u8]`, and a `[u8]` element
-     * read truncates with & 0xFF WITHOUT untagging, so a tagged slot would hand
-     * back the tag's low byte instead of the byte. */
+    /* ENCODE_INT, not a raw byte. The hosted BUGFIX note at
+     * runtime_native.c:2757 says a `[u8]` element read masks with & 0xFF
+     * WITHOUT untagging, so a tagged slot would hand back the tag's low byte —
+     * true hosted, FALSE on this lane, and copying it here was the defect.
+     *
+     * Measured in-guest 2026-09-01 with RAW storage: `"MCP_RTT_PAYLOAD".bytes()`
+     * read back element 0 = 77 and element 14 = 68 correctly, but element 2
+     * (byte 80 = 'P') came back as 10 — i.e. this lane's `[u8]` read DOES
+     * untag, via the `IS_INT(v) ? DECODE_INT(v) : v` rule that
+     * simpleos_raw_or_encoded_int spells out. TAG_INT is 0, so every raw byte
+     * that happens to be a multiple of 8 is indistinguishable from an encoded
+     * int and is silently divided by 8. In `MCP_RTT_PAYLOAD` exactly the two
+     * 'P' bytes (80) are multiples of 8, and both became '\n' (80>>3 = 10):
+     * `_bytes_text` rebuilt "MC\n_RTT_\nAYLOAD" — right length, wrong bytes —
+     * which is the whole of the mcp row's "lost the payload" failure.
+     *
+     * Storing tagged also matches what the rest of this arch tree already
+     * does: freestanding_runtime.c's rt_text_to_bytes pushes rt_int(byte), and
+     * rt_bytes_from_raw documents its slots as "tagged int (byte << 3)".
+     * rt_bytes_to_text below already accepts either form, so nothing that
+     * consumes these arrays needs to change. */
     for (uint64_t i = 0; i < s->len; i++) {
-        arr = rt_array_push_handle(arr, (RuntimeValue)(uint8_t)s->data[i]);
+        arr = rt_array_push_handle(arr, ENCODE_INT((int64_t)(uint8_t)s->data[i]));
     }
     return arr;
 }
@@ -2306,4 +2323,72 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs)
         case 8: return ((Fn8)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
         default: return 0;
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Ports of three hosted concurrency-primitive constructors.
+ *
+ * Needed because #209 ("freestanding boot never ran module-global
+ * initializers") made every `__module_init_*` in the entry closure LIVE. Their
+ * module-level globals construct a mutex, an atomic counter and a thread-local
+ * slot, so --gc-sections no longer discards those three references and the
+ * riscv64 component link failed with exactly three undefined symbols:
+ *   rt_mutex_new         (runtime_native.c:3988; src/lib/nogc_sync_mut/concurrent/mutex.spl:11)
+ *   rt_atomic_int_new    (runtime_native.c:676;  src/lib/nogc_sync_mut/atomic.spl:32)
+ *   rt_thread_local_new  (compiler_rust/runtime/src/value/sffi/sync.rs:128;
+ *                         src/lib/nogc_sync_mut/sffi/concurrent.spl:258)
+ * Ports of existing hosted names, not new rt_* symbols.
+ *
+ * ONLY these three are defined, deliberately, for the same reason stated at the
+ * dictionary block above: the load/store/lock/unlock siblings are not pinned
+ * down by any caller in this link, and writing an entry point no caller has
+ * pinned down is how ABI drift gets introduced. If one of them is ever reached
+ * it fails CLOSED at link time with a named undefined symbol rather than
+ * silently returning a wrong value.
+ *
+ * This image is single-hart with no preemption inside these paths, so the
+ * atomic/mutex state is plain memory — the seq_cst machinery the hosted
+ * versions carry has nothing to order against here.
+ * ------------------------------------------------------------------------- */
+
+#define HEAP_MUTEX 12U
+
+typedef struct {
+    HeapHeader hdr;
+    RuntimeValue value;
+    uint32_t locked;
+} RuntimeMutex;
+
+RuntimeValue rt_mutex_new(RuntimeValue initial)
+{
+    RuntimeMutex *m = (RuntimeMutex *)rv_alloc(sizeof(RuntimeMutex));
+    if (!m) return NIL_VALUE;
+    m->hdr.type = HEAP_MUTEX;
+    m->hdr.size = (uint32_t)sizeof(RuntimeMutex);
+    m->value = initial;
+    m->locked = 0;
+    return ENCODE_PTR(m);
+}
+
+/* Hosted returns a RAW pointer as the handle (`(int64_t)(intptr_t)value`), not
+ * a tagged value, and rt_atomic_int_load casts it straight back — so this port
+ * must do the same rather than ENCODE_PTR. */
+typedef struct {
+    int64_t value;
+} RuntimeAtomicInt;
+
+int64_t rt_atomic_int_new(int64_t initial)
+{
+    RuntimeAtomicInt *a = (RuntimeAtomicInt *)rv_alloc(sizeof(RuntimeAtomicInt));
+    if (!a) return 0;
+    a->value = (int64_t)simpleos_raw_or_encoded_int((RuntimeValue)initial);
+    return (int64_t)(intptr_t)a;
+}
+
+/* Hosted hands out a monotonically increasing opaque id from a counter that
+ * starts at 1, so 0 stays available as "no slot". Same contract here. */
+int64_t rt_thread_local_new(void)
+{
+    static int64_t g_thread_local_next = 1;
+    return g_thread_local_next++;
 }
