@@ -350,6 +350,43 @@ RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
     return ENCODE_PTR(out);
 }
 
+/* rt_string_repeat(str, count) -- the riscv64 freestanding definition of an
+ * EXISTING runtime symbol, not a new one. CIRBuilder.indent_str calls it, so
+ * the build-and-run row's link failed with
+ * `ld.lld: error: undefined symbol: rt_string_repeat` once rt_exit was
+ * supplied. Signature (i64, i64) -> i64 is taken from codegen's own runtime
+ * symbol table, i.e. the tagged RuntimeValue convention that every other
+ * string entry point in this file already uses.
+ *
+ * Built on the exact rt_string_concat idiom above (rv_alloc + HEAP_STRING
+ * header + ENCODE_PTR), not copied from a sibling arch. A non-positive count
+ * yields the empty string, matching the hosted runtime. The multiply is
+ * overflow-checked before it can reach rv_alloc: `count` is runtime-derived
+ * and untrusted at this boundary, the same rule the bump allocator's own
+ * rv_size_mul enforces. */
+RuntimeValue rt_string_repeat(RuntimeValue str, RuntimeValue count_val)
+{
+    RuntimeString *src = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : 0;
+    uintptr_t unit = src ? src->len : 0;
+    int64_t n = IS_INT(count_val) ? DECODE_INT(count_val) : (int64_t)count_val;
+    if (n <= 0 || unit == 0) return rt_string_from_cstr("");
+
+    uintptr_t count = (uintptr_t)n;
+    if (unit > ((uintptr_t)-1 - 1U - sizeof(RuntimeString)) / count) return NIL_VALUE;
+    uintptr_t total = unit * count;
+
+    RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + total + 1U);
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_STRING;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + total + 1U);
+    out->len = (uint32_t)total;
+    for (uintptr_t r = 0; r < count; r++) {
+        for (uintptr_t i = 0; i < unit; i++) out->data[r * unit + i] = src->data[i];
+    }
+    out->data[total] = 0;
+    return ENCODE_PTR(out);
+}
+
 RuntimeValue rt_value_to_string(RuntimeValue value)
 {
     if (IS_HEAP(value)) {
