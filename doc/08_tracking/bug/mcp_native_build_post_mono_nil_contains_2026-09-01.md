@@ -1,0 +1,48 @@
+# MCP native build: `method 'contains' not found on type 'nil'` immediately after monomorphization
+
+**Date:** 2026-09-01 · **Status:** OPEN · **Severity:** blocker (last thing between the MCP build and MIR lowering)
+
+## Provenance
+HEAD `ec054763e96` (on top of `9fb0d279739`), seed
+`src/compiler_rust/target/release/simple.exe` md5
+`286f66b8615dce0e0da788f0550c4008`. `SIMPLE_EXECUTION_MODE=interpret`,
+`SIMPLE_NATIVE_BUILD_WORKER=1`, `SIMPLE_RESOLVE_METHODS` unset (default OFF).
+
+```
+bin: simple.exe run src/app/cli/native_build_worker.spl src/app/mcp/main.spl
+```
+
+## How far the build now gets (rc=1, ~21 min)
+```
+step 1/6 parse           100/100 OK
+step 1/6 surface_build   100/100 OK
+step 2/6 hir             100/100 OK        [hir-cache] hits=100 misses=0
+         any-escape pass      548 diagnostic(s)   (warnings)
+         enum-contract pass     0 diagnostic(s)
+         [mono] generic_fns=0 call_sites=0 specializations=0 unresolved=0
+         0 compile errors  (SIMPLE_DUMP_COMPILE_ERRORS=1 -> zero [compile-error] lines)
+error: semantic: method `contains` not found on type `nil` (receiver value: nil)
+```
+This is the FIRST time the build has cleared HIR entirely. It dies between the
+`[mono]` receipt (`driver_hir_pipeline_passes.spl:129`) and MIR lowering, so the
+candidate region is the `mono_diags` loop, `record_pass_receipt`, or
+`post_mono_verify_modules` / `post_mono_report_*` that follow it
+(`driver_hir_pipeline_passes.spl:129-175`).
+
+## Not yet pinned
+`SIMPLE_DEBUG_FIELD_ACCESS=1` and `SIMPLE_INTERP_OOB_DEBUG=1` print NOTHING for
+this one — the seed's `[field-access-error]` probe covers field access, not a
+method-not-found on a nil receiver. There is no equivalent
+`[method-call-error]` dump. Next step is either to add one to the seed, or to
+bisect with `eprint` probes across `driver_hir_pipeline_passes.spl:129-175`
+(each full run costs ~21 minutes; surface_build alone is ~19 of them).
+
+## Defect family
+Same shape as the two already fixed today: a provider returns nil/a status
+where the caller expects a collection, and the member access is fatal. See
+`doc/08_tracking/bug/mcp_native_build_hir_entry_env_get_nil_len_fatal_2026-09-01.md`
+and `doc/08_tracking/bug/self_rooted_chain_val_binding_clobbers_receiver_2026-09-01.md`.
+
+## MIR error count
+Still NOT obtainable — MIR lowering (step 3+/6) is never entered. The last
+real full-build number remains 133, measured before this lane's fixes.
