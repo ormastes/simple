@@ -89,6 +89,46 @@ fn has_concrete_body(body: &simple_parser::ast::Block) -> bool {
     !body.statements.is_empty() && !matches!(body.statements.as_slice(), [simple_parser::ast::Node::Pass(_)])
 }
 
+/// Record a method's DECLARED return type under the qualified key
+/// `"{Type}.{method}"`, which is exactly the key
+/// `Lowerer::static_call_return_type_name` (`hir/lower/stmt_lowering.rs`) looks
+/// up when it types the local in `var x = Type.factory()`.
+///
+/// Without a row here that lookup returns None and the local is erased to
+/// `TypeId::ANY`, which makes MIR emit a BARE `MethodCallStatic{"find"}` whose
+/// name codegen's `is_bare_builtin_collection_method` heuristic then routes to
+/// the builtin `rt_find` before any user-method resolution — reading a type
+/// header class instances do not carry. See
+/// `doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md`.
+///
+/// #202 added this for `Node::Impl` only. `Node::Class`, `Node::Struct` and
+/// `Node::Extend` declare their methods INLINE and were left without it, so a
+/// `class` with an inline `static fn` factory — the exact shape of
+/// `DispatchRegistry.new_for_test` — still erased. Qualified keys share no
+/// namespace with the bare function names recorded by the `Node::Function` arm,
+/// so they cannot collide with them; a genuine cross-module clash on the same
+/// qualified name is marked ambiguous (empty `Type::Simple`) exactly as that arm
+/// does and is dropped by the `retain` before the map is returned.
+fn record_method_return_type(
+    fn_return_types: &mut std::collections::HashMap<String, simple_parser::Type>,
+    raw: String,
+    method: &simple_parser::ast::FunctionDef,
+) {
+    let Some(captured) = method.return_type.clone() else {
+        return;
+    };
+    match fn_return_types.entry(raw) {
+        std::collections::hash_map::Entry::Occupied(mut e) => {
+            if e.get() != &captured {
+                e.insert(simple_parser::Type::Simple(String::new()));
+            }
+        }
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(captured);
+        }
+    }
+}
+
 fn method_arity(method: &simple_parser::ast::FunctionDef) -> usize {
     method.params.len() + usize::from(!method.is_static && !method.params.iter().any(|param| param.name == "self"))
 }
@@ -395,7 +435,8 @@ pub(crate) fn build_import_map(
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, c.name, m.name));
                                 fn_arities.insert(mangled.clone(), method_arity(m));
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                raw_to_mangled.entry(raw).or_default().push(mangled);
+                                raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
+                                record_method_return_type(&mut fn_return_types, raw, m);
                             }
                         }
                     }
@@ -461,7 +502,8 @@ pub(crate) fn build_import_map(
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, s.name, m.name));
                                 fn_arities.insert(mangled.clone(), method_arity(m));
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                raw_to_mangled.entry(raw).or_default().push(mangled);
+                                raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
+                                record_method_return_type(&mut fn_return_types, raw, m);
                             }
                         }
                     }
@@ -602,31 +644,7 @@ pub(crate) fn build_import_map(
                                     fn_arities.insert(mangled.clone(), method_arity(m));
                                     raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                     raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
-                                    // Declared return type of an `impl` method, keyed
-                                    // `Type.method`. Without this row the whole-program
-                                    // map had nothing for a static factory such as
-                                    // `CompilerConfig.from_env`, so
-                                    // `lower_static_method_call` fell through to its
-                                    // "ClassName.factory() returns ClassName" guess,
-                                    // which is ANY when the class is not registered in
-                                    // the IMPORTING module. Qualified keys share no
-                                    // namespace with the bare function names recorded
-                                    // above, so they cannot collide with them; a genuine
-                                    // cross-module clash is marked ambiguous exactly as
-                                    // the `Node::Function` arm does and is dropped by the
-                                    // `retain` before this map is returned.
-                                    if let Some(captured) = m.return_type.clone() {
-                                        match fn_return_types.entry(raw) {
-                                            std::collections::hash_map::Entry::Occupied(mut e) => {
-                                                if e.get() != &captured {
-                                                    e.insert(simple_parser::Type::Simple(String::new()));
-                                                }
-                                            }
-                                            std::collections::hash_map::Entry::Vacant(e) => {
-                                                e.insert(captured);
-                                            }
-                                        }
-                                    }
+                                    record_method_return_type(&mut fn_return_types, raw, m);
                                 }
                             }
                         }
@@ -638,7 +656,8 @@ pub(crate) fn build_import_map(
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ext.target_type, m.name));
                                 fn_arities.insert(mangled.clone(), method_arity(m));
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                raw_to_mangled.entry(raw).or_default().push(mangled);
+                                raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
+                                record_method_return_type(&mut fn_return_types, raw, m);
                             }
                         }
                     }

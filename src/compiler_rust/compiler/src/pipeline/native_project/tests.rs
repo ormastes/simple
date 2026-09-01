@@ -8485,3 +8485,79 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         "the verdict must state the escape hatch; got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// riscv64 mcp row: a `class`/`struct`/`extend` method's declared return type
+// must reach `fn_return_types` under the qualified `"{Type}.{method}"` key.
+//
+// doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
+//
+// #202 added this capture for `Node::Impl` only. The three arms that declare
+// methods INLINE were left without it, so `var reg = DispatchRegistry.new_for_test()`
+// — a `class` with an inline `static fn` factory — had no row, the local was
+// erased to `TypeId::ANY`, and MIR emitted a BARE `MethodCallStatic{"find"}`
+// that codegen's builtin-collection heuristic routed to `rt_find`, trapping the
+// riscv64 guest. Each assertion below FAILS before the `record_method_return_type`
+// wiring in `imports.rs`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_build_import_map_records_class_inline_static_factory_return_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let path = lib_root.join("mcp/dispatch.spl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "class DispatchRegistry:\n    count: i64\n\n    static fn new_for_test() -> DispatchRegistry:\n        return DispatchRegistry(0)\n\n    me find(tool_name: text) -> i64:\n        return self.count\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![(path.clone(), std::fs::read_to_string(&path).unwrap())];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+
+    // The static factory: this row is what types the local and prevents ANY erasure.
+    assert_eq!(
+        result.fn_return_types.get("DispatchRegistry.new_for_test"),
+        Some(&simple_parser::Type::Simple("DispatchRegistry".to_string())),
+        "class inline `static fn` factory return type missing from fn_return_types"
+    );
+    // The `me` method is recorded under the same qualified scheme.
+    assert_eq!(
+        result.fn_return_types.get("DispatchRegistry.find"),
+        Some(&simple_parser::Type::Simple("i64".to_string())),
+        "class inline `me` method return type missing from fn_return_types"
+    );
+    // Bare function names share no namespace with the qualified keys.
+    assert!(result.fn_return_types.get("new_for_test").is_none());
+}
+
+#[test]
+fn test_build_import_map_records_struct_inline_method_return_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let path = lib_root.join("model/point.spl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "struct Point:\n    x: i64\n\n    static fn origin() -> Point:\n        return Point(0)\n\n    me get(k: i64) -> i64:\n        return self.x\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![(path.clone(), std::fs::read_to_string(&path).unwrap())];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+
+    assert_eq!(
+        result.fn_return_types.get("Point.origin"),
+        Some(&simple_parser::Type::Simple("Point".to_string())),
+        "struct inline `static fn` factory return type missing from fn_return_types"
+    );
+    // `get` is another name in `is_bare_builtin_collection_method` — same defect class.
+    assert_eq!(
+        result.fn_return_types.get("Point.get"),
+        Some(&simple_parser::Type::Simple("i64".to_string())),
+        "struct inline `me get` return type missing from fn_return_types"
+    );
+}
