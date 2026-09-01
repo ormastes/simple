@@ -1,0 +1,234 @@
+# codex-impl: pure snapshot-freeze state machine over anchored same-handle
+# observations. Host I/O closes handles only after producing these observations;
+# this module never accepts or rereads a presentation pathname.
+
+use compiler.common.cache_contract.snapshot_contract_v1 (
+    LogicalSourcePathV1, PathSemanticsV1, SourceBlobV1, SourceEncodingPolicyV1,
+    GeneratedProvenanceV1, SnapshotSourceEntryV1, CompileSnapshotV1,
+    ResolutionWitnessV1, NegativeCandidateV1, DirectoryGenerationV1,
+    GeneratedInputV1, NamedDigestV1, logical_source_path_valid_v1
+)
+use compiler.common.cache_contract.errors_v1 (
+    SnapshotErrorCodeV1, SnapshotErrorV1, RetryClassV1, ErrorSeverityV1,
+    RejectTelemetryV1
+)
+use compiler.frontend.snapshot.resolution_witness_v1 (
+    resolution_witness_valid_v1
+)
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+pub struct SnapshotSourceObservationV1:
+    logical_path: LogicalSourcePathV1
+    source_bytes: [u8]
+    generated_provenance: GeneratedProvenanceV1?
+    same_anchored_handle_read: bool
+    nofollow_regular: bool
+    physical_identity_before: text
+    physical_identity_after: text
+    stable_facts_before: text
+    stable_facts_after: text
+    bytes_digest_after_read: text
+    bytes_digest_after_revalidation: text
+
+pub struct SnapshotAttemptV1:
+    root_trust_digest: text
+    sources: [SnapshotSourceObservationV1]
+    resolution_witnesses: [ResolutionWitnessV1]
+    negative_candidates: [NegativeCandidateV1]
+    directory_generations_before: [DirectoryGenerationV1]
+    directory_generations_after: [DirectoryGenerationV1]
+    generated_inputs_before: [GeneratedInputV1]
+    generated_inputs_after: [GeneratedInputV1]
+
+pub struct SnapshotFreezeMetadataV1:
+    repository_namespace_digest: text
+    path_policy_digest: text
+    configuration_digest: text
+    target_layout_digest: text
+    compiler_owner_digest: text
+    runtime_digest: text
+    provider_manifests: [NamedDigestV1]
+    toolchain_component_digests: [NamedDigestV1]
+
+pub struct FrozenSnapshotCandidateV1:
+    snapshot: CompileSnapshotV1
+    source_blobs: [SourceBlobV1]
+    accepted_attempt: i64
+    rejected_attempt_digests: [text]
+
+
+fn _freeze_error(detail: text) -> SnapshotErrorV1:
+    SnapshotErrorV1(
+        code: SnapshotErrorCodeV1.SourceSnapshotUnstable,
+        retry: RetryClassV1.Never,
+        severity: ErrorSeverityV1.Error,
+        reject: RejectTelemetryV1(
+            reason_digest: sha256_text("simple.snapshot.reject.v1\u0000" + detail),
+            bounded_detail: detail.substring(0, if detail.len() < 256: detail.len() else: 256)
+        )
+    )
+
+fn _freeze_append(left: [u8], right: [u8]) -> [u8]:
+    var out: [u8] = []
+    out.reserve(left.len() + right.len())
+    for value in left:
+        out.push(value)
+    for value in right:
+        out.push(value)
+    out
+
+pub fn source_blob_digest_v1(bytes: [u8]) -> text:
+    sha256_u8_hex(_freeze_append("simple.source.v1\u0000".to_bytes(), bytes))
+
+fn _path_key(path: LogicalSourcePathV1) -> text:
+    val semantics = match path.path_semantics:
+        case PathSemanticsV1.CaseSensitiveNfc: "s"
+        case PathSemanticsV1.CaseFoldedNfc: "f"
+    "{path.repository_namespace_digest.len()}:{path.repository_namespace_digest}{semantics}:{path.module_relative_utf8.len()}:{path.module_relative_utf8}"
+
+fn _sort_source_observations(values: [SnapshotSourceObservationV1]) -> [SnapshotSourceObservationV1]:
+    var out = values
+    var index = 1
+    while index < out.len():
+        val held = out[index]
+        var position = index
+        while position > 0 and _path_key(held.logical_path) < _path_key(out[position - 1].logical_path):
+            out[position] = out[position - 1]
+            position = position - 1
+        out[position] = held
+        index = index + 1
+    out
+
+fn _sort_text_rows(values: [text]) -> [text]:
+    var out = values
+    var index = 1
+    while index < out.len():
+        val held = out[index]
+        var position = index
+        while position > 0 and held < out[position - 1]:
+            out[position] = out[position - 1]
+            position = position - 1
+        out[position] = held
+        index = index + 1
+    out
+
+fn _directory_material(values: [DirectoryGenerationV1]) -> text:
+    var rows: [text] = []
+    for value in values:
+        rows.push(_path_key(value.anchor_logical_path) + "=" + value.stable_generation_digest)
+    _sort_text_rows(rows).join("\n")
+
+fn _generated_material(values: [GeneratedInputV1]) -> text:
+    var rows: [text] = []
+    for value in values:
+        rows.push(_path_key(value.logical_path) + "=" + value.producer_digest + ":" + value.input_manifest_digest)
+    _sort_text_rows(rows).join("\n")
+
+fn _source_observation_stable(value: SnapshotSourceObservationV1) -> bool:
+    if (not logical_source_path_valid_v1(value.logical_path) or
+            not value.same_anchored_handle_read or not value.nofollow_regular):
+        return false
+    if (value.physical_identity_before == "" or
+            value.physical_identity_before != value.physical_identity_after):
+        return false
+    if value.stable_facts_before == "" or value.stable_facts_before != value.stable_facts_after:
+        return false
+    val frozen_digest = source_blob_digest_v1(value.source_bytes)
+    frozen_digest == value.bytes_digest_after_read and
+        frozen_digest == value.bytes_digest_after_revalidation
+
+fn _witnesses_match_sources(
+    witnesses: [ResolutionWitnessV1], sources: [SnapshotSourceObservationV1]
+) -> bool:
+    var selected_digests: [text] = []
+    for witness in witnesses:
+        if not resolution_witness_valid_v1(witness):
+            return false
+        if witness.selected_index >= 0:
+            selected_digests.push(witness.candidates[witness.selected_index].content_digest)
+    for source in sources:
+        if not selected_digests.contains(source.bytes_digest_after_read):
+            return false
+    true
+
+pub fn snapshot_attempt_stable_v1(attempt: SnapshotAttemptV1) -> bool:
+    if (attempt.root_trust_digest == "" or
+            _directory_material(attempt.directory_generations_before) !=
+                _directory_material(attempt.directory_generations_after) or
+            _generated_material(attempt.generated_inputs_before) !=
+                _generated_material(attempt.generated_inputs_after)):
+        return false
+    val sorted = _sort_source_observations(attempt.sources)
+    var previous_key = ""
+    for source in sorted:
+        val key = _path_key(source.logical_path)
+        if key == previous_key or not _source_observation_stable(source):
+            return false
+        previous_key = key
+    _witnesses_match_sources(attempt.resolution_witnesses, sorted)
+
+pub fn snapshot_attempt_receipt_digest_v1(attempt: SnapshotAttemptV1) -> text:
+    var rows: [text] = [attempt.root_trust_digest,
+        _directory_material(attempt.directory_generations_before),
+        _directory_material(attempt.directory_generations_after),
+        _generated_material(attempt.generated_inputs_before),
+        _generated_material(attempt.generated_inputs_after)]
+    for source in _sort_source_observations(attempt.sources):
+        rows.push(_path_key(source.logical_path) + "=" + source.bytes_digest_after_read +
+            ":" + source.physical_identity_before + ":" + source.physical_identity_after +
+            ":" + source.stable_facts_before + ":" + source.stable_facts_after +
+            ":" + source.bytes_digest_after_revalidation)
+    for witness in attempt.resolution_witnesses:
+        rows.push(witness.witness_digest)
+    sha256_text("simple.snapshot.attempt.v1\u0000" + rows.join("\n"))
+
+fn _freeze_accepted(
+    attempt: SnapshotAttemptV1, metadata: SnapshotFreezeMetadataV1,
+    attempt_index: i64, rejected: [text]
+) -> FrozenSnapshotCandidateV1:
+    var blobs: [SourceBlobV1] = []
+    var entries: [SnapshotSourceEntryV1] = []
+    for source in _sort_source_observations(attempt.sources):
+        val digest = source_blob_digest_v1(source.source_bytes)
+        blobs.push(SourceBlobV1(
+            logical_path: source.logical_path,
+            source_bytes: source.source_bytes,
+            source_digest: digest,
+            encoding_policy: SourceEncodingPolicyV1.Utf8Exact,
+            generated_provenance: source.generated_provenance
+        ))
+        entries.push(SnapshotSourceEntryV1(
+            logical_path: source.logical_path, source_blob_digest: digest))
+    val snapshot = CompileSnapshotV1(
+        schema: 1,
+        repository_namespace_digest: metadata.repository_namespace_digest,
+        path_policy_digest: metadata.path_policy_digest,
+        source_entries: entries,
+        resolution_witnesses: attempt.resolution_witnesses,
+        negative_candidates: attempt.negative_candidates,
+        directory_generations: attempt.directory_generations_after,
+        generated_inputs: attempt.generated_inputs_after,
+        configuration_digest: metadata.configuration_digest,
+        target_layout_digest: metadata.target_layout_digest,
+        compiler_owner_digest: metadata.compiler_owner_digest,
+        runtime_digest: metadata.runtime_digest,
+        provider_manifests: metadata.provider_manifests,
+        toolchain_component_digests: metadata.toolchain_component_digests
+    )
+    FrozenSnapshotCandidateV1(snapshot: snapshot, source_blobs: blobs,
+        accepted_attempt: attempt_index, rejected_attempt_digests: rejected)
+
+pub fn freeze_compile_snapshot_v1(
+    attempts: [SnapshotAttemptV1], metadata: SnapshotFreezeMetadataV1
+) -> Result<FrozenSnapshotCandidateV1, SnapshotErrorV1>:
+    if attempts.len() == 0 or attempts.len() > 2:
+        return Err(_freeze_error("snapshot-freezer-requires-one-attempt-plus-one-retry"))
+    var rejected: [text] = []
+    var index = 0
+    while index < attempts.len():
+        val attempt = attempts[index]
+        if snapshot_attempt_stable_v1(attempt):
+            return Ok(_freeze_accepted(attempt, metadata, index, rejected))
+        rejected.push(snapshot_attempt_receipt_digest_v1(attempt))
+        index = index + 1
+    Err(_freeze_error("source-snapshot-unstable:" + rejected.join(",")))

@@ -1,0 +1,214 @@
+# codex-impl: immutable verified CAS. Disk representation is lowercase hex so
+# the existing bounded no-follow same-handle text read remains binary-safe.
+
+use compiler.common.cache_contract.errors_v1 (
+    CacheErrorCodeV1, CacheErrorV1, RetryClassV1, ErrorSeverityV1,
+    RejectTelemetryV1
+)
+use compiler.common.cache_contract.canonical_cache_codec_v1.*
+use compiler.frontend.snapshot.compile_snapshot_freezer.{FrozenSnapshotCandidateV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, file_rename}
+use std.io.*
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+val VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1: i64 = 268435456
+
+pub struct VerifiedCasLookupV1:
+    present: bool
+    kind: text
+    digest: text
+    canonical_envelope: [u8]
+
+pub struct PublishedCompileSnapshotV1:
+    snapshot_id: text
+    snapshot_cas_digest: text
+    source_blob_cas_digests: [text]
+
+fn _cas_error(code: CacheErrorCodeV1, retry: RetryClassV1, detail: text) -> CacheErrorV1:
+    CacheErrorV1(
+        code: code,
+        retry: retry,
+        severity: ErrorSeverityV1.Error,
+        reject: RejectTelemetryV1(
+            reason_digest: sha256_text("simple.cache.reject.v1\u0000" + detail),
+            bounded_detail: detail.substring(0, if detail.len() < 256: detail.len() else: 256)
+        )
+    )
+
+fn _cas_hex_digit(value: i64) -> text:
+    "0123456789abcdef".substring(value, value + 1)
+
+fn _cas_hex_encode(bytes: [u8]) -> text:
+    var out = ""
+    for byte in bytes:
+        val value = byte as i64
+        out = out + _cas_hex_digit((value >> 4) & 15) + _cas_hex_digit(value & 15)
+    out
+
+fn _cas_hex_value(value: text) -> i64:
+    "0123456789abcdef".index_of(value)
+
+fn _cas_hex_decode(encoded: text, max_bytes: i64) -> Result<[u8], CacheErrorV1>:
+    if encoded.len() % 2 != 0 or encoded.len() / 2 > max_bytes:
+        return Err(_cas_error(CacheErrorCodeV1.CacheBoundsExceeded,
+            RetryClassV1.Never, "cas-hex-length-invalid"))
+    var out: [u8] = []
+    var index = 0
+    while index < encoded.len():
+        val high = _cas_hex_value(encoded.substring(index, index + 1))
+        val low = _cas_hex_value(encoded.substring(index + 1, index + 2))
+        if high < 0 or low < 0:
+            return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+                RetryClassV1.Never, "cas-hex-character-invalid"))
+        out.push(((high << 4) | low) as u8)
+        index = index + 2
+    Ok(out)
+
+fn _cas_digest_valid(digest: text) -> bool:
+    if digest.len() != 64:
+        return false
+    var index = 0
+    while index < digest.len():
+        if _cas_hex_value(digest.substring(index, index + 1)) < 0:
+            return false
+        index = index + 1
+    true
+
+fn _cas_kind_valid(kind: text) -> bool:
+    if kind == "" or kind.len() > 64:
+        return false
+    val allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-"
+    var index = 0
+    while index < kind.len():
+        if not allowed.contains(kind.substring(index, index + 1)):
+            return false
+        index = index + 1
+    true
+
+fn _cas_expected_kind_tag(kind: text) -> i64:
+    if kind == "source_blob": return canonical_cache_kind_source_blob_v1()
+    if kind == "compile_snapshot": return canonical_cache_kind_compile_snapshot_v1()
+    if kind == "public_summary": return canonical_cache_kind_public_summary_v1()
+    -1
+
+pub fn verified_cas_digest_v1(canonical_envelope: [u8]) -> text:
+    canonical_cache_object_digest_v1(canonical_envelope)
+
+pub fn verified_cas_object_path_v1(root: text, kind: text, digest: text) -> Result<text, CacheErrorV1>:
+    if (root == "" or not _cas_kind_valid(kind) or _cas_expected_kind_tag(kind) < 0 or
+            not _cas_digest_valid(digest)):
+        return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "cas-object-address-invalid"))
+    Ok("{root}/objects/{kind}/{digest.substring(0, 2)}/{digest.substring(2, 4)}/{digest.substring(4, 64)}")
+
+fn _cas_parent(path: text) -> text:
+    val index = path.last_index_of("/")
+    if index <= 0: "" else: path.substring(0, index)
+
+fn _cas_quarantine(root: text, path: text, digest: text) -> bool:
+    val directory = "{root}/quarantine"
+    dir_create_all(directory)
+    val target = "{directory}/{digest}-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    if file_rename(path, target):
+        directory_fsync(directory)
+    else:
+        false
+
+pub fn verified_cas_get_v1(
+    root: text, kind: text, digest: text, max_envelope_bytes: i64
+) -> Result<VerifiedCasLookupV1, CacheErrorV1>:
+    if max_envelope_bytes < 0 or max_envelope_bytes > VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1:
+        return Err(_cas_error(CacheErrorCodeV1.CacheBoundsExceeded,
+            RetryClassV1.Never, "cas-read-bound-invalid"))
+    val path = verified_cas_object_path_v1(root, kind, digest)?
+    if not file_exists(path):
+        return Ok(VerifiedCasLookupV1(present: false, kind: kind,
+            digest: digest, canonical_envelope: []))
+    val encoded_result = file_read_regular_no_follow_bounded(path, max_envelope_bytes * 2)
+    val encoded = match encoded_result:
+        Ok(value): value
+        Err(_):
+            _ = _cas_quarantine(root, path, digest)
+            return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+                RetryClassV1.Never, "cas-object-not-regular-or-oversized"))
+    val decoded_result = _cas_hex_decode(encoded, max_envelope_bytes)
+    val bytes = match decoded_result:
+        Ok(value): value
+        Err(error):
+            _ = _cas_quarantine(root, path, digest)
+            return Err(error)
+    val envelope = canonical_cache_decode_envelope_v1(bytes)
+    if not envelope.ok:
+        _ = _cas_quarantine(root, path, digest)
+        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+            RetryClassV1.Never, "cas-envelope-invalid:" + envelope.error))
+    val decoded = match envelope.value:
+        case value: value
+        case nil:
+            _ = _cas_quarantine(root, path, digest)
+            return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+                RetryClassV1.Never, "cas-envelope-missing"))
+    if decoded.kind != _cas_expected_kind_tag(kind) or decoded.schema != 1:
+        _ = _cas_quarantine(root, path, digest)
+        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+            RetryClassV1.Never, "cas-envelope-kind-or-schema-mismatch"))
+    if verified_cas_digest_v1(bytes) != digest:
+        _ = _cas_quarantine(root, path, digest)
+        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+            RetryClassV1.Never, "cas-object-digest-mismatch"))
+    Ok(VerifiedCasLookupV1(present: true, kind: kind,
+        digest: digest, canonical_envelope: bytes))
+
+pub fn verified_cas_put_v1(
+    root: text, kind: text, canonical_envelope: [u8]
+) -> Result<text, CacheErrorV1>:
+    if canonical_envelope.len() > VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1:
+        return Err(_cas_error(CacheErrorCodeV1.CacheBoundsExceeded,
+            RetryClassV1.Never, "cas-publish-bound-exceeded"))
+    val digest = verified_cas_digest_v1(canonical_envelope)
+    val path = verified_cas_object_path_v1(root, kind, digest)?
+    val existing = verified_cas_get_v1(root, kind, digest, canonical_envelope.len())?
+    if existing.present:
+        return Ok(digest)
+    val parent = _cas_parent(path)
+    val temp_dir = "{root}/tmp"
+    dir_create_all(parent)
+    dir_create_all(temp_dir)
+    val temp = "{temp_dir}/{digest}-{rt_getpid()}-{rt_time_now_unix_micros()}.tmp"
+    if not file_write(temp, _cas_hex_encode(canonical_envelope)) or not file_fsync(temp):
+        _ = file_delete(temp)
+        return Err(_cas_error(CacheErrorCodeV1.CacheUnavailable,
+            RetryClassV1.AfterStateChange, "cas-temp-write-failed"))
+    if not file_rename(temp, path):
+        _ = file_delete(temp)
+    if not directory_fsync(parent):
+        return Err(_cas_error(CacheErrorCodeV1.CacheUnavailable,
+            RetryClassV1.AfterStateChange, "cas-parent-sync-failed"))
+    val admitted = verified_cas_get_v1(root, kind, digest, canonical_envelope.len())?
+    if not admitted.present or admitted.canonical_envelope != canonical_envelope:
+        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+            RetryClassV1.Never, "cas-publish-readback-mismatch"))
+    Ok(digest)
+
+# Publish only already-frozen bytes. Every object is read back and verified by
+# verified_cas_put_v1 before the snapshot receipt is returned.
+pub fn publish_frozen_compile_snapshot_v1(
+    root: text, frozen: FrozenSnapshotCandidateV1
+) -> Result<PublishedCompileSnapshotV1, CacheErrorV1>:
+    var source_digests: [text] = []
+    for blob in frozen.source_blobs:
+        val encoded = canonical_source_blob_encode_v1(blob)
+        val digest = verified_cas_put_v1(root, "source_blob", encoded)?
+        source_digests.push(digest)
+    val snapshot_id = canonical_compile_snapshot_digest_v1(frozen.snapshot)
+    val snapshot_envelope = canonical_compile_snapshot_encode_v1(frozen.snapshot)
+    val snapshot_cas_digest = verified_cas_put_v1(
+        root, "compile_snapshot", snapshot_envelope)?
+    Ok(PublishedCompileSnapshotV1(
+        snapshot_id: snapshot_id,
+        snapshot_cas_digest: snapshot_cas_digest,
+        source_blob_cas_digests: source_digests
+    ))
