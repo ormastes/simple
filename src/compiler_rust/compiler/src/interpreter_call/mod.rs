@@ -210,6 +210,15 @@ pub(crate) fn owner_bound_function(
 ) -> Option<Arc<FunctionDef>> {
     let mut source_owner = Arc::clone(source_owner);
     let mut source_name = source_name.to_owned();
+    if std::env::var("SIMPLE_DEBUG_IMPORT_ALIAS").is_ok() {
+        for cand in all_candidates(&source_name, functions) {
+            eprintln!(
+                "[alias-cand] name={source_name} cand_owner={:?} want={source_owner} mangled_hit={}",
+                function_module_owner(&cand),
+                functions.contains_key(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name))
+            );
+        }
+    }
     let mut target: Option<Arc<FunctionDef>> = None;
     for _ in 0..16 {
         target = functions
@@ -238,6 +247,36 @@ pub(crate) fn owner_bound_function(
         }
     }
     target
+}
+
+/// Owner-aware resolution of an identifier used in VALUE position (not a
+/// call): `val ns = {"exist": exist}` after `use file.{exist}`. The bare-name
+/// `functions` map holds an arbitrary one of the same-named definitions, so a
+/// value-position read of a multiply-defined imported name silently captured
+/// whichever module registered last — and an ALIASED import (`exist as
+/// dir_exist`) resolved to nothing at all. Same selection rule as
+/// `import_bound_candidate` (module OWNER, never bare name), minus the
+/// argument-score check, which has no arguments to score here. Returns None
+/// when the current module declares the name itself (local definition wins),
+/// when no binding was recorded, or when the owner cannot be matched — every
+/// None falls through to the historical behavior.
+pub(crate) fn import_bound_value_function(
+    name: &str,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Option<Arc<FunctionDef>> {
+    let current = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone())?;
+    if candidate_declared_by(&current, name, functions).is_some() {
+        return None;
+    }
+    let (source_owner, source_name) = crate::interpreter::owner_bindings(&current)
+        .and_then(|bindings| bindings.get(name).cloned())?;
+    owner_bound_function(&source_owner, &source_name, Some(&current), functions)
+}
+
+/// True when `name` has more than one registered definition in the flattened
+/// unit, i.e. the bare-name `functions` entry is ambiguous.
+pub(crate) fn function_name_is_ambiguous(name: &str) -> bool {
+    FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).map_or(false, |v| v.len() > 1))
 }
 
 /// Explicit-import dispatch for a bare call of a MULTIPLY-defined name.

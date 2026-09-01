@@ -855,7 +855,19 @@ fn load_matching_package_siblings(
     for sibling_path in sibling_files {
         let imported =
             load_module_with_imports_internal(&sibling_path, visited, importing_capabilities, true, target_arch)?;
-        collected.extend(imported.items);
+        // Tag the sibling's own items with the SIBLING's path before they are
+        // merged into the package. The caller runs
+        // `strip_flattened_import_nodes(imported, &resolved)` over the merged
+        // module with `resolved` = the package `__init__.spl`, and the
+        // owner-attr guard keeps the FIRST tag — so an untagged sibling
+        // function was stamped as owned by `__init__.spl`. That corrupted
+        // every owner-keyed lookup for package submodule functions: an
+        // aliased import (`use dir.{exist as dir_exist}`) records a binding
+        // to `<pkg>/dir.spl::exist`, but no candidate carried that owner, so
+        // the alias resolved to nothing (`variable \`dir_exist\` not found`)
+        // and same-named submodule functions were indistinguishable. See
+        // doc/08_tracking/bug/module_val_dict_export_unresolved_via_use_2026-09-01.md.
+        collected.extend(strip_flattened_import_nodes(imported, &sibling_path).items);
     }
 
     Ok(collected)

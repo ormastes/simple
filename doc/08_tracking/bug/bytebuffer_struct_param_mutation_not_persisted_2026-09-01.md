@@ -265,3 +265,108 @@ exists only in the two spec files, not in product code.
 Status: struct->class change verified clean (platform-neutral, pure .spl, no
 Windows-conditional code touched). The interpreter fix's verification claim
 is REOPENED: ints_spec 9/11 and bytes_foundation 5/6 at HEAD here.
+
+## Re-verification 2026-09-01 (second independent pass) — REOPEN was a MEASUREMENT ARTIFACT; interpreter fix CONFIRMED WORKING
+
+The "claimed fix does not reproduce" section above is superseded. The fix
+(de84aa2542a, patterns.rs) is live and correct at HEAD. Both the original
+false-positive concern and the reopen were measured through
+**`bin/simple test`'s child-process binary resolution, which on Windows
+silently spawns a WEEK-STALE deployed binary** — not the binary under test.
+
+### Mechanism (probe-verified)
+
+`src/app/test_runner_new/test_runner_single.spl` `find_simple_binary()`:
+1. `SIMPLE_BINARY` env — unset.
+2. `rt_path_absolute("/proc/self/exe")` — **fails on Windows** (returns
+   `C:/proc/self/exe`, no such file), so the invoking binary is never found.
+3. argv[0] — is the subcommand `test`, not a path.
+4. Falls back to **`bin/simple`** — on this box a seed from **2026-08-24
+   20:25** (28,291,570 bytes, md5 `856e49ab0e499f5703f150491065960d`),
+   predating the patterns.rs fix by a week.
+
+The runner even prints
+`WARNING: child binary ./bin/simple is NOT the invoking binary C:/proc/self/exe`
+(visible only with the child-binary debug lines; two sessions missed it).
+
+Why only the CHAINED tests failed under the stale child: the
+`struct ByteBuffer` -> `class ByteBuffer` change lives in `src/lib/**`, which
+is read as SOURCE on every run — so even the Aug 24 binary sees it and the
+decomposed form passes. The patterns.rs fix is BAKED INTO THE BINARY — the
+Aug 24 child lacks it, so exactly the chained form fails. That reproduces the
+9/11 + 5/6 split and the reopen's ✗-chained/✓-decomposed minimal spec
+byte-for-byte. The reopen's `[wbma-enter]`-only trace came from the PARENT
+process interpreting the runner; the probe-less Aug 24 child ran the spec.
+
+Additionally, silence from the `[wbma-enter]` probe never implied the fix was
+inert even on a fixed binary: the chained path's write-back is the inline
+identifier-arg loop in `exec_function_with_self_return_values`
+(`interpreter_method/special/execution.rs`), which does NOT call
+`write_back_mutable_arguments` (where `[wbma-enter]` lives).
+
+### Probe evidence (fresh seed, gated probes added this pass, all fired)
+
+`SIMPLE_EXECUTION_MODE=interpret SIMPLE_DEBUG_WBMA=1` on the minimal repro:
+
+```
+[wbma-chained-recv] outer_method=store argc=1          <- patterns.rs chained-MethodCall branch
+[wbma-chained-owned-dispatch] class=U16le method=store <- de84aa2542a's Object branch
+[wbma-owned-writeback] func=store param=buf caller_var=b <- write-back into caller env
+chained len=2
+```
+
+Dispatch chain for `U16le.of(v).store(b)` at statement level:
+`handle_method_call_with_self_update_inner` (patterns.rs, chained-receiver
+branch) -> `find_and_exec_method_with_self_owned_values` ->
+`exec_function_with_self_return_values` (identifier-arg write-back loop).
+
+### Measured before/after (2026-09-01, interpreter engine, receipts quoted)
+
+Parent seed: `src/compiler_rust/target/release/simple.exe` 38,753,792 bytes,
+md5 `a544ad89978432578b7f185128339a80` (HEAD + this pass's gated probes +
+in-flight sibling-session hunks present in the working tree at build
+time: `interpreter_eval.rs` (import-alias resolution) and
+`pipeline/module_loader.rs` — both outside the write-back path). Verified
+`cmp simple.exe deps/simple.exe` FRESH immediately before measuring.
+
+```
+BEFORE (default lane, child = stale bin/simple 856e49ab..., 2026-08-24):
+  ints_spec.spl:              Results: 11 total, 9 passed, 2 failed
+  bytes_foundation_spec.spl:  Results: 6 total, 5 passed, 1 failed
+AFTER (SIMPLE_BINARY=<fresh seed a544ad89...>, same specs):
+  ints_spec.spl:              Results: 11 total, 11 passed, 0 failed
+  bytes_foundation_spec.spl:  Results: 6 total, 6 passed, 0 failed
+[engine-receipt] engine=interpreter requested=interpret demoted=no reason=- file=test/01_unit/lib/common/bytes/ints_spec.spl
+```
+
+Same before/after flip on the two new regression specs below (0/3 -> 3/3,
+1/5 -> 5/5; the one stale-child pass is the decomposed-only example).
+
+### Regression specs (per testing.md two-spec rule)
+
+- `test/01_unit/lib/common/bytes/chained_store_writeback_spec.spl` — exact
+  defect shape (chained `store`, LE+BE, chained==decomposed equivalence).
+- `test/01_unit/compiler/interpreter/chained_receiver_mut_arg_writeback_spec.spl`
+  — generalization: 3-level chains, multiple mutable args on one chained
+  call, mutation of a chain-returned value, and a no-aliasing guard
+  (an unrelated caller variable must stay untouched).
+
+**These specs FAIL under plain `bin/simple test` on any box whose deployed
+`bin/simple` predates de84aa2542a** (as this box's does). That is a correct
+verdict about the deployed binary, not about HEAD. Do not weaken the specs;
+redeploy `bin/simple`.
+
+### Aliasing risk assessment
+
+No new write-back was added this pass (probes only). The existing owned-values
+write-back copies only IDENTIFIER arguments whose callee-side value is a
+container, param-position-matched — the generalization spec's no-alias example
+pins that an unrelated variable is not affected.
+
+### Still open / follow-ups
+
+- `bin/simple run` JIT-lane SIGSEGV on the repro — unchanged, separate defect.
+- The Windows child-binary resolution defect that caused BOTH false
+  measurements is filed separately:
+  `doc/08_tracking/bug/test_runner_windows_child_binary_stale_fallback_2026-09-01.md`.
+- `bin/simple` on this box needs redeployment to pick up the interpreter fix.

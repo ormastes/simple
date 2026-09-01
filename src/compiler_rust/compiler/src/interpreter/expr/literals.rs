@@ -321,6 +321,18 @@ pub(super) fn eval_literal_expr(
             // Then check functions for top-level function definitions
             // Return as Value::Function for first-class function usage
             if let Some(func) = functions.get(name).cloned() {
+                // The bare-name entry is arbitrary when the name is defined by
+                // more than one module. If the CURRENT module recorded an
+                // import binding for it (`use m.{f}`), prefer the definition
+                // owned by the module the import names — same rule the call
+                // path applies via `import_bound_candidate`. See
+                // doc/08_tracking/bug/module_val_dict_export_unresolved_via_use_2026-09-01.md.
+                let func = if crate::interpreter::interpreter_call::function_name_is_ambiguous(name) {
+                    crate::interpreter::interpreter_call::import_bound_value_function(name, functions)
+                        .unwrap_or(func)
+                } else {
+                    func
+                };
                 return Ok(Some(Value::Function {
                     name: name.clone(),
                     def: func,
@@ -364,6 +376,19 @@ pub(super) fn eval_literal_expr(
                 // No PascalCase class loaded; surface a Symbol so downstream
                 // type-coercion can still recognise it as a unit reference.
                 return Ok(Some(Value::Symbol(name.clone())));
+            }
+
+            // Last chance before erroring: an ALIASED selective import
+            // (`use m.{f as g}`) binds a name that exists in no other table —
+            // `g` is not a function, class, enum, or global — but the current
+            // module's recorded import binding knows exactly which module's
+            // `f` it names. Resolve it by owner, same as the call path.
+            if let Some(def) = crate::interpreter::interpreter_call::import_bound_value_function(name, functions) {
+                return Ok(Some(Value::Function {
+                    name: name.clone(),
+                    def,
+                    captured_env: Arc::new(Env::new()),
+                }));
             }
 
             // Collect all known names for typo suggestion

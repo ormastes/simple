@@ -1359,6 +1359,23 @@ pub(crate) fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
 
 /// Dispatch a command to its Simple app, returning None if app not found
 fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool, gc_off: bool) -> Option<i32> {
+    // Hand Simple apps the real invoking binary. The pure-Simple test runner
+    // (src/app/test_runner_new/test_runner_single.spl find_simple_binary)
+    // resolves the invoking binary via /proc/self/exe, which exists only on
+    // Linux; on win32 it silently fell back to a possibly-stale `bin/simple`,
+    // so `simple test` children ran a binary that predated resolver fixes —
+    // the exact defect of doc/08_tracking/bug/
+    // test_runner_child_binary_ignores_invoking_binary_2026-07-27.md
+    // re-manifesting on Windows (measured 2026-09-01: every multi-segment
+    // bare `common.*` import failed with "Cannot resolve module" under
+    // `simple test` while `simple run` on the same spec passed). Apps run
+    // in-process here, so the env var is inherited by any child they spawn.
+    // An explicit user-provided SIMPLE_BINARY always wins.
+    if std::env::var_os("SIMPLE_BINARY").is_none() {
+        if let Ok(exe) = std::env::current_exe() {
+            std::env::set_var("SIMPLE_BINARY", exe);
+        }
+    }
     // Keep Simple app dispatch narrow. Most compiler/build commands still rely on
     // Rust handlers, but selected app surfaces need a real Simple entrypoint.
     if app_relative_path != "src/app/ui/cli_entry.spl"

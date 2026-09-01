@@ -1415,6 +1415,17 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 pending_flattened_global_owner = Some(Arc::from(
                     normalize_path_key(Path::new(raw_owner)).to_string_lossy().as_ref(),
                 ));
+                // Top-level module-init statements (the `val ns = {...}`
+                // namespace-dict idiom) evaluate identifiers that may be
+                // multiply-defined across the flattened unit. Owner-aware
+                // resolution (`import_bound_value_function`) needs to know
+                // WHICH module's statement is executing; function calls
+                // already save/restore this around their own bodies, so
+                // setting it here only covers the top-level statements that
+                // follow this marker.
+                super::CURRENT_EXEC_MODULE.with(|cell| {
+                    *cell.borrow_mut() = pending_flattened_global_owner.clone();
+                });
             }
             Node::Const(marker) if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) => {
                 record_flattened_import_binding(&marker.name);
@@ -1433,19 +1444,31 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 if let Some((_importer, local_name, source_owner, source_name)) =
                     crate::interpreter::decode_import_binding_marker(&marker.name)
                 {
+                    if std::env::var("SIMPLE_DEBUG_IMPORT_ALIAS").is_ok() {
+                        eprintln!("[alias-marker] local={local_name} owner={source_owner} source={source_name}");
+                    }
                     if local_name != "*"
                         && source_name != "*"
                         && local_name != source_name
                         && env.get(local_name).is_none()
                         && !functions.contains_key(local_name)
                     {
-                        let owner: Arc<str> = Arc::from(source_owner);
-                        if let Some(def) = crate::interpreter_call::owner_bound_function(
+                        let owner: Arc<str> = Arc::from(
+                            normalize_path_key(Path::new(source_owner)).to_string_lossy().as_ref(),
+                        );
+                        let resolved = super::interpreter_call::owner_bound_function(
                             &owner,
                             source_name,
                             None,
                             &functions,
-                        ) {
+                        );
+                        if std::env::var("SIMPLE_DEBUG_IMPORT_ALIAS").is_ok() {
+                            eprintln!(
+                                "[alias-resolve] local={local_name} owner={owner} source={source_name} resolved={}",
+                                resolved.is_some()
+                            );
+                        }
+                        if let Some(def) = resolved {
                             env.insert(
                                 local_name.to_owned(),
                                 Value::Function {

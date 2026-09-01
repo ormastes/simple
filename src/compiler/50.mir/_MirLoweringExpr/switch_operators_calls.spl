@@ -2297,6 +2297,66 @@ impl MirLowering:
                 case Binding(_, _):
                     has_default = true
                     default_body = arm.body
+                case HirPatternKind.Literal(lit_pat_expr):
+                    # `case nil:` arm on an enum-match scrutinee (bug:
+                    # enum_match_nil_literal_arm_unsupported_2026-09-01):
+                    # `match opt: case Some(x): ... case nil: ...` is the
+                    # codebase's idiomatic None arm, but HIR carries it as a
+                    # Literal(NilLit) pattern, so it used to fall to the
+                    # catch-all "unsupported arm pattern" diagnostic below
+                    # (6 of the 14 MCP census errors — every `case nil` in
+                    # app/mcp/assistant/_SessionStore/store_operations.spl).
+                    # Lower it as the scrutinee enum's `None` variant arm:
+                    # no payload, no bindings, so none of the binding-order
+                    # hazards of Tuple/Struct arms apply. Any OTHER literal
+                    # (int/string/...) on an enum scrutinee keeps the honest
+                    # unsupported diagnostic, unchanged.
+                    var nil_lit_arm = false
+                    match lit_pat_expr.kind:
+                        case NilLit: nil_lit_arm = true
+                        case _: ()
+                    if not nil_lit_arm:
+                        var lit_diag_span = arm.pattern.span
+                        if lit_diag_span.file == "":
+                            lit_diag_span = arm.span
+                        self.error("enum match: unsupported arm pattern (kind=Literal)", Some(lit_diag_span))
+                    else:
+                        val lookup_key_nil = if enum_key != "": enum_key else: enum_name
+                        var d_nil: i64 = -1
+                        if enum_name != "" and self.enum_has_variants(lookup_key_nil):
+                            d_nil = self.enum_variant_discriminant(lookup_key_nil, "None")
+                            if d_nil < 0:
+                                # Known enum with no None variant: loud error,
+                                # never a silent dead arm (same policy as the
+                                # known-enum/unknown-variant path above).
+                                val known_variants_nil = self.enum_variant_names(lookup_key_nil)
+                                val known_text_nil = known_variants_nil.join(", ")
+                                self.error("enum match: `case nil` arm, but enum '{enum_name}' has no 'None' variant (known variants: {known_text_nil})", Some(arm.pattern.span))
+                        else:
+                            # No enum established yet (nil arm listed before
+                            # any Enum arm): resolve 'None' exactly the way a
+                            # bare Enum arm resolves its variant — global
+                            # owner search, loud on ambiguity or a miss.
+                            val owner_keys_nil = self.variant_owner_keys("None")
+                            if owner_keys_nil.len() == 1:
+                                d_nil = self.enum_variant_discriminant(owner_keys_nil[0], "None")
+                                if enum_name == "":
+                                    enum_name = self.enum_bare_of(owner_keys_nil[0])
+                            elif owner_keys_nil.len() > 1:
+                                self.error("enum match: `case nil` arm is ambiguous (multiple enums declare 'None'); use an explicit EnumName.None arm", Some(arm.pattern.span))
+                            else:
+                                self.error("enum match: `case nil` arm, but no registered enum declares 'None'", Some(arm.pattern.span))
+                        if d_nil >= 0:
+                            var nil_binds: [SymbolId] = []
+                            var nil_bind_pos: [i64] = []
+                            enum_discs = enum_discs.push(d_nil)
+                            enum_binds = enum_binds.push(nil_binds)
+                            enum_bind_pos = enum_bind_pos.push(nil_bind_pos)
+                            enum_arities = enum_arities.push(0)
+                            enum_bodies = enum_bodies.push(arm.body)
+                            enum_variants = enum_variants.push("None")
+                            enum_deep_flags = enum_deep_flags.push(0)
+                            enum_arm_srcidx = enum_arm_srcidx.push(ai)
                 case _:
                     # Diagnostic-only widening (2026-09-01): name the actual
                     # unsupported HirPatternKind and fall back to the whole

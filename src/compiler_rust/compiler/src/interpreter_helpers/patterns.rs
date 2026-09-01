@@ -449,6 +449,9 @@ fn handle_method_call_with_self_update_inner(
         // Handle nested method calls like self.advance().unwrap()
         // The receiver itself might be a method call that mutates an object
         if let Expr::MethodCall { .. } = receiver.as_ref() {
+            if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+                eprintln!("[wbma-chained-recv] outer_method={} argc={}", method, args.len());
+            }
             // Recursively handle the inner method call first
             let (inner_result, inner_update) =
                 handle_method_call_with_self_update(receiver, env, functions, classes, enums, impl_methods)?;
@@ -475,6 +478,9 @@ fn handle_method_call_with_self_update_inner(
             // doc/08_tracking/bug/bytebuffer_struct_param_mutation_not_persisted_2026-09-01.md.
             if let Value::Object { class, fields } = &inner_result {
                 if object_method_exists(classes, impl_methods, class, method) {
+                    if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+                        eprintln!("[wbma-chained-owned-dispatch] class={} method={}", class, method);
+                    }
                     let eval_args = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                     if let Some((outer_result, updated_inner_self)) = find_and_exec_method_with_self_owned_values(
                         method,

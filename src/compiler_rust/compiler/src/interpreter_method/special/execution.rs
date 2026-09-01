@@ -264,6 +264,12 @@ pub fn exec_function_with_self_return(
                     updated_arg,
                     Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                 ) {
+                    if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+                        eprintln!(
+                            "[wbma-selfret-writeback] func={} param={} caller_var={}",
+                            func.name, param.name, var_name
+                        );
+                    }
                     sync_module_global_writeback(var_name, &updated_arg);
                     outer_env.insert(var_name.clone(), updated_arg);
                 }
@@ -403,6 +409,12 @@ pub fn exec_function_with_self_return_values(
                     updated_arg,
                     Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                 ) {
+                    if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+                        eprintln!(
+                            "[wbma-owned-writeback] func={} param={} caller_var={}",
+                            func.name, param.name, var_name
+                        );
+                    }
                     sync_module_global_writeback(var_name, &updated_arg);
                     outer_env.insert(var_name.clone(), updated_arg);
                 }
