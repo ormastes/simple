@@ -1,0 +1,82 @@
+# mkfs.dbfsrt — build a PER-RUN DBFS volume for the in-guest DBFS filesystem
+# server round-trip gate (scripts/check/check-simpleos-dbfs-server-roundtrip-ovmf.shs).
+#
+# This is mkfs_dbfs.spl's sibling, and it exists for one reason mkfs_dbfs.spl
+# cannot serve: the gate needs a volume that is DIFFERENT ON EVERY RUN, so that
+# a stale image from a previous run cannot satisfy the current one.
+#
+# Two per-run values are seeded in, and they do different jobs:
+#
+#   TOKEN (written to /DBFSRT.TOK by this builder, host-side)
+#     Proves the guest OPENED THE VOLUME THIS RUN STAGED. The guest must read
+#     the token back BEFORE it writes anything. Without this rung a guest that
+#     silently re-formatted the disk (dbfs_superblock_format_disk on some
+#     failure path) would still be able to write a fresh file and read it back
+#     — a perfect round-trip on a WIPED volume. Pre-boot nonce-absence does not
+#     catch that, because the nonce is absent from a wiped volume too.
+#
+#   NONCE (never written here; written by the GUEST through the filesystem
+#     server, to /DBFSRT.TXT)
+#     Proves data actually moved through the server this run. The gate asserts
+#     the freshly-built volume contains NEITHER the nonce NOR /DBFSRT.TXT
+#     before boot, so every nonce byte found afterwards — in the serial log and
+#     in the raw image host-side — is a byte this run's guest wrote.
+#
+# Layout is build_dbfs_rootfs_image's (dbfs_image.spl): LBA 0-1 reserved for
+# NVFS coexistence (zeroed), LBA 2-3 DBFS superblock replicas, LBA 4+ arena.
+# That LBA 4 arena base is the same DBFS_ARENA_BASE_LBA the production in-guest
+# probe uses (src/os/kernel/boot/boot_fs.spl), which is what makes a volume
+# built here mountable by the unmodified production path.
+#
+# Usage:
+#   bin/simple run src/os/port/mkfs_dbfsrt.spl -- <output_path> <token> [size_sectors]
+
+use os.port.dbfs_image.{DbfsImageConfig, PayloadEntry, build_dbfs_rootfs_image}
+use std.process
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+val DBFSRT_DEFAULT_SIZE_SECTORS: u64 = 65536u64   # 32 MiB, same as mkfs_dbfs
+
+fn _dbfsrt_text_bytes(s: text) -> [u8]:
+    rt_text_to_bytes(s)
+
+fn _dbfsrt_seeds(token: text) -> [PayloadEntry]:
+    """The seed set. /DBFSRT.TOK carries THIS run's token; the other two mirror
+    mkfs_dbfs.spl's seeds so the volume is a realistic DBFS root and not a
+    degenerate one-file special case.
+    """
+    [
+        PayloadEntry(
+            name: "/DBFSRT.TOK",
+            data: _dbfsrt_text_bytes("dbfsrt-token:" + token)
+        ),
+        PayloadEntry(
+            name: "/etc/motd",
+            data: _dbfsrt_text_bytes("SimpleOS DBFS round-trip volume\n")
+        ),
+        PayloadEntry(
+            name: "/README",
+            data: _dbfsrt_text_bytes(
+                "Per-run DBFS volume for the in-guest filesystem server round-trip gate.\n"
+            )
+        ),
+    ]
+
+fn main(args: [text]):
+    if args.len() < 2:
+        print "mkfs.dbfsrt: usage: <output_path> <token> [size_sectors]"
+        process.exit(2)
+    val output = args[0]
+    val token = args[1]
+    if token == "":
+        print "mkfs.dbfsrt: FAILED: token must be non-empty"
+        process.exit(2)
+    val size_sectors = if args.len() > 2: args[2].to_i64().to_u64() else: DBFSRT_DEFAULT_SIZE_SECTORS
+    val cfg = DbfsImageConfig(size_sectors: size_sectors, seeds: _dbfsrt_seeds(token))
+    match build_dbfs_rootfs_image(cfg, output):
+        case Ok(_):
+            print "mkfs.dbfsrt: wrote {output} ({size_sectors} sectors) token={token}"
+        case Err(e):
+            print "mkfs.dbfsrt: FAILED: {e}"
+            process.exit(1)
