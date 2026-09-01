@@ -1,8 +1,13 @@
 # riscv64 mcp row: an erased (`ANY`) receiver routes a user `me` method to `rt_find`, which reads a type header class instances do not have
 
-Status: DEFECT 1 FIXED (2026-09-01), DEFECT 2 OPEN — the ANY-erasure trap is
-closed by a compiler fix and proven in-guest; the `.bytes()` string-content
-truncation remains and is now the sole blocker on the mcp row.
+Status: ALL THREE DEFECTS FIXED (2026-09-01) — the mcp row is GREEN and the
+riscv64 component gate is **4 of 4**. Defect 1 (ANY-erasure trap) closed by a
+compiler fix; defect 2 (`.bytes()` payload truncation) closed by tagging the
+byte slots in `baremetal_runtime_core.inc.c`; a third defect found in front of
+it (the #209-exposed link failure, pre-existing at `origin/main`) closed by
+porting three constructors. See the three dated sections at the end of this
+record. NOTE: this record's "winning TU is freestanding_runtime.c" claim is
+WRONG and is corrected in the defect-2 section.
 Arch: riscv64 freestanding (SimpleOS, OpenSBI `-bios fw_payload`)
 Gate: `scripts/check/check-simpleos-riscv64-components-in-guest-opensbi.shs`
 Filed: 2026-08-31
@@ -455,3 +460,159 @@ the only thing keeping the mcp row red. The record's provenance question stands:
 (`freestanding_runtime.c`), so `.bytes()` is served by a translation unit that
 may not share this runtime's array/string layout. That investigation was not
 started here.
+
+---
+
+## Defect 2 FIXED — 2026-09-01. Row GREEN, 4 of 4.
+
+```
+PASS — 4 component(s) checked (mcp,devtool,caret,testrun), each completed a real
+round-trip in-guest on SimpleOS riscv64 under real OpenSBI firmware via
+-bios fw_payload (no -kernel, no isa-debug-exit), compiled by the RUST SEED
+.../src/compiler_rust/target/release/simple; 100 serial line(s)
+```
+
+```
+[mcp] request  tool=echo args=[MCP_RTT_PAYLOAD]
+[mcp] response {"status":"ok","body":"MCP_RTT_PAYLOAD"}
+[mcp] request  tool=no_such_tool_xyz (must be refused)
+[mcp] response {"status":"error","code":"unregistered_tool","reason":"no handler for: no_such_tool_xyz"}
+COMPONENT_MCP_SIMPLEOS_RISCV64_OK dispatch round-trip echoed the payload and refused the unknown tool
+```
+
+### FIRST: the TU-provenance question in this record is answered, and its answer
+### was wrong
+
+This record states twice that "the winning TU for this lane is
+`freestanding_runtime.c`" and that `rt_string_bytes` and `rt_find` "come from
+the hosted runtime". **Both are false.** Measured with `nm` over the retained
+link objects (`.simple/native-objects-*/`):
+
+| symbol | defining object(s) |
+|---|---|
+| `rt_string_bytes` | `_boot_baremetal_runtime_core.inc.o` (T) — and nothing else |
+| `rt_index_get` | `baremetal_runtime_core.inc.o`, `baremetal_stubs.o`, `ghdl_boot_info_runtime.o` |
+| `rt_string_concat`, `rt_array_len`, `rt_array_get`, `rt_string_len` | `baremetal_runtime_core.inc.o` (+ `baremetal_stubs.o`) |
+
+`_boot_freestanding_runtime.o` defines **none** of them. The hosted
+`runtime_native.c` is not on this link line at all. The winning TU is
+`examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c`.
+Correct this before relying on any provenance claim above.
+
+### The defect: raw byte slots collide with TAG_INT == 0
+
+`rt_string_bytes` was ported into `baremetal_runtime_core.inc.c` storing **RAW**
+bytes, carrying over the hosted BUGFIX note at `runtime_native.c:2757` ("a `[u8]`
+element read truncates with `& 0xFF` WITHOUT untagging"). That note is true
+hosted and **false on this lane**.
+
+This runtime uses `TAG_INT == 0`, and every reader untags with the
+`IS_INT(v) ? DECODE_INT(v) : v` rule that `simpleos_raw_or_encoded_int` spells
+out. So a raw byte whose value is a multiple of 8 is bit-for-bit
+indistinguishable from an `ENCODE_INT`-tagged int and is silently **divided by
+8** — while the other 224 byte values pass through untouched. That is why the
+symptom looked like corruption-after-position-2 rather than a systematic
+encoding error.
+
+### In-guest measurement (temporary probes, since removed)
+
+```
+[mcp] probe b0  bytes len EXPECTED       # .bytes().len() == 15, correct
+[mcp] probe b0a elem0 EXPECTED           # pb[0] == 77 ('M'), correct
+[mcp] probe b0c elem2 WRONG              # pb[2] == 10, not 80 ('P')
+[mcp] probe b0d elem14 EXPECTED          # pb[14] == 68 ('D'), correct
+[mcp] probe b0e cfc80=P END              # char_from_code(80) is fine
+[mcp] probe b1  rebuilt=MC
+_RTT_
+AYLOAD END
+[mcp] probe b1a rebuilt len EXPECTED     # 15 chars — RIGHT LENGTH, WRONG BYTES
+```
+
+In `MCP_RTT_PAYLOAD` exactly the two `P` bytes (80) are multiples of 8, and both
+came back as 10 — i.e. `'\n'`. `_bytes_text` rebuilt `"MC\n_RTT_\nAYLOAD"`, and
+`serial_println` stops at the first `\n`, which is the whole of the record's
+`body":"MC` and of `[mcp] FAIL registered dispatch lost the payload`.
+`.bytes()` length, `char_from_code`, `rt_string_concat` and string interpolation
+were all separately probed and are all correct — the probe also compared a
+hand-built concat envelope against an interpolated one and both truncated
+identically, which is what excluded the builder/interpolation path.
+
+Note the earlier "embedded NUL" reading in this record was wrong: the byte is
+`\n`, not NUL, and the serial writer is line-oriented.
+
+### Fix
+
+One line in `baremetal_runtime_core.inc.c`'s `rt_string_bytes`: push
+`ENCODE_INT((int64_t)(uint8_t)s->data[i])` instead of the raw byte. This also
+makes the port agree with the rest of this arch tree, which already tags —
+`freestanding_runtime.c`'s `rt_text_to_bytes` pushes `rt_int(byte)`, and
+`rt_bytes_from_raw` documents its slots as "tagged int (byte << 3)". The
+consumer `rt_bytes_to_text` already accepted either form, so nothing downstream
+changed.
+
+### Reproduce guard
+
+`scripts/check/check-freestanding-byte-array-slot-tags.shs` — fail-closed,
+`--selftest` (10 fixtures) runs before every scan and is fatal, same verdict
+convention as the other guards, 0 definitions is ERROR. Verified against the
+real file: **FAIL on the pre-fix content naming
+`baremetal_runtime_core.inc.c:rt_string_bytes`, PASS after**. Modelled on the
+sibling `check-freestanding-rt-value-int-tags.shs`, which pins the same tag
+class for `rt_value_int`.
+
+Two of its fixtures exist because two earlier revisions of the guard were
+**green on the exact content they were written to catch**, and both traps are
+worth knowing before writing another guard of this kind:
+* **comment masking** — the incident's own body carries the words
+  "deliberately NOT ENCODE_INT", so a text match over raw source calls it
+  tagged. The guard strips C comments first.
+* **the length argument** — the body opens with
+  `rt_array_new(ENCODE_INT(s->len))`, so "body contains ENCODE_INT" is true of
+  the defective version. The guard classifies the STORE EXPRESSIONS only.
+A third fixture pins a pure delegation (`return rt_bytes_alloc_packed(size);`),
+which stores no slot and must not be classified — the first run of the guard
+reported a false FAIL on x86_64 `rt_extras.c` for exactly that shape.
+
+---
+
+## A THIRD defect was in front of this one: the riscv64 component kernel did not link
+
+Measured 2026-09-01 on a fresh seed at **`origin/main`** as well as at PR #219's
+branch — identical, so it is pre-existing and not introduced by #219:
+
+```
+Build failed: link failed: ld.lld: error: undefined symbol: rt_mutex_new
+ld.lld: error: undefined symbol: rt_atomic_int_new
+ld.lld: error: undefined symbol: rt_thread_local_new
+```
+
+Exactly three, and they are a consequence of
+`60f4cfd8e2d fix(riscv64): freestanding boot never ran module-global
+initializers (#209)`: with the `__module_init_*` functions now LIVE, the
+module-level globals that construct a mutex, an atomic counter and a
+thread-local slot are no longer discarded by `--gc-sections`. The lane runs in
+`DeferToLinker` mode, so it failed closed rather than stubbing them to nil —
+correct behaviour, and the reason this was a hard blocker rather than a silent
+wrong answer.
+
+Fixed by porting exactly those three constructors into
+`baremetal_runtime_core.inc.c` (ports of existing hosted names:
+`runtime_native.c:3988`, `runtime_native.c:676`,
+`compiler_rust/runtime/src/value/sffi/sync.rs:128`). Only three, deliberately —
+the same policy the dictionary block in that file already states: the
+load/store/lock/unlock siblings are pinned down by no caller in this link, and
+if one is ever reached it fails closed at link time with a named undefined
+symbol rather than silently returning a wrong value. `rt_atomic_int_new`
+returns a RAW pointer handle because the hosted version does
+(`(int64_t)(intptr_t)value`, read straight back by `rt_atomic_int_load`);
+`rt_mutex_new` returns a tagged heap handle; `rt_thread_local_new` hands out a
+monotonic id from 1. The image is single-hart with no preemption in these paths,
+so the state is plain memory.
+
+Evidence: link fails at both `origin/main` and the PR #219 branch before the
+change; after it, `PASS — riscv64 component-sanity kernel built by the RUST
+SEED ... kernel.elf (289776 bytes ELF) + kernel.Image (156344 bytes ...)`.
+
+## Status
+
+All three defects on this row are now closed and the row is **4 of 4**.

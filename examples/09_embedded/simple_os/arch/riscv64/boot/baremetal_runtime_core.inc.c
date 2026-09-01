@@ -1451,12 +1451,29 @@ RuntimeValue rt_string_bytes(RuntimeValue str)
     if (s && s->hdr.type != HEAP_STRING) s = 0;
     RuntimeValue arr = rt_array_new(ENCODE_INT(s ? (int64_t)s->len : 0));
     if (!s) return arr;
-    /* RAW byte, deliberately NOT ENCODE_INT — same reason as the hosted BUGFIX
-     * note at runtime_native.c:2757: `.bytes()` is `[u8]`, and a `[u8]` element
-     * read truncates with & 0xFF WITHOUT untagging, so a tagged slot would hand
-     * back the tag's low byte instead of the byte. */
+    /* ENCODE_INT, not a raw byte. The hosted BUGFIX note at
+     * runtime_native.c:2757 says a `[u8]` element read masks with & 0xFF
+     * WITHOUT untagging, so a tagged slot would hand back the tag's low byte —
+     * true hosted, FALSE on this lane, and copying it here was the defect.
+     *
+     * Measured in-guest 2026-09-01 with RAW storage: `"MCP_RTT_PAYLOAD".bytes()`
+     * read back element 0 = 77 and element 14 = 68 correctly, but element 2
+     * (byte 80 = 'P') came back as 10 — i.e. this lane's `[u8]` read DOES
+     * untag, via the `IS_INT(v) ? DECODE_INT(v) : v` rule that
+     * simpleos_raw_or_encoded_int spells out. TAG_INT is 0, so every raw byte
+     * that happens to be a multiple of 8 is indistinguishable from an encoded
+     * int and is silently divided by 8. In `MCP_RTT_PAYLOAD` exactly the two
+     * 'P' bytes (80) are multiples of 8, and both became '\n' (80>>3 = 10):
+     * `_bytes_text` rebuilt "MC\n_RTT_\nAYLOAD" — right length, wrong bytes —
+     * which is the whole of the mcp row's "lost the payload" failure.
+     *
+     * Storing tagged also matches what the rest of this arch tree already
+     * does: freestanding_runtime.c's rt_text_to_bytes pushes rt_int(byte), and
+     * rt_bytes_from_raw documents its slots as "tagged int (byte << 3)".
+     * rt_bytes_to_text below already accepts either form, so nothing that
+     * consumes these arrays needs to change. */
     for (uint64_t i = 0; i < s->len; i++) {
-        arr = rt_array_push_handle(arr, (RuntimeValue)(uint8_t)s->data[i]);
+        arr = rt_array_push_handle(arr, ENCODE_INT((int64_t)(uint8_t)s->data[i]));
     }
     return arr;
 }
