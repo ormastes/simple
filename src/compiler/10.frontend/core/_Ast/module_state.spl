@@ -434,27 +434,33 @@ fn module_decl_at(index: i64) -> i64:
     if index < 0 or index >= ast_module_decl_count_get():
         return -1
     if rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) == 1:
-        ast_decl_at_trace_push(500 + index)
         if index >= ast_module_decl_slots_len():
-            ast_decl_at_trace_push(501)
             return -1
-        val from_arena = ast_module_decl_slot_get(index)
-        ast_decl_at_trace_push(from_arena)
-        return from_arena
+        return ast_module_decl_slot_get(index)
     val env_value = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(index)) ?? ""
-    # ROW2 PROBE (temporary) -- 900+index marks entry to the env-first tail,
-    # 800+len marks the observed env_value length, 700+/600+ mark which arm.
-    ast_decl_at_trace_push(900 + index)
-    ast_decl_at_trace_push(800 + env_value.len())
-    if env_value != "":
-        ast_decl_at_trace_push(700)
-        val parsed_env = ast_parse_i64(env_value)
-        ast_decl_at_trace_push(parsed_env)
-        return parsed_env
-    ast_decl_at_trace_push(600)
-    val from_slot = ast_module_decl_slot_get(index)
-    ast_decl_at_trace_push(from_slot)
-    return from_slot
+    # LENGTH test, not `!= ""`. Measured in-guest on riscv64 freestanding under
+    # real OpenSBI fw_payload (2026-09-01): for a MISSING env entry this reads
+    # env_value.len() == 0 and yet `env_value != ""` evaluates TRUE, so every
+    # call took the env arm and returned ast_parse_i64("") == 0 -- i.e.
+    # module_decl_at answered decl 0 for EVERY index, and any module with more
+    # than one top-level declaration converted as N copies of its first one.
+    # That is what made the in-guest build-and-run row report "module has no
+    # main function" while both lowering stages reported zero errors.
+    #
+    # `.len()` is measured CORRECT on the same path in the same boot, so this
+    # asks the question the code actually means and does not depend on text
+    # equality against an empty literal. Semantics are unchanged everywhere the
+    # comparison already worked: a present entry is still non-empty and still
+    # wins over the array, exactly as on the hosted bootstrap path.
+    #
+    # The underlying `text != ""` defect is NOT fixed by this line and is filed
+    # as doc/08_tracking/bug/riscv64_freestanding_text_neq_empty_literal_true_
+    # for_zero_length_2026-09-01.md -- this site is repaired because it is the
+    # one that silently loses declarations; the comparison itself needs a
+    # codegen fix.
+    if env_value.len() > 0:
+        return ast_parse_i64(env_value)
+    ast_module_decl_slot_get(index)
 
 # ===== AST Reset =====
 
