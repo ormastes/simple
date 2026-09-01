@@ -133,8 +133,61 @@ fn lookup_builtin_tag(name: text) -> BuiltinTag:
         return BuiltinTag.EnvSet
     BuiltinTag.Unknown
 
+# ROW2 PROBE (temporary): raw values for the callee-resolution failure.
+var rfbn_probe_hit: text = "?"
+var rfbn_probe_idx: text = "?"
+var rfbn_probe_dictlen: text = "?"
+var rfbn_probe_vals: text = "?"
+
+fn _rfbn_i64_text(n: i64) -> text:
+    """Pure-Simple i64 renderer; interpolating an i64 emits
+    rt_raw_i64_to_string, which the freestanding riscv64 runtime lacks."""
+    if n == 0:
+        return "0"
+    var neg = false
+    var v = n
+    if v < 0:
+        neg = true
+        v = 0 - v
+    var out = ""
+    while v > 0:
+        val d = v % 10
+        var ch = "0"
+        if d == 1:
+            ch = "1"
+        if d == 2:
+            ch = "2"
+        if d == 3:
+            ch = "3"
+        if d == 4:
+            ch = "4"
+        if d == 5:
+            ch = "5"
+        if d == 6:
+            ch = "6"
+        if d == 7:
+            ch = "7"
+        if d == 8:
+            ch = "8"
+        if d == 9:
+            ch = "9"
+        out = ch + out
+        v = v / 10
+    if neg:
+        return "-" + out
+    out
+
 impl InterpreterBackendImpl:
     fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:
+        # ROW2 PROBE (temporary, rv64 in-guest): record RAW values for the two
+        # candidate mechanisms behind "function 'add' not found" -- a dict
+        # .has() that answers false on the baremetal HEAP_DICT tag, versus a
+        # has_fn_index bool that reads true and fail-closes before the linear
+        # scan that would have found it. Never interpolates an integer.
+        rfbn_probe_hit = if ctx.fn_by_name.has(name): "Y" else: "N"
+        rfbn_probe_idx = if ctx.has_fn_index: "Y" else: "N"
+        rfbn_probe_dictlen = _rfbn_i64_text(ctx.fn_by_name.len())
+        rfbn_probe_vals = _rfbn_i64_text(ctx.module.functions.values().len())
         if ctx.fn_by_name.has(name):
             return Some(ctx.fn_by_name[name])
         if ctx.has_fn_index:
@@ -181,7 +234,7 @@ impl InterpreterBackendImpl:
                 if cf_target_hit.?:
                     self.call_hir_function(cf_target_hit.unwrap(), args, ctx)
                 else:
-                    Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
+                    Err(BackendError.runtime_error("function '{f_t.name}' not found [PROBE hit=" + rfbn_probe_hit + " hasidx=" + rfbn_probe_idx + " dictlen=" + rfbn_probe_dictlen + " vals=" + rfbn_probe_vals + "]", Some(span)))
 
             case Value.Closure(c):
                 itrace("[CF] Closure arm")
