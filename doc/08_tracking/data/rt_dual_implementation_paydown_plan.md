@@ -118,7 +118,19 @@ Measured: 2064 `rt_*` are dispatch-registered; 390 of those are both-lane and
 uncovered; but only **31** have any recorded Simple twin, and of those only
 **7** had a twin that actually exists. All 7 were covered by this change.
 
-### Tranche A — implement 5 twins already specified but never written (next)
+### Tranche A — implement 5 twins already specified but never written (DONE 2026-09-01)
+
+**Status: landed.** All five twins are written in pure Simple and dual-run:
+`src/lib/common/str_search_pure.spl` (`str_ends_with`, `str_last_index_of`),
+`src/lib/common/char_from_code_pure.spl` (`char_from_code`),
+`src/lib/common/float_class_pure.spl` (`is_nan_f64`, `is_inf_f64`); pairs in
+`test/01_unit/lib/common/spec/dual_run_tranche_a_spec.spl`. Each was proved
+mutation-red (an injected bug in the twin makes its case FAIL), not merely
+green. Two attempted mutants on `char_from_code` are equivalent mutants: with
+the surrogate guard or the >U+10FFFF guard removed, the downstream UTF-8
+validator rejects the same inputs and still yields "", so the twin's answer is
+unchanged. No new `rt_*` symbol was added in C or Rust.
+
 
 The migration inventory's `replacement:` field mixes **landed** migrations with
 **planned** ones. Grepping `src/lib` for each named function found five that do
@@ -132,7 +144,17 @@ with it — worse than no coverage. Each is small, pure and already
 dispatch-registered, so writing the five real twins is the cheapest next +5
 pairs. **Do not fix the inventory by editing its prose; regenerate the census.**
 
-### Tranche B — the remaining ~19 recorded twins (~2 weeks)
+### Tranche B — the remaining ~19 recorded twins (~2 weeks, STARTED 2026-09-01)
+
+**Started:** `rt_dict_contains` (C-MIG-0041) and `rt_array_repeat` (C-MIG-0042)
+are wired in `test/01_unit/lib/common/spec/dual_run_tranche_b_spec.spl`; their
+twins already existed and were only file-private, so the change was to export
+them. Both are mutation-red. **`rt_base64url_encode` was attempted and left
+UNCOVERED on purpose:** its interpreter oracle takes TWO arguments (a
+pointer/length pair), not one `text`, so no honest one-argument value-compare
+exists — an adapter written to make the two agree is exactly the twin that
+would make the harness certify a lie. It needs the shadow-buffer mode.
+
 
 `rt_crc32_text`, `rt_base64url_encode`, `rt_dict_contains`, `rt_array_repeat`,
 `rt_text_find_invalid_utf8`, `rt_simd_str_last_index_of`, the `rt_string_*`
