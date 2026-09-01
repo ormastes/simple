@@ -540,7 +540,8 @@ use simple_runtime::metal_graphics_runtime::{
     rt_metal_draw_indexed, rt_metal_draw_primitives, rt_metal_end_compute_encoder, rt_metal_end_render_pass,
     rt_metal_free_buffer, rt_metal_free_texture, rt_metal_get_last_error, rt_metal_init, rt_metal_is_available,
     rt_metal_run_blit_frame, rt_metal_run_compute_frame, rt_metal_set_buffer, rt_metal_set_bytes, rt_metal_set_scissor,
-    rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed,
+    rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed, rt_metal_buffer_upload_raw,
+    rt_metal_buffer_download_raw, rt_metal_set_bytes_raw,
 };
 
 pub(super) fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
@@ -941,6 +942,36 @@ pub fn rt_metal_buffer_download_fn(args: &[Value]) -> Result<Value, CompileError
         ptr,
         arg_i64(args, 1, "rt_metal_buffer_download", 3)?,
         arg_i64(args, 2, "rt_metal_buffer_download", 3)?,
+    )))
+}
+
+// Raw-pointer companions of the byte-array wrappers above: the Engine2D Metal
+// fast path (backend_metal_runtime_ops.spl / nogc_sync_mut/io/metal_ptr.spl)
+// passes already-bridged i64 data pointers straight through, so these take no
+// Value::ByteArray detour. Without registrations for them the interpreted
+// Metal lane died with "unknown extern function: rt_metal_set_bytes_raw".
+pub fn rt_metal_buffer_upload_raw_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_buffer_upload_raw(
+        arg_i64(args, 0, "rt_metal_buffer_upload_raw", 3)?,
+        arg_i64(args, 1, "rt_metal_buffer_upload_raw", 3)?,
+        arg_i64(args, 2, "rt_metal_buffer_upload_raw", 3)?,
+    )))
+}
+
+pub fn rt_metal_buffer_download_raw_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_buffer_download_raw(
+        arg_i64(args, 0, "rt_metal_buffer_download_raw", 3)?,
+        arg_i64(args, 1, "rt_metal_buffer_download_raw", 3)?,
+        arg_i64(args, 2, "rt_metal_buffer_download_raw", 3)?,
+    )))
+}
+
+pub fn rt_metal_set_bytes_raw_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_set_bytes_raw(
+        arg_i64(args, 0, "rt_metal_set_bytes_raw", 4)?,
+        arg_i64(args, 1, "rt_metal_set_bytes_raw", 4)?,
+        arg_i64(args, 2, "rt_metal_set_bytes_raw", 4)?,
+        arg_i64(args, 3, "rt_metal_set_bytes_raw", 4)?,
     )))
 }
 

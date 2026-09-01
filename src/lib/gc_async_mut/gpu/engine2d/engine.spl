@@ -1650,16 +1650,14 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push(if quad_index == batch.quads.len(): "cuda:success" else: "cuda:failed")
                     if quad_index == batch.quads.len(): winner = "cuda"
             elif target == "metal":
-                val active = self.metal_backend
-                if active == nil:
-                    attempts.push("metal:unavailable")
-                else:
-                    val metal = active
+                if val Some(metal) = self.metal_backend:
                     quad_index = metal.draw_font_batch(x, y, batch)
                     self.metal_backend = Some(metal)
                     if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
                     attempts.push(if quad_index == batch.quads.len(): "metal:success" else: "metal:failed")
                     if quad_index == batch.quads.len(): winner = "metal"
+                else:
+                    attempts.push("metal:unavailable")
             elif target == "opencl":
                 val active = self.opencl_backend
                 if active == nil:
@@ -1953,9 +1951,7 @@ class Engine2D with DrawIrRenderTarget:
             val opencl = active_opencl
             opencl.invalidate_font_atlas()
             self.opencl_backend = opencl
-        val active_metal = self.metal_backend
-        if active_metal != nil:
-            val metal = active_metal
+        if val Some(metal) = self.metal_backend:
             metal.invalidate_font_atlas()
             self.metal_backend = Some(metal)
         val active_rocm = self.rocm_backend
@@ -2018,9 +2014,7 @@ class Engine2D with DrawIrRenderTarget:
             val opencl = active_opencl
             opencl.invalidate_font_atlas()
             self.opencl_backend = opencl
-        val active_metal = self.metal_backend
-        if active_metal != nil:
-            val metal = active_metal
+        if val Some(metal) = self.metal_backend:
             metal.invalidate_font_atlas()
             self.metal_backend = Some(metal)
         val active_rocm = self.rocm_backend
@@ -2627,13 +2621,16 @@ class Engine2D with DrawIrRenderTarget:
 
     me draw_metal_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
         """Blend child pixels only through the active checked Metal path."""
-        val active = self.metal_backend
-        if active == nil:
-            return false
-        val metal = active
-        val completed = metal.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
-        self.metal_backend = Some(metal)
-        completed
+        # Destructured binding, not `val metal = <optional>` — mirrors the
+        # vulkan twin above. Binding the whole Option and re-wrapping it with
+        # `Some(metal)` stored `Some(Some(backend))`, and every later
+        # `.session`-style access on the field then failed with
+        # "unknown property or method ... on Option".
+        if val Some(metal) = self.metal_backend:
+            val completed = metal.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
+            self.metal_backend = Some(metal)
+            return completed
+        false
 
     # Concrete-typed offscreen creator. Every branch already produces an
     # Engine2D (create_shared_vulkan_offscreen / create_shared_metal_offscreen /
