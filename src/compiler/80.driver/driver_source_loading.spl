@@ -735,6 +735,33 @@ pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bo
     driver_closure_scan_phase_trace("cached_scan:done", path)
     (content, imports, siblings, false)
 
+pub fn _driver_cached_entry_source_imports(path: text) -> [text]:
+    """Return only cached imports for closure traversal.
+
+    The closure BFS revisits every source after collection has populated the
+    scan cache.  Calling `_driver_cached_entry_source_scan` on that hit rebuilt
+    a four-field result containing the full source text even though the BFS
+    discarded three fields.  For large compiler closures that exposed the
+    largest payload to avoidable return-value ownership work. Keep the miss
+    path centralized, but make the overwhelmingly common hit return only the
+    small import vector.
+    """
+    val key = _driver_physical_source_key(path)
+    if _g_entry_scan_imports_by_path.contains_key(key):
+        _g_entry_scan_hit_count = _g_entry_scan_hit_count + 1
+        return _g_entry_scan_imports_by_path[key]
+    val (_, imports, _, _) = _driver_cached_entry_source_scan(path)
+    imports
+
+pub fn _driver_cached_entry_source_content(path: text) -> text:
+    """Return only cached content without reconstructing scan side payloads."""
+    val key = _driver_physical_source_key(path)
+    if _g_entry_scan_content_by_path.contains_key(key):
+        _g_entry_scan_hit_count = _g_entry_scan_hit_count + 1
+        return _g_entry_scan_content_by_path[key]
+    val (content, _, _, _) = _driver_cached_entry_source_scan(path)
+    content
+
 fn _driver_entry_sibling_path(line: text) -> text:
     if line.starts_with("mod "):
         val tail = line.substring(4).trim()
@@ -1237,7 +1264,7 @@ pub fn _driver_collect_explicit_compiler_source(p: text) -> [SourceFile]:
     """Load an explicitly requested compiler input without packaging filters."""
     if not p.ends_with(".spl"):
         return []
-    val (content, _, _, _) = _driver_cached_entry_source_scan(p)
+    val content = _driver_cached_entry_source_content(p)
     if content == "":
         return []
     _driver_module_aliases_with_closure(
@@ -1282,7 +1309,7 @@ fn _driver_collect_entry_import_source_untimed(
         normalized.starts_with("doc/") or normalized.contains("/doc/"))
     if normalized.contains("/test/") or normalized.contains("/tests/") or normalized.contains("/testdata/") or is_repository_doc or normalized.contains("/verification/"):
         return result
-    val (content, _, _, _) = _driver_cached_entry_source_scan(p)
+    val content = _driver_cached_entry_source_content(p)
     if content == "":
         return result
     _driver_module_aliases_with_closure(
@@ -1322,8 +1349,7 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         unsafe(capabilities: [ffi]):
             native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         if native_entry != "":
-            val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)
-            content = cached_content
+            content = _driver_cached_entry_source_content(p)
         else:
             unsafe(capabilities: [ffi]):
                 content = rt_file_read_text(p) ?? ""

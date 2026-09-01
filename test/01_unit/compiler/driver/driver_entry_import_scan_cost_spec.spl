@@ -23,6 +23,8 @@ fast reject must both be present, with the reject ahead of the comment scan.
 use compiler.driver.driver_source_loading.{
     _driver_entry_import_module_paths,
     _driver_cached_entry_source_scan,
+    _driver_cached_entry_source_imports,
+    _driver_cached_entry_source_content,
     _driver_collect_sources,
     driver_entry_scan_cache_reset,
     driver_entry_scan_cache_release,
@@ -163,6 +165,21 @@ describe "entry-closure import scan":
         expect(driver_entry_scan_cache_scan_count()).to_equal(1)
         expect(driver_entry_scan_cache_hit_count()).to_equal(1)
 
+    it "serves narrow cache hits without changing scan results":
+        val _ = rt_dir_create("build/test_tmp/closure_scan_narrow", true)
+        val path = "build/test_tmp/closure_scan_narrow/source.spl"
+        val source = "use std.first\nmod local\nfn value() -> i64:\n    7\n"
+        val _ = rt_file_write_text(path, source)
+        driver_entry_scan_cache_reset()
+
+        val (_, imports, _, first_hit) = _driver_cached_entry_source_scan(path)
+        expect(first_hit).to_equal(false)
+        expect(_driver_cached_entry_source_imports(path)).to_equal(imports)
+        expect(_driver_cached_entry_source_content(path)).to_equal(source)
+        expect(driver_entry_scan_cache_read_count()).to_equal(1)
+        expect(driver_entry_scan_cache_scan_count()).to_equal(1)
+        expect(driver_entry_scan_cache_hit_count()).to_equal(2)
+
     it "shares the build-local scan cache across CLI and driver walkers":
         val dir = "build/test_tmp/closure_scan_memo_cross"
         val entry = dir + "/entry.spl"
@@ -202,10 +219,11 @@ describe "entry-closure import scan":
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
 
         expect(_native_build_entry_closure("", []).len()).to_equal(1)
-        # The cached vector remains immutable; closure-owned synthetic imports
-        # are appended to its explicit mutable copy below.
-        expect(driver).to_contain("val (_, cached_closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)")
-        expect(driver).to_contain("var closure_imports = cached_closure_imports")
+        # The narrow accessor avoids rebuilding a tuple that contains the full
+        # source text on every closure-cache hit. Closure-owned synthetic
+        # imports are appended to the returned vector below.
+        expect(driver).to_contain("var closure_imports = _driver_cached_entry_source_imports(closure_src.path)")
+        expect(driver).to_not_contain("val (_, cached_closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)")
         expect(driver).to_not_contain("val closure_imports = _driver_entry_import_module_paths(closure_src.content)")
         expect(native_build).to_contain("val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)")
         expect(native_build).to_not_contain("var import_scan_cache: Dict<text, [text]> = {}")
@@ -214,7 +232,7 @@ describe "entry-closure import scan":
         expect(compile_targets).to_contain("driver_entry_scan_cache_reset()")
         expect(compile_targets).to_contain("driver_entry_scan_cache_release()")
         expect(loading).to_contain("native_entry = rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY\")")
-        expect(loading).to_contain("val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)")
+        expect(loading).to_contain("content = _driver_cached_entry_source_content(p)")
         expect(loading).to_contain("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_SCAN_PHASES")
         expect(loading).to_contain("[closure-scan] phase={phase} path={path}")
         expect(native_build).to_contain("driver_closure_scan_phase_trace(\"closure_node:start\", f)")

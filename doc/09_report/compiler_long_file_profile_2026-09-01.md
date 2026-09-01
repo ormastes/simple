@@ -81,3 +81,20 @@ For context only, the broader cached bootstrap was **103.2 s** in R10 (3
 compiled, 819 cached) and **115.8 s** in R11 (4 compiled, 818 cached).  Those are
 different build revisions/work sets and are not a valid file-level regression
 comparison.
+
+## Follow-up optimization
+
+The closure profile led to a pure-Simple cache-access fix in
+`driver_source_loading.spl`: closure traversal now requests only the cached
+import vector, rather than reconstructing a four-field result that also carries
+the complete source text. Source collection likewise requests only content on
+cache hits. This removes the avoidable large-payload return path without
+changing discovery, resolution, ordering, aliasing, or invalidation semantics.
+
+The source-shape prevention assertions are in
+`test/01_unit/compiler/driver/driver_entry_import_scan_cost_spec.spl`. A post-fix
+whole-file timing is intentionally pending: the only available R11 executable
+is rejected, embeds the pre-fix driver, fails this workload's HIR correctness,
+and cannot publish a warm artifact. Exact after-time/RSS evidence therefore
+requires the next admitted bootstrap candidate; quoting a run of the old
+embedded driver as an after result would be false evidence.
