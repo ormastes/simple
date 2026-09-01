@@ -1683,7 +1683,16 @@ impl<'a> MirLowerer<'a> {
             let mut sigs_by_name: HashMap<&str, Vec<Vec<TypeId>>> = HashMap::new();
             let mut order: Vec<&str> = Vec::new();
             for func in &hir.functions {
-                if !func.name.starts_with('_') || func.name.contains('.') {
+                // Free functions only — methods are `Type.method`-qualified and
+                // cannot collide this way. Both `_`-prefixed private helpers AND
+                // public functions are considered: the previous `_`-only gate
+                // left every colliding PUBLIC name with no `$dupN` variants at
+                // all, so its call sites fell through to plain last-write-wins.
+                // That is a live silent wrong-dispatch — see
+                // test/01_unit/compiler/driver/public_dup_signature_dispatch_spec.spl,
+                // where a caller that selectively imports `m1.pick(i64)` and
+                // passes an i64 executes `m2.pick(bool)`'s body instead.
+                if func.name.contains('.') {
                     continue;
                 }
                 let sig: Vec<TypeId> = func.params.iter().filter(|p| p.name != "self").map(|p| p.ty).collect();
@@ -1700,10 +1709,29 @@ impl<'a> MirLowerer<'a> {
                     // observably equivalent — leave the name alone.
                     continue;
                 }
+                // For PUBLIC names the LAST definition deliberately keeps the
+                // bare name. Only the direct-call branch of MIR lowering
+                // consults `private_dup_overloads`; indirect calls (function
+                // taken as a value), extern imports and any by-name symbol
+                // lookup still resolve the bare name, so mangling every
+                // definition would leave those references undefined. Keeping the
+                // last one bare makes every such reference resolve exactly as it
+                // does today (last-write-wins) while exact-signature direct
+                // calls now reach the right body. `_`-prefixed helpers keep
+                // their existing all-mangled scheme unchanged.
+                let keep_last_bare = !name.starts_with('_');
+                let last_idx = sigs.len() - 1;
                 let candidates = sigs
                     .iter()
                     .enumerate()
-                    .map(|(k, sig)| (sig.clone(), format!("{name}$dup{k}")))
+                    .map(|(k, sig)| {
+                        let mangled = if keep_last_bare && k == last_idx {
+                            name.to_string()
+                        } else {
+                            format!("{name}$dup{k}")
+                        };
+                        (sig.clone(), mangled)
+                    })
                     .collect();
                 self.private_dup_overloads.insert(name.to_string(), candidates);
             }
