@@ -70,7 +70,20 @@ typedef struct {
 
 /* Pure-Simple driver/service receipts and PCM staging outgrow the historical
  * 64 KiB bootstrap heap. Keep a fixed, linker-accounted 1 MiB arena. */
-static unsigned char g_heap[1024 * 1024] __attribute__((aligned(16)));
+/* The bump arena is the region the LINKER SCRIPT already reserves for it:
+ * arch/common/linker_riscv_common.ld carves a 64 MB `.heap` between
+ * __heap_start and __heap_end and documents it as "for bump allocator", but
+ * nothing ever read those symbols -- the arena was a 1 MiB static array and the
+ * 64 MB stayed dead address space. 1 MiB cannot hold the in-guest Simple
+ * frontend: the riscv64 build-and-run row exhausted it inside make_core_lexer,
+ * rv_alloc returned NULL, and the unchecked store faulted with tval=0. `.heap`
+ * is NOLOAD, so using it costs the kernel Image no bytes. g_heap_off stays in
+ * .bss (zeroed by crt0); rv_alloc does not require a zeroed arena, and
+ * rv_calloc zeroes what it hands out. */
+extern unsigned char __heap_start[];
+extern unsigned char __heap_end[];
+#define RV_HEAP_BASE (__heap_start)
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start))
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));
@@ -118,9 +131,26 @@ static uint64_t simpleos_raw_or_encoded_int(RuntimeValue v)
     return IS_INT(v) ? (uint64_t)DECODE_INT(v) : (uint64_t)v;
 }
 
+/* An exhausted bump arena must NAME itself. Before this, rv_alloc simply
+ * returned NULL, the caller stored through it, and the only evidence was a
+ * store fault with tval=0 at an address nobody could attribute -- which is how
+ * the riscv64 build-and-run row's failure read for a whole session. One line,
+ * emitted once, turns that into a diagnosis. It does not change the return
+ * value: callers still see NULL and fail exactly as before. */
+static int g_heap_exhausted_reported = 0;
+/* serial_puts is defined below and writes the UART directly. It is the only
+ * printer usable here: serial_println() takes a RuntimeValue and would have to
+ * ALLOCATE a RuntimeString to report that allocation just failed. */
+static void serial_puts(const char *s);
+
 void *malloc(size_t size)
 {
-    return rv_alloc(size);
+    void *p = rv_alloc(size);
+    if (!p && size != 0 && !g_heap_exhausted_reported) {
+        g_heap_exhausted_reported = 1;
+        serial_puts("[rv64] FATAL bump heap exhausted - malloc returned NULL\r\n");
+    }
+    return p;
 }
 
 void free(void *ptr)
