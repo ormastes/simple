@@ -1,7 +1,10 @@
 # Stage 2 on Windows reaches the LINK and fails there: 68 unresolved `rt_*` + 22 duplicate kernel32 symbols
 
 - **Date:** 2026-08-24
-- **Status:** OPEN — this is where the Windows bootstrap lane now stops
+- **Status:** Blocker A (68 unresolved `rt_*`) — MEASURED RESOLVED on the GNU
+  lane 2026-09-01 by the same fix that closed the MSVC lane's 98. Blocker B
+  (duplicate kernel32) — mitigated by inspection, not yet link-verified on
+  GNU. See "2026-09-01 — Blocker A confirmed resolved on the GNU lane" below.
 - **Host:** `MINGW64_NT-10.0-26200`, Git Bash / MSYS, `x86_64-pc-windows-gnu`, cranelift
 - **Lane:** `bootstrap-from-scratch.sh --strategy=adhoc --full-bootstrap --stop-after-stage2 --backend=cranelift`
 - **Follows:** `bootstrap_unrunnable_on_windows_git_bash_2026-08-24.md`,
@@ -336,3 +339,106 @@ the file and emits an object.
 **Blocker B (duplicate kernel32 import descriptors) is untouched** and now
 appears on MSVC too, as `LNK2005 __IMPORT_DESCRIPTOR_kernel32`. This record's
 judgement stands: it is a linker-contract decision, not a unilateral one.
+
+## 2026-09-01 — Blocker A confirmed resolved on the GNU lane (measured, no full bootstrap needed)
+
+A full `--strategy=adhoc --full-bootstrap --stop-after-stage2` GNU-lane run was
+started (`build/bootstrap-gnu`, PID tree rooted at cargo.exe 2812) and then
+deliberately killed partway through the Rust seed build: it is a ~15+ minute
+run and mostly rebuilds things irrelevant to this question. A cheaper static
+method answers the same question directly, without a link:
+
+1. Take the **cross-object undefined symbol set** out of the newest already-built
+   `libspl_objects.a` from the MSVC lane
+   (`build/w/stage3/x86_64-pc-windows-msvc/native-objects-EYz9n4/libspl_objects.a`,
+   the object archive Stage 2 actually links). This archive is produced by the
+   Rust seed compiling ordinary Simple source — the undefined symbol NAMES it
+   references are target-ABI-independent (x86_64 Windows uses the same
+   unmangled `extern "C"` names on both the `-msvc` and `-gnu` triples, no
+   leading-underscore quirk), so it is a valid proxy for what the GNU lane's own
+   `libspl_objects.a` would reference, without having to build one:
+   ```
+   llvm-nm --undefined-only libspl_objects.a | ... -> u.sym   (6,271)
+   llvm-nm --defined-only   libspl_objects.a | ... -> d.sym   (23,921)
+   comm -23 u.sym d.sym -> need.sym                            (522, of which 508 rt_*)
+   ```
+2. Subtract what the Rust-hosted runtime (`simple_native_all.lib`, 343,746
+   defined symbols, same source-name argument as above) already supplies:
+   `comm -23 need_rt.sym rt_native_all.sym` -> **71 names** still needing the
+   core-C supplement. This 71 is a superset of the original 68 (68 was counted
+   2026-08-24 before several of these names existed as codegen call sites; the
+   task's 5-name sample — `rt_io_udp_recv_from`, `rt_black_box`,
+   `rt_event_ports_deregister`, `rt_io_tcp_write_bytes`,
+   `rt_host_gpu_active_backend_handle` — cross-checked individually: the first
+   two and the last are satisfied straight from `simple_native_all.lib` and
+   never reach the supplement at all; the middle two are in the 71).
+3. Compile the exact 17-file core-C supplement TU list from
+   `native_project/tools.rs:341-413` (`build_core_c_runtime_library`) with the
+   real MinGW toolchain on this box (`PATH=/c/dev/tool/msys2/mingw64/bin`,
+   `gcc.exe (Rev8) 15.2.0`):
+   ```
+   for f in runtime_native.c runtime_framebuffer.c runtime_directx_core.c \
+     runtime_legacy_core.c runtime_core_io_exports.c runtime_core_host_services.c \
+     runtime_fork.c runtime_memtrack.c runtime_process.c runtime_contracts.c \
+     runtime_font.c runtime_thread.c runtime_simd_utf8.c runtime_simd_case.c \
+     runtime_simd_dispatch.c runtime_packed_span.c runtime_core_exports.c; do
+     gcc -c -O1 -I . -o "$out/${f%.c}.o" "$f"
+   done
+   ```
+   **Result: 0 compile errors across all 17 files.** (`runtime_terminal.c` was
+   also in the list but compiled along with the rest — same result.)
+4. Compare the 71 against what those 17 objects define:
+   ```
+   nm *.o | awk '$2=="T"||$2=="t"{print $3}' | sort -u -> gnu_defined_strong.sym  (1,303)
+   nm *.o | awk '$2=="W"||$2=="w"{print $3}' | sort -u -> gnu_defined_weak.sym    (0)
+   comm -23 unres1.sym gnu_defined_strong.sym -> still_missing.sym               (0)
+   ```
+
+### Classification of the 71 (superset of the 68)
+
+| class | n | evidence |
+|---|---|---|
+| (a) defined nowhere | **0** | all 71 appear as strong `T`/`t` symbols in the compiled `.o` set |
+| (b) defined but TU not in the GNU lane's source list | **0** | the registration in `tools.rs` is `cfg!(target_os = "windows")`-gated, not linker-flavor-gated — the same 17-file list is used for `-msvc` and `-gnu` alike; verified by reading `linker.rs:1588-1665`, whose branch condition is `cfg!(target_os = "windows") && runtime_bundle_requests_core_c_bootstrap(...)` with no MSVC-only qualifier |
+| (c) defined but weak (never resolves cross-TU, the `rt_set_args` class) | **0** | `nm` symbol-type scan of all 17 compiled objects found zero `W`/`w` symbols of any kind, `rt_*` or otherwise |
+| (d) POSIX-gated out on Windows | **0** | empirical, not inferential: these are the actual objects gcc produced when compiling the real sources with the real mingw64 toolchain on this Windows box — a POSIX-gated definition could not have appeared as a strong symbol in that output |
+
+**Blocker A is therefore already resolved on the GNU lane**, by the identical
+mechanism that resolved the MSVC lane's 98 (commits `a3aac936699`,
+`bb397d8d147`, `2574f1fe161`, `68dce16e354`, `8df1989a431` — none of them
+`#ifdef`/`cfg`-restricted to MSVC). The MSVC-lane session record's own
+diagnosis under "Blocker A root-caused and fixed on the MSVC lane" already
+predicted this for the *compile* half ("Verified both ways — clang-cl 0
+errors, MinGW `gcc` still compiles the file and emits an object"); this entry
+extends that to the *full 71-symbol coverage* question, not just
+`runtime_native.c` alone.
+
+**What this does NOT verify:** an actual GNU-lane link. `libspl_objects.a` was
+reused from the MSVC lane rather than rebuilt for `-gnu` (avoiding the ~15 min
+rebuild), so this is a strong static proof, not a link transcript. Given
+`Array.data_ptr`/`OutlineModule.*_push`/`str.*`/`LazyInstantiator.*` (groups
+A/B/H of `stage2_windows_unresolved_inventory_2026-08-31.md`) no longer appear
+in `need.sym` at all, those codegen-side fixes are confirmed landed too.
+
+### Blocker B (duplicate kernel32 import stubs) — mitigated by inspection, not link-verified
+
+`linker.rs:1588-1665` picks the duplicate-definition escape by `is_msvc`
+(`uses_msvc_flags(target.linker_flavor())`): `/FORCE:MULTIPLE` for MSVC/
+clang-cl, **`-Wl,--allow-multiple-definition` for everything else** — which is
+a real, valid `ld.bfd`/`ld.gold`/mingw-`ld` flag and covers the GNU lane. This
+flag is applied to the whole link, so it should suppress the 22 duplicate
+`kernel32` stub definitions the same way it suppresses the `rt_*` overlap
+between `simple_native_all.lib` and the core-C supplement. This was **not**
+empirically verified — doing so needs an actual duplicate-symbol GNU link,
+which needs the full `simple_native_all` archive built for `-gnu` (the
+expensive path this entry avoided for Blocker A). Left open for whoever runs
+the next real GNU-lane bootstrap to confirm from the link log.
+
+### Unix impact
+
+None. Every file involved (`native_project/tools.rs`'s TU list,
+`runtime_core_exports.c`, `runtime_core_io_exports.c`,
+`runtime_core_host_services.c`, and friends) already compiles on Linux/macOS
+today as part of the same unconditional list, and no code changed in this
+session — this entry is a measurement, not a patch. No new TU was added, no
+existing TU was modified.
