@@ -227,3 +227,104 @@ written up as fact until a freestanding build is disassembled or instrumented.
 `tup_early_false` function quoted above plus `var ab: [bool] = [false, true]`.
 Interpreter and host `native-build` both GREEN — so any guard built on it must
 run the freestanding lane, or a freestanding-flagged host build, to be RED.
+
+---
+
+# ROOT CAUSE, MEASURED AND FIXED (2026-09-01, fifth session)
+
+## It is the Cranelift boxed-closure boundary, not the parser and not the C runtime
+
+The riscv64 lane builds with **`--backend cranelift --entry-closure`**
+(`scripts/os/build-simpleos-riscv64-interpreter-kernel.shs:113-120`). That
+matters: the LLVM backend, which the host uses by default, is CORRECT here, and
+the two backends do not share this code.
+
+Disassembling the real row-2 kernel at the exact call site this record already
+identified (`parse_statement` -> `try_parse_bare_ident_string_call`) shows the
+destructure lowering verbatim:
+
+```
+803216d4:  jalr  ... <...try_parse_bare_ident_string_call>
+803216dc:  li    a1,0
+803216f4:  jalr  a2          ; -> rt_tuple_get(tuple, 0)
+8032170c:  jalr  a1          ; -> rt_value_unbox_int(element)
+80321710:  mv    s6,a0
+...
+80321754:  zext.b a0,s7
+80321758:  bnez   a0,...     ; branch on the "decoded" bool
+```
+
+(The two indirect targets were resolved from their in-image pointer words to
+`rt_tuple_get` at `0x80201330` and `rt_value_unbox_int` at `0x80203230`.)
+
+The source of that sequence is the `TypeId::BOOL` arm of the boxed-closure
+unbox, present in two places documented in-tree as exact mirrors —
+`codegen/closure_boxed_entry.rs` (`unbox_arg`) and
+`codegen/instr/closures_structs.rs` (`unbox_from_closure_boundary`):
+
+```rust
+TypeId::BOOL => {
+    let raw = call_runtime_1(ctx, builder, "rt_value_unbox_int", tagged);
+    builder.ins().icmp_imm(IntCC::NotEqual, raw, 0)
+}
+```
+
+**`rt_value_unbox_int` is bit-preserving for anything that is not `TAG_INT`,
+and a tagged BOOL is `TAG_SPECIAL` — so here it is a PASSTHROUGH, not a
+decode.** The `!= 0` that follows therefore answers TRUE for `true` (11) *and*
+for `false` (19), because both are non-zero. The matching `box_result` emits
+exactly those tagged values via `rt_value_bool`, so the round trip was
+self-defeating: box `false` -> 19 -> unbox -> `19 != 0` -> `true`.
+
+This explains every row of the symptom table, including the two that previously
+looked inconsistent:
+- the tuple's `i64` element reads correctly, because the `I64` arm's
+  `rt_value_unbox_int` *is* the right decode for a tagged int;
+- a plain `bool` return is correct, because it never crosses the boxed boundary.
+
+## Two earlier hypotheses in this record are REFUTED, not merely superseded
+
+- **The `.len()` fail-open** was already ruled out by the previous session; it
+  stays ruled out and is a separate defect.
+- **The branch terminator** (`codegen/instr/body.rs:1300`,
+  `icmp_imm(IntCC::NotEqual, cond_val, 0)`) was this session's first hypothesis
+  and is **wrong for this defect**. The disassembly settles it: the branch
+  operand is already `I8` (`zext.b` + `bnez`), so that `cond_ty != I8` path is
+  never taken here. A change there was written, measured against the
+  disassembly, and REVERTED rather than shipped. Recorded so the next session
+  does not re-derive it. (Whether a wide tagged value can reach that terminator
+  by some other route was not established either way, and no claim is made.)
+- The `TRUE_VALUE`=8 / `FALSE_VALUE`=0 macro disagreement is real but is NOT
+  this defect; it is filed separately as
+  `baremetal_bool_macros_disagree_with_codegen_tags_2026-09-01.md`.
+
+## The fix
+
+Both mirror sites now decode the TAGGED value directly, using the same falsy set
+the LLVM backend already uses in `runtime_int_truthy_i1`:
+
+    falsy = (v == 0) | (v == 19 /* tagged false */) | (v == 3 /* nil */)
+
+This is also correct for a RAW 0/1 bool (0 is falsy, 1 is not), so it is safe
+whichever representation the producer used.
+
+## Why the guard is a source-shape ratchet
+
+Stated plainly rather than papered over: `scripts/check/check-cranelift-boxed-bool-decode.shs`
+checks the SHAPE of the two definitions, not runtime behaviour. A behavioural
+host test was attempted and is genuinely blocked — three reproducer shapes
+(positional file, closure value, and the lane's own `--source`/`--entry` form)
+either inlined the call away (zero `rt_value_unbox_int` or boxed-thunk symbols
+in the artifact) or died first on an unrelated pre-existing stdlib error
+(`nil is forbidden by the non-optional return contract of 'file_hash_sha256'`),
+which is the same wall the previous session hit. The behavioural test is the
+in-guest lane itself. The guard is RED against this fix's own parent
+(`633641ee097`, naming both sites) and GREEN after, with a fatal 5-fixture
+`--selftest`.
+
+## Correction to this record's own earlier text
+
+The host is NOT generally blocked, and the host backend is NOT affected: a
+reproducer with no `Option`/`.len()` surface native-builds and runs correctly on
+host x86_64. The host lane's correctness is a property of the LLVM backend, not
+evidence that the defect was absent.
