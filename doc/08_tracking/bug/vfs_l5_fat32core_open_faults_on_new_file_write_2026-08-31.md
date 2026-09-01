@@ -355,3 +355,79 @@ in the table above. The defect-class-neighbour obligation is met inside the fix:
 all three fixed-cap monotonic registries in that file were audited together, and
 the two that were live defects (`simpleos_fv_wide`, `simpleos_fv_structs`) were
 fixed in the same change as the enum one that caused L5.
+
+---
+
+## RESOLVED — L6 and L7 green, goal item 5 is 8 of 8 (2026-09-01)
+
+The predicted fix was correct and sufficient. `fat32_sync_entry_size`
+(`src/lib/nogc_async_mut/fs_driver/fat32_dir_ops.spl`) writes the current length
+back to bytes 28..31 of the file's short directory entry and flushes that
+directory cluster, reusing `fat32_rename`'s slot-patch mechanics. It is called
+from `fat32_close`, `fat32_write` (only when the length actually grew) and
+`fat32_write_4k_overwrite` in `fat32_owned_io.spl`.
+
+The entry is located by **first cluster** rather than by threading a parent
+directory + slot offset through `OpenFile`: a cluster chain belongs to exactly
+one file on a valid volume, so the match is unambiguous, and no `DirEntry`
+producer or `resolve_path` signature had to change. Subdirectories are searched
+breadth-first from `root_cluster` via an explicit worklist, so files below the
+root get the same treatment. `invalidate_dentry_cache()` after the patch is
+load-bearing: without it `resolve_path` can serve the stale cached size to the
+read-back `open`.
+
+Verbatim verdict, in-guest under real OVMF pflash (no `-kernel`, no
+`isa-debug-exit`), exit code captured directly into a variable (`GATE_EXIT=0`):
+
+```
+PASS — 8 check(s) checked, the KERNEL-RESIDENT SimpleOS VFS filesystem service
+(cooperative; named-port IPC half advisory-RED, see A1) served a write and a
+read-back of this run's nonce 20260831235512574590 in-guest under OVMF real
+firmware, and the nonce bytes are physically present in the NVMe image
+```
+
+Serial transcript:
+
+```
+[grub-uefi] multiboot loading /boot/kernel.elf ...
+[vfsrt] probe begin nonce=20260831235512574590
+[vfsrt] initializing storage stack (VFS/NVMe/FAT32)
+[vfsrt] vfs_boot_init_production ok=true
+[vfsrt] generic FAT32 mount ok (arbitrary paths writable)
+[vfsrt] fs-server up ready=true
+[vfsrt] ipc-port attempted (advisory)
+[vfsrt] server write begin path=/VFSRT.TXT bytes=32
+[vfsrt] server write path=/VFSRT.TXT ok=true
+[vfsrt] server stat exists=true
+[vfsrt] server read-back=vfsrt-nonce:20260831235512574590   <- L6 GREEN (was empty)
+[vfsrt] ROUNDTRIP_OK nonce=20260831235512574590             <- L7 GREEN
+[vfsrt] probe complete
+```
+
+Host-side confirmation on the same image, the exact field this record
+root-caused — `VFSRT.TXT`'s entry at offset 0x84000 of
+`build/os/vfsrt/fat32-vfsrt.img`:
+
+| | before | after |
+|---|---|---|
+| size field (+28, LE u32) | `0` | `32` |
+| first cluster | 12773 | 12773 (unchanged) |
+
+The gate's contract was not weakened: `vfs_boot_init_production`, the nonce
+anchoring and the staged system volume are untouched, and the `--selftest`
+still reports `9 fixture(s) OK` on this run.
+
+### Filed, not fixed here
+- **Lazy-allocation gap.** When `fat32_write` allocates the first cluster itself
+  (`of.start_cluster < 2` on entry), the directory entry still records cluster 0,
+  so `fat32_sync_entry_size` cannot find it and returns `Ok(false)`. That entry's
+  cluster pointer is stale too — a distinct pre-existing defect, not reachable
+  through `create_file`, which always allocates. Tolerated deliberately rather
+  than papered over.
+- **The regression specs cannot run on the seed.** See
+  `seed_indexed_field_assign_complex_receiver_unisolated_2026-08-31.md` — a new
+  occurrence of an already-open indexed-field-assignment limitation, which reds
+  every write/truncate example in `test/01_unit/lib/driver/fat32_file_io_spec.spl`
+  (4 red before this change, 6 after, all with the same interpreter message and
+  none on an assertion). The specs are committed anyway and will discriminate
+  once that gap closes.
