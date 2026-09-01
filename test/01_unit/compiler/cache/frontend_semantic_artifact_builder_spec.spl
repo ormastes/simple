@@ -4,6 +4,7 @@ use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, Pa
 use compiler.common.cache_contract.semantic_read_set_v1.{
     SemanticEffectKindV1, SemanticReplayPolicyV1,
 }
+use compiler.common.cache_contract.canonical_cache_codec_v1 (canonical_public_summary_encode_v1)
 use compiler.frontend.cache_artifact.*
 use compiler.core.parser.{parse_module_silent_checked}
 
@@ -181,6 +182,23 @@ describe "frontend semantic cache artifact builders":
         expect(parse_module_silent_checked(rendered,
             "simple-summary/recursive/_tldr.spl")).to_equal(false)
 
+    it "shares graph identity with the codec across declaration kinds":
+        val function_sig = "pub extern fn make_widget() -> Widget"
+        val class_sig = "pub extern class Widget:\n    fn label() -> text"
+        val summary = project_public_summary_v1(summary_input([
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:widget", class_sig),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:widget", class_sig),
+            fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:make", function_sig,
+                dependencies: ["sym:widget"]),
+            fact(FrontendPublicFactKindV1.Declaration, "sym:make", function_sig,
+                dependencies: ["sym:widget"]),
+            fact(FrontendPublicFactKindV1.LayoutAbi, "sym:widget-layout", "Widget:opaque",
+                dependencies: ["sym:widget"]),
+        ])).unwrap()
+        expect(parse_module_silent_checked(render_public_summary_tldr_v1(summary),
+            "simple-summary/kinds/_tldr.spl")).to_equal(false)
+        expect(canonical_public_summary_encode_v1(summary).len() > 0).to_equal(true)
+
     it "rejects missing dependencies, missing forwards and signature conflicts":
         val sig = "pub extern fn alpha() -> i64"
         expect(project_public_summary_v1(summary_input([
@@ -236,6 +254,10 @@ describe "frontend semantic cache artifact builders":
             SemanticEffectKindV1.EnvironmentFacade, "env:MODE", "env", digest("env-provider"),
             digest("debug"), SemanticReplayPolicyV1.DeclaredReplayable)
         expect(build_semantic_read_set_v1([undeclared, replayable], []).is_err()).to_equal(true)
+        var other_provider = undeclared
+        other_provider.provider_id = "other-env"
+        other_provider.provider_manifest_digest = digest("other-env-provider")
+        expect(build_semantic_read_set_v1([undeclared, other_provider], []).is_err()).to_equal(true)
         val changed_value = FrozenSemanticReadV1(
             SemanticEffectKindV1.EnvironmentFacade, "env:MODE", "env", digest("env-provider"),
             digest("release"), SemanticReplayPolicyV1.UndeclaredUncacheable)

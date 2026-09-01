@@ -2,17 +2,17 @@
 
 use std.spec.*
 use std.spec.step
-use compiler.common.cache_contract.canonical_cache_codec_v1.{canonical_cache_encode_envelope_v1, canonical_cache_decode_envelope_v1, canonical_cache_object_digest_v1, canonical_cache_encode_sorted_text_map_v1, canonical_public_summary_encode_v1, canonical_public_summary_decode_v1, canonical_public_summary_declaration_graph_digest_v1, canonical_cache_encode_text_v1, canonical_semantic_read_set_encode_v1, canonical_semantic_read_set_decode_v1}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{canonical_cache_encode_envelope_v1, canonical_cache_decode_envelope_v1, canonical_cache_object_digest_v1, canonical_cache_encode_sorted_text_map_v1, canonical_public_summary_encode_v1, canonical_public_summary_decode_v1, canonical_public_summary_declaration_graph_digest_v1, canonical_cache_encode_text_v1, canonical_semantic_read_set_encode_v1, canonical_semantic_read_set_decode_v1, canonical_compile_snapshot_payload_v1}
 use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1}
-use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, logical_source_path_valid_v1}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, SnapshotSourceEntryV1, ResolutionCandidateV1, ResolutionWitnessV1, NamedDigestV1, CompileSnapshotV1, logical_source_path_valid_v1}
 use compiler.common.cache_contract.semantic_read_set_v1.{SemanticEffectKindV1, SemanticReplayPolicyV1, SemanticReadEntryV1, SemanticReadSetV1}
 
 fn _summary_v1() -> PublicSummaryV1:
     val path = LogicalSourcePathV1(
         repository_namespace_digest: "1111111111111111111111111111111111111111111111111111111111111111",
         module_relative_utf8: "pkg/main.spl", path_semantics: PathSemanticsV1.CaseSensitiveNfc)
-    val forwards = [PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "fn main() -> i64")]
-    val declarations = [PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "fn main() -> i64: @summary_body")]
+    val forwards = [PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "pub extern fn main() -> i64", dependency_symbol_ids: [])]
+    val declarations = [PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "pub extern fn main() -> i64", dependency_symbol_ids: [])]
     val none: [PublicSummaryEntryV1] = []
     var summary = PublicSummaryV1(
         snapshot_id: "2222222222222222222222222222222222222222222222222222222222222222",
@@ -29,6 +29,29 @@ fn _summary_v1() -> PublicSummaryV1:
         virtual_text_digest: "7777777777777777777777777777777777777777777777777777777777777777")
     summary.declaration_graph_digest = canonical_public_summary_declaration_graph_digest_v1(summary)
     summary
+
+fn _digest(ch: text) -> text: ch.repeat(64)
+
+fn _logical(name: text) -> LogicalSourcePathV1:
+    LogicalSourcePathV1(repository_namespace_digest: _digest("1"),
+        module_relative_utf8: name, path_semantics: PathSemanticsV1.CaseSensitiveNfc)
+
+fn _snapshot_v1(reverse: bool, physical: text) -> CompileSnapshotV1:
+    val first = SnapshotSourceEntryV1(logical_path: _logical("pkg/a.spl"), source_blob_digest: _digest("a"))
+    val second = SnapshotSourceEntryV1(logical_path: _logical("pkg/b.spl"), source_blob_digest: _digest("b"))
+    val candidate = ResolutionCandidateV1(order: 0, logical_path: "pkg/a.spl", normalization_key: "pkg/a.spl",
+        physical_identity_digest: physical, parent_directory_generation_digest: _digest("2"),
+        entry_kind: "file", exists: true, selected: true, content_digest: _digest("a"),
+        symlink_chain_digest: _digest("3"))
+    val witness = ResolutionWitnessV1(resolver_policy_digest: _digest("4"), root_trust_digest: _digest("5"),
+        candidates: [candidate], selected_index: 0, generated_input_digests: [], witness_digest: _digest("6"))
+    CompileSnapshotV1(schema: 1, repository_namespace_digest: _digest("1"), path_policy_digest: _digest("7"),
+        source_entries: if reverse then [second, first] else [first, second], resolution_witnesses: [witness],
+        negative_candidates: [], directory_generations: [], generated_inputs: [], configuration_digest: _digest("8"),
+        target_layout_digest: _digest("9"), compiler_owner_digest: _digest("a"), runtime_digest: _digest("b"),
+        provider_manifests: if reverse then [NamedDigestV1(name: "z", digest: _digest("c")), NamedDigestV1(name: "a", digest: _digest("d"))]
+            else [NamedDigestV1(name: "a", digest: _digest("d")), NamedDigestV1(name: "z", digest: _digest("c"))],
+        toolchain_component_digests: [])
 
 describe "Canonical cache envelope V1":
     it "roundtrips one golden payload and produces a stable object digest":
@@ -77,6 +100,15 @@ describe "LogicalSourcePathV1 portability":
             repository_namespace_digest: namespace, module_relative_utf8: "C:\\src\\compiler\\main.spl",
             path_semantics: PathSemanticsV1.CaseFoldedNfc))).to_equal(false)
 
+describe "CompileSnapshotV1 canonical identity":
+    it "is independent of collection permutations and physical worktree witnesses":
+        val first = canonical_compile_snapshot_payload_v1(_snapshot_v1(false, _digest("e")))
+        val permuted = canonical_compile_snapshot_payload_v1(_snapshot_v1(true, _digest("e")))
+        val other_worktree = canonical_compile_snapshot_payload_v1(_snapshot_v1(false, _digest("f")))
+        expect(first.len() > 0).to_equal(true)
+        expect(first).to_equal(permuted)
+        expect(first).to_equal(other_worktree)
+
 describe "PublicSummaryV1 canonical codec":
     it "roundtrips the distinct forward-declaration phase":
         step("Roundtrip a public forward declaration")
@@ -88,15 +120,15 @@ describe "PublicSummaryV1 canonical codec":
             case nil: _summary_v1()
         expect(summary.forward_declarations.len()).to_equal(1)
         expect(summary.forward_declarations[0].stable_symbol_id).to_equal("sym.main")
-        expect(summary.declarations[0].canonical_bytes).to_equal("fn main() -> i64: @summary_body")
+        expect(summary.declarations[0].canonical_bytes).to_equal("pub extern fn main() -> i64")
 
     it "binds forward ordering and the declaration graph into the digest":
         step("Invalidate changed declaration phases")
         val base = canonical_public_summary_encode_v1(_summary_v1())
         var changed = _summary_v1()
         changed.forward_declarations = [
-            PublicSummaryEntryV1(stable_symbol_id: "sym.z", canonical_bytes: "forward z"),
-            PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "fn main() -> i64")]
+            PublicSummaryEntryV1(stable_symbol_id: "sym.z", canonical_bytes: "pub extern fn z()", dependency_symbol_ids: []),
+            PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "pub extern fn main() -> i64", dependency_symbol_ids: [])]
         changed.declaration_graph_digest = canonical_public_summary_declaration_graph_digest_v1(changed)
         expect(canonical_cache_object_digest_v1(base) == canonical_cache_object_digest_v1(canonical_public_summary_encode_v1(changed))).to_equal(false)
 
@@ -136,10 +168,20 @@ describe "SemanticReadSetV1 canonical codec":
             replay_policy: SemanticReplayPolicyV1.DeclaredReplayable)
         expect(canonical_semantic_read_set_encode_v1(SemanticReadSetV1(entries: [entry], uncacheable_reason: "")).len()).to_equal(0)
 
+    it "rejects different providers for one semantic effect identity":
+        val first = SemanticReadEntryV1(effect_kind: SemanticEffectKindV1.Plugin,
+            logical_name: "backend", provider_id: "llvm", provider_manifest_digest: _digest("1"),
+            value_digest: _digest("2"), replay_policy: SemanticReplayPolicyV1.DeclaredReplayable)
+        var second = first
+        second.provider_id = "cranelift"
+        second.provider_manifest_digest = _digest("3")
+        expect(canonical_semantic_read_set_encode_v1(
+            SemanticReadSetV1(entries: [first, second], uncacheable_reason: "")).len()).to_equal(0)
+
     it "rejects conflicting duplicate symbols within one phase":
         step("Reject ambiguous declarations")
         var changed = _summary_v1()
         changed.forward_declarations = [
-            PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "a"),
-            PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "b")]
+            PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "a", dependency_symbol_ids: []),
+            PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "b", dependency_symbol_ids: [])]
         expect(canonical_public_summary_encode_v1(changed).len()).to_equal(0)

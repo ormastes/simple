@@ -1,7 +1,8 @@
 # codex-impl: public-only deterministic summary and virtual source projection.
 
 use std.common.crypto.sha256.{sha256_text}
-use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1}
+use compiler.frontend.core.parser (parse_module_silent_checked)
+use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1, public_summary_declaration_graph_digest_v1, public_summary_normalized_signature_v1, public_summary_sorted_dependencies_v1}
 use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1}
 
 pub enum FrontendPublicFactKindV1:
@@ -267,6 +268,7 @@ pub fn project_public_summary_v1(input: PublicSummaryProjectionInputV1) -> Resul
         val entry = PublicSummaryEntryV1(
             stable_symbol_id: fact.stable_symbol_id,
             canonical_bytes: fact.canonical_bytes,
+            dependency_symbol_ids: public_summary_sorted_dependencies_v1(fact.dependency_symbol_ids),
         )
         match fact.fact_kind:
             case FrontendPublicFactKindV1.ForwardDeclaration:
@@ -296,26 +298,25 @@ pub fn project_public_summary_v1(input: PublicSummaryProjectionInputV1) -> Resul
             if _fact_index_v1(ordered_forward_facts, dependency) < 0:
                 return Err("public summary fact names a dependency without a forward declaration")
     var forward_declarations: [PublicSummaryEntryV1] = []
-    var graph_lines: [text] = []
     for forward in ordered_forward_facts:
         val declaration_index = _entry_index_v1(declarations, forward.stable_symbol_id)
         if declaration_index < 0:
             return Err("public forward declaration has no full declaration")
         if _entry_count_v1(declarations, forward.stable_symbol_id) != 1:
             return Err("public summary has conflicting full declarations")
-        if declarations[declaration_index].canonical_bytes != forward.canonical_bytes:
+        if (public_summary_normalized_signature_v1(declarations[declaration_index].canonical_bytes) !=
+                public_summary_normalized_signature_v1(forward.canonical_bytes)):
             return Err("public forward and full signatures differ")
         forward_declarations.push(PublicSummaryEntryV1(
             stable_symbol_id: forward.stable_symbol_id,
             canonical_bytes: forward.canonical_bytes,
+            dependency_symbol_ids: public_summary_sorted_dependencies_v1(forward.dependency_symbol_ids),
         ))
-        var dependencies = _sorted_unique_text_v1(forward.dependency_symbol_ids)
-        graph_lines.push("{forward.stable_symbol_id}:{dependencies.join(",")}")
     for declaration in declarations:
         if _fact_index_v1(ordered_forward_facts, declaration.stable_symbol_id) < 0:
             return Err("public declaration is missing a forward declaration")
-    val declaration_graph_digest = sha256_text(
-        "simple.public.summary.graph.v1\u0000" + graph_lines.join("\n"))
+    val declaration_graph_digest = public_summary_declaration_graph_digest_v1(
+        forward_declarations, declarations)
 
     val virtual_text = _render_summary_parts_v1(
         input.snapshot_id,
@@ -332,6 +333,8 @@ pub fn project_public_summary_v1(input: PublicSummaryProjectionInputV1) -> Resul
         reverse_reference_roots,
     )
     val virtual_text_digest = sha256_text("simple.public.summary.text.v1\u0000" + virtual_text)
+    if parse_module_silent_checked(virtual_text, "simple-summary/generated/_tldr.spl"):
+        return Err("public summary rendering is not grammar-valid Simple")
 
     Ok(PublicSummaryV1(
         snapshot_id: input.snapshot_id,
@@ -352,3 +355,6 @@ pub fn project_public_summary_v1(input: PublicSummaryProjectionInputV1) -> Resul
         declaration_graph_digest: declaration_graph_digest,
         virtual_text_digest: virtual_text_digest,
     ))
+
+export FrontendPublicFactKindV1, FrozenPublicFactV1, PublicSummaryProjectionInputV1
+export render_public_summary_tldr_v1, project_public_summary_v1

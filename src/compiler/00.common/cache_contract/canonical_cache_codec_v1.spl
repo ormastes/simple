@@ -2,8 +2,8 @@
 
 use std.common.crypto.sha256 (sha256_u8_hex)
 use std.common.string_core.{text_to_bytes, bytes_to_text}
-use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1}
-use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, SourceBlobV1, SourceEncodingPolicyV1, CompileSnapshotV1, ResolutionWitnessV1, ResolutionCandidateV1, logical_source_path_valid_v1}
+use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1, public_summary_declaration_graph_digest_v1, public_summary_normalized_signature_v1, public_summary_sorted_dependencies_v1}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, SourceBlobV1, SourceEncodingPolicyV1, CompileSnapshotV1, ResolutionWitnessV1, ResolutionCandidateV1, SnapshotSourceEntryV1, NegativeCandidateV1, DirectoryGenerationV1, GeneratedInputV1, NamedDigestV1, logical_source_path_valid_v1}
 use compiler.common.cache_contract.file_ast_v1.{FileAstNodeV1, FileAstV1}
 use compiler.common.cache_contract.semantic_read_set_v1.{SemanticEffectKindV1, SemanticReplayPolicyV1, SemanticReadEntryV1, SemanticReadSetV1}
 
@@ -254,7 +254,9 @@ fn _append_candidate_v1(buffer: [u8], candidate: ResolutionCandidateV1) -> bool:
     _push_u64_v1(buffer, candidate.order)
     if not _append_text_v1(buffer, candidate.logical_path): return false
     if not _append_text_v1(buffer, candidate.normalization_key): return false
-    if not _append_digest_v1(buffer, candidate.physical_identity_digest): return false
+    # Same-handle identity validates the frozen witness, but is deliberately
+    # excluded from reusable semantic identity across worktrees.
+    if _digest_hex_to_raw_v1(candidate.physical_identity_digest).len() != 32: return false
     if not _append_digest_v1(buffer, candidate.parent_directory_generation_digest): return false
     if not _append_text_v1(buffer, candidate.entry_kind): return false
     buffer.push((if candidate.exists: 1 else: 0) as u8)
@@ -279,7 +281,140 @@ fn _append_witness_v1(buffer: [u8], witness: ResolutionWitnessV1) -> bool:
     if witness.selected_index >= 0 and (selected != 1 or not witness.candidates[witness.selected_index].selected): return false
     _push_u64_v1(buffer, witness.selected_index + 1)
     if not _append_text_sequence_v1(buffer, witness.generated_input_digests): return false
-    _append_digest_v1(buffer, witness.witness_digest)
+    # The live witness digest may bind handle identity for same-handle
+    # validation. Validate it, but never publish it into semantic identity.
+    _digest_hex_to_raw_v1(witness.witness_digest).len() == 32
+
+fn _path_key_v1(path: LogicalSourcePathV1) -> text:
+    val tag = match path.path_semantics:
+        case PathSemanticsV1.CaseSensitiveNfc: "1"
+        case PathSemanticsV1.CaseFoldedNfc: "2"
+    path.repository_namespace_digest + "\u0000" + path.module_relative_utf8 + "\u0000" + tag
+
+fn _source_key_v1(value: SnapshotSourceEntryV1) -> text: _path_key_v1(value.logical_path)
+fn _witness_key_v1(value: ResolutionWitnessV1) -> text:
+    var key = value.resolver_policy_digest + "\u0000" + value.root_trust_digest
+    for candidate in value.candidates:
+        key = key + "\u0000" + candidate.order.to_text() + "\u0000" + candidate.logical_path +
+            "\u0000" + candidate.normalization_key + "\u0000" + candidate.content_digest +
+            "\u0000" + candidate.symlink_chain_digest
+    for digest in value.generated_input_digests:
+        key = key + "\u0000" + digest
+    key
+fn _negative_key_v1(value: NegativeCandidateV1) -> text:
+    _path_key_v1(value.anchor) + "\u0000" + _path_key_v1(value.logical_candidate)
+fn _generation_key_v1(value: DirectoryGenerationV1) -> text: _path_key_v1(value.anchor_logical_path)
+fn _generated_key_v1(value: GeneratedInputV1) -> text: _path_key_v1(value.logical_path)
+fn _named_key_v1(value: NamedDigestV1) -> text: value.name
+
+fn _snapshot_sources_sorted_v1(values: [SnapshotSourceEntryV1]) -> [SnapshotSourceEntryV1]:
+    var out: [SnapshotSourceEntryV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _source_key_v1(value) < _source_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_witnesses_sorted_v1(values: [ResolutionWitnessV1]) -> [ResolutionWitnessV1]:
+    var out: [ResolutionWitnessV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _witness_key_v1(value) < _witness_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_negatives_sorted_v1(values: [NegativeCandidateV1]) -> [NegativeCandidateV1]:
+    var out: [NegativeCandidateV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _negative_key_v1(value) < _negative_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_generations_sorted_v1(values: [DirectoryGenerationV1]) -> [DirectoryGenerationV1]:
+    var out: [DirectoryGenerationV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _generation_key_v1(value) < _generation_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_generated_sorted_v1(values: [GeneratedInputV1]) -> [GeneratedInputV1]:
+    var out: [GeneratedInputV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _generated_key_v1(value) < _generated_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_named_sorted_v1(values: [NamedDigestV1]) -> [NamedDigestV1]:
+    var out: [NamedDigestV1] = []
+    for value in values:
+        var position = out.len()
+        while position > 0 and _named_key_v1(value) < _named_key_v1(out[position - 1]):
+            position = position - 1
+        out.push(value)
+        var cursor_index = out.len() - 1
+        while cursor_index > position:
+            out[cursor_index] = out[cursor_index - 1]
+            cursor_index = cursor_index - 1
+        out[position] = value
+    out
+
+fn _snapshot_sources_duplicate_v1(values: [SnapshotSourceEntryV1]) -> bool:
+    for i in 1..values.len():
+        if _source_key_v1(values[i - 1]) == _source_key_v1(values[i]): return true
+    false
+fn _snapshot_witnesses_duplicate_v1(values: [ResolutionWitnessV1]) -> bool:
+    for i in 1..values.len():
+        if _witness_key_v1(values[i - 1]) == _witness_key_v1(values[i]): return true
+    false
+fn _snapshot_negatives_duplicate_v1(values: [NegativeCandidateV1]) -> bool:
+    for i in 1..values.len():
+        if _negative_key_v1(values[i - 1]) == _negative_key_v1(values[i]): return true
+    false
+fn _snapshot_generations_duplicate_v1(values: [DirectoryGenerationV1]) -> bool:
+    for i in 1..values.len():
+        if _generation_key_v1(values[i - 1]) == _generation_key_v1(values[i]): return true
+    false
+fn _snapshot_generated_duplicate_v1(values: [GeneratedInputV1]) -> bool:
+    for i in 1..values.len():
+        if _generated_key_v1(values[i - 1]) == _generated_key_v1(values[i]): return true
+    false
+fn _snapshot_named_duplicate_v1(values: [NamedDigestV1]) -> bool:
+    for i in 1..values.len():
+        if _named_key_v1(values[i - 1]) == _named_key_v1(values[i]): return true
+    false
 
 pub fn canonical_compile_snapshot_payload_v1(snapshot: CompileSnapshotV1) -> [u8]:
     var buffer: [u8] = []
@@ -287,24 +422,42 @@ pub fn canonical_compile_snapshot_payload_v1(snapshot: CompileSnapshotV1) -> [u8
     _push_u64_v1(buffer, snapshot.schema)
     if not _append_digest_v1(buffer, snapshot.repository_namespace_digest): return []
     if not _append_digest_v1(buffer, snapshot.path_policy_digest): return []
-    _push_u64_v1(buffer, snapshot.source_entries.len())
-    for entry in snapshot.source_entries:
+    if (snapshot.source_entries.len() > canonical_cache_max_entries_v1() or
+            snapshot.resolution_witnesses.len() > canonical_cache_max_entries_v1() or
+            snapshot.negative_candidates.len() > canonical_cache_max_entries_v1() or
+            snapshot.directory_generations.len() > canonical_cache_max_entries_v1() or
+            snapshot.generated_inputs.len() > canonical_cache_max_entries_v1() or
+            snapshot.provider_manifests.len() > canonical_cache_max_entries_v1() or
+            snapshot.toolchain_component_digests.len() > canonical_cache_max_entries_v1()): return []
+    val source_entries = _snapshot_sources_sorted_v1(snapshot.source_entries)
+    val witnesses = _snapshot_witnesses_sorted_v1(snapshot.resolution_witnesses)
+    val negatives = _snapshot_negatives_sorted_v1(snapshot.negative_candidates)
+    val generations = _snapshot_generations_sorted_v1(snapshot.directory_generations)
+    val generated_inputs = _snapshot_generated_sorted_v1(snapshot.generated_inputs)
+    val providers = _snapshot_named_sorted_v1(snapshot.provider_manifests)
+    val components = _snapshot_named_sorted_v1(snapshot.toolchain_component_digests)
+    if (_snapshot_sources_duplicate_v1(source_entries) or _snapshot_witnesses_duplicate_v1(witnesses) or
+            _snapshot_negatives_duplicate_v1(negatives) or _snapshot_generations_duplicate_v1(generations) or
+            _snapshot_generated_duplicate_v1(generated_inputs) or _snapshot_named_duplicate_v1(providers) or
+            _snapshot_named_duplicate_v1(components)): return []
+    _push_u64_v1(buffer, source_entries.len())
+    for entry in source_entries:
         if not _append_logical_path_v1(buffer, entry.logical_path): return []
         if not _append_digest_v1(buffer, entry.source_blob_digest): return []
-    _push_u64_v1(buffer, snapshot.resolution_witnesses.len())
-    for witness in snapshot.resolution_witnesses:
+    _push_u64_v1(buffer, witnesses.len())
+    for witness in witnesses:
         if not _append_witness_v1(buffer, witness): return []
-    _push_u64_v1(buffer, snapshot.negative_candidates.len())
-    for negative in snapshot.negative_candidates:
+    _push_u64_v1(buffer, negatives.len())
+    for negative in negatives:
         if not _append_logical_path_v1(buffer, negative.anchor): return []
         if not _append_logical_path_v1(buffer, negative.logical_candidate): return []
         if not _append_digest_v1(buffer, negative.absence_witness_digest): return []
-    _push_u64_v1(buffer, snapshot.directory_generations.len())
-    for generation in snapshot.directory_generations:
+    _push_u64_v1(buffer, generations.len())
+    for generation in generations:
         if not _append_logical_path_v1(buffer, generation.anchor_logical_path): return []
         if not _append_digest_v1(buffer, generation.stable_generation_digest): return []
-    _push_u64_v1(buffer, snapshot.generated_inputs.len())
-    for generated in snapshot.generated_inputs:
+    _push_u64_v1(buffer, generated_inputs.len())
+    for generated in generated_inputs:
         if not _append_logical_path_v1(buffer, generated.logical_path): return []
         if not _append_digest_v1(buffer, generated.producer_digest): return []
         if not _append_digest_v1(buffer, generated.input_manifest_digest): return []
@@ -312,12 +465,12 @@ pub fn canonical_compile_snapshot_payload_v1(snapshot: CompileSnapshotV1) -> [u8
     if not _append_digest_v1(buffer, snapshot.target_layout_digest): return []
     if not _append_digest_v1(buffer, snapshot.compiler_owner_digest): return []
     if not _append_digest_v1(buffer, snapshot.runtime_digest): return []
-    _push_u64_v1(buffer, snapshot.provider_manifests.len())
-    for provider in snapshot.provider_manifests:
+    _push_u64_v1(buffer, providers.len())
+    for provider in providers:
         if not _append_text_v1(buffer, provider.name): return []
         if not _append_digest_v1(buffer, provider.digest): return []
-    _push_u64_v1(buffer, snapshot.toolchain_component_digests.len())
-    for component in snapshot.toolchain_component_digests:
+    _push_u64_v1(buffer, components.len())
+    for component in components:
         if not _append_text_v1(buffer, component.name): return []
         if not _append_digest_v1(buffer, component.digest): return []
     buffer
@@ -422,7 +575,7 @@ fn _replay_tag_v1(policy: SemanticReplayPolicyV1) -> i64:
         case SemanticReplayPolicyV1.UndeclaredUncacheable: 2
 
 fn _read_entry_key_v1(entry: SemanticReadEntryV1) -> text:
-    _effect_tag_v1(entry.effect_kind).to_text() + "\u0000" + entry.logical_name + "\u0000" + entry.provider_id
+    _effect_tag_v1(entry.effect_kind).to_text() + "\u0000" + entry.logical_name
 
 pub fn canonical_semantic_read_set_payload_v1(read_set: SemanticReadSetV1) -> [u8]:
     var entries = read_set.entries.copy()
@@ -441,7 +594,8 @@ pub fn canonical_semantic_read_set_payload_v1(read_set: SemanticReadSetV1) -> [u
         if i > 0 and _read_entry_key_v1(entries[i - 1]) == _read_entry_key_v1(entries[i]):
             val previous = entries[i - 1]
             val current = entries[i]
-            if (previous.provider_manifest_digest != current.provider_manifest_digest or
+            if (previous.provider_id != current.provider_id or
+                    previous.provider_manifest_digest != current.provider_manifest_digest or
                     previous.value_digest != current.value_digest or
                     _replay_tag_v1(previous.replay_policy) != _replay_tag_v1(current.replay_policy)):
                 return []
@@ -610,6 +764,8 @@ fn _summary_entries_conflict_free_v1(entries: [PublicSummaryEntryV1]) -> bool:
     while i < entries.len():
         if (text_to_bytes(entries[i].stable_symbol_id).len() > canonical_cache_max_text_bytes_v1() or
                 text_to_bytes(entries[i].canonical_bytes).len() > canonical_cache_max_text_bytes_v1()): return false
+        val dependencies = public_summary_sorted_dependencies_v1(entries[i].dependency_symbol_ids)
+        if dependencies.len() != entries[i].dependency_symbol_ids.len(): return false
         var j = i + 1
         while j < entries.len():
             if entries[i].stable_symbol_id == entries[j].stable_symbol_id and entries[i].canonical_bytes != entries[j].canonical_bytes:
@@ -627,20 +783,17 @@ fn _encode_summary_entries_v1(buffer: [u8], entries: [PublicSummaryEntryV1]):
     for entry in sorted:
         _append_text_v1(buffer, entry.stable_symbol_id)
         _append_text_v1(buffer, entry.canonical_bytes)
+        _append_text_sequence_v1(buffer, public_summary_sorted_dependencies_v1(entry.dependency_symbol_ids))
 
 fn _encode_summary_entries_preserved_v1(buffer: [u8], entries: [PublicSummaryEntryV1]):
     _push_u64_v1(buffer, entries.len())
     for entry in entries:
         _append_text_v1(buffer, entry.stable_symbol_id)
         _append_text_v1(buffer, entry.canonical_bytes)
+        _append_text_sequence_v1(buffer, public_summary_sorted_dependencies_v1(entry.dependency_symbol_ids))
 
 pub fn canonical_public_summary_declaration_graph_digest_v1(summary: PublicSummaryV1) -> text:
-    var graph: [u8] = []
-    _push_u16_v1(graph, 1)
-    _encode_summary_entries_preserved_v1(graph, summary.forward_declarations)
-    _push_u16_v1(graph, 2)
-    _encode_summary_entries_v1(graph, summary.declarations)
-    _domain_digest_v1("simple.public-summary.declaration-graph.v1\u0000", graph)
+    public_summary_declaration_graph_digest_v1(summary.forward_declarations, summary.declarations)
 
 fn _decode_summary_entries_v1(cursor: _CanonicalCursorV1) -> [PublicSummaryEntryV1]:
     var buffer: [PublicSummaryEntryV1] = []
@@ -650,7 +803,8 @@ fn _decode_summary_entries_v1(cursor: _CanonicalCursorV1) -> [PublicSummaryEntry
         return buffer
     var i = 0
     while i < count:
-        buffer.push(PublicSummaryEntryV1(stable_symbol_id: cursor.read_text(), canonical_bytes: cursor.read_text()))
+        buffer.push(PublicSummaryEntryV1(stable_symbol_id: cursor.read_text(), canonical_bytes: cursor.read_text(),
+            dependency_symbol_ids: cursor.read_texts()))
         i = i + 1
     if not canonical_summary_entries_valid_v1(buffer): cursor.failed = true
     buffer
@@ -674,6 +828,15 @@ pub fn canonical_public_summary_payload_v1(summary: PublicSummaryV1) -> [u8]:
             _digest_hex_to_raw_v1(summary.virtual_text_digest).len() != 32):
         return buffer
     if summary.declaration_graph_digest != canonical_public_summary_declaration_graph_digest_v1(summary): return buffer
+    if summary.forward_declarations.len() != summary.declarations.len(): return buffer
+    for forward in summary.forward_declarations:
+        var matched = false
+        for declaration in summary.declarations:
+            if declaration.stable_symbol_id == forward.stable_symbol_id:
+                if public_summary_normalized_signature_v1(forward.canonical_bytes) !=
+                        public_summary_normalized_signature_v1(declaration.canonical_bytes): return []
+                matched = true
+        if not matched: return []
     _append_text_v1(buffer, summary.snapshot_id)
     _append_text_v1(buffer, summary.logical_path.repository_namespace_digest)
     _append_text_v1(buffer, summary.logical_path.module_relative_utf8)
