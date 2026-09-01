@@ -340,3 +340,120 @@ and **that entry does not compile** — `return ()` in a `main` with no declared
 return type is itself the HIR error quoted above. Every run of the documented
 repro therefore died on the fixture, not on the defect under investigation, and
 the transport defect hid which. Drop the `return ()` line before reusing it.
+
+---
+
+## ROOT CAUSE FOUND AND FIXED (2026-09-01, later session)
+
+**Status: FIXED.** The defect is in the Rust seed interpreter's chained
+method-call write-back, exactly as the previous session's "corruption is in the
+interpreter's env slot for `self`" conclusion predicted.
+
+### The two measurements that closed it
+
+The previous session's recommended step was implemented: print the **local
+environment's key set** in the `[field-access-error]` branch, since
+`Expr::FieldAccess` carries no span. That named the frame immediately:
+
+```
+[field-access-error] field=symbols recv_type=bool recv=false expr=Identifier("self")
+  stack=... -> register_imported_symbol -> register_imported_symbol_inner
+  locals=alias_position,already_bound,callable_position,composite_position,
+         constant_position,enum_position,import_span,imported_index,imported_mod,
+         imported_mod_name,imported_name,local_name,materialize_enum,
+         routed_origin,scan_started,self,surface_key,trait_position
+```
+
+So the failing hop IS in `_inner`'s own frame, `self` IS in that frame's
+overlay, and the frame is past the `already_bound` / `*_position` bindings.
+
+A second trap (`SIMPLE_TRAP_SELF_WRITE=1`, on `CowEnv::insert`, printing a Rust
+backtrace whenever a **bool** is written into any frame's `self` slot) fired
+**exactly once** and named the writer:
+
+```
+[self-slot-write] value_type=bool value=false
+   0: CowEnv::insert
+   1: interpreter::node_exec::exec_node
+   2: block_exec::exec_block_fn
+   3: interpreter_control::exec_if_core
+   ...
+   8: interpreter_helpers::patterns::handle_method_call_with_self_update_inner
+   9: interpreter_helpers::patterns::handle_method_call_with_self_update
+```
+
+`exec_node`'s `Node::Let` arm does `env.insert(obj_name, new_self)` with the
+pair returned by `handle_method_call_with_self_update`.
+
+### The defect
+
+`interpreter_helpers/patterns.rs`, the **owned-values** branch of
+`handle_method_call_with_self_update_inner`, for a chained call
+`root.<inner>(..).<outer>(..)`:
+
+```rust
+if let Some((ref obj_name, _)) = inner_update {
+    if let Value::Object { class: updated_class, .. } = &updated_inner_self {
+        if updated_class == class {                       // <-- always true
+            return Ok((outer_result.clone(),
+                       Some((obj_name.clone(), outer_result))));   // <-- writes the
+        }                                                          //     RETURN VALUE
+    }                                                              //     into the ROOT
+    return Ok((outer_result, inner_update));
+}
+```
+
+`class` is the class of the **outer call's own receiver**, and
+`updated_inner_self` is that same receiver after the call — so
+`updated_class == class` compares a class to itself. It is trivially true and
+says nothing about `obj_name`, the ROOT variable being overwritten.
+
+Applied to `module_import_registration.spl`'s
+`val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()`:
+
+- root (`obj_name`) = `self` (the `HirLowering` receiver),
+- outer receiver = the `SymbolId` returned by `lookup_or_invalid`,
+- `updated_class == class` is `SymbolId == SymbolId` -> passes,
+- `outer_result` = `is_valid()`'s **bool** -> `env.insert("self", Bool(false))`.
+
+`self` is a bool from that statement onward, so the next `self.symbols` hop
+fails with *"cannot access field on value of type 'bool'"*. `.symbols` is
+merely the first field reached — which is why every source-level probe wave
+was silent: nothing in `.spl` rebinds `self`, and every method *entry* really
+was clean.
+
+### Why six probe waves missed it and the sibling fix did not cover it
+
+The non-owned fallback path ~60 lines below already carries the CORRECT gate —
+`inner_self.class == outer_result.class` **and** both links declared `me` —
+added by
+`doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md`.
+That fix hardened one path and missed its owned-values sibling. The two paths
+now carry the identical gate.
+
+### Evidence (12-module reproducer, same seed, same flags, same cache policy)
+
+| | before fix | after fix |
+|---|---|---|
+| `[field-access-error]` count | 1 | **0** |
+| `[self-slot-write]` count | 1 | **0** |
+| furthest HIR module | `hir 6/12` (`std.nogc_sync_mut.io.pipe`) FATAL | **`hir 12/12`** |
+
+`SIMPLE_DEBUG_FIELD_ACCESS=1` was set on every measuring run, per this record's
+own warning.
+
+### Fixture bug exposed by getting further
+
+With HIR completing, the reproducer entry itself failed on
+*"untyped function returns a value: function 'main' returns a value but
+declares no return type"* — a defect in `src/app/repro_iowner/i_owner.spl`'s
+own `return ()`, unreachable before because HIR never got that far. Removed.
+Note the diagnostics **did** survive transport on this run (secondary defect 1
+did not reproduce here).
+
+### Diagnostics retained (do not delete — logging retention policy)
+
+- `[field-access-error]` now also prints `locals=` (frame overlay keys) and
+  `env_keys=`, gated on the existing `SIMPLE_DEBUG_FIELD_ACCESS`. This is the
+  attributability this record complained was missing.
+- `SIMPLE_TRAP_SELF_WRITE=1` on `CowEnv::insert` (capped at 8 reports).
