@@ -4,12 +4,24 @@ use compiler.common.cache_contract.snapshot_contract_v1 (
     ResolutionCandidateV1, ResolutionWitnessV1
 )
 use std.common.crypto.sha256.{sha256_text}
+use std.common.cache_path_policy_v1.{cache_path_policy_v1}
 
 fn _rw_field(name: text, value: text) -> text:
     "{name.len()}:{name}{value.len()}:{value}"
 
 fn _rw_bool(value: bool) -> text:
     if value: "1" else: "0"
+
+fn _rw_digest_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val digits = "0123456789abcdef"
+    var index = 0
+    while index < value.len():
+        if not digits.contains(value.substring(index, index + 1)):
+            return false
+        index = index + 1
+    true
 
 fn _rw_candidate_material(candidate: ResolutionCandidateV1) -> text:
     _rw_field("order", "{candidate.order}") +
@@ -24,10 +36,10 @@ fn _rw_candidate_material(candidate: ResolutionCandidateV1) -> text:
         _rw_field("symlink_chain", candidate.symlink_chain_digest)
 
 fn _rw_generated_material(values: [text]) -> text:
-    var out = ""
+    var material = ""
     for value in values:
-        out = out + _rw_field("generated", value)
-    out
+        material = material + _rw_field("generated", value)
+    material
 
 pub fn resolution_witness_digest_v1(
     resolver_policy_digest: text,
@@ -58,18 +70,24 @@ fn _rw_relative_path_valid(path: text) -> bool:
 fn _rw_candidate_valid(candidate: ResolutionCandidateV1, index: i64) -> bool:
     if candidate.order != index or not _rw_relative_path_valid(candidate.logical_path):
         return false
-    if (candidate.normalization_key == "" or
-            candidate.parent_directory_generation_digest == "" or
-            candidate.entry_kind == "" or candidate.symlink_chain_digest == ""):
+    val path_policy = cache_path_policy_v1(candidate.logical_path)
+    if not path_policy.accepted or path_policy.logical_relative != candidate.logical_path:
+        return false
+    if (candidate.normalization_key == "" or candidate.entry_kind == "" or
+            not _rw_digest_valid(candidate.parent_directory_generation_digest) or
+            not _rw_digest_valid(candidate.physical_identity_digest) or
+            not _rw_digest_valid(candidate.content_digest) or
+            not _rw_digest_valid(candidate.symlink_chain_digest)):
         return false
     if candidate.exists:
-        candidate.physical_identity_digest != "" and candidate.content_digest != ""
+        candidate.entry_kind != "absent"
     else:
-        candidate.physical_identity_digest == "" and candidate.content_digest == "" and not candidate.selected
+        candidate.entry_kind == "absent" and not candidate.selected
 
 pub fn resolution_witness_valid_v1(witness: ResolutionWitnessV1) -> bool:
-    if (witness.resolver_policy_digest == "" or witness.root_trust_digest == "" or
-            witness.witness_digest == ""):
+    if (not _rw_digest_valid(witness.resolver_policy_digest) or
+            not _rw_digest_valid(witness.root_trust_digest) or
+            not _rw_digest_valid(witness.witness_digest)):
         return false
     if witness.selected_index < -1 or witness.selected_index >= witness.candidates.len():
         return false
@@ -93,6 +111,11 @@ pub fn resolution_witness_valid_v1(witness: ResolutionWitnessV1) -> bool:
     else:
         if selected_count != 1 or not witness.candidates[witness.selected_index].exists:
             return false
+    var generated_seen: [text] = []
+    for digest in witness.generated_input_digests:
+        if not _rw_digest_valid(digest) or generated_seen.contains(digest):
+            return false
+        generated_seen.push(digest)
     witness.witness_digest == resolution_witness_digest_v1(
         witness.resolver_policy_digest,
         witness.root_trust_digest,

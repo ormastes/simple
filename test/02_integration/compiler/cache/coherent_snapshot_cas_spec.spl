@@ -8,7 +8,7 @@ use std.spec.step
 use std.io.{dir_remove_all, file_write, file_exists, file_delete}
 use compiler.common.cache_contract.snapshot_contract_v1 (
     PathSemanticsV1, LogicalSourcePathV1, ResolutionCandidateV1,
-    DirectoryGenerationV1
+    NegativeCandidateV1, DirectoryGenerationV1
 )
 use compiler.common.cache_contract.canonical_cache_codec_v1 (
     canonical_cache_encode_envelope_v1, canonical_cache_kind_source_blob_v1
@@ -22,8 +22,7 @@ use compiler.frontend.snapshot.compile_snapshot_freezer (
     freeze_compile_snapshot_v1
 )
 use compiler.driver.cache.cas.verified_cas_store (
-    verified_cas_put_v1, verified_cas_get_v1, verified_cas_object_path_v1,
-    publish_frozen_compile_snapshot_v1
+    verified_cas_put_v1, verified_cas_get_v1, verified_cas_object_path_v1
 )
 
 extern fn rt_getpid() -> i64
@@ -88,12 +87,6 @@ describe "coherent snapshot freezer":
         expect(frozen.is_ok()).to_equal(true)
         expect(frozen.unwrap().source_blobs.len()).to_equal(1)
         expect(frozen.unwrap().accepted_attempt).to_equal(0)
-        val base = "build/test-artifacts/coherent-snapshot-publish-{rt_getpid()}"
-        dir_remove_all(base)
-        val published = publish_frozen_compile_snapshot_v1(base, frozen.unwrap()).unwrap()
-        expect(published.snapshot_id.len()).to_equal(64)
-        expect(published.source_blob_cas_digests.len()).to_equal(1)
-        dir_remove_all(base)
 
     it "retries once after same-stat content mutation and accepts only the second generation":
         step("Discard a changed first generation before publication")
@@ -130,6 +123,45 @@ describe "coherent snapshot freezer":
         val witness = make_resolution_witness_v1(
             "e".repeat(64), "f".repeat(64), [first, second], 0, [])
         expect(resolution_witness_valid_v1(witness)).to_equal(false)
+
+    it "rejects root, namespace, duplicate source, and unproved absence mismatches":
+        step("Bind every witness and absence to one root namespace")
+        val stable = attempt([97], "b".repeat(64), "stable-1",
+            "c".repeat(64), [97])
+        val wrong_root = SnapshotAttemptV1(
+            root_trust_digest: "0".repeat(64), sources: stable.sources,
+            resolution_witnesses: stable.resolution_witnesses,
+            negative_candidates: stable.negative_candidates,
+            directory_generations_before: stable.directory_generations_before,
+            directory_generations_after: stable.directory_generations_after,
+            generated_inputs_before: [], generated_inputs_after: [])
+        expect(snapshot_attempt_stable_v1(wrong_root)).to_equal(false)
+        val duplicate = SnapshotAttemptV1(
+            root_trust_digest: stable.root_trust_digest,
+            sources: [stable.sources[0], stable.sources[0]],
+            resolution_witnesses: stable.resolution_witnesses,
+            negative_candidates: [],
+            directory_generations_before: stable.directory_generations_before,
+            directory_generations_after: stable.directory_generations_after,
+            generated_inputs_before: [], generated_inputs_after: [])
+        expect(snapshot_attempt_stable_v1(duplicate)).to_equal(false)
+        val unproved_absence = SnapshotAttemptV1(
+            root_trust_digest: stable.root_trust_digest, sources: stable.sources,
+            resolution_witnesses: stable.resolution_witnesses,
+            negative_candidates: [NegativeCandidateV1(
+                anchor: logical("pkg"), logical_candidate: logical("pkg/missing.spl"),
+                absence_witness_digest: "7".repeat(64))],
+            directory_generations_before: stable.directory_generations_before,
+            directory_generations_after: stable.directory_generations_after,
+            generated_inputs_before: [], generated_inputs_after: [])
+        expect(snapshot_attempt_stable_v1(unproved_absence)).to_equal(false)
+        val wrong_metadata = SnapshotFreezeMetadataV1(
+            repository_namespace_digest: "9".repeat(64),
+            path_policy_digest: "1".repeat(64), configuration_digest: "2".repeat(64),
+            target_layout_digest: "3".repeat(64), compiler_owner_digest: "4".repeat(64),
+            runtime_digest: "5".repeat(64), provider_manifests: [],
+            toolchain_component_digests: [])
+        expect(freeze_compile_snapshot_v1([stable], wrong_metadata).is_err()).to_equal(true)
 
 describe "verified immutable CAS":
     it "shares identical envelopes across checkout-relative presentation roots":

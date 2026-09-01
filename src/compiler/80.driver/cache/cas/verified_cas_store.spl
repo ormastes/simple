@@ -6,7 +6,6 @@ use compiler.common.cache_contract.errors_v1 (
     RejectTelemetryV1
 )
 use compiler.common.cache_contract.canonical_cache_codec_v1.*
-use compiler.frontend.snapshot.compile_snapshot_freezer.{FrozenSnapshotCandidateV1}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{dir_create_all, file_rename}
 use std.io.*
@@ -22,10 +21,6 @@ pub struct VerifiedCasLookupV1:
     digest: text
     canonical_envelope: [u8]
 
-pub struct PublishedCompileSnapshotV1:
-    snapshot_id: text
-    snapshot_cas_digest: text
-    source_blob_cas_digests: [text]
 
 fn _cas_error(code: CacheErrorCodeV1, retry: RetryClassV1, detail: text) -> CacheErrorV1:
     CacheErrorV1(
@@ -42,11 +37,11 @@ fn _cas_hex_digit(value: i64) -> text:
     "0123456789abcdef".substring(value, value + 1)
 
 fn _cas_hex_encode(bytes: [u8]) -> text:
-    var out = ""
+    var encoded = ""
     for byte in bytes:
         val value = byte as i64
-        out = out + _cas_hex_digit((value >> 4) & 15) + _cas_hex_digit(value & 15)
-    out
+        encoded = encoded + _cas_hex_digit((value >> 4) & 15) + _cas_hex_digit(value & 15)
+    encoded
 
 fn _cas_hex_value(value: text) -> i64:
     "0123456789abcdef".index_of(value)
@@ -55,7 +50,7 @@ fn _cas_hex_decode(encoded: text, max_bytes: i64) -> Result<[u8], CacheErrorV1>:
     if encoded.len() % 2 != 0 or encoded.len() / 2 > max_bytes:
         return Err(_cas_error(CacheErrorCodeV1.CacheBoundsExceeded,
             RetryClassV1.Never, "cas-hex-length-invalid"))
-    var out: [u8] = []
+    var decoded: [u8] = []
     var index = 0
     while index < encoded.len():
         val high = _cas_hex_value(encoded.substring(index, index + 1))
@@ -63,9 +58,9 @@ fn _cas_hex_decode(encoded: text, max_bytes: i64) -> Result<[u8], CacheErrorV1>:
         if high < 0 or low < 0:
             return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
                 RetryClassV1.Never, "cas-hex-character-invalid"))
-        out.push(((high << 4) | low) as u8)
+        decoded.push(((high << 4) | low) as u8)
         index = index + 2
-    Ok(out)
+    Ok(decoded)
 
 fn _cas_digest_valid(digest: text) -> bool:
     if digest.len() != 64:
@@ -192,23 +187,3 @@ pub fn verified_cas_put_v1(
         return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
             RetryClassV1.Never, "cas-publish-readback-mismatch"))
     Ok(digest)
-
-# Publish only already-frozen bytes. Every object is read back and verified by
-# verified_cas_put_v1 before the snapshot receipt is returned.
-pub fn publish_frozen_compile_snapshot_v1(
-    root: text, frozen: FrozenSnapshotCandidateV1
-) -> Result<PublishedCompileSnapshotV1, CacheErrorV1>:
-    var source_digests: [text] = []
-    for blob in frozen.source_blobs:
-        val encoded = canonical_source_blob_encode_v1(blob)
-        val digest = verified_cas_put_v1(root, "source_blob", encoded)?
-        source_digests.push(digest)
-    val snapshot_id = canonical_compile_snapshot_digest_v1(frozen.snapshot)
-    val snapshot_envelope = canonical_compile_snapshot_encode_v1(frozen.snapshot)
-    val snapshot_cas_digest = verified_cas_put_v1(
-        root, "compile_snapshot", snapshot_envelope)?
-    Ok(PublishedCompileSnapshotV1(
-        snapshot_id: snapshot_id,
-        snapshot_cas_digest: snapshot_cas_digest,
-        source_blob_cas_digests: source_digests
-    ))
