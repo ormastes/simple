@@ -4,28 +4,6 @@
 # validation while retaining the bounded committed-tree guards.
 set -u
 
-# --- re-entry guard (OLDGUARD_DEPTH) ---
-# 2026-08-26: a recursive pre-push probe (nicknamed "oldguard" in session
-# memory) was observed spawning thousands of timeout/sh processes and hanging
-# the host. The exact recursing artifact could not be located by static
-# search of the current tree (see
-# doc/08_tracking/bug/oldguard_prepush_probe_recursion_2026-08-26.md), but any
-# chain where this dispatcher (or a guard it calls) ends up invoking a real
-# `git push`/`jj git push` that re-triggers this same hook is exactly the
-# recursion shape described. This sentinel bounds that shape unconditionally,
-# as defense-in-depth, regardless of which script turns out to be the
-# original offender: each invocation increments OLDGUARD_DEPTH and refuses to
-# continue past a small hard cap, so a self-reentrant chain dies in a handful
-# of hops instead of forking until the box falls over.
-: "${OLDGUARD_DEPTH:=0}"
-OLDGUARD_DEPTH=$((OLDGUARD_DEPTH + 1))
-export OLDGUARD_DEPTH
-OLDGUARD_MAX_DEPTH=3
-if [ "$OLDGUARD_DEPTH" -gt "$OLDGUARD_MAX_DEPTH" ]; then
-    echo "pre-push dispatcher: OLDGUARD_DEPTH=$OLDGUARD_DEPTH exceeds cap ($OLDGUARD_MAX_DEPTH) — refusing, this hook (or something it calls) is re-entering itself" >&2
-    exit 1
-fi
-
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
     echo "pre-push dispatcher: cannot locate repository root" >&2
     exit 1
@@ -38,7 +16,35 @@ cat > "$REFS"
 
 LOCAL_HOOK="$HOOKS_DIR/pre-push.local"
 CANONICAL_GUARD="$ROOT/scripts/check/pre-push-conflict-tree-guard.shs"
-if [ -x "$LOCAL_HOOK" ] && ! cmp -s "$LOCAL_HOOK" "$CANONICAL_GUARD"; then
+
+# Recursion fuse. `.git/hooks/pre-push` is a thin launcher that execs THIS
+# dispatcher, and the installer leaves a byte-identical copy at
+# `pre-push.local`. The old test below only compared the local hook against
+# CANONICAL_GUARD, so a launcher-shaped local hook looked like a legitimate
+# third-party hook: dispatcher -> local hook -> exec dispatcher -> ... Each
+# turn of that loop is a live `sh`, so a single `git push` forks without bound
+# until the host runs out of pids (measured 2026-09-01: 16,253 processes, one
+# distinct parent each, still climbing; concurrent builds began failing with
+# EAGAIN "failed to spawn thread"). Two independent stops, because either
+# alone can be defeated: an env marker that survives exec, and a content
+# comparison against the dispatcher itself.
+if [ -n "${SIMPLE_PREPUSH_DISPATCHER_ACTIVE:-}" ]; then
+    LOCAL_HOOK=""
+fi
+SIMPLE_PREPUSH_DISPATCHER_ACTIVE=1
+export SIMPLE_PREPUSH_DISPATCHER_ACTIVE
+
+DISPATCHER_SELF="$ROOT/scripts/hooks/pre-push"
+if [ -n "$LOCAL_HOOK" ] && cmp -s "$LOCAL_HOOK" "$DISPATCHER_SELF"; then
+    LOCAL_HOOK=""
+fi
+# A launcher whose only job is to exec this dispatcher is not a user hook.
+if [ -n "$LOCAL_HOOK" ] && [ -r "$LOCAL_HOOK" ] &&
+   grep -q 'scripts/hooks/pre-push' "$LOCAL_HOOK" 2>/dev/null; then
+    LOCAL_HOOK=""
+fi
+
+if [ -n "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ] && ! cmp -s "$LOCAL_HOOK" "$CANONICAL_GUARD"; then
     "$LOCAL_HOOK" "$@" < "$REFS" || {
         rc=$?
         echo "pre-push dispatcher: preserved local hook failed (status $rc)" >&2
