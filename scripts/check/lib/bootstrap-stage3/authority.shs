@@ -218,10 +218,8 @@ bootstrap_stage3_host_platform() {
 bootstrap_stage3_target_c_compiler() {
     case "$1" in
         *-pc-windows-msvc)
-            command -v cl 2>/dev/null ||
-                command -v cl.exe 2>/dev/null ||
-                command -v clang-cl 2>/dev/null ||
-                command -v clang-cl.exe 2>/dev/null
+            bootstrap_stage3_windows_runnable_compiler cl.exe '/?' ||
+                bootstrap_stage3_windows_runnable_compiler clang-cl.exe '--version'
             ;;
         x86_64-pc-windows-gnu)
             command -v "${CC_x86_64_pc_windows_gnu:-gcc}" 2>/dev/null
@@ -230,6 +228,47 @@ bootstrap_stage3_target_c_compiler() {
             command -v cc 2>/dev/null
             ;;
     esac
+}
+
+bootstrap_stage3_windows_runnable_compiler() {
+    bootstrap_stage3_windows_name=$1
+    bootstrap_stage3_windows_probe_arg=$2
+    bootstrap_stage3_windows_candidates=""
+    if command -v where.exe >/dev/null 2>&1; then
+        bootstrap_stage3_windows_candidates=$(
+            where.exe "$bootstrap_stage3_windows_name" 2>/dev/null |
+                tr -d '\r'
+        ) || bootstrap_stage3_windows_candidates=""
+    fi
+    if [ -z "$bootstrap_stage3_windows_candidates" ]; then
+        bootstrap_stage3_windows_candidate=$(
+            command -v "$bootstrap_stage3_windows_name" 2>/dev/null
+        ) || return 1
+        bootstrap_stage3_windows_candidates=$bootstrap_stage3_windows_candidate
+    fi
+
+    bootstrap_stage3_windows_old_ifs=$IFS
+    IFS='
+'
+    for bootstrap_stage3_windows_candidate in $bootstrap_stage3_windows_candidates; do
+        IFS=$bootstrap_stage3_windows_old_ifs
+        if command -v cygpath >/dev/null 2>&1; then
+            bootstrap_stage3_windows_candidate=$(
+                cygpath -u "$bootstrap_stage3_windows_candidate" 2>/dev/null
+            ) || continue
+        fi
+        if [ -x "$bootstrap_stage3_windows_candidate" ] &&
+           "$bootstrap_stage3_windows_candidate" \
+                "$bootstrap_stage3_windows_probe_arg" >/dev/null 2>&1; then
+            printf '%s\n' "$bootstrap_stage3_windows_candidate"
+            IFS=$bootstrap_stage3_windows_old_ifs
+            return 0
+        fi
+        IFS='
+'
+    done
+    IFS=$bootstrap_stage3_windows_old_ifs
+    return 1
 }
 
 bootstrap_stage3_resolve_rust_toolchain() (
