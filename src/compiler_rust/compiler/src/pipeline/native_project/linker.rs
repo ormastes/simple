@@ -13,7 +13,8 @@ use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
-    find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib, find_objcopy_tool,
+    find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
+    find_msvc_compiler_rt_builtins, find_objcopy_tool,
     is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
     validate_stage4_cli_c_provider_archive_disjointness,
 };
@@ -765,6 +766,18 @@ extern "C" {
     void rt_set_args_wide(int argc, const wchar_t** argv);
     void __simple_runtime_init(void);
     void __simple_runtime_shutdown(void);
+    // generate_init_caller() ALWAYS emits a concrete (non-weak) definition
+    // of this symbol -- even when init_names is empty -- so it is safe to
+    // declare and call directly here with no /ALTERNATENAME fallback,
+    // exactly like the non-MSVC `main()` stub below does (guarded there by
+    // a weak-symbol null check instead, since MSVC/clang-cl has no
+    // __attribute__((weak))). Omitting this call was the actual bug: every
+    // module-level global that needs a heap-boxed initializer
+    // (codegen/llvm/backend_core.rs, `__module_init[_<prefix>]`) never ran
+    // its initializer on Windows, leaving the global's storage at its
+    // PE-loader-zeroed BSS default (null) -- see
+    // doc/08_tracking/bug/windows_msvc_module_init_alternatename_link_order_2026-08-31.md.
+    void __simple_call_module_inits(void);
 }
 #pragma comment(linker, "/ALTERNATENAME:spl_main=_spl_main_stub")
 #pragma comment(linker, "/ALTERNATENAME:__simple_runtime_init=___simple_runtime_init_stub")
@@ -774,6 +787,7 @@ extern "C" void ___simple_runtime_init_stub(void) {}
 extern "C" void ___simple_runtime_shutdown_stub(void) {}
 int wmain(int argc, wchar_t** argv) {
     __simple_runtime_init();
+    __simple_call_module_inits();
     rt_set_args_wide(argc, const_cast<const wchar_t**>(argv));
     int r = spl_main();
     __simple_runtime_shutdown();
@@ -813,34 +827,51 @@ int main(int argc, char** argv) {
         std::fs::write(&main_cpp, stub_code).map_err(|e| format!("write main stub: {e}"))?;
 
         let main_o = temp_dir.join("_main_stub.o");
-        let output = if is_clang_cl {
-            std::process::Command::new(&cxx)
-                .arg("/c")
-                .arg(format!("/Fo{}", main_o.display()))
-                .arg("/Gy")
-                .arg(&main_cpp)
-                .output()
-                .map_err(|e| format!("compile main stub: {e}"))?
-        } else {
-            std::process::Command::new(&cxx)
-                .args([
-                    "-c",
-                    "-Os",
-                    "-ffunction-sections",
-                    "-fdata-sections",
-                    "-fno-asynchronous-unwind-tables",
-                    "-fno-unwind-tables",
-                    "-fno-stack-protector",
-                    "-o",
-                ])
-                .arg(&main_o)
-                .arg(&main_cpp)
-                .output()
-                .map_err(|e| format!("compile main stub: {e}"))?
-        };
+        let clang_cl_args: Vec<String> = vec![
+            "/c".to_string(),
+            format!("/Fo{}", main_o.display()),
+            "/Gy".to_string(),
+            main_cpp.display().to_string(),
+        ];
+        let other_args: Vec<String> = vec![
+            "-c".to_string(),
+            "-Os".to_string(),
+            "-ffunction-sections".to_string(),
+            "-fdata-sections".to_string(),
+            "-fno-asynchronous-unwind-tables".to_string(),
+            "-fno-unwind-tables".to_string(),
+            "-fno-stack-protector".to_string(),
+            "-o".to_string(),
+            main_o.display().to_string(),
+            main_cpp.display().to_string(),
+        ];
+        let argv: &[String] = if is_clang_cl { &clang_cl_args } else { &other_args };
+        let output = std::process::Command::new(&cxx)
+            .args(argv)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "compile main stub: failed to spawn `{} {}`: {e}",
+                    cxx,
+                    argv.join(" ")
+                )
+            })?;
         if !output.status.success() {
+            // clang-cl (like cl.exe) writes diagnostics to STDOUT, not stderr --
+            // capturing only stderr here previously produced a message ending
+            // in ": " with nothing after it. Capture both streams plus the
+            // exact argv invoked so the failure is diagnosable without a
+            // manual reproduction.
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Failed to compile main stub ({}): {}", cxx, stderr));
+            return Err(format!(
+                "Failed to compile main stub ({} {}): exit={:?} stdout=[{}] stderr=[{}]",
+                cxx,
+                argv.join(" "),
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            ));
         }
         Ok(main_o)
     }
@@ -851,7 +882,7 @@ int main(int argc, char** argv) {
         temp_dir: &Path,
         object_paths: &[PathBuf],
         symbol_cache: Option<&mut HashMap<PathBuf, Vec<String>>>,
-    ) -> Result<Option<PathBuf>, String> {
+    ) -> Result<(Option<PathBuf>, Vec<String>), String> {
         let mut init_names = Vec::new();
         let mut local_cache = HashMap::new();
         let cache = match symbol_cache {
@@ -1015,7 +1046,7 @@ int main(int argc, char** argv) {
         if !status.success() {
             return Err(format!("compile init_all.cpp failed ({})", cxx));
         }
-        Ok(Some(init_o))
+        Ok((Some(init_o), init_names))
     }
 
     /// Compile C runtime sources to object files (currently disabled).
@@ -1049,7 +1080,7 @@ int main(int argc, char** argv) {
         let object_paths = link_object_paths.as_slice();
 
         let main_o = self.compile_main_stub(temp_dir)?;
-        let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
+        let (init_o, init_names) = self.generate_init_caller(temp_dir, object_paths, None)?;
         let extra_link_objects = configured_extra_link_objects()?;
         let selected_runtime = self.selected_runtime_library(temp_dir)?;
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
@@ -1380,9 +1411,39 @@ int main(int argc, char** argv) {
                 }
                 #[cfg(target_os = "windows")]
                 {
+                    // MSVC's `/ALTERNATENAME` (emitted by `generate_init_caller`
+                    // for every `__module_init_*` name, to emulate ELF/Mach-O
+                    // weak symbols) does not behave as a fallback-if-still-
+                    // undefined the way `__attribute__((weak))` does: link.exe
+                    // substitutes the alternate at the point the referencing
+                    // object (`_init_all.o`) is processed, which happens BEFORE
+                    // this archive -- appended after `_init_all.o` in the
+                    // deferred `/link` group for clang-cl, or immediately after
+                    // it here for plain MSVC -- is even scanned for its real
+                    // definitions. The archive member holding the true
+                    // `__module_init_<prefix>` then never gets pulled in, the
+                    // empty stub silently wins, and module init never runs
+                    // (doc/08_tracking/bug/windows_msvc_module_init_alternatename_link_order_2026-08-31.md).
+                    //
+                    // Force resolution the same way `runtime_retention_symbols`
+                    // already does for the runtime archive: `/INCLUDE:<name>`
+                    // pulls the archive member with that DEFINED symbol into the
+                    // link's root set regardless of ALTERNATENAME's rewrite.
+                    // Every name in `init_names` was scanned as a global symbol
+                    // out of exactly the object files this archive is built
+                    // from, so each one is guaranteed to have a real definition
+                    // here -- `/INCLUDE` on a name with no definition anywhere
+                    // is a hard unresolved-external link error, which is why
+                    // this is safe only because of that provenance.
                     if is_clang_cl {
+                        for name in &init_names {
+                            clang_cl_link_args.push(format!("/INCLUDE:{name}"));
+                        }
                         clang_cl_link_args.push(clang_cl_whole_archive_arg(&archive_path));
                     } else if is_msvc {
+                        for name in &init_names {
+                            cmd.arg(format!("-Wl,/INCLUDE:{name}"));
+                        }
                         cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
                     } else {
                         cmd.arg("-Wl,--whole-archive")
@@ -1706,6 +1767,20 @@ int main(int argc, char** argv) {
                 cmd.arg("-Wl,--no-as-needed");
             }
         }
+        #[cfg(target_os = "windows")]
+        if is_msvc {
+            // __builtin_cpu_init/__builtin_cpu_supports (runtime_simd_dispatch.c)
+            // lower to references to __cpu_model/__cpu_indicator_init, owned by
+            // the compiler runtime -- never fabricated as stubs (see
+            // is_compiler_rt_builtin_symbol). The GNU/mingw lane gets these for
+            // free because g++/gcc always link libgcc; the MSVC lane does not
+            // link compiler-rt by default, so they were genuinely unresolved
+            // (LNK2019) the moment stub fabrication for them was correctly
+            // removed. Link clang's own builtins archive explicitly.
+            if let Some(builtins) = find_msvc_compiler_rt_builtins(&cc, cross_target.arch.name()) {
+                cmd.arg(&builtins);
+            }
+        }
         #[cfg(target_os = "macos")]
         if macos_runtime_host_support_required(selected_runtime.is_some(), host_gpu_lane, exact_stage4) {
             add_macos_runtime_host_support(&mut cmd);
@@ -1880,7 +1955,7 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         }
         let object_paths = link_object_paths.as_slice();
         let mut symbol_cache = HashMap::new();
-        let init_o = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
+        let (init_o, _init_names) = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
         let cc = find_c_compiler();
 
         let compiler_rt_builtins = find_compiler_rt_builtins(triple);

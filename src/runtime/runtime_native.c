@@ -2305,14 +2305,17 @@ int64_t stdin_read_char(void) {
  * Windows CRT stdio defaults to TEXT mode, which rewrites every '
 ' written to
  * stdout into "
-" (and strips '' on read). That silently corrupts any
+" (and strips '
+' on read). That silently corrupts any
  * byte-counted protocol carried over stdio: a JSON-RPC / MCP "Content-Length"
  * frame terminated by CRLFCRLF leaves the process as CR CR LF CR CR LF, so the
  * header separator no longer matches and the announced byte count no longer
  * describes the bytes on the wire. Measured 2026-08-31 on the deployed native
  * bin/release/x86_64-pc-windows-msvc/simple_lsp_mcp_server.exe: it emitted
- * "Content-Length: 381
-
+ * "Content-Length: 381
+
+
+
 {...}". The Rust seed does not have this
  * defect because Rust's std never translates, which is exactly why the same
  * server answers correctly when run from source and corruptly when built native.
@@ -5500,9 +5503,84 @@ __attribute__((weak)) const char* spl_get_arg(int64_t idx) {
     return rt_core_argv && rt_core_argv[idx] ? rt_core_argv[idx] : "";
 }
 
+/* Windows-only: NOT weak there. On this repo's Windows GNU (MinGW/
+ * binutils) toolchain, a PE/COFF weak-external function symbol never
+ * resolves against a caller in a different translation unit -- verified
+ * directly (binutils 2.42, gcc 15.2.0): `__attribute__((weak)) void
+ * foo(void){}` in one .o/.a and `foo();` in another fails to link with
+ * "undefined reference to `foo'" even with the object linked directly
+ * (not through an archive), with `-Wl,-u,foo`, and with
+ * `-Wl,--whole-archive` -- unlike ELF, where a weak archive member is
+ * pulled normally. `rt_set_args` is the only rt_* weak function used as a
+ * retention root (see `runtime_retention_symbols` in
+ * compiler/src/pipeline/native_project/linker.rs); the other roots
+ * (`rt_function_not_found`, `rt_string_bytes`, `__simple_runtime_init`)
+ * are plain strong definitions and link fine.
+ *
+ * Kept weak on non-Windows deliberately: the Stage4 dual-capsule Linux/
+ * FreeBSD/macOS path (linker.rs ~1444-1461, `exact_stage4`) can link this
+ * C runtime archive alongside the Rust runtime capsule
+ * (`compiler_rust/runtime/src/value/args.rs` also defines `rt_set_args`)
+ * WITHOUT `-Wl,-z,muldefs` (that flag is only added when `!exact_stage4`,
+ * lines ~1280-1283) and without `--allow-multiple-definition` on that
+ * lazy-resolution path, so a strong definition here could collide with
+ * the Rust capsule's strong definition on exactly that lane -- the same
+ * "archive members resolve at OBJECT granularity" duplicate-symbol class
+ * documented a few hundred lines below in this file's own git history
+ * (8ca87866c6, ~475 collisions). ELF/Mach-O extract a weak archive member
+ * normally (unlike the Windows GNU case above), so keeping it weak there
+ * costs nothing and avoids that risk. See the Windows bootstrap
+ * rt_set_args unresolved-reference investigation, 2026-09-01. */
+#if defined(_WIN32)
+void rt_set_args(int argc, char** argv) {
+#else
 __attribute__((weak)) void rt_set_args(int argc, char** argv) {
+#endif
     spl_init_args(argc, argv);
 }
+
+#if defined(_WIN32)
+/* Wide-argv counterpart used by the generated MSVC wmain() entry point
+ * (compile_main_stub in linker.rs). wmain receives argv as UTF-16;
+ * convert each element to UTF-8 and hand it to the same argv storage
+ * rt_set_args uses, so downstream CLI-arg access is unaffected by which
+ * entry point ran. Previously undeclared/undefined -- any native-build
+ * output linking this MSVC main stub failed with LNK2019 for
+ * rt_set_args_wide (unresolved external referenced by wmain). */
+/* Not weak: same reason as rt_set_args above -- weak function symbols
+ * don't resolve on this Windows GNU toolchain. Single definition here. */
+void rt_set_args_wide(int argc, const wchar_t** argv) {
+    if (argc <= 0 || !argv) {
+        spl_init_args(argc > 0 ? argc : 0, NULL);
+        return;
+    }
+    char** utf8_argv = (char**)calloc((size_t)argc, sizeof(char*));
+    if (!utf8_argv) {
+        spl_init_args(0, NULL);
+        return;
+    }
+    for (int i = 0; i < argc; i++) {
+        const wchar_t* wide = argv[i];
+        if (!wide) {
+            utf8_argv[i] = _strdup("");
+            continue;
+        }
+        int needed = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+        if (needed <= 0) {
+            utf8_argv[i] = _strdup("");
+            continue;
+        }
+        char* converted = (char*)malloc((size_t)needed);
+        if (!converted) {
+            utf8_argv[i] = _strdup("");
+            continue;
+        }
+        WideCharToMultiByte(CP_UTF8, 0, wide, -1, converted, needed, NULL, NULL);
+        utf8_argv[i] = converted;
+    }
+    spl_init_args(argc, utf8_argv);
+}
+#endif /* _WIN32 */
 
 __attribute__((weak)) int32_t rt_get_argc(void) {
     return (int32_t)spl_arg_count();

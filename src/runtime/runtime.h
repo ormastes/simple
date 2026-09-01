@@ -1110,6 +1110,14 @@ void        spl_init_args(int argc, char** argv);
 int64_t     spl_arg_count(void);
 const char* spl_get_arg(int64_t idx);
 void        rt_set_args(int argc, char** argv);
+#ifdef _WIN32
+/* Windows wide-argv entry point (wmain). Converts each UTF-16 argv
+ * element to UTF-8 and forwards to rt_set_args's underlying storage
+ * (spl_init_args), so CLI arg access is identical to the narrow path.
+ * See src/compiler_rust/compiler/src/pipeline/native_project/linker.rs
+ * compile_main_stub -- the generated MSVC wmain() calls this. */
+void        rt_set_args_wide(int argc, const wchar_t** argv);
+#endif
 int32_t     rt_get_argc(void);
 SplArray*   rt_get_args(void);
 

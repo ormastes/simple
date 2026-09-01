@@ -1904,14 +1904,25 @@ void spl_condvar_destroy(spl_condvar_handle handle) {
 /* The core-C capsule already gets this compatibility ABI from
  * runtime_legacy_core.c.  Keep one owner when runtime_thread.c is added to
  * that archive; regular hosted runtime builds still use this implementation.
- */
-#if !defined(SIMPLE_CORE_C_STANDALONE) || defined(_WIN32)
-/* _WIN32 exception: the hosted Windows lane compiles with
- * -DSIMPLE_CORE_C_STANDALONE=1 (for spl_dl* ownership) but does NOT include
- * runtime_legacy_core.c, so omitting this left rt_pool_* with an undefined
- * spl_thread_cpu_count (measured 2026-08-31). Non-Windows lanes are
- * unchanged; a future Windows core archive carrying legacy_core links with
- * --allow-multiple-definition, so the duplicate is tolerated there. */
+ *
+ * A `_WIN32` exception used to widen this to `#if !defined(
+ * SIMPLE_CORE_C_STANDALONE) || defined(_WIN32)`, on the premise that "the
+ * hosted Windows lane compiles with -DSIMPLE_CORE_C_STANDALONE=1 but does
+ * NOT include runtime_legacy_core.c". That premise does not hold for any
+ * lane that actually exists: every caller that defines
+ * SIMPLE_CORE_C_STANDALONE (native_project/tools.rs's build_c_runtime_library,
+ * used by both build_core_c_runtime_library and build_stage4_c_runtime_library,
+ * and the standalone script build-core-c-bootstrap-runtime-capsule.shs) puts
+ * runtime_legacy_core.c in the SAME unconditional input list, on every
+ * platform including Windows -- so on Windows this TU's own copy collided
+ * with legacy_core.c's, both landing in simple_runtime.lib and both getting
+ * pulled into the same link: `error LNK2005: spl_thread_cpu_count ... already
+ * defined in simple_runtime.lib(runtime_thread.obj)` (measured 2026-08-31,
+ * once the Stage 2 sanity gate's Windows-ABI-env bug was fixed and it could
+ * finally exercise the MSVC/clang-cl lane instead of silently falling back to
+ * GNU). Restored to the single, unconditional guard below; legacy_core.c is
+ * the sole owner on every platform whenever SIMPLE_CORE_C_STANDALONE is set. */
+#if !defined(SIMPLE_CORE_C_STANDALONE)
 int64_t spl_thread_cpu_count(void) {
 #ifdef SPL_THREAD_PTHREAD
     #if defined(__APPLE__) || defined(__MACH__)

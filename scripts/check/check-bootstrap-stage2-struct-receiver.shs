@@ -30,7 +30,55 @@ stage2_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage2-receiver.XXXXXX")
 trap 'rm -rf "$stage2_probe_dir"' EXIT HUP INT TERM
 
 stage2_probe_bin="$stage2_probe_dir/bootstrap-struct-receiver-guard"
+# SIMPLE_NO_STUB_FALLBACK=1 is required on the MSVC/clang-cl lane: without it,
+# linker.rs's stub-fallback path adds a bare `/WHOLEARCHIVE` (no `:lib`
+# qualifier -- whole-archives every input archive) plus
+# `/FORCE:MULTIPLE,UNRESOLVED` to the clang-cl link line. That combination
+# lets the MSVC linker silently resolve the CRT startup call into `wmain`
+# to address 0 (image base) instead of erroring on the real duplicate/
+# unresolved symbol, producing a binary that segfaults (rc=139) at CRT
+# startup before any user code -- including a two-line hello world -- ever
+# runs. Confirmed by hand: this exact fixture, unchanged, exits 0 and
+# prints its expected output once this flag is set. The second probe below
+# (positional Stage-3 route) already carries this flag unconditionally for
+# the same reason; this one was simply missed.
+#
+# Scoped to the windows-msvc target only (not applied unconditionally like
+# the second probe) so this change is byte-for-byte inert on the
+# Linux/macOS lanes this same script also runs under -- provable rather
+# than merely assumed, since only the Windows lane could be verified here.
+# See doc/08_tracking/bug/stage2_windows_msvc_struct_receiver_probe_segv_2026-09-01.md.
+case "$stage2_target" in
+    *windows-msvc*) stage2_no_stub_fallback=1 ;;
+    *) stage2_no_stub_fallback= ;;
+esac
+# Derive the Windows ABI/linker flavor from the REQUESTED target rather than
+# trusting the caller's ambient environment. Target::linker_flavor() (Rust)
+# and _is_mingw()/_is_mingw_env() (self-hosted Simple) both fall back to an
+# MSYSTEM heuristic when SIMPLE_WINDOWS_ABI/SIMPLE_LINKER_FLAVOR are unset --
+# MSYSTEM is always set under Git Bash/MSYS2, so an msvc-targeted invocation
+# of this script that does not itself export those two vars silently builds
+# GNU flavor: compile flags go GNU-style (clang-cl warns and ignores them)
+# and the link step pulls in windows-mingw-only libraries such as gcc_eh,
+# which do not exist for an MSVC/clang-cl link -- LNK1181 "cannot open input
+# file 'gcc_eh.lib'". This reproduced exactly by invoking this script
+# directly (as its own usage line invites) without pre-exporting
+# SIMPLE_WINDOWS_ABI/SIMPLE_LINKER_FLAVOR, even though the full bootstrap
+# caller (bootstrap-from-scratch.sh) already exports both ambiently. Setting
+# them here, keyed off $stage2_target, makes the probe self-sufficient
+# regardless of what the caller's shell happened to export. No effect on
+# non-Windows targets: both vars are exported empty, which every consumer
+# treats as "no override, auto-detect" (see target.rs linker_flavor() and
+# runtime_compiler.spl _is_mingw()).
+case "$stage2_target" in
+    *windows-msvc*) stage2_windows_abi=msvc; stage2_linker_flavor=msvc ;;
+    *windows-gnu*)  stage2_windows_abi=gnu;  stage2_linker_flavor=gnu ;;
+    *) stage2_windows_abi=; stage2_linker_flavor= ;;
+esac
 if ! env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_NO_STUB_FALLBACK="$stage2_no_stub_fallback" \
+    SIMPLE_WINDOWS_ABI="$stage2_windows_abi" \
+    SIMPLE_LINKER_FLAVOR="$stage2_linker_flavor" \
     "$stage2_compiler" native-build \
     --target "$stage2_target" \
     --backend "$stage2_backend" \
@@ -97,6 +145,8 @@ env SIMPLE_BINARY="$stage2_compiler" \
     SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage2_probe_dir/stage3-route-cache" \
     SIMPLE_RUNTIME_PATH="$stage2_runtime_dir" \
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
+    SIMPLE_WINDOWS_ABI="$stage2_windows_abi" \
+    SIMPLE_LINKER_FLAVOR="$stage2_linker_flavor" \
     "$stage2_route_timeout_bin" -k 5s "${stage2_route_timeout}s" \
     "$stage2_compiler" native-build \
     --target "$stage2_target" \

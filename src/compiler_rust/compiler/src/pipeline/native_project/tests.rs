@@ -6181,6 +6181,25 @@ fn test_compiler_rt_builtin_symbols_are_not_stub_candidates() {
     ));
 }
 
+/// GCC's x86 CPU-feature-dispatch support symbols, defined with real bodies in
+/// libgcc's `cpuinfo.o`. Regression test for the Windows/MinGW GNU-lane
+/// incident where the stub generator fabricated a weak *function* body named
+/// `__cpu_model` for what libgcc actually defines as `.bss` *data*, colliding
+/// at final link as "multiple definition of `__cpu_model`" (`ld.exe` against
+/// `libgcc.a(cpuinfo.o)`).
+#[test]
+fn test_gcc_cpu_dispatch_symbols_are_not_stub_candidates() {
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__cpu_model"));
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__cpu_indicator_init"));
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__cpu_features2"));
+    // Mach-O's extra leading underscore.
+    assert!(super::tools::is_compiler_rt_builtin_symbol("___cpu_model"));
+    // Must stay an EXACT match, not a prefix: an unrelated application symbol
+    // that merely starts with "__cpu" is a real stub candidate and must not
+    // be silently swallowed by this exclusion.
+    assert!(!super::tools::is_compiler_rt_builtin_symbol("__cpu_scaling_governor_get"));
+}
+
 #[test]
 fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_system_symbol("__Znwm"));
@@ -6333,6 +6352,7 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
     let init_object = builder
         .generate_init_caller(temp.path(), &[], None)
         .unwrap()
+        .0
         .expect("empty init set must still own __simple_call_module_inits");
     let symbols = std::process::Command::new("nm")
         .arg("-g")
