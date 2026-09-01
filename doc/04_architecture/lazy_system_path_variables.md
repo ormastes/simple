@@ -39,9 +39,9 @@ Phase A implements the runtime contract through a raw template constructor;
 single-quoted literals are the bootstrap-stable spelling when braces must reach
 that constructor unchanged. Phase B preserves typed string suffixes in the
 pure-Simple flat AST and lowers `"..."_path` to the same token contract. Phase C
-propagates expected `Path` types so `file_open("...")` receives identical
-lowering. An ordinary untyped string containing `{sys:...}` fails with an
-`_path`/type-annotation suggestion; content spelling alone never implies a path.
+checks the constructor result against expected `LazyPathTemplate` types. An
+ordinary untyped string remains `text` and fails strong path parameters;
+content spelling alone never implies a path or triggers environment work.
 
 ## Startup closure
 

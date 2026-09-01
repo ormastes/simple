@@ -13,6 +13,10 @@
   admitted boundary input and converts to the same drive path.
 - **REQ-LSPV-006:** A resolved template memoizes either its successful value or error for deterministic repeated access. Tests may use a non-process input record.
 - **REQ-LSPV-007:** Raw strings never perform ordinary Simple interpolation. The library constructor accepts raw template text; future `_path` and contextual-`Path` lowering shall compile `{sys:...}` directly into deferred tokens.
-- **REQ-LSPV-008:** Passing runtime `text` to a strong `Path` API eventually becomes an error after migration; literals in an expected `Path` context may lower contextually without `_path`.
-- **REQ-LSPV-009:** The pure-Simple parser, interpreter, and native frontend shall eventually have parity for typed string suffixes before `_path` is the default spelling.
+- **REQ-LSPV-008:** Passing runtime `text` to a strong path-template API is a
+  type error. Expected-type checking accepts `"..."_path`; it never guesses
+  that arbitrary runtime text is a path.
+- **REQ-LSPV-009:** The pure-Simple lexer preserves string suffixes and the flat
+  bridge lowers `_path` to `LazyPathTemplate.new`. Interpreter and native lanes
+  consume the same ordinary constructor call.
 - **REQ-LSPV-010:** Canonical values remain `/`-separated, but file access and executable launch convert at the final host boundary. Windows, MinGW, MSYS, and Cygwin accept `C:/x`, `/c/x`, and `c/x`, pass `C:\\x` to the OS, and preserve UNC roots as `\\server\share`.
