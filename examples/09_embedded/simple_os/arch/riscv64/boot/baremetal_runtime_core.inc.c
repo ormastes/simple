@@ -1181,6 +1181,39 @@ RuntimeValue rt_contains(RuntimeValue collection, RuntimeValue value)
         }
         return 0;
     }
+
+    /* DICT arm -- hosted parity, and the SAME defect family as the tag-11 gap
+     * in the inline `.len()` path and the dict arm added to rt_len above.
+     * `.has` / `.contains` / `.contains_key` on a Dict lower to rt_contains,
+     * NOT to rt_dict_contains (codegen/llvm/emitter.rs:324 and
+     * codegen/instr/closures_structs.rs:117 map all of them to "rt_contains"),
+     * and the hosted rt_contains answers dicts via rt_core_dict_has
+     * (runtime_native.c). This port handled only HEAP_STRING and HEAP_ARRAY
+     * and fell through to `return 0`, so EVERY `dict.has(k)` answered FALSE
+     * in-guest on a dict that provably held the key.
+     *
+     * MEASURED 2026-09-01, in-guest under real OpenSBI v1.4 fw_payload, nonce
+     * 8d03ec284ec3be32, from the build-and-run row's own run half:
+     *
+     *     FAIL run error: function 'add' not found
+     *       [PROBE hit=N hasidx=Y dictlen=2 vals=2]
+     *
+     * i.e. the interpreter's name index held BOTH functions (dictlen=2, built
+     * from the same 2 module functions, vals=2), and `.has("add")` still said
+     * no. resolve_function_by_name then fail-closed on has_fn_index and never
+     * ran the linear scan that would have found it.
+     *
+     * Key rule is identical to rt_dict_contains below -- raw handle identity
+     * first, then rt_string_eq for text keys. Spelled inline rather than
+     * calling that function because it is defined later in this TU. */
+    if (h->type == HEAP_DICT) {
+        RuntimeDict *d = (RuntimeDict *)h;
+        for (uint64_t i = 0; i < d->len; i++) {
+            if (d->keys[i] == value) return 1;
+            if (rt_string_eq(d->keys[i], value)) return 1;
+        }
+        return 0;
+    }
     return 0;
 }
 
