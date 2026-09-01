@@ -106,3 +106,49 @@ form.** This is a real bootstrap divergence that a redeploy will hit, and it
 matches the "found Dedent" signature the prior record reported — but against
 the self-hosted parser, not the seed. Filed here for whoever performs the
 redeploy; out of scope for this lane.
+
+## Resolved: the `get_arm64_wm_qemu_target()` spec contradiction
+
+The prior record left this open. It is settled: **the two `wm_entry.spl`
+assertions are stale; the production-render contract spec is correct and is
+currently RED because the SOURCE is what lags.**
+
+Evidence chain:
+
+1. `src/os/_QemuRunner/runner_targets.spl:545` still has
+   `entry: "examples/09_embedded/simple_os/arch/arm64/wm_entry.spl"`, with
+   `output: "build/os/simpleos_arm64_wm.elf"`. The predicate
+   `_is_arm64_wm_qemu_target` (`os/_QemuRunner/os_build_run.spl:712-714`, and its
+   mirror at `src/os/qemu_runner_part2.spl:628`) matches the same string.
+2. `wm_entry.spl` is explicitly **legacy**:
+   `scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs:4` —
+   *"The old implementation built arch/x86_64/wm_entry.spl, a hand-drawn legacy…"*.
+3. **x86_64 already completed this migration**: `runner_targets.spl:720`
+   `get_desktop_gui_target()` uses `arch/x86_64/gui_entry_desktop.spl`.
+   arm64 is lagging a finished migration.
+4. **Decisive**: the arm64 readiness gate has ALREADY migrated —
+   `scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs:8,88` sets
+   `ENTRY=.../arch/arm64/gui_entry_desktop.spl`. So the lane *script* builds
+   `gui_entry_desktop.spl` while the QEMU *target* still names `wm_entry.spl`.
+   That is an internal inconsistency in the product, not in the contract spec.
+5. History: the contract spec's intent-bearing commit is `f2ffa11a188`
+   *"feat(simpleos): require process-owned arm and riscv desktops"* — newer than
+   the substantive commits behind the two asserting specs (`ae55a746719` /
+   `6f86ff32a7d`, `f12958a4d51`). It is a **requirement** spec, deliberately
+   written ahead of the source.
+6. Both entries exist; `get_arm64_desktop_engine2d_target()`
+   (`runner_targets.spl:558-573`) already uses `gui_entry_desktop.spl`.
+
+Correct fix (NOT applied here — it repoints the shared `arm64-wm-ramfb` lane,
+which cannot be revalidated until a kernel builds, and is not needed for the
+Engine2D gate):
+
+1. `runner_targets.spl:545` — `entry:` -> `.../arch/arm64/gui_entry_desktop.spl`,
+   KEEPING `output: "build/os/simpleos_arm64_wm.elf"` (the contract spec asserts
+   exactly that pairing, and the `output` is what keeps the predicate
+   distinguishable from the engine2d target).
+2. `os_build_run.spl:713` and the mirror `qemu_runner_part2.spl:628` — same
+   string swap so the predicate keeps matching.
+3. `test/01_unit/os/qemu_runner_extended_spec.spl:301` and
+   `test/03_system/gui/arm64_wm_qemu_contract_spec.spl:156` — expect
+   `gui_entry_desktop.spl`. Their `target.output` assertions stay valid.
