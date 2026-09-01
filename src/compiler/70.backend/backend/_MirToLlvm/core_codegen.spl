@@ -24,7 +24,8 @@ use compiler.backend.backend_api.*
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
-    llvm_ir_builder_build}
+    llvm_ir_builder_build, llvm_ir_builder_handle,
+    llvm_ir_builder_push_line}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 use compiler.mir.mir_coverage_probe_admission.{
@@ -606,8 +607,10 @@ impl MirTextCodegen for MirToLlvm:
         val is_readonly = not has_store and not has_call
         val is_small = inst_count < 10
 
-        # Rename only the requested entry module's main to __simple_main.
-        val fn_name = self.llvm_function_symbol_name(name)
+        # Callers pass the already-selected emitted symbol.  Do not remangle
+        # it across this receiver boundary: Phase-2 previously returned nil
+        # here and emitted a valid-but-wrong `define ... @nil()` function.
+        val fn_name = name
         self.defined_func_names[fn_name] = true
 
         # entry_point.spl hardcodes `declare i64 @__simple_main()` and reads
@@ -682,7 +685,19 @@ impl MirTextCodegen for MirToLlvm:
             else:
                 self.builder.emit(opening)
         else:
-            self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small, dbg_id)
+            val param_str = params.join(", ")
+            var attrs = " nounwind" + placement_attrs
+            if is_readonly and not placement_naked:
+                attrs = attrs + " readonly"
+            if is_small and not placement_naked:
+                attrs = attrs + " alwaysinline"
+            var dbg_suffix = ""
+            match dbg_id:
+                Some(id): dbg_suffix = " !dbg !{id}"
+                nil: ()
+            val opening = "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{"
+            val builder_handle = llvm_ir_builder_handle(self.builder)
+            llvm_ir_builder_push_line(opening, builder_handle)
         if bootstrap_debug:
             print "[mir-to-llvm] function:started {name}"
 
@@ -2317,8 +2332,7 @@ impl MirTextCodegen for MirToLlvm:
         "%l{id}"
 
     me local_value_text(id: i64) -> text:
-        """Return a (possibly forward-referenced) LLVM local name, or `undef`
-        only for locals that were never declared at all.
+        """Return the LLVM SSA name for a MIR local.
 
         `self.local_types`/`ptr_locals`/`bool_locals` are populated up-front
         from `body.locals` in `translate_function`, independent of the order
@@ -2330,18 +2344,15 @@ impl MirTextCodegen for MirToLlvm:
         forward references by CFG dominance, not textual order, so emitting
         the real `%lN` name here is valid -- unlike emitting `undef`, which
         silently produces wrong branch/arithmetic results (bug #135).
-        Only a local with NO declared type at all (truly malformed MIR)
-        still falls back to `undef` so LLVM stays valid.
+        This helper deliberately does not consult receiver-owned tracking maps.
+        A Stage-2 native receiver can lose imported mutable-map state between
+        the instruction that defines a local and the call that consumes it.
+        More importantly, `undef` is never an honest replacement for a MIR SSA
+        operand: it silently turns malformed MIR (or lost receiver state) into
+        executable wrong-code.  Always retaining `%lN` lets LLVM accept valid
+        forward references and reject missing definitions fail-closed.
         """
-        # contains_key, never `.get(...).?`.
-        # See doc/07_guide/language/dict_native_pitfalls.md
-        if self.defined_locals.contains_key(id):
-            return self.get_local(id)
-        if self.ptr_locals.contains_key(id) or self.bool_locals.contains_key(id) or self.local_types.contains_key(id):
-            return self.get_local(id)
-        # ponytail: malformed MIR (no declared local at all) lowers to
-        # `undef` so LLVM stays valid.
-        "undef"
+        self.get_local(id)
 
     me get_local_type(id: i64) -> text:
         """Get LLVM type for a local variable, falling back to native int type."""

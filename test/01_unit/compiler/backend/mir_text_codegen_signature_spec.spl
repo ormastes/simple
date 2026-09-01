@@ -21,6 +21,7 @@ describe "MIR text codegen function signature":
         expect(trait_source).to_contain(r"use compiler.common.diagnostics.span.{Span}")
         expect(trait_source).to_contain(signature)
         expect(llvm_source).to_contain(signature)
+        expect(llvm_source).to_contain("val fn_name = name")
         expect(driver_source).to_contain(
             "translator.translate_function(if name == \"main\": \"__simple_main\" else: name, body, fn_.span)"
         )
@@ -65,3 +66,32 @@ describe "MIR text codegen function signature":
 
         expect(ir).to_contain("define void @trait_signature_probe()")
         expect(ir).to_contain("ret void")
+
+    it "preserves an already-emitted entry symbol without remangling":
+        var translator = MirToLlvm.create(
+            "test.already_emitted_main",
+            CodegenTarget.X86_64,
+            nil
+        )
+        translator.builder.emit_module_header()
+        val body = MirBody(
+            name: "main",
+            blocks: [
+                MirBlock(
+                    id: BlockId.entry(),
+                    label: Some("entry"),
+                    instructions: [],
+                    terminator: MirTerminator.Ret(nil)
+                )
+            ],
+            locals: [],
+            arg_count: 0,
+            return_ty: MirType.unit()
+        )
+
+        translator.translate_function("__simple_main", body, Span.empty())
+        val ir = translator.builder.build()
+
+        expect(ir).to_contain("define i64 @__simple_main()")
+        expect(ir).not.to_contain("@nil(")
+        expect(ir).not.to_contain("@__simple_main_test_already_emitted_main(")

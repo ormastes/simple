@@ -5,7 +5,7 @@ use Config;
 use Digest::SHA qw(sha256_hex);
 use Errno qw(EINTR EEXIST ESRCH ECHILD EACCES EPERM ENOENT);
 use Fcntl qw(:DEFAULT :mode F_GETFD F_SETFD FD_CLOEXEC O_NOFOLLOW O_DIRECTORY);
-use File::Basename qw(dirname);
+use File::Basename qw(basename dirname);
 use Getopt::Long qw(GetOptions);
 use IO::Handle;
 use POSIX qw(WNOHANG SIG_BLOCK SIGTERM SIGINT SIGHUP SIGQUIT
@@ -13,6 +13,7 @@ use POSIX qw(WNOHANG SIG_BLOCK SIGTERM SIGINT SIGHUP SIGQUIT
 use Time::HiRes qw(clock_gettime sleep CLOCK_MONOTONIC);
 
 my $O_CLOEXEC = 02000000;
+my $F_DUPFD_CLOEXEC = 1030;
 my $O_TMPFILE = 020200000;
 my $AT_SYMLINK_FOLLOW = 0x400;
 my ($SYS_OPENAT, $SYS_LINKAT) = $Config{archname} =~ /(?:aarch64|riscv64)/
@@ -111,11 +112,42 @@ sub descriptor_handle {
     set_cloexec($fh);
     return $fh;
 }
+sub open_local_procfd_directory {
+    my ($path) = @_;
+    return unless $path =~ m{\A/proc/};
+    $path =~ m{\A/proc/([1-9][0-9]*|self)/fd/([1-9][0-9]*)(?:/(.*))?\z}
+        or die "stage3 shared runner: malformed procfd directory authority\n";
+    my ($owner, $fd, $suffix) = ($1, 0 + $2, $3);
+    ($owner eq 'self' || $owner == $$)
+        or die "stage3 shared runner: foreign procfd directory authority\n";
+    open(my $current, '<&', $fd)
+        or die "stage3 shared runner: duplicate local procfd directory: $!\n";
+    set_cloexec($current);
+    my @st = stat($current);
+    @st && -d _ or die "stage3 shared runner: procfd anchor is not a directory\n";
+    return $current unless defined($suffix);
+    my @part = split m{/}, $suffix, -1;
+    @part && !grep { $_ eq '' || $_ eq '.' || $_ eq '..' ||
+        $_ !~ /\A[A-Za-z0-9_.-]+\z/ } @part
+        or die "stage3 shared runner: unsafe procfd descendant component\n";
+    for my $part (@part) {
+        my $next_fd = syscall($SYS_OPENAT, fileno($current), $part,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC, 0);
+        my $next = descriptor_handle(
+            $next_fd, "open procfd directory component $part");
+        close($current)
+            or die "stage3 shared runner: close procfd directory: $!\n";
+        $current = $next;
+    }
+    return $current;
+}
 sub open_directory_walk {
     my ($path) = @_;
     normalized_absolute($path)
         or die "stage3 shared runner: noncanonical directory path\n";
     $SYS_OPENAT or die "stage3 shared runner: unsupported syscall architecture\n";
+    my $procfd = open_local_procfd_directory($path);
+    return $procfd if defined($procfd);
     sysopen(my $current, '/', O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC)
         or die "stage3 shared runner: open root directory: $!\n";
     set_cloexec($current);
@@ -148,14 +180,22 @@ sub open_regular {
     my ($path, $expected_sha) = @_;
     normalized_absolute($path)
         or die "stage3 shared runner: noncanonical file path\n";
-    my $parent = open_directory_walk(dirname($path));
-    my $leaf = substr($path, length(dirname($path)) +
-        (dirname($path) eq '/' ? 0 : 1));
-    $leaf =~ /\A[^\/]+\z/ or die "stage3 shared runner: invalid file leaf\n";
-    my $fd = syscall($SYS_OPENAT, fileno($parent), $leaf,
-        O_RDONLY | O_NOFOLLOW | $O_CLOEXEC, 0);
-    my $fh = descriptor_handle($fd, "open $path");
-    close($parent) or die "stage3 shared runner: close file parent: $!\n";
+    my $fh;
+    if ($path =~ m{\A/proc/([1-9][0-9]*)/fd/([1-9][0-9]*)\z}) {
+        $1 == $$ or die "stage3 shared runner: foreign procfd file authority\n";
+        open($fh, '<&', 0 + $2)
+            or die "stage3 shared runner: duplicate local procfd $path: $!\n";
+        set_cloexec($fh);
+    } else {
+        my $parent = open_directory_walk(dirname($path));
+        my $leaf = substr($path, length(dirname($path)) +
+            (dirname($path) eq '/' ? 0 : 1));
+        $leaf =~ /\A[^\/]+\z/ or die "stage3 shared runner: invalid file leaf\n";
+        my $fd = syscall($SYS_OPENAT, fileno($parent), $leaf,
+            O_RDONLY | O_NOFOLLOW | $O_CLOEXEC, 0);
+        $fh = descriptor_handle($fd, "open $path");
+        close($parent) or die "stage3 shared runner: close file parent: $!\n";
+    }
     my @st = stat($fh);
     @st && -f _ or die "stage3 shared runner: nonregular file $path\n";
     my $sha = hash_fh($fh);
@@ -167,6 +207,10 @@ sub open_regular {
 }
 sub open_directory_descriptor {
     my ($path) = @_;
+    normalized_absolute($path)
+        or die "stage3 shared runner: noncanonical helper directory path\n";
+    my $procfd = open_local_procfd_directory($path);
+    return $procfd if defined($procfd);
     sysopen(my $fh, $path,
         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC)
         or die "stage3 shared runner: open helper directory $path: $!\n";
@@ -269,9 +313,15 @@ sub open_relative_directory {
 }
 sub procfd_directory {
     my ($path, $kind) = @_;
-    defined($path) && $path =~ m{\A/proc/[1-9][0-9]*/fd/[0-9]+\z}
+    defined($path) && $path =~ m{\A/proc/[1-9][0-9]*/fd/[1-9][0-9]*\z}
         or die "stage3 shared runner: $kind is not a procfd directory\n";
-    my $fh = open_directory_descriptor($path);
+    sysopen(my $fh, "$path/.",
+        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC)
+        or die "stage3 shared runner: open $kind ingress directory: $!\n";
+    set_cloexec($fh);
+    my @st = stat($fh);
+    @st && -d _
+        or die "stage3 shared runner: $kind ingress is not a directory\n";
     return ($fh, directory_identity($fh));
 }
 sub absent_output_leaf {
@@ -765,9 +815,8 @@ for my $role (sort keys %$unit_roles) {
     $held{"unit_role:$role"} = [$fh, $identity];
     $unit_role_identity{$role} = $identity;
 }
-$unit_role_identity{payload}{sha256} eq
-        $unit_role_identity{gate_interpreter}{sha256}
-    or die "stage3 shared runner: Perl role bytes mismatch\n";
+$unit_role_identity{gate_interpreter}{sha256} eq $o{dash_sha256}
+    or die "stage3 shared runner: Dash gate-interpreter mismatch\n";
 my ($facade_source_fh, $facade_source_identity) = open_regular($o{facade},
     $unit_role_identity{facade}{sha256});
 $held{facade_source} = [$facade_source_fh, $facade_source_identity];
@@ -868,6 +917,7 @@ my %capsule_relative = (
     planner_admission => 'scripts/check/lib/bootstrap-planner-admission-bound.shs',
     candidate_frontend =>
         'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs',
+    bounded_log => 'scripts/bootstrap/run-process-group-bounded-log.pl',
 );
 my (%capsule_helper_fh, %capsule_helper_identity);
 for my $name (sort keys %capsule_relative) {
@@ -885,8 +935,8 @@ $capsule_helper_fh{bootstrap_script} = $held{'role:bootstrap_script'}[0];
 $capsule_helper_identity{bootstrap_script} = $role_identity{bootstrap_script};
 my @capsule_helper_order = qw(bootstrap_script candidate_builder jobs_policy facade
     authority command_snapshot sanity manifest_write manifest_verify self_test
-    runner_module planner_admission candidate_frontend);
-@capsule_helper_order == 13
+    runner_module planner_admission candidate_frontend bounded_log);
+@capsule_helper_order == 14
     or die "stage3 shared runner: helper capsule inventory count\n";
 for my $name (@capsule_helper_order) {
     exists($capsule_helper_fh{$name}) && exists($capsule_helper_identity{$name})
@@ -959,7 +1009,8 @@ for my $name (sort keys %stage2_relative) {
             absent => 1 };
     }
 }
-for my $spec ([runtime_dir => "$stage2_base/stage2-runtime-authority"],
+for my $spec ([stage2_sanity_companion_parent => $stage2_base],
+        [runtime_dir => "$stage2_base/stage2-runtime-authority"],
         [stage2_cache_dir => "$stage2_base/stage2-native-cache"]) {
     my ($name, $relative) = @$spec;
     my ($fh, $identity) = open_relative_directory($stage2_transaction_fh,
@@ -1140,6 +1191,10 @@ my $capsule_text = join('',
         $descriptor_ref->($capsule_helper_fh{bootstrap_script}) . "\n",
     'BOOTSTRAP_STAGE3_CANDIDATE_FRONTEND_DESCRIPTOR=' .
         $descriptor_ref->($capsule_helper_fh{candidate_frontend}) . "\n",
+    'BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=' .
+        $descriptor_ref->($capsule_helper_fh{bounded_log}) . "\n",
+    'BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=' .
+        $descriptor_ref->($held{'role:perl'}[0]) . "\n",
     'BOOTSTRAP_STAGE3_AUTHORITY_DESCRIPTOR=' .
         $descriptor_ref->($capsule_helper_fh{authority}) . "\n",
     'BOOTSTRAP_STAGE3_COMMAND_DESCRIPTOR=' .
@@ -1157,6 +1212,8 @@ my $capsule_text = join('',
     'export BOOTSTRAP_STAGE3_FACADE_PATH ' .
         'BOOTSTRAP_STAGE3_BOOTSTRAP_SCRIPT_DESCRIPTOR ' .
         'BOOTSTRAP_STAGE3_CANDIDATE_FRONTEND_DESCRIPTOR ' .
+        'BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR ' .
+        'BOOTSTRAP_STAGE3_PERL_DESCRIPTOR ' .
         'BOOTSTRAP_STAGE3_AUTHORITY_DESCRIPTOR ' .
         'BOOTSTRAP_STAGE3_COMMAND_DESCRIPTOR ' .
         'BOOTSTRAP_STAGE3_SANITY_DESCRIPTOR ' .
@@ -1541,12 +1598,15 @@ sub durable_identity_of_path {
     return $identity;
 }
 sub validate_verification_text {
-    my ($text, $provenance_identity, $candidate_identity) = @_;
-    my @expected = qw(schema run_id provenance_sha256 candidate_sha256
+    my ($text, $provenance_identity, $candidate_identity,
+        $authority_map_identity) = @_;
+    my @expected = qw(schema run_id provenance_sha256
+        bound_artifact_authority_map_path
+        bound_artifact_authority_map_sha256 candidate_sha256
         source_snapshot_sha256 runtime_snapshot_sha256 tool_snapshot_sha256
         git_receipt_sha256 verifier_sha256 status);
     my @line = split /\n/, $text, -1;
-    @line == 11 && $line[-1] eq ''
+    @line == @expected + 1 && $line[-1] eq ''
         or die "stage3 shared runner: verification receipt row count\n";
     pop @line;
     my %value;
@@ -1558,6 +1618,10 @@ sub validate_verification_text {
     $value{schema} eq 'simple-stage3-provenance-verification-v1' &&
         $value{run_id} eq $o{run_id} && $value{status} eq 'pass' &&
         $value{provenance_sha256} eq $provenance_identity->{sha256} &&
+        $value{bound_artifact_authority_map_path} eq
+            "$o{candidate_provenance}.authority-map.env" &&
+        $value{bound_artifact_authority_map_sha256} eq
+            $authority_map_identity->{sha256} &&
         $value{candidate_sha256} eq $candidate_identity->{sha256} &&
         $value{source_snapshot_sha256} eq $artifact_identity{source_snapshot}{sha256} &&
         $value{runtime_snapshot_sha256} eq $artifact_identity{runtime_snapshot}{sha256} &&
@@ -1598,84 +1662,385 @@ sub validate_parent_authentication_text {
         or die "stage3 shared runner: parent authentication correlation\n";
 }
 sub capture_verifier {
-    my ($provenance_identity, $candidate_identity) = @_;
+    my ($provenance_identity, $candidate_identity,
+        $authority_map_identity) = @_;
     my $capture = "$o{unit_evidence}/.candidate-verification.capture.$parent_pid";
     sysopen(my $capture_fh, $capture,
         O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | $O_CLOEXEC, 0600)
         or die "stage3 shared runner: create verifier capture: $!\n";
     set_cloexec($capture_fh);
+    pipe(my $setup_read_fh, my $setup_write_fh)
+        or die "stage3 shared runner: verifier setup pipe: $!\n";
+    set_cloexec($setup_read_fh);
+    set_cloexec($setup_write_fh);
     my $pid = fork();
     defined($pid) or die "stage3 shared runner: fork verifier: $!\n";
     if (!$pid) {
+        my $verifier_child_fail = sub {
+            my ($token, $status) = @_;
+            my %stage_byte = (
+                'process-group' => 'G', 'stdout-redirect' => 'O',
+                'stderr-redirect' => 'E', 'fd-limit' => 'L',
+                'fd-collision' => 'C', 'fd-map-overflow' => 'M',
+                'fd-source-collision' => 'J', 'fd-source-stat' => 'T',
+                'fd-dup' => 'D', 'fd-dup2' => '2',
+                'fd-stage-close' => 'K', 'fd-identity' => 'I',
+                'script-seek' => 'Q', 'script-stdin' => 'N',
+                'script-stdin-identity' => 'V',
+                'script-hash' => 'H', 'script-prefix' => 'P',
+                'script-offset' => 'Z',
+                'phase-status-fd' => 'Y',
+                'stdio-flags' => 'W',
+                'dash-exec' => 'X',
+            );
+            syswrite($setup_write_fh, $stage_byte{$token} // '?', 1);
+            syswrite(STDERR, "stage3 verifier child: FAIL ($token)\n");
+            POSIX::_exit($status);
+        };
+        close($setup_read_fh)
+            or $verifier_child_fail->('process-group', 125);
         $SIG{HUP} = $SIG{INT} = $SIG{QUIT} = $SIG{TERM} = $SIG{CHLD} = 'DEFAULT';
-        setpgrp(0, 0) or POSIX::_exit(125);
-        open(STDOUT, '>&', $capture_fh) or POSIX::_exit(125);
-        open(STDERR, '>&', $console_fh) or POSIX::_exit(125);
-        my $dash = exec_fd_path($dash_exec_fh);
-        exec {$dash} 'dash', parent_fd_path($held{'role:provenance_verifier'}[0]),
+        setpgrp(0, 0) or $verifier_child_fail->('process-group', 125);
+        open(STDOUT, '>&', $capture_fh)
+            or $verifier_child_fail->('stdout-redirect', 125);
+        open(STDERR, '>&', $console_fh)
+            or $verifier_child_fail->('stderr-redirect', 125);
+        for my $stdio_fh (*STDOUT, *STDERR) {
+            my $stdio_flags = fcntl($stdio_fh, F_GETFD, 0);
+            defined($stdio_flags) && !($stdio_flags & FD_CLOEXEC)
+                or $verifier_child_fail->('stdio-flags', 125);
+        }
+        !-e '/proc/self/fd/159'
+            or $verifier_child_fail->('phase-status-fd', 125);
+        POSIX::dup2(fileno($setup_write_fh), 159) == 159
+            or $verifier_child_fail->('phase-status-fd', 125);
+        open(my $phase_status_fh, '>&=', 159)
+            or $verifier_child_fail->('phase-status-fd', 125);
+        my $phase_status_flags = fcntl($phase_status_fh, F_GETFD, 0);
+        defined($phase_status_flags) &&
+            fcntl($phase_status_fh, F_SETFD,
+                $phase_status_flags & ~FD_CLOEXEC)
+            or $verifier_child_fail->('phase-status-fd', 125);
+        my $verifier_next_fd = 160;
+        my $verifier_last_fd = 190;
+        my $verifier_staging_min = 191;
+        $^F = $verifier_last_fd;
+        my $verifier_open_max = POSIX::sysconf(&POSIX::_SC_OPEN_MAX);
+        defined($verifier_open_max) &&
+            $verifier_open_max > $verifier_staging_min
+            or $verifier_child_fail->('fd-limit', 125);
+        for my $reserved_fd ($verifier_next_fd .. $verifier_last_fd) {
+            !-e "/proc/self/fd/$reserved_fd"
+                or $verifier_child_fail->('fd-collision', 125);
+        }
+        my $verifier_local_path = sub {
+            my ($source_fh) = @_;
+            $verifier_next_fd <= $verifier_last_fd
+                or $verifier_child_fail->('fd-map-overflow', 125);
+            my $target_fd = $verifier_next_fd++;
+            fileno($source_fh) != $target_fd
+                or $verifier_child_fail->('fd-source-collision', 125);
+            my @source_st = stat($source_fh);
+            @source_st or $verifier_child_fail->('fd-source-stat', 125);
+            my $staged_fd = fcntl(
+                $source_fh, $F_DUPFD_CLOEXEC, $verifier_staging_min);
+            defined($staged_fd) &&
+                $staged_fd >= $verifier_staging_min &&
+                $staged_fd < $verifier_open_max
+                or $verifier_child_fail->('fd-dup', 125);
+            POSIX::dup2($staged_fd, $target_fd) == $target_fd
+                or $verifier_child_fail->('fd-dup2', 125);
+            POSIX::close($staged_fd) == 0
+                or $verifier_child_fail->('fd-stage-close', 125);
+            my @local_st = stat("/proc/self/fd/$target_fd");
+            @local_st && $local_st[0] == $source_st[0] &&
+                $local_st[1] == $source_st[1] &&
+                $local_st[2] == $source_st[2]
+                or $verifier_child_fail->('fd-identity', 125);
+            return "/proc/$$/fd/$target_fd";
+        };
+        my %verifier_local = (
+            script => $verifier_local_path->($held{'role:provenance_verifier'}[0]),
+            manifest => $verifier_local_path->($held{candidate_provenance}[0]),
+            bound_artifacts => $verifier_local_path->($held{manifest_bound_map}[0]),
+            bound_map => $verifier_local_path->($held{authority_map}[0]),
+            scratch => $verifier_local_path->($held{verifier_scratch_root}[0]),
+            candidate => $verifier_local_path->($held{candidate_output}[0]),
+            stage2_sanity => $verifier_local_path->($stage2_input_fh{stage2_sanity}),
+            stage2_sanity_parent => $verifier_local_path->($stage2_input_fh{stage2_sanity_companion_parent}),
+            source => $verifier_local_path->($held{'artifact:source_snapshot'}[0]),
+            runtime => $verifier_local_path->($held{'artifact:runtime_snapshot'}[0]),
+            tools => $verifier_local_path->($held{'artifact:tool_snapshot'}[0]),
+            git => $verifier_local_path->($held{'artifact:git_receipt'}[0]),
+            facade => $verifier_local_path->($capsule_helper_fh{facade}),
+            bootstrap => $verifier_local_path->($capsule_helper_fh{bootstrap_script}),
+            frontend => $verifier_local_path->($capsule_helper_fh{candidate_frontend}),
+            bounded => $verifier_local_path->($capsule_helper_fh{bounded_log}),
+            perl => $verifier_local_path->($held{'role:perl'}[0]),
+            authority => $verifier_local_path->($capsule_helper_fh{authority}),
+            command => $verifier_local_path->($capsule_helper_fh{command_snapshot}),
+            sanity => $verifier_local_path->($capsule_helper_fh{sanity}),
+            manifest_write => $verifier_local_path->($capsule_helper_fh{manifest_write}),
+            manifest_verify => $verifier_local_path->($capsule_helper_fh{manifest_verify}),
+            self_test => $verifier_local_path->($capsule_helper_fh{self_test}),
+            runner => $verifier_local_path->($capsule_helper_fh{runner_module}),
+            plan => $verifier_local_path->($held{stage3_plan}[0]),
+            memory => $verifier_local_path->($held{memory_result}[0]),
+            phase => $verifier_local_path->($held{phase_result}[0]),
+            admitted => $verifier_local_path->($held{'role:admitted_compiler'}[0]),
+            transcript => $verifier_local_path->($held{stage3_transcript}[0]),
+            inventory => $verifier_local_path->($helper_capsule_inventory_fh),
+            dash => $verifier_local_path->($dash_exec_fh),
+        );
+        my $verifier_self_path = sub {
+            my ($path) = @_;
+            $path =~ s{\A/proc/\Q$$\E/fd/}{/proc/self/fd/}
+                or $verifier_child_fail->('fd-identity', 125);
+            return $path;
+        };
+        my $dash = $verifier_self_path->($verifier_local{dash});
+        my $verifier_script_self =
+            $verifier_self_path->($verifier_local{script});
+        my @verifier_script_st = stat($verifier_local{script});
+        @verifier_script_st
+            or $verifier_child_fail->('script-stdin-identity', 125);
+        open(my $verifier_script_stream, '<', $verifier_script_self)
+            or $verifier_child_fail->('script-stdin', 125);
+        my $verifier_stream_sha = Digest::SHA->new(256);
+        $verifier_stream_sha->addfile($verifier_script_stream);
+        $verifier_stream_sha->hexdigest eq $o{provenance_verifier_sha256}
+            or $verifier_child_fail->('script-hash', 125);
+        defined(sysseek($verifier_script_stream, 0, 0))
+            or $verifier_child_fail->('script-seek', 125);
+        my $verifier_prefix = '';
+        sysread($verifier_script_stream, $verifier_prefix, 18) == 18 &&
+            $verifier_prefix eq "#!/bin/sh\nset -eu\n"
+            or $verifier_child_fail->('script-prefix', 125);
+        defined(sysseek($verifier_script_stream, 0, 0))
+            or $verifier_child_fail->('script-seek', 125);
+        POSIX::dup2(fileno($verifier_script_stream), 0) == 0
+            or $verifier_child_fail->('script-stdin', 125);
+        my @verifier_stdin_st = stat(STDIN);
+        @verifier_stdin_st &&
+            $verifier_stdin_st[0] == $verifier_script_st[0] &&
+            $verifier_stdin_st[1] == $verifier_script_st[1] &&
+            $verifier_stdin_st[2] == $verifier_script_st[2]
+            or $verifier_child_fail->('script-stdin-identity', 125);
+        my $verifier_stdin_offset = sysseek(STDIN, 0, 1);
+        defined($verifier_stdin_offset) && $verifier_stdin_offset == 0
+            or $verifier_child_fail->('script-offset', 125);
+        syswrite($setup_write_fh, 'S', 1) == 1
+            or $verifier_child_fail->('script-offset', 125);
+        syswrite($setup_write_fh, 'R', 1) == 1
+            or $verifier_child_fail->('dash-exec', 125);
+        exec {$dash} 'dash', '-s', '--', '--phase-status-fd=159',
+            "--verifier-script-descriptor=$verifier_local{script}",
             "--run-id=$o{run_id}",
-            "--manifest=" . parent_fd_path($held{candidate_provenance}[0]),
+            "--manifest=$verifier_local{manifest}",
             "--manifest-display=$o{candidate_provenance}",
             "--manifest-root-display=" . dirname($o{candidate_provenance}),
             "--bound-artifacts-descriptor=" .
-                parent_fd_path($held{manifest_bound_map}[0]),
+                $verifier_local{bound_artifacts},
+            "--bound-map-descriptor=" .
+                $verifier_local{bound_map},
             "--scratch-root=" .
-                parent_fd_path($held{verifier_scratch_root}[0]),
+                $verifier_local{scratch},
             "--root=$o{root}",
-            "--candidate=" . parent_fd_path($held{candidate_output}[0]),
+            "--candidate=$verifier_local{candidate}",
+            "--stage2-sanity-authority=$verifier_local{stage2_sanity}",
+            "--stage2-sanity-display=" . $stage2_input_identity{stage2_sanity}{path},
+            "--stage2-sanity-companion-parent=" .
+                $verifier_local{stage2_sanity_parent},
             "--candidate-display=$o{candidate_output}",
-            "--source-snapshot=" . parent_fd_path($held{'artifact:source_snapshot'}[0]),
-            "--runtime-snapshot=" . parent_fd_path($held{'artifact:runtime_snapshot'}[0]),
-            "--tool-snapshot=" . parent_fd_path($held{'artifact:tool_snapshot'}[0]),
-            "--git-receipt=" . parent_fd_path($held{'artifact:git_receipt'}[0]),
+            "--source-snapshot=$verifier_local{source}",
+            "--runtime-snapshot=$verifier_local{runtime}",
+            "--tool-snapshot=$verifier_local{tools}",
+            "--git-receipt=$verifier_local{git}",
             "--verifier-sha256=$o{provenance_verifier_sha256}",
-            "--facade=" . parent_fd_path($capsule_helper_fh{facade}),
+            "--facade=$verifier_local{facade}",
             "--facade-display=$o{facade}",
             "--bootstrap-script-descriptor=" .
-                parent_fd_path($capsule_helper_fh{bootstrap_script}),
+                $verifier_local{bootstrap},
             "--candidate-frontend-descriptor=" .
-                parent_fd_path($capsule_helper_fh{candidate_frontend}),
+                $verifier_local{frontend},
+            "--bounded-log-descriptor=" .
+                $verifier_local{bounded},
+            "--perl-descriptor=$verifier_local{perl}",
             "--authority-descriptor=" .
-                parent_fd_path($capsule_helper_fh{authority}),
+                $verifier_local{authority},
             "--command-descriptor=" .
-                parent_fd_path($capsule_helper_fh{command_snapshot}),
+                $verifier_local{command},
             "--sanity-descriptor=" .
-                parent_fd_path($capsule_helper_fh{sanity}),
+                $verifier_local{sanity},
             "--manifest-write-descriptor=" .
-                parent_fd_path($capsule_helper_fh{manifest_write}),
+                $verifier_local{manifest_write},
             "--manifest-verify-descriptor=" .
-                parent_fd_path($capsule_helper_fh{manifest_verify}),
+                $verifier_local{manifest_verify},
             "--self-test-descriptor=" .
-                parent_fd_path($capsule_helper_fh{self_test}),
+                $verifier_local{self_test},
             "--runner-descriptor=" .
-                parent_fd_path($capsule_helper_fh{runner_module}),
-            "--launch-plan=" . parent_fd_path($held{stage3_plan}[0]),
+                $verifier_local{runner},
+            "--launch-plan=$verifier_local{plan}",
             "--launch-plan-sha256=$plan_identity->{sha256}",
-            "--memory=" . parent_fd_path($held{memory_result}[0]),
-            "--memory-display=$memory",
-            "--phase=" . parent_fd_path($held{phase_result}[0]),
-            "--phase-display=$phase",
+            "--memory=$verifier_local{memory}",
+            "--memory-display=" . dirname($o{candidate_output}) .
+                "/memory-snapshot-v1.events",
+            "--phase=$verifier_local{phase}",
+            "--phase-display=" . dirname($o{candidate_output}) .
+                "/phase-profile-v1.events",
             "--admitted-compiler=" .
-                parent_fd_path($held{'role:admitted_compiler'}[0]),
+                $verifier_local{admitted},
             "--admitted-compiler-display=$o{admitted_compiler}",
             "--stage3-transcript-descriptor=" .
-                parent_fd_path($held{stage3_transcript}[0]),
+                $verifier_local{transcript},
             "--stage3-transcript-display=" .
-                $held{stage3_transcript}[1]{path},
+                dirname($o{candidate_output}) .
+                "/stage3-command.transcript",
             "--helper-capsule-inventory=" .
-                parent_fd_path($helper_capsule_inventory_fh),
+                $verifier_local{inventory},
             "--helper-capsule-inventory-sha256=" .
                 $helper_capsule_inventory_identity->{sha256},
             "--helper-capsule-entry-parity-sha256=$capsule_parity_sha256";
-        POSIX::_exit(126);
+        $verifier_child_fail->('dash-exec', 126);
     }
+    close($setup_write_fh)
+        or die "stage3 shared runner: close verifier setup writer: $!\n";
     establish_child_group($pid);
     $active_pid = $pid;
     $active_pgid = $pid;
     my $status = wait_child($pid, $pid, 120_000);
     undef $active_pid;
     undef $active_pgid;
-    $status == 0 or die "stage3 shared runner: provenance verifier failed ($status)\n";
+    my $setup_bytes = '';
+    while (1) {
+        my $count = sysread($setup_read_fh, my $chunk, 32);
+        if (!defined($count)) {
+            next if $! == EINTR;
+            die "stage3 shared runner: read verifier setup status: $!\n";
+        }
+        last if $count == 0;
+        $setup_bytes .= $chunk;
+        length($setup_bytes) <= 32
+            or die "stage3 shared runner: verifier setup status overflow\n";
+    }
+    close($setup_read_fh)
+        or die "stage3 shared runner: close verifier setup reader: $!\n";
+    if ($status != 0) {
+        my %setup_stage = (
+            G => 'process-group', O => 'stdout-redirect', E => 'stderr-redirect',
+            L => 'fd-limit', C => 'fd-collision', M => 'fd-map-overflow',
+            J => 'fd-source-collision', T => 'fd-source-stat', D => 'fd-dup',
+            2 => 'fd-dup2', K => 'fd-stage-close',
+            I => 'fd-identity', R => 'ready', X => 'dash-exec',
+            Q => 'script-seek', N => 'script-stdin',
+            V => 'script-stdin-identity',
+            H => 'script-hash', P => 'script-prefix', Z => 'script-offset',
+            S => 'script-stream-ready',
+            Y => 'phase-status-fd', W => 'stdio-flags',
+            b => 'wrapper-startup', o => 'wrapper-options',
+            p => 'wrapper-parent', d => 'wrapper-display',
+            s => 'wrapper-scratch', r => 'wrapper-replay',
+            f => 'wrapper-facade', i => 'wrapper-integrity',
+            m => 'wrapper-manifest', v => 'wrapper-verified',
+            c => 'wrapper-receipt',
+        );
+        my %manifest_substage = (
+            1 => 'entry', 2 => 'parent-authorities', 3 => 'displays',
+            4 => 'map-exists', 5 => 'map-hash', 6 => 'snapshot-create',
+            7 => 'snapshot-copy-hash', 8 => 'snapshot-open',
+            9 => 'map-header-vector', A => 'role-loop',
+            B => 'schema-layout', C => 'transcripts',
+            D => 'artifact-bindings', E => 'runtime-tool',
+            F => 'sanity-admission', G => 'replay',
+            H => 'parent-chain', I => 'complete',
+        );
+        my $last_byte = length($setup_bytes) ? substr($setup_bytes, -1, 1) : '';
+        my $stage = $setup_stage{$last_byte} // 'no-status';
+        my $manifest_substage_bytes;
+        my $manifest_a_failure_code;
+        my $manifest_schema_length_code;
+        if ($setup_bytes =~ /\ASRbodsrfim([1-9A-I]+)m\z/) {
+            $manifest_substage_bytes = $1;
+            $stage = 'wrapper-manifest';
+        } elsif ($setup_bytes =~ /\ASRbodsrfim([1-9A-I]+)\z/) {
+            # Compatibility diagnostic for helpers captured before the
+            # manifest verifier stopped replacing the wrapper EXIT trap.
+            $manifest_substage_bytes = $1;
+            $stage = 'wrapper-manifest';
+        } elsif ($setup_bytes =~
+            /\ASRbodsrfim([1-9A-I]*A)a([0-9A-V]{2})m\z/) {
+            $manifest_substage_bytes = $1;
+            $manifest_a_failure_code = $2;
+            $stage = 'wrapper-manifest';
+        } elsif ($setup_bytes =~
+            /\ASRbodsrfim([1-9A-I]*A)a([0-9A-V]{2})\z/) {
+            $manifest_substage_bytes = $1;
+            $manifest_a_failure_code = $2;
+            $stage = 'wrapper-manifest';
+        } elsif ($setup_bytes =~
+            /\ASRbodsrfim([1-9A-I]*A)l([0-9A-V]{2})m\z/) {
+            $manifest_substage_bytes = $1;
+            $manifest_schema_length_code = $2;
+            $stage = 'wrapper-manifest';
+        } elsif ($setup_bytes =~
+            /\ASRbodsrfim([1-9A-I]*A)l([0-9A-V]{2})\z/) {
+            $manifest_substage_bytes = $1;
+            $manifest_schema_length_code = $2;
+            $stage = 'wrapper-manifest';
+        }
+        if (defined($manifest_substage_bytes)) {
+            my $substage_byte = substr($manifest_substage_bytes, -1, 1);
+            $stage .= '-' . $manifest_substage{$substage_byte};
+        }
+        if (defined($manifest_a_failure_code)) {
+            my %a_group = (
+                V0 => 'output-identity', V1 => 'manifest-snapshot',
+                V2 => 'fixed-schema-policy', V3 => 'helper-fingerprint',
+                V4 => 'hash-map-platform', V5 => 'cache-runtime',
+                V6 => 'command-layout',
+                U0 => 'manifest-root-canonical',
+                U1 => 'manifest-authority-grammar-regular',
+                U2 => 'manifest-fd8-open-source-stat',
+                U3 => 'manifest-scratch-create',
+                U4 => 'manifest-copy-chmod',
+                U5 => 'manifest-source-stability-byte-count',
+                U6 => 'manifest-snapshot-hash',
+                U7 => 'manifest-parse-anchor-schema-count',
+                U8 => 'manifest-schema-extraction',
+                U9 => 'manifest-schema-value',
+                S0 => 'manifest-schema-empty',
+                S1 => 'manifest-schema-multiple-or-newline',
+                S2 => 'manifest-schema-length',
+                S3 => 'manifest-schema-content-hash',
+                S5 => 'manifest-schema-length-overflow',
+                T0 => 'manifest-fd8-repoint',
+                T1 => 'manifest-fd8-identity-mode-size',
+                T2 => 'manifest-fd8-snapshot-hash',
+                T3 => 'manifest-fd8-reopen-schema-count',
+            );
+            my $meaning = $a_group{$manifest_a_failure_code};
+            if (!defined($meaning)) {
+                my $alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUV';
+                my $high = index($alphabet, substr($manifest_a_failure_code, 0, 1));
+                my $low = index($alphabet, substr($manifest_a_failure_code, 1, 1));
+                my $index = $high * 32 + $low;
+                $meaning = "singular-key-index-$index";
+            }
+            $stage .= "-a-$manifest_a_failure_code-$meaning";
+        }
+        if (defined($manifest_schema_length_code)) {
+            my $alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUV';
+            my $high = index($alphabet,
+                substr($manifest_schema_length_code, 0, 1));
+            my $low = index($alphabet,
+                substr($manifest_schema_length_code, 1, 1));
+            my $length = $high * 32 + $low;
+            $stage .= "-schema-length-$length";
+        }
+        die "stage3 shared runner: provenance verifier failed ($status, setup-$stage)\n";
+    }
+    $setup_bytes =~ /\ASR/ && substr($setup_bytes, -1, 1) eq 'c'
+        or die "stage3 shared runner: provenance verifier setup protocol\n";
     $capture_fh->sync or die "stage3 shared runner: fsync verifier capture: $!\n";
     seek($capture_fh, 0, 0) or die "stage3 shared runner: rewind verifier capture: $!\n";
     local $/;
@@ -1683,7 +2048,8 @@ sub capture_verifier {
     defined($text) && length($text) <= 1_048_576
         or die "stage3 shared runner: verifier output cap\n";
     close($capture_fh) or die "stage3 shared runner: close verifier capture: $!\n";
-    validate_verification_text($text, $provenance_identity, $candidate_identity);
+    validate_verification_text($text, $provenance_identity,
+        $candidate_identity, $authority_map_identity);
     publish_exclusive($candidate_verify, $text, 0600);
     unlink($capture) or die "stage3 shared runner: remove verifier capture: $!\n";
     fsync_parent($capture);
@@ -1755,21 +2121,27 @@ if (!$candidate_builder_pid) {
         "--rss-raw=$builder_output_leaf{rss_raw}",
         "--rss-sampler=" . parent_fd_path($sampler_exec_fh),
         "--rss-sampler-sha256=$o{sampler_sha256}",
-        "--admitted-compiler=$o{admitted_compiler}",
+        "--admitted-compiler=" . parent_fd_path($stage2_input_fh{admitted}),
         "--admitted-compiler-sha256=$o{admitted_compiler_sha256}",
         "--compatibility-marker=$o{compatibility_marker}",
-        "--runner-plan=$launch_plan", "--runner-plan-sha256=$plan_identity->{sha256}",
-        "--env-tool=" . parent_fd_path($held{'role:env'}[0]),
-        "--planner-admission=$o{planner_receipt}",
-        map({ "--$_=" . parent_fd_path($stage2_input_fh{$_}) }
+        "--runner-plan=" . parent_fd_path($held{stage3_plan}[0]),
+        "--runner-plan-sha256=$plan_identity->{sha256}",
+        "--env-tool=" . parent_fd_path($held{'unit_role:env'}[0]),
+        "--planner-admission=" .
+            parent_fd_path($held{'artifact:planner_receipt'}[0]),
+        map({ my $option = $_; $option =~ tr/_/-/;
+              "--$option=" . parent_fd_path($stage2_input_fh{$_}) }
             qw(stage2 stage2_admission seed seed_stamp native_all)),
         "--compiler-backfill=" . ($stage2_input_fh{compiler_backfill}
             ? parent_fd_path($stage2_input_fh{compiler_backfill}) : 'absent'),
-        map({ "--$_=" . parent_fd_path($stage2_input_fh{$_}) }
+        map({ my $option = $_; $option =~ tr/_/-/;
+              "--$option=" . parent_fd_path($stage2_input_fh{$_}) }
             qw(stage2_sanity stage2_receiver stage2_receiver_log stage2_transcript
                stage2_build_log source_before git_before tool_before
                runtime_origin_before runtime_origin_after runtime_admitted
                stage2_cache_dir)),
+        "--stage2-sanity-companion-parent=" .
+            parent_fd_path($stage2_input_fh{stage2_sanity_companion_parent}),
         "--stage3-cache-dir=" . parent_fd_path($builder_dir{stage3_cache_dir}),
         "--runtime-dir=" . parent_fd_path($stage2_input_fh{runtime_dir}),
         "--private-home=" . parent_fd_path($builder_dir{private_home}),
@@ -1835,6 +2207,28 @@ $held{candidate_output} = [$candidate_hold_fh, $candidate_hold_identity];
 $held{candidate_provenance} =
     [$candidate_provenance_hold_fh, $candidate_provenance_hold_identity];
 my $candidate_manifest = retained_pairs($candidate_provenance_hold_fh, 16_777_216);
+my $authority_map_path = "$o{candidate_provenance}.authority-map.env";
+my $authority_map_sha = $candidate_manifest->{bound_artifact_authority_map_sha256};
+defined($authority_map_sha) or die "stage3 shared runner: missing authority map hash\n";
+my ($authority_map_fh, $authority_map_identity) =
+    open_regular($authority_map_path, $authority_map_sha);
+$held{authority_map} = [$authority_map_fh, $authority_map_identity];
+my $authority_map = retained_pairs($authority_map_fh, 16_777_216);
+my %manifest_path_role = (
+    seed_path => 'seed', native_all_path => 'native_all', stage2_path => 'stage2',
+    stage2_admitted_path => 'stage2_admitted', stage2_build_log_path => 'stage2_build_log',
+    stage2_command_transcript_path => 'stage2_command_transcript',
+    stage2_sanity_evidence_path => 'stage2_sanity_evidence',
+    stage2_receiver_evidence_path => 'stage2_receiver_evidence',
+    stage2_admission_receipt_path => 'stage2_admission_receipt',
+    stage3_build_log_path => 'stage3_build_log',
+    stage3_command_transcript_path => 'stage3_command_transcript',
+    stage3_sanity_evidence_path => 'stage3_sanity_evidence', git_state_path => 'git_state',
+    runtime_origin_snapshot_path => 'runtime_origin_snapshot',
+    runtime_admitted_snapshot_path => 'runtime_admitted_snapshot',
+    tool_authority_path => 'tool_authority', seed_inputs_stamp_path => 'seed_inputs_stamp',
+    source_snapshot_path => 'source_snapshot', stage3_jobs_receipt_path => 'jobs_receipt',
+    compiler_backfill_path => 'compiler_backfill');
 my @manifest_bound_pairs = (
     [qw(seed_path seed_sha256)], [qw(native_all_path native_all_sha256)],
     [qw(stage2_path stage2_sha256)],
@@ -1868,25 +2262,31 @@ for my $pair (@manifest_bound_pairs) {
     defined($candidate_manifest->{$path_key}) &&
         defined($candidate_manifest->{$sha_key})
         or die "stage3 shared runner: missing manifest-bound artifact $path_key/$sha_key\n";
-    my ($fh, $identity) = open_regular($candidate_manifest->{$path_key},
-        $candidate_manifest->{$sha_key});
+    my $role = $manifest_path_role{$path_key};
+    defined($role) or die "stage3 shared runner: unmapped manifest role $path_key\n";
+    my $authority = $authority_map->{"${role}_authority"};
+    my $authority_sha = $authority_map->{"${role}_sha256"};
+    defined($authority) && defined($authority_sha) &&
+        $authority_sha eq $candidate_manifest->{$sha_key}
+        or die "stage3 shared runner: authority map mismatch $role\n";
+    my ($fh, $identity) = open_regular($authority, $authority_sha);
     $held{"manifest:$path_key"} = [$fh, $identity];
 }
 for my $directory_key (qw(stage2_native_cache_dir stage3_native_cache_dir
         runtime_path)) {
-    my $path = $candidate_manifest->{$directory_key};
+    my $path = $authority_map->{"${directory_key}_authority"};
     defined($path) && normalized_absolute($path)
         or die "stage3 shared runner: missing manifest-bound directory $directory_key\n";
     my $fh = open_directory_descriptor($path);
     $held{"manifest-directory:$directory_key"} =
         [$fh, directory_identity($fh)];
 }
-my $manifest_root = dirname($o{candidate_provenance});
-for my $extra ([stage2_receiver_log => "$manifest_root/stage2-receiver.log"],
-        [source_inputs_before => "$manifest_root/source-inputs-before.txt"],
-        [tool_authority_before => "$manifest_root/tool-authority-before.txt"]) {
-    my ($name, $path) = @$extra;
-    my ($fh, $identity) = open_regular($path, undef);
+for my $name (qw(stage2_receiver_log source_inputs_before tool_authority_before)) {
+    my $path = $authority_map->{"${name}_authority"};
+    my $sha = $authority_map->{"${name}_sha256"};
+    defined($path) && defined($sha)
+        or die "stage3 shared runner: missing authority map role $name\n";
+    my ($fh, $identity) = open_regular($path, $sha);
     $held{"manifest:$name"} = [$fh, $identity];
 }
 my $bound_map_text = "schema=simple-stage3-bound-artifact-descriptors-v1\n";
@@ -1942,7 +2342,8 @@ $held{verifier_scratch_root} =
     [$verifier_scratch_fh, directory_identity($verifier_scratch_fh)];
 
 my $verifier_ok = eval {
-    capture_verifier($candidate_provenance_identity, $candidate_identity);
+    capture_verifier($candidate_provenance_identity, $candidate_identity,
+        $authority_map_identity);
     1;
 };
 my $verifier_error = $@;

@@ -10,7 +10,7 @@ use std.spec.step
 
 use test.helpers.compiler_native_link_source.{compiler_native_link_source}
 # codex-system-test
-use compiler.backend.backend.stage4_symbol_closure.{stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_requested_from_nm_output}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_expand_argv_provider_roots, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_requested_from_nm_output}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -18,6 +18,33 @@ extern fn rt_file_read_text(path: text) -> text
 use std.spec.step
 
 describe "Stage4 selected archive projection":
+    it "expands every argv entry root to one canonical provider family":
+        # @req REQ-SSPEC-COMPILER
+        step("expands every argv entry root to one canonical provider family")
+        val expected = [
+            "rt_cli_arg_at", "rt_cli_arg_count", "rt_cli_get_args",
+            "rt_get_argc", "rt_get_args", "rt_set_args",
+            "spl_arg_count", "spl_get_arg", "spl_init_args", "sys_get_args"
+        ]
+        val expected_with_unrelated = [
+            "rt_cli_arg_at", "rt_cli_arg_count", "rt_cli_get_args",
+            "rt_get_argc", "rt_get_args", "rt_set_args", "rt_unrelated",
+            "spl_arg_count", "spl_get_arg", "spl_init_args", "sys_get_args"
+        ]
+        for root in expected:
+            expect(stage4_expand_argv_provider_roots(["rt_unrelated", root])).to_equal(expected_with_unrelated)
+
+    it "keeps the complete C argv provider global before localization":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the complete C argv provider global before localization")
+        val nm = (
+            "00000000 T spl_init_args\n00000010 T spl_arg_count\n00000020 T spl_get_arg\n" +
+            "00000030 T rt_set_args\n00000040 T rt_get_argc\n00000050 T rt_get_args\n" +
+            "00000060 T sys_get_args\n00000070 T rt_cli_get_args\n" +
+            "00000080 T rt_cli_arg_count\n00000090 T rt_cli_arg_at\n000000a0 T rt_unrelated\n"
+        )
+        expect(stage4_projection_localization_symbols(nm, "elf", ["rt_set_args"]).unwrap()).to_equal(["rt_unrelated"])
+
     it "keeps entry runtime intrinsics and memtrack state in the requested closure":
         # @req REQ-SSPEC-COMPILER
         step("keeps entry runtime intrinsics and memtrack state in the requested closure")

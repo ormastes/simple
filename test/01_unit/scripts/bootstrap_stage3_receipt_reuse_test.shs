@@ -13,6 +13,26 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage3-receipt-reuse.XXXXXX")
 trap 'chmod -R u+w "$scratch" 2>/dev/null || true; rm -rf "$scratch"' \
     EXIT INT TERM HUP
 
+mkdir "$scratch/real-ancestor"
+printf 'regular\n' >"$scratch/real-ancestor/evidence.log"
+ln -s "$scratch/real-ancestor" "$scratch/symlink-ancestor"
+exec 9<"$scratch"
+bootstrap_stage3_sanity_safe_regular \
+    "/proc/$$/fd/9/real-ancestor/evidence.log" || {
+    echo 'nested procfd evidence path was rejected' >&2
+    exit 1
+}
+if bootstrap_stage3_sanity_safe_regular \
+    "$scratch/symlink-ancestor/evidence.log"; then
+    echo 'symlinked evidence ancestor was accepted' >&2
+    exit 1
+fi
+if bootstrap_stage3_sanity_safe_regular \
+    "/proc/$$/fd/9/symlink-ancestor/evidence.log"; then
+    echo 'procfd evidence symlink ancestor was accepted' >&2
+    exit 1
+fi
+
 marker="$scratch/candidate-executed"
 candidate="$scratch/stage2"
 cat >"$candidate" <<EOF
@@ -25,6 +45,61 @@ candidate_sha=$(bootstrap_stage3_hash_file "$candidate")
 canonical_version=$(bootstrap_stage3_canonical_version "$root")
 
 sanity="$scratch/stage2-sanity.env"
+: >"$sanity.frontend-driver.log"
+for sanity_mode in 0 1; do
+    mode_log="$sanity.frontend-bootstrap-$sanity_mode.log"
+    for probe in p2_add stage2_mir_retention stage2_module_path_naming \
+        hello_world_positional; do
+        case "$probe" in p2_add) probe_log=$mode_log ;; *) probe_log=$mode_log.$(printf '%s' "$probe" | tr _ -) ;; esac
+        printf 'probe=%s\n' "$probe" >"$probe_log"
+        probe_sha=$(bootstrap_stage3_hash_file "$probe_log")
+        cat >"$probe_log.bounded.env" <<BOUND
+schema=simple-bounded-process-log-v1
+status=complete
+reason=child-exit
+raw_status=0
+max_bytes=4194304
+bytes_captured=$(wc -c <"$probe_log" | tr -d ' ')
+timeout_seconds=180
+term_grace_seconds=1
+combined_stream=stdout-stderr
+process_group=setsid
+artifact_limit=none
+log_leaf=${probe_log##*/}
+log_sha256=$probe_sha
+BOUND
+    done
+    cat >"$sanity.frontend-bootstrap-$sanity_mode.status.env" <<STATUS
+schema=simple-candidate-frontend-status-v2
+result=pass
+probe=complete
+raw_status=0
+bootstrap_mode=$sanity_mode
+backend=llvm
+log_path=$mode_log
+p2_add_raw_status=0
+p2_add_log_path=$mode_log
+p2_add_log_sha256=$(bootstrap_stage3_hash_file "$mode_log")
+p2_add_collector_receipt_path=$mode_log.bounded.env
+p2_add_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$mode_log.bounded.env")
+stage2_mir_retention_raw_status=0
+stage2_mir_retention_log_path=$mode_log.stage2-mir-retention
+stage2_mir_retention_log_sha256=$(bootstrap_stage3_hash_file "$mode_log.stage2-mir-retention")
+stage2_mir_retention_collector_receipt_path=$mode_log.stage2-mir-retention.bounded.env
+stage2_mir_retention_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$mode_log.stage2-mir-retention.bounded.env")
+stage2_module_path_naming_raw_status=0
+stage2_module_path_naming_log_path=$mode_log.stage2-module-path-naming
+stage2_module_path_naming_log_sha256=$(bootstrap_stage3_hash_file "$mode_log.stage2-module-path-naming")
+stage2_module_path_naming_collector_receipt_path=$mode_log.stage2-module-path-naming.bounded.env
+stage2_module_path_naming_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$mode_log.stage2-module-path-naming.bounded.env")
+hello_world_positional_raw_status=0
+hello_world_positional_log_path=$mode_log.hello-world-positional
+hello_world_positional_log_sha256=$(bootstrap_stage3_hash_file "$mode_log.hello-world-positional")
+hello_world_positional_collector_receipt_path=$mode_log.hello-world-positional.bounded.env
+hello_world_positional_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$mode_log.hello-world-positional.bounded.env")
+STATUS
+done
+empty_sha=$(bootstrap_stage3_hash_file "$sanity.frontend-driver.log")
 cat >"$sanity" <<EOF
 schema=simple-bootstrap-sanity-evidence-v1
 status=pass
@@ -34,19 +109,279 @@ version_output=simple-bootstrap $canonical_version
 unsupported_status=1
 unsupported_output_sha256=0000000000000000000000000000000000000000000000000000000000000000
 frontend_smoke_status=0
+frontend_smoke_backend=llvm
 frontend_smoke_bootstrap_mode_status=0
-frontend_smoke_output_sha256=0000000000000000000000000000000000000000000000000000000000000000
+frontend_smoke_bootstrap0_raw_status=0
+frontend_smoke_bootstrap0_log_path=$sanity.frontend-bootstrap-0.log
+frontend_smoke_bootstrap0_log_sha256=$(bootstrap_stage3_hash_file "$sanity.frontend-bootstrap-0.log")
+frontend_smoke_bootstrap0_status_path=$sanity.frontend-bootstrap-0.status.env
+frontend_smoke_bootstrap0_status_sha256=$(bootstrap_stage3_hash_file "$sanity.frontend-bootstrap-0.status.env")
+frontend_smoke_bootstrap1_ran=true
+frontend_smoke_bootstrap1_raw_status=0
+frontend_smoke_bootstrap1_log_path=$sanity.frontend-bootstrap-1.log
+frontend_smoke_bootstrap1_log_sha256=$(bootstrap_stage3_hash_file "$sanity.frontend-bootstrap-1.log")
+frontend_smoke_bootstrap1_status_path=$sanity.frontend-bootstrap-1.status.env
+frontend_smoke_bootstrap1_status_sha256=$(bootstrap_stage3_hash_file "$sanity.frontend-bootstrap-1.status.env")
+frontend_smoke_output_sha256=$empty_sha
+frontend_smoke_driver_log_path=$sanity.frontend-driver.log
+frontend_smoke_driver_log_sha256=$empty_sha
 candidate_sha256_after=$candidate_sha
 EOF
-bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$candidate" "$root"
+bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$sanity" "$(dirname -- "$sanity")" "$candidate" "$root"
+if bootstrap_stage3_verify_sanity_evidence_receipt \
+    "$sanity" '' "$(dirname -- "$sanity")" "$candidate" "$root"; then
+    echo 'empty sanity display was accepted' >&2; exit 1
+fi
+if bootstrap_stage3_verify_sanity_evidence_receipt \
+    "$sanity" relative/sanity.env "$(dirname -- "$sanity")" "$candidate" "$root"; then
+    echo 'relative sanity display was accepted' >&2; exit 1
+fi
+mkdir "$scratch/external-companion-parent"
+if bootstrap_stage3_verify_sanity_evidence_receipt \
+    "$sanity" "$sanity" "$scratch/external-companion-parent" "$candidate" "$root"; then
+    echo 'external companion authority was accepted' >&2; exit 1
+fi
+if bootstrap_stage3_verify_sanity_evidence_receipt \
+    "$sanity" "$scratch/coherent-but-wrong.env" "$(dirname -- "$sanity")" \
+    "$candidate" "$root"; then
+    echo 'coherent foreign display set was accepted' >&2; exit 1
+fi
 [ ! -e "$marker" ] || {
     echo 'receipt verification executed the admitted Stage 2 candidate' >&2
     exit 1
 }
+mode0_status=$sanity.frontend-bootstrap-0.status.env
+cp "$mode0_status" "$scratch/mode0.status.saved"
+sed 's/simple-candidate-frontend-status-v2/simple-candidate-frontend-status-v1/' \
+    "$scratch/mode0.status.saved" >"$mode0_status"
+if bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$sanity" "$(dirname -- "$sanity")" "$candidate" "$root"; then
+    echo 'legacy frontend status v1 was accepted' >&2; exit 1
+fi
+cp "$scratch/mode0.status.saved" "$mode0_status"
+probe_log=$sanity.frontend-bootstrap-0.log.stage2-mir-retention
+printf tamper >>"$probe_log"
+if bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$sanity" "$(dirname -- "$sanity")" "$candidate" "$root"; then
+    echo 'tampered bounded frontend log was accepted' >&2; exit 1
+fi
+printf 'probe=stage2_mir_retention\n' >"$probe_log"
+probe_receipt=$probe_log.bounded.env
+mv "$probe_receipt" "$scratch/probe.receipt.saved"
+if bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$sanity" "$(dirname -- "$sanity")" "$candidate" "$root"; then
+    echo 'deleted bounded frontend receipt was accepted' >&2; exit 1
+fi
+mv "$scratch/probe.receipt.saved" "$probe_receipt"
+
+mode0_log=$sanity.frontend-bootstrap-0.log
+mode0_status=$sanity.frontend-bootstrap-0.status.env
+p2_receipt=$mode0_log.bounded.env
+retention_receipt=$mode0_log.stage2-mir-retention.bounded.env
+cp "$sanity" "$scratch/sanity.negative.saved"
+cp "$mode0_status" "$scratch/status.negative.saved"
+cp "$p2_receipt" "$scratch/p2.receipt.saved"
+cp "$retention_receipt" "$scratch/retention.receipt.saved"
+refresh_negative_bindings() {
+    negative_probe=$1
+    negative_receipt=$2
+    negative_receipt_sha=$(bootstrap_stage3_hash_file "$negative_receipt")
+    sed "s|^${negative_probe}_collector_receipt_sha256=.*|${negative_probe}_collector_receipt_sha256=$negative_receipt_sha|" \
+        "$mode0_status" >"$scratch/status.refresh"
+    mv "$scratch/status.refresh" "$mode0_status"
+    negative_status_sha=$(bootstrap_stage3_hash_file "$mode0_status")
+    sed "s|^frontend_smoke_bootstrap0_status_sha256=.*|frontend_smoke_bootstrap0_status_sha256=$negative_status_sha|" \
+        "$sanity" >"$scratch/sanity.refresh"
+    mv "$scratch/sanity.refresh" "$sanity"
+}
+restore_negative_fixture() {
+    cp "$scratch/sanity.negative.saved" "$sanity"
+    cp "$scratch/status.negative.saved" "$mode0_status"
+    cp "$scratch/p2.receipt.saved" "$p2_receipt"
+    cp "$scratch/retention.receipt.saved" "$retention_receipt"
+}
+
+cp "$p2_receipt" "$scratch/swap.receipt"
+cp "$retention_receipt" "$p2_receipt"
+cp "$scratch/swap.receipt" "$retention_receipt"
+refresh_negative_bindings p2_add "$p2_receipt"
+refresh_negative_bindings stage2_mir_retention "$retention_receipt"
+if bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$sanity" "$(dirname -- "$sanity")" "$candidate" "$root"; then
+    echo 'swapped bounded frontend receipts were accepted' >&2; exit 1
+fi
+restore_negative_fixture
+
+for negative_case in child-nonzero timeout overflow; do
+    case "$negative_case" in
+      child-nonzero) negative_reason=child-exit; negative_raw=7 ;;
+      timeout) negative_reason=timeout; negative_raw=124 ;;
+      overflow) negative_reason=overflow; negative_raw=125 ;;
+    esac
+    sed -e "s/^reason=.*/reason=$negative_reason/" \
+        -e "s/^raw_status=.*/raw_status=$negative_raw/" \
+        "$scratch/p2.receipt.saved" >"$p2_receipt"
+    sed "s/^p2_add_raw_status=.*/p2_add_raw_status=$negative_raw/" \
+        "$scratch/status.negative.saved" >"$mode0_status"
+    cp "$scratch/sanity.negative.saved" "$sanity"
+    refresh_negative_bindings p2_add "$p2_receipt"
+    if bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$sanity" "$sanity" "$(dirname -- "$sanity")" "$candidate" "$root"; then
+        echo "hash-consistent bounded frontend $negative_case receipt was accepted" >&2
+        exit 1
+    fi
+    restore_negative_fixture
+done
+
+# The positional probe is no longer a clean-nonzero exception: admission
+# requires all four native builds to complete successfully.
+positional_receipt=$mode0_log.hello-world-positional.bounded.env
+cp "$positional_receipt" "$scratch/positional.receipt.saved"
+sed -e 's/^reason=.*/reason=child-exit/' -e 's/^raw_status=.*/raw_status=7/' \
+    "$scratch/positional.receipt.saved" >"$positional_receipt"
+sed 's/^hello_world_positional_raw_status=.*/hello_world_positional_raw_status=7/' \
+    "$scratch/status.negative.saved" >"$mode0_status"
+cp "$scratch/sanity.negative.saved" "$sanity"
+refresh_negative_bindings hello_world_positional "$positional_receipt"
+if bootstrap_stage3_verify_sanity_evidence_receipt \
+    "$sanity" "$sanity" "$(dirname -- "$sanity")" "$candidate" "$root"; then
+    echo 'hash-consistent positional child-exit nonzero status was accepted' >&2
+    exit 1
+fi
+cp "$scratch/positional.receipt.saved" "$positional_receipt"
+restore_negative_fixture
+
+assert_negative_sanity() {
+    negative_label=$1
+    if bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$sanity" "$sanity" "$(dirname -- "$sanity")" "$candidate" "$root"; then
+        echo "$negative_label was accepted" >&2
+        exit 1
+    fi
+    restore_negative_fixture
+}
+
+# Even fully hash-consistent evidence must remain confined to the four exact
+# companion leaves.  Neither arbitrary siblings nor files outside the evidence
+# directory are authority.
+mkdir "$scratch/outside-evidence"
+outside_log=$scratch/outside-evidence/outside-frontend.log
+outside_receipt=$outside_log.bounded.env
+cp "$mode0_log" "$outside_log"
+cp "$p2_receipt" "$outside_receipt"
+outside_log_sha=$(bootstrap_stage3_hash_file "$outside_log")
+outside_receipt_sha=$(bootstrap_stage3_hash_file "$outside_receipt")
+sed -e "s|^p2_add_log_path=.*|p2_add_log_path=$outside_log|" \
+    -e "s|^p2_add_log_sha256=.*|p2_add_log_sha256=$outside_log_sha|" \
+    -e "s|^p2_add_collector_receipt_path=.*|p2_add_collector_receipt_path=$outside_receipt|" \
+    -e "s|^p2_add_collector_receipt_sha256=.*|p2_add_collector_receipt_sha256=$outside_receipt_sha|" \
+    "$scratch/status.negative.saved" >"$mode0_status"
+cp "$scratch/sanity.negative.saved" "$sanity"
+negative_status_sha=$(bootstrap_stage3_hash_file "$mode0_status")
+sed "s|^frontend_smoke_bootstrap0_status_sha256=.*|frontend_smoke_bootstrap0_status_sha256=$negative_status_sha|" \
+    "$sanity" >"$scratch/sanity.refresh" && mv "$scratch/sanity.refresh" "$sanity"
+assert_negative_sanity 'outside bounded frontend paths'
+
+mv "$mode0_log" "$scratch/mode0.log.real"
+ln -s "$scratch/mode0.log.real" "$mode0_log"
+assert_negative_sanity 'symlinked bounded frontend log'
+rm "$mode0_log"
+mv "$scratch/mode0.log.real" "$mode0_log"
+
+for bounded_mutation in missing-status missing-log-sha wrong-bytes wrong-max \
+    wrong-timeout wrong-grace wrong-stream wrong-group wrong-artifact wrong-leaf; do
+    case "$bounded_mutation" in
+      missing-status) sed '/^status=/d' "$scratch/p2.receipt.saved" ;;
+      missing-log-sha) sed '/^log_sha256=/d' "$scratch/p2.receipt.saved" ;;
+      wrong-bytes) sed 's/^bytes_captured=.*/bytes_captured=99999999/' "$scratch/p2.receipt.saved" ;;
+      wrong-max) sed 's/^max_bytes=.*/max_bytes=1/' "$scratch/p2.receipt.saved" ;;
+      wrong-timeout) sed 's/^timeout_seconds=.*/timeout_seconds=179/' "$scratch/p2.receipt.saved" ;;
+      wrong-grace) sed 's/^term_grace_seconds=.*/term_grace_seconds=2/' "$scratch/p2.receipt.saved" ;;
+      wrong-stream) sed 's/^combined_stream=.*/combined_stream=stdout/' "$scratch/p2.receipt.saved" ;;
+      wrong-group) sed 's/^process_group=.*/process_group=none/' "$scratch/p2.receipt.saved" ;;
+      wrong-artifact) sed 's/^artifact_limit=.*/artifact_limit=4194304/' "$scratch/p2.receipt.saved" ;;
+      wrong-leaf) sed 's/^log_leaf=.*/log_leaf=redirected.log/' "$scratch/p2.receipt.saved" ;;
+    esac >"$p2_receipt"
+    cp "$scratch/sanity.negative.saved" "$sanity"
+    cp "$scratch/status.negative.saved" "$mode0_status"
+    refresh_negative_bindings p2_add "$p2_receipt"
+    assert_negative_sanity "bounded receipt $bounded_mutation"
+done
+
+# One receipt cannot authorize two probes, even when both outer hashes are
+# updated.  Likewise mode 1 cannot alias mode 0 evidence.
+p2_receipt_sha=$(bootstrap_stage3_hash_file "$p2_receipt")
+sed -e "s|^stage2_mir_retention_collector_receipt_path=.*|stage2_mir_retention_collector_receipt_path=$p2_receipt|" \
+    -e "s|^stage2_mir_retention_collector_receipt_sha256=.*|stage2_mir_retention_collector_receipt_sha256=$p2_receipt_sha|" \
+    "$scratch/status.negative.saved" >"$mode0_status"
+cp "$scratch/sanity.negative.saved" "$sanity"
+negative_status_sha=$(bootstrap_stage3_hash_file "$mode0_status")
+sed "s|^frontend_smoke_bootstrap0_status_sha256=.*|frontend_smoke_bootstrap0_status_sha256=$negative_status_sha|" \
+    "$sanity" >"$scratch/sanity.refresh" && mv "$scratch/sanity.refresh" "$sanity"
+assert_negative_sanity 'duplicate bounded receipt path'
+
+mode1_status=$sanity.frontend-bootstrap-1.status.env
+cp "$mode1_status" "$scratch/mode1.status.saved"
+sed -e "s|^p2_add_log_path=.*|p2_add_log_path=$mode0_log|" \
+    -e "s|^p2_add_log_sha256=.*|p2_add_log_sha256=$(bootstrap_stage3_hash_file "$mode0_log")|" \
+    -e "s|^p2_add_collector_receipt_path=.*|p2_add_collector_receipt_path=$p2_receipt|" \
+    -e "s|^p2_add_collector_receipt_sha256=.*|p2_add_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$p2_receipt")|" \
+    "$scratch/mode1.status.saved" >"$mode1_status"
+negative_status_sha=$(bootstrap_stage3_hash_file "$mode1_status")
+sed "s|^frontend_smoke_bootstrap1_status_sha256=.*|frontend_smoke_bootstrap1_status_sha256=$negative_status_sha|" \
+    "$sanity" >"$scratch/sanity.refresh" && mv "$scratch/sanity.refresh" "$sanity"
+assert_negative_sanity 'cross-mode bounded evidence alias'
+cp "$scratch/mode1.status.saved" "$mode1_status"
+
+sed -e 's/^reason=.*/reason=setup-failure/' -e 's/^raw_status=.*/raw_status=126/' \
+    "$scratch/p2.receipt.saved" >"$p2_receipt"
+sed -e 's/^result=.*/result=fail/' -e 's/^probe=.*/probe=p2_add-build/' \
+    -e 's/^raw_status=.*/raw_status=126/' -e 's/^p2_add_raw_status=.*/p2_add_raw_status=126/' \
+    "$scratch/status.negative.saved" >"$mode0_status"
+cp "$scratch/sanity.negative.saved" "$sanity"
+refresh_negative_bindings p2_add "$p2_receipt"
+assert_negative_sanity 'setup-failure bounded status'
+
+sed -e 's/^result=.*/result=fail/' -e 's/^probe=.*/probe=setup-failure/' \
+    -e 's/^raw_status=.*/raw_status=126/' \
+    -e 's/^p2_add_raw_status=.*/p2_add_raw_status=not-run/' \
+    -e 's|^p2_add_log_path=.*|p2_add_log_path=-|' \
+    -e 's/^p2_add_log_sha256=.*/p2_add_log_sha256=-/' \
+    -e 's|^p2_add_collector_receipt_path=.*|p2_add_collector_receipt_path=-|' \
+    -e 's/^p2_add_collector_receipt_sha256=.*/p2_add_collector_receipt_sha256=-/' \
+    -e 's/^stage2_mir_retention_raw_status=.*/stage2_mir_retention_raw_status=not-run/' \
+    -e 's|^stage2_mir_retention_log_path=.*|stage2_mir_retention_log_path=-|' \
+    -e 's/^stage2_mir_retention_log_sha256=.*/stage2_mir_retention_log_sha256=-/' \
+    -e 's|^stage2_mir_retention_collector_receipt_path=.*|stage2_mir_retention_collector_receipt_path=-|' \
+    -e 's/^stage2_mir_retention_collector_receipt_sha256=.*/stage2_mir_retention_collector_receipt_sha256=-/' \
+    -e 's/^stage2_module_path_naming_raw_status=.*/stage2_module_path_naming_raw_status=not-run/' \
+    -e 's|^stage2_module_path_naming_log_path=.*|stage2_module_path_naming_log_path=-|' \
+    -e 's/^stage2_module_path_naming_log_sha256=.*/stage2_module_path_naming_log_sha256=-/' \
+    -e 's|^stage2_module_path_naming_collector_receipt_path=.*|stage2_module_path_naming_collector_receipt_path=-|' \
+    -e 's/^stage2_module_path_naming_collector_receipt_sha256=.*/stage2_module_path_naming_collector_receipt_sha256=-/' \
+    -e 's/^hello_world_positional_raw_status=.*/hello_world_positional_raw_status=not-run/' \
+    -e 's|^hello_world_positional_log_path=.*|hello_world_positional_log_path=-|' \
+    -e 's/^hello_world_positional_log_sha256=.*/hello_world_positional_log_sha256=-/' \
+    -e 's|^hello_world_positional_collector_receipt_path=.*|hello_world_positional_collector_receipt_path=-|' \
+    -e 's/^hello_world_positional_collector_receipt_sha256=.*/hello_world_positional_collector_receipt_sha256=-/' \
+    "$scratch/status.negative.saved" >"$mode0_status"
+cp "$scratch/sanity.negative.saved" "$sanity"
+negative_status_sha=$(bootstrap_stage3_hash_file "$mode0_status")
+sed "s|^frontend_smoke_bootstrap0_status_sha256=.*|frontend_smoke_bootstrap0_status_sha256=$negative_status_sha|" \
+    "$sanity" >"$scratch/sanity.refresh" && mv "$scratch/sanity.refresh" "$sanity"
+for incomplete_probe in p2_add stage2_mir_retention stage2_module_path_naming \
+    hello_world_positional; do
+    grep -qx "${incomplete_probe}_raw_status=not-run" "$mode0_status"
+    grep -qx "${incomplete_probe}_log_path=-" "$mode0_status"
+    grep -qx "${incomplete_probe}_log_sha256=-" "$mode0_status"
+    grep -qx "${incomplete_probe}_collector_receipt_path=-" "$mode0_status"
+    grep -qx "${incomplete_probe}_collector_receipt_sha256=-" "$mode0_status"
+done
+[ -f "$mode0_status" ] && [ -f "$sanity" ] || {
+    echo 'early failure evidence was not retained' >&2; exit 1
+}
+assert_negative_sanity 'early-probe incomplete frontend status'
 sed 's/^frontend_smoke_bootstrap_mode_status=0$/frontend_smoke_bootstrap_mode_status=1/' \
     "$sanity" >"$sanity.bootstrap-mode-tampered"
 if bootstrap_stage3_verify_sanity_evidence_receipt \
-    "$sanity.bootstrap-mode-tampered" "$candidate" "$root"; then
+    "$sanity.bootstrap-mode-tampered" "$sanity.bootstrap-mode-tampered" \
+    "$(dirname -- "$sanity")" "$candidate" "$root"; then
     echo 'sanity receipt accepted a failed bootstrap-mode frontend smoke' >&2
     exit 1
 fi
@@ -82,7 +417,14 @@ probe_log=$receiver_log
 probe_log_sha256=$(bootstrap_stage3_hash_file "$receiver_log")
 EOF
 bootstrap_stage3_verify_receiver_evidence_receipt \
-    "$receiver" "$candidate" "$runtime_snapshot" "$receiver_log"
+    "$receiver" "$receiver" "$candidate" "$candidate" \
+    "$runtime_snapshot" "$runtime_snapshot" "$receiver_log" "$receiver_log"
+if bootstrap_stage3_verify_receiver_evidence_receipt \
+    "$receiver" "$receiver" "$candidate" "$candidate" \
+    "$runtime_snapshot" "$runtime_snapshot" "$receiver_log" "$receiver_log.other"; then
+    echo 'receiver receipt accepted mismatched probe-log display' >&2
+    exit 1
+fi
 [ ! -e "$marker" ] || {
     echo 'receiver receipt verification executed the admitted Stage 2 candidate' >&2
     exit 1
@@ -115,11 +457,17 @@ identity_changed=$(bootstrap_stage3_stage2_admission_identity \
 
 admission="$scratch/admission.env"
 bootstrap_stage3_write_stage2_admission_receipt \
-    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
-    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"
+    "$admission" "$admission" "$candidate" "$candidate" \
+    "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+    "$(dirname -- "$runtime_snapshot")/stage2-runtime-authority" "$(dirname -- "$runtime_snapshot")/stage2-runtime-authority" \
+    "$tool_snapshot" "$tool_snapshot" "$args_sha" "$sanity" "$sanity" \
+    "$(dirname -- "$sanity")" "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$root"
 bootstrap_stage3_verify_stage2_admission_receipt \
-    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
-    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"
+    "$admission" "$admission" "$candidate" "$candidate" \
+    "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+    "$(dirname -- "$runtime_snapshot")/stage2-runtime-authority" "$(dirname -- "$runtime_snapshot")/stage2-runtime-authority" \
+    "$tool_snapshot" "$tool_snapshot" "$args_sha" "$sanity" "$sanity" \
+    "$(dirname -- "$sanity")" "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$root"
 [ ! -e "$marker" ] || {
     echo 'admission receipt verification executed the Stage 2 candidate' >&2
     exit 1
@@ -128,8 +476,11 @@ bootstrap_stage3_verify_stage2_admission_receipt \
 cp -p "$candidate" "$candidate.saved"
 printf '# candidate tamper\n' >>"$candidate"
 if bootstrap_stage3_verify_stage2_admission_receipt \
-    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
-    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"; then
+    "$admission" "$admission" "$candidate" "$candidate" \
+    "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+    "$(dirname -- "$runtime_snapshot")/stage2-runtime-authority" "$(dirname -- "$runtime_snapshot")/stage2-runtime-authority" \
+    "$tool_snapshot" "$tool_snapshot" "$args_sha" "$sanity" "$sanity" \
+    "$(dirname -- "$sanity")" "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$root"; then
     echo 'admission receipt accepted a tampered candidate' >&2
     exit 1
 fi
@@ -141,9 +492,11 @@ sed 's/^admission_identity=.*/admission_identity=0000000000000000000000000000000
     "$admission.tampered" >"$admission.tampered.next"
 mv "$admission.tampered.next" "$admission.tampered"
 if bootstrap_stage3_verify_stage2_admission_receipt \
-    "$admission.tampered" "$candidate" "$source_snapshot" \
-    "$runtime_snapshot" "$tool_snapshot" "$args_sha" "$sanity" \
-    "$receiver" "$root"; then
+    "$admission.tampered" "$admission.tampered" "$candidate" "$candidate" \
+    "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+    "$(dirname -- "$runtime_snapshot")/stage2-runtime-authority" "$(dirname -- "$runtime_snapshot")/stage2-runtime-authority" \
+    "$tool_snapshot" "$tool_snapshot" "$args_sha" "$sanity" "$sanity" \
+    "$(dirname -- "$sanity")" "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$root"; then
     echo 'admission receipt accepted a tampered receipt' >&2
     exit 1
 fi
@@ -152,8 +505,10 @@ cp -p "$sanity" "$sanity.saved"
 sed 's/^frontend_smoke_status=0$/frontend_smoke_status=1/' \
     "$sanity.saved" >"$sanity"
 if bootstrap_stage3_verify_stage2_admission_receipt \
-    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
-    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"; then
+    "$admission" "$admission" "$candidate" "$candidate" \
+    "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+    "$tool_snapshot" "$tool_snapshot" "$args_sha" "$sanity" "$sanity" \
+    "$(dirname -- "$sanity")" "$receiver" "$receiver" "$root"; then
     echo 'admission receipt reblessed tampered sanity evidence' >&2
     exit 1
 fi
@@ -161,7 +516,8 @@ mv "$sanity.saved" "$sanity"
 
 printf 'receiver log tamper\n' >>"$receiver_log"
 if bootstrap_stage3_verify_receiver_evidence_receipt \
-    "$receiver" "$candidate" "$runtime_snapshot" "$receiver_log"; then
+    "$receiver" "$receiver" "$candidate" "$candidate" \
+    "$runtime_snapshot" "$runtime_snapshot" "$receiver_log" "$receiver_log"; then
     echo 'receiver receipt accepted a tampered probe log' >&2
     exit 1
 fi
@@ -187,7 +543,8 @@ done
 
 v3_manifest="$scratch/provenance-v3.env"
 printf 'schema=simple-bootstrap-stage3-provenance-v3\n' >"$v3_manifest"
-if bootstrap_stage3_verify_manifest "$v3_manifest" "$root" "$candidate"; then
+if bootstrap_stage3_verify_manifest "$v3_manifest" "$v3_manifest" "$root" \
+    "$candidate" "$candidate" "${v3_manifest}.authority-map.env"; then
     echo 'v3 Stage 3 provenance was not rejected fail-closed' >&2
     exit 1
 fi

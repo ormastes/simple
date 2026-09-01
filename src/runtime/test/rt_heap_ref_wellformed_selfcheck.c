@@ -7,10 +7,10 @@
  *
  *   doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md
  *
- * Contract: the probe answers FORMATION ONLY — "is this a heap-tagged
- * pointer outside the zero page" — never liveness. It must false-reject
- * nothing a live heap payload can be, so it deliberately does NOT consult
- * the immortal-pointer registry.
+ * Contract: the probe answers FORMATION ONLY — "is this a tagged heap or raw
+ * class pointer outside the zero page" — never liveness. It must false-reject
+ * nothing a live heap payload can be, so it deliberately does NOT consult the
+ * immortal-pointer registry.
  *
  * The core-C bootstrap runtime capsule compiles and runs this check.
  */
@@ -46,6 +46,10 @@ int main(void) {
         "heap-tagged zero-page address is malformed");
     check(rt_heap_ref_wellformed(heap_tagged) == 1,
         "heap-tagged real address is wellformed without a registry probe");
+
+    int64_t untagged = (int64_t)(uintptr_t)&anchor;
+    check(rt_heap_ref_wellformed(untagged) == 1,
+        "raw untagged class reference is wellformed");
 
     if (failures != 0) {
         printf("rt_heap_ref_wellformed_selfcheck: %d failure(s)\n", failures);

@@ -80,6 +80,14 @@ fn fab_lex_prof_enabled() -> bool:
     if _fab_lex_prof_cached < 0:
         _fab_lex_prof_cached = if (_sffi_env_get("SIMPLE_LEX_PHASE_PROFILE") ?? "") == "1": 1 else: 0
     _fab_lex_prof_cached == 1
+
+# Cache-boundary attribution is opt-in and narrower than PARSEPHASE: it marks
+# the whole-pool snapshot that is later persisted by frontend_parse_cache.
+var _fab_cache_boundary_prof_cached: i64 = -1
+fn fab_cache_boundary_prof_enabled() -> bool:
+    if _fab_cache_boundary_prof_cached < 0:
+        _fab_cache_boundary_prof_cached = if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_BOUNDARY_PROFILE") ?? "") == "1": 1 else: 0
+    _fab_cache_boundary_prof_cached == 1
 @unsafe(reason: "raw transient-array scope begin ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
 @unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
@@ -1417,7 +1425,11 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     # HIT on the next build with par_had_error restored true but no parser
     # diagnostics re-emitted -- a build that fails with no message.
     if _fab_capture_pools == 1 and not parser_has_errors():
+        val dump_t0 = if fab_cache_boundary_prof_enabled(): _sffi_time_now_unix_micros() else: 0
         _fab_captured_blob = flat_pools_dump_all()
+        if fab_cache_boundary_prof_enabled():
+            val dump_t1 = _sffi_time_now_unix_micros()
+            print("PARSECACHE\tdump_ms={(dump_t1 - dump_t0) / 1000}\tbytes={_fab_captured_blob.len()}\tpath={path}")
     val built_module = flat_ast_to_module(path)
     if fab_phase_prof_enabled():
         val _pp_t6 = _sffi_time_now_unix_micros()

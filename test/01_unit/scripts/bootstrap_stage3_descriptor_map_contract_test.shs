@@ -3,9 +3,24 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage3-descriptor-map.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+
+printf '%s\n' 'schema=sentinel-schema' >"$scratch/manifest-value.env"
+bootstrap_stage3_key=outer-key-sentinel
+bootstrap_stage3_manifest=outer-manifest-sentinel
+[ "$(bootstrap_stage3_manifest_value schema \
+    "$scratch/manifest-value.env")" = sentinel-schema ] || {
+    echo 'manifest value direct lookup failed' >&2
+    exit 1
+}
+[ "$bootstrap_stage3_key" = outer-key-sentinel ] &&
+    [ "$bootstrap_stage3_manifest" = outer-manifest-sentinel ] || {
+    echo 'manifest value clobbered caller variables' >&2
+    exit 1
+}
 mkdir "$scratch/authority" "$scratch/display-parent"
 printf 'immutable authority\n' >"$scratch/authority/input"
 exec 7<"$scratch/authority"
@@ -93,10 +108,10 @@ bootstrap_stage3_validate_descriptor_map "$map_descriptor" "$map_sha" \
     x86_64-unknown-linux-gnu "$roles"
 
 # A consumer still binds the audit spelling exactly, without reopening it.
-bootstrap_stage3_descriptor_map_expect_display_token "$map_descriptor" \
-    bootstrap_script "$scratch/display-parent/input"
-if bootstrap_stage3_descriptor_map_expect_display_token "$map_descriptor" \
-    bootstrap_script "$scratch/display-parent/other"; then
+[ "$(bootstrap_stage3_descriptor_map_value "$map_descriptor" \
+    bootstrap_script display_token)" = "$scratch/display-parent/input" ]
+if [ "$(bootstrap_stage3_descriptor_map_value "$map_descriptor" \
+    bootstrap_script display_token)" = "$scratch/display-parent/other" ]; then
     echo 'FAIL: descriptor/display mismatch admitted' >&2
     exit 1
 fi
@@ -154,8 +169,8 @@ for mutation in owner-pid owner-start vector order duplicate; do
     esac
     reject_map "$mutation mutation" "$mutated"
 done
-if bootstrap_stage3_descriptor_map_expect_display_token "$map_descriptor" \
-    missing_role ''; then
+if bootstrap_stage3_descriptor_map_value "$map_descriptor" \
+    missing_role display_token >/dev/null 2>&1; then
     echo 'FAIL: empty/missing display admitted' >&2; exit 1
 fi
 
