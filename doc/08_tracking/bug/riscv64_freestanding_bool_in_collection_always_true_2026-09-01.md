@@ -135,3 +135,95 @@ Find the codegen site that materialises a `bool`-typed element read from
 `rt_tuple_get` / `rt_array_get` and use it as a condition without decoding the
 tagged `19`. Fix there, not in the parser: forcing `parse_block` to advance
 would mask a defect class that reaches every `bool` in every collection.
+
+---
+
+# FIFTH SESSION MEASUREMENT (2026-09-01) — host native-build is GREEN, and codegen uses TWO bool representations
+
+## The host block recorded above was the reproducer's shape, not a real block
+
+The previous session recorded "Host is blocked: `native-build` of a minimal
+reproducer fails first with an unrelated, pre-existing `semantic: method 'len'
+not found on type 'enum'`". That was a property of *that* reproducer, not of the
+host lane. A reproducer with no `Option`/`.len()` surface native-builds cleanly
+on host x86_64 (`rc=0`, ~29s) and **runs CORRECTLY**:
+
+```
+GOOD m=false
+GOOD ab0=false
+0
+```
+
+covering both shapes from the table above — a `bool` destructured out of a
+returned tuple, and `ab[0]` out of a `[bool]` array literal. So the defect is
+**NOT general to the compiled backend**. It is specific to the riscv64
+freestanding lane. This narrows the search and contradicts nothing previously
+measured.
+
+## What the host disassembly shows: tuples and arrays disagree, deliberately
+
+Disassembling the working host binary shows codegen uses **two different and
+mutually incompatible `bool` representations**, one per container kind, each
+internally consistent:
+
+**Tuple path — RAW 0/1, consumed by a bit-0 test.** `tup_early_false` inlines
+the tuple construction and stores raw words:
+
+```
+2d27:  mov  $0x10,%edi ; call rt_alloc
+2d31:  movq $0x1,(%rax)        <- `true`  stored as RAW 1
+2d38:  movq $0x4d,0x8(%rax)
+...
+2d4c:  xorps %xmm0,%xmm0
+2d4f:  movups %xmm0,(%rax)     <- `false` stored as RAW 0 (both words)
+```
+
+and the consumer at the destructure site tests bit 0 of the word directly:
+
+```
+2c63:  testb $0x1,(%rdx)       <- RAW bit-0 test, no tag decode
+```
+
+**Array path — TAGGED 11/19, consumed by an equality test against 11.** The
+`[false, true]` literal pushes tagged constants through the runtime:
+
+```
+2c97:  mov $0x13,%esi ; call rt_array_push   <- 0x13 = 19 = TAGGED false
+2ca4:  mov $0xb,%esi  ; call rt_array_push   <- 0x0b = 11 = TAGGED true
+2cc8:  call rt_array_get
+2ccd:  cmp $0xb,%rax                         <- compares against TAGGED true
+```
+
+## Why this is the mechanism, and what it predicts
+
+The two schemes are only safe while producer and consumer agree. **Tagged
+`false` is 19, whose bit 0 is SET.** So the instant a TAGGED bool reaches the
+tuple consumer's `testb $0x1`, it reads `true` — and so does tagged `true` (11,
+bit 0 also set). That is precisely an "always true" bool, for both operands,
+which is exactly the measured table. The i64 element of the same tuple reading
+back correctly is also explained: only the bool word is misencoded, the pointer
+and the integer slot are fine.
+
+So the freestanding lane is **mixing the two conventions** — writing a tagged
+bool into a slot whose reader uses the raw bit-0 test (or the mirror-image
+mismatch on the array path, where a non-11 value reads false). The host is green
+only because there each container's producer and consumer happen to match.
+
+This supersedes the earlier "a consumer uses the collection element directly as
+a machine truth value" lead only in precision, not in direction: that lead was
+right, and the host disassembly now names both conventions and the exact
+instruction (`testb $0x1`) that cannot survive a tagged operand.
+
+## Status of the next step
+
+Still open: WHICH side diverges in the freestanding build (a baremetal
+`rt_array_*` / tuple store that re-encodes, versus codegen emitting a tagged
+constant where the host emitted a raw one). Not yet established; must not be
+written up as fact until a freestanding build is disassembled or instrumented.
+
+## Reproducer, host, cheap
+
+`/mnt/data/tmp/rv64x/repro.spl` in this session; the shape is the
+`tup_early_false` function quoted above plus `var ab: [bool] = [false, true]`.
+Interpreter and host `native-build` both GREEN — so any guard built on it must
+run the freestanding lane, or a freestanding-flagged host build, to be RED.
