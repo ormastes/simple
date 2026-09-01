@@ -282,3 +282,89 @@ separated by printing the RAW `hdr.type` of the `fn_` handle on entry to
 `call_hir_function`, which is a strictly cheaper probe than the
 before/after-MIR probe the prior section proposed (that probe tests a
 discriminator now known to be the wrong one).
+
+## ROOT CAUSE — `rt_unwrap_or_trap` never unwrapped (fix `b655e343cdb`)
+
+The section above ended at three candidates and a probe. The probe was not
+needed: the third candidate is right, and the tree proves it without a boot.
+
+`examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c`
+defined, in full:
+
+```c
+RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
+{
+    if (value == NIL_VALUE) { ...trap... }
+    return value;                 /* <-- the Some-BOX, not its payload */
+}
+```
+
+Its only test was `== NIL_VALUE`. Two independent fail-opens follow: a boxed
+`Some(x)` is returned VERBATIM, so callers receive the 24-byte `RuntimeEnum`
+wrapper where the payload belongs; and a boxed `None`/`Err` passes through
+silently instead of trapping.
+
+### The chain, end to end, with every measured number accounted for
+
+1. The interpreter resolves a CALLEE through
+   `resolve_function_by_name(name, ctx) -> HirFunction?`
+   (`70.backend/backend/interpreter_calls.spl:137-153`) and then
+   `cf_target_hit.unwrap()` (`:181`, and the sibling at
+   `interpreter_expr.spl:311`).
+2. `.unwrap()` returns the Some-box. `call_hir_function` (`:195`) therefore
+   binds `fn_: HirFunction` to a 24-byte `RuntimeEnum` living in a 32-byte
+   `rv_alloc` slot (the bump allocator aligns to 16).
+3. Entry to `call_hir_function` makes the by-value COW copy of `fn_` —
+   `rt_alloc(248)` at `807116ac`, the 31-field `HirFunction` — and walks the
+   source's slots. `+8`/`+16`/`+24` are the wrapper's `enum_id|discriminant`,
+   its `payload`, and zero padding; none of them faults, which is why the three
+   heap fields "before" `return_type` appeared to clone fine. That was never
+   evidence the object was a `HirFunction`.
+4. `+32` is PAST the 32-byte slot: it reads the next bump allocation's
+   `HeapHeader`, `0x0000003200000001` = `type=1` (`HEAP_STRING`), `size=50`.
+5. That word has `TAG_HEAP` in its low bits, so the clone's tag test accepts it
+   and dereferences `size << 32` as an address: `scause=0x5` load access fault,
+   `stval=0x3200000000`, `sepc` in `call_hir_function+0x414`. Stack guard intact,
+   `sp` 8 MB high — consistent, because nothing about this is a stack problem.
+
+Row 1 stayed GREEN because `interpret_hir_module` reaches `call_hir_function`
+only via `module.functions.values()` + a typed local (`interpreter.spl:190-196`)
+and passes the `HirFunction` DIRECTLY. It never wraps an optional, and its
+program has no callee at all.
+
+### This was already fixed once, on the sibling architecture
+
+`examples/09_embedded/simple_os/arch/common/boot/freestanding_value_registry_impl.h:149`
+carries the correct implementation, and its comment describes this identical
+failure in the same terms — "every `.unwrap()` fell through returning the
+WRAPPER instead of the payload ... the first field load off it faults" — for the
+x86_64 L5 VFS blocker
+(`vfs_l5_fat32core_open_faults_on_new_file_write_2026-08-31.md`). That fix landed
+in the COMMON header and the x86_64 lane. riscv64 carries its OWN duplicate
+definition in its own boot TU, which shadows the sibling for this lane and was
+never brought along. **A tree-wide grep for `rt_unwrap_or_trap` finds the good
+sibling and looks green** — the duplicate-definition trap this boot directory
+has now been bitten by four times.
+
+Canonical semantics also exist at `src/runtime/runtime_native.c:12972` (hosted C)
+and `src/runtime/simple_core/core_values.spl:142` (pure Simple). Both
+discriminant forms are accepted by the fix, deliberately: simple-core builds
+canonical Options with ORDINAL discriminants (Some=0, None=1) while native
+lowering identifies Ok/Err by the stable 32-bit variant-name hashes, so a
+hash-only fix would still return the wrapper for an ordinal-built Option.
+
+`riscv32` has no `rt_unwrap_or_trap` at all (grep of
+`examples/09_embedded/simple_os/arch/riscv32/`), so it carries no broken twin —
+but it will need the symbol whenever its lane starts executing optionals.
+
+### Guard
+
+`scripts/check/check-rv64-unwrap-or-trap-unwraps.shs` — verified RED against
+`b655e343cdb~1` and GREEN after. Deliberately NOT a source-shape ratchet like
+its neighbour `check-rv64-rt-contains-has-dict-arm.shs`: a shape check cannot
+distinguish a correct unwrap from one that reaches the `HEAP_ENUM` arm and still
+returns the wrapper, which is this defect exactly. It extracts the real body,
+host-compiles it against a `_Static_assert`-pinned transcription of the TU's
+value layout, and asserts a Some-box yields its PAYLOAD. `--selftest` fatal,
+6 fixtures, three of them must-FAIL (pre-fix body; a hash-only HALF-fix; an
+uncompilable body). Wired in `.github/workflows/repo-hygiene.yml`.
