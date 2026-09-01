@@ -68,6 +68,24 @@ gate_error() {
     exit 2
 }
 
+# Cleanup registry for mktemp'd work dirs. A single trap registered ONCE here
+# (rather than a fresh `trap ... EXIT` at every mktemp site) because
+# hw_check_candidate's own work dir is created and torn down NESTED inside
+# hw_selftest's work dir's lifetime (hw_selftest calls hw_check_candidate per
+# fixture) -- a per-site EXIT trap would silently clobber the outer one when
+# the inner function returns, leaving the outer dir unprotected against a
+# later interrupt. Accumulating into one list and trapping once avoids that.
+HW_CLEANUP_DIRS=""
+hw_register_cleanup_dir() {
+    HW_CLEANUP_DIRS="$HW_CLEANUP_DIRS $1"
+}
+hw_cleanup_all() {
+    for hw_cleanup_dir in $HW_CLEANUP_DIRS; do
+        rm -rf "$hw_cleanup_dir"
+    done
+}
+trap hw_cleanup_all EXIT HUP INT TERM
+
 case "$HW_THREADS" in
     ''|*[!0-9]*|0) gate_error "HW_THREADS must be a positive integer" ;;
 esac
@@ -188,6 +206,7 @@ hw_check_candidate() {
     hwc_candidate=$1
     hwc_name=$(basename "$hwc_candidate")
     hwc_work=$(mktemp -d "${TMPDIR:-/tmp}/hw-native-build.XXXXXX") || return 1
+    hw_register_cleanup_dir "$hwc_work"
 
     hw_probe "$hwc_candidate" "$hwc_work" entry
     HW_CHECKED=$((HW_CHECKED + 1))
@@ -212,6 +231,7 @@ hw_check_candidate() {
 hw_selftest() {
     st_work=$(mktemp -d "${TMPDIR:-/tmp}/hw-native-build-selftest.XXXXXX") ||
         gate_error "selftest could not create a work dir"
+    hw_register_cleanup_dir "$st_work"
     st_fail=""
     st_n=0
 
