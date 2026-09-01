@@ -850,6 +850,7 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => arr.len() as i64,
                 Value::ByteArray(arr) | Value::FrozenByteArray(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
+                Value::StrBytes(b) => b.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
                 Value::LabeledTuple { values, .. } => values.len() as i64,
                 Value::Object {

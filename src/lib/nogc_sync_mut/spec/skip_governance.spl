@@ -32,7 +32,8 @@ use compiler.common.assurance.policy_schema.AssuranceStrictness
 use std.io_runtime.{env_get}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{read_file_text}
-use std.io_runtime.{process_run}
+use std.io_runtime.{time_now_unix_micros}
+use std.common.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day}
 
 # ================================================================
 # SkipRecord — the SDN-tracked shape
@@ -155,12 +156,18 @@ fn _yyyymmdd(date: text) -> i64:
     d.to_i64() ?? -1
 
 fn _today_yyyymmdd() -> i64:
-    val result = process_run("/bin/sh", ["-c", "date +%Y%m%d"])
-    val stdout = result[0]
-    val code = result[2]
-    if code != 0:
-        return -1
-    stdout.trim().to_i64() ?? -1
+    # Portable: derive today's UTC date from the wall-clock timestamp
+    # instead of shelling out to `/bin/sh -c "date +%Y%m%d"`, which does
+    # not exist on Windows and made every expiry check fail-closed to
+    # "expired" there (host-arbitrary, not a real skip-governance
+    # verdict). std.io_runtime.time_now_unix_micros() and
+    # std.common.time_utils's civil-date arithmetic are pure/portable
+    # and used the same way elsewhere in this codebase.
+    val micros = time_now_unix_micros()
+    val year = timestamp_get_year(micros)
+    val month = timestamp_get_month(micros)
+    val day = timestamp_get_day(micros)
+    year * 10000 + month * 100 + day
 
 fn is_expired(expiry: text) -> bool:
     val parsed = _yyyymmdd(expiry)
