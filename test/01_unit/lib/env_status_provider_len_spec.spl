@@ -1,0 +1,66 @@
+"""
+Generalization spec — field/method access on status-returning providers
+(sibling of test/01_unit/lib/log_env_nil_guard_spec.spl, 2026-09-01).
+
+Defect class: a provider whose "absent" result is a status value (nil /
+Option::None / bool) instead of the record or text the caller expects makes
+every direct member access on the result a latent fatal:
+
+    method `len` not found on type `enum` (receiver value: Option::None)
+    undefined field 'X': cannot access field on value of type 'bool'
+
+The env_get family is the highest-traffic instance: five co-compiled
+definitions across std with two signatures ((text)->text vs
+(text)->Optional(text)), so which one a call site gets depends on dispatch.
+This spec probes the neighbours of the fixed site: every text-contract
+member of the family must yield a value that supports `.len()` for an UNSET
+variable, and every optional-contract member must yield nil — never a value
+that explodes on first member access.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.env.variables.{env_get, env_get_or, env_has, env_unset}
+use std.nogc_sync_mut.io_runtime.{env_get_opt, env_get_nullable}
+
+val ABSENT = "SIMPLE_SPEC_STATUS_PROVIDER_ABSENT_VAR"
+
+describe "status-returning providers: member access on the absent case":
+
+    it "env_get (text contract): absent -> empty text, .len() works":
+        env_unset(ABSENT)
+        val v = env_get(ABSENT)
+        expect(v.len()).to_equal(0)
+        # A second member access on the same value — chains must not need
+        # an intermediate re-typing to survive.
+        expect(v + "x").to_equal("x")
+
+    it "env_get_or (text contract): absent -> default, .len() works":
+        env_unset(ABSENT)
+        val v = env_get_or(ABSENT, "fallback")
+        expect(v).to_equal("fallback")
+        expect(v.len()).to_equal(8)
+
+    it "env_get_opt (optional contract): absent -> nil, comparable without fatal":
+        env_unset(ABSENT)
+        val v = env_get_opt(ABSENT)
+        assert_true(v == nil)
+
+    it "env_get_nullable (optional contract): absent -> nil, comparable without fatal":
+        env_unset(ABSENT)
+        val v = env_get_nullable(ABSENT)
+        assert_true(v == nil)
+
+    it "env_has (bool contract): result is a usable bool, not a record":
+        env_unset(ABSENT)
+        val present = env_has(ABSENT)
+        assert_false(present)
+
+    it "text contract holds for a SET variable too (round trip)":
+        # Guards against the inverse failure: a wrapper collapsing a real
+        # value to a status.
+        use std.nogc_sync_mut.env.variables.{env_set}
+        env_set(ABSENT, "abc")
+        val v = env_get(ABSENT)
+        expect(v.len()).to_equal(3)
+        env_unset(ABSENT)
+        expect(env_get(ABSENT).len()).to_equal(0)
