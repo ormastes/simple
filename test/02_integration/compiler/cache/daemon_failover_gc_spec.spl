@@ -1,0 +1,57 @@
+"""Focused lifecycle and failover evidence for REQ-CSM-009..011."""
+
+use std.spec.step
+use compiler.driver.cache.daemon.cache_daemon_lifecycle
+use compiler.driver.cache.daemon.cache_daemon_transport
+
+describe "compiler cache daemon lifecycle":
+    it "rejects stale or hostile readiness identity":
+        step("Validate credential, protocol, epoch, owner and nonce together")
+        val receipt = CacheDaemonReadinessReceipt(
+            owner_instance_nonce: "owner-7", peer_user_id: "user-a", writer_epoch: 7i64,
+            protocol_digest: "protocol-v1", readiness_nonce: "ready-7",
+        )
+        expect(cache_daemon_receipt_valid(receipt, "user-a", "protocol-v1", "ready-7")).to_equal(true)
+        expect(cache_daemon_receipt_valid(receipt, "user-b", "protocol-v1", "ready-7")).to_equal(false)
+        expect(cache_daemon_receipt_valid(receipt, "user-a", "protocol-v1", "stale")).to_equal(false)
+
+    it "attempts exactly one reconnect then selects isolated direct spool":
+        step("Bound daemon failure to one retry and preserve a private spool namespace")
+        val decision = cache_transport_decide(false, false, 249i64)
+        expect(decision.route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+        expect(decision.reconnect_count).to_equal(1i64)
+        expect(isolated_spool_path("/cache/spool", "client-9")).to_equal("/cache/spool/client-9")
+        expect(isolated_spool_path("/cache/spool", "../shared")).to_equal("")
+
+    it "uses daemon only when readiness arrives inside the budget":
+        step("Accept the sole retry while it remains inside 250 milliseconds")
+        val ready = cache_transport_decide(false, true, 250i64)
+        expect(ready.route).to_equal(CACHE_ROUTE_DAEMON)
+        expect(ready.reconnect_count).to_equal(1i64)
+        val late = cache_transport_decide(true, true, 251i64)
+        expect(late.route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+
+    it "exits no earlier than ten seconds after every inhibitor ends":
+        step("Drive the monotonic lifecycle with a fake clock")
+        val lifecycle = cache_daemon_lifecycle_new()
+        expect(lifecycle.begin_request(0i64)).to_equal(true)
+        expect(lifecycle.begin_lease(1i64)).to_equal(true)
+        expect(lifecycle.begin_publication(2i64)).to_equal(true)
+        expect(lifecycle.begin_gc_transaction(3i64)).to_equal(true)
+        lifecycle.end_request(4i64)
+        lifecycle.end_lease(5i64)
+        lifecycle.end_publication(6i64)
+        lifecycle.end_gc_transaction(7i64)
+        expect(lifecycle.should_begin_shutdown(10006i64)).to_equal(false)
+        expect(lifecycle.should_begin_shutdown(10007i64)).to_equal(true)
+        expect(lifecycle.begin_request(10008i64)).to_equal(false)
+
+    it "new admitted work cancels an armed idle deadline":
+        step("Restart the ten second interval after later activity")
+        val lifecycle = cache_daemon_lifecycle_new()
+        lifecycle.arm_if_idle(0i64)
+        expect(lifecycle.should_begin_shutdown(9999i64)).to_equal(false)
+        expect(lifecycle.begin_request(9999i64)).to_equal(true)
+        lifecycle.end_request(10000i64)
+        expect(lifecycle.should_begin_shutdown(19999i64)).to_equal(false)
+        expect(lifecycle.should_begin_shutdown(20000i64)).to_equal(true)

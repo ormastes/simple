@@ -1,0 +1,119 @@
+"""Cache daemon admission and idle lifecycle.
+
+This state is availability coordination only.  It is never cache correctness
+authority; verified CAS/journal evidence remains required after admission.
+"""
+
+val CACHE_DAEMON_IDLE_ARM_MS: i64 = 10000i64
+val CACHE_DAEMON_IDLE_EXIT_MAX_MS: i64 = 12000i64
+
+struct CacheDaemonReadinessReceipt:
+    owner_instance_nonce: text
+    peer_user_id: text
+    writer_epoch: i64
+    protocol_digest: text
+    readiness_nonce: text
+
+fn cache_daemon_receipt_valid(
+    receipt: CacheDaemonReadinessReceipt,
+    expected_user_id: text,
+    expected_protocol_digest: text,
+    expected_readiness_nonce: text,
+) -> bool:
+    receipt.owner_instance_nonce != "" and
+        receipt.peer_user_id == expected_user_id and
+        receipt.writer_epoch > 0i64 and
+        receipt.protocol_digest == expected_protocol_digest and
+        receipt.readiness_nonce == expected_readiness_nonce
+
+class CacheDaemonLifecycle:
+    request_count: i64
+    lease_count: i64
+    publication_count: i64
+    gc_transaction_count: i64
+    idle_since_ms: i64
+    admission_open: bool
+
+    static fn create() -> CacheDaemonLifecycle:
+        CacheDaemonLifecycle(
+            request_count: 0i64,
+            lease_count: 0i64,
+            publication_count: 0i64,
+            gc_transaction_count: 0i64,
+            idle_since_ms: -1i64,
+            admission_open: true,
+        )
+
+    fn activity_count() -> i64:
+        self.request_count + self.lease_count + self.publication_count + self.gc_transaction_count
+
+    me note_activity(now_ms: i64):
+        self.idle_since_ms = -1i64
+
+    me begin_request(now_ms: i64) -> bool:
+        if not self.admission_open:
+            return false
+        self.request_count = self.request_count + 1i64
+        self.note_activity(now_ms)
+        true
+
+    me end_request(now_ms: i64):
+        if self.request_count > 0i64:
+            self.request_count = self.request_count - 1i64
+        self.arm_if_idle(now_ms)
+
+    me begin_lease(now_ms: i64) -> bool:
+        if not self.admission_open:
+            return false
+        self.lease_count = self.lease_count + 1i64
+        self.note_activity(now_ms)
+        true
+
+    me end_lease(now_ms: i64):
+        if self.lease_count > 0i64:
+            self.lease_count = self.lease_count - 1i64
+        self.arm_if_idle(now_ms)
+
+    me begin_publication(now_ms: i64) -> bool:
+        if not self.admission_open:
+            return false
+        self.publication_count = self.publication_count + 1i64
+        self.note_activity(now_ms)
+        true
+
+    me end_publication(now_ms: i64):
+        if self.publication_count > 0i64:
+            self.publication_count = self.publication_count - 1i64
+        self.arm_if_idle(now_ms)
+
+    me begin_gc_transaction(now_ms: i64) -> bool:
+        if not self.admission_open:
+            return false
+        self.gc_transaction_count = self.gc_transaction_count + 1i64
+        self.note_activity(now_ms)
+        true
+
+    me end_gc_transaction(now_ms: i64):
+        if self.gc_transaction_count > 0i64:
+            self.gc_transaction_count = self.gc_transaction_count - 1i64
+        self.arm_if_idle(now_ms)
+
+    me arm_if_idle(now_ms: i64):
+        if self.activity_count() == 0i64 and self.idle_since_ms < 0i64:
+            self.idle_since_ms = now_ms
+
+    me should_begin_shutdown(now_ms: i64) -> bool:
+        self.arm_if_idle(now_ms)
+        if self.activity_count() != 0i64 or self.idle_since_ms < 0i64:
+            return false
+        if now_ms - self.idle_since_ms < CACHE_DAEMON_IDLE_ARM_MS:
+            return false
+        self.admission_open = false
+        true
+
+    fn exceeded_exit_bound(now_ms: i64) -> bool:
+        self.activity_count() == 0i64 and self.idle_since_ms >= 0i64 and
+            now_ms - self.idle_since_ms > CACHE_DAEMON_IDLE_EXIT_MAX_MS
+
+fn cache_daemon_lifecycle_new() -> CacheDaemonLifecycle:
+    CacheDaemonLifecycle.create()
