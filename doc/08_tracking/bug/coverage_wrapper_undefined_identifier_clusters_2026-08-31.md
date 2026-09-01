@@ -348,3 +348,113 @@ is a lower bound on the population, never the population.
 - Causes C (`_append_bytes` 11 conflicting defs, `Platform` 2 enums), D
   (`folded_global_scalar_type`), E (`_pmm_reset_contiguous_registry`) — unchanged,
   still need an owner decision, as filed above.
+
+---
+
+## Round 3 — 2026-09-01, suite4 census re-baselined against `origin/main` `c0cae452481`
+
+Evidence base: `/tmp/suite4.log` (started 2026-08-31 13:43, binary from
+`4b4e2a304b4`), 362 distinct symbols. **29 commits landed on `main` after the
+log started**, so a log row proves a failure at 13:43, not today. Every symbol
+below was re-checked against a seed built from `c0cae452481` in a private
+worktree, discriminated by `bin/simple compile <probe>.spl` with the exit
+status read into a variable on the next line — never through a pipe.
+
+### Stale vs live split (top clusters, 655 of 1266 rows)
+
+| symbol | rows | verdict on `c0cae452481` |
+|---|---|---|
+| `_pmm_reset_contiguous_registry` | 215 | LIVE, cause E — **fixed here** |
+| `folded_global_scalar_type` | 110 | LIVE, cause D — **fixed here** |
+| `value` | 76 | STALE — `std.nogc_sync_mut.js.engine.runtime` probes clean (PR #182) |
+| `rt_random_randint` | 69 | LIVE, cause B — **fixed here** |
+| `print_raw` | 68 | STALE at the filed site — `std.nogc_sync_mut.lsp.lsp_protocol` probes clean |
+| `_inc32` | 24 | STALE — defined `src/os/crypto/aes256_gcm.spl:559` since `d7a13a45f6b` |
+| `manifest_reason_content_hash_mismatch` | 22 | LIVE, cause E — **fixed here** |
+| `exec_memory_allocs_remove` | 14 | LIVE, cause E — **fixed here** |
+
+### Cause E resolved: it was a bad merge, not "never written"
+
+The doc's open question ("dropped by a bad merge or never written?") is
+answered. `git show 856847ef887:src/os/kernel/memory/pmm.spl` contains
+`_pmm_reset_contiguous_registry` **and** `pmm_is_live_contiguous_allocation`;
+both are absent from `a8244005f9b` and `e274cd33719`, the two
+`chore: merge all share-history worktree branches into main` commits. So the
+symbols were real, working code that a merge dropped while leaving every call
+site behind — including `memory_leveling_manager.spl:30`, which still
+`use`s `pmm_is_live_contiguous_allocation` from a module that no longer
+defines it.
+
+The restore is **surgical, not a file rollback**: `pmm.spl` at `main` is AHEAD
+of `856847ef887` on refcounts (fixed `[u16; MAX_PHYS_PAGES]` array, the O(n^2)
+`.push()` fix) and BEHIND only on the contiguous registry. Both directions were
+diffed before choosing. Restored: the two registry arrays, the five
+`_pmm_*_contiguous*` helpers, the `_pmm_remove_containing_page` call in
+`pmm_free_page`, the `_pmm_record_contiguous` rollback path in
+`pmm_alloc_pages`, and the public `pmm_free_page_range` /
+`pmm_is_live_contiguous_allocation`.
+
+**Layering, again.** Fixing it exposed `_pmm_alloc_page_address`, which appears
+nowhere in the suite4 census. The same merge had renamed that function's header
+to a *second* `pmm_alloc_page() -> PageFrame?` while leaving its `0` terminator
+and its caller — a duplicate definition (live cause C) plus a missing symbol in
+one edit. Reconstructed from `ae55a746719`, which carries the original verbatim.
+
+### Sites fixed
+
+| site | symbol | cause | fix |
+|---|---|---|---|
+| `src/os/kernel/memory/pmm.spl` | `_pmm_reset_contiguous_registry`, `pmm_is_live_contiguous_allocation`, `_pmm_alloc_page_address` | E (merge-dropped) | restore the registry block + call sites; re-identify `_pmm_alloc_page_address` |
+| `src/os/kernel/loader/artifact_manifest.spl` | `manifest_reason_content_hash_mismatch` | E | add the missing family member; the literal and semantics are fully specified by `manifest_verify_content_hash`'s own docstring, and `artifact_manifest_spec.spl:67` already imports it |
+| `src/compiler/99.loader/loader/smf_mmap_native.spl:276,383` | `exec_memory_allocs_remove` / `_len` | E | the helpers never existed; `EXEC_MEMORY_ALLOCS` is a module-level `Dict<i64,i64>` in the same file, already used directly at `:249` and `:376`. Calls replaced with `.remove(address)` / `.len()` (Dict.remove verified by probe) |
+| `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` | `folded_global_scalar_type` | D | hoisted the class-scope plain `fn` to module level — it takes no `self`, so behaviour-identical. **The resolver question stays open**: this is a recorded workaround, not an answer to whether a class-scope associated function should be visible to sibling `me` methods |
+| `src/app/office/sheets/formula.spl:6607,6614,8402` | `rt_random_randint` | B | `rt_random_randint` IS backed (`compiler_rust/runtime/src/value/sffi/random.rs:68`), so this is a resolution bug, not an unbacked extern. Fixed by importing the existing wrapper `std.sffi.math.{random_randint}` — deliberately NOT by adding a 4th `extern fn` declaration, which would feed cause C |
+
+### Before/after, same seed built from `c0cae452481`
+
+```
+before: rc=1 os.kernel.memory.pmm        :: undefined identifier: _pmm_reset_contiguous_registry
+after:  rc=0                                                                    <- fully clean
+before: rc=1 artifact_manifest           :: undefined identifier: manifest_reason_content_hash_mismatch
+after:  rc=1 artifact_manifest           :: [requires the interpreter]          <- pre-existing
+before: rc=1 smf_mmap_native             :: undefined identifier: exec_memory_allocs_remove
+after:  rc=1 smf_mmap_native             :: [requires the interpreter]          <- pre-existing
+before: rc=1 mir _MirLowering            :: undefined identifier: folded_global_scalar_type
+after:  rc=1 mir _MirLowering            :: undefined identifier: hir_ty         <- LAYERED, new, not in the census
+before: rc=1 app.office.sheets.formula   :: undefined identifier: rt_random_randint
+after:  rc=1 app.office.sheets.formula   :: [requires the interpreter]          <- pre-existing
+```
+
+Tests: `pmm_spec` 25/25 (3 new registry scenarios added — they do not compile
+before the fix), `artifact_manifest_spec` 31/31,
+`app/office/sheets/cell_format_spec` 18/18.
+`compiler/mir/array_at_native_lowering_spec` is 4/10 both with and without the
+hoist — pre-existing, measured on a reverted copy of the same file, not a
+regression from this change.
+
+### Still open
+
+- `hir_ty` — newly exposed by the cause-D fix, owner unknown.
+- `print_raw` (68) — the filed lsp_protocol site probes clean, but the cause-C
+  signature collision across 10 sites is untouched and remains a decision.
+- `_append_bytes` (9), `Platform` (9), `_u8_at` (4), `alloc` (1) — cause C,
+  unchanged.
+- The remaining ~350 long-tail symbols are unre-baselined; every one of them
+  needs the stale-vs-live check above before it is worked.
+
+### Round-3 verification addenda (measured, not inferred)
+
+- **Mutation-red on the 3 new `pmm_spec` scenarios.** With `pmm.spl` reverted to
+  `c0cae452481` and the spec unchanged: `25 total, 22 passed, 3 failed` — exactly
+  the three new scenarios, and only those. Restored: `25/25`. The earlier
+  "do not compile before the fix" wording was an inference; this is the run.
+- **Downstream importer.** `use os.kernel.memory.memory_leveling_manager.*`
+  compiles **rc=0, fully clean** after the restore. That module's `use` of
+  `pmm_is_live_contiguous_allocation` (`:30`) had been dangling since the merge,
+  so this is the strongest confirmation that the restored surface is the one its
+  real caller expects — not just that pmm's own closure resolves.
+- **Scope of proof, restated so it is not misquoted.** "430 rows" is the count
+  *attributed to these five symbols in the suite4 log*. Per round 1's retraction,
+  the mapping from a fixed module to a wrapper count is still NOT established —
+  no failing wrapper was captured here either. Read it as attribution, never as
+  a measured effect of this change.
