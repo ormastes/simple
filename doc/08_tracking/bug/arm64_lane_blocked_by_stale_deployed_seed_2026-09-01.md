@@ -209,7 +209,11 @@ wall. Neither is arm64-owned; `src/os/apps/dbd/` is the shared server payload.
    `self.state` is qualified; `provider`, `credential`, `credential_wiped`,
    `cert_chain`, `private_key` are not. Every other method in the file uses
    `self.`. Codegen is right to say `unresolved identifier 'provider'`.
-   Fix: qualify all five.
+   Fix: qualify all five. **FIXED in this change**, with RED/GREEN evidence:
+   pre-fix `native-build --target aarch64-unknown-simpleos` reports
+   `unresolved identifier 'provider'`; post-fix the
+   `DbdProvisioningOwnerV1.ready` body failure is gone (0 occurrences). The
+   file still fails for defect 2 below, which is why the gate does not move.
 
 2. **`DbdTransactionOwnerV1` is imported and used but DEFINED NOWHERE.**
    `dbd.spl:45` imports it from `os.apps.dbd.dbd_protocol`; it is used as a
@@ -288,9 +292,20 @@ The gate and its 25 selftest fixtures were not modified or weakened.
    `native-build --target` probe). Hard precondition; owned by the bootstrap
    lane. Note it will then hit the self-hosted multi-line `export` gap above
    (56 files).
-2. Fix `DbdProvisioningOwnerV1.ready()` — qualify the five bare field reads.
+2. ~~Fix `DbdProvisioningOwnerV1.ready()`~~ — DONE in this change.
 3. Define `DbdTransactionOwnerV1` (or remove its consumer half) — needs the dbd
    lane's design intent.
 4. Repoint `get_arm64_wm_qemu_target()` per the resolution above.
 5. Only then can the `protocol: linux` AAVMF handover be tested. It stays
    UNPROVEN until it is.
+
+## Repo-wide implication — NOT an arm64 problem
+
+The shared deployed seed
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
+(built 2026-08-26) predates the 2026-08-30 parser fix. `utf8.spl` is a stdlib
+dependency of nearly everything, so **every lane compiling current stdlib
+through that binary inherits this same parse wall.** It was not redeployed from
+this lane — other lanes are running against it mid-session and replacing it
+underneath them would be unsafe. Flagged as an action item for whoever can
+coordinate the swap: a plain `cargo build --release --bin simple` is sufficient.
