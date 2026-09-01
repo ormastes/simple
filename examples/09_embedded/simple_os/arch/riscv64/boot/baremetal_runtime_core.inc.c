@@ -1940,28 +1940,145 @@ int64_t rt_dict_values(int64_t dict)
 }
 
 /* --- process environment --------------------------------------------------
- * A baremetal guest has no process environment: there is no exec, no envp, and
- * nothing that could have set a variable. These therefore report ABSENCE
- * honestly (nil / the caller's default / failure), which is a true answer, not
- * a placeholder. Reporting success from rt_env_set would be a lie, and
- * returning an empty STRING from rt_env_get — as the x86_64 sibling does —
- * makes "set to empty" indistinguishable from "not set". */
+ * A baremetal guest still has no process environment: no exec, no envp, and
+ * nothing outside the guest that could have set a variable. What it DOES have,
+ * once in-guest compilation runs, is a guest that sets and reads back its own
+ * keys: `parse_and_build_module`
+ * (src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl) stashes
+ * `SIMPLE_BOOTSTRAP_LEX_SOURCE` / `_LEX_PATH`, parses, and restores them on
+ * scope exit -- checking the result and `panic`ing on failure (line 1441).
+ *
+ * The previous always-fail stubs were an honest answer to "what did the
+ * PROCESS environment contain" (nothing), but the frontend is not asking that.
+ * It is using the environment as its own scratch storage, so answering
+ * "absent" to a key this guest itself just set is not truthfulness, it is a
+ * wrong answer -- and it panicked the in-guest interpreter with
+ * `failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE for
+ * src/os/rv64_interp_hello.spl` the moment module-global initializers started
+ * running and execution reached that far
+ * (doc/08_tracking/bug/riscv64_freestanding_env_set_unbacked_blocks_in_guest_parse_2026-09-01.md).
+ *
+ * So: a guest-local table, holding exactly and only what this guest stored.
+ * A key never set still reports ABSENCE (nil / the caller's default), so
+ * "set to empty" stays distinguishable from "not set" -- the property the old
+ * comment was protecting is preserved, and no inherited process environment is
+ * fabricated. `rt_env_remove` keeps returning failure for an absent key.
+ *
+ * Fixed capacity, no growth: the frontend uses a handful of keys and a
+ * baremetal guest must not depend on an unbounded allocator here. A set that
+ * would exceed the table fails rather than silently dropping a key. */
+#define SIMPLEOS_ENV_MAX_ENTRIES 32U
+
+typedef struct {
+    char *key;
+    uint64_t key_len;
+    char *value;
+    uint64_t value_len;
+} SimpleosEnvEntry;
+
+static SimpleosEnvEntry simpleos_env_table[SIMPLEOS_ENV_MAX_ENTRIES];
+static unsigned simpleos_env_count = 0U;
+
+static int simpleos_env_key_eq(const SimpleosEnvEntry *e, const char *key, uint64_t key_len)
+{
+    if (!e->key || e->key_len != key_len) return 0;
+    for (uint64_t i = 0; i < key_len; i++) {
+        if (e->key[i] != key[i]) return 0;
+    }
+    return 1;
+}
+
+static SimpleosEnvEntry *simpleos_env_find(const char *key, uint64_t key_len)
+{
+    if (!key) return (SimpleosEnvEntry *)0;
+    for (unsigned i = 0; i < simpleos_env_count; i++) {
+        if (simpleos_env_key_eq(&simpleos_env_table[i], key, key_len)) {
+            return &simpleos_env_table[i];
+        }
+    }
+    return (SimpleosEnvEntry *)0;
+}
+
+static char *simpleos_env_dup(const char *src, uint64_t len)
+{
+    char *out = (char *)calloc(1, (size_t)len + 1U);
+    if (!out) return (char *)0;
+    for (uint64_t i = 0; i < len; i++) out[i] = src ? src[i] : 0;
+    out[len] = 0;
+    return out;
+}
+
+/* Deliberately NOT rt_string_new: that helper refuses any length above 4096
+ * (see its guard). A stashed lexer SOURCE routinely exceeds that, and a
+ * silently truncated restore would corrupt the parse in a way far harder to
+ * find than an outright failure. Same layout, no cap. */
+static RuntimeValue simpleos_env_string(const char *src, uint64_t len)
+{
+    RuntimeString *s = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + (uintptr_t)len + 1U);
+    if (!s) return NIL_VALUE;
+    s->hdr.type = HEAP_STRING;
+    s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (uintptr_t)len + 1U);
+    s->len = len;
+    for (uint64_t i = 0; i < len; i++) s->data[i] = src ? src[i] : 0;
+    s->data[len] = 0;
+    return ENCODE_PTR(s);
+}
+
 RuntimeValue rt_env_get(RuntimeValue key_ptr, uint64_t key_len)
 {
-    (void)key_ptr; (void)key_len;
-    return NIL_VALUE;
+    SimpleosEnvEntry *e = simpleos_env_find((const char *)(uintptr_t)key_ptr, key_len);
+    if (!e) return NIL_VALUE;
+    return simpleos_env_string(e->value, e->value_len);
 }
 
 int64_t rt_env_get_i64(RuntimeValue key_ptr, uint64_t key_len, int64_t default_value)
 {
-    (void)key_ptr; (void)key_len;
-    return default_value;
+    SimpleosEnvEntry *e = simpleos_env_find((const char *)(uintptr_t)key_ptr, key_len);
+    if (!e || e->value_len == 0U) return default_value;
+
+    const char *v = e->value;
+    uint64_t i = 0;
+    int negative = 0;
+    if (v[0] == '-') { negative = 1; i = 1; }
+    else if (v[0] == '+') { i = 1; }
+    if (i >= e->value_len) return default_value;
+
+    int64_t acc = 0;
+    for (; i < e->value_len; i++) {
+        if (v[i] < '0' || v[i] > '9') return default_value;
+        acc = acc * 10 + (int64_t)(v[i] - '0');
+    }
+    return negative ? -acc : acc;
 }
 
 int8_t rt_env_set(RuntimeValue key_ptr, uint64_t key_len, RuntimeValue value_ptr, uint64_t value_len)
 {
-    (void)key_ptr; (void)key_len; (void)value_ptr; (void)value_len;
-    return 0;
+    const char *key = (const char *)(uintptr_t)key_ptr;
+    const char *value = (const char *)(uintptr_t)value_ptr;
+    if (!key) return 0;
+
+    char *stored = simpleos_env_dup(value, value_len);
+    if (!stored) return 0;
+
+    SimpleosEnvEntry *e = simpleos_env_find(key, key_len);
+    if (e) {
+        /* The old value is intentionally not freed: this runtime's allocator
+         * has no free list, so a free would be a no-op that reads as one. */
+        e->value = stored;
+        e->value_len = value_len;
+        return 1;
+    }
+
+    if (simpleos_env_count >= SIMPLEOS_ENV_MAX_ENTRIES) return 0;
+    char *stored_key = simpleos_env_dup(key, key_len);
+    if (!stored_key) return 0;
+    e = &simpleos_env_table[simpleos_env_count];
+    e->key = stored_key;
+    e->key_len = key_len;
+    e->value = stored;
+    e->value_len = value_len;
+    simpleos_env_count++;
+    return 1;
 }
 
 int8_t rt_env_remove(RuntimeValue key_ptr, uint64_t key_len)

@@ -451,12 +451,53 @@ boot_row() {
     why=$(elf_free_of_weak_nil_stubs "$elf") \
         || fail "$rd kernel ELF is not safely linked: $why (a clean link is not evidence; see the WEAK-NIL STUB CHECK header)"
 
+    # OpenSBI embeds the payload with `.incbin "$(FW_PAYLOAD_PATH)"` and does
+    # NOT list that path as a prerequisite of fw_payload.o. Its make is
+    # incremental, so the SECOND row's build finds fw_payload.o already up to
+    # date and silently reuses the FIRST row's Image -- both rows then boot the
+    # same guest. Measured 2026-09-01: buildrun-fw_payload.bin contained 2
+    # `HELLO_INTERP_SIMPLEOS_RISCV64` markers and ZERO `BUILDRUN` markers, and
+    # the build-and-run guest emitted `[interp]` rungs and panicked on
+    # `src/os/rv64_interp_hello.spl` -- the interpreter row's program. The gate
+    # reported that as "the build-and-run guest never reached its entry", which
+    # is not what happened: it reached a DIFFERENT row's entry.
+    #
+    # Deleting the firmware objects forces the incbin to be re-read. It is not
+    # a full `make clean` -- the platform library and the rest of the tree stay
+    # warm, so this costs seconds, not a rebuild.
+    rm -rf "$OPENSBI_SRC/build/platform/generic/firmware"
+
     make -C "$OPENSBI_SRC" PLATFORM=generic CROSS_COMPILE="$OPENSBI_CROSS" \
         FW_PAYLOAD=y FW_PAYLOAD_PATH="$img" FW_PAYLOAD_OFFSET=0x200000 -j4 \
         >"$WORK/$rd-opensbi-build.log" 2>&1 \
         || { tail -20 "$WORK/$rd-opensbi-build.log" >&2; nothing "OpenSBI fw_payload build failed for $rd"; }
     fw=$OPENSBI_SRC/build/platform/generic/firmware/fw_payload.bin
     [ -s "$fw" ] || nothing "fw_payload.bin missing after build for $rd"
+
+    # POSITIVE embed assertion (hazard: "assert positively that the firmware
+    # embeds YOUR Image"). A firmware that built cleanly is not evidence it
+    # carries THIS row's payload -- that is exactly the failure above, which
+    # was invisible for as long as nobody checked. Requiring the row's whole
+    # flat Image to appear verbatim inside the firmware cannot be satisfied by
+    # a stale sibling: the two Images differ.
+    python3 - "$fw" "$img" "$rd" <<'EMBED_CHECK'
+import sys
+fw, img, rd = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(fw, 'rb') as f:
+    firmware = f.read()
+with open(img, 'rb') as f:
+    image = f.read()
+if not image:
+    sys.exit("row %s: flat Image is empty" % rd)
+if image not in firmware:
+    sys.exit(
+        "row %s: fw_payload.bin (%d bytes) does NOT embed its own kernel.Image "
+        "(%d bytes) -- the firmware carries some other payload, so booting it "
+        "would measure the wrong guest" % (rd, len(firmware), len(image))
+    )
+EMBED_CHECK
+    [ $? -eq 0 ] || nothing "fw_payload for $rd does not embed that row's kernel.Image"
+
     cp "$fw" "$WORK/$rd-fw_payload.bin"
 
     rm -f "$ROW_LOG"
