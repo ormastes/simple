@@ -1,10 +1,12 @@
 #!/bin/sh
-R=/mnt/data/worktrees/wmvk-x86-3
+# 12-module reproducer for the `self`-bound-to-bool HIR defect.
+# Record: doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
+R=/mnt/data/worktrees/selfbool-1
 cd $R || exit 9
 SEED=$R/src/compiler_rust/target/release/simple
-RP=$R/build/simpleos_gpu_host/x86_64-vulkan-cuda-runtime-target/bootstrap
+RP=${REPRO_RUNTIME_PATH:-/mnt/data/worktrees/wmvk-x86-3/build/simpleos_gpu_host/x86_64-vulkan-cuda-runtime-target/bootstrap}
 OUT=$R/build/repro/i_owner_bin
-LOG=$R/build/repro/i_owner.log
+LOG=${REPRO_LOG:-$R/build/repro/i_owner.log}
 mkdir -p $R/build/repro
 SIMPLE_DEBUG_FIELD_ACCESS=1 SIMPLE_BOOTSTRAP_DIAG=1 \
 SIMPLE_BINARY="$SEED" SIMPLE_BIN="$SEED" SIMPLE_BOOTSTRAP_DRIVER="$SEED" \
