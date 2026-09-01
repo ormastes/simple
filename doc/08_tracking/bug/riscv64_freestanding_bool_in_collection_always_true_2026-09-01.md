@@ -328,3 +328,43 @@ The host is NOT generally blocked, and the host backend is NOT affected: a
 reproducer with no `Option`/`.len()` surface native-builds and runs correctly on
 host x86_64. The host lane's correctness is a property of the LLVM backend, not
 evidence that the defect was absent.
+
+## The passthrough claim, verified against the DEFINITION THAT WINS THE LINK
+
+Two in-tree comments assert the opposite of the premise above — that
+`rt_value_unbox_int` already decodes tagged bools
+(`codegen/instr/mod.rs:1598`: "wide box -> value, TAG_INT -> >>3, **tagged
+true/false -> 1/0**, everything else verbatim"; similarly
+`cranelift_emitter.rs:800`). Taken at face value they would make this fix a
+no-op on a non-bug, so they were checked rather than believed — this is exactly
+the duplicate-definition trap, and a tree-wide grep or a source comment cannot
+settle it.
+
+Disassembled out of the actual row-2 `kernel.elf`, `rt_value_unbox_int`
+(`0x80203230`) is a thin wrapper that tail-calls `simpleos_raw_or_encoded_int`
+(`0x80202538`), whose entire body is:
+
+```
+    lbu   a0,-24(s0)      ; low byte of v
+    andi  a0,a0,7         ; tag bits
+    bnez  a0,<passthrough>
+    ld    a0,-24(s0)
+    srai  a0,a0,0x3       ; TAG_INT  -> v >> 3
+    j     <ret>
+<passthrough>:
+    ld    a0,-24(s0)      ; everything else -> v, VERBATIM
+```
+
+i.e. `(v & 7) == 0 ? v >> 3 : v`. **There is no bool case at all.** Tagged
+`false` is 19, `19 & 7 == 3`, so it takes the passthrough arm and returns 19;
+`19 != 0` is true. The premise is confirmed against the linked definition.
+
+So those two comments describe the HOST runtime's `rt_value_unbox_int`, not the
+baremetal one that this lane actually links. That divergence is itself worth
+noting: the baremetal implementation missing the bool arm is a second way to
+express the same defect, and is captured in
+`baremetal_bool_macros_disagree_with_codegen_tags_2026-09-01.md`.
+
+The fix as applied does not depend on which runtime is linked — it decodes the
+tagged value in codegen rather than delegating to `rt_value_unbox_int` — which
+is why it was preferred over adding a bool arm to the C.
