@@ -1,0 +1,88 @@
+#![allow(primitive_api)]
+
+use std.common.crypto.sha256 (sha256_text)
+
+pub struct ActionRootRecordV1:
+    sequence: i64
+    action_digest: text
+    object_kind: text
+    object_digest: text
+    manifest_digest: text
+
+pub struct JournalRecoveryV1:
+    records: [ActionRootRecordV1]
+    accepted_bytes: i64
+    quarantined_tail: bool
+    generation: i64
+
+fn _digest_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn _kind_v1(value: text) -> bool:
+    value == "source_blob" or value == "file_ast" or value == "public_summary" or value == "semantic_read_set" or value == "native_object"
+
+fn _body_v1(record: ActionRootRecordV1) -> text:
+    "{record.sequence}|{record.action_digest}|{record.object_kind}|{record.object_digest}|{record.manifest_digest}"
+
+fn _line_v1(record: ActionRootRecordV1) -> text:
+    val body = _body_v1(record)
+    "{body}|{sha256_text("simple.action.root.journal.v1\u0000" + body)}\n"
+
+fn _record_valid_v1(record: ActionRootRecordV1) -> bool:
+    record.sequence >= 0 and _digest_v1(record.action_digest) and _kind_v1(record.object_kind) and
+        _digest_v1(record.object_digest) and _digest_v1(record.manifest_digest)
+
+fn _parse_line_v1(line: text) -> ActionRootRecordV1?:
+    val fields = line.split("|")
+    if fields.len() != 6: return nil
+    val record = ActionRootRecordV1(sequence: fields[0].to_i64(), action_digest: fields[1],
+        object_kind: fields[2], object_digest: fields[3], manifest_digest: fields[4])
+    if not _record_valid_v1(record): return nil
+    val body = _body_v1(record)
+    if fields[5] != sha256_text("simple.action.root.journal.v1\u0000" + body): return nil
+    Some(record)
+
+pub class ActionRootJournalV1:
+    bytes: text
+    generation: i64
+    next_sequence: i64
+
+    static fn empty(generation: i64) -> ActionRootJournalV1:
+        ActionRootJournalV1(bytes: "", generation: generation, next_sequence: 0)
+
+    me append(action_digest: text, object_kind: text, object_digest: text,
+              manifest_digest: text) -> Result<ActionRootRecordV1, text>:
+        val record = ActionRootRecordV1(sequence: self.next_sequence, action_digest: action_digest,
+            object_kind: object_kind, object_digest: object_digest, manifest_digest: manifest_digest)
+        if not _record_valid_v1(record): return Err("journal record rejected")
+        self.bytes = self.bytes + _line_v1(record)
+        self.next_sequence = self.next_sequence + 1
+        Ok(record)
+
+    me recover() -> JournalRecoveryV1:
+        recover_action_root_journal_v1(self.bytes, self.generation)
+
+pub fn recover_action_root_journal_v1(bytes: text, generation: i64) -> JournalRecoveryV1:
+    var records: [ActionRootRecordV1] = []
+    var accepted: i64 = 0
+    var expected: i64 = 0
+    var quarantined = false
+    val lines = bytes.split("\n")
+    for index in 0..lines.len():
+        val line = lines[index]
+        if line == "":
+            if index + 1 < lines.len(): quarantined = true
+            continue
+        val parsed = _parse_line_v1(line)
+        if parsed == nil or parsed?.sequence != expected:
+            quarantined = true
+            break
+        records.push(parsed?)
+        accepted = accepted + line.len() + 1
+        expected = expected + 1
+    JournalRecoveryV1(records: records, accepted_bytes: accepted,
+        quarantined_tail: quarantined or accepted != bytes.len(), generation: generation)
