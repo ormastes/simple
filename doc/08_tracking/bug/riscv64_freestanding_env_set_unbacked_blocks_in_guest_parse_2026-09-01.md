@@ -1,6 +1,8 @@
 # riscv64 freestanding: `_sffi_env_set` is unbacked, so the in-guest parser panics on scope exit (2026-09-01)
 
-Status: **OPEN — newly reached blocker.** It became reachable only because the
+Status: **RESOLVED 2026-09-01 (`aac4ad219da`).** Two successor defects, reached
+only after this one was fixed, are recorded at the end of this file and are
+OPEN. This blocker itself became reachable only because the
 module-global-initializer defect above it was fixed; before that, execution
 never got this far.
 
