@@ -684,3 +684,55 @@ recompiled, so a fix-and-retry no longer costs the ~2 h a cold run does.
 
 Note `src/std` is a **symlink to `lib`** in this worktree, so `src/std/...` and
 `src/lib/...` are the same inode; one edit covers both spellings.
+
+### Per-file diagnosis of the remaining 59 (next lane starts here)
+
+**1. `backend_session.spl` (13) — `alias X = Y` is not a real declaration form.**
+Lines 200-202 are:
+```
+alias ComputeError = GcComputeError
+alias BackendSessionPolicy = GcBackendSessionPolicy
+alias BackendSessionHandle = GcBackendSessionHandle
+```
+and line 204 exports the alias names. `alias` is a lexer keyword
+(`TokenKind::Alias`) but the parser only ever turns it into a keyword-IDENTIFIER
+(`parser/src/expressions/primary/identifiers.rs:58`,
+`parse_keyword_identifier("alias")`). So these three lines parse as a bare name
+`alias` followed by an assignment — which is exactly the reported
+`unresolved name: alias` x6, plus `ComputeError` / `BackendSessionPolicy` /
+`BackendSessionHandle` x2 each. The supported spelling is `type X = Y`, used in
+**48** stdlib files; `^alias ` at top level appears in **exactly this one file**
+repo-wide. Fix: `alias` -> `type` on the three lines.
+Per the CLAUDE.md grammar rule this is recorded rather than silently
+normalised: either `alias` becomes a real type-alias declaration in the parser,
+or the keyword should be rejected at top level instead of degrading into an
+identifier and failing 200 lines later with an unrelated message.
+
+**2. `draw_ir_adv.spl` (21) — three names used, none imported.** `DRAW_IR_BACKEND_GPU`
+is `pub val` and IS exported (`draw_ir.spl:743`), so it only needs adding to the
+`use std.common.ui.draw_ir.{...}` block. `draw_ir_rect_bounds` (161) and
+`draw_ir_no_rect` (164) are plain `fn`, not `pub`, and not exported — they must
+be published first.
+
+**3. `nogc_sync_mut/io/vulkan_sffi.spl` (27) — NOT yet diagnosed.** It imports 37
+`rt_vulkan_*` names from `std.gpu.engine2d.sffi_vulkan`; 25 resolve and 12 do
+not. Two hypotheses were tested and **both are disproved**: it is not an export
+list (`sffi_vulkan.spl` has no `export` line at all, yet 25 names resolve
+through it), and it is not a duplicate declaration (each failing name is
+declared exactly once tree-wide, in `sffi_vulkan.spl`). Failing and working
+declarations are interleaved by line number (44 works, 46 fails; 64 fails, 66
+works; 108/116 fail, 136 works) and are identical in form, so it is not a
+declaration-shape issue either. This one needs fresh investigation; start with
+`SIMPLE_AMBIGDBG=1`, which makes the callable sweep print `sweep-candidate` and
+`sweep-verdict` lines per dependency.
+
+**4. `nogc_async_mut/env/platform.spl` (3)** — `rt_env_cwd`, imported via
+`std.env.types` from `std.io_runtime`. `io_runtime.spl:70` declares
+`extern fn rt_env_cwd() -> text?` while `sffi/env.spl:10` declares
+`extern fn rt_env_cwd() -> text` — different return types. This is the
+long-standing `[use-warning]` and may share a root cause with (3).
+
+Fix all four in ONE pass before rebuilding: parse is cached (~6 min) but
+`surface_build` is not (~90-120 min), so each rebuild costs about two hours
+regardless of how few files changed. Expect `hir-cache` misses above 4 next
+time — publishing names in `draw_ir.spl` invalidates its dependents.
