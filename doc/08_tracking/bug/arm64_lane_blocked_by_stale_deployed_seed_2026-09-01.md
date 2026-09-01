@@ -247,3 +247,50 @@ Unchanged and still honest — the kernel does not exist, so the gate cannot run
 build/os/simpleos_arm64_desktop_engine2d.elf`.
 The `protocol: linux` AAVMF -> BOOTAA64.EFI -> kernel.elf handover therefore
 remains **UNPROVEN**. Do not record it as proven.
+
+## Decisive: the attested kernel build REQUIRES a bootstrap redeploy
+
+The gate's own remediation hint names
+`scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`. Run with
+the rebuilt seed it refuses outright, before reaching any source:
+
+```
+arm64_desktop_engine2d_attested_build_status=fail
+arm64_desktop_engine2d_attested_build_reason=compiler-version-invalid
+```
+
+That is by design: the attested lane will not accept the Rust bootstrap seed as
+the producing compiler, and `scripts/lib/simple-compiler-select.shs:301` skips
+it for the same reason. So even with the parse wall gone and the dbd defects
+hypothetically fixed, **this kernel cannot be attested-built until a
+pure-Simple compiler that passes `native-build --target
+aarch64-unknown-simpleos` is deployed.**
+
+**Stating it plainly, as asked: a bootstrap redeploy IS necessary here.** It is
+not a workaround for the parse errors (those were the stale binary, now
+understood and reproducible), it is a hard precondition of the attested build
+path this gate depends on. It is blocked on
+`stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md` — all four
+tracked stage binaries fail the target probe.
+
+## Verbatim gate verdict (unchanged, rc=2)
+
+```
+[arm64-wm-vulkan] selftest OK (25 fixtures)
+ERROR — nothing was checked: arm64 desktop/WM kernel missing: build/os/simpleos_arm64_desktop_engine2d.elf — build it first with scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+```
+
+The gate and its 25 selftest fixtures were not modified or weakened.
+
+## Ordered remaining work
+
+1. Bootstrap redeploy (a pure-Simple compiler passing the aarch64
+   `native-build --target` probe). Hard precondition; owned by the bootstrap
+   lane. Note it will then hit the self-hosted multi-line `export` gap above
+   (56 files).
+2. Fix `DbdProvisioningOwnerV1.ready()` — qualify the five bare field reads.
+3. Define `DbdTransactionOwnerV1` (or remove its consumer half) — needs the dbd
+   lane's design intent.
+4. Repoint `get_arm64_wm_qemu_target()` per the resolution above.
+5. Only then can the `protocol: linux` AAVMF handover be tested. It stays
+   UNPROVEN until it is.
