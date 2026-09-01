@@ -373,13 +373,24 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // runtime_process_owned throughout, so this was a seed-only lane gap of
         // the same never-an-archive-member class as runtime_simd_case.c above.
         // Verified collision-free against every other member (nm, host cc).
-        //
-        // NOT restored from that same hunk: runtime_memory.c. It redefines 16
-        // symbols that runtime_native.c already owns here (rt_alloc, rt_free,
-        // rt_realloc, rt_memcpy, rt_memset, rt_struct_alloc,
-        // rt_struct_receiver_valid, rt_ptr_*, copy_mem, rt_mem_guard_stats), so
-        // adding it would break the archive's single-owner contract. Those pairs
-        // are separately tracked by check-runtime-symbol-lane-divergence.shs.
+        "runtime_memory.c",
+        // ^ canonical memory provider, compiled WITH -DSIMPLE_RUNTIME_MEMORY_OWNER=1
+        // (see the compile flags below).  It shares 16 symbol NAMES with
+        // runtime_native.c (rt_alloc, rt_free, rt_realloc, rt_memcpy, rt_memset,
+        // rt_struct_alloc, rt_struct_receiver_valid, rt_ptr_*, copy_mem,
+        // rt_mem_guard_stats) but those are not duplicate DEFINITIONS:
+        // runtime_native.c wraps its entire copy of that family in
+        // `#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)` (lines 5893 and 11701), so
+        // exactly one owner survives any given build.  The macro is what makes
+        // the two mutually exclusive, and the seed lane was setting neither the
+        // flag nor the file -- which is why core-C carried NO definition at all
+        // of rt_ptr_read_i32, rt_mem_harden_check_native, rt_mem_profile_*,
+        // rt_transient_raw_scope_* or spl_i64_is_zero: those live ONLY in
+        // runtime_memory.c.  The pure-Simple backend lane already does both
+        // (70.backend/backend/runtime_compiler.spl:521,545 push the define, and
+        // its `sources` array carries "runtime_memory"), and tests.rs:3145-3150
+        // pins that lane's flag -- so this closes a seed-only lane gap rather
+        // than changing the design.
         "runtime_process_owned.c",
         "runtime_coverage_core.c",
         // Defines simple_contract_check / simple_contract_check_msg. Migrated
@@ -497,6 +508,10 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg("-fPIC")
             .arg("-std=gnu11")
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
+            // Selects runtime_memory.c as THE memory provider and compiles out
+            // runtime_native.c's mutually-exclusive fallback copies of the same
+            // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
+            .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
             .args(core_c_target_flags(target, source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
