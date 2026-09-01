@@ -32,10 +32,30 @@ use std.db.dbfs_engine.superblock.{
     dbfs_superblock_validate
 }
 use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.error.{FsError}
 
 pub val NVFS_BOOT_ARENA_BASE_LBA_V1: i64 = DBFS_BOOT_ARENA_BASE_LBA_V1
 pub val NVFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1: u64 = DBFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1
 pub val NVFS_BOOT_DBFS_BACKED_PROVIDER_V1: text = "nvfs-dbfs-backed-v1"
+
+fn _nvfs_boot_fs_error_name_v1(err: FsError) -> text:
+    """Name a backend error so a refused root mount stays diagnosable."""
+    match err:
+        case FsError.Unsupported:   "unsupported"
+        case FsError.Transient(_):  "transient"
+        case FsError.Corrupt:       "corrupt"
+        case FsError.NoSpace:       "no-space"
+        case FsError.Permission:    "permission"
+        case FsError.NotFound:      "not-found"
+        case FsError.AlreadyExists: "already-exists"
+        case FsError.Busy:          "busy"
+        case FsError.IoError(_):    "io-error"
+        case FsError.Interrupted:   "interrupted"
+        case FsError.TooLarge:      "too-large"
+        case FsError.ReadOnly:      "read-only"
+        case FsError.InvalidArg:    "invalid-arg"
+        case FsError.StaleHandle:   "stale-handle"
+        case FsError.PathTraversal: "path-traversal"
 
 fn _nvfs_boot_magic_present_v1(bytes: [u8]) -> bool:
     if bytes.len() < 4: return false
@@ -112,7 +132,11 @@ pub fn boot_nvfs_root_mount_transaction_v1(
         NVFS_BOOT_DBFS_BACKED_PROVIDER_V1, dev,
         NVFS_BOOT_ARENA_BASE_LBA_V1, backing_sb.block_count.to_i64())
     if opened.is_err():
-        return Err("nvfs-root: driver-open-failed")
+        # Never collapse a typed backend error into a constant: the reason a
+        # root refused to open is the only thing that makes a RED gate
+        # actionable, and it was previously discarded here.
+        return Err("nvfs-root: driver-open-failed:" +
+            _nvfs_boot_fs_error_name_v1(opened.unwrap_err()))
     val staged = vfs_nvfs_root_mount_stage_v1(opened.unwrap())
     if staged.is_err():
         return Err("nvfs-root: " + staged.unwrap_err())
