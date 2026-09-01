@@ -398,6 +398,53 @@ jobs:
         run: |
           sh scripts/check/check-no-pid-keyed-build-artifacts.shs
 
+      # Baremetal tagged-bool decode parity.
+      #
+      # Pins riscv64_freestanding_bool_in_collection_always_true_2026-09-01:
+      # the riscv64 baremetal `rt_value_unbox_int` omitted the tagged-bool arm
+      # the canonical hosted runtime implements, so every bool read out of a
+      # collection decoded as its raw tag (always truthy). The in-guest parser
+      # then looped, exhausted the bump arena and re-entered spl_start 67 times.
+      # Blocking, not advisory: a pure static scan over the runtime definitions
+      # (no compiler, no QEMU, no firmware), measured green on this tree
+      # (PASS -- 3 definition(s) checked), runs in seconds, and its --selftest
+      # is fatal with a must-FAIL fixture.
+      - name: Baremetal tagged-bool decode parity
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-baremetal-tagged-bool-decode.shs
+
+      # Inline .len() heap-tag coverage.
+      #
+      # Pins the `-1` half of
+      # riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01: Cranelift
+      # inlines `.len()` as a load keyed on the heap type byte and answers a -1
+      # SENTINEL for any tag it does not recognise -- which fails OPEN in both
+      # directions at once (`x.len() == 0` is false AND `i < x.len()` iterates
+      # zero times). Blocking, not advisory: a pure static scan of the codegen
+      # tag table against the baremetal heap tags, ratcheted by
+      # inline_len_uncovered_heap_tag_baseline.txt, green on this tree
+      # (PASS -- 8 tag(s) checked, 4 known-uncovered) and needing only grep.
+      - name: Inline .len() covers baremetal heap tags
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-inline-len-covers-baremetal-heap-tags.shs
+
+      # Bump-allocator exhaustion is reported, never silent.
+      #
+      # The 67 silent guest re-entries above were a full bump arena: rv_alloc()
+      # returned NULL, the caller stored through it, and the fault was
+      # unattributable -- the exhaustion report existed but lived only in
+      # malloc(), not rt_alloc/calloc/realloc. Two sessions read that as a
+      # firmware/reset problem. This guard requires every NULL-returning path to
+      # name itself on the console and every riscv64 boot TU to wire a printing
+      # reporter. Blocking, not advisory: pure static scan, green on this tree
+      # (PASS -- 6 definition(s) checked), no build artifact required.
+      - name: Bump-allocator exhaustion is reported
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-bump-heap-exhaustion-reported.shs
+
   # Advisory gates: honestly RED on the current tree.
   #
   # Separate job, exactly like the repo-hygiene job at the top of this file and
