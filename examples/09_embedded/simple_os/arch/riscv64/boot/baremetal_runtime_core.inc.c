@@ -1878,6 +1878,78 @@ RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
         rt_qemu_exit_failure();
         for (;;) { __asm__ volatile("wfi"); }
     }
+    /* AND IT MUST ALSO ACTUALLY UNWRAP. Until 2026-09-01 this function's ONLY
+     * check was the `== NIL_VALUE` one above, so a boxed `Some(x)` was returned
+     * VERBATIM -- the caller got the 24-byte RuntimeEnum WRAPPER where the
+     * payload belonged. That is not a cosmetic divergence: the wrapper is
+     * handed on as a struct/class receiver, and the first field load past its
+     * 32-byte allocation slot reads the NEXT bump allocation's HeapHeader.
+     *
+     * That is exactly the riscv64 in-guest build-and-run row's blocker
+     * (doc/08_tracking/bug/riscv64_in_guest_interp_resets_on_cross_function_call_2026-09-01.md).
+     * The interpreter resolves a CALLEE through
+     * `resolve_function_by_name(...) -> HirFunction?` and then
+     * `cf_target_hit.unwrap()` (70.backend/backend/interpreter_calls.spl:138,181),
+     * so `call_hir_function` received a Some-box instead of the HirFunction.
+     * Its by-value COW copy of the 248-byte `fn_` parameter then read offset 32
+     * of a 32-byte object and found `0x0000003200000001` -- which, read through
+     * this TU's own `HeapHeader {uint32_t type; uint32_t size;}`, is
+     * type=1 (HEAP_STRING) size=50: a neighbouring RuntimeString's header. It
+     * carries TAG_HEAP in its low bits, so the clone's tag test accepted it and
+     * dereferenced `size << 32` as an address -> scause=5 load access fault at
+     * stval=0x3200000000. The interpreter row stayed GREEN throughout because
+     * it reaches call_hir_function only via the `.values()` + typed-local path
+     * (interpreter.spl:190-196), which never wraps an optional.
+     *
+     * This is NOT a new behaviour invented here. It is a PORT of semantics that
+     * already exist twice in this tree, and the same defect was already
+     * diagnosed and fixed on the x86_64 freestanding sibling:
+     *   - src/runtime/runtime_native.c:12972 (the hosted C definition)
+     *   - src/runtime/simple_core/core_values.spl:142 (the canonical pure-Simple one)
+     *   - examples/09_embedded/simple_os/arch/common/boot/freestanding_value_registry_impl.h:149,
+     *     whose comment describes this identical failure -- "every `.unwrap()`
+     *     fell through returning the WRAPPER instead of the payload ... the
+     *     first field load off it faults" -- for the L5 VFS blocker
+     *     (vfs_l5_fat32core_open_faults_on_new_file_write_2026-08-31.md).
+     * That fix landed in the COMMON header and in the x86_64 lane; riscv64
+     * carries its own duplicate definition in THIS file, which shadows the
+     * sibling for this lane and was never brought along. A tree-wide grep for
+     * rt_unwrap_or_trap finds the GOOD sibling and looks green -- the exact
+     * duplicate-definition trap this boot directory has been bitten by before.
+     *
+     * DISCRIMINANT FORMS: both are accepted, deliberately. The hosted C
+     * definition accepts `discriminant == 0 || == SPL_HASH_SOME` for Some and
+     * `1 || SPL_HASH_NONE` for None, because simple-core constructs canonical
+     * Options with ORDINAL discriminants (Some=0, None=1) while native lowering
+     * identifies Ok/Err by the stable 32-bit variant-name hashes. Accepting
+     * only the hashes would leave this function still returning the wrapper for
+     * an ordinal-built Option. Mirrored here rather than narrowed.
+     *
+     * Identification is by heap header, the same basis rt_enum_id /
+     * rt_enum_discriminant / rt_enum_payload in this TU already use, so a
+     * non-enum value still returns verbatim exactly as before. */
+    if (!IS_HEAP(value)) return value;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return value;
+    {
+        const uint32_t some_hash = 4053299545u, none_hash = 2371748697u;
+        const uint32_t ok_hash   = 2405352012u, err_hash  = 4200179024u;
+        if (e->enum_id == 1u) {
+            if (e->discriminant == 0u || e->discriminant == some_hash) return e->payload;
+            if (e->discriminant == 1u || e->discriminant == none_hash) {
+                serial_puts("\r\n[TRAP] rt_unwrap_or_trap: .unwrap() called on None\r\n");
+                rt_qemu_exit_failure();
+                for (;;) { __asm__ volatile("wfi"); }
+            }
+            return value;
+        }
+        if (e->discriminant == ok_hash) return e->payload;
+        if (e->discriminant == err_hash) {
+            serial_puts("\r\n[TRAP] rt_unwrap_or_trap: .unwrap() called on Err\r\n");
+            rt_qemu_exit_failure();
+            for (;;) { __asm__ volatile("wfi"); }
+        }
+    }
     return value;
 }
 
