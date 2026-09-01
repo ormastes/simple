@@ -123,3 +123,31 @@ Stopping at diagnosis is deliberate.
 None from this record (documentation only). Note the defect itself is
 target-agnostic: it fails identically on Linux and macOS, and is not a Windows
 porting gap.
+
+## Corroborating evidence (2026-09-01, MCP session-store slice)
+
+An independent audit of MCP's assistant/session-store files re-measured the full
+build at **133 errors** (the earlier 120 undercounted; only 54 carried file
+attribution before the diagnostics fixes).
+
+Two findings strengthen this diagnosis:
+
+1. **The unresolved methods are plain stdlib text/array calls with no type
+   ambiguity**: , , , , . All are
+   confirmed working in the interpreter. If resolution never runs, even a wholly
+   unambiguous receiver stays  — which is exactly what is observed.
+
+2. **The class-registration failure cascades ACROSS files.**
+   's constructor calls are NOT self-referential — they are
+   ordinary calls to types imported from  — yet they fail
+   identically because they share MIR module space with the broken
+    in . So this is a cross-module
+   class-registration-ordering defect, not a per-class quirk.
+
+**Triage warning:** reported error locations are frequently WRONG — several are
+attributed to  import lines rather than the real call sites (e.g.
+ errors reported at 9:16 while the real usages are at
+lines 332/368/407/481/514). Do not trust the location without checking.
+
+**No source fixes were applied to MCP**, deliberately: rewriting idiomatic Simple
+to dodge a compiler bug is prohibited by CLAUDE.md and would hide the defect.
