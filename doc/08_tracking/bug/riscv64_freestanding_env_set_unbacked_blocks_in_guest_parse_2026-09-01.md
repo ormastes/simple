@@ -139,3 +139,31 @@ so the guest restarts after `[buildrun] lowering source through the real
 frontend` rather than progressing or halting. Not investigated; the repetition
 means a trap-and-reset, so the next step is a `-d int,guest_errors` run to name
 the fault, not more source reading.
+
+### Build-and-run row: the loop's fault is now named
+
+`-d int,guest_errors` over the existing `buildrun-fw_payload.bin` (no rebuild;
+`-no-reboot` was already set, so this is the guest re-entering its own entry,
+not a machine reset). Filtering to the kernel's address range — the many
+`illegal_instruction` traps at `0x80009f0c`/`0x8000b1xx` are OpenSBI's own
+`mhpmcounter` CSR probing inside firmware and are normal:
+
+```
+   1208 epc:0x00000000802df43c, tval:0x0000000000000000, desc=fault_store
+      1 epc:0x00000000802df640, tval:0x0000000000000000, desc=fault_store
+```
+
+`tval = 0` is a store through a NULL pointer, and `nm -n` places `0x802df43c`
+inside:
+
+```
+compiler__frontend__core__lexer_struct__make_core_lexer
+```
+
+So the build-and-run row faults while CONSTRUCTING the lexer, one repetition
+per loop iteration. Same file as the original defect
+(`src/compiler/10.frontend/core/lexer_struct.spl`) but a different failure: a
+null *store* during construction, not an empty *read* of an uninitialised
+global. The interpreter row gets past this point, so whatever is null here is
+reached only on the build-and-run path. Next step is to identify which store in
+`make_core_lexer` is at that offset; not done here.
