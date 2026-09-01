@@ -818,11 +818,35 @@ spl_i64 rt_array_set_text(spl_i64 collection, spl_i64 index_value, spl_i64 value
     return rt_index_set(collection, index_value, value);
 }
 
+/* rt_slice takes its three index arguments RAW, NOT tagged.
+ *
+ * This is the canonical ABI, not a local choice: the hosted twin
+ * src/runtime/runtime_native.c:3816 uses `start`/`end`/`step` verbatim with no
+ * decode, and the x86_64 freestanding sibling says so explicitly at
+ * arch/x86_64/boot/rt_extras.c:1241 ("Cranelift bare-metal slice lowering
+ * passes raw indices, not boxed ints"). Compiler-side, `substring` lowers to
+ * rt_slice(text, start, end, 1) in mir/lower/lowering_expr_method.rs:1324-1360,
+ * where `step` is a bare ConstInt.
+ *
+ * These arguments MUST NOT go through rt_index_arg. Because RT_VALUE_TAG_INT is
+ * 0x0, that helper cannot tell a tagged int from a raw int whose low three bits
+ * are zero, so it silently divides every raw index that is a multiple of 8 by 8.
+ * That is a live corruption here: json_find (app/llm_caret/json_helpers.spl:128)
+ * probes with s.substring(i, i + nlen), and for the key "role" in
+ * {"role":"user",...} the sole matching probe is substring(1, 8) — end = 8 was
+ * read as tagged and returned as 1, making end == start, so rt_slice answered
+ * the empty string, the one matching position was invisible, json_find returned
+ * -1, and extract_json_string returned "". The second key "content" matched at
+ * substring(15, 25), where neither bound is a multiple of 8, and worked — which
+ * is exactly the "first key empty, second key correct" symptom recorded in
+ * doc/08_tracking/bug/simpleos_aarch64_rt_slice_misdecodes_raw_indices_2026-08-31.md
+ * (and why PR #173's .len() u32/i64 fix changed the serial output not at all).
+ */
 spl_i64 rt_slice(spl_i64 value, spl_i64 start_value, spl_i64 end_value, spl_i64 step_value) {
     RtString *string = rt_as_string(value);
-    spl_i64 start = rt_index_arg(start_value);
-    spl_i64 end = rt_index_arg(end_value);
-    spl_i64 step = rt_index_arg(step_value);
+    spl_i64 start = start_value;
+    spl_i64 end = end_value;
+    spl_i64 step = step_value;
     if (!string) {
         return rt_nil();
     }
@@ -1194,6 +1218,80 @@ spl_i64 rt_contains(spl_i64 collection, spl_i64 value) {
         }
     }
     return 0;
+}
+
+/* Port of the hosted rt_find (src/runtime/runtime_native.c:8328) into the
+ * freestanding aarch64 runtime. NOT a new rt_* — the name and its contract
+ * already exist in the hosted C runtime; this lane only lacked an aarch64
+ * definition, which is what made the in-guest dev-tool kernel fail to link
+ * ("ld.lld: error: undefined symbol: rt_find", referenced from the real
+ * compiler.tools.lint os_freestanding_lints module).
+ *
+ * The hosted version's RETURN SHAPE DIFFERS BY RECEIVER and that is preserved
+ * here: a text receiver yields a RAW byte index (rt_string_find), -1 when
+ * absent, which is the branch the lint rules actually take.
+ *
+ * DIVERGENCE, stated rather than papered over: the hosted array branch takes a
+ * CLOSURE predicate and yields the matching ELEMENT. This runtime has no
+ * rt_array_find, and rt_find has no way to know the arity or calling convention
+ * of the predicate it was handed (rt_closure_* now exist at the bottom of this
+ * file, but they only allocate and read a closure — they do not CALL one), so
+ * the array branch here answers the only question it can
+ * answer honestly: the INDEX of the first element equal to `value` under
+ * rt_native_eq, mirroring rt_contains directly above, and -1 when absent. -1
+ * for "absent" is load-bearing: callers branch on `< 0`, so returning 0 would
+ * read as "found at the start". A closure argument reaches the text branch and
+ * returns -1 rather than silently matching.
+ */
+spl_i64 rt_find(spl_i64 collection, spl_i64 value) {
+    RtString *text = rt_as_string(collection);
+    RtString *needle = rt_as_string(value);
+    if (text && needle) {
+        return rt_string_find(collection, value);
+    }
+    RtArray *array = rt_as_array(collection);
+    if (array) {
+        spl_i64 len = rt_array_len(collection);
+        for (spl_i64 i = 0; i < len; i = i + 1) {
+            if (rt_native_eq(rt_array_get(collection, rt_int(i)), value) > 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+/* Port of the hosted rt_value_unbox_int (src/runtime/runtime_native.c:2497)
+ * into the freestanding aarch64 runtime. NOT a new rt_* — the name and its
+ * contract already exist in the hosted C runtime and the Rust seed
+ * (runtime/src/value/sffi/value_ops.rs); this lane only lacked an aarch64
+ * definition, which is what made the in-guest caret and test-runner kernels
+ * fail to link ("ld.lld: error: undefined symbol: rt_value_unbox_int").
+ *
+ * The Cranelift UnboxInt lowering emits a call to this for EVERY unbox site,
+ * so totality is the contract, not a nicety:
+ *   TAG_INT scalar      -> value >> 3;
+ *   tagged true/false   -> 1 / 0;
+ *   anything else       -> passed through VERBATIM, so a heap enum/string
+ *                          handle is not >>3-mangled.
+ * The literals 11 and 19 are rt_special(RT_VALUE_SPECIAL_TRUE/FALSE) under
+ * this file's own tag scheme ((payload << 3) | TAG_SPECIAL), i.e. the same two
+ * constants the hosted twin hard-codes — written out rather than computed so
+ * the two implementations can be diffed by eye.
+ *
+ * DIVERGENCE, stated rather than papered over: the hosted twin first checks for
+ * a heap-boxed WIDE int and returns its full i64. This runtime has no wide-int
+ * heap object at all (its heap types are STRING/ARRAY/TUPLE/ENUM only), so
+ * there is nothing to check for and no value is lost; a wide int cannot exist
+ * here to be mis-decoded.
+ */
+spl_i64 rt_value_unbox_int(spl_i64 value) {
+    if ((((spl_u64)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_INT) {
+        return value >> 3;
+    }
+    if (value == 11) return 1;  /* TAG_SPECIAL | SPECIAL_TRUE  */
+    if (value == 19) return 0;  /* TAG_SPECIAL | SPECIAL_FALSE */
+    return value;
 }
 
 spl_i64 rt_string_ends_with(spl_i64 value, spl_i64 suffix_value) {
@@ -3574,4 +3672,114 @@ spl_i64 rt_aarch64_p10_keepalive(void) {
         }
     }
     return live;
+}
+
+/* ---------------------------------------------------------------------------
+ * Closures.
+ *
+ * PORT, not a new symbol: rt_closure_new / rt_closure_set_capture /
+ * rt_closure_get_capture / rt_closure_func_ptr are all declared in
+ * src/runtime/runtime.h:664-667 and defined for the hosted target in
+ * src/runtime/runtime_native.c (rt_closure_new at :8042). The riscv64
+ * freestanding sibling carries the same port in
+ * examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c.
+ *
+ * This file previously had NONE of them — the rt_find comment above says so
+ * outright ("a freestanding image has no closure support at all"), which is why
+ * the aarch64 mcp component kernel did not link at all:
+ *   ld.lld: error: undefined symbol: rt_closure_new
+ *   ld.lld: error: undefined symbol: rt_closure_func_ptr
+ * The MCP dispatcher needs exactly these: DispatchEntry.handler is a closure.
+ * Stubbing them would produce a dispatcher that silently handles nothing, so
+ * they are implemented rather than stubbed.
+ *
+ * PARAMETER WIDTHS ARE NOT FREE CHOICES — they are the codegen ABI, declared in
+ * src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:678-681:
+ *   rt_closure_new         (I64, I32)      -> I64
+ *   rt_closure_set_capture (I64, I32, I64) -> I8
+ *   rt_closure_get_capture (I64, I32)      -> I64
+ *   rt_closure_func_ptr    (I64)           -> I64
+ * and matched by the Rust runtime (value/objects.rs:177,198,213,227), whose
+ * index/count parameters are `u32`. Declaring these 64-bit leaves the upper
+ * half of the register undefined, so the count/index read as garbage and the
+ * indirect call goes through a NULL func_ptr. That defect trapped the riscv64
+ * lane and is recorded in that file's port comment.
+ *
+ * Differences from the hosted definition, and why each is correct here:
+ *   * calloc -> rt_alloc (this file's bump heap) plus an EXPLICIT nil fill.
+ *     rt_alloc does not zero, and zeroing would be wrong anyway: nil here is
+ *     TAG_SPECIAL (0x3), not 0.
+ *   * rt_core_register_closure is dropped: no collector, nothing is ever freed,
+ *     so every closure is already immortal.
+ *   * func_ptr is stored RAW (untagged). Codegen passes and expects a bare code
+ *     address; tagging it would corrupt the indirect call.
+ * ------------------------------------------------------------------------- */
+
+#define RT_HEAP_CLOSURE 0x09U
+
+typedef struct RtClosure {
+    RtHeapHeader header;
+    spl_u64 func_ptr;
+    spl_u64 capture_count;
+    spl_i64 captures[];
+} RtClosure;
+
+/* Reject a handle that is not a closure rather than reading a foreign field. */
+static RtClosure *rt_as_closure(spl_i64 value) {
+    return (RtClosure *)rt_as_heap(value, RT_HEAP_CLOSURE);
+}
+
+spl_i64 rt_closure_new(spl_i64 func_ptr, spl_u32 capture_count) {
+    spl_i64 count = (spl_i64)capture_count;
+    RtClosure *closure;
+    spl_i64 i;
+    if (!func_ptr || count < 0) {
+        return rt_nil();
+    }
+    /* Bounded like every other allocation against this bump heap. */
+    if (count > 4096) {
+        return rt_nil();
+    }
+    closure = (RtClosure *)rt_alloc(
+        (spl_i64)(sizeof(RtClosure) + (spl_u64)count * sizeof(spl_i64)));
+    if (!closure) {
+        return rt_nil();
+    }
+    closure->header.object_type = (spl_u8)RT_HEAP_CLOSURE;
+    closure->header.gc_flags = 0;
+    closure->header.reserved = 0;
+    closure->header.size =
+        (spl_u32)(sizeof(RtClosure) + (spl_u64)count * sizeof(spl_i64));
+    closure->func_ptr = (spl_u64)func_ptr;
+    closure->capture_count = (spl_u64)count;
+    for (i = 0; i < count; i = i + 1) {
+        closure->captures[i] = rt_nil();
+    }
+    return rt_heap(closure);
+}
+
+/* Returns I8 per the codegen spec, not a tagged value. */
+signed char rt_closure_set_capture(spl_i64 closure_value, spl_u32 index, spl_i64 value) {
+    RtClosure *closure = rt_as_closure(closure_value);
+    if (!closure || (spl_u64)index >= closure->capture_count) {
+        return 0;
+    }
+    closure->captures[index] = value;
+    return 1;
+}
+
+spl_i64 rt_closure_get_capture(spl_i64 closure_value, spl_u32 index) {
+    RtClosure *closure = rt_as_closure(closure_value);
+    if (!closure || (spl_u64)index >= closure->capture_count) {
+        return rt_nil();
+    }
+    return closure->captures[index];
+}
+
+spl_i64 rt_closure_func_ptr(spl_i64 closure_value) {
+    RtClosure *closure = rt_as_closure(closure_value);
+    if (!closure) {
+        return 0;
+    }
+    return (spl_i64)closure->func_ptr;
 }

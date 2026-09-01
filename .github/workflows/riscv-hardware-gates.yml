@@ -14,6 +14,7 @@ on:
       - 'test/01_unit/lib/hardware/**'
       - 'scripts/fpga/**'
       - 'scripts/check/check-riscv-hardware-gates.shs'
+      - 'scripts/check/check-seed-not-stale.shs'
       - 'scripts/check/check-simpleos-riscv64-*.shs'
       - 'scripts/check/fixtures/riscv64_boot_contract_probe.c'
       - '.github/workflows/riscv-hardware-gates.yml'
@@ -24,6 +25,7 @@ on:
       - 'test/01_unit/lib/hardware/**'
       - 'scripts/fpga/**'
       - 'scripts/check/check-riscv-hardware-gates.shs'
+      - 'scripts/check/check-seed-not-stale.shs'
       - 'scripts/check/check-simpleos-riscv64-*.shs'
       - 'scripts/check/fixtures/riscv64_boot_contract_probe.c'
       - '.github/workflows/riscv-hardware-gates.yml'
@@ -68,6 +70,22 @@ jobs:
           cargo build --profile bootstrap -p simple-driver
           test -x target/bootstrap/simple
           ./target/bootstrap/simple --version || true
+
+      # Stale-seed gate. This job restores src/compiler_rust/target from
+      # actions/cache and then builds into it, so a cache hit can leave a seed
+      # binary OLDER than the seed sources in this checkout -- exactly the trap
+      # that manufactured 34 phantom PARSE failures across src/os and src/lib on
+      # 2026-08-31 (an entire failure class that vanished on rebuild with no
+      # source change). A stale seed does not announce itself: it reports
+      # ordinary-looking "Unexpected token" errors that read as stale source.
+      # Placed AFTER the build, and pointed at the binary this job actually
+      # builds (target/bootstrap, not the default target/release) -- with no
+      # seed present the guard is ERROR exit 2, never a pass.
+      # See doc/08_tracking/bug/simpleos_b1_merge_clobber_e274cd33719_2026-08-31.md.
+      - name: Seed-not-stale gate
+        env:
+          SEED: src/compiler_rust/target/bootstrap/simple
+        run: sh scripts/check/check-seed-not-stale.shs
 
       - name: Run RISC-V hardware gates
         env:
@@ -114,3 +132,9 @@ jobs:
       # isa-debug-exit. Clones the pinned OpenSBI v1.4 itself.
       - name: riscv64 guest boot under OpenSBI gate
         run: sh scripts/check/check-simpleos-riscv64-opensbi-guest-boot.shs
+
+      # In-guest execution: a Simple hello world runs INSIDE SimpleOS riscv64
+      # under real OpenSBI fw_payload and prints its own output. The gate
+      # self-checks the assembled QEMU argv for -kernel / isa-debug-exit.
+      - name: SimpleOS riscv64 hello world in-guest (OpenSBI real firmware)
+        run: sh scripts/check/check-simpleos-riscv64-hello-world-in-guest-opensbi.shs

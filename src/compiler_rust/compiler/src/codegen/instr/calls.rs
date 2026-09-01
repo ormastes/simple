@@ -3171,7 +3171,18 @@ pub fn compile_call<M: Module>(
     // `ctx.func_ids.get(func_name)` user-function branch. Process-control
     // names in PRELUDE_UNSHADOWABLE keep builtin precedence.
     // See doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md
-    let sffi_name: &str = sffi_alias_target_shadowed(func_name_for_sffi, ctx.func_ids.contains_key(func_name_raw))
+    //
+    // The shadow test must be "is there a locally DEFINED function body of this
+    // name", not merely "is this name in func_ids": an `extern fn rt_x(...)`
+    // declaration is also registered in `func_ids`, with `Linkage::Import`. A
+    // user re-declaring a runtime symbol is not overriding it, so counting the
+    // declaration as a shadow suppressed the alias and emitted a direct call to
+    // the raw symbol under the SFFI calling convention — e.g.
+    // `extern fn rt_file_write_bytes(path: text, data: [u8])` lowered to a
+    // 3-argument call (path_ptr, path_len, array) against the 4-argument C ABI
+    // `rt_file_write_bytes(path_ptr, path_len, data_ptr, data_len)`, so the
+    // length came from a stale register and the file got garbage bytes.
+    let sffi_name: &str = sffi_alias_target_shadowed(func_name_for_sffi, has_defined_local_function(ctx, func_name_raw))
         .unwrap_or(func_name_for_sffi);
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
     // but mapped SFFI name for runtime_funcs and builtin I/O checks

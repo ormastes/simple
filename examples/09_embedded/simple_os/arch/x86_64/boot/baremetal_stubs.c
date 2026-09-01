@@ -3659,7 +3659,7 @@ int64_t rt_sosix_collector_nonce_echo(void) {
     if (fat32_read_file("/SOSIXNON.TXT", nonce_file, sizeof(nonce_file),
                         &bytes_read) != 0)
         return 0;
-    size_t line_len = x86_64_collector_nonce_slot_line_length(nonce_file, bytes_read);
+    size_t line_len = x86_64_nonce_slot_line_length(nonce_file, bytes_read);
     if (line_len == 0U) return 0;
     for (size_t i = 0; i < line_len; i++) serial_putchar((char)nonce_file[i]);
     return 1;
@@ -15893,21 +15893,29 @@ RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
     return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr;
 }
 
+/* x86-64 permits unaligned 16/32/64-bit loads, and these helpers are used for
+ * BOTH device MMIO and unaligned RAM scratch reads (the FAT32 BPB puts
+ * bytes-per-sector at byte offset 11 of the boot sector). The old alignment
+ * guard silently returned 0 for any odd/unaligned address, so bps read back as
+ * 0 and every FAT32 mount was refused as "geometry invalid" with no error.
+ * Silently returning a plausible value for a read that never happened is the
+ * exact fail-open shape this tree bans; the null-page guard is kept because a
+ * low address is a real programming error, not a legal unaligned access. */
 RuntimeValue rt_mmio_read_u16_real(RuntimeValue addr)
 {
-    if ((uint64_t)addr < 0x1000u || (((uint64_t)addr) & 0x1u)) return 0;
+    if ((uint64_t)addr < 0x1000u) return 0;
     return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u32_real(RuntimeValue addr)
 {
-    if ((uint64_t)addr < 0x1000u || (((uint64_t)addr) & 0x3u)) return 0;
+    if ((uint64_t)addr < 0x1000u) return 0;
     return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u64_real(RuntimeValue addr)
 {
-    if ((uint64_t)addr < 0x1000u || (((uint64_t)addr) & 0x7u)) return 0;
+    if ((uint64_t)addr < 0x1000u) return 0;
     return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr;
 }
 

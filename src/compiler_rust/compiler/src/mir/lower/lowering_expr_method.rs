@@ -1979,7 +1979,54 @@ impl<'a> MirLowerer<'a> {
             .is_some_and(|name| name == "Result" || name == "Option")
             && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len());
 
-        let func_name = if wrapper_enum_builtin_collision {
+        // The receiver is type-erased AND the method name collides with the
+        // builtin-collection set that codegen claims BEFORE user-method
+        // resolution. Left bare, this call is routed to a tag-dispatching
+        // runtime helper (`rt_find`, `rt_index_get`, ...) that untags the
+        // receiver and reads a 32-bit type header — one that CLASS INSTANCES DO
+        // NOT CARRY. On riscv64/freestanding that misread traps and reboots the
+        // guest; on x86_64/aarch64 it silently returns the helper's `-1` miss
+        // sentinel instead of running the user's method, so the defect is
+        // LATENT on every arch rather than riscv64-specific.
+        //
+        // Recover the class from the local's single reaching definition and
+        // qualify the call, so it resolves like any other typed receiver. The
+        // narrow gate matters: this fires ONLY for names already in the
+        // collision set and ONLY for a receiver nothing else could type, so a
+        // genuine erased Dict/Array/text receiver still reaches the builtin and
+        // bug #62 is preserved untouched.
+        // doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
+        let erased_class_receiver_ty: Option<TypeId> = if !wrapper_enum_builtin_collision
+            && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(
+                method,
+                args.len(),
+            )
+            && self.type_registry.and_then(|r| r.get_type_name(receiver.ty)).is_none()
+            && receiver_local_ty
+                .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)))
+                .is_none()
+        {
+            match &receiver.kind {
+                crate::hir::HirExprKind::Local(idx) => self.erased_local_class_types.get(idx).copied(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let func_name = if let Some(class_ty) = erased_class_receiver_ty
+            .filter(|_| !wrapper_enum_builtin_collision)
+            .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)).map(|n| (t, n)))
+            .map(|(_, n)| n)
+        {
+            if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                eprintln!(
+                    "[MIR-METHOD-DISPATCH] '{}' qualified via single-assignment class '{}' (erased receiver would otherwise be claimed by the builtin-collection heuristic)",
+                    method, class_ty
+                );
+            }
+            format!("{}.{}", class_ty, method)
+        } else if wrapper_enum_builtin_collision {
             if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                 eprintln!(
                     "[MIR-METHOD-DISPATCH] '{}' receiver resolved to Result/Option wrapper; routing as erased builtin instead of a nonexistent qualified method",

@@ -1,0 +1,42 @@
+#!/bin/sh
+# Build the SimpleOS x86_64 hello-world in-guest kernel (OVMF/multiboot lane).
+#
+# Boot chain is OVMF pflash -> GRUB-EFI -> multiboot1; this script only produces
+# the multiboot kernel ELF. The gate that boots it is
+# scripts/check/check-simpleos-hello-world-in-guest-ovmf.shs.
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+SEED="${SEED:-src/compiler_rust/target/release/simple}"
+ENTRY=examples/09_embedded/simple_os/arch/x86_64/hello_world_ovmf_entry.spl
+LINKER="${LINKER:-examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld}"
+OUT="${OUT:-build/os/hello/simpleos_hello_uefi128.elf}"
+CACHE="${CACHE:-build/os/hello/kcache}"
+[ -x "$SEED" ] || { echo "ERROR — nothing was checked: seed missing at $SEED"; exit 2; }
+mkdir -p "$(dirname "$OUT")" build/os/generated
+printf 'pub fn ssh_live_build_marker() -> text:\n    "hello-world-in-guest-ovmf"\n' \
+    > build/os/generated/ssh_live_build_marker.spl
+OBJCOPY_PREFIX=""
+for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin; do
+    [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+done
+rm -f "$OUT"
+# SIMPLE_ALLOW_STUB_FALLBACK: 19 src/os modules currently fail HIR/MIR lowering
+# on stale source idioms (erased-receiver field access, paren-less accessors) —
+# see doc/08_tracking/bug/simpleos_x86_64_hello_world_in_guest_2026-08-31.md B1.
+# NONE of them is on this entry's call path: hello_world_ovmf_entry.spl carries
+# its own ring-3 map+enter helpers and touches only pmm / vmm /
+# arch_adapt.x86_64_user_entry / boot.mmio / the C FAT32+NVMe bridge. The gate
+# that boots this kernel re-checks that no function THIS lane calls was stubbed.
+# --timeout 1200: 12 modules hit the 300s default on a loaded box (they compile
+# fine, just slowly); a timeout is not a compile error and must not look like one.
+SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+SIMPLE_ALLOW_STUB_FALLBACK="${SIMPLE_ALLOW_STUB_FALLBACK:-1}" \
+PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+    "$SEED" native-build --source build/os/generated --source src/os --source src/lib \
+    --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 \
+    --opt-level=aggressive --log off --entry-closure --cache-dir "$CACHE" \
+    --timeout "${FILE_TIMEOUT:-1200}" \
+    --entry "$ENTRY" --target x86_64-unknown-none -o "$OUT" --linker-script "$LINKER"
+[ -f "$OUT" ] || { echo "FAIL — kernel build produced no $OUT"; exit 1; }
+echo "OK $OUT ($(stat -c%s "$OUT") bytes)"

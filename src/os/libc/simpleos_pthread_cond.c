@@ -7,6 +7,8 @@
  * until the kernel owns that transition.
  */
 
+#include "include/errno.h"   /* ENOSYS/EINVAL/... were used undeclared: this file never compiled */
+
 #ifndef ETIMEDOUT
 #define ETIMEDOUT 110
 #endif

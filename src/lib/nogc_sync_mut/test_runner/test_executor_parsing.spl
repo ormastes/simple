@@ -334,7 +334,30 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
         val clean = strip_ansi(raw_line)
         val trimmed = clean.trim()
         val canonical_results = trimmed.starts_with("Results:") and trimmed.contains(" total") and trimmed.contains(" passed") and trimmed.contains(" failed")
-        if canonical_results:
+        # Cargo/rustc-style summary, e.g.
+        #   "test result: FAILED. 2 passed; 1 failed; 0 ignored"
+        #   "test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out"
+        # This branch was MISSING until 2026-08-31, so a cargo transcript
+        # summarised as 0 passed / 0 failed — indistinguishable from "no tests
+        # ran". A sibling product module (rust_test_runner.spl:60,69) already
+        # consumed exactly this shape, so it is a real supported input, not an
+        # imagined one. See doc/08_tracking/bug/
+        # simpleos_testrun_row_feeds_unsupported_transcript_shape_2026-08-31.md.
+        # Recognition needs the " passed"/" failed" fields as well as the
+        # prefix, so authored prose ("test result: inconclusive, see log") is
+        # not mistaken for a summary — the same discrimination the canonical
+        # branch gets from its " total"/" passed"/" failed" requirement.
+        # NOTE: matching is case-sensitive on purpose. Cargo prints the verdict
+        # uppercase ("FAILED."), so `extract_number_before(_, "failed")` cannot
+        # latch onto the verdict word and always finds the "1 failed" field.
+        val cargo_results = trimmed.starts_with("test result:") and trimmed.contains(" passed") and trimmed.contains(" failed")
+        # Both forms are members of the SAME summary family: they reset the
+        # segment identically and share results_pos, so every existing
+        # precedence rule (later direct Passed:/Failed: wins, later BDD
+        # "N examples, M failures" wins, last summary of the file wins) applies
+        # to the cargo form unchanged, with no new return path.
+        val summary_family = canonical_results or cargo_results
+        if summary_family:
             # Start a new summary segment. Authored output before a canonical-
             # shaped line must not leak into a later real BDD/direct summary.
             total_passed = 0
@@ -351,17 +374,31 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
             results_seen = true
             results_valid = false
             results_pos = line_idx
-            val result_total = extract_number_before(s: trimmed, keyword: "total")
-            val result_passed = extract_number_before(s: trimmed, keyword: "passed")
-            val result_failed = extract_number_before(s: trimmed, keyword: "failed")
-            if result_total >= 0 and result_passed >= 0 and result_failed >= 0 and result_total == result_passed + result_failed:
-                results_valid = true
-                results_passed = result_passed
-                results_failed = result_failed
-                val parsed_skipped = extract_number_before(s: trimmed, keyword: "skipped")
-                val parsed_pending = extract_number_before(s: trimmed, keyword: "pending")
-                results_skipped = if parsed_skipped >= 0: parsed_skipped else: 0
-                results_pending = if parsed_pending >= 0: parsed_pending else: 0
+            if canonical_results:
+                val result_total = extract_number_before(s: trimmed, keyword: "total")
+                val result_passed = extract_number_before(s: trimmed, keyword: "passed")
+                val result_failed = extract_number_before(s: trimmed, keyword: "failed")
+                if result_total >= 0 and result_passed >= 0 and result_failed >= 0 and result_total == result_passed + result_failed:
+                    results_valid = true
+                    results_passed = result_passed
+                    results_failed = result_failed
+                    val parsed_skipped = extract_number_before(s: trimmed, keyword: "skipped")
+                    val parsed_pending = extract_number_before(s: trimmed, keyword: "pending")
+                    results_skipped = if parsed_skipped >= 0: parsed_skipped else: 0
+                    results_pending = if parsed_pending >= 0: parsed_pending else: 0
+            else:
+                # Cargo has no "total" field, so there is no cross-check to make
+                # here; do not invent one. `ignored` is cargo's skip concept;
+                # cargo has no pending concept at all.
+                val cargo_passed = extract_number_before(s: trimmed, keyword: "passed")
+                val cargo_failed = extract_number_before(s: trimmed, keyword: "failed")
+                if cargo_passed >= 0 and cargo_failed >= 0:
+                    results_valid = true
+                    results_passed = cargo_passed
+                    results_failed = cargo_failed
+                    val cargo_ignored = extract_number_before(s: trimmed, keyword: "ignored")
+                    results_skipped = if cargo_ignored >= 0: cargo_ignored else: 0
+                    results_pending = 0
         elif trimmed.starts_with("Passed:"):
             summary_passed = extract_number_after_colon(s: trimmed, prefix: "Passed:")
             summary_passed_pos = line_idx
@@ -390,10 +427,10 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
         elif trimmed.starts_with("Skipped:"):
             summary_skipped = extract_number_after_colon(s: trimmed, prefix: "Skipped:")
         # Count individual "... pending" test lines
-        elif not canonical_results and clean.contains("... pending"):
+        elif not summary_family and clean.contains("... pending"):
             total_pending = total_pending + 1
         # Count skipped (separate from pending)
-        if not canonical_results and not trimmed.starts_with("Skipped:") and clean.contains("skipped"):
+        if not summary_family and not trimmed.starts_with("Skipped:") and clean.contains("skipped"):
             val skip_count2 = extract_number_before(s: clean, keyword: "skipped")
             if skip_count2 > 0:
                 total_skipped = total_skipped + skip_count2
@@ -451,6 +488,30 @@ fn find_raw(s: text, keyword: text) -> i64:
         i = i + 1
     -1
 
+# Decode an all-digit run to i64 WITHOUT text.to_int(). Measured in-guest on
+# SimpleOS x86_64 (OVMF -> GRUB-EFI, real firmware, 2026-08-31): the probe
+# `("2".to_int() ?? 0) == 2` prints NO in a freestanding image while
+# starts_with/contains/slice-equality/split all print YES — so `to_int`'s
+# Optional decode is the single failing layer there, and every count this file
+# extracts came back 0. Same defect class find_raw's own comment documents for
+# `text.index_of` (flat-optional in-band sentinel), and the same remedy the
+# senior guidance there prescribes: prefer raw >=0 sentinel arithmetic over an
+# Optional in critical paths. char_code + i64 compares are already mandatory in
+# both callers for the unrelated pointer-cmp miscompile, so this keeps the whole
+# digit path on primitives that are proven to work in-guest.
+# See doc/08_tracking/bug/
+# simpleos_testrun_row_feeds_unsupported_transcript_shape_2026-08-31.md.
+fn digits_to_i64(digits: text) -> i64:
+    var acc = 0
+    var i = 0
+    while i < digits.len():
+        val code: i64 = char_code(digits[i:i + 1])
+        if code < 48 or code > 57:
+            return -1
+        acc = acc * 10 + (code - 48)
+        i = i + 1
+    acc
+
 fn extract_number_after_colon(s: text, prefix: text) -> i64:
     val idx = find_raw(s, prefix)
     if idx < 0:
@@ -470,7 +531,7 @@ fn extract_number_after_colon(s: text, prefix: text) -> i64:
     if end_pos == 0:
         return -1
     val num_str = after[0:end_pos]
-    num_str.to_int() ?? 0
+    digits_to_i64(num_str)
 
 fn extract_number_before(s: text, keyword: text) -> i64:
     val idx = find_raw(s, keyword)
@@ -497,7 +558,7 @@ fn extract_number_before(s: text, keyword: text) -> i64:
     if start > end:
         return -1
     val num_str = s[start:end + 1]
-    num_str.to_int() ?? 0
+    digits_to_i64(num_str)
 
 # =========================================================================
 # Child Process Arguments & Result Building

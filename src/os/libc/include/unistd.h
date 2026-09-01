@@ -29,6 +29,11 @@ extern "C" {
 /* sysconf names */
 #define _SC_PAGESIZE         30
 #define _SC_NPROCESSORS_CONF 83
+/* _SC_NPROCESSORS_ONLN was missing while src/runtime/runtime_pool.c:329 asks
+ * for it (the thread-pool sizing query), blocking the SimpleOS runtime
+ * cross-compile. 84 is the Linux value and the natural sibling of
+ * _SC_NPROCESSORS_CONF 83 already above. */
+#define _SC_NPROCESSORS_ONLN 84
 
 /* File I/O */
 ssize_t read(int fd, void *buf, size_t count);

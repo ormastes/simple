@@ -1,6 +1,12 @@
 # BUG: rt_extras.c RuntimeString layout 4 bytes off vs baremetal_stubs.c — string-data reads shifted
 
-**Status:** RESOLVED (2026-07-12)
+**Status:** RESOLVED (2026-07-12) — **but the header fix was REVERTED by the tree
+wipe `6f86ff32a7d` / restore `ae55a746719` and had to be re-applied 2026-08-31.**
+`arch/common/baremetal_runtime.h` was back to `uint32_t len` with no
+`_Static_assert`, and the same defect had never been fixed on riscv64/arm64 at
+all — where it stalled the in-guest components lane. Re-applied, and now pinned
+by `scripts/check/check-freestanding-string-len-abi.shs`. See
+`doc/08_tracking/bug/freestanding_string_len_u32_vs_codegen_i64_abi_2026-08-31.md`.
 **Severity:** medium-high (every rt_extras.c string-data read returns bytes shifted 4 early; silent corruption)
 **Component:** SimpleOS x86_64 freestanding runtime — `examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c` vs `boot/baremetal_stubs.c`
 **Found:** 2026-07-11 (clang file-launch lane; explains `rt_text_to_bytes` elements reading as zeros)

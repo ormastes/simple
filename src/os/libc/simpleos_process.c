@@ -166,20 +166,29 @@ int gethostname(char *name, size_t len) {
     return 0;
 }
 
-gid_t getgid(void) {
-    errno = ENOSYS;
-    return (gid_t)-1;
-}
-
-uid_t geteuid(void) {
-    errno = ENOSYS;
-    return (uid_t)-1;
-}
-
-gid_t getegid(void) {
-    errno = ENOSYS;
-    return (gid_t)-1;
-}
+/* getgid/geteuid/getegid used to be defined a SECOND time here, returning
+ * ENOSYS/-1, duplicating the single-user `return 0` definitions at the top of
+ * this file (with getuid, getppid and friends). clang rejects the file outright:
+ *
+ *   error: redefinition of 'getgid'  (and 'geteuid', 'getegid')
+ *   note: previous definition is here   simpleos_process.c:122
+ *
+ * so THIS FILE HAS NEVER COMPILED — the same defect class as the
+ * runtime_native.c incident recorded in .claude/rules/vcs.md, where source that
+ * is well-formed as bytes and passes every tree-structure guard is nonsense to
+ * a compiler. It blocks scripts/os/simpleos-sysroot-riscv64.shs, and therefore
+ * every SimpleOS user payload (including the in-guest Simple interpreter) on
+ * every architecture.
+ *
+ * The duplicates are deleted rather than the originals, on two grounds:
+ *   * SimpleOS is single-user. `getuid` — which had no duplicate and so is not
+ *     in question — already returns 0, and a set where getuid succeeds as root
+ *     while getgid/geteuid/getegid fail with ENOSYS is incoherent; callers that
+ *     check `geteuid() == 0` for a privilege test would read -1 as "not root"
+ *     while getuid() said otherwise.
+ *   * The surviving block sits with getpid/getppid/setsid/getsid, the section
+ *     that is actually maintained against the syscall layer.
+ */
 
 /* ====================================================================
  * 3. Sleep

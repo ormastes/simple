@@ -83,11 +83,65 @@ void simpleos_dlmalloc_test_fail_next_insert(void) {
  * Internal helpers
  * ==================================================================== */
 
-static void *_mmap_pages(size_t size) {
-    size = (size + HEAP_PAGE_SIZE - 1) & ~(size_t)(HEAP_PAGE_SIZE - 1);
-    int64_t addr = simpleos_syscall(10, 0, (int64_t)size,
+/* Overflow-checked size arithmetic.
+ *
+ * _checked_add and _checked_round_up were CALLED by _malloc_locked (and
+ * _mmap_pages was called with an out-parameter it did not have) but were never
+ * DEFINED anywhere in the tree — a half-landed hardening change. clang rejects
+ * the file:
+ *
+ *   error: call to undeclared function '_checked_add'
+ *   error: call to undeclared function '_checked_round_up'
+ *   error: too many arguments to function call, expected single argument
+ *          'size', have 2 arguments      (_mmap_pages)
+ *
+ * so simpleos_dlmalloc.c HAS NEVER COMPILED, and with it the whole SimpleOS
+ * libc and every SimpleOS user payload on every architecture. Same defect class
+ * as the runtime_native.c incident in .claude/rules/vcs.md: source that passes
+ * every tree-structure guard and is nonsense to a compiler.
+ *
+ * The contract is recoverable unambiguously from the call sites, so these are
+ * completed rather than the calls reverted:
+ *   * `!_checked_add(size, HEADER_SIZE, &requested)` must mean "false on
+ *     overflow", since the caller returns NULL (allocation failure) on false.
+ *   * `_checked_round_up(requested, 16, &size)` rounds up to an alignment that
+ *     is a power of two, likewise false on overflow.
+ * Returning false rather than saturating is what makes them a hardening
+ * measure: a saturated size would be handed to mmap and could wrap a later
+ * pointer computation.
+ */
+static int _checked_add(size_t a, size_t b, size_t *out) {
+    if (b > (size_t)-1 - a) return 0;
+    *out = a + b;
+    return 1;
+}
+
+static int _checked_round_up(size_t value, size_t align, size_t *out) {
+    /* align is always a compile-time power of two at the call sites; assert the
+     * precondition rather than silently computing nonsense if that changes. */
+    if (align == 0 || (align & (align - 1)) != 0) return 0;
+    if (value > (size_t)-1 - (align - 1)) return 0;
+    *out = (value + align - 1) & ~(align - 1);
+    return 1;
+}
+
+/* Map at least `size` bytes and report through *mapped_out how many bytes were
+ * ACTUALLY mapped after page rounding.
+ *
+ * The out-parameter is the whole point of the caller's change and is not
+ * cosmetic: the caller stores the result as both the heap region's size and the
+ * initial block header's size, and then splits the remainder onto the free
+ * list. Using the caller's un-rounded request there would under-report the
+ * region by up to a page, so the tail of every mapping would be invisible to
+ * the allocator — leaked at best, and outside _region_for_address's ownership
+ * check (which free/realloc use as their authority) at worst. */
+static void *_mmap_pages(size_t size, size_t *mapped_out) {
+    size_t mapped;
+    if (!_checked_round_up(size, HEAP_PAGE_SIZE, &mapped)) return NULL;
+    int64_t addr = simpleos_syscall(10, 0, (int64_t)mapped,
                                      3 /* PROT_READ|PROT_WRITE */, 0, 0);
     if (addr <= 0) return NULL;
+    if (mapped_out) *mapped_out = mapped;
     return (void *)addr;
 }
 

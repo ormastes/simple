@@ -318,6 +318,25 @@ impl Lowerer {
                 Ok(self.module.types.register(ptr_type))
             }
             Type::Tuple(types) => {
+                // `()` is the UNIT type, not a zero-element tuple. The parser
+                // produces `Type::Tuple(vec![])` for it (parser_types.rs:756),
+                // and registering that as `HirType::Tuple([])` handed back a
+                // TypeId that is not `TypeId::VOID` — so a `-> ()` function's
+                // `Return(None)` failed the `return_type == TypeId::VOID` test
+                // in codegen/instr/body.rs and fell into the fail-fast trap arm,
+                // emitting `ud2` with NO `ret` at all. In-guest on SimpleOS that
+                // is a live fault, not a diagnostic: the mcp component row died
+                // at `DispatchRegistry.register` (`me register(...) -> ():`),
+                // x86_64 serial `FAULT @ 0x0000000008005e61`, which objdump maps
+                // exactly to that function's terminating `ud2`.
+                //
+                // TypeId::VOID is the codebase's own stated home for this — see
+                // type_system.rs:93 ("Use TypeId::VOID for empty/unit types"),
+                // and the resolver already maps the bare name `unit` to VOID at
+                // line 234. This makes the `()` spelling agree with it.
+                if types.is_empty() {
+                    return Ok(TypeId::VOID);
+                }
                 let mut type_ids = Vec::new();
                 for t in types {
                     type_ids.push(self.resolve_type(t)?);

@@ -16,6 +16,8 @@
  *   result in rax
  */
 
+#include "include/errno.h"   /* ENOSYS/EINVAL/... were used undeclared: this file never compiled */
+
 /*
  * When cross-compiled (-target x86_64-unknown-none-elf -I include), our
  * freestanding headers provide all types. When analyzed by clangd on
@@ -122,6 +124,19 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 int munmap(void *addr, size_t length) {
     int64_t r = simpleos_syscall(11, (int64_t)(uintptr_t)addr, (int64_t)length,
                                   0, 0, 0);
+    if (r < 0) return set_errno(r);
+    return 0;
+}
+
+/* SimpleOS syscall 12 == mprotect, implemented in the kernel by
+ * spl_handle_mprotect (src/os/kernel/abi/syscall_shim_process.spl:286), which
+ * routes to the VMM (src/os/kernel/ipc/syscall_memory.spl:105). The declaration
+ * was already in <sys/mman.h> with no definition anywhere, so every link that
+ * pulled runtime_memory.o (rt_alloc / rt_free guard pages) failed with an
+ * undefined reference. This is the wrapper, not a stub. */
+int mprotect(void *addr, size_t length, int prot) {
+    int64_t r = simpleos_syscall(12, (int64_t)(uintptr_t)addr, (int64_t)length,
+                                  (int64_t)prot, 0, 0);
     if (r < 0) return set_errno(r);
     return 0;
 }
