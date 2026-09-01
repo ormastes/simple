@@ -187,3 +187,81 @@ further in this pass.
 
 ## Not fixed here
 `bin/simple run` JIT-lane SIGSEGV (see above) — separate defect, still open.
+
+## Re-verification 2026-09-01 (independent, Windows checkout) — claimed fix DOES NOT REPRODUCE
+
+Verified by a separate session on `C:\Users\ormas\dev\simple` at HEAD
+`5998bfa5e94` (working tree clean for `src/compiler_rust`). Binary identity:
+the seed was REBUILT from HEAD with `cargo build --release --bin simple`;
+cargo could not replace the locked `target/release/simple.exe` (12:10:26,
+PREDATES both fix commits — stale, do not verify against it), so the real
+artifact is `src/compiler_rust/target/release/deps/simple.exe`
+(38,715,392 bytes, 2026-09-01 12:21:53). That binary contains both commits'
+code (the `SIMPLE_DEBUG_WBMA` trace prints added in `5998bfa5e94` are live).
+
+Observed with that fresh binary (verdict lines verbatim):
+
+```
+test/01_unit/lib/common/bytes/ints_spec.spl:             11 total,  9 passed, 2 failed
+test/01_unit/lib/common/bytes/bytes_foundation_spec.spl:  6 total,  5 passed, 1 failed
+test/01_unit/lib/common/bytes/span_spec.spl:             11 total, 11 passed, 0 failed
+test/01_unit/lib/common/bytes/bits_spec.spl:             13 total, 13 passed, 0 failed
+test/01_unit/lib/common/compress/typed/deflate_typed_spec.spl: 37 total, 37 passed, 0 failed
+test/01_unit/lib/common/crypto/typed/ctypes_spec.spl:    31 total, 31 passed, 0 failed
+```
+
+The three failures are byte-identical to this record's ORIGINAL pre-fix
+evidence ("U16le stores", "U16be stores", "U32be + U32le ... CRC";
+`expected 0 to equal 190`). Minimal 2-test spec isolates the shape:
+
+```
+✗ chained store persists      (U16le.of(0xBEEF).store(b) -> b.len()==0)
+✓ decomposed store persists   (val u = U16le.of(0xBEEF); u.store(b2) -> 2)
+```
+
+So at HEAD on this machine the chained-`MethodCall`-receiver write-back is
+still lost; the patterns.rs branch either is not reached or does not fire
+for this shape here. Hypothesis (one line, unproven): the fix was verified
+against uncommitted working-tree state — `5998bfa5e94`'s own message says
+pieces "had dropped out of the working tree" in that shared checkout.
+`SIMPLE_DEBUG_WBMA=1` shows `store` never reaching the traced write-back
+path (only plain-fn `[wbma-enter]` lines appear).
+
+Also re-measured, same binary:
+- `run` lane on the minimal repro: still SIGSEGV (rc=139) — matches the
+  still-open half above.
+- `macho_writer_spec.spl`: ERROR `Cannot resolve module:
+  compiler.backend.native.macho_writer`, executed=0 — PRE-EXISTING on this
+  machine (identical error on the 2026-08-24 seed), unrelated to ByteBuffer
+  (that spec uses elf_writer.spl's own local `struct ByteBuffer`).
+
+## Blast-radius audit of struct->class (same session) — change itself is CLEAN
+
+Enumerated all 40 `ByteBuffer`-referencing files. Three distinct types share
+the name: (1) lib `span.spl` ByteBuffer (the changed one); (2)
+`src/compiler/70.backend/backend/native/elf_writer.spl:192` local `struct
+ByteBuffer` (functional style, out of scope); (3) `perf_sugar_spec.spl`
+local `class ByteBuffer` (out of scope). Real users of (1): bits.spl,
+ints.spl, deflate_typed.spl, bytes `__init__` facade, and 5 specs;
+lzma2_typed/roaring/search-types import it but have zero use sites.
+
+Classification: every use site is category (a) — single-owner accumulator or
+intended-visible parameter mutation. Zero category (b) (copy-relying) sites:
+no `ByteBuffer` struct/class fields anywhere, no collection storage, no
+buffer-to-buffer assignment in product code, and ByteBuffer is append-only
+(`push_*`) or rebinding (`clear` sets `self.buf = []`), so a frozen span can
+never observe changed bytes inside its window. Empirically confirmed
+(test lane, fresh seed): freeze()/to_bytes() snapshots stay independent of
+later pushes (1/1), and `var b2 = b1; b2.push_u8(...)` still COPIES in the
+interpreter even for a class (`b1.len()` stays 1) — so no aliasing hazard
+via assignment either (note: that is an engine-semantics observation worth
+its own scrutiny — class assignment appears to remain value-copy in the
+interpreter).
+
+Chained-shape sweep: `grep -rnE '\)\.(store|push_span|push_bytes|push_u8|push_byte|update)\('`
+over `src/lib` + `src/compiler` = 0 hits — the still-broken chained shape
+exists only in the two spec files, not in product code.
+
+Status: struct->class change verified clean (platform-neutral, pure .spl, no
+Windows-conditional code touched). The interpreter fix's verification claim
+is REOPENED: ints_spec 9/11 and bytes_foundation 5/6 at HEAD here.
