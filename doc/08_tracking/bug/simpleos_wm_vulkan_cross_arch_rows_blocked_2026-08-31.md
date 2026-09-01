@@ -540,3 +540,47 @@ designed knob: supplying a pre-built daemon plus
 `SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1` reaches the QEMU/ivshmem/screendump
 phase without a deployed pure-Simple compiler and without weakening the
 compiler-admission checks, which were left exactly as they are.
+
+## 2026-09-01 — the x86_64 GUEST probe kernel is a second, independent blocker
+
+The provided-daemon path (`SIMPLEOS_GPU_HOST_BIN` +
+`SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1`) does not skip the guest: `build_guest`
+still requires `kernel_for_isa x86_64` =
+**`build/os/simpleos_x86_64_host_gpu_probe.elf`**, or it returns
+`guest-artifact-missing`. That is NOT the kernel this lane already has —
+`build/os/simpleos_x86_64_desktop_engine2d.elf` is a different artifact and does
+not satisfy `kernel_for_isa`.
+
+Building the probe kernel with `build_guest`'s own x86_64 flags surfaced two
+**source** defects in
+`examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl`
+(both now fixed):
+
+- `host_gpu_ivshmem_probe_main_profile` passed `isa` to `_host_gpu_probe_fail`,
+  but `isa` is a local of `_host_gpu_probe_main_at` — undefined in that scope.
+- `_host_gpu_probe_main_at` used `CudaHostOffloadAdapter` and
+  `VulkanHostOffloadAdapter` with no `use` for either. A repo-wide grep finds
+  **no other importer of either class**, so this code had never been compiled.
+
+These were reported as `[CODEGEN BODY] ... GlobalLoad: unresolved identifier`,
+which reads like a codegen defect but is not: the compiler was right, and it
+correctly refused to emit stubs (`SIMPLE_ALLOW_STUB_FALLBACK` was never set).
+
+With those fixed the kernel clears codegen and reaches the **link** stage, where
+it stops on deeper, still-open x86_64 bring-up gaps:
+
+1. `examples/09_embedded/simple_os/arch/x86_64/boot/tls13_aes256_gcm_helper.c`
+   fails `clang` with 4 errors — calls to undeclared `x86_aes_repack_bytes`,
+   `x86_tls13_aes256_gcm_decrypt_tagged` and
+   `x86_ssh_aes256_gcm_decrypt_packet_tagged`. Same defect class as the
+   `runtime_native.c` incident: C that has never compiled sitting in-tree.
+   (clang even suggests `rt_ssh_aes256_gcm_decrypt_packet`, declared right
+   above the call.)
+2. `ld.lld: undefined symbol: up2_elf64_module_load` (from
+   `_boot_multiboot2_elf64_loader.o`) and `rt_byte_array_new` (from several
+   `src/lib/common` modules), against
+   `Freestanding unresolved symbol check: 41 unexpected symbol(s)`.
+
+So the x86_64 pixel-evidence row is blocked by **two independent chains**: the
+host daemon (closure defect, fixed above) and this guest kernel. Only the first
+was in the previous diagnosis.
