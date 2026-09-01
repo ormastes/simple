@@ -368,3 +368,68 @@ host-compiles it against a `_Static_assert`-pinned transcription of the TU's
 value layout, and asserts a Some-box yields its PAYLOAD. `--selftest` fatal,
 6 fixtures, three of them must-FAIL (pre-fix body; a hash-only HALF-fix; an
 uncompilable body). Wired in `.github/workflows/repo-hygiene.yml`.
+
+## MEASURED after the fix — the fault is GONE, a different defect is now exposed
+
+Full gate, real OpenSBI v1.4 `-bios fw_payload` (never `-kernel`, never
+`isa-debug-exit`), gate `selftest OK (23 fixtures)`, fresh nonce
+`2a6b2c81217ecb3f`, both kernels built by the Rust seed.
+
+**Row 1 (interpreter) — GREEN, unchanged:**
+```
+OpenSBI v1.4
+HELLO_INTERP_SIMPLEOS_RISCV64_OK nonce=2a6b2c81217ecb3f
+HELLO_INTERP_SIMPLEOS_RISCV64 second line proves the interpreter kept running
+[interp] interpreter row exited rc=0
+```
+
+**Row 2 (build-and-run) — still RED, but at a COMPLETELY DIFFERENT point:**
+```
+OpenSBI v1.4
+[buildrun] SimpleOS riscv64 in-guest build-and-run sanity (OpenSBI fw_payload)
+[buildrun] serial up, building then running a Simple program
+[buildrun] phase=hir-ok
+[buildrun] phase=mir-ok functions lowered
+[buildrun] running the built program
+[buildrun] FAIL run error: invalid operands for +
+[buildrun] build-and-run row exited rc=nonzero
+[buildrun] parking
+```
+
+### What this measures
+
+**There is no `[TRAP]` line.** The trap vector is installed and proven to fire
+(it produced the frame this record is built on), so its silence is evidence, not
+absence of instrumentation. The `scause=0x5` load access fault at
+`call_hir_function+0x414` is **gone**.
+
+The row now reports a clean, well-formed interpreter error from INSIDE the
+callee. `invalid operands for +` can only be raised by evaluating `a + b`, which
+is the body of `add` — so `.unwrap()` now hands `call_hir_function` a real
+`HirFunction`, the parameter-binding loop runs, and the body is evaluated. Every
+step the old fault made unreachable is now reached. That is the fix working, and
+it is confirmation by a changed failure MODE rather than by a green light.
+
+**Honest status: row 2 is still RED and the gate still FAILs.** The
+`rt_unwrap_or_trap` defect was A blocker, and demonstrably the one that produced
+the measured trap frame; it was not the LAST one. Serial:
+`build/os/riscv64_interp/run/buildrun-serial.log`. Kernel identity verified
+before the log was trusted: `nm` shows exactly ONE `rt_unwrap_or_trap`
+(`0000000080204cb4 T`) — no duplicate-symbol shadowing — and `llvm-objdump` of
+that address shows the new arms physically present in the image
+(`andi a0,a0,0x7` / `li a1,0x1` IS_HEAP, `andi a0,a0,-0x8` DECODE_PTR,
+`lw a0,0x0(a0)` / `li a1,0x7` / `beq` the `hdr.type == HEAP_ENUM` test).
+
+### The next defect, stated without guessing at its cause
+
+`add(a: i64, b: i64) -> i64` is called as `add(40, 2)`. The `+` operator inside
+it rejects its operands, so the values bound to `a`/`b` are not what the
+interpreter's arithmetic expects. Candidates, NOT yet discriminated:
+the argument `Value`s are built in the caller and may be encoded differently from
+what `eval_expr`'s binary-op arm accepts; or the parameter-binding loop
+(`interpreter_calls.spl:202-213`) stores them under a form the lookup returns
+ANY-erased; or the freestanding runtime's arithmetic helper has a missing arm in
+the same family as the six already fixed on this branch. The cheapest
+discriminator is to print the RAW 64-bit words of both operands at the point `+`
+rejects them — raw hex, never a comparison result, and never an integer
+interpolated into Simple text.
