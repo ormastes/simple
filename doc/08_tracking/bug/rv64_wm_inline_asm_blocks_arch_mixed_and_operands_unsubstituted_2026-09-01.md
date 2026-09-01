@@ -121,8 +121,8 @@ assembler.
 `extract_asm_block_strings`'s `_ => {}` arm and vanish. So block-form asm can
 never bind an operand, on ANY backend, and the placeholder lines above become
 no-ops in the C sidecar rather than working instructions. Making the block form
-carry its constraints is a separate parser feature; file it before relying on
-block-form operands. (This is not a new regression: those lines never worked —
+carry its constraints is a separate parser feature, filed as
+`doc/08_tracking/bug/asm_block_form_discards_operand_constraints_2026-09-01.md`. (This is not a new regression: those lines never worked —
 they previously emitted unassemblable text.)
 
 `clobbers: vec![]` in `parse_asm_parenthesized` is NOT part of this: parenthesized
