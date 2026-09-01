@@ -8,7 +8,7 @@
 use std.fs_driver.mem_block_device.{MemBlockDevice}
 use std.fs_driver.types.{OpenFlags, Path}
 use std.fs_driver.error.{FsError}
-use std.db.dbfs_engine.superblock.{dbfs_superblock_set_device, dbfs_superblock_format_disk}
+use std.db.dbfs_engine.superblock.{dbfs_superblock_set_device, dbfs_superblock_format_disk_with_block_count}
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 
 pub struct PayloadEntry:
@@ -81,9 +81,24 @@ pub fn _dbfs_image_mem_device(cfg: DbfsImageConfig) -> Result<MemBlockDevice, te
         return Err("dbfs image requires at least 8 sectors")
     val dev = MemBlockDevice.new(cfg.size_sectors, DBFS_IMAGE_SECTOR_SIZE)
     dbfs_superblock_set_device(dev)
-    if not dbfs_superblock_format_disk(DBFS_IMAGE_UUID_HI, DBFS_IMAGE_UUID_LO):
-        return Err("dbfs image superblock format failed")
     val arena_blocks = (cfg.size_sectors as i64) - DBFS_IMAGE_FIRST_ARENA_LBA
+    # MUST be the _with_block_count variant. The plain dbfs_superblock_format_disk
+    # serializes block_count as 0 -- an explicit "unknown", and its own docstring
+    # says "Production boot media must call
+    # dbfs_superblock_format_disk_with_block_count instead"
+    # (dbfs_engine/superblock.spl). Images built with the plain call were
+    # therefore UNMOUNTABLE by the production in-guest probe: boot_fs.spl passes
+    # sb.block_count straight to DbFsDriver.open_on_device, which rejects
+    # anything under 4 with FsError.InvalidArg. Measured in-guest under OVMF
+    # 2026-09-01: "dbfs superblock found=true gen=1" followed immediately by
+    # "dbfs driver open ok=false".
+    #
+    # The value is the ARENA block count, not the device sector count, because
+    # that is what open_on_device is given alongside base LBA 4 -- keeping the
+    # host builder and the in-guest probe in agreement.
+    if not dbfs_superblock_format_disk_with_block_count(
+            DBFS_IMAGE_UUID_HI, DBFS_IMAGE_UUID_LO, arena_blocks as u64):
+        return Err("dbfs image superblock format failed")
     val opened = DbFsDriver.open_on_device(dev, DBFS_IMAGE_FIRST_ARENA_LBA, arena_blocks)
     if opened.is_err():
         return Err("dbfs image driver open failed")
