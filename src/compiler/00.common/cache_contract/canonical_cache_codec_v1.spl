@@ -4,6 +4,8 @@ use std.common.crypto.sha256 (sha256_u8_hex)
 use std.common.string_core.{text_to_bytes, bytes_to_text}
 use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1}
 use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, SourceBlobV1, SourceEncodingPolicyV1, CompileSnapshotV1, ResolutionWitnessV1, ResolutionCandidateV1, logical_source_path_valid_v1}
+use compiler.common.cache_contract.file_ast_v1.{FileAstNodeV1, FileAstV1}
+use compiler.common.cache_contract.semantic_read_set_v1.{SemanticEffectKindV1, SemanticReplayPolicyV1, SemanticReadEntryV1, SemanticReadSetV1}
 
 pub fn canonical_cache_max_payload_bytes_v1() -> i64: 268435456
 pub fn canonical_cache_max_entries_v1() -> i64: 1048576
@@ -12,6 +14,8 @@ pub fn canonical_cache_header_bytes_v1() -> i64: 56
 pub fn canonical_cache_kind_public_summary_v1() -> i64: 3
 pub fn canonical_cache_kind_source_blob_v1() -> i64: 1
 pub fn canonical_cache_kind_compile_snapshot_v1() -> i64: 2
+pub fn canonical_cache_kind_file_ast_v1() -> i64: 4
+pub fn canonical_cache_kind_semantic_read_set_v1() -> i64: 5
 
 pub struct CanonicalCacheEnvelopeV1:
     kind: i64
@@ -318,6 +322,199 @@ pub fn canonical_compile_snapshot_digest_v1(snapshot: CompileSnapshotV1) -> text
     if payload.len() == 0: return ""
     _domain_digest_v1("simple.compile.snapshot.v1\u0000", payload)
 
+pub fn canonical_file_ast_payload_v1(ast: FileAstV1) -> [u8]:
+    var out: [u8] = []
+    if ast.nodes.len() == 0 or ast.nodes.len() > canonical_cache_max_entries_v1(): return out
+    if ast.root_node < 0 or ast.root_node >= ast.nodes.len(): return out
+    if not _append_digest_v1(out, ast.source_blob_digest): return []
+    if not _append_digest_v1(out, ast.grammar_digest): return []
+    if not _append_digest_v1(out, ast.compiler_owner_digest): return []
+    if not _append_text_sequence_v1(out, ast.string_table): return []
+    _push_u64_v1(out, ast.nodes.len())
+    for node in ast.nodes:
+        if node.kind < 0 or node.flags < 0 or node.source_start < 0 or node.source_end < node.source_start: return []
+        if node.first_child < 0 or node.child_count < 0 or node.first_child > ast.nodes.len() - node.child_count: return []
+        if node.payload_index < -1 or node.payload_index >= ast.payload_tables.len(): return []
+        _push_u64_v1(out, node.kind)
+        _push_u64_v1(out, node.flags)
+        _push_u64_v1(out, node.source_start)
+        _push_u64_v1(out, node.source_end)
+        _push_u64_v1(out, node.first_child)
+        _push_u64_v1(out, node.child_count)
+        _push_u64_v1(out, node.payload_index + 1)
+    if not _append_text_sequence_v1(out, ast.payload_tables): return []
+    _push_u64_v1(out, ast.root_node)
+    if not _append_digest_v1(out, ast.public_summary_digest): return []
+    if not _append_digest_v1(out, ast.semantic_read_set_digest): return []
+    out
+
+pub fn canonical_file_ast_encode_v1(ast: FileAstV1) -> [u8]:
+    val payload = canonical_file_ast_payload_v1(ast)
+    if payload.len() == 0: return payload
+    canonical_cache_encode_envelope_v1(canonical_cache_kind_file_ast_v1(), 1, payload)
+
+pub struct FileAstDecodeV1:
+    ok: bool
+    value: FileAstV1?
+    error: text
+
+pub fn canonical_file_ast_decode_v1(bytes: [u8]) -> FileAstDecodeV1:
+    val decoded = canonical_cache_decode_envelope_v1(bytes)
+    if not decoded.ok: return FileAstDecodeV1(ok: false, value: nil, error: decoded.error)
+    val envelope = match decoded.value:
+        case value: value
+        case nil: return FileAstDecodeV1(ok: false, value: nil, error: "missing_envelope")
+    if envelope.kind != canonical_cache_kind_file_ast_v1() or envelope.schema != 1:
+        return FileAstDecodeV1(ok: false, value: nil, error: "file_ast_schema_mismatch")
+    val cursor = _CanonicalCursorV1(bytes: envelope.payload, position: 0, failed: false)
+    val source = cursor.read_digest()
+    val grammar = cursor.read_digest()
+    val owner = cursor.read_digest()
+    val strings = cursor.read_texts()
+    val node_count = cursor.read_u64()
+    var nodes: [FileAstNodeV1] = []
+    if node_count <= 0 or node_count > canonical_cache_max_entries_v1(): cursor.failed = true
+    var i = 0
+    while i < node_count and not cursor.failed:
+        nodes.push(FileAstNodeV1(kind: cursor.read_u64(), flags: cursor.read_u64(), source_start: cursor.read_u64(),
+            source_end: cursor.read_u64(), first_child: cursor.read_u64(), child_count: cursor.read_u64(),
+            payload_index: cursor.read_u64() - 1))
+        i = i + 1
+    val payloads = cursor.read_texts()
+    val root = cursor.read_u64()
+    val summary = cursor.read_digest()
+    val read_set = cursor.read_digest()
+    if cursor.failed or cursor.position != cursor.bytes.len():
+        return FileAstDecodeV1(ok: false, value: nil, error: "malformed_file_ast")
+    val value = FileAstV1(source_blob_digest: source, grammar_digest: grammar, compiler_owner_digest: owner,
+        string_table: strings, nodes: nodes, payload_tables: payloads, root_node: root,
+        public_summary_digest: summary, semantic_read_set_digest: read_set)
+    if canonical_file_ast_payload_v1(value).len() == 0:
+        return FileAstDecodeV1(ok: false, value: nil, error: "invalid_file_ast_indices")
+    FileAstDecodeV1(ok: true, value: value, error: "")
+
+fn _effect_tag_v1(kind: SemanticEffectKindV1) -> i64:
+    match kind:
+        case SemanticEffectKindV1.Source: 1
+        case SemanticEffectKindV1.GeneratedSource: 2
+        case SemanticEffectKindV1.MacroCtfeInput: 3
+        case SemanticEffectKindV1.EnvironmentFacade: 4
+        case SemanticEffectKindV1.ClockFacade: 5
+        case SemanticEffectKindV1.RandomnessFacade: 6
+        case SemanticEffectKindV1.NetworkFacade: 7
+        case SemanticEffectKindV1.ProcessFacade: 8
+        case SemanticEffectKindV1.Plugin: 9
+        case SemanticEffectKindV1.ToolchainComponent: 10
+
+fn _replay_tag_v1(policy: SemanticReplayPolicyV1) -> i64:
+    match policy:
+        case SemanticReplayPolicyV1.DeclaredReplayable: 1
+        case SemanticReplayPolicyV1.UndeclaredUncacheable: 2
+
+fn _read_entry_key_v1(entry: SemanticReadEntryV1) -> text:
+    _effect_tag_v1(entry.effect_kind).to_text() + "\u0000" + entry.logical_name + "\u0000" + entry.provider_id
+
+pub fn canonical_semantic_read_set_payload_v1(read_set: SemanticReadSetV1) -> [u8]:
+    var entries = read_set.entries.copy()
+    var i = 1
+    while i < entries.len():
+        val held = entries[i]
+        var j = i
+        while j > 0 and _read_entry_key_v1(held) < _read_entry_key_v1(entries[j - 1]):
+            entries[j] = entries[j - 1]
+            j = j - 1
+        entries[j] = held
+        i = i + 1
+    var out: [u8] = []
+    _push_u64_v1(out, entries.len())
+    i = 0
+    while i < entries.len():
+        if i > 0 and _read_entry_key_v1(entries[i - 1]) == _read_entry_key_v1(entries[i]): return []
+        val entry = entries[i]
+        _push_u16_v1(out, _effect_tag_v1(entry.effect_kind))
+        _append_text_v1(out, entry.logical_name)
+        _append_text_v1(out, entry.provider_id)
+        if not _append_digest_v1(out, entry.provider_manifest_digest): return []
+        if not _append_digest_v1(out, entry.value_digest): return []
+        _push_u16_v1(out, _replay_tag_v1(entry.replay_policy))
+        i = i + 1
+    _append_text_v1(out, read_set.uncacheable_reason)
+    out
+
+pub fn canonical_semantic_read_set_encode_v1(read_set: SemanticReadSetV1) -> [u8]:
+    val payload = canonical_semantic_read_set_payload_v1(read_set)
+    if payload.len() == 0: return payload
+    canonical_cache_encode_envelope_v1(canonical_cache_kind_semantic_read_set_v1(), 1, payload)
+
+pub struct SemanticReadSetDecodeV1:
+    ok: bool
+    value: SemanticReadSetV1?
+    error: text
+
+fn _effect_from_tag_v1(tag: i64) -> SemanticEffectKindV1?:
+    match tag:
+        case 1: SemanticEffectKindV1.Source
+        case 2: SemanticEffectKindV1.GeneratedSource
+        case 3: SemanticEffectKindV1.MacroCtfeInput
+        case 4: SemanticEffectKindV1.EnvironmentFacade
+        case 5: SemanticEffectKindV1.ClockFacade
+        case 6: SemanticEffectKindV1.RandomnessFacade
+        case 7: SemanticEffectKindV1.NetworkFacade
+        case 8: SemanticEffectKindV1.ProcessFacade
+        case 9: SemanticEffectKindV1.Plugin
+        case 10: SemanticEffectKindV1.ToolchainComponent
+        case _: nil
+
+fn _replay_from_tag_v1(tag: i64) -> SemanticReplayPolicyV1?:
+    match tag:
+        case 1: SemanticReplayPolicyV1.DeclaredReplayable
+        case 2: SemanticReplayPolicyV1.UndeclaredUncacheable
+        case _: nil
+
+pub fn canonical_semantic_read_set_decode_v1(bytes: [u8]) -> SemanticReadSetDecodeV1:
+    val decoded = canonical_cache_decode_envelope_v1(bytes)
+    if not decoded.ok: return SemanticReadSetDecodeV1(ok: false, value: nil, error: decoded.error)
+    val envelope = match decoded.value:
+        case value: value
+        case nil: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "missing_envelope")
+    if envelope.kind != canonical_cache_kind_semantic_read_set_v1() or envelope.schema != 1:
+        return SemanticReadSetDecodeV1(ok: false, value: nil, error: "semantic_read_set_schema_mismatch")
+    val cursor = _CanonicalCursorV1(bytes: envelope.payload, position: 0, failed: false)
+    val count = cursor.read_u64()
+    if count < 0 or count > canonical_cache_max_entries_v1():
+        return SemanticReadSetDecodeV1(ok: false, value: nil, error: "semantic_read_set_bounds")
+    var entries: [SemanticReadEntryV1] = []
+    var i = 0
+    while i < count:
+        if cursor.position > cursor.bytes.len() - 2:
+            return SemanticReadSetDecodeV1(ok: false, value: nil, error: "truncated_effect_tag")
+        val effect_tag = _read_le_v1(cursor.bytes, cursor.position, 2)
+        cursor.position = cursor.position + 2
+        val effect = match _effect_from_tag_v1(effect_tag):
+            case value: value
+            case nil: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "unknown_effect_tag")
+        val logical_name = cursor.read_text()
+        val provider_id = cursor.read_text()
+        val provider_digest = cursor.read_digest()
+        val value_digest = cursor.read_digest()
+        if cursor.position > cursor.bytes.len() - 2:
+            return SemanticReadSetDecodeV1(ok: false, value: nil, error: "truncated_replay_tag")
+        val replay_tag = _read_le_v1(cursor.bytes, cursor.position, 2)
+        cursor.position = cursor.position + 2
+        val replay = match _replay_from_tag_v1(replay_tag):
+            case value: value
+            case nil: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "unknown_replay_tag")
+        entries.push(SemanticReadEntryV1(effect_kind: effect, logical_name: logical_name, provider_id: provider_id,
+            provider_manifest_digest: provider_digest, value_digest: value_digest, replay_policy: replay))
+        i = i + 1
+    val reason = cursor.read_text()
+    if cursor.failed or cursor.position != cursor.bytes.len():
+        return SemanticReadSetDecodeV1(ok: false, value: nil, error: "malformed_semantic_read_set")
+    val value = SemanticReadSetV1(entries: entries, uncacheable_reason: reason)
+    if canonical_semantic_read_set_payload_v1(value).len() == 0:
+        return SemanticReadSetDecodeV1(ok: false, value: nil, error: "noncanonical_semantic_read_set")
+    SemanticReadSetDecodeV1(ok: true, value: value, error: "")
+
 class _CanonicalCursorV1:
     bytes: [u8]
     position: i64
@@ -342,6 +539,26 @@ class _CanonicalCursorV1:
         val value = bytes_to_text(self.bytes[self.position..(self.position + count)])
         self.position = self.position + count
         value
+
+    me fn read_digest() -> text:
+        if self.failed or self.position > self.bytes.len() - 32:
+            self.failed = true
+            return ""
+        val value = _raw_digest_to_hex_v1(self.bytes, self.position)
+        self.position = self.position + 32
+        value
+
+    me fn read_texts() -> [text]:
+        var values: [text] = []
+        val count = self.read_u64()
+        if count < 0 or count > canonical_cache_max_entries_v1():
+            self.failed = true
+            return values
+        var i = 0
+        while i < count:
+            values.push(self.read_text())
+            i = i + 1
+        values
 
 fn _append_text_v1(out: [u8], value: text):
     _append_bytes_v1(out, canonical_cache_encode_text_v1(value))
