@@ -557,9 +557,34 @@ fn handle_method_call_with_self_update_inner(
                         enums,
                         impl_methods,
                     )? {
-                        if let Some((ref obj_name, _)) = inner_update {
-                            if let Value::Object { class: updated_class, .. } = &updated_inner_self {
-                                if updated_class == class {
+                        if let Some((ref obj_name, ref inner_self)) = inner_update {
+                            // Same gate as the non-owned fallback below, and for
+                            // the same reason: overwrite the ROOT binding with
+                            // the outer result only when the chain provably
+                            // threads one mutable identity through both links.
+                            //
+                            // The old gate here compared `updated_inner_self`'s
+                            // class to `class` -- the class of the OUTER call's
+                            // own receiver -- which is the same object, so it was
+                            // trivially true and said nothing about `obj_name`.
+                            // `val ok = self.symbols.lookup_or_invalid(n).is_valid()`
+                            // therefore wrote `is_valid()`'s BOOL into the frame's
+                            // `self` slot, and every later `self.<field>` in that
+                            // frame failed with "cannot access field on value of
+                            // type 'bool'". The 2026-08-31 fix hardened the
+                            // fallback path below but missed this owned-values
+                            // sibling.
+                            // doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
+                            // doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
+                            if let (
+                                Value::Object { class: inner_class, .. },
+                                Value::Object { class: outer_class, .. },
+                            ) = (inner_self, &outer_result)
+                            {
+                                if inner_class == outer_class
+                                    && method_is_me(classes, impl_methods, inner_class, inner_method)
+                                    && method_is_me(classes, impl_methods, inner_class, method)
+                                {
                                     return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
                                 }
                             }
