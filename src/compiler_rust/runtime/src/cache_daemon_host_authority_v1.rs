@@ -235,7 +235,13 @@ mod linux {
             libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o600,
         );
-        if lock_fd < 0 || libc::flock(lock_fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
+        let mut lock_stat: libc::stat = std::mem::zeroed();
+        let lock_is_private_regular = lock_fd >= 0
+            && libc::fstat(lock_fd, &mut lock_stat) == 0
+            && (lock_stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && lock_stat.st_nlink == 1
+            && lock_stat.st_uid == libc::geteuid();
+        if !lock_is_private_regular || libc::flock(lock_fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
             if lock_fd >= 0 {
                 libc::close(lock_fd);
             }
