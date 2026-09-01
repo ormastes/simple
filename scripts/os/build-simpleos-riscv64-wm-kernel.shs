@@ -1,0 +1,156 @@
+#!/bin/sh
+# build-simpleos-riscv64-wm-kernel.shs
+#
+# Build the riscv64 in-guest WM RENDER SMOKE kernel from tracked Simple source:
+#
+#   build/os/riscv64_wm/wm/kernel.{elf,Image}
+#
+# Sibling of build-simpleos-riscv64-interpreter-kernel.shs and deliberately the
+# same shape: same seed compiler, same linker script, same --entry-closure, same
+# nonce discipline, same not-a-stub checks. Read that script's header for the
+# reasoning behind each; only the differences are restated here.
+#
+# COMPILER: the Rust bootstrap SEED, stated loudly. The pure-Simple self-hosted
+# compiler cannot compile anything in this tree yet, so this artifact is
+# seed-built and the gate's verdict says so rather than implying self-hosting.
+# SIMPLE_BIN must point at a FRESHLY BUILT seed; the checked-in bin/simple is
+# stale and manufactures phantom PARSE failures.
+#
+# --timeout 1200 is passed to native-build deliberately: the 300s default makes
+# modules that compile fine "fail". A timeout is not a compile error.
+#
+# THE NONCE, AND WHY IT IS ALSO A COLOUR
+# --------------------------------------
+# A fresh nonce is generated HERE, outside the guest, and written into
+# build/os/generated/rv64_wm_nonce.spl. Unlike the interpreter lane, this lane's
+# evidence is PIXELS, so the nonce is exported twice over: as text (for the
+# serial line) and as three 8-bit channel values derived from its first six hex
+# digits. The guest paints a fixed-origin rectangle in that colour; the gate
+# recomputes the same three channels from the nonce it chose and reads them back
+# out of a QMP screendump. A stale Image cannot match, because its rectangle
+# carries the previous run's colour.
+#
+# NOT-A-STUB CHECK: the kernel must contain its own row symbol AND the real
+# display entry point. --gc-sections has previously discarded an unrooted but
+# reachable graph and still reported a successful link, so a size check, or even
+# a clean link, is not evidence. The gate additionally `nm`s this ELF for
+# weak-nil stubs before booting it.
+#
+# Exit status: 0 = the kernel is a non-empty RISC-V ELF with .text, carries its
+# row symbol, the display symbol and the nonce, and yielded a non-empty flat
+# Image; non-zero = nothing usable. There is no partial success.
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT"
+
+OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/riscv64_wm}
+SIMPLE_BIN=${SIMPLE_BIN:-$REPO_ROOT/src/compiler_rust/target/release/simple}
+ARCH_DIR=$REPO_ROOT/examples/09_embedded/simple_os/arch/riscv64
+LDS=$ARCH_DIR/linker.ld
+GEN_DIR=$REPO_ROOT/build/os/generated
+NB_TIMEOUT=${NATIVE_BUILD_TIMEOUT:-1200}
+
+fail() { printf 'build-riscv64-wm-kernel: ERROR — %s\n' "$*" >&2; exit 1; }
+
+[ -x "$SIMPLE_BIN" ] || fail "no compiler at $SIMPLE_BIN (build the seed: cargo build --release --bin simple in src/compiler_rust)"
+[ -f "$LDS" ] || fail "missing linker script $LDS"
+
+# --- the nonce ---------------------------------------------------------------
+if [ -z "${NONCE:-}" ]; then
+    NONCE=$( (od -An -N8 -tx1 /dev/urandom 2>/dev/null || date +%s%N) | tr -d ' \n' )
+fi
+case "$NONCE" in
+    '') fail "empty nonce — refusing to build an unanchored image" ;;
+esac
+
+# Derive the patch colour from the nonce. The gate recomputes these three
+# numbers with the SAME rule (see rv64_wm_nonce_rgb() there) and its selftest
+# pins the rule on a fixed vector, so the two cannot drift apart silently.
+# Channels are forced non-zero and distinguishable from the scanout's cleared
+# background: a patch that happened to be pure black would be indistinguishable
+# from "nothing was drawn", which is the exact vacuous green this lane exists to
+# prevent.
+hex6=$(printf '%s' "$NONCE" | tr -dc '0-9a-fA-F' | cut -c1-6)
+[ "${#hex6}" -eq 6 ] || fail "nonce $NONCE has fewer than 6 hex digits — cannot derive a patch colour"
+NR=$(( 0x$(printf '%s' "$hex6" | cut -c1-2) | 0x40 ))
+NG=$(( 0x$(printf '%s' "$hex6" | cut -c3-4) | 0x40 ))
+NB=$(( 0x$(printf '%s' "$hex6" | cut -c5-6) | 0x40 ))
+
+mkdir -p "$GEN_DIR"
+{
+    printf 'pub fn rv64_wm_nonce() -> text:\n    "%s"\n\n' "$NONCE"
+    printf 'pub fn rv64_wm_nonce_r() -> u32:\n    %su32\n\n' "$NR"
+    printf 'pub fn rv64_wm_nonce_g() -> u32:\n    %su32\n\n' "$NG"
+    printf 'pub fn rv64_wm_nonce_b() -> u32:\n    %su32\n' "$NB"
+} > "$GEN_DIR/rv64_wm_nonce.spl"
+printf 'build-riscv64-wm-kernel: nonce %s rgb=%s,%s,%s -> %s\n' \
+    "$NONCE" "$NR" "$NG" "$NB" "$GEN_DIR/rv64_wm_nonce.spl"
+
+OBJCOPY=
+for c in riscv64-unknown-elf-objcopy riscv64-linux-gnu-objcopy llvm-objcopy objcopy; do
+    command -v "$c" >/dev/null 2>&1 && { OBJCOPY=$c; break; }
+done
+[ -n "$OBJCOPY" ] || fail "no objcopy available to extract the flat Image"
+
+# The real display bring-up must be present: this is the symbol whose absence
+# would mean the row "rendered" without a scanout driver in the image.
+DISPLAY_SYM=riscv64_display_initialize
+ROW_SYM=wm_vulkan_smoke_row
+
+row_dir=$OUT_DIR/wm
+row_entry=$ARCH_DIR/wm_vulkan_smoke_entry.spl
+row_kernel=$row_dir/kernel.elf
+row_image=$row_dir/kernel.Image
+row_log=$row_dir/kernel-build.log
+
+[ -f "$row_entry" ] || fail "missing entry $row_entry"
+mkdir -p "$row_dir"
+rm -f "$row_kernel" "$row_image"
+
+# Exit status read DIRECTLY into a variable on the next line — never through a
+# pipe, whose $? is the last pipeline element's status. `set +e` around the
+# invocation is load-bearing: under `set -e` a failing native-build aborts the
+# script AT the invocation, so `rc=$?` never runs and the diagnostic block never
+# prints, turning an honest compile failure into a silent exit 1.
+set +e
+"$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
+    --timeout "$NB_TIMEOUT" \
+    --source "$GEN_DIR" \
+    --entry "$row_entry" \
+    --target riscv64gc-unknown-none-elf \
+    --linker-script "$LDS" \
+    -o "$row_kernel" >"$row_log" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || { tail -60 "$row_log" >&2; fail "native-build failed for wm (rc=$rc), log: $row_log"; }
+
+[ -s "$row_kernel" ] || fail "native-build reported success but $row_kernel is missing or empty"
+
+hdr=$(readelf -h "$row_kernel" 2>/dev/null) || fail "readelf could not parse $row_kernel"
+case "$hdr" in
+    *RISC-V*) ;;
+    *) fail "$row_kernel is not a RISC-V ELF" ;;
+esac
+readelf -SW "$row_kernel" 2>/dev/null | grep -q ' \.text ' \
+    || fail "$row_kernel has no .text section (empty-link false success)"
+
+syms=$(readelf -sW "$row_kernel" 2>/dev/null) || fail "readelf could not list symbols in $row_kernel"
+for want in "$ROW_SYM" "$DISPLAY_SYM"; do
+    case "$syms" in
+        *"$want"*) ;;
+        *) fail "$row_kernel contains no $want symbol (it was garbage-collected out, or never linked in)" ;;
+    esac
+done
+
+grep -aqF "$NONCE" "$row_kernel" \
+    || fail "$row_kernel does not contain the build nonce — the generated nonce module was not linked in"
+
+"$OBJCOPY" -O binary "$row_kernel" "$row_image" || fail "flat Image extraction failed"
+[ -s "$row_image" ] || fail "flat Image $row_image is empty"
+
+printf 'build-riscv64-wm-kernel: wm OK — %s (%s bytes ELF) + %s (%s bytes Image, has %s + %s + nonce)\n' \
+    "$row_kernel" "$(wc -c <"$row_kernel")" "$row_image" "$(wc -c <"$row_image")" "$ROW_SYM" "$DISPLAY_SYM"
+
+printf 'PASS — riscv64 WM render smoke kernel built by the RUST SEED (%s), nonce %s rgb=%s,%s,%s, out %s\n' \
+    "$SIMPLE_BIN" "$NONCE" "$NR" "$NG" "$NB" "$OUT_DIR"
