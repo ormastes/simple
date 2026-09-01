@@ -124,6 +124,43 @@ pub fn dir_sep() -> text:
     else:
         "/"
 
+pub fn to_native_path(path: text) -> text:
+    """Convert a canonical forward-slash path to this platform's NATIVE form.
+
+    This is THE single conversion point for Windows separator variation. Call it
+    at the boundary where a native path is genuinely required -- handing a path
+    to a spawned process (argv), or to a native tool's response file -- and
+    nowhere else.
+
+    Boundary evidence (measured by execution, Windows 11, 2026-09-01, one file,
+    two forms):
+      - Win32 file API in-process: BOTH "C:\a\b.txt" and "C:/a/b.txt" read OK.
+        Filesystem I/O therefore needs NO conversion; converting there is
+        redundant work, not a fix.
+      - spawned `cmd.exe /c type <path>`: backslash form -> exit 0 with the file
+        contents; forward-slash form -> exit 1, "The syntax of the command is
+        incorrect." This is the documented "fails mute" class.
+
+    CROSS-PLATFORM IMPACT: on every non-Windows platform this is the IDENTITY
+    function -- it returns its argument unchanged, byte for byte. That is
+    deliberate and is not a simplification. A backslash is a LEGAL character in
+    a POSIX filename, so rewriting "\\" -> "/" off Windows would silently
+    corrupt a real path. (The pre-existing dead helper `to_native_separators` in
+    fs/path.spl did exactly that on its Unix branch; it has zero callers, so it
+    never fired.)
+
+    Apply ONLY to a value already known to be a filesystem path. A URL, a CLI
+    switch, or a regex also contains "/" and would be mangled.
+
+    Example:
+        to_native_path("C:/tmp/a.txt")   # Windows -> "C:\tmp\a.txt"
+                                         # POSIX   -> "C:/tmp/a.txt" (unchanged)
+    """
+    if is_windows():
+        path.replace("/", "\\")
+    else:
+        path
+
 pub fn path_sep() -> text:
     """Returns the PATH environment variable separator."""
     if is_windows():

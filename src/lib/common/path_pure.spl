@@ -164,3 +164,48 @@ pub fn path_dirname(path: text) -> text:
         # the parent is the root.
         return "/"
     return parent_raw.substring(0, pn)
+
+# ===========================================================================
+# Separator form conversion (pure text; no platform query, no filesystem)
+# ===========================================================================
+#
+# CANONICAL FORM RULE for this codebase: paths are carried internally in
+# FORWARD-SLASH form on every platform, and converted to the native form ONLY
+# at the boundary where the native form is actually required.
+#
+# That boundary was established by EXECUTION on Windows 11 (2026-09-01), not
+# by citation. Same file, same host, two forms:
+#
+#   layer                                    "C:\..\short.txt"  "C:/../short.txt"
+#   Win32 file API in-process (read/write)   OK                 OK
+#   spawned process argv (cmd.exe /c type)   exit 0, CONTENT    exit 1, "The
+#                                                               syntax of the
+#                                                               command is
+#                                                               incorrect."
+#
+# So: forward slashes are FINE for all filesystem I/O, and are a hard failure
+# when handed to a spawned native tool. Convert at spawn/argv, nowhere else.
+#
+# WARNING: `to_backslash` must be applied ONLY to a value already known to be a
+# filesystem path. Applying it blanket-wise mangles URLs ("https://x" ->
+# "https:\x"), CLI switches, and regexes, all of which legitimately contain
+# "/". There is deliberately no "convert this whole command line" helper.
+
+# Convert every backslash to a forward slash: the canonical internal form.
+#
+# On POSIX this is NOT safe to apply to an arbitrary path -- a backslash is a
+# legal character in a POSIX filename -- which is why the platform wrapper
+# `to_native_path` uses IDENTITY as its non-Windows branch rather than calling
+# this. It is exported for callers parsing a value that is known to have come
+# from a Windows producer (llvm-config output, a Windows env var, cygpath).
+pub fn to_slash(path: text) -> text:
+    path.replace("\\", "/")
+
+# Convert every forward slash to a backslash: the Windows native/argv form.
+#
+# Idempotent, and correct for a path already in mixed form ("C:/a\b" ->
+# "C:\a\b"), which is the common shape when a Windows env var is joined onto a
+# forward-slash literal. Leaves a UNC prefix well-formed: "//server/share"
+# becomes "\server\share".
+pub fn to_backslash(path: text) -> text:
+    path.replace("/", "\\")
