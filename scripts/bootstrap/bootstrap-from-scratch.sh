@@ -638,6 +638,65 @@ portable_lock_canonical_output "${output_dir}" || {
   exit 1
 }
 output_dir=${PORTABLE_LOCK_CANONICAL_OUTPUT}
+
+# Disk-space precondition. A full bootstrap needs ~10-15 GB (Rust authority
+# cargo target tree + generation publish + stage2/3 native artifacts); below
+# roughly that it has been observed to die SILENTLY -- no error, no
+# diagnostic, just a corrupt or missing artifact discovered minutes later.
+# Refuse up front with an actionable message instead. Checks BOTH the output
+# tree (stage2/3 artifacts, native caches, the Rust authority's own
+# rust-authority-<fingerprint> cargo target under --full-bootstrap) and the
+# repo root (bootstrap.generations/, .bootstrap-authority-locks/, and the
+# checked-out Rust sources under src/compiler_rust/target/), since a caller
+# can point --output at a different filesystem than the repo lives on and
+# either one filling up is fatal. `df -P` is used deliberately: POSIX output
+# format has a fixed column layout (Filesystem 1024-blocks Used Available
+# Capacity Mounted-on) and never line-wraps a long filesystem name onto a
+# second line the way plain `df` can on some Linux/BSD builds, which would
+# otherwise misalign the awk column read; `-k` pins the unit to 1024-byte
+# blocks so the number is unambiguous across platforms (GNU/BSD/macOS/MSYS on
+# Windows all support -P -k identically -- verified on this host's MSYS df).
+# A `df` that cannot be run at all (missing tool, unrecognised path) reports
+# unknown space rather than a bad number, and the gate skips rather than
+# false-failing on that host -- absence of a working `df` is not evidence of
+# low disk. Threshold overridable via SIMPLE_BOOTSTRAP_MIN_FREE_GB for
+# unusual setups (e.g. a deliberately tight CI container); 0 disables the
+# gate outright.
+bootstrap_free_space_kb() {
+  bfsk_path=$1
+  [ -e "${bfsk_path}" ] || return 1
+  bfsk_line=$(df -Pk "${bfsk_path}" 2>/dev/null | awk 'NR==2 {print $4}') ||
+    return 1
+  case "${bfsk_line}" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "${bfsk_line}"
+}
+bootstrap_check_disk_space() {
+  bcds_min_gb=${SIMPLE_BOOTSTRAP_MIN_FREE_GB:-10}
+  case "${bcds_min_gb}" in ''|*[!0-9]*) bcds_min_gb=10 ;; esac
+  [ "${bcds_min_gb}" -gt 0 ] || return 0
+  bcds_min_kb=$((bcds_min_gb * 1024 * 1024))
+  bcds_worst_kb=
+  bcds_worst_path=
+  for bcds_probe_path in "${output_dir}" "${repo_root}"; do
+    bcds_probe_kb=$(bootstrap_free_space_kb "${bcds_probe_path}") || continue
+    if [ -z "${bcds_worst_kb}" ] || [ "${bcds_probe_kb}" -lt "${bcds_worst_kb}" ]
+    then
+      bcds_worst_kb=${bcds_probe_kb}
+      bcds_worst_path=${bcds_probe_path}
+    fi
+  done
+  # No usable df reading on this host/path at all -- skip rather than guess.
+  [ -n "${bcds_worst_kb}" ] || return 0
+  if [ "${bcds_worst_kb}" -lt "${bcds_min_kb}" ]; then
+    bcds_worst_gb=$((bcds_worst_kb / 1024 / 1024))
+    bcds_short_gb=$(((bcds_min_kb - bcds_worst_kb + 1024 * 1024 - 1) / 1024 / 1024))
+    echo "error: insufficient disk space to start a bootstrap: ${bcds_worst_gb} GB free on the filesystem holding ${bcds_worst_path}, need at least ${bcds_min_gb} GB (short by ~${bcds_short_gb} GB)" >&2
+    echo "error: a bootstrap that starts below this floor has previously died SILENTLY when disk filled mid-build; free space first (see rust-authority generation GC in scripts/bootstrap/bootstrap-authority-wiring.shs, and build/w/rust-authority-* / bootstrap.generations/ as the largest reclaimable consumers) or override with SIMPLE_BOOTSTRAP_MIN_FREE_GB=<n> if this host is intentionally tight" >&2
+    return 1
+  fi
+}
+bootstrap_check_disk_space || exit 1
+
 [ -z "${resume_stage4_output}" ] ||
   [ "${output_dir}" = "${scheduler_lineage_output}" ] || {
   echo "error: Stage 4 output differs from scheduler lineage admission" >&2
@@ -2251,6 +2310,15 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: Rust runtime authority changed during private admission" >&2
     exit 1
   }
+  # Reclaim stale immutable Rust authority generations while the authority
+  # lock is still held (never before acquisition -- see
+  # bootstrap_authority_prune_generations in bootstrap-authority-wiring.shs).
+  # Best-effort: a reclaim failure is disk hygiene, not correctness, and must
+  # not turn an otherwise-successful bootstrap into a failure.
+  bootstrap_authority_prune_generations \
+    "${rust_authority_generation_root}" "${rust_authority_current_marker}" \
+    "${rust_target_lock_handle}" ||
+    echo "warning: could not prune stale Rust authority generations" >&2
   bootstrap_release_rust_authority || {
     echo "error: could not release Rust authority after private admission" >&2
     exit 1
