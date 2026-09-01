@@ -1,0 +1,121 @@
+# codex-impl: process-local registration for authenticated virtual summaries.
+
+use compiler.common.cache_contract.cache_gateway_v1 (CacheGatewayV1)
+use compiler.common.cache_contract.errors_v1 (SummaryErrorV1)
+use compiler.common.cache_contract.virtual_source_store_v1.*
+use compiler.common.cache_contract.virtual_source_consumer_v1.*
+
+pub enum VirtualSourceRegistrationStatusV1:
+    Ready
+    Unavailable
+    Miss
+    Rejected
+
+pub struct RegisteredVirtualSourceListV1:
+    status: VirtualSourceRegistrationStatusV1
+    page: VirtualSourceListPageV1?
+    error: SummaryErrorV1?
+
+pub struct RegisteredVirtualSourceStatV1:
+    status: VirtualSourceRegistrationStatusV1
+    value: VirtualSourceStatV1?
+    error: SummaryErrorV1?
+
+pub struct RegisteredVirtualSourceReadV1:
+    status: VirtualSourceRegistrationStatusV1
+    value: VirtualSourceReadV1?
+    error: SummaryErrorV1?
+
+pub struct RegisteredVirtualSourcePageV1:
+    status: VirtualSourceRegistrationStatusV1
+    value: SummaryPageV1?
+    error: SummaryErrorV1?
+
+# The cache startup owner installs these adapters. Protocol handlers only read
+# them; they never open a database, infer credentials, parse source, or generate
+# a summary on a miss.
+var _compiler_virtual_source_v1: VirtualSourceConsumerAdapterV1? = nil
+var _mcp_virtual_source_v1: VirtualSourceConsumerAdapterV1? = nil
+var _lsp_virtual_source_v1: VirtualSourceConsumerAdapterV1? = nil
+var _spipe_virtual_source_v1: VirtualSourceConsumerAdapterV1? = nil
+
+pub fn install_virtual_source_consumers_from_gateway_v1(gateway: CacheGatewayV1, auth: SummaryAuthV1, snapshot: text):
+    val store = gateway.virtual_source_store()
+    _compiler_virtual_source_v1 = Some(compiler_cli_virtual_source_v1(store, auth, snapshot))
+    _mcp_virtual_source_v1 = Some(mcp_virtual_source_v1(store, auth, snapshot))
+    _lsp_virtual_source_v1 = Some(simple_lsp_mcp_virtual_source_v1(store, auth, snapshot))
+    _spipe_virtual_source_v1 = Some(spipe_virtual_source_v1(store, auth, snapshot))
+
+pub fn clear_virtual_source_consumers_v1():
+    _compiler_virtual_source_v1 = nil
+    _mcp_virtual_source_v1 = nil
+    _lsp_virtual_source_v1 = nil
+    _spipe_virtual_source_v1 = nil
+
+fn _list_v1(adapter: VirtualSourceConsumerAdapterV1?, logical_directory: text, max_entries: i64, continuation: text?) -> RegisteredVirtualSourceListV1:
+    if adapter == nil:
+        return RegisteredVirtualSourceListV1(status: VirtualSourceRegistrationStatusV1.Unavailable, page: nil, error: nil)
+    val result = adapter.unwrap().list(logical_directory, max_entries, continuation)
+    match result:
+        case Ok(value): RegisteredVirtualSourceListV1(status: VirtualSourceRegistrationStatusV1.Ready, page: Some(value), error: nil)
+        case Err(error): RegisteredVirtualSourceListV1(status: VirtualSourceRegistrationStatusV1.Rejected, page: nil, error: Some(error))
+
+fn _stat_v1(adapter: VirtualSourceConsumerAdapterV1?, uri: text) -> RegisteredVirtualSourceStatV1:
+    if adapter == nil:
+        return RegisteredVirtualSourceStatV1(status: VirtualSourceRegistrationStatusV1.Unavailable, value: nil, error: nil)
+    val result = adapter.unwrap().stat(uri)
+    match result:
+        case Err(error): RegisteredVirtualSourceStatV1(status: VirtualSourceRegistrationStatusV1.Rejected, value: nil, error: Some(error))
+        case Ok(lookup):
+            if not lookup.present or lookup.value == nil:
+                return RegisteredVirtualSourceStatV1(status: VirtualSourceRegistrationStatusV1.Miss, value: nil, error: nil)
+            RegisteredVirtualSourceStatV1(status: VirtualSourceRegistrationStatusV1.Ready, value: lookup.value, error: nil)
+
+fn _read_v1(adapter: VirtualSourceConsumerAdapterV1?, uri: text, offset: i64, max_bytes: i64) -> RegisteredVirtualSourceReadV1:
+    if adapter == nil:
+        return RegisteredVirtualSourceReadV1(status: VirtualSourceRegistrationStatusV1.Unavailable, value: nil, error: nil)
+    val result = adapter.unwrap().read(uri, offset, max_bytes)
+    match result:
+        case Err(error): RegisteredVirtualSourceReadV1(status: VirtualSourceRegistrationStatusV1.Rejected, value: nil, error: Some(error))
+        case Ok(lookup):
+            if not lookup.present or lookup.value == nil:
+                return RegisteredVirtualSourceReadV1(status: VirtualSourceRegistrationStatusV1.Miss, value: nil, error: nil)
+            RegisteredVirtualSourceReadV1(status: VirtualSourceRegistrationStatusV1.Ready, value: lookup.value, error: nil)
+
+fn _page_v1(adapter: VirtualSourceConsumerAdapterV1?, uri: text, continuation: text?, max_bytes: i64, max_entries: i64) -> RegisteredVirtualSourcePageV1:
+    if adapter == nil:
+        return RegisteredVirtualSourcePageV1(status: VirtualSourceRegistrationStatusV1.Unavailable, value: nil, error: nil)
+    val result = adapter.unwrap().page(uri, continuation, max_bytes, max_entries)
+    match result:
+        case Err(error): RegisteredVirtualSourcePageV1(status: VirtualSourceRegistrationStatusV1.Rejected, value: nil, error: Some(error))
+        case Ok(lookup):
+            if not lookup.present or lookup.value == nil:
+                return RegisteredVirtualSourcePageV1(status: VirtualSourceRegistrationStatusV1.Miss, value: nil, error: nil)
+            RegisteredVirtualSourcePageV1(status: VirtualSourceRegistrationStatusV1.Ready, value: lookup.value, error: nil)
+
+pub fn mcp_virtual_source_list_registered_v1(logical_directory: text, max_entries: i64, continuation: text?) -> RegisteredVirtualSourceListV1:
+    _list_v1(_mcp_virtual_source_v1, logical_directory, max_entries, continuation)
+
+pub fn mcp_virtual_source_stat_registered_v1(uri: text) -> RegisteredVirtualSourceStatV1:
+    _stat_v1(_mcp_virtual_source_v1, uri)
+
+pub fn mcp_virtual_source_read_registered_v1(uri: text, offset: i64, max_bytes: i64) -> RegisteredVirtualSourceReadV1:
+    _read_v1(_mcp_virtual_source_v1, uri, offset, max_bytes)
+
+pub fn mcp_virtual_source_page_registered_v1(uri: text, continuation: text?, max_bytes: i64, max_entries: i64) -> RegisteredVirtualSourcePageV1:
+    _page_v1(_mcp_virtual_source_v1, uri, continuation, max_bytes, max_entries)
+
+pub fn lsp_virtual_source_read_registered_v1(uri: text, offset: i64, max_bytes: i64) -> RegisteredVirtualSourceReadV1:
+    _read_v1(_lsp_virtual_source_v1, uri, offset, max_bytes)
+
+pub fn spipe_virtual_source_page_registered_v1(uri: text, continuation: text?, max_bytes: i64, max_entries: i64) -> RegisteredVirtualSourcePageV1:
+    _page_v1(_spipe_virtual_source_v1, uri, continuation, max_bytes, max_entries)
+
+# Compiler/CLI accepts virtual bytes only through the registered exact-snapshot
+# adapter. A non-simple-summary path is a typed miss and remains eligible for
+# the normal physical resolver; a simple-summary URI never falls through to a
+# physical file, so it cannot shadow one.
+pub fn compiler_virtual_source_read_registered_v1(uri: text, max_bytes: i64) -> RegisteredVirtualSourceReadV1:
+    if not uri.starts_with("simple-summary://"):
+        return RegisteredVirtualSourceReadV1(status: VirtualSourceRegistrationStatusV1.Miss, value: nil, error: nil)
+    _read_v1(_compiler_virtual_source_v1, uri, 0, max_bytes)

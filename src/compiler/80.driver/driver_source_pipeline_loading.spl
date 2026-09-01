@@ -25,6 +25,7 @@ use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
+use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, compiler_virtual_source_read_registered_v1}
 
 @unsafe(reason: "raw nullable bootstrap source read; nil is provider failure", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
@@ -180,6 +181,30 @@ impl CompilerDriver:
             val input_path = driver_inputs[i]
             log_phase(
                 "phase1:load_sources:input:start index={i} path={input_path}")
+            if input_path.starts_with("simple-summary://"):
+                val virtual = compiler_virtual_source_read_registered_v1(input_path, 65536)
+                if virtual.status == VirtualSourceRegistrationStatusV1.Unavailable:
+                    self.ctx.add_error("virtual summary cache unavailable for '{input_path}'")
+                    return (self.ctx, false)
+                if virtual.status == VirtualSourceRegistrationStatusV1.Miss:
+                    self.ctx.add_error("virtual summary missing from the installed exact snapshot: '{input_path}'")
+                    return (self.ctx, false)
+                if virtual.status != VirtualSourceRegistrationStatusV1.Ready or virtual.value == nil:
+                    self.ctx.add_error("virtual summary request rejected: '{input_path}'")
+                    return (self.ctx, false)
+                val virtual_read = virtual.value.unwrap()
+                if not virtual_read.complete:
+                    self.ctx.add_error("virtual summary exceeds the compiler read bound: '{input_path}'")
+                    return (self.ctx, false)
+                val module_name = _driver_module_name_from_path(input_path)
+                val virtual_source = SourceFile(path: input_path, content: rt_bytes_to_text(virtual_read.bytes), module_name: module_name)
+                val virtual_key = input_path + "::" + module_name
+                if not seen_sources.contains_key(virtual_key):
+                    seen_sources[virtual_key] = true
+                    all_sources.append(virtual_source)
+                log_phase("phase1:load_sources:input:done index={i} loaded=1 total={all_sources.len()}")
+                i = i + 1
+                continue
             # `_driver_collect_sources` owns bulk-lane exclusions (interpreter,
             # parser, treesitter, and async lowering).  Applying those filters
             # to the explicit entry makes a real, existing file disappear when

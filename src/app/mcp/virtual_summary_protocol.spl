@@ -1,0 +1,74 @@
+# Bounded MCP projection of the cache-startup-owned virtual summary registry.
+
+use compiler.common.cache_contract.virtual_source_registration_v1.*
+use .main_lazy_json.{extract_field, escape_json, make_tool_result, make_tool_error}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+fn _summary_status_text_v1(status: VirtualSourceRegistrationStatusV1) -> text:
+    match status:
+        case VirtualSourceRegistrationStatusV1.Ready: "ready"
+        case VirtualSourceRegistrationStatusV1.Unavailable: "unavailable"
+        case VirtualSourceRegistrationStatusV1.Miss: "miss"
+        case VirtualSourceRegistrationStatusV1.Rejected: "rejected"
+
+fn _summary_unready_v1(id: text, status: VirtualSourceRegistrationStatusV1) -> text:
+    val label = _summary_status_text_v1(status)
+    if status == VirtualSourceRegistrationStatusV1.Unavailable:
+        return make_tool_error(id, -32004, "virtual summary cache unavailable")
+    if status == VirtualSourceRegistrationStatusV1.Miss:
+        return make_tool_error(id, -32002, "virtual summary not found in the exact snapshot")
+    make_tool_error(id, -32602, "virtual summary request rejected")
+
+fn _bounded_i64_v1(body: text, key: text, fallback: i64, limit: i64) -> i64:
+    val raw = extract_field(body, key)
+    val value = if raw == "": fallback else: raw.to_i64() ?? -1
+    if value <= 0 or value > limit: return -1
+    value
+
+pub fn handle_virtual_summary_list_v1(id: text, body: text) -> text:
+    val max_entries = _bounded_i64_v1(body, "max_entries", 128, 256)
+    if max_entries < 0: return make_tool_error(id, -32602, "max_entries must be 1..256")
+    val continuation_raw = extract_field(body, "continuation")
+    val continuation: text? = if continuation_raw == "": nil else: Some(continuation_raw)
+    val result = mcp_virtual_source_list_registered_v1(extract_field(body, "logical_directory"), max_entries, continuation)
+    if result.status != VirtualSourceRegistrationStatusV1.Ready or result.page == nil:
+        return _summary_unready_v1(id, result.status)
+    val page = result.page.unwrap()
+    var entries: [text] = []
+    for entry in page.entries:
+        entries.push("{\"uri\":\"{escape_json(entry.uri)}\",\"path\":\"{escape_json(entry.logical_path.value)}\",\"digest\":\"{entry.content_digest}\"}")
+    val next = if page.continuation == nil: "null" else: "\"{escape_json(page.continuation.unwrap())}\""
+    make_tool_result(id, "{\"status\":\"ready\",\"entries\":[{entries.join(",")}],\"continuation\":{next},\"complete\":{if page.complete: "true" else: "false"}}")
+
+pub fn handle_virtual_summary_stat_v1(id: text, body: text) -> text:
+    val uri = extract_field(body, "uri")
+    val result = mcp_virtual_source_stat_registered_v1(uri)
+    if result.status != VirtualSourceRegistrationStatusV1.Ready or result.value == nil:
+        return _summary_unready_v1(id, result.status)
+    val value = result.value.unwrap()
+    make_tool_result(id, "{\"status\":\"ready\",\"uri\":\"{escape_json(value.uri)}\",\"size\":{value.rendered_size},\"digest\":\"{value.content_digest}\"}")
+
+pub fn handle_virtual_summary_read_v1(id: text, body: text) -> text:
+    val max_bytes = _bounded_i64_v1(body, "max_bytes", 65536, 65536)
+    val offset = extract_field(body, "offset").to_i64() ?? 0
+    if max_bytes < 0 or offset < 0: return make_tool_error(id, -32602, "invalid read bounds")
+    val result = mcp_virtual_source_read_registered_v1(extract_field(body, "uri"), offset, max_bytes)
+    if result.status != VirtualSourceRegistrationStatusV1.Ready or result.value == nil:
+        return _summary_unready_v1(id, result.status)
+    val value = result.value.unwrap()
+    val next = if value.next_offset == nil: "null" else: str(value.next_offset.unwrap())
+    make_tool_result(id, "{\"status\":\"ready\",\"uri\":\"{escape_json(value.uri)}\",\"text\":\"{escape_json(rt_bytes_to_text(value.bytes))}\",\"next_offset\":{next},\"complete\":{if value.complete: "true" else: "false"}}")
+
+pub fn handle_virtual_summary_page_v1(id: text, body: text) -> text:
+    val max_bytes = _bounded_i64_v1(body, "max_bytes", 65536, 65536)
+    val max_entries = _bounded_i64_v1(body, "max_entries", 128, 256)
+    if max_bytes < 0 or max_entries < 0: return make_tool_error(id, -32602, "invalid page bounds")
+    val continuation_raw = extract_field(body, "continuation")
+    val continuation: text? = if continuation_raw == "": nil else: Some(continuation_raw)
+    val result = mcp_virtual_source_page_registered_v1(extract_field(body, "uri"), continuation, max_bytes, max_entries)
+    if result.status != VirtualSourceRegistrationStatusV1.Ready or result.value == nil:
+        return _summary_unready_v1(id, result.status)
+    val value = result.value.unwrap()
+    val next = if value.continuation == nil: "null" else: "\"{escape_json(value.continuation.unwrap())}\""
+    make_tool_result(id, "{\"status\":\"ready\",\"uri\":\"{escape_json(value.uri)}\",\"text\":\"{escape_json(value.rendered_text)}\",\"continuation\":{next},\"complete\":{if value.complete: "true" else: "false"}}")

@@ -1,0 +1,51 @@
+# Minimal SPipe evidence-provider registry. Providers return bounded immutable
+# evidence and never perform source generation in the request path.
+
+use compiler.common.cache_contract.virtual_source_registration_v1.*
+
+pub struct SPipeEvidenceRequestV1:
+    uri: text
+    continuation: text?
+    max_bytes: i64
+    max_entries: i64
+
+pub struct SPipeEvidenceResultV1:
+    provider: text
+    status: VirtualSourceRegistrationStatusV1
+    page: SummaryPageV1?
+
+pub struct SPipeEvidenceProviderV1:
+    name: text
+    scheme: text
+    max_bytes: i64
+    max_entries: i64
+
+pub class SPipeEvidenceRegistryV1:
+    providers: [SPipeEvidenceProviderV1]
+
+    static fn empty() -> SPipeEvidenceRegistryV1:
+        SPipeEvidenceRegistryV1(providers: [])
+
+    me register_virtual_summary_v1():
+        for provider in self.providers:
+            if provider.name == "simple.cache.public_summary.v1": return
+        self.providers.push(SPipeEvidenceProviderV1(
+            name: "simple.cache.public_summary.v1", scheme: "simple-summary://",
+            max_bytes: 65536, max_entries: 256))
+
+    fn read(request: SPipeEvidenceRequestV1) -> SPipeEvidenceResultV1:
+        if not request.uri.starts_with("simple-summary://"):
+            return SPipeEvidenceResultV1(provider: "", status: VirtualSourceRegistrationStatusV1.Miss, page: nil)
+        var admitted = false
+        for provider in self.providers:
+            if provider.name == "simple.cache.public_summary.v1": admitted = true
+        if not admitted:
+            return SPipeEvidenceResultV1(provider: "simple.cache.public_summary.v1", status: VirtualSourceRegistrationStatusV1.Unavailable, page: nil)
+        if request.max_bytes <= 0 or request.max_bytes > 65536 or request.max_entries <= 0 or request.max_entries > 256:
+            return SPipeEvidenceResultV1(provider: "simple.cache.public_summary.v1", status: VirtualSourceRegistrationStatusV1.Rejected, page: nil)
+        val result = spipe_virtual_source_page_registered_v1(
+            request.uri, request.continuation, request.max_bytes, request.max_entries)
+        SPipeEvidenceResultV1(provider: "simple.cache.public_summary.v1", status: result.status, page: result.value)
+
+pub fn register_spipe_virtual_summary_evidence_v1(registry: SPipeEvidenceRegistryV1):
+    registry.register_virtual_summary_v1()
