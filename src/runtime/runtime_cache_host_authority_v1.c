@@ -4,8 +4,18 @@
 #ifndef _WIN32
 #define _GNU_SOURCE
 #endif
+
 #include <stdint.h>
 #include <stddef.h>
+
+/* Reserved daemon-receipt ABI. Unsupported on every host until credential,
+ * live-lock, boot identity and fsynced monotonic-epoch providers are present. */
+int64_t rt_cache_host_authenticate_peer_v1(int64_t root, int64_t peer) {(void)root;(void)peer;return -1;}
+int64_t rt_cache_host_acquire_exclusive_lock_v1(int64_t root, int64_t peer) {(void)root;(void)peer;return -1;}
+int64_t rt_cache_host_boot_identity_v1(int64_t lock) {(void)lock;return -1;}
+int64_t rt_cache_host_advance_writer_epoch_v1(int64_t lock, int64_t boot) {(void)lock;(void)boot;return -1;}
+int64_t rt_cache_host_publish_readiness_v1(int64_t lock,int64_t epoch,const uint8_t*nonce,int64_t len){(void)lock;(void)epoch;(void)nonce;(void)len;return -1;}
+int64_t rt_cache_host_validate_readiness_v1(int64_t peer,int64_t ready,const uint8_t*nonce,int64_t len,int64_t epoch){(void)peer;(void)ready;(void)nonce;(void)len;(void)epoch;return -1;}
 
 #ifdef _WIN32
 #define UNSUPPORTED(name, args) int64_t name args { return -1; }
@@ -71,7 +81,7 @@ static int open_beneath(int root, const char *path, int flags, mode_t mode) {
     int fd = openat(parent, part, flags|O_NOFOLLOW|O_CLOEXEC, mode); close(parent); return fd;
 }
 static int open_absolute_root(const char *path) {
-    if (*path != '/') return -1; int fd = open("/", O_RDONLY|O_DIRECTORY|O_CLOEXEC); if (fd < 0) return -1;
+    if (*path != '/' || !valid_relative(path + 1)) return -1; int fd = open("/", O_RDONLY|O_DIRECTORY|O_CLOEXEC); if (fd < 0) return -1;
     char copy[32769]; snprintf(copy, sizeof copy, "%s", path+1); char *save=NULL, *part=strtok_r(copy,"/",&save);
     while (part) { int next=openat(fd,part,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC); close(fd); if(next<0)return -1; fd=next; part=strtok_r(NULL,"/",&save); } return fd;
 }

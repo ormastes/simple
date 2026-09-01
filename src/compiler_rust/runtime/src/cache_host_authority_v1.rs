@@ -482,6 +482,9 @@ mod unix {
             symlink("safe", dir.path().join("root-link")).unwrap();
             let linked_root = dir.path().join("root-link");
             assert_eq!(root(&linked_root), INVALID);
+            for alias in ["/", "/tmp/", "/tmp//cache", "/tmp/./cache", "/tmp/../cache"] {
+                assert_eq!(root(std::path::Path::new(alias)), INVALID);
+            }
             let r = root(dir.path());
             for name in [
                 b"ancestor/object".as_slice(),
@@ -561,7 +564,7 @@ mod unix {
                 barrier.wait();
                 let file = fs::OpenOptions::new().write(true).open(object_path).unwrap();
                 use std::os::unix::fs::FileExt;
-                file.write_all_at(&vec![b'b'; 4096], 4096).unwrap();
+                file.write_all_at(&vec![b'b'; 4096], 0).unwrap();
                 file.sync_all().unwrap();
                 barrier.wait();
             });
