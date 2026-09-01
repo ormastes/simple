@@ -69,6 +69,19 @@ mod unix {
         unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) }
     }
 
+    /// Duplicate only a live root capability for another runtime authority
+    /// provider.  The raw descriptor never crosses the Simple ABI.
+    pub(crate) fn duplicate_root_fd(handle: i64) -> Option<RawFd> {
+        let guard = handles().lock().ok()?;
+        match guard.get(&handle) {
+            Some(Entry::Root(fd)) => {
+                let duplicated = dup_fd(*fd);
+                (duplicated >= 0).then_some(duplicated)
+            }
+            _ => None,
+        }
+    }
+
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn stat_nsec_equal(a: &libc::stat, b: &libc::stat) -> bool {
         a.st_mtime_nsec == b.st_mtime_nsec && a.st_ctime_nsec == b.st_ctime_nsec
