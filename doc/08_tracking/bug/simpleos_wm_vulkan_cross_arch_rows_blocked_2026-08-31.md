@@ -598,10 +598,21 @@ genuinely the only missing input, exactly as originally scoped — the guest
 probe kernel discussed above belongs to the OTHER gate and is not on this path.
 
 The daemon native-build is running detached with the closure fix in place:
-`source_closure 230/230`, `load_sources 313/313`, **0 `hir-fatal`** (against 772
-before the fix). It is slow precisely because the closure is now complete —
-230 modules instead of the truncated 96 — and `surface_build` costs 20-60 s for
-the heavy engine2d modules.
+`source_closure 230/230`, `load_sources 313/313`. It is slow precisely because
+the closure is now complete — 230 modules instead of the truncated 96 — and
+`surface_build` costs 20-60 s for the heavy engine2d modules.
+
+**What is measured vs. what is still pending — do not conflate these.**
+Measured: the scanner returns 39 imports for `engine.spl` instead of 1; the
+closure is 230/230 instead of 96/96; the new spec is 4/5 RED before the fix and
+5/5 green after; the existing dedup spec's 11 failures are identical on both
+sides. **Pending: the HIR outcome.** No post-fix run has yet REACHED the HIR
+phase — the current build is still in step 1/6 — so a `hir-fatal` count of 0
+right now is vacuous, not evidence that the 772 are gone. That the closure fix
+removes them is the hypothesis this build is testing, and it is well supported
+(every one of the 772 traced to a module the closure had dropped), but it is
+not yet a measurement. Also pending: the daemon link, the `nm` census, and the
+gate verdict.
 
 A chained runner is armed so the remaining steps complete without supervision:
 when the build exits it writes the undefined-`rt_*` census, the WEAK-definition
