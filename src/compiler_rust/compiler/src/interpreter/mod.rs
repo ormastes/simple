@@ -66,13 +66,13 @@ pub(crate) use interpreter_state::{
     EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, IMMUTABLE_VARS,
     IN_IMMUTABLE_FN_METHOD, INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
     MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER,
-    MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY, TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS,
-    UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS,
-    CLASS_OVERLOADS, FUNCTION_MODULE_OWNER, CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
-    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
-    report_globals_census, owned_globals_snapshot, owned_global, owned_global_present, owner_has_globals,
-    steal_owned_global, set_owned_global, seed_owner_globals, reset_owned_globals_from_initial, owner_bindings,
-    record_owner_binding,
+    MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY,
+    TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
+    UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS, CLASS_OVERLOADS, FUNCTION_MODULE_OWNER,
+    CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+    FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner, report_globals_census, owned_globals_snapshot,
+    owned_global, owned_global_present, owner_has_globals, steal_owned_global, set_owned_global, seed_owner_globals,
+    reset_owned_globals_from_initial, owner_bindings, record_owner_binding,
 };
 
 // Core types and utilities
@@ -146,13 +146,13 @@ pub(crate) use bitfield_runtime::{instantiate_bitfield, register_bitfield, updat
 mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
     bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
-    create_range_object_opt, create_range_object_step, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
-    eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter, eval_dict_for_each, eval_dict_map_values,
-    eval_option_and_then, eval_option_filter, eval_option_map, eval_option_or_else, eval_result_and_then,
-    eval_result_map, eval_result_map_err, eval_result_or_else, find_and_exec_method, handle_functional_update,
-    handle_method_call_with_self_update, iter_to_vec, message_to_value, normalize_index, slice_collection,
-    spawn_actor_with_expr, spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr,
-    try_method_missing, with_effect_context,
+    create_range_object_opt, create_range_object_step, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all,
+    eval_array_any, eval_array_filter, eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter,
+    eval_dict_for_each, eval_dict_map_values, eval_option_and_then, eval_option_filter, eval_option_map,
+    eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else,
+    find_and_exec_method, handle_functional_update, handle_method_call_with_self_update, iter_to_vec, message_to_value,
+    normalize_index, slice_collection, spawn_actor_with_expr, spawn_future_with_callable,
+    spawn_future_with_callable_and_env, spawn_future_with_expr, try_method_missing, with_effect_context,
 };
 
 // Include the rest of the interpreter functions
@@ -167,8 +167,8 @@ pub(crate) use interpreter_call::{
 pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results};
 use interpreter_call::{
     bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_bound_args,
-    exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_ALL, BDD_AFTER_EACH,
-    BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
+    exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_ALL,
+    BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
 };
 
 // Module caching and loading state

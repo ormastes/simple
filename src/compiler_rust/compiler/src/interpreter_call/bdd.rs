@@ -956,6 +956,35 @@ pub(super) fn eval_bdd_builtin(
                 }
             }
         }
+        "step" => {
+            // Manual-only scenario marker consumed by spipe-docgen.  The runtime
+            // body is `pub fn step(description: text)` in
+            // src/lib/nogc_sync_mut/spec.spl, which is a documented no-op, and the
+            // native path supplies the same no-op via
+            // `spipe_inline_helpers()` in
+            // src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl.
+            //
+            // This table had no arm for it, so on the interpret path every
+            // example calling the documented `step(...)` DSL marker died with
+            // "semantic: function `step` not found" — the whole example was
+            // reported failed even though nothing it asserted was wrong.
+            //
+            // The description is deliberately NOT evaluated: `step` ignores it
+            // (spec.spl only early-returns on ""), and descriptions are free
+            // text that would otherwise hit FString interpolation errors, the
+            // same reason `describe` above uses `extract_desc_str`.
+            //
+            // BDD builtins are consulted at Priority 3 in
+            // interpreter_call/mod.rs, ahead of the user function registry at
+            // Priority 4, so a spec that defines its own `step` (for example
+            // test/05_perf/stress/multicore_green_fanout_spec.spl's
+            // `fn step(name: text) -> i64`) must keep winning.  Returning None
+            // falls through to that lookup instead of shadowing it with a no-op.
+            if functions.contains_key("step") {
+                return Ok(None);
+            }
+            Ok(Some(Value::Nil))
+        }
         "planned" => {
             // Future-implementation marker: a spec declared before its feature
             // exists. Bookkeeping mirrors `pending` (never pass, never fail,

@@ -101,6 +101,56 @@ var g_pmm: PhysMemManager = PhysMemManager(
     last_alloc_index: 0
 )
 
+# Only pmm_alloc_pages entries are proofs of contiguous ownership.  Fixed
+# arrays keep this registry usable before the freestanding heap exists.
+var g_pmm_contiguous_bases: [u64; 256] = [0; 256]
+var g_pmm_contiguous_counts: [u64; 256] = [0; 256]
+
+fn _pmm_reset_contiguous_registry():
+    var i: u64 = 0
+    while i < PMM_MAX_CONTIGUOUS_ALLOCATIONS:
+        g_pmm_contiguous_bases[i] = 0
+        g_pmm_contiguous_counts[i] = 0
+        i = i + 1
+
+fn _pmm_find_contiguous(base: u64, count: u64) -> i64:
+    var i: u64 = 0
+    while i < PMM_MAX_CONTIGUOUS_ALLOCATIONS:
+        if g_pmm_contiguous_counts[i] == count and g_pmm_contiguous_bases[i] == base:
+            return i as i64
+        i = i + 1
+    -1
+
+fn _pmm_record_contiguous(base: u64, count: u64) -> bool:
+    var i: u64 = 0
+    while i < PMM_MAX_CONTIGUOUS_ALLOCATIONS:
+        if g_pmm_contiguous_counts[i] == 0:
+            g_pmm_contiguous_bases[i] = base
+            g_pmm_contiguous_counts[i] = count
+            return true
+        i = i + 1
+    false
+
+fn _pmm_remove_contiguous(base: u64, count: u64) -> bool:
+    val index = _pmm_find_contiguous(base, count)
+    if index < 0:
+        return false
+    g_pmm_contiguous_bases[index] = 0
+    g_pmm_contiguous_counts[index] = 0
+    true
+
+fn _pmm_remove_containing_page(page_index: u64):
+    var i: u64 = 0
+    while i < PMM_MAX_CONTIGUOUS_ALLOCATIONS:
+        val count = g_pmm_contiguous_counts[i]
+        if count != 0:
+            val start = g_pmm_contiguous_bases[i] / PAGE_SIZE
+            if page_index >= start and page_index < start + count:
+                g_pmm_contiguous_bases[i] = 0
+                g_pmm_contiguous_counts[i] = 0
+                return
+        i = i + 1
+
 # Forward declaration for serial debug
 use os.kernel.log.klog_api.{log_raw_println}
 
@@ -298,14 +348,14 @@ fn pmm_init_identity_range(total_memory: u64, kernel_start: u64, kernel_end: u64
 # Page Allocation
 # ============================================================================
 
-fn pmm_alloc_page() -> PageFrame?:
-    """Allocate a single 4KB page frame.
+fn _pmm_alloc_page_address() -> u64:
+    """Allocate a single 4KB page frame, returning its physical address.
 
     Uses next-fit search starting from last allocation index.
-    Returns nil if no free pages available.
+    Returns 0 if no free pages available.
     """
     if g_pmm.free_pages == 0:
-        return nil
+        return 0
 
     # Next-fit search: start from last allocation hint
     var index = g_pmm.last_alloc_index
@@ -319,7 +369,8 @@ fn pmm_alloc_page() -> PageFrame?:
             g_pmm.last_alloc_index = index + 1
             if g_pmm.last_alloc_index >= g_pmm.total_pages:
                 g_pmm.last_alloc_index = 0
-            return PageFrame(pfn: index)
+            _pmm_set_refcount(index, 1)
+            return index * PAGE_SIZE
 
         index = index + 1
         if index >= g_pmm.total_pages:
@@ -354,6 +405,7 @@ fn pmm_free_page(frame: PageFrame):
         return  # Out of range
 
     if _bitmap_test(g_pmm, index):
+        _pmm_remove_containing_page(index)
         _bitmap_clear(g_pmm, index)
         g_pmm.free_pages = g_pmm.free_pages + 1
 
@@ -365,7 +417,7 @@ fn pmm_alloc_pages(count: u64) -> PhysAddr?:
     """
     if count == 0:
         return nil
-    if g_pmm.free_pages < count:
+    if count > g_pmm.total_pages or g_pmm.free_pages < count:
         return nil
 
     # Linear scan for contiguous free run
@@ -388,10 +440,38 @@ fn pmm_alloc_pages(count: u64) -> PhysAddr?:
                 _bitmap_set(g_pmm, start + i)
                 i = i + 1
             g_pmm.free_pages = g_pmm.free_pages - count
-            return PhysAddr(addr: start * PAGE_SIZE)
+            val base = start * PAGE_SIZE
+            if _pmm_record_contiguous(base, count):
+                return PhysAddr(addr: base)
+
+            # A full proof registry must not turn a real allocation into an
+            # unverifiable one.
+            i = 0
+            while i < count:
+                _bitmap_clear(g_pmm, start + i)
+                i = i + 1
+            g_pmm.free_pages = g_pmm.free_pages + count
+            return nil
 
     # No contiguous run found
     nil
+
+fn pmm_free_page_range(base_phys: PhysAddr, count: u64):
+    """Free a contiguous range previously returned by pmm_alloc_pages."""
+    if count == 0:
+        return
+    _pmm_remove_contiguous(base_phys.addr, count)
+    var offset: u64 = 0
+    while offset < count:
+        val phys = PhysAddr(addr: base_phys.addr + offset * PAGE_SIZE)
+        pmm_free_page(PageFrame.from_phys_addr(phys))
+        offset = offset + 1
+
+fn pmm_is_live_contiguous_allocation(base: u64, page_count: u64) -> bool:
+    """Prove an exact live range returned by pmm_alloc_pages."""
+    if page_count == 0 or base % PAGE_SIZE != 0:
+        return false
+    _pmm_find_contiguous(base, page_count) >= 0
 
 # ============================================================================
 # PMM Query Interface

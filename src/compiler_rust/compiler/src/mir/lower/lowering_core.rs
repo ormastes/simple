@@ -2189,9 +2189,7 @@ fn collect_local_writes(stmts: &[HirStmt], out: &mut Vec<(usize, TypeId)>) {
                 }
             }
             HirStmt::If {
-                then_block,
-                else_block,
-                ..
+                then_block, else_block, ..
             } => {
                 collect_local_writes(then_block, out);
                 if let Some(else_block) = else_block {

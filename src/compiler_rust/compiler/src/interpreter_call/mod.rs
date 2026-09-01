@@ -16,11 +16,11 @@ pub(crate) use bdd::{
     BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ, BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
-    bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named, captured_env_with_live_globals, exec_function,
-    exec_function_with_bound_args, exec_function_with_captured_env, exec_function_with_values,
-    exec_function_with_values_and_self, exec_lambda, execute_function_body, instantiate_class, publish_and_repoint,
-    publish_live_bound_globals, refresh_live_bound_globals, sync_live_bound_globals, sync_owned_captured_globals,
-    ProceedContext, IN_NEW_METHOD,
+    bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named,
+    captured_env_with_live_globals, exec_function, exec_function_with_bound_args, exec_function_with_captured_env,
+    exec_function_with_values, exec_function_with_values_and_self, exec_lambda, execute_function_body,
+    instantiate_class, publish_and_repoint, publish_live_bound_globals, refresh_live_bound_globals,
+    sync_live_bound_globals, sync_owned_captured_globals, ProceedContext, IN_NEW_METHOD,
 };
 pub(crate) use core::bitfield_support::instantiate_bitfield_from_args;
 
@@ -32,7 +32,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
     CLASS_OVERLOADS, FUNCTION_OVERLOADS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, BITFIELDS, CURRENT_EXEC_MODULE,
-    FUNCTION_MODULE_OWNER,
+    FUNCTION_MODULE_OWNER, TRAIT_IMPLS,
 };
 use crate::interpreter::module_cache::MODULE_CLASSES_CACHE;
 use crate::runtime_profile;
@@ -57,9 +57,25 @@ fn debug_overload_select() -> bool {
 }
 
 fn value_type_matches_name(value: &Value, expected: &str) -> bool {
-    let matched = value.type_name() == expected
+    let matched = expected == "Any"
+        || value.type_name() == expected
         || value.matches_type(expected)
-        || matches!((value, expected), (Value::Str(_), "text"));
+        || matches!((value, expected), (Value::Str(_), "text"))
+        // A concrete object's class name never equals a TRAIT-typed parameter's
+        // name verbatim (`fn run(h: ScreenHost)` called with a `Screen2dHost`
+        // that does `impl ScreenHost for Screen2dHost`). Fall back to
+        // TRAIT_IMPLS so trait-typed params accept any concrete type that
+        // implements the trait — the same fallback
+        // interpreter_method/special/objects.rs applies to trait-typed
+        // constructor params (fat32_core_lfn_static_new_trait_param_2026-07-20).
+        // Without it, EVERY overloaded free function with a trait-typed
+        // parameter failed overload scoring with "no caller-authorized
+        // overload ... matches the supplied arguments".
+        || match value {
+            Value::Object { class, .. } => TRAIT_IMPLS
+                .with(|cell| cell.borrow().contains_key(&(expected.to_string(), class.clone()))),
+            _ => false,
+        };
     if debug_overload_select() {
         println!(
             "[type-match] expected={expected} runtime={} display={} matched={matched}",
@@ -90,6 +106,15 @@ fn value_matches_type(value: &Value, ty: &Type) -> bool {
             // arrays.
             Value::Array(items) => items.first().is_none_or(|item| value_matches_type(item, element)),
             Value::FrozenArray(items) => items.first().is_none_or(|item| value_matches_type(item, element)),
+            // A `[u8]` parameter receives a packed byte buffer at runtime, not
+            // a Value::Array — and a byte buffer can ONLY hold u8 elements, so
+            // the element check is discharged by construction. Without these
+            // arms every `[u8]` parameter (file blobs, digests, framebuffers)
+            // failed overload scoring when the fn had any co-compiled overload.
+            Value::ByteArray(_) | Value::FrozenByteArray(_) => {
+                matches!(element.as_ref(), Type::Simple(name) if name == "u8")
+                    || matches!(element.as_ref(), Type::Simple(name) if name == "Any")
+            }
             // Tuples may be heterogeneous, but are bounded by (small) declared
             // arity rather than data size, so keep the exhaustive check to
             // preserve dispatch semantics for tuple-as-array-argument matches.
@@ -101,7 +126,12 @@ fn value_matches_type(value: &Value, ty: &Type) -> bool {
 }
 
 fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
-    if func.params.len() != values.len() {
+    // Defaulted parameters are optional at the call site: `fn f(a, b = 1)`
+    // called with one value must still score, otherwise any overloaded fn
+    // whose signature carries a default becomes uncallable with the defaults
+    // omitted ("no caller-authorized overload ... matches").
+    let required = func.params.iter().filter(|p| p.default.is_none()).count();
+    if values.len() < required || values.len() > func.params.len() {
         return None;
     }
 
@@ -356,7 +386,9 @@ pub(crate) fn call_value_as_callable(
     }
 }
 
-#[allow(clippy::borrowed_box)] // reason: Box<dyn Trait> is the required storage type for this dispatch point
+// NOTE: no #[allow] here. An attribute on a `thread_local!` invocation is
+// applied to the macro call, not the items it expands to, so rustc ignores it
+// and clippy reports `unused attribute `allow``, which is denied in CI.
 thread_local! {
     /// Prelude names already reported by `warn_prelude_shadow_once`, so a
     /// shadowed builtin called in a loop warns once rather than per call.

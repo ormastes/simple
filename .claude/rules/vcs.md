@@ -42,6 +42,38 @@ Side policy is per-path: paths whose latest truth is local restore from the pre-
 
 ## Pre-push guards
 
+### What ACTUALLY runs on push (verified 2026-09-01 — read this before trusting any "Wired into" line below)
+
+The installed hook is `scripts/check/pre-push-conflict-tree-guard.shs`. It runs
+`check-hook-installation.shs` (line 118) and then, at line 135,
+`exec sh "$repo_root/scripts/check/check-push-must-pass.shs" --from-pre-push-hook`.
+It runs no guard of its own. The single authoritative enforcement surface is
+therefore the `push,`-tier rows of `config/check/must_check_gates.sdn`, each of
+which must ALSO have an exact-match `'<id>:<mode>:<command>'` case in
+`run_manifest_push_gates` (`check-push-must-pass.shs`) — an unmatched row hits
+the fail-closed `*)` default and returns 2, so a manifest row alone is not
+wiring and a dispatch case alone is dead code.
+
+Several per-guard bullets below end with "Wired into
+`pre-push-conflict-tree-guard.shs`". **That phrase is stale for at least
+`check-seed-builds-push.shs`, `check-c-runtime-compiles-push.shs` (it is a
+bootstrap-tier automated gate, not a push gate) and `check-no-direct-rt.shs`
+(dispatch case present, manifest row absent), and `check-unbacked-extern-ratchet.shs`
+has never appeared in the push tier at all.** The repo already admitted this
+class of drift in `run_push_gate`'s own comment: "That is why
+.claude/rules/vcs.md described several guards as 'wired into the pre-push hook'
+while they appeared in no enforcement surface". The bullets are retained for
+their mechanism and incident history, which remain accurate; treat the manifest,
+not the prose, as the source of truth for what enforces.
+
+Added to the push tier 2026-09-01 (rt_* dual-implementation directive):
+`push-rt-dual-implementation` (blocking — `check-rt-dual-implementation-ratchet.shs`,
+freezes the 2,488 single-lane `rt_*` symbols) and `push-dual-run-shadow`
+(advisory — `check-dual-run-shadow.shs` needs a runnable `bin/simple` and exits 2
+without one, which as a blocking gate would block every push from a
+binary-less host; `push_blocking: false` records the verdict on stderr instead).
+
+
 **Run them from the REPO ROOT of a real clone.** Until 2026-08-01 both guards
 failed open on the working directory: from a `git archive` worktree under
 `/dev/shm` or `/run/user/1000` (no `.git`) they printed `nothing to push` and

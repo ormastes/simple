@@ -146,9 +146,7 @@ impl Lowerer {
             .as_ref()?
             .get(&format!("{}.{}", type_name, method))?;
         match declared {
-            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => {
-                (!name.is_empty()).then(|| name.clone())
-            }
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => (!name.is_empty()).then(|| name.clone()),
             _ => None,
         }
     }
@@ -409,10 +407,41 @@ impl Lowerer {
                 // The name comes from the callee's DECLARED return type, never
                 // from the callee type name itself: `Foo.parse() -> text` must
                 // NOT hint "Foo". No declared row means no hint — never a guess.
+                // When the authored return type is a type this module HAS
+                // registered, upgrade the binding's TypeId outright instead of
+                // stopping at the name hint. The name hint has exactly one
+                // consumer — `expr/access.rs`'s ambiguous-FIELD recovery — so on
+                // its own it leaves the local at ANY, and an ANY receiver makes
+                // MIR emit a BARE `MethodCallStatic{"find"}` whose name
+                // codegen's `is_bare_builtin_collection_method` heuristic routes
+                // to the builtin `rt_find` before any user-method resolution.
+                // That reads a type header class instances do not carry and
+                // traps the riscv64 guest.
+                //
+                // This reproduces exactly what annotating the local
+                // (`var reg: DispatchRegistry = DispatchRegistry.new_for_test()`)
+                // was measured to do in the bug record's controlled experiment:
+                // the local becomes a real TypeId and BOTH `reg.find(...)` and
+                // `reg.register(...)` lower qualified. Riding the existing
+                // TypeId path rather than teaching method-call lowering a second
+                // name-hint mechanism.
+                //
+                // Gated on `ty == TypeId::ANY`, so an authored type is never
+                // overridden: the only bindings affected are ones that were
+                // already erased. The name hint is still recorded when lookup
+                // finds nothing, preserving the registration-independent
+                // field-access recovery for unregistered cross-module types.
+                //
+                // doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
                 if ty == TypeId::ANY {
                     if let Some(init) = &let_stmt.value {
                         if let Some(hint) = self.static_call_return_type_name(init) {
-                            ctx.static_call_type_hints.insert(name.clone(), hint);
+                            match self.module.types.lookup(&hint) {
+                                Some(resolved) if resolved != TypeId::ANY => ty = resolved,
+                                _ => {
+                                    ctx.static_call_type_hints.insert(name.clone(), hint);
+                                }
+                            }
                         }
                     }
                 }
@@ -2995,6 +3024,44 @@ impl Lowerer {
         }
     }
 
+    /// The subject of a bare `expect(<subject>)` call, or `None` for anything
+    /// else. Named/multiple arguments are rejected so a user-defined `expect`
+    /// with a different arity is never hijacked.
+    fn bare_expect_subject(expr: &Expr) -> Option<&Expr> {
+        let Expr::Call { callee, args } = expr else {
+            return None;
+        };
+        if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect")
+            || args.len() != 1
+            || args[0].name.is_some()
+        {
+            return None;
+        }
+        Some(&args[0].value)
+    }
+
+    /// Peel the optional negation link off a matcher-chain receiver:
+    /// `expect(x)` -> (x, false); `expect(x).not` / `expect(x).not_()` ->
+    /// (x, true). Returns `None` unless the innermost receiver really is a
+    /// bare `expect(..)` call, so a `not` FIELD on a user struct cannot be
+    /// captured.
+    fn peel_expect_matcher_receiver(expr: &Expr) -> Option<(&Expr, bool)> {
+        if let Some(subject) = Self::bare_expect_subject(expr) {
+            return Some((subject, false));
+        }
+        match expr {
+            Expr::FieldAccess { receiver, field } if field == "not" || field == "not_" => {
+                Self::bare_expect_subject(receiver).map(|s| (s, true))
+            }
+            Expr::MethodCall {
+                receiver, method, args, ..
+            } if (method == "not" || method == "not_") && args.is_empty() => {
+                Self::bare_expect_subject(receiver).map(|s| (s, true))
+            }
+            _ => None,
+        }
+    }
+
     /// Lower `expect(<subject>).<matcher>(<expected>)` into the same
     /// `rt_bdd_expect_*` builtins the operator form uses, by rewriting the
     /// matcher into its equivalent comparison expression.
@@ -3010,45 +3077,101 @@ impl Lowerer {
         expr: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<Vec<HirStmt>>> {
-        let Expr::MethodCall {
-            receiver, method, args, ..
-        } = expr
-        else {
+        // The statement is either `<recv>.<matcher>(<args>)` or the paren-less
+        // property form `<recv>.<matcher>` (e.g. `expect(x).to_be_nil`), which
+        // the parser produces as a plain FieldAccess.
+        const NO_ARGS: &[simple_parser::Argument] = &[];
+        let (receiver, method, args): (&Expr, &str, &[simple_parser::Argument]) = match expr {
+            Expr::MethodCall {
+                receiver, method, args, ..
+            } => (receiver.as_ref(), method.as_str(), args.as_slice()),
+            Expr::FieldAccess { receiver, field } => (receiver.as_ref(), field.as_str(), NO_ARGS),
+            _ => return Ok(None),
+        };
+        let Some((subject, negated)) = Self::peel_expect_matcher_receiver(receiver) else {
             return Ok(None);
         };
-        let Expr::Call {
-            callee,
-            args: recv_args,
-        } = receiver.as_ref()
-        else {
-            return Ok(None);
-        };
-        if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect")
-            || recv_args.len() != 1
-            || recv_args[0].name.is_some()
-        {
+        if args.len() > 1 || args.first().is_some_and(|a| a.name.is_some()) {
             return Ok(None);
         }
-        let subject = &recv_args[0].value;
         let expected = args.first().map(|a| &a.value);
 
         use simple_parser::BinOp;
+        // `to_not_<x>` is sugar for a negated `to_<x>`, exactly as the test
+        // runner's textual pre-pass treats it
+        // (`execution.rs::rewrite_method_expect_line`).
+        let (negated, method) = match method.strip_prefix("to_not_") {
+            Some(rest) => (!negated, format!("to_{rest}")),
+            None => (negated, method.to_string()),
+        };
+
         // (op, needs_expected). `to_equal`/`to_be` map onto the dedicated
         // equality builtin; ordered comparisons lower through the generic
         // truthiness builtin over a synthesized comparison.
-        let cmp_op = match (method.as_str(), expected) {
-            ("to_equal" | "to_be", Some(_)) => Some(BinOp::Eq),
-            ("to_not_equal", Some(_)) => Some(BinOp::NotEq),
-            ("to_be_greater_than", Some(_)) => Some(BinOp::Gt),
-            ("to_be_less_than", Some(_)) => Some(BinOp::Lt),
-            ("to_be_greater_than_or_equal" | "to_be_gte", Some(_)) => Some(BinOp::GtEq),
-            ("to_be_less_than_or_equal" | "to_be_lte", Some(_)) => Some(BinOp::LtEq),
-            _ => None,
+        //
+        // An unknown matcher returns `None` so the previous (loud) lowering is
+        // kept — never a silently-dropped assertion.
+        enum Pred {
+            Cmp(BinOp, Expr),
+            Truthy(Expr),
+        }
+        let pred = match (method.as_str(), expected) {
+            ("to_equal" | "to_be", Some(e)) => Pred::Cmp(BinOp::Eq, e.clone()),
+            ("to_be_greater_than", Some(e)) => Pred::Cmp(BinOp::Gt, e.clone()),
+            ("to_be_less_than", Some(e)) => Pred::Cmp(BinOp::Lt, e.clone()),
+            ("to_be_greater_than_or_equal" | "to_be_gte", Some(e)) => Pred::Cmp(BinOp::GtEq, e.clone()),
+            ("to_be_less_than_or_equal" | "to_be_lte", Some(e)) => Pred::Cmp(BinOp::LtEq, e.clone()),
+            // `expect(x).to_be_nil` / `.to_be_none` — arg-less property form.
+            ("to_be_nil" | "to_be_none", None) => Pred::Cmp(BinOp::Eq, Expr::Nil),
+            // `expect(xs).to_contain(y)` lowers through the builtin `contains`
+            // method, which is registered for String/Array/Dict and returns
+            // bool (`method_registry/builtins.rs`).
+            ("to_contain", Some(e)) => Pred::Truthy(Expr::MethodCall {
+                receiver: Box::new(subject.clone()),
+                method: "contains".to_string(),
+                args: vec![simple_parser::Argument::new(None, e.clone())],
+                generic_args: vec![],
+            }),
+            _ => return Ok(None),
         };
-        let Some(op) = cmp_op else {
-            return Ok(None);
+
+        // Apply negation: comparisons invert their operator (keeping the
+        // existing single-comparison lowering); everything else is wrapped in
+        // a logical `not`.
+        let (op, expected) = match (pred, negated) {
+            (Pred::Cmp(op, e), false) => (op, e),
+            (Pred::Cmp(op, e), true) => {
+                let inverted = match op {
+                    BinOp::Eq => BinOp::NotEq,
+                    BinOp::NotEq => BinOp::Eq,
+                    BinOp::Gt => BinOp::LtEq,
+                    BinOp::Lt => BinOp::GtEq,
+                    BinOp::GtEq => BinOp::Lt,
+                    BinOp::LtEq => BinOp::Gt,
+                    _ => return Ok(None),
+                };
+                (inverted, e)
+            }
+            (Pred::Truthy(e), negated) => {
+                let e = if negated {
+                    Expr::Unary {
+                        op: simple_parser::UnaryOp::Not,
+                        operand: Box::new(e),
+                    }
+                } else {
+                    e
+                };
+                let hir = self.lower_expr(&e, ctx)?;
+                return Ok(Some(vec![HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_expect_truthy_rv".to_string(),
+                        args: vec![hir],
+                    },
+                    ty: TypeId::NIL,
+                })]));
+            }
         };
-        let expected = expected.expect("cmp_op only matches when an expected value is present");
+        let expected = &expected;
 
         if op == BinOp::Eq {
             let left_hir = self.lower_expr(subject, ctx)?;

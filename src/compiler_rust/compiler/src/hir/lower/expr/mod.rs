@@ -173,9 +173,7 @@ impl Lowerer {
             Expr::MethodCall {
                 receiver, method, args, ..
             } => self.lower_method_call(receiver, method, args, ctx),
-            Expr::StructInit { name, fields, spread } => {
-                self.lower_struct_init(name, fields, spread.as_deref(), ctx)
-            }
+            Expr::StructInit { name, fields, spread } => self.lower_struct_init(name, fields, spread.as_deref(), ctx),
             // Simple Math: Grid and Tensor literals (#1920-#1929)
             Expr::GridLiteral { rows, device } => self.lower_grid_literal(rows, device, ctx),
             Expr::TensorLiteral {

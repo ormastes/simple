@@ -341,8 +341,19 @@ pub fn detect_common_mistake_lookahead(
     next: Option<&Token>,
     after_next: Option<&Token>,
 ) -> Option<CommonMistake> {
-    // Check for Python-style 'def'
-    if current.lexeme == "def" && matches!(current.kind, TokenKind::Identifier { .. }) {
+    // Check for Python-style 'def'.
+    //
+    // `def` is NOT a Simple keyword, so it is a perfectly legal identifier — e.g.
+    // `var def = GenericTypeDef.new(name)` in
+    // src/compiler_rust/lib/std/src/verification/lean/auto_gen.spl. Firing on the
+    // bare token flagged those uses as Python-isms. Python's `def` is always
+    // immediately followed by the function NAME (`def add(a, b):`), so require an
+    // identifier in `next` before reporting. Same spirit as the `void`/`new`
+    // position guards below.
+    if current.lexeme == "def"
+        && matches!(current.kind, TokenKind::Identifier { .. })
+        && matches!(next.map(|t| &t.kind), Some(TokenKind::Identifier { .. }))
+    {
         return Some(CommonMistake::PythonDef);
     }
 
@@ -381,9 +392,21 @@ pub fn detect_common_mistake_lookahead(
     // Check for 'void' (Java/C++) - but NOT when used as a type annotation after ->
     // In Simple, -> void is a valid (but verbose) way to say "no return value"
     // Only flag Java-style "void foo()" pattern, not "fn foo() -> void"
+    // The Arrow guard alone only covers a bare `-> void`. `void` is also a legal
+    // Simple type in two more positions that this rule was flagging:
+    //   * inside a generic argument list — `-> Result<void, FileError>` (previous
+    //     is `<` or `,`), and
+    //   * as a pointee — `*void` (previous is `*`), e.g.
+    //     `fn sys_mmap(addr: *void, ...)` in std's file/__init__.spl.
+    //   * as the unit VALUE in a call argument — `return Ok(void)` for a
+    //     `Result<void, E>` function (previous is `(`).
+    // Java's `void foo()` never has any of these to its left.
     if current.lexeme == "void"
         && matches!(current.kind, TokenKind::Identifier { .. })
-        && !matches!(previous.kind, TokenKind::Arrow)
+        && !matches!(
+            previous.kind,
+            TokenKind::Arrow | TokenKind::Lt | TokenKind::Comma | TokenKind::Star | TokenKind::LParen
+        )
     {
         return Some(CommonMistake::JavaVoid);
     }
@@ -646,8 +669,81 @@ mod tests {
         );
         let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "".to_string());
 
-        let mistake = detect_common_mistake(&token, &prev, None);
+        // Python's `def` is always followed by the function NAME. This test used to
+        // pass `None` for `next`; it now supplies that name, because PythonDef is
+        // only reported in definition position (see the identifier regression test
+        // below). Strengthened, not relaxed: the Python shape must still be caught.
+        let name = ident_token("add");
+        let mistake = detect_common_mistake(&token, &prev, Some(&name));
         assert_eq!(mistake, Some(CommonMistake::PythonDef));
+    }
+
+    /// Build a bare identifier token with the given lexeme.
+    fn ident_token(name: &str) -> Token {
+        Token::new(
+            TokenKind::Identifier {
+                name: name.to_string(),
+                pattern: NamePattern::detect(name),
+            },
+            Span::new(0, name.len(), 1, 1),
+            name.to_string(),
+        )
+    }
+
+    /// `def` is not a Simple keyword, so it is a legal identifier. Regression for
+    /// the suite rows on `var def = GenericTypeDef.new(name)` in
+    /// src/compiler_rust/lib/std/src/verification/lean/auto_gen.spl, which were
+    /// reported as Python-isms. Fails before the definition-position guard.
+    #[test]
+    fn test_def_as_identifier_is_not_a_python_mistake() {
+        let def = ident_token("def");
+        let var = Token::new(TokenKind::Var, Span::new(0, 3, 1, 1), "var".to_string());
+        let assign = Token::new(TokenKind::Assign, Span::new(4, 5, 1, 5), "=".to_string());
+
+        // `var def = ...` — assignment target, not a definition.
+        assert_eq!(detect_common_mistake(&def, &var, Some(&assign)), None);
+        // `def = def.add_nested_field(field)` — reassignment, prev is a newline.
+        let nl = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "".to_string());
+        assert_eq!(detect_common_mistake(&def, &nl, Some(&assign)), None);
+    }
+
+    /// `void` is a legal Simple type inside a generic argument list and behind a
+    /// pointer sigil. Regression for the suite rows on
+    /// `fn sys_munmap(...) -> Result<void, FileError>` and `addr: *void` in
+    /// src/compiler_rust/lib/std/src/file/__init__.spl. Fails before the
+    /// position guard, which previously excluded only a bare `-> void`.
+    #[test]
+    fn test_void_in_type_position_is_not_a_java_mistake() {
+        let void = ident_token("void");
+        let comma = Token::new(TokenKind::Comma, Span::new(0, 1, 1, 1), ",".to_string());
+
+        for prev_kind in [
+            TokenKind::Lt,
+            TokenKind::Comma,
+            TokenKind::Star,
+            TokenKind::Arrow,
+            TokenKind::LParen,
+        ] {
+            let prev = Token::new(prev_kind, Span::new(0, 1, 1, 1), "".to_string());
+            assert_eq!(
+                detect_common_mistake(&void, &prev, Some(&comma)),
+                None,
+                "void in a type position must not be flagged"
+            );
+        }
+    }
+
+    /// The positive cases must keep firing — the guards above narrow position,
+    /// they must not disable either rule.
+    #[test]
+    fn test_java_void_declaration_still_detected() {
+        let void = ident_token("void");
+        let nl = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "".to_string());
+        let name = ident_token("foo");
+        assert_eq!(
+            detect_common_mistake(&void, &nl, Some(&name)),
+            Some(CommonMistake::JavaVoid)
+        );
     }
 
     #[test]

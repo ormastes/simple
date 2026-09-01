@@ -189,7 +189,16 @@ pub(crate) fn run_before(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(), CompileError> {
-    run_kind(AdviceType::Before, false, func, env, functions, classes, enums, impl_methods)
+    run_kind(
+        AdviceType::Before,
+        false,
+        func,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )
 }
 
 /// Run `after_success` or `after_error` advice, chosen by the target's result.

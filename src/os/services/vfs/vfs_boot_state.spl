@@ -220,6 +220,49 @@ pub(package) fn vfs_state_mount_table_lease_restore_v1(
     g_mount_table_active_lease_nonce_v1 = 0u64
     vfs_state_mount_table_unlock_v1()
 
+pub(package) fn vfs_state_mount_table_lease_restore_ready_v1(
+    lease: VfsMountTableLeaseV1
+) -> bool:
+    """Restore one live lease AND publish readiness under a single lock.
+
+    The readiness counterpart of `vfs_state_mount_table_lease_restore_v1`, and
+    the sole publication point for a root staged through a table lease.
+
+    ATOMICITY IS THE WHOLE POINT, and is why this lives here rather than in the
+    transaction. `vfs_nvfs_root_mount_stage_v1` treats `vfs_is_ready()` as "the
+    canonical root is already claimed" and refuses to stage when it is true, so
+    readiness and the restored table must become visible together. Restoring
+    first and setting readiness afterwards would expose a window in which the
+    table carries a published root while the VFS still reports itself unready —
+    exactly the state a second staging attempt is allowed to seize. Setting the
+    flag from the transaction instead would publish readiness with the canonical
+    owner still leased out, i.e. readiness over no reachable table at all.
+
+    Validation, ordering and quarantine behaviour are identical to the plain
+    restore: a stale, double or foreign-epoch restore quarantines the owner and
+    publishes nothing. Readiness is written only after the table value is back
+    under the same uninterrupted lock hold, so a rejected restore can never
+    leave the VFS marked ready.
+    """
+    if not _vfs_state_mount_table_raw_lock_v1(): return false
+    if not g_mount_table_lease_active_v1 or g_mount_table.? or
+        lease.epoch == 0u64 or lease.epoch != g_mount_table_owner_epoch_v1 or
+        lease.nonce == 0u64 or
+        lease.nonce != g_mount_table_active_lease_nonce_v1:
+        g_mount_table_quarantined_v1 = true
+        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
+        return false
+    g_mount_table = Some(lease.table)
+    g_mount_table_lease_active_v1 = false
+    g_mount_table_active_lease_nonce_v1 = 0u64
+    # Same handoff identity the FAT32 production path publishes: the storage
+    # acceptance reason hard-rejects any provider other than "simple-driver",
+    # and this root reached us over the pure-Simple NVMe lease device.
+    g_vfs_initialized = true
+    g_vfs_boot_storage_provider = "simple-driver"
+    g_vfs_boot_storage_pure_simple = true
+    vfs_state_mount_table_unlock_v1()
+
 # Narrow owner port for the server-data namespace.  Only opaque seals and
 # immutable revalidation facts cross this seam; the MountTable and DBFS driver
 # remain owned here.
@@ -524,6 +567,74 @@ pub fn vfs_boot_init() -> bool:
         return true
     log_raw_println("[vfs-init] pure-Simple NVMe + FAT32 unavailable; VFS unavailable")
     false
+
+pub fn vfs_boot_init_pure_nvme_device() -> bool:
+    """Bring the pure-Simple NVMe lease device up and publish the production handoff.
+
+    This is the FILESYSTEM-AGNOSTIC half of `vfs_boot_init_production()`: PCI
+    enumeration -> NVMe device grant -> controller init -> transfer evidence ->
+    system lease -> block adapter -> bounce buffer -> backend identity binding,
+    then `boot_nvme_production_handoff_provision_bound`. It performs no FAT32
+    work and deliberately does NOT set `g_vfs_initialized` — publishing
+    readiness here would make `vfs_nvfs_root_mount_stage_v1` refuse with
+    `root-already-ready`, since that transaction requires an unclaimed root.
+
+    Callers pair this with `boot_fs_mount_freestanding_production()`, which
+    probes NVFS -> DBFS -> FAT32 on the provisioned lease device and publishes
+    whichever root it takes through the canonical mount transaction. That is how
+    a non-FAT32 root (an NVFS volume) reaches the same production boot entry
+    `os_main` uses; `vfs_boot_init_production()` cannot serve it because its
+    bring-up is fused to `_vfs_boot_init_pure_nvme_fat32`.
+    """
+    log_raw_println("[vfs-init] Starting pure-Simple NVMe device bring-up (filesystem-agnostic)...")
+    _vfs_boot_reset_storage_state()
+    pcimgr_init()
+    var nvme_idx = pcimgr_find_nvme_storage()
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_by_class_i64(1, 8)
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_qemu_nvme()
+    if nvme_idx < 0:
+        log_raw_println("[vfs-init] pure-nvme device rejected: no NVMe device")
+        return false
+    val grant_result = pcimgr_grant_device(nvme_idx.to_u64(), 0)
+    if grant_result.is_err():
+        log_raw_println("[vfs-init] pure-nvme device grant failed: {grant_result.unwrap_err()}")
+        return false
+    val grant = grant_result.unwrap()
+    nvme_boot_runtime_reset()
+    val nvme_init = nvme_boot_runtime_init(grant)
+    if nvme_init.is_err():
+        log_raw_println("[vfs-init] pure-nvme device init failed: {nvme_init.unwrap_err()}")
+        return false
+    val transfer_evidence_result = nvme_boot_runtime_transfer_evidence(
+        device_grant_is_isolated(grant))
+    if transfer_evidence_result.is_err():
+        log_raw_println("[vfs-init] pure-nvme transfer probe failed: {transfer_evidence_result.unwrap_err()}")
+        return false
+    val transfer_evidence = transfer_evidence_result.unwrap()
+    val lease_result = vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(
+        nvme_boot_runtime_sector_size(),
+        nvme_boot_runtime_sector_count(),
+        transfer_evidence
+    )
+    if lease_result.is_err():
+        log_raw_println("[vfs-init] pure-nvme lease unavailable: {lease_result.unwrap_err()}")
+        return false
+    val lease = lease_result.unwrap()
+    var adapter = nvme_boot_runtime_system_adapter()
+    val bounce_init = adapter.init_bounce_buffer()
+    if bounce_init.is_err():
+        log_raw_println("[vfs-init] pure-nvme bounce buffer failed: {bounce_init.unwrap_err()}")
+        return false
+    val backend_binding = nvme_boot_runtime_backend_binding(lease.base_lba, lease.lba_count)
+    if backend_binding.is_err():
+        log_raw_println("[vfs-init] pure-nvme backend identity unavailable: {backend_binding.unwrap_err()}")
+        return false
+    boot_nvme_production_handoff_provision_bound(
+        adapter, transfer_evidence, lease, backend_binding.unwrap())
+    log_raw_println("[vfs-init] pure-Simple NVMe lease device provisioned for production mount")
+    true
 
 pub fn vfs_boot_init_production() -> bool:
     """Initialize production VFS without entering C bridge or virtio fallback storage."""

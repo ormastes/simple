@@ -1641,9 +1641,7 @@ int main(int argc, char** argv) {
                         // it INTO the crate gives the linker no such choice.
                         let core_c_runtime =
                             build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
-                                .ok_or_else(|| {
-                                    "failed to build the core-c-bootstrap runtime supplement".to_string()
-                                })?;
+                                .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
                         cmd.arg(core_c_runtime);
                         // Archive members resolve at OBJECT granularity, not
                         // symbol granularity: pulling runtime_native.obj to

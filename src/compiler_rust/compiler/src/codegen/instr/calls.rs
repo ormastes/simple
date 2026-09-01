@@ -3182,8 +3182,9 @@ pub fn compile_call<M: Module>(
     // 3-argument call (path_ptr, path_len, array) against the 4-argument C ABI
     // `rt_file_write_bytes(path_ptr, path_len, data_ptr, data_len)`, so the
     // length came from a stale register and the file got garbage bytes.
-    let sffi_name: &str = sffi_alias_target_shadowed(func_name_for_sffi, has_defined_local_function(ctx, func_name_raw))
-        .unwrap_or(func_name_for_sffi);
+    let sffi_name: &str =
+        sffi_alias_target_shadowed(func_name_for_sffi, has_defined_local_function(ctx, func_name_raw))
+            .unwrap_or(func_name_for_sffi);
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
     // but mapped SFFI name for runtime_funcs and builtin I/O checks
     let func_name: &str = func_name_raw;

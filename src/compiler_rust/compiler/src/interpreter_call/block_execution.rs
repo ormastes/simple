@@ -180,9 +180,7 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
                 let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
                 let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
                 let step = fields.get("step").and_then(|v| v.as_int().ok()).unwrap_or(1);
-                return Ok(range_object_values(
-                    start, end, inclusive, step,
-                ));
+                return Ok(range_object_values(start, end, inclusive, step));
             }
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
@@ -503,8 +501,7 @@ pub(super) fn exec_block_closure_into(
                         // (and every example in it) has finished, in
                         // registration order. Mirrors the same drain in the
                         // call-form `describe`/`context` handler in bdd.rs.
-                        let after_all_hooks =
-                            BDD_AFTER_ALL.with(|cell| cell.borrow_mut().pop().unwrap_or_default());
+                        let after_all_hooks = BDD_AFTER_ALL.with(|cell| cell.borrow_mut().pop().unwrap_or_default());
                         for hook in after_all_hooks {
                             exec_block_value(hook, &mut local_env, functions, classes, enums, impl_methods)?;
                         }
