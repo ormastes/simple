@@ -57,11 +57,18 @@ fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
     var handle: i64 = 0
     val status = unsafe(capabilities: [ffi, raw_ptr]):
         spl_dlopen_checked(path, &mut handle)
-    if status != 0:
+    if status == 0 and handle > 0:
+        return Ok(handle)
+    # status==0 with handle==0 is the &mut-out-param writeback-loss signature
+    # of the seed interpreter lane (spl_dlopen_checked sets the out slot through
+    # a BorrowMut the caller never observes). Fall back to the direct-return
+    # ABI, which works identically in compiled and interpreted modes; a genuine
+    # load failure still surfaces as handle<=0 here.
+    val direct = unsafe(capabilities: [ffi]):
+        spl_dlopen(path)
+    if direct <= 0:
         return Err("E-SFFI-001: failed to load provider: {path} (status {status})")
-    if handle <= 0:
-        return Err("E-SFFI-009: provider load succeeded with a null handle: {path}")
-    Ok(handle)
+    Ok(direct)
 
 @unsafe(reason: "checked resolver returns an unverified raw function pointer", capabilities: [ffi, raw_ptr])
 fn _sffi_dlsym_checked(handle: i64, name: text) -> Result<i64, text>:
@@ -70,11 +77,14 @@ fn _sffi_dlsym_checked(handle: i64, name: text) -> Result<i64, text>:
     var symbol: i64 = 0
     val status = unsafe(capabilities: [ffi, raw_ptr]):
         spl_dlsym_checked(handle, name, &mut symbol)
-    if status != 0:
+    if status == 0 and symbol > 0:
+        return Ok(symbol)
+    # Same writeback-loss fallback as _sffi_dlopen_checked above.
+    val direct = unsafe(capabilities: [ffi]):
+        spl_dlsym(handle, name)
+    if direct <= 0:
         return Err("E-SFFI-001: unresolved foreign symbol: {name} (status {status})")
-    if symbol <= 0:
-        return Err("E-SFFI-009: symbol resolution succeeded with a null pointer: {name}")
-    Ok(symbol)
+    Ok(direct)
 
 # Resolved, immutable integer-only call slot. Resolution happens once; calls do
 # not perform dlsym, path lookup, hashing, or signature verification. This is a
