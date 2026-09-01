@@ -128,11 +128,52 @@ Fails at `hir 6/12` with the error above. **Always run with
    precise semantic error into `native-build failed without diagnostics`. This
    masked the bug above and should be fixed independently — a build that knows
    why it failed must be able to say so.
-2. **`native-capsule-receipt-invalid`.** A clean hello-world entry
-   (`fn main(): print("...")`, no imports) clears HIR but then fails with
-   `reason: native-capsule-receipt-invalid:app.<mod>` and produces no binary.
-   Under this flag set no entry has yet produced an output binary, so this
-   gates the lane even after the `self` defect is fixed.
+2. **`native-capsule-receipt-invalid`. RESOLVED 2026-09-01** (`310ae337782`,
+   test `92210d502cc`). A clean hello-world entry clears HIR and then fails with
+   `reason: native-capsule-receipt-invalid:app.<mod>`, producing no binary.
+
+   Root cause: `src/compiler/80.driver/driver_aot_native_output.spl` imported
+   `file_write_text`/`file_read_text` from **`std.file_system`**, which its own
+   header calls "Mock implementations for pure Simple demonstration". The mock
+   `file_write_text` is `if path == "" or content == nil: return false` then
+   `true` — it writes NOTHING and reports success. The capsule receipt was
+   therefore never on disk, and the validator (which is CORRECT) rejected it.
+
+   Confirming evidence in the failing lane's own cache dir
+   (`build/repro/cache-f_noreturn/`): the object, `build_cache.sdn` and the
+   `.fpc` are present, while **every** file authored through
+   `_sffi_file_write_text` — the receipt, `phase.marker`, `.cache_scope`, the
+   witness-shadow receipt — is missing. A clean split along exactly that API.
+
+   Why it was "neither confirmed nor refuted": six same-arity `file_write_text`
+   definitions exist across the stdlib, and which one binds is decided by the
+   seed's co-compiled-collision fallback ("last definition wins" — the failing
+   log's own preserved diagnostics name the collision). The wmvk-x86-3 seed
+   picks the mock; the simple-main seed picks a real one and builds green over
+   identical source. Both prior observations were right.
+
+   Fix: bind to the uniquely-named, rt-backed `file_write_exact` /
+   `file_read_nullable` from `std.io_runtime`; read the receipt back after
+   writing so a silent no-op fails at the write site as
+   `capsule-receipt-write-unverified`; rename the file-local
+   `file_write_text`/`file_read_text` shadows in
+   `{nogc_sync_mut,nogc_async_mut}/env/config.spl` that carried the
+   `(text,text)->()` vs `->bool` signature collision.
+
+   Measured with the wmvk seed on `src/app/repro_hello/hw.spl`:
+   parent `BUILD_RC=1`, no binary, 0 receipts → fixed `BUILD_RC=0`, binary runs,
+   1 receipt. Reproduce: `sh scripts/check/repro-native-capsule-receipt-invalid.shs`.
+   Ratchet: `sh scripts/check/check-no-mock-file-system-io.shs` (baseline 9).
+
+   **Defect-class neighbours, still open (not fixed here):** 9 remaining
+   product-code imports of mock `std.file_system` I/O primitives, several in
+   `80.driver` (`driver_api_interpret`, `driver_api_project_build`,
+   `watcher/smf_manifest`, `cache/lease/lease`, `driver_public_headers`, …), and
+   ~13 other same-name/differing-signature stdlib collisions the failing log
+   names (`env_get`, `dir_create`, `dir_list`, `file_size`, `shell`,
+   `process_wait`, `join_path`, …). Each is the same latent silent-success trap.
+
+   The `self`-bound-to-bool defect (above) remains the lane's first blocker.
 
 ## Status of the five PR #252 fixes (calibrated)
 
