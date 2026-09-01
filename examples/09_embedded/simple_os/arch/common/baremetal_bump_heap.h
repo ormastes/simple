@@ -56,7 +56,20 @@ static inline int rv_size_align16(size_t size, size_t *out){
 #define RV_HEAP_PROGRESS(off) ((void)(off))
 #endif
 
+/* Optional kernel-stack-guard probe, run at the single allocation funnel.
+ * On a no-MMU boot with .stack laid out directly below .bss/.data/.text, a
+ * blown kernel stack takes NO fault: it silently overwrites data and then code.
+ * A TU that can print defines RV_ALLOC_GUARD_CHECK() to test a painted guard
+ * band; the default is a no-op, so no other includer of this header changes
+ * behaviour. Placed here rather than in malloc() for the same reason
+ * RV_HEAP_EXHAUSTED_REPORT is: rt_alloc/calloc and in-TU rv_alloc call sites
+ * bypass malloc entirely, so a malloc-only check would be fail-open. */
+#ifndef RV_ALLOC_GUARD_CHECK
+#define RV_ALLOC_GUARD_CHECK() ((void)0)
+#endif
+
 static void *rv_alloc(size_t size){
+    RV_ALLOC_GUARD_CHECK();
     size_t aligned = 0;
     if (!rv_size_align16(size, &aligned)) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     if (g_heap_off > (size_t)RV_HEAP_SIZE) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
