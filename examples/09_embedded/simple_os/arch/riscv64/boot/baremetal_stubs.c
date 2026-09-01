@@ -114,6 +114,41 @@ extern char _stack_top[];
  * rt_qemu_exit_success, rt_native_eq/neq, rt_riscv_nvfs_probe). */
 #include "../../common/riscv_common.h"
 
+/* Raw UART printers, defined further down; declared here because the
+ * allocation-free failure paths above and below must not allocate. */
+static void serial_puts(const char *s);
+static void serial_put_dec(int64_t value);
+
+/* rt_exit — the riscv64 freestanding definition of an EXISTING runtime symbol,
+ * not a new one. MIR lowering emits a call to it from
+ * _MirLowering/bootstrap_globals.spl, and riscv64 was the only SimpleOS arch
+ * that never defined it (aarch64 and arm64 both do), so the build-and-run row's
+ * link died with `ld.lld: error: undefined symbol: rt_exit`. That is the
+ * correct fail-closed behaviour and must stay that way: the fix is to supply
+ * the definition, never to let an unresolved symbol through.
+ *
+ * The parameter is i64. This is taken from codegen's own runtime symbol table
+ * (`rt_exit(arg0: i64)` in runtime_symbol_entries.rs), NOT from the arm64
+ * sibling, which declares `int32_t` -- copying that would have reproduced the
+ * cross-arch ABI drift this tree has been bitten by before.
+ *
+ * There is no parent process to report a code to in S-mode, so this prints the
+ * code and parks the hart. It deliberately does NOT poke the SiFive test
+ * device: this lane's whole point is real-firmware behaviour, and a
+ * shutdown-device exit is the riscv equivalent of the banned isa-debug-exit
+ * pass semantics. Parking is also what the row's own entry does when it
+ * finishes, and it is what real hardware would do. */
+__attribute__((noreturn))
+void rt_exit(int64_t code)
+{
+    serial_puts("[exit] rt_exit(");
+    serial_put_dec(code);
+    serial_puts(") - halting\r\n");
+    for (;;) {
+        __asm__ volatile("wfi");
+    }
+}
+
 RuntimeValue rt_qemu_exit_failure(void)
 {
     *(volatile uint32_t *)SIFIVE_TEST_BASE = 0x3333U;
@@ -146,7 +181,6 @@ static int g_heap_exhausted_reported = 0;
 /* serial_puts is defined below and writes the UART directly. It is the only
  * printer usable here: serial_println() takes a RuntimeValue and would have to
  * ALLOCATE a RuntimeString to report that allocation just failed. */
-static void serial_puts(const char *s);
 
 void *malloc(size_t size)
 {
