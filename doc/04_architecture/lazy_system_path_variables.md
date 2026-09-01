@@ -29,7 +29,9 @@ The process adapter uses the compiled-in platform name and bounded `env_get` cal
 
 Canonical paths are cache/comparison values. File and process-launch owners call
 `system_path_native` only at the final OS boundary. Windows output uses `\\` and
-normalizes `C:/x`, `/c/x`, or `c/x` to `C:\\x`; POSIX output retains `/`.
+normalizes `C:/x`, documented MinGW `/c/x`, or compact `c/x` to `C:\\x`;
+MinGW/MSYS/Cygwin platform names follow the Windows branch. UNC roots retain
+their double leading separator. POSIX output retains `/`.
 
 ## Grammar migration
 

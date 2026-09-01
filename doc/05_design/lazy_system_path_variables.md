@@ -23,6 +23,9 @@
 `system_path_native` is the required adapter before a canonical value is passed
 to a file primitive or used as the executable/working-directory path of a
 process primitive. It is deliberately not called while forming cache keys.
+The canonical `io_runtime`, `io.file_ops`, and `io.process_ops` owners apply
+the adapter to file/directory operands and executable names. Process arguments
+remain opaque because an arbitrary argument is not necessarily a path.
 
 ## Errors
 
