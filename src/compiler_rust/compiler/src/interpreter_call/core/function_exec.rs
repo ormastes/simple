@@ -1329,6 +1329,14 @@ fn write_back_mutable_arguments(
     classes: &HashMap<String, Arc<ClassDef>>,
     self_mode: SelfMode,
 ) {
+    if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+        eprintln!(
+            "[wbma-enter] func={} nargs={} outer_env_has_b={}",
+            func.name,
+            args.len(),
+            outer_env.contains_key("b")
+        );
+    }
     let params_to_bind: Vec<_> = func
         .params
         .iter()
@@ -1432,6 +1440,16 @@ fn write_back_mutable_arguments(
                 // caller binding that a `mut` parameter has already updated.
                 if !param_is_mut && mut_written.contains(&caller_name) {
                     continue;
+                }
+                if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+                    eprintln!(
+                        "[wbma-ident] func={} caller_name={} param_name={} callee_present={} outer_has={}",
+                        func.name,
+                        caller_name,
+                        param_name,
+                        local_env.get(&param_name).is_some(),
+                        outer_env.contains_key(&caller_name)
+                    );
                 }
                 if let Some(callee_val) = local_env.get(&param_name) {
                     // Value-type structs (task #91) keep VALUE semantics: never
