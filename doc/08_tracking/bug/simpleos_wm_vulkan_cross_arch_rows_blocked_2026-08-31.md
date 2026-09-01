@@ -624,3 +624,63 @@ Resume by reading that file. Build log:
 `build/simpleos_wm_vulkan/daemon-build2.log`. Neither
 `SIMPLE_ALLOW_STUB_FALLBACK` nor `SIMPLE_ALLOW_UNRESOLVED_RUNTIME` was ever set,
 and the gate's classifier and blank-frame must-FAIL were not touched.
+
+## 2026-09-01 — MEASURED: the closure fix cuts 772 HIR errors to 59, in 4 files
+
+The post-fix build reached HIR and completed the phase (`hir 230/230`). Result:
+
+| | before the closure fix | after |
+|---|---|---|
+| modules in closure | 96 | **230** |
+| sources loaded | 111 | **313** |
+| HIR errors | **772** | **59** |
+| files carrying them | many (misattributed) | **4** |
+
+`BUILD_RC=1` — the daemon still does not link. But the remaining 59 are a
+different, tractable population, and this is the first time they have been
+visible: the 772 phantom errors were masking them.
+
+```
+ 31 unresolved name: draw_ir_rect_bounds      27 src/std/nogc_sync_mut/io/vulkan_sffi.spl
+ 24 unresolved type: Option                   21 src/std/gc_async_mut/gpu/engine2d/draw_ir_adv.spl
+  6 unresolved name: alias                    13 src/std/gc_async_mut/gpu/engine2d/backend_session.spl
+  5 unresolved type: Result                    3 src/std/nogc_async_mut/env/platform.spl
+  5 unresolved name: draw_ir_no_rect
+  4 unresolved name: DRAW_IR_BACKEND_GPU
+ 3x5 rt_vulkan_{push_constants,dispatch,bind_pipeline,bind_descriptors,bind_buffer}
+ 2x5 rt_vulkan_{is_available,compile_spirv_array,compile_spirv,begin_compute,alloc_buffer}
+  2 rt_env_cwd   2 ComputeError   2 BackendSessionPolicy   2 BackendSessionHandle
+  1 IntelBackend  1 DrawIrRect
+```
+
+Diagnosis so far, same "never compiled" class as the guest probe entry:
+
+- **`draw_ir_adv.spl`** uses `DRAW_IR_BACKEND_GPU` (line 1334),
+  `draw_ir_rect_bounds` (1572) and `draw_ir_no_rect` (2593) but imports none of
+  them (its `use std.common.ui.draw_ir.{...}` block, lines 8-27, lists neither).
+  `DRAW_IR_BACKEND_GPU` is `pub val` and IS in `draw_ir.spl`'s `export` line
+  743, so it only needs importing; `draw_ir_rect_bounds` (161) and
+  `draw_ir_no_rect` (164) are plain `fn`, not `pub`, and are NOT exported, so
+  they also have to be published before they can be imported.
+- **`backend_session.spl`** names `BackendSessionPolicy`,
+  `BackendSessionHandle` and `ComputeError`, and **none of the three is defined
+  anywhere in `src/lib`**. Line 8 carries them inside a COMMENTED-OUT import,
+  and the file itself defines `GcComputeError`, not `ComputeError`. This is
+  renamed/dead API, not a missing `use` — it needs a real decision, not an
+  import line.
+- **`vulkan_sffi.spl`** imports the `rt_vulkan_*` names (line 21) rather than
+  declaring them `extern`; the import target does not provide them.
+- **`platform.spl`**'s `rt_env_cwd` is the pre-existing
+  `[use-warning] 'rt_env_cwd' is named in use std.io_runtime.{...} but module
+  .../src/std/io_runtime.spl does not provide it`.
+
+Note the error attribution is again unreliable: all three `draw_ir_adv` names
+are reported at `draw_ir_adv.spl:65:29`, which is a `val _E2D_TEXT_PROBE`
+declaration, not any of the use sites.
+
+**The rebuild loop is now short.** The build ended with
+`[hir-cache] hits=226 misses=4 stores=0` — only the 4 offending modules are
+recompiled, so a fix-and-retry no longer costs the ~2 h a cold run does.
+
+Note `src/std` is a **symlink to `lib`** in this worktree, so `src/std/...` and
+`src/lib/...` are the same inode; one edit covers both spellings.
