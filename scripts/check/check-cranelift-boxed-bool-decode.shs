@@ -1,0 +1,291 @@
+#!/bin/sh
+# check-cranelift-boxed-bool-decode.shs
+#
+# Pins the fix for
+# doc/08_tracking/bug/riscv64_freestanding_bool_in_collection_always_true_2026-09-01.md
+#
+# THE DEFECT THIS EXISTS TO PREVENT
+# --------------------------------
+# The Cranelift backend decodes a `bool` crossing a boxed-closure boundary. It
+# used to do this:
+#
+#     TypeId::BOOL => {
+#         let raw = call_runtime_1(ctx, builder, "rt_value_unbox_int", tagged);
+#         builder.ins().icmp_imm(IntCC::NotEqual, raw, 0)
+#     }
+#
+# `rt_value_unbox_int` is bit-preserving for anything that is not TAG_INT, and a
+# tagged BOOL is TAG_SPECIAL — so it is a PASSTHROUGH here, not a decode. The
+# `!= 0` then answered TRUE for `true` (11) *and* for `false` (19), because both
+# are non-zero. Every bool that round-tripped a boxed boundary read back as
+# `true`. The matching `box_result` emits exactly those tagged values via
+# `rt_value_bool`, so the round trip was self-defeating.
+#
+# Downstream this hung the riscv64 in-guest parser: `parse_statement` destructures
+# `try_parse_bare_ident_string_call()`'s `(false, 0)` early exit, read the flag as
+# `true`, never called `parse_expr()`, never consumed a token, and spun in
+# `parse_block`'s `while true:` until the bump arena was gone.
+#
+# WHY THIS IS A SOURCE-SHAPE GUARD AND NOT A RUN GUARD
+# ----------------------------------------------------
+# Stated plainly rather than papered over: this guard checks the SHAPE of two
+# definitions, not runtime behaviour. A behavioural test needs the boxed path,
+# and the boxed path is not reachable from a host `native-build` — measured
+# 2026-09-01, three separate host reproducer shapes (positional file, closure
+# value, and the lane's own `--source`/`--entry` form) all either inlined the
+# call away (zero `rt_value_unbox_int` / boxed-thunk symbols in the artifact) or
+# died first on an unrelated pre-existing stdlib error. The behavioural test for
+# this defect is the in-guest lane,
+# scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs row 2.
+# This guard is the cheap ratchet that keeps the two mirror definitions from
+# silently regressing between those expensive boots.
+#
+# It is a per-DEFINITION check by construction: it extracts each `TypeId::BOOL`
+# match arm and judges that arm's body. A tree-wide grep would prove nothing
+# here, since both the defective and the correct form mention the same symbols.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> definition(s) checked, all decode the tagged bool   exit 0
+#   FAIL  — ...                                                     exit 1
+#   ERROR — nothing was checked                                     exit 2
+#
+# `--selftest` runs before every scan and is fatal.
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+# The two sites. They are documented in-tree as exact mirrors of each other, so
+# both must carry the fix; fixing one and not the other is a real regression and
+# this guard treats it as FAIL, not as a partial pass.
+SITE_1="src/compiler_rust/compiler/src/codegen/closure_boxed_entry.rs"
+SITE_2="src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs"
+
+# Extract the body of every `TypeId::BOOL =>` match arm that sits inside an
+# UNBOX function, by brace depth, so nested blocks and comments inside the arm
+# are handled. Prints one line per arm:
+# "<startline>\t<body with newlines squashed to spaces>".
+#
+# Scoping to unbox functions is load-bearing, not a convenience. Each of these
+# files also carries a `TypeId::BOOL` arm on the BOX side (`box_result` /
+# `box_for_closure_boundary`), which legitimately ENCODES a raw bool into a
+# tagged value via `rt_value_bool` and must not test a falsy set at all. Judging
+# those by the decode rule would make this guard fail on correct code, and
+# relaxing the rule so they passed would blind it to the real defect. The
+# enclosing `fn` name is tracked so only decode sites are judged.
+extract_bool_arms() {
+    awk '
+        /^[[:space:]]*(pub[[:space:]]*(\([^)]*\))?[[:space:]]*)?fn[[:space:]]+[A-Za-z0-9_]+/ {
+            fname = $0
+            sub(/^.*fn[[:space:]]+/, "", fname)
+            sub(/[^A-Za-z0-9_].*$/, "", fname)
+            curfn = fname
+        }
+        /TypeId::BOOL[[:space:]]*=>/ {
+            if (curfn !~ /unbox/) next
+            inarm = 1; depth = 0; body = ""; start = NR; seen_open = 0
+        }
+        inarm {
+            body = body " " $0
+            n = gsub(/\{/, "{"); m = gsub(/\}/, "}")
+            depth += n - m
+            if (n > 0) seen_open = 1
+            if (seen_open && depth <= 0) {
+                print start "\t" body
+                inarm = 0
+            }
+            next
+        }
+    ' "$1"
+}
+
+# Judge one arm body. Echoes a reason on failure, prints nothing when good.
+judge_arm() {
+    body=$1
+
+    # The defective shape: unbox_int feeding a `!= 0` test. Both halves must be
+    # present to call it defective, so a correct arm that happens to mention
+    # unbox_int in a comment is not flagged.
+    if printf '%s' "$body" | grep -q 'rt_value_unbox_int' \
+       && printf '%s' "$body" | grep -qE 'IntCC::NotEqual[^)]*,[[:space:]]*0'; then
+        echo "uses the passthrough shape 'rt_value_unbox_int(v) != 0', which reads tagged false (19) as true"
+        return 1
+    fi
+
+    # The required shape: the tagged falsy set, all three members.
+    # falsy = (v == 0) | (v == 19 /* tagged false */) | (v == 3 /* nil */)
+    missing=""
+    printf '%s' "$body" | grep -qE 'IntCC::Equal[^)]*,[[:space:]]*19' || missing="$missing tagged-false(19)"
+    printf '%s' "$body" | grep -qE 'IntCC::Equal[^)]*,[[:space:]]*3([^0-9]|$)' || missing="$missing nil(3)"
+    printf '%s' "$body" | grep -qE 'IntCC::Equal[^)]*,[[:space:]]*0([^0-9]|$)' || missing="$missing zero(0)"
+    if [ -n "$missing" ]; then
+        echo "does not test the full tagged falsy set; missing:$missing"
+        return 1
+    fi
+    return 0
+}
+
+# Scan a tree. Sets EV_CHECKED / EV_OFFENDERS.
+scan_tree() {
+    root=$1
+    EV_CHECKED=0
+    EV_OFFENDERS=""
+    for rel in "$SITE_1" "$SITE_2"; do
+        f="$root/$rel"
+        [ -f "$f" ] || continue
+        arms=$(extract_bool_arms "$f")
+        [ -n "$arms" ] || continue
+        # Iterate arms. Field 1 is the line number, the rest is the body.
+        printf '%s\n' "$arms" | while IFS= read -r arm; do
+            [ -n "$arm" ] || continue
+            printf '%s\n' "$arm"
+        done > "$TMP/arms.txt"
+        while IFS= read -r arm; do
+            [ -n "$arm" ] || continue
+            ln=${arm%%	*}
+            body=${arm#*	}
+            EV_CHECKED=$((EV_CHECKED + 1))
+            if reason=$(judge_arm "$body"); then
+                :
+            else
+                EV_OFFENDERS="$EV_OFFENDERS $rel:$ln ($reason);"
+            fi
+            echo "$EV_CHECKED" > "$TMP/count"
+            echo "$EV_OFFENDERS" > "$TMP/offenders"
+        done < "$TMP/arms.txt"
+        [ -f "$TMP/count" ] && EV_CHECKED=$(cat "$TMP/count")
+        [ -f "$TMP/offenders" ] && EV_OFFENDERS=$(cat "$TMP/offenders")
+    done
+}
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# ---------------------------------------------------------------- selftest
+selftest() {
+    st_fail=0
+    fx="$TMP/fx"
+
+    mk_fixture() {
+        # $1 = dir, $2 = arm body text for BOTH sites
+        mkdir -p "$1/$(dirname "$SITE_1")" "$1/$(dirname "$SITE_2")"
+        for rel in "$SITE_1" "$SITE_2"; do
+            {
+                echo "fn unbox_arg(ty: TypeId) -> Value {"
+                echo "    match ty {"
+                echo "        TypeId::BOOL => {"
+                printf '%s\n' "$2"
+                echo "        }"
+                echo "        _ => tagged,"
+                echo "    }"
+                echo "}"
+                # Every fixture also carries the BOX-side arm, so each selftest
+                # case doubles as proof that the box arm is ignored: if scoping
+                # ever broke, the expected counts below would be 4, not 2.
+                echo "fn box_result(ty: TypeId) -> Value {"
+                echo "    match ty {"
+                echo "        TypeId::BOOL => {"
+                echo "            let widened = b.ins().uextend(types::I64, val);"
+                echo "            call1(b, h.box_bool, widened)"
+                echo "        }"
+                echo "        _ => val,"
+                echo "    }"
+                echo "}"
+            } > "$1/$rel"
+        done
+    }
+
+    GOOD_ARM='            let is_zero = b.ins().icmp_imm(IntCC::Equal, tagged, 0);
+            let is_tagged_false = b.ins().icmp_imm(IntCC::Equal, tagged, 19);
+            let is_nil = b.ins().icmp_imm(IntCC::Equal, tagged, 3);
+            let zero_or_false = b.ins().bor(is_zero, is_tagged_false);
+            let falsy = b.ins().bor(zero_or_false, is_nil);
+            b.ins().icmp_imm(IntCC::Equal, falsy, 0)'
+
+    BAD_ARM='            let raw = call1(b, h.unbox_int, tagged);
+            b.ins().icmp_imm(IntCC::NotEqual, raw, 0)'
+
+    PARTIAL_ARM='            let is_zero = b.ins().icmp_imm(IntCC::Equal, tagged, 0);
+            let is_nil = b.ins().icmp_imm(IntCC::Equal, tagged, 3);
+            b.ins().icmp_imm(IntCC::Equal, is_nil, 0)'
+
+    # 1. clean fixture must PASS with 2 definitions checked
+    rm -rf "$fx"; mk_fixture "$fx" "$GOOD_ARM"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 2 ] || [ -n "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[1] clean fixture: expected 2 checked / 0 offenders, got $EV_CHECKED / '$EV_OFFENDERS'"
+        st_fail=1
+    fi
+
+    # 2. incident-replay fixture (the exact old shape) must FAIL, naming both
+    rm -rf "$fx"; mk_fixture "$fx" "$BAD_ARM"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 2 ] || [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[2] incident-replay fixture: expected offenders, got $EV_CHECKED / '$EV_OFFENDERS'"
+        st_fail=1
+    fi
+
+    # 3. one site fixed, the mirror not -> still FAIL (no partial pass)
+    rm -rf "$fx"; mk_fixture "$fx" "$GOOD_ARM"
+    mkdir -p "$fx/$(dirname "$SITE_2")"
+    {
+        echo "fn unbox_arg(ty: TypeId) -> Value {"
+        echo "    match ty {"
+        echo "        TypeId::BOOL => {"
+        printf '%s\n' "$BAD_ARM"
+        echo "        }"
+        echo "    }"
+        echo "}"
+    } > "$fx/$SITE_2"
+    scan_tree "$fx"
+    if [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[3] half-fixed fixture: expected the unfixed mirror to be an offender"
+        st_fail=1
+    fi
+
+    # 4. an incomplete falsy set (missing tagged-false 19) must FAIL
+    rm -rf "$fx"; mk_fixture "$fx" "$PARTIAL_ARM"
+    scan_tree "$fx"
+    if [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[4] partial-falsy fixture: expected FAIL for a missing 19 compare"
+        st_fail=1
+    fi
+
+    # 5. empty tree must check 0 definitions, so the caller is forced to ERROR
+    rm -rf "$fx"; mkdir -p "$fx"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 0 ]; then
+        echo "selftest[5] empty tree: expected 0 checked, got $EV_CHECKED"
+        st_fail=1
+    fi
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+}
+
+selftest
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 5 selftest fixture(s) checked, selftest only"
+    exit 0
+fi
+
+# ---------------------------------------------------------------- real scan
+rm -f "$TMP/count" "$TMP/offenders"
+scan_tree "$REPO_ROOT"
+
+if [ "$EV_CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no TypeId::BOOL unbox arm found in $SITE_1 or $SITE_2)"
+    exit 2
+fi
+
+offenders=$(echo "$EV_OFFENDERS" | sed 's/^ *//;s/ *$//')
+if [ -n "$offenders" ]; then
+    echo "FAIL — $EV_CHECKED definition(s) checked, offending: $offenders"
+    exit 1
+fi
+
+echo "PASS — $EV_CHECKED definition(s) checked, all decode the tagged bool"
+exit 0
