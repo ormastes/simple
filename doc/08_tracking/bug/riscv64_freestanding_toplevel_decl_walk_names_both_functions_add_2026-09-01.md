@@ -184,3 +184,63 @@ Whether the wrong env answer is a KEY collision (`int_to_str` — which contains
 — producing the same key text for 0 and 1) or a VALUE defect. Second probe adds
 `int_to_str(0)`, `int_to_str(1)`, the composed key, and the raw `rt_env_get` of
 both the composed and the literal key.
+
+---
+
+## RESOLVED 2026-09-01 — root cause measured, fixed, and the row moved on
+
+**Root cause:** `module_decl_at` chose between its env mirror and its slot array
+with `if env_value != "":`, and on this target that comparison is **TRUE for a
+zero-length text**. An in-memory branch trace inside the real function
+(nonce `919b943728da5c1c`) recorded, for a MISSING env entry:
+
+```
+trace=900    entered the env-first tail with index 0
+trace=800    env_value.len() == 0      <- the text IS empty
+trace=700    the `!= ""` arm was taken ANYWAY
+```
+
+So every call returned `ast_parse_i64("") == 0`: `module_decl_at` answered
+declaration **0 for every index**, the walk converted decl 0 twice, and `main`
+never existed downstream. Candidate **(a)**, as the earlier measurement said —
+but not for any of the reasons anyone predicted.
+
+**Every cheaper explanation was refuted by measurement, not by argument:** the
+slot array is correct (`slots-len=2, slot0=0, slot1=1`); `decl_get_name` is
+innocent (asked about index 0 both times, so (b) is out); the env mirror is
+EMPTY (`env0/env1/envlit1` all `<NIL>`, `SIMPLE_BOOTSTRAP` unset) so the env
+branch should never have been reachable at all; a **verbatim replica** of the
+function body compiled into the same image answers CORRECTLY (`v1-1=1`), as do
+explicit-return, snapshotted-index and no-env variants; `nm` shows exactly one
+definition of each symbol, so the duplicate-definition trap did not apply; and
+the row-2 `kernel.elf` disassembly is correct at all three `slot_get` sites.
+Only instrumenting the real function's branch decisions found it.
+
+**Fix:** `if env_value.len() > 0:` — `.len()` is measured correct on the same
+path in the same boot. Hosted semantics unchanged: a present entry is still
+non-empty and still outranks the array.
+
+**Pinned by** `scripts/check/check-decl-index-lookup-not-empty-text-compare.shs`
+(RED against this fix's own parent, GREEN at the fix; fatal `--selftest`, 5
+fixtures including must-FAIL replays of both spellings; wired blocking).
+
+**The comparison itself is NOT fixed** and is filed as
+`riscv64_freestanding_text_neq_empty_literal_true_for_zero_length_2026-09-01.md`.
+
+### Row 2 status: still RED, on a DIFFERENT and later defect
+
+Measured after the fix (nonce `41d7bd8ce8c848bd`, real OpenSBI fw_payload):
+
+```
+[buildrun] phase=hir-ok
+[buildrun] FAIL mir lowering error: E-MIR-TYPE-ZeroKind: lower_type received a
+  well-formed HirType whose `kind` field is raw 0 (never written) while
+  lowering 'main' -- fix the PRODUCER that left kind unset, not lower_type
+```
+
+`main` now EXISTS, is lowered to HIR, and reaches MIR — which is exactly the
+progress this defect was blocking, and is the first time `main` has ever been
+seen downstream on this row. The new blocker is unrelated: `fn main():`
+declares no return type, and the producer of its implicit return HirType leaves
+`kind` at raw 0. Filed as
+`riscv64_in_guest_mir_lower_type_zero_kind_on_main_2026-09-01.md`.
