@@ -46,3 +46,19 @@ emits `rt_raw_i64_to_string`, which this runtime does not provide, and the lane
 tolerates unresolved symbols, so it becomes a NULL-GOT fault rather than a link
 error). Verify any probe is physically in `kernel.elf` before trusting a silent
 result.
+
+## Re-confirmed on the probe-free tree
+
+The measurement above (nonce 2b59d9831fd35815) was taken with the temporary
+row-2 probes still in the image. After removing all of them the row was rebooted
+from the cleaned tree — nonce **804651e7362b19ea**, real OpenSBI v1.4
+`-bios fw_payload`, gate selftest OK (23 fixtures) — and behaves identically:
+
+```
+[buildrun] phase=hir-ok
+[buildrun] phase=mir-ok functions lowered
+[buildrun] running the built program
+                                          <-- resets, entry re-enters from the top
+```
+
+So the reset is a property of the tree being reported, not of the probes.
