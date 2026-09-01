@@ -244,8 +244,8 @@ mod linux {
         insert(Receipt::Lock(Lock {
             root_fd,
             lock_fd,
-            pid,
-            uid,
+            pid: libc::getpid(),
+            uid: libc::geteuid(),
             root_dev: dev,
             root_ino: ino,
         }))
