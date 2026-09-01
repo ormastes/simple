@@ -106,15 +106,84 @@ way) and in `checksum.spl` (`Crc32.update`, `Adler32.update`). The self-containe
 local `ByteBuffer` inside one function) are unaffected, which is why most specs
 in these files pass — only the cross-call chaining pattern breaks.
 
-## Root cause (not yet located)
+## RESOLVED (interpreter/`test` lane) 2026-09-01
 
-Not investigated further — this is interpreter/runtime struct-parameter-passing
-semantics, orthogonal to `src/lib/common/bytes/*`. Flagging per
-`.claude/rules/testing.md` guidance rather than attempting a compiler-internals
-fix in scope of a test-triage pass.
+Root-caused and fixed. Two independent defects, addressed separately:
+
+**1. `ByteBuffer` was a `struct` (value type).** Struct arguments are
+deep-copied on parameter pass — this is DOCUMENTED, INTENDED interpreter
+behavior (`doc/07_guide/language/value_semantics_by_engine.md`), not a bug.
+`ByteBuffer` is a growable accumulator meant to be mutated across
+method/function boundaries (`U16le.store(buf)`, `Crc32.update(span)`,
+`inflate_fixed_copy_match(out, ...)`), so it was fighting the language's
+value semantics. Fixed by changing `struct ByteBuffer:` to `class ByteBuffer:`
+in `src/lib/common/bytes/span.spl` (reference type — see the docstring added
+there). This alone fixed the DECOMPOSED shape
+(`val u = U16le.of(x); u.store(b)`) but not yet the exact spec pattern.
+
+**2. Real interpreter defect: a two-level chained `MethodCall` receiver
+dropped write-back of the OUTER call's own mutable arguments.** Minimal
+repro: `Wrapper.of(65).store(b)` (chained) lost the mutation to `b`;
+`val u = Wrapper.of(65); u.store(b)` (decomposed) did not.
+`handle_method_call_with_self_update_inner`
+(`src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs`, the
+statement-level dispatcher used for a bare expression-statement, a `val x =
+...` initializer, or a loop body) has a hand-written branch for exactly this
+shape (`if let Expr::MethodCall { .. } = receiver.as_ref()`), added to handle
+chains like `self.advance().unwrap()`. It evaluated the outer call's
+arguments into bare `Value`s against a **cloned** `env` and dispatched via
+`call_method_on_value(inner_result, method, &eval_args, &mut working_env,
+...)` — losing both the original `Argument` AST (needed to map an evaluated
+value back to a caller identifier) and writing to a clone the caller never
+sees again. `write_back_mutable_arguments` / `exec_function_with_self_return`
+(the mechanisms that make `x.method(buf)` persist a mutation to `buf`) were
+never reached for this shape, confirmed by instrumented tracing (`git log`
+this file for the `SIMPLE_DEBUG_WBMA`-gated diagnostics left in
+`interpreter_call/core/function_exec.rs` and `interpreter_method/mod.rs`,
+useful for any future write-back investigation).
+
+Fix (patterns.rs, in the `Expr::MethodCall` branch of
+`handle_method_call_with_self_update_inner`): when `inner_result` is a
+`Value::Object` whose class defines `method`, evaluate the outer call's
+arguments against the REAL `env` and dispatch through
+`find_and_exec_method_with_self_owned_values` (already used elsewhere in this
+file for the analogous `self.field.method(...)` shape), which writes any
+mutated `Array`/`Dict`/`Object`/`Tuple` identifier argument back into `env`
+exactly like the ordinary `x.method(buf)` path. The old
+clone-env-then-`call_method_on_value` path is kept as a fallback for
+non-Object receivers (a chain ending in a string/array/dict builtin method).
+
+**Verified (interpreter lane, `bin/simple test` — same binary class the repo
+tooling uses):**
+```
+test/01_unit/lib/common/bytes/ints_spec.spl:            11 total, 11 passed, 0 failed   (was 9/11)
+test/01_unit/lib/common/bytes/bytes_foundation_spec.spl:  6 total,  6 passed, 0 failed   (was failing)
+test/01_unit/lib/common/bytes/span_spec.spl:             11 total, 11 passed, 0 failed
+test/01_unit/lib/common/compress/typed/deflate_typed_spec.spl: 37 total, 37 passed, 0 failed
+test/01_unit/lib/common/crypto/typed/ctypes_spec.spl:    31 total, 31 passed, 0 failed
+test/01_unit/compiler/backend/macho_writer_spec.spl:     39 total, 39 passed, 0 failed
+test/01_unit/compiler/backend/native_backend_spec.spl:    4 total,  4 passed, 0 failed
+```
+All other `ByteBuffer` consumers checked and unaffected/passing.
+
+**NOT fixed — separate, still-open defect: `bin/simple run` (JIT-with-
+interpreter-fallback lane) still SIGSEGVs** on the exact repro in this file's
+"Minimal repro" section, unchanged by either fix above (re-verified after the
+patterns.rs fix, exit 139). This is a JIT-lane crash, not the interpreter
+write-back defect fixed here — `test` and `run` are different engines per
+`.claude/rules/testing.md`, and this file's own earlier text already noted
+the SIGSEGV/silent-zero divergence between them. Left open; not investigated
+further in this pass.
+
+## Files changed
+- `src/lib/common/bytes/span.spl` — `struct ByteBuffer` -> `class ByteBuffer`.
+- `src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs` — write-back
+  fix for chained `MethodCall` receivers, described above.
+- `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs`,
+  `src/compiler_rust/compiler/src/interpreter_method/mod.rs` — `SIMPLE_DEBUG_WBMA`-gated
+  diagnostic tracing added during root-causing; left in (off by default),
+  matching the existing `SIMPLE_DEBUG_ARG_BINDING`/`SIMPLE_INTERP_OOB_DEBUG`
+  pattern already used elsewhere in this codebase.
 
 ## Not fixed here
-
-Per CLAUDE.md testing rules, the two reproducing specs (`ints_spec.spl`,
-`bytes_foundation_spec.spl`) are left RED and reported as genuine failures
-rather than weakened. `.spl` test files not modified.
+`bin/simple run` JIT-lane SIGSEGV (see above) — separate defect, still open.
