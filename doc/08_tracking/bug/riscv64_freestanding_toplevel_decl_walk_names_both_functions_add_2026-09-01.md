@@ -109,3 +109,78 @@ Cycle cost: full gate rebuild + both boots ~12 min.
 
 Print RAW values, never comparison results. A `.len()` on a Dict was answering
 -1 on this lane until today, and a boolean answer would have hidden it.
+
+---
+
+## MEASURED 2026-09-01 (second lane): candidate **(a)** — and the mechanism is
+## NOT the one that was predicted
+
+One boot, real OpenSBI v1.4 `fw_payload` (`-bios` only, no `-kernel`, no
+`isa-debug-exit`), nonce `a1aaa9eb6ed791ec`, gate selftest OK (23 fixtures),
+freshly built Rust seed (`cargo build --release --bin simple`, exit 0).
+Verbatim guest serial:
+
+```
+[probe] decl-count=2
+[probe] slots-len=2
+[probe] slot0=0
+[probe] slot1=1        <- the slot ARRAY is CORRECT
+[probe] declat0=0
+[probe] declat1=0      <- module_decl_at(1) DISAGREES with slot_get(1)
+[probe] name0=[add]
+[probe] name1=[add]
+[probe] prefer-arena=
+[probe] parsed-fns=1
+[probe] order-len=2
+[probe] parsed-fn-order=[add]
+[probe] parsed-fn-order=[add]
+[buildrun] FAIL run error: module has no main function
+```
+
+### This settles (a) vs (b)
+
+`module_decl_at(0)` and `module_decl_at(1)` both answer **0**, so
+`convert_decl_fn` converts declaration 0 twice. That is candidate **(a)**.
+Candidate (b) is refuted: `decl_get_name` is innocent — it is asked about index
+0 both times and correctly says `add` both times.
+
+### And it refutes the leading mechanism for (a)
+
+The predicted mechanism was dropped writes to the `module_decl_slots` global
+(the shape of the historic defect the comment at `decl_nodes.spl:1418-1426`
+describes), which would have left the pristine 128-zero initializer. It did
+not happen: `slots-len=2` and `slot0=0 / slot1=1` are exactly right, so
+`module_add_decl`'s writes landed and the array is the correct truth. The
+same-module-accessor fix recorded in that comment is still holding.
+
+The defect is therefore INSIDE `module_decl_at`
+(`src/compiler/10.frontend/core/_Ast/module_state.spl:433-443`), between its
+guard and the array it is supposed to fall back to. Enumerating the branches
+that can return 0 for `index = 1` while `ast_module_decl_slot_get(1)` is 1:
+
+- the `index < 0 or index >= count` guard returns `-1`, not 0 — and
+  `decl-count=2` rules it out anyway;
+- the `SIMPLE_NATIVE_ARENA_DECLS == 1` branch returns `slot_get(index)`, which
+  is measured as 1 — so it cannot be the branch taken;
+- **only** `return ast_parse_i64(env_value)` on the ENV-FIRST path can answer 0.
+
+So the env-first mirror is answering for index 1 with something that parses to
+0 — i.e. the env crutch is serving index 0's entry (or garbage) for index 1,
+and it takes precedence over the array that is right there and correct.
+
+### Note on `prefer-arena=`
+
+It printed EMPTY, not `true`/`false`. `bool.to_string()` in freestanding
+riscv64 yields the empty string. That is a separate reporting defect, harmless
+here (nothing branches on it), but it is exactly why this record insists on RAW
+values: a probe that had rendered this as a comparison would have read as
+`false` and misled again.
+
+### Open, being measured next
+
+Whether the wrong env answer is a KEY collision (`int_to_str` — which contains a
+`for k in 0..20`, on a lane with a live `for`-in defect,
+`freestanding_riscv64_for_in_array_yields_nil_after_first_element_2026-08-31.md`
+— producing the same key text for 0 and 1) or a VALUE defect. Second probe adds
+`int_to_str(0)`, `int_to_str(1)`, the composed key, and the raw `rt_env_get` of
+both the composed and the literal key.
