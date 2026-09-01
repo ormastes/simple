@@ -1228,14 +1228,18 @@ impl MirLowering:
                                         case Class | Struct:
                                             srn_owner_id = srn_sym_id
                                         case _: ()
-                            if srn_owner_id < 0:
-                                val srn_by_name = self.symbols.lookup_or_invalid(srn_name)
-                                if srn_by_name.is_valid():
-                                    if val srn_named_sym = self.symbols.get_symbol_raw(srn_by_name.id):
-                                        match srn_named_sym.kind:
-                                            case Class | Struct:
-                                                srn_owner_id = srn_by_name.id
-                                            case _: ()
+                            # NO name-keyed fallback here, deliberately.
+                            # `lookup_or_invalid(srn_name)` was tried and
+                            # MISBOUND under a name collision: with
+                            # `use dup_a.{Dup}` + `use dup_b.{Dup as DupB}`
+                            # in scope, `Dup.new()` constructed dup_b's Dup
+                            # (measured: printed tag=B, expected tag=A) --
+                            # the silent-wrong-binding class this repo keeps
+                            # producing, strictly worse than the loud error
+                            # it replaced. Only the receiver's attached
+                            # symbol id is collision-proof.
+                            if mir_mc_trace_state == 1:
+                                eprint("[mir-method-call] static-owner-recovery method={method} recv={srn_name} attached_id={srn_sym_id} owner_id={srn_owner_id}\n")
                             if srn_owner_id >= 0:
                                 static_receiver_name = srn_name
                                 static_receiver_owner_id = srn_owner_id
@@ -2521,7 +2525,6 @@ impl MirLowering:
         # be independently declared per backend. to_upper is safe on BOTH:
         # rt_string_to_upper and rt_string_to_float use the shared tagged-value
         # ABI on both LLVM and Cranelift.
-        #
         # The interpreter also accepts `to_float` on NUMERIC receivers
         # (interpreter_method/primitives.rs:31 -- n as f64). This arm must
         # never claim those: rt_string_to_float on a raw int is silent
@@ -2672,7 +2675,8 @@ impl MirLowering:
                 # value/sffi/value_ops.rs:91, and already emitted by
                 # expr_dispatch's F64 decode arm, so the symbol is proven
                 # linked). NIL decodes to 0.0 (payload 0 << 3), which is
-                # exactly the interpreter's failure value.
+                # exactly the interpreter's failure value -- verified
+                # empirically on the native lane.
                 if method == "to_float":
                     val tfv_op = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_value_as_float"),
