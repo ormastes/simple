@@ -1,4 +1,17 @@
-# `match` over `FsError` yields the arm-less default in freestanding cranelift builds
+# An `Err(FsError)` payload reads as a zero/default value in freestanding cranelift builds
+
+Title deliberately covers BOTH live hypotheses; they have not been separated yet
+and whoever picks this up should not be pointed at one of them prematurely:
+
+- **H1** a `match` over `FsError` selects no arm in this build mode; or
+- **H2** the `FsError` payload of an `Err` does not survive transfer out of
+  `NvfsDriver.new_on_device` / `unwrap_err()`, so a total match sees a
+  zero-initialized value and every arm test fails.
+
+H2 is somewhat favoured: `is_err()` was TRUE (the tag transferred), so the tag
+and the payload disagree. A one-run discriminator settles it — construct
+`FsError.NotFound` locally inside the round-trip entry, classify it, print the
+code. `6` in-guest ⇒ H2; `0` ⇒ H1.
 
 - Date: 2026-09-01
 - Status: OPEN — blocks `scripts/check/check-simpleos-nvfs-server-roundtrip-ovmf.shs` at rung L4
