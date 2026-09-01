@@ -252,12 +252,18 @@ fn import_bound_candidate(
             break;
         }
         let hop = crate::interpreter::owner_bindings(&source_owner).and_then(|bindings| {
+            if debug_dupdispatch() {
+                eprintln!("[dupdispatch] HOP-TRY owner={source_owner} name={source_name} has_name={} has_star={}", bindings.contains_key(source_name.as_str()), bindings.contains_key("*"));
+            }
             bindings.get(&source_name).cloned().filter(|next| {
                 *next.0 != *source_owner || next.1 != source_name
             }).or_else(|| {
                 bindings.get("*").map(|glob| (Arc::clone(&glob.0), source_name.clone()))
             })
         });
+        if debug_dupdispatch() {
+            eprintln!("[dupdispatch] HOP-RESULT owner={source_owner} name={source_name} hop={:?}", hop.as_ref().map(|(o,n)| (o.to_string(), n.clone())));
+        }
         match hop {
             Some((next_owner, next_name))
                 if *next_owner != *current

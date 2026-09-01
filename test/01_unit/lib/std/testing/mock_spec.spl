@@ -126,7 +126,6 @@ class MockFunction:
 
     me reset():
         self.calls = []
-        self.return_values = []
         self.return_index = 0
         self.should_panic = false
         self.panic_message = ""
@@ -179,8 +178,17 @@ class MockRegistry:
         nil
 
     me reset_all():
+        # Workaround: `for entry in self.entries: entry.mockfn.reset()`
+        # mutates a per-iteration COPY of each RegistryEntry (Simple's
+        # value semantics), never the entries actually stored in
+        # self.entries — copy-modify-rebuild-assign instead, same
+        # pattern as MockFunction.record_call() above.
+        var rebuilt: [RegistryEntry] = []
         for entry in self.entries:
-            entry.mockfn.reset()
+            var mfn = entry.mockfn
+            mfn.reset()
+            rebuilt.append(RegistryEntry(key: entry.key, mockfn: mfn))
+        self.entries = rebuilt
 
 fn create_mock(name: text) -> MockFunction:
     MockFunction__new(name)
@@ -401,8 +409,14 @@ describe "Mock Library - Phase 1 (Call Tracking)":
 
             registry.reset_all()
 
-            expect mock1.was_called() == false
-            expect mock2.was_called() == false
+            # MockFunction is a value type (copy semantics): registering a
+            # mock copies its current state into the registry, so mutating
+            # the ORIGINAL mock1/mock2 locals after registration (or reading
+            # them after reset_all()) observes a different copy than the one
+            # the registry actually reset. Assert against the registry's own
+            # copies, which is the state reset_all() genuinely controls.
+            expect registry.get("mock1").unwrap().was_called() == false
+            expect registry.get("mock2").unwrap().was_called() == false
 
     context "Helper Functions":
         it "creates mock with helper":
@@ -508,7 +522,7 @@ describe "Mock Library - Phase 2+ (Trait-based Mocking)":
             # match result:
             #     case Err(msg): check(msg == "Simulated error")
             #     case Ok(_): check(false)  # Should not succeed
-            check(true)  # Placeholder until Result pattern is implemented
+            expect true  # Placeholder until Result pattern is implemented
 
     context "Expectations (expect/verify)":
         it "verifies method was called":
