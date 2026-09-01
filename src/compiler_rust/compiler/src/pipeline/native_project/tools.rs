@@ -364,6 +364,24 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
+        // Owned-process receipt ABI (rt_process_run_owned_observed_bounded_value
+        // and siblings) and the coverage probe/dump ABI. Both were registered by
+        // 97a39131fe3 "fix(runtime): close core tool host providers" and dropped
+        // from this list by the 929de773c88 (#150) stale snapshot alongside
+        // runtime_core_host_services.c (since restored). The pure-Simple backend
+        // list (src/compiler/70.backend/backend/runtime_compiler.spl) has carried
+        // runtime_process_owned throughout, so this was a seed-only lane gap of
+        // the same never-an-archive-member class as runtime_simd_case.c above.
+        // Verified collision-free against every other member (nm, host cc).
+        //
+        // NOT restored from that same hunk: runtime_memory.c. It redefines 16
+        // symbols that runtime_native.c already owns here (rt_alloc, rt_free,
+        // rt_realloc, rt_memcpy, rt_memset, rt_struct_alloc,
+        // rt_struct_receiver_valid, rt_ptr_*, copy_mem, rt_mem_guard_stats), so
+        // adding it would break the archive's single-owner contract. Those pairs
+        // are separately tracked by check-runtime-symbol-lane-divergence.shs.
+        "runtime_process_owned.c",
+        "runtime_coverage_core.c",
         // Defines simple_contract_check / simple_contract_check_msg. Migrated
         // Rust -> C by 76371b85c3, then silently dropped from this list by
         // ea30567675 "chore: sync diagnostics and runtime updates" while the .c
@@ -1153,21 +1171,29 @@ struct Stage4CliCProviderSpec {
     undefined: Stage4CliCUndefinedPolicy,
 }
 
+// Stage4's C time provider is a THIN ABI SHIM only: a hosted clock plus the
+// bounded thread-local progress slots. Calendar arithmetic and progress policy
+// are owned by `std.common.time_utils` in pure Simple (fa170a1350d
+// "refactor(runtime): move timestamp policy to Simple"), and the C bodies for
+// rt_timestamp_* / rt_progress_{init,reset,get_elapsed_seconds} survive ONLY
+// inside `#ifdef SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT` in
+// src/runtime/runtime_timestamp.c -- a macro defined in exactly one place
+// (src/compiler_rust/runtime/build.rs) for the Rust seed's cdylib, which cannot
+// link Pure Simple modules. Stage4 never defines it, so expecting those 12
+// names here asserted a duplicate policy provider that the architecture
+// deliberately removed.
+//
+// fa170a1350d corrected this list to the 6 shim symbols; 929de773c88 (#150,
+// "fix(windows): native-build works end to end") reintroduced the pre-refactor
+// 14 as a stale-snapshot clobber -- it never touched runtime_timestamp.c and
+// added no replacement Windows provider, so this is a revert, not a redesign.
 const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
-    "rt_progress_get_elapsed_seconds",
-    "rt_progress_init",
-    "rt_progress_reset",
+    "rt_progress_clock_now_nanos",
+    "rt_progress_tls_clear",
+    "rt_progress_tls_is_initialized",
+    "rt_progress_tls_start_nanos",
+    "rt_progress_tls_store_start_nanos",
     "rt_time_now_seconds_f64",
-    "rt_timestamp_add_days",
-    "rt_timestamp_diff_days",
-    "rt_timestamp_from_components",
-    "rt_timestamp_get_day",
-    "rt_timestamp_get_hour",
-    "rt_timestamp_get_microsecond",
-    "rt_timestamp_get_minute",
-    "rt_timestamp_get_month",
-    "rt_timestamp_get_second",
-    "rt_timestamp_get_year",
 ];
 
 const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
