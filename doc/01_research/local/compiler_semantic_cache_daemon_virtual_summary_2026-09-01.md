@@ -57,3 +57,57 @@ The broadest current seam is above the compiler: `src/app/cli/_CliMain/main_and_
 Existing focused cache tests do not prove authoritative reuse. Required evidence includes same-stat mutation, newly appearing import, symlink/case/Unicode attacks, macro/env/time/network reads, new trait impl/AOP rule, corrupt AST and DB/CAS split-brain, snapshot edit races, kill-at-publish-boundary recovery, concurrent GC leases, cross-worktree hits, real `_tldr.spl` non-shadowing, MCP pagination/root containment, admitted Phase-2/Phase-3 AST parity, and daemon/no-daemon byte equivalence.
 
 Compile-time reads follow a strict cacheability rule: declared hermetic inputs are hashed before execution; supported deterministic providers may supply a replayable value plus provider digest; undeclared environment, clock, randomness, network, filesystem or process reads mark the action uncacheable and prohibit successful action-receipt publication. Merely observing an impure value after execution never makes the action authoritative.
+
+## Codex prior-art gap audit addendum (2026-09-01)
+
+<!-- codex-research -->
+
+Audit base: `2aeb4641c5b` (`origin/codex/compiler-semantic-cache-main-pr`).
+The repository's parallel-research slots were already occupied, so the requested
+sidecar lanes were unavailable; this addendum is the normal-capability review.
+
+### Three cache generations coexist
+
+1. The live front-end and HIR caches remain
+   `frontend_parse_cache.spl` and `driver_hir_cache.spl`. The parse cache hashes
+   a path after a separate existence check, then compilation can read the path
+   again. The HIR cache hashes the source separately and folds
+   `ModuleSurface.canonical_path` plus five hand-maintained environment switches.
+   These are ccache-style direct-cache boundaries, not coherent snapshots.
+2. The older `cas_store.spl`/action index/tier router/lease/GC stack remains the
+   only broadly composed local-machine cache implementation. `ActionKey` says
+   explicitly that it is compute-and-log only. The tier router still consumes
+   the older text CAS rather than the verified descriptor-pinned CAS.
+3. The new `CompileSnapshotV1`, semantic-read-set builder, canonical codecs,
+   verified CAS, journal/catalog, gateway, and daemon contracts have focused
+   tests but no production compiler caller. Searches for
+   `freeze_compile_snapshot_v1`, `build_semantic_read_set_v1`,
+   `CacheGatewayAdapterV1`, and `verified_cas_put_v1` find definitions and tests,
+   not driver wiring. They are an implementation scaffold, not current cache
+   authority.
+
+### Requested risk audit
+
+| Risk | Current evidence | Gap and consequence |
+|---|---|---|
+| Path identity | `CompileSnapshotV1` separates logical paths from physical identity and carries negative candidates/directory generations. | No host capture owner constructs those observations. `CaseSensitiveNfc`/`CaseFoldedNfc` are labels: path validation does not prove NFC, and case-folding uses `to_lower()`, not a filesystem-defined Unicode case-fold/collision policy. |
+| Newly appearing imports | `resolution_witness_v1.spl` and the freezer validate supplied ordered/negative witnesses. | The production resolver does not emit them. The ccache direct-mode new-header hole therefore remains open for any authoritative reuse based on today's parse/HIR caches. |
+| Same-stat/time-of-check races | Verified CAS reads use descriptor receipts; snapshot observations contain before/after identities and byte digests. | The live parse/HIR cache key paths still do `exists` then hash, and compiler reads are not frozen to that handle. No mutation-at-read end-to-end test drives the real compiler. |
+| Time/env/process/network reads | `SemanticReadSetV1` represents clock, environment, randomness, network, process, plugin, and toolchain effects and marks `UndeclaredUncacheable`. | The builder is called only by tests. There is no effect-provider instrumentation that proves every compile-time read reaches the builder, and no publication gate consumes `uncacheable_reason`. The HIR cache instead hashes five manually listed environment variables. |
+| Compiler/plugin/provider identity | The snapshot accepts compiler/runtime/provider/toolchain digests; native object scope accepts provider and optimizer receipts. | The values are caller-supplied and are not constructed for semantic cache actions. An externally pre-set `SIMPLE_FRONTEND_CACHE_SCOPE` bypasses recomputation in `driver_source_pipeline_parsing.spl:236-240`. `ActionKey` has compiler executable/source fields but no provider/toolchain manifest collection. |
+| Cross-worktree reuse | Canonical snapshot codecs omit physical presentation roots. | `coherent_snapshot_cas_spec.spl:167-177` writes equal envelopes into two different cache roots and proves only equal digests, not a hit from one shared machine cache. The live front-end/HIR roots are workspace-relative, and the HIR closure digest includes `canonical_path`. |
+| Remote poisoning | Artifact bytes are recomputed by digest and remote writes are absent from `RemoteTransport`. | `remote_client.spl:110-116` trusts the manifest's claimed `digest` field instead of hashing canonical manifest bytes. `receipt_digest` is unused; target, dependency, AOP, and block roots are explicitly deferred, with no local publisher found. `Verified` is therefore stronger than the evidence. |
+| Daemon authentication/failover | Rust Linux uses `SO_PEERCRED`, nonce, boot identity, durable epoch, private files, and a 250 ms bounded route. Pure policy falls back to an anchored spool. | Default pure-Simple native uses `src/runtime/runtime_cache_host_authority_v1.c`: daemon authority and reader-pin/GC ABI calls return `-1`; `rt_cache_daemon_serve_v1`/`route_v1` have no native-C provider. Thus native production cannot take an authenticated daemon or descriptor-pinned hit. |
+| Single writer | Rust has both a daemon process lock and writer-authority lock. | They are different records (`.simple-cache-daemon-v1.lock` and `.simple-cache-writer.lock`). No proof binds them to one writer epoch. Native C implements neither authority. |
+| GC/read/publication races | New gateway pins bind process, boot, even reader epoch, journal generation, manifest, namespace, and expiry. | Native-C pin and GC-transition functions fail closed. Older GC is raw path based and uncoordinated: mark/sweep can move a just-published blob before its action mapping is committed; fast GC deletes `trash/` again at the end of the same sweep, so its stated grace period is absent. |
+| Lease liveness | Lease files carry heartbeat generations. | Reclaim tests only an entry's original `created_at`; heartbeat increments a generation but does not refresh the time used by `lease_is_reclaimable`. A live build older than six hours becomes reclaimable despite heartbeats. |
+| Immutable action mapping | New journal/catalog quarantines conflicting roots. | Older `action_put`/`result_manifest_put` publish via a move that can replace an existing path, and the old poisoning spec records overwrite and dangling-artifact behavior. The newer conflict-safe path is not wired into compiler publication. |
+
+### Implementation judgment
+
+No production fix was made in this audit. The release-critical failure is not a
+small local defect: closing it requires native-C daemon and reader authority,
+one writer/GC protocol, production snapshot/read-set capture, and driver
+cutover. A narrow fix to one helper would risk converting an intentional miss
+into false authority while adjacent gates remain absent. The bounded first lane
+and its tests are recorded in the weakness tracker.

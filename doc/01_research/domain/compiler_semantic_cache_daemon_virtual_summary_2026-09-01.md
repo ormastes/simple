@@ -53,3 +53,97 @@ Selected common API consequence: the pure selectors `user_local_location_v1` and
 ## Performance methodology
 
 Measure cold, unchanged warm, private-body edit, public-signature edit, AOP/trait edit and link lanes separately. Use one warmup and at least seven alternating baseline/candidate pairs on a quiet runner. Compute both the median and 20%-trimmed mean over per-pair candidate/baseline ratios. With coefficient of variation at most 5%, fail when both exceed 1.10 and pass when both are at most 1.10. Report `INCONCLUSIVE` when they disagree across 1.10, variance exceeds the bound, or admitted-runner/evidence requirements are incomplete; permit one bounded quiet-runner retry and block release if it remains inconclusive. Pin source/compiler/provider/cache/baseline digests and record wall, CPU, RSS, hit/miss/reparse counts and output identity.
+
+## Codex primary-source comparison addendum (2026-09-01)
+
+<!-- codex-research -->
+
+### ccache modes are three different evidence boundaries
+
+The current [ccache 4.13.6 manual](https://ccache.dev/manual/4.13.6.html)
+distinguishes:
+
+- preprocessor mode, whose key includes preprocessor output, non-preprocessor
+  options, and preprocessor diagnostics;
+- direct mode, whose first lookup uses source/options and a manifest of headers
+  observed on an earlier compile; and
+- depend mode, which avoids preprocessing and learns inputs from `/showIncludes`
+  or `-MD`/`-MMD` compiler output.
+
+Those modes expose different failure closures. Direct mode cannot prove with
+complete accuracy that a newly created higher-priority header would now win,
+even though current ccache records include-directory existence to mitigate the
+common case. Depend mode is only as complete as dependency output (`-MMD`
+intentionally omits system headers). Preprocessor mode captures more effective
+input state, but absolute paths, diagnostics, debug directories, and option
+normalization affect relocation. Simple should therefore not offer a mode knob
+that weakens evidence. Resolver-owned selected and negative candidates are the
+minimum authoritative boundary.
+
+The same manual also makes four traps explicit:
+
+- compiler identity defaults to mtime+size, while content hashing is the safer
+  bootstrap choice; plugins are inputs too;
+- `__DATE__`, `__TIME__`, `__TIMESTAMP__`, and `__FILE__` couple results to
+  ambient time or spelling, and sloppiness can knowingly permit stale results;
+- inode/stat caches and newly modified inputs require race defenses because the
+  compiler can read different bytes than the cache key observed; and
+- `base_dir`, `hash_dir`, and debug-prefix mapping trade relocation hits against
+  path-bearing output correctness.
+
+Simple's snapshot/read-set design is stronger than these modes if it is wired:
+same-handle frozen bytes, negative resolution witnesses, explicit compile clock,
+and separate logical/presentation paths close the known holes. Unwired value
+objects do not provide that strength to the current compiler.
+
+### sccache makes daemon availability policy explicit
+
+The official [sccache local-cache documentation](https://github.com/mozilla/sccache/blob/main/docs/Local.md)
+states that multiple local servers racing on one store cause spurious build
+failures. It also documents the same newly appearing header, time-macro, and
+unknown-external-factor hazards for its preprocessor cache. The
+[configuration documentation](https://github.com/mozilla/sccache/blob/main/docs/Configuration.md)
+requires absolute base directories, exposes a maximum IPC frame length, notes
+that some environment configuration requires server restart, supports
+read-only tiers, and recommends a client-side mode where compilation remains in
+the client and the daemon owns shared state. The
+[README](https://github.com/mozilla/sccache/blob/main/README.md) makes local
+compiler failover opt-in after server I/O failure.
+
+The lesson for Simple is to make three policies non-ambient and independently
+testable: who owns compilation, whether a cache write failure may fail a build,
+and which daemon generation/configuration admitted the request. Simple's stated
+fallback-to-compile policy is appropriate, but the native provider and process
+tests must prove it; a pure state machine fed synthetic booleans is not daemon
+evidence.
+
+For distributed execution, sccache's
+[quickstart](https://github.com/mozilla/sccache/blob/main/docs/DistributedQuickstart.md)
+uses authenticated clients/servers and recommends TLS in front of the
+scheduler. Authentication protects who may publish; it does not replace local
+content and semantic verification.
+
+### Bazel REAPI separates content integrity from action authority
+
+The authoritative [Remote Execution API proto](https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/remote/execution/v2/remote_execution.proto)
+addresses CAS blobs by their own content, addresses action-cache results by the
+digest of a serialized `Action`, requires `Command` and input-root digests, and
+allows `do_not_cache` and a namespace salt to be part of action identity. It
+also requires an action cache to keep referenced CAS blobs available for a
+period after returning a result and advises clients to verify reassembled blob
+digests.
+
+Bazel's source-level [`remote_verify_downloads` option](https://github.com/bazelbuild/bazel/blob/master/src/main/java/com/google/devtools/build/lib/remote/options/RemoteOptions.java)
+defaults to verifying hashes of remote downloads and discarding mismatches.
+The [Remote Asset API](https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/remote/asset/v1/remote_asset.proto)
+says only trusted clients should be allowed to push URI-to-digest associations.
+Together these are the relevant split: digest verification rejects corrupted
+bytes; authenticated/authorized publication and complete action identity reject
+validly hashed but malicious or semantically wrong mappings.
+
+Simple currently recomputes artifact digests but not the remote result-manifest
+digest and does not consume its promotion receipt. This is the classic gap
+between CAS integrity and action-cache authority. Remote-main reads must remain
+non-authoritative until canonical manifest bytes, complete semantic roots,
+publisher trust, namespace, and receipt are verified locally before any
+backfill or execution.
