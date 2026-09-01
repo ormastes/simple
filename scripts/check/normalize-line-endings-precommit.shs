@@ -31,7 +31,13 @@ is_binary() {
     if git diff --cached --numstat -- "$1" 2>/dev/null | head -1 | grep -q '^-	-'; then
         return 0
     fi
-    if LC_ALL=C grep -qU "$(printf '\000')" "$1" 2>/dev/null; then
+    # NUL detection: command substitution CANNOT carry a null byte (the shell
+    # silently drops it, making `grep -qU "$(printf '\000')"` an empty pattern
+    # that matches EVERY file and classifies all of them binary). Compare the
+    # byte count with and without NULs instead.
+    _sz="$(wc -c < "$1" 2>/dev/null)"
+    _nz="$(LC_ALL=C tr -d '\000' < "$1" 2>/dev/null | wc -c)"
+    if [ "$_sz" != "$_nz" ]; then
         return 0
     fi
     return 1
@@ -95,6 +101,21 @@ selftest() {
         echo "selftest FAIL: mid-line CR destroyed"; _rc=1
     fi
 
+    # (g) a TEXT file must NOT be classified binary, and a file containing a
+    # NUL byte MUST be. Regression fixture: the original NUL test used
+    # `grep -qU "$(printf '\000')"`, but a shell strips NUL from command
+    # substitution, so the pattern was empty, matched everything, and the hook
+    # skipped every file as "binary" while still printing PASS -- a silent
+    # no-op that looked green.
+    printf 'plain text\n' > "$_d/g.txt"
+    if is_binary "$_d/g.txt"; then
+        echo "selftest FAIL: text file misclassified as binary"; _rc=1
+    fi
+    printf 'a\000b\n' > "$_d/g.bin" 2>/dev/null
+    if ! is_binary "$_d/g.bin"; then
+        echo "selftest FAIL: NUL-containing file not detected as binary"; _rc=1
+    fi
+
     rm -rf "$_d" 2>/dev/null
     return $_rc
 }
@@ -105,7 +126,7 @@ if ! selftest; then
 fi
 
 if [ "${1:-}" = "--selftest" ]; then
-    echo "PASS - selftest only, 6 fixtures"
+    echo "PASS - selftest only, 8 fixtures"
     exit 0
 fi
 
