@@ -1113,13 +1113,20 @@ RuntimeValue rt_value_int(RuntimeValue value)
  * in arch/common/boot/freestanding_value_registry_impl.h:112-119 already
  * implements. This definition was simply an incomplete port of the same name.
  *
+ * The literals 11 and 19 are spelled out rather than using the
+ * TAGGED_BOOL_TRUE/FALSE macros in arch/common/baremetal_runtime.h: this file
+ * is #included into a TU that does not see that header (it was tried, and the
+ * build failed with "use of undeclared identifier 'TAGGED_BOOL_TRUE'"), and the
+ * sibling implementation in freestanding_value_registry_impl.h:112 spells them
+ * out the same way.
+ *
  * Do NOT push the bool arm down into simpleos_raw_or_encoded_int: its other
  * callers pass sizes, capacities and lengths, where a raw 11 or 19 is a
  * legitimate count and must NOT be rewritten to 1 or 0. */
 RuntimeValue rt_value_unbox_int(RuntimeValue value)
 {
-    if (value == TAGGED_BOOL_TRUE) return 1;
-    if (value == TAGGED_BOOL_FALSE) return 0;
+    if (value == 11) return 1;  /* tagged true  */
+    if (value == 19) return 0;  /* tagged false */
     return (RuntimeValue)(int64_t)simpleos_raw_or_encoded_int(value);
 }
 
