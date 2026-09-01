@@ -507,3 +507,36 @@ explicitly rejects any binary whose smoke output says `Rust-built` /
 `bootstrap seed only`. No `bin/release/x86_64-unknown-linux-gnu/simple` is
 deployed here. That admission was NOT weakened. The gate remains blocked on a
 bootstrap deploy, independently of the closure fix.
+
+### Dual check and regression baseline (measured, not asserted)
+
+Both runs use the same seed binary; the pre-fix side is an isolated worktree
+detached at `36de9a8580c` (the commit before the fix), so neither run disturbs
+the other.
+
+| spec | pre-fix (36de9a8580c) | post-fix |
+|---|---|---|
+| `entry_closure_non_ascii_import_scan_spec.spl` (new) | 1 passed, **4 failed** | **5 passed, 0 failed** |
+| `entry_closure_physical_source_dedup_spec.spl` (existing) | 4 passed, 11 failed | 4 passed, 11 failed |
+
+The single pre-fix pass in the new spec is the deliberate pure-ASCII control,
+which is exactly the step that must NOT move — so the spec discriminates the
+defect rather than the file.
+
+The 11 failures in the existing dedup spec are **pre-existing and unrelated**:
+the failing-test name sets are byte-identical on both sides (`diff` reports no
+difference), and they are seed-interpreter semantic errors (`variable 'Thing'
+not found`, `variable 'run_command' not found`) plus text assertions about
+unrelated files (hash-map utilities, expression type inference). This fix
+introduces no new failure and repairs none of them.
+
+### The gate is NOT blocked on the compiler — it has a provided-daemon path
+
+Correction to the note above: `check-simpleos-qemu-host-gpu-2d.shs:2861` takes
+the `pure-simple-compiler-missing` branch only when `simple_bin` is empty AND
+(`SIMPLEOS_GPU_HOST_BIN` is unset OR `SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS`
+is not 1). Line 2878 (`daemon=${SIMPLEOS_GPU_HOST_BIN:-$default_daemon}`) is a
+designed knob: supplying a pre-built daemon plus
+`SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1` reaches the QEMU/ivshmem/screendump
+phase without a deployed pure-Simple compiler and without weakening the
+compiler-admission checks, which were left exactly as they are.
