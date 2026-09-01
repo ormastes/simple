@@ -1,0 +1,71 @@
+# Cache path policy V1 -- pure validation shared by hosted runtime adapters.
+#
+# This module intentionally does not claim filesystem containment.  The host
+# adapter must open the selected root once and resolve every accepted relative
+# path beneath that handle (openat2/openat on Unix, handle-relative CreateFileW
+# on Windows).  These functions close the spelling aliases before that call.
+
+struct CachePathPolicyV1Result:
+    accepted: bool
+    logical_relative: text
+    error_code: text
+
+fn _cache_path_reject(code: text) -> CachePathPolicyV1Result:
+    CachePathPolicyV1Result(accepted: false, logical_relative: "", error_code: code)
+
+fn _cache_path_reserved_windows_name(segment: text) -> bool:
+    val lowered = segment.lower()
+    val stem = lowered.split(".")[0]
+    if stem == "con" or stem == "prn" or stem == "aux" or stem == "nul":
+        return true
+    if stem.len() == 4:
+        val prefix = stem.substring(0, 3)
+        val digit = stem.substring(3, 4)
+        if (prefix == "com" or prefix == "lpt") and "123456789".contains(digit):
+            return true
+    false
+
+fn cache_path_policy_v1(relative: text) -> CachePathPolicyV1Result:
+    if relative == "":
+        return _cache_path_reject("CACHE_PATH_EMPTY")
+    val logical = relative.replace("\\", "/")
+    if logical.starts_with("/") or logical.starts_with("//"):
+        return _cache_path_reject("CACHE_PATH_ABSOLUTE")
+    if logical.len() >= 2 and logical.substring(1, 2) == ":":
+        return _cache_path_reject("CACHE_PATH_DRIVE")
+    if logical.contains(":"):
+        return _cache_path_reject("CACHE_PATH_ADS")
+    var canonical: [text] = []
+    for segment in logical.split("/"):
+        if segment == "" or segment == "." or segment == "..":
+            return _cache_path_reject("CACHE_PATH_COMPONENT")
+        if segment.ends_with(".") or segment.ends_with(" "):
+            return _cache_path_reject("CACHE_PATH_WINDOWS_TRIM_ALIAS")
+        if _cache_path_reserved_windows_name(segment):
+            return _cache_path_reject("CACHE_PATH_WINDOWS_DEVICE")
+        canonical.push(segment)
+    CachePathPolicyV1Result(accepted: true, logical_relative: canonical.join("/"), error_code: "")
+
+fn user_local_location_v1(os: text, local_app_data: text, xdg_cache_home: text, home: text) -> text:
+    if os == "windows":
+        if local_app_data != "":
+            return local_app_data.replace("\\", "/")
+        return home.replace("\\", "/") + "/AppData/Local"
+    if os == "macos":
+        return home + "/Library/Caches"
+    if xdg_cache_home != "":
+        return xdg_cache_home
+    home + "/.cache"
+
+fn cache_location_v1(app: text, os: text, override_root: text, local_app_data: text, xdg_cache_home: text, home: text, workspace: text) -> text:
+    if override_root != "":
+        return override_root
+    if home != "" or local_app_data != "" or xdg_cache_home != "":
+        return user_local_location_v1(os, local_app_data, xdg_cache_home, home) + "/" + app
+    workspace + "/.simple/cache-manager"
+
+fn cache_root_default_v1(os: text, override_root: text, local_app_data: text, home: text, workspace: text) -> text:
+    cache_location_v1("Simple/cache-manager", os, override_root, local_app_data, "", home, workspace)
+
+export CachePathPolicyV1Result, cache_path_policy_v1
+export user_local_location_v1, cache_location_v1, cache_root_default_v1

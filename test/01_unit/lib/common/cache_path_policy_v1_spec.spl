@@ -1,0 +1,37 @@
+use std.spec
+use std.cache_path_policy_v1.{cache_path_policy_v1, user_local_location_v1, cache_location_v1, cache_root_default_v1}
+
+describe "cache path policy V1":
+    it "canonicalizes portable relative separators":
+        val checked = cache_path_policy_v1("db\\index.sdb")
+        expect(checked.accepted).to_equal(true)
+        expect(checked.logical_relative).to_equal("db/index.sdb")
+
+    it "rejects absolute drive UNC extended device and ADS spellings":
+        val cases = ["/etc/passwd", "C:\\cache", "C:cache", "\\\\server\\share", "\\\\?\\C:\\cache", "\\\\.\\pipe\\x", "db/file:stream"]
+        for candidate in cases:
+            expect(cache_path_policy_v1(candidate).accepted).to_equal(false)
+
+    it "rejects traversal empty aliases and Windows trim aliases":
+        val cases = ["../db", "db/../x", "db//x", "./db", "db/name.", "db/name "]
+        for candidate in cases:
+            expect(cache_path_policy_v1(candidate).accepted).to_equal(false)
+
+    it "rejects reserved DOS device names case insensitively including extensions":
+        val cases = ["CON", "nul.txt", "Aux", "COM1", "lpt9.log"]
+        for candidate in cases:
+            expect(cache_path_policy_v1(candidate).accepted).to_equal(false)
+
+    it "selects one override root and the portable Windows default":
+        expect(cache_root_default_v1("linux", "/mnt/data/simple-cache-manager", "", "/home/u", "/repo")).to_equal("/mnt/data/simple-cache-manager")
+        expect(cache_root_default_v1("windows", "", "C:\\Users\\u\\AppData\\Local", "C:\\Users\\u", "C:\\repo")).to_equal("C:/Users/u/AppData/Local/Simple/cache-manager")
+
+    it "maps user-local cache conventions without reading environment directly":
+        expect(user_local_location_v1("windows", "D:\\Local", "", "C:\\Users\\u")).to_equal("D:/Local")
+        expect(user_local_location_v1("macos", "", "", "/Users/u")).to_equal("/Users/u/Library/Caches")
+        expect(user_local_location_v1("linux", "", "/mnt/cache/u", "/home/u")).to_equal("/mnt/cache/u")
+        expect(cache_location_v1("Simple/cache-manager", "linux", "", "", "/mnt/cache/u", "/home/u", "/repo")).to_equal("/mnt/cache/u/Simple/cache-manager")
+
+    it "falls back without creating a second machine cache root":
+        expect(cache_root_default_v1("linux", "", "", "/home/u", "/repo")).to_equal("/home/u/.cache/simple/cache-manager")
+        expect(cache_root_default_v1("simpleos", "", "", "", "/repo")).to_equal("/repo/.simple/cache-manager")
