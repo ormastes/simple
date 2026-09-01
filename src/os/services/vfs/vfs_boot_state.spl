@@ -220,6 +220,49 @@ pub(package) fn vfs_state_mount_table_lease_restore_v1(
     g_mount_table_active_lease_nonce_v1 = 0u64
     vfs_state_mount_table_unlock_v1()
 
+pub(package) fn vfs_state_mount_table_lease_restore_ready_v1(
+    lease: VfsMountTableLeaseV1
+) -> bool:
+    """Restore one live lease AND publish readiness under a single lock.
+
+    The readiness counterpart of `vfs_state_mount_table_lease_restore_v1`, and
+    the sole publication point for a root staged through a table lease.
+
+    ATOMICITY IS THE WHOLE POINT, and is why this lives here rather than in the
+    transaction. `vfs_nvfs_root_mount_stage_v1` treats `vfs_is_ready()` as "the
+    canonical root is already claimed" and refuses to stage when it is true, so
+    readiness and the restored table must become visible together. Restoring
+    first and setting readiness afterwards would expose a window in which the
+    table carries a published root while the VFS still reports itself unready —
+    exactly the state a second staging attempt is allowed to seize. Setting the
+    flag from the transaction instead would publish readiness with the canonical
+    owner still leased out, i.e. readiness over no reachable table at all.
+
+    Validation, ordering and quarantine behaviour are identical to the plain
+    restore: a stale, double or foreign-epoch restore quarantines the owner and
+    publishes nothing. Readiness is written only after the table value is back
+    under the same uninterrupted lock hold, so a rejected restore can never
+    leave the VFS marked ready.
+    """
+    if not _vfs_state_mount_table_raw_lock_v1(): return false
+    if not g_mount_table_lease_active_v1 or g_mount_table.? or
+        lease.epoch == 0u64 or lease.epoch != g_mount_table_owner_epoch_v1 or
+        lease.nonce == 0u64 or
+        lease.nonce != g_mount_table_active_lease_nonce_v1:
+        g_mount_table_quarantined_v1 = true
+        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
+        return false
+    g_mount_table = Some(lease.table)
+    g_mount_table_lease_active_v1 = false
+    g_mount_table_active_lease_nonce_v1 = 0u64
+    # Same handoff identity the FAT32 production path publishes: the storage
+    # acceptance reason hard-rejects any provider other than "simple-driver",
+    # and this root reached us over the pure-Simple NVMe lease device.
+    g_vfs_initialized = true
+    g_vfs_boot_storage_provider = "simple-driver"
+    g_vfs_boot_storage_pure_simple = true
+    vfs_state_mount_table_unlock_v1()
+
 # Narrow owner port for the server-data namespace.  Only opaque seals and
 # immutable revalidation facts cross this seam; the MountTable and DBFS driver
 # remain owned here.
