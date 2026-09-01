@@ -457,3 +457,27 @@ did not reproduce here).
   `env_keys=`, gated on the existing `SIMPLE_DEBUG_FIELD_ACCESS`. This is the
   attributability this record complained was missing.
 - `SIMPLE_TRAP_SELF_WRITE=1` on `CowEnv::insert` (capped at 8 reports).
+
+### Reproduce test, RED-before / GREEN-after against the fix's OWN parent
+
+`test/01_unit/interpreter/chained_call_self_slot_corruption_spec.spl`
+(3 examples) mirrors the failing shape.
+
+The parent seed was built by reverting **only** `patterns.rs` to
+`f861a2e42e7~1` into a separate `CARGO_TARGET_DIR`, so the one-file change is
+the only variable:
+
+| seed | result |
+|---|---|
+| fix's own parent (only `patterns.rs` reverted) | **3/3 FAIL** — `undefined field 'tag': cannot access field on value of type 'bool'` |
+| with the fix | **3/3 PASS** |
+| pre-existing unfixed seed in `wmvk-x86-3` | 3/3 FAIL (same signature) |
+
+Regression check: `chained_call_receiver_mutation_spec.spl` still passes
+**5/5** on the fixed seed, including
+`it "still writes back a genuine me-method builder chain"` — the case the gate
+must keep admitting.
+
+This spec doubles as the methodology sentinel: it discriminates between the two
+binaries, so the results cannot be a stale-source / cross-worktree artifact.
+`cargo check --release --bin simple` is clean.
