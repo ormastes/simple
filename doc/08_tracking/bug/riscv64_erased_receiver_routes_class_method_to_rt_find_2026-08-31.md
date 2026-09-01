@@ -1,6 +1,8 @@
 # riscv64 mcp row: an erased (`ANY`) receiver routes a user `me` method to `rt_find`, which reads a type header class instances do not have
 
-Status: OPEN — root-caused end to end, no fix shipped.
+Status: DEFECT 1 FIXED (2026-09-01), DEFECT 2 OPEN — the ANY-erasure trap is
+closed by a compiler fix and proven in-guest; the `.bytes()` string-content
+truncation remains and is now the sole blocker on the mcp row.
 Arch: riscv64 freestanding (SimpleOS, OpenSBI `-bios fw_payload`)
 Gate: `scripts/check/check-simpleos-riscv64-components-in-guest-opensbi.shs`
 Filed: 2026-08-31
@@ -357,3 +359,99 @@ every conclusion above rests on a MIR dump or an asserted value.
 
 1. The `--entry-closure` erasure above (blocks the mcp trap).
 2. The separate `.bytes()` / `_bytes_text` truncation (`"MC`), untouched here.
+
+
+## Defect 1 FIXED — 2026-09-01, measured in-guest at `origin/main` c0cae452481
+
+Two commits, both on top of `c0cae452481` (tip = PR #205), seed rebuilt between
+each. Fix direction 1 from the list above, as written — no object-model change,
+no product method renamed, no annotation adopted.
+
+### What was actually wrong: TWO missing rungs, not one
+
+The record above named `lower_static_method_call` as the erasure site and marked
+it "not established". It is not the site. The real chain has two independent
+gaps, and closing either alone leaves the trap intact — measured, not reasoned:
+
+1. **No `fn_return_types` row existed for the callee.** #202 added the qualified
+   `"{Type}.{method}"` return-type capture to `imports.rs`'s `Node::Impl` arm
+   ONLY. `Node::Class`, `Node::Struct` and `Node::Extend` declare their methods
+   INLINE and were left without it. `DispatchRegistry` is a `class` with an
+   inline `static fn new_for_test()`, so it had no row at all — which is exactly
+   why #202's rung "fired zero times" here. Fixed by extracting
+   `record_method_return_type()` and wiring all four arms through it.
+
+   **This alone changed nothing in-guest.** Rerun with only this fix: still
+   `FAIL ... 1 failed: mcp`, serial log still 238,124 lines, row still stopping
+   at `probe m3e`, MIR still emitting a bare `MethodCallStatic{"find"}` on
+   `VReg(75)` with `Load ... ty: TypeId(14)`.
+
+2. **The recovered type name was never applied to the binding's TypeId.**
+   `stmt_lowering.rs:413` looked the name up and stored it in
+   `ctx.static_call_type_hints` — a map with exactly ONE consumer,
+   `expr/access.rs:729`, which handles ambiguous FIELD access. Method-call
+   lowering never reads it. So the local stayed `TypeId::ANY` and MIR still
+   emitted the bare name. Fixed by upgrading `ty` to
+   `self.module.types.lookup(&hint)` when that resolves, keeping the name-hint
+   insert as the fallback for types this module has not registered.
+
+### Evidence
+
+MIR at the gate's real `native-build --entry-closure` invocation, after both
+fixes — both calls qualified, matching the annotation experiment exactly:
+
+```
+func_name: "DispatchRegistry.find"      (2)
+func_name: "DispatchRegistry.register"  (1)
+```
+
+In-guest, same gate, same firmware (`-bios fw_payload`, no `-kernel`, no
+`isa-debug-exit`), seed rebuilt from the patched tree:
+
+| | baseline `c0cae452481` | + fix 1 only | + fix 1 and 2 |
+|---|---|---|---|
+| serial log | 331,773 lines | 238,124 lines | **102 lines** |
+| furthest probe | `m3e` | `m3e` | `m5`, then the real round-trip |
+| verdict | FAIL, 1 failed: mcp | FAIL, 1 failed: mcp | FAIL, 1 failed: mcp |
+
+The trap (a re-entrant kernel loop, not a reset) is gone. The row now reaches
+every previously-unreachable step and fails on the SECOND defect instead:
+
+```
+[mcp] probe m3f me-method self-field READ ok (miss, as expected)
+[mcp] probe m4 register ok
+[mcp] probe m5 AuthorityToken.root_for ok
+[mcp] response {"status":"ok","body":"MC
+[mcp] response {"status":"error","code":"unregistered_tool", ...}
+[mcp] FAIL registered dispatch lost the payload
+```
+
+This is byte-for-byte the controlled experiment's output, now produced by a
+compiler fix rather than a source annotation.
+
+### Regression tests
+
+`native_project/tests.rs`:
+`test_build_import_map_records_class_inline_static_factory_return_type` and
+`test_build_import_map_records_struct_inline_method_return_type`. Both FAIL
+before the `imports.rs` change (`left: None`) and pass after. The struct test
+also covers `me get`, another name in the `is_bare_builtin_collection_method`
+shadow set, so the defect-class neighbour is pinned too.
+
+### Scope of the TypeId upgrade
+
+Gated on `ty == TypeId::ANY`, so an authored type is never overridden; the only
+bindings it can affect are ones that were already erased. Every such site is one
+where an erased receiver was being routed to a builtin instead of its user
+method — i.e. the defect class itself. The latent mis-resolution the record
+notes on x86_64 and aarch64 (where `rt_find` answers `-1` instead of trapping)
+is closed by the same change.
+
+### Still open: defect 2
+
+The `.bytes()` / `_bytes_text` truncation (`body":"MC`) is unchanged and is now
+the only thing keeping the mcp row red. The record's provenance question stands:
+`rt_string_bytes` is not defined in the winning freestanding TU
+(`freestanding_runtime.c`), so `.bytes()` is served by a translation unit that
+may not share this runtime's array/string layout. That investigation was not
+started here.

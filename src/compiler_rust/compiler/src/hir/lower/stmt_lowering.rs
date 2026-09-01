@@ -407,10 +407,41 @@ impl Lowerer {
                 // The name comes from the callee's DECLARED return type, never
                 // from the callee type name itself: `Foo.parse() -> text` must
                 // NOT hint "Foo". No declared row means no hint — never a guess.
+                // When the authored return type is a type this module HAS
+                // registered, upgrade the binding's TypeId outright instead of
+                // stopping at the name hint. The name hint has exactly one
+                // consumer — `expr/access.rs`'s ambiguous-FIELD recovery — so on
+                // its own it leaves the local at ANY, and an ANY receiver makes
+                // MIR emit a BARE `MethodCallStatic{"find"}` whose name
+                // codegen's `is_bare_builtin_collection_method` heuristic routes
+                // to the builtin `rt_find` before any user-method resolution.
+                // That reads a type header class instances do not carry and
+                // traps the riscv64 guest.
+                //
+                // This reproduces exactly what annotating the local
+                // (`var reg: DispatchRegistry = DispatchRegistry.new_for_test()`)
+                // was measured to do in the bug record's controlled experiment:
+                // the local becomes a real TypeId and BOTH `reg.find(...)` and
+                // `reg.register(...)` lower qualified. Riding the existing
+                // TypeId path rather than teaching method-call lowering a second
+                // name-hint mechanism.
+                //
+                // Gated on `ty == TypeId::ANY`, so an authored type is never
+                // overridden: the only bindings affected are ones that were
+                // already erased. The name hint is still recorded when lookup
+                // finds nothing, preserving the registration-independent
+                // field-access recovery for unregistered cross-module types.
+                //
+                // doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
                 if ty == TypeId::ANY {
                     if let Some(init) = &let_stmt.value {
                         if let Some(hint) = self.static_call_return_type_name(init) {
-                            ctx.static_call_type_hints.insert(name.clone(), hint);
+                            match self.module.types.lookup(&hint) {
+                                Some(resolved) if resolved != TypeId::ANY => ty = resolved,
+                                _ => {
+                                    ctx.static_call_type_hints.insert(name.clone(), hint);
+                                }
+                            }
                         }
                     }
                 }
