@@ -337,13 +337,10 @@ impl Lowerer {
         // best-effort ORDERING hint (its prior use), but not sound enough to
         // reject a name on. Only the registry list gates the hard error below.
         let registry_fields: Option<Vec<(String, TypeId)>> =
-            self.module
-                .types
-                .get(struct_ty)
-                .and_then(|hir_ty| match hir_ty {
-                    HirType::Struct { fields: sf, .. } => Some(sf.clone()),
-                    _ => None,
-                });
+            self.module.types.get(struct_ty).and_then(|hir_ty| match hir_ty {
+                HirType::Struct { fields: sf, .. } => Some(sf.clone()),
+                _ => None,
+            });
         let registry_declared: Option<Vec<String>> = registry_fields
             .as_ref()
             .map(|sf| sf.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>());

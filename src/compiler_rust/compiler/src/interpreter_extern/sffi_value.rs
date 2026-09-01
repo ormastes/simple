@@ -384,12 +384,7 @@ pub fn rt_heap_ref_wellformed_fn(args: &[Value]) -> Result<Value, CompileError> 
 
     let is_heap_formed = !matches!(
         value,
-        Value::Nil
-            | Value::Int(_)
-            | Value::UInt { .. }
-            | Value::Float(_)
-            | Value::Float32(_)
-            | Value::Bool(_)
+        Value::Nil | Value::Int(_) | Value::UInt { .. } | Value::Float(_) | Value::Float32(_) | Value::Bool(_)
     );
 
     Ok(Value::Bool(is_heap_formed))

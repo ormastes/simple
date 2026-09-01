@@ -288,8 +288,7 @@ impl Lowerer {
                     }
                 }
                 let has_known_method = candidate_struct_names.iter().any(|name| {
-                    self.has_known_method_for_struct_name(name, field)
-                        || Self::is_builtin_methodful_struct_name(name)
+                    self.has_known_method_for_struct_name(name, field) || Self::is_builtin_methodful_struct_name(name)
                 });
                 // Try to resolve field type via struct name lookup before falling back.
                 // This preserves the real TypeId for self.field.method() chains — without

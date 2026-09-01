@@ -146,9 +146,7 @@ impl Lowerer {
             .as_ref()?
             .get(&format!("{}.{}", type_name, method))?;
         match declared {
-            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => {
-                (!name.is_empty()).then(|| name.clone())
-            }
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => (!name.is_empty()).then(|| name.clone()),
             _ => None,
         }
     }

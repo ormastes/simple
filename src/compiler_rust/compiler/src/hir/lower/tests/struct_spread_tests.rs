@@ -165,10 +165,8 @@ fn ordinary_ranges_still_lower_as_ranges() {
 fn spread_in_a_non_constructor_call_is_a_hard_error() {
     // This is the containment for a genuine prefix-range ARGUMENT: it becomes
     // a loud diagnostic instead of `rt_range(0, <object pointer>)`.
-    let err = parse_and_lower(
-        "fn take(n: i64) -> i64:\n    return n\n\nfn f() -> i64:\n    return take(..n)\n",
-    )
-    .expect_err("must not lower");
+    let err = parse_and_lower("fn take(n: i64) -> i64:\n    return n\n\nfn f() -> i64:\n    return take(..n)\n")
+        .expect_err("must not lower");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("struct spread"),
