@@ -26,23 +26,8 @@ Master plan §5.3 requires ONE artifact manifest covering ELF, SMF, script and n
 | Design | doc/01_research/domain/simpleos_production_host_master_plan.md (§5.3, §5.4, §12) |
 | Research | doc/01_research/domain/simpleos_production_host_master_plan.md |
 | Source | `test/01_unit/os/kernel/loader/artifact_manifest_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
-
-# Unified SimpleArtifactManifest Specification (P2 Process/Loader)
-
-**Feature IDs:** #OS-P2-ARTIFACT-MANIFEST
-**Category:** Runtime / Security
-**Difficulty:** 3/5
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** doc/03_plan/agent_tasks/simpleos_production_harden_parallel.md (lane MAN)
-**Design:** doc/01_research/domain/simpleos_production_host_master_plan.md (§5.3, §5.4, §12)
-**Research:** doc/01_research/domain/simpleos_production_host_master_plan.md
 
 ## Overview
 
@@ -79,34 +64,27 @@ self-referential comparisons.
 
 #### uses the dependency-free common value contract through the loader adapter
 
-- Verify: uses the dependency-free common value contract through the loader adapter
-   - Expected: common_manifest.artifact_kind equals `elf`
-   - Expected: common_manifest.format_version equals `1)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: uses the dependency-free common value contract through the loader adapter")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-UNIT
 val common_manifest: CommonSimpleArtifactManifest = manifest_for_kind(manifest_kind_elf())
 expect(common_manifest.artifact_kind).to_equal("elf")
-expect(common_manifest.format_version).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(common_manifest.format_version).to_equal(1)
 ```
 
 </details>
 
 #### validates a well-formed ELF manifest
 
-- Verify: validates a well-formed ELF manifest
 - the elf skeleton carries elf64 + W^X abi features and app_default namespace
    - Expected: m.artifact_kind equals `elf`
-   - Expected: m.format_version equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: m.format_version equals `1`
    - Expected: m.namespace_template equals `app_default`
 - and it validates against the running target
    - Expected: check.reason equals `ok`
@@ -115,17 +93,14 @@ expect(common_manifest.format_version).to_equal(1)  # oracle: pinned constant as
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: validates a well-formed ELF manifest")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("the elf skeleton carries elf64 + W^X abi features and app_default namespace")
 val m = _elf_ok()
 expect(m.artifact_kind).to_equal("elf")
-expect(m.format_version).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(m.format_version).to_equal(1)
 expect(m.required_abi_features).to_contain("elf64")
 expect(m.required_abi_features).to_contain("w_xor_x")
 expect(m.namespace_template).to_equal("app_default")
@@ -140,21 +115,13 @@ expect(check.reason).to_equal("ok")
 
 #### validates a well-formed SMF manifest
 
-- Verify: validates a well-formed SMF manifest
-   - Expected: m.artifact_kind equals `smf`
-   - Expected: check.reason equals `ok`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: validates a well-formed SMF manifest")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val m = _smf_ok()
 expect(m.artifact_kind).to_equal("smf")
 expect(m.required_abi_features).to_contain("smf1")
@@ -168,22 +135,13 @@ expect(check.reason).to_equal("ok")
 
 #### validates a well-formed script manifest that declares its interpreter
 
-- Verify: validates a well-formed script manifest that declares its interpreter
-   - Expected: m.artifact_kind equals `script`
-   - Expected: m.interpreter equals `/usr/bin/simple`
-   - Expected: check.reason equals `ok`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: validates a well-formed script manifest that declares its interpreter")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val m = _script_ok()
 expect(m.artifact_kind).to_equal("script")
 expect(m.interpreter).to_equal("/usr/bin/simple")
@@ -197,21 +155,13 @@ expect(check.reason).to_equal("ok")
 
 #### validates a well-formed native-Simple manifest
 
-- Verify: validates a well-formed native-Simple manifest
-   - Expected: m.artifact_kind equals `native_simple`
-   - Expected: check.reason equals `ok`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: validates a well-formed native-Simple manifest")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val m = _native_ok()
 expect(m.artifact_kind).to_equal("native_simple")
 expect(m.required_abi_features).to_contain("simple_rt")
@@ -225,20 +175,16 @@ expect(check.reason).to_equal("ok")
 
 #### knows exactly the four artifact kinds
 
-- Verify: knows exactly the four artifact kinds
 - anything else is unknown - no fuzzy prefix matching
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: knows exactly the four artifact kinds")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 assert_true(manifest_kind_is_known("elf"))
 assert_true(manifest_kind_is_known("smf"))
 assert_true(manifest_kind_is_known("script"))
@@ -253,7 +199,6 @@ expect_not(manifest_kind_is_known(""))
 
 #### rejects a manifest with an empty entrypoint
 
-- Verify: rejects a manifest with an empty entrypoint
 - a bare skeleton is deliberately not yet valid
    - Expected: skeleton.entrypoint equals ``
    - Expected: check.reason equals `empty_entrypoint`
@@ -263,13 +208,10 @@ expect_not(manifest_kind_is_known(""))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: rejects a manifest with an empty entrypoint")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("a bare skeleton is deliberately not yet valid")
 val skeleton = manifest_for_kind(manifest_kind_elf())
 expect(skeleton.entrypoint).to_equal("")
@@ -283,21 +225,13 @@ expect(manifest_reason_empty_entrypoint()).to_equal("empty_entrypoint")
 
 #### rejects an unknown artifact kind
 
-- Verify: rejects an unknown artifact kind
-   - Expected: check.reason equals `unknown_artifact_kind`
-   - Expected: manifest_reason_unknown_kind() equals `unknown_artifact_kind`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: rejects an unknown artifact kind")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val m = manifest_with_entrypoint(manifest_for_kind("wasm"), "/usr/bin/thing")
 val check = manifest_validate(m)
 expect_not(check.ok)
@@ -309,7 +243,6 @@ expect(manifest_reason_unknown_kind()).to_equal("unknown_artifact_kind")
 
 #### rejects a target-triple mismatch against the running target
 
-- Verify: rejects a target-triple mismatch against the running target
 - the running target is simpleos/x86_64/simpleos
    - Expected: running.os equals `simpleos`
    - Expected: running.arch equals `x86_64`
@@ -325,13 +258,10 @@ expect(manifest_reason_unknown_kind()).to_equal("unknown_artifact_kind")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: rejects a target-triple mismatch against the running target")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("the running target is simpleos/x86_64/simpleos")
 val running = manifest_running_target()
 expect(running.os).to_equal("simpleos")
@@ -365,23 +295,17 @@ assert_true(manifest_target_matches(anywhere.target, running))
 
 #### rejects a signature that no content hash binds
 
-- Verify: rejects a signature that no content hash binds
-   - Expected: check.reason equals `signature_without_content_hash`
-   - Expected: manifest_reason_signature_without_hash() equals `signature_without_content_hash`
 - the same signature WITH a hash that binds it is accepted
-   - Expected: bound.content_hashes.len() equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: bound.content_hashes.len() equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: rejects a signature that no content hash binds")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val unbound = manifest_with_signature(_elf_ok(), "ed25519:aabbcc", [])
 val check = manifest_validate(unbound)
 expect_not(check.ok)
@@ -391,14 +315,13 @@ expect(manifest_reason_signature_without_hash()).to_equal("signature_without_con
 step("the same signature WITH a hash that binds it is accepted")
 val bound = manifest_with_signature(_elf_ok(), "ed25519:aabbcc", ["blake3:deadbeef"])
 assert_true(manifest_validate(bound).ok)
-expect(bound.content_hashes.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(bound.content_hashes.len()).to_equal(1)
 ```
 
 </details>
 
 #### rejects a script manifest with no interpreter - never defaults one
 
-- Verify: rejects a script manifest with no interpreter - never defaults one
 - the script skeleton has an EMPTY interpreter on purpose
    - Expected: bare.interpreter equals ``
 - so it is rejected rather than run under some assumed default
@@ -410,13 +333,10 @@ expect(bound.content_hashes.len()).to_equal(1)  # oracle: pinned constant assert
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: rejects a script manifest with no interpreter - never defaults one")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("the script skeleton has an EMPTY interpreter on purpose")
 val bare = manifest_with_entrypoint(
     manifest_for_kind(manifest_kind_script()),
@@ -438,22 +358,13 @@ assert_true(manifest_validate(_script_ok()).ok)
 
 #### rejects a manifest from a future format version
 
-- Verify: rejects a manifest from a future format version
-   - Expected: manifest_format_version() equals `1)  # oracle: pinned constant asserted by this scenario`
-   - Expected: check.reason equals `unsupported_format_version`
-   - Expected: manifest_reason_bad_format_version() equals `unsupported_format_version`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: rejects a manifest from a future format version")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val future = SimpleArtifactManifest(
     format_version: 2,
     artifact_kind: manifest_kind_elf(),
@@ -475,7 +386,7 @@ val future = SimpleArtifactManifest(
     signature: "",
     debug_identity: ""
 )
-expect(manifest_format_version()).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(manifest_format_version()).to_equal(1)
 val check = manifest_validate(future)
 expect_not(check.ok)
 expect(check.reason).to_equal("unsupported_format_version")
@@ -486,21 +397,17 @@ expect(manifest_reason_bad_format_version()).to_equal("unsupported_format_versio
 
 #### reports the six rejection reasons as six distinct strings
 
-- Verify: reports the six rejection reasons as six distinct strings
 - a shared reason string would let two failures be confused
-   - Expected: distinct.len() equals `7)  # oracle: pinned constant asserted by this scenario`
+   - Expected: distinct.len() equals `7`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: reports the six rejection reasons as six distinct strings")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("a shared reason string would let two failures be confused")
 val reasons = [
     manifest_reason_ok(),
@@ -519,18 +426,13 @@ for r in reasons:
             seen = true
     if not seen:
         distinct.push(r)
-expect(distinct.len()).to_equal(7)  # oracle: pinned constant asserted by this scenario
+expect(distinct.len()).to_equal(7)
 ```
 
 </details>
 
 #### computes the ELF policy ceiling as READ|EXEC|MAP with concrete bits
 
-- Verify: computes the ELF policy ceiling as READ|EXEC|MAP with concrete bits
-   - Expected: CAP_RIGHT_READ equals `1u32`
-   - Expected: CAP_RIGHT_EXEC equals `4u32`
-   - Expected: CAP_RIGHT_ADMIN equals `8u32`
-   - Expected: CAP_RIGHT_MAP equals `64u32`
 - base rights for elf are 1|4|64 = 69
    - Expected: manifest_kind_base_rights(manifest_kind_elf()) equals `69u32`
    - Expected: manifest_required_rights(_elf_ok()) equals `69u32`
@@ -539,13 +441,10 @@ expect(distinct.len()).to_equal(7)  # oracle: pinned constant asserted by this s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: computes the ELF policy ceiling as READ|EXEC|MAP with concrete bits")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(CAP_RIGHT_READ).to_equal(1u32)
 expect(CAP_RIGHT_EXEC).to_equal(4u32)
 expect(CAP_RIGHT_ADMIN).to_equal(8u32)
@@ -560,7 +459,6 @@ expect(manifest_required_rights(_elf_ok())).to_equal(69u32)
 
 #### never lets any artifact kind request CAP_RIGHT_ADMIN
 
-- Verify: never lets any artifact kind request CAP_RIGHT_ADMIN
 - ADMIN is absent from every kind's allowed mask
    - Expected: manifest_kind_allowed_rights(manifest_kind_elf()) & CAP_RIGHT_ADMIN equals `0u32`
    - Expected: manifest_kind_allowed_rights(manifest_kind_smf()) & CAP_RIGHT_ADMIN equals `0u32`
@@ -574,13 +472,10 @@ expect(manifest_required_rights(_elf_ok())).to_equal(69u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: never lets any artifact kind request CAP_RIGHT_ADMIN")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("ADMIN is absent from every kind's allowed mask")
 expect(manifest_kind_allowed_rights(manifest_kind_elf()) & CAP_RIGHT_ADMIN).to_equal(0u32)
 expect(manifest_kind_allowed_rights(manifest_kind_smf()) & CAP_RIGHT_ADMIN).to_equal(0u32)
@@ -600,7 +495,6 @@ expect(manifest_required_rights(greedy)).to_equal(69u32)
 
 #### never lets a script request EXEC or MOUNT
 
-- Verify: never lets a script request EXEC or MOUNT
 - a script is read and mapped - the INTERPRETER is what executes
    - Expected: manifest_kind_base_rights(manifest_kind_script()) equals `65u32`
    - Expected: manifest_required_rights(_script_ok()) equals `65u32`
@@ -613,13 +507,10 @@ expect(manifest_required_rights(greedy)).to_equal(69u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: never lets a script request EXEC or MOUNT")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("a script is read and mapped - the INTERPRETER is what executes")
 expect(manifest_kind_base_rights(manifest_kind_script())).to_equal(65u32)
 expect(manifest_required_rights(_script_ok())).to_equal(65u32)
@@ -638,22 +529,13 @@ expect(manifest_required_rights(greedy)).to_equal(65u32)
 
 #### gives an unknown artifact kind no rights at all
 
-- Verify: gives an unknown artifact kind no rights at all
-   - Expected: manifest_kind_allowed_rights("wasm") equals `0u32`
-   - Expected: manifest_required_rights(m) equals `0u32`
-   - Expected: manifest_effective_rights(m, 511u32, 511u32) equals `0u32`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: gives an unknown artifact kind no rights at all")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val m = manifest_with_entrypoint(manifest_for_kind("wasm"), "/usr/bin/thing")
 expect(manifest_kind_allowed_rights("wasm")).to_equal(0u32)
 expect(manifest_required_rights(m)).to_equal(0u32)
@@ -664,13 +546,9 @@ expect(manifest_effective_rights(m, 511u32, 511u32)).to_equal(0u32)
 
 #### adds MAP when libraries or startup preloads are declared
 
-- Verify: adds MAP when libraries or startup preloads are declared
-   - Expected: with_libs.native_libraries.len() equals `1)  # oracle: pinned constant asserted by this scenario`
-   - Expected: with_libs.smf_libraries.len() equals `1)  # oracle: pinned constant asserted by this scenario`
-   - Expected: manifest_required_rights(with_libs) & CAP_RIGHT_MAP equals `64u32`
 - a section 12 startup contract rides on the SAME manifest
-   - Expected: with_startup.argument_schema.len() equals `1)  # oracle: pinned constant asserted by this scenario`
-   - Expected: with_startup.startup_preloads.len() equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: with_startup.argument_schema.len() equals `1`
+   - Expected: with_startup.startup_preloads.len() equals `1`
    - Expected: with_startup.startup_preloads[0].mode equals `map_read_only`
    - Expected: manifest_required_rights(with_startup) & CAP_RIGHT_READ equals `1u32`
    - Expected: manifest_required_rights(with_startup) & CAP_RIGHT_MAP equals `64u32`
@@ -679,16 +557,13 @@ expect(manifest_effective_rights(m, 511u32, 511u32)).to_equal(0u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: adds MAP when libraries or startup preloads are declared")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val with_libs = manifest_with_libraries(_smf_ok(), ["libc.so"], ["std.smf"])
-expect(with_libs.native_libraries.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
-expect(with_libs.smf_libraries.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(with_libs.native_libraries.len()).to_equal(1)
+expect(with_libs.smf_libraries.len()).to_equal(1)
 expect(manifest_required_rights(with_libs) & CAP_RIGHT_MAP).to_equal(64u32)
 
 step("a section 12 startup contract rides on the SAME manifest")
@@ -706,8 +581,8 @@ val with_startup = manifest_with_startup(
         hash_policy: "verify"
     )]
 )
-expect(with_startup.argument_schema.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
-expect(with_startup.startup_preloads.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(with_startup.argument_schema.len()).to_equal(1)
+expect(with_startup.startup_preloads.len()).to_equal(1)
 expect(with_startup.startup_preloads[0].mode).to_equal("map_read_only")
 expect(manifest_required_rights(with_startup) & CAP_RIGHT_READ).to_equal(1u32)
 expect(manifest_required_rights(with_startup) & CAP_RIGHT_MAP).to_equal(64u32)
@@ -718,7 +593,6 @@ assert_true(manifest_validate(with_startup).ok)
 
 #### intersects effective rights with BOTH ceilings using concrete bits
 
-- Verify: intersects effective rights with BOTH ceilings using concrete bits
 - parent may delegate READ|WRITE|EXEC = 7
    - Expected: parent equals `7u32`
 - system ceiling is READ|EXEC|ADMIN|MAP = 77
@@ -739,13 +613,10 @@ assert_true(manifest_validate(with_startup).ok)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: intersects effective rights with BOTH ceilings using concrete bits")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("parent may delegate READ|WRITE|EXEC = 7")
 val parent: u32 = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
 expect(parent).to_equal(7u32)
@@ -779,20 +650,13 @@ expect(eff & CAP_RIGHT_ADMIN).to_equal(0u32)
 
 #### cannot amplify past a powerless parent
 
-- Verify: cannot amplify past a powerless parent
-   - Expected: manifest_effective_rights(m, 0u32, 511u32) equals `0u32`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: cannot amplify past a powerless parent")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val m = _elf_ok()
 expect(manifest_effective_rights(m, 0u32, 511u32)).to_equal(0u32)
 assert_true(manifest_rights_within_ceilings(m, 0u32, 511u32))
@@ -802,20 +666,13 @@ assert_true(manifest_rights_within_ceilings(m, 0u32, 511u32))
 
 #### cannot amplify past a powerless system ceiling
 
-- Verify: cannot amplify past a powerless system ceiling
-   - Expected: manifest_effective_rights(m, 511u32, 0u32) equals `0u32`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: cannot amplify past a powerless system ceiling")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val m = _native_ok()
 expect(manifest_effective_rights(m, 511u32, 0u32)).to_equal(0u32)
 ```
@@ -824,21 +681,13 @@ expect(manifest_effective_rights(m, 511u32, 0u32)).to_equal(0u32)
 
 #### keeps script effective rights free of EXEC even when parent holds it
 
-- Verify: keeps script effective rights free of EXEC even when parent holds it
-   - Expected: eff equals `65u32`
-   - Expected: eff & CAP_RIGHT_EXEC equals `0u32`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: keeps script effective rights free of EXEC even when parent holds it")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val parent: u32 = CAP_RIGHT_READ | CAP_RIGHT_EXEC | CAP_RIGHT_MAP
 val system: u32 = CAP_RIGHT_READ | CAP_RIGHT_EXEC | CAP_RIGHT_MAP
 val eff = manifest_effective_rights(_script_ok(), parent, system)
@@ -851,7 +700,6 @@ assert_true(spawn_rights_is_subset(eff, parent))
 
 #### projects launch-metadata entry kinds onto artifact kinds
 
-- Verify: projects launch-metadata entry kinds onto artifact kinds
 - launch_metadata.startup_detect_launch_kind vocabulary
    - Expected: manifest_kind_from_launch_entry_kind("smf") equals `smf`
    - Expected: manifest_kind_from_launch_entry_kind("script") equals `script`
@@ -865,13 +713,10 @@ assert_true(spawn_rights_is_subset(eff, parent))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: projects launch-metadata entry kinds onto artifact kinds")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("launch_metadata.startup_detect_launch_kind vocabulary")
 expect(manifest_kind_from_launch_entry_kind("smf")).to_equal("smf")
 expect(manifest_kind_from_launch_entry_kind("script")).to_equal("script")
@@ -886,11 +731,6 @@ expect(manifest_kind_from_launch_entry_kind("bogus")).to_equal("")
 
 #### adapts a parsed LaunchMetadata into a valid unified manifest
 
-- Verify: adapts a parsed LaunchMetadata into a valid unified manifest
-   - Expected: m.artifact_kind equals `native_simple`
-   - Expected: m.entrypoint equals `/usr/bin/simple`
-   - Expected: m.target.os equals `simpleos`
-   - Expected: manifest_required_rights(m) & CAP_RIGHT_MAP equals `64u32`
 - a cross-target LaunchMetadata is rejected here, not silently run
    - Expected: manifest_validate(cross).reason equals `target_triple_mismatch`
 
@@ -898,13 +738,10 @@ expect(manifest_kind_from_launch_entry_kind("bogus")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: adapts a parsed LaunchMetadata into a valid unified manifest")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val m = manifest_from_launch_metadata(
     "native",
     "simpleos",
@@ -932,19 +769,13 @@ expect(manifest_validate(cross).reason).to_equal("target_triple_mismatch")
 
 #### renders a greppable one-line summary for serial traces
 
-- Verify: renders a greppable one-line summary for serial traces
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: renders a greppable one-line summary for serial traces")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val s = manifest_summary(_script_ok())
 expect(s).to_contain("kind=script")
 expect(s).to_contain("os=simpleos")
@@ -956,7 +787,6 @@ expect(s).to_contain("interp=/usr/bin/simple")
 
 #### builds manifests without mutating the input manifest
 
-- Verify: builds manifests without mutating the input manifest
 - builders are pure - the skeleton must survive being built from
    - Expected: bound.entrypoint equals `/etc/boot.shs`
    - Expected: skeleton.entrypoint equals ``
@@ -968,13 +798,10 @@ expect(s).to_contain("interp=/usr/bin/simple")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: builds manifests without mutating the input manifest")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("builders are pure - the skeleton must survive being built from")
 val skeleton = manifest_for_kind(manifest_kind_script())
 val bound = manifest_with_entrypoint(skeleton, "/etc/boot.shs")
@@ -991,7 +818,6 @@ expect(manifest_validate(bound).reason).to_equal("script_without_interpreter")
 
 #### validates against an explicitly supplied running target
 
-- Verify: validates against an explicitly supplied running target
 - validate_for_target is the pure form validate() delegates to
    - Expected: here.reason equals `target_triple_mismatch`
    - Expected: there.reason equals `ok`
@@ -1000,13 +826,10 @@ expect(manifest_validate(bound).reason).to_equal("script_without_interpreter")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: validates against an explicitly supplied running target")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("validate_for_target is the pure form validate() delegates to")
 val m = manifest_with_target(
     _elf_ok(),
@@ -1028,7 +851,6 @@ expect(there.reason).to_equal("ok")
 
 #### computes the FIPS 180-4 published SHA-256 test vector for 'abc'
 
-- Verify: computes the FIPS 180-4 published SHA-256 test vector for 'abc'
 - absolute oracle - the published KAT, not a self-referential compare
    - Expected: digest equals `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`
 
@@ -1036,13 +858,10 @@ expect(there.reason).to_equal("ok")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: computes the FIPS 180-4 published SHA-256 test vector for 'abc'")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("absolute oracle - the published KAT, not a self-referential compare")
 val digest = manifest_sha256_hex(rt_text_to_bytes("abc"))
 expect(digest).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
@@ -1052,7 +871,6 @@ expect(digest).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff6
 
 #### accepts a manifest whose declared hash matches the REAL artifact bytes
 
-- Verify: accepts a manifest whose declared hash matches the REAL artifact bytes
 - real bytes for a real artifact
 - manifest declares exactly that digest
 - verification computes the SAME hash over the SAME bytes and passes
@@ -1062,13 +880,10 @@ expect(digest).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff6
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: accepts a manifest whose declared hash matches the REAL artifact bytes")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("real bytes for a real artifact")
 val real_bytes = rt_text_to_bytes("#!/usr/bin/simple\nprint \"hello from the real artifact\"\n")
 val real_hex = manifest_sha256_hex(real_bytes)
@@ -1087,7 +902,6 @@ expect(outcome.reason).to_equal(manifest_reason_ok())
 
 #### REJECTS a manifest when the artifact bytes were tampered with (security property)
 
-- Verify: REJECTS a manifest when the artifact bytes were tampered with (security property)
 - the manifest was signed against the ORIGINAL bytes
 - but the bytes actually being loaded were TAMPERED - one byte flipped
 - real SHA-256 of the tampered bytes does not match the declared hash - REJECTED
@@ -1098,13 +912,10 @@ expect(outcome.reason).to_equal(manifest_reason_ok())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: REJECTS a manifest when the artifact bytes were tampered with (security property)")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("the manifest was signed against the ORIGINAL bytes")
 val original_bytes = rt_text_to_bytes("#!/usr/bin/simple\nprint \"hello from the real artifact\"\n")
 val original_hex = manifest_sha256_hex(original_bytes)
@@ -1126,23 +937,15 @@ expect(manifest_reason_content_hash_mismatch()).to_equal("content_hash_mismatch"
 
 #### fails closed when NO content hash is declared - never a vacuous pass
 
-- Verify: fails closed when NO content hash is declared - never a vacuous pass
-   - Expected: m.content_hashes.len() equals `0)  # oracle: pinned constant asserted by this scenario`
-   - Expected: outcome.reason equals `manifest_reason_no_content_hash_declared()`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_ARTIFACT_MANIFEST-001
-step("Verify: fails closed when NO content hash is declared - never a vacuous pass")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val m = _elf_ok()
-expect(m.content_hashes.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(m.content_hashes.len()).to_equal(0)
 val outcome = manifest_verify_content_hash(m, rt_text_to_bytes("anything"))
 expect_not(outcome.ok)
 expect(outcome.reason).to_equal(manifest_reason_no_content_hash_declared())
@@ -1170,36 +973,68 @@ expect(outcome.reason).to_equal(manifest_reason_no_content_hash_declared())
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `07e4b6f1c6befce4305caccab7f747446408adb53bb21f64424f50875879418a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `17774ffb3b2b29f5de13992af156be654dbc548dc87b08756923c4a84102d7b4`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `07e4b6f1c6befce4305caccab7f747446408adb53bb21f64424f50875879418a`.
+Source SHA-256: `17774ffb3b2b29f5de13992af156be654dbc548dc87b08756923c4a84102d7b4`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `07e4b6f1c6befce4305caccab7f747446408adb53bb21f64424f50875879418a`  
+Source SHA-256: `17774ffb3b2b29f5de13992af156be654dbc548dc87b08756923c4a84102d7b4`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **79/100**; effective score: **79/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 79/100
 source: test/01_unit/os/kernel/loader/artifact_manifest_spec.spl
 mirror: doc/06_spec/01_unit/os/kernel/loader/artifact_manifest_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 11 blockers: 0
+  narrative=100 structure=60 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/kernel/loader/artifact_manifest_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/os/kernel/loader/artifact_manifest_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/kernel/loader/artifact_manifest_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, recovery/troubleshooting
+doc/06_spec/01_unit/os/kernel/loader/artifact_manifest_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/loader/artifact_manifest_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/os/kernel/loader/artifact_manifest_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/kernel/loader/artifact_manifest_spec.spl:107:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'uses the dependency-free common value contract through the loader adapter' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/kernel/loader/artifact_manifest_spec.spl:118:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'validates a well-formed ELF manifest' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/loader/artifact_manifest_spec.spl:132:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'validates a well-formed SMF manifest' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/kernel/loader/artifact_manifest_spec.spl:141:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'validates a well-formed script manifest that declares its interpreter' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/kernel/loader/artifact_manifest_spec.spl:150:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'validates a well-formed native-Simple manifest' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/kernel/loader/artifact_manifest_spec.spl:159:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'knows exactly the four artifact kinds' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/loader/artifact_manifest_spec.spl:173:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects a manifest with an empty entrypoint' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

@@ -997,12 +997,16 @@ fn validate_concurrency_api_expr(
         | Expr::Cast { expr: operand, .. }
         | Expr::Spread(operand)
         | Expr::DictSpread(operand)
+        | Expr::StructSpread(operand)
         | Expr::Try(operand)
         | Expr::ForceUnwrap(operand)
         | Expr::ExistsCheck(operand)
-        | Expr::UnwrapOrReturn { expr: operand, .. }
         | Expr::CastOrReturn { expr: operand, .. }
         | Expr::ContractOld(operand) => validate_concurrency_api_expr(file_path, operand, ctx, errors),
+        Expr::UnwrapOrReturn { expr, default } => {
+            validate_concurrency_api_expr(file_path, expr, ctx, errors);
+            validate_concurrency_api_expr(file_path, default, ctx, errors);
+        }
         Expr::If {
             condition,
             then_branch,
@@ -1020,7 +1024,7 @@ fn validate_concurrency_api_expr(
                 validate_concurrency_api_expr(file_path, value, ctx, errors);
             }
         }
-        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
             for node in nodes {
                 validate_concurrency_api_node(file_path, node, ctx, errors);
             }
@@ -1211,12 +1215,16 @@ fn share_nothing_expr(
         | Expr::Cast { expr: operand, .. }
         | Expr::Spread(operand)
         | Expr::DictSpread(operand)
+        | Expr::StructSpread(operand)
         | Expr::Try(operand)
         | Expr::ForceUnwrap(operand)
         | Expr::ExistsCheck(operand)
-        | Expr::UnwrapOrReturn { expr: operand, .. }
         | Expr::CastOrReturn { expr: operand, .. }
         | Expr::ContractOld(operand) => share_nothing_expr(operand, globals, locals, reported, violations),
+        Expr::UnwrapOrReturn { expr, default } => {
+            share_nothing_expr(expr, globals, locals, reported, violations);
+            share_nothing_expr(default, globals, locals, reported, violations);
+        }
         Expr::Index { receiver, index } => {
             share_nothing_expr(receiver, globals, locals, reported, violations);
             share_nothing_expr(index, globals, locals, reported, violations);
@@ -1241,7 +1249,7 @@ fn share_nothing_expr(
                 share_nothing_expr(value, globals, locals, reported, violations);
             }
         }
-        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
             for node in nodes {
                 share_nothing_node(node, globals, locals, reported, violations);
             }

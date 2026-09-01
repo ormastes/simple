@@ -1,0 +1,134 @@
+"""Contract examples for the filesystem block-device identity owner."""
+
+use os.kernel.fs.block_device_identity_owner_v1.{
+    BlockDeviceRegionBindingV1, BlockDeviceIdentityErrorV1,
+    block_device_identity_create_v1, block_device_identity_validate_v1,
+    block_device_identity_replace_v1, block_device_identity_unmount_v1,
+    block_device_identity_pin_v1, block_device_identity_unpin_v1,
+    block_device_identity_quarantine_unpin_v1,
+    block_device_identity_retry_unpin_v1
+}
+
+fn binding(owner_id: u64, generation: u64, base_lba: u64, sectors: u64) -> BlockDeviceRegionBindingV1:
+    BlockDeviceRegionBindingV1(
+        backend_kind: 1u32, backend_owner_id: owner_id,
+        backend_generation: generation, base_lba: base_lba,
+        sector_count: sectors)
+
+describe "block device identity owner v1":
+    it "binds a create-issued seal to the exact backend and region":
+        val exact = binding(7001u64, 3u64, 2048u64, 4096u64)
+        val registration = block_device_identity_create_v1(exact).unwrap()
+        expect(block_device_identity_validate_v1(registration.seal(), exact).unwrap()).to_be(true)
+        match block_device_identity_validate_v1(
+            registration.seal(), binding(7001u64, 3u64, 2049u64, 4096u64)):
+            Err(BlockDeviceIdentityErrorV1.InvalidBinding): pass_do_nothing("expected exact-binding rejection")
+            _: fail("changed region must not validate")
+        block_device_identity_unmount_v1(registration).unwrap()
+
+    it "rejects overlapping active regions of one backend generation":
+        val first = block_device_identity_create_v1(
+            binding(7002u64, 9u64, 100u64, 50u64)).unwrap()
+        match block_device_identity_create_v1(binding(7002u64, 9u64, 149u64, 4u64)):
+            Err(BlockDeviceIdentityErrorV1.RegionConflict): pass_do_nothing("expected overlap rejection")
+            _: fail("overlapping region must be rejected")
+        block_device_identity_unmount_v1(first).unwrap()
+
+    it "requires backend generation change to use replacement":
+        val first = block_device_identity_create_v1(
+            binding(7005u64, 1u64, 10u64, 10u64)).unwrap()
+        match block_device_identity_create_v1(binding(7005u64, 2u64, 100u64, 10u64)):
+            Err(BlockDeviceIdentityErrorV1.RegionConflict): pass_do_nothing("expected generation conflict")
+            _: fail("a new backend generation must not bypass replacement")
+        block_device_identity_unmount_v1(first).unwrap()
+
+    it "invalidates old seals and copied lifecycle authority on replacement":
+        val original = binding(7003u64, 1u64, 500u64, 100u64)
+        val registration = block_device_identity_create_v1(original).unwrap()
+        val copied_registration = registration
+        val replacement = binding(7003u64, 2u64, 500u64, 100u64)
+        val next = block_device_identity_replace_v1(registration, replacement).unwrap()
+        match block_device_identity_validate_v1(copied_registration.seal(), original):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected stale prior seal")
+            _: fail("replacement must invalidate the prior seal")
+        match block_device_identity_unmount_v1(copied_registration):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected consumed lifecycle authority")
+            _: fail("copied prior close authority must be stale")
+        block_device_identity_unmount_v1(next).unwrap()
+
+    it "makes unmount single-use and invalidates observation":
+        val exact = binding(7004u64, 1u64, 900u64, 32u64)
+        val registration = block_device_identity_create_v1(exact).unwrap()
+        val copied_registration = registration
+        val seal = registration.seal()
+        block_device_identity_unmount_v1(registration).unwrap()
+        match block_device_identity_unmount_v1(copied_registration):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected single-use unmount")
+            _: fail("a copied registration must not unmount twice")
+        match block_device_identity_validate_v1(seal, exact):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected invalidated seal")
+            _: fail("unmount must invalidate the seal")
+
+    it "blocks replacement and unmount while an exact region is pinned":
+        val exact = binding(7010u64, 4u64, 4096u64, 512u64)
+        val registration = block_device_identity_create_v1(exact).unwrap()
+        val copied_registration = registration
+        val lease = block_device_identity_pin_v1(registration, exact).unwrap()
+        match block_device_identity_replace_v1(
+            copied_registration, binding(7010u64, 5u64, 4096u64, 512u64)):
+            Err(BlockDeviceIdentityErrorV1.Busy): pass_do_nothing("expected pinned replace rejection")
+            _: fail("replacement must be busy while a pin is live")
+        match block_device_identity_unmount_v1(registration):
+            Err(BlockDeviceIdentityErrorV1.Busy): pass_do_nothing("expected pinned unmount rejection")
+            _: fail("unmount must be busy while a pin is live")
+        block_device_identity_unpin_v1(lease).unwrap()
+        block_device_identity_unmount_v1(copied_registration).unwrap()
+
+    it "binds pin acquisition to the exact device generation and region":
+        val exact = binding(7011u64, 8u64, 8192u64, 1024u64)
+        val registration = block_device_identity_create_v1(exact).unwrap()
+        match block_device_identity_pin_v1(
+            registration, binding(7011u64, 8u64, 8193u64, 1024u64)):
+            Err(BlockDeviceIdentityErrorV1.InvalidBinding): pass_do_nothing("expected exact-region rejection")
+            _: fail("a changed region must not acquire a pin")
+        val lease = block_device_identity_pin_v1(registration, exact).unwrap()
+        val copied_lease = lease
+        block_device_identity_unpin_v1(lease).unwrap()
+        match block_device_identity_unpin_v1(copied_lease):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected consumed pin lease")
+            _: fail("copied pin leases must release at most once")
+        block_device_identity_unmount_v1(registration).unwrap()
+
+    it "keeps an indeterminate unpin busy until exact retry succeeds":
+        val exact = binding(7012u64, 2u64, 16384u64, 256u64)
+        val registration = block_device_identity_create_v1(exact).unwrap()
+        val copied_registration = registration
+        val lease = block_device_identity_pin_v1(registration, exact).unwrap()
+        val copied_lease = lease
+        block_device_identity_quarantine_unpin_v1(lease).unwrap()
+        match block_device_identity_quarantine_unpin_v1(copied_lease):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected single quarantine transition")
+            _: fail("a copied lease must not quarantine the same release twice")
+        match block_device_identity_unpin_v1(copied_lease):
+            Err(BlockDeviceIdentityErrorV1.UnpinIndeterminate): pass_do_nothing("expected explicit retry requirement")
+            _: fail("normal unpin must not clear an indeterminate provider release")
+        match block_device_identity_unmount_v1(registration):
+            Err(BlockDeviceIdentityErrorV1.Busy): pass_do_nothing("expected quarantined pin to remain busy")
+            _: fail("indeterminate provider release must retain the pin")
+        block_device_identity_retry_unpin_v1(copied_lease).unwrap()
+        match block_device_identity_retry_unpin_v1(copied_lease):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected consumed retry lease")
+            _: fail("successful retry must invalidate every copied lease")
+        block_device_identity_unmount_v1(copied_registration).unwrap()
+
+    it "keeps the device busy until every independent pin is released":
+        val exact = binding(7013u64, 6u64, 32768u64, 128u64)
+        val registration = block_device_identity_create_v1(exact).unwrap()
+        val first = block_device_identity_pin_v1(registration, exact).unwrap()
+        val second = block_device_identity_pin_v1(registration, exact).unwrap()
+        block_device_identity_unpin_v1(first).unwrap()
+        match block_device_identity_unmount_v1(registration):
+            Err(BlockDeviceIdentityErrorV1.Busy): pass_do_nothing("expected second pin to retain busy state")
+            _: fail("releasing one of two pins must not permit unmount")
+        block_device_identity_unpin_v1(second).unwrap()
+        block_device_identity_unmount_v1(registration).unwrap()

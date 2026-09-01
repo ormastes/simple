@@ -1,7 +1,6 @@
 # JIT text-return extern segfault
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Status: **Resolved — 2026-05-29.**
 
 ## Status
 

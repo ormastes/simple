@@ -1,4 +1,4 @@
-use simple_parser::ast::Node;
+use simple_parser::ast::{Expr, Node};
 use simple_parser::Parser;
 
 fn parse(src: &str) -> Vec<Node> {
@@ -26,15 +26,13 @@ fn parse_if_else_statement() {
 
 #[test]
 fn parse_capability_scoped_unsafe_block() {
-    let items = parse(
-        "fn call_raw():\n    unsafe(capabilities: [ffi, raw_ptr]):\n        raw_call()",
-    );
+    let items = parse("fn call_raw():\n    unsafe(capabilities: [ffi, raw_ptr]):\n        raw_call()");
     let Node::Function(function) = &items[0] else {
         panic!("expected function");
     };
     assert!(matches!(
         &function.body.statements[0],
-        Node::Expression(simple_parser::ast::Expr::UnsafeBlock(_))
+        Node::Expression(simple_parser::ast::Expr::UnsafeBlock(_, _))
     ));
 }
 
@@ -64,6 +62,128 @@ fn parse_inline_assignment_elif_then_else() {
 #[test]
 fn parse_block_then_inline_elif_and_else_if_chain() {
     parse_ok("if a:\n    reason = \"a\"\nelif b: reason = \"b\"\nelse if c: reason = \"c\"\nelse: reason = \"d\"");
+}
+
+fn assert_inline_if_with_block_elif_keeps_following_sibling(source: &str, expected_body_count: usize) {
+    let items = parse(source);
+    let Node::Function(function) = &items[0] else {
+        panic!("expected function");
+    };
+    assert_eq!(function.body.statements.len(), expected_body_count);
+    let chain_index = function.body.statements.len() - 2;
+    let sibling_index = function.body.statements.len() - 1;
+
+    let Node::Expression(Expr::If {
+        then_branch,
+        else_branch: Some(elif_branch),
+        ..
+    }) = &function.body.statements[chain_index]
+    else {
+        panic!("expected inline if expression with elif branch");
+    };
+    assert!(matches!(then_branch.as_ref(), Expr::MethodCall { .. }));
+
+    let mut branch = elif_branch.as_ref();
+    let mut saw_block_elif = false;
+    loop {
+        match branch {
+            Expr::If {
+                then_branch,
+                else_branch: Some(next),
+                ..
+            } => {
+                match then_branch.as_ref() {
+                    Expr::DoBlock(statements) => {
+                        assert_eq!(statements.len(), 1);
+                        saw_block_elif = true;
+                    }
+                    Expr::MethodCall { .. } => {}
+                    other => panic!("unexpected elif body: {other:?}"),
+                }
+                branch = next.as_ref();
+            }
+            Expr::MethodCall { .. } => break,
+            other => panic!("unexpected terminal else body: {other:?}"),
+        }
+    }
+    assert!(saw_block_elif);
+    assert!(matches!(
+        &function.body.statements[sibling_index],
+        Node::Expression(Expr::MethodCall { .. })
+    ));
+}
+
+#[test]
+fn parse_json_escape_inline_if_with_block_elif_and_following_sibling() {
+    assert_inline_if_with_block_elif_keeps_following_sibling(
+        include_str!("../../../../test/fixtures/parser_import_newline/escape_target.spl"),
+        4,
+    );
+}
+
+#[test]
+fn parse_non_escape_inline_if_with_block_elif_and_following_sibling() {
+    assert_inline_if_with_block_elif_keeps_following_sibling(
+        r#"fn classify(cp: i64) -> text:
+    var parts: [text] = []
+    if cp == 34: parts.push("quote")
+    elif cp < 32:
+        parts.push("control")
+    else: parts.push("plain")
+    parts.join("")
+"#,
+        3,
+    );
+}
+
+#[test]
+fn parse_inline_if_with_block_else_if_inline_else_and_following_sibling() {
+    let items = parse(
+        r#"fn classify(cp: i64) -> text:
+    var parts: [text] = []
+    if cp == 1: parts.push("one")
+    else if cp == 2:
+        parts.push("two")
+    else: parts.push("other")
+    parts.join("")
+"#,
+    );
+    let Node::Function(function) = &items[0] else {
+        panic!("expected function");
+    };
+    assert_eq!(function.body.statements.len(), 3);
+
+    let Node::Expression(Expr::If {
+        then_branch,
+        else_branch: Some(else_if_branch),
+        ..
+    }) = &function.body.statements[1]
+    else {
+        panic!("expected outer inline if expression");
+    };
+    assert!(matches!(then_branch.as_ref(), Expr::MethodCall { .. }));
+
+    let Expr::If {
+        then_branch: else_if_then,
+        else_branch: Some(final_else),
+        ..
+    } = else_if_branch.as_ref()
+    else {
+        panic!("expected nested else-if expression");
+    };
+    let Expr::DoBlock(else_if_statements) = else_if_then.as_ref() else {
+        panic!("expected block-form else-if body");
+    };
+    assert_eq!(else_if_statements.len(), 1);
+    assert!(matches!(
+        &else_if_statements[0],
+        Node::Expression(Expr::MethodCall { .. })
+    ));
+    assert!(matches!(final_else.as_ref(), Expr::MethodCall { .. }));
+    assert!(matches!(
+        &function.body.statements[2],
+        Node::Expression(Expr::MethodCall { .. })
+    ));
 }
 
 #[test]
@@ -431,9 +551,7 @@ fn parse_inline_match_call_arg_terminated_by_comma() {
 #[test]
 fn parse_inline_match_last_call_arg_terminated_by_rparen() {
     // The `)` shares the last arm's line, so no Dedent has been flushed.
-    parse_ok(
-        "fn f(x: i64) -> text:\n    return take_flipped(x, match x:\n        1: \"one\"\n        _: \"other\")",
-    );
+    parse_ok("fn f(x: i64) -> text:\n    return take_flipped(x, match x:\n        1: \"one\"\n        _: \"other\")");
 }
 
 #[test]

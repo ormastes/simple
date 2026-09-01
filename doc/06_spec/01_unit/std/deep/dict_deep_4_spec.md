@@ -1,143 +1,244 @@
 # @manual: primary
 
-> Purpose: Pin dict_deep behavior with real computed-value oracles so regressions in the
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 38 | 38 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# @manual: primary
-
-Purpose: Pin dict_deep behavior with real computed-value oracles so regressions in the
+# STDLIB Deep-Dive Test
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Category | Standard Library |
-| Status | Active |
+| Feature IDs | #STDLIB-DEEP |
+| Category | Standard Library Deep Coverage |
+| Status | Implemented |
 | Source | `test/01_unit/std/deep/dict_deep_4_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Purpose: Pin dict_deep behavior with real computed-value oracles so regressions in the
-stdlib surface this spec covers fail loudly instead of passing vacuously.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-LIB-DICT-DEEP-c958
-doc/01_research/local/REQ-LIB-DICT-DEEP-c958.md
-doc/03_plan/sys_test/REQ-LIB-DICT-DEEP-c958.md
-doc/04_architecture/REQ-LIB-DICT-DEEP-c958.md
-doc/05_design/REQ-LIB-DICT-DEEP-c958.md
 
 ## Scenarios
 
-### dict_deep stdlib behavior oracles
+### Dict Deep Coverage
 
-#### comparison ordering
+#### reads back a value stored under a key
 
-- Verify: comparison ordering
-   - Expected: 1 < 2 is true
-   - Expected: 2 <= 2 is true
-   - Expected: 3 > 4 is false
-   - Expected: 5 == 5 is true
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-LIB-DICT-001
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-# @req: REQ-LIB-DICT-DEEP-c958
-step("Verify: comparison ordering")
-# oracle: transitive i64 ordering as written
-expect(1 < 2).to_equal(true)
-expect(2 <= 2).to_equal(true)
-expect(3 > 4).to_equal(false)
-expect(5 == 5).to_equal(true)
-```
-
-</details>
-
-#### integer arithmetic and abs
-
-- Verify: integer arithmetic and abs
-   - Expected: abs(-5) equals `5)  # oracle: pinned constant asserted by this scenario`
-   - Expected: 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 equals `1024)  # oracle: pinned constant asserted by this scenario`
-   - Expected: 7 / 2 equals `3)  # oracle: pinned constant asserted by this scenario`
-   - Expected: 7 % 3 equals `1)  # oracle: pinned constant asserted by this scenario`
+- reads back a value stored under a key
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-DICT-001
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-# @req: REQ-LIB-DICT-DEEP-c958
-step("Verify: integer arithmetic and abs")
-# oracle: 5 — abs(-5) is the absolute value; 1024 — 2^10
-expect(abs(-5)).to_equal(5)  # oracle: pinned constant asserted by this scenario
-expect(2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2).to_equal(1024)  # oracle: pinned constant asserted by this scenario
-expect(7 / 2).to_equal(3)  # oracle: pinned constant asserted by this scenario
-expect(7 % 3).to_equal(1)  # oracle: pinned constant asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("reads back a value stored under a key")
+val d = {"a": 1}
+check(d["a"] == 1)
 ```
 
 </details>
 
-#### float math min max sqrt floor ceil
+#### keeps distinct keys distinct
 
-- Verify: float math min max sqrt floor ceil
-   - Expected: min(3.0, 7.0) equals `3.0`
-   - Expected: max(3.0, 7.0) equals `7.0`
-   - Expected: sqrt(16.0) equals `4.0`
-   - Expected: floor(2.7) equals `2.0`
-   - Expected: ceil(2.1) equals `3.0`
+- keeps distinct keys distinct
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-DICT-001
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-# @req: REQ-LIB-DICT-DEEP-c958
-step("Verify: float math min max sqrt floor ceil")
-# oracle: 3.0/7.0 — min/max pick the smaller/larger operand; 4.0 — sqrt(16)
-expect(min(3.0, 7.0)).to_equal(3.0)
-expect(max(3.0, 7.0)).to_equal(7.0)
-expect(sqrt(16.0)).to_equal(4.0)
-expect(floor(2.7)).to_equal(2.0)
-expect(ceil(2.1)).to_equal(3.0)
+# @req REQ-SSPEC-UNIT
+step("keeps distinct keys distinct")
+val d = {"a": 1, "b": 2}
+check(d["a"] == 1 and d["b"] == 2)
 ```
 
 </details>
 
-#### text case conversion
+#### reports key presence and absence
 
-- Verify: text case conversion
-   - Expected: "hello".upper() equals `HELLO`
-   - Expected: "HELLO".lower() equals `hello`
-   - Expected: "Hello".upper() equals `HELLO`
+- reports key presence and absence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("reports key presence and absence")
+val d = {"a": 1, "b": 2}
+check(d.contains_key("a"))
+check(not d.contains_key("zzz"))
+```
+
+</details>
+
+#### counts keys via keys().len()
+
+- counts keys via keys().len()
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("counts keys via keys().len()")
+val d = {"a": 1, "b": 2, "c": 3}
+check(d.keys().len() == 3)
+```
+
+</details>
+
+#### an empty dict has no keys and reports no membership
+
+- an empty dict has no keys and reports no membership
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("an empty dict has no keys and reports no membership")
+val d = {}
+check(d.keys().len() == 0)
+check(not d.contains_key("a"))
+```
+
+</details>
+
+#### a later duplicate key overwrites the earlier value
+
+- a later duplicate key overwrites the earlier value
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("a later duplicate key overwrites the earlier value")
+val d = {"k": 1, "k": 2}
+check(d["k"] == 2)
+check(d.keys().len() == 1)
+```
+
+</details>
+
+#### distinguishes a stored zero from an absent key
+
+- distinguishes a stored zero from an absent key
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("distinguishes a stored zero from an absent key")
+val d = {"z": 0}
+check(d["z"] == 0)
+check(d.contains_key("z"))
+check(not d.contains_key("missing"))
+```
+
+</details>
+
+#### keys are case sensitive
+
+- keys are case sensitive
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("keys are case sensitive")
+val d = {"a": 1, "A": 2}
+check(d["a"] == 1)
+check(d["A"] == 2)
+check(d.keys().len() == 2)
+```
+
+</details>
+
+#### handles an empty-string key
+
+- handles an empty-string key
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("handles an empty-string key")
+val d = {"": 7}
+check(d[""] == 7)
+check(d.contains_key(""))
+```
+
+</details>
+
+#### stores text values, not just integers
+
+- stores text values, not just integers
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("stores text values, not just integers")
+val d = {"name": "simple"}
+check(d["name"] == "simple")
+```
+
+</details>
+
+#### every inserted key appears in keys()
+
+- every inserted key appears in keys()
 
 
 <details>
@@ -147,52 +248,382 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-DICT-001
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-# @req: REQ-LIB-DICT-DEEP-c958
-step("Verify: text case conversion")
-# oracle: "HELLO"/"hello" — upper/lower are exact case maps
-expect("hello".upper()).to_equal("HELLO")
-expect("HELLO".lower()).to_equal("hello")
-expect("Hello".upper()).to_equal("HELLO")
+# @req REQ-SSPEC-UNIT
+step("every inserted key appears in keys()")
+val d = {"a": 1, "b": 2, "c": 3}
+var seen = 0
+for k in d.keys():
+    if d.contains_key(k):
+        seen = seen + 1
+check(seen == 3)
 ```
 
 </details>
 
-#### text split trim contains prefix
+#### arr 1
 
-- Verify: text split trim contains prefix
-   - Expected: "hello world".split(" ").len() equals `2)  # oracle: pinned constant asserted by this scenario`
-   - Expected: "  x  ".trim() equals `x`
-   - Expected: "hello" contains `ell`
-   - Expected: "hello".starts_with("he") is true
+- arr 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-DICT-001
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-# @req: REQ-LIB-DICT-DEEP-c958
-step("Verify: text split trim contains prefix")
-# oracle: 2 — "hello world" splits into 2 fields on a single space
-expect("hello world".split(" ").len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
-expect("  x  ".trim()).to_equal("x")
-expect("hello".contains("ell")).to_equal(true)
-expect("hello".starts_with("he")).to_equal(true)
+# @req REQ-SSPEC-UNIT
+step("arr 1")
+
+val a = [1,2,3]
+check(a.len() == 3)
 ```
 
 </details>
 
-#### text replace
+#### arr 2
 
-- Verify: text replace
-   - Expected: "hello".replace("l", "L") equals `heLLo`
-   - Expected: "aaa".replace("a", "b") equals `bbb`
+- arr 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("arr 2")
+val a = []
+check(a.len() == 0)
+```
+
+</details>
+
+#### arr 3
+
+- arr 3
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("arr 3")
+val a = [1, 2, 3]
+check(a.len() == 3)
+```
+
+</details>
+
+#### arr 4
+
+- arr 4
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("arr 4")
+val a = [1,2,3]
+check(a.len() == 3)
+```
+
+</details>
+
+#### arr 5
+
+- arr 5
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("arr 5")
+var a = [1,2]
+val b = a.append(3)
+check(b.len() == 3)
+```
+
+</details>
+
+#### str 1
+
+- str 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 1")
+
+check("".len() == 0)
+```
+
+</details>
+
+#### str 2
+
+- str 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 2")
+check("a".len() == 1)
+```
+
+</details>
+
+#### str 3
+
+- str 3
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 3")
+check("test".len() == 4)
+```
+
+</details>
+
+#### str 4
+
+- str 4
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 4")
+check("hello".contains("ell"))
+```
+
+</details>
+
+#### str 5
+
+- str 5
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 5")
+check("test".starts_with("te"))
+```
+
+</details>
+
+#### str 6
+
+- str 6
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 6")
+check("test".ends_with("st"))
+```
+
+</details>
+
+#### opt 1
+
+- opt 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("opt 1")
+
+val o = Some(1)
+check(o.?)
+```
+
+</details>
+
+#### opt 2
+
+- opt 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("opt 2")
+val o = nil
+check(not o.?)
+```
+
+</details>
+
+#### opt 3
+
+- opt 3
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("opt 3")
+val o = Some(42)
+check(o? == 42)
+```
+
+</details>
+
+#### opt 4
+
+- opt 4
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("opt 4")
+val o = nil
+check((o ?? 99) == 99)
+```
+
+</details>
+
+#### dict 1
+
+- dict 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("dict 1")
+
+val d = {"a": 1}
+check(d["a"] == 1)
+```
+
+</details>
+
+#### dict 2
+
+- dict 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("dict 2")
+# was: `val d = {}` then `check(true)` — bound the dict and then
+# ignored it, asserting a constant instead.
+val d = {}
+check(d.keys().len() == 0)
+```
+
+</details>
+
+#### dict 3
+
+- dict 3
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("dict 3")
+val d = {"a": 1, "b": 2}
+check(d["a"] == 1)
+```
+
+</details>
+
+#### if 1
+
+- if 1
 
 
 <details>
@@ -202,14 +633,192 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-DICT-001
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-# @req: REQ-LIB-DICT-DEEP-c958
-step("Verify: text replace")
-# oracle: "heLLo" — every 'l' replaced by 'L'
-expect("hello".replace("l", "L")).to_equal("heLLo")
-expect("aaa".replace("a", "b")).to_equal("bbb")
+# @req REQ-SSPEC-UNIT
+step("if 1")
+
+if true:
+    check(true)
+else:
+    check(false)
 ```
+
+</details>
+
+#### if 2
+
+- if 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("if 2")
+if false:
+    check(false)
+else:
+    check(true)
+```
+
+</details>
+
+#### if 3
+
+- if 3
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("if 3")
+val x = 10
+if x > 5:
+    check(true)
+else:
+    check(false)
+```
+
+</details>
+
+#### for 1
+
+- for 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("for 1")
+
+var c = 0
+for i in 0..5:
+    c = c + 1
+check(c == 5)
+```
+
+</details>
+
+#### for 2
+
+- for 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("for 2")
+
+var s = 0
+for i in 0..10:
+    s = s + i
+check(s == 45)
+```
+
+</details>
+
+#### match 1
+
+- match 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("match 1")
+
+match Some(1):
+    Some(x): check(x == 1)
+    nil: check(false)
+```
+
+</details>
+
+#### match 2
+
+- match 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("match 2")
+
+match nil:
+    Some(x): check(false)
+    nil: check(true)
+```
+
+</details>
+
+#### nested 1
+
+- nested 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("nested 1")
+
+# was: `check(true)` in the inner loop — the loops ran but nothing
+# about them was observed. Now the iteration count is the assertion.
+var n = 0
+for i in 0..3:
+    for j in 0..3:
+        n = n + 1
+check(n == 9)
+```
+
+</details>
+
+#### complex 1
+
+- complex 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("complex 1")
 
 </details>
 
@@ -267,8 +876,8 @@ expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 38 |
+| Active scenarios | 38 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -276,39 +885,50 @@ expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `48f04eb26821213ac5cfaa65fd18e2e3a9af797ecdae852ec15a1d8e78d009b7`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `7c32ceda151a177e6cff8d3e67b0b864cbe2426eade1a24a7fa3682fc01e1cdd`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `48f04eb26821213ac5cfaa65fd18e2e3a9af797ecdae852ec15a1d8e78d009b7`.
+Source SHA-256: `7c32ceda151a177e6cff8d3e67b0b864cbe2426eade1a24a7fa3682fc01e1cdd`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `48f04eb26821213ac5cfaa65fd18e2e3a9af797ecdae852ec15a1d8e78d009b7`  
+Source SHA-256: `7c32ceda151a177e6cff8d3e67b0b864cbe2426eade1a24a7fa3682fc01e1cdd`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 88/100
+SSpec documentization score: 92/100
 source: test/01_unit/std/deep/dict_deep_4_spec.spl
 mirror: doc/06_spec/01_unit/std/deep/dict_deep_4_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/std/deep/dict_deep_4_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/std/deep/dict_deep_4_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/std/deep/dict_deep_4_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/std/deep/dict_deep_4_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/std/deep/dict_deep_4_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/std/deep/dict_deep_4_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reads back a value stored under a key' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/deep/dict_deep_4_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps distinct keys distinct' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/deep/dict_deep_4_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports key presence and absence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

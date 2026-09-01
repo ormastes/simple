@@ -65,6 +65,18 @@ fn clear_last_error() {
     LAST_ERROR.lock().clear();
 }
 
+fn unavailable(name: &str, operation: &str) -> CompileError {
+    let message = format!("{name}: {operation} is unavailable in the interpreter 2D physics provider");
+    set_last_error(message.clone());
+    CompileError::runtime(message)
+}
+
+fn invalid_handle(name: &str, kind: &str, id: i64) -> CompileError {
+    let message = format!("{name}: invalid {kind} handle: {id}");
+    set_last_error(message.clone());
+    CompileError::runtime(message)
+}
+
 #[derive(Clone)]
 struct ContactRecord {
     collider1: i64,
@@ -94,7 +106,6 @@ fn get_i64(args: &[Value], index: usize, func: &str) -> Result<i64, CompileError
 fn get_f64(args: &[Value], index: usize, func: &str) -> Result<f64, CompileError> {
     match args.get(index) {
         Some(Value::Float(v)) => Ok(*v),
-        Some(Value::Float32(v)) => Ok(f64::from(*v)),
         Some(Value::Int(v)) => Ok(*v as f64),
         _ => Err(wrong_arg_type(func, index, "float")),
     }
@@ -114,7 +125,6 @@ fn get_f64_array(args: &[Value], index: usize, func: &str) -> Result<Vec<f64>, C
             for value in values.iter() {
                 match value {
                     Value::Float(v) => out.push(*v),
-                    Value::Float32(v) => out.push(f64::from(*v)),
                     Value::Int(v) => out.push(*v as f64),
                     _ => return Err(wrong_arg_type(func, index, "[f64]")),
                 }
@@ -336,19 +346,19 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         "rt_rapier2d_world_free" => {
             clear_last_error();
             let world_id = get_i64(args, 0, name)?;
-            WORLDS.lock().remove(&world_id);
-            Ok(Value::Bool(true))
+            Ok(Value::Bool(WORLDS.lock().remove(&world_id).is_some()))
         }
         "rt_rapier2d_world_step" => {
             clear_last_error();
             let world_id = get_i64(args, 0, name)?;
             let dt = get_f64(args, 1, name)?;
             let mut worlds = WORLDS.lock();
-            if let Some(world) = worlds.get_mut(&world_id) {
-                let body_ids: Vec<i64> = world.bodies.keys().copied().collect();
-                for body_id in body_ids {
-                    resolve_dynamic_body(world, body_id, dt);
-                }
+            let Some(world) = worlds.get_mut(&world_id) else {
+                return Err(invalid_handle(name, "world", world_id));
+            };
+            let body_ids: Vec<i64> = world.bodies.keys().copied().collect();
+            for body_id in body_ids {
+                resolve_dynamic_body(world, body_id, dt);
             }
             Ok(Value::Bool(true))
         }
@@ -357,10 +367,12 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let world_id = get_i64(args, 0, name)?;
             let gravity_x = get_f64(args, 1, name)?;
             let gravity_y = get_f64(args, 2, name)?;
-            if let Some(world) = WORLDS.lock().get_mut(&world_id) {
-                world.gravity_x = gravity_x;
-                world.gravity_y = gravity_y;
-            }
+            let mut worlds = WORLDS.lock();
+            let Some(world) = worlds.get_mut(&world_id) else {
+                return Err(invalid_handle(name, "world", world_id));
+            };
+            world.gravity_x = gravity_x;
+            world.gravity_y = gravity_y;
             Ok(Value::Bool(true))
         }
         "rt_rapier2d_body_new_dynamic" | "rt_rapier2d_body_new_static" | "rt_rapier2d_body_new_kinematic" => {
@@ -426,11 +438,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     ]));
                 }
             }
-            Ok(Value::Tuple(vec![
-                Value::Float(0.0),
-                Value::Float(0.0),
-                Value::Float(0.0),
-            ]))
+            Err(invalid_handle(name, "body", body_id))
         }
         "rt_rapier2d_body_set_position" => {
             clear_last_error();
@@ -464,11 +472,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     ]));
                 }
             }
-            Ok(Value::Tuple(vec![
-                Value::Float(0.0),
-                Value::Float(0.0),
-                Value::Float(0.0),
-            ]))
+            Err(invalid_handle(name, "body", body_id))
         }
         "rt_rapier2d_body_set_velocity" => {
             clear_last_error();
@@ -813,15 +817,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     Value::Float(contact.penetration),
                 ]));
             }
-            Ok(Value::Tuple(vec![
-                Value::Int(0),
-                Value::Int(0),
-                Value::Float(0.0),
-                Value::Float(0.0),
-                Value::Float(0.0),
-                Value::Float(0.0),
-                Value::Float(0.0),
-            ]))
+            Err(invalid_handle(name, "contact-list or contact index", list_id))
         }
         "rt_rapier2d_contacts_free" => {
             clear_last_error();
@@ -845,20 +841,13 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             }
             Ok(Value::Bool(false))
         }
-        "rt_rapier2d_world_cast_ray" => {
-            set_last_error("ray casting is not implemented by the interpreter 2D physics runtime");
-            Ok(Value::Tuple(vec![Value::Bool(false), Value::Int(0), Value::Float(0.0)]))
-        }
+        "rt_rapier2d_world_cast_ray" => Err(unavailable(name, "ray casting")),
         "rt_rapier2d_joint_distance"
         | "rt_rapier2d_joint_revolute"
         | "rt_rapier2d_joint_prismatic"
-        | "rt_rapier2d_joint_fixed" => {
-            set_last_error("joints are not implemented by the interpreter 2D physics runtime");
-            Ok(Value::Int(0))
-        }
+        | "rt_rapier2d_joint_fixed" => Err(unavailable(name, "joint creation")),
         "rt_rapier2d_joint_free" | "rt_rapier2d_joint_set_limits" | "rt_rapier2d_joint_set_motor" => {
-            set_last_error("joints are not implemented by the interpreter 2D physics runtime");
-            Ok(Value::Bool(false))
+            Err(unavailable(name, "joint operation"))
         }
         "rt_rapier2d_world_body_count" => {
             clear_last_error();
@@ -880,11 +869,54 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 .unwrap_or(0);
             Ok(Value::Int(count))
         }
-        "rt_rapier2d_world_joint_count" => {
-            clear_last_error();
-            Ok(Value::Int(0))
-        }
+        "rt_rapier2d_world_joint_count" => Err(unavailable(name, "joint counting")),
         "rt_rapier2d_get_last_error" => Ok(Value::text(LAST_ERROR.lock().clone())),
         _ => Err(unknown_function(name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_operations_are_errors_not_fabricated_values() {
+        for name in [
+            "rt_rapier2d_world_cast_ray",
+            "rt_rapier2d_joint_distance",
+            "rt_rapier2d_joint_free",
+            "rt_rapier2d_world_joint_count",
+        ] {
+            let error = dispatch(name, &[]).expect_err("unimplemented operation must fail closed");
+            assert!(
+                error.message().contains("unavailable"),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_body_getters_are_errors_not_zero_tuples() {
+        let args = [Value::Int(i64::MAX), Value::Int(i64::MAX)];
+        for name in ["rt_rapier2d_body_get_position", "rt_rapier2d_body_get_velocity"] {
+            let error = dispatch(name, &args).expect_err("missing body must fail closed");
+            assert!(
+                error.message().contains("invalid body handle"),
+                "unexpected error for {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_contact_is_an_error_not_a_zero_record() {
+        let args = [Value::Int(i64::MAX), Value::Int(0)];
+        let error = dispatch("rt_rapier2d_contacts_get", &args).expect_err("missing contact must fail closed");
+        assert!(error.message().contains("invalid contact-list"));
+    }
+
+    #[test]
+    fn freeing_a_missing_world_reports_false() {
+        let result = dispatch("rt_rapier2d_world_free", &[Value::Int(i64::MAX)]).unwrap();
+        assert_eq!(result, Value::Bool(false));
     }
 }

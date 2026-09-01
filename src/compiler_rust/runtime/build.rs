@@ -15,9 +15,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../compiler/src/codegen/runtime_sffi.rs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_process.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_fork.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
@@ -40,6 +39,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_NATIVE_ALL_PROVIDER");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_SYMBOL_TABLE");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_TLS");
 
     compile_c_runtime_sources();
 
@@ -54,6 +54,7 @@ fn main() {
     let runtime_c_dir = manifest_dir.join("../../runtime");
     let runtime_symbol_table = env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some();
     let runtime_regex = env::var_os("CARGO_FEATURE_RUNTIME_REGEX").is_some();
+    let runtime_tls = env::var_os("CARGO_FEATURE_RUNTIME_TLS").is_some();
 
     // Symbols provided by simple-native-all when driver-hooks is active.
     let driver_hooks = env::var_os("CARGO_FEATURE_DRIVER_HOOKS").is_some();
@@ -96,7 +97,8 @@ fn main() {
     }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let defined_symbols = collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex, &target_os);
+    let defined_symbols =
+        collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex, runtime_tls, &target_os);
 
     generated.push_str("#[allow(clashing_extern_declarations)]\n");
     generated.push_str("mod exported_symbols {\n");
@@ -159,22 +161,29 @@ fn runtime_symbol_declaration(
         "rt_ptr_write_bytes_raw" => "(addr: i64, offset: i64, src: *const u8, len: i64) -> i64",
         "rt_memset" => "(dst: *mut u8, val: i8, n: i64) -> *mut u8",
         "rt_memcpy" => "(dst: *mut u8, src: *const u8, n: i64) -> *mut u8",
-        "rt_atomic_compare_exchange" =>
-            "(atomic: i64, expected: i64, new_value: i64, result_ptr: *mut i64) -> i64",
+        "rt_atomic_compare_exchange" => "(atomic: i64, expected: i64, new_value: i64, result_ptr: *mut i64) -> i64",
         "rt_atomic_bool_new" => "(initial: bool) -> i64",
         "rt_atomic_bool_load" => "(handle: i64) -> bool",
         "rt_atomic_bool_store" => "(handle: i64, value: bool)",
         "rt_atomic_bool_swap" => "(handle: i64, value: bool) -> bool",
-        "rt_atomic_int_compare_exchange" =>
-            "(handle: i64, current: i64, new_value: i64) -> bool",
+        "rt_atomic_bool_compare_exchange" => "(handle: i64, current: bool, new_value: bool) -> bool",
+        "rt_atomic_bool_fetch_and" => "(handle: i64, value: bool) -> bool",
+        "rt_atomic_bool_fetch_or" => "(handle: i64, value: bool) -> bool",
+        "rt_atomic_bool_fetch_not" => "(handle: i64) -> bool",
+        // The callable SFFI tier models booleans as I8, but this linker-anchor
+        // declaration shares a scope with the Rust wrapper's C `bool` ABI.
+        // Keep the declaration identical to the wrapper to avoid two
+        // incompatible Rust declarations for one link name.
+        "rt_progress_tls_is_initialized" => "() -> bool",
+        "rt_atomic_int_compare_exchange" => "(handle: i64, current: i64, new_value: i64) -> bool",
         "rt_atomic_flag_test_and_set" => "(handle: i64) -> bool",
-        "rt_file_mmap" =>
-            "(addr: *mut u8, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *mut u8",
+        "rt_atomic_flag_load" => "(handle: i64) -> bool",
+        "rt_spin_loop_hint" => "()",
+        "rt_file_mmap" => "(addr: *mut u8, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *mut u8",
         "rt_file_munmap" => "(addr: *mut u8, length: u64) -> i32",
         "rt_file_madvise" => "(addr: *mut u8, length: u64, advice: i32) -> i32",
         "rt_file_msync" => "(addr: *mut u8, length: u64, flags: i32) -> i32",
-        "rt_file_lock" =>
-            "(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64",
+        "rt_file_lock" => "(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64",
         "rt_file_unlock" => "(handle: i64) -> bool",
         "rt_file_read_text_at_checked" => "(path: i64, offset: i64, size: i64) -> i64",
         "rt_time_now_nanos" | "rt_time_now_micros" | "rt_time_now_unix_micros" => "() -> i64",
@@ -202,9 +211,7 @@ fn canonical_runtime_symbol_declaration(
         [ty] => format!(" -> {}", rust_abi_type(ty)),
         many => {
             let tuple = many.iter().map(|ty| rust_abi_type(ty)).collect::<Vec<_>>().join(", ");
-            return format!(
-                "#[allow(improper_ctypes)]\n        pub fn {alias}({params}) -> ({tuple});"
-            );
+            return format!("#[allow(improper_ctypes)]\n        pub fn {alias}({params}) -> ({tuple});");
         }
     };
     format!("pub fn {alias}({params}){result};")
@@ -226,6 +233,7 @@ fn compile_c_runtime_sources() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let native_all_provider = env::var_os("CARGO_FEATURE_NATIVE_ALL_PROVIDER").is_some();
     let mut c_sources = vec![
+        "runtime_backend_plugin.c",
         "runtime_memory.c",
         "runtime_time.c",
         "runtime_timestamp.c",
@@ -288,9 +296,8 @@ fn compile_c_runtime_sources() {
         // baremetal object and the freestanding sysroot archives never get the
         // hosted one, so neither lane needs -z muldefs. Do NOT add
         // startup/baremetal/runtime_log.c to this list), and the standalone
-        // rt_socket_set_nonblocking
-        // extraction (see that file's header comment for why the whole
-        // async_linux_epoll.c it was extracted from is not linked here).
+        // prepare/commit/mask syscall shim used by the canonical Pure-Simple
+        // rt_socket_set_nonblocking owner.
         // runtime_framebuffer.c (rt_fb_*, 2 names) already appears above in
         // this same list -- only its interpreter dispatch entry was missing.
         "runtime_image.c",
@@ -306,34 +313,19 @@ fn compile_c_runtime_sources() {
         // also declares extern "C" live in runtime_packed_span.c, also never
         // registered here.
         "runtime_packed_span.c",
-        // rt_process_run_owned_bounded_value + rt_process_owned_* (Vulkan
+        // rt_process_run_owned_bounded_value / observed sibling + rt_process_owned_* (Vulkan
         // Engine2D native-JIT blocker, doc/08_tracking/bug/
         // vulkan_engine2d_native_jit_missing_rt_struct_receiver_valid_2026-08-12.md
         // follow-up): the names are in the runtime_symbols.rs manifest and
         // declared by JIT codegen, but this list never included the source
         // file, so the JIT hit "unresolved external symbol
-        // 'rt_process_run_owned_bounded_value'" and dropped whole modules to
+        // 'rt_process_run_owned_bounded_value' (or observed sibling)" and dropped whole modules to
         // the interpreter. Its only cross-file C dependency, rt_free_deep
         // (runtime_native.c, not compiled here), is swapped for the Rust
         // rt_string_free via SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE below --
         // exact-equivalent since every value it deep-frees is a string.
         // Re-added after the tree-wipe restore ae55a746719 dropped it again.
         "runtime_process_owned.c",
-        // rt_process_*_piped / rt_process_read_stdout_checked /
-        // rt_process_is_alive_checked / rt_process_write_stdin_some /
-        // rt_process_close_piped / rt_process_is_alive / rt_browser_renderer_* /
-        // rt_editor_*_simple_dap: all C-only (no Rust twin), listed in
-        // runtime_symbols.rs and emitted by JIT codegen, but runtime_process.c
-        // was never in this list — so the JIT's `first_unresolved_import`
-        // guard tripped on `rt_process_read_stdout_checked` and dropped whole
-        // modules (stage1 included) to the interpreter. Exact same shape as
-        // runtime_process_owned.c above. Its three Rust-duplicated symbols
-        // (rt_process_run_timeout / rt_process_run_bounded / rt_process_wait)
-        // are compiled out by SIMPLE_RUNTIME_PROCESS_RUST_CORE below.
-        "runtime_process.c",
-        // runtime_process.c's fork/exec helper (rt_fork_*), used by the piped
-        // spawn path.
-        "runtime_fork.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");
@@ -348,6 +340,9 @@ fn compile_c_runtime_sources() {
     // See the runtime_process_owned.c comment above: rt_free_deep lives in
     // runtime_native.c, which this crate does not compile.
     build.define("SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE", None);
+    // Bootstrap-only compatibility: the seed cannot link the canonical Pure
+    // Simple timestamp module. Stage4 never enables this provider.
+    build.define("SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT", None);
     // See the runtime_process.c comment above: the Rust runtime crate already
     // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
     build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
@@ -437,6 +432,7 @@ fn collect_defined_runtime_symbols(
     root: &Path,
     c_root: &Path,
     runtime_regex: bool,
+    runtime_tls: bool,
     target_os: &str,
 ) -> HashSet<String> {
     let mut exported = HashSet::new();
@@ -456,6 +452,13 @@ fn collect_defined_runtime_symbols(
                 continue;
             }
             if !runtime_regex && entry_path.file_name().and_then(|name| name.to_str()) == Some("regex.rs") {
+                continue;
+            }
+            // `net_tls.rs` is compiled only with `runtime-tls`. A textual
+            // export scan used to register its no_mangle names even when the
+            // module was cfg-disabled, creating table relocations to symbols
+            // that could not exist in the archive.
+            if !runtime_tls && entry_path.file_name().and_then(|name| name.to_str()) == Some("net_tls.rs") {
                 continue;
             }
             if let Ok(file) = fs::read_to_string(&entry_path) {
@@ -485,8 +488,6 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         "runtime_memtrack.c",
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
-        "runtime_process.c",
-        "runtime_fork.c",
     ];
     for source in LINKED_C_SOURCES {
         if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {
@@ -496,18 +497,7 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         let Ok(file) = fs::read_to_string(path) else {
             continue;
         };
-        if *source == "runtime_process.c" {
-            // SIMPLE_RUNTIME_PROCESS_RUST_CORE compiles these three OUT of the
-            // C object; the Rust runtime provides them. The text scan can't see
-            // the #ifndef, so drop them explicitly or the generated extern
-            // block would anchor a C symbol that isn't there.
-            const RUST_OWNED: &[&str] = &["rt_process_run_timeout", "rt_process_run_bounded", "rt_process_wait"];
-            exported.extend(
-                runtime_export_scan::c_function_definitions(&file)
-                    .into_iter()
-                    .filter(|symbol| !RUST_OWNED.contains(&symbol.as_str())),
-            );
-        } else if *source == "runtime_simd_dispatch.c" {
+        if *source == "runtime_simd_dispatch.c" {
             let dispatch_exports = runtime_export_scan::c_function_definitions(&file);
             exported.extend(
                 dispatch_exports

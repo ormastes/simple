@@ -2,7 +2,7 @@
 
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)](doc/archive/release/PRODUCTION_READY_SUMMARY.md)
 [![Tests](https://img.shields.io/badge/tests-4067%2F4067%20passing-brightgreen)](doc/09_report/session/full_test_suite_results_2026-02-14.md)
-[![Multiplatform Bootstrap](https://github.com/ormastes/simple/actions/workflows/rust-bootstrap-multiplatform.yml/badge.svg)](.github/workflows/rust-bootstrap-multiplatform.yml)
+[![LLVM Cross](https://github.com/ormastes/simple/actions/workflows/simple-llvm-cross.yml/badge.svg)](.github/workflows/simple-llvm-cross.yml)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 Simple is a self-hosted language and toolchain that combines a readable Python-like surface with compiler-integrated testing, documentation, architecture rules, and baremetal-oriented execution paths.
@@ -137,15 +137,10 @@ bin/simple build bootstrap
 Direct commands behind the wrapper:
 
 ```bash
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+src/compiler_rust/target/bootstrap/simple --version
+bin/simple build bootstrap
 sha256sum bootstrap/simple_stage2 bootstrap/simple_stage3
 ```
-
-`src/compiler_rust/target/bootstrap/simple` is a bootstrap seed only and prints
-a `WARNING` when run directly. Use the pure-Simple `bin/simple` for normal
-build/test/tooling work.
 
 See [doc/02_requirements/app/build/bootstrap.md](doc/02_requirements/app/build/bootstrap.md) and [doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md](doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md) for the current bootstrap flow and remaining pure-Simple self-hosting notes.
 
@@ -614,7 +609,6 @@ Run SDoctest examples:
 simple test --sdoctest README.md      # Run verified examples in Markdown/docs
 simple test --spl-doctest src/math.spl # Run file-local source-comment doctests
 simple test --sdoctest --tag slow     # Filter by tag
-simple test test --whole              # Release gate: specs/long tests plus configured Markdown and production-source doctests
 ```
 
 `--doctest` is still accepted as a compatibility alias, but `--sdoctest` is the clearer name for the implemented path.
@@ -1029,18 +1023,16 @@ See [doc/09_report/session/full_test_suite_results_2026-02-14.md](doc/09_report/
 ### Code Quality
 
 ```bash
-# Rust workspace quality aggregate (clippy + rustfmt + Rust tests)
+# Check before commit (fmt + lint + test)
 simple build check
 
-# Pure-Simple source quality gates
-simple lint <changed .spl files>
-simple duplicate-check <owned-dir> --mode token --min-lines 5
-simple test <scope>
+# Full check (includes coverage + duplication)
+simple build check --full
 
-# Format Rust workspace code
+# Format code
 simple build fmt
 
-# Run Rust clippy
+# Lint
 simple build lint
 ```
 

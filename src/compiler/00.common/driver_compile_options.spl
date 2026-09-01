@@ -14,6 +14,10 @@ struct CompileOptions:
     profile: text
     no_borrow_check: bool
     backend: text
+    # Canonical native target transported from the CLI into codegen/linking.
+    # Linkers must not reconstruct this semantic input from process env.
+    native_target: text = ""
+    backend_plugin_path: text = ""
     interpreter_mode: text
     gc_off: bool
     smf_output_mode: text
@@ -21,6 +25,15 @@ struct CompileOptions:
     # Semantic trace level for debug instrumentation.
     # Empty string = disabled. Valid values: "functions", "objects", "full".
     debug_trace_level: text
+    # Legacy branch/line coverage is independent from exact MC/DC.
+    coverage_enabled: bool = false
+    # MC/DC transport is scalar/text so standalone native CLI aggregate copies
+    # do not depend on enum representation. Empty/zero means "use environment
+    # or the compiler default"; explicit static-off is represented by
+    # "static-off", not by an empty value.
+    mcdc_mode_text: text = ""
+    mcdc_owner_bytes: i64 = 0
+    mcdc_global_bytes: i64 = 0
     # Runtime family restriction for module resolution.
     # Empty list = no restriction (all families allowed).
     allowed_families: [text]
@@ -72,11 +85,17 @@ fn driver_core_compile_options_default() -> CompileOptions:
         profile: "dev",
         no_borrow_check: false,
         backend: "auto",
+        native_target: "",
+        backend_plugin_path: "",
         interpreter_mode: "optimized",
         gc_off: false,
         smf_output_mode: "code_only",
         low_memory: false,
         debug_trace_level: "",
+        coverage_enabled: false,
+        mcdc_mode_text: "",
+        mcdc_owner_bytes: 0,
+        mcdc_global_bytes: 0,
         allowed_families: [],
         build_mode: "debug",
         cli_mode_text: "",
@@ -99,8 +118,21 @@ fn compileoptions_effective_mir_opt_level(opts: CompileOptions) -> i64:
 
 fn compileoptions_normalize_mir_optimization(opts: CompileOptions) -> CompileOptions:
     val effective = compileoptions_effective_mir_opt_level(opts)
+    # Preserve the scalar MC/DC transport explicitly across the aggregate copy.
+    # Standalone bootstrap binaries have historically corrupted tail fields of
+    # large by-value aggregates; these values are validated at context creation.
+    val mcdc_mode_text = opts.mcdc_mode_text
+    val mcdc_owner_bytes = opts.mcdc_owner_bytes
+    val mcdc_global_bytes = opts.mcdc_global_bytes
+    val backend_plugin_path = opts.backend_plugin_path
+    val native_target = opts.native_target
     var normalized = opts
     normalized.optimize = effective > 0
     normalized.opt_level = effective
     normalized.release = opts.release or effective > 0
+    normalized.mcdc_mode_text = mcdc_mode_text
+    normalized.mcdc_owner_bytes = mcdc_owner_bytes
+    normalized.mcdc_global_bytes = mcdc_global_bytes
+    normalized.backend_plugin_path = backend_plugin_path
+    normalized.native_target = native_target
     normalized

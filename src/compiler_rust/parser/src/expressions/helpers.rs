@@ -12,7 +12,11 @@ impl<'a> Parser<'a> {
     /// backslash-lambda form (`\x, y: body`) uses a bare trailing `:` to end
     /// the parameter list and start the body, so a per-param `: Type` there
     /// would be ambiguous with that terminator and must stay disabled.
-    pub(super) fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>, allow_types: bool) -> Result<(), ParseError> {
+    pub(super) fn parse_remaining_lambda_params(
+        &mut self,
+        params: &mut Vec<LambdaParam>,
+        allow_types: bool,
+    ) -> Result<(), ParseError> {
         while self.check(&TokenKind::Comma) {
             self.advance();
             // Support wildcard parameter: \x, _: or |x, _|
@@ -186,9 +190,6 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // See the inline-form branch below: pseudo-INDENTs left by a wrapped
-        // condition that the inline path must reconcile itself.
-        let mut inline_then_deferred_dedents = 0usize;
         // Support both inline and block-form syntax for then branch
         let then_branch = if use_braces {
             // Curly brace form: if cond { body } else { body }
@@ -211,64 +212,26 @@ impl<'a> Parser<'a> {
 
             // Empty then-branch: `if cond:\nelse: ...` or `if cond:\nelif ...:`
             if self.check(&TokenKind::Else) || self.check(&TokenKind::Elif) {
-                self.deferred_dedent_count += deferred_before;
+                // Nothing was consumed on behalf of the pending dedent(s);
+                // put them back for whatever parses the else/elif next.
+                self.deferred_dedent_count = deferred_before;
                 Expr::Tuple(vec![]) // unit value
             } else {
-                // EQUAL-column shape, the twin of the "Deep" case drained just
-                // above: when the condition's continuation line sits at exactly
-                // the body's column, the continuation already consumed the only
-                // INDENT the lexer emits, and the body starts with no INDENT of
-                // its own. Demanding one here made
-                //   val n = if a == 1 or
-                //       a == 2:
-                //       "yes"
-                //   else:
-                //       "no"
-                // fail with "expected Indent, found FString" — the exact shape
-                // in src/compiler/50.mir/hwir/riscv_scalar_csr_owner.spl:48-52
-                // that blocked formal_verification_2_0_spec. `parse_for` /
-                // `parse_while_with_label` already carry this same guard for
-                // their statement forms; this brings the if-EXPRESSION form in
-                // line with them rather than inventing a new rule.
-                // `is_statement_start()` (shared with the for/while guards)
-                // deliberately lists only statement KEYWORDS and identifiers.
-                // An if-EXPRESSION's then-branch is an expression block, whose
-                // first item is very often a bare literal (`"completion_" + f`),
-                // so the shared predicate alone reports "not a statement start"
-                // and the equal-column shape goes undetected. Widening the
-                // shared predicate would change the loop guards too; this local
-                // extension covers exactly the literal/opening-bracket starts an
-                // expression block can begin with.
-                let body_starts_here = self.is_statement_start()
-                    || matches!(
-                        self.current.kind,
-                        TokenKind::Integer(_)
-                            | TokenKind::Float(_)
-                            | TokenKind::TypedInteger(_, _)
-                            | TokenKind::TypedFloat(_, _)
-                            | TokenKind::String(_)
-                            | TokenKind::FString(_)
-                            | TokenKind::RawString(_)
-                            | TokenKind::TypedString(_, _)
-                            | TokenKind::TypedRawString(_, _)
-                            | TokenKind::Bool(_)
-                            | TokenKind::Nil
-                            | TokenKind::Symbol(_)
-                            | TokenKind::LParen
-                            | TokenKind::LBracket
-                            | TokenKind::Minus
-                            | TokenKind::Not
-                    );
-                let equal_column =
-                    deferred_before > 0 && !self.check(&TokenKind::Indent) && body_starts_here;
-                if equal_column {
-                    // The body's terminating DEDENT and the pseudo-INDENT's
-                    // compensating DEDENT are the SAME token, consumed by the
-                    // block loop below — so exactly one is reconciled here.
-                    // Same accounting as `header_continuation_dedents_to_reconcile`.
-                    self.deferred_dedent_count += deferred_before.saturating_sub(1);
-                } else {
-                    self.deferred_dedent_count += deferred_before;
+                // Equal-column shape (see `parse_condition_block` /
+                // `header_continuation_is_equal_column`): when the
+                // condition's trailing-operator continuation line sits at
+                // the SAME column as this body, the lexer emits no fresh
+                // `Indent` here — the continuation's pseudo-INDENT already
+                // opened this level. `expect(Indent)` then failed outright
+                // ("expected Indent, found <first body token>"), so
+                // `val x = if <multi-line cond>:\n    body` (continuation
+                // and body columns equal) could never be written as an
+                // if-EXPRESSION even though the equivalent `if` STATEMENT
+                // already handles this shape via `parse_condition_block`.
+                // See doc/08_tracking/bug/
+                // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md.
+                let equal_column = self.header_continuation_is_equal_column(deferred_before);
+                if !equal_column {
                     self.expect(&TokenKind::Indent)?;
                 }
 
@@ -294,6 +257,18 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
 
+                // Equal-column shape: the terminating Dedent just consumed
+                // above IS the continuation's compensating one, so it must
+                // not be counted again — mirrors
+                // `header_continuation_dedents_to_reconcile`'s
+                // `saturating_sub(1)`.
+                let deferred = if equal_column {
+                    deferred_before.saturating_sub(1)
+                } else {
+                    deferred_before
+                };
+                self.deferred_dedent_count += deferred;
+
                 Expr::DoBlock(statements)
             } // close else for empty-then-branch check
         } else if self.check(&TokenKind::Return) || self.check(&TokenKind::Break) || self.check(&TokenKind::Continue) {
@@ -301,22 +276,22 @@ impl<'a> Parser<'a> {
             let stmt = self.parse_item()?;
             Expr::DoBlock(vec![stmt])
         } else {
-            // Inline form: parse as expression.
-            //
-            // A condition wrapped onto a continuation line leaves a pseudo-INDENT
-            // whose compensating DEDENT nothing on this path reconciles — the
-            // block-form branch above drains it, the inline branch never did. The
-            // stray DEDENT then surfaces after the whole if-expression as
-            // "expected expression, found Dedent", which is what
-            // src/compiler/50.mir/hwir/riscv_scalar_csr_owner.spl:139-141 hits:
-            //   val output_name = if field[0] == "a" or
-            //       field[0] == "b": "completion_" + field[0] else: field[0]
-            // Recorded here and reconciled after the else-branch, using the same
-            // Newline+Dedent pair consumption the `continuation_indents` block
-            // below already performs for the elif/else peek.
-            inline_then_deferred_dedents = self.deferred_dedent_count;
-            self.deferred_dedent_count = 0;
-            self.parse_expression()?
+            // Inline form: parse as expression
+            let expr = self.parse_expression()?;
+            // A multi-line CONDITION's trailing-operator continuation
+            // (`if a == x and\n    b == y: ...`) can leave a compensating
+            // pseudo-DEDENT queued in `deferred_dedent_count` (see
+            // `drain_available_deferred_dedents` above). The block-form
+            // then-branch drains it via that call; an INLINE then-branch
+            // never introduces a competing Indent of its own, so the
+            // deferred dedent is still pending right here and must be
+            // reconciled the same way `parse_inline_or_block` does for the
+            // statement-form `if`, or the next thing this expression-form
+            // `if` returns to sees an orphaned Dedent it never expects.
+            // See doc/08_tracking/bug/
+            // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md.
+            self.reconcile_inline_body_deferred_dedents();
+            expr
         };
 
         // Peek through newlines/indents to check for elif/else continuation.
@@ -398,7 +373,18 @@ impl<'a> Parser<'a> {
                     Expr::DoBlock(vec![stmt])
                 } else {
                     // Inline form: parse as expression
-                    self.parse_expression()?
+                    let e = self.parse_expression()?;
+                    // Same reconciliation as the inline then-branch above: the
+                    // condition's deferred pseudo-dedent may still be pending
+                    // here (an inline then-branch followed immediately by
+                    // `else:` on the same source line never gave the earlier
+                    // reconcile call a Dedent to consume — `else` was the
+                    // next token, not a Newline/Dedent). Reconcile again now
+                    // that the whole inline if/else expression is done, or
+                    // the leftover dedent surfaces as an orphaned Dedent in
+                    // whatever follows this expression.
+                    self.reconcile_inline_body_deferred_dedents();
+                    e
                 };
 
                 Some(Box::new(else_expr))
@@ -426,23 +412,6 @@ impl<'a> Parser<'a> {
                 } else if self.check(&TokenKind::Dedent) {
                     self.advance(); // consume Dedent
                 }
-            }
-        }
-
-        // Reconcile the wrapped-condition pseudo-INDENT(s) the INLINE then-form
-        // left pending (see the inline branch above). Same Newline+Dedent pair
-        // shape as the `continuation_indents` loop, and a no-op when the
-        // condition was on one line, so single-line `if c: a else: b` is
-        // untouched.
-        for _ in 0..inline_then_deferred_dedents {
-            if self.check(&TokenKind::Newline) {
-                let next = self.peek_next();
-                if matches!(next.kind, TokenKind::Dedent) {
-                    self.advance(); // consume Newline
-                    self.advance(); // consume Dedent
-                }
-            } else if self.check(&TokenKind::Dedent) {
-                self.advance(); // consume Dedent
             }
         }
 
@@ -482,10 +451,51 @@ impl<'a> Parser<'a> {
             // Record start position for span
             let arg_start = self.current.span;
 
+            // ROOT FIX (bug struct_spread_paren_form_parses_as_range_2026-08-30):
+            // PAREN-form struct spread `S(..base, field: v)`.
+            //
+            // Before this, `..` here fell through to `parse_expression` ->
+            // `parse_range`, producing `Expr::Range { start: None, end: base }`
+            // which lowers to `rt_range(0, <tagged object pointer>)` — a range
+            // of billions of elements, i.e. a compiler/runtime HANG. All 110
+            // spread sites in `src/` use this form; zero use the brace form the
+            // parser half-supported.
+            //
+            // Containment: this is the ONLY place prefix `..` is reinterpreted.
+            // `parse_range` is untouched, so `a..b`, `0..n`, `arr[..n]`, `x..`,
+            // `for i in 0..n` and `f(1..5)` all still parse as ranges. A bare
+            // `f(..)` (full range) and `f(..=x)` also still reach `parse_range`,
+            // because we only fire when `..` is followed by a token that can
+            // actually start an expression.
+            //
+            // A genuine prefix-range ARGUMENT (`f(..n)`) is the one shape this
+            // reinterprets; HIR rejects `StructSpread` in a non-constructor call
+            // with a hard error, so that case becomes a loud diagnostic rather
+            // than silent wrongness.
+            let is_struct_spread = self.check(&TokenKind::DoubleDot)
+                && !matches!(
+                    self.peek_next().kind,
+                    TokenKind::RParen
+                        | TokenKind::RBracket
+                        | TokenKind::RBrace
+                        | TokenKind::Comma
+                        | TokenKind::Colon
+                        | TokenKind::Semicolon
+                        | TokenKind::Newline
+                        | TokenKind::Dedent
+                        | TokenKind::Eof
+                );
+            if is_struct_spread {
+                self.advance(); // consume '..'
+            }
+
             // Check for named argument with '=' or ':' syntax
             // Also support keywords as named argument names (e.g., type="model", default=true)
             let mut name = None;
-            let maybe_name = match &self.current.kind {
+            let maybe_name = if is_struct_spread {
+                None
+            } else {
+                match &self.current.kind {
                 TokenKind::Identifier { name: id, .. } => Some(id.clone()),
                 // Allow keywords as named argument names
                 TokenKind::Type => Some("type".to_string()),
@@ -557,6 +567,7 @@ impl<'a> Parser<'a> {
                 // (e.g. K(and_then: "ok")).
                 TokenKind::AndThen => Some("and_then".to_string()),
                 _ => None,
+                }
             };
             if let Some(id_clone) = maybe_name {
                 // Peek ahead for '=' or ':' without consuming the stream
@@ -585,6 +596,10 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Ellipsis) {
                 self.advance(); // consume ...
                 value = Expr::Spread(Box::new(value));
+            }
+
+            if is_struct_spread {
+                value = Expr::StructSpread(Box::new(value));
             }
 
             // Create span from start to current position
@@ -910,9 +925,23 @@ impl<'a> Parser<'a> {
             self.lexer.disable_forced_indentation();
             Expr::DoBlock(statements)
         } else {
-            // Inline expression - disable forced indentation after parsing
-            let expr = self.parse_expression()?;
+            // Inline expression (body starts on the same line as the colon, e.g.
+            // `\row: row == 1 and\n    row == 2`). Forced indentation was enabled
+            // above only so a genuine block body gets real Indent/Dedent tokens;
+            // an inline expression that merely *continues* onto later lines (a
+            // trailing binary operator such as `and`/`or`) is not a block and
+            // must NOT see Indent/Dedent tokens for its continuation lines --
+            // normal bracket-depth newline suppression already keeps it on one
+            // logical line. Disabling forced indentation must happen BEFORE
+            // parsing, not after: parse_expression() itself consumes the
+            // continuation lines, so disabling afterward is too late and the
+            // lexer emits an Indent/Dedent pair mid-expression, which
+            // parse_expression() cannot consume, surfacing as "Unexpected
+            // token: expected expression, found Dedent" at the caller's
+            // closing bracket. See doc/08_tracking/bug/
+            // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md
             self.lexer.disable_forced_indentation();
+            let expr = self.parse_expression()?;
             expr
         };
 

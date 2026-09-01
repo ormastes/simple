@@ -1,8 +1,5 @@
 # Native-build Stage 4 dispatch and strict-link blockers
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
-
 ## Status
 
 Dispatch and the quadratic entry-closure scan are fixed; strict Stage-4 link
@@ -10,15 +7,6 @@ composition remains blocked. The latest bounded exact-entry run resolved its
 source closure without an import or phase diagnostic, then terminated with
 SIGBUS before emitting objects. That post-resolution phase boundary is not yet
 localized.
-
-A later low-RSS phase-one stall exposed one remaining allocation amplifier in
-the shared import scanner: splitting the complete source into lines and
-trimming every line registered ordinary source text before testing whether it
-was an import. The scanner now performs one byte pass and materializes only an
-ASCII module token for a recognized declaration. It does not apply byte offsets
-to `text`, so Unicode on earlier lines has identical interpreter/native
-behavior. Focused source and behavior regressions are retained; a fresh Stage4
-execution is still pending.
 
 The 2026-07-15 source follow-up also routes the canonical Stage4 one-binary
 `--entry` through the existing in-process pure-Simple project driver and clears

@@ -1,0 +1,131 @@
+# Dump-first embedded DebugServiceV1 slice.
+#
+# Acquisition remains owned by the existing OpenOCD, TRACE32, JTAG, or product
+# dump mechanism. This module neither talks to a target nor parses dump bytes;
+# it policy-gates, retains, and indexes an already captured native artifact.
+
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugPolicyV1, DebugCapabilityV1, DebugVerificationV1,
+    DebugPerturbationV1, DebugRootOperationV1, DebugTargetNodeV1,
+    DebugEvidenceArtifactV1, DebugEvidenceManifestV1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_open, central_debug_service_v1_add_target,
+    central_debug_service_v1_export_evidence, central_debug_service_v1_record_outcome,
+    central_debug_service_v1_close,
+}
+use std.common.debug.evidence_bundle_writer_v1.{
+    DebugBundleArtifactInputV1, DebugEvidenceBundleWriteRequestV1,
+    DebugEvidenceBundleWriteResultV1, write_debug_evidence_bundle_v1,
+}
+
+pub enum EmbeddedDumpMechanismV1:
+    OpenOcdSnapshot
+    Trace32Dump
+    JtagSnapshot
+    CustomProductDump
+
+pub struct EmbeddedDumpRetentionV1:
+    session_id: DebugSessionId
+    evidence: DebugEvidenceManifestV1
+    bundle: DebugEvidenceBundleWriteResultV1
+
+fn _mechanism_name(mechanism: EmbeddedDumpMechanismV1) -> text:
+    match mechanism:
+        case EmbeddedDumpMechanismV1.OpenOcdSnapshot: "openocd"
+        case EmbeddedDumpMechanismV1.Trace32Dump: "trace32"
+        case EmbeddedDumpMechanismV1.JtagSnapshot: "jtag"
+        case EmbeddedDumpMechanismV1.CustomProductDump: "custom-product"
+
+fn _media_type(mechanism: EmbeddedDumpMechanismV1) -> text:
+    match mechanism:
+        case EmbeddedDumpMechanismV1.OpenOcdSnapshot: "application/vnd.simple.openocd-snapshot"
+        case EmbeddedDumpMechanismV1.Trace32Dump: "application/vnd.lauterbach.trace32-dump"
+        case EmbeddedDumpMechanismV1.JtagSnapshot: "application/vnd.simple.jtag-snapshot"
+        case EmbeddedDumpMechanismV1.CustomProductDump: "application/vnd.simple.product-dump"
+
+fn _add_capability(session_id: DebugSessionId, target_id: text, parent_id: text,
+                   kind: text, support: CapLevel, verification: DebugVerificationV1,
+                   reason: text) -> Result<Nil, text>:
+    central_debug_service_v1_add_target(session_id,
+        DebugTargetNodeV1(target_id: target_id, parent_target_id: parent_id,
+            kind: kind, label: kind),
+        DebugCapabilityV1(target_id: target_id, support: support,
+            verification: verification, perturbation: DebugPerturbationV1.Passive,
+            reason: reason))
+
+pub fn retain_embedded_dump_v1(
+    mechanism: EmbeddedDumpMechanismV1,
+    source_path: text,
+    bundle_root: text,
+    raw_name: text,
+    digest: text,
+    privacy_label: text,
+    target_id: text,
+    build_id: text,
+    captured_at_ns: i64,
+    policy: DebugPolicyV1,
+) -> Result<EmbeddedDumpRetentionV1, text>:
+    if target_id.trim() == "": return Err("embedded dump target id is required")
+    if raw_name.trim() == "": return Err("embedded dump raw name is required")
+    val session_id = central_debug_service_v1_open(build_id, policy)?
+    val mechanism_name = _mechanism_name(mechanism)
+    match _add_capability(session_id, target_id, "", "embedded." + mechanism_name,
+            CapLevel.Native, DebugVerificationV1.FixtureVerified,
+            "native artifact supplied by the existing " + mechanism_name + " mechanism"):
+        case Err(reason):
+            central_debug_service_v1_close(session_id)
+            return Err(reason)
+        case Ok(_): ()
+    for (suffix, kind, reason) in [
+        ("source-anchor", "embedded.source-anchor", "dump retention does not prove a real SourceAnchor"),
+        ("symbol", "embedded.symbol", "dump retention does not prove a real SymbolId"),
+        ("rtos", "embedded.rtos-awareness", "no RTOS task or ISR decoder is connected"),
+    ]:
+        match _add_capability(session_id, target_id + "/" + suffix, target_id, kind,
+                CapLevel.Unavailable, DebugVerificationV1.Blocked, reason):
+            case Err(add_reason):
+                central_debug_service_v1_close(session_id)
+                return Err(add_reason)
+            case Ok(_): ()
+
+    # export_evidence is the central policy gate and index. It runs before the
+    # bundle writer touches the source artifact or creates the destination.
+    val artifact = DebugEvidenceArtifactV1(path: source_path,
+        media_type: _media_type(mechanism), digest: digest, native: true,
+        privacy_label: privacy_label)
+    val evidence = match central_debug_service_v1_export_evidence(
+            session_id, captured_at_ns, [artifact]):
+        case Err(reason):
+            central_debug_service_v1_close(session_id)
+            return Err(reason)
+        case Ok(value): value
+    val receipts_sdn = "schema: debug-receipts-v1\nsession_id: \"" +
+        session_id.value + "\"\nbuild_id: \"" + build_id +
+        "\"\naction: evidence.export\nexecution_changed: false\n"
+    val request = DebugEvidenceBundleWriteRequestV1(
+        bundle_root: bundle_root, session_id: session_id.value,
+        build_id: build_id, captured_at_ns: captured_at_ns,
+        receipts_sdn: receipts_sdn,
+        replay_inputs: [],
+        artifacts: [DebugBundleArtifactInputV1(source_path: source_path,
+            bundle_path: "raw/" + raw_name, digest: digest,
+            media_type: _media_type(mechanism), native: true,
+            privacy_label: privacy_label)],
+    )
+    val bundle = match write_debug_evidence_bundle_v1(request, policy):
+        case Err(reason):
+            central_debug_service_v1_record_outcome(session_id, DebugRootOperationV1.Evidence,
+                DebugPerturbationV1.Passive, "embedded.dump.retain.outcome",
+                false, false, reason)
+            central_debug_service_v1_close(session_id)
+            return Err(reason)
+        case Ok(value): value
+    central_debug_service_v1_record_outcome(session_id, DebugRootOperationV1.Evidence,
+        DebugPerturbationV1.Passive, "embedded.dump.retain.outcome", true,
+        false, "raw native artifact retained and indexed; payload redacted")
+    Ok(EmbeddedDumpRetentionV1(session_id: session_id, evidence: evidence, bundle: bundle))
+
+pub fn close_embedded_dump_v1(session_id: DebugSessionId) -> Result<Nil, text>:
+    central_debug_service_v1_close(session_id)

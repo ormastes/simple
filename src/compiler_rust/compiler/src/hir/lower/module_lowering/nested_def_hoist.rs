@@ -247,7 +247,7 @@ fn walk_expr(expr: &Expr, h: &mut Hoister) {
             }
         }
         Expr::Lambda { body, .. } => walk_expr(body, h),
-        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
             for n in nodes {
                 walk_node(n, h);
             }
@@ -290,6 +290,7 @@ fn walk_expr(expr: &Expr, h: &mut Hoister) {
             }
         }
         Expr::Spread(e) | Expr::DictSpread(e) => walk_expr(e, h),
+        Expr::StructSpread(e) => walk_expr(e, h),
         // Other Expr variants don't carry function-body-shaped children we
         // need to descend into for definition hoisting. If a future Expr
         // variant introduces nested statements, extend this match.

@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "access_policy.h"
 
 #if defined(TARGET_RA4M1)
 #include "board_ra4m1_uno_r4.h"
@@ -10,6 +11,47 @@
 
 extern uint32_t _sbss, _ebss, _etext, _stack_top;
 extern uint32_t _app_sandbox_start, _app_sandbox_end;
+
+/* Pure-Simple validation policy.  C retains only address-text acquisition,
+ * volatile MMIO, UART output, startup, weak vectors, and assembly bridges. */
+#define CM33_ACCESS_OUTCOME_MASK 0xFFu
+#define CM33_ACCESS_UNALIGNED    1u
+#define CM33_ACCESS_UNREADABLE   2u
+#define CM33_ACCESS_UNWRITABLE   3u
+
+/* Pure-Simple scalar/parser/FS-table policy.  C retains only byte/table
+ * acquisition and writeback at this reviewed freestanding boundary. */
+extern uint32_t cm33_policy_streq(uint32_t a_byte, uint32_t b_byte);
+extern uint32_t cm33_policy_starts_with(uint32_t value_byte,
+                                       uint32_t prefix_byte);
+extern uint32_t cm33_policy_parse_hex_prefix(uint32_t first_byte,
+                                            uint32_t second_byte);
+extern uint32_t cm33_policy_parse_hex_digit(uint32_t byte);
+extern uint32_t cm33_policy_strlen_simple(uint32_t byte);
+extern uint32_t cm33_policy_memcpy_simple(uint32_t remaining);
+extern uint32_t cm33_policy_fs_add_file(uint32_t file_count,
+                                       uint32_t used,
+                                       uint32_t size,
+                                       uint32_t max_files,
+                                       uint32_t storage_size);
+extern uint32_t cm33_policy_fs_add_name(uint32_t byte,
+                                       uint32_t index,
+                                       uint32_t name_max);
+extern uint32_t cm33_policy_fs_init(uint32_t index);
+extern uint32_t cm33_policy_fs_find(uint32_t index,
+                                   uint32_t file_count,
+                                   uint32_t names_equal);
+
+#define CM33_TEXT_STEP_MISMATCH 0u
+#define CM33_TEXT_STEP_ADVANCE  1u
+#define CM33_TEXT_STEP_MATCHED  2u
+#define CM33_HEX_DIGIT_INVALID  0xFFFFFFFFu
+#define CM33_FS_ADD_OUTCOME_MASK 0xFFu
+#define CM33_FS_ADD_USED_SHIFT   8u
+#define CM33_FS_ADD_ADMITTED     0u
+#define CM33_FS_INIT_DONE        0xFFFFFFFFu
+#define CM33_FS_FIND_FOUND       1u
+#define CM33_FS_FIND_NOT_FOUND   2u
 
 /* ── UART wrappers ────────────────────────────────────────────── */
 static void uart_init(void) {
@@ -46,25 +88,29 @@ static void write_dec(uint32_t v) {
 
 /* ── String helpers ───────────────────────────────────────────── */
 static int streq(const char *a, const char *b) {
-    while (*a && *b) { if (*a++ != *b++) return 0; }
-    return *a == *b;
+    for (;;) {
+        uint32_t step = cm33_policy_streq((uint8_t)*a, (uint8_t)*b);
+        if (step == CM33_TEXT_STEP_ADVANCE) { a++; b++; continue; }
+        return step == CM33_TEXT_STEP_MATCHED;
+    }
 }
 
 static int starts_with(const char *s, const char *prefix) {
-    while (*prefix) { if (*s++ != *prefix++) return 0; }
-    return 1;
+    for (;;) {
+        uint32_t step = cm33_policy_starts_with((uint8_t)*s,
+                                               (uint8_t)*prefix);
+        if (step == CM33_TEXT_STEP_ADVANCE) { s++; prefix++; continue; }
+        return step == CM33_TEXT_STEP_MATCHED;
+    }
 }
 
 static uint32_t parse_hex(const char *s) {
-    if (s[0] == '0' && s[1] == 'x') s += 2;
+    s += cm33_policy_parse_hex_prefix((uint8_t)s[0], (uint8_t)s[1]);
     uint32_t r = 0;
     while (*s) {
         uint8_t c = *s++;
-        uint8_t n;
-        if (c >= '0' && c <= '9') n = c - '0';
-        else if (c >= 'a' && c <= 'f') n = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') n = c - 'A' + 10;
-        else break;
+        uint32_t n = cm33_policy_parse_hex_digit(c);
+        if (n == CM33_HEX_DIGIT_INVALID) break;
         r = (r << 4) | n;
     }
     return r;
@@ -72,14 +118,14 @@ static uint32_t parse_hex(const char *s) {
 
 static uint32_t strlen_simple(const char *s) {
     uint32_t n = 0;
-    while (*s++) n++;
+    while (cm33_policy_strlen_simple((uint8_t)*s)) { s++; n++; }
     return n;
 }
 
 static void memcpy_simple(void *dst, const void *src, uint32_t n) {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
-    while (n--) *d++ = *s++;
+    while (cm33_policy_memcpy_simple(n)) { *d++ = *s++; n--; }
 }
 
 /* ── SCB / Fault registers ────────────────────────────────────── */
@@ -484,18 +530,22 @@ static const uint8_t svc_hello_app[] = {
 };
 
 static void fs_add_file(const char *name, const uint8_t *src, uint32_t size, uint32_t flags) {
-    if (fs_count >= FS_MAX_FILES) return;
-    if (fs_used + size > sizeof(fs_storage)) return;
+    uint32_t receipt = cm33_policy_fs_add_file(fs_count, fs_used, size,
+                                               FS_MAX_FILES,
+                                               sizeof(fs_storage));
+    if ((receipt & CM33_FS_ADD_OUTCOME_MASK) != CM33_FS_ADD_ADMITTED) return;
     struct fs_file *f = &fs_table[fs_count];
     const char *n = name;
-    int i = 0;
-    while (*n && i < FS_NAME_MAX - 1) f->name[i++] = *n++;
+    uint32_t i = 0;
+    while (cm33_policy_fs_add_name((uint8_t)*n, i, FS_NAME_MAX)) {
+        f->name[i++] = *n++;
+    }
     f->name[i] = '\0';
     f->data = &fs_storage[fs_used];
     f->size = size;
     f->flags = flags;
     memcpy_simple(&fs_storage[fs_used], src, size);
-    fs_used += (size + 3) & ~3u;
+    fs_used = receipt >> CM33_FS_ADD_USED_SHIFT;
     fs_count++;
 }
 
@@ -509,12 +559,22 @@ static const char readme_text[] =
 static void fs_init(void) {
     fs_count = 0;
     fs_used = 0;
-    fs_add_file("readme.txt", (const uint8_t *)readme_text, sizeof(readme_text) - 1, 0);
-    fs_add_file("hello.bin", hello_app, sizeof(hello_app), 1);
-    fs_add_file("count.bin", count_app, sizeof(count_app), 1);
-    fs_add_file("spin.bin", spin_app, sizeof(spin_app), 1);
-    fs_add_file("svc_hi.bin", svc_hello_app, sizeof(svc_hello_app), 1);
-    fs_add_file("rogue.bin", rogue_app, sizeof(rogue_app), 1);
+    for (uint32_t index = 0;; index++) {
+        uint32_t kind = cm33_policy_fs_init(index);
+        if (kind == CM33_FS_INIT_DONE) break;
+        switch (kind) {
+        case 0:
+            fs_add_file("readme.txt", (const uint8_t *)readme_text,
+                        sizeof(readme_text) - 1, 0);
+            break;
+        case 1: fs_add_file("hello.bin", hello_app, sizeof(hello_app), 1); break;
+        case 2: fs_add_file("count.bin", count_app, sizeof(count_app), 1); break;
+        case 3: fs_add_file("spin.bin", spin_app, sizeof(spin_app), 1); break;
+        case 4: fs_add_file("svc_hi.bin", svc_hello_app, sizeof(svc_hello_app), 1); break;
+        case 5: fs_add_file("rogue.bin", rogue_app, sizeof(rogue_app), 1); break;
+        default: return;
+        }
+    }
     uart_puts("[FS] In-memory filesystem: ");
     write_dec(fs_count);
     uart_puts(" files, ");
@@ -523,10 +583,12 @@ static void fs_init(void) {
 }
 
 static struct fs_file *fs_find(const char *name) {
-    for (uint32_t i = 0; i < fs_count; i++) {
-        if (streq(fs_table[i].name, name)) return &fs_table[i];
+    for (uint32_t i = 0;; i++) {
+        uint32_t names_equal = i < fs_count && streq(fs_table[i].name, name);
+        uint32_t step = cm33_policy_fs_find(i, fs_count, names_equal);
+        if (step == CM33_FS_FIND_FOUND) return &fs_table[i];
+        if (step == CM33_FS_FIND_NOT_FOUND) return (struct fs_file *)0;
     }
-    return (struct fs_file *)0;
 }
 
 /* ── Shell Commands ───────────────────────────────────────────── */
@@ -663,26 +725,21 @@ static void cmd_exec(const char *name) {
     }
 }
 
-static int addr_readable(uint32_t addr) {
-    if (addr >= BOARD_FLASH_BASE && addr < BOARD_FLASH_BASE + BOARD_FLASH_SIZE) return 1;
-    if (addr >= BOARD_RAM_BASE && addr < BOARD_RAM_BASE + BOARD_RAM_SIZE) return 1;
-    if (addr >= 0x40000000 && addr < 0x60000000) return 1;
-    if (addr >= 0xE000E000 && addr < 0xE0100000) return 1;
-    return 0;
-}
-
 static void cmd_peek(const char *arg) {
     uint32_t addr = parse_hex(arg);
-    if ((addr & 3) != 0) { uart_putln("error: address not 4-byte aligned"); return; }
-    if (!addr_readable(addr)) { uart_putln("error: address not in readable region"); return; }
+    uint32_t access = cortex_m_policy_read_receipt(
+        addr, BOARD_FLASH_BASE, BOARD_FLASH_SIZE, BOARD_RAM_BASE, BOARD_RAM_SIZE
+    ) & CM33_ACCESS_OUTCOME_MASK;
+    if (access == CM33_ACCESS_UNALIGNED) {
+        uart_putln("error: address not 4-byte aligned");
+        return;
+    }
+    if (access == CM33_ACCESS_UNREADABLE) {
+        uart_putln("error: address not in readable region");
+        return;
+    }
     uint32_t val = *(volatile uint32_t *)addr;
     uart_putc('['); write_hex32(addr); uart_puts("] = 0x"); write_hex32(val); uart_putln("");
-}
-
-static int addr_writable(uint32_t addr) {
-    if (addr >= BOARD_RAM_BASE && addr < BOARD_RAM_BASE + BOARD_RAM_SIZE) return 1;
-    if (addr >= 0x40000000 && addr < 0x60000000) return 1;
-    return 0;
 }
 
 static void cmd_poke(const char *arg) {
@@ -691,8 +748,17 @@ static void cmd_poke(const char *arg) {
     while (*p && *p != ' ') p++;
     if (!*p) { uart_putln("usage: poke <addr> <val>"); return; }
     p++;
-    if ((addr & 3) != 0) { uart_putln("error: address not 4-byte aligned"); return; }
-    if (!addr_writable(addr)) { uart_putln("error: address not in writable region"); return; }
+    uint32_t access = cortex_m_policy_write_receipt(
+        addr, BOARD_RAM_BASE, BOARD_RAM_SIZE
+    ) & CM33_ACCESS_OUTCOME_MASK;
+    if (access == CM33_ACCESS_UNALIGNED) {
+        uart_putln("error: address not 4-byte aligned");
+        return;
+    }
+    if (access == CM33_ACCESS_UNWRITABLE) {
+        uart_putln("error: address not in writable region");
+        return;
+    }
     uint32_t val = parse_hex(p);
     *(volatile uint32_t *)addr = val;
     uart_putc('['); write_hex32(addr); uart_puts("] <- 0x"); write_hex32(val); uart_putln("");

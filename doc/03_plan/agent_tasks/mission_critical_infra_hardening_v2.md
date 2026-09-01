@@ -159,12 +159,28 @@ self-promote to an aggregate PASS.
   commands, common aggregate-root routing, complete producer argument/env
   mappings, static usage-compatibility coverage, and
   sync/atomic-rename/post-publication hash verification.
+- Candidate release handoff is explicit: the live orchestrator requires the
+  aggregate candidate command to return its semantic blocked status, requires
+  one `result=BLOCKED` candidate report before reviewer activation, and checks
+  the final compatibility report alias byte-for-byte against the final report.
+  Tooling tar admission bounds both member count and expanded manifest bytes,
+  and requires exactly one canonical `./manifest.env` member.
 - Verified locally: focused script contract covers complete PASS plus stale,
   mutated-hash, and missing-receipt BLOCKED behavior.
 - Implemented: `check-mci-v2-release.shs` dependency-orders producers,
   canonical external signing, candidate aggregation, independent-review
   activation, and final aggregation with common identities and bounded child
   execution. Its synthetic workflow is permanently `CONTRACT_ONLY`.
+- Integrated: the release orchestrator now runs the existing canonical
+  `check-simpleos-mission-critical-release.shs` immediately before the
+  SimpleOS manifest producer. It fails closed unless the gate's bounded
+  outputs prove matrix `26/26`, matrix/release `pass`, and release blockers
+  `none`; it publishes a hash-bound
+  `simpleos-mission-critical-gate-v1.env` sidecar with the orchestrator's
+  run/source/configuration tuple and explicitly makes no QEMU claim. The
+  focused fixture covers both the controlled PASS contract and gate-failure
+  rejection. This is orchestration evidence only; it does not weaken or
+  replace the existing gate.
 - Still BLOCKED: all real hardware, QEMU, 24-hour stress, GPU/RenderDoc, and
   other lane executions not represented by fresh same-run receipts. This work
   did not execute or promote any of those rows. The canonical release
@@ -200,6 +216,30 @@ self-promote to an aggregate PASS.
   Resume only with an exact-current admitted pure-Simple compiler. Keep the
   formal dual-track, RTL/SBY, QEMU, FPGA, aggregate, and release rows RED.
 
+### Stale checked-in report routing (preflight 2026-08-12)
+
+The bounded matrix preflight identified nine fixed-date report defaults as
+stale. The matrix now selects the newest same-prefix report unless an explicit
+`*_REPORT` override is supplied, while retaining the filename-age blocker. A
+newer report is routing metadata only; it is not a fresh PASS. Classifications
+and exact producer resumes are:
+
+| Report prefix | Classification | Canonical producer / resume |
+|---|---|---|
+| `shared_wm_renderer_unification_evidence` | current-host executable | `sh scripts/check/check-shared-wm-renderer-unification-evidence.shs` |
+| `cpu_simd_engine2d_evidence` | current-host executable | `SIMPLE_BIN=<admitted-self-hosted> sh scripts/check/check-cpu-simd-engine2d-evidence.shs` |
+| `simpleos_llvm_port_evidence_current` | external-toolchain blocked | `BLOCKED(no-canonical-producer): LLVM_SRC=<pinned-llvm-checkout> sh src/os/port/llvm/build.shs cross` |
+| `gui_renderdoc_feature_coverage_status` | external/hardware blocked | `sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs` |
+| `layered_simple_gui_web_engine2d_bitmap_evidence` | current-host executable | `sh scripts/check/check-layered-simple-gui-web-engine2d-bitmap-evidence.shs` |
+| `production_gui_web_renderer_parity_evidence` | external/hardware blocked | `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` |
+| `simple_web_engine2d_js_bitmap_evidence` | current-host executable | `JS_RENDER_RUNTIME=node sh scripts/check/check-simple-web-engine2d-js-bitmap-evidence.shs` |
+| `bun_simple_web_engine2d_js_bitmap_evidence` | current-host executable | `JS_RENDER_RUNTIME=bun sh scripts/check/check-simple-web-engine2d-js-bitmap-evidence.shs` |
+| `qemu_gtk_wm_capture_evidence` | external/hardware blocked | `QEMU_HOST_GTK_SCENE_EVIDENCE=1 sh scripts/check/check-qemu-gtk-wm-capture-evidence.shs` |
+
+The matrix route table is the authoritative resume map for this nine-row stale-report routing subset. The full AC-1/AC-6 evidence matrix, including formal and hardware correspondence HOLD rows, is owned by the mission-critical architecture and system-test plan;
+the existing retained log remains diagnostic only. No timestamp-only refresh,
+cached substitution, GPU/QEMU/RenderDoc run, or PASS promotion is implied.
+
 The highest-capability reviewer receives no implementation ownership. The
 reviewer checks every REQ-MCI-001..011 and NFR-MCI-001..009 against the current
 source, executable scenarios, raw evidence, generated manual, and one-run gate
@@ -225,107 +265,3 @@ specs and a signed native-facade receipt exercises the source-matched deployed
 ABI; the focused C evidence alone is not a release claim. Release is eligible
 only after the independent receipt accepts all 20 requirements and
 the aggregate reports `release_blockers=none`.
-
-## Wave 5 — warning-phase migration extension (planned 2026-08-23; PLANNING ONLY, nothing below is implemented or verified by this section's author)
-
-Two feature lanes are in flight elsewhere (status NOT verified here — their
-owners report through the merge owner as usual):
-
-- Lane `mcwarn-1` — **Feature 1: assurance warning phase.** A resolved policy
-  may carry `warning_phase = true`; every diagnostic the active assurance mode
-  would raise drops **exactly one** severity rung (error → warning, warning →
-  info/note). It is NOT a silencer: a downgraded diagnostic is still reported,
-  still counted, and still appears in receipts. The count of downgraded
-  diagnostics is itself exit evidence for migration steps below.
-- Lane `mcalloc-1` — **Feature 2: allocation-diagnostic config.** A knob for
-  the no-dynamic-allocation diagnostic (FLT-MEM-001 family,
-  `00.common/assurance/flight_rules.spl:290`). **Design tension, stated
-  explicitly:** a global off-switch defeats the safety property the check
-  exists to enforce — critical code that allocates is exactly what the mode
-  forbids. The safer shape is a *scoped, explicit* opt-out: per-module or
-  per-function annotation (or SDN-scoped path list) that names the exempted
-  site, is enumerable in the receipt, and is rejected in `critical` unless the
-  warning phase is active. A process-global env var that sets the alloc
-  diagnostic to `off` must be rejected under `critical`/`verified`; `warn` is
-  the floor there. The merge owner freezes the knob's schema field name in
-  Wave 0 style before either lane's output integrates.
-
-### Shared-contract facts both lanes and the migration must respect (from source)
-
-1. `policy_names.spl` is the frozen NAME table: zero `use` lines, zero
-   module-level state, alias set FROZEN. Neither feature adds a profile name
-   or alias. `warning_phase` is a policy FIELD (policy_schema.spl /
-   `ResolvedAssurancePolicyV1` → V2 or an additive field with hash impact),
-   never a new name like "critical-warn".
-2. Five consumers hold **three projections** of the table: lint → level dict,
-   driver → `SafetyPassSeverity` (Advisory/Warn/Deny,
-   `driver_safety_severity.spl:45-85`), interpreter → **bool**
-   (`match_fallthrough_profile_is_deny`, `eval_decls.spl:303`). A one-rung
-   downgrade is expressible in the lint and driver projections; it is
-   **structurally inexpressible** in a bool. See migration step M3.
-3. The driver RE-READS `SIMPLE_SAFETY_PROFILE` per call while the interpreter
-   LATCHES it once at `eval_init` (`eval_decls.spl:297`; policy_schema.spl
-   header). Any warning-phase toggle read through the env var inherits this
-   split-brain: the two components can disagree about whether the warning
-   phase is active with nothing detecting it. Gates below must therefore
-   compare `policy_hash()` across components, not env-var text.
-4. `35.semantics/noalloc_checker.spl` exists but is NOT a gate, and its family
-   manifest exempts its own allocators (flight_rules.spl:295, plan premises
-   7/7b, WP-11/WP-12). The alloc knob configures a diagnostic that is not yet
-   enforced end-to-end; the knob must not be advertised as making the check
-   sound.
-
-### Migration M — compiler, interpreter, loader into mission-critical (warning level first)
-
-Sequenced one at a time; a step does not start until the previous step's gate
-is green. Owner per step is a single lane agent; the merge owner alone
-integrates; the independent final reviewer alone signs the final receipt
-(coordination rules above apply unchanged).
-
-| Step | Scope | Owner | Entry condition | Exit evidence | Gate |
-|---|---|---|---|---|---|
-| M0 | Feature freeze: `warning_phase` field + alloc-knob schema landed, hashed, and both lanes' specs green | merge owner | `mcwarn-1` and `mcalloc-1` handoffs received | policy-hash cross-component agreement spec green; downgrade-is-reported negative control (a silenced diagnostic FAILS the spec) | new `check-mc-warning-phase.shs` (fail-closed, `--selftest`, verdict-line convention of `.claude/rules/vcs.md` guards) |
-| M1 | **Driver/compiler** (`80.driver` + `50.mir`/`35.semantics` safety passes) under `critical` + warning phase | lane `mcmig-driver-1` | M0 green | full `bin/simple build bootstrap` stage-2 completes with N downgraded diagnostics reported, 0 errors; N recorded in receipt; diagnostic inventory file committed | `check-mc-migrate-driver.shs`: runs a pinned compile under the profile, asserts exit 0 AND N>0 reported (N=0 means the mode silently didn't apply — FAIL, not pass) |
-| M2 | **Loader** (module loading/admission path, `00.common/mission_critical/compiler_admission.spl` surface) | lane `mcmig-loader-1` | M1 green + M1 inventory triaged | loader paths run under profile; alloc diagnostics in loader classified via the scoped opt-out (each exemption named in receipt, none global) | `check-mc-migrate-loader.shs`: same shape as M1; additionally FAILs if any exemption is process-global |
-| M3 | **Interpreter** — the odd one out | lane `mcmig-interp-1` | M2 green | `match_fallthrough_profile_is_deny` replaced by a three-state projection (or by consuming `SafetyPassSeverity` from the shared table) + latch-vs-reread divergence spec | `check-mc-migrate-interp.shs` + the existing all-spellings agreement spec extended to the new projection |
-| M4 | Ratchet: warning phase → error phase, per component in the same order | merge owner | M1–M3 inventories at 0 outstanding downgrades for that component | per-component receipt shows 0 downgraded diagnostics before the flip; flip commit carries the receipt path | rerun of M1–M3 gates with `warning_phase=false` |
-| M5 | Independent final review of the whole migration | independent final reviewer (never a lane author) | M4 green | signed acceptance receipt per Wave 4 contract | Wave 4 reviewer gate (existing; not duplicated here) |
-
-**Why the interpreter is last and different (M3):** its projection is a
-`bool` ("deny or not"). A warning phase means "was going to deny, now warns"
-— a third state. Migrating the interpreter before widening the projection
-would force one of two wrong encodings: `deny=true` (warning phase does
-nothing there: interpreter still hard-fails while compiler warns — the
-migration deadlocks on interpreter errors) or `deny=false` (warning phase
-silences instead of downgrades — violates the Feature 1 non-silencing
-contract). So M3's real work is the projection change, and it lands behind
-M1/M2 so the shared severity type is already proven in two consumers first.
-The latch-at-`eval_init` behaviour additionally means a warning-phase toggle
-mid-session is invisible to the interpreter; M3's spec must pin either
-re-resolve-per-eval or documented latch semantics, not leave it implicit.
-
-**Risks named from source, not generic:**
-- R-W1 Split-brain profile (driver re-read vs interpreter latch) makes a
-  half-active warning phase look green. Mitigation: policy-hash comparison in
-  every M gate.
-- R-W2 Bool projection cannot express the downgrade (above) — M3 shape risk.
-- R-W3 Alias-freeze violation: encoding the warning phase as a new profile
-  spelling would unfreeze the frozen table and touch all five consumers.
-  Forbidden; it is a policy field.
-- R-W4 Alloc knob as global off-switch defeats FLT-MEM-001; also the checker
-  it configures is not yet a gate (premise 7), so a green M-gate must not be
-  read as "no allocation in critical paths" — only as "diagnostic policy
-  applied as configured".
-- R-W5 `policy_hash()` changes when the schema grows a field: every consumer
-  that persists or compares the hash must roll in the same integration, or
-  cross-component agreement specs go red spuriously. Merge-owner serial step.
-- R-W6 Bootstrap coupling: M1's gate needs a working stage-2 native build;
-  the stage-binaries guard is currently ADVISORY-RED (tracked stage binaries
-  SEGV, see `.claude/rules/vcs.md`). M1 is blocked on that repair and must
-  say so rather than gate on the Rust seed.
-
-Where the existing plan already covers a thing, it governs: lane C owns
-allocation arenas/telemetry (the knob configures the *diagnostic*, not the
-arenas); Wave 3 serial integration and Wave 4 reviewer contract apply to M0
-and M5 verbatim; no `MciWarningPhaseV1` receipt type is invented — downgrade
-counts ride the existing `EvidenceReceiptV1` artifacts list.

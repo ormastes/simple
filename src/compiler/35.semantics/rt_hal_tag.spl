@@ -1,0 +1,99 @@
+# codex-impl
+# Semantic interpretation of the typed @rt(hal[, c][, rust]) metadata.
+
+use compiler.common.attributes.{FunctionAttr}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.{HirModule, HirType}
+
+pub struct RtHalTagMetadata:
+    enabled: bool
+    compare_c: bool
+    compare_rust: bool
+    error: text
+
+var rt_hal_compilation_finalize_required = false
+var rt_hal_compilation_plan_path = ""
+
+pub fn rt_hal_compilation_requires_finalize() -> bool:
+    rt_hal_compilation_finalize_required
+
+pub fn rt_hal_compilation_configured_plan_path() -> text:
+    rt_hal_compilation_plan_path
+
+pub fn rt_hal_tag_metadata(attr: FunctionAttr) -> RtHalTagMetadata:
+    RtHalTagMetadata(
+        enabled: attr.is_rt_hal and attr.rt_hal_error == "",
+        compare_c: attr.is_rt_hal and attr.rt_hal_compare_c,
+        compare_rust: attr.is_rt_hal and attr.rt_hal_compare_rust,
+        error: attr.rt_hal_error
+    )
+
+pub fn rt_hal_function_metadata(function: HirFunction) -> RtHalTagMetadata:
+    rt_hal_tag_metadata(function.func_attr)
+
+pub fn rt_hal_tag_error(attr: FunctionAttr) -> text:
+    val metadata = rt_hal_tag_metadata(attr)
+    if metadata.error != "":
+        return metadata.error
+    if (metadata.compare_c or metadata.compare_rust) and not metadata.enabled:
+        return "E-RT-HAL-TAG: comparator requires @rt(hal)"
+    ""
+
+# "" when the parameter type is transportable by the dual-run argument
+# vector (DualArgs: i64/u*/f64/bool/text/[u8]); otherwise the reason.
+pub fn rt_hal_untransportable_param_reason(ty: HirType) -> text:
+    match ty.kind:
+        case Int(_, _): ""
+        case Float(_): ""
+        case Bool: ""
+        case Str: ""
+        case Array(element, _):
+            match element.kind:
+                case Int(bits, _):
+                    if bits == 8: "" else: "has an element type that is not u8"
+                case _: "has an element type that is not u8"
+        case Slice(element):
+            match element.kind:
+                case Int(bits, _):
+                    if bits == 8: "" else: "has an element type that is not u8"
+                case _: "has an element type that is not u8"
+        case _: "has a type that cannot be transported canonically"
+
+pub fn validate_rt_hal_tags(modules: Dict<text, HirModule>, plan_path: text = "") -> [text]:
+    var errors: [text] = []
+    rt_hal_compilation_finalize_required = false
+    rt_hal_compilation_plan_path = plan_path
+    for module_name in modules.keys():
+        val module = modules[module_name]
+        for function in module.functions.values():
+            val tag_error = rt_hal_tag_error(function.func_attr)
+            if tag_error != "":
+                errors.push("{module_name}.{function.name}: {tag_error}")
+            # Transport/receipt rules apply only when a foreign comparator is
+            # requested; a Pure-only @rt(hal) ABI dual-runs nothing.
+            if function.func_attr.is_rt_hal and (function.func_attr.rt_hal_compare_c or function.func_attr.rt_hal_compare_rust):
+                rt_hal_compilation_finalize_required = true
+                if plan_path == "" or plan_path.len() > 4096 or not plan_path.starts_with("/") or plan_path.contains("/../") or plan_path.ends_with("/.."):
+                    errors.push("{module_name}.{function.name}: E-RT-HAL-CONFIG: foreign comparison requires --rt-hal-plan with a bounded canonical absolute EnvAccessPlan path; implicit PATH discovery is forbidden")
+                # Typed in-process argument transport (design B.4, runtime
+                # std.nogc_sync_mut.rt_hal.dual_runner DualArgs): integers of
+                # any width, floats, bool, text, and byte buffers ([u8]) are
+                # transported by value; anything else cannot be shadowed.
+                for param in function.params:
+                    val reason = rt_hal_untransportable_param_reason(param.type_)
+                    if reason != "":
+                        errors.push("{module_name}.{function.name}: E-RT-HAL-SIGNATURE: parameter `{param.name}` {reason}; dual-run transports i64/u*/f64/bool/text/[u8] only")
+                if function.is_async:
+                    errors.push("{module_name}.{function.name}: E-RT-HAL-SIGNATURE: async boundary receipts are unsupported")
+                match function.return_type.kind:
+                    case Int(bits, _):
+                        if bits != 64:
+                            errors.push("{module_name}.{function.name}: E-RT-HAL-SIGNATURE: integer receipt must be exactly 64 bits")
+                    case _:
+                        errors.push("{module_name}.{function.name}: E-RT-HAL-SIGNATURE: boundary comparison requires an integer receipt return")
+    errors
+
+export RtHalTagMetadata, rt_hal_tag_metadata, rt_hal_function_metadata
+export rt_hal_tag_error, validate_rt_hal_tags, rt_hal_compilation_requires_finalize
+export rt_hal_untransportable_param_reason
+export rt_hal_compilation_configured_plan_path

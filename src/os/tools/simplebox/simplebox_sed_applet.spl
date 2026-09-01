@@ -1,0 +1,255 @@
+# Bounded literal substitution for filesystem-launched SimpleOS Simplebox.
+
+use os.userlib.fs.{file_open_direct, file_read_direct, file_close_direct}
+use os.tools.simplebox.simplebox_fs_applets.{
+    SIMPLEBOX_FILE_LIMIT, SIMPLEBOX_FILE_BYTES_LIMIT,
+    SIMPLEBOX_READ_CHUNK_BYTES, SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT
+}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+
+extern fn stdout_write(data: text)
+
+pub const SIMPLEBOX_SED_SCRIPT_BYTES_LIMIT: u64 = 4096u64
+pub const SIMPLEBOX_SED_OUTPUT_BYTES_LIMIT: u64 = 67108864u64
+
+struct SimpleboxSedProgram:
+    accepted: bool
+    needle: text
+    replacement: text
+    replace_all: bool
+    prefix: [u64]
+    error: text
+
+struct SimpleboxSedTransform:
+    accepted: bool
+    output: text
+
+struct SimpleboxSedState:
+    parts: [text]
+    pending: [u8]
+    output_bytes: u64
+    failure: text
+
+fn _sed_parse_program(script: text) -> SimpleboxSedProgram:
+    # This intentionally admits a literal, non-escaping subset only:
+    # s/OLD/NEW/ and s/OLD/NEW/g. Regex syntax, alternate delimiters, and
+    # backslash escapes are rejected instead of being interpreted ambiguously.
+    if script.len() == 0u64 or script.len() > SIMPLEBOX_SED_SCRIPT_BYTES_LIMIT:
+        return SimpleboxSedProgram(
+            accepted: false, needle: "", replacement: "", replace_all: false,
+            prefix: [],
+            error: "invalid or oversized script")
+    if not script.starts_with("s/"):
+        return SimpleboxSedProgram(
+            accepted: false, needle: "", replacement: "", replace_all: false,
+            prefix: [],
+            error: "unsupported script; expected s/OLD/NEW/ or s/OLD/NEW/g")
+    if script.contains("\\"):
+        return SimpleboxSedProgram(
+            accepted: false, needle: "", replacement: "", replace_all: false,
+            prefix: [], error: "backslash escapes are unsupported")
+    var second_slash: u64 = 2u64
+    while second_slash < script.len() and
+          script.slice(second_slash, second_slash + 1u64) != "/":
+        second_slash = second_slash + 1u64
+    if second_slash >= script.len() or second_slash == 2u64:
+        return SimpleboxSedProgram(
+            accepted: false, needle: "", replacement: "", replace_all: false,
+            prefix: [],
+            error: "empty or unterminated search literal")
+    var third_slash = second_slash + 1u64
+    while third_slash < script.len() and
+          script.slice(third_slash, third_slash + 1u64) != "/":
+        third_slash = third_slash + 1u64
+    if third_slash >= script.len():
+        return SimpleboxSedProgram(
+            accepted: false, needle: "", replacement: "", replace_all: false,
+            prefix: [],
+            error: "unterminated replacement literal")
+    val suffix = script.slice(third_slash + 1u64, script.len())
+    if suffix != "" and suffix != "g":
+        return SimpleboxSedProgram(
+            accepted: false, needle: "", replacement: "", replace_all: false,
+            prefix: [],
+            error: "unsupported substitution flag")
+    val needle = script.slice(2u64, second_slash)
+    val needle_bytes = needle.bytes()
+    var prefix: [u64] = []
+    prefix.push(0u64)
+    var prefix_index: u64 = 1u64
+    var matched: u64 = 0u64
+    while prefix_index < needle_bytes.len():
+        while matched > 0u64 and needle_bytes[prefix_index] != needle_bytes[matched]:
+            matched = prefix[matched - 1u64]
+        if needle_bytes[prefix_index] == needle_bytes[matched]:
+            matched = matched + 1u64
+        prefix.push(matched)
+        prefix_index = prefix_index + 1u64
+    SimpleboxSedProgram(
+        accepted: true,
+        needle: needle,
+        replacement: script.slice(second_slash + 1u64, third_slash),
+        replace_all: suffix == "g", prefix: prefix, error: "")
+
+fn _sed_first_match_index(line: text, program: SimpleboxSedProgram) -> i64:
+    val bytes = line.bytes()
+    val needle = program.needle.bytes()
+    var matched: u64 = 0u64
+    var index: u64 = 0u64
+    while index < bytes.len():
+        while matched > 0u64 and bytes[index] != needle[matched]:
+            matched = program.prefix[matched - 1u64]
+        if bytes[index] == needle[matched]:
+            matched = matched + 1u64
+        if matched == needle.len():
+            return (index + 1u64 - needle.len()).to_i64()
+        index = index + 1u64
+    -1
+
+fn _sed_nonoverlap_match_count(line: text, program: SimpleboxSedProgram) -> u64:
+    val bytes = line.bytes()
+    val needle = program.needle.bytes()
+    var count: u64 = 0u64
+    var matched: u64 = 0u64
+    var index: u64 = 0u64
+    while index < bytes.len():
+        while matched > 0u64 and bytes[index] != needle[matched]:
+            matched = program.prefix[matched - 1u64]
+        if bytes[index] == needle[matched]:
+            matched = matched + 1u64
+        if matched == needle.len():
+            count = count + 1u64
+            # sed substitutions are non-overlapping; restart after a match.
+            matched = 0u64
+        index = index + 1u64
+    count
+
+fn _sed_transform_line_bounded(
+    line: text, program: SimpleboxSedProgram, remaining: u64
+) -> SimpleboxSedTransform:
+    var match_count: u64 = 0u64
+    var first_match: i64 = -1
+    if program.replace_all:
+        match_count = _sed_nonoverlap_match_count(line, program)
+    else:
+        first_match = _sed_first_match_index(line, program)
+        if first_match >= 0:
+            match_count = 1u64
+    val retained = line.len() - match_count * program.needle.len()
+    if retained > remaining:
+        return SimpleboxSedTransform(accepted: false, output: "")
+    if match_count > 0u64 and
+       program.replacement.len() > (remaining - retained) / match_count:
+        return SimpleboxSedTransform(accepted: false, output: "")
+    val output_bytes = retained + match_count * program.replacement.len()
+    if output_bytes > remaining:
+        return SimpleboxSedTransform(accepted: false, output: "")
+    val output = if program.replace_all:
+        line.replace(program.needle, program.replacement)
+    elif first_match >= 0:
+        val match_index = first_match.to_u64()
+        line.slice(0u64, match_index) + program.replacement +
+            line.slice(match_index + program.needle.len(), line.len())
+    else:
+        line
+    SimpleboxSedTransform(accepted: true, output: output)
+
+fn _sed_finish_line(
+    prior: SimpleboxSedState, program: SimpleboxSedProgram, newline: bool
+) -> SimpleboxSedState:
+    var state = prior
+    val newline_bytes: u64 = if newline: 1u64 else: 0u64
+    val remaining = SIMPLEBOX_SED_OUTPUT_BYTES_LIMIT - state.output_bytes
+    if newline_bytes > remaining:
+        state.failure = "output exceeds simplebox byte limit"
+        return state
+    val transformed = _sed_transform_line_bounded(
+        bytes_to_string(state.pending), program, remaining - newline_bytes)
+    if not transformed.accepted:
+        state.failure = "output exceeds simplebox byte limit"
+        return state
+    var output = transformed.output
+    if newline:
+        output = output + "\n"
+    state.parts.push(output)
+    state.output_bytes = state.output_bytes + output.len()
+    state.pending = []
+    state
+
+fn _sed_read_file(
+    path: text, prior: SimpleboxSedState, program: SimpleboxSedProgram
+) -> SimpleboxSedState:
+    var state = prior
+    val opened = file_open_direct(path, 0u32)
+    match opened:
+        case Err(reason):
+            state.failure = path + ": " + reason
+            state
+        case Ok(fd):
+            var consumed: u64 = 0u64
+            var complete = false
+            while not complete and state.failure == "":
+                match file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES):
+                    case Err(reason): state.failure = path + ": " + reason
+                    case Ok(chunk):
+                        if chunk.len() == 0u64:
+                            complete = true
+                        elif chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT - consumed:
+                            state.failure = path + ": file exceeds simplebox byte limit"
+                        else:
+                            consumed = consumed + chunk.len()
+                            var index: u64 = 0u64
+                            while index < chunk.len() and state.failure == "":
+                                val byte = chunk[index]
+                                if byte == 10u8:
+                                    state = _sed_finish_line(state, program, true)
+                                else:
+                                    state.pending.push(byte)
+                                index = index + 1u64
+            if state.failure == "" and state.pending.len() > 0u64:
+                state = _sed_finish_line(state, program, false)
+            if not file_close_direct(fd) and state.failure == "":
+                state.failure = path + ": close failed"
+            state
+
+pub fn simplebox_sed(args: [text]) -> i32:
+    """Apply one bounded literal substitution to bounded file operands.
+
+    Safe primary forms are `sed [--] 's/OLD/NEW/' FILE...` and the `g`
+    variant. Stdin, in-place edits, regexes, address ranges, escapes, and
+    unbounded input are rejected. Input is fully admitted before output so an
+    I/O or size failure cannot expose a partial transformation.
+    """
+    var script_index: u64 = 0u64
+    if args.len() > 0u64 and args[0] == "--":
+        script_index = 1u64
+    elif args.len() > 0u64 and args[0].starts_with("-"):
+        stdout_write("sed: unsupported option: " + args[0] + "\n")
+        return 2
+    if script_index + 1u64 >= args.len():
+        stdout_write("sed: missing SCRIPT or FILE operand\n")
+        return 2
+    val program = _sed_parse_program(args[script_index])
+    if not program.accepted:
+        stdout_write("sed: " + program.error + "\n")
+        return 2
+    if args.len() - script_index - 1u64 > SIMPLEBOX_FILE_LIMIT.to_u64():
+        stdout_write("sed: too many file operands\n")
+        return 2
+
+    var state = SimpleboxSedState(
+        parts: [], pending: [], output_bytes: 0u64, failure: "")
+    var index = script_index + 1u64
+    while index < args.len() and state.failure == "":
+        val path = args[index]
+        if path.len() == 0u64 or path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+            state.failure = "invalid path length"
+        else:
+            state = _sed_read_file(path, state, program)
+        index = index + 1u64
+    if state.failure != "":
+        stdout_write("sed: " + state.failure + "\n")
+        return 2
+    for part in state.parts:
+        stdout_write(part)
+    0

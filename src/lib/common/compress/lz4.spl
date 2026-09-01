@@ -218,30 +218,32 @@ fn _lz4_compute_header_checksum(desc: [u8]) -> u8:
 pub fn lz4_compress_frame(data: [u8], opts: CompressionOptions) -> [u8]:
     """Compress `data` as a single LZ4 frame.
 
-    Produces a valid LZ4 frame: magic, FLG/BD header, one data block, and
-    end-of-stream marker.  Uses hash-table compressor by default; falls back
-    to store path for incompressible inputs.  Respects checksum and
-    content_size options.
+    Produces a valid LZ4 frame: magic, FLG/BD header, zero or one data blocks,
+    and end-of-stream marker. Empty input uses the canonical immediate end
+    mark. Uses hash-table compressor by default; falls back to store path for
+    incompressible inputs. Respects checksum and content_size options.
     """
     val want_checksum = opts.checksum
     val content_size = opts.content_size
     val block_mode = opts.block_mode
 
-    # Encode block data (compressed or raw).
-    # In LZ4 framing, an uncompressed block (high bit set in size word) contains
-    # the original bytes verbatim — NOT LZ4-tokenized data.
-    val compressed_block_data = _lz4_encode_block_compress(data)
-    var block_is_uncompressed = false
-    var block_data: [u8] = compressed_block_data
-    if compressed_block_data.len() >= data.len():
-        # Fall back to uncompressed: embed raw bytes directly in frame
-        block_data = data
-        block_is_uncompressed = true
-
     if block_mode == "block":
         # Raw LZ4 block mode (no frame) — return compressed block bytes only.
         # Use LZ4-tokenized encoding so the caller can decompress with lz4_decompress_block.
         return _lz4_encode_block_compress(data)
+
+    # Encode block data (compressed or raw). An empty frame has no data block:
+    # its descriptor is followed immediately by the zero end mark. This is the
+    # canonical compact representation and avoids an unnecessary empty block.
+    var block_is_uncompressed = false
+    var block_data: [u8] = []
+    if data.len() > 0:
+        val compressed_block_data = _lz4_encode_block_compress(data)
+        block_data = compressed_block_data
+        if compressed_block_data.len() >= data.len():
+            # Fall back to uncompressed: embed raw bytes directly in frame
+            block_data = data
+            block_is_uncompressed = true
 
     # FLG byte: version=01(bits 7:6), B.Indep=1(bit 5), B.checksum(bit 4),
     #           C.Size(bit 3), C.checksum(bit 2)
@@ -269,18 +271,19 @@ pub fn lz4_compress_frame(data: [u8], opts: CompressionOptions) -> [u8]:
     # Header checksum
     out = out.push(hc)
 
-    # Block size field (4 bytes LE):
-    # high bit = 1 means uncompressed (raw), high bit = 0 means compressed
-    var size_word: u32 = block_data.len().to_u32()
-    if block_is_uncompressed:
-        size_word = size_word | 0x80000000u32
-    out = _lz4_append_bytes(out, _lz4_write_le32_u(size_word))
-    out = _lz4_append_bytes(out, block_data)
+    if data.len() > 0:
+        # Block size field (4 bytes LE): high bit = 1 means uncompressed
+        # (raw), high bit = 0 means compressed.
+        var size_word: u32 = block_data.len().to_u32()
+        if block_is_uncompressed:
+            size_word = size_word | 0x80000000u32
+        out = _lz4_append_bytes(out, _lz4_write_le32_u(size_word))
+        out = _lz4_append_bytes(out, block_data)
 
-    # Optional block checksum
-    if want_checksum:
-        val bc = xxhash32_bytes(block_data, 0u32)
-        out = _lz4_append_bytes(out, _lz4_write_le32_u(bc))
+        # Optional block checksum
+        if want_checksum:
+            val bc = xxhash32_bytes(block_data, 0u32)
+            out = _lz4_append_bytes(out, _lz4_write_le32_u(bc))
 
     # End mark
     out = _lz4_append_bytes(out, _lz4_write_le32(0))

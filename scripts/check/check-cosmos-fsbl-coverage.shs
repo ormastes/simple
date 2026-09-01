@@ -1,0 +1,365 @@
+#!/bin/sh
+# Produce a host-only receipt from the emitted pure-Simple FSBL policy object
+# and the separately instrumented C acquisition bridge. Board evidence is out
+# of scope.
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+C_SOURCE=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c
+SIMPLE_SOURCE=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl
+C_HARNESS=test/02_integration/os/cosmos/cosmos_fsbl_bridge_coverage_test.c
+DEFAULT_EVIDENCE_DIR=build/coverage/cosmos-fsbl
+STAGE3_HELPER=$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs
+STAGE4_HELPER=$ROOT/scripts/check/lib/stage4-candidate-provenance.shs
+
+fail() {
+    echo "FAIL cosmos-fsbl-coverage: $*" >&2
+    exit 1
+}
+
+receipt_value() {
+    _receipt=$1
+    _key=$2
+    awk -F= -v key="$_key" '$1 == key { count++; value=substr($0, index($0, "=") + 1) } END { if (count == 1) print value }' "$_receipt"
+}
+
+require_unsigned() {
+    _value=$1
+    _label=$2
+    case $_value in ''|*[!0-9]*) fail "$_label is not an unsigned integer" ;; esac
+}
+
+require_file_hash() {
+    _path=$1
+    _expected=$2
+    [ -f "$ROOT/$_path" ] || fail "missing bound source: $_path"
+    _actual=$(sha256sum "$ROOT/$_path" | awk '{print $1}')
+    [ "$_actual" = "$_expected" ] || fail "source hash mismatch: $_path"
+}
+
+require_evidence_hash() {
+    _path=$1
+    _expected=$2
+    case $_path in "$ROOT"/*) ;; *) fail "evidence path is outside this worktree: $_path" ;; esac
+    [ -f "$_path" ] || fail "missing raw evidence: $_path"
+    _actual=$(sha256sum "$_path" | awk '{print $1}')
+    [ "$_actual" = "$_expected" ] || fail "raw evidence hash mismatch: $_path"
+}
+
+require_authority_hash() {
+    _path=$1
+    _expected=$2
+    case $_path in /*) ;; *) fail "compiler authority path is not absolute: $_path" ;; esac
+    [ -f "$_path" ] || fail "missing compiler authority: $_path"
+    _actual=$(sha256sum "$_path" | awk '{print $1}')
+    [ "$_actual" = "$_expected" ] || fail "compiler authority hash mismatch: $_path"
+}
+
+derive_simple_decision_locations() {
+    awk '
+        BEGIN { pending = -1 }
+        pending >= 0 {
+            branch = $0
+            sub(/^[[:space:]]*/, "", branch)
+            if (branch !~ /^if /) exit 3
+            location[pending] = pending ":" record_line ":" record_column ":" NR ":" index($0, "if ")
+            pending = -1
+        }
+        /_fsbl_policy_coverage_record\([0-9][0-9]*u32,/ {
+            row = $0
+            sub(/^.*_fsbl_policy_coverage_record\(/, "", row)
+            sub(/u32,.*/, "", row)
+            id = row + 0
+            seen[id]++
+            pending = id
+            record_line = NR
+            record_column = index($0, "_fsbl_policy_coverage_record")
+        }
+        END {
+            if (pending >= 0) exit 4
+            for (id = 0; id < 12; id++) if (seen[id] != 1) exit 2
+            for (id = 0; id < 12; id++) {
+                if (id != 0) printf ","
+                printf "%s", location[id]
+            }
+            printf "\n"
+        }
+    ' "$1"
+}
+
+parse_simple_raw() {
+    awk '
+        $1 == "COSMOS_FSBL_SIMPLE_RUNTIME_COVERAGE" {
+            for (i = 2; i <= NF; i++) {
+                split($i, pair, "=")
+                if (pair[1] == "mask") mask = pair[2]
+                if (pair[1] == "required") required = pair[2]
+                if (pair[1] == "decisions") decisions = pair[2]
+                if (pair[1] == "outcomes") outcomes = pair[2]
+            }
+            rows++
+        }
+        END { if (rows == 1) print mask, required, decisions, outcomes }
+    ' "$1"
+}
+
+parse_c_raw() {
+    awk '$1 ~ /cosmos_fsbl[.]c$/ { print $(NF-2), $(NF-1); rows++ } END { if (rows != 1) exit 2 }' "$1"
+}
+
+mask_popcount() {
+    _mask=$1
+    _count=0
+    while [ "$_mask" -gt 0 ]; do
+        _count=$((_count + (_mask % 2)))
+        _mask=$((_mask / 2))
+    done
+    echo "$_count"
+}
+
+validate_receipt() {
+    _receipt=$1
+    [ -f "$_receipt" ] || fail "missing receipt: $_receipt"
+
+    [ "$(receipt_value "$_receipt" schema)" = "cosmos-fsbl-coverage-v2" ] || fail "receipt schema mismatch"
+    [ "$(receipt_value "$_receipt" claim_scope)" = "cosmos-fsbl-c-bridge-and-production-simple-policy-object-only" ] || fail "receipt scope mismatch"
+    [ "$(receipt_value "$_receipt" board_evidence)" = "separate-not-included" ] || fail "board evidence was blended into host coverage"
+    [ "$(receipt_value "$_receipt" whole_hal_claim)" = "false" ] || fail "whole-HAL coverage claim is forbidden"
+
+    _c_source=$(receipt_value "$_receipt" c_source)
+    _c_harness=$(receipt_value "$_receipt" c_harness)
+    _simple_source=$(receipt_value "$_receipt" simple_source)
+    [ "$_c_source" = "$C_SOURCE" ] || fail "C source scope mismatch"
+    [ "$_c_harness" = "$C_HARNESS" ] || fail "mixed harness scope mismatch"
+    [ "$_simple_source" = "$SIMPLE_SOURCE" ] || fail "Simple source scope mismatch"
+    require_file_hash "$_c_source" "$(receipt_value "$_receipt" c_source_sha256)"
+    require_file_hash "$_c_harness" "$(receipt_value "$_receipt" c_harness_sha256)"
+    require_file_hash "$_simple_source" "$(receipt_value "$_receipt" simple_source_sha256)"
+
+    [ "$(receipt_value "$_receipt" c_measurement)" = "llvm-profile-instr-generate-coverage-mapping" ] || fail "C measurement is not compiler instrumentation"
+    [ "$(receipt_value "$_receipt" simple_measurement)" = "production-owner-runtime-branch-outcome-mask" ] || fail "Simple measurement is not runtime branch instrumentation"
+    [ "$(receipt_value "$_receipt" simple_execution)" = "mixed-c-simple-linked-object" ] || fail "Simple policy was not executed from a mixed object harness"
+    [ "$(receipt_value "$_receipt" simple_compiler_stage)" = "4-admitted-self-host" ] || fail "Simple object compiler is not admitted Stage 4"
+
+    _locations=$(derive_simple_decision_locations "$ROOT/$SIMPLE_SOURCE") || fail "cannot derive exact Simple decision locations"
+    [ "$_locations" = "$(receipt_value "$_receipt" simple_decision_locations)" ] || fail "Simple decision location map mismatch"
+
+    _c_hit=$(receipt_value "$_receipt" c_branches_hit)
+    _c_total=$(receipt_value "$_receipt" c_branches_total)
+    _simple_mask=$(receipt_value "$_receipt" simple_outcome_mask)
+    _simple_required=$(receipt_value "$_receipt" simple_outcome_required)
+    _simple_hit=$(receipt_value "$_receipt" simple_outcomes_hit)
+    _simple_total=$(receipt_value "$_receipt" simple_outcomes_total)
+    _simple_decisions=$(receipt_value "$_receipt" simple_decisions_total)
+    for _pair in "$_c_hit:c_branches_hit" "$_c_total:c_branches_total" \
+        "$_simple_mask:simple_outcome_mask" "$_simple_required:simple_outcome_required" \
+        "$_simple_hit:simple_outcomes_hit" "$_simple_total:simple_outcomes_total" \
+        "$_simple_decisions:simple_decisions_total"; do
+        require_unsigned "${_pair%%:*}" "${_pair#*:}"
+    done
+    [ "$_c_hit" -eq 2 ] && [ "$_c_total" -eq 2 ] || fail "C bridge LLVM coverage is not the separate 2/2 slice"
+    [ "$_simple_decisions" -eq 12 ] || fail "Simple production decision denominator changed"
+    [ "$_simple_total" -eq 24 ] || fail "Simple branch-outcome denominator changed"
+    [ "$_simple_required" -eq 16777215 ] || fail "Simple required outcome mask changed"
+    [ "$_simple_mask" -eq "$_simple_required" ] || fail "Simple policy has an unexecuted branch outcome"
+    [ "$_simple_hit" -eq "$_simple_total" ] || fail "Simple policy outcome count is incomplete"
+    [ "$(mask_popcount "$_simple_mask")" -eq "$_simple_hit" ] || fail "Simple hit count does not match emitted mask"
+
+    _c_raw=$(receipt_value "$_receipt" c_raw_report)
+    _simple_raw=$(receipt_value "$_receipt" simple_raw_output)
+    _simple_object=$(receipt_value "$_receipt" simple_object)
+    _simple_compiler=$(receipt_value "$_receipt" simple_compiler)
+    _simple_provenance=$(receipt_value "$_receipt" simple_compiler_provenance)
+    require_evidence_hash "$_c_raw" "$(receipt_value "$_receipt" c_raw_report_sha256)"
+    require_evidence_hash "$_simple_raw" "$(receipt_value "$_receipt" simple_raw_output_sha256)"
+    require_evidence_hash "$_simple_object" "$(receipt_value "$_receipt" simple_object_sha256)"
+    require_authority_hash "$_simple_compiler" "$(receipt_value "$_receipt" simple_compiler_sha256)"
+    require_authority_hash "$_simple_provenance" "$(receipt_value "$_receipt" simple_compiler_provenance_sha256)"
+    [ -f "$STAGE3_HELPER" ] && [ -f "$STAGE4_HELPER" ] || fail "missing compiler provenance helpers"
+    BOOTSTRAP_STAGE3_FACADE_PATH=$STAGE3_HELPER
+    STAGE4_PROVENANCE_HELPER_PATH=$STAGE4_HELPER
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    . "$STAGE3_HELPER"
+    . "$STAGE4_HELPER"
+    stage4_verify_candidate_provenance "$_simple_provenance" "$_simple_compiler" "$ROOT" || fail "receipt compiler is not admitted Stage 4"
+    _simple_identity=$("$_simple_compiler" --version 2>&1 || true)
+    case $_simple_identity in *"Rust-built Simple binary is a bootstrap seed"*) fail "receipt compiler is a bootstrap seed" ;; esac
+
+    _c_pair=$(parse_c_raw "$_c_raw") || fail "cannot parse C LLVM branch counters"
+    set -- $_c_pair
+    [ "$#" -eq 2 ] || fail "malformed C LLVM branch counters"
+    _c_raw_hit=$(($1 - $2))
+    [ "$_c_raw_hit" -eq "$_c_hit" ] && [ "$1" -eq "$_c_total" ] || fail "receipt C counters disagree with compiler report"
+
+    _simple_pair=$(parse_simple_raw "$_simple_raw")
+    set -- $_simple_pair
+    [ "$#" -eq 4 ] || fail "cannot parse executed Simple object counters"
+    [ "$1" -eq "$_simple_mask" ] && [ "$2" -eq "$_simple_required" ] && \
+        [ "$3" -eq "$_simple_decisions" ] && [ "$4" -eq "$_simple_total" ] || \
+        fail "receipt Simple counters disagree with mixed harness output"
+}
+
+pick_llvm_toolchain() {
+    if [ -n "${CLANG:-}" ] && [ -n "${LLVM_PROFDATA:-}" ] && [ -n "${LLVM_COV:-}" ]; then return; fi
+    for _version in 20 19 18; do
+        if command -v "clang-$_version" >/dev/null 2>&1 &&
+           command -v "llvm-profdata-$_version" >/dev/null 2>&1 &&
+           command -v "llvm-cov-$_version" >/dev/null 2>&1; then
+            CLANG=clang-$_version LLVM_PROFDATA=llvm-profdata-$_version LLVM_COV=llvm-cov-$_version
+            export CLANG LLVM_PROFDATA LLVM_COV
+            return
+        fi
+    done
+    fail "matching clang, llvm-profdata, and llvm-cov toolchain not found"
+}
+
+pick_simple_compiler() {
+    SIMPLE_BIN=${SIMPLE_BIN:-$ROOT/bin/simple}
+    [ -x "$SIMPLE_BIN" ] || fail "missing pure-Simple compiler: $SIMPLE_BIN"
+    [ -f "$STAGE3_HELPER" ] && [ -f "$STAGE4_HELPER" ] || fail "missing compiler provenance helpers"
+    BOOTSTRAP_STAGE3_FACADE_PATH=$STAGE3_HELPER
+    STAGE4_PROVENANCE_HELPER_PATH=$STAGE4_HELPER
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    . "$STAGE3_HELPER"
+    . "$STAGE4_HELPER"
+    _canonical=$(bootstrap_stage3_canonical_file "$SIMPLE_BIN") || fail "cannot resolve Simple compiler canonically"
+    SIMPLE_PROVENANCE=${SIMPLE_PROVENANCE:-${_canonical}.provenance.env}
+    stage4_verify_candidate_provenance "$SIMPLE_PROVENANCE" "$_canonical" "$ROOT" || fail "Cosmos FSBL coverage requires admitted Stage-4 compiler provenance"
+    _identity=$("$_canonical" --version 2>&1 || true)
+    case $_identity in *"Rust-built Simple binary is a bootstrap seed"*) fail "bootstrap seed cannot produce Cosmos FSBL coverage evidence" ;; esac
+    SIMPLE_BIN=$_canonical
+    export SIMPLE_BIN SIMPLE_PROVENANCE
+}
+
+run_sabotage_checks() {
+    _receipt=$1
+    _scratch=$2
+
+    sed 's/^c_branches_total=.*/c_branches_total=0/' "$_receipt" > "$_scratch/c-zero-denominator.receipt"
+    if ( validate_receipt "$_scratch/c-zero-denominator.receipt" ) >/dev/null 2>&1; then fail "validator accepted sabotaged C denominator"; fi
+    echo "SABOTAGE c-zero-denominator REJECTED"
+
+    _removed_raw="$_scratch/simple-removed-outcome.out"
+    sed 's/mask=16777215 /mask=16777214 /' "$(receipt_value "$_receipt" simple_raw_output)" > "$_removed_raw"
+    _removed_hash=$(sha256sum "$_removed_raw" | awk '{print $1}')
+    sed -e 's/^simple_outcome_mask=.*/simple_outcome_mask=16777214/' \
+        -e 's/^simple_outcomes_hit=.*/simple_outcomes_hit=23/' \
+        -e "s#^simple_raw_output=.*#simple_raw_output=$_removed_raw#" \
+        -e "s/^simple_raw_output_sha256=.*/simple_raw_output_sha256=$_removed_hash/" \
+        "$_receipt" > "$_scratch/simple-removed-outcome.receipt"
+    if ( validate_receipt "$_scratch/simple-removed-outcome.receipt" ) >/dev/null 2>&1; then fail "validator accepted a removed Simple runtime outcome"; fi
+    echo "SABOTAGE simple-removed-outcome REJECTED"
+
+    sed 's/^simple_source_sha256=.*/simple_source_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$_receipt" > "$_scratch/source-hash.receipt"
+    if ( validate_receipt "$_scratch/source-hash.receipt" ) >/dev/null 2>&1; then fail "validator accepted sabotaged source hash"; fi
+    echo "SABOTAGE source-hash REJECTED"
+
+    sed 's/^board_evidence=.*/board_evidence=included/' "$_receipt" > "$_scratch/board-blend.receipt"
+    if ( validate_receipt "$_scratch/board-blend.receipt" ) >/dev/null 2>&1; then fail "validator accepted blended board evidence"; fi
+    echo "SABOTAGE board-blend REJECTED"
+}
+
+measure() {
+    _receipt=$1
+    case $_receipt in /*) ;; *) _receipt=$ROOT/$_receipt ;; esac
+    _evidence_dir=$(dirname -- "$_receipt")
+    mkdir -p "$_evidence_dir" || fail "cannot create evidence directory"
+    _tmp=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-fsbl-coverage.XXXXXX") || fail "cannot create temporary directory"
+    trap 'case ${_tmp:-} in /tmp/cosmos-fsbl-coverage.*|${TMPDIR:-/tmp}/cosmos-fsbl-coverage.*) [ ! -d "$_tmp" ] || rm -r -- "$_tmp" ;; esac' EXIT HUP INT TERM
+
+    pick_llvm_toolchain
+    pick_simple_compiler
+    _simple_object=$_evidence_dir/cosmos_fsbl_policy.o
+    SIMPLE_LIB=$ROOT/src "$SIMPLE_BIN" native-build --backend llvm \
+        --source "$ROOT/src/os/kernel/arch/arm32/cosmos" --entry-closure \
+        --entry "$ROOT/$SIMPLE_SOURCE" --target x86_64-unknown-linux-gnu \
+        --emit-object --no-mangle --cache-dir "$_tmp/simple-cache" \
+        -o "$_simple_object" > "$_evidence_dir/simple-object-build.log" 2>&1 || \
+        fail "pure-Simple policy object build failed"
+    [ -s "$_simple_object" ] || fail "pure-Simple policy object is missing"
+
+    (
+        cd "$ROOT" || exit 1
+        "$CLANG" -std=c11 -O0 -g -fprofile-instr-generate -fcoverage-mapping \
+            -Wall -Wextra -Werror -DCOSMOS_MMIO_TEST -DCOSMOS_FSBL_COVERAGE_TEST \
+            -Isrc/os/kernel/arch/arm32/cosmos "$C_SOURCE" "$C_HARNESS" \
+            "$_simple_object" -o "$_tmp/cosmos-fsbl-mixed-coverage"
+    ) || fail "mixed C/Simple coverage build failed"
+    LLVM_PROFILE_FILE="$_tmp/cosmos-fsbl.profraw" "$_tmp/cosmos-fsbl-mixed-coverage" > "$_evidence_dir/mixed-runtime-output.txt" 2>&1 || fail "mixed C/Simple coverage harness failed"
+    "$LLVM_PROFDATA" merge -sparse "$_tmp/cosmos-fsbl.profraw" -o "$_tmp/cosmos-fsbl.profdata" || fail "C profile merge failed"
+    "$LLVM_COV" report "$_tmp/cosmos-fsbl-mixed-coverage" -instr-profile="$_tmp/cosmos-fsbl.profdata" "$ROOT/$C_SOURCE" > "$_evidence_dir/c-llvm-cov-report.txt" || fail "C coverage report failed"
+
+    _c_pair=$(parse_c_raw "$_evidence_dir/c-llvm-cov-report.txt") || fail "cannot parse C branch coverage counters"
+    set -- $_c_pair
+    [ "$#" -eq 2 ] || fail "malformed C branch coverage counters"
+    _c_total=$1 _c_missed=$2 _c_hit=$(($1 - $2))
+    _simple_pair=$(parse_simple_raw "$_evidence_dir/mixed-runtime-output.txt")
+    set -- $_simple_pair
+    [ "$#" -eq 4 ] || fail "cannot parse Simple runtime branch outcomes"
+    _simple_mask=$1 _simple_required=$2 _simple_decisions=$3 _simple_total=$4
+    _simple_hit=$(mask_popcount "$_simple_mask")
+    _locations=$(derive_simple_decision_locations "$ROOT/$SIMPLE_SOURCE") || fail "cannot derive Simple decision location map"
+
+    _c_hash=$(sha256sum "$ROOT/$C_SOURCE" | awk '{print $1}')
+    _c_harness_hash=$(sha256sum "$ROOT/$C_HARNESS" | awk '{print $1}')
+    _simple_hash=$(sha256sum "$ROOT/$SIMPLE_SOURCE" | awk '{print $1}')
+    _c_raw_hash=$(sha256sum "$_evidence_dir/c-llvm-cov-report.txt" | awk '{print $1}')
+    _simple_raw_hash=$(sha256sum "$_evidence_dir/mixed-runtime-output.txt" | awk '{print $1}')
+    _simple_object_hash=$(sha256sum "$_simple_object" | awk '{print $1}')
+    _simple_compiler_hash=$(sha256sum "$SIMPLE_BIN" | awk '{print $1}')
+    _simple_provenance_hash=$(sha256sum "$SIMPLE_PROVENANCE" | awk '{print $1}')
+    _clang_version=$($CLANG --version | sed -n '1p')
+
+    {
+        echo "schema=cosmos-fsbl-coverage-v2"
+        echo "claim_scope=cosmos-fsbl-c-bridge-and-production-simple-policy-object-only"
+        echo "board_evidence=separate-not-included"
+        echo "whole_hal_claim=false"
+        echo "c_source=$C_SOURCE"
+        echo "c_source_sha256=$_c_hash"
+        echo "c_harness=$C_HARNESS"
+        echo "c_harness_sha256=$_c_harness_hash"
+        echo "c_measurement=llvm-profile-instr-generate-coverage-mapping"
+        echo "c_toolchain=$_clang_version"
+        echo "c_branches_hit=$_c_hit"
+        echo "c_branches_total=$_c_total"
+        echo "c_raw_report=$_evidence_dir/c-llvm-cov-report.txt"
+        echo "c_raw_report_sha256=$_c_raw_hash"
+        echo "simple_source=$SIMPLE_SOURCE"
+        echo "simple_source_sha256=$_simple_hash"
+        echo "simple_measurement=production-owner-runtime-branch-outcome-mask"
+        echo "simple_execution=mixed-c-simple-linked-object"
+        echo "simple_decision_locations=$_locations"
+        echo "simple_decisions_total=$_simple_decisions"
+        echo "simple_outcome_mask=$_simple_mask"
+        echo "simple_outcome_required=$_simple_required"
+        echo "simple_outcomes_hit=$_simple_hit"
+        echo "simple_outcomes_total=$_simple_total"
+        echo "simple_object=$_simple_object"
+        echo "simple_object_sha256=$_simple_object_hash"
+        echo "simple_compiler=$SIMPLE_BIN"
+        echo "simple_compiler_sha256=$_simple_compiler_hash"
+        echo "simple_compiler_stage=4-admitted-self-host"
+        echo "simple_compiler_provenance=$SIMPLE_PROVENANCE"
+        echo "simple_compiler_provenance_sha256=$_simple_provenance_hash"
+        echo "simple_raw_output=$_evidence_dir/mixed-runtime-output.txt"
+        echo "simple_raw_output_sha256=$_simple_raw_hash"
+    } > "$_receipt" || fail "cannot write coverage receipt"
+
+    validate_receipt "$_receipt"
+    run_sabotage_checks "$_receipt" "$_tmp"
+    echo "cosmos_fsbl_coverage_receipt=$_receipt"
+    echo "cosmos_fsbl_c_bridge_llvm_branches=$_c_hit/$_c_total"
+    echo "cosmos_fsbl_simple_runtime_outcomes=$_simple_hit/$_simple_total"
+    echo "cosmos_fsbl_simple_policy_object=$_simple_object"
+    echo "cosmos_fsbl_board_evidence=separate-not-included"
+    echo "STATUS: PASS cosmos-fsbl scoped runtime branch evidence"
+}
+
+cd "$ROOT" || fail "cannot enter repository root"
+case ${1:-} in
+    --validate) [ "$#" -eq 2 ] || fail "usage: $0 --validate RECEIPT"; validate_receipt "$2"; echo "STATUS: PASS cosmos-fsbl coverage receipt validation" ;;
+    --output) [ "$#" -eq 2 ] || fail "usage: $0 --output RECEIPT"; measure "$2" ;;
+    '') measure "$ROOT/$DEFAULT_EVIDENCE_DIR/receipt.sdn" ;;
+    *) fail "unknown argument: $1" ;;
+esac

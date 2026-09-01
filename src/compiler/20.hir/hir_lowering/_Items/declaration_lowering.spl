@@ -4,7 +4,6 @@
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
-use compiler.hir.hir_lowering._Items.lowering_helpers.{bootstrap_hir_symbol_for_name, bootstrap_hir_symbol_known_name, platform_attr_fields_for, function_params}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem}
@@ -13,7 +12,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.expressions.*
-use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, is_valid_asm_symbol_name, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
@@ -116,7 +115,7 @@ impl HirLowering:
                 self.bootstrap_hir_type_from_tag(param_types[pi])
             else:
                 HirType(kind: HirTypeKind.Infer(0, 0), span: span)
-            val p_sym = self.symbols.define(p_name, SymbolKind.Parameter, p_type, span, Visibility.Private, false, nil)
+            val p_sym = self.symbols.define(p_name, SymbolKind.Parameter, Some(p_type), span, Visibility.Private, false, nil)
             params.push(HirParam(symbol: p_sym, name: p_name, type_: p_type, has_default: false, default: HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span, is_mutable: false))
             pi = pi + 1
         val body_ids = decl_get_body(decl_idx)
@@ -176,7 +175,7 @@ impl HirLowering:
             val owns_byte_at_alias = self.module_filename.replace("\\", "/") == "src/runtime/simple_core/core_string.spl"
             if not owns_byte_at_alias:
                 self.error("function name '__simple_rt_string_byte_at' is reserved for compiler-generated text calls", fn_.span)
-        val bootstrap_diag = (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and hir_lower_diag_enabled()
+        val bootstrap_diag = self.ambient_bootstrap_enabled() and hir_lower_diag_enabled()
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:start {fn_.name}")
         var fn_symbol_id = SymbolId(id: -1)
@@ -215,7 +214,7 @@ impl HirLowering:
         var fn_fallback_type: HirType? = nil
         if fn_.is_static:
             if val owner_type = self.current_method_self_type:
-                fn_fallback_type = self.declared_callable_type(fn_, nil)
+                fn_fallback_type = Some(self.declared_callable_type(fn_, nil))
         # The bare-name bootstrap fast path below owns ONLY the compiler's own
         # fixed set of top-level CLI entry functions (bootstrap_version,
         # main, ...) -- bootstrap_hir_symbol_known_name is that same fixed
@@ -244,7 +243,7 @@ impl HirLowering:
         # signature-declaration pre-pass) already defined for it -- present in
         # the flat table, carrying the real declared type -- so both the
         # call site and the emitted body agree on one real, linkable symbol.
-        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not fn_.is_method and bootstrap_hir_symbol_known_name(fn_.name):
+        if self.ambient_bootstrap_enabled() and not fn_.is_method and bootstrap_hir_symbol_known_name(fn_.name):
             fn_symbol_id = bootstrap_hir_symbol_for_name(fn_.name)
         else:
             val fn_symbol_lookup = self.symbols.lookup(fn_symbol_name)
@@ -347,7 +346,7 @@ impl HirLowering:
                     needs_implicit_self = true
         if needs_implicit_self:
             val self_type = implicit_self_type
-            val self_symbol = self.symbols.define("self", SymbolKind.Parameter, self_type, fn_.span, Visibility.Private, false, nil)
+            val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
             params = params.push(HirParam(
                 symbol: self_symbol,
                 name: "self",
@@ -384,7 +383,7 @@ impl HirLowering:
         # fallback for bootstrap functions with no declaration.
         if fn_.has_return_type:
             val declared_ret = self.lower_type(fn_.return_type)
-            if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            if self.ambient_bootstrap_enabled():
                 # NARROW (deliberate): in bootstrap mode only Str declared
                 # returns take priority for now. Widening every declared type
                 # (arrays/structs/dicts) immediately broke consumers tuned to
@@ -399,7 +398,29 @@ impl HirLowering:
                         return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
             else:
                 return_type = declared_ret
-        elif (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        elif self.ambient_bootstrap_enabled() and fn_.name != "main":
+            # `main` is excluded for the same reason it is excluded at the
+            # `not fn_.has_return_type` guard further down in this file: an
+            # entry point with no declared return type IS unit.
+            #
+            # Without this exclusion the function contradicts itself. The BODY
+            # is lowered by `has_return_type` (false here) via
+            # `lower_hir_block_unit`, which deliberately produces NO tail value;
+            # but the RETURN TYPE came from `bootstrap_builtin_return_type`,
+            # whose fallback for any name outside its small builtin table
+            # (get_args / bootstrap_version / eprint) is
+            # `hir_bootstrap_i64_type`. So `fn main(): print(...)` was lowered
+            # as unit-bodied but i64-returning, and
+            # 50.mir/_MirLowering/function_lowering.spl:577 correctly rejected
+            # it: "E-SFFI-016: missing return in non-unit function 'main'".
+            #
+            # The table is meant as a fallback for bootstrap BUILTINS whose
+            # declarations are not visible, not for a declared function that
+            # simply omits its return type. NOTE: the same contradiction still
+            # exists for any other undeclared, bodied function lowered in
+            # bootstrap mode; only the entry point is fixed here, because that
+            # is the one this gate exercises and a wider change to the fallback
+            # is unverifiable without a bootstrap.
             return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
@@ -444,7 +465,7 @@ impl HirLowering:
         # nil and traps "field access on nil receiver", dropping the in-guest
         # interpreter's main. main's untyped body returns Unit (defaulted above),
         # so it needs none of this user-function return inference.
-        if (not fn_.has_return_type) and (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" and fn_.name != "main":
+        if (not fn_.has_return_type) and not self.ambient_bootstrap_enabled() and fn_.name != "main":
             val fn_sym_type = self.symbols.get_symbol_type(fn_symbol_id)
             if fn_sym_type.?:
                 match fn_sym_type.unwrap().kind:
@@ -467,6 +488,12 @@ impl HirLowering:
 
         # Parse function attributes (@entry, @naked, @noreturn, @section, @interrupt)
         var fa: FunctionAttr = parse_function_attrs(fn_.attributes)
+        if fa.rt_hal_error != "":
+            self.error_fatal(fa.rt_hal_error, Some(fn_.span))
+        if fa.placement_error != "":
+            self.error_fatal(fa.placement_error, Some(fn_.span))
+        if fa.is_global and not is_valid_asm_symbol_name(fn_.name):
+            self.error_fatal("E-GLOBAL-MANGLE: `{fn_.name}` is not a valid assembler symbol name for @global", Some(fn_.span))
         if fn_.is_kernel:
             fa.is_gpu_kernel = true
         # Parse export attributes (@export("C"))
@@ -643,7 +670,10 @@ impl HirLowering:
         val fld: ParserField = f
         val fld_type: Type = fld.type_
         val type_ = self.lower_type(fld_type)
-        val symbol = self.symbols.define(fld.name, SymbolKind.Field, type_, fld.span, fld.visibility, false, nil)
+        self.lower_field_with_type(fld, type_)
+
+    me lower_field_with_type(fld: ParserField, type_: HirType) -> HirField:
+        val symbol = self.symbols.define(fld.name, SymbolKind.Field, Some(type_), fld.span, fld.visibility, false, nil)
 
         # Lower default without closures to avoid bootstrap SSA issues.
         # `ParserField.default` is a DESUGARED plain Expr field gated by `has_default`
@@ -682,9 +712,9 @@ impl HirLowering:
         )
 
     me lower_enum(enum_: ParserEnum, owner_module: text) -> HirEnum:
-        self.lower_enum_with_symbol(enum_, owner_module, enum_.name)
+        self.lower_enum_with_symbol(enum_, owner_module, enum_.name, false)
 
-    me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text) -> HirEnum:
+    me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text, project_imported_payloads: bool) -> HirEnum:
         # Field access, NOT a positional `case ParserEnum(...)` destructure: that
         # arm was written for an 8-field ParserEnum and stopped matching once
         # `attributes` (and later fields) were appended, so every enum lowered
@@ -701,8 +731,12 @@ impl HirLowering:
         for tp in type_params:
             hir_type_params = hir_type_params.push(self.lower_type_param(tp))
         var hir_variants: [HirVariant] = []
+        # Imported enum payload dependencies are registered in the declaring
+        # owner's qualified type index. Resolving their raw parser spellings in
+        # the consumer can either miss (`Effect`) or bind a distinct same-named
+        # type, so only imported variants project through that owner.
         for v in variants:
-            hir_variants = hir_variants.push(self.lower_variant(v))
+            hir_variants = hir_variants.push(self.lower_variant(v, owner_module, project_imported_payloads))
         var hir_attrs: [HirAttribute] = []
         for raw_attr in enum_.attributes:
             hir_attrs = hir_attrs.push(hir_attribute_from_raw(raw_attr))
@@ -735,7 +769,7 @@ impl HirLowering:
             dyn_open: enum_.dyn_open
         )
 
-    me lower_variant(v: Variant) -> HirVariant:
+    me lower_variant(v: Variant, owner_module: text, project_imported_payloads: bool) -> HirVariant:
         val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil)
 
         # QUALIFIED patterns in a statement match, not `val kind = match` over
@@ -750,12 +784,21 @@ impl HirLowering:
             case VariantKind.Tuple(types):
                 var hir_types: [HirType] = []
                 for t in types:
-                    hir_types = hir_types.push(self.lower_type(t))
+                    val lowered_type = if project_imported_payloads:
+                        self.imported_surface_type(t, owner_module)
+                    else:
+                        self.lower_type(t)
+                    hir_types = hir_types.push(lowered_type)
                 kind = HirVariantKind.Tuple(hir_types)
             case VariantKind.Struct(fields):
                 var hir_fields: [HirField] = []
                 for f in fields:
-                    hir_fields = hir_fields.push(self.lower_field(f))
+                    val fld: ParserField = f
+                    val lowered_type = if project_imported_payloads:
+                        self.imported_surface_type(fld.type_, owner_module)
+                    else:
+                        self.lower_type(fld.type_)
+                    hir_fields = hir_fields.push(self.lower_field_with_type(fld, lowered_type))
                 kind = HirVariantKind.Struct(hir_fields)
 
         var discriminant = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: v.span)

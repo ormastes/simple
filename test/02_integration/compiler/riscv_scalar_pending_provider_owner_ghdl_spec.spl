@@ -1,0 +1,148 @@
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_unique_workdir, ghdl_analyze_in,
+    ghdl_elaborate_in, ghdl_run_in, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig, HwPort}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.mir.hwir.riscv_scalar_decoded_uop_interface.{strict_hw_scalar_decoded_uop_interface}
+use compiler.mir.hwir.riscv_scalar_completion_interface.{strict_hw_scalar_completion_interface}
+use compiler.mir.hwir.riscv_scalar_pending_provider_protocol.{strict_hw_scalar_pending_provider_protocol}
+use compiler.mir.hwir.riscv_scalar_pending_provider_owner.{strict_riscv_scalar_pending_provider_owner}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan,
+    riscv_scalar_semantic_opcode}
+
+fn signal_type(port: HwPort) -> text:
+    if port.bit_width == 1: return "std_logic"
+    "std_logic_vector(" + (port.bit_width - 1).to_text() + " downto 0)"
+
+fn signal_default(port: HwPort) -> text:
+    if port.bit_width == 1: return "'0'"
+    "(others => '0')"
+
+fn pending_owner_testbench(entity_name: text, ports: [HwPort], row: i64,
+    semantic: i64, width32: i64) -> text:
+    var declarations = ""; var mappings = ""; var index = 0
+    for port in ports:
+        declarations = declarations + "  signal " + port.name + " : " +
+            signal_type(port) + " := " + signal_default(port) + ";\n"
+        mappings = mappings + "    " + port.name + " => " + port.name
+        if index + 1 < ports.len(): mappings = mappings + ","
+        mappings = mappings + "\n"; index = index + 1
+    """
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.env.all;
+entity {entity_name}_tb is end entity;
+architecture sim of {entity_name}_tb is
+{declarations}begin
+  clk <= not clk after 1 ns;
+  dut: entity work.{entity_name} port map(
+{mappings}  );
+  process
+    variable accepts : natural := 0;
+  begin
+    rst <= '1'; wait until rising_edge(clk); wait until rising_edge(clk); rst <= '0';
+    wait until rising_edge(clk); wait for 1 ps;
+    assert dispatch_ready='1' and busy='0' and protocol_fault='0'
+      report "owner not idle after reset" severity failure;
+
+    dispatch_tag <= "001"; dispatch_valid <= '1'; dispatch_decode_legal <= '1';
+    dispatch_decoded_row_index <= std_logic_vector(to_unsigned({row}, dispatch_decoded_row_index'length));
+    dispatch_decoded_semantic_opcode <= std_logic_vector(to_unsigned({semantic}, 6));
+    dispatch_decoded_execution_class <= "011"; dispatch_decoded_memory_effect <= "001";
+    dispatch_decoded_declared_operand_width_is_32 <= '{width32}';
+    dispatch_lineage_valid <= '1';
+    dispatch_provider_event_id <= x"000000000000002A";
+    dispatch_decode_event_id <= x"000000000000002A";
+    dispatch_canonical_instruction <= x"00000083";
+    wait until rising_edge(clk); dispatch_valid <= '0'; wait for 1 ps;
+    assert busy='1' and lsu_request_valid='1' and lsu_request_canonical_instruction=x"00000083"
+      report "delayed LSU request payload was not captured" severity failure;
+    wait until rising_edge(clk); wait for 1 ps;
+    assert lsu_request_valid='1' and lsu_request_provider_event_id=x"000000000000002A" and
+      lsu_request_canonical_instruction=x"00000083"
+      report "LSU request payload changed while accept was delayed" severity failure;
+
+    lsu_request_ready <= '1'; lsu_request_accept <= '1';
+    wait until rising_edge(clk); accepts := accepts + 1;
+    lsu_request_ready <= '0'; lsu_request_accept <= '0'; wait for 1 ps;
+    assert busy='1' and lsu_request_valid='0' and lsu_completion_ready='1' and accepts=1
+      report "request was not accepted exactly once" severity failure;
+
+    lsu_completion_tag <= "001";
+    lsu_completion_event_id <= x"000000000000002A";
+    lsu_completion_decode_event_id <= x"000000000000002A";
+    lsu_completion_rd_value <= x"11223344"; lsu_completion_valid <= '1';
+    wait until rising_edge(clk); lsu_completion_valid <= '0'; wait for 1 ps;
+    assert busy='1' and selected_completion_valid='1' and selected_completion_rd_value=x"11223344"
+      report "matched completion was not captured" severity failure;
+    wait until rising_edge(clk); wait for 1 ps;
+    assert selected_completion_valid='1' and selected_completion_tag="001" and
+      selected_completion_event_id=x"000000000000002A" and
+      selected_completion_rd_value=x"11223344"
+      report "completion changed under downstream backpressure" severity failure;
+    downstream_ready <= '1'; wait until rising_edge(clk); downstream_ready <= '0'; wait for 1 ps;
+    assert busy='0' and selected_completion_valid='0' and protocol_fault='0'
+      report "completion was not consumed exactly once" severity failure;
+
+    -- A completion on the wrong lane while idle is terminal and sticky.
+    csr_completion_valid <= '1'; csr_completion_tag <= "011";
+    csr_completion_event_id <= x"0000000000000099";
+    wait until rising_edge(clk); csr_completion_valid <= '0'; wait for 1 ps;
+    assert busy='1' and protocol_fault='1' report "wrong-lane completion did not fault" severity failure;
+    wait until rising_edge(clk); wait for 1 ps;
+    assert busy='1' and protocol_fault='1' and dispatch_ready='0'
+      report "wrong-lane fault was not sticky" severity failure;
+
+    rst <= '1'; wait until rising_edge(clk); rst <= '0'; wait until rising_edge(clk); wait for 1 ps;
+    assert busy='0' and protocol_fault='0' and dispatch_ready='1'
+      report "reset did not recover the owner" severity failure;
+
+    -- Overlapping completion valids are rejected even without an outstanding request.
+    lsu_completion_valid <= '1'; fence_completion_valid <= '1';
+    wait until rising_edge(clk); lsu_completion_valid <= '0'; fence_completion_valid <= '0'; wait for 1 ps;
+    assert busy='1' and protocol_fault='1' report "overlapping completions did not fault" severity failure;
+    rst <= '1'; wait until rising_edge(clk); rst <= '0'; wait until rising_edge(clk); wait for 1 ps;
+    assert busy='0' and protocol_fault='0' and dispatch_ready='1'
+      report "reset did not recover overlap fault" severity failure;
+    finish;
+  end process;
+end architecture;
+"""
+
+describe "scalar pending-provider owner clocked GHDL protocol":
+    slow_it "holds, accepts once, backpressures completion, faults sticky, and resets":
+        check_msg(ghdl_available(), "GHDL is required for pending-provider owner integration evidence")
+        if not ghdl_available(): return
+        val config = CoreConfig.rv32(); val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val decoder = strict_riscv_scalar_decoder_hwir("pending_owner_ghdl_decoder",
+            config, plan).unwrap()
+        val decoded = strict_hw_scalar_decoded_uop_interface(config, plan, decoder).unwrap()
+        val completion = strict_hw_scalar_completion_interface(config,
+            LsuConfig.rv32_product_default()).unwrap()
+        val protocol = strict_hw_scalar_pending_provider_protocol(
+            config, decoded, decoder, plan, completion).unwrap()
+        val owner = strict_riscv_scalar_pending_provider_owner("scalar_pending_provider_owner_ghdl",
+            protocol, decoded, decoder, plan, completion).unwrap()
+        val emitted = render_strict_sequential_hwir(owner,
+            "hwir-gen2-scalar-pending-provider-owner-ghdl-v1")
+        expect(emitted.is_success()).to_equal(true)
+        var load_row = 0; var load_semantic = 0; var load_width32 = 0; var row_index = 0
+        for entry in plan.entries:
+            if load_row == 0 and entry.execution_class == "load-store" and entry.memory_effect == "load":
+                load_row = row_index + 1
+                load_semantic = riscv_scalar_semantic_opcode(entry.semantic_operation)
+                load_width32 = if entry.operand_width_bits == 32: 1 else: 0
+            row_index = row_index + 1
+        check_msg(load_row > 0, "RV32I plan has no load route for pending-owner evidence")
+        val workdir = ghdl_unique_workdir("pending-owner-ghdl").unwrap()
+        val path = workdir + "/scalar_pending_provider_owner_ghdl.vhd"
+        expect(vhdl_write_file(path, emitted.vhdl + "\n" + pending_owner_testbench(
+            owner.entity_name, owner.ports, load_row, load_semantic, load_width32))).to_equal(true)
+        check_msg(ghdl_analyze_in(path, workdir).success, "GHDL rejected pending-owner VHDL")
+        check_msg(ghdl_elaborate_in(owner.entity_name + "_tb", workdir).success,
+            "GHDL could not elaborate pending-owner testbench")
+        check_msg(ghdl_run_in(owner.entity_name + "_tb", Some("100ns"), workdir).success,
+            "GHDL pending-owner clocked protocol simulation failed")

@@ -67,6 +67,7 @@ val SATP_MODE_SHIFT: u64 = 60
 val IDENTITY_MAP_END: u64 = 0x40000000      # 1GB
 val RV64_SUPERVISOR_MMIO_VPN2_SLOT: u64 = 0 # 0x00000000..0x3FFFFFFF
 val RV64_KERNEL_VPN2_SLOT: u64 = 2          # 0x80000000..0xBFFFFFFF
+val RV64_SV39_USER_MAX: u64 = 0x0000003FFFFFFFFF
 
 # ============================================================================
 # Virtual Memory Manager
@@ -198,8 +199,14 @@ fn _ensure_table_entry(table_phys: u64, index: u64) -> u64:
     """
     val entry = _read_pte(table_phys, index)
 
-    if _pte_is_valid(entry) and not _pte_is_leaf(entry):
-        # Non-leaf valid entry — follow it to next level
+    if _pte_is_valid(entry):
+        if _pte_is_leaf(entry):
+            # A leaf is an owned mapping, not an absent table.  In particular,
+            # per-process roots inherit supervisor-only gigapages for MMIO and
+            # kernel RAM.  Replacing either leaf with a user table would remove
+            # the supervisor mapping and hand its VPN range to userspace.
+            return 0
+        # Non-leaf valid entry — follow it to next level.
         return _pte_phys_addr(entry)
 
     # Allocate new table
@@ -269,17 +276,36 @@ fn _identity_map_1gb():
 # Page Mapping (4KB pages)
 # ============================================================================
 
-fn riscv64_vmm_map_page_in(root_phys: u64, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+fn _riscv64_vmm_map_page_in_checked(
+    root_phys: u64, virt: VirtAddr, phys: PhysAddr, flags: VmFlags,
+    user_mapping: bool
+) -> bool:
     """Map a single 4KB virtual page in the supplied Sv39 root.
 
     Walks the 3-level page table, creating intermediate tables as needed.
     Returns true on success, false on failure (e.g., out of memory).
     """
-    if root_phys == 0:
+    if root_phys == 0 or root_phys % PAGE_SIZE != 0:
         return false
 
     val vaddr = virt.addr
     val paddr = phys.addr
+    # Accept only an aligned canonical Sv39 page with an encodable physical
+    # PPN.  User-root callers are further confined to the lower half and must
+    # carry an explicit user permission.  Reject W+X even when a caller
+    # bypasses the authenticated ELF load-plan gate.
+    val lower_canonical = vaddr <= RV64_SV39_USER_MAX - (PAGE_SIZE - 1)
+    val upper_canonical = vaddr >= 0xFFFFFFC000000000u64
+    if (vaddr % PAGE_SIZE != 0 or
+        (not lower_canonical and not upper_canonical) or
+        paddr % PAGE_SIZE != 0 or
+        (paddr / PAGE_SIZE) > (PTE_PPN_MASK >> PTE_PPN_SHIFT) or
+        not flags.present() or
+        (flags.writable() and not flags.no_execute())):
+        return false
+    if user_mapping and
+        (vaddr < PAGE_SIZE or not lower_canonical or not flags.user()):
+        return false
 
     # Walk Level 2 (VPN[2]) -> Level 1
     val l1_phys = _ensure_table_entry(root_phys, _vpn2(vaddr))
@@ -291,16 +317,26 @@ fn riscv64_vmm_map_page_in(root_phys: u64, virt: VirtAddr, phys: PhysAddr, flags
     if l0_phys == 0:
         return false
 
-    # Write the leaf PTE at Level 0
+    # Mapping is create-only.  An existing leaf (or malformed non-leaf at L0)
+    # belongs to an earlier segment/stack mapping and must never be replaced.
+    if _pte_is_valid(_read_pte(l0_phys, _vpn0(vaddr))):
+        return false
+
+    # Write the leaf PTE at Level 0.
     val pte_flags = _vmflags_to_pte_bits(flags)
     val entry = _phys_to_pte_ppn(paddr) | pte_flags
     _write_pte(l0_phys, _vpn0(vaddr), entry)
 
     true
 
+fn riscv64_vmm_map_page_in(root_phys: u64, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Create one non-overwriting user mapping in an explicit process root."""
+    _riscv64_vmm_map_page_in_checked(root_phys, virt, phys, flags, true)
+
 fn riscv64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     """Map a page in the active kernel Sv39 root."""
-    riscv64_vmm_map_page_in(g_vmm.root_phys, virt, phys, flags)
+    _riscv64_vmm_map_page_in_checked(
+        g_vmm.root_phys, virt, phys, flags, false)
 
 fn riscv64_vmm_unmap_page(virt: VirtAddr) -> bool:
     """Unmap a single 4KB virtual page.

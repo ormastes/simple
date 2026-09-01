@@ -1,0 +1,142 @@
+"""Static contract coverage for the unwired Clang filesystem pipeline owner."""
+use std.spec.*
+use std.common.contracts.execution.simpleos_vfs_mutation_v1.{TaskExecutionInstanceV1}
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_I686_TRIPLE,
+    SIMPLEOS_TARGET_V1_ARMV7_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE
+}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet, CapabilityToken}
+use os.kernel.loader.clang_filesystem_pipeline_owner_v1.*
+
+fn _actor_v1() -> TaskExecutionInstanceV1:
+    TaskExecutionInstanceV1(
+        task_id: 41u64, lifecycle_generation: 7u64, exec_generation: 3u64)
+
+fn _token_v1(kind: CapabilityKind, id: u64) -> CapabilityToken:
+    CapabilityToken(kind: kind, generation: 1u64, owner: 41u64,
+        token_id: id, parent_token_id: 0u64, depth: 0)
+
+fn _caps_v1() -> CapabilitySet:
+    CapabilitySet(caps: [
+        _token_v1(CapabilityKind.FileExec(path_prefix: "/usr/bin/clang"), 1u64),
+        _token_v1(CapabilityKind.FileExec(path_prefix: "/usr/bin/ld.lld"), 2u64),
+        _token_v1(CapabilityKind.FileRead(path_prefix: "/nvfs/work/hello.c"), 3u64),
+        _token_v1(CapabilityKind.FileRead(path_prefix: "/nvfs/work"), 4u64),
+        _token_v1(CapabilityKind.FileWrite(path_prefix: "/nvfs/work/hello.o"), 5u64),
+        _token_v1(CapabilityKind.FileCreate(path_prefix: "/nvfs/work/hello.o"), 6u64),
+        _token_v1(CapabilityKind.FileWrite(path_prefix: "/nvfs/work/hello.elf"), 7u64),
+        _token_v1(CapabilityKind.FileCreate(path_prefix: "/nvfs/work/hello.elf"), 8u64),
+        _token_v1(CapabilityKind.FileRead(path_prefix: "/usr/include"), 9u64),
+        _token_v1(CapabilityKind.FileRead(path_prefix: "/usr/share/simpleos/simpleos.ld"), 10u64),
+        _token_v1(CapabilityKind.FileRead(path_prefix: "/usr/lib/crt0.o"), 11u64),
+        _token_v1(CapabilityKind.FileRead(path_prefix: "/usr/lib/libsimpleos_c.a"), 12u64),
+        _token_v1(CapabilityKind.FileRead(path_prefix: "/usr/lib/libsimple_runtime.a"), 13u64),
+        _token_v1(CapabilityKind.FileRead(path_prefix: "/usr/lib/libm.a"), 14u64)
+    ], is_pledged: true)
+
+fn _request_v1() -> ClangFilesystemPipelineRequestV1:
+    ClangFilesystemPipelineRequestV1(
+        actor: _actor_v1(), target_triple: "x86_64-unknown-simpleos",
+        filesystem: ClangFilesystemPipelineFilesystemV1.Nvfs,
+        source_path: "/nvfs/work/hello.c",
+        object_path: "/nvfs/work/hello.o",
+        executable_path: "/nvfs/work/hello.elf",
+        working_directory: "/nvfs/work",
+        include_tree_sha256:
+            "1111111111111111111111111111111111111111111111111111111111111111")
+
+fn _fat32_caps_v1() -> CapabilitySet:
+    var caps = _caps_v1()
+    caps.caps[2].kind = CapabilityKind.FileRead(path_prefix: "/fat32/work/hello.c")
+    caps.caps[3].kind = CapabilityKind.FileRead(path_prefix: "/fat32/work")
+    caps.caps[4].kind = CapabilityKind.FileWrite(path_prefix: "/fat32/work/hello.o")
+    caps.caps[5].kind = CapabilityKind.FileCreate(path_prefix: "/fat32/work/hello.o")
+    caps.caps[6].kind = CapabilityKind.FileWrite(path_prefix: "/fat32/work/hello.elf")
+    caps.caps[7].kind = CapabilityKind.FileCreate(path_prefix: "/fat32/work/hello.elf")
+    caps
+
+describe "Clang filesystem pipeline owner v1":
+    it "accepts exact task-bound filesystem authority for x86-64":
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            _request_v1(), _caps_v1())).to_be(true)
+
+    it "accepts the authenticated 32-bit x86 ARM and RISC-V targets":
+        val targets = [
+            SIMPLEOS_TARGET_V1_I686_TRIPLE,
+            SIMPLEOS_TARGET_V1_ARMV7_TRIPLE,
+            SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE,
+        ]
+        for target in targets:
+            var request = _request_v1()
+            request.target_triple = target
+            expect(clang_filesystem_pipeline_request_valid_v1(
+                request, _caps_v1())).to_be(true)
+
+    it "rejects target and filesystem substitution":
+        var request = _request_v1()
+        request.target_triple = "x86_64-unknown-linux-gnu"
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            request, _caps_v1())).to_be(false)
+
+    it "rejects alternate names inside the selected work directory":
+        var request = _request_v1()
+        request.executable_path = "/nvfs/work/other.elf"
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            request, _caps_v1())).to_be(false)
+        request = _request_v1()
+        request.working_directory = "/nvfs/work/nested"
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            request, _caps_v1())).to_be(false)
+        request = _request_v1()
+        request.source_path = "/dbfs/work/hello.c"
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            request, _caps_v1())).to_be(false)
+
+    it "rejects missing create authority and foreign token ownership":
+        var caps = _caps_v1()
+        caps.caps.pop()
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            _request_v1(), caps)).to_be(false)
+
+    it "rejects broader prefixes and unrelated surplus authority":
+        var caps = _caps_v1()
+        caps.caps[2].kind = CapabilityKind.FileRead(path_prefix: "/nvfs")
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            _request_v1(), caps)).to_be(false)
+        caps = _caps_v1()
+        caps.caps.push(_token_v1(
+            CapabilityKind.FileRead(path_prefix: "/nvfs/other"), 9u64))
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            _request_v1(), caps)).to_be(false)
+
+    it "rejects duplicate provenance tokens and FAT32 aliases until canonical binding":
+        var caps = _caps_v1()
+        caps.caps[7].token_id = caps.caps[6].token_id
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            _request_v1(), caps)).to_be(false)
+        caps = _fat32_caps_v1()
+        var request = _request_v1()
+        request.filesystem = ClangFilesystemPipelineFilesystemV1.Fat32
+        request.source_path = "/fat32/work/hello.c"
+        request.object_path = "/fat32/work/hello.o"
+        request.executable_path = "/fat32/work/hello.elf"
+        request.working_directory = "/fat32/work"
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            request, caps)).to_be(false)
+        caps = _caps_v1()
+        caps.caps[0].owner = 99u64
+        expect(clang_filesystem_pipeline_request_valid_v1(
+            _request_v1(), caps)).to_be(false)
+
+    it "allows only one forward lifecycle and retires unknown outcomes":
+        val reserved = clang_filesystem_pipeline_transition_v1(
+            ClangFilesystemPipelineStateV1.Free,
+            ClangFilesystemPipelineEventV1.Reserve).unwrap()
+        val dispatched = clang_filesystem_pipeline_transition_v1(
+            reserved, ClangFilesystemPipelineEventV1.Dispatch).unwrap()
+        expect(clang_filesystem_pipeline_transition_v1(
+            dispatched, ClangFilesystemPipelineEventV1.OutcomeUnknown).unwrap() ==
+            ClangFilesystemPipelineStateV1.Retired).to_be(true)
+        expect(clang_filesystem_pipeline_transition_v1(
+            dispatched, ClangFilesystemPipelineEventV1.Dispatch).is_nil()).to_be(true)

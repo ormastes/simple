@@ -12,19 +12,9 @@ use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.dynamic_identity.closure.{Closure}
-use compiler.hir.hir_symbol_table_methods.*
-# `HirModule` (below) types 13 of its fields with declarations that physically
-# live in hir_definitions.spl, and this module carried NO import of that module
-# at all -- the names were only ever reachable because hir_definitions globs
-# this file back, which is not a route the dependency-materialization walk
-# accepts. The walk therefore reported
-# `[hir-callable-dep-origin-unresolved] owner=compiler.hir.hir_types
-# dependency=HirClass` (and 12 siblings) and each one resurfaced as a hard
-# `unresolved type: HirClass` against ~90 innocent importers -- the single
-# largest HIR-semantic error population in the Stage 3 log of 2026-08-24
-# (~1,170 of ~1,360 fatal errors). See the twin explicit-import comment in
-# hir_definitions.spl for the mechanism.
 use compiler.hir.hir_definitions.{HirFunction, HirClass, HirStruct, HirEnum, HirBitfield, HirTrait, HirImpl, HirConst, HirStaticAssert, HirAopAdvice, HirDiBinding, HirArchRule, HirMockDecl}
+use compiler.hir.hir_symbol_table_methods.*
+use std.string_core.{char_code}
 
 # ============================================================================
 # HIR Module Structure
@@ -121,6 +111,39 @@ struct HirSymbol:
     is_public: bool
     is_mutable: bool
     defining_module: text?   # Which module defined this symbol (for visibility checking)
+    builtin_method_tag: i64  # 0=None, 1=StrStrip, 2=StrLines
+
+val BUILTIN_METHOD_NONE = 0
+val BUILTIN_METHOD_STR_STRIP = 1
+val BUILTIN_METHOD_STR_LINES = 2
+
+fn hir_builtin_method_tag(qualified_name: text) -> i64:
+    # This classifier runs while building the compiler itself. Keep it wholly
+    # scalar: staged text equality would admit a frozen Rust runtime CGU and a
+    # second LLVM option registry into the successor.
+    if qualified_name.len() != 9:
+        return BUILTIN_METHOD_NONE
+    if char_code(qualified_name[0]) != 115 or char_code(qualified_name[1]) != 116 or char_code(qualified_name[2]) != 114 or char_code(qualified_name[3]) != 46:
+        return BUILTIN_METHOD_NONE
+    if char_code(qualified_name[4]) == 115 and char_code(qualified_name[5]) == 116 and char_code(qualified_name[6]) == 114 and char_code(qualified_name[7]) == 105 and char_code(qualified_name[8]) == 112:
+        return BUILTIN_METHOD_STR_STRIP
+    if char_code(qualified_name[4]) == 108 and char_code(qualified_name[5]) == 105 and char_code(qualified_name[6]) == 110 and char_code(qualified_name[7]) == 101 and char_code(qualified_name[8]) == 115:
+        return BUILTIN_METHOD_STR_LINES
+    BUILTIN_METHOD_NONE
+
+fn hir_symbol_visibility_or_private(visibility: Visibility) -> Visibility:
+    # Streaming transfer in older self-host compilers can zero a non-optional
+    # enum field. Preserve every valid scoped visibility; an invalid payload
+    # must fail closed to file-private rather than reaching the HIR cache codec
+    # as a non-enum value or accidentally widening access.
+    match visibility:
+        case Visibility.Public: Visibility.Public
+        case Visibility.Peer: Visibility.Peer
+        case Visibility.Up: Visibility.Up
+        case Visibility.Internal: Visibility.Internal
+        case Visibility.Package: Visibility.Package
+        case Visibility.Private: Visibility.Private
+        case _: Visibility.Private
 
 """Kind of symbol."""
 enum SymbolKind:
@@ -251,6 +274,11 @@ class SymbolTable:
     # Persistent root owner reused by reset_module. The Scope row is a small
     # routing value; its symbol backing never crosses reset by value.
     root_scope_symbols: Dict<text, i64>
+    # Module-owned structural-union identity shared by lowering and the later
+    # synthesis pass. Reverse ownership makes preferred-hash collisions loud
+    # to the allocator instead of silently aliasing two enums/variants.
+    structural_union_symbols: Dict<text, i64>
+    structural_union_owners: Dict<i64, text>
 
 impl SymbolTable:
     static fn new() -> SymbolTable:
@@ -267,7 +295,9 @@ impl SymbolTable:
             qualified_types: {},
             exact_symbols: {},
             module_callables: {},
-            root_scope_symbols: root_scope_symbols
+            root_scope_symbols: root_scope_symbols,
+            structural_union_symbols: {},
+            structural_union_owners: {}
         )
         # Create root scope (direct mutation avoids copy-modify-reassign bug)
         table.scopes[0] = Scope(
@@ -293,6 +323,8 @@ impl SymbolTable:
         self.qualified_types = {}
         self.exact_symbols = {}
         self.module_callables = {}
+        self.structural_union_symbols = {}
+        self.structural_union_owners = {}
         self.current_scope = ScopeId(id: 0)
         self.next_symbol_id = 0
         self.next_scope_id = 1
@@ -357,10 +389,17 @@ impl SymbolTable:
                 # Bracket-index read: same stage4 lane hardening as `lookup`.
                 return SymbolId(id: self.scopes[self.current_scope.id].symbols[name])
 
-        val raw_id = self.next_symbol_id
+        var raw_id = self.next_symbol_id
+        # Zero overhead on the ordinary compact lane beyond one scalar compare;
+        # if normal allocation ever reaches reserved structural-union IDs, skip
+        # owners instead of aliasing them.
+        if raw_id >= 900000000:
+            while self.structural_union_owners.contains_key(raw_id):
+                raw_id = raw_id + 1
         val id = SymbolId(id: raw_id)
         self.next_symbol_id = raw_id + 1
 
+        val retained_visibility = hir_symbol_visibility_or_private(visibility)
         val symbol = HirSymbol(
             id: id,
             name: name,
@@ -368,10 +407,11 @@ impl SymbolTable:
             type_: type_,
             scope: self.current_scope,
             span: span,
-            visibility: visibility,
-            is_public: visibility == Visibility.Public,
+            visibility: retained_visibility,
+            is_public: retained_visibility == Visibility.Public,
             is_mutable: is_mutable,
-            defining_module: defining_module
+            defining_module: defining_module,
+            builtin_method_tag: hir_builtin_method_tag(name)
         )
 
         self.symbols[raw_id] = symbol
@@ -705,5 +745,52 @@ export ScopeId, Scope, ScopeKind, SymbolTable
 export HirType, HirTypeKind
 export DimExpr, DimExprKind
 export DeviceType, MemorySpace, LayerType, ParamShape
+
+# ============================================================================
+# Optional payload accessor
+# ============================================================================
+
+@unsafe(reason: "raw enum discriminant probe; -1 is the not-an-enum sentinel", capabilities: [ffi])
+extern fn rt_enum_discriminant(value: HirTypeKind) -> i64
+
+# Payload of an `Optional` whose inner type is a CONTAINER (Dict/Array/Slice),
+# else nil.
+#
+# Discriminant-guarded before the `match`, the same idiom every
+# `parser_type_kind_*` accessor uses: a qualified-arm match against an enum
+# value built through a different import spelling of the same module silently
+# falls to the wildcard on some lanes, and both callers of this helper also
+# import `TypeKind`, which has colliding variant names.
+#
+# CONTAINER-only on purpose. Typing an unannotated `val x = f()` as the bare
+# payload when `f` returns `T?` is what a human writes by hand (see the
+# `val map: Dict<text, any> = json_to_object(obj)` bindings in
+# src/lib/common/json/object_ops.spl), but doing it for EVERY optional return
+# would change what `.?` and `unwrap()` see on hundreds of bindings, and there
+# is no test lane that native-builds, so no suite would catch a regression.
+# Containers are the case where the loss is fatal rather than merely
+# imprecise: it surfaces as "#143 for-in over non-array iterables".
+# doc/08_tracking/bug/for_in_optional_initialized_local_loses_collection_type_2026-08-24.md
+fn _hir_optional_container_payload(t: HirType) -> HirType?:
+    val tk: HirTypeKind = t.kind
+    if rt_enum_discriminant(tk) != rt_enum_discriminant(HirTypeKind.Optional(t)):
+        return nil
+    val inner: HirType? = match tk:
+        case HirTypeKind.Optional(payload): payload
+        case _: nil
+    if not inner.?:
+        return nil
+    val inner_t: HirType = inner ?? t
+    val ik: HirTypeKind = inner_t.kind
+    val ik_disc = rt_enum_discriminant(ik)
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Dict(inner_t, inner_t)):
+        return inner_t
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Array(inner_t, nil)):
+        return inner_t
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Slice(inner_t)):
+        return inner_t
+    nil
+
 export Effect, EffectKind
+export _hir_optional_container_payload
 # ============================================================================

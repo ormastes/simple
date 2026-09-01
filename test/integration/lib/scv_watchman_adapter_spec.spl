@@ -1,0 +1,106 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves the SCV-IMPL-E-08 Watchman adapter behind the
+EventSource protocol (`src/lib/scv/watchman_adapter.spl`): the cursor's
+opaque token is the watchman clockspec; file notifications settle on a
+logical clock (no sleeping); `is_fresh_instance` and recrawl responses
+force the mandatory reconcile path — events are refused until
+scv_watchman_reconcile runs. The transport is a deterministic fake-watchman
+message queue: no live watchman binary is exercised here (real-binary
+integration is an explicit TODO in the module).
+Audience: Maintainers of the SCV event layer.
+"""
+# @req: REQ-SCV-WATCHMAN-ADAPTER-001
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use std.scv.watchman_adapter.{
+    WatchmanMsg, scv_watchman_open, scv_watchman_inject,
+    scv_watchman_pull, scv_watchman_reconcile}
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+
+fn _files_msg(clock: text, kind: text, path: text) -> WatchmanMsg:
+    WatchmanMsg(kind: "files", clock: clock, fresh: false,
+                events: [FsWatchEvent(seq: 0, kind: kind, path: path, related: "")])
+
+describe "scv watchman adapter behind EventSource (E-08)":
+    # @manual scenario evidence
+    it "opens with a watchman cursor marked fresh_instance":
+        # @req REQ-SCV-WATCHMAN-ADAPTER-001
+        step("Open and inspect cursor fields")
+        val (a, cur) = scv_watchman_open("/repo", 100)
+        expect(cur.source).to_equal("watchman")
+        expect(cur.fresh_instance).to_equal(true)
+        expect(cur.overflowed).to_equal(false)
+
+    it "refuses events on a fresh cursor until reconcile runs":
+        # @req REQ-SCV-WATCHMAN-ADAPTER-001
+        step("Inject a files message, pull fresh, reconcile, pull again")
+        var (a, cur) = scv_watchman_open("/repo", 100)
+        a = scv_watchman_inject(a, WatchmanMsg(kind: "subscribe_ack", clock: "c:1:1", fresh: false, events: []), 0)
+        a = scv_watchman_inject(a, _files_msg("c:1:2", "created", "a.txt"), 0)
+        val (a1, pull1) = scv_watchman_pull(a, cur, 1000)
+        expect(pull1.needs_rescan).to_equal(true)
+        expect(pull1.events.len()).to_equal(0)
+        val (a2, cur2) = scv_watchman_reconcile(a1, cur)
+        expect(cur2.fresh_instance).to_equal(false)
+        val (a3, pull3) = scv_watchman_pull(a2, cur2, 1000)
+        expect(pull3.needs_rescan).to_equal(false)
+        expect(pull3.events.len()).to_equal(1)
+        expect(pull3.events[0].path).to_equal("a.txt")
+
+    it "carries the watchman clockspec as the opaque token":
+        # @req REQ-SCV-WATCHMAN-ADAPTER-001
+        step("Clock advances with delivered messages")
+        var (a, cur) = scv_watchman_open("/repo", 100)
+        a = scv_watchman_inject(a, WatchmanMsg(kind: "subscribe_ack", clock: "c:9:1", fresh: false, events: []), 0)
+        val (a1, cur1) = scv_watchman_reconcile(a, cur)
+        expect(cur1.opaque_token).to_equal("c:9:1")
+        a = scv_watchman_inject(a1, _files_msg("c:9:7", "modified", "b.txt"), 0)
+        val (a2, pull2) = scv_watchman_pull(a, cur1, 1000)
+        expect(pull2.cursor.opaque_token).to_equal("c:9:7")
+
+    it "settles file events on the logical clock without sleeping":
+        # @req REQ-SCV-WATCHMAN-ADAPTER-001
+        step("An event inside the settle window is held; past it, released")
+        var (a, cur) = scv_watchman_open("/repo", 100)
+        val (a0, cur0) = scv_watchman_reconcile(a, cur)
+        var a1 = scv_watchman_inject(a0, _files_msg("c:1:3", "modified", "hot.txt"), 950)
+        val (a2, early) = scv_watchman_pull(a1, cur0, 1000)
+        expect(early.events.len()).to_equal(0)
+        expect(early.needs_rescan).to_equal(false)
+        val (a3, late) = scv_watchman_pull(a2, early.cursor, 1050)
+        expect(late.events.len()).to_equal(1)
+        expect(late.events[0].path).to_equal("hot.txt")
+
+    it "maps is_fresh_instance to the mandatory reconcile path":
+        # @req REQ-SCV-WATCHMAN-ADAPTER-001
+        step("A fresh files response invalidates the incremental stream")
+        var (a, cur) = scv_watchman_open("/repo", 100)
+        val (a0, cur0) = scv_watchman_reconcile(a, cur)
+        var a1 = scv_watchman_inject(a0, WatchmanMsg(kind: "files", clock: "c:2:1", fresh: true,
+                                                     events: [FsWatchEvent(seq: 0, kind: "created", path: "x", related: "")]), 0)
+        val (a2, pull) = scv_watchman_pull(a1, cur0, 1000)
+        expect(pull.needs_rescan).to_equal(true)
+        expect(pull.cursor.overflowed).to_equal(true)
+        expect(pull.events.len()).to_equal(0)
+        val (a3, cur3) = scv_watchman_reconcile(a2, pull.cursor)
+        expect(cur3.overflowed).to_equal(false)
+
+    it "maps a recrawl warning to the mandatory reconcile path":
+        # @req REQ-SCV-WATCHMAN-ADAPTER-001
+        step("Recrawl ⇒ overflowed cursor, refused events, reconcile clears")
+        var (a, cur) = scv_watchman_open("/repo", 100)
+        val (a0, cur0) = scv_watchman_reconcile(a, cur)
+        var a1 = scv_watchman_inject(a0, WatchmanMsg(kind: "recrawl", clock: "c:3:1", fresh: false, events: []), 0)
+        a1 = scv_watchman_inject(a1, _files_msg("c:3:2", "modified", "y.txt"), 0)
+        val (a2, pull) = scv_watchman_pull(a1, cur0, 1000)
+        expect(pull.needs_rescan).to_equal(true)
+        expect(pull.cursor.overflowed).to_equal(true)
+        val (a3, cur3) = scv_watchman_reconcile(a2, pull.cursor)
+        val (a4, pull4) = scv_watchman_pull(a3, cur3, 2000)
+        expect(pull4.needs_rescan).to_equal(false)

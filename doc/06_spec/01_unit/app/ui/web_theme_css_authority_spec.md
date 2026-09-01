@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -28,7 +28,7 @@ val fingerprint = theme_package_fingerprint("aetheric_dark")
 val css = generate_css("glass_obsidian_dark")
 expect(css).to_contain("Folder theme package")
 expect(css).to_contain("theme=aetheric_dark")
-expect(css).to_contain("fingerprint={fingerprint}")
+expect(css).to_contain("fingerprint={pkg.fingerprint}")
 expect(css).to_contain("--ui-accent: #adc6ff")
 expect(css).to_contain("--app-background-image")
 ```
@@ -139,8 +139,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

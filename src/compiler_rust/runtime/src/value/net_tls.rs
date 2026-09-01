@@ -20,7 +20,6 @@
 // Handles live in a separate table from the TCP-native handles;
 // `is_valid_handle(h)` only checks `h != 0` so the two namespaces coexist.
 
-static NEXT_TLS_FAKE_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 const TLS_CLIENT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const TLS_CLIENT_WRITE_MAX: usize = 50 * 1024 * 1024;
 
@@ -29,10 +28,6 @@ fn tls_client_timeout_from_ms(timeout_ms: i64) -> Option<std::time::Duration> {
         return None;
     }
     Some(std::time::Duration::from_millis(timeout_ms as u64))
-}
-
-fn next_tls_fake_handle() -> i64 {
-    NEXT_TLS_FAKE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn apply_socket_timeout(
@@ -342,25 +337,50 @@ pub extern "C" fn rt_tls_client_write_timeout(
     }
 }
 
+/// Checked client read: NIL is an I/O/contract failure, empty text is clean EOF.
 #[no_mangle]
-pub extern "C" fn rt_tls_client_read(conn: i64, max_bytes: i64) -> crate::value::RuntimeValue {
-    rt_tls_client_read_timeout(conn, max_bytes, TLS_CLIENT_IO_TIMEOUT.as_millis() as i64)
+pub extern "C" fn rt_tls_client_read_checked(
+    conn: i64,
+    max_bytes: i64,
+) -> crate::value::RuntimeValue {
+    tls_client_read_timeout_impl(
+        conn,
+        max_bytes,
+        TLS_CLIENT_IO_TIMEOUT.as_millis() as i64,
+        true,
+    )
 }
 
+/// Checked timeout read: NIL is failure, empty text is clean EOF.
 #[no_mangle]
-pub extern "C" fn rt_tls_client_read_timeout(
+pub extern "C" fn rt_tls_client_read_timeout_checked(
     conn: i64,
     max_bytes: i64,
     timeout_ms: i64,
 ) -> crate::value::RuntimeValue {
-    if max_bytes <= 0 { return empty_text(); }
+    tls_client_read_timeout_impl(conn, max_bytes, timeout_ms, true)
+}
+
+#[inline]
+fn tls_client_read_timeout_impl(
+    conn: i64,
+    max_bytes: i64,
+    timeout_ms: i64,
+    checked: bool,
+) -> crate::value::RuntimeValue {
+    if max_bytes <= 0 {
+        return tls_client_read_failure(checked);
+    }
     let timeout = match tls_client_timeout_from_ms(timeout_ms) {
         Some(t) => t.min(TLS_CLIENT_IO_TIMEOUT),
-        None => return empty_text(),
+        None => return tls_client_read_failure(checked),
     };
     let entry_arc = {
         let guard = TLS_CLIENT_CONNS.lock().unwrap();
-        match guard.get(&conn) { Some(a) => a.clone(), None => return empty_text() }
+        match guard.get(&conn) {
+            Some(entry) => entry.clone(),
+            None => return tls_client_read_failure(checked),
+        }
     };
     let size = max_bytes.min(65_536) as usize;
     let mut buf = vec![0u8; size];
@@ -368,21 +388,27 @@ pub extern "C" fn rt_tls_client_read_timeout(
         let mut entry_guard = entry_arc.lock().unwrap();
         let entry = &mut *entry_guard;
         if apply_socket_timeout(&entry.stream, timeout).is_err() {
-            return empty_text();
+            return tls_client_read_failure(checked);
         }
         let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
         tls_stream.read(&mut buf)
     };
     let n = match read_result {
         Ok(n) => n,
-        Err(error) => {
-            eprintln!("rt_tls_client_read: {}", error);
+        Err(_) => {
             TLS_CLIENT_CONNS.lock().unwrap().remove(&conn);
-            return empty_text();
+            return tls_client_read_failure(checked);
         }
     };
-    if n == 0 { return empty_text(); }
+    if n == 0 {
+        return empty_text();
+    }
     unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), n as u64) }
+}
+
+#[inline]
+fn tls_client_read_failure(checked: bool) -> crate::value::RuntimeValue {
+    if checked { crate::value::RuntimeValue::NIL } else { empty_text() }
 }
 
 #[no_mangle]
@@ -645,12 +671,28 @@ fn tls_server_write_bytes_impl(conn: i64, bytes: &[u8]) -> i64 {
     }
 }
 
+/// Checked server read: NIL is an I/O/contract failure, empty text is clean EOF.
 #[no_mangle]
-pub extern "C" fn rt_tls_server_read(conn: i64, max_bytes: i64) -> crate::value::RuntimeValue {
-    if max_bytes <= 0 { return empty_text(); }
+pub extern "C" fn rt_tls_server_read_checked(
+    conn: i64,
+    max_bytes: i64,
+) -> crate::value::RuntimeValue {
+    tls_server_read_impl(conn, max_bytes, true)
+}
+
+#[inline]
+fn tls_server_read_impl(
+    conn: i64,
+    max_bytes: i64,
+    checked: bool,
+) -> crate::value::RuntimeValue {
+    if max_bytes <= 0 { return tls_client_read_failure(checked); }
     let entry_arc = {
         let guard = TLS_CONNS.lock().unwrap();
-        match guard.get(&conn) { Some(a) => a.clone(), None => return empty_text() }
+        match guard.get(&conn) {
+            Some(entry) => entry.clone(),
+            None => return tls_client_read_failure(checked),
+        }
     };
     let size = max_bytes.min(65_536) as usize;
     let mut buf = vec![0u8; size];
@@ -658,7 +700,10 @@ pub extern "C" fn rt_tls_server_read(conn: i64, max_bytes: i64) -> crate::value:
         let mut entry_guard = entry_arc.lock().unwrap();
         let entry = &mut *entry_guard;
         let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
-        match tls_stream.read(&mut buf) { Ok(n) => n, Err(_) => return empty_text() }
+        match tls_stream.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return tls_client_read_failure(checked),
+        }
     };
     if n == 0 { return empty_text(); }
     unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), n as u64) }
@@ -681,108 +726,6 @@ pub extern "C" fn rt_tls_server_shutdown(server: i64) -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_load_cert(_cert_path: crate::value::RuntimeValue) -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_load_key(_key_path: crate::value::RuntimeValue) -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_verify_cert(_cert: i64) -> bool {
-    false
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_get_cert_subject(_cert: i64) -> crate::value::RuntimeValue {
-    empty_text()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_get_cert_issuer(_cert: i64) -> crate::value::RuntimeValue {
-    empty_text()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_get_cert_expiry(_cert: i64) -> crate::value::RuntimeValue {
-    empty_text()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_free_cert(_cert: i64) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_new() -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_add_root_cert(
-    _config: i64,
-    _cert_path: crate::value::RuntimeValue,
-) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_set_alpn(
-    _config: i64,
-    _protocols: crate::value::RuntimeValue,
-) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_enable_sni(_config: i64, _enabled: bool) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_set_verify_mode(_config: i64, _verify: bool) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_free(_config: i64) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_server_config_new(
-    _cert_path: crate::value::RuntimeValue,
-    _key_path: crate::value::RuntimeValue,
-) -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_server_config_set_alpn(
-    _config: i64,
-    _protocols: crate::value::RuntimeValue,
-) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_server_config_require_client_cert(_config: i64, _require: bool) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_server_config_free(_config: i64) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_get_peer_cert(_conn: i64) -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
 pub extern "C" fn rt_tls_get_protocol_version(conn: i64) -> crate::value::RuntimeValue {
     // Check server connections first, then client connections
     if let Some(arc) = TLS_CONNS.lock().unwrap().get(&conn).cloned() {
@@ -791,7 +734,7 @@ pub extern "C" fn rt_tls_get_protocol_version(conn: i64) -> crate::value::Runtim
             let s = match v {
                 rustls::ProtocolVersion::TLSv1_2 => "TLSv1.2",
                 rustls::ProtocolVersion::TLSv1_3 => "TLSv1.3",
-                _ => "TLS",
+                _ => return crate::value::RuntimeValue::NIL,
             };
             return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
         }
@@ -802,50 +745,110 @@ pub extern "C" fn rt_tls_get_protocol_version(conn: i64) -> crate::value::Runtim
             let s = match v {
                 rustls::ProtocolVersion::TLSv1_2 => "TLSv1.2",
                 rustls::ProtocolVersion::TLSv1_3 => "TLSv1.3",
-                _ => "TLS",
+                _ => return crate::value::RuntimeValue::NIL,
             };
             return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
         }
     }
-    unsafe { crate::value::collections::rt_string_new(b"tcp".as_ptr(), 3) }
+    crate::value::RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_get_cipher_suite(_conn: i64) -> crate::value::RuntimeValue {
-    empty_text()
+pub extern "C" fn rt_tls_get_cipher_suite(conn: i64) -> crate::value::RuntimeValue {
+    if let Some(arc) = TLS_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        return entry.conn.negotiated_cipher_suite()
+            .and_then(|suite| tls_cipher_suite_name(suite.suite()))
+            .map(runtime_static_text)
+            .unwrap_or(crate::value::RuntimeValue::NIL);
+    }
+    if let Some(arc) = TLS_CLIENT_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        return entry.conn.negotiated_cipher_suite()
+            .and_then(|suite| tls_cipher_suite_name(suite.suite()))
+            .map(runtime_static_text)
+            .unwrap_or(crate::value::RuntimeValue::NIL);
+    }
+    crate::value::RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_get_negotiated_alpn(_conn: i64) -> crate::value::RuntimeValue {
-    empty_text()
+pub extern "C" fn rt_tls_get_negotiated_alpn(conn: i64) -> crate::value::RuntimeValue {
+    if let Some(arc) = TLS_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        return entry.conn.alpn_protocol().map(runtime_bytes_text).unwrap_or_else(empty_text);
+    }
+    if let Some(arc) = TLS_CLIENT_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        return entry.conn.alpn_protocol().map(runtime_bytes_text).unwrap_or_else(empty_text);
+    }
+    crate::value::RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_is_handshake_complete(_conn: i64) -> bool {
-    true
+pub extern "C" fn rt_tls_is_handshake_complete(conn: i64) -> crate::value::RuntimeValue {
+    if let Some(arc) = TLS_CONNS.lock().unwrap().get(&conn).cloned() {
+        return crate::value::RuntimeValue::from_bool(!arc.lock().unwrap().conn.is_handshaking());
+    }
+    if let Some(arc) = TLS_CLIENT_CONNS.lock().unwrap().get(&conn).cloned() {
+        return crate::value::RuntimeValue::from_bool(!arc.lock().unwrap().conn.is_handshaking());
+    }
+    crate::value::RuntimeValue::NIL
 }
 
-#[no_mangle]
-pub extern "C" fn rt_tls_generate_self_signed_cert(
-    _common_name: crate::value::RuntimeValue,
-    _days_valid: i64,
-    _cert_out: crate::value::RuntimeValue,
-    _key_out: crate::value::RuntimeValue,
-) -> bool {
-    false
+#[inline]
+fn runtime_static_text(value: &'static str) -> crate::value::RuntimeValue {
+    runtime_bytes_text(value.as_bytes())
 }
 
-#[no_mangle]
-pub extern "C" fn rt_tls_hash_cert(_cert_path: crate::value::RuntimeValue) -> crate::value::RuntimeValue {
-    empty_text()
+#[inline]
+fn runtime_bytes_text(value: &[u8]) -> crate::value::RuntimeValue {
+    unsafe { crate::value::collections::rt_string_new(value.as_ptr(), value.len() as u64) }
+}
+
+#[inline]
+fn tls_cipher_suite_name(suite: rustls::CipherSuite) -> Option<&'static str> {
+    use rustls::CipherSuite::*;
+    match suite {
+        TLS13_AES_128_GCM_SHA256 => Some("TLS_AES_128_GCM_SHA256"),
+        TLS13_AES_256_GCM_SHA384 => Some("TLS_AES_256_GCM_SHA384"),
+        TLS13_CHACHA20_POLY1305_SHA256 => Some("TLS_CHACHA20_POLY1305_SHA256"),
+        TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 => Some("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"),
+        TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 => Some("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"),
+        TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 => Some("TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"),
+        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 => Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+        TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 => Some("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"),
+        TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => Some("TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod platform_trust_tests {
-    use super::TLS_CLIENT_CONFIG;
+    use super::{
+        rt_tls_client_read_checked, rt_tls_client_read_timeout_checked,
+        rt_tls_server_read_checked, rt_tls_get_cipher_suite,
+        rt_tls_get_negotiated_alpn, rt_tls_get_protocol_version,
+        rt_tls_is_handshake_complete, TLS_CLIENT_CONFIG,
+    };
 
     #[test]
     fn platform_verifier_initializes() {
         assert!(TLS_CLIENT_CONFIG.is_ok(), "{:?}", TLS_CLIENT_CONFIG.as_ref().err());
+    }
+
+    #[test]
+    fn checked_client_and_server_reads_fail_closed_for_invalid_handles() {
+        assert!(rt_tls_client_read_checked(-1, 1024).is_nil());
+        assert!(rt_tls_client_read_timeout_checked(-1, 1024, 100).is_nil());
+        assert!(rt_tls_server_read_checked(-1, 1024).is_nil());
+    }
+
+    #[test]
+    fn invalid_connection_metadata_is_absent_not_fabricated() {
+        assert!(rt_tls_get_protocol_version(-1).is_nil());
+        assert!(rt_tls_get_cipher_suite(-1).is_nil());
+        assert!(rt_tls_get_negotiated_alpn(-1).is_nil());
+        assert!(rt_tls_is_handshake_complete(-1).is_nil());
     }
 }

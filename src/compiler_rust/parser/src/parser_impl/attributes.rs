@@ -30,6 +30,8 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "mode_failure_strategy",
     // Module/compiler directives
     "inline",
+    "always_inline",
+    "force_inline",
     "gc",
     "bypass",
     "no_gc",
@@ -69,6 +71,7 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "interrupt",
     "boot",
     "align",
+    "global",
     "export",
     // Driver framework (FR-DRIVER-0001): @driver(...) / @native_lib(...)
     // routed through the attribute (not decorator) path so named args like

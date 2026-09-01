@@ -1,6 +1,6 @@
 # Image Builder Artifact Specification
 
-> <details>
+> 1.  reset dir
 
 <!-- sdn-diagram:id=image_builder_artifact_spec.arch -->
 <details class="sdn-source">
@@ -41,14 +41,12 @@ image_builder_artifact_spec -> os
 
 #### writes a staged disk image tree and deploy manifest
 
--  reset dir
-   - Expected: rt_file_write_text(simple_payload, "SMF_FAKE_TARGET_SIMPLE\n") is true
+1.  reset dir
    - Expected: result.is_ok() is true
    - Expected: rt_file_exists(output) is true
    - Expected: rt_file_exists("{output}.manifest.sdn") is true
    - Expected: rt_file_exists("{output}.contents/rootfs/etc/fstab") is true
    - Expected: rt_file_exists("{output}.contents/rootfs/sbin/init") is true
-   - Expected: rt_file_exists("{output}.contents/rootfs/bin/simplebox") is true
    - Expected: rt_file_exists("{output}.contents/rootfs/sys/apps/llvm") is true
    - Expected: rt_file_exists("{output}.contents/rootfs/sys/apps/clang") is true
    - Expected: rt_file_exists("{output}.contents/rootfs/sys/apps/rust") is true
@@ -58,37 +56,26 @@ image_builder_artifact_spec -> os
    - Expected: rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/llvm/hello.ll") is true
    - Expected: rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/clang/hello.c") is true
    - Expected: rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/rust/hello.rs") is true
-   - Expected: rt_file_exists("{output}.contents/rootfs/bin/simple") is true
-   - Expected: rt_file_exists("{output}.contents/rootfs/bin/simple.smf") is true
-   - Expected: rt_file_exists("{output}.contents/rootfs/usr/bin/simple") is true
-   - Expected: rt_file_exists("{output}.contents/rootfs/usr/bin/simple.smf") is true
-   - Expected: rt_file_exists("{output}.contents/rootfs/sys/apps/simple_compiler") is true
-   - Expected: rt_file_exists("{output}.contents/rootfs/sys/apps/simple_interpreter") is true
-   - Expected: rt_file_exists("{output}.contents/rootfs/sys/apps/simple_loader") is true
-   - Expected: rt_file_exists("{output}.contents/rootfs/SYS/SIMPLETOOL.SDN") is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects a marker file pretending to be a target Simple payload")
 val dir = "build/test-artifacts/image-builder"
 _reset_dir(dir)
 val output = "{dir}/simpleos-x86_64.img"
-val simple_payload = "{dir}/simple-target.smf"
-expect(rt_file_write_text(simple_payload, "SMF_FAKE_TARGET_SIMPLE\n")).to_equal(true)
-val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", output, 64, simple_payload)
+val result = build_install_image(PkgArch.X86_64, "", "", output, 64)
 expect(result.is_ok()).to_equal(true)
 expect(rt_file_exists(output)).to_equal(true)
 expect(rt_file_exists("{output}.manifest.sdn")).to_equal(true)
 expect(rt_file_exists("{output}.contents/rootfs/etc/fstab")).to_equal(true)
 expect(rt_file_exists("{output}.contents/rootfs/sbin/init")).to_equal(true)
-expect(rt_file_exists("{output}.contents/rootfs/bin/simplebox")).to_equal(true)
-val deploy_manifest = rt_file_read_text("{output}.manifest.sdn")
-expect(deploy_manifest).to_contain("/bin/simplebox")
 expect(rt_file_exists("{output}.contents/rootfs/sys/apps/llvm")).to_equal(true)
 expect(rt_file_exists("{output}.contents/rootfs/sys/apps/clang")).to_equal(true)
 expect(rt_file_exists("{output}.contents/rootfs/sys/apps/rust")).to_equal(true)
@@ -98,33 +85,166 @@ expect(rt_file_exists("{output}.contents/rootfs/SYS/RUSTMAN.TXT")).to_equal(true
 expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/llvm/hello.ll")).to_equal(true)
 expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/clang/hello.c")).to_equal(true)
 expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/rust/hello.rs")).to_equal(true)
-expect(rt_file_exists("{output}.contents/rootfs/bin/simple")).to_equal(true)
-expect(rt_file_exists("{output}.contents/rootfs/bin/simple.smf")).to_equal(true)
-expect(rt_file_exists("{output}.contents/rootfs/usr/bin/simple")).to_equal(true)
-expect(rt_file_exists("{output}.contents/rootfs/usr/bin/simple.smf")).to_equal(true)
-expect(rt_file_exists("{output}.contents/rootfs/sys/apps/simple_compiler")).to_equal(true)
-expect(rt_file_exists("{output}.contents/rootfs/sys/apps/simple_interpreter")).to_equal(true)
-expect(rt_file_exists("{output}.contents/rootfs/sys/apps/simple_loader")).to_equal(true)
-expect(rt_file_exists("{output}.contents/rootfs/SYS/SIMPLETOOL.SDN")).to_equal(true)
 val llvm_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/LLVMMAN.TXT")
 val clang_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/CLANGMAN.TXT")
 val rust_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/RUSTMAN.TXT")
-val simple_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/SIMPLETOOL.SDN")
 expect(llvm_manifest).to_contain("mode=native-filesystem-app")
 expect(llvm_manifest).to_contain("status=standalone-required")
 expect(clang_manifest).to_contain("mode=native-filesystem-app")
 expect(clang_manifest).to_contain("status=standalone-required")
 expect(rust_manifest).to_contain("mode=native-filesystem-app")
 expect(rust_manifest).to_contain("status=standalone-required")
-expect(simple_manifest).to_contain("runtime_source = \"simpleos-filesystem\"")
-expect(simple_manifest).to_contain("role = \"/usr/bin/simple\"")
+```
+
+</details>
+
+#### rejects a digest-bound header-only ELF before staging any toolchain role
+
+1.  reset dir
+   - Expected: result.is_ok() is true
+   - Expected: rt_file_exists(output) is true
+   - Expected: rt_file_exists("{output}.manifest.sdn") is true
+   - Expected: rt_file_exists("{output}.contents/rootfs/usr/libexec/simpleos-installer/installer") is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("rejects a digest-bound header-only ELF before staging any toolchain role")
+val dir = "build/test-artifacts/image-builder-header-only"
+_reset_dir(dir)
+val output = "{dir}/simpleos-x86_64.img"
+val simple_payload = "{dir}/simple-target"
+val bytes = _header_only_elf()
+expect(rt_file_write_bytes(simple_payload, bytes)).to_be(true)
+expect(rt_file_write_text("{simple_payload}.build_stamp",
+    _simple_stamp(sha256_u8_hex(bytes), "bin/release/simple"))).to_be(true)
+val result = build_install_image_with_simple_binary(
+    PkgArch.X86_64, "", "", output, 64, simple_payload)
+expect(result.is_err()).to_be(true)
+if val Err(message) = result:
+    expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)
+expect(rt_file_exists("{output}.contents/rootfs/bin/simple")).to_be(false)
+```
+
+</details>
+
+#### rejects a digest-bound bootstrap seed receipt before staging
+
+- rejects a digest-bound bootstrap seed receipt before staging
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("rejects a digest-bound bootstrap seed receipt before staging")
+val dir = "build/test-artifacts/image-builder-seed-receipt"
+_reset_dir(dir)
+val output = "{dir}/simpleos-x86_64.img"
+val simple_payload = "{dir}/simple-target"
+val bytes = _header_only_elf()
+expect(rt_file_write_bytes(simple_payload, bytes)).to_be(true)
+expect(rt_file_write_text("{simple_payload}.build_stamp",
+    _simple_stamp(sha256_u8_hex(bytes),
+        "src/compiler_rust/target/bootstrap/simple"))).to_be(true)
+val result = build_install_image_with_simple_binary(
+    PkgArch.X86_64, "", "", output, 64, simple_payload)
+expect(result.is_err()).to_be(true)
+if val Err(message) = result:
+    expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)
+expect(rt_file_exists("{output}.contents/rootfs/bin/simple")).to_be(false)
+```
+
+</details>
+
+#### rejects a payload whose build receipt digest does not bind its bytes
+
+- rejects a payload whose build receipt digest does not bind its bytes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("rejects a payload whose build receipt digest does not bind its bytes")
+val dir = "build/test-artifacts/image-builder-digest-mismatch"
+_reset_dir(dir)
+val output = "{dir}/simpleos-x86_64.img"
+val simple_payload = "{dir}/simple-target"
+val bytes = _header_only_elf()
+expect(rt_file_write_bytes(simple_payload, bytes)).to_be(true)
+expect(rt_file_write_text("{simple_payload}.build_stamp",
+    _simple_stamp("f" * 64, "bin/release/simple"))).to_be(true)
+val result = build_install_image_with_simple_binary(
+    PkgArch.X86_64, "", "", output, 64, simple_payload)
+expect(result.is_err()).to_be(true)
+if val Err(message) = result:
+    expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)
+expect(rt_file_exists("{output}.contents/rootfs/bin/simple")).to_be(false)
+```
+
+</details>
+
+#### records missing installer executables without staging false payloads
+
+- records missing installer executables without staging false payloads
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val dir = "build/test-artifacts/image-builder"
+_reset_dir(dir)
+val output = "{dir}/simpleos-x86_64.img"
+val result = build_install_image(PkgArch.X86_64, "", "", output, 64)
+expect(result.is_ok()).to_equal(true)
+expect(rt_file_exists(output)).to_equal(true)
+expect(rt_file_exists("{output}.manifest.sdn")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/etc/fstab")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/sbin/init")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/sys/apps/llvm")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/sys/apps/clang")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/sys/apps/rust")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/SYS/LLVMMAN.TXT")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/SYS/CLANGMAN.TXT")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/SYS/RUSTMAN.TXT")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/llvm/hello.ll")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/clang/hello.c")).to_equal(true)
+expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/rust/hello.rs")).to_equal(true)
+val llvm_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/LLVMMAN.TXT")
+val clang_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/CLANGMAN.TXT")
+val rust_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/RUSTMAN.TXT")
+expect(llvm_manifest).to_contain("mode=native-filesystem-app")
+expect(llvm_manifest).to_contain("status=standalone-required")
+expect(clang_manifest).to_contain("mode=native-filesystem-app")
+expect(clang_manifest).to_contain("status=standalone-required")
+expect(rust_manifest).to_contain("mode=native-filesystem-app")
+expect(rust_manifest).to_contain("status=standalone-required")
 ```
 
 </details>
 
 #### writes installer-media staging for non-x86 architectures
 
--  reset dir
+1.  reset dir
    - Expected: result.is_ok() is true
    - Expected: rt_file_exists(output) is true
    - Expected: rt_file_exists("{output}.manifest.sdn") is true
@@ -152,7 +272,7 @@ expect(rt_file_exists("{output}.contents/rootfs/usr/libexec/simpleos-installer/i
 
 #### writes rootfs backend markers for alternate hosted backends while keeping FAT32 carrier
 
--  reset dir
+1.  reset dir
    - Expected: result.is_ok() is true
    - Expected: rt_file_exists("{output}.contents/rootfs/etc/rootfs.sdn") is true
    - Expected: rt_file_exists("{output}.contents/rootfs/SYS/ROOTFS.CFG") is true
@@ -191,7 +311,7 @@ expect(boot_marker).to_contain("rootfs_carrier=fat32")
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/installer/image_builder_artifact_spec.spl` |
-| Updated | 2026-07-06 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

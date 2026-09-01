@@ -26,23 +26,8 @@
 | Design | doc/04_architecture/os/security/ocap_privilege_architecture.md (§P1/§P2) |
 | Research | doc/01_research/os/security/llm_role_cspace_container_design.md |
 | Source | `test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
-
-# Boot-Seal Readiness Specification (master plan §5.4, Phase 2)
-
-**Feature IDs:** #OS-OCAP-P2-SEAL
-**Category:** Runtime / Security
-**Difficulty:** 4/5
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** doc/03_plan/agent_tasks/simpleos_production_master_plan_completion_status.md
-**Design:** doc/04_architecture/os/security/ocap_privilege_architecture.md (§P1/§P2)
-**Research:** doc/01_research/os/security/llm_role_cspace_container_design.md
 
 ## Overview
 
@@ -84,53 +69,25 @@ difference: it is the reason the arming session must install
 
 #### denies a non-root ambient spawn once the window is sealed
 
-- Verify: denies a non-root ambient spawn once the window is sealed
-- force sealed behaviour with a non-root caller
-   - Expected: spawn_authority_bootstrap_sealed() is true
-- the bare ambient path is EPERM for the non-root caller
-   - Expected: spawn_authority_check_ambient(_non_root()) equals `SPAWN_AUTHORITY_EPERM`
-- and so is the recipe-aware gate when NO recipe is declared
-   - Expected: spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_NONE) equals `SPAWN_AUTHORITY_EPERM`
-- root itself is still admitted - boot is not broken by the seal
-   - Expected: spawn_authority_check_ambient(0) equals `0)  # oracle: pinned constant asserted by this scenario`
-   - Expected: spawn_authority_check_spawn(0, SPAWN_RECIPE_NONE) equals `0)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: denies a non-root ambient spawn once the window is sealed")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-step("force sealed behaviour with a non-root caller")
-_seal_with_non_root_caller()
-expect(spawn_authority_bootstrap_sealed()).to_equal(true)
-
-step("the bare ambient path is EPERM for the non-root caller")
-expect(spawn_authority_check_ambient(_non_root())).to_equal(SPAWN_AUTHORITY_EPERM)
-
-step("and so is the recipe-aware gate when NO recipe is declared")
-expect(spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_NONE)).to_equal(SPAWN_AUTHORITY_EPERM)
-
-step("root itself is still admitted - boot is not broken by the seal")
-expect(spawn_authority_check_ambient(0)).to_equal(0)  # oracle: pinned constant asserted by this scenario
-expect(spawn_authority_check_spawn(0, SPAWN_RECIPE_NONE)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+# @req REQ-SSPEC-UNIT
 ```
 
 </details>
 
 #### admits the SHELL caller under its recipe while sealed
 
-- Verify: admits the SHELL caller under its recipe while sealed
 - recipe is recognised as migrated
    - Expected: spawn_recipe_is_migrated(SPAWN_RECIPE_SHELL) is true
    - Expected: spawn_recipe_name(SPAWN_RECIPE_SHELL) equals `shell`
 - sealed gate ADMITS it - this is the no-op-on-arming property
-   - Expected: spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_SHELL) equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_SHELL) equals `0`
 - the same caller with no recipe is still denied
    - Expected: spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_NONE) equals `SPAWN_AUTHORITY_EPERM`
 
@@ -138,20 +95,17 @@ expect(spawn_authority_check_spawn(0, SPAWN_RECIPE_NONE)).to_equal(0)  # oracle:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: admits the SHELL caller under its recipe while sealed")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 step("recipe is recognised as migrated")
 expect(spawn_recipe_is_migrated(SPAWN_RECIPE_SHELL)).to_equal(true)
 expect(spawn_recipe_name(SPAWN_RECIPE_SHELL)).to_equal("shell")
 
 step("sealed gate ADMITS it - this is the no-op-on-arming property")
-expect(spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_SHELL)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_SHELL)).to_equal(0)
 
 step("the same caller with no recipe is still denied")
 expect(spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_NONE)).to_equal(SPAWN_AUTHORITY_EPERM)
@@ -161,25 +115,16 @@ expect(spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_NONE)).to_equal(SPA
 
 #### admits the CONSOLE_SHELL caller under its recipe while sealed
 
-- Verify: admits the CONSOLE_SHELL caller under its recipe while sealed
-   - Expected: spawn_recipe_is_migrated(SPAWN_RECIPE_CONSOLE_SHELL) is true
-   - Expected: spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_CONSOLE_SHELL) equals `0)  # oracle: pinned constant asserted by this scenario`
-   - Expected: spawn_recipe_name(SPAWN_RECIPE_CONSOLE_SHELL) equals `console-shell`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: admits the CONSOLE_SHELL caller under its recipe while sealed")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 expect(spawn_recipe_is_migrated(SPAWN_RECIPE_CONSOLE_SHELL)).to_equal(true)
-expect(spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_CONSOLE_SHELL)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_CONSOLE_SHELL)).to_equal(0)
 expect(spawn_recipe_name(SPAWN_RECIPE_CONSOLE_SHELL)).to_equal("console-shell")
 ```
 
@@ -187,25 +132,16 @@ expect(spawn_recipe_name(SPAWN_RECIPE_CONSOLE_SHELL)).to_equal("console-shell")
 
 #### admits the APP_LAUNCHER caller under its recipe while sealed
 
-- Verify: admits the APP_LAUNCHER caller under its recipe while sealed
-   - Expected: spawn_recipe_is_migrated(SPAWN_RECIPE_APP_LAUNCHER) is true
-   - Expected: spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_APP_LAUNCHER) equals `0)  # oracle: pinned constant asserted by this scenario`
-   - Expected: spawn_recipe_name(SPAWN_RECIPE_APP_LAUNCHER) equals `app-launcher`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: admits the APP_LAUNCHER caller under its recipe while sealed")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 expect(spawn_recipe_is_migrated(SPAWN_RECIPE_APP_LAUNCHER)).to_equal(true)
-expect(spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_APP_LAUNCHER)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(spawn_authority_check_spawn(_non_root(), SPAWN_RECIPE_APP_LAUNCHER)).to_equal(0)
 expect(spawn_recipe_name(SPAWN_RECIPE_APP_LAUNCHER)).to_equal("app-launcher")
 ```
 
@@ -215,26 +151,22 @@ expect(spawn_recipe_name(SPAWN_RECIPE_APP_LAUNCHER)).to_equal("app-launcher")
 
 #### mints a non-empty PLEDGED pouch for the SHELL recipe with no rejects
 
-- Verify: mints a non-empty PLEDGED pouch for the SHELL recipe with no rejects
 - mint from the seeded parent grant
 - the child pouch is PLEDGED - it can only ever shrink from here
    - Expected: caps.is_pledged is true
 - it is NOT the deny-all set: every declared grant was authorized
    - Expected: caps.caps.len() equals `spawn_recipe_grant_count(SPAWN_RECIPE_SHELL)`
-   - Expected: spawn_authority_recipe_rejected_count() equals `0)  # oracle: pinned constant asserted by this scenario`
-   - Expected: spawn_authority_recipe_mint_count() equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: spawn_authority_recipe_rejected_count() equals `0`
+   - Expected: spawn_authority_recipe_mint_count() equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: mints a non-empty PLEDGED pouch for the SHELL recipe with no rejects")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 step("mint from the seeded parent grant")
 val caps = _mint_for(SPAWN_RECIPE_SHELL)
@@ -244,34 +176,26 @@ expect(caps.is_pledged).to_equal(true)
 
 step("it is NOT the deny-all set: every declared grant was authorized")
 expect(caps.caps.len()).to_equal(spawn_recipe_grant_count(SPAWN_RECIPE_SHELL))
-expect(spawn_authority_recipe_rejected_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario
-expect(spawn_authority_recipe_mint_count()).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(spawn_authority_recipe_rejected_count()).to_equal(0)
+expect(spawn_authority_recipe_mint_count()).to_equal(1)
 ```
 
 </details>
 
 #### mints non-empty pouches for the CONSOLE_SHELL and APP_LAUNCHER recipes
 
-- Verify: mints non-empty pouches for the CONSOLE_SHELL and APP_LAUNCHER recipes
-   - Expected: console_caps.is_pledged is true
-   - Expected: console_caps.caps.len() equals `spawn_recipe_grant_count(SPAWN_RECIPE_CONSOLE_SHELL)`
-   - Expected: launcher_caps.is_pledged is true
-   - Expected: launcher_caps.caps.len() equals `spawn_recipe_grant_count(SPAWN_RECIPE_APP_LAUNCHER)`
 - no grant was dropped for lack of parent authority across both
-   - Expected: spawn_authority_recipe_rejected_count() equals `0)  # oracle: pinned constant asserted by this scenario`
-   - Expected: spawn_authority_recipe_mint_count() equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: spawn_authority_recipe_rejected_count() equals `0`
+   - Expected: spawn_authority_recipe_mint_count() equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: mints non-empty pouches for the CONSOLE_SHELL and APP_LAUNCHER recipes")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 val console_caps = _mint_for(SPAWN_RECIPE_CONSOLE_SHELL)
 expect(console_caps.is_pledged).to_equal(true)
@@ -282,33 +206,29 @@ expect(launcher_caps.is_pledged).to_equal(true)
 expect(launcher_caps.caps.len()).to_equal(spawn_recipe_grant_count(SPAWN_RECIPE_APP_LAUNCHER))
 
 step("no grant was dropped for lack of parent authority across both")
-expect(spawn_authority_recipe_rejected_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario
-expect(spawn_authority_recipe_mint_count()).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(spawn_authority_recipe_rejected_count()).to_equal(0)
+expect(spawn_authority_recipe_mint_count()).to_equal(2)
 ```
 
 </details>
 
 #### still hands the deny-all ambient set to a recipe-less sealed caller
 
-- Verify: still hands the deny-all ambient set to a recipe-less sealed caller
 - no recipe declared -> the unchanged ambient path
 - pledged AND empty = the fail-closed deny-all set
    - Expected: caps.is_pledged is true
-   - Expected: caps.caps.len() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: caps.caps.len() equals `0`
 - and no recipe pouch was minted on that path
-   - Expected: spawn_authority_recipe_mint_count() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: spawn_authority_recipe_mint_count() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: still hands the deny-all ambient set to a recipe-less sealed caller")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 step("no recipe declared -> the unchanged ambient path")
 val caps = spawn_authority_spawn_caps(
@@ -316,37 +236,33 @@ val caps = spawn_authority_spawn_caps(
 
 step("pledged AND empty = the fail-closed deny-all set")
 expect(caps.is_pledged).to_equal(true)
-expect(caps.caps.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(caps.caps.len()).to_equal(0)
 
 step("and no recipe pouch was minted on that path")
-expect(spawn_authority_recipe_mint_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(spawn_authority_recipe_mint_count()).to_equal(0)
 ```
 
 </details>
 
 #### gives root the unchanged ambient set when no recipe is declared
 
-- Verify: gives root the unchanged ambient set when no recipe is declared
 - root takes the ambient path exactly as before this module grew
    - Expected: caps.is_pledged is false
-   - Expected: spawn_authority_recipe_mint_count() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: spawn_authority_recipe_mint_count() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: gives root the unchanged ambient set when no recipe is declared")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 step("root takes the ambient path exactly as before this module grew")
 val caps = spawn_authority_spawn_caps(0, SPAWN_RECIPE_NONE, CapabilitySet.full())
 expect(caps.is_pledged).to_equal(false)
-expect(spawn_authority_recipe_mint_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(spawn_authority_recipe_mint_count()).to_equal(0)
 ```
 
 </details>
@@ -355,33 +271,29 @@ expect(spawn_authority_recipe_mint_count()).to_equal(0)  # oracle: pinned consta
 
 #### mints DENY-ALL from an ambient full() parent - the arming blocker
 
-- Verify: mints DENY-ALL from an ambient full() parent - the arming blocker
 - an ambient full() parent holds ZERO concrete tokens
-   - Expected: ambient_parent.caps.len() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: ambient_parent.caps.len() equals `0`
 - so every recipe grant is REJECTED and the child is powerless
    - Expected: caps.is_pledged is true
-   - Expected: caps.caps.len() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: caps.caps.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: mints DENY-ALL from an ambient full() parent - the arming blocker")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 step("an ambient full() parent holds ZERO concrete tokens")
 val ambient_parent = CapabilitySet.full()
-expect(ambient_parent.caps.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(ambient_parent.caps.len()).to_equal(0)
 
 step("so every recipe grant is REJECTED and the child is powerless")
 val caps = spawn_authority_spawn_caps(_non_root(), SPAWN_RECIPE_SHELL, ambient_parent)
 expect(caps.is_pledged).to_equal(true)
-expect(caps.caps.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(caps.caps.len()).to_equal(0)
 expect(spawn_authority_recipe_rejected_count()).to_equal(
     spawn_recipe_grant_count(SPAWN_RECIPE_SHELL))
 ```
@@ -390,25 +302,21 @@ expect(spawn_authority_recipe_rejected_count()).to_equal(
 
 #### mints the full recipe from a SEEDED parent - what boot must install
 
-- Verify: mints the full recipe from a SEEDED parent - what boot must install
 - the seeded root grant holds one delegable token per recipe grant
    - Expected: seeded.is_pledged is true
    - Expected: seeded.caps.len() equals `spawn_recipe_grant_count(SPAWN_RECIPE_SHELL)`
 - and every grant is then authorized - zero rejects
    - Expected: caps.caps.len() equals `spawn_recipe_grant_count(SPAWN_RECIPE_SHELL)`
-   - Expected: spawn_authority_recipe_rejected_count() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: spawn_authority_recipe_rejected_count() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: mints the full recipe from a SEEDED parent - what boot must install")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 step("the seeded root grant holds one delegable token per recipe grant")
 val seeded = spawn_recipe_seed_parent_caps(SPAWN_RECIPE_SHELL, 4242u64)
@@ -418,7 +326,7 @@ expect(seeded.caps.len()).to_equal(spawn_recipe_grant_count(SPAWN_RECIPE_SHELL))
 step("and every grant is then authorized - zero rejects")
 val caps = spawn_authority_spawn_caps(_non_root(), SPAWN_RECIPE_SHELL, seeded)
 expect(caps.caps.len()).to_equal(spawn_recipe_grant_count(SPAWN_RECIPE_SHELL))
-expect(spawn_authority_recipe_rejected_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(spawn_authority_recipe_rejected_count()).to_equal(0)
 ```
 
 </details>
@@ -427,10 +335,6 @@ expect(spawn_authority_recipe_rejected_count()).to_equal(0)  # oracle: pinned co
 
 #### declares READ|EXEC and nothing else for every migrated recipe
 
-- Verify: declares READ|EXEC and nothing else for every migrated recipe
-   - Expected: spawn_recipe_rights_mask(SPAWN_RECIPE_SHELL) equals `expected`
-   - Expected: spawn_recipe_rights_mask(SPAWN_RECIPE_CONSOLE_SHELL) equals `expected`
-   - Expected: spawn_recipe_rights_mask(SPAWN_RECIPE_APP_LAUNCHER) equals `expected`
 - no migrated recipe asks for WRITE
    - Expected: write_bit equals `0u32`
 - an unmigrated recipe declares NOTHING - fail closed, not wildcard
@@ -440,13 +344,10 @@ expect(spawn_authority_recipe_rejected_count()).to_equal(0)  # oracle: pinned co
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: declares READ|EXEC and nothing else for every migrated recipe")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val expected = CAP_RIGHT_READ | CAP_RIGHT_EXEC
 expect(spawn_recipe_rights_mask(SPAWN_RECIPE_SHELL)).to_equal(expected)
 expect(spawn_recipe_rights_mask(SPAWN_RECIPE_CONSOLE_SHELL)).to_equal(expected)
@@ -464,24 +365,13 @@ expect(spawn_recipe_rights_mask(SPAWN_RECIPE_NONE)).to_equal(0u32)
 
 #### pins each recipe to its narrow path prefix
 
-- Verify: pins each recipe to its narrow path prefix
-   - Expected: spawn_recipe_exec_prefix(SPAWN_RECIPE_SHELL) equals `/bin/`
-   - Expected: spawn_recipe_read_prefix(SPAWN_RECIPE_SHELL) equals `/bin/`
-   - Expected: spawn_recipe_exec_prefix(SPAWN_RECIPE_APP_LAUNCHER) equals `/sys/apps/`
-   - Expected: spawn_recipe_read_prefix(SPAWN_RECIPE_APP_LAUNCHER) equals `/sys/apps/`
-   - Expected: spawn_recipe_exec_prefix(SPAWN_RECIPE_NONE) equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: pins each recipe to its narrow path prefix")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(spawn_recipe_exec_prefix(SPAWN_RECIPE_SHELL)).to_equal("/bin/")
 expect(spawn_recipe_read_prefix(SPAWN_RECIPE_SHELL)).to_equal("/bin/")
 expect(spawn_recipe_exec_prefix(SPAWN_RECIPE_APP_LAUNCHER)).to_equal("/sys/apps/")
@@ -493,7 +383,6 @@ expect(spawn_recipe_exec_prefix(SPAWN_RECIPE_NONE)).to_equal("")
 
 #### meets the profile attenuation deny-wins at the recipe
 
-- Verify: meets the profile attenuation deny-wins at the recipe
 - no profile: the child gets the recipe declaration, not the parent's WRITE
    - Expected: no_profile equals `CAP_RIGHT_READ | CAP_RIGHT_EXEC`
    - Expected: spawn_rights_is_subset(no_profile, parent) is true
@@ -506,13 +395,10 @@ expect(spawn_recipe_exec_prefix(SPAWN_RECIPE_NONE)).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: meets the profile attenuation deny-wins at the recipe")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val parent = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
 step("no profile: the child gets the recipe declaration, not the parent's WRITE")
 val no_profile = spawn_recipe_effective_rights(
@@ -537,7 +423,6 @@ expect(spawn_recipe_effective_rights(
 
 #### clears the declared recipe so it cannot admit a later ambient spawn
 
-- Verify: clears the declared recipe so it cannot admit a later ambient spawn
 - declare a recipe the way a migrated call site does
    - Expected: spawn_authority_current_recipe() equals `SPAWN_RECIPE_APP_LAUNCHER`
 - clearing it returns the caller to the sealed ambient verdict
@@ -547,19 +432,16 @@ expect(spawn_recipe_effective_rights(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-LOADER_SPAWN_SEAL_READINESS-001
-step("Verify: clears the declared recipe so it cannot admit a later ambient spawn")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 _seal_with_non_root_caller()
 step("declare a recipe the way a migrated call site does")
 spawn_authority_note_recipe(SPAWN_RECIPE_APP_LAUNCHER)
 expect(spawn_authority_current_recipe()).to_equal(SPAWN_RECIPE_APP_LAUNCHER)
 expect(spawn_authority_check_spawn(
-    _non_root(), spawn_authority_current_recipe())).to_equal(0)  # oracle: pinned constant asserted by this scenario
+    _non_root(), spawn_authority_current_recipe())).to_equal(0)
 
 step("clearing it returns the caller to the sealed ambient verdict")
 spawn_authority_clear_recipe()
@@ -590,36 +472,68 @@ expect(spawn_authority_check_spawn(
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `d60923d15a3e249591335bc06eca08a64a71d400b4958f9e04c020b294a389f8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `03f1e294540c2df8b94b6b9a4e60ab9c043482e0a4b7bc63936bff8831283f18`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `d60923d15a3e249591335bc06eca08a64a71d400b4958f9e04c020b294a389f8`.
+Source SHA-256: `03f1e294540c2df8b94b6b9a4e60ab9c043482e0a4b7bc63936bff8831283f18`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `d60923d15a3e249591335bc06eca08a64a71d400b4958f9e04c020b294a389f8`  
+Source SHA-256: `03f1e294540c2df8b94b6b9a4e60ab9c043482e0a4b7bc63936bff8831283f18`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **79/100**; effective score: **79/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 79/100
 source: test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl
 mirror: doc/06_spec/01_unit/os/kernel/loader/spawn_seal_readiness_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 11 blockers: 0
+  narrative=100 structure=60 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/kernel/loader/spawn_seal_readiness_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/os/kernel/loader/spawn_seal_readiness_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/kernel/loader/spawn_seal_readiness_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: recovery/troubleshooting
+doc/06_spec/01_unit/os/kernel/loader/spawn_seal_readiness_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 13 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl:104:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'denies a non-root ambient spawn once the window is sealed' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl:121:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'admits the SHELL caller under its recipe while sealed' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl:133:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'admits the CONSOLE_SHELL caller under its recipe while sealed' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl:139:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'admits the APP_LAUNCHER caller under its recipe while sealed' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl:147:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mints a non-empty PLEDGED pouch for the SHELL recipe with no rejects' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl:160:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mints non-empty pouches for the CONSOLE_SHELL and APP_LAUNCHER recipes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl:236:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'pins each recipe to its narrow path prefix' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->

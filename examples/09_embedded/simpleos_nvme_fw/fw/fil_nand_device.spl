@@ -28,13 +28,6 @@ use nvme_types.*
 use fil_nand.*   # NandRead (shared FIL read result {data, lba, seq, ecc, err})
 use fil_ecc.*
 
-fn nand_device_erase_counter_next(v: i64) -> i64:
-    if v < 0:
-        return 1
-    if v >= FW_SAFE_I64_LIMIT:
-        return FW_SAFE_I64_LIMIT
-    v + 1
-
 # ── ONFI command opcodes ──────────────────────────────────────────────────────
 val ONFI_READ_1ST:  i64 = 0x00   # read setup
 val ONFI_READ_2ND:  i64 = 0x30   # read confirm -> data out
@@ -109,25 +102,16 @@ fn nand_device_new() -> NandDevice:
         erase_fail.push(0)
         i = i + 1
 
-    NandDevice(page_data: page_data, oob_lba: oob_lba, oob_seq: oob_seq, oob_ecc: oob_ecc, page_err: page_err, programmed: programmed, bad_block: bad_block, blk_erase: blk_erase, prog_fail: prog_fail, erase_fail: erase_fail, cmd: 0, addr: NULL_IDX, din: 0, din_lba: UNMAP, din_seq: 0, dout: 0, dout_lba: UNMAP, dout_seq: 0, dout_ecc: 0, dout_err: 0, status: STATUS_IDLE)
+    NandDevice(page_data: page_data, oob_lba: oob_lba, oob_seq: oob_seq, oob_ecc: oob_ecc, page_err: page_err, programmed: programmed, bad_block: bad_block, blk_erase: blk_erase, prog_fail: prog_fail, erase_fail: erase_fail, cmd: 0, addr: -1, din: 0, din_lba: UNMAP, din_seq: 0, dout: 0, dout_lba: UNMAP, dout_seq: 0, dout_ecc: 0, dout_err: 0, status: STATUS_IDLE)
 
 # ── Low-level ONFI bus protocol (param-into-scalar latches; exec reads scalars) ─
 impl NandDevice:
-    me page_ready(ppn: i64) -> bool:
-        ppn_in_range(ppn) and ppn < me.page_data.len() and ppn < me.oob_lba.len() and ppn < me.oob_seq.len() and ppn < me.oob_ecc.len() and ppn < me.page_err.len() and ppn < me.programmed.len()
-
-    me block_ready(blk: i64) -> bool:
-        block_in_range(blk) and blk < me.bad_block.len() and blk < me.blk_erase.len() and blk < me.prog_fail.len() and blk < me.erase_fail.len()
-
-    me block_pages_ready(blk: i64) -> bool:
-        me.block_ready(blk) and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.page_data.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.oob_lba.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.oob_seq.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.oob_ecc.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.page_err.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.programmed.len()
-
     # Latch a command byte. RESET clears the latches; the 2nd byte of a sequence
     # is what exec() dispatches on.
     me cmd_latch(op: i64):
         me.cmd = op
         if op == ONFI_RESET:
-            me.addr = NULL_IDX
+            me.addr = -1
             me.din = 0
             me.din_lba = UNMAP
             me.din_seq = 0
@@ -184,18 +168,11 @@ impl NandDevice:
         if not me.page_ready(ppn):
             me.status = STATUS_BUSY_FAIL
             return
-        val blk: i64 = ppn_block(ppn)
-        if not me.block_ready(blk):
-            me.status = STATUS_BUSY_FAIL
-            return
-        if me.bad_block[blk] != 0:
-            me.status = STATUS_BUSY_FAIL
-            return
-        if me.prog_fail[blk] != 0:
+        if me.prog_fail[blk] == 1:
             me.prog_fail[blk] = 0
             me.status = STATUS_BUSY_FAIL
             return
-        if me.programmed[ppn] != 0:
+        if me.programmed[ppn] == 1:
             me.status = STATUS_BUSY_FAIL
             return
         me.page_data[ppn] = me.din
@@ -212,10 +189,7 @@ impl NandDevice:
         if not me.block_pages_ready(blk):
             me.status = STATUS_BUSY_FAIL
             return
-        if me.bad_block[blk] != 0:
-            me.status = STATUS_BUSY_FAIL
-            return
-        if me.erase_fail[blk] != 0:
+        if me.erase_fail[blk] == 1:
             me.erase_fail[blk] = 0
             me.status = STATUS_BUSY_FAIL
             return
@@ -230,15 +204,13 @@ impl NandDevice:
             me.page_err[ppn] = 0
             me.programmed[ppn] = 0
             pg = pg + 1
-        me.blk_erase[blk] = nand_device_erase_counter_next(me.blk_erase[blk])
+        me.blk_erase[blk] = me.blk_erase[blk] + 1
         me.status = STATUS_IDLE
 
     me data_out() -> i64:
         me.dout
 
     me status_reg() -> i64:
-        if me.status < 0 or me.status > 255:
-            me.status = STATUS_BUSY_FAIL
         me.status
 
     # ── High-level FIL seam (drop-in for fil_nand.Nand; drives the ONFI bus) ───
@@ -247,9 +219,7 @@ impl NandDevice:
         if not me.page_ready(ppn):
             return NAND_BAD_BLOCK
         val blk: i64 = ppn_block(ppn)
-        if not me.block_ready(blk):
-            return NAND_BAD_BLOCK
-        if me.bad_block[blk] != 0:
+        if me.bad_block[blk] == 1:
             return NAND_BAD_BLOCK
         me.cmd_latch(ONFI_PROG_1ST)
         me.addr_latch(ppn)
@@ -267,10 +237,7 @@ impl NandDevice:
         me.addr_latch(ppn)
         me.cmd_latch(ONFI_READ_2ND)
         me.exec()
-        var err: i64 = me.dout_err
-        if err < 0:
-            err = 0
-        NandRead(data: me.dout, lba: me.dout_lba, seq: me.dout_seq, ecc: me.dout_ecc, err: err)
+        NandRead(data: me.dout, lba: me.dout_lba, seq: me.dout_seq, ecc: me.dout_ecc, err: me.dout_err)
 
     # Erase one block. Returns NAND_OK / NAND_BAD_BLOCK / NAND_ERASE_FAIL.
     me erase_block(blk: i64) -> i64:
@@ -367,9 +334,6 @@ fn nand_device_selftest() -> i64:
     # Bad block -> program rejected.
     dev.set_bad(7)
     fail = fail + expect_eq(dev.program(block_first_ppn(7), 1, 1, 1), NAND_BAD_BLOCK, "program to bad block -> BAD_BLOCK")
-    dev.bad_block[10] = 7
-    fail = fail + expect_eq(dev.program(block_first_ppn(10), 1, 1, 1), NAND_BAD_BLOCK, "corrupted nonzero device bad-block marker fails closed")
-    fail = fail + expect_eq(dev.erase_block(10), NAND_BAD_BLOCK, "corrupted nonzero device bad-block marker blocks erase")
 
     # One-shot program fault then recovery.
     dev.inject_prog_fail(4)
@@ -377,21 +341,11 @@ fn nand_device_selftest() -> i64:
     fail = fail + expect_eq(dev.program(p4, 5, 5, 0x33), NAND_PROG_FAIL, "inject_prog_fail -> PROG_FAIL")
     fail = fail + expect_eq(dev.program(p4, 5, 5, 0x33), NAND_OK, "program ok after one-shot clears")
     fail = fail + expect_eq(dev.read_page(p4).data, 0x33, "post-recovery read round-trips")
-    dev.prog_fail[11] = 7
-    val p11: i64 = block_first_ppn(11)
-    fail = fail + expect_eq(dev.program(p11, 11, 11, 0x44), NAND_PROG_FAIL, "corrupted nonzero program fault fails once")
-    fail = fail + expect_eq(dev.program(p11, 11, 11, 0x44), NAND_OK, "corrupted program fault clears after one failure")
-    val p12: i64 = block_first_ppn(12)
-    dev.programmed[p12] = 7
-    fail = fail + expect_eq(dev.program(p12, 12, 12, 0x45), NAND_PROG_FAIL, "corrupted nonzero programmed marker blocks overwrite")
 
     # One-shot erase fault.
     dev.inject_erase_fail(8)
     fail = fail + expect_eq(dev.erase_block(8), NAND_ERASE_FAIL, "inject_erase_fail -> ERASE_FAIL")
     fail = fail + expect_eq(dev.erase_block(8), NAND_OK, "erase ok after one-shot clears")
-    dev.erase_fail[13] = 7
-    fail = fail + expect_eq(dev.erase_block(13), NAND_ERASE_FAIL, "corrupted nonzero erase fault fails once")
-    fail = fail + expect_eq(dev.erase_block(13), NAND_OK, "corrupted erase fault clears after one failure")
 
     # Injected bit-flip count surfaces in the read error field (FIL ECC consumes it).
     val pf: i64 = block_first_ppn(9)

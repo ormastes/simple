@@ -1,6 +1,6 @@
 # Checkable Canceled-Pointer Focus Preservation
 
-> Verifies the browser checkable canceled pointer focus behaviour end to end so maintainers of this
+> A canceled primary pointerdown still permits the same-target click and the
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Checkable Canceled-Pointer Focus Preservation
 
-Verifies the browser checkable canceled pointer focus behaviour end to end so maintainers of this
+A canceled primary pointerdown still permits the same-target click and the
 
 ## At a Glance
 
@@ -20,18 +20,13 @@ Verifies the browser checkable canceled pointer focus behaviour end to end so ma
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the browser checkable canceled pointer focus behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+A canceled primary pointerdown still permits the same-target click and the
+checkbox input/change defaults, but it must not move focus from an existing
+text input. Hosted and isolated renderer paths must expose the same exact
+event order and focused target.
 
 ## Scenarios
 
@@ -39,7 +34,7 @@ unrelated sibling features are out of scope.
 
 #### should preserve text focus while activating the checkbox
 
-- Verify: should preserve text focus while activating the checkbox
+- should preserve text focus while activating the checkbox
    - HTML capture: after_step
 - Open the same text input and checkbox in hosted and isolated renderers
    - HTML capture: after_step
@@ -57,28 +52,27 @@ unrelated sibling features are out of scope.
    - HTML capture: after_step
    - Evidence: HTML text verified by 4 expected checks
    - Expected: hosted_choice_down.semantic_target_id equals `choice`
-   - Expected: hosted_choice_down.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: hosted_choice_down.callback_count equals `1`
    - Expected: hosted_choice_up.semantic_target_id equals `choice`
-   - Expected: hosted_choice_up.callback_count equals `3)  # oracle: pinned constant asserted by this scenario`
+   - Expected: hosted_choice_up.callback_count equals `3`
 - Observe checkable order and preserved text focus
    - HTML capture: after_step
    - Evidence: HTML text verified by 4 expected checks
    - Expected: hosted.browser.current_title equals `expected_events`
    - Expected: worker.browser.current_title equals `expected_events`
-   - Expected: hosted.browser.dom_callback_count equals `5)  # oracle: pinned constant asserted by this scenario`
-   - Expected: worker.browser.dom_callback_count equals `5)  # oracle: pinned constant asserted by this scenario`
+   - Expected: hosted.browser.dom_callback_count equals `5`
+   - Expected: worker.browser.dom_callback_count equals `5`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 82 lines folded for reproduction.
+Runnable source: 81 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
-step("Verify: should preserve text focus while activating the checkbox")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should preserve text focus while activating the checkbox")
 step("Open the same text input and checkbox in hosted and isolated renderers")
 var hosted = HostedWebContentSession.create(
     902, CHECKABLE_CANCELED_POINTER_FOCUS_HTML, 80, 48
@@ -121,9 +115,9 @@ val worker_choice_up = worker.handle(BrowserRendererMessage(
     payload: "P1\t4\t4\t28\t0"
 ))
 expect(hosted_choice_down.semantic_target_id).to_equal("choice")
-expect(hosted_choice_down.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(hosted_choice_down.callback_count).to_equal(1)
 expect(hosted_choice_up.semantic_target_id).to_equal("choice")
-expect(hosted_choice_up.callback_count).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(hosted_choice_up.callback_count).to_equal(3)
 expect(worker_choice_down.ok).to_be(true)
 expect(worker_choice_up.ok).to_be(true)
 
@@ -155,8 +149,8 @@ expect(be_dom_has_attr(
 expect(be_dom_has_attr(
     worker_choice[worker_choice.len() - 1], "checked"
 )).to_be(true)
-expect(hosted.browser.dom_callback_count).to_equal(5)  # oracle: pinned constant asserted by this scenario
-expect(worker.browser.dom_callback_count).to_equal(5)  # oracle: pinned constant asserted by this scenario
+expect(hosted.browser.dom_callback_count).to_equal(5)
+expect(worker.browser.dom_callback_count).to_equal(5)
 hosted.close()
 ```
 
@@ -175,39 +169,50 @@ hosted.close()
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `75b2a789ccf233fa4cb555bf1cdc5925163aed38647bd43de6100cb726d6aa50`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `67dde46c6a8b2bc17988709c425d50d0c2c3e26c3fb76871bd54c76f66c09cf7`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `75b2a789ccf233fa4cb555bf1cdc5925163aed38647bd43de6100cb726d6aa50`.
+Source SHA-256: `67dde46c6a8b2bc17988709c425d50d0c2c3e26c3fb76871bd54c76f66c09cf7`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `75b2a789ccf233fa4cb555bf1cdc5925163aed38647bd43de6100cb726d6aa50`  
+Source SHA-256: `67dde46c6a8b2bc17988709c425d50d0c2c3e26c3fb76871bd54c76f66c09cf7`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 88/100
 source: test/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.spl
 mirror: doc/06_spec/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=95 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 5 blockers: 0
+  narrative=100 structure=95 oracle=70
+  traceability=100 evidence=90 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.spl:72:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve text focus while activating the checkbox' describes the test rather than its outcome
+test/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.spl:62:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve text focus while activating the checkbox' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve text focus while activating the checkbox' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

@@ -11,8 +11,35 @@ use compiler.driver.driver_source_loading.{
     _driver_is_bootstrap_entry_source
 }
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.common.mir_target_context.{MirTargetContext}
+use std.common.convert.{try_parse_int}
 
 extern fn rt_env_get(key: text) -> text
+
+fn _driver_mcdc_mir_mode(ctx: CompileContext) -> i64:
+    # EXPLICIT COMPARISONS, not `match`. The default is "off" -> 0, yet the
+    # bootstrap lane emitted `mcdc_static_probe_mask_range` calls -- a symbol no
+    # runtime in this tree defines (grep of src/runtime finds nothing), so every
+    # native link failed with "Undefined symbols for architecture arm64". That
+    # means this function returned 1 while the config said "off": the `match`
+    # arms mis-dispatched, selecting a value arm over the `_` catch-all. Same
+    # staged-lane match hazard already worked around with explicit discriminant
+    # dispatch elsewhere in the backend. Equality tests do not depend on match
+    # arm binding, so the "off" default is honoured.
+    val mcdc_requested = ctx.config["mcdc_mode"] ?? "off"
+    if mcdc_requested == "on" or mcdc_requested == "static" or mcdc_requested == "static-on":
+        return 1
+    if mcdc_requested == "dynamic" or mcdc_requested == "dynamic-aspect":
+        return 2
+    0
+
+fn _driver_mcdc_budget(ctx: CompileContext, key: text, fallback: i64) -> i64:
+    if val raw = ctx.config[key]:
+        if val parsed = try_parse_int(raw):
+            if parsed > 0: return parsed
+        ctx.add_error("MCDC-E-BUFFER-CAP: {key} must be a positive integer, got '{raw}'")
+        return 0
+    fallback
 
 # Diagnostics-plumbing: MirLowering.errors was silently dropped on the
 # native-build worker path (nothing outside 70.backend read it), so a bare
@@ -61,7 +88,12 @@ fn _format_mir_error(err: MirError) -> text:
 #     case in expr_dispatch.spl pushes the bare, colon-less "undefined
 #     variable" string with no name, so it fell through this prefix check
 #     entirely and silently produced an i64 nil temp).
-#   - "unsupported array/string slice index" — a[start:end] has no native
+#   - "unsupported array/string slice index" — MIGRATED 2026-08-25 to
+#     `error_fatal` at its only site (expr_dispatch.spl); entry removed from
+#     the list below. It was the third casualty of exactly the hazard this
+#     header describes: rewording it to name the range form it actually
+#     reports turned a clean build failure into a silent success emitting the
+#     placeholder const 0. Original note follows: a[start:end] has no native
 #     lowering; was silently producing a garbage value.
 #   - "B5b" — every int-literal `match` Phase-2 diagnostic in
 #     lower_int_match's arm loop (non-IntLit literal/Or, Tuple/Array/Struct/
@@ -131,7 +163,6 @@ fn _mir_error_is_fatal(message: text) -> bool:
         message.starts_with("unresolved method call:") or
         message.starts_with("unsupported MIR expression:") or
         message.starts_with("match guards (case x if cond:) are not supported") or
-        message.starts_with("unsupported array/string slice index") or
         message.starts_with("B5b") or
         message.starts_with("match default binding has no resolved symbol") or
         message.starts_with("enum match:") or
@@ -156,8 +187,22 @@ impl CompilerDriver:
     # --------------------------------------------------------------------------
 
     me lower_to_mir() -> bool:
-        val skip_mir_lower = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER") ?? ""
-        if skip_mir_lower == "1":
+        self.lower_to_mir_with_target_context(
+            driver_mir_target_context(self.ctx.options), false, true)
+
+    me lower_to_mir_for_explicit_target(target_context: MirTargetContext) -> bool:
+        self.lower_to_mir_with_target_context(target_context, true, false)
+
+    me lower_to_mir_with_target_context(
+        target_context: MirTargetContext,
+        force_all_sources: bool,
+        allow_bootstrap_shortcuts: bool
+    ) -> bool:
+        val skip_mir_lower = if allow_bootstrap_shortcuts:
+            rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER") ?? ""
+        else:
+            ""
+        if allow_bootstrap_shortcuts and skip_mir_lower == "1":
             print "[bootstrap] skipping MIR lowering"
             var skip_idx = 0
             while skip_idx < self.ctx.sources.len():
@@ -174,11 +219,9 @@ impl CompilerDriver:
                 if name_skip == "app.cli.bootstrap_main":
                     self.ctx.set_bootstrap_entry_mir(name_skip, mir_skip)
                 skip_idx = skip_idx + 1
-            return self.ctx.error_count_value == 0
+            return not self.ctx.has_errors()
 
-        val target_context = driver_mir_target_context(self.ctx.options)
-
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        if allow_bootstrap_shortcuts and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
             if bootstrap_hir == nil:
                 self.ctx.add_error("MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
@@ -187,11 +230,12 @@ impl CompilerDriver:
             log_bootstrap_flat_warning("mir:bootstrap_fixed")
             log_phase("aot:bootstrap_fixed:start module=app.cli.bootstrap_main functions={bootstrap_hir.functions.len()}")
             var bootstrap_lowering = MirLowering.new_for_target(bootstrap_hir.symbols, target_context)
+            bootstrap_lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx), _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576), _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864), self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
             log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()}")
-            return self.ctx.error_count_value == 0
+            return not self.ctx.has_errors()
 
         if self.ctx.sources.len() > 0:
             # Mirror phase-2 parse_all_impl (driver.spl): under --entry-closure
@@ -201,7 +245,7 @@ impl CompilerDriver:
             # through to the empty MirModule stub below, producing "MIR module
             # has no functions" for the first such module the AOT backend
             # tried to compile on its own (e.g. std.io_runtime).
-            val native_entry_closure_mir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+            val native_entry_closure_mir = force_all_sources or (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
             var direct_idx = 0
             # Canonical constructor — do NOT hand-duplicate MirLowering(...) here.
             # A duplicated copy drifted 8 fields behind the class and the seed
@@ -210,6 +254,9 @@ impl CompilerDriver:
             # (native_build_entry_struct_construction_buildfail_2026-07-20).
             # Guard: test/03_system/native/struct_construct_native.spl.
             var direct_lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+            if not allow_bootstrap_shortcuts:
+                direct_lowering.use_explicit_semantic_policy()
+            direct_lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx), _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576), _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864), self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
             # Crossmodule field-index prepass: the entry module is lowered
             # BEFORE the dependency modules it imports, so without this an
             # imported struct's field order was unknown while lowering the
@@ -255,12 +302,7 @@ impl CompilerDriver:
                         self.ctx.sources.len(), name_direct,
                         4, 6, 0, 0, "running")
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
-            # Read the authoritative scalar field directly: a `has_errors()`
-            # receiver call on the freshly dict-stored ctx can lose the
-            # receiver handle under native codegen (2026-08-23 hello-world
-            # SIGSEGV at has_errors+4, this=0). Same defect class as the
-            # parse-phase verdicts in driver_source_pipeline_parsing.spl.
-            return self.ctx.error_count_value == 0
+            return not self.ctx.has_errors()
 
         # Canonical constructor — this was a SECOND hand-duplicated
         # MirLowering(...) copy, drifted even further behind the class (same 8
@@ -268,6 +310,9 @@ impl CompilerDriver:
         # native_build_entry_struct_construction_buildfail_2026-07-20, so the
         # nil-fill landmine was still live on this fallback path).
         var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+        if not allow_bootstrap_shortcuts:
+            lowering.use_explicit_semantic_policy()
+        lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx), _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576), _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864), self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
 
         # BUG-001 diagnostic: log module count entering MIR lowering
         log_debug("[lower_to_mir] lowering to MIR")
@@ -287,7 +332,7 @@ impl CompilerDriver:
                     self.ctx.set_bootstrap_entry_mir(name, mir_module)
             _driver_collect_mir_errors(self.ctx, lowering.errors)
             log_debug("[lower_to_mir] MIR done")
-        return self.ctx.error_count_value == 0
+        return not self.ctx.has_errors()
         for src3 in self.ctx.sources:
             val name = src3.module_name
             val mir_module = MirModule(
@@ -302,5 +347,5 @@ impl CompilerDriver:
                 self.ctx.set_bootstrap_entry_mir(name, mir_module)
 
         log_debug("[lower_to_mir] MIR done")
-        self.ctx.error_count_value == 0
+        not self.ctx.has_errors()
 use compiler.common.diagnostics.span.{Span}

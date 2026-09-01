@@ -1,6 +1,6 @@
 # SDL2 Host Input Backend Spec
 
-> Verifies the hosted input sdl2 behaviour end to end so maintainers of this
+> `src/os/compositor/hosted_input_sdl2.spl` had ZERO coverage, including
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # SDL2 Host Input Backend Spec
 
-Verifies the hosted input sdl2 behaviour end to end so maintainers of this
+`src/os/compositor/hosted_input_sdl2.spl` had ZERO coverage, including
 
 ## At a Glance
 
@@ -20,40 +20,46 @@ Verifies the hosted input sdl2 behaviour end to end so maintainers of this
 | Category | Testing |
 | Status | Done |
 | Source | `test/01_unit/os/compositor/hosted_input_sdl2_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the hosted input sdl2 behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+## Purpose and Audience
+
+`src/os/compositor/hosted_input_sdl2.spl` had ZERO coverage, including
+`sdl2_wheel_to_mouse_wheel` — the ONLY sign negation in the whole input
+system. PS/2 is positive-down on the wire and passes through unnegated; SDL2
+is positive-up and must flip exactly once. A wrong or doubled flip inverts
+scrolling everywhere and nothing else in the tree would notice.
+
+This spec pins:
+
+- the wheel sign, at the free function AND end-to-end through `record_wheel`
+- `create` / `create_unavailable` availability honesty
+- `apply_mouse_button` edge-triggered state
+- the keysym -> `Key` translation seam and `key_to_char` shift handling
+
+Every seam used here is hardware-free: the backend is constructed with window
+handle 0, so no SDL2 extern is ever called.
 
 ## Scenarios
 
 ### sdl2 wheel sign
-_The single sign negation on the SDL2 path, at the free function._
 
 #### negates a scroll-up detent into positive-down
 
-- Verify: negates a scroll-up detent into positive-down
+- negates a scroll-up detent into positive-down
    - Expected: sdl2_wheel_to_mouse_wheel(1) equals `0 - 1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: negates a scroll-up detent into positive-down")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("negates a scroll-up detent into positive-down")
 """SDL2 wheel_y +1 means scrolling UP; MouseEvent.wheel is
 positive-DOWN, so it must come out as -1."""
 expect(sdl2_wheel_to_mouse_wheel(1)).to_equal(0 - 1)
@@ -63,29 +69,49 @@ expect(sdl2_wheel_to_mouse_wheel(1)).to_equal(0 - 1)
 
 #### negates a scroll-down detent into negative
 
-- Verify: negates a scroll-down detent into negative
-   - Expected: sdl2_wheel_to_mouse_wheel(0 - 1) equals `1)  # oracle: pinned constant asserted by this scenario`
+- negates a scroll-down detent into negative
+   - Expected: sdl2_wheel_to_mouse_wheel(0 - 1) equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: negates a scroll-down detent into negative")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(sdl2_wheel_to_mouse_wheel(0 - 1)).to_equal(1)  # oracle: pinned constant asserted by this scenario
+# @req REQ-SSPEC-OS
+step("negates a scroll-down detent into negative")
+expect(sdl2_wheel_to_mouse_wheel(0 - 1)).to_equal(1)
 ```
 
 </details>
 
 #### leaves a zero detent alone
 
-- Verify: leaves a zero detent alone
-   - Expected: sdl2_wheel_to_mouse_wheel(0) equals `0)  # oracle: pinned constant asserted by this scenario`
+- leaves a zero detent alone
+   - Expected: sdl2_wheel_to_mouse_wheel(0) equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("leaves a zero detent alone")
+expect(sdl2_wheel_to_mouse_wheel(0)).to_equal(0)
+```
+
+</details>
+
+#### flips a multi-detent burst without scaling it
+
+- flips a multi-detent burst without scaling it
+   - Expected: sdl2_wheel_to_mouse_wheel(3) equals `0 - 3`
+   - Expected: sdl2_wheel_to_mouse_wheel(0 - 7) equals `7`
 
 
 <details>
@@ -95,19 +121,19 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: leaves a zero detent alone")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(sdl2_wheel_to_mouse_wheel(0)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+# @req REQ-SSPEC-OS
+step("flips a multi-detent burst without scaling it")
+expect(sdl2_wheel_to_mouse_wheel(3)).to_equal(0 - 3)
+expect(sdl2_wheel_to_mouse_wheel(0 - 7)).to_equal(7)
 ```
 
 </details>
 
-#### flips a multi-detent burst without scaling it
+#### flips exactly once, not twice
 
-- Verify: flips a multi-detent burst without scaling it
-   - Expected: sdl2_wheel_to_mouse_wheel(3) equals `0 - 3`
-   - Expected: sdl2_wheel_to_mouse_wheel(0 - 7) equals `7)  # oracle: pinned constant asserted by this scenario`
+- flips exactly once, not twice
+   - Expected: sdl2_wheel_to_mouse_wheel(5) equals `0 - 5`
+   - Expected: sdl2_wheel_to_mouse_wheel(sdl2_wheel_to_mouse_wheel(5)) equals `5`
 
 
 <details>
@@ -117,35 +143,11 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: flips a multi-detent burst without scaling it")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(sdl2_wheel_to_mouse_wheel(3)).to_equal(0 - 3)
-expect(sdl2_wheel_to_mouse_wheel(0 - 7)).to_equal(7)  # oracle: pinned constant asserted by this scenario
-```
-
-</details>
-
-#### flips exactly once, not twice
-
-- Verify: flips exactly once, not twice
-   - Expected: sdl2_wheel_to_mouse_wheel(5) equals `0 - 5`
-   - Expected: sdl2_wheel_to_mouse_wheel(sdl2_wheel_to_mouse_wheel(5)) equals `5)  # oracle: pinned constant asserted by this scenario`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: flips exactly once, not twice")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("flips exactly once, not twice")
 """A double negation would be the identity. Pin that it is NOT."""
 expect(sdl2_wheel_to_mouse_wheel(5)).to_equal(0 - 5)
-expect(sdl2_wheel_to_mouse_wheel(sdl2_wheel_to_mouse_wheel(5))).to_equal(5)  # oracle: pinned constant asserted by this scenario
+expect(sdl2_wheel_to_mouse_wheel(sdl2_wheel_to_mouse_wheel(5))).to_equal(5)
 ```
 
 </details>
@@ -155,20 +157,19 @@ _The same flip, observed through a built MouseEvent._
 
 #### carries the single flip into the built MouseEvent
 
-- Verify: carries the single flip into the built MouseEvent
+- carries the single flip into the built MouseEvent
    - Expected: ev.wheel equals `0 - 1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: carries the single flip into the built MouseEvent")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("carries the single flip into the built MouseEvent")
 var b = offline_backend()
 val ev = b.record_wheel(1)
 expect(ev.wheel).to_equal(0 - 1)
@@ -178,49 +179,47 @@ expect(ev.wheel).to_equal(0 - 1)
 
 #### carries a scroll-down detent as positive
 
-- Verify: carries a scroll-down detent as positive
-   - Expected: ev.wheel equals `2)  # oracle: pinned constant asserted by this scenario`
+- carries a scroll-down detent as positive
+   - Expected: ev.wheel equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: carries a scroll-down detent as positive")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("carries a scroll-down detent as positive")
 var b = offline_backend()
 val ev = b.record_wheel(0 - 2)
-expect(ev.wheel).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(ev.wheel).to_equal(2)
 ```
 
 </details>
 
 #### clears the wheel after one event (one-shot detent)
 
-- Verify: clears the wheel after one event (one-shot detent)
+- clears the wheel after one event (one-shot detent)
    - Expected: first.wheel equals `0 - 1`
-   - Expected: second.wheel equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: second.wheel equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: clears the wheel after one event (one-shot detent)")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("clears the wheel after one event (one-shot detent)")
 var b = offline_backend()
 val first = b.record_wheel(1)
 expect(first.wheel).to_equal(0 - 1)
 val second = b.record_mouse_position(0, 0)
-expect(second.wheel).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(second.wheel).to_equal(0)
 ```
 
 </details>
@@ -230,19 +229,18 @@ _A backend with no live SDL2 window says so instead of polling into the void._
 
 #### reports unavailable for a zero window handle
 
-- Verify: reports unavailable for a zero window handle
+- reports unavailable for a zero window handle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: reports unavailable for a zero window handle")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("reports unavailable for a zero window handle")
 val b = Sdl2InputBackend.create(0)
 assert_false(b.is_available())
 ```
@@ -251,7 +249,28 @@ assert_false(b.is_available())
 
 #### explains why it is unavailable
 
-- Verify: explains why it is unavailable
+- explains why it is unavailable
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("explains why it is unavailable")
+val b = Sdl2InputBackend.create(0)
+expect(b.unavailable_reason()).to_contain("sdl2 window handle is 0")
+```
+
+</details>
+
+#### reports available for a live window handle
+
+- reports available for a live window handle
+   - Expected: b.unavailable_reason() equals ``
 
 
 <details>
@@ -261,31 +280,8 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: explains why it is unavailable")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-val b = Sdl2InputBackend.create(0)
-expect(b.unavailable_reason()).to_contain("sdl2 window handle is 0")
-```
-
-</details>
-
-#### reports available for a live window handle
-
-- Verify: reports available for a live window handle
-   - Expected: b.unavailable_reason() equals ``
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: reports available for a live window handle")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("reports available for a live window handle")
 val b = Sdl2InputBackend.create(42)
 assert_true(b.is_available())
 expect(b.unavailable_reason()).to_equal("")
@@ -295,20 +291,19 @@ expect(b.unavailable_reason()).to_equal("")
 
 #### create_unavailable preserves the caller's reason
 
-- Verify: create_unavailable preserves the caller's reason
+- create_unavailable preserves the caller's reason
    - Expected: b.unavailable_reason() equals `SDL2 not built in`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: create_unavailable preserves the caller's reason")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("create_unavailable preserves the caller's reason")
 val b = Sdl2InputBackend.create_unavailable("SDL2 not built in")
 assert_false(b.is_available())
 expect(b.unavailable_reason()).to_equal("SDL2 not built in")
@@ -321,19 +316,18 @@ _Edge-triggered button state, driven without SDL2._
 
 #### reports a left press as pressed and just-pressed once
 
-- Verify: reports a left press as pressed and just-pressed once
+- reports a left press as pressed and just-pressed once
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: reports a left press as pressed and just-pressed once")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("reports a left press as pressed and just-pressed once")
 var b = offline_backend()
 b.apply_mouse_button(0, true)
 val ev = b.record_mouse_position(10, 20)
@@ -346,19 +340,18 @@ assert_false(ev.left_just_released)
 
 #### does not repeat just-pressed while held
 
-- Verify: does not repeat just-pressed while held
+- does not repeat just-pressed while held
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: does not repeat just-pressed while held")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("does not repeat just-pressed while held")
 var b = offline_backend()
 b.apply_mouse_button(0, true)
 b.record_mouse_position(10, 20)
@@ -372,19 +365,18 @@ assert_false(ev.left_just_pressed)
 
 #### reports a left release as just-released
 
-- Verify: reports a left release as just-released
+- reports a left release as just-released
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: reports a left release as just-released")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("reports a left release as just-released")
 var b = offline_backend()
 b.apply_mouse_button(0, true)
 b.record_mouse_position(1, 1)
@@ -398,19 +390,18 @@ assert_true(ev.left_just_released)
 
 #### tracks right and middle buttons independently of left
 
-- Verify: tracks right and middle buttons independently of left
+- tracks right and middle buttons independently of left
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: tracks right and middle buttons independently of left")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("tracks right and middle buttons independently of left")
 var b = offline_backend()
 b.apply_mouse_button(1, true)
 b.apply_mouse_button(2, true)
@@ -425,19 +416,18 @@ assert_true(ev.right_just_pressed)
 
 #### marks mouse state as buffered
 
-- Verify: marks mouse state as buffered
+- marks mouse state as buffered
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: marks mouse state as buffered")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("marks mouse state as buffered")
 var b = offline_backend()
 assert_false(b.has_buffered_mouse())
 b.apply_mouse_button(0, true)
@@ -451,29 +441,28 @@ _Movement deltas are real, not hardcoded zeros._
 
 #### reports real movement deltas, not zeros
 
-- Verify: reports real movement deltas, not zeros
-   - Expected: ev.x equals `13)  # oracle: pinned constant asserted by this scenario`
-   - Expected: ev.y equals `7)  # oracle: pinned constant asserted by this scenario`
-   - Expected: ev.dx equals `3)  # oracle: pinned constant asserted by this scenario`
+- reports real movement deltas, not zeros
+   - Expected: ev.x equals `13`
+   - Expected: ev.y equals `7`
+   - Expected: ev.dx equals `3`
    - Expected: ev.dy equals `0 - 3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: reports real movement deltas, not zeros")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("reports real movement deltas, not zeros")
 var b = offline_backend()
 b.record_mouse_position(10, 10)
 val ev = b.record_mouse_position(13, 7)
-expect(ev.x).to_equal(13)  # oracle: pinned constant asserted by this scenario
-expect(ev.y).to_equal(7)  # oracle: pinned constant asserted by this scenario
-expect(ev.dx).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(ev.x).to_equal(13)
+expect(ev.y).to_equal(7)
+expect(ev.dx).to_equal(3)
 expect(ev.dy).to_equal(0 - 3)
 ```
 
@@ -484,7 +473,7 @@ _SDL keysyms become distinct Key values, or nil when unmapped._
 
 #### maps lowercase letters to distinct keys, not all to Key.A
 
-- Verify: maps lowercase letters to distinct keys, not all to Key.A
+- maps lowercase letters to distinct keys, not all to Key.A
    - Expected: b.key_to_char(ka) equals `a`
    - Expected: b.key_to_char(kz) equals `z`
 
@@ -492,13 +481,12 @@ _SDL keysyms become distinct Key values, or nil when unmapped._
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: maps lowercase letters to distinct keys, not all to Key.A")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("maps lowercase letters to distinct keys, not all to Key.A")
 var b = offline_backend()
 if val ka = sdl2_keysym_to_key(97):
     expect(b.key_to_char(ka)).to_equal("a")
@@ -514,20 +502,19 @@ else:
 
 #### maps digits
 
-- Verify: maps digits
+- maps digits
    - Expected: b.key_to_char(k5) equals `5`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: maps digits")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("maps digits")
 var b = offline_backend()
 if val k5 = sdl2_keysym_to_key(53):
     expect(b.key_to_char(k5)).to_equal("5")
@@ -539,20 +526,19 @@ else:
 
 #### maps punctuation
 
-- Verify: maps punctuation
+- maps punctuation
    - Expected: b.key_to_char(kc) equals `,`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: maps punctuation")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("maps punctuation")
 var b = offline_backend()
 if val kc = sdl2_keysym_to_key(44):
     expect(b.key_to_char(kc)).to_equal(",")
@@ -564,19 +550,18 @@ else:
 
 #### returns nil for an unmapped keysym rather than guessing
 
-- Verify: returns nil for an unmapped keysym rather than guessing
+- returns nil for an unmapped keysym rather than guessing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: returns nil for an unmapped keysym rather than guessing")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("returns nil for an unmapped keysym rather than guessing")
 expect(sdl2_keysym_to_key(999999)).to_be_nil()
 ```
 
@@ -584,19 +569,18 @@ expect(sdl2_keysym_to_key(999999)).to_be_nil()
 
 #### maps a scancode-derived navigation keysym
 
-- Verify: maps a scancode-derived navigation keysym
+- maps a scancode-derived navigation keysym
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: maps a scancode-derived navigation keysym")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("maps a scancode-derived navigation keysym")
 if val kup = sdl2_keysym_to_key(1073741906):
     var b = offline_backend()
     expect(b.key_to_char(kup)).to_be_nil()
@@ -611,20 +595,19 @@ _Character output tracks the SDL modifier bitfield._
 
 #### yields lowercase with no modifiers
 
-- Verify: yields lowercase with no modifiers
+- yields lowercase with no modifiers
    - Expected: b.key_to_char(Key.A) equals `a`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: yields lowercase with no modifiers")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("yields lowercase with no modifiers")
 var b = offline_backend()
 expect(b.key_to_char(Key.A)).to_equal("a")
 ```
@@ -633,20 +616,19 @@ expect(b.key_to_char(Key.A)).to_equal("a")
 
 #### yields uppercase once SDL reports a shift modifier
 
-- Verify: yields uppercase once SDL reports a shift modifier
+- yields uppercase once SDL reports a shift modifier
    - Expected: b.key_to_char(Key.A) equals `A`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: yields uppercase once SDL reports a shift modifier")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("yields uppercase once SDL reports a shift modifier")
 var b = offline_backend()
 b.apply_key_mods(0x0003)
 assert_true(b.shift_held())
@@ -657,20 +639,19 @@ expect(b.key_to_char(Key.A)).to_equal("A")
 
 #### yields shifted punctuation
 
-- Verify: yields shifted punctuation
+- yields shifted punctuation
    - Expected: b.key_to_char(Key.Num1) equals `!`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: yields shifted punctuation")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("yields shifted punctuation")
 var b = offline_backend()
 b.apply_key_mods(0x0003)
 expect(b.key_to_char(Key.Num1)).to_equal("!")
@@ -680,19 +661,18 @@ expect(b.key_to_char(Key.Num1)).to_equal("!")
 
 #### adopts ctrl and alt from the SDL modifier bitfield
 
-- Verify: adopts ctrl and alt from the SDL modifier bitfield
+- adopts ctrl and alt from the SDL modifier bitfield
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: adopts ctrl and alt from the SDL modifier bitfield")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("adopts ctrl and alt from the SDL modifier bitfield")
 var b = offline_backend()
 b.apply_key_mods(0x00C0)
 assert_true(b.ctrl_held())
@@ -706,19 +686,18 @@ assert_false(b.ctrl_held())
 
 #### returns nil for a key with no character
 
-- Verify: returns nil for a key with no character
+- returns nil for a key with no character
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: returns nil for a key with no character")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("returns nil for a key with no character")
 var b = offline_backend()
 expect(b.key_to_char(Key.F1)).to_be_nil()
 ```
@@ -738,36 +717,59 @@ expect(b.key_to_char(Key.F1)).to_be_nil()
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-WM-HOST-PLATFORM-003`
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `f6c66d0905357bbb91fd530a4f6b30a2a39a86b676f021fa573bcdc692930882`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `884a005da7ad665f9c1128569de7e49fd0bf765ce95bfbce55d41f21b86334dc`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `f6c66d0905357bbb91fd530a4f6b30a2a39a86b676f021fa573bcdc692930882`.
+Source SHA-256: `884a005da7ad665f9c1128569de7e49fd0bf765ce95bfbce55d41f21b86334dc`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `f6c66d0905357bbb91fd530a4f6b30a2a39a86b676f021fa573bcdc692930882`  
+Source SHA-256: `884a005da7ad665f9c1128569de7e49fd0bf765ce95bfbce55d41f21b86334dc`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/os/compositor/hosted_input_sdl2_spec.spl
 mirror: doc/06_spec/01_unit/os/compositor/hosted_input_sdl2_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/compositor/hosted_input_sdl2_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=80; blocker cap makes effective=49
 doc/06_spec/01_unit/os/compositor/hosted_input_sdl2_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/compositor/hosted_input_sdl2_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/os/compositor/hosted_input_sdl2_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/compositor/hosted_input_sdl2_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/compositor/hosted_input_sdl2_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/os/compositor/hosted_input_sdl2_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'negates a scroll-up detent into positive-down' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/compositor/hosted_input_sdl2_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'negates a scroll-down detent into negative' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/compositor/hosted_input_sdl2_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'leaves a zero detent alone' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

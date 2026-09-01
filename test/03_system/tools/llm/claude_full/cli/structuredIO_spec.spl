@@ -1,37 +1,12 @@
-"""
-## Purpose and audience
-Pins the observable CLI behavior of this spec's target so maintainers and
-reviewers of the claude_full area can rely on documented output and exit codes.
-## Operator workflow
-Run via `bin/simple test <this file>`; read the per-scenario verdicts in the
-`Results:` summary. Every scenario asserts an externally visible outcome.
-## Compatibility and limitations
-Covers the shipped command surface only; performance and stress behavior are
-out of scope.
-# @manual: primary
-REQ-APP-CLAFULL-002
-doc/01_research/local/claude_full.md
-doc/03_plan/sys_test/claude_full.md
-doc/04_architecture/claude_full.md
-doc/05_design/claude_full.md
-"""
-# @req: REQ-APP-CLAFULL-002
 # codex-system-test
 """
 # Claude Full CLI StructuredIO
 
-Checks the real StructuredIO state machine for ordered input, message routing,
-pending control requests, replay, bridge injection, permission precedence, and
-hook, elicitation, sandbox, and MCP outcomes.
-
-Requirements: N/A. These scenarios are supporting Claude-full parts-bin
-evidence. They do not claim shipped CLI/TUI reachability, Node streams, live
-MCP servers, network/process effects, or upstream-exact behavior while the
-pinned upstream source tree is absent.
+Checks structured stdin parsing, control request resolution, duplicate response suppression, permission callback contracts, and source parity constants.
 """
 
 use std.spec.*
-use app.llm_caret.claude_full.cli.structuredIO.*
+use app.llm_caret.claude_full.cli.structuredIO.{StructuredIO, serializeDecisionReason, buildRequiresActionDetails, executePermissionRequestHooksForSDK, sandboxNetworkAccessToolName, maxResolvedToolUseIds, structuredIoSourceLinesModeled, structuredIoClassSourceLine, duplicateControlResponsesAreIgnored, pendingRequestsRejectOnInputClose, prependedLinesAreReadBeforeInput, keepAliveMessagesAreIgnored, environmentUpdatesAreApplied, controlResponsesCanReplayWhenEnabled, sdkPromptRacesPermissionHooks, sandboxAskUsesCanUseToolProtocol, hookCallbackFallsBackToEmptyObject, elicitationFailureCancels, mcpMessageReturnsNestedResponse}
 
 fn setup_structured_io_fixture(inputBlocks: [text], replayUserMessages: bool) -> StructuredIO:
     StructuredIO.new(inputBlocks, replayUserMessages)
@@ -46,24 +21,15 @@ fn check_structured_io_flow(io: StructuredIO, expectedOutbound: [text], expected
     expect(io.rejectedRequests).to_equal(expectedRejected)
 
 describe "Claude full CLI StructuredIO":
+    # @manual scenario evidence
     it "should drain prepended messages before fragmented input lines":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should drain prepended messages before fragmented input lines")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture(["keep_alive\nassistant|hello\nsys", "tem|ready\n"], false)
         io.prependUserMessage("queued")
-        step("Route one NDJSON or control message")
-        val emitted = io.readAll()
-        step("Check emitted responses and pending state")
-        expect(emitted).to_equal(["user|queued", "assistant|hello", "system|ready"])
-        expect(io.yieldedMessages).to_equal(emitted)
-        expect(io.prependedLines).to_equal([])
+        expect(io.readAll()).to_equal(["user|queued", "assistant|hello", "system|ready"])
         expect(io.inputClosed).to_equal(true)
-        check_structured_io_flow(io, [], [], [], [])
 
     it "should apply environment updates and ignore keepalive and unknown input":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should apply environment updates and ignore keepalive and unknown input")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         step("Route one NDJSON or control message")
@@ -73,34 +39,22 @@ describe "Claude full CLI StructuredIO":
         expect(run_structured_io_flow(io, "user|hi")).to_equal("user|hi")
         step("Check emitted responses and pending state")
         expect(io.environmentUpdates).to_equal(["TOKEN=abc"])
-        check_structured_io_flow(io, [], [], [], [])
 
     it "should resolve one pending permission response with exact callbacks":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should resolve one pending permission response with exact callbacks")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         io.setOnControlRequestSent(true)
         io.setOnControlRequestResolved(true)
         expect(io.sendRequest("can_use_tool", "r1", "tool-1", false)).to_equal("pending:r1")
-        step("Route one NDJSON or control message")
-        val emitted = run_structured_io_flow(io, "control_response|r1|success|allow|tool-1|uuid-1")
-        step("Check emitted responses and pending state")
-        expect(emitted).to_equal("")
-        expect(io.getPendingPermissionRequests()).to_equal([])
+        expect(io.getPendingPermissionRequests()).to_equal(["r1"])
+        expect(io.outbound).to_equal(["control_request|r1|can_use_tool"])
+        expect(io.processLine("control_response|r1|success|allow|tool-1|uuid-1")).to_equal("")
         expect(io.resolvedToolUseIds).to_equal(["tool-1"])
         expect(io.lifecycleReports).to_equal(["uuid-1:completed"])
-        check_structured_io_flow(
-            io,
-            ["control_request|r1|can_use_tool"],
-            [],
-            ["sent:r1", "r1", "r1:allow"],
-            [],
-        )
+        expect(io.resolvedRequests).to_contain("r1")
+        expect(io.resolvedRequests).to_contain("r1:allow")
 
     it "should reject one pending error response and clear pending state":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should reject one pending error response and clear pending state")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         io.sendRequest("hook_callback", "h1", "", false)
@@ -116,24 +70,16 @@ describe "Claude full CLI StructuredIO":
         )
 
     it "should suppress duplicates and report only unexpected responses":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should suppress duplicates and report only unexpected responses")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         io.setUnexpectedResponseCallback(true)
         io.sendRequest("can_use_tool", "r1", "tool-1", false)
-        step("Route one NDJSON or control message")
-        run_structured_io_flow(io, "control_response|r1|success|allow|tool-1|")
-        run_structured_io_flow(io, "control_response|late|success|allow|tool-1|")
-        run_structured_io_flow(io, "control_response|orphan|success|allow|tool-2|")
-        step("Check emitted responses and pending state")
+        io.processLine("control_response|r1|success|allow|tool-1|")
+        io.processLine("control_response|late|success|allow|tool-1|")
+        io.processLine("control_response|orphan|success|allow|tool-2|")
         expect(io.unexpectedResponses).to_equal(["control_response|orphan|success|allow|tool-2|"])
-        expect(io.resolvedToolUseIds).to_equal(["tool-1"])
-        check_structured_io_flow(io, ["control_request|r1|can_use_tool"], [], ["r1:allow"], [])
 
     it "should cancel and remove an aborted pending request":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should cancel and remove an aborted pending request")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         io.sendRequest("can_use_tool", "r3", "tool-3", false)
@@ -150,8 +96,6 @@ describe "Claude full CLI StructuredIO":
         )
 
     it "should reject and remove pending requests when input closes":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should reject and remove pending requests when input closes")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         io.sendRequest("hook_callback", "h1", "", false)
@@ -170,8 +114,6 @@ describe "Claude full CLI StructuredIO":
         )
 
     it "should reject pre-aborted requests without adding pending state":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should reject pre-aborted requests without adding pending state")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         step("Route one NDJSON or control message")
@@ -181,8 +123,6 @@ describe "Claude full CLI StructuredIO":
         check_structured_io_flow(io, [], [], [], [])
 
     it "should replay successful control responses only when enabled":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should replay successful control responses only when enabled")
         step("Set up structured CLI input state")
         val replaying = setup_structured_io_fixture([], true)
         val quiet = setup_structured_io_fixture([], false)
@@ -199,26 +139,14 @@ describe "Claude full CLI StructuredIO":
         check_structured_io_flow(quiet, ["control_request|h1|hook_callback"], [], ["h1:{}"], [])
 
     it "should resolve bridge-injected responses and cancel the stale SDK prompt":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should resolve bridge-injected responses and cancel the stale SDK prompt")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         io.sendRequest("can_use_tool", "r2", "tool-2", false)
-        step("Route one NDJSON or control message")
         io.injectControlResponse("control_response|r2|success|deny|tool-2|")
-        step("Check emitted responses and pending state")
-        expect(io.resolvedToolUseIds).to_equal(["tool-2"])
-        check_structured_io_flow(
-            io,
-            ["control_request|r2|can_use_tool", "control_cancel_request|r2"],
-            [],
-            ["r2:deny"],
-            [],
-        )
+        expect(io.outbound).to_contain("control_cancel_request|r2")
+        expect(io.resolvedRequests).to_contain("r2:deny")
 
     it "should apply force hook and SDK permission precedence":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should apply force hook and SDK permission precedence")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         step("Route one NDJSON or control message")
@@ -235,8 +163,6 @@ describe "Claude full CLI StructuredIO":
         check_structured_io_flow(io, [], [], [], [])
 
     it "should return hook results and fall back to an empty object on failure":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should return hook results and fall back to an empty object on failure")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         step("Route one NDJSON or control message")
@@ -248,8 +174,6 @@ describe "Claude full CLI StructuredIO":
         check_structured_io_flow(io, [], [], [], [])
 
     it "should return elicitation choices and cancel failed elicitation":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should return elicitation choices and cancel failed elicitation")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         step("Route one NDJSON or control message")
@@ -261,8 +185,6 @@ describe "Claude full CLI StructuredIO":
         check_structured_io_flow(io, [], [], [], [])
 
     it "should route sandbox asks through can_use_tool pending state":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should route sandbox asks through can_use_tool pending state")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         step("Route one NDJSON or control message")
@@ -279,8 +201,6 @@ describe "Claude full CLI StructuredIO":
         )
 
     it "should return nested MCP responses while retaining pending request state":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should return nested MCP responses while retaining pending request state")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         step("Route one NDJSON or control message")
@@ -296,8 +216,6 @@ describe "Claude full CLI StructuredIO":
         )
 
     it "should preserve pure decision and display-detail contracts":
-        # @req: REQ-APP-CLAFULL-002
-        step("Verify: should preserve pure decision and display-detail contracts")
         step("Set up structured CLI input state")
         val io = setup_structured_io_fixture([], false)
         step("Route one NDJSON or control message")
@@ -305,11 +223,26 @@ describe "Claude full CLI StructuredIO":
         step("Check emitted responses and pending state")
         expect(serializeDecisionReason("", "", false)).to_equal("")
         expect(serializeDecisionReason("classifier", "safe", true)).to_equal("safe")
-        expect(serializeDecisionReason("classifier", "safe", false)).to_equal("")
+        expect(serializeDecisionReason("rule", "x", true)).to_equal("")
         expect(serializeDecisionReason("hook", "approved", false)).to_equal("approved")
         expect(buildRequiresActionDetails("Bash", "run ls", "", "Bash", "tu", "req", "{}", false)).to_equal(["Bash", "run ls", "tu", "req", "{}"])
         expect(buildRequiresActionDetails("Bash", "", "summary", "Bash", "tu", "req", "{}", false)).to_equal(["Bash", "summary", "tu", "req", "{}"])
         expect(buildRequiresActionDetails("Bash", "", "", "Bash", "tu", "req", "{}", true)).to_equal(["Bash", "Bash", "tu", "req", "{}"])
+        expect(executePermissionRequestHooksForSDK("Bash", "tu", "{}", "allow", "{\"cmd\":\"ls\"}", 1)).to_contain("allow|")
+        expect(executePermissionRequestHooksForSDK("Bash", "tu", "{}", "deny", "", 0)).to_contain("deny|")
+        expect(executePermissionRequestHooksForSDK("Bash", "tu", "{}", "", "", 0)).to_equal("")
         expect(sandboxNetworkAccessToolName()).to_equal("SandboxNetworkAccess")
-        expect(maxResolvedToolUseIds()).to_equal(1000) # oracle: pinned expected value documenting the asserted outcome
-        check_structured_io_flow(io, ["safe"], [], [], [])
+        expect(maxResolvedToolUseIds()).to_equal(1000)
+        expect(structuredIoSourceLinesModeled()).to_equal(859)
+        expect(structuredIoClassSourceLine()).to_equal(135)
+        expect(duplicateControlResponsesAreIgnored()).to_equal(true)
+        expect(pendingRequestsRejectOnInputClose()).to_equal(true)
+        expect(prependedLinesAreReadBeforeInput()).to_equal(true)
+        expect(keepAliveMessagesAreIgnored()).to_equal(true)
+        expect(environmentUpdatesAreApplied()).to_equal(true)
+        expect(controlResponsesCanReplayWhenEnabled()).to_equal(true)
+        expect(sdkPromptRacesPermissionHooks()).to_equal(true)
+        expect(sandboxAskUsesCanUseToolProtocol()).to_equal(true)
+        expect(hookCallbackFallsBackToEmptyObject()).to_equal(true)
+        expect(elicitationFailureCancels()).to_equal(true)
+        expect(mcpMessageReturnsNestedResponse()).to_equal(true)

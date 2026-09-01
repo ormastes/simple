@@ -5,10 +5,10 @@
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, phys_addr_value, virt_addr_value}
 use os.kernel.types.vmspace_types.{VmArea, ProcessVmSpace}
 use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read64, mmio_write64}
-use os.kernel.memory.vmm_core.{
+use os.kernel.memory.vmm.{
     PAGE_SIZE, VMM_KERNEL_SPACE_START, VMM_U64_MAX,
     PTE_PRESENT, PTE_USER, PTE_WRITABLE, PTE_HUGE_PAGE, PTE_ADDR_MASK,
-    g_vmm, vmm_kernel_pml4_phys, _phys_to_virt, _read_pte, _pte_is_present, _pte_phys_addr,
+    g_vmm, _phys_to_virt, _read_pte, _pte_is_present, _pte_phys_addr,
     _pml4_index, _pdpt_index, _pd_index, _pt_index,
     vmm_translate, vmm_read_pte
 }
@@ -430,53 +430,6 @@ fn vmm_copyin_string_vector(
 
     _vmm_copy_vector_err(7, bytes_read)
 
-fn vmm_copyin_packed_string_vector(
-    base_ptr: u64,
-    table_offset: u64,
-    max_count: u64,
-    max_string_len: u64,
-    max_total_bytes: u64
-) -> VmmCopyStringVectorResult:
-    """Copy Simple's packed [strings...][offset table] vector from userspace."""
-    if base_ptr == 0:
-        return VmmCopyStringVectorResult(status: _vmm_copy_ok(0), values: [])
-    if table_offset > VMM_U64_MAX - base_ptr:
-        return _vmm_copy_vector_err(14, 0)
-
-    val table_ptr = base_ptr + table_offset
-    var out: [text] = []
-    var total_bytes: u64 = 0
-    var bytes_read: u64 = 0
-    var i: u64 = 0
-    while i < max_count:
-        if i > (VMM_U64_MAX / 8):
-            return _vmm_copy_vector_err(14, bytes_read)
-        val slot = table_ptr + i * 8
-        if slot < table_ptr:
-            return _vmm_copy_vector_err(14, bytes_read)
-        val off_result = vmm_copyin_u64(slot)
-        if not off_result.status.ok:
-            return _vmm_copy_vector_err(off_result.status.errno, bytes_read)
-        bytes_read = bytes_read + 8
-
-        val off = off_result.value
-        if off == 0 and i > 0:
-            return VmmCopyStringVectorResult(status: _vmm_copy_ok(bytes_read), values: out)
-        if off > VMM_U64_MAX - base_ptr:
-            return _vmm_copy_vector_err(14, bytes_read)
-        val item_result = vmm_copyin_cstr(base_ptr + off, max_string_len)
-        if not item_result.status.ok:
-            return _vmm_copy_vector_err(item_result.status.errno, bytes_read + item_result.status.bytes_read)
-        val item_bytes = item_result.status.bytes_read
-        total_bytes = total_bytes + item_bytes
-        if total_bytes > max_total_bytes:
-            return _vmm_copy_vector_err(7, bytes_read + item_bytes)
-        bytes_read = bytes_read + item_bytes
-        out.push(item_result.value)
-        i = i + 1
-
-    _vmm_copy_vector_err(7, bytes_read)
-
 fn vmm_verify_user_write(addr: u64, size: u64) -> bool:
     """Verify that [addr, addr+size) is mapped as user-writable."""
     if not _vmm_is_userspace_range(addr, size):
@@ -512,7 +465,7 @@ fn vmm_copyout_bytes(ptr: u64, bytes: [u8]) -> i32:
 
 fn _vmm_check_pte_flags(vaddr: u64, required_bits: u64) -> bool:
     """Walk page tables and verify the leaf PTE has all required_bits set."""
-    val pml4_virt = _phys_to_virt(vmm_kernel_pml4_phys())
+    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
 
     val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
     if not _pte_is_present(pml4_entry):

@@ -44,10 +44,10 @@ use os.services.netstack.socket.{
 use os.userlib.syscall_raw.{syscall}
 
 use os.kernel.log.klog_api.{log_raw_println}
-extern fn unsafe_addr_of(ref: any) -> u64
 
 # IPC method constants for network syscalls
 impl NetstackService:
+    @unsafe(reason: "receives an untrusted kernel IPC address through the raw syscall boundary", capabilities: [ffi, raw_ptr])
     me process_ipc_requests():
         """Poll for and process IPC requests from applications.
 
@@ -60,10 +60,14 @@ impl NetstackService:
 
         self._dispatch_ipc(msg_raw.to_u64())
 
+    @unsafe(reason: "reads and dispatches a raw kernel IPC message descriptor", capabilities: [ffi, raw_ptr])
     me _dispatch_ipc(msg_addr: u64):
         """Parse and dispatch an IPC request."""
+        @unsafe(reason: "reads a byte from an unvalidated foreign address", capabilities: [ffi, raw_ptr])
         extern fn mmio_read8(addr: u64) -> u8
+        @unsafe(reason: "reads a word from an unvalidated foreign address", capabilities: [ffi, raw_ptr])
         extern fn mmio_read32(addr: u64) -> u32
+        @unsafe(reason: "reads a double word from an unvalidated foreign address", capabilities: [ffi, raw_ptr])
         extern fn mmio_read64(addr: u64) -> u64
 
         val src_port = mmio_read64(msg_addr)
@@ -72,14 +76,14 @@ impl NetstackService:
         val payload_addr = msg_addr + 32
 
         match method:
-            NET_SOCKET: self._ipc_socket(src_port, payload_addr, payload_len)
-            NET_BIND: self._ipc_bind(src_port, payload_addr, payload_len)
-            NET_LISTEN: self._ipc_listen(src_port, payload_addr, payload_len)
-            NET_CONNECT: self._ipc_connect(src_port, payload_addr, payload_len)
-            NET_ACCEPT: self._ipc_accept(src_port, payload_addr, payload_len)
-            NET_SEND: self._ipc_send(src_port, payload_addr, payload_len)
-            NET_RECV: self._ipc_recv(src_port, payload_addr, payload_len)
-            NET_CLOSE: self._ipc_close(src_port, payload_addr, payload_len)
+            NET_SOCKET: if payload_len >= 1u32: self._ipc_socket(src_port, payload_addr, payload_len) else: self._send_ipc_error(src_port, "short socket request")
+            NET_BIND: if payload_len >= 10u32: self._ipc_bind(src_port, payload_addr, payload_len) else: self._send_ipc_error(src_port, "short bind request")
+            NET_LISTEN: if payload_len >= 8u32: self._ipc_listen(src_port, payload_addr, payload_len) else: self._send_ipc_error(src_port, "short listen request")
+            NET_CONNECT: if payload_len >= 10u32: self._ipc_connect(src_port, payload_addr, payload_len) else: self._send_ipc_error(src_port, "short connect request")
+            NET_ACCEPT: if payload_len >= 4u32: self._ipc_accept(src_port, payload_addr, payload_len) else: self._send_ipc_error(src_port, "short accept request")
+            NET_SEND: if payload_len >= 4u32: self._ipc_send(src_port, payload_addr, payload_len) else: self._send_ipc_error(src_port, "short send request")
+            NET_RECV: if payload_len >= 8u32: self._ipc_recv(src_port, payload_addr, payload_len) else: self._send_ipc_error(src_port, "short recv request")
+            NET_CLOSE: if payload_len >= 4u32: self._ipc_close(src_port, payload_addr, payload_len) else: self._send_ipc_error(src_port, "short close request")
             NET_IFCONFIG: self._ipc_ifconfig(src_port)
             _: self._send_ipc_error(src_port, "unknown method")
 
@@ -87,17 +91,25 @@ impl NetstackService:
     # IPC Handlers
     # ========================================================================
 
+    @unsafe(reason: "reads a validated-size socket request from raw IPC memory", capabilities: [ffi, raw_ptr])
     me _ipc_socket(src_port: u64, payload_addr: u64, payload_len: u32):
         """Create a new socket. Payload: protocol(u8) — 1=TCP, 2=UDP."""
+        @unsafe(reason: "reads a byte from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read8(addr: u64) -> u8
         val proto_raw = mmio_read8(payload_addr)
+        if proto_raw != 1 and proto_raw != 2:
+            self._send_ipc_error(src_port, "invalid socket protocol")
+            return
         val proto = if proto_raw == 1: SocketProtocol.Tcp else: SocketProtocol.Udp
         val fd = self.sockets.create(proto)
         self._send_ipc_i32(src_port, fd)
 
+    @unsafe(reason: "reads a validated-size bind request from raw IPC memory", capabilities: [ffi, raw_ptr])
     me _ipc_bind(src_port: u64, payload_addr: u64, payload_len: u32):
         """Bind socket. Payload: fd(i32) | ip(u32) | port(u16)."""
+        @unsafe(reason: "reads a halfword from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read16(addr: u64) -> u16
+        @unsafe(reason: "reads a word from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read32(addr: u64) -> u32
 
         val fd = mmio_read32(payload_addr).to_i32()
@@ -109,8 +121,10 @@ impl NetstackService:
             Ok(_): self._send_ipc_i32(src_port, 0)
             Err(msg): self._send_ipc_error(src_port, msg)
 
+    @unsafe(reason: "reads a validated-size listen request from raw IPC memory", capabilities: [ffi, raw_ptr])
     me _ipc_listen(src_port: u64, payload_addr: u64, payload_len: u32):
         """Listen on socket. Payload: fd(i32) | backlog(u32)."""
+        @unsafe(reason: "reads a word from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read32(addr: u64) -> u32
         val fd = mmio_read32(payload_addr).to_i32()
         val backlog = mmio_read32(payload_addr + 4)
@@ -119,9 +133,12 @@ impl NetstackService:
             Ok(_): self._send_ipc_i32(src_port, 0)
             Err(msg): self._send_ipc_error(src_port, msg)
 
+    @unsafe(reason: "reads a validated-size connect request from raw IPC memory", capabilities: [ffi, raw_ptr])
     me _ipc_connect(src_port: u64, payload_addr: u64, payload_len: u32):
         """Connect socket. Payload: fd(i32) | ip(u32) | port(u16)."""
+        @unsafe(reason: "reads a halfword from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read16(addr: u64) -> u16
+        @unsafe(reason: "reads a word from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read32(addr: u64) -> u32
 
         val fd = mmio_read32(payload_addr).to_i32()
@@ -184,8 +201,10 @@ impl NetstackService:
         self.sockets.mark_connect_failed_by_conn(conn_id, "timeout")
         0 - ERR_ETIMEDOUT
 
+    @unsafe(reason: "reads a validated-size accept request from raw IPC memory", capabilities: [ffi, raw_ptr])
     me _ipc_accept(src_port: u64, payload_addr: u64, payload_len: u32):
         """Accept connection. Payload: fd(i32)."""
+        @unsafe(reason: "reads a word from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read32(addr: u64) -> u32
         val fd = mmio_read32(payload_addr).to_i32()
 
@@ -193,9 +212,12 @@ impl NetstackService:
             Ok(new_fd): self._send_ipc_i32(src_port, new_fd)
             Err(msg): self._send_ipc_error(src_port, msg)
 
+    @unsafe(reason: "reads a validated-size send request from raw IPC memory", capabilities: [ffi, raw_ptr])
     me _ipc_send(src_port: u64, payload_addr: u64, payload_len: u32):
         """Send data. Payload: fd(i32) | data(bytes)."""
+        @unsafe(reason: "reads a byte from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read8(addr: u64) -> u8
+        @unsafe(reason: "reads a word from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read32(addr: u64) -> u32
 
         val fd = mmio_read32(payload_addr).to_i32()
@@ -236,8 +258,10 @@ impl NetstackService:
         else:
             self._send_ipc_error(src_port, "invalid fd")
 
+    @unsafe(reason: "reads a validated-size receive request from raw IPC memory", capabilities: [ffi, raw_ptr])
     me _ipc_recv(src_port: u64, payload_addr: u64, payload_len: u32):
         """Receive data. Payload: fd(i32) | max_len(u32)."""
+        @unsafe(reason: "reads a word from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read32(addr: u64) -> u32
 
         val fd = mmio_read32(payload_addr).to_i32()
@@ -272,8 +296,10 @@ impl NetstackService:
         else:
             self._send_ipc_error(src_port, "invalid fd")
 
+    @unsafe(reason: "reads a validated-size close request from raw IPC memory", capabilities: [ffi, raw_ptr])
     me _ipc_close(src_port: u64, payload_addr: u64, payload_len: u32):
         """Close socket. Payload: fd(i32)."""
+        @unsafe(reason: "reads a word from raw IPC memory", capabilities: [ffi, raw_ptr])
         extern fn mmio_read32(addr: u64) -> u32
         val fd = mmio_read32(payload_addr).to_i32()
 

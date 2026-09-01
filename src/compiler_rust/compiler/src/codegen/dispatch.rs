@@ -27,8 +27,20 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
         // =====================================================================
         MirInst::Copy { dest, src } => emitter.emit_copy(*dest, *src),
         MirInst::AggregateCopy {
-            dest, src, byte_size, deep_fields, ..
-        } => emitter.emit_aggregate_copy(*dest, *src, *byte_size, deep_fields),
+            dest,
+            src,
+            byte_size,
+            type_name,
+            owner_has_vtable,
+            deep_fields,
+        } => emitter.emit_aggregate_copy(
+            *dest,
+            *src,
+            *byte_size,
+            type_name.as_deref(),
+            *owner_has_vtable,
+            deep_fields,
+        ),
         MirInst::BinOp { dest, op, left, right } => emitter.emit_binop(*dest, *op, *left, *right),
         MirInst::UnaryOp { dest, op, operand } => emitter.emit_unary_op(*dest, *op, *operand),
         MirInst::Cast {
@@ -62,7 +74,9 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             boxed_result,
         } => emitter.emit_interp_call(dest, func_name, args, *boxed_result),
         MirInst::InterpEval { dest, expr_index } => emitter.emit_interp_eval(*dest, *expr_index as usize),
-        MirInst::InlineAsm { instructions, volatile } => emitter.emit_inline_asm(instructions, *volatile),
+        MirInst::InlineAsm {
+            instructions, volatile, ..
+        } => emitter.emit_inline_asm(instructions, *volatile),
         MirInst::IndirectCall {
             dest,
             callee,

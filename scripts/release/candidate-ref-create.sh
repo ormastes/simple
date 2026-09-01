@@ -1,0 +1,69 @@
+#!/bin/sh
+# Create one immutable candidate ref from one exact existing commit.
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 2
+POLICY_TOOL="$ROOT/scripts/release/github-policy.sh"
+
+usage() {
+    echo "usage: $0 --yes <owner/repo> <candidate/vX.Y.Z[-pre.N]/aNNN> <40-hex-commit> <release/X.Y>" >&2
+    exit 2
+}
+
+[ "${1:-}" = --yes ] || usage
+REPO=${2:-}
+CANDIDATE=${3:-}
+COMMIT=${4:-}
+TARGET=${5:-}
+[ -n "$REPO" ] && [ -n "$CANDIDATE" ] && [ -n "$COMMIT" ] && [ -n "$TARGET" ] || usage
+
+printf '%s\n' "$CANDIDATE" |
+    grep -Eq '^candidate/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?/a[0-9]{3}$' || {
+        echo "candidate-ref-create: invalid candidate name: $CANDIDATE" >&2
+        exit 2
+    }
+case $COMMIT in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+    *) echo "candidate-ref-create: commit must be exactly 40 lowercase hex characters" >&2; exit 2 ;;
+esac
+
+"$POLICY_TOOL" verify-live "$REPO"
+
+printf '%s\n' "$TARGET" |
+    grep -Eq '^release/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
+        echo "candidate-ref-create: invalid protected target: $TARGET" >&2
+        exit 2
+    }
+CANDIDATE_VERSION=${CANDIDATE#candidate/v}
+CANDIDATE_VERSION=${CANDIDATE_VERSION%%/a*}
+CANDIDATE_LINE=$(printf '%s\n' "$CANDIDATE_VERSION" | awk -F. '{print $1 "." $2}')
+[ "$TARGET" = "release/$CANDIDATE_LINE" ] || {
+    echo "candidate-ref-create: candidate version does not match target line: $TARGET" >&2
+    exit 2
+}
+
+ACTOR=$(gh api user --jq '.id')
+[ "$ACTOR" = 2378857 ] || {
+    echo "candidate-ref-create: authenticated actor is not candidate creation authority" >&2
+    exit 1
+}
+
+REF="refs/heads/$CANDIDATE"
+if gh api "repos/$REPO/git/ref/heads/$CANDIDATE" >/dev/null 2>&1; then
+    echo "candidate-ref-create: candidate already exists; refusing update: $REF" >&2
+    exit 1
+fi
+TYPE=$(gh api "repos/$REPO/git/commits/$COMMIT" --jq '.sha' 2>/dev/null || true)
+[ "$TYPE" = "$COMMIT" ] || {
+    echo "candidate-ref-create: exact commit does not exist in $REPO: $COMMIT" >&2
+    exit 1
+}
+TARGET_SHA=$(gh api "repos/$REPO/git/ref/heads/$TARGET" --jq '.object.sha' 2>/dev/null || true)
+[ "$TARGET_SHA" = "$COMMIT" ] || {
+    echo "candidate-ref-create: commit is not the exact protected target tip: $TARGET" >&2
+    exit 1
+}
+
+jq -n --arg ref "$REF" --arg sha "$COMMIT" '{ref:$ref,sha:$sha}' |
+    gh api --method POST "repos/$REPO/git/refs" --input - >/dev/null
+echo "candidate-ref-create: created $REF at $COMMIT"

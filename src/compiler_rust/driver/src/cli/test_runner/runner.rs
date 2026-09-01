@@ -203,6 +203,81 @@ fn parse_resource_throttle_config(content: &str, options: &mut TestOptions) {
     }
 }
 
+/// Feature-group key for a spec path: the segment after `test/`, else the
+/// first segment, else "other" — mirrors `test_file_group` in the pure-Simple
+/// emitter so both lanes bucket identically.
+fn test_file_group(path: &Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    let rest = s.strip_prefix("test/").unwrap_or(&s);
+    match rest.split('/').next() {
+        Some(seg) if rest.contains('/') => seg.to_string(),
+        _ => "other".to_string(),
+    }
+}
+
+/// One-line combined run JSON matching the pure-Simple emitter's shape
+/// (`combined_test_run_json` in test_runner_output.spl): totals, per-group
+/// aggregates with done_pct, per-file rows. `pending` maps from the seed's
+/// `ignored` bucket (where `planned()` specs land — see the call site).
+fn combined_run_json(result: &TestRunResult) -> String {
+    let mut groups: Vec<(String, usize, usize, usize, usize)> = Vec::new();
+    let mut files_json: Vec<String> = Vec::new();
+    for f in &result.files {
+        let g = test_file_group(&f.path);
+        let entry = match groups.iter_mut().find(|(name, ..)| *name == g) {
+            Some(e) => e,
+            None => {
+                groups.push((g, 0, 0, 0, 0));
+                groups.last_mut().unwrap()
+            }
+        };
+        entry.1 += f.passed;
+        entry.2 += f.failed;
+        entry.3 += f.skipped;
+        entry.4 += f.ignored;
+        files_json.push(format!(
+            "{{\"path\":{},\"passed\":{},\"failed\":{},\"skipped\":{},\"pending\":{},\"duration_ms\":{},\"error\":{}}}",
+            serde_json::to_string(&f.path.to_string_lossy()).unwrap_or_else(|_| "\"\"".into()),
+            f.passed,
+            f.failed,
+            f.skipped,
+            f.ignored,
+            f.duration_ms,
+            match &f.error {
+                Some(e) => serde_json::to_string(e).unwrap_or_else(|_| "null".into()),
+                None => "null".into(),
+            }
+        ));
+    }
+    let groups_json: Vec<String> = groups
+        .iter()
+        .map(|(name, p, fl, s, pe)| {
+            let denom = p + fl + pe;
+            let done_pct = if denom > 0 { p * 100 / denom } else { 0 };
+            format!(
+                "{{\"name\":{},\"passed\":{},\"failed\":{},\"skipped\":{},\"pending\":{},\"done_pct\":{}}}",
+                serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into()),
+                p,
+                fl,
+                s,
+                pe,
+                done_pct
+            )
+        })
+        .collect();
+    let success = result.total_failed == 0;
+    format!(
+        "{{\"success\":{success},\"spec\":{{\"success\":{success},\"total_passed\":{},\"total_failed\":{},\"total_skipped\":{},\"total_pending\":{},\"total_duration_ms\":{},\"groups\":[{}],\"files\":[{}]}},\"spl_doctest\":null,\"sdoctest\":null}}",
+        result.total_passed,
+        result.total_failed,
+        result.total_skipped,
+        result.total_ignored,
+        result.total_duration_ms,
+        groups_json.join(","),
+        files_json.join(",")
+    )
+}
+
 /// Run tests with the given options
 pub fn run_tests(options: TestOptions) -> TestRunResult {
     let suite_start = Instant::now();
@@ -427,6 +502,15 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         total_duration_ms: suite_start.elapsed().as_millis() as u64,
     };
 
+    // Combined machine-readable summary for dashboard consumers, matching the
+    // pure-Simple emitter's shape (src/lib/nogc_sync_mut/test_runner/
+    // test_runner_output.spl, pinned by test_runner_group_json_spec.spl).
+    // The seed has no per-test planned/pending distinction — planned() specs
+    // land in the ignored bucket — so total_pending maps from total_ignored.
+    if options.format == OutputFormat::Json {
+        println!("{}", combined_run_json(&result));
+    }
+
     // Post-processing (skip in list mode)
     if !list_mode {
         generate_diagrams_if_enabled(&options, &result, quiet);
@@ -534,6 +618,38 @@ fn initialize_profiling(options: &TestOptions, quiet: bool) {
     if !quiet {
         println!("Runtime profiling enabled (mode: {:?})", mode);
     }
+}
+
+/// Verdict text for a coverage run that never reached an instrumented
+/// execution path. Mirrors the repo-wide `ERROR — nothing was checked`
+/// convention: a run that did not execute what the operator asked for is an
+/// ERROR, never a pass.
+pub const COVERAGE_NOT_INSTRUMENTED_ERROR: &str =
+    "ABORTED BEFORE EXECUTION — --coverage was requested but this runner's \
+interpreter mode never builds or runs the instrumented (MIR-probe) artifact, \
+so no coverage evidence exists for this spec. This is NOT a test result. \
+Re-run with an instrumented execution mode, or set \
+SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED \
+run (which is still not counted as coverage evidence).";
+
+/// True only when the operator explicitly opted in to the uninstrumented
+/// degrade via `SIMPLE_COVERAGE_FALLBACK=interpreter`. Any other value — and
+/// the unset case — fails closed.
+pub fn coverage_interpreter_fallback_opted_in() -> bool {
+    matches!(
+        std::env::var("SIMPLE_COVERAGE_FALLBACK").as_deref(),
+        Ok("interpreter")
+    )
+}
+
+/// Decide whether an interpreter-mode run may proceed under `--coverage`.
+/// Returns `Err(reason)` when the run must be reported as an ERROR instead of
+/// being executed and counted.
+pub fn coverage_interpreter_gate(coverage_requested: bool, opted_in: bool) -> Result<(), &'static str> {
+    if coverage_requested && !opted_in {
+        return Err(COVERAGE_NOT_INSTRUMENTED_ERROR);
+    }
+    Ok(())
 }
 
 /// Initialize coverage tracking if enabled
@@ -905,7 +1021,43 @@ fn execute_test_files(
                     }
                 }
             }
+            TestExecutionMode::Interpreter if coverage_interpreter_gate(
+                options.coverage,
+                coverage_interpreter_fallback_opted_in(),
+            )
+            .is_err() =>
+            {
+                // FAIL CLOSED: `--coverage` asked for instrumented execution.
+                // Interpreter mode never builds the instrumented artifact
+                // (coverage probes are MIR-owned; the HIR tree interpreter
+                // never executes them), so a green verdict here would be
+                // evidence of nothing. Report an ERROR naming the reason
+                // rather than a pass. See
+                // .claude/rules/vcs.md on the `ERROR — nothing was checked`
+                // convention.
+                if !quiet {
+                    eprintln!("[coverage-abort] {}: {}", path.display(), COVERAGE_NOT_INSTRUMENTED_ERROR);
+                }
+                TestFileResult {
+                    path: path.to_path_buf(),
+                    passed: 0,
+                    failed: 1,
+                    skipped: 0,
+                    ignored: 0,
+                    duration_ms: 0,
+                    error: Some(COVERAGE_NOT_INSTRUMENTED_ERROR.to_string()),
+                    individual_results: vec![],
+                }
+            }
             TestExecutionMode::Interpreter => {
+                if options.coverage && !quiet {
+                    // Explicitly opted-in degrade: loud, every spec, and never
+                    // presented as coverage evidence.
+                    eprintln!(
+                        "[coverage-uninstrumented] {}: SIMPLE_COVERAGE_FALLBACK=interpreter — running WITHOUT coverage instrumentation; this run produces NO coverage evidence.",
+                        path.display()
+                    );
+                }
                 // TODO(P2/driver): port this Rust test-runner file to pure Simple.
                 // Per CLAUDE.md, all code must live in .spl/.shs — the Rust
                 // driver is the bootstrap seed only. The production binary is
@@ -1663,18 +1815,41 @@ fn handle_run_management_with_db(options: &TestOptions, db_path: &Path) -> TestR
 
 #[cfg(test)]
 mod tests {
+
+    // Regression: a coverage run that never reaches an instrumented execution
+    // path must be an ERROR, never a pass.
+    // Bug: silent interpreter fallback under --coverage.
+    #[test]
+    fn coverage_gate_fails_closed_when_not_opted_in() {
+        let verdict = super::coverage_interpreter_gate(true, false);
+        assert!(verdict.is_err(), "--coverage in interpreter mode must fail closed");
+        let reason = verdict.unwrap_err();
+        assert!(reason.contains("ABORTED BEFORE EXECUTION"));
+        assert!(reason.contains("NOT a test result"));
+        assert!(reason.contains("SIMPLE_COVERAGE_FALLBACK=interpreter"));
+    }
+
+    #[test]
+    fn coverage_gate_allows_explicit_opt_in() {
+        assert!(super::coverage_interpreter_gate(true, true).is_ok());
+    }
+
+    #[test]
+    fn coverage_gate_does_not_cry_wolf_without_coverage() {
+        assert!(super::coverage_interpreter_gate(false, false).is_ok());
+        assert!(super::coverage_interpreter_gate(false, true).is_ok());
+    }
+
     use std::fs;
     use std::path::PathBuf;
 
     use tempfile::tempdir;
 
     use super::{
-        generate_spipe_docs_for_results_with_binary, handle_run_management_with_db,
-        platform_tag_matches_mode, targeted_discovery_is_empty,
+        generate_spipe_docs_for_results_with_binary, handle_run_management_with_db, platform_tag_matches_mode,
+        targeted_discovery_is_empty,
     };
-    use crate::cli::test_runner::types::{
-        OutputFormat, TestExecutionMode, TestFileResult, TestOptions, TestRunResult,
-    };
+    use crate::cli::test_runner::types::{OutputFormat, TestExecutionMode, TestFileResult, TestOptions, TestRunResult};
     use crate::test_db::{TestRunRecord, TestRunStatus, list_runs};
     use crate::unified_db::Database;
 

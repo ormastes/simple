@@ -19,36 +19,61 @@ Features:
 */
 
 # SFFI declarations for synchronization primitives
-extern fn rt_mutex_new() -> i64
-extern fn rt_mutex_lock(mutex: i64)
-extern fn rt_mutex_try_lock(mutex: i64) -> i64
-extern fn rt_mutex_unlock(mutex: i64)
-extern fn rt_mutex_free(mutex: i64)
+@unsafe(reason: "runtime-owned mutex handle ABI carrying an initial RuntimeValue", capabilities: [ffi])
+extern fn rt_mutex_new(value: Any) -> Any
+@unsafe(reason: "blocking runtime mutex ABI; nil means an invalid handle", capabilities: [ffi])
+extern fn rt_mutex_lock(mutex: Any) -> Any
+@unsafe(reason: "non-blocking runtime mutex ABI; nil conflates contention and invalid handle", capabilities: [ffi])
+extern fn rt_mutex_try_lock(mutex: Any) -> Any
+@unsafe(reason: "runtime mutex owner/value update ABI with integer status", capabilities: [ffi])
+extern fn rt_mutex_unlock(mutex: Any, new_value: Any) -> i64
+@unsafe(reason: "consumes an idle runtime-owned mutex handle", capabilities: [ffi])
+extern fn rt_mutex_free(mutex: Any)
 
-extern fn rt_rwlock_new() -> i64
-extern fn rt_rwlock_read(lock: i64)
-extern fn rt_rwlock_try_read(lock: i64) -> i64
-extern fn rt_rwlock_write(lock: i64)
-extern fn rt_rwlock_try_write(lock: i64) -> i64
-extern fn rt_rwlock_unlock_read(lock: i64)
-extern fn rt_rwlock_unlock_write(lock: i64)
-extern fn rt_rwlock_free(lock: i64)
+@unsafe(reason: "runtime-owned RwLock handle ABI carrying an initial RuntimeValue", capabilities: [ffi])
+extern fn rt_rwlock_new(value: Any) -> Any
+@unsafe(reason: "runtime RwLock snapshot ABI; provider guard does not escape the call", capabilities: [ffi])
+extern fn rt_rwlock_read(lock: Any) -> Any
+@unsafe(reason: "runtime RwLock try-read snapshot ABI; nil conflates contention and failure", capabilities: [ffi])
+extern fn rt_rwlock_try_read(lock: Any) -> Any
+@unsafe(reason: "runtime RwLock write snapshot ABI; provider guard does not escape the call", capabilities: [ffi])
+extern fn rt_rwlock_write(lock: Any) -> Any
+@unsafe(reason: "runtime RwLock try-write snapshot ABI; nil conflates contention and failure", capabilities: [ffi])
+extern fn rt_rwlock_try_write(lock: Any) -> Any
+@unsafe(reason: "runtime RwLock value-update ABI with integer status", capabilities: [ffi])
+extern fn rt_rwlock_set(lock: Any, new_value: Any) -> i64
+@unsafe(reason: "consumes a runtime-owned RwLock handle", capabilities: [ffi])
+extern fn rt_rwlock_free(lock: Any)
 
+@unsafe(reason: "runtime condvar registry handle ABI", capabilities: [ffi])
 extern fn rt_condvar_new() -> i64
-extern fn rt_condvar_wait(cv: i64, mutex: i64)
-extern fn rt_condvar_wait_timeout(cv: i64, mutex: i64, millis: i64) -> i64
+@unsafe(reason: "provider is a non-waiting stub and does not integrate the mutex guard", capabilities: [ffi])
+extern fn rt_condvar_wait(cv: i64, mutex: Any)
+@unsafe(reason: "provider sleeps rather than atomically releasing/reacquiring the mutex", capabilities: [ffi])
+extern fn rt_condvar_wait_timeout(cv: i64, mutex: Any, millis: i64) -> i64
+@unsafe(reason: "runtime condvar registry notification ABI", capabilities: [ffi])
 extern fn rt_condvar_notify_one(cv: i64)
+@unsafe(reason: "runtime condvar registry broadcast ABI", capabilities: [ffi])
 extern fn rt_condvar_notify_all(cv: i64)
+@unsafe(reason: "consumes a runtime condvar registry handle", capabilities: [ffi])
 extern fn rt_condvar_free(cv: i64)
 
+@unsafe(reason: "runtime Once registry handle ABI", capabilities: [ffi])
 extern fn rt_once_new() -> i64
-extern fn rt_once_call(once: i64, func: i64) -> i64
-extern fn rt_once_is_completed(once: i64) -> i64
+@unsafe(reason: "provider callback execution is a stub and must not establish completion", capabilities: [ffi, raw_ptr])
+extern fn rt_once_call(once: i64, func: i64)
+@unsafe(reason: "runtime Once completion-state ABI", capabilities: [ffi])
+extern fn rt_once_is_completed(once: i64) -> bool
+@unsafe(reason: "consumes a runtime Once registry handle", capabilities: [ffi])
 extern fn rt_once_free(once: i64)
 
+@unsafe(reason: "runtime thread-local registry handle ABI", capabilities: [ffi])
 extern fn rt_thread_local_new() -> i64
-extern fn rt_thread_local_get(tls: i64) -> i64
-extern fn rt_thread_local_set(tls: i64, value: i64)
+@unsafe(reason: "runtime thread-local RuntimeValue ABI; nil means unset or invalid", capabilities: [ffi])
+extern fn rt_thread_local_get(tls: i64) -> Any
+@unsafe(reason: "runtime thread-local RuntimeValue store ABI", capabilities: [ffi])
+extern fn rt_thread_local_set(tls: i64, value: Any)
+@unsafe(reason: "invalidates a runtime thread-local registry handle", capabilities: [ffi])
 extern fn rt_thread_local_free(tls: i64)
 
 /**
@@ -65,36 +90,37 @@ Only one thread can hold the lock at a time.
 ```
 */
 struct Mutex<T>:
-    _handle: i64
+    _handle: Any
     _value: T
 
     # Create a new mutex protecting a value.
     fn new(value: T) -> Mutex<T>:
-        val handle = rt_mutex_new()
+        val handle = rt_mutex_new(value)
         return Mutex(_handle: handle, _value: value)
 
     # Lock the mutex and apply a function to the protected value.
     # Returns the function's result.
     fn lock<R>(self, func: fn(T) -> R) -> R:
-        rt_mutex_lock(self._handle)
-        val result = func(self._value)
-        rt_mutex_unlock(self._handle)
+        val current = rt_mutex_lock(self._handle)
+        val result = func(current)
+        rt_mutex_unlock(self._handle, current)
         return result
 
     # Try to lock the mutex without blocking.
     # Returns Some(result) if lock acquired, None otherwise.
     fn try_lock<R>(self, func: fn(T) -> R) -> Option<R>:
-        if rt_mutex_try_lock(self._handle) == 1:
-            val result = func(self._value)
-            rt_mutex_unlock(self._handle)
+        val current = rt_mutex_try_lock(self._handle)
+        if current != nil:
+            val result = func(current)
+            rt_mutex_unlock(self._handle, current)
             return Option.Some(result)
         return Option.None
 
     # Lock and mutate the protected value.
     fn with_lock(self, func: fn(T) -> T):
-        rt_mutex_lock(self._handle)
-        self._value = func(self._value)
-        rt_mutex_unlock(self._handle)
+        val current = rt_mutex_lock(self._handle)
+        self._value = func(current)
+        rt_mutex_unlock(self._handle, self._value)
 
     # Get a copy of the protected value.
     fn get(self) -> T:
@@ -137,50 +163,48 @@ Ideal for read-heavy workloads.
 ```
 */
 struct RwLock<T>:
-    _handle: i64
+    _handle: Any
     _value: T
 
     fn new(value: T) -> RwLock<T>:
-        val handle = rt_rwlock_new()
+        val handle = rt_rwlock_new(value)
         return RwLock(_handle: handle, _value: value)
 
     # Acquire read lock and apply function.
     # Multiple readers can hold the lock simultaneously.
     fn read<R>(self, func: fn(T) -> R) -> R:
-        rt_rwlock_read(self._handle)
-        val result = func(self._value)
-        rt_rwlock_unlock_read(self._handle)
-        return result
+        return func(rt_rwlock_read(self._handle))
 
     # Try to acquire read lock without blocking.
     fn try_read<R>(self, func: fn(T) -> R) -> Option<R>:
-        if rt_rwlock_try_read(self._handle) == 1:
-            val result = func(self._value)
-            rt_rwlock_unlock_read(self._handle)
+        val current = rt_rwlock_try_read(self._handle)
+        if current != nil:
+            val result = func(current)
             return Option.Some(result)
         return Option.None
 
     # Acquire write lock and apply function.
     # Exclusive access - no other readers or writers.
     fn write<R>(self, func: fn(T) -> R) -> R:
-        rt_rwlock_write(self._handle)
-        val result = func(self._value)
-        rt_rwlock_unlock_write(self._handle)
+        val current = rt_rwlock_write(self._handle)
+        val result = func(current)
+        rt_rwlock_set(self._handle, current)
         return result
 
     # Try to acquire write lock without blocking.
     fn try_write<R>(self, func: fn(T) -> R) -> Option<R>:
-        if rt_rwlock_try_write(self._handle) == 1:
-            val result = func(self._value)
-            rt_rwlock_unlock_write(self._handle)
+        val current = rt_rwlock_try_write(self._handle)
+        if current != nil:
+            val result = func(current)
+            rt_rwlock_set(self._handle, current)
             return Option.Some(result)
         return Option.None
 
     # Write lock and mutate.
     fn with_write(self, func: fn(T) -> T):
-        rt_rwlock_write(self._handle)
-        self._value = func(self._value)
-        rt_rwlock_unlock_write(self._handle)
+        val current = rt_rwlock_write(self._handle)
+        self._value = func(current)
+        rt_rwlock_set(self._handle, self._value)
 
     # Get value (read lock).
     fn get(self) -> T:
@@ -298,7 +322,9 @@ struct Once:
     # Subsequent calls are no-ops.
     fn call(self, func: fn()):
         if not self._completed:
-            rt_once_call(self._handle, func as i64)
+            # The current provider callback entry point is a documented stub;
+            # invoke locally rather than silently skipping the initializer.
+            func()
             self._completed = true
 
     # Call with result.
@@ -312,7 +338,7 @@ struct Once:
 
     # Check if already called.
     fn is_completed(self) -> bool:
-        return self._completed or rt_once_is_completed(self._handle) == 1
+        return self._completed or rt_once_is_completed(self._handle)
 
     fn free(self):
         rt_once_free(self._handle)
@@ -422,16 +448,16 @@ struct ThreadLocal<T>:
 
     # Get this thread's value, initializing if needed.
     fn get(self) -> T:
-        val ptr = rt_thread_local_get(self._handle)
-        if ptr == 0:
-            val value = self._init()
-            rt_thread_local_set(self._handle, value as i64)
-            return value
-        return ptr as T
+        val current = rt_thread_local_get(self._handle)
+        if current == nil:
+            val initialized = self._init()
+            rt_thread_local_set(self._handle, initialized)
+            return initialized
+        return current
 
     # Set this thread's value.
     fn set(self, value: T):
-        rt_thread_local_set(self._handle, value as i64)
+        rt_thread_local_set(self._handle, value)
 
     # Apply function to thread-local value.
     fn with<R>(self, func: fn(T) -> R) -> R:
@@ -504,9 +530,12 @@ struct Barrier:
             )
             return false
 
+    @unsafe(reason: "manual release invalidates copied synchronization aliases", capabilities: [ffi])
     fn free(self):
-        self._waiting.free()
-        self._generation.free()
+        unsafe(capabilities: [ffi]):
+            self._waiting.free()
+        unsafe(capabilities: [ffi]):
+            self._generation.free()
         self._mutex.free()
         self._cv.free()
 
@@ -568,8 +597,8 @@ struct Semaphore:
         while true:
             val current = self._permits.load()
             if current > 0:
-                val result = self._permits.compare_exchange(current, current - 1)
-                if result.0:
+                val exchanged = self._permits.compare_exchange(current, current - 1)
+                if exchanged:
                     return
             # Wait for permit
             self._mutex.lock(\ready:
@@ -580,8 +609,7 @@ struct Semaphore:
     fn try_acquire(self) -> bool:
         val current = self._permits.load()
         if current > 0:
-            val result = self._permits.compare_exchange(current, current - 1)
-            return result.0
+            return self._permits.compare_exchange(current, current - 1)
         return false
 
     fn release(self):
@@ -593,8 +621,10 @@ struct Semaphore:
     fn available(self) -> i64:
         return self._permits.load()
 
+    @unsafe(reason: "manual release invalidates copied synchronization aliases", capabilities: [ffi])
     fn free(self):
-        self._permits.free()
+        unsafe(capabilities: [ffi]):
+            self._permits.free()
         self._mutex.free()
         self._cv.free()
 
@@ -670,8 +700,10 @@ struct Latch:
     fn is_done(self) -> bool:
         return self._count.load() == 0
 
+    @unsafe(reason: "manual release invalidates copied synchronization aliases", capabilities: [ffi])
     fn free(self):
-        self._count.free()
+        unsafe(capabilities: [ffi]):
+            self._count.free()
         self._mutex.free()
         self._cv.free()
 

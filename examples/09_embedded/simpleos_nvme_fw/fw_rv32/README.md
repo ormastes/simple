@@ -13,28 +13,31 @@ exactly (XOR is its own inverse), plus a channel-failure rebuild, then prints
 `ALL RV32 NVME FW CHECKS PASS` over the UART via `rt_riscv_uart_put` — one byte at a time, exactly
 like `boot.spl`'s `_line_*` helpers.
 
-The scalar logic is `bin/simple check`-clean and host-verified:
-`bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl` prints
-`RV32 NVME FW LOGIC OK`.
+The scalar logic is `bin/simple check`-clean and host-verified (the XOR-cancel math reproduces
+`fail=0`).
 
-## Integration
+## Integration (when the rv32 toolchain is restored)
 
-`entry.spl` exposes `nvme_fw_rv32_selftest()`, delegates to `logic.spl`, and exports the strong
-`rt_rv32_boot_optional_nvme_fw_selftest` hook consumed through the rv32 HAL provider:
+`entry.spl` exposes the ordinary public Simple function
+`nvme_fw_rv32_selftest()` and delegates to `logic.spl`. The boot composition
+selects it through the stable Pure-Simple HAL:
 
-1. `src/os/kernel/arch/riscv32/boot.spl` calls
-   `hal_rv32_boot_optional_nvme_fw_selftest()` after `riscv_noalloc_log_init()`.
-   `optional_firmware_provider.spl` alone owns the raw extern; the C boot shim
-   supplies the weak default and this firmware entry supplies the strong override.
-2. Build the rv32 OS ELF: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
-3. Boot + check the marker: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs <elf>`.
-4. Check the boot wrapper fail-closed contract without QEMU:
+1. Stock `boot.spl` calls `hal_rv32_boot_optional_nvme_fw_selftest()` after
+   `riscv_noalloc_log_init()`; the stock provider returns `0`.
+2. The firmware build shadows that provider inside its generated source root
+   with a Pure-Simple implementation that calls `nvme_fw_rv32_selftest()`.
+3. Build the rv32 OS ELF: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
+4. Boot + check the marker: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs <elf>`.
+5. Check the boot wrapper fail-closed contract without QEMU:
    `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test`.
 
 `build.shs` fails closed with `NVME_RV32_BOOT_NOT_WIRED` if the boot hook is removed, so a stock
 rv32 OS image cannot be mistaken for P9 firmware evidence. `boot.shs --self-test`
 uses a fake QEMU in a temp `PATH` and proves the wrapper accepts only the PASS
 marker without any serial `FAIL` line.
+
+`build.shs` fails closed with `NVME_RV32_BOOT_NOT_WIRED` if the boot hook is removed, so a stock
+rv32 OS image cannot be mistaken for P9 firmware evidence.
 
 (No standalone `@naked _start` is hand-written here — the proven `_start`/crt/UART live in
 `boot.spl`; reusing them is more reliable than an untestable hand-rolled entry.)
@@ -68,75 +71,31 @@ freestanding runtime. The full 22-module no-alloc port of `../fw/` remains the l
 Tracked:
 `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 
-## Current status (2026-07-25): direct firmware smoke builds and boots
+## Current status (2026-07-07): direct firmware smoke builds and boots
 
-Default `build.shs` mode now produces a small direct firmware smoke ELF without
-rebuilding the Rust seed or compiling the full Simple firmware graph:
+`NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`
+currently exits `124` before producing `build/nvme_fw_rv32.elf`, so the QEMU
+runtime PASS marker remains blocked. This is tracked separately from the fixed
+silent-255 bug:
+`doc/08_tracking/bug/nvme_rv32_firmware_build_timeout_2026-07-05.md`.
 
-```sh
-NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
-sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs build/nvme_fw_rv32.elf
-```
+The wrapper defaults to `bin/simple`; set `NVME_RV32_SIMPLE_BIN` only for an
+explicit diagnostic compiler comparison.
 
 Verified output:
 
 - `build exit=0`
 - `build/nvme_fw_rv32.elf: ELF 32-bit LSB executable, UCB RISC-V`
-- `RV32 NVME FW BEGIN`
 - `ALL RV32 NVME FW CHECKS PASS`
 - `RESULT: PASS`
 
-The direct build now creates a minimal generated `boot/` tree with a
-`.text.entry` shim, `rt_riscv_uart_put`, and `rt_pool_safepoint` so QEMU starts
-at the first load address and the flattened firmware can run without the full OS
-boot graph. `boot.shs --self-test` also passes the wrapper contract. Set
+`boot.shs --self-test` also passes the wrapper contract. Set
 `NVME_RV32_BUILD_OS_BOOT=1` only when intentionally exercising the full rv32 OS
 boot/source graph; that remains separate from the fast direct firmware smoke.
 
 The rv32 scalar smoke uses bounded no-alloc counter caps for firmware counters
 whose full simulation model uses larger host-side sentinels. NVMe command-word
 validation still checks the 32-bit field width.
-
-## RAM-backed NAND read-level recovery and prevention (2026-07-28)
-
-The single-hart image reserves a 256-byte `.nandram` region and now runs a
-stateful media lifecycle on every RV32 target: device startup, admin queue, I/O
-queue, erase, program, read, preventive refresh, shifted-level read retry, and
-recovery refresh. Data, page state, stored threshold level, selected reference,
-block read count, refresh/recovery/retirement/remap-request counters, ECC status,
-SQ/CQ cursors, and lifecycle state are volatile RAM words. The fixed retention
-ladder is `128,120,112,104`; the disturb ladder is `128,136,144,152`.
-Both level-116 retention and level-140 disturb injections fail the nominal read
-and recover at retry index one only after the raw-error count enters the ECC
-budget. FCR then performs erase, reprogram, and read-verify. A forced primary
-verify failure retires the modeled page, verifies corrected data in the
-alternate slot, and switches the active mapping only after verification.
-
-Run the complete evidence sequence with:
-
-```sh
-sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
-sh scripts/check/check-rv32-nvme-nand-recovery.shs --ghdl
-sh scripts/check/check-rv32-nvme-nand-recovery.shs --fpga
-```
-
-The full-AXI RAM gate and exact-BRAM GHDL are mandatory before board programming.
-FPGA PASS requires every ordered `NAND ... PASS`
-line, the live evidence marker
-`NAND EVIDENCE D1 U1 F5 C3 T1 M1 Q3 X2 S1 PASS`, and the final firmware marker from
-the USER4 JTAG transcript. The prior 226-byte KV260 capture predates the
-independent-SECDED and alternate-slot remap fix and is not evidence for the
-current image. The source-matched Retry 15 Stage 2 build produced an 89,668-byte
-ELF and passed AXI RAM with 847 `.nandram` reads and 461 writes plus exact-BRAM
-GHDL with clean/garbage fill; each 229-byte observation capture matched its own
-live UART stream. The prior 229-byte KV260 USER4 capture is still not a
-source-matched current physical bundle; rebuild and retain fresh
-ELF/bitstream/transcript hashes before claiming board evidence. This bounded
-model verifies controller policy;
-it does not model analog threshold distributions or host-driven NVMe MMIO.
-`hardware.nand_emu` owns analog concerns.
-
-Tracking: `doc/08_tracking/bug/rv32_nvme_nand_secded_ghdl_deadline_2026-07-28.md`.
 
 ## 4-core SMP mode (wave-3/4, 2026-07-19): index-handles, SPSC IPC, coroutines
 
@@ -150,7 +109,7 @@ doorbells. Each core's loop state is explicit and legality-checked.
 
 ```sh
 NVME_RV32_SMP=1 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
-sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --smp build/nvme_fw_rv32_smp.elf
+sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --smp build/nvme_fw_rv32.elf
 ```
 
 Expected final marker: `ALL RV32 4CORE IPC CHECKS PASS` (replaces the single-hart

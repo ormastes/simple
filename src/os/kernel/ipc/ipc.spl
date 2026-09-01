@@ -7,7 +7,7 @@
 # Consumes: IpcInputPort (scheduler for blocking, memory for buffers)
 # Produces: IpcOutputPort (message passing, capability management)
 
-use os.kernel.types.ipc_types.{IpcPort, IpcMessage, IpcEndpoint, IpcFlags, OwnedIpcReceiveStatus, OwnedIpcReceiveResult}
+use os.kernel.types.ipc_types.{IpcPort, IpcMessage, IpcEndpoint, IpcFlags}
 use os.kernel.types.task_types.{TaskId, BlockReason}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
 use os.kernel.ipc.capability.{CapabilityManager}
@@ -138,16 +138,6 @@ struct IpcPortState:
     waiters: [TaskId]           # Tasks blocked on recv for this port
     max_depth: i32
 
-fn _copy_owned_payload(payload: [u8]) -> [u8]:
-    """Make the queue's byte copy without retaining caller storage."""
-    var copied: [u8] = []
-    for byte in payload:
-        copied.push(byte)
-    copied
-
-fn _owned_receive_without_message(status: OwnedIpcReceiveStatus) -> OwnedIpcReceiveResult:
-    OwnedIpcReceiveResult(status: status, header: nil, payload: [])
-
 # ============================================================================
 # IPC Manager
 # ============================================================================
@@ -167,15 +157,6 @@ class IpcManager:
     Capability transfer:
       Messages with CapTransfer flag carry CapabilityTokens.
       cap_grant/cap_revoke/cap_check delegate to CapabilityManager.
-
-    Concurrency/resource contract:
-      The scheduler/kernel dispatcher serializes mutation of one IpcManager;
-      this class does not provide an internal lock. Each port admits at most
-      MAX_MESSAGES queue slots and MAX_OWNED_QUEUE_BYTES copied payload bytes.
-      Payload ownership is transferred only through send_owned/recv_owned.
-      K1 checks a claimed TaskId against the port table but cannot authenticate
-      that claim. K2 must bind the sender/receiver TaskId to dispatcher-owned
-      current-task state before exposing authenticated delivery.
     """
     ports: [IpcPortState?]          # Port table (nil = unused slot)
     next_port_id: u64               # Monotonic port ID allocator
@@ -194,6 +175,16 @@ impl IpcManager:
             next_port_id: 1,
             cap_manager: CapabilityManager.new()
         )
+
+    pub(package) me install_boot_task_pouch_exact_v1(
+        task: TaskId, caps: CapabilitySet
+    ) -> bool:
+        """Install the same finite pouch as a staged scheduler boot TCB."""
+        self.cap_manager.install_scheduler_task_capabilities_v1(task, caps)
+
+    pub(package) me remove_boot_task_pouch_v1(task: TaskId):
+        """Rollback an unactivated staged boot task's IPC capability record."""
+        self.cap_manager.destroy_task(task)
 
     # -- Port Lifecycle ------------------------------------------------------
 
@@ -553,6 +544,18 @@ impl IpcManager:
         """Check if a task holds a capability of the given kind."""
         self.cap_manager.check(task, kind)
 
+    fn capabilities_for_task(task: TaskId) -> CapabilitySet?:
+        """Return the authoritative task set for launch handoff checks."""
+        self.cap_manager.capabilities_for_task(task)
+
+    me mint_task_capability_set(task: TaskId, kinds: [CapabilityKind]) -> CapabilitySet?:
+        """Mint a pledged, task-owned root set in the authoritative manager."""
+        self.cap_manager.mint_task_capability_set(task, kinds)
+
+    me cap_revoke_all_for_task(task: TaskId):
+        """Rollback all authority for a task during a failed launch."""
+        self.cap_manager.revoke_all_for_task(task)
+
     # -- Cleanup -------------------------------------------------------------
 
     me destroy_task_ports(task_id: TaskId):
@@ -568,28 +571,6 @@ impl IpcManager:
                 if port_state.port.owner == task_id.id:
                     self.destroy_port_owned(task_id, port_state.port.id)
             i = i + 1
-
-    fn queued_message_count(port_id: u64) -> i32:
-        """Return queue depth for resource accounting and kernel diagnostics."""
-        val slot = self._find_port_by_id(port_id)
-        if slot < 0:
-            return 0
-        val state = self.ports[slot]
-        if state == nil:
-            return 0
-        val port_state = state
-        port_state.queue.len()
-
-    fn queued_owned_payload_bytes(port_id: u64) -> u64:
-        """Return bytes currently owned by one port queue."""
-        val slot = self._find_port_by_id(port_id)
-        if slot < 0:
-            return 0u64
-        val state = self.ports[slot]
-        if state == nil:
-            return 0u64
-        val port_state = state
-        port_state.queue.owned_payload_bytes
 
     # -- Internal Helpers ----------------------------------------------------
 

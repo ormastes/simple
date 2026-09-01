@@ -1,39 +1,36 @@
 # Bug: add_remove_log_modes_spec.spl Timeout Under Resource Limits
 
-**Date:** 2026-07-17 / 2026-07-18 (diagnosis update)
+**Date:** 2026-07-17  
 **Lane:** L5 (test/02_integration and test/integration)  
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** ROOT CAUSE IDENTIFIED - Interpreter load time with 600+ files under 120s runner limit
 
-## Root Cause (Confirmed)
-Spec invokes `bin/simple run` with `SIMPLE_LIB="$REPO/src"`, which forces the interpreter to load ALL 600+ .spl files from:
-- src/lib/ (~200+ files across async/sync/gc tiers)
-- src/compiler/ (~150+ files)
-- src/app/ (~80+ files including all app implementations)
-- src/runtime/, src/i18n/ (additional overhead)
+## Symptom
+Test runner times out after 120 seconds when attempting to run `test/02_integration/app/add_remove_log_modes_spec.spl` and `test/integration/app/add_remove_log_modes_spec.spl`.
 
-Each test case spawns a fresh interpreter process, triggering full module resolution. At interpreter scale, parsing + resolving 600+ files takes >90s per invocation under test runner resource governor (120s limit).
+Error message:
+```
+Error: Timed out under resource limits
+```
 
-**Symptoms witnessed:**
-- Interpreter emits: `[memory-guard] SIMPLE_LIB=... contains 600+ .spl files — consider narrowing scope`
-- Consistent 120+ second hang per test file
-- No error/exception logged; resource limiter forcibly kills process at timeout
+Test setup completes quickly (~15ms), but the test itself hangs and consumes resources until timeout triggers.
 
-**Why spec couldn't remove SIMPLE_LIB:**
-- Apps use `use std.cli`, `use std.log`, `use app.io`
-- Without SIMPLE_LIB, module resolver fails: "unknown extern function rt_cli_arg_count"
-- With SIMPLE_LIB=src: 600+ file load kills timeout
-- With SIMPLE_LIB narrowed: complex rebuild of module tree (see doc/07_guide/app/editor_tui.md § narrowing approach)
+## Minimal Repro
+```bash
+bin/simple test test/02_integration
+# Times out on first test file after ~120 seconds
+```
 
-## Current Status: INCONCLUSIVE FIX
-Spec remains at original form (SIMPLE_LIB="$REPO/src"). Removal breaks module resolution; narrowing requires 3-layer directory copy overhead that negates savings.
+## Evidence
+- test/02_integration: FAIL add_remove_log_modes_spec.spl (0 passed, 1 failed, 120013ms)
+- test/integration: FAIL add_remove_log_modes_spec.spl (0 passed, 1 failed, 120014ms)
+- Both sections blocked: 0 tests complete before timeout
+- Identical timeout signature in both directories suggests shared root cause
 
-## Recommended Solutions
+## Suspected Layer
+Test runner resource limit enforcement (self-protection), test executor, or test file itself.
 
-**Option A (Preferred): Use compiled app binaries**
-- Compile add/remove apps to binaries: `bin/release/add`, `bin/release/remove`
-- Test calls binaries directly (no interpreter overhead)
-- Matches production deployment model
+## Impact
+Blocks all lane L5 testing for both test/02_integration (~1088 tests) and test/integration (~612 tests).
 
 **Option B: Increase runner resource limit**
 - Raise test timeout from 120s → 180-240s for this suite
@@ -63,21 +60,3 @@ added for readers. Both files parse clean (fix --dry-run, 0 errors). Regular
 section runs will no longer die on this spec; the slow lane gives the 16
 interpreter spawns adequate budget. Durable improvement (retarget spec to
 compiled binaries once redeploy lands) remains listed above as option 1.
-
-## Verification 2026-08-17 (content classification, fleet lane I)
-STILL-OPEN and still UNSETTLED — this doc`s own status ("INCONCLUSIVE FIX") is
-the accurate one, and this lane could not upgrade it.
-Content check: `test/02_integration/app/add_remove_log_modes_spec.spl` is
-present and still carries a `SIMPLE_LIB`/`SIMPLE_TIMEOUT_SECONDS` reference,
-i.e. the SIMPLE_LIB=src whole-tree interpreter load this doc blames is still the
-shape of the test.
-Why every timing number in this doc must be re-taken, not trusted:
-`SIMPLE_TIMEOUT_SECONDS` was **parsed and then discarded** until recently, and
-even after that it misbehaved (a value of 600 truncated a run at 135s, while 0
-let it finish). Any conclusion in this doc that rests on that variable proves
-nothing about the real runtime. Re-measurement must use an explicit
-`--timeout <n>` flag.
-NOT PROVEN HERE: no re-run. A stage-3 self-hosting bootstrap held this host at
-~98% CPU for the whole session; the shared test slot never freed. A timeout row
-measured under that contention would be pure noise in the failing direction,
-which is worse than no measurement. Needs an idle host.

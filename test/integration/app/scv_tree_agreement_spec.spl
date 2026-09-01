@@ -1,0 +1,99 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves `scv promote-verify --git <path>` enforces exact tree
+agreement (Git == SCV, byte for byte) BEFORE and AFTER a promotion is recorded
+(SCV-MIG-15, scv_v2_final_report §16.2): agreement on both sides publishes a
+promotion record with the backend mapping row; any divergence is a FAIL and
+nothing is marked published.
+Audience: Maintainers of the SCV migration promotion path.
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _prelude(tag: text) -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-ta-{tag}.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "mkdir work && cd work",
+        "printf 'alpha\\n' > a.txt",
+        "mkdir -p sub && printf 'beta\\n' > sub/b.txt",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null",
+        "git init -q \"$TMP/mirror\"",
+        "cp a.txt \"$TMP/mirror/\" && mkdir -p \"$TMP/mirror/sub\" && cp sub/b.txt \"$TMP/mirror/sub/\"",
+        "git -C \"$TMP/mirror\" add -A",
+        "git -C \"$TMP/mirror\" -c user.email=t@t -c user.name=t commit -q -m base"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    expect(out == "" and err == "").to_equal(false)
+    combined
+
+describe "scv promote-verify":
+    # @manual scenario evidence
+    it "publishes only after exact tree agreement holds before and after promotion":
+        # @req REQ-SSPEC-INTEGRATION
+        step("publishes only after exact tree agreement holds before and after promotion")
+        step("Run promote-verify against a byte-identical git mirror")
+        var lines = _prelude("match")
+        lines.push("scv promote-verify --git \"$TMP/mirror\"")
+        lines.push("printf 'pv_code=%s\\n' \"$?\"")
+        lines.push("cat .scv/meta/promotion.sdn")
+        lines.push("cat .scv/meta/backend_map.sdn | head -4")
+        val out = _run(lines)
+        step("Verify pre and post comparisons both passed and the promotion is published")
+        expect(out).to_contain("pre: ")
+        expect(out).to_contain("post: ")
+        expect(out).to_contain("PASS — exact tree agreement verified before and after promotion")
+        expect(out).to_contain("published: true")
+        expect(out).to_contain("backend_map:")
+        expect(out).to_contain("pv_code=0")
+        expect(out).to_contain("exit=0")
+
+    it "is idempotent: a re-run over an unchanged pair still publishes cleanly":
+        # @req REQ-SSPEC-INTEGRATION
+        step("is idempotent: a re-run over an unchanged pair still publishes cleanly")
+        step("Run promote-verify twice against the same matching mirror")
+        var lines = _prelude("idem")
+        lines.push("scv promote-verify --git \"$TMP/mirror\" >/dev/null")
+        lines.push("scv promote-verify --git \"$TMP/mirror\"")
+        lines.push("printf 'pv_code=%s\\n' \"$?\"")
+        val out = _run(lines)
+        step("Verify the second run reaches the same PASS verdict")
+        expect(out).to_contain("PASS — exact tree agreement verified before and after promotion")
+        expect(out).to_contain("pv_code=0")
+        expect(out).to_contain("exit=0")
+
+    it "fails and marks nothing published when the git tree diverged":
+        # @req REQ-SSPEC-INTEGRATION
+        step("fails and marks nothing published when the git tree diverged")
+        step("Diverge the git mirror, then attempt promote-verify")
+        var lines = _prelude("diverge")
+        lines.push("printf 'ALPHA\\n' > \"$TMP/mirror/a.txt\"")
+        lines.push("git -C \"$TMP/mirror\" add -A")
+        lines.push("git -C \"$TMP/mirror\" -c user.email=t@t -c user.name=t commit -q -m diverge")
+        lines.push("set +e")
+        lines.push("scv promote-verify --git \"$TMP/mirror\"")
+        lines.push("printf 'pv_code=%s\\n' \"$?\"")
+        lines.push("set -e")
+        lines.push("test -f .scv/meta/promotion.sdn && echo promotion_record=present || echo promotion_record=absent")
+        val out = _run(lines)
+        step("Verify the FAIL verdict, exit 1, and the absent promotion record")
+        expect(out).to_contain("bytes differ: a.txt")
+        expect(out).to_contain("FAIL — promotion blocked: pre-promotion tree disagreement; nothing marked published")
+        expect(out).to_contain("pv_code=1")
+        expect(out).to_contain("promotion_record=absent")
+        expect(out).to_contain("exit=0")

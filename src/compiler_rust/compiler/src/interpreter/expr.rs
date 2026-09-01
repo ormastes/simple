@@ -16,7 +16,7 @@ use super::{
 };
 
 /// Helper to unwrap Option or Result values, returning Some(inner_value) or None
-fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
+pub(super) fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
     match val {
         Value::Enum {
             ref enum_name,
@@ -238,7 +238,7 @@ fn route_expr(
             ops::eval_op_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- control flow ---
-        Expr::Lambda { .. } | Expr::If { .. } | Expr::Match { .. } | Expr::DoBlock(_) | Expr::UnsafeBlock(_) => {
+        Expr::Lambda { .. } | Expr::If { .. } | Expr::Match { .. } | Expr::DoBlock(_) | Expr::UnsafeBlock(_, _) => {
             control::eval_control_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- calls & field access ---
@@ -268,6 +268,16 @@ fn route_expr(
         | Expr::DictSpread(_) => {
             collections::eval_collection_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
+        // A struct-update spread is consumed by the constructor that owns it
+        // (interpreter_call/core/class_instantiation.rs). Reaching generic
+        // expression evaluation means `..base` was written somewhere it has no
+        // meaning; say so instead of evaluating the base and silently using it
+        // as an ordinary value.
+        Expr::StructSpread(_) => Some(Err(CompileError::semantic(
+            "struct spread `..base` is only valid as an argument of a struct/class construction \
+             such as `S(..base, field: value)`"
+                .to_string(),
+        ))),
         // Remaining variants (Spawn, Await, Yield, Try, MacroInvocation, Unwrap*, etc.)
         // are handled by the match in evaluate_expr.
         _ => None,
@@ -285,15 +295,13 @@ pub(crate) fn evaluate_expr(
 ) -> Result<Value, CompileError> {
     // Check watchdog timeout at every expression evaluation (single atomic load, negligible overhead).
     if crate::interpreter::is_timeout_exceeded() {
-        return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+        return Err(CompileError::TimeoutExceeded {
+            timeout_secs: crate::interpreter::timeout_limit_secs(),
+        });
     }
 
     // Phase D dispatch profiler: default OFF (one relaxed atomic load when off).
     crate::interpreter::dispatch_profile::record(expr);
-    // SIGPROF sampler (SIMPLE_INTERP_SAMPLE=1): innermost expr kind, default OFF.
-    let _kind_guard = crate::interpreter::sampler::KindGuard::enter(
-        if crate::interpreter::sampler::enabled() { crate::interpreter::dispatch_profile::expr_kind(expr) } else { "" },
-    );
 
     // Fast path: O(1) discriminant-based dispatch — avoids up to 4 sequential
     // full-enum matches when the previous cascade approach returned None.

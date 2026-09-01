@@ -1,4 +1,5 @@
 # Lazy instantiation at link-time.
+use compiler.hir.hir_types.{Effect}
 #
 # This module handles on-demand instantiation of generic templates
 # when resolving missing symbols during linking.
@@ -93,6 +94,46 @@ impl LazyInstantiator:
         """Create a new lazy instantiator."""
         LazyInstantiator(config, {}, NoteSdnMetadata.new(), {}, 0, {})
 
+    me load_metadata(smf_path: text, metadata: NoteSdnMetadata):
+        """Load note.sdn metadata from an input SMF file.
+
+        Port of linker/lazy_instantiator.rs::load_metadata: merge the input's
+        instantiations into the output metadata, keep the possible entries
+        keyed by source path for lookup."""
+        for inst in metadata.instantiations:
+            self.output_metadata.add_instantiation(inst)
+        self.input_metadata[smf_path] = metadata
+
+    fn find_possible(symbol: text) -> (text, PossibleInstantiationEntry)?:
+        """Find a possible instantiation entry for a symbol.
+
+        Port of linker/lazy_instantiator.rs::find_possible; loop shape follows
+        99.loader/jit_instantiator.spl::find_possible."""
+        for path in self.input_metadata.keys():
+            val metadata = self.input_metadata[path]
+            for entry in metadata.possible:
+                if entry.mangled_name == symbol:
+                    return Some((path, entry))
+        nil
+
+    fn can_instantiate(symbol: text) -> bool:
+        """Check if a symbol can be lazily instantiated."""
+        self.find_possible(symbol).?
+
+    me instantiate_all_missing(missing_symbols: [text]) -> [LazyInstantiationResult]:
+        """Instantiate all missing symbols that can be instantiated.
+
+        Port of linker/lazy_instantiator.rs::instantiate_all_missing. Calls
+        the module-scope me-function form directly: try_instantiate lives at
+        module scope as lazyinstantiator_try_instantiate (below), so a
+        self.try_instantiate call would reference a method symbol that does
+        not exist."""
+        var results: [LazyInstantiationResult] = []
+        for symbol in missing_symbols:
+            if self.can_instantiate(symbol):
+                results.push(lazyinstantiator_try_instantiate(self, symbol))
+        results
+
 fn lazyinstantiator_new(config: LazyInstantiatorConfig) -> LazyInstantiator:
         """Create a new lazy instantiator."""
         LazyInstantiator.new(config)
@@ -144,7 +185,7 @@ me lazyinstantiator_try_instantiate(self: LazyInstantiator, symbol: text) -> Laz
             print "[lazy-inst] Instantiating {symbol} from {source_path}"
 
         # Perform instantiation
-        val result = self.lazyinstantiator_do_instantiate(entry, source_path)
+        val result = self.do_instantiate(entry, source_path)
 
         # Cleanup
         lazyinstantiator_drop_in_progress(self, symbol)

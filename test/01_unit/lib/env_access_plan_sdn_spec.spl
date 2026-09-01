@@ -1,0 +1,70 @@
+# @cover src/lib/common/env_access/plan_sdn.spl 80%
+use std.spec
+use std.common.env_access.plan_sdn.*
+
+val PLAN_SHA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn operation_rows(count: i64, adapter_id: i64 = 1) -> text:
+    var rows = "["
+    var index = 0
+    while index < count:
+        if index > 0: rows = rows + ", "
+        rows = rows + "{operation_id: test/fixture" + index.to_text() +
+            ".spl::query, c_adapter_id: " + adapter_id.to_text() +
+            ", rust_adapter_id: 0, effect_capable: false, c_effect_adapter_id: 0, rust_effect_adapter_id: 0}"
+        index = index + 1
+    rows + "]"
+
+fn valid_plan_sdn(extra: text = "", version: i64 = 1) -> text:
+    return "{schema: simple-env-access-plan-v1, version: " + version.to_text() +
+        ", plan_id: cold-main, canonical_repo_root: /workspace/repo" + extra +
+        ", max_total_bytes: 512, max_processes: 1" +
+        ", instructions: [{kind: run-allowed-tool, resource: c-comparator, arguments: [], timeout_ms: 100, max_stdout_bytes: 128, max_stderr_bytes: 128}]" +
+        ", tools: [{tool_id: c-comparator, canonical_path: /workspace/tools/c-comparator, identity_hash: " + PLAN_SHA + "}]" +
+        ", hardware_probes: [{probe_id: board-id, schema_id: board-id-v1, max_arguments: 0, max_timeout_ms: 100, max_stdout_bytes: 64, max_stderr_bytes: 64}]" +
+        ", rt_hal_operations: " + operation_rows(1) +
+        ", install: {compare_c: true, compare_rust: false, c_tool_id: c-comparator, rust_tool_id: \"\", worker_count: 1, queue_capacity: 1, timeout_ticks: 100, max_output_bytes: 128, required_assurance_rank: 2}}"
+
+describe "strict environment plan SDN codec":
+    it "parses typed tool and hardware identities then validates the parent plan":
+        val loaded = env_access_plan_parse_sdn_v1(valid_plan_sdn()).unwrap()
+        expect(loaded.plan.allowed_tools.len()).to_equal(1)
+        expect(loaded.plan.allowed_hardware_probes.len()).to_equal(1)
+        expect(loaded.c_tool_id).to_equal("c-comparator")
+        expect(loaded.required_assurance_rank).to_equal(2)
+        expect(loaded.rt_hal_operations.len()).to_equal(1)
+        val encoded = env_access_plan_encode_sdn_v1(loaded).unwrap()
+        expect(env_access_plan_parse_sdn_v1(encoded).unwrap().plan.plan_id).to_equal("cold-main")
+
+    it "binds canonical identity to the complete same-rank plan and operation map":
+        val loaded = env_access_plan_parse_sdn_v1(valid_plan_sdn()).unwrap()
+        val baseline = env_access_plan_canonical_identity_v1(loaded).unwrap()
+        val canonical = env_access_plan_encode_sdn_v1(loaded).unwrap()
+        val round_trip = env_access_plan_parse_sdn_v1(canonical).unwrap()
+        expect(env_access_plan_canonical_identity_v1(round_trip).unwrap()).to_equal(baseline)
+        val changed_operation = valid_plan_sdn().replace(operation_rows(1), operation_rows(1, 2))
+        val changed = env_access_plan_parse_sdn_v1(changed_operation).unwrap()
+        expect(env_access_plan_canonical_identity_v1(changed).unwrap() != baseline).to_equal(true)
+        val changed_whole_plan = valid_plan_sdn().replace("max_processes: 1", "max_processes: 2")
+        val replaced = env_access_plan_parse_sdn_v1(changed_whole_plan).unwrap()
+        expect(env_access_plan_canonical_identity_v1(replaced).unwrap() != baseline).to_equal(true)
+
+    it "rejects an absent or over-bound exact operation map":
+        val absent = valid_plan_sdn().replace(operation_rows(1), "[]")
+        expect(env_access_plan_parse_sdn_v1(absent).unwrap_err()).to_equal("RTHAL-E-OPERATION-PLAN")
+        val over_bound = valid_plan_sdn().replace(operation_rows(1), operation_rows(257))
+        expect(env_access_plan_parse_sdn_v1(over_bound).unwrap_err()).to_equal("ENV-E-BOUND")
+
+    it "rejects unknown and duplicate fields":
+        expect(env_access_plan_parse_sdn_v1(valid_plan_sdn(", surprise: true")).unwrap_err()).to_contain("unknown plan field")
+        val duplicate = valid_plan_sdn().replace("plan_id: cold-main", "plan_id: cold-main, plan_id: shadow")
+        expect(env_access_plan_parse_sdn_v1(duplicate).unwrap_err()).to_contain("duplicate fields")
+
+    it "rejects unsupported versions before installation":
+        expect(env_access_plan_parse_sdn_v1(valid_plan_sdn("", 2)).unwrap_err()).to_equal("ENV-E-PLAN-VERSION")
+
+    it "requires a bounded canonical assurance rank":
+        val missing = valid_plan_sdn().replace(", required_assurance_rank: 2", "")
+        expect(env_access_plan_parse_sdn_v1(missing).unwrap_err()).to_contain("missing install field 'required_assurance_rank'")
+        val invalid = valid_plan_sdn().replace("required_assurance_rank: 2", "required_assurance_rank: 9")
+        expect(env_access_plan_parse_sdn_v1(invalid).unwrap_err()).to_equal("RTHAL-E-ASSURANCE")

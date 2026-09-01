@@ -1,6 +1,6 @@
-# process_isolation_as_spec
+# Process Isolation As Specification
 
-> Verifies the process isolation as behaviour end to end so maintainers of this
+> Tests covering AddressSpace handle accessors, as_switch_to deduplication, as_create / as_destroy lifecycle, Process Table Extended — alloc and register, Process Table Extended — count and list, Convenience helpers.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# process_isolation_as_spec
-
-Verifies the process isolation as behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/01_unit/os/process_isolation_as_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the process isolation as behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Process Isolation As Specification
 
 ## Scenarios
 
@@ -39,19 +17,22 @@ unrelated sibling features are out of scope.
 
 #### as_phys_root returns the physical root
 
-- Verify: as_phys_root returns the physical root
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- as_phys_root returns the physical root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_phys_root returns the physical root")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("as_phys_root returns the physical root")
 val space = AddressSpace(phys_root: 0x1000, id: 7)
 expect as_phys_root(space) == 0x1000
 ```
@@ -60,19 +41,18 @@ expect as_phys_root(space) == 0x1000
 
 #### as_id returns the monotonic id
 
-- Verify: as_id returns the monotonic id
+- as_id returns the monotonic id
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_id returns the monotonic id")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("as_id returns the monotonic id")
 val space = AddressSpace(phys_root: 0x2000, id: 42)
 expect as_id(space) == 42
 ```
@@ -81,19 +61,18 @@ expect as_id(space) == 42
 
 #### as_is_kernel true for zero root
 
-- Verify: as_is_kernel true for zero root
+- as_is_kernel true for zero root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_is_kernel true for zero root")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("as_is_kernel true for zero root")
 val space = AddressSpace(phys_root: 0, id: 0)
 expect as_is_kernel(space) == true
 ```
@@ -102,19 +81,16 @@ expect as_is_kernel(space) == true
 
 #### as_is_kernel false for nonzero root
 
-- Verify: as_is_kernel false for nonzero root
+- as_is_kernel false for nonzero root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_is_kernel false for nonzero root")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val space = AddressSpace(phys_root: 0x3000, id: 1)
 expect as_is_kernel(space) == false
 ```
@@ -123,19 +99,18 @@ expect as_is_kernel(space) == false
 
 #### as_kernel_sentinel returns zero root
 
-- Verify: as_kernel_sentinel returns zero root
+- as_kernel_sentinel returns zero root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_kernel_sentinel returns zero root")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("as_kernel_sentinel returns zero root")
 val sentinel = as_kernel_sentinel()
 expect sentinel.phys_root == 0
 expect sentinel.id == 0
@@ -147,50 +122,7 @@ expect sentinel.id == 0
 
 #### as_switch_to updates current root
 
-- Verify: as_switch_to updates current root
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_switch_to updates current root")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-as_switch_to(0x4000)
-expect as_current_phys_root() == 0x4000
-```
-
-</details>
-
-#### as_switch_to is idempotent (same root twice)
-
-- Verify: as_switch_to is idempotent (same root twice)
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_switch_to is idempotent (same root twice)")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-as_switch_to(0x5000)
-as_switch_to(0x5000)
-expect as_current_phys_root() == 0x5000
-```
-
-</details>
-
-#### as_switch_to zero root is a no-op after the root is set
-
-- Verify: as_switch_to zero root is a no-op after the root is set
+- as_switch_to updates current root
 
 
 <details>
@@ -200,9 +132,47 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_switch_to zero root is a no-op after the root is set")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+as_switch_to(0x4000)
+expect as_current_phys_root() == 0x4000
+```
+
+</details>
+
+#### as_switch_to is idempotent (same root twice)
+
+- as_switch_to is idempotent (same root twice)
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("as_switch_to is idempotent (same root twice)")
+as_switch_to(0x5000)
+as_switch_to(0x5000)
+expect as_current_phys_root() == 0x5000
+```
+
+</details>
+
+#### as_switch_to zero root is a no-op after the root is set
+
+- as_switch_to zero root is a no-op after the root is set
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("as_switch_to zero root is a no-op after the root is set")
 as_switch_to(0x6000)
 as_switch_to(0)
 # zero means no-op; current root stays from previous call
@@ -215,19 +185,18 @@ expect as_current_phys_root() == 0x6000
 
 #### as_create returns an AddressSpace (phys_root may be 1 if VMM not init)
 
-- Verify: as_create returns an AddressSpace (phys_root may be 1 if VMM not init)
+- as_create returns an AddressSpace (phys_root may be 1 if VMM not init)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_create returns an AddressSpace (phys_root may be 1 if VMM not init)")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("as_create returns an AddressSpace (phys_root may be 1 if VMM not init)")
 val space = as_create()
 val root = as_phys_root(space)
 expect (root == 0 or root == 1 or root > 4096) == true
@@ -237,19 +206,18 @@ expect (root == 0 or root == 1 or root > 4096) == true
 
 #### as_destroy on kernel sentinel is a no-op
 
-- Verify: as_destroy on kernel sentinel is a no-op
+- as_destroy on kernel sentinel is a no-op
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_destroy on kernel sentinel is a no-op")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("as_destroy on kernel sentinel is a no-op")
 val sentinel = as_kernel_sentinel()
 as_destroy(sentinel)
 expect as_phys_root(sentinel) == 0
@@ -259,19 +227,18 @@ expect as_phys_root(sentinel) == 0
 
 #### as_destroy on sentinel root=1 is a no-op
 
-- Verify: as_destroy on sentinel root=1 is a no-op
+- as_destroy on sentinel root=1 is a no-op
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: as_destroy on sentinel root=1 is a no-op")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("as_destroy on sentinel root=1 is a no-op")
 val legacy = AddressSpace(phys_root: 1, id: 0)
 as_destroy(legacy)
 expect as_phys_root(legacy) == 1
@@ -283,29 +250,7 @@ expect as_phys_root(legacy) == 1
 
 #### pt_ext_alloc_pid is monotonically increasing
 
-- Verify: pt_ext_alloc_pid is monotonically increasing
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_alloc_pid is monotonically increasing")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-val p1 = pt_ext_alloc_pid()
-val p2 = pt_ext_alloc_pid()
-expect p2 > p1
-```
-
-</details>
-
-#### pt_ext_alloc_pid always > 0
-
-- Verify: pt_ext_alloc_pid always > 0
+- pt_ext_alloc_pid is monotonically increasing
 
 
 <details>
@@ -315,9 +260,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_alloc_pid always > 0")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_alloc_pid is monotonically increasing")
+val p1 = pt_ext_alloc_pid()
+val p2 = pt_ext_alloc_pid()
+expect p2 > p1
+```
+
+</details>
+
+#### pt_ext_alloc_pid always > 0
+
+- pt_ext_alloc_pid always > 0
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_alloc_pid always > 0")
 val pid = pt_ext_alloc_pid()
 expect pid > 0
 ```
@@ -326,19 +291,18 @@ expect pid > 0
 
 #### pt_ext_register + pt_ext_lookup round-trip
 
-- Verify: pt_ext_register + pt_ext_lookup round-trip
+- pt_ext_register + pt_ext_lookup round-trip
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_register + pt_ext_lookup round-trip")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_register + pt_ext_lookup round-trip")
 val pid = pt_ext_alloc_pid()
 val space = AddressSpace(phys_root: 0x9000, id: 99)
 pt_ext_register(pid, space)
@@ -352,19 +316,18 @@ expect opt.entry.space.phys_root == 0x9000
 
 #### pt_ext_lookup absent PID returns is_some = false
 
-- Verify: pt_ext_lookup absent PID returns is_some = false
+- pt_ext_lookup absent PID returns is_some = false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_lookup absent PID returns is_some = false")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_lookup absent PID returns is_some = false")
 val opt = pt_ext_lookup(-999)
 expect opt.is_some == false
 ```
@@ -373,19 +336,18 @@ expect opt.is_some == false
 
 #### pt_ext_set_state updates state field
 
-- Verify: pt_ext_set_state updates state field
+- pt_ext_set_state updates state field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_set_state updates state field")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_set_state updates state field")
 val pid = pt_ext_alloc_pid()
 val space = AddressSpace(phys_root: 0xA000, id: 3)
 pt_ext_register(pid, space)
@@ -399,19 +361,18 @@ expect opt.entry.state == "blocked"
 
 #### pt_ext_reap tombstones the entry
 
-- Verify: pt_ext_reap tombstones the entry
+- pt_ext_reap tombstones the entry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_reap tombstones the entry")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_reap tombstones the entry")
 val pid = pt_ext_alloc_pid()
 val space = AddressSpace(phys_root: 1, id: 0)
 pt_ext_register(pid, space)
@@ -426,19 +387,18 @@ expect opt.is_some == false
 
 #### pt_ext_count increases after register
 
-- Verify: pt_ext_count increases after register
+- pt_ext_count increases after register
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_count increases after register")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_count increases after register")
 val before = pt_ext_count()
 val pid = pt_ext_alloc_pid()
 pt_ext_register(pid, AddressSpace(phys_root: 1, id: 0))
@@ -450,19 +410,18 @@ expect after == before + 1
 
 #### pt_ext_list_pids contains newly registered pid
 
-- Verify: pt_ext_list_pids contains newly registered pid
+- pt_ext_list_pids contains newly registered pid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_list_pids contains newly registered pid")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_list_pids contains newly registered pid")
 val pid = pt_ext_alloc_pid()
 pt_ext_register(pid, AddressSpace(phys_root: 1, id: 0))
 val pids = pt_ext_list_pids()
@@ -481,19 +440,16 @@ expect found == true
 
 #### pt_ext_spawn returns a positive pid
 
-- Verify: pt_ext_spawn returns a positive pid
+- pt_ext_spawn returns a positive pid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_spawn returns a positive pid")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val pid = pt_ext_spawn()
 expect pid > 0
 ```
@@ -502,19 +458,18 @@ expect pid > 0
 
 #### pt_ext_spawn registers a live entry
 
-- Verify: pt_ext_spawn registers a live entry
+- pt_ext_spawn registers a live entry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_spawn registers a live entry")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_spawn registers a live entry")
 val pid = pt_ext_spawn()
 val opt = pt_ext_lookup(pid)
 expect opt.is_some == true
@@ -524,19 +479,18 @@ expect opt.is_some == true
 
 #### pt_ext_spawn_with_kernel_as registers with phys_root 0
 
-- Verify: pt_ext_spawn_with_kernel_as registers with phys_root 0
+- pt_ext_spawn_with_kernel_as registers with phys_root 0
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_spawn_with_kernel_as registers with phys_root 0")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_spawn_with_kernel_as registers with phys_root 0")
 val pid = pt_ext_spawn_with_kernel_as()
 val opt = pt_ext_lookup(pid)
 expect opt.is_some == true
@@ -547,24 +501,43 @@ expect opt.entry.space.phys_root == 0
 
 #### pt_ext_address_space_for returns sentinel for unknown pid
 
-- Verify: pt_ext_address_space_for returns sentinel for unknown pid
+- pt_ext_address_space_for returns sentinel for unknown pid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-OS_PROCESS_ISOLATION_AS-001
-step("Verify: pt_ext_address_space_for returns sentinel for unknown pid")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("pt_ext_address_space_for returns sentinel for unknown pid")
 val space = pt_ext_address_space_for(-777)
 expect space.phys_root == 0
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/01_unit/os/process_isolation_as_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering AddressSpace handle accessors, as_switch_to deduplication, as_create / as_destroy lifecycle, Process Table Extended — alloc and register, Process Table Extended — count and list, Convenience helpers.
+- AddressSpace handle accessors
+- as_switch_to deduplication
+- as_create / as_destroy lifecycle
+- Process Table Extended — alloc and register
+- Process Table Extended — count and list
+- Convenience helpers
 
 ## Scenario Summary
 
@@ -579,36 +552,50 @@ expect space.phys_root == 0
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `7ce1a306883787ed85643ab62a3e9f7101a1bf77d10bcf4ae5416997f62c612b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `d1119e00c23fd8a51aed9882ff8ec12e9eec7fba5e23aee52d34d9da998aa791`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `7ce1a306883787ed85643ab62a3e9f7101a1bf77d10bcf4ae5416997f62c612b`.
+Source SHA-256: `d1119e00c23fd8a51aed9882ff8ec12e9eec7fba5e23aee52d34d9da998aa791`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `7ce1a306883787ed85643ab62a3e9f7101a1bf77d10bcf4ae5416997f62c612b`  
+Source SHA-256: `d1119e00c23fd8a51aed9882ff8ec12e9eec7fba5e23aee52d34d9da998aa791`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/01_unit/os/process_isolation_as_spec.spl
 mirror: doc/06_spec/01_unit/os/process_isolation_as_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/process_isolation_as_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/os/process_isolation_as_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/process_isolation_as_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/os/process_isolation_as_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/process_isolation_as_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'as_phys_root returns the physical root' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/process_isolation_as_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'as_id returns the monotonic id' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/process_isolation_as_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'as_is_kernel true for zero root' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

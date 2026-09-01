@@ -1,8 +1,5 @@
 # Bootstrap Stage 3 runtime authority root symlink
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 ## Status
 
 - Claimed: 2026-08-02

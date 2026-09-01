@@ -1,0 +1,278 @@
+const SCORE_MATCH = 16
+const BONUS_BOUNDARY = 8
+const BONUS_CAMEL = 6
+const BONUS_CONSECUTIVE = 4
+const BONUS_FIRST_CHAR = 8
+const PENALTY_GAP_START = 3
+const PENALTY_GAP_EXTENSION = 1
+const TOP_LEVEL_CACHE_LIMIT = 100
+const MAX_QUERY_LEN = 64
+const CHUNK_MS = 4
+
+class SearchResult:
+    path: text
+    score: i64
+    fuzzScore: i64
+
+class FileIndex:
+    paths: [text]
+    lowerPaths: [text]
+    charBits: [i64]
+    pathLens: [i64]
+    topLevelCache: [SearchResult]
+    readyCount: i64
+
+impl FileIndex:
+    static fn new() -> FileIndex:
+        FileIndex(paths: [], lowerPaths: [], charBits: [], pathLens: [], topLevelCache: [], readyCount: 0)
+
+    me loadFromFileList(fileList: [text]) -> ():
+        var paths: [text] = []
+        var i = 0
+        while i < fileList.len():
+            val line = fileList[i]
+            if line.len() > 0 and not containsText(paths, line):
+                paths.push(line)
+            i = i + 1
+        me.buildIndex(paths)
+
+    me loadFromFileListAsync(fileList: [text]) -> text:
+        me.loadFromFileList(fileList)
+        "queryable:done"
+
+    me buildIndex(paths: [text]) -> ():
+        me.resetArrays(paths)
+        var i = 0
+        while i < paths.len():
+            me.indexPath(i)
+            i = i + 1
+        me.readyCount = paths.len()
+
+    me resetArrays(paths: [text]) -> ():
+        me.paths = paths
+        me.lowerPaths = []
+        me.charBits = []
+        me.pathLens = []
+        me.readyCount = 0
+        me.topLevelCache = computeTopLevelEntries(paths, TOP_LEVEL_CACHE_LIMIT)
+
+    me indexPath(i: i64) -> ():
+        val lp = me.paths[i].lower()
+        me.lowerPaths.push(lp)
+        me.pathLens.push(lp.len())
+        me.charBits.push(charBitmap(lp))
+
+    me search(query: text, limit: i64) -> [SearchResult]:
+        if limit <= 0:
+            return []
+        if query.len() == 0:
+            return takeResults(me.topLevelCache, limit)
+        val caseSensitive = query != query.lower()
+        val needle = if caseSensitive: query else: query.lower()
+        val nLen = minI64(needle.len(), MAX_QUERY_LEN)
+        val needleShort = needle.slice(0, nLen)
+        val needleBitmap = charBitmap(needleShort)
+        var top: [SearchResult] = []
+        var i = 0
+        while i < me.readyCount:
+            if (me.charBits[i] & needleBitmap) == needleBitmap:
+                val haystack = if caseSensitive: me.paths[i] else: me.lowerPaths[i]
+                val score = fuzzyScore(me.paths[i], haystack, needleShort)
+                if score >= 0:
+                    top = insertTop(top, SearchResult(path: me.paths[i], score: 0, fuzzScore: score), limit)
+            i = i + 1
+        finalizeScores(top)
+
+fn fuzzyScore(path: text, haystack: text, needle: text) -> i64:
+    if needle.len() == 0:
+        return 0
+    var positions: [i64] = []
+    var prev = -1
+    var gapPenalty = 0
+    var consecBonus = 0
+    var j = 0
+    while j < needle.len():
+        val pos = findCharFrom(haystack, needle.slice(j, j + 1), prev + 1)
+        if pos < 0:
+            return -1
+        positions.push(pos)
+        if j > 0:
+            val gap = pos - prev - 1
+            if gap == 0:
+                consecBonus = consecBonus + BONUS_CONSECUTIVE
+            else:
+                gapPenalty = gapPenalty + PENALTY_GAP_START + gap * PENALTY_GAP_EXTENSION
+        prev = pos
+        j = j + 1
+    var score = needle.len() * SCORE_MATCH + consecBonus - gapPenalty
+    score = score + scoreBonusAt(path, positions[0], true)
+    var k = 1
+    while k < positions.len():
+        score = score + scoreBonusAt(path, positions[k], false)
+        k = k + 1
+    score + maxI64(0, 32 - (path.len() >> 2))
+
+fn scoreBonusAt(path: text, pos: i64, first: bool) -> i64:
+    if pos == 0:
+        if first:
+            return BONUS_FIRST_CHAR
+        return 0
+    val prevCh = path.char_code_at(pos - 1)
+    if isBoundary(prevCh):
+        return BONUS_BOUNDARY
+    if isLower(prevCh) and isUpper(path.char_code_at(pos)):
+        return BONUS_CAMEL
+    0
+
+fn isBoundary(code: i64) -> bool:
+    code == 47 or code == 92 or code == 45 or code == 95 or code == 46 or code == 32
+
+fn isLower(code: i64) -> bool:
+    code >= 97 and code <= 122
+
+fn isUpper(code: i64) -> bool:
+    code >= 65 and code <= 90
+
+fn charBitmap(value: text) -> i64:
+    var bits = 0
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code >= 97 and code <= 122:
+            bits = bits | (1 << (code - 97))
+        i = i + 1
+    bits
+
+fn findCharFrom(value: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i < value.len():
+        if value.slice(i, i + 1) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn insertTop(results: [SearchResult], result: SearchResult, limit: i64) -> [SearchResult]:
+    var out: [SearchResult] = []
+    var inserted = false
+    var i = 0
+    while i < results.len():
+        if not inserted and result.fuzzScore > results[i].fuzzScore:
+            out.push(result)
+            inserted = true
+        out.push(results[i])
+        i = i + 1
+    if not inserted:
+        out.push(result)
+    while out.len() > limit:
+        out.pop()
+    out
+
+fn finalizeScores(results: [SearchResult]) -> [SearchResult]:
+    var out: [SearchResult] = []
+    val denom = maxI64(results.len(), 1)
+    var i = 0
+    while i < results.len():
+        var score = (i * 1000) / denom
+        if results[i].path.contains("test"):
+            score = minI64((score * 105) / 100, 1000)
+        out.push(SearchResult(path: results[i].path, score: score, fuzzScore: results[i].fuzzScore))
+        i = i + 1
+    out
+
+fn computeTopLevelEntries(paths: [text], limit: i64) -> [SearchResult]:
+    var segments: [text] = []
+    var i = 0
+    while i < paths.len() and segments.len() < limit:
+        val segment = firstPathSegment(paths[i])
+        if segment.len() > 0 and not containsText(segments, segment):
+            segments.push(segment)
+        i = i + 1
+    segments = sortSegments(segments)
+    var out: [SearchResult] = []
+    var j = 0
+    while j < segments.len() and j < limit:
+        out.push(SearchResult(path: segments[j], score: 0, fuzzScore: 0))
+        j = j + 1
+    out
+
+fn firstPathSegment(path: text) -> text:
+    var end = path.len()
+    var i = 0
+    while i < path.len():
+        val code = path.char_code_at(i)
+        if code == 47 or code == 92:
+            end = i
+            i = path.len()
+        else:
+            i = i + 1
+    path.slice(0, end)
+
+fn sortSegments(values: [text]) -> [text]:
+    var out = values
+    var changed = true
+    while changed:
+        changed = false
+        var i = 0
+        while i + 1 < out.len():
+            if segmentLess(out[i + 1], out[i]):
+                val tmp = out[i]
+                out[i] = out[i + 1]
+                out[i + 1] = tmp
+                changed = true
+            i = i + 1
+    out
+
+fn segmentLess(a: text, b: text) -> bool:
+    if a.len() != b.len():
+        return a.len() < b.len()
+    a < b
+
+fn takeResults(values: [SearchResult], limit: i64) -> [SearchResult]:
+    var out: [SearchResult] = []
+    var i = 0
+    while i < values.len() and i < limit:
+        out.push(values[i])
+        i = i + 1
+    out
+
+fn containsText(values: [text], value: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn yieldToEventLoop() -> text:
+    "yield"
+
+fn chunkMs() -> i64:
+    CHUNK_MS
+
+fn fileIndexSourceLinesModeled() -> i64:
+    370
+
+fn minI64(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+fn maxI64(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+# ponytail: async build resolves immediately in this model; add real yielding only when Simple indexes large trees on the UI thread.
+# Source parity note: loadFromFileList deduplicates and filters empty paths.
+# Source parity note: async loading returns queryable/done phases.
+# Source parity note: indexPath precomputes lowercase path, length, and a-z bitmap.
+# Source parity note: empty queries return cached top-level path segments.
+# Source parity note: lowercase queries are case-insensitive; uppercase queries are case-sensitive.
+# Source parity note: query length is capped at MAX_QUERY_LEN.
+# Source parity note: bitmap rejection skips paths missing any needle letter.
+# Source parity note: fuzzy scan rewards consecutive, boundary, camelCase, and first-char matches.
+# Source parity note: gap penalties reduce fuzzy score.
+# Source parity note: top-k keeps only the requested limit.
+# Source parity note: final scores are position-based, lower is better.
+# Source parity note: paths containing test receive a small capped penalty.
+# Source parity note: top-level entries split on slash or backslash and sort by length then alpha.

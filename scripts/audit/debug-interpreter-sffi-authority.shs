@@ -1,0 +1,66 @@
+#!/bin/sh
+# Keep the two interpreter-debug facades explicit about their raw boundary.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+for source in \
+    "$root/src/lib/nogc_sync_mut/debug/interpreter_backend.spl" \
+    "$root/src/app/debug/interpreter_backend.spl"; do
+    declarations=$(grep -c '^extern fn rt_' "$source")
+    if [ "$declarations" -ne 12 ]; then
+        echo "debug interpreter raw-declaration inventory changed: $source" >&2
+        exit 1
+    fi
+
+    tagged=$(awk '
+        /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+        /^extern fn rt_/ { if (previous_is_ffi) tagged += 1 }
+        { previous_is_ffi = 0 }
+        END { print tagged + 0 }
+    ' "$source")
+    if [ "$tagged" -ne "$declarations" ]; then
+        echo "debug interpreter declaration lacks unsafe(ffi): $source" >&2
+        exit 1
+    fi
+
+    awk '
+        function indent(line, copy) {
+            copy = line
+            sub(/[^ ].*$/, "", copy)
+            return length(copy)
+        }
+        NF && unsafe_indent >= 0 &&
+        $0 !~ /unsafe\(capabilities: \[ffi\]\):$/ && indent($0) <= unsafe_indent {
+            unsafe_indent = -1
+        }
+        /unsafe\(capabilities: \[ffi\]\):$/ {
+            unsafe_indent = indent($0)
+            next
+        }
+        !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / &&
+        /rt_(debug|cli)_[A-Za-z0-9_]+[(]/ {
+            if (unsafe_indent < 0 || indent($0) <= unsafe_indent) {
+                print "debug interpreter raw call lacks lexical FFI authority: " NR ":" $0 > "/dev/stderr"
+                failed = 1
+            }
+        }
+        BEGIN { unsafe_indent = -1 }
+        END { if (failed) exit 1 }
+    ' "$source"
+
+    grep -q 'if status != 0:' "$source"
+    grep -q 'if bp_id <= 0:' "$source"
+    grep -q 'if status < 0:' "$source"
+done
+
+expected=$(mktemp)
+trap 'rm -f "$expected"' EXIT INT TERM
+sed 's/std\.nogc_sync_mut\.debug\.coordinator/app.debug.coordinator/' \
+    "$root/src/lib/nogc_sync_mut/debug/interpreter_backend.spl" >"$expected"
+if ! cmp -s "$expected" "$root/src/app/debug/interpreter_backend.spl"; then
+    echo 'debug interpreter facades diverged beyond their coordinator owner' >&2
+    exit 1
+fi
+
+echo 'debug interpreter SFFI authority: PASS (12 raw calls/facade; lexical FFI authority; status failures map to Result.Err)'

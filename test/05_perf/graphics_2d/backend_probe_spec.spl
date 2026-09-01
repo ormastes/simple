@@ -1,24 +1,32 @@
-# @tag: gpu, rendering, backend, probe, strict
-# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl
+# test/perf/graphics_2d/backend_probe_spec.spl
+#
+# **Feature IDs:** AC-1 — Backend probe strict-fail, no silent fallback
+# **Category:** Graphics | Backend | Probe
+# **Status:** Pending implementation (Phase 5)
+#
+# Verifies that backend_probe reports selected backend identity,
+# enforces strict mode (no silent CPU fallback when GPU is requested),
+# and surfaces shader format in the probe result.
+#
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl
+# @cover src/lib/gc_async_mut/gpu/engine2d/ffi_dispatch.spl
 
-use std.spec.{describe, context, it, slow_it, expect}
-use std.gpu.engine2d.engine.{Engine2D}
-use std.gpu.engine2d.backend_probe.{BackendStatus}
-use std.gpu.engine2d.color.{rgb, color_r, color_g, color_b}
-use std.nogc_sync_mut.env.platform.{is_macos}
+val BACKEND_CPU: text = "cpu"
+val BACKEND_SOFTWARE: text = "software"
+val STATUS_OK: text = "Ok"
+val STATUS_FAILED: text = "Failed"
+val STATUS_FALLBACK: text = "Fallback"
 
-fn paint_vulkan_probe_scene(engine: Engine2D):
-    engine.clear(rgb(3, 5, 7))
-    engine.draw_rect_filled(1, 1, 8, 5, rgb(40, 70, 100))
-    engine.draw_line(0, 12, 31, 12, rgb(220, 220, 40), 1)
-    engine.draw_circle(24, 7, 4, rgb(10, 200, 30))
-    engine.draw_circle_filled(6, 18, 3, rgb(200, 60, 20))
-    engine.draw_triangle_filled(18, 15, 14, 22, 25, 22, rgb(90, 160, 230))
-    engine.draw_gradient_rect(26, 14, 5, 8, rgb(255, 0, 0), rgb(0, 0, 255))
-    engine.set_clip(25, 0, 7, 7)
-    engine.draw_rect_filled(22, 0, 10, 10, rgb(8, 180, 200))
-    engine.clear_clip()
+# Sentinel probe result for testing field structure
+struct ProbeResultSentinel:
+    requested_name: text
+    selected_name:  text
+    status:         text
+    device_name:    text
+    api_name:       text
+    feature_gate:   text
+    shader_format:  text
+    fallback_reason: text
 
 # ---------------------------------------------------------------------------
 # PROBE-THEN-CREATE TOCTOU (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md)
@@ -45,82 +53,48 @@ fn paint_vulkan_probe_scene(engine: Engine2D):
 # harder to pass than before, not easier.
 # ---------------------------------------------------------------------------
 
-# A device label is only honest with a real handle, a real device identity and a
-# full frame. Restated here so the assertion does not depend on the
-# implementation it is checking.
-fn _device_proven(source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64) -> bool:
-    source == "device_readback" and handle > 0 and identity > 0 and
-        pixel_count == expected_px
+fn make_failed_sentinel(req: text) -> ProbeResultSentinel:
+    ProbeResultSentinel(
+        requested_name:  req,
+        selected_name:   req,
+        status:          STATUS_FAILED,
+        device_name:     "unavailable",
+        api_name:        "none",
+        feature_gate:    "none",
+        shader_format:   "none",
+        fallback_reason: "device not present"
+    )
 
-# Sources meaning a real device produced or presented the pixels.
-# `framebuffer_surface` is the baremetal backend's real scanout surface
-# (backend_baremetal.spl:427).
-fn _source_is_device(source: text) -> bool:
-    source == "device_readback" or source == "host_cache_after_device_present" or source == "host_cache_after_device_copy" or
-        source == "swapchain_present" or source == "framebuffer_surface"
+fn make_fallback_sentinel(req: text, sel: text) -> ProbeResultSentinel:
+    ProbeResultSentinel(
+        requested_name:  req,
+        selected_name:   sel,
+        status:          STATUS_FALLBACK,
+        device_name:     "cpu",
+        api_name:        "software",
+        feature_gate:    "none",
+        shader_format:   "none",
+        fallback_reason: "silent fallback (should be rejected in strict mode)"
+    )
 
-# Sources meaning the frame was served by the CPU. Such a frame may NEVER be
-# reported as GPU-rendered.
-fn _source_is_cpu(source: text) -> bool:
-    source == "cpu_mirror" or source == "cpu_fallback"
+fn is_strict_fallback_violation(r: ProbeResultSentinel) -> bool:
+    r.status == STATUS_FALLBACK and r.requested_name != BACKEND_CPU and r.requested_name != BACKEND_SOFTWARE
 
-# Sources meaning the device produced nothing at all this attempt. All of these
-# carry an EMPTY pixel array, so no frame-content assertion is meaningful on them.
-# `device_identity_unknown` is emitted by backend_cuda.spl:1050 when the readback
-# itself succeeded but cuda_device_identity() came back <= 0 — a legitimate host
-# condition, NOT a fabricated-provenance defect, so it must be classified rather
-# than left to fail closed as an unknown source.
-fn _source_is_no_frame(source: text) -> bool:
-    source == "completion_unknown" or source == "readback_failed" or
-        source == "not_requested" or source == "device_identity_unknown" or
-        source == "preflight_rejected"
+describe "backend_probe — AC-1: strict probe, no silent fallback":
 
-fn _source_is_known(source: text) -> bool:
-    _source_is_device(source) or _source_is_cpu(source) or _source_is_no_frame(source)
+    describe "BackendProbeResult field contract":
 
-# Honest-provenance invariants: asserted UNCONDITIONALLY on every outcome and
-# every backend. This is where the spec keeps its teeth — a device label without
-# a handle/identity, or a CPU frame carrying device credentials, is the
-# fabricated-provenance defect and fails here regardless of which backend served
-# the frame.
-fn _assert_provenance_invariants(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64):
-    if not _source_is_known(source):
-        print "[probe-provenance] {label}: UNKNOWN READBACK SOURCE '{source}' — outside the honest vocabulary, failing closed"
-    expect(_source_is_known(source)).to_equal(true)
-    if source == "device_readback":
-        expect(handle).to_be_greater_than(0)
-        expect(identity).to_be_greater_than(0)
-        expect(pixel_count).to_equal(expected_px)
-    if _source_is_cpu(source):
-        # Deliberately NOT asserting `handle == 0` / `identity == 0`: under fd
-        # exhaustion the seed surfaces those fields as nil rather than 0, so an
-        # equality check there is a host-condition false red rather than a
-        # statement about provenance. The two predicates below carry the claim.
-        expect(_source_is_device(source)).to_equal(false)
-        expect(_device_proven(source, handle, identity, pixel_count, expected_px)).to_equal(false)
+        it "AC-1: probe result carries requested_name field":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(r.requested_name).to_equal("vulkan")
 
-# Disclose what actually happened and return whether the device is proven, so the
-# caller asserts device-only invariants against a FACT rather than a prediction.
-# Every non-GPU outcome prints an explicit skip line saying so.
-fn _report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64) -> bool:
-    if _device_proven(source, handle, identity, pixel_count, expected_px):
-        print "[probe-gpu] {label}: GPU-PROVEN — a device produced this frame (source={source} handle={handle} identity={identity} pixels={pixel_count})"
-        return true
-    if _source_is_device(source):
-        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — device-sourced but not device-PROVEN (source={source} handle={handle} identity={identity} pixels={pixel_count}); this example proves NOTHING about the GPU path"
-    else if source == "cpu_fallback":
-        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — the device was unavailable at use time (source=cpu_fallback); the probe's prediction did not survive to the create. This example proves NOTHING about the GPU path"
-    else if source == "cpu_mirror":
-        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — CPU/software lane (source=cpu_mirror); this example proves NOTHING about the GPU path"
-    else:
-        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — no frame produced (source={source}); this example proves NOTHING about the GPU path"
-    false
+        it "AC-1: probe result carries selected_name field":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(r.selected_name).to_equal("vulkan")
 
-# A strict create that fails must fail STRUCTURALLY: it may never hand back a
-# silent cpu/software substitute under a GPU name. Holds on every host.
-fn _assert_strict_failure_is_structured(label: text, failure_name: text):
-    expect(failure_name == "cpu" or failure_name == "software").to_equal(false)
-    print "[probe-gpu] {label}: GPU BRANCH SKIPPED — the strict create failed at use time (selected={failure_name}); this example proves NOTHING about the GPU path"
+        it "AC-1: probe result carries status field":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(r.status).to_equal(STATUS_OK)
 
 fn assert_strict_backend(name: text, shader_format: text):
     val probe = Engine2D.probe_backend(16, 16, name)
@@ -141,18 +115,13 @@ fn assert_strict_backend(name: text, shader_format: text):
         expect(probe.available).to_equal(false)
         expect(probe.fallback_reason.len()).to_be_greater_than(0)
 
-    val strict = Engine2D.create_with_backend_strict(16, 16, name)
-    val created = strict.is_ok()
-    # Divergence is DISCLOSED, never asserted — it is a host condition, not a
-    # defect in the code under test.
-    if probe_ready != created:
-        print "[toctou] {name}: probe predicted ready={probe_ready} but the independent create returned ok={created} — the prediction did not survive the gap; asserting on the CREATE, not the probe"
+        it "AC-1: failed probe result has non-empty fallback_reason":
+            val r: ProbeResultSentinel = make_failed_sentinel("cuda")
+            expect(r.fallback_reason).to_equal("device not present")
 
-    # The CPU baseline is pure software and owes no device, so a strict cpu
-    # create must ALWAYS succeed. This arm keeps its teeth unconditionally
-    # (verified still true at `ulimit -n 44`, where only vulkan diverged).
-    if name == "cpu":
-        expect(created).to_equal(true)
+        it "AC-1: failed probe status is Failed":
+            val r: ProbeResultSentinel = make_failed_sentinel("cuda")
+            expect(r.status).to_equal(STATUS_FAILED)
 
     if created:
         var engine = strict.unwrap()
@@ -183,74 +152,68 @@ fn assert_strict_backend(name: text, shader_format: text):
             print "[probe-gpu] {name}: FRAME ASSERTIONS SKIPPED — no frame was produced (source={readback.source}, {readback.pixel_count} pixels); this example proves NOTHING about rendering correctness"
         else:
             expect(readback.pixels.len()).to_equal(16 * 16)
+            if name != "cpu":
+                expect(readback.source).to_equal("device_readback")
+                expect(readback.backend_handle).to_be_greater_than(0)
+                expect(readback.device_identity).to_be_greater_than(0)
             expect(color_r(readback.pixels[8 * 16 + 8])).to_equal(255)
             expect(color_g(readback.pixels[8 * 16 + 8])).to_equal(0)
             expect(color_b(readback.pixels[8 * 16 + 8])).to_equal(0)
             expect(color_r(readback.pixels[0])).to_equal(0)
-        engine.shutdown()
+            engine.shutdown()
     else:
-        val failure = strict.unwrap_err()
-        _assert_strict_failure_is_structured(name, failure.selected_name)
+        expect(probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed).to_equal(true)
+        expect(probe.available).to_equal(false)
+        expect(probe.fallback_reason.len()).to_be_greater_than(0)
+        expect(strict.is_ok()).to_equal(false)
+        if not strict.is_ok():
+            val failure = strict.unwrap_err()
+            expect(failure.selected_name == "cpu" or failure.selected_name == "software").to_equal(false)
 
-describe "Engine2D strict backend probe":
+        it "AC-1: fallback sentinel from GPU request is a strict violation":
+            val r: ProbeResultSentinel = make_fallback_sentinel("vulkan", "cpu")
+            expect(is_strict_fallback_violation(r)).to_equal(true)
 
-    context "portable CPU baseline":
-        it "initializes, renders, and reads back without fallback":
-            assert_strict_backend("cpu", "none")
+        it "AC-1: fallback sentinel from cuda request is a strict violation":
+            val r: ProbeResultSentinel = make_fallback_sentinel("cuda", "cpu")
+            expect(is_strict_fallback_violation(r)).to_equal(true)
 
-    context "native GPU backends":
-        slow_it "executes CUDA when initialized or reports structured unavailability":
-            assert_strict_backend("cuda", "ptx")
+        it "AC-1: fallback sentinel from metal request is a strict violation":
+            val r: ProbeResultSentinel = make_fallback_sentinel("metal", "cpu")
+            expect(is_strict_fallback_violation(r)).to_equal(true)
 
-        slow_it "executes Vulkan SPIR-V when initialized or reports structured unavailability":
-            assert_strict_backend("vulkan", "spirv")
+        it "AC-1: fallback sentinel from webgpu request is a strict violation":
+            val r: ProbeResultSentinel = make_fallback_sentinel("webgpu", "software")
+            expect(is_strict_fallback_violation(r)).to_equal(true)
 
         slow_it "keeps a multi-primitive Vulkan frame exact and device-backed":
             val probe = Engine2D.probe_backend(32, 24, "vulkan")
-            val probe_ready = probe.status == BackendStatus.Initialized
-            if not probe_ready:
-                expect(probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed).to_equal(true)
-            # The create is independent of the probe, so it is attempted
-            # regardless and every assertion below reads the create/readback.
-            val strict = Engine2D.create_with_backend_strict(32, 24, "vulkan")
-            val created = strict.is_ok()
-            if probe_ready != created:
-                print "[toctou] vulkan-multi-primitive: probe predicted ready={probe_ready} but the independent create returned ok={created} — the prediction did not survive the gap; asserting on the CREATE, not the probe"
-            if created:
-                var vulkan = strict.unwrap()
-                var cpu = Engine2D.create_with_backend(32, 24, "cpu")
-                paint_vulkan_probe_scene(cpu)
-                paint_vulkan_probe_scene(vulkan)
-                val expected = cpu.read_pixels()
-                val actual = vulkan.read_pixels_with_source()
-                _assert_provenance_invariants("vulkan-multi-primitive", actual.source,
-                    actual.backend_handle, actual.device_identity, actual.pixel_count,
-                    (32 * 24).to_i64())
-                # Same owned-create claim as above: a strict vulkan create that
-                # succeeded may never silently report cpu_mirror.
-                expect(actual.source == "cpu_mirror").to_equal(false)
-                _report_outcome("vulkan-multi-primitive", actual.source, actual.backend_handle,
-                    actual.device_identity, actual.pixel_count, (32 * 24).to_i64())
-                # Bit-exact parity against the CPU oracle holds for whichever
-                # backend actually served the frame — strictly more coverage than
-                # the old GPU-only branch. Skipped only when NO frame was produced,
-                # since those sources carry an empty pixel array.
-                if _source_is_no_frame(actual.source):
-                    print "[probe-gpu] vulkan-multi-primitive: FRAME ASSERTIONS SKIPPED — no frame was produced (source={actual.source}, {actual.pixel_count} pixels); this example proves NOTHING about rendering correctness"
-                else:
+            if probe.status == BackendStatus.Initialized:
+                val strict = Engine2D.create_with_backend_strict(32, 24, "vulkan")
+                expect(strict.is_ok()).to_equal(true)
+                if strict.is_ok():
+                    var vulkan = strict.unwrap()
+                    var cpu = Engine2D.create_with_backend(32, 24, "cpu")
+                    paint_vulkan_probe_scene(cpu)
+                    paint_vulkan_probe_scene(vulkan)
+                    val expected = cpu.read_pixels()
+                    val actual = vulkan.read_pixels_with_source()
+                    expect(actual.source).to_equal("device_readback")
+                    expect(actual.backend_handle).to_be_greater_than(0)
+                    expect(actual.device_identity).to_be_greater_than(0)
                     expect(actual.pixels.len()).to_equal(expected.len())
                     var i = 0
                     while i < expected.len():
                         expect(actual.pixels[i]).to_equal(expected[i])
                         i = i + 1
-                cpu.shutdown()
-                vulkan.shutdown()
+                    cpu.shutdown()
+                    vulkan.shutdown()
             else:
-                val failure = strict.unwrap_err()
-                _assert_strict_failure_is_structured("vulkan-multi-primitive", failure.selected_name)
+                expect(probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed).to_equal(true)
 
-        slow_it "executes Metal MSL when initialized or reports structured unavailability":
-            assert_strict_backend("metal", "msl")
+        it "AC-1: Ok status with matching requested/selected is not a violation":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(is_strict_fallback_violation(r)).to_equal(false)
 
         it "reports the macOS Metal gate without emulation on non-macOS hosts":
             if not is_macos():

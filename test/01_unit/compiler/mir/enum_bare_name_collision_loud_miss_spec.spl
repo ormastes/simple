@@ -1,3 +1,9 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExpr, HirExprKind}
@@ -5,6 +11,7 @@ use compiler.hir.hir_types.{SymbolId, SymbolTable}
 use compiler.mir.mir_data.{MirSignature, MirType}
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.core.interpreter.eval_tables.{enum_table_register, enum_table_lookup, enum_table_reset}
+
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -58,7 +65,47 @@ fn make_enum(name: text, runtime_name: text, variant_names: [text]) -> HirEnum:
         type_bindings: {})
 
 describe "enum bare-name collision produces a loud miss":
+    it "derives a qualified key through the scalar symbol readers":
+        var symbols = SymbolTable.new()
+        symbols.register_preserved_symbol(HirSymbol(
+            id: SymbolId(id: 77),
+            name: "Colour",
+            kind: SymbolKind.Enum,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            visibility: Visibility.Public,
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("src/ui/palette.spl")))
+        var lowering = MirLowering.new(symbols)
+
+        expect(lowering.enum_qualified_key(SymbolId(id: 77))).to_equal("ui.palette.Colour")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "fails loudly instead of unwrapping a missing enum symbol":
+        var lowering = MirLowering.new(SymbolTable.new())
+
+        val key = lowering.enum_qualified_key(SymbolId(id: 424242))
+
+        expect(key).to_equal("")
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[0].message).to_contain("missing or invalid symbol id 424242")
+
+    it "fails loudly for an invalid negative enum symbol id":
+        var lowering = MirLowering.new(SymbolTable.new())
+
+        val key = lowering.enum_qualified_key(SymbolId(id: -1))
+
+        expect(key).to_equal("")
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[0].message).to_contain("missing or invalid symbol id -1")
+
     it "records a divergent same-bare-name registration and names both sides":
+        # @req REQ-SSPEC-COMPILER
+        step("records a divergent same-bare-name registration and names both sides")
         var lowering = MirLowering.new(SymbolTable.new())
         lowering.register_enum_variants(make_enum(
             "Style", "web.layout.Style", ["Bold", "Italic"]))
@@ -73,6 +120,8 @@ describe "enum bare-name collision produces a loud miss":
         expect(recorded).to_contain("term.render.Style")
 
     it "stays quiet when the same enum is re-registered identically":
+        # @req REQ-SSPEC-COMPILER
+        step("stays quiet when the same enum is re-registered identically")
         var lowering = MirLowering.new(SymbolTable.new())
         lowering.register_enum_variants(make_enum(
             "Colour", "ui.Colour", ["Red", "Green"]))
@@ -82,6 +131,8 @@ describe "enum bare-name collision produces a loud miss":
         expect(lowering.enum_bare_name_collisions.has("Colour")).to_equal(false)
 
     it "reports a variant that survived eviction as a -1 miss":
+        # @req REQ-SSPEC-COMPILER
+        step("reports a variant that survived eviction as a -1 miss")
         var lowering = MirLowering.new(SymbolTable.new())
         lowering.register_enum_variants(make_enum(
             "Style", "web.layout.Style", ["Bold", "Italic"]))
@@ -94,6 +145,8 @@ describe "enum bare-name collision produces a loud miss":
         expect(lowering.enum_variant_discriminant("Style", "Plain")).to_equal(0)
 
     it "names the colliding owner in the miss detail":
+        # @req REQ-SSPEC-COMPILER
+        step("names the colliding owner in the miss detail")
         var lowering = MirLowering.new(SymbolTable.new())
         lowering.register_enum_variants(make_enum(
             "Style", "web.layout.Style", ["Bold", "Italic"]))
@@ -106,6 +159,8 @@ describe "enum bare-name collision produces a loud miss":
         expect(detail).to_contain("Bold, Italic")
 
     it "names any other registered enum that does declare the variant":
+        # @req REQ-SSPEC-COMPILER
+        step("names any other registered enum that does declare the variant")
         var lowering = MirLowering.new(SymbolTable.new())
         lowering.register_enum_variants(make_enum(
             "Shape", "geom.Shape", ["Circle", "Square"]))
@@ -118,6 +173,8 @@ describe "enum bare-name collision produces a loud miss":
         expect(detail).to_contain("Shape")
 
     it "falls back to listing the registered variants when nothing collides":
+        # @req REQ-SSPEC-COMPILER
+        step("falls back to listing the registered variants when nothing collides")
         var lowering = MirLowering.new(SymbolTable.new())
         lowering.register_enum_variants(make_enum(
             "Shape", "geom.Shape", ["Circle", "Square"]))
@@ -127,6 +184,8 @@ describe "enum bare-name collision produces a loud miss":
 
 describe "the MIR construction sites emit the miss instead of swallowing it":
     it "records a loud error when a construction resolves to discriminant -1":
+        # @req REQ-SSPEC-COMPILER
+        step("records a loud error when a construction resolves to discriminant -1")
         var lowering = MirLowering.new(SymbolTable.new())
         val web_style = make_enum("Style", "web.layout.Style", ["Bold", "Italic"])
         val term_style = make_enum("Style", "term.render.Style", ["Plain", "Reverse"])
@@ -154,6 +213,8 @@ describe "the MIR construction sites emit the miss instead of swallowing it":
         expect(message).to_contain("MORE THAN ONE")
 
     it "stays quiet when the variant resolves normally":
+        # @req REQ-SSPEC-COMPILER
+        step("stays quiet when the variant resolves normally")
         var lowering = MirLowering.new(SymbolTable.new())
         val shape = make_enum("Shape", "geom.Shape", ["Circle", "Square"])
         lowering.register_enum_variants(shape)
@@ -173,6 +234,8 @@ describe "interpreter enum table reports the same collision":
     # collision FIRST-wins -- the opposite of MIR's last-wins. Both engines are
     # therefore silently wrong in different directions on the same source.
     it "drops the second divergent declaration (first-wins) rather than merging":
+        # @req REQ-SSPEC-COMPILER
+        step("drops the second divergent declaration (first-wins) rather than merging")
         enum_table_reset()
         enum_table_register("Style", ["Bold", "Italic"])
         enum_table_register("Style", ["Plain", "Reverse"])
@@ -183,6 +246,8 @@ describe "interpreter enum table reports the same collision":
         expect(enum_table_lookup("Style")).to_equal("Bold,Italic")
 
     it "keeps an identical re-registration idempotent":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps an identical re-registration idempotent")
         enum_table_reset()
         enum_table_register("Colour", ["Red", "Green"])
         enum_table_register("Colour", ["Red", "Green"])
@@ -190,6 +255,8 @@ describe "interpreter enum table reports the same collision":
         expect(enum_table_lookup("Colour")).to_equal("Red,Green")
 
     it "warns loudly on the divergent drop instead of returning silently":
+        # @req REQ-SSPEC-COMPILER
+        step("warns loudly on the divergent drop instead of returning silently")
         # The drop itself is unobservable from outside the table (that is the
         # whole defect), so pin the warning at the source. The registration path
         # must consult the collision reporter BEFORE its early return.

@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """
 # Stage3 Real Entry Body Regression
 
@@ -6,9 +10,12 @@ compile and execute a nontrivial positional entry.  A link-valid ret-0 stub
 cannot satisfy the runtime marker assertion.
 """
 
+use std.spec.step
+
 use std.spec.*
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -36,8 +43,19 @@ fn probe_source() -> text:
         "    0\n"
     ].join("")
 
+fn canonical_bootstrap_version() -> text:
+    val authority = rt_file_read_text("release/version.sdn") ?? ""
+    for raw_line in authority.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with("semver:"):
+            return line.substring("semver:".len(), line.len()).trim()
+    ""
+
 describe "pure-Simple Stage3 real entry body":
+    # @manual scenario evidence
     it "builds and executes a nontrivial bare positional entry":
+        # @req REQ-SSPEC-SYSTEM
+        step("builds and executes a nontrivial bare positional entry")
         val stage3 = rt_env_get("SIMPLE_STAGE3_BIN") ?? ""
 
         step("Require an explicit admitted pure-Simple Stage3 binary")
@@ -46,10 +64,12 @@ describe "pure-Simple Stage3 real entry body":
         expect(stage3.contains("src/compiler_rust")).to_equal(false)
 
         step("Verify the selected compiler identifies as the bootstrap compiler")
+        val expected_version = canonical_bootstrap_version()
+        expect(expected_version.len()).to_be_greater_than(0)
         val (version_out, version_err, version_code) = rt_process_run(stage3, ["--version"])
         expect(version_code).to_equal(0)
         expect(version_err).to_equal("")
-        expect(version_out).to_contain("simple-bootstrap 1.0.0-RC")
+        expect(version_out.trim()).to_equal("simple-bootstrap " + expected_version)
 
         step("Write a helper-calling entry whose observable marker requires real body execution")
         val (mkdir_out, mkdir_code) = shell("rm -rf '" + BUILD_DIR + "' && mkdir -p '" + BUILD_DIR + "'")
@@ -57,10 +77,10 @@ describe "pure-Simple Stage3 real entry body":
         expect(mkdir_out).to_equal("")
         expect(rt_file_write_text(SOURCE_PATH, probe_source())).to_equal(true)
 
-        step("Build through Stage3 using the canonical bare positional entry form")
+        step("Build through Stage3 in its admitted bootstrap mode using the canonical bare positional entry form")
         val (build_out, build_err, build_code) = rt_process_run("/usr/bin/env", [
-            "-u", "SIMPLE_BOOTSTRAP",
             "-u", "SIMPLE_RUNTIME_PATH",
+            "SIMPLE_BOOTSTRAP=1",
             "SIMPLE_NO_STUB_FALLBACK=1",
             "SIMPLE_LIB=src",
             stage3,

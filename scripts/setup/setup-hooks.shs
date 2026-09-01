@@ -1,0 +1,43 @@
+#!/bin/sh
+# General Unix setup hook entrypoint. The dedicated must-check installer owns
+# all pre-push classification and migration, including linked worktrees.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+hooks_dir=$(git -C "$repo_root" rev-parse --git-path hooks 2>/dev/null) || {
+    echo "setup-hooks: ERROR: not a Git worktree" >&2
+    exit 2
+}
+case "$hooks_dir" in /*) ;; *) hooks_dir="$repo_root/$hooks_dir" ;; esac
+mkdir -p "$hooks_dir"
+
+# Pre-commit remains deferred, but preserve an unrelated local hook without
+# letting a second setup overwrite an already-preserved payload.
+pre_commit="$hooks_dir/pre-commit"
+if [ -f "$pre_commit" ] && [ ! -L "$pre_commit" ]; then
+    [ ! -e "$pre_commit.local" ] || {
+        echo "setup-hooks: ERROR: refusing to overwrite $pre_commit.local" >&2
+        exit 1
+    }
+    mv "$pre_commit" "$pre_commit.local"
+    echo "setup-hooks: preserved pre-existing pre-commit as pre-commit.local"
+fi
+
+installer="$repo_root/scripts/setup/install-must-check-hooks.shs"
+[ -f "$installer" ] || {
+    echo "setup-hooks: ERROR: mandatory installer is missing: $installer" >&2
+    exit 1
+}
+sh "$installer" --install
+
+if [ ! -e "$pre_commit" ]; then
+    echo "setup-hooks: note: $pre_commit NOT installed (blocked on the"
+    echo "setup-hooks:       ui-backend-isolation ratchet; see the bug doc)"
+fi
+
+hook_check="$repo_root/scripts/check/check-hook-installation.shs"
+[ -f "$hook_check" ] || {
+    echo "setup-hooks: ERROR: mandatory verifier is missing: $hook_check" >&2
+    exit 1
+}
+sh "$hook_check"

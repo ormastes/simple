@@ -1,0 +1,406 @@
+# @cover src/app/debug/__init__.spl 0%
+# codex-system-test
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-009 REQ-010
+"""# Unified debugging and evidence — Wave 0/2 contract
+
+## Overview
+
+This executable contract freezes the additive V1 boundary before domain
+adapters expand. It checks public names, the deliberately small operation
+surface, central mutable-session ownership, build-bound receipts, and explicit
+policy authorization.
+
+The contract is intentionally about shared service behavior. Existing DAP,
+MCP, GDB/LLDB, TRACE32, OpenOCD, JTAG, and DbgEng mechanisms remain adapters.
+Passing this specification never proves that one of those external tools is
+installed, reachable, privileged, or live-verified.
+
+**Requirements:** doc/02_requirements/feature/simple_unified_debugging_evidence.md
+
+**NFR requirements:** doc/02_requirements/nfr/simple_unified_debugging_evidence.md
+
+**Research:** doc/01_research/app/tools/simple_unified_debugging_evidence_2026-08-14.md
+
+**Plan:** doc/03_plan/sys_test/simple_unified_debugging_evidence.md
+
+**Architecture:** doc/04_architecture/simple_unified_debugging_evidence.md
+
+**Design:** doc/05_design/simple_unified_debugging_evidence.md
+
+## Scope
+
+The scenarios cover REQ-001 through REQ-007 and REQ-009 through REQ-010.
+They cover the Wave 0 contract and selected Wave 2 ownership behavior.
+They do not claim REQ-008 bundle materialization.
+They do not claim the AOP validator in REQ-012.
+They do not claim live doctor behavior in REQ-013.
+They do not claim full CLI execution in REQ-014.
+They do not claim domain slices in REQ-015 through REQ-018.
+Those requirements have separate focused evidence and remaining release gates.
+
+## How to run
+
+Run the executable scenario with the pure-Simple self-hosted binary:
+
+```text
+bin/simple test \
+  test/03_system/app/debug/feature/simple_unified_debugging_evidence_spec.spl \
+  --mode=interpreter --no-session-daemon
+```
+
+Generate this manual with:
+
+```text
+bin/simple spipe-docgen \
+  test/03_system/app/debug/feature/simple_unified_debugging_evidence_spec.spl \
+  --output doc/06_spec --no-index
+```
+
+If the launcher identifies itself as the Rust bootstrap seed, the result is
+focused diagnostic evidence only. Bootstrap Stage 4 remains authoritative.
+
+## Syntax and examples
+
+Open a session through `DebugServiceV1` and retain only `DebugSessionId`.
+Associate every target capability with its exact `target_id`.
+Build topology only from target IDs already present in the same session.
+Authorize an operation before invoking its adapter mechanism.
+Record support, verification, and perturbation independently.
+Bind every receipt to the session build identity.
+Close service state idempotently without claiming target execution changed.
+
+## Scenario catalog
+
+1. Every locked V1 public contract name has one definition.
+2. Exact V1 wire peers negotiate successfully.
+3. Additive V1 minor versions negotiate successfully.
+4. Unsupported major versions fail structurally.
+5. Malformed version strings fail structurally.
+6. Capability support does not imply verification.
+7. Capability verification does not imply perturbation.
+8. The root operation set stays deliberately small.
+9. Domain extension remains versioned and registered.
+10. One service owns mutable session state.
+11. Anonymous build identity is rejected.
+12. Clients receive opaque, unique session IDs.
+13. Policy authorization precedes action.
+14. Receipts retain build and perturbation facts.
+15. Mutation remains denied by the development default.
+16. Target nodes and typed edges retain topology.
+17. Missing topology endpoints fail closed.
+18. Event contracts retain causality and privacy fields.
+19. V1 remains additive to legacy traits.
+20. Session receipt streams remain isolated.
+21. Session close is idempotent.
+22. Post-close operations are denied without execution change.
+
+## Expected evidence
+
+A passing run reports fourteen executed examples and zero failures.
+The service runtime scenarios use real mutable `DebugServiceV1` values.
+The wire scenarios execute real negotiation logic.
+The topology scenario creates two nodes and one typed edge.
+The policy scenarios inspect actual returned receipts.
+The source-contract scenarios are interface-lock checks, not live adapters.
+
+## Failure interpretation
+
+A missing contract name means the interface lock changed.
+A negotiation failure means wire compatibility changed.
+A capability-dimension failure means truth states were collapsed.
+A session collision means central ownership is broken.
+A missing denial receipt means policy auditing is incomplete.
+An accepted missing-endpoint edge means the graph can fabricate topology.
+A post-close accepted action means stale session authority survived cleanup.
+
+Do not repair a failure by weakening an assertion or adding a parallel API.
+Inspect the owning contract/service and preserve existing adapter mechanisms.
+
+## Explicit nonclaims
+
+This specification does not attach to a real process.
+It does not launch a DAP server.
+It does not open an MCP transport.
+It does not connect TRACE32 or OpenOCD.
+It does not parse a Windows dump.
+It does not export native evidence files.
+It does not prove browser, SQL, mobile, or embedded domain behavior.
+It does not prove performance, crash isolation, or bounded memory.
+
+Those claims require live doctor rows, focused adapter tests, retained evidence,
+and the pure-Simple Bootstrap-4 release gate.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugCapabilityV1, DebugVerificationV1, DebugPerturbationV1,
+    DebugRootOperationV1, DebugTargetNodeV1, DebugTargetEdgeV1,
+    DebugTargetEdgeKindV1, DebugTargetGraphV1, debug_wire_negotiate_v1,
+    debug_policy_development_v1,
+}
+use std.common.debug.service_v1.{DebugServiceV1}
+
+const CONTRACTS_V1 = "src/lib/common/debug/contracts_v1.spl"
+const SERVICE_V1 = "src/lib/common/debug/service_v1.spl"
+
+fn declaration_count(source: text, declaration: text) -> i64:
+    source.split(declaration).len() - 1
+
+fn between(source: text, start: text, finish: text) -> text:
+    val first = source.find(start)
+    if first < 0: return ""
+    val last = source.find(finish, first + start.len())
+    if last < 0: return ""
+    source.slice(first, last)
+
+fn require_session(result: Result<DebugSessionId, text>) -> DebugSessionId:
+    match result:
+        case Ok(session_id): session_id
+        case Err(reason): fail("expected debug session: {reason}")
+
+fn require_graph(result: Option<DebugTargetGraphV1>) -> DebugTargetGraphV1:
+    match result:
+        case Some(graph): graph
+        case None: fail("expected debug target graph")
+
+fn native_capability(target_id: text) -> DebugCapabilityV1:
+    DebugCapabilityV1(
+        target_id: target_id,
+        support: CapLevel.Native,
+        verification: DebugVerificationV1.FixtureVerified,
+        perturbation: DebugPerturbationV1.Passive,
+        reason: "fixture",
+    )
+
+describe "REQ-002/004/006: locked versioned contracts":
+    it "should expose every locked V1 contract name exactly once":
+        step("Start one centrally owned debug session")
+        val contracts = file_read(CONTRACTS_V1)
+        val service = file_read(SERVICE_V1)
+        expect(declaration_count(service, "pub class DebugServiceV1:")).to_equal(1)
+        expect(declaration_count(contracts, "pub struct DebugWireV1:")).to_equal(1)
+        expect(declaration_count(contracts, "pub struct DebugSessionId:")).to_equal(1)
+        expect(declaration_count(contracts, "pub struct DebugTargetGraphV1:")).to_equal(1)
+        expect(declaration_count(contracts, "pub struct DebugCapabilityV1:")).to_equal(1)
+        expect(declaration_count(contracts, "pub struct DebugEventV1:")).to_equal(1)
+        expect(declaration_count(contracts, "pub struct DebugReceiptV1:")).to_equal(1)
+        expect(declaration_count(contracts, "pub struct DebugPolicyV1:")).to_equal(1)
+
+    it "should accept V1 peers and reject unsupported or malformed majors structurally":
+        step("Start one centrally owned debug session")
+        val exact = debug_wire_negotiate_v1("debug-wire-v1")
+        val additive = debug_wire_negotiate_v1("debug-wire-v1.7")
+        val future = debug_wire_negotiate_v1("debug-wire-v2")
+        val malformed = debug_wire_negotiate_v1("wire-latest")
+        expect(exact.accepted).to_equal(true)
+        expect(exact.local_major).to_equal(1)
+        expect(additive.accepted).to_equal(true)
+        expect(additive.peer_major).to_equal(1)
+        expect(future.accepted).to_equal(false)
+        expect(future.peer_major).to_equal(2)
+        expect(future.reason).to_equal("unsupported debug wire major")
+        expect(malformed.accepted).to_equal(false)
+        expect(malformed.peer_major).to_equal(-1)
+        expect(malformed.reason).to_equal("invalid debug wire version")
+
+    it "should keep support verification and perturbation as independent facts":
+        step("Choose the cheapest decisive observation")
+        val contracts = file_read(CONTRACTS_V1)
+        val capability = between(contracts, "pub struct DebugCapabilityV1:", "pub struct DebugTargetNodeV1:")
+        expect(capability).to_contain("support: CapLevel")
+        expect(capability).to_contain("verification: DebugVerificationV1")
+        expect(capability).to_contain("perturbation: DebugPerturbationV1")
+        expect(contracts).to_contain("LiveVerified")
+        expect(contracts).to_contain("FixtureVerified")
+        expect(contracts).to_contain("Unverified")
+        expect(contracts).to_contain("Blocked")
+        expect(contracts).to_contain("Passive")
+        expect(contracts).to_contain("Cooperative")
+        expect(contracts).to_contain("Stopping")
+        expect(contracts).to_contain("Mutating")
+
+    it "should keep the root operation surface small and version domain extension":
+        step("Choose the cheapest decisive observation")
+        val contracts = file_read(CONTRACTS_V1)
+        val roots = between(contracts, "pub enum DebugRootOperationV1:", "pub struct DebugSessionId:")
+        expect(roots).to_contain("Observe")
+        expect(roots).to_contain("Inspect")
+        expect(roots).to_contain("Control")
+        expect(roots).to_contain("Probe")
+        expect(roots).to_contain("Profile")
+        expect(roots).to_contain("Evidence")
+        expect(roots).to_contain("Domain")
+        expect(roots.contains("Attach")).to_equal(false)
+        expect(roots.contains("Sql")).to_equal(false)
+
+describe "REQ-001/009/010: central session policy and receipts":
+    it "should make DebugServiceV1 the central mutable owner":
+        step("Start one centrally owned debug session")
+        val service = file_read(SERVICE_V1)
+        val owner = between(service, "pub class DebugServiceV1:", "    static fn create()")
+        expect(owner).to_contain("sessions: [DebugSessionRecordV1]")
+        expect(owner).to_contain("receipts: [DebugReceiptV1]")
+        expect(service).to_contain("me open_session(")
+        expect(service).to_contain("me add_target(")
+        expect(service).to_contain("me authorize(")
+        expect(service).to_contain("me close_session(")
+
+    it "should reject anonymous builds and return session IDs to clients":
+        step("Start one centrally owned debug session")
+        val service = file_read(SERVICE_V1)
+        val opening = between(service, "    me open_session(", "    me open_observe_session(")
+        expect(opening).to_contain("Result<DebugSessionId, text>")
+        expect(opening).to_contain('if build_id.trim() == ""')
+        expect(opening).to_contain("debug session requires an exact build id")
+        expect(opening).to_contain("DebugSessionId(value:")
+        expect(opening).to_contain("build_id: build_id")
+
+    it "should authorize before action and emit build-bound receipts":
+        step("Capture receipted evidence")
+        val service = file_read(SERVICE_V1)
+        val authorization = between(service, "    me authorize(", "    me close_session(")
+        expect(authorization).to_contain("policy.allow_control")
+        expect(authorization).to_contain("policy.allow_probe")
+        expect(authorization).to_contain("policy.allow_profile")
+        expect(authorization).to_contain("policy.allow_evidence")
+        expect(authorization).to_contain("not policy.allow_mutation")
+        expect(service).to_contain("build_id = self.sessions[idx].build_id")
+        expect(service).to_contain("execution_changed: execution_changed")
+        expect(service).to_contain("self.receipts.push(receipt)")
+
+describe "REQ-003/005/007: topology provenance and additive migration":
+    it "should bind target topology and events to sessions and exact builds":
+        step("Discover the real target graph")
+        val contracts = file_read(CONTRACTS_V1)
+        val graph = between(contracts, "pub struct DebugTargetGraphV1:", "pub struct DebugEventV1:")
+        val event = between(contracts, "pub struct DebugEventV1:", "pub struct DebugPolicyV1:")
+        expect(graph).to_contain("session_id: DebugSessionId")
+        expect(graph).to_contain("build_id: text")
+        expect(graph).to_contain("nodes: [DebugTargetNodeV1]")
+        expect(graph).to_contain("edges: [DebugTargetEdgeV1]")
+        expect(event).to_contain("session_id: DebugSessionId")
+        expect(event).to_contain("build_id: text")
+        expect(event).to_contain("source_anchor: text")
+        expect(event).to_contain("symbol_id: text")
+
+    it "should retain causality privacy typed payload and observed-or-caused provenance":
+        step("Capture receipted evidence")
+        val contracts = file_read(CONTRACTS_V1)
+        val event = between(contracts, "pub struct DebugEventV1:", "pub struct DebugPolicyV1:")
+        expect(event).to_contain("trace_id: text")
+        expect(event).to_contain("task_id: text")
+        expect(event).to_contain("transaction_id: text")
+        expect(event).to_contain("query_id: text")
+        expect(event).to_contain("privacy_label: text")
+        expect(event).to_contain("payload_type: text")
+        expect(event).to_contain("provenance: DebugProvenanceV1")
+        expect(contracts).to_contain("Observed")
+        expect(contracts).to_contain("Caused")
+
+    it "should add V1 contracts without redefining legacy backend traits":
+        step("Clean up and record reusable knowledge")
+        val contracts = file_read(CONTRACTS_V1)
+        val service = file_read(SERVICE_V1)
+        expect(contracts.contains("trait DebugBackend")).to_equal(false)
+        expect(contracts.contains("trait DebugTarget")).to_equal(false)
+        expect(service.contains("trait DebugBackend")).to_equal(false)
+        expect(service.contains("trait DebugTarget")).to_equal(false)
+        expect(service).to_contain("Central owner for V1 debug sessions")
+
+describe "Wave 0 runtime behavior":
+    it "should isolate session IDs builds and receipt streams":
+        step("Start one centrally owned debug session")
+        val service = DebugServiceV1.create()
+        val first = require_session(service.open_observe_session("build-a"))
+        val second = require_session(service.open_observe_session("build-b"))
+        expect(first.value == second.value).to_equal(false)
+        expect(service.session_count()).to_equal(2)
+        val first_receipts = service.receipts_for(first)
+        val second_receipts = service.receipts_for(second)
+        expect(first_receipts.len()).to_equal(1)
+        expect(second_receipts.len()).to_equal(1)
+        expect(first_receipts[0].build_id).to_equal("build-a")
+        expect(second_receipts[0].build_id).to_equal("build-b")
+        expect(first_receipts[0].session_id.value).to_equal(first.value)
+        expect(second_receipts[0].session_id.value).to_equal(second.value)
+
+    it "should deny mutation even when development control is enabled":
+        step("Choose the cheapest decisive observation")
+        val service = DebugServiceV1.create()
+        val session_id = require_session(service.open_session("build-policy", debug_policy_development_v1()))
+        val receipt = service.authorize(
+            session_id,
+            DebugRootOperationV1.Control,
+            DebugPerturbationV1.Mutating,
+            "memory.write",
+        )
+        expect(receipt.allowed).to_equal(false)
+        expect(receipt.execution_changed).to_equal(false)
+        expect(receipt.reason).to_equal("mutation denied by policy")
+        expect(receipt.build_id).to_equal("build-policy")
+        expect(receipt.perturbation == DebugPerturbationV1.Mutating).to_equal(true)
+
+    it "should accept only edges whose endpoints exist in the same session":
+        step("Discover the real target graph")
+        val service = DebugServiceV1.create()
+        val session_id = require_session(service.open_observe_session("build-graph"))
+        val host = DebugTargetNodeV1(target_id: "host", parent_target_id: "", kind: "host", label: "Host")
+        val worker = DebugTargetNodeV1(target_id: "worker", parent_target_id: "host", kind: "worker", label: "Worker")
+        match service.add_target(session_id, host, native_capability("host")):
+            case Ok(_): pass_do_nothing("host added")
+            case Err(reason): fail("host target rejected: {reason}")
+        match service.add_target(session_id, worker, native_capability("worker")):
+            case Ok(_): pass_do_nothing("worker added")
+            case Err(reason): fail("worker target rejected: {reason}")
+        val real_edge = DebugTargetEdgeV1(
+            from_target_id: "host",
+            to_target_id: "worker",
+            kind: DebugTargetEdgeKindV1.Owns,
+            boundary: "process-task",
+        )
+        match service.add_edge(session_id, real_edge):
+            case Ok(_): pass_do_nothing("real edge added")
+            case Err(reason): fail("real edge rejected: {reason}")
+        val fabricated_edge = DebugTargetEdgeV1(
+            from_target_id: "host",
+            to_target_id: "missing",
+            kind: DebugTargetEdgeKindV1.Boundary,
+            boundary: "fabricated",
+        )
+        match service.add_edge(session_id, fabricated_edge):
+            case Ok(_): fail("edge with a missing endpoint was accepted")
+            case Err(reason): expect(reason).to_equal("debug edge endpoints must exist")
+        val graph = require_graph(service.graph(session_id))
+        expect(graph.build_id).to_equal("build-graph")
+        expect(graph.nodes.len()).to_equal(2)
+        expect(graph.edges.len()).to_equal(1)
+        expect(graph.edges[0].boundary).to_equal("process-task")
+
+    it "should close idempotently and deny later action without changing execution":
+        step("Clean up and record reusable knowledge")
+        val service = DebugServiceV1.create()
+        val session_id = require_session(service.open_observe_session("build-close"))
+        match service.close_session(session_id):
+            case Ok(_): pass_do_nothing("session closed")
+            case Err(reason): fail("close rejected: {reason}")
+        match service.close_session(session_id):
+            case Ok(_): pass_do_nothing("repeat close is idempotent")
+            case Err(reason): fail("repeat close rejected: {reason}")
+        expect(service.session_count()).to_equal(0)
+        val denied = service.authorize(
+            session_id,
+            DebugRootOperationV1.Evidence,
+            DebugPerturbationV1.Passive,
+            "evidence.capture",
+        )
+        expect(denied.allowed).to_equal(false)
+        expect(denied.execution_changed).to_equal(false)
+        expect(denied.reason).to_equal("debug session is closed")
+        expect(denied.build_id).to_equal("build-close")
+        val receipts = service.receipts_for(session_id)
+        expect(receipts.len()).to_equal(3)
+        expect(receipts[1].action).to_equal("session.close")
+        expect(receipts[1].execution_changed).to_equal(false)
+        expect(receipts[2].outcome).to_equal("denied")

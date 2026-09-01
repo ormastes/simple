@@ -1,16 +1,5 @@
 # loss{} and nograd{} Block Tests
 
-> Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the same supported math-expression subset as `m{}` blocks. Runtime autograd semantics are covered by `math_autograd_runtime_spec.spl`.
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 27 | 27 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# loss{} and nograd{} Block Tests
-
 Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the same supported math-expression subset as `m{}` blocks. Runtime autograd semantics are covered by `math_autograd_runtime_spec.spl`.
 
 ## At a Glance
@@ -22,7 +11,7 @@ Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the same s
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/feature/usage/loss_nograd_blocks_spec.spl` |
-| Updated | 2026-08-21 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -487,5 +476,51 @@ expect(pretty).to_contain("√")
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+## Overview
 
-</details>
+Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the
+same supported math-expression subset as `m{}` blocks. Runtime autograd
+semantics are covered by `math_autograd_runtime_spec.spl`.
+
+## Evidence
+
+| Category | Count |
+|----------|------:|
+| Artifacts | 2 |
+
+### Artifacts
+
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/result.json` |
+| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/summary.txt` |
+
+## Scenarios
+
+- evaluates addition
+- evaluates subtraction
+- evaluates multiplication
+- evaluates division
+- evaluates integer power
+- evaluates fractional power
+- evaluates frac
+- evaluates nested frac
+- reads outer variables
+- reads multiple outer variables
+- evaluates sqrt
+- evaluates exp
+- evaluates abs
+- evaluates addition
+- evaluates subtraction
+- evaluates multiplication
+- evaluates division
+- evaluates integer power
+- evaluates fractional power
+- evaluates frac
+- reads outer variables
+- evaluates sqrt
+- evaluates exp
+- renders LaTeX via render_latex_raw
+- renders Unicode via to_pretty
+- renders LaTeX via render_latex_raw
+- renders Unicode via to_pretty

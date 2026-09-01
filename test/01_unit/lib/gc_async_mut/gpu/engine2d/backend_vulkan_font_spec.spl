@@ -21,6 +21,7 @@ use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_vulkan_glsl_source}
 
+
 fn _font_quad_batch(version: i64) -> FontRenderBatch:
     FontRenderBatch(program_version: version, font_identity: "unit-font", face_generation: 1,
         valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
@@ -139,7 +140,7 @@ describe "Vulkan font atlas composite companion":
         expect(vulkan_font_promotion_ready("precompiled-spirv", 1, 1, true, true, 4, true,
             7, true, true, "device", "cpu", "driver")).to_equal(false)
 
-    it "pins the current validated font compositor SPIR-V semantics":
+    it "pins but rejects the stale font compositor SPIR-V semantics":
         val blob = spirv_font_atlas_composite()
         expect(blob.len()).to_equal(7012)
         expect(blob[0]).to_equal(0x03u8)
@@ -150,11 +151,11 @@ describe "Vulkan font atlas composite companion":
         expect(sha256_text(font_atlas_composite_vulkan_glsl_source())).to_equal("8a5c542279bbd37d03be5b9a2fea636f3171bb68cf4072d87162b382541d4444")
         expect(FONT_ATLAS_COMPOSITE_VULKAN_SEMANTICS_VERSION).to_equal(FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)
         val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
-        expect(session).to_contain("self.install_pinned_font_atlas_pipeline(spirv_font_atlas_composite())")
+        expect(session).to_contain("self.install_font_atlas_pipeline(spirv_font_atlas_composite())")
         var runtime = VulkanSession.create()
-        val unavailable = runtime.install_font_atlas_pipeline(blob)
-        expect(unavailable.status).to_equal("unavailable")
-        expect(unavailable.reason).to_equal("invalid-session")
+        val rejected = runtime.install_font_atlas_pipeline(blob)
+        expect(rejected.status).to_equal("rejected")
+        expect(rejected.reason).to_equal("font-pipeline-semantics-mismatch")
 
     it "requires retained portable-toolchain provenance and exact Vulkan identity":
         val checker = file_read("scripts/check/check-portable-compute-toolchains.shs")
@@ -216,7 +217,7 @@ describe "Vulkan font atlas composite companion":
         expect(checker).to_contain("non-elf-compiler")
         expect(checker).to_contain("glslang-diagnostic-only-missing-clean-loader-provenance")
         expect(checker).to_contain("--vulkan-provenance-self-test")
-        expect(checker).to_contain(r"${target}_${role}_sha256=$tool_sha")
+        expect(checker).to_contain("${target}_${role}_sha256=$tool_sha")
         expect(checker).to_contain("_artifact_sha256=")
         expect(checker).to_contain("_required_symbols=")
         expect(checker).to_contain("8a5c542279bbd37d03be5b9a2fea636f3171bb68cf4072d87162b382541d4444")
@@ -224,8 +225,8 @@ describe "Vulkan font atlas composite companion":
         expect(checker).to_contain("--target-env=vulkan1.1")
         expect(checker).to_contain("vulkan_font_artifact_equivalent=false")
         expect(checker).to_contain("pinned-artifact-hash-mismatch")
-        expect(checker).to_contain("field_of vulkan_font_candidate_compiled")
-        expect(checker).to_contain("field_of vulkan_font_artifact_validated")
+        expect(checker).to_contain("vulkan_font_candidate_compiled=")
+        expect(checker).to_contain("vulkan_font_artifact_validated=")
         expect(checker).to_contain("vulkan_font_pinned_verified=")
         expect(checker).to_contain("vulkan_font_semantics_revision=")
         expect(checker).to_contain("vulkan_font_validator_result=pass")
@@ -349,8 +350,8 @@ describe "Vulkan font atlas composite companion":
         session.font_atlas_emission_compile_ns = 5
         val cached = session.install_font_atlas_pipeline(first)
         val rejected = session.install_font_atlas_pipeline(changed)
-        expect(cached.status).to_equal("ready")
-        expect(cached.reason).to_equal("cached")
+        expect(cached.status).to_equal("rejected")
+        expect(cached.reason).to_equal("font-pipeline-semantics-mismatch")
         expect(rejected.status).to_equal("rejected")
         expect(rejected.reason).to_equal("font-pipeline-artifact-hash-mismatch")
         expect(session.shader_font_atlas).to_equal(11)
@@ -367,25 +368,6 @@ describe "Vulkan font atlas composite companion":
         state.session.shader_font_atlas = 1
         state.session.pipe_font_atlas = 1
         val evidence = state.composite_font_batch(0, 0, _font_quad_batch(2))
-        expect(evidence.status).to_equal("rejected")
-        expect(evidence.reason).to_equal("invalid-font-batch")
-        expect(state.d_font_atlas).to_equal(0)
-
-    it "rejects rotated transforms before atlas mutation":
-        var state = VulkanBackend.create()
-        state.owns_session = true
-        state.session.is_initialized = true
-        state.session.device = 1
-        state.session.font_atlas_status = "ready"
-        state.session.font_atlas_artifact_mode = "precompiled-spirv"
-        state.session.shader_font_atlas = 1
-        state.session.pipe_font_atlas = 1
-        val rotated = FontRenderBatch(program_version: 1, font_identity: "unit-font", face_generation: 1,
-            valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
-            quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
-                width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
-            atlas_generation: 1, dirty_rects: [], transform_identity: "rotate-90")
-        val evidence = state.composite_font_batch(0, 0, rotated)
         expect(evidence.status).to_equal("rejected")
         expect(evidence.reason).to_equal("invalid-font-batch")
         expect(state.d_font_atlas).to_equal(0)

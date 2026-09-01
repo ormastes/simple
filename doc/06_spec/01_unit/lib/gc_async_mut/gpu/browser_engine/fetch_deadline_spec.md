@@ -24,14 +24,8 @@ The browser owns one absolute five-second Fetch budget across redirects after DN
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | N/A |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
-
-# Browser Fetch Aggregate Redirect Deadline
 
 ## Overview
 
@@ -57,25 +51,34 @@ would cross the deadline fails before its response is committed.
 
 #### should stop a mixed-scheme redirect chain at one absolute deadline
 
-- Verify: should stop a mixed-scheme redirect chain at one absolute deadline
+- should stop a mixed-scheme redirect chain at one absolute deadline
 - Register three local hops whose aggregate latency exceeds five seconds
+- var registry = MockResponseRegistry create at
+- [Pair
+- [Pair
+- [Pair
+- set mock registry
+- Logger new
 - Fetch with one absolute deadline shared by every redirect
+- Ok
+- fail
+- Err
    - Expected: error.source equals `network`
 - Reject the late response without committing cache state
-   - Expected: get_mock_registry().observed_requests.len() equals `3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: get_mock_registry().now_ms equals `6000)  # oracle: pinned constant asserted by this scenario  # oracle: pinned ... (full value in folded executable source)`
-   - Expected: fetch.cache.entries.len() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: get_mock_registry().observed_requests.len() equals `3`
+   - Expected: get_mock_registry().now_ms equals `6000`
+   - Expected: fetch.cache.entries.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Verify: should stop a mixed-scheme redirect chain at one absolute deadline")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("should stop a mixed-scheme redirect chain at one absolute deadline")
 step("Register three local hops whose aggregate latency exceeds five seconds")
 var registry = MockResponseRegistry.create_at(1000)
 registry.register_slow(
@@ -107,33 +110,38 @@ match fetch.fetch(_deadline_request("http://slow.test/start")):
         )
 
 step("Reject the late response without committing cache state")
-expect(get_mock_registry().observed_requests.len()).to_equal(3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(get_mock_registry().now_ms).to_equal(6000)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(fetch.cache.entries.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(get_mock_registry().observed_requests.len()).to_equal(3)
+expect(get_mock_registry().now_ms).to_equal(6000)
+expect(fetch.cache.entries.len()).to_equal(0)
 ```
 
 </details>
 
 #### should complete a mixed-scheme redirect chain within the same budget
 
-- Verify: should complete a mixed-scheme redirect chain within the same budget
+- should complete a mixed-scheme redirect chain within the same budget
 - Register a local HTTP to HTTPS chain within five seconds
+- var registry = MockResponseRegistry create at
+- [Pair
+- [Pair
+- set mock registry
+- Logger new
 - Complete all hops before the absolute deadline
-   - Expected: response.status equals `200)  # oracle: pinned constant asserted by this scenario  # oracle: pinned c... (full value in folded executable source)`
+   - Expected: response.status equals `200`
    - Expected: response.body_text() equals `done`
-   - Expected: get_mock_registry().observed_requests.len() equals `3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: get_mock_registry().now_ms equals `5500)  # oracle: pinned constant asserted by this scenario  # oracle: pinned ... (full value in folded executable source)`
+   - Expected: get_mock_registry().observed_requests.len() equals `3`
+   - Expected: get_mock_registry().now_ms equals `5500`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Verify: should complete a mixed-scheme redirect chain within the same budget")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("should complete a mixed-scheme redirect chain within the same budget")
 step("Register a local HTTP to HTTPS chain within five seconds")
 var registry = MockResponseRegistry.create_at(1000)
 registry.register_slow(
@@ -158,10 +166,10 @@ match fetch.fetch(_deadline_request("http://fast.test/start")):
     Err(error):
         fail(error.message)
     Ok(response):
-        expect(response.status).to_equal(200)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+        expect(response.status).to_equal(200)
         expect(response.body_text()).to_equal("done")
-expect(get_mock_registry().observed_requests.len()).to_equal(3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(get_mock_registry().now_ms).to_equal(5500)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(get_mock_registry().observed_requests.len()).to_equal(3)
+expect(get_mock_registry().now_ms).to_equal(5500)
 ```
 
 </details>
@@ -171,23 +179,26 @@ expect(get_mock_registry().now_ms).to_equal(5500)  # oracle: pinned constant ass
 
 #### should retain the twenty-redirect ceiling inside the deadline
 
-- Verify: should retain the twenty-redirect ceiling inside the deadline
+- should retain the twenty-redirect ceiling inside the deadline
 - Register a zero-latency local redirect loop
+- var registry = MockResponseRegistry create at
+- [Pair
+- set mock registry
+- Logger new
 - Stop after twenty redirects without refreshing the deadline
-   - Expected: get_mock_registry().observed_requests.len() equals `21)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: get_mock_registry().now_ms equals `1000)  # oracle: pinned constant asserted by this scenario  # oracle: pinned ... (full value in folded executable source)`
+   - Expected: get_mock_registry().observed_requests.len() equals `21`
+   - Expected: get_mock_registry().now_ms equals `1000`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-017
-step("Verify: should retain the twenty-redirect ceiling inside the deadline")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("should retain the twenty-redirect ceiling inside the deadline")
 step("Register a zero-latency local redirect loop")
 var registry = MockResponseRegistry.create_at(1000)
 registry.register_slow(
@@ -208,8 +219,8 @@ match fetch.fetch(_deadline_request("https://loop.test/again")):
         expect(error.message).to_equal(
             "Too many redirects (max: 20)"
         )
-expect(get_mock_registry().observed_requests.len()).to_equal(21)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(get_mock_registry().now_ms).to_equal(1000)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(get_mock_registry().observed_requests.len()).to_equal(21)
+expect(get_mock_registry().now_ms).to_equal(1000)
 ```
 
 </details>
@@ -237,45 +248,62 @@ expect(get_mock_registry().now_ms).to_equal(1000)  # oracle: pinned constant ass
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `bca99a576ea2cab30675bdb26710b9b1de848aa427bb0708dae57304c31a0130`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `d6f5214a03c5241e495dbc86f81ad83315beec1136f0839a953898745e9cc890`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `bca99a576ea2cab30675bdb26710b9b1de848aa427bb0708dae57304c31a0130`.
+Source SHA-256: `d6f5214a03c5241e495dbc86f81ad83315beec1136f0839a953898745e9cc890`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `bca99a576ea2cab30675bdb26710b9b1de848aa427bb0708dae57304c31a0130`  
+Source SHA-256: `d6f5214a03c5241e495dbc86f81ad83315beec1136f0839a953898745e9cc890`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+Raw score: **84/100**; effective score: **84/100**; blockers: **0**.
 
-SSpec documentization score: 92/100
+SSpec documentization score: 84/100
 source: test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl
 mirror: doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=85 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 9 blockers: 0
+  narrative=100 structure=85 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, recovery/troubleshooting
+doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:65:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should stop a mixed-scheme redirect chain at one absolute deadline' describes the test rather than its outcome
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:63:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should stop a mixed-scheme redirect chain at one absolute deadline' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:105:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should complete a mixed-scheme redirect chain within the same budget' describes the test rather than its outcome
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should stop a mixed-scheme redirect chain at one absolute deadline' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:103:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should complete a mixed-scheme redirect chain within the same budget' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:139:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain the twenty-redirect ceiling inside the deadline' describes the test rather than its outcome
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:103:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should complete a mixed-scheme redirect chain within the same budget' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:137:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain the twenty-redirect ceiling inside the deadline' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl:137:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should retain the twenty-redirect ceiling inside the deadline' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

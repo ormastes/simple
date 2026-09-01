@@ -156,10 +156,6 @@ If multiple LLMs participate in research:
 - Generate mirrored `doc/06_spec/...` manuals from SSpec and read them as
   manuals; revise steps, captures, inline/previous expansion, and visibility
   until primary flows are understandable without opening the source test.
-- For formal-verification manuals, keep generated readiness evidence separate
-  from durable Lean/BYL proof obligations and from stricter release gates. A
-  SPipe matrix pass must not be worded as mission-critical release evidence
-  while a strict SBY proof lane is still blocked.
 
 **2.4 Detail Design**
 - Data structures, algorithms, module interactions, error handling
@@ -235,8 +231,7 @@ If multiple LLMs participate in research:
 
 **3.11-3.13** Bug Reports + Duplication Check + Refactoring (files >800 lines split).
 
-**3.14** Full Test Suite: `bin/simple test test --whole --mode=interpreter`, then
-`bin/simple lint <changed .spl files>` and the applicable duplication gate.
+**3.14** Full Test Suite: `bin/simple test && bin/simple build lint && bin/simple build check`
 
 **3.15** Run `/verify` + VCS Sync.
 
@@ -479,6 +474,12 @@ After approval, use the jj linear push flow from `$release`: capture file count,
 ---
 
 ## Self-Sufficiency Principle
+
+### Shared knowledge selection
+
+Before implementation, every participant follows `knowledge_selection.md` and
+uses the same retained feature-plus-layer receipt. Kernel and driver paths
+always select MDSOC-only knowledge; feature guidance cannot enable ECS there.
 
 The core design principle: **every phase, every LLM, is self-sufficient.**
 

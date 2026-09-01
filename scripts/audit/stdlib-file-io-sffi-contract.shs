@@ -1,0 +1,99 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+facade="$root/src/compiler_rust/lib/std/src/infra/file_io.spl"
+mmap_facade="$root/src/compiler_rust/lib/std/src/file/__init__.spl"
+provider="$root/src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/file_io.rs"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+
+if [ "$(grep -c '^extern fn ' "$facade")" -ne 36 ] ||
+   [ "$(grep -c '^@unsafe(.*capabilities: \[ffi\])$' "$facade")" -ne 36 ]; then
+    echo "stdlib file-I/O declaration authority inventory changed" >&2
+    exit 1
+fi
+if [ "$(grep -c 'unsafe(capabilities: \[ffi\]):$' "$facade")" -ne 47 ]; then
+    echo "stdlib file-I/O lexical authority inventory changed" >&2
+    exit 1
+fi
+if [ "$(grep -c '^extern fn ' "$mmap_facade")" -ne 7 ] ||
+   [ "$(grep -c '^@unsafe(.*capabilities: \[' "$mmap_facade")" -ne 7 ] ||
+   [ "$(grep -c 'unsafe(capabilities: \[ffi' "$mmap_facade")" -ne 7 ]; then
+    echo "mmap file facade declaration/call authority inventory changed" >&2
+    exit 1
+fi
+
+calls=$(awk '
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / {
+        line = $0
+        while (match(line, /(rt_(file|dir|path)_[A-Za-z0-9_]+|rt_current_dir|rt_set_current_dir)[(]/)) {
+            calls += 1
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    END { print calls + 0 }
+' "$facade")
+if [ "$calls" -ne 47 ]; then
+    echo "stdlib file-I/O raw-call inventory changed" >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    NF && unsafe_indent >= 0 &&
+    $0 !~ /unsafe\(capabilities: \[ffi\]\):$/ && indent($0) <= unsafe_indent {
+        unsafe_indent = -1
+    }
+    /unsafe\(capabilities: \[ffi\]\):$/ {
+        unsafe_indent = indent($0)
+        next
+    }
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / &&
+    /(rt_(file|dir|path)_[A-Za-z0-9_]+|rt_current_dir|rt_set_current_dir)[(]/ {
+        if (unsafe_indent < 0 || indent($0) <= unsafe_indent) {
+            print "stdlib file-I/O call lacks lexical FFI authority: " NR ":" $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    BEGIN { unsafe_indent = -1 }
+    END { if (failed) exit 1 }
+' "$facade"
+
+grep -q 'extern fn rt_file_read_text(path: text) -> text?' "$facade"
+grep -q 'extern fn rt_dir_list(path: text) -> List<text>?' "$facade"
+grep -q 'extern fn rt_file_size(path: text) -> i64' "$facade"
+grep -q 'extern fn rt_file_get_size(fd: i32) -> i64' "$facade"
+grep -q 'extern fn rt_dir_create(path: text, recursive: bool) -> bool' "$facade"
+grep -q 'extern fn rt_dir_remove(path: text, recursive: bool) -> bool' "$facade"
+grep -q 'rt_dir_create(path, false)' "$facade"
+grep -q 'rt_dir_remove(path, false)' "$facade"
+grep -q 'rt_file_is_dir(path)' "$facade"
+if grep -q 'entries.len() >= 0' "$facade"; then
+    echo "directory query fabricates true from unsigned length" >&2
+    exit 1
+fi
+
+grep -q 'pub extern "C" fn rt_file_get_size(fd: i32) -> i64' "$provider"
+grep -q 'if fd < 0 {' "$provider"
+grep -q 'unwrap_or(-1)' "$provider"
+grep -q 'RuntimeFuncSpec::new("rt_file_get_size", &\[I32\], &\[I64\])' "$registry"
+grep -q 'extern fn rt_file_get_size(fd: i32) -> i64' "$mmap_facade"
+
+awk '
+    /pub fn rt_dir_list\(/ { in_fn = 1 }
+    in_fn && /Err\(_\) => Ok\(Value::Nil\)/ { found = 1 }
+    in_fn && /^}/ { in_fn = 0 }
+    END { if (!found) exit 1 }
+' "$interpreter"
+
+if grep -E '^[[:space:]]*(sha256|verify_signature|dlsym|registry_lookup|mutex_lock|ffi_call)\(' "$facade" "$mmap_facade" >/dev/null; then
+    echo "stdlib file-I/O path gained per-operation admission or generic dispatch" >&2
+    exit 1
+fi
+
+echo "stdlib file-I/O SFFI contract audit: PASS (36 declarations; 47 minimal scopes; signed i64 descriptor size; optional read/list failures; semantic directory bool; direct I/O preserved)"

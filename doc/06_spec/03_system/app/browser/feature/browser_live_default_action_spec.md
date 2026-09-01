@@ -1,6 +1,6 @@
 # Browser live default-action validation
 
-> Verifies the browser live default action behaviour end to end so maintainers of this
+> Click listeners may change the activation target before default behavior runs.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Browser live default-action validation
 
-Verifies the browser live default action behaviour end to end so maintainers of this
+Click listeners may change the activation target before default behavior runs.
 
 ## At a Glance
 
@@ -20,18 +20,14 @@ Verifies the browser live default action behaviour end to end so maintainers of 
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/browser/feature/browser_live_default_action_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the browser live default action behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+Click listeners may change the activation target before default behavior runs.
+The original checkbox/radio pre-activation is rolled back when its action no
+longer matches, and only the action derived from the live routed node executes.
+New browsing-context targets remain distinct from current-document navigation
+and fail closed when popup authority or a popup host is unavailable.
 
 ## Scenarios
 
@@ -39,7 +35,7 @@ unrelated sibling features are out of scope.
 
 #### should route only the action derived from the live target
 
-- Verify: should route only the action derived from the live target
+- should route only the action derived from the live target
    - HTML capture: after_step
 - Install guarded link and submit controls
    - HTML capture: after_step
@@ -54,13 +50,12 @@ unrelated sibling features are out of scope.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
-step("Verify: should route only the action derived from the live target")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should route only the action derived from the live target")
 step("Install guarded link and submit controls")
 val fixture = setup_post_dispatch_activation_fixture()
 
@@ -78,7 +73,7 @@ check_live_default_action_control_case()
 
 #### should never coerce a new target into the current document
 
-- Verify: should never coerce a new target into the current document
+- should never coerce a new target into the current document
    - HTML capture: after_step
 - Install whitespace, mixed-case, named, and keyword targets
    - HTML capture: after_step
@@ -93,13 +88,12 @@ check_live_default_action_control_case()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 108 lines folded for reproduction.
+Runnable source: 107 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
-step("Verify: should never coerce a new target into the current document")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should never coerce a new target into the current document")
 step("Install whitespace, mixed-case, named, and keyword targets")
 val spaced_self = setup_target_context_fixture(
     " _self ", "Spaced self", false
@@ -222,42 +216,53 @@ expect_current_target_navigation(empty_target)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `dc787d2298ca1f09045fefaa7cd7b8a20415b22c09da5c2ca9edcc40e3a78b57`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `80c6f11828413f8a7d4d40e161529d860e3d7f2e5ae4199313992996b8e8292f`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `dc787d2298ca1f09045fefaa7cd7b8a20415b22c09da5c2ca9edcc40e3a78b57`.
+Source SHA-256: `80c6f11828413f8a7d4d40e161529d860e3d7f2e5ae4199313992996b8e8292f`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `dc787d2298ca1f09045fefaa7cd7b8a20415b22c09da5c2ca9edcc40e3a78b57`  
+Source SHA-256: `80c6f11828413f8a7d4d40e161529d860e3d7f2e5ae4199313992996b8e8292f`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **93/100**; effective score: **93/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 93/100
+SSpec documentization score: 92/100
 source: test/03_system/app/browser/feature/browser_live_default_action_spec.spl
 mirror: doc/06_spec/03_system/app/browser/feature/browser_live_default_action_spec.md (current)
-findings: 5 blockers: 0
+findings: 6 blockers: 0
   narrative=100 structure=90 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=80 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/browser/feature/browser_live_default_action_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/03_system/app/browser/feature/browser_live_default_action_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/browser/feature/browser_live_default_action_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/browser/feature/browser_live_default_action_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/browser/feature/browser_live_default_action_spec.spl:324:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should route only the action derived from the live target' describes the test rather than its outcome
+test/03_system/app/browser/feature/browser_live_default_action_spec.spl:314:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should route only the action derived from the live target' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/browser_live_default_action_spec.spl:343:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should never coerce a new target into the current document' describes the test rather than its outcome
+test/03_system/app/browser/feature/browser_live_default_action_spec.spl:314:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should route only the action derived from the live target' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/browser_live_default_action_spec.spl:332:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should never coerce a new target into the current document' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/browser_live_default_action_spec.spl:332:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should never coerce a new target into the current document' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

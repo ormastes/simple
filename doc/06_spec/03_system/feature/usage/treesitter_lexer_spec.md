@@ -32,10 +32,12 @@ treesitter_lexer_spec -> compiler
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # TreeSitter Lexer Specification
 
 use compiler.core.lexer.{Lexer, lexer_new, lexer_next_token, Token, TokenKind}
 
+```
 ## At a Glance
 
 | Field | Value |

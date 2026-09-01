@@ -17,6 +17,11 @@ fn is_numbered_placeholder(name: &str) -> bool {
     if name.len() < 2 || !name.starts_with('_') {
         return false;
     }
+    // Numbered placeholders are canonical and 1-indexed. Reject `_0` and
+    // leading-zero aliases before replacement subtracts one from the index.
+    if name.as_bytes()[1] == b'0' {
+        return false;
+    }
     name[1..].chars().all(|c| c.is_ascii_digit())
 }
 
@@ -160,6 +165,7 @@ fn find_max_numbered(expr: &Expr) -> usize {
         }
         Expr::Cast { expr, .. } => find_max_numbered(expr),
         Expr::Spread(inner) => find_max_numbered(inner),
+        Expr::StructSpread(inner) => find_max_numbered(inner),
         Expr::Lambda { .. } => 0,
         // Match: scan the scrutinee (subject) only. Arms are a scoping boundary
         // because `case _:` uses `_` as a wildcard pattern, not a placeholder.
@@ -268,6 +274,7 @@ fn replace_numbered_placeholders(expr: Expr) -> Expr {
             target_type,
         },
         Expr::Spread(inner) => Expr::Spread(Box::new(replace_numbered_placeholders(*inner))),
+        Expr::StructSpread(inner) => Expr::StructSpread(Box::new(replace_numbered_placeholders(*inner))),
         Expr::Lambda { .. } => expr,
         // Match: replace placeholders in the scrutinee (subject) only.
         // Arms are a scoping boundary; their bodies and patterns are left
@@ -348,6 +355,7 @@ fn count_placeholders(expr: &Expr) -> usize {
         }
         Expr::Cast { expr, .. } => count_placeholders(expr),
         Expr::Spread(inner) => count_placeholders(inner),
+        Expr::StructSpread(inner) => count_placeholders(inner),
         // Lambda bodies should not be traversed (they have their own scope)
         Expr::Lambda { .. } => 0,
         // Match: count placeholders in the scrutinee only; arms are a scoping boundary.
@@ -477,6 +485,7 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
             target_type,
         },
         Expr::Spread(inner) => Expr::Spread(Box::new(replace_placeholders(*inner, counter))),
+        Expr::StructSpread(inner) => Expr::StructSpread(Box::new(replace_placeholders(*inner, counter))),
         // Don't descend into lambdas (they have their own scope)
         Expr::Lambda { .. } => expr,
         // Match: replace placeholders in the scrutinee only.
@@ -567,12 +576,27 @@ fn replace_bare_placeholder_fixed(expr: Expr, slot: usize) -> Expr {
             then_branch: Box::new(replace_bare_placeholder_fixed(*then_branch, slot)),
             else_branch: else_branch.map(|e| Box::new(replace_bare_placeholder_fixed(*e, slot))),
         },
-        Expr::Tuple(items) => Expr::Tuple(items.into_iter().map(|e| replace_bare_placeholder_fixed(e, slot)).collect()),
-        Expr::Array(items) => Expr::Array(items.into_iter().map(|e| replace_bare_placeholder_fixed(e, slot)).collect()),
+        Expr::Tuple(items) => Expr::Tuple(
+            items
+                .into_iter()
+                .map(|e| replace_bare_placeholder_fixed(e, slot))
+                .collect(),
+        ),
+        Expr::Array(items) => Expr::Array(
+            items
+                .into_iter()
+                .map(|e| replace_bare_placeholder_fixed(e, slot))
+                .collect(),
+        ),
         Expr::Dict(entries) => Expr::Dict(
             entries
                 .into_iter()
-                .map(|(k, v)| (replace_bare_placeholder_fixed(k, slot), replace_bare_placeholder_fixed(v, slot)))
+                .map(|(k, v)| {
+                    (
+                        replace_bare_placeholder_fixed(k, slot),
+                        replace_bare_placeholder_fixed(v, slot),
+                    )
+                })
                 .collect(),
         ),
         Expr::FString { parts, .. } => {
@@ -604,6 +628,7 @@ fn replace_bare_placeholder_fixed(expr: Expr, slot: usize) -> Expr {
             target_type,
         },
         Expr::Spread(inner) => Expr::Spread(Box::new(replace_bare_placeholder_fixed(*inner, slot))),
+        Expr::StructSpread(inner) => Expr::StructSpread(Box::new(replace_bare_placeholder_fixed(*inner, slot))),
         Expr::Lambda { .. } => expr,
         Expr::Match { subject, arms } => Expr::Match {
             subject: Box::new(replace_bare_placeholder_fixed(*subject, slot)),
@@ -629,6 +654,16 @@ fn replace_numbered_fstring_parts(parts: Vec<FStringPart>) -> Vec<FStringPart> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_placeholders_are_canonical_and_one_based() {
+        for rejected in ["_0", "_00", "_01", "env_get", "_a", "_9x"] {
+            assert!(!is_numbered_placeholder(rejected), "accepted {rejected}");
+            assert_eq!(numbered_placeholder_index(rejected), None);
+        }
+        assert_eq!(numbered_placeholder_index("_1"), Some(1));
+        assert_eq!(numbered_placeholder_index("_10"), Some(10));
+    }
 
     fn fstring_with_expr(expr: Expr) -> Expr {
         let parts = vec![FStringPart::Literal("item:".to_string()), FStringPart::Expr(expr)];

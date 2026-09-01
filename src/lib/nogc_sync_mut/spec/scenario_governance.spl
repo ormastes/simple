@@ -1,0 +1,163 @@
+# Typed environment-scenario omission governance.
+#
+# This composes the common environment selection contract with the canonical
+# SDN skip registry. It deliberately does not create a second skip registry.
+
+use std.common.env_access.model.{
+    EnvScenarioDisposition, EnvScenarioSelection,
+    env_scenario_selection_error
+}
+use std.spec.skip_governance.{SkipRecord, skip_ref, validate_skip_ref_record}
+use std.common.mcdc.model.{McdcExclusion, mcdc_exclusion_error}
+use std.common.convert.{try_parse_int}
+
+var _scenario_mcdc_exclusions: [McdcExclusion] = []
+
+pub fn scenario_governance_mcdc_exclusions_capacity() -> i64: 1024
+
+pub fn scenario_governance_mcdc_exclusions_reset():
+    _scenario_mcdc_exclusions.clear()
+
+pub fn scenario_governance_mcdc_exclusions_snapshot() -> [McdcExclusion]:
+    var snapshot: [McdcExclusion] = []
+    for exclusion in _scenario_mcdc_exclusions:
+        snapshot.push(exclusion)
+    snapshot
+
+pub enum ScenarioOmissionStatus:
+    Blocked
+    Unsupported
+    Excluded
+
+pub struct ScenarioOmissionValidation:
+    ok: bool
+    message: text
+    record: SkipRecord
+
+fn _invalid(message: text, record: SkipRecord) -> ScenarioOmissionValidation:
+    ScenarioOmissionValidation(ok: false, message: message, record: record)
+
+fn _valid(record: SkipRecord) -> ScenarioOmissionValidation:
+    ScenarioOmissionValidation(ok: true, message: "", record: record)
+
+fn _empty_record(id: text) -> SkipRecord:
+    SkipRecord(
+        id: id, category: "", reason: "", owner: "", requirement: "",
+        alternative_evidence: "", venue: "", expiry: "", issue: ""
+    )
+
+# Validation is fail-closed for every assurance profile. Environment omission
+# is evidence, not a compatibility convenience, so reason/owner/tracking are
+# never optional even outside critical mode.
+pub fn validate_scenario_omission(
+        selection: EnvScenarioSelection,
+        status: ScenarioOmissionStatus) -> ScenarioOmissionValidation:
+    val record = skip_ref(selection.tracking_id)
+    validate_scenario_omission_record(selection, status, record)
+
+# Record-parameterized form keeps policy tests pure and allocation-bounded;
+# production callers use validate_scenario_omission, which resolves the same
+# canonical doc/08_tracking/skip registry as skip_via_ref.
+pub fn validate_scenario_omission_record(
+        selection: EnvScenarioSelection,
+        status: ScenarioOmissionStatus,
+        record: SkipRecord) -> ScenarioOmissionValidation:
+    val selection_problem = env_scenario_selection_error(selection)
+    if selection_problem != "":
+        return _invalid(selection_problem, _empty_record(selection.tracking_id))
+
+    if status == ScenarioOmissionStatus.Excluded:
+        if selection.disposition != EnvScenarioDisposition.Exclude:
+            return _invalid("ENV-E-EXCLUSION-DISPOSITION", _empty_record(selection.tracking_id))
+    elif selection.disposition != EnvScenarioDisposition.Skip:
+        return _invalid("ENV-E-UNAVAILABLE-DISPOSITION", _empty_record(selection.tracking_id))
+
+    # Force the canonical validator into its strict path: an unavailable
+    # scenario must never become admissible merely because the active profile
+    # is below critical.
+    val governed = validate_skip_ref_record(record, "critical")
+    if not governed.ok:
+        return _invalid(governed.message, record)
+    if record.owner != selection.owner:
+        return _invalid("ENV-E-OMISSION-OWNER-MISMATCH", record)
+    if record.reason != selection.reason:
+        return _invalid("ENV-E-OMISSION-REASON-MISMATCH", record)
+
+    if status == ScenarioOmissionStatus.Excluded:
+        val scenario_id = selection.scenario_id.trim().lower()
+        if (scenario_id == "all" or scenario_id.contains("*") or
+            scenario_id.contains(",")):
+            return _invalid("ENV-E-EXCLUSION-SCOPE", record)
+        if record.category != "mcdc-exclusion":
+            return _invalid("ENV-E-EXCLUSION-CATEGORY", record)
+        if not record.requirement.starts_with("REQ-MC-"):
+            return _invalid("ENV-E-EXCLUSION-REQUIREMENT", record)
+        if record.alternative_evidence.trim() == "" or record.venue.trim() == "":
+            return _invalid("ENV-E-EXCLUSION-EVIDENCE", record)
+        if selection.expires_or_version != record.expiry:
+            return _invalid("ENV-E-EXCLUSION-VERSION", record)
+
+    _valid(record)
+
+pub fn scenario_omission_status_name(status: ScenarioOmissionStatus) -> text:
+    match status:
+        case ScenarioOmissionStatus.Blocked: "BLOCKED"
+        case ScenarioOmissionStatus.Unsupported: "UNSUPPORTED"
+        case ScenarioOmissionStatus.Excluded: "EXCLUDED"
+
+fn _stable_mcdc_decision_identity_error(semantic_id: text) -> text:
+    val stable_id = semantic_id.trim()
+    if stable_id == "" or stable_id.len() > 4096:
+        return "MCDC-E-IDENTITY"
+    val length_end = stable_id.index_of(":")
+    if length_end <= 0:
+        return "MCDC-E-IDENTITY"
+    val authored_length = try_parse_int(stable_id[0..length_end])
+    if authored_length == nil or (authored_length ?? 0) <= 0:
+        return "MCDC-E-IDENTITY"
+    val authored_start = length_end + 1
+    val offset_separator = authored_start + (authored_length ?? 0)
+    if offset_separator >= stable_id.len() or stable_id[offset_separator..offset_separator + 1] != ":":
+        return "MCDC-E-IDENTITY"
+    val source_offset = try_parse_int(stable_id[offset_separator + 1..])
+    if source_offset == nil or (source_offset ?? -1) < 0:
+        return "MCDC-E-IDENTITY"
+    ""
+
+pub fn scenario_governance_collect_mcdc_exclusion(
+        selection: EnvScenarioSelection,
+        semantic_decision_id: text,
+        condition_ordinal: i64,
+        identity_version: text) -> text:
+    val identity_problem = _stable_mcdc_decision_identity_error(semantic_decision_id)
+    if identity_problem != "":
+        return identity_problem
+    if condition_ordinal < 0:
+        return "MCDC-E-EXCLUSION-SCOPE"
+    if identity_version.trim() == "" or identity_version.len() > 128:
+        return "MCDC-E-EXCLUSION-STALE"
+    val validation = validate_scenario_omission(
+        selection, ScenarioOmissionStatus.Excluded)
+    if not validation.ok:
+        return validation.message
+    val exclusion = McdcExclusion(
+        semantic_id: semantic_decision_id.trim(),
+        condition_ordinal: condition_ordinal,
+        whole_decision: false,
+        reason: selection.reason,
+        reviewer: selection.owner,
+        review_id: selection.tracking_id,
+        expires_or_version: identity_version.trim()
+    )
+    val exclusion_problem = mcdc_exclusion_error(exclusion)
+    if exclusion_problem != "":
+        return exclusion_problem
+    for existing in _scenario_mcdc_exclusions:
+        if (existing.semantic_id == exclusion.semantic_id and
+            existing.whole_decision == exclusion.whole_decision and
+            existing.condition_ordinal == exclusion.condition_ordinal):
+            return "MCDC-E-EXCLUSION-DUPLICATE"
+    if _scenario_mcdc_exclusions.len() >= scenario_governance_mcdc_exclusions_capacity():
+        return "MCDC-E-EXCLUSION-CAP"
+    _scenario_mcdc_exclusions.push(exclusion)
+    ""

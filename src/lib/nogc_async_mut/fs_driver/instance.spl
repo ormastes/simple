@@ -32,6 +32,15 @@ struct RamFsStub:
     """
     name: text
 
+    fn capabilities() -> FsCapabilitySet:
+        """Same capability set a real RamFsDriver reports."""
+        FsCapabilitySet.empty()
+            .with(Capability.Execute)
+            .with(Capability.PosixCompat)
+            .with(Capability.CaseSensitive)
+            .with(Capability.Hardlinks)
+            .with(Capability.SparseFiles)
+
 # --- DriverInstance enum ---
 
 enum DriverInstance:
@@ -186,10 +195,22 @@ impl DriverInstance:
             case DbFs(d):      d.direct_io_extent_for_handle(handle, file_offset, byte_len)
             case _:            Err(FsError.Unsupported)
 
+    me fn prepare_fat32_direct_write_v1(handle: FileHandle) -> Result<(), FsError>:
+        """Invalidate FAT32 execute observations before a mapped DMA write.
+
+        Other backends retain their existing direct-I/O ownership paths; this
+        hook is intentionally a no-op for them.
+        """
+        match self:
+            case Fat32(d): d.prepare_direct_write_v1(handle)
+            case _:       Ok(())
+
     fn mmap_shared_writable_handle(handle: FileHandle, offset: i64, length: i64) -> Result<(), FsError>:
         """mmap shared writable — always ENOTSUP (not supported by any driver here)."""
         Err(FsError.Unsupported)
 
     fn link_path_text(target: text, link_path: text) -> Result<(), FsError>:
-        """Hard link — always ENOTSUP."""
-        Err(FsError.Unsupported)
+        """Create a hard link using paths relative to this driver mount."""
+        match self:
+            case RamFs(d): d.link(Path(raw: target), Path(raw: link_path))
+            case _:        Err(FsError.Unsupported)

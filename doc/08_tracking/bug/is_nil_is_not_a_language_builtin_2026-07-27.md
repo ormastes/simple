@@ -4,8 +4,7 @@
 - **Lane:** NILQ (investigating lane SPECFIX finding "F1")
 - **Severity:** Medium (no silent wrong answer; but the JIT failure is a
   *runtime* error that only fires when the line executes)
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** Open — needs a decision, not a dispatcher patch
 
 ## Reported as
 

@@ -176,9 +176,21 @@ impl MathParser {
                     let right = self.parse_power()?;
                     left = MathExpr::MatMul(Box::new(left), Box::new(right));
                 }
-                // Implicit multiplication: number followed by identifier or paren
-                // e.g., 2x, 3(x+1)
-                MathToken::Ident(_) | MathToken::LParen if self.is_implicit_mul(&left) => {
+                // Implicit multiplication: an operand-starting token directly
+                // after a complete operand, e.g. 2x, 3(x+1), (a)(b)(c), -2x.
+                //
+                // The decision belongs to the CURRENT token, not to the shape of
+                // `left`: at this point in the loop `left` is always a complete
+                // multiplicative operand, so any Ident/LParen that follows starts
+                // a new factor. Enumerating the allowed shapes of `left` was the
+                // old behaviour and it silently DROPPED trailing factors whenever
+                // `left` was a shape not in the list — `Mul` (so `(a)(a)(a)` gave
+                // 4, not 8) and `Neg` (so `-2x` gave -2, not -6).
+                //
+                // Precedence is unchanged: the right operand is parsed with
+                // parse_power(), so implicit multiplication binds exactly like
+                // explicit `*` and `^` still binds tighter (`2x^3` == 2*(x^3)).
+                MathToken::Ident(_) | MathToken::LParen => {
                     let right = self.parse_power()?;
                     left = MathExpr::Mul(Box::new(left), Box::new(right));
                 }
@@ -187,14 +199,6 @@ impl MathParser {
         }
 
         Ok(left)
-    }
-
-    /// Check if implicit multiplication should apply
-    fn is_implicit_mul(&self, left: &MathExpr) -> bool {
-        matches!(
-            left,
-            MathExpr::Int(_) | MathExpr::Float(_) | MathExpr::Var(_) | MathExpr::Group(_) | MathExpr::Subscript(_, _)
-        )
     }
 
     /// Parse power: a ^ b (right-associative)

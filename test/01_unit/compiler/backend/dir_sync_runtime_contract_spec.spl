@@ -1,0 +1,50 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "directory durability runtime contract":
+    it "keeps the exact pointer-length boolean ABI in both compiler backends":
+        val sffi = source("src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        val cranelift = source("src/compiler_rust/compiler/src/codegen/instr/calls.rs")
+        val llvm = source("src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs")
+        val simple = source("src/compiler/50.mir/text_extern_abi.spl")
+        expect(sffi).to_contain("RuntimeFuncSpec::new(\"rt_dir_sync\", &[I64, I64], &[I8])")
+        expect(cranelift).to_contain("| \"rt_dir_sync\"")
+        expect(llvm).to_contain("| \"rt_dir_sync\"")
+        expect(simple).to_contain("| \"rt_dir_sync\" |")
+
+    it "registers real hosted providers and a fail-closed generated fallback":
+        val registry = source("src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
+        val rust_provider = source("src/compiler_rust/compiler/src/interpreter_extern/file_io.rs")
+        val stubs = source("src/compiler_rust/compiler/src/linker/native_binary/stubs.rs")
+        expect(registry).to_contain("insert_simple!(\"rt_dir_sync\", file_io::rt_dir_sync)")
+        expect(rust_provider).to_contain("pub fn rt_dir_sync")
+        expect(rust_provider).to_contain("#[cfg(not(unix))]")
+        expect(rust_provider).to_contain("Ok(Value::Bool(false))")
+        expect(stubs).to_contain("bool rt_dir_sync(const char* a, int64_t n)")
+        expect(stubs).to_contain("(void)a; (void)n; return false;")
+
+    it "requires an actual directory and retries interrupted POSIX operations":
+        for path in ["src/runtime/runtime.c", "src/runtime/runtime_legacy_core.c"]:
+            val provider = source(path)
+            if path.ends_with("runtime.c"):
+                expect(provider).to_contain("int         rt_dir_sync")
+            else:
+                expect(provider).to_contain("int rt_dir_sync")
+            expect(provider).to_contain("int flags = O_RDONLY;")
+            expect(provider).to_contain("flags |= O_DIRECTORY;")
+            expect(provider).to_contain("!S_ISDIR(status.st_mode)")
+            expect(provider).to_contain("errno == EINTR")
+            expect(provider).to_contain("#if defined(_WIN32)")
+            expect(provider).to_contain("return 0;")
+
+    it "exposes the capability through canonical pure-Simple I/O owners":
+        val sffi = source("src/lib/nogc_sync_mut/sffi/io.spl")
+        val runtime = source("src/lib/nogc_sync_mut/io_runtime.spl")
+        expect(sffi).to_contain("extern fn rt_dir_sync(path: text) -> bool")
+        expect(sffi).to_contain("fn dir_sync(path: text) -> bool:")
+        expect(runtime).to_contain("pub fn dir_sync(path: text) -> bool:")
+        expect(runtime).to_contain("export dir_sync")

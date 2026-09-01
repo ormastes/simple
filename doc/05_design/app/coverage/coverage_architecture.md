@@ -471,15 +471,3 @@ SIMPLE_COVERAGE=1 simple my_script.spl
 **Alternative**: Could check only when accessing global coverage storage, but that's after potential allocations/work.
 
 **Status**: Complete
-# Per-owner admission
-
-`# @cover <source-path> <percent>%` is an executable per-owner contract, not
-display metadata. The shared coverage collector resolves annotations from the
-executed test files against `CoverageData.files`; both runner entrypoints fail
-closed for malformed annotations, absent targets, or insufficient decision
-coverage. Aggregate thresholds remain a separate gate.
-
-The final source-coverage denominator must merge a compiler-emitted manifest
-that pre-registers every decision as zero/zero. Runtime rows alone cover only
-observed sites and cannot prove that untouched functions or branches exist in
-the denominator (TODO594).

@@ -1,9 +1,16 @@
-# Lane: Stage 4 / `$sp_dev`
+# Lane: stage4 / $sp_dev remake plan (ex-codex 019f9c04)
+Goal: "$sp_dev remake plan; do all item tasks in parallel."
+Last state: parser ambiguity in `src/compiler/70.backend/backend/vulkan_backend.spl` was patched by replacing `if ... else` expression-form branches with explicit `if ... return` blocks.
+Current status: stage4 native-build now reaches parse completion; no parser errors from `vulkan_backend.spl`.
+Blocking: stage4 consistently crashes with segmentation fault during phase3 hir lowering (`[hir-lower] lower_expr:kind`) after `phase3:hir_typecheck` begins, exit code 139.
 
-Goal: complete the pure-Simple x86_64 Stage 4 bootstrap, verify the exact fresh
-CLI, and deploy it only after the bounded essential-tools smoke passes.
+Parallel execution split is now defined in
+[`doc/03_plan/agent_tasks/stage4_spdev.md`](doc/03_plan/agent_tasks/stage4_spdev.md)
+with Team A–D lanes and merge/final-review ownership.
 
-## Current state (2026-08-02)
+Recent commands:
+- Ran direct stage4 native-build command with `SIMPLE_NATIVE_BUILD_THREADS=4`; logs: `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build-current.log`; result `EXIT:139`.
+- Ran same command with `SIMPLE_NATIVE_BUILD_THREADS=1` (to exclude concurrency effects); logs: `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build-threads1.log`; result `EXIT:139`.
 
 - Stage 3 incremental refresh passes and normally reuses 724/727 cached units.
 - Stage 4 reaches HIR lowering without the former `vulkan_backend.spl` parser
@@ -161,7 +168,7 @@ cross-object or QEMU rows are not substitutes unless explicitly stated.
 |---|---|---|---|
 | `ST4-PLAT-A64-LINUX` | AArch64 Linux; native host unavailable | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on AArch64 Linux | LLVM 18, C toolchain, Rust bootstrap prerequisites. Retain `build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple`, `build/bootstrap/full/aarch64-unknown-linux-gnu/simple`, logs, hashes, and essential-tools markers. Current x86 Linux may run cross architecture gates, but not claim native bootstrap PASS. |
 | `ST4-PLAT-MAC` | macOS x86_64/AArch64; host unavailable | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on macOS | Xcode CLI tools, Homebrew LLVM 18, coreutils and freetype. Retain matching `stage3/<triple>/simple`, `full/<triple>/simple`, logs, hashes, and smoke markers. |
-| `ST4-PLAT-WIN` | Windows x86_64; host unavailable | `bash scripts/bootstrap/bootstrap-from-scratch.sh windows-entry --msvc --backend=llvm --mode=dynload --full-bootstrap --no-mcp --jobs=2` in Git Bash/MSYS2 | MSVC-compatible LLVM 18, Rust, Git Bash/MSYS2, `cygpath`; set linker flavor through the wrapper. Retain `build/bootstrap/stage3/x86_64-pc-windows-msvc/simple.exe` and logs. Full-CLI/deploy is currently restricted to Linux/macOS, so do not add it. |
+| `ST4-PLAT-WIN` | Windows x86_64; host unavailable | `bash scripts/bootstrap/bootstrap-windows.sh --msvc --backend=llvm --mode=dynload --full-bootstrap --no-mcp --jobs=2` in Git Bash/MSYS2 | MSVC-compatible LLVM 18, Rust, Git Bash/MSYS2, `cygpath`; set linker flavor through the wrapper. Retain `build/bootstrap/stage3/x86_64-pc-windows-msvc/simple.exe` and logs. Full-CLI/deploy is currently restricted to Linux/macOS, so do not add it. |
 | `ST4-PLAT-FREEBSD` | FreeBSD x86_64; safely runnable from this Linux host through QEMU | `sh scripts/check/check-freebsd-bootstrap-qemu.shs --full` | `qemu-system-x86_64`, qemu-utils, genisoimage, SSH key/client and rsync; provision the canonical FreeBSD 14.4 image plus trusted SHA-256 in shared media first. The wrapper is offline-only, then provisions guest LLVM/Rust dependencies. Retain `build/freebsd/bootstrap-logs/`, VM evidence, and guest `build/bootstrap/stage3/x86_64-unknown-freebsd/simple`. Never invoke the FreeBSD seed script directly on Linux. |
 | `ST4-PLAT-SIMPLEOS-X64` | SimpleOS x86_64; safely host-driven from this Linux host | `sh scripts/bootstrap/bootstrap-from-scratch.sh --target=simpleos-x86_64 --output=build/bootstrap --jobs=2` | A verified host `bin/simple`, SimpleOS cross toolchain/QEMU prerequisites. Retain staged guest artifacts under `build/bootstrap` plus the emitted manifest/logs; this is a target lane, not a hosted full CLI. |
 | `ST4-PLAT-SIMPLEOS-A64` | SimpleOS AArch64; safely buildable/QEMU-checkable from Linux after x86 acceptance | `sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs` | Verified native compiler, LLVM backend, QEMU AArch64, frozen-source admission. Retain `build/os/fat32-arm64-desktop.img`, attestation manifest, logs, and follow with `check-simpleos-arm64-qmp-input-evidence.shs` when live input evidence is required. |

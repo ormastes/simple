@@ -647,10 +647,22 @@ mod vulkan_feature_disabled_tests {
             // fe8fee8d6f0 it is an honest dlopen probe of the system Vulkan
             // loader rather than an inert stub, so a `1` from it is a truthful
             // answer about the host, not a lie about work that never happened.
-            ("rt_vulkan_begin_compute", gfx::vulkan_graphics_runtime_compute::rt_vulkan_begin_compute()),
-            ("rt_vulkan_begin_graphics", gfx::vulkan_graphics_runtime_compute::rt_vulkan_begin_graphics()),
-            ("rt_vulkan_wait_idle", gfx::vulkan_graphics_runtime_compute::rt_vulkan_wait_idle()),
-            ("rt_vulkan_create_fence", gfx::vulkan_graphics_runtime_sync::rt_vulkan_create_fence()),
+            (
+                "rt_vulkan_begin_compute",
+                gfx::vulkan_graphics_runtime_compute::rt_vulkan_begin_compute(),
+            ),
+            (
+                "rt_vulkan_begin_graphics",
+                gfx::vulkan_graphics_runtime_compute::rt_vulkan_begin_graphics(),
+            ),
+            (
+                "rt_vulkan_wait_idle",
+                gfx::vulkan_graphics_runtime_compute::rt_vulkan_wait_idle(),
+            ),
+            (
+                "rt_vulkan_create_fence",
+                gfx::vulkan_graphics_runtime_sync::rt_vulkan_create_fence(),
+            ),
             (
                 "rt_vulkan_compile_spirv",
                 gfx::vulkan_graphics_runtime_shader::rt_vulkan_compile_spirv(0),

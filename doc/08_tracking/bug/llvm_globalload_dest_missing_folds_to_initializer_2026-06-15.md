@@ -3,8 +3,7 @@
 - **ID:** llvm_globalload_dest_missing_folds_to_initializer_2026-06-15
 - **Severity:** P1 (silent miscompilation; any module-level `var`/`val` read inside a function returns the static initializer, not the current runtime value)
 - **Backend:** LLVM (target-independent — reproduced on `x86_64-unknown-linux-gnu` and `riscv64-unknown-none`)
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** FIXED (see Fix)
 
 ## Symptom
 

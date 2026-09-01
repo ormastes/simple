@@ -1,7 +1,6 @@
 ---
 id: gpu_scheduler_diag_counter_readback_type_infer_2026-07-06
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+status: OPEN
 severity: medium
 discovered: 2026-07-06
 discovered_by: GPU event/job scheduler std.diag instrumentation spec authoring

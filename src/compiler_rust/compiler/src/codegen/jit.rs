@@ -62,7 +62,6 @@ impl JitCompiler {
 
         // Register runtime SFFI symbols from the provider
         register_runtime_symbols_from_provider(&mut builder, provider.as_ref());
-        register_compiler_owned_symbols(&mut builder);
 
         let module = JITModule::new(builder);
         let backend = CodegenBackend::with_module(module)?;
@@ -84,6 +83,7 @@ impl JitCompiler {
 
     /// Compile a MIR module and return function pointers.
     pub fn compile_module(&mut self, mir: &MirModule) -> JitResult<()> {
+        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
         // Pre-compile guard against the broken JIT lambda/closure ABI.
         //
         // `compile_closure_create` builds a closure as a bare `rt_alloc` block
@@ -139,8 +139,21 @@ impl JitCompiler {
             )));
         }
 
-        // Compile all functions
+        // Compile all functions. This is intentionally stage-traced rather
+        // than per-function traced: the compiler worker may contain thousands
+        // of bodies, while a bounded bootstrap diagnosis only needs to know
+        // whether it is blocked before codegen, inside codegen, or finalizing.
+        if stage_trace {
+            eprintln!(
+                "[jit-stage] compile_all:start functions={} globals={}",
+                mir.functions.len(),
+                mir.globals.len()
+            );
+        }
         let functions = self.backend.compile_all_functions(mir)?;
+        if stage_trace {
+            eprintln!("[jit-stage] compile_all:done compiled={}", functions.len());
+        }
 
         // Pre-finalize guard against NULL-jump crashes.
         //
@@ -182,10 +195,16 @@ impl JitCompiler {
         }
 
         // Finalize all functions (make them executable)
+        if stage_trace {
+            eprintln!("[jit-stage] finalize:start");
+        }
         self.backend
             .module
             .finalize_definitions()
             .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+        if stage_trace {
+            eprintln!("[jit-stage] finalize:done");
+        }
 
         // Store function pointers
         for func in &functions {
@@ -314,9 +333,9 @@ impl JitCompiler {
                     {
                         let _ = callee;
                         if !(crate::codegen::jit_closure_abi_supports(*return_type)
-                                && param_types
-                                    .iter()
-                                    .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
+                            && param_types
+                                .iter()
+                                .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
                         {
                             return Some((
                                 func.name.clone(),
@@ -382,11 +401,6 @@ impl JitCompiler {
             .map(|(name, _, _)| name.as_str())
             .filter(|name| !mir.extern_fn_names.contains(*name))
             .collect();
-        // A DEFINED function (non-extern, with a body) loaded as a value is
-        // now JIT-able: `emit_boxed_fn_value_entries` gives it a `name$boxed`
-        // thunk and `emit_global_load` wraps that in a zero-capture
-        // `rt_closure_new`, so it is a real closure object. Only extern /
-        // bodiless names still have no representation and keep the refusal.
         let func_names: std::collections::HashSet<&str> = mir
             .functions
             .iter()
@@ -525,48 +539,6 @@ fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &d
     }
 }
 
-/// Runtime-ABI symbols whose bodies live in THIS crate rather than in
-/// `simple-runtime`, and which therefore never appear in `RUNTIME_SYMBOL_NAMES`
-/// (that list is generated from the runtime crate plus the C runtime sources).
-///
-/// Without this table the JIT has no way to reach them: the static provider does
-/// not know them, and `dlsym(RTLD_DEFAULT)` misses because a Rust `bin` does not
-/// put its `#[no_mangle]` symbols in the dynamic symbol table. The import would
-/// be bound to a NULL GOT slot, so `first_unresolved_import` correctly refuses
-/// and de-JITs the whole module — which is exactly what happened to stage1 on
-/// `rt_native_build`.
-///
-/// Every entry here is a REAL function address. This is a registration of an
-/// existing definition, never a stub: a stub that returned nil would be the
-/// unbacked-extern defect class (see
-/// `doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`).
-fn compiler_owned_symbol(name: &str) -> Option<*const u8> {
-    match name {
-        "rt_native_build" => Some(crate::native_build_sffi::rt_native_build as *const u8),
-        _ => None,
-    }
-}
-
-/// The names `compiler_owned_symbol` answers for. Kept beside it so a test can
-/// assert the two agree and neither can silently empty out.
-pub const COMPILER_OWNED_RUNTIME_SYMBOLS: &[&str] = &["rt_native_build"];
-
-/// Publish [`COMPILER_OWNED_RUNTIME_SYMBOLS`] to a `JITBuilder`, mirroring what
-/// `register_runtime_symbols_from_provider` does for the runtime-owned set.
-fn register_compiler_owned_symbols(builder: &mut JITBuilder) {
-    for &name in COMPILER_OWNED_RUNTIME_SYMBOLS {
-        if let Some(ptr) = compiler_owned_symbol(name) {
-            builder.symbol(name, ptr);
-        }
-    }
-}
-
-/// True if `name` is resolvable purely through the compiler-owned table.
-/// Exposed so the regression gate can check the same predicate the JIT uses.
-pub fn compiler_owned_symbol_resolves(name: &str) -> bool {
-    compiler_owned_symbol(name).is_some()
-}
-
 /// True if a `Linkage::Import` symbol named `name` will resolve to a real
 /// address at JIT finalize time — i.e. it is a registered runtime symbol or is
 /// `dlsym`-resolvable in the current process. This is exactly the resolution
@@ -575,9 +547,6 @@ pub fn compiler_owned_symbol_resolves(name: &str) -> bool {
 /// slot and would SIGSEGV when called.
 fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
     if provider.get_symbol(name).is_some() {
-        return true;
-    }
-    if compiler_owned_symbol(name).is_some() {
         return true;
     }
     if crate::elf_utils::resolve_runtime_symbol(name).is_some() {

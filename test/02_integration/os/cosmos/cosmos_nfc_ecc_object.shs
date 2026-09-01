@@ -1,0 +1,46 @@
+#!/bin/sh
+# Sourced helper: emit the host pure-Simple Cosmos NFC ECC policy object with
+# the same Stage-4 provenance admission used by the production image build.
+
+cosmos_build_host_ecc_policy_object() {
+    _ecc_root=$1
+    _ecc_source_dir=$2
+    _ecc_build_dir=$3
+    _ecc_simple=${SIMPLE_BIN:-$_ecc_root/bin/simple}
+
+    [ -x "$_ecc_simple" ] || {
+        echo "BLOCKED: missing executable pure-Simple compiler: $_ecc_simple" >&2
+        return 2
+    }
+    BOOTSTRAP_STAGE3_FACADE_PATH="$_ecc_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    STAGE4_PROVENANCE_HELPER_PATH="$_ecc_root/scripts/check/lib/stage4-candidate-provenance.shs"
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    . "$STAGE4_PROVENANCE_HELPER_PATH"
+    _ecc_canonical=$(bootstrap_stage3_canonical_file "$_ecc_simple") || {
+        echo "BLOCKED: cannot resolve pure-Simple compiler canonically" >&2
+        return 2
+    }
+    _ecc_provenance=${SIMPLE_PROVENANCE:-${_ecc_canonical}.provenance.env}
+    stage4_verify_candidate_provenance \
+        "$_ecc_provenance" "$_ecc_canonical" "$_ecc_root" || {
+        echo "BLOCKED: Cosmos NFC ECC policy requires admitted Stage-4 provenance" >&2
+        return 2
+    }
+    case $("$_ecc_canonical" --version 2>&1 || true) in
+        *"Rust-built Simple binary is a bootstrap seed"*)
+            echo "BLOCKED: bootstrap seed cannot emit the Cosmos NFC ECC policy" >&2
+            return 2
+            ;;
+    esac
+    SIMPLE_LIB="$_ecc_root/src" "$_ecc_canonical" native-build \
+        --backend llvm \
+        --source "$_ecc_source_dir" \
+        --entry-closure \
+        --entry "$_ecc_source_dir/cosmos_nfc_ecc.spl" \
+        --target x86_64-unknown-linux-gnu \
+        --emit-object \
+        --no-mangle \
+        --cache-dir "$_ecc_build_dir/simple-ecc-cache" \
+        -o "$_ecc_build_dir/cosmos_nfc_ecc_simple.o"
+}

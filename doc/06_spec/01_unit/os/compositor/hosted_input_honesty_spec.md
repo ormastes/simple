@@ -1,6 +1,6 @@
 # Hosted Input Honesty Spec (Lane A4, cluster 4: sites 21-25)
 
-> Verifies the hosted input honesty behaviour end to end so maintainers of this
+> `doc/04_architecture/ui/wm_host_platform_matrix.md` found five false-success
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Hosted Input Honesty Spec (Lane A4, cluster 4: sites 21-25)
 
-Verifies the hosted input honesty behaviour end to end so maintainers of this
+`doc/04_architecture/ui/wm_host_platform_matrix.md` found five false-success
 
 ## At a Glance
 
@@ -20,18 +20,51 @@ Verifies the hosted input honesty behaviour end to end so maintainers of this
 | Category | Testing |
 | Status | Done |
 | Source | `test/01_unit/os/compositor/hosted_input_honesty_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the hosted input honesty behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+## Purpose and Audience
+
+`doc/04_architecture/ui/wm_host_platform_matrix.md` found five false-success
+input sites (cluster 4, sites 21-25). This spec locks in the fixes:
+
+- Site 21 (`hosted_input_backend.spl`): `_build_mouse_event()` used to
+  hardcode `dx: 0, dy: 0` regardless of real movement. It now tracks the
+  previous position and reports a real delta.
+- Site 22 (`hosted_input_backend.spl`): `rt_winit_event_mouse_button` was
+  declared `-> (i64, bool)`, matching only the interpreter's synthetic tuple
+  encoding — the compiled native runtime (`src/runtime/spl_winit/src/lib.rs`)
+  defines it `-> i64` (button id only). Decoding a native i64 return as a
+  2-tuple reads garbage for `pressed`. Fixed to declare `-> i64` and decode
+  pressed-ness via the separate `rt_winit_event_mouse_pressed` accessor.
+- Sites 23/24 (`hosted_input_sdl2.spl`): dead code (zero callers anywhere in
+  `src/`) with a keymap that sent every lowercase letter to `Key.A`. A sibling
+  lane already fixed this file's dangling externs
+  (`doc/04_architecture/ui/sdl2_seam_subset_audit.md`), but confirmed it is
+  still uncalled and still constructs the wrong `KeyEvent`/`MouseEvent`
+  shapes, so it remains dead per the matrix's own finding. Per this lane's
+  default, the file (and its now-orphaned unit spec) is deleted rather than
+  fixing dead code.
+- Site 25 (`arm64_virtio_input_backend.spl`): every `rt_arm64_virtio_input_*`
+  extern is dangling repo-wide (no native or interpreter definition at all —
+  calling one is a hard "unknown extern function" error, not a silent zero
+  default, so there is nothing safe to probe at runtime). `create()` now sets
+  the honest static `available() == false` instead of letting the poll loop
+  read as a permanently-idle-but-present device; `create_with_poller`'s
+  explicit `available` parameter lets a real/test-injected poller report
+  `true`.
+
+## Scope and Preconditions
+
+This host has no `DISPLAY`/`WAYLAND_DISPLAY` (see the matrix's "What can
+actually be EXECUTED" section), so a live winit window and live virtio-mmio
+hardware cannot be exercised here. Site 21 and site 25 are therefore verified
+through hardware-free seams already present in the owning classes
+(`HostedInputBackend.record_mouse_position`, mirroring the pre-existing
+`Arm64VirtioInputBackend.feed_raw_event` pattern) rather than a live event
+loop. Site 22 and sites 23/24 are verified structurally (anchored source
+reads), which is the only form of verification available for an ABI
+declaration and a deletion.
 
 ## Scenarios
 
@@ -39,59 +72,61 @@ unrelated sibling features are out of scope.
 
 #### reports a nonzero, honest delta across two sequential positions
 
-- Verify: reports a nonzero, honest delta across two sequential positions
-   - Expected: first.dx equals `10)  # oracle: pinned constant asserted by this scenario`
-   - Expected: first.dy equals `20)  # oracle: pinned constant asserted by this scenario`
-   - Expected: second.dx equals `3)  # oracle: pinned constant asserted by this scenario`
-   - Expected: second.dy equals `5)  # oracle: pinned constant asserted by this scenario`
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- reports a nonzero, honest delta across two sequential positions
+   - Expected: first.dx equals `10`
+   - Expected: first.dy equals `20`
+   - Expected: second.dx equals `3`
+   - Expected: second.dy equals `5`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: reports a nonzero, honest delta across two sequential positions")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("reports a nonzero, honest delta across two sequential positions")
 var backend = HostedInputBackend.create(0)
 val first = backend.record_mouse_position(10, 20)
 # From the (0,0) construction baseline, the first observed position
 # IS the delta.
-expect(first.dx).to_equal(10)  # oracle: pinned constant asserted by this scenario
-expect(first.dy).to_equal(20)  # oracle: pinned constant asserted by this scenario
+expect(first.dx).to_equal(10)
+expect(first.dy).to_equal(20)
 
 val second = backend.record_mouse_position(13, 25)
-expect(second.dx).to_equal(3)  # oracle: pinned constant asserted by this scenario
-expect(second.dy).to_equal(5)  # oracle: pinned constant asserted by this scenario
+expect(second.dx).to_equal(3)
+expect(second.dy).to_equal(5)
 ```
 
 </details>
 
 #### reports an honest zero delta when position genuinely does not change
 
-- Verify: reports an honest zero delta when position genuinely does not change
-   - Expected: unchanged.dx equals `0)  # oracle: pinned constant asserted by this scenario`
-   - Expected: unchanged.dy equals `0)  # oracle: pinned constant asserted by this scenario`
+- reports an honest zero delta when position genuinely does not change
+   - Expected: unchanged.dx equals `0`
+   - Expected: unchanged.dy equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: reports an honest zero delta when position genuinely does not change")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("reports an honest zero delta when position genuinely does not change")
 var backend = HostedInputBackend.create(0)
 backend.record_mouse_position(50, 60)
 val unchanged = backend.record_mouse_position(50, 60)
-expect(unchanged.dx).to_equal(0)  # oracle: pinned constant asserted by this scenario
-expect(unchanged.dy).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(unchanged.dx).to_equal(0)
+expect(unchanged.dy).to_equal(0)
 ```
 
 </details>
@@ -100,19 +135,18 @@ expect(unchanged.dy).to_equal(0)  # oracle: pinned constant asserted by this sce
 
 #### declares rt_winit_event_mouse_button as a plain i64 return, not a fabricated tuple
 
-- Verify: declares rt_winit_event_mouse_button as a plain i64 return, not a fabricated tuple
+- declares rt_winit_event_mouse_button as a plain i64 return, not a fabricated tuple
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: declares rt_winit_event_mouse_button as a plain i64 return, not a fabricated tuple")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("declares rt_winit_event_mouse_button as a plain i64 return, not a fabricated tuple")
 val source = hosted_input_backend_source()
 expect(source).to_contain("extern fn rt_winit_event_mouse_button(ev: i64) -> i64")
 expect(source).to_not_contain("rt_winit_event_mouse_button(ev: i64) -> (i64, bool)")
@@ -122,19 +156,18 @@ expect(source).to_not_contain("rt_winit_event_mouse_button(ev: i64) -> (i64, boo
 
 #### decodes pressed-ness through the real separate rt_winit_event_mouse_pressed accessor
 
-- Verify: decodes pressed-ness through the real separate rt_winit_event_mouse_pressed accessor
+- decodes pressed-ness through the real separate rt_winit_event_mouse_pressed accessor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: decodes pressed-ness through the real separate rt_winit_event_mouse_pressed accessor")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("decodes pressed-ness through the real separate rt_winit_event_mouse_pressed accessor")
 val source = hosted_input_backend_source()
 expect(source).to_contain("extern fn rt_winit_event_mouse_pressed(ev: i64) -> i64")
 expect(source).to_contain("rt_winit_event_mouse_pressed(ev) != 0")
@@ -146,7 +179,7 @@ expect(source).to_contain("rt_winit_event_mouse_pressed(ev) != 0")
 
 #### no longer exists and has no remaining reference anywhere in src/ or test/
 
-- Verify: no longer exists and has no remaining reference anywhere in src/ or test/
+- no longer exists and has no remaining reference anywhere in src/ or test/
    - Expected: exists.trim() equals `GONE`
    - Expected: refs.trim() equals ``
 
@@ -154,13 +187,12 @@ expect(source).to_contain("rt_winit_event_mouse_pressed(ev) != 0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: no longer exists and has no remaining reference anywhere in src/ or test/")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("no longer exists and has no remaining reference anywhere in src/ or test/")
 val exists = shell_output(
     'test -f src/os/compositor/hosted_input_sdl2.spl && echo EXISTS || echo GONE'
 )
@@ -184,7 +216,7 @@ expect(refs.trim()).to_equal("")
 
 #### create() reports unavailable because every rt_arm64_virtio_input_* extern is dangling
 
-- Verify: create() reports unavailable because every rt_arm64_virtio_input_* extern is dangling
+- create() reports unavailable because every rt_arm64_virtio_input_* extern is dangling
    - Expected: backend.poll_key() equals `nil`
    - Expected: backend.poll_mouse() equals `nil`
 
@@ -192,13 +224,12 @@ expect(refs.trim()).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: create() reports unavailable because every rt_arm64_virtio_input_* extern is dangling")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("create() reports unavailable because every rt_arm64_virtio_input_* extern is dangling")
 val backend = Arm64VirtioInputBackend.create(640, 480)
 assert_false(backend.available())
 # Unavailable must mean "never even attempts to pump", not merely
@@ -212,19 +243,18 @@ expect(backend.poll_mouse()).to_equal(nil)
 
 #### create_with_poller's explicit available flag can honestly report true for a real injected backend
 
-- Verify: create_with_poller's explicit available flag can honestly report true for a real injected backend
+- create_with_poller's explicit available flag can honestly report true for a real injected backend
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WM-HOST-PLATFORM-003
-step("Verify: create_with_poller's explicit available flag can honestly report true for a real injected backend")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("create_with_poller's explicit available flag can honestly report true for a real injected backend")
 val backend = Arm64VirtioInputBackend.create_with_poller(
     640,
     480,
@@ -249,36 +279,59 @@ assert_true(backend.available())
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-WM-HOST-PLATFORM-003`
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `dcdbbfdde72bb0680dcc600ad9fbfaa8581cc5e6763795f6288f56c1c09bf7ac`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `bde4b44eb3f94280bc7405a54e79de5238515914ed651395782499fcf07e4b5e`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `dcdbbfdde72bb0680dcc600ad9fbfaa8581cc5e6763795f6288f56c1c09bf7ac`.
+Source SHA-256: `bde4b44eb3f94280bc7405a54e79de5238515914ed651395782499fcf07e4b5e`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `dcdbbfdde72bb0680dcc600ad9fbfaa8581cc5e6763795f6288f56c1c09bf7ac`  
+Source SHA-256: `bde4b44eb3f94280bc7405a54e79de5238515914ed651395782499fcf07e4b5e`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/os/compositor/hosted_input_honesty_spec.spl
 mirror: doc/06_spec/01_unit/os/compositor/hosted_input_honesty_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/compositor/hosted_input_honesty_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=80; blocker cap makes effective=49
 doc/06_spec/01_unit/os/compositor/hosted_input_honesty_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/compositor/hosted_input_honesty_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/os/compositor/hosted_input_honesty_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/compositor/hosted_input_honesty_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/compositor/hosted_input_honesty_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/os/compositor/hosted_input_honesty_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports a nonzero, honest delta across two sequential positions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/compositor/hosted_input_honesty_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports an honest zero delta when position genuinely does not change' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/compositor/hosted_input_honesty_spec.spl:100:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'declares rt_winit_event_mouse_button as a plain i64 return, not a fabricated tuple' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

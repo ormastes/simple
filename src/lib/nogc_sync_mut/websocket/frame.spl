@@ -9,11 +9,15 @@ use std.nogc_sync_mut.websocket.types.{
     OPCODE_PONG,
     OPCODE_CLOSE,
     FIN_BIT,
+    RSV1_BIT,
+    RSV2_BIT,
+    RSV3_BIT,
     MASK_BIT,
     OPCODE_MASK,
     PAYLOAD_LEN_MASK,
     PAYLOAD_LEN_EXTENDED_16,
-    PAYLOAD_LEN_EXTENDED_64
+    PAYLOAD_LEN_EXTENDED_64,
+    validate_frame_structure
 }
 use std.nogc_sync_mut.websocket.handshake.{ws_handshake_text_to_bytes as text_to_bytes}
 
@@ -57,6 +61,12 @@ fn unmask_payload(payload: List<i64>, mask_key: List<i64>) -> List<i64>:
 
 fn create_frame(is_final: i64, opcode: i64, is_masked: i64, payload: List<i64>, mask_key: List<i64>) -> List<i64>:
     val result = []
+    # The generic constructor is public and is also used by message
+    # fragmentation.  Keep it from emitting reserved opcodes or fragmented /
+    # oversized control frames; RFC 6455 section 5.5 requires every control
+    # frame to be final and no larger than 125 bytes.
+    if validate_frame_structure(is_final, opcode, payload.length()) == 0:
+        return result
     if is_masked == 1 and mask_key.length() < 4:
         return result
 
@@ -167,6 +177,12 @@ fn parse_frame_header(data: List<i64>) -> List<i64>:
     val byte1 = data[0]
     val byte2 = data[1]
 
+    # No WebSocket extensions are negotiated by this frame layer, therefore
+    # every RSV bit is a protocol error.  Reject it here before an extension-
+    # shaped frame can be interpreted as ordinary application data.
+    if (byte1 & (RSV1_BIT | RSV2_BIT | RSV3_BIT)) != 0:
+        return []
+
     val fin = if (byte1 & FIN_BIT) != 0: 1 else: 0
     val opcode = byte1 & OPCODE_MASK
     val masked = if (byte2 & MASK_BIT) != 0: 1 else: 0
@@ -178,23 +194,47 @@ fn parse_frame_header(data: List<i64>) -> List<i64>:
     if payload_len_initial == PAYLOAD_LEN_EXTENDED_16:
         if len < 4:
             return []
-        val len_hi = data[2]
-        val len_lo = data[3]
+        val len_hi = data[2] & 0xFF
+        val len_lo = data[3] & 0xFF
         payload_length = (len_hi << 8) | len_lo
+        # RFC 6455 section 5.2 requires the shortest possible length encoding.
+        # Reject non-canonical encodings so intermediaries cannot disagree on
+        # where this frame ends and the next frame begins.
+        if payload_length < PAYLOAD_LEN_EXTENDED_16:
+            return []
         header_size = 4
     else:
         if payload_len_initial == PAYLOAD_LEN_EXTENDED_64:
             if len < 10:
                 return []
-            val len_b3 = data[6]
-            val len_b2 = data[7]
-            val len_b1 = data[8]
-            val len_b0 = data[9]
+            # This implementation intentionally supports payload lengths only
+            # through 32 bits. Previously it silently discarded the high half
+            # of the RFC 6455 64-bit length, allowing a declared >4 GiB frame
+            # to be accepted using its low word and desynchronizing the stream.
+            # Fail closed instead; this also rejects the forbidden high bit.
+            if ((data[2] & 0xFF) != 0 or
+                (data[3] & 0xFF) != 0 or
+                (data[4] & 0xFF) != 0 or
+                (data[5] & 0xFF) != 0):
+                return []
+            val len_b3 = data[6] & 0xFF
+            val len_b2 = data[7] & 0xFF
+            val len_b1 = data[8] & 0xFF
+            val len_b0 = data[9] & 0xFF
             payload_length = (len_b3 << 24) | (len_b2 << 16) | (len_b1 << 8) | len_b0
+            if payload_length < 65536:
+                return []
             header_size = 10
 
     if masked == 1:
         header_size = header_size + 4
+
+    # This single-frame structural gate covers reserved opcodes and the RFC
+    # control-frame invariants.  Message-level continuation sequencing remains
+    # the responsibility of a connection state machine, while valid text /
+    # binary continuation frames continue to pass this parser unchanged.
+    if validate_frame_structure(fin, opcode, payload_length) == 0:
+        return []
 
     [fin, opcode, masked, payload_length, header_size]
 

@@ -110,6 +110,7 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_last_present_copy_bytes", Ret::I, "i"),
     ("rt_vulkan_last_present_copy_rects", Ret::I, "i"),
     ("rt_vulkan_create_compute_pipeline", Ret::I, "iii"),
+    ("rt_vulkan_create_compute_pipeline_raw", Ret::I, "iiii"),
     ("rt_vulkan_create_descriptor_set", Ret::I, "i"),
     ("rt_vulkan_create_fence", Ret::I, ""),
     ("rt_vulkan_create_font_graphics_pipeline", Ret::I, "iiii"),
@@ -221,7 +222,6 @@ fn arg_i64(args: &[Value], idx: usize, name: &str) -> Result<i64, CompileError> 
 fn arg_f64(args: &[Value], idx: usize, name: &str) -> Result<f64, CompileError> {
     match args.get(idx) {
         Some(Value::Float(v)) => Ok(*v),
-        Some(Value::Float32(v)) => Ok(f64::from(*v)),
         #[allow(clippy::cast_precision_loss)]
         Some(Value::Int(v)) => Ok(*v as f64),
         other => Err(CompileError::runtime(format!(
@@ -455,12 +455,25 @@ mod tests {
         );
     }
 
-    /// Cross-validated against the runtime crate's exports (107 as of the
-    /// 2026-08-21 sweep that registered the 11 missing array/present entry
-    /// points); hold that number so a silent drop is a failure.
+    /// Cross-validated against the runtime crate's exports (108 after the
+    /// raw compute-pipeline provider ABI was added on 2026-08-29); hold that
+    /// number so a silent drop is a failure.
     #[test]
-    fn family_size_is_one_hundred_seven() {
-        assert_eq!(VULKAN_FNS.len(), 107);
+    fn family_size_is_one_hundred_eight() {
+        assert_eq!(VULKAN_FNS.len(), 108);
+    }
+
+    /// A duplicated registry row can satisfy source coverage while inflating
+    /// the fixed family count, so keep uniqueness as an independent invariant.
+    #[test]
+    fn family_names_are_unique() {
+        let mut names: Vec<&str> = VULKAN_FNS.iter().map(|(name, _, _)| *name).collect();
+        names.sort_unstable();
+        let duplicate = names.windows(2).find(|pair| pair[0] == pair[1]);
+        assert!(
+            duplicate.is_none(),
+            "duplicate Vulkan extern registry row: {duplicate:?}"
+        );
     }
 
     /// Names outside the family are rejected, never silently succeed.

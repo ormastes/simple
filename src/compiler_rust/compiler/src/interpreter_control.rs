@@ -44,7 +44,9 @@ macro_rules! check_execution_limit {
 macro_rules! check_timeout {
     () => {
         if crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
     };
 }
@@ -59,7 +61,7 @@ use std::collections::HashMap;
 // Import parent interpreter types and functions
 use super::{
     await_value, captured_env_with_live_globals, evaluate_expr, exec_block, exec_block_fn, execute_function_body,
-    publish_and_repoint, sync_owned_captured_globals, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS,
+    publish_and_repoint, sync_owned_captured_globals, Control, Enums, ImplMethods, BDD_AFTER_ALL, BDD_CONTEXT_DEFS,
     BDD_INDENT, BDD_LAZY_VALUES, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, IMMUTABLE_VARS,
 };
 
@@ -73,9 +75,7 @@ use super::interpreter_call::exec_block_value;
 use super::interpreter_patterns::{is_catch_all_pattern, pattern_matches};
 
 // Import coverage helpers
-use super::coverage_helpers::{
-    decision_id_from_span, is_coverage_enabled, record_decision_coverage_here,
-};
+use super::coverage_helpers::{decision_id_from_span, is_coverage_enabled, record_decision_coverage_here};
 
 /// Handle loop control flow result. Returns Some if we should exit the loop.
 /// `my_label` is this loop's label (if any).
@@ -152,9 +152,7 @@ pub(crate) fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind 
                     Some(inner) => {
                         // READ side of the enum-payload provenance diagnostic
                         // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1).
-                        crate::interpreter::note_enum_payload_function(
-                            "if-val", enum_name, variant, 0, inner,
-                        );
+                        crate::interpreter::note_enum_payload_function("if-val", enum_name, variant, 0, inner);
                         LetBind::Bind(name, inner.clone())
                     }
                 }
@@ -339,10 +337,7 @@ pub(super) fn exec_if(
 
             // COVERAGE: Record decision for elif statement
             let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
-            record_decision_coverage_here(if_stmt.span.line + idx,
-                if_stmt.span.column,
-                elif_decision,
-            );
+            record_decision_coverage_here(if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
 
             if elif_decision {
                 return exec_block(block, env, functions, classes, enums, impl_methods);
@@ -354,28 +349,6 @@ pub(super) fn exec_if(
         return exec_block(block, env, functions, classes, enums, impl_methods);
     }
     Ok(Control::Next)
-}
-
-/// Store a loop fast-path result into `env`, mirroring module-level globals.
-///
-/// The tree-walk fast paths for `while`/`for` loops compute the loop's final
-/// values natively and write them back with a single `env.insert`. For a
-/// module-level `var`, `env` is NOT authoritative on read: identifier
-/// evaluation prefers `MODULE_GLOBALS` for non-local names
-/// (`interpreter/expr/literals.rs`), and the generic statement path keeps the
-/// two in sync via `interpreter/place.rs::sync_module_global`. Writing only
-/// `env` therefore left the stale pre-loop value visible, so a top-level
-/// `while i < 5: sum = sum + i; i = i + 1` evaluated to 0 instead of 10.
-fn env_insert_synced(env: &mut Env, name: String, value: Value) {
-    crate::interpreter::MODULE_GLOBALS.with(|cell| {
-        // Peek before taking the write borrow: borrow_mut() on this
-        // generation-tracked cell invalidates owned-env templates.
-        if !cell.borrow().contains_key(&name) {
-            return;
-        }
-        cell.borrow_mut().insert(name.clone(), value.clone());
-    });
-    env.insert(name, value);
 }
 
 pub(super) fn exec_while(
@@ -490,10 +463,7 @@ pub(super) fn exec_while(
                     // This should be very rare; fall through to a full condition eval.
                     let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
                     let decision_result = is_condition_present(&while_stmt.condition, &cond_val);
-                    record_decision_coverage_here(while_stmt.span.line,
-                        while_stmt.span.column,
-                        decision_result,
-                    );
+                    record_decision_coverage_here(while_stmt.span.line, while_stmt.span.column, decision_result);
                     if !decision_result {
                         break;
                     }
@@ -529,10 +499,7 @@ pub(super) fn exec_while(
                 }
             };
 
-            record_decision_coverage_here(while_stmt.span.line,
-                while_stmt.span.column,
-                decision_result,
-            );
+            record_decision_coverage_here(while_stmt.span.line, while_stmt.span.column, decision_result);
 
             if !decision_result {
                 break;
@@ -559,10 +526,7 @@ pub(super) fn exec_while(
         let decision_result = is_condition_present(&while_stmt.condition, &cond_val);
 
         // COVERAGE: Record decision for while condition on each iteration
-        record_decision_coverage_here(while_stmt.span.line,
-            while_stmt.span.column,
-            decision_result,
-        );
+        record_decision_coverage_here(while_stmt.span.line, while_stmt.span.column, decision_result);
 
         if !decision_result {
             break;
@@ -769,7 +733,9 @@ fn try_exec_direct_float_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Re
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let left_value = eval_float_operand(&loop_shape.left, target);
         let right_value = eval_float_operand(&loop_shape.right, target);
@@ -783,8 +749,8 @@ fn try_exec_direct_float_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Re
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Float(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Float(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -893,7 +859,9 @@ fn try_exec_indexed_float_array_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let element = match values.get(index as usize) {
             Some(Value::Float(value)) => *value,
@@ -911,8 +879,8 @@ fn try_exec_indexed_float_array_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Float(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Float(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1046,7 +1014,9 @@ fn try_exec_indexed_string_match_count_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let byte = bytes[index as usize];
         if (byte == needle) == loop_shape.match_when_equal {
@@ -1063,8 +1033,8 @@ fn try_exec_indexed_string_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1188,7 +1158,9 @@ fn try_exec_indexed_float_array_match_count_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let element = match values.get(index as usize) {
             Some(Value::Float(value)) => *value,
@@ -1208,8 +1180,8 @@ fn try_exec_indexed_float_array_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1329,7 +1301,9 @@ fn try_exec_indexed_int_array_match_count_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let element = match values.get(index as usize) {
             Some(Value::Int(value)) => *value,
@@ -1349,8 +1323,8 @@ fn try_exec_indexed_int_array_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1470,7 +1444,9 @@ fn try_exec_indexed_int_array_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let element = match values.get(index as usize) {
             Some(Value::Int(value)) => *value,
@@ -1488,8 +1464,8 @@ fn try_exec_indexed_int_array_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1758,7 +1734,9 @@ fn try_exec_direct_int_match_count_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         if eval_direct_int_branch_predicate(&loop_shape.predicate, index) {
             let left_value = eval_inline_operand(&left, target, index);
@@ -1774,8 +1752,8 @@ fn try_exec_direct_int_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1893,7 +1871,9 @@ fn try_exec_direct_int_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Resu
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let left_value = eval_inline_operand(&left, target, index);
         let right_value = eval_inline_operand(&right, target, index);
@@ -1907,8 +1887,8 @@ fn try_exec_direct_int_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Resu
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -2017,7 +1997,9 @@ fn try_exec_one_arg_int_helper_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let left_value = eval_inline_operand(&left, target, index);
         let right_value = eval_inline_operand(&right, target, index);
@@ -2031,8 +2013,8 @@ fn try_exec_one_arg_int_helper_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -2167,7 +2149,9 @@ fn try_exec_two_arg_int_helper_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let left_value = eval_inline_operand(&left, target, index);
         let right_value = eval_inline_operand(&right, target, index);
@@ -2181,8 +2165,8 @@ fn try_exec_two_arg_int_helper_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -3091,6 +3075,11 @@ pub(super) fn exec_context(
             // Increase indent for nested blocks
             BDD_INDENT.with(|cell: &RefCell<usize>| *cell.borrow_mut() += 1);
 
+            // Open this group's `after_all` scope; drained below when the
+            // group's body ends. See the same push/drain pair in
+            // interpreter_call/bdd.rs and interpreter_call/block_execution.rs.
+            BDD_AFTER_ALL.with(|cell: &RefCell<Vec<Vec<Value>>>| cell.borrow_mut().push(vec![]));
+
             // If this is a context_def reference, execute its givens first
             if let Some(ctx_blocks) = ctx_def_blocks {
                 for ctx_block in ctx_blocks {
@@ -3100,6 +3089,27 @@ pub(super) fn exec_context(
 
             // Execute the block
             let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
+
+            // Drain this group's `after_all` hooks in registration order now
+            // that its body -- and therefore every example in it, which this
+            // runner executes eagerly -- has finished. A hook error only
+            // surfaces when the body itself succeeded, so it cannot mask a
+            // real example failure.
+            let after_all_hooks =
+                BDD_AFTER_ALL.with(|cell: &RefCell<Vec<Vec<Value>>>| cell.borrow_mut().pop().unwrap_or_default());
+            let mut hook_err = None;
+            for hook in after_all_hooks {
+                if let Err(e) = exec_block_value(hook, env, functions, classes, enums, impl_methods) {
+                    if hook_err.is_none() {
+                        hook_err = Some(e);
+                    }
+                }
+            }
+            let result = match (result, hook_err) {
+                (Ok(v), None) => Ok(v),
+                (Ok(_), Some(e)) => Err(e),
+                (other, _) => other,
+            };
 
             // Clear lazy values after context exits
             BDD_LAZY_VALUES.with(|cell: &RefCell<HashMap<String, (Value, Option<Value>)>>| cell.borrow_mut().clear());
@@ -3219,13 +3229,18 @@ fn exec_method_body(
     for (k, v) in fields {
         local_env.mark_local(k.clone());
         local_env.insert(k.clone(), v.clone());
+        // Flag the binding as a field PRE-BIND. Without this the field looks
+        // like an ordinary local to `env.contains_key`, so the bare
+        // `field = value` guard in `exec_assignment` saw
+        // `is_first_assignment == false` and never fired for plain `fn`
+        // methods -- the write landed on the doomed local and `self.field`
+        // was silently unchanged.
+        // doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+        local_env.mark_field_prebind(k.clone());
     }
     let mut bound = HashMap::from([("self".to_string(), receiver.clone())]);
     for (index, param) in method.params.iter().filter(|p| p.name != "self").enumerate() {
-        bound.insert(
-            param.name.clone(),
-            args.get(index).cloned().unwrap_or(Value::Nil),
-        );
+        bound.insert(param.name.clone(), args.get(index).cloned().unwrap_or(Value::Nil));
     }
     env.release_scope();
     let result = execute_function_body(
@@ -3623,7 +3638,9 @@ fn try_exec_enumerated_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> 
     let mut iterations = 0u64;
     for (idx, item) in values.iter().enumerate() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let loop_value = if uses_item {
             let Value::Int(loop_value) = item else {
@@ -3647,12 +3664,12 @@ fn try_exec_enumerated_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> 
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_index {
-        env_insert_synced(env, loop_shape.index_var, Value::Int(value));
+        env.insert(loop_shape.index_var, Value::Int(value));
     }
     if let Some(value) = last_item {
-        env_insert_synced(env, loop_shape.item_var, value);
+        env.insert(loop_shape.item_var, value);
     }
     Ok(Some(Control::Next))
 }
@@ -3784,7 +3801,9 @@ fn try_exec_string_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Re
     let mut iterations = 0u64;
     for ch in text.chars() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         if (ch == loop_shape.needle) == loop_shape.match_when_equal {
             let left_value = eval_single_range_for_operand(&left, target, 0);
@@ -3800,9 +3819,9 @@ fn try_exec_string_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Re
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(ch) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::text(ch.to_string()));
+        env.insert(loop_shape.loop_var, Value::text(ch.to_string()));
     }
     Ok(Some(Control::Next))
 }
@@ -3945,7 +3964,9 @@ fn try_exec_string_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<O
     let mut iterations = 0u64;
     for ch in text.chars() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let left_value = eval_single_range_for_operand(&left, target, 0);
         let right_value = eval_single_range_for_operand(&right, target, 0);
@@ -3959,9 +3980,9 @@ fn try_exec_string_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<O
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(ch) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::text(ch.to_string()));
+        env.insert(loop_shape.loop_var, Value::text(ch.to_string()));
     }
     Ok(Some(Control::Next))
 }
@@ -4062,7 +4083,9 @@ fn try_exec_float_array_match_count_for_loop(
     let mut iterations = 0u64;
     for item in values.iter() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let Value::Float(loop_value) = item else {
             return Ok(None);
@@ -4081,9 +4104,9 @@ fn try_exec_float_array_match_count_for_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Float(value));
+        env.insert(loop_shape.loop_var, Value::Float(value));
     }
     Ok(Some(Control::Next))
 }
@@ -4203,7 +4226,9 @@ fn try_exec_float_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Op
     let mut iterations = 0u64;
     for item in values.iter() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let Value::Float(loop_value) = item else {
             return Ok(None);
@@ -4220,9 +4245,9 @@ fn try_exec_float_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Op
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Float(target));
+    env.insert(loop_shape.assignment.target, Value::Float(target));
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Float(value));
+        env.insert(loop_shape.loop_var, Value::Float(value));
     }
     Ok(Some(Control::Next))
 }
@@ -4336,7 +4361,9 @@ fn try_exec_int_array_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) ->
     let mut iterations = 0u64;
     for item in values.iter() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let Value::Int(loop_value) = item else {
             return Ok(None);
@@ -4355,9 +4382,9 @@ fn try_exec_int_array_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) ->
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Int(value));
+        env.insert(loop_shape.loop_var, Value::Int(value));
     }
     Ok(Some(Control::Next))
 }
@@ -4498,7 +4525,9 @@ fn try_exec_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
     let mut iterations = 0u64;
     for item in values.iter() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         let Value::Int(loop_value) = item else {
             return Ok(None);
@@ -4515,9 +4544,9 @@ fn try_exec_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Int(value));
+        env.insert(loop_shape.loop_var, Value::Int(value));
     }
     Ok(Some(Control::Next))
 }
@@ -4608,7 +4637,9 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
         let mut iterations = 0u64;
         while current < end {
             if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-                return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+                return Err(CompileError::TimeoutExceeded {
+                    timeout_secs: crate::interpreter::timeout_limit_secs(),
+                });
             }
             let left_value = eval_single_range_for_operand(&left, target, current);
             let right_value = eval_single_range_for_operand(&right, target, current);
@@ -4622,9 +4653,9 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
             current = current.wrapping_add(1);
             iterations = iterations.wrapping_add(1);
         }
-        env_insert_synced(env, assignment.target.clone(), Value::Int(target));
+        env.insert(assignment.target.clone(), Value::Int(target));
         if let Some(value) = last_value {
-            env_insert_synced(env, loop_shape.loop_var, Value::Int(value));
+            env.insert(loop_shape.loop_var, Value::Int(value));
         }
         return Ok(Some(Control::Next));
     }
@@ -4654,7 +4685,9 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
     let mut iterations = 0u64;
     while current < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
         for assignment in &loop_shape.assignments {
             let left = eval_range_for_operand(&assignment.left, &locals, current)?;
@@ -4674,11 +4707,11 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
 
     for assignment in &loop_shape.assignments {
         if let Some(value) = locals.get(&assignment.target) {
-            env_insert_synced(env, assignment.target.clone(), Value::Int(*value));
+            env.insert(assignment.target.clone(), Value::Int(*value));
         }
     }
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Int(value));
+        env.insert(loop_shape.loop_var, Value::Int(value));
     }
     Ok(Some(Control::Next))
 }
@@ -4885,7 +4918,8 @@ pub(crate) fn exec_match_core(
             }
 
             // COVERAGE: Record that this match arm was taken
-            record_decision_coverage_here(match_stmt.span.line + arm_index,
+            record_decision_coverage_here(
+                match_stmt.span.line + arm_index,
                 match_stmt.span.column,
                 true, // We matched an arm
             );
@@ -4982,7 +5016,8 @@ pub(crate) fn exec_if_core(
                 // closure `if val get_value = …` returned `<fn:get_value>`.
                 env.mark_local(name.clone());
                 env.insert(name, inner);
-                let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
+                let (flow, last_val) =
+                    exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
                 return match flow {
                     Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                     other => Ok((other, Value::Nil)),
@@ -5082,10 +5117,7 @@ pub(crate) fn exec_if_core(
                 elif_val
             };
             let elif_decision = is_condition_present(cond, &elif_val);
-            record_decision_coverage_here(if_stmt.span.line + elif_idx,
-                if_stmt.span.column,
-                elif_decision,
-            );
+            record_decision_coverage_here(if_stmt.span.line + elif_idx, if_stmt.span.column, elif_decision);
             if elif_decision {
                 let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
                 return match flow {
@@ -5140,7 +5172,8 @@ mod exec_if_core_tests {
     /// the value is absent. It must be SKIPPED instead.
     #[test]
     fn exec_if_core_skips_if_val_when_absent() {
-        let if_stmt = parse_trailing_if("fn probe():\n    if val v = x:\n        \"TAKEN\"\n    else:\n        \"SKIPPED\"\n");
+        let if_stmt =
+            parse_trailing_if("fn probe():\n    if val v = x:\n        \"TAKEN\"\n    else:\n        \"SKIPPED\"\n");
         let mut env = Env::new();
         env.insert("x".to_string(), Value::Nil);
         let (flow, value) = exec_if_core(
@@ -5214,7 +5247,8 @@ mod exec_if_core_tests {
     /// presence-aware `Value::Nil`).
     #[test]
     fn exec_if_core_if_val_with_exists_check_skips_empty_string() {
-        let if_stmt = parse_trailing_if("fn probe():\n    if val v = x.?:\n        \"TAKEN\"\n    else:\n        \"SKIPPED\"\n");
+        let if_stmt =
+            parse_trailing_if("fn probe():\n    if val v = x.?:\n        \"TAKEN\"\n    else:\n        \"SKIPPED\"\n");
         let mut env = Env::new();
         env.insert("x".to_string(), Value::text(""));
         let (flow, value) = exec_if_core(
@@ -5247,7 +5281,8 @@ mod exec_if_core_tests {
     fn exec_if_core_takes_then_branch_for_some_zero_via_exists_check() {
         use crate::value::enum_names;
 
-        let if_stmt = parse_trailing_if("fn probe():\n    if x.?:\n        \"present\"\n    else:\n        \"absent\"\n");
+        let if_stmt =
+            parse_trailing_if("fn probe():\n    if x.?:\n        \"present\"\n    else:\n        \"absent\"\n");
         let mut env = Env::new();
         env.insert(
             "x".to_string(),
@@ -5275,7 +5310,8 @@ mod exec_if_core_tests {
     fn exec_if_core_takes_else_branch_for_none_via_exists_check() {
         use crate::value::enum_names;
 
-        let if_stmt = parse_trailing_if("fn probe():\n    if x.?:\n        \"present\"\n    else:\n        \"absent\"\n");
+        let if_stmt =
+            parse_trailing_if("fn probe():\n    if x.?:\n        \"present\"\n    else:\n        \"absent\"\n");
         let mut env = Env::new();
         env.insert(
             "x".to_string(),
@@ -5370,5 +5406,51 @@ mod if_val_binding_locality_tests {
         env.insert("get_value".to_string(), Value::Int(7));
         assert!(env.is_local("get_value"));
         assert!(matches!(env.get("get_value"), Some(Value::Int(7))));
+    }
+
+    /// Reproduce for
+    /// doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+    ///
+    /// `exec_method_body` pre-binds every receiver field as a frame local, so
+    /// `contains_key` (which is all `is_first_assignment` in
+    /// `interpreter/node_exec.rs` ever consulted) reports the field as ALREADY
+    /// bound and the bare-`field = ...` trap was skipped for plain `fn`
+    /// methods. `is_field_prebind` is the discriminator that restores it.
+    /// Before the fix this assertion fails: the pre-bind was indistinguishable
+    /// from an ordinary local.
+    #[test]
+    fn field_prebind_is_distinguishable_from_an_ordinary_local() {
+        let mut env = Env::new();
+        env.mark_local("flag".to_string());
+        env.insert("flag".to_string(), Value::Bool(false));
+        env.mark_field_prebind("flag".to_string());
+        assert!(env.contains_key("flag"), "the pre-bind is a real binding");
+        assert!(
+            env.is_field_prebind("flag"),
+            "a method-entry field pre-bind must be recognisable, or the bare \
+             `field = ...` guard stays dead for plain `fn` methods"
+        );
+    }
+
+    /// The discriminator must not fire for a genuine local that merely shares a
+    /// field's name — otherwise the fix trades a silent no-op for a false
+    /// rejection of legal shadowing.
+    #[test]
+    fn a_genuine_local_declaration_clears_the_field_prebind_flag() {
+        let mut env = Env::new();
+        env.mark_local("flag".to_string());
+        env.insert("flag".to_string(), Value::Bool(false));
+        env.mark_field_prebind("flag".to_string());
+        // `val flag = ...` inside the method body re-declares the name.
+        env.mark_local("flag".to_string());
+        env.insert("flag".to_string(), Value::Int(1));
+        assert!(!env.is_field_prebind("flag"));
+
+        // Loop variables take the block-local path instead.
+        let mut env2 = Env::new();
+        env2.mark_local("flag".to_string());
+        env2.mark_field_prebind("flag".to_string());
+        env2.enter_block_local("flag".to_string());
+        assert!(!env2.is_field_prebind("flag"));
     }
 }

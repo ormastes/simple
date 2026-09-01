@@ -66,14 +66,33 @@ use compiler.frontend.aspect_registry.{aspect_registry_bounded_time_of_key}
 # `layer_eq_module_identities` (C1) and `effect_module_identities` (C4).
 fn aspect_module_identities(modules: Dict<text, HirModule>) -> [text]:
     var ids: [text] = []
+    var seen: Dict<text, bool> = {}
     for module_key in modules.keys():
         val module: HirModule = modules[module_key]
-        if module.path != "" and not ids.contains(module.path):
+        if module.path != "" and not seen.contains_key(module.path):
             ids.push(module.path)
-        if module.name != "" and not ids.contains(module.name):
+            seen[module.path] = true
+        if module.name != "" and not seen.contains_key(module.name):
             ids.push(module.name)
-        if not ids.contains(module_key):
+            seen[module.name] = true
+        if not seen.contains_key(module_key):
             ids.push(module_key)
+            seen[module_key] = true
+    ids
+
+# Hash-indexed form for hot claim scoping. Keep `aspect_module_identities` as
+# the ordered public projection used by diagnostics and compatibility callers;
+# validation and weaving only need membership and must not rescan all module
+# aliases for every process-wide registry claim.
+fn aspect_module_identity_index(modules: Dict<text, HirModule>) -> Dict<text, bool>:
+    var ids: Dict<text, bool> = {}
+    for module_key in modules.keys():
+        val module: HirModule = modules[module_key]
+        if module.path != "":
+            ids[module.path] = true
+        if module.name != "":
+            ids[module.name] = true
+        ids[module_key] = true
     ids
 
 fn aspect_join_point_kind_list() -> text:
@@ -100,7 +119,7 @@ fn validate_aspect_contracts(modules: Dict<text, HirModule>) -> [text]:
     if claim_keys.len() == 0:
         return errors
 
-    val module_ids = aspect_module_identities(modules)
+    val module_ids = aspect_module_identity_index(modules)
     # Enumerated ONCE for the whole compilation, not per claim: two advice
     # declarations on the same edge must see the same join-point id.
     val forwards = forward_join_points(modules)
@@ -115,7 +134,7 @@ fn validate_aspect_contracts(modules: Dict<text, HirModule>) -> [text]:
         # that owns the advice carries it again when it is compiled, and the
         # spec asserts that in-scope advice really does produce diagnostics, so
         # a scoping bug that silenced everything would turn it red.
-        if not module_ids.contains(claim_path):
+        if not module_ids.contains_key(claim_path):
             continue
 
         val kind = aspect_registry_kind_of_key(key)
@@ -188,5 +207,5 @@ fn validate_aspect_contracts(modules: Dict<text, HirModule>) -> [text]:
             continue
     errors
 
-export validate_aspect_contracts, aspect_module_identities, aspect_missing_obligations
+export validate_aspect_contracts, aspect_module_identities, aspect_module_identity_index, aspect_missing_obligations
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

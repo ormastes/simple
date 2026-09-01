@@ -8,7 +8,8 @@ use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_req
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
-use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestFileResult, TestRunResult}
+use std.test_runner.test_runner_output.{test_run_result_json}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, light_request_encode, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, has_verdict_line, exit_code_reason}
 
@@ -309,6 +310,59 @@ fn fail_closed_on_no_examples(path: text, body: text, code: i64) -> i64:
     print timeout_verdict_line(path, "no-examples-executed", 0)
     no_examples_exit_code(body, code)
 
+# --json mode: rows collected from each file's real SPEC FILE VERDICT line,
+# emitted at the end through the pinned stdlib emitter (test_run_result_json,
+# groups + done_pct included). Planned markers print "(planned)" and are
+# counted as pending, not skipped.
+var json_mode = false
+var json_files: [TestFileResult] = []
+
+fn record_json_row(path: text, combined: text):
+    if not json_mode:
+        return
+    var passed = 0
+    var failed = 0
+    var skipped = 0
+    # The spipe matcher preprocessor runs a rewritten copy named
+    # `.spipe_matchers_<pid>_<ts>_<basename>`, so the verdict line carries
+    # that temp name, not the requested path. Match on the basename suffix.
+    val slash = path.rfind("/")
+    val base = if slash >= 0: path[slash + 1:path.len()] else: path
+    for line in combined.split("\n"):
+        if line.contains("SPEC FILE VERDICT:") and line.contains(base):
+            for tok in line.split(" "):
+                if tok.starts_with("passed="):
+                    passed = tok[7:tok.len()].to_i64() ?? 0
+                elif tok.starts_with("failed="):
+                    failed = tok[7:tok.len()].to_i64() ?? 0
+                elif tok.starts_with("skipped="):
+                    skipped = tok[8:tok.len()].to_i64() ?? 0
+    var pending = 0
+    for line in combined.split("\n"):
+        if line.contains("(planned)"):
+            pending = pending + 1
+    if pending > skipped:
+        pending = skipped
+    json_files.push(TestFileResult(
+        path: path, passed: passed, failed: failed, skipped: skipped - pending,
+        pending: pending, duration_ms: 0, setup_ms: 0, error: "",
+        timed_out: false, cached: false))
+
+fn print_json_summary():
+    var tp = 0
+    var tf = 0
+    var ts = 0
+    var tpe = 0
+    for f in json_files:
+        tp = tp + f.passed
+        tf = tf + f.failed
+        ts = ts + f.skipped
+        tpe = tpe + f.pending
+    val r = TestRunResult(files: json_files, total_passed: tp, total_failed: tf,
+        total_skipped: ts, total_pending: tpe, total_timed_out: 0,
+        total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+    print "{\"success\":" + (if tf == 0: "true" else: "false") + ",\"spec\":" + test_run_result_json(r) + ",\"spl_doctest\":null,\"sdoctest\":null}"
+
 fn print_response(path: text, content: text) -> i64:
     val newline = content.find("\n")
     if newline < 0:
@@ -316,6 +370,7 @@ fn print_response(path: text, content: text) -> i64:
         return 1
     val code = content[0:newline].trim().to_i64() ?? 1
     val body = content[newline + 1:]
+    record_json_row(path, body)
     if body != "":
         print body
     fail_closed_on_no_examples(path, body, code)
@@ -411,6 +466,7 @@ fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
         outer_timeout_ms,
         TEST_OUTPUT_CAPTURE_BYTES
     )
+    record_json_row(path, out + "\n" + err)
     if out != "":
         print out
     if err != "":
@@ -544,7 +600,18 @@ fn _test_env_gate_names() -> text:
     names.join(", ")
 
 fn main() -> i64:
-    val cleaned = clean_args()
+    val raw_cleaned = clean_args()
+    var cleaned: [text] = []
+    var jf = 0
+    while jf < raw_cleaned.len():
+        if raw_cleaned[jf] == "--json":
+            json_mode = true
+        elif raw_cleaned[jf] == "--format" and jf + 1 < raw_cleaned.len() and raw_cleaned[jf + 1] == "json":
+            json_mode = true
+            jf = jf + 1
+        else:
+            cleaned.push(raw_cleaned[jf])
+        jf = jf + 1
     if has_spl_doctest_flag(cleaned):
         return run_scoped_spl_doctest(cleaned)
     val run = parse_client_run(cleaned)
@@ -704,4 +771,6 @@ fn main() -> i64:
     if executed != requested.len():
         print "ERROR: executed {executed} of {requested.len()} requested spec file(s); some were skipped"
         return 1
+    if json_mode:
+        print_json_summary()
     worst

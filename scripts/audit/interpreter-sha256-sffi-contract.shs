@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+provider=src/compiler_rust/compiler/src/interpreter_extern/sha256.rs
+decl=src/compiler_rust/lib/std/src/infra/hash.spl
+registration=src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+
+test "$(rg -c '^@unsafe\(reason: "raw SHA-256' "$decl")" -eq 6
+sha256_wrapper="$(sed -n '/^struct Sha256Hasher:/,/^struct /p' "$decl")"
+test "$(printf '%s\n' "$sha256_wrapper" | rg -c 'unsafe\(capabilities: \[ffi\]\):')" -eq 6
+for spec in new:0 write:3 finish:1 reset:1 free:1; do
+    suffix=${spec%%:*}
+    arity=${spec##*:}
+    name="rt_sha256_${suffix}"
+    body="$(sed -n "/^pub fn ${name}/,/^}/p" "$provider")"
+    printf '%s\n' "$body" | rg -q "require_arity\(args, ${arity}, \"${name}\"\)\?;"
+    rg -q "\"${name}\"" "$registration"
+done
+
+write="$(sed -n '/^pub fn rt_sha256_write/,/^}/p' "$provider")"
+printf '%s\n' "$write" | rg -q 'usize::try_from\(args\[2\]\.as_int\(\)\?\)'
+! printf '%s\n' "$write" | rg -q '_ => payload.len\(\)'
+
+rg -q 'fetch_update\(Ordering::SeqCst, Ordering::SeqCst' "$provider"
+! sed -n '/^fn handle_of/,/^}/p' "$provider" | rg -q 'as i64'
+
+# Free is intentionally idempotent in both interpreter/native contracts; keep
+# that explicit rather than misclassifying its second remove as ABI success.
+rg -q 'rt_sha256_free.*idempotent' "$provider"
+
+for suffix in new write finish finish_bytes reset free; do
+    name="rt_sha256_${suffix}"
+    test "$(rg -c "^[[:space:]]+${name}\\(" "$decl")" -eq 1
+done
+
+echo "interpreter SHA-256 SFFI contract audit: PASS (strict arity/length/handles; raw declarations unsafe; free explicitly idempotent)"

@@ -12,17 +12,29 @@ use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, s
 # Tier 1: Extern Declarations (Raw SFFI)
 # ============================================================================
 
+@unsafe(reason: "raw owned font-data handle allocation ABI; zero means failure", capabilities: [ffi])
 extern fn rt_font_load_array(bytes: [u8]) -> i64
+@unsafe(reason: "raw path-based owned font handle allocation ABI; zero means failure", capabilities: [ffi])
 extern fn rt_font_load(path: text) -> i64
+@unsafe(reason: "raw owned font-handle release ABI", capabilities: [ffi])
 extern fn rt_font_free(handle: i64)
+@unsafe(reason: "raw borrowed font handle and owned bitmap-handle allocation ABI", capabilities: [ffi])
 extern fn rt_font_glyph_bitmap(font_handle: i64, codepoint: i64, size: f64) -> i64
+@unsafe(reason: "raw borrowed font-handle glyph lookup ABI", capabilities: [ffi])
 extern fn rt_font_glyph_index(font_handle: i64, codepoint: i64) -> i64
+@unsafe(reason: "raw borrowed bitmap-handle width ABI", capabilities: [ffi])
 extern fn rt_font_bitmap_width(bitmap_handle: i64) -> i64
+@unsafe(reason: "raw borrowed bitmap-handle height ABI", capabilities: [ffi])
 extern fn rt_font_bitmap_height(bitmap_handle: i64) -> i64
+@unsafe(reason: "raw borrowed bitmap-handle coordinate lookup ABI", capabilities: [ffi])
 extern fn rt_font_bitmap_get_pixel(bitmap_handle: i64, x: i64, y: i64) -> i64
+@unsafe(reason: "raw owned bitmap-handle release ABI", capabilities: [ffi])
 extern fn rt_font_bitmap_free(bitmap_handle: i64)
+@unsafe(reason: "raw borrowed font-handle advance-metric ABI", capabilities: [ffi])
 extern fn rt_font_glyph_advance(font_handle: i64, codepoint: i64, size: f64) -> i64
+@unsafe(reason: "raw borrowed font-handle line-height ABI", capabilities: [ffi])
 extern fn rt_font_line_height(font_handle: i64, size: f64) -> i64
+@unsafe(reason: "raw borrowed font-handle ascent ABI", capabilities: [ffi])
 extern fn rt_font_ascent(font_handle: i64, size: f64) -> i64
 
 # ============================================================================
@@ -127,7 +139,8 @@ impl GlyphBitmap:
     fn get_pixel(x: i64, y: i64) -> i64:
         if not self.is_valid():
             return 0
-        rt_font_bitmap_get_pixel(self.bitmap_handle, x, y)
+        unsafe(capabilities: [ffi]):
+            rt_font_bitmap_get_pixel(self.bitmap_handle, x, y)
 
 fn load_font(path: text) -> FontHandle?:
     val selected = selected_font_asset_candidate_for_path(path)
@@ -141,10 +154,11 @@ fn load_font(path: text) -> FontHandle?:
         file_read_bytes(path)
     if not font_runtime_ttf_default_supported(blob):
         return nil
-    val h = if selected != nil:
-        rt_font_load_array(blob)
-    else:
-        rt_font_load(path)
+    val h = unsafe(capabilities: [ffi]):
+        if selected != nil:
+            rt_font_load_array(blob)
+        else:
+            rt_font_load(path)
     if h == 0:
         return nil
     val identity = if selected != nil:
@@ -155,35 +169,45 @@ fn load_font(path: text) -> FontHandle?:
 
 fn free_font(font: FontHandle):
     if _unregister_font_face(font.handle, font.generation):
-        rt_font_free(font.handle)
+        unsafe(capabilities: [ffi]):
+            rt_font_free(font.handle)
 
 fn get_glyph(font: FontHandle, codepoint: i64, size_px: f64) -> GlyphBitmap?:
     if not font.is_live():
         return nil
-    val bmp_handle = rt_font_glyph_bitmap(font.handle, codepoint, size_px)
+    val bmp_handle = unsafe(capabilities: [ffi]):
+        rt_font_glyph_bitmap(font.handle, codepoint, size_px)
     if bmp_handle == 0:
         return nil
-    val w = rt_font_bitmap_width(bmp_handle)
-    val h = rt_font_bitmap_height(bmp_handle)
-    val adv = rt_font_glyph_advance(font.handle, codepoint, size_px)
+    var w = 0
+    var h = 0
+    var adv = 0
+    unsafe(capabilities: [ffi]):
+        w = rt_font_bitmap_width(bmp_handle)
+        h = rt_font_bitmap_height(bmp_handle)
+        adv = rt_font_glyph_advance(font.handle, codepoint, size_px)
     val metrics = GlyphMetrics(width: w, height: h, advance: adv, codepoint: codepoint)
     GlyphBitmap(bitmap_handle: bmp_handle, width: w, height: h, metrics: metrics)
 
 fn glyph_index(font: FontHandle, codepoint: i64) -> i64:
     if not font.is_live():
         return 0
-    rt_font_glyph_index(font.handle, codepoint)
+    unsafe(capabilities: [ffi]):
+        rt_font_glyph_index(font.handle, codepoint)
 
 fn free_glyph_bitmap(bmp: GlyphBitmap):
     if bmp.is_valid():
-        rt_font_bitmap_free(bmp.bitmap_handle)
+        unsafe(capabilities: [ffi]):
+            rt_font_bitmap_free(bmp.bitmap_handle)
 
 fn get_line_height(font: FontHandle, size_px: f64) -> i64:
     if not font.is_live():
         return 0
-    rt_font_line_height(font.handle, size_px)
+    unsafe(capabilities: [ffi]):
+        rt_font_line_height(font.handle, size_px)
 
 fn font_face_ascent(handle: i64, generation: i64, size_px: i32) -> i32:
     if not font_face_is_live(handle, generation) or size_px <= 0:
         return 0
-    rt_font_ascent(handle, size_px.to_f64()).to_i32()
+    unsafe(capabilities: [ffi]):
+        rt_font_ascent(handle, size_px.to_f64()).to_i32()

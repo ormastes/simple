@@ -1,0 +1,132 @@
+"""Focused coverage for bounded static/dynamic MC/DC probe accumulation."""
+# @req: REQ-MCDC-SHORT-CIRCUIT-002
+# @req: REQ-MCDC-DYNAMIC-007
+
+use std.spec
+use std.common.mcdc.model.{McdcMode, mcdc_default_policy}
+use std.common.aspect_readiness.{READINESS_FULL, readiness_declare}
+use std.common.facet_registry.{catalog_new, catalog_register_aspect}
+use std.nogc_sync_mut.mcdc.dynamic_aspect.{MCDC_ASPECT_ABI_V1, MCDC_ASPECT_SCHEMA_V1, McdcDynamicAspect}
+use std.nogc_sync_mut.mcdc.probe_registry.{McdcProbeRegistry, mcdc_probe_current_owner_id}
+use std.nogc_sync_mut.mcdc.dynamic_probe.{mcdc_dynamic_probe_abort, mcdc_dynamic_probe_begin, mcdc_dynamic_probe_configure, mcdc_dynamic_probe_controller_load_builtin_current_owner, mcdc_dynamic_probe_controller_prepare_owners, mcdc_dynamic_probe_controller_publish_prepared, mcdc_dynamic_probe_controller_select_aspect, mcdc_dynamic_probe_controller_unload_all, mcdc_dynamic_probe_controller_unload_current_owner, mcdc_dynamic_probe_is_published, mcdc_dynamic_probe_owner_ids, mcdc_dynamic_probe_worker_spawn_hook}
+use std.nogc_sync_mut.mcdc.static_probe.{mcdc_static_probe_abort, mcdc_static_probe_begin, mcdc_static_probe_configure_for_owners, mcdc_static_probe_owner_ids, mcdc_static_probe_worker_spawn_hook}
+
+describe "MC/DC pinned probe protocol":
+    it "keeps the static registry cold until final policy configuration":
+        expect(mcdc_static_probe_begin(1)).to_equal(0)
+
+    it "cold-registers a real static worker before user probes and then uses TLS":
+        val policy = mcdc_default_policy(McdcMode.StaticOn)
+        val current_owner = mcdc_probe_current_owner_id()
+        expect(mcdc_static_probe_configure_for_owners(
+            policy, [current_owner, current_owner + 10, current_owner + 20])).to_equal(true)
+        expect(mcdc_static_probe_owner_ids().len()).to_equal(3)
+        expect(mcdc_static_probe_worker_spawn_hook()).to_equal(true)
+        expect(mcdc_static_probe_owner_ids().len()).to_equal(3)
+        val worker_token = mcdc_static_probe_begin(1)
+        expect(worker_token).to_be_greater_than(0)
+        mcdc_static_probe_abort(worker_token)
+
+    it "publishes a configured dynamic capsule and restores publication after a failed unload":
+        step("Verify: activation installs and binds the first owner; failed withdrawal retries safely")
+        expect(mcdc_dynamic_probe_begin(1)).to_equal(0)
+        val policy = mcdc_default_policy(McdcMode.DynamicAspect)
+        expect(mcdc_dynamic_probe_configure(policy.global_bytes, policy.owner_bytes)).to_equal(true)
+        expect(mcdc_dynamic_probe_is_published()).to_equal(false)
+        expect(mcdc_dynamic_probe_begin(1)).to_equal(0)
+        expect(mcdc_dynamic_probe_controller_load_builtin_current_owner()).to_equal(true)
+        expect(mcdc_dynamic_probe_is_published()).to_equal(true)
+        val pinned = mcdc_dynamic_probe_begin(1)
+        expect(pinned).to_be_greater_than(0)
+        expect(mcdc_dynamic_probe_controller_unload_current_owner()).to_equal(false)
+        expect(mcdc_dynamic_probe_is_published()).to_equal(true)
+        mcdc_dynamic_probe_abort(pinned)
+        expect(mcdc_dynamic_probe_controller_unload_current_owner()).to_equal(true)
+        expect(mcdc_dynamic_probe_is_published()).to_equal(false)
+        expect(mcdc_dynamic_probe_begin(1)).to_equal(0)
+
+    it "records only conditions actually observed before decision end":
+        step("Verify: fixed masks preserve a skipped short-circuit RHS")
+        var aspect = McdcDynamicAspect.create_direct_static(
+            3, mcdc_default_policy(McdcMode.StaticOn)
+        )
+        val token = aspect.begin_evaluation(3, 41)
+        expect(token).to_be_greater_than(0)
+        expect(aspect.observe_condition(3, token, 0, false)).to_equal(true)
+        expect(aspect.finish_evaluation(3, token, false)).to_equal(true)
+        expect(aspect.recorded_count()).to_equal(1)
+
+    it "tracks unload reader pins atomically around an owner evaluation":
+        val policy = mcdc_default_policy(McdcMode.StaticOn)
+        var registry = McdcProbeRegistry.create(policy.owner_bytes, policy.owner_bytes)
+        expect(registry.install(
+            McdcDynamicAspect.create_direct_static(303, policy))).to_equal(true)
+        val slot = registry.slot_of(303)
+        expect(registry.all_reader_pins_zero()).to_equal(true)
+        expect(registry.reader_pin_acquire_at(slot)).to_equal(true)
+        expect(registry.all_reader_pins_zero()).to_equal(false)
+        registry.reader_pin_release_at(slot)
+        expect(registry.all_reader_pins_zero()).to_equal(true)
+
+    it "cold-registers a real dynamic worker without adding hot lookup":
+        val module_name = "test.mcdc.parallel.prepared"
+        val current_owner = mcdc_probe_current_owner_id()
+        val catalog = catalog_new()
+        expect(catalog_register_aspect(catalog, "mcdc-parallel", "packs/mcdc.apk")).to_equal(true)
+        expect(readiness_declare(module_name, READINESS_FULL, 1, 2)).to_equal(true)
+        expect(mcdc_dynamic_probe_controller_select_aspect(
+            catalog, "mcdc-parallel", module_name,
+            MCDC_ASPECT_ABI_V1, MCDC_ASPECT_SCHEMA_V1)).to_equal(true)
+        expect(mcdc_dynamic_probe_controller_prepare_owners(
+            [current_owner, current_owner + 30, current_owner + 40])).to_equal(true)
+        expect(mcdc_dynamic_probe_controller_publish_prepared()).to_equal(true)
+        expect(mcdc_dynamic_probe_owner_ids().len()).to_equal(2)
+        expect(mcdc_dynamic_probe_worker_spawn_hook()).to_equal(true)
+        expect(mcdc_dynamic_probe_owner_ids().len()).to_equal(3)
+        val worker_token = mcdc_dynamic_probe_begin(2)
+        expect(worker_token).to_be_greater_than(0)
+        mcdc_dynamic_probe_abort(worker_token)
+        expect(mcdc_dynamic_probe_controller_unload_all()).to_equal(true)
+
+    it "records compiler-derived masking for evaluated irrelevant occurrences":
+        step("Verify: a controlling RHS masks the evaluated LHS range")
+        var aspect = McdcDynamicAspect.create_direct_static(
+            4, mcdc_default_policy(McdcMode.StaticOn)
+        )
+        val token = aspect.begin_evaluation(4, 42)
+        aspect.observe_condition(4, token, 0, false)
+        aspect.observe_condition(4, token, 1, true)
+        expect(aspect.mark_masked_range(4, token, 0, 1, true)).to_equal(true)
+        aspect.finish_evaluation(4, token, true)
+        expect(aspect.recorder.?.evaluation_at(0).masked_mask0).to_equal(1)
+
+    it "keeps nested decisions in distinct preallocated slots":
+        step("Verify: inner completion does not overwrite outer masks")
+        var aspect = McdcDynamicAspect.create_direct_static(
+            5, mcdc_default_policy(McdcMode.StaticOn)
+        )
+        val outer = aspect.begin_evaluation(5, 50)
+        expect(aspect.observe_condition(5, outer, 0, true)).to_equal(true)
+        val inner = aspect.begin_evaluation(5, 51)
+        expect(aspect.observe_condition(5, inner, 0, false)).to_equal(true)
+        expect(aspect.finish_evaluation(5, inner, false)).to_equal(true)
+        expect(aspect.finish_evaluation(5, outer, true)).to_equal(true)
+        expect(aspect.recorded_count()).to_equal(2)
+
+    it "maps multiple owners without sharing capsule mutation":
+        step("Verify: fixed registry keeps owner-local recorders distinct")
+        val policy = mcdc_default_policy(McdcMode.StaticOn)
+        var registry = McdcProbeRegistry.create(
+            policy.owner_bytes * 2, policy.owner_bytes
+        )
+        expect(registry.install(McdcDynamicAspect.create_direct_static(11, policy))).to_equal(true)
+        expect(registry.install(McdcDynamicAspect.create_direct_static(12, policy))).to_equal(true)
+        val first = registry.find(11)
+        val second = registry.find(12)
+        expect(first != nil).to_equal(true)
+        expect(second != nil).to_equal(true)
+        val token = first.?.begin_evaluation(11, 90)
+        first.?.observe_condition(11, token, 0, true)
+        first.?.finish_evaluation(11, token, true)
+        expect(first.?.recorded_count()).to_equal(1)
+        expect(second.?.recorded_count()).to_equal(0)

@@ -80,19 +80,19 @@ class RedisServer:
 
     me remove_at(idx: i64):
         """Remove the entry at idx from all three parallel arrays."""
-        var nk: [text] = []
-        var nv: [text] = []
-        var ne: [i64] = []
-        var i = 0
-        while i < self.skeys.len():
-            if i != idx:
-                nk.push(self.skeys[i])
-                nv.push(self.svals[i])
-                ne.push(self.sexp[i])
-            i = i + 1
-        self.skeys = nk
-        self.svals = nv
-        self.sexp = ne
+        # The supported command surface never exposes storage order. Keep the
+        # three parallel fields aligned by moving the tail entry into the hole
+        # and truncating once, instead of allocating and copying three complete
+        # arrays for every DEL or lazy-expiry purge. Lookup remains O(n), but
+        # removal is O(1) with no entry-proportional temporary memory.
+        val last = self.skeys.len().to_i64() - 1
+        if idx != last:
+            self.skeys[idx] = self.skeys[last]
+            self.svals[idx] = self.svals[last]
+            self.sexp[idx] = self.sexp[last]
+        self.skeys.pop()
+        self.svals.pop()
+        self.sexp.pop()
 
     me set_value(key: text, value: text):
         """Set key=value, clearing any prior expiry (SET semantics)."""
@@ -300,11 +300,18 @@ class RedisServer:
         var buf = ""
         var quit = false
         while not quit:
-            val chunk = rt_io_tcp_read(s.fd, 16384)
-            if chunk.len() == 0:
+            val chunk = unsafe(capabilities: [ffi]):
+                rt_io_tcp_read(s.fd, 16384)
+            if chunk == nil or chunk!.len() == 0:
                 break
-            buf = buf + bytes_to_text(chunk)
-            self.now_seconds = rt_time_now_seconds()
+            buf = buf + bytes_to_text(chunk!)
+            val now_micros = unsafe(capabilities: [ffi]):
+                rt_time_now_unix_micros()
+            if now_micros < 0:
+                # Do not dispatch TTL-sensitive commands with a fabricated
+                # clock value; the existing close path releases the socket.
+                break
+            self.now_seconds = now_micros / 1000000
             # Drain all complete commands from the buffer.
             var progressed = true
             while progressed:
@@ -312,14 +319,18 @@ class RedisServer:
                 match parse_next_request(buf):
                     case Some(r):
                         val reply = self.dispatch(r.args)
-                        rt_io_tcp_write_text(s.fd, reply)
+                        val written = unsafe(capabilities: [ffi]):
+                            rt_io_tcp_write_text(s.fd, reply)
+                        if written != reply.len():
+                            quit = true
                         buf = r.rest
                         progressed = true
                         if r.args.len() > 0 and ascii_upper(r.args[0]) == "QUIT":
                             quit = true
                             progressed = false
                     case nil: pass
-        rt_io_tcp_close(s.fd)
+        unsafe(capabilities: [ffi]):
+            rt_io_tcp_close(s.fd)
 
 # ============================================================================
 # Request parsing — RESP arrays of bulk strings + inline commands (text-based)
@@ -478,8 +489,12 @@ fn resp_empty_array() -> text:
 # SFFI
 # ============================================================================
 
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
 use std.common.string_core.{bytes_to_text}
-extern fn rt_time_now_seconds() -> i64
+@unsafe(reason: "raw wall-clock microsecond provider; negative i64 sentinel is failure", capabilities: [ffi])
+extern fn rt_time_now_unix_micros() -> i64

@@ -1,18 +1,41 @@
 use compiler.common.driver_core_types.{CompileResult}
+use std.file_system.{file_write_text, file_read_text}
 use compiler.driver.driver_public_header_parse.{PublicExportField, PublicExportClass, PublicExportFunction, PublicExportMethod, parse_public_exports}
+use std.io_runtime.{process_run, dir_create, file_exists}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
+@unsafe(reason: "raw runtime-owned joined-path text ABI; empty is failure", capabilities: [ffi])
 extern fn rt_path_join(a: text, b: text) -> text
+
+@always_inline
+fn _header_write_raw(path: text, content: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        file_write_text(path, content)
+
+@always_inline
+fn _header_exists_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        file_exists(path)
+
+@always_inline
+fn _header_read_raw(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        file_read_text(path)
+
+@always_inline
+fn _header_dir_create_raw(path: text, recursive: bool) -> bool:
+    unsafe(capabilities: [ffi]):
+        dir_create(path, recursive)
+
+@always_inline
+fn _header_path_join_raw(a: text, b: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_path_join(a, b)
 
 # The header helper uses a lightweight source parser because direct external
 # execution of the full driver helper path is still unstable in interpreter mode.
 
 pub fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, emit_cpp: bool) -> CompileResult:
-    val source = rt_file_read_text(path) ?? ""
+    val source = _header_read_raw(path) ?? ""
     if source.trim() == "":
         return CompileResult.RuntimeError("failed to read source file: {path}")
 
@@ -28,26 +51,30 @@ pub fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bo
 
     if emit_c:
         val c_header = _emit_public_c_header(lib_name, parsed.exported_functions, parsed.exported_classes)
-        val c_path = rt_path_join(output_dir, lib_name + ".h")
-        if not rt_file_write_text(c_path, c_header):
+        val c_path = _header_path_join_raw(output_dir, lib_name + ".h")
+        if c_path == "":
+            return CompileResult.RuntimeError("failed to construct generated C header path")
+        if not _header_write_raw(c_path, c_header):
             return CompileResult.RuntimeError("failed to write generated header: {c_path}")
-        if not rt_file_exists(c_path):
+        if not _header_exists_raw(c_path):
             return CompileResult.RuntimeError("generated header missing after write: {c_path}")
 
     if emit_cpp:
         val cpp_header = _emit_public_cpp_header(lib_name, parsed.exported_classes, parsed.exported_functions)
-        val cpp_path = rt_path_join(output_dir, lib_name + ".hpp")
-        if not rt_file_write_text(cpp_path, cpp_header):
+        val cpp_path = _header_path_join_raw(output_dir, lib_name + ".hpp")
+        if cpp_path == "":
+            return CompileResult.RuntimeError("failed to construct generated C++ header path")
+        if not _header_write_raw(cpp_path, cpp_header):
             return CompileResult.RuntimeError("failed to write generated C++ header: {cpp_path}")
-        if not rt_file_exists(cpp_path):
+        if not _header_exists_raw(cpp_path):
             return CompileResult.RuntimeError("generated C++ header missing after write: {cpp_path}")
 
     CompileResult.Success(nil)
 
 fn _ensure_output_dir(path: text) -> bool:
-    if rt_dir_create(path, true):
+    if _header_dir_create_raw(path, true):
         return true
-    val (_, _, exit_code) = rt_process_run("mkdir", ["-p", path])
+    val (_, _, exit_code) = process_run("mkdir", ["-p", path])
     exit_code == 0
 
 fn _emit_public_c_header(lib_name: text, functions: [PublicExportFunction], classes: [PublicExportClass]) -> text:

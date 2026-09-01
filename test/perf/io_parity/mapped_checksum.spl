@@ -1,0 +1,55 @@
+"""Mapped-byte checksum used by the C/Rust/Simple I/O parity benchmark.
+
+Reads an unaligned byte prefix, aligned eight-byte words, then the byte tail.
+The aligned middle avoids undefined unaligned i64 loads while reducing the
+canonical raw-pointer boundary from one call per byte to one call per word.
+"""
+
+use std.nogc_sync_mut.ptr.raw.{raw_read_i64, raw_read_u8}
+
+fn checksum_word_bytes(word: i64) -> i64:
+    ((word & 0xFF) +
+        ((word >> 8) & 0xFF) +
+        ((word >> 16) & 0xFF) +
+        ((word >> 24) & 0xFF) +
+        ((word >> 32) & 0xFF) +
+        ((word >> 40) & 0xFF) +
+        ((word >> 48) & 0xFF) +
+        ((word >> 56) & 0xFF))
+
+fn mapped_byte_checksum(address: i64, size: i64) -> i64:
+    if address <= 0 or size <= 0:
+        return 0
+
+    var checksum: i64 = 0
+    var offset: i64 = 0
+
+    while offset < size and (address + offset) % 8 != 0:
+        checksum = checksum + raw_read_u8(address, offset)
+        offset = offset + 1
+
+    while size - offset >= 8:
+        checksum = checksum + checksum_word_bytes(raw_read_i64(address, offset))
+        offset = offset + 8
+
+    while offset < size:
+        checksum = checksum + raw_read_u8(address, offset)
+        offset = offset + 1
+
+    checksum
+
+fn mapped_checksum_read_calls(address: i64, size: i64) -> i64:
+    if address <= 0 or size <= 0:
+        return 0
+
+    var calls: i64 = 0
+    var offset: i64 = 0
+    while offset < size and (address + offset) % 8 != 0:
+        calls = calls + 1
+        offset = offset + 1
+    while size - offset >= 8:
+        calls = calls + 1
+        offset = offset + 8
+    calls + (size - offset)
+
+export checksum_word_bytes, mapped_byte_checksum, mapped_checksum_read_calls

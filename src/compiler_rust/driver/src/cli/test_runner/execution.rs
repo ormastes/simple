@@ -1347,6 +1347,39 @@ fn preprocess_matchers_only(path: &Path) -> Result<PathBuf, String> {
     Ok(tmp_path)
 }
 
+/// Net count of unclosed `[`/`(`/`{` on one line, skipping string literals
+/// and `#` comments. Used so a multi-line top-level declaration such as
+/// `val XS: [text] = [` ... `]` is kept whole at module scope: the closing
+/// `]` sits at column 0 and is not itself a declaration keyword, so
+/// indentation alone ended the declaration and swept the `]` into the
+/// generated `fn main()`, leaving the module-scope list literal unterminated
+/// ("parse: expected RBracket, found Val").
+fn spipe_open_bracket_delta(line: &str) -> i64 {
+    let mut delta = 0i64;
+    let mut in_str: Option<char> = None;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if let Some(q) = in_str {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                in_str = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => in_str = Some(ch),
+            '#' => break,
+            '[' | '(' | '{' => delta += 1,
+            ']' | ')' | '}' => delta -= 1,
+            _ => {}
+        }
+    }
+    delta
+}
+
 fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     let path_str = path.to_string_lossy();
     if !path_str.ends_with("_spec.spl") {
@@ -1363,6 +1396,8 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     let mut top_fn_indent = 0usize;
     let mut in_import_block = false;
     let mut import_brace_depth = 0usize;
+    // Unclosed bracket depth of the top-level declaration being collected.
+    let mut top_decl_depth = 0i64;
 
     // Hoisting state: when we encounter a nested `class`/`impl`/`enum`/`type`
     // at indent > 0 inside what would otherwise be body content, we lift the
@@ -1500,6 +1535,13 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
                 || trimmed.starts_with("mod "));
 
         if in_top_fn {
+            // A declaration whose first line left brackets open continues at
+            // column 0 (the closing `]`), so indentation alone cannot end it.
+            if top_decl_depth > 0 {
+                top_decl_depth = (top_decl_depth + spipe_open_bracket_delta(line)).max(0);
+                top_level_parts.push(line.to_string());
+                continue;
+            }
             if trimmed.is_empty() {
                 top_level_parts.push(String::new());
                 continue;
@@ -1535,6 +1577,7 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
         if starts_top_level {
             in_top_fn = true;
             top_fn_indent = 0;
+            top_decl_depth = spipe_open_bracket_delta(line).max(0);
             top_level_parts.push(line.to_string());
             continue;
         }
@@ -1622,8 +1665,7 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
         let needle = format!("{}(", name);
         body_joined.contains(&needle)
             || top_joined.contains(&needle)
-            || (*name == "expect"
-                && top_joined.contains("expect "))
+            || (*name == "expect" && top_joined.contains("expect "))
     });
     let helpers_section = if helpers_used { SPIPE_INLINE_HELPERS } else { "" };
 
@@ -2172,6 +2214,80 @@ fn create_test_runner(options: &super::types::TestOptions) -> Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: a multi-line top-level `val XS: [text] = [ ... ]` used to
+    /// have its closing `]` (column 0, not a declaration keyword) swept into
+    /// the generated `fn main()`, leaving the module-scope list literal
+    /// unterminated and producing
+    /// `parse: Unexpected token: expected RBracket, found Val`.
+    /// Shape taken from test/perf/graphics_2d/no_duplication_spec.spl.
+    #[test]
+    fn spipe_wrapper_keeps_multiline_top_level_list_at_module_scope() {
+        let dir = std::env::temp_dir().join(format!(
+            "spipe_rbracket_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("multiline_list_spec.spl");
+        std::fs::write(
+            &src,
+            concat!(
+                "val CANONICAL_OUTPUT_DIRS: [text] = [\n",
+                "    \"test/perf/graphics_2d/\",\n",
+                "    \"test/perf/local_gpu_check/\"\n",
+                "]\n",
+                "\n",
+                "val CANONICAL_BACKENDS: [text] = [\n",
+                "    \"cpu\",\n",
+                "    \"vulkan\"\n",
+                "]\n",
+                "\n",
+                "describe \"multiline lists\":\n",
+                "    it \"has two dirs\":\n",
+                "        expect(CANONICAL_OUTPUT_DIRS.len()).to_equal(2)\n",
+            ),
+        )
+        .unwrap();
+
+        let out = preprocess_spipe_for_smf(&src).expect("preprocess must succeed");
+        let wrapped = std::fs::read_to_string(&out).unwrap();
+        let (top, body) = wrapped.split_once("fn main():").expect("wrapper must emit fn main()");
+
+        // Both list literals must be closed *above* fn main().
+        let opens = top.matches('[').count();
+        let closes = top.matches(']').count();
+        assert_eq!(
+            opens, closes,
+            "unbalanced brackets at module scope:\n{}",
+            top
+        );
+        assert!(
+            top.contains("val CANONICAL_BACKENDS"),
+            "second declaration missing from module scope:\n{}",
+            top
+        );
+        // The stray closing bracket must not have been indented into main().
+        assert!(
+            !body.lines().any(|l| l.trim() == "]"),
+            "closing bracket leaked into fn main() body:\n{}",
+            body
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spipe_open_bracket_delta_ignores_strings_and_comments() {
+        assert_eq!(spipe_open_bracket_delta("val xs = ["), 1);
+        assert_eq!(spipe_open_bracket_delta("]"), -1);
+        assert_eq!(spipe_open_bracket_delta("it \"matrix[0] is zero\":"), 0);
+        assert_eq!(spipe_open_bracket_delta("val a = 1  # note [unclosed"), 0);
+        assert_eq!(spipe_open_bracket_delta("fn f(a: i64) -> i64:"), 0);
+    }
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
@@ -2340,11 +2456,7 @@ mod tests {
     const DROPPING_SPEC_SOURCE: &str = "describe \"alpha\":\n    it \"a1\":\n        expect(1).to_equal(1)\n    it \"a2\":\n        expect(2).to_equal(2)\n\ndescribe \"beta\":\n    return\n    it \"b1\":\n        expect(3).to_equal(3)\n    it \"b2\":\n        expect(4).to_equal(4)\n\ndescribe \"gamma\":\n    it \"g1\":\n        expect(5).to_equal(5)\n";
 
     fn drop_fixture(tag: &str, source: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "simple_testdrop_{}_{}.spl",
-            tag,
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_testdrop_{}_{}.spl", tag, std::process::id()));
         std::fs::write(&path, source).expect("write fixture");
         path
     }
@@ -2534,18 +2646,18 @@ mod tests {
         // so the read failed and the call silently fell back to the original path.
         let tempdir = tempdir().expect("tempdir");
         let spec_path = tempdir.path().join("example_spec.spl");
-        fs::write(&spec_path, "describe \"safe\":\n    it \"runs\":\n        expect value to_equal 1\n")
-            .expect("write spec");
+        fs::write(
+            &spec_path,
+            "describe \"safe\":\n    it \"runs\":\n        expect value to_equal 1\n",
+        )
+        .expect("write spec");
 
         let args = build_safe_mode_child_args(&spec_path, &options);
 
         assert_eq!(args.first().map(String::as_str), Some("run"));
         assert_eq!(
             args.get(1).map(String::as_str),
-            tempdir
-                .path()
-                .join(".spipe_matchers_example_spec.spl")
-                .to_str()
+            tempdir.path().join(".spipe_matchers_example_spec.spl").to_str()
         );
         assert!(!args.iter().any(|arg| arg == "test"));
     }

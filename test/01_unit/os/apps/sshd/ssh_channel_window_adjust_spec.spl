@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Purpose: Specify fail-closed RFC 4254 remote window-adjust ownership.
+Audience: maintainers of the filesystem-launched Pure Simple SSH server.
+"""
+# @req: REQ-OS-APPS-001
+# @cover src/os/apps/sshd/ssh_channel.spl 80%
+use std.spipe.*
+use std.spec.step
+use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, SSH_MSG_CHANNEL_WINDOW_ADJUST}
+use os.apps.sshd.ssh_session_channel.{ssh_channel_send_limit_v1}
+
+fn window_adjust(recipient: u32, increment: u32) -> [u8]:
+    [
+        SSH_MSG_CHANNEL_WINDOW_ADJUST,
+        ((recipient >> 24) & 255u32).to_u8(),
+        ((recipient >> 16) & 255u32).to_u8(),
+        ((recipient >> 8) & 255u32).to_u8(),
+        (recipient & 255u32).to_u8(),
+        ((increment >> 24) & 255u32).to_u8(),
+        ((increment >> 16) & 255u32).to_u8(),
+        ((increment >> 8) & 255u32).to_u8(),
+        (increment & 255u32).to_u8()
+    ]
+
+describe "SSH channel window-adjust owner":
+    it "bounds outbound fragments by window, peer packet, and transport ceilings":
+        step("Compute the exact safe outbound fragment size")
+        expect(ssh_channel_send_limit_v1(
+            100000u64, 100000u32, 50000u32)).to_equal(
+                DEFAULT_MAX_PACKET.to_u64())
+        expect(ssh_channel_send_limit_v1(
+            100000u64, 17u32, 50000u32)).to_equal(17u64)
+        expect(ssh_channel_send_limit_v1(
+            100000u64, 100000u32, 9u32)).to_equal(9u64)
+        expect(ssh_channel_send_limit_v1(
+            100000u64, 0u32, 50000u32)).to_equal(0u64)
+
+    it "applies one exact nonzero adjustment to its open channel":
+        step("Apply an exact remote window adjustment")
+        var table = ChannelTable.new()
+        val local_id = table.open(ChannelType.Session, 41u32, 64u32, DEFAULT_MAX_PACKET)
+        expect(table.apply_remote_window_adjust(window_adjust(local_id, 32u32))).to_be(true)
+        expect(table.channels[0].remote_window).to_equal(96u32)
+
+    it "rejects trailing bytes without mutating the window":
+        step("Reject a non-canonical window-adjust frame")
+        var table = ChannelTable.new()
+        val local_id = table.open(ChannelType.Session, 42u32, 64u32, DEFAULT_MAX_PACKET)
+        var payload = window_adjust(local_id, 32u32)
+        payload.push(0u8)
+        expect(table.apply_remote_window_adjust(payload)).to_be(false)
+        expect(table.channels[0].remote_window).to_equal(64u32)
+
+    it "rejects zero, overflow, unknown, and closed channel adjustments":
+        step("Reject invalid window adjustment state transitions")
+        var table = ChannelTable.new()
+        val local_id = table.open(ChannelType.Session, 43u32, 4294967294u32, DEFAULT_WINDOW_SIZE)
+        expect(table.apply_remote_window_adjust(window_adjust(local_id, 0u32))).to_be(false)
+        expect(table.channels[0].remote_window).to_equal(4294967294u32)
+        expect(table.apply_remote_window_adjust(window_adjust(local_id, 2u32))).to_be(false)
+        expect(table.apply_remote_window_adjust(window_adjust(99u32, 1u32))).to_be(false)
+        expect(table.close(local_id)).to_be(true)
+        expect(table.apply_remote_window_adjust(window_adjust(local_id, 1u32))).to_be(false)
+        expect(table.channels[0].remote_window).to_equal(4294967294u32)

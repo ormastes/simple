@@ -475,8 +475,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         // Computed before the match: the guard needs `&mut self` to peek, which the
         // match's borrow of `self.current.kind` would otherwise forbid.
-        let move_prefixes_operand =
-            matches!(self.current.kind, TokenKind::Move) && self.move_is_keyword_prefix();
+        let move_prefixes_operand = matches!(self.current.kind, TokenKind::Move) && self.move_is_keyword_prefix();
         match &self.current.kind {
             TokenKind::Minus => {
                 self.advance();

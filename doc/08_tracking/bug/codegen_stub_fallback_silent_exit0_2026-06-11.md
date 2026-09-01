@@ -52,24 +52,4 @@ The escape hatch follows the repo convention `std::env::var_os("SIMPLE_...").is_
 - `stub_fallback_allowed_when_env_var_set` — asserts `compile_all_functions` returns `Ok` when `SIMPLE_ALLOW_STUB_FALLBACK=1`, confirming the escape hatch works
 
 **cargo check -p simple-compiler:** clean (0 new warnings/errors)
-**cargo test -p simple-compiler stub_fallback:** 3 passed, 0 failed.
-
-## Linker strict-mode update 2026-07-10
-
-`SIMPLE_NO_STUB_FALLBACK=1` now emits no weak linker stubs and disables each
-platform's unresolved-symbol ignore/force flags. Resolution is deferred to the
-real linker after section GC, so discardable sections do not create a scanner
-false positive while unresolved live calls still fail the link. Cranelift
-currently emits one `.text` section per Simple module, so unused functions in
-an imported module remain live together and must still be removed at the module
-ownership boundary. The focused regression is
-`test_no_stub_fallback_defers_unresolved_host_symbols_to_linker`.
-
-## Focused tooling regression 2026-07-19
-
-A non-strict incremental duplication-check build generated unresolved linker
-stubs, reported success, then either scanned zero files or crashed with
-`function not found: to_equal`. Repeating the build with
-`SIMPLE_NO_STUB_FALLBACK=1` failed at
-link time with the exact missing symbols. The unstable-build workflow now makes
-strict linking mandatory for candidate and verification artifacts.
+**cargo test -p simple-compiler stub_fallback:** 3 passed, 0 failed (includes pre-existing `test_no_stub_fallback_rejects_unresolved_host_symbols` in `stubs.rs`, which is a separate linker-level gate and was unchanged)

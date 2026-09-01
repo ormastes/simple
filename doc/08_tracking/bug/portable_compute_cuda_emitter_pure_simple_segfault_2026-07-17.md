@@ -56,19 +56,6 @@ A current Rust bootstrap-seed interpreter diagnostic exits 0 and emits a
 SHA-256 strings. This isolates the remaining failure to stale pure-Simple
 deployment, but is not accepted as pure-Simple or CUDA toolchain evidence.
 
-## 2026-07-25 bounded recheck
-
-A CUDA-only canonical checker run invoked the emitter through
-`bin/release/simple`. The emitter again terminated before producing source; its
-stderr was `timeout: the monitored command dumped core` followed by
-`Segmentation fault`. Both CUDA rows report `generated_source_failed` and zero
-bytes, and neither candidate compiled or validated. The retained report is
-`doc/09_report/portable_compute_toolchains_2026-07-25.md`.
-
-No PTX pin changed and no device-readback claim is accepted. This recheck
-matches the diagnosed stale-deployment symptom but does not add a new backtrace
-or claim a new root cause.
-
 ## Acceptance
 
 - The pure-Simple emitter exits successfully and produces non-empty source.
@@ -76,10 +63,3 @@ or claim a new root cause.
 - The tracked backend passes its provenance/trust check.
 - Device readback covers translucent destination alpha and matches the common
   composition result.
-
-## Re-verification 2026-08-17 (app-rest lane) — UNVERIFIABLE (blocked on deploy + CUDA host)
-
-The symptom is a segfault of a DEPLOYED native binary.
-`src/app/portable_compute_emit/main.spl` is a 2.6 KB thin entry point with no
-statically visible defect, so no content-based verdict is possible. Reproduction
-needs a native deploy and a CUDA host. Classify as blocked-on-deploy.

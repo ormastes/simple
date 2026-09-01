@@ -1,0 +1,230 @@
+"""
+## Purpose and audience
+Purpose: Prove visible aspect-catalog digest identity and atomic invalidation.
+Audience: compiler loader and AOP cache maintainers.
+"""
+
+use std.spec.{describe, it}
+use compiler.loader.module_loader_compat.{
+    ModuleLoader, LoadResult, moduleloader_aspect_loader_handle,
+    moduleloader_visible_aspect_catalog_digest,
+    moduleloader_visible_aspect_catalog_generation,
+    moduleloader_aspect_catalog_digest_computations,
+    moduleloader_aspect_catalog_invalidations
+}
+use compiler.driver.smf_writer.{generate_aspect_pack_smf}
+use std.common.aspect_pack.{
+    ApkModuleSourceV2, ApkCatalogEntryV2, apk_build_pack_v2,
+    apk_build_catalog_v2, APK_ENTRY_FACET, APK_ACT_LAZY_FACET,
+    apk_loader_packs_opened, apk_loader_modules_decompressed,
+    apk_loader_bytes_decompressed, apk_activation_stack_enter_v1,
+    apk_activation_stack_exit_v1
+}
+use std.io_runtime.{file_write_bytes, mkdir_p}
+
+fn catalog_pack_path() -> text:
+    "build/test/aspect_catalog_invalidation.smf"
+
+fn catalog_payload(tag: text) -> [u8]:
+    var code: [i64] = []
+    var i = 0
+    while i < 16:
+        code.push(0)
+        i = i + 1
+    code.push(195)
+    var writer = SmfWriter.create()
+    writer.add_code_section("nested", code)
+    writer.add_symbol(SmfWriterSymbol(name: "nested_" + tag,
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function, section_index: 1, value: 0,
+        size: 16, layout_phase: 2, is_event_loop_anchor: false, layout_pinned: true))
+    writer.add_relocation(SmfRelocation(offset: 0, symbol_index: 0,
+        reloc_type: RelocationType.Abs64, addend: tag.len()))
+    val raw = writer.write().unwrap()
+    var out: [u8] = []
+    for b in raw:
+        out.push(b as u8)
+    out
+
+fn catalog_pack_bytes() -> [u8]:
+    var modules: [ApkModuleSourceV2] = []
+    modules.push(ApkModuleSourceV2(module_id: "debug.core", aspect_id: "debug",
+        module_abi_hash: "abi-debug-1", required_core_public_abi_hash: "",
+        variant_fingerprint: "", payload: catalog_payload("debug")))
+    modules.push(ApkModuleSourceV2(module_id: "trace.spans", aspect_id: "trace",
+        module_abi_hash: "abi-trace-1", required_core_public_abi_hash: "",
+        variant_fingerprint: "", payload: catalog_payload("trace")))
+    apk_build_pack_v2(modules).bytes
+
+fn catalog_bytes_for(module_id: text, abi_hash: text) -> [u8]:
+    var entries: [ApkCatalogEntryV2] = []
+    entries.push(ApkCatalogEntryV2(facet_key: "Widget/Debuggable",
+        pack_path: catalog_pack_path(), module_id: module_id,
+        entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
+        abi_hash: abi_hash))
+    apk_build_catalog_v2(entries).bytes
+
+fn write_catalog_pack() -> bool:
+    val _ = mkdir_p("build/test")
+    match generate_aspect_pack_smf(catalog_pack_bytes()):
+        case Err(_): false
+        case Ok(image): file_write_bytes(catalog_pack_path(), image)
+
+fn loader_with_pack() -> ModuleLoader:
+    expect(write_catalog_pack()).to_equal(true)
+    var loader = ModuleLoader.with_defaults()
+    match loader.load(catalog_pack_path()):
+        case LoadResult.Success(_): pass
+        case _: panic("aspect pack load failed")
+    loader
+
+describe "visible aspect catalog digest and invalidation":
+    it "same catalog has a stable digest and no generation churn":
+        var loader = ModuleLoader.with_defaults()
+        val catalog = catalog_bytes_for("debug.core", "abi-debug-1")
+        val first = match loader.install_aspect_catalog(catalog):
+            case Ok(digest): digest
+            case Err(message): panic(message)
+        expect(first.len()).to_equal(64)
+        expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
+        val second = match loader.install_aspect_catalog(catalog):
+            case Ok(digest): digest
+            case Err(message): panic(message)
+        expect(second).to_equal(first)
+        expect(moduleloader_visible_aspect_catalog_digest(loader)).to_equal(first)
+        expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
+        expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
+
+    it "changed catalog invalidates resident routing before publication":
+        var loader = loader_with_pack()
+        val old_digest = match loader.install_aspect_catalog(catalog_bytes_for("debug.core", "abi-debug-1")):
+            case Ok(digest): digest
+            case Err(message): panic(message)
+        var old_ref = loader.aspect_facet_visible("Widget/Debuggable")
+        val old_generation = old_ref.load.generation
+        expect(old_ref.load.module_id).to_equal("debug.core")
+        expect(old_ref.release()).to_equal(true)
+        val new_digest = match loader.install_aspect_catalog(catalog_bytes_for("trace.spans", "abi-trace-1")):
+            case Ok(digest): digest
+            case Err(message): panic(message)
+        expect(new_digest == old_digest).to_equal(false)
+        expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(2)
+        expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(1)
+        expect(loader.try_aspect_facet("Widget/Debuggable").load.found).to_equal(false)
+        var new_ref = loader.aspect_facet_visible("Widget/Debuggable")
+        expect(new_ref.load.module_id).to_equal("trace.spans")
+        expect(new_ref.load.generation).to_be_greater_than(old_generation)
+        expect(new_ref.release()).to_equal(true)
+
+    it "compatibility acquisition honors each supplied catalog before resident lookup":
+        var loader = loader_with_pack()
+        var old_ref = loader.aspect_facet(
+            catalog_bytes_for("debug.core", "abi-debug-1"), "Widget/Debuggable")
+        expect(old_ref.load.module_id).to_equal("debug.core")
+        expect(old_ref.release()).to_equal(true)
+        var changed_ref = loader.aspect_facet(
+            catalog_bytes_for("trace.spans", "abi-trace-1"), "Widget/Debuggable")
+        expect(changed_ref.load.module_id).to_equal("trace.spans")
+        expect(changed_ref.release()).to_equal(true)
+
+        var cold_entries: [ApkCatalogEntryV2] = []
+        cold_entries.push(ApkCatalogEntryV2(facet_key: "Widget/Traceable",
+            pack_path: catalog_pack_path(), module_id: "trace.spans",
+            entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
+            abi_hash: "abi-trace-1"))
+        var cold_ref = loader.aspect_facet(
+            apk_build_catalog_v2(cold_entries).bytes, "Widget/Traceable")
+        expect(cold_ref.load.module_id).to_equal("trace.spans")
+        expect(cold_ref.release()).to_equal(true)
+
+    it "pinned generation blocks update without partial mutation":
+        var loader = loader_with_pack()
+        val old_digest = match loader.install_aspect_catalog(catalog_bytes_for("debug.core", "abi-debug-1")):
+            case Ok(digest): digest
+            case Err(message): panic(message)
+        var pinned = loader.aspect_facet_visible("Widget/Debuggable")
+        match loader.install_aspect_catalog(catalog_bytes_for("trace.spans", "abi-trace-1")):
+            case Err(_): pass
+            case Ok(_): panic("pinned catalog update was admitted")
+        expect(moduleloader_visible_aspect_catalog_digest(loader)).to_equal(old_digest)
+        expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
+        expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
+        expect(pinned.is_live()).to_equal(true)
+        expect(pinned.release()).to_equal(true)
+
+    it "activating facet blocks update without invalidation or generation churn":
+        var loader = loader_with_pack()
+        val old_digest = match loader.install_aspect_catalog(catalog_bytes_for("debug.core", "abi-debug-1")):
+            case Ok(digest): digest
+            case Err(message): panic(message)
+        val handle = moduleloader_aspect_loader_handle(loader)
+        expect(apk_activation_stack_enter_v1(handle, "Widget/Debuggable")).to_equal(true)
+        match loader.install_aspect_catalog(catalog_bytes_for("trace.spans", "abi-trace-1")):
+            case Err(_): pass
+            case Ok(_): panic("activating catalog update was admitted")
+        expect(moduleloader_visible_aspect_catalog_digest(loader)).to_equal(old_digest)
+        expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
+        expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
+        apk_activation_stack_exit_v1(handle, "Widget/Debuggable")
+
+    it "caller mutation detaches and a corrupt replacement cannot evict the valid catalog":
+        var loader = loader_with_pack()
+        var caller_catalog = catalog_bytes_for("debug.core", "abi-debug-1")
+        val digest = match loader.install_aspect_catalog(caller_catalog):
+            case Ok(value): value
+            case Err(message): panic(message)
+        caller_catalog.pop()
+        caller_catalog.push(0u8)
+        match loader.install_aspect_catalog(caller_catalog):
+            case Err(_): pass
+            case Ok(_): panic("corrupt catalog replacement was admitted")
+        expect(moduleloader_visible_aspect_catalog_digest(loader)).to_equal(digest)
+        expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
+        expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
+        var retained = loader.aspect_facet_visible("Widget/Debuggable")
+        expect(retained.load.module_id).to_equal("debug.core")
+        expect(retained.release()).to_equal(true)
+
+    it "pack unload and reload preserve catalog identity but publish a new facet generation":
+        var loader = loader_with_pack()
+        match loader.install_aspect_catalog(catalog_bytes_for("debug.core", "abi-debug-1")):
+            case Ok(_): pass
+            case Err(message): panic(message)
+        val digest = moduleloader_visible_aspect_catalog_digest(loader)
+        val hashes = moduleloader_aspect_catalog_digest_computations(loader)
+        var old_ref = loader.aspect_facet_visible("Widget/Debuggable")
+        val old_generation = old_ref.load.generation
+        expect(old_ref.release()).to_equal(true)
+        loader.unload(catalog_pack_path())
+        expect(loader.try_aspect_facet("Widget/Debuggable").load.found).to_equal(false)
+        match loader.load(catalog_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("aspect pack reload failed")
+        var new_ref = loader.aspect_facet_visible("Widget/Debuggable")
+        expect(new_ref.load.generation).to_be_greater_than(old_generation)
+        expect(moduleloader_visible_aspect_catalog_digest(loader)).to_equal(digest)
+        expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
+        expect(moduleloader_aspect_catalog_digest_computations(loader)).to_equal(hashes)
+        expect(new_ref.release()).to_equal(true)
+
+    it "resident hit and miss neither rehash nor move pack I/O counters":
+        var loader = loader_with_pack()
+        match loader.install_aspect_catalog(catalog_bytes_for("debug.core", "abi-debug-1")):
+            case Ok(_): pass
+            case Err(message): panic(message)
+        var first = loader.aspect_facet_visible("Widget/Debuggable")
+        val handle = moduleloader_aspect_loader_handle(loader)
+        val hashes = moduleloader_aspect_catalog_digest_computations(loader)
+        val opened = apk_loader_packs_opened(handle)
+        val inflated = apk_loader_modules_decompressed(handle)
+        val bytes = apk_loader_bytes_decompressed(handle)
+        var hit = loader.aspect_facet_visible("Widget/Debuggable")
+        val miss = loader.try_aspect_facet("Widget/Missing").load
+        expect(hit.load.from_cache).to_equal(true)
+        expect(miss.found).to_equal(false)
+        expect(moduleloader_aspect_catalog_digest_computations(loader)).to_equal(hashes)
+        expect(apk_loader_packs_opened(handle)).to_equal(opened)
+        expect(apk_loader_modules_decompressed(handle)).to_equal(inflated)
+        expect(apk_loader_bytes_decompressed(handle)).to_equal(bytes)
+        expect(hit.release()).to_equal(true)
+        expect(first.release()).to_equal(true)

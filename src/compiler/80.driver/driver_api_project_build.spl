@@ -6,6 +6,7 @@
 #   - Contains the most expensive import chains (header_gen, shared_lib_flags)
 
 use compiler.driver.driver_api_types (_combine_driver_api_process_error)
+use std.file_system.{file_write_text}
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use lazy compiler.mir.mir_instructions (MirModule)
@@ -20,12 +21,9 @@ use lazy compiler.mir.mir_instructions (MirModule)
 use lazy compiler.tools.header_gen.mod_ (HeaderGenerator)
 use lazy compiler.tools.header_gen.shared_lib_flags (get_shared_lib_flags)
 use compiler.tools.header_gen.shared_lib_flags (SharedLibFlags)
+use std.io_runtime.{process_run, file_delete, dir_create}
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn _project_build_compile(options: CompileOptions) -> CompileResult:
     val driver = compiler_driver_create(options)
@@ -68,18 +66,18 @@ pub fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bo
                     print "[header-gen] Warning: no @export(\"C\") items found"
                     return result
 
-                rt_dir_create(output_dir, true)
+                dir_create(output_dir, true)
 
                 if emit_c:
                     val c_header = header_generator.generate_c_header(lib_name)
                     val c_path = rt_path_join(output_dir, lib_name + ".h")
-                    rt_file_write_text(c_path, c_header)
+                    file_write_text(c_path, c_header)
                     print "[header-gen] Generated C header: {c_path}"
 
                 if emit_cpp:
                     val cpp_header = header_generator.generate_cpp_header(lib_name)
                     val cpp_path = rt_path_join(output_dir, lib_name + ".hpp")
-                    rt_file_write_text(cpp_path, cpp_header)
+                    file_write_text(cpp_path, cpp_header)
                     print "[header-gen] Generated C++ header: {cpp_path}"
 
             result
@@ -117,9 +115,9 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
             source_args.push("-o")
             source_args.push(source_obj)
 
-            val (src_out, src_err, src_code) = rt_process_run("c++", source_args)
+            val (src_out, src_err, src_code) = process_run("c++", source_args)
             if src_code != 0:
-                rt_file_delete(cpp_output)
+                file_delete(cpp_output)
                 return CompileResult.CodegenError(_combine_driver_api_process_error("C++ object compilation failed", src_out, src_err))
 
             var runtime_args: [text] = []
@@ -138,10 +136,10 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
             runtime_args.push("-o")
             runtime_args.push(runtime_obj)
 
-            val (rt_out, rt_err, rt_code) = rt_process_run("cc", runtime_args)
+            val (rt_out, rt_err, rt_code) = process_run("cc", runtime_args)
             if rt_code != 0:
-                rt_file_delete(cpp_output)
-                rt_file_delete(source_obj)
+                file_delete(cpp_output)
+                file_delete(source_obj)
                 return CompileResult.CodegenError(_combine_driver_api_process_error("Runtime object compilation failed", rt_out, rt_err))
 
             var link_args: [text] = []
@@ -154,10 +152,10 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
             link_args.push("-o")
             link_args.push(output)
 
-            val (link_out, link_err, link_code) = rt_process_run("c++", link_args)
-            rt_file_delete(cpp_output)
-            rt_file_delete(source_obj)
-            rt_file_delete(runtime_obj)
+            val (link_out, link_err, link_code) = process_run("c++", link_args)
+            file_delete(cpp_output)
+            file_delete(source_obj)
+            file_delete(runtime_obj)
 
             if link_code != 0:
                 return CompileResult.CodegenError(_combine_driver_api_process_error("Shared library link failed", link_out, link_err))

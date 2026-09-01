@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/database/fast_db.spl"
+provider="$root/src/runtime/runtime_db.c"
+
+declarations=$(grep -c '^[[:space:]]*extern fn rt_db_' "$owner")
+if [ "$declarations" -ne 21 ]; then
+    echo "fast-db extern inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_db_/ { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every fast-db declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+
+grep -q 'extern fn rt_db_get_text.*-> text?' "$owner"
+grep -q 'if h < 0:' "$owner"
+grep -q '@unsafe(reason: "legacy fast-database facade exposes ambiguous status' "$owner"
+grep -q 'if (type_mask != 0) return (-1);' "$provider"
+grep -q 'snprintf(buf, 32, "%" PRId64, pk);' "$provider"
+
+if grep -q '(const char\*)(uintptr_t)' "$provider"; then
+    echo "fast-db integer ABI values must never be reinterpreted as pointers" >&2
+    exit 1
+fi
+if grep -q 'db_table_create_cstr(name ? name :\|db_put_cstr(handle, pk ? pk :\|db_update_text_cstr(handle, pk ? pk :' "$provider"; then
+    echo "fast-db exported text bridge still fabricates empty input on failure" >&2
+    exit 1
+fi
+
+echo "fast-db SFFI contract audit: PASS (21 unsafe declarations; integer batch ABI cannot dereference integer values)"

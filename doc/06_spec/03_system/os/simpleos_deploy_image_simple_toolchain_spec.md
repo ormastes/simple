@@ -1,96 +1,57 @@
 # SimpleOS target payload image admission — operator manual
 
-Source: `test/03_system/os/simpleos_deploy_image_simple_toolchain_spec.spl`
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/03_system/os/simpleos_deploy_image_simple_toolchain_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-Status: source/manual current; pure-Simple Stage-4 execution, `spipe-docgen`,
-and seven-score `sspec-maintain` evidence remain blocked by B-HOST-CLI.
-Stubs: 0. Scenarios: 3 active, 0 skipped, 0 pending.
-
-## Purpose and claim boundary
-
-This `image-admission` spec calls the production
-`os.installer.image_builder.build_install_image_with_simple_binary` API. It
-proves that marker, Rust-seed, and wrong-target payloads are rejected before
-`/SYS/SIMPLETOOL.SDN` is staged. It does not prove a valid image was produced,
-booted, or exercised in a guest.
-
-## Preconditions
-
-- Run from the repository root with an admitted pure-Simple Stage-4 runner.
-- The test may write isolated ignored fixtures below `build/tmp/`.
-- The Rust seed and bootstrap-only Stage 2 are not admissible test runners or
-  payload provenance.
-
-## Operator workflow
-
-1. Run the executable SSpec once with the admitted runner.
-2. Require all three examples to execute and exit zero.
-3. Confirm every result is an error from the production image builder and that
-   no toolchain manifest exists in the corresponding rootfs tree.
-4. Retain the runner path/SHA-256, command, and stdout/stderr.
-5. Generate the SPipe manual with `0 stubs` and inspect all seven
-   `sspec-maintain` scores when Stage 4 is available.
+Negative image-admission coverage through the production SimpleOS image
+builder. These scenarios prove that unadmitted payloads cannot create
+/SYS/SIMPLETOOL.SDN. They do not prove image boot or guest execution.
 
 ## Scenarios
 
-### Marker without provenance
+### SimpleOS deploy image Simple toolchain payload
 
-`step("Submit a marker payload to the production image builder")`
+#### should reject a marker payload without a provenance stamp
 
-The builder must return an error containing `lacks target provenance` and must
-not create `/SYS/SIMPLETOOL.SDN`.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-### Rust bootstrap-seed provenance
 
-`step("Submit seed provenance to the production image builder")`
+- should reject a marker payload without a provenance stamp
+- Submit a marker payload to the production image builder
 
-Even with the correct target, focused entry, entry-closure flag, and LLVM
-backend, a stamp naming `compiler_rust` must be rejected with `bootstrap seed`
-before ELF staging.
-
-### Wrong target provenance
-
-`step("Submit wrong-target provenance to the production image builder")`
-
-An `aarch64-unknown-simpleos` stamp submitted for an x86_64 image must be
-rejected with `target mismatch` before ELF staging.
-
-## Traceability
-
-| Requirement | Coverage | Claim boundary |
-|---|---|---|
-| REQ-004 | Production builder refuses to stage unadmitted toolchain roles/manifest | Negative image admission |
-| REQ-007 | Marker and Rust-seed payloads fail verification | Negative image admission |
-| NFR-002 | Missing/wrong provenance fails closed | Negative image admission |
-| REQ-SOS-TD-002 / REQ-SOS-TD-003 | Not satisfied here | Require admitted positive image and live deployment receipts |
-
-## Evidence and provenance
-
-The oracle is the production image builder imported by the executable spec.
-There are no source-string assertions or test-only reimplementations of its
-decision. Record the spec SHA-256, `src/os/installer/image_builder.spl`
-SHA-256, runner SHA-256, command, exit code, stdout, and stderr.
 
 <details>
-<summary>Executable SSpec flow</summary>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-describe "SimpleOS deploy image Simple toolchain payload":
-    it "should reject a marker payload without a provenance stamp":
-        step("Submit a marker payload to the production image builder")
+# @req REQ-SSPEC-SYSTEM
+step("should reject a marker payload without a provenance stamp")
+val root = "build/tmp/simpleos_deploy_image_marker_rejection"
+dir_create_all(root)
+val payload = root + "/simple-target.smf"
+val image = root + "/simpleos-disk.img"
 
-    it "should reject payload provenance from the Rust bootstrap seed":
-        step("Submit seed provenance to the production image builder")
-
-    it "should reject a payload stamped for the wrong target":
-        step("Submit wrong-target provenance to the production image builder")
+step("Submit a marker payload to the production image builder")
+expect(file_write(payload, "SMF_FAKE_TARGET_SIMPLE\nrole=compiler-interpreter-loader\n")).to_be(true)
+val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", image, 64, payload)
+expect(result.is_err()).to_be(true)
+if val Err(message) = result:
+    expect(message).to_contain("lacks target provenance")
+expect(file_exists(image + ".contents/rootfs/SYS/SIMPLETOOL.SDN")).to_be(false)
 ```
-
-The complete reproducible source and assertions are at the Source path above.
 
 </details>
 
-## Compatibility and limitations
+#### should reject payload provenance from the Rust bootstrap seed
 
 - This is negative admission coverage; a green result does not establish a
   deployable payload or bootable image.

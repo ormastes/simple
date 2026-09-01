@@ -1,0 +1,39 @@
+use std.test.*
+use std.fs.{file_read}
+
+describe "scheduler current-execution snapshot boundary static contract":
+    it "samples identity generations admission and lease from one TCB":
+        val scheduler = file_read("src/os/kernel/scheduler/scheduler_types.spl")
+        expect(scheduler).to_contain("pub fn current_execution_snapshot_v1(")
+        expect(scheduler).to_contain("val task = maybe_task.unwrap()")
+        expect(scheduler).to_contain("task.lifecycle_generation == 0u64")
+        expect(scheduler).to_contain("task.exec_generation == 0u64")
+        expect(scheduler).to_contain("val admitted = match task.state:")
+        expect(scheduler).to_contain("scheduler_capability_snapshot_issue_v1(")
+        expect(scheduler).to_contain("SchedulerCurrentExecutionSnapshotV1(")
+        expect(scheduler).not.to_contain("current_capability_snapshot_lease_v1(")
+
+    it "makes the syscall ingress consume exactly one concrete snapshot":
+        val process = file_read("src/os/kernel/ipc/syscall_process.spl")
+        val service = file_read(
+            "src/os/kernel/loader/authenticated_fs_exec_submission_service_v1.spl")
+        expect(process).to_contain("scheduler.current_execution_snapshot_v1()")
+        expect(process).to_contain("scheduler, execution.unwrap(), caller")
+        expect(service).to_contain("caller.to_u64() != task_id")
+        expect(service).to_contain("scheduler_capability_snapshot_validate_v1(")
+        expect(service).to_contain("scheduler_capability_snapshot_consume_once_v1(")
+        expect(service).to_contain("scheduler_capability_snapshot_retire_v1(")
+        expect(service).to_contain("scheduler_pinned_capability_snapshot_caps_v1(")
+        expect(service).to_contain("exec_cap_check_caps(")
+        expect(service.index_of("val reserved = service.reserve(")).to_be_less_than(
+            service.index_of("val pinned = scheduler_capability_snapshot_consume_once_v1("))
+
+    it "keeps the authenticated run synchronous and scheduler state threaded":
+        val process = file_read("src/os/kernel/ipc/syscall_process.spl")
+        val service = file_read(
+            "src/os/kernel/loader/authenticated_fs_exec_submission_service_v1.spl")
+        val dispatcher = file_read("src/os/kernel/ipc/syscall.spl")
+        expect(service).to_contain("returns an actual exit/error code, not pid")
+        expect(process).to_contain("ProcessSyscallState(")
+        expect(dispatcher).to_contain("val st = _handle_spawn_binary_state(")
+        expect(dispatcher).to_contain("scheduler: st.scheduler")

@@ -2,6 +2,30 @@
 
 > Smoke tests for the RV32IMAC core. Verifies basic instruction execution through GHDL simulation: NOP, ADD, branch, load/store.
 
+<!-- sdn-diagram:id=rv32_core_smoke_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=rv32_core_smoke_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+rv32_core_smoke_spec -> std
+rv32_core_smoke_spec -> hardware
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=rv32_core_smoke_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 25 | 25 | 0 | 0 |
@@ -22,19 +46,8 @@ Smoke tests for the RV32IMAC core. Verifies basic instruction execution through 
 | Difficulty | 3/5 |
 | Status | In Progress |
 | Source | `test/02_integration/hardware/rv32imac/rv32_core_smoke_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
-
-# RV32IMAC Core Smoke Tests
-
-**Feature IDs:** #RV32-CORE-001
-**Category:** Hardware
-**Difficulty:** 3/5
-**Status:** In Progress
 
 ## Overview
 
@@ -47,20 +60,19 @@ through GHDL simulation: NOP, ADD, branch, load/store.
 
 #### x0 always reads as zero
 
-- Verify: x0 always reads as zero
-   - Expected: rf.read(0) equals `0)  # oracle: pinned constant asserted by this scenario`
+- x0 always reads as zero
+   - Expected: rf.read(0) equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: x0 always reads as zero")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("x0 always reads as zero")
 """
 **Given:** Fresh register file
 **When:** Writing to x0 then reading
@@ -68,27 +80,26 @@ step("Verify: x0 always reads as zero")
 """
 var rf = Rv32RegFile.create()
 rf.write(0, 0xDEADBEEF)
-expect(rf.read(0)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(rf.read(0)).to_equal(0)
 ```
 
 </details>
 
 #### writes and reads back correctly
 
-- Verify: writes and reads back correctly
+- writes and reads back correctly
    - Expected: rf.read(1) equals `0x12345678`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: writes and reads back correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("writes and reads back correctly")
 """
 **Given:** Register file
 **When:** Writing 0x12345678 to x1
@@ -103,22 +114,21 @@ expect(rf.read(1)).to_equal(0x12345678)
 
 #### handles all 32 registers
 
-- Verify: handles all 32 registers
-   - Expected: rf.read(0) equals `0)  # oracle: pinned constant asserted by this scenario`
-   - Expected: rf.read(1) equals `100)  # oracle: pinned constant asserted by this scenario`
-   - Expected: rf.read(31) equals `3100)  # oracle: pinned constant asserted by this scenario`
+- handles all 32 registers
+   - Expected: rf.read(0) equals `0`
+   - Expected: rf.read(1) equals `100`
+   - Expected: rf.read(31) equals `3100`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: handles all 32 registers")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles all 32 registers")
 """
 **Given:** Register file
 **When:** Writing unique values to x1-x31
@@ -129,9 +139,9 @@ var i = 1
 while i < 32:
     rf.write(i, i * 100)
     i = i + 1
-expect(rf.read(0)).to_equal(0)  # oracle: pinned constant asserted by this scenario
-expect(rf.read(1)).to_equal(100)  # oracle: pinned constant asserted by this scenario
-expect(rf.read(31)).to_equal(3100)  # oracle: pinned constant asserted by this scenario
+expect(rf.read(0)).to_equal(0)
+expect(rf.read(1)).to_equal(100)
+expect(rf.read(31)).to_equal(3100)
 ```
 
 </details>
@@ -140,72 +150,69 @@ expect(rf.read(31)).to_equal(3100)  # oracle: pinned constant asserted by this s
 
 #### computes ADD correctly
 
-- Verify: computes ADD correctly
-   - Expected: alu_execute(AluOp.Add, 5, 3) equals `8)  # oracle: pinned constant asserted by this scenario`
+- computes ADD correctly
+   - Expected: alu_execute(AluOp.Add, 5, 3) equals `8`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes ADD correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes ADD correctly")
 """
 **Given:** ALU with ADD operation
 **When:** 5 + 3
 **Then:** Returns 8
 """
-expect(alu_execute(AluOp.Add, 5, 3)).to_equal(8)  # oracle: pinned constant asserted by this scenario
+expect(alu_execute(AluOp.Add, 5, 3)).to_equal(8)
 ```
 
 </details>
 
 #### computes SUB correctly
 
-- Verify: computes SUB correctly
-   - Expected: alu_execute(AluOp.Sub, 10, 3) equals `7)  # oracle: pinned constant asserted by this scenario`
+- computes SUB correctly
+   - Expected: alu_execute(AluOp.Sub, 10, 3) equals `7`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes SUB correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes SUB correctly")
 """
 **Given:** ALU with SUB operation
 **When:** 10 - 3
 **Then:** Returns 7
 """
-expect(alu_execute(AluOp.Sub, 10, 3)).to_equal(7)  # oracle: pinned constant asserted by this scenario
+expect(alu_execute(AluOp.Sub, 10, 3)).to_equal(7)
 ```
 
 </details>
 
 #### computes AND correctly
 
-- Verify: computes AND correctly
+- computes AND correctly
    - Expected: alu_execute(AluOp.And, 0xFF00FF00, 0x0F0F0F0F) equals `0x0F000F00`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes AND correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes AND correctly")
 expect(alu_execute(AluOp.And, 0xFF00FF00, 0x0F0F0F0F)).to_equal(0x0F000F00)
 ```
 
@@ -213,20 +220,19 @@ expect(alu_execute(AluOp.And, 0xFF00FF00, 0x0F0F0F0F)).to_equal(0x0F000F00)
 
 #### computes OR correctly
 
-- Verify: computes OR correctly
+- computes OR correctly
    - Expected: alu_execute(AluOp.Or, 0xFF000000, 0x00FF0000) equals `0xFFFF0000`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes OR correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes OR correctly")
 expect(alu_execute(AluOp.Or, 0xFF000000, 0x00FF0000)).to_equal(0xFFFF0000)
 ```
 
@@ -234,20 +240,19 @@ expect(alu_execute(AluOp.Or, 0xFF000000, 0x00FF0000)).to_equal(0xFFFF0000)
 
 #### computes XOR correctly
 
-- Verify: computes XOR correctly
+- computes XOR correctly
    - Expected: alu_execute(AluOp.Xor, 0xFF00FF00, 0xFFFF0000) equals `0x00FFFF00`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes XOR correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes XOR correctly")
 expect(alu_execute(AluOp.Xor, 0xFF00FF00, 0xFFFF0000)).to_equal(0x00FFFF00)
 ```
 
@@ -255,94 +260,90 @@ expect(alu_execute(AluOp.Xor, 0xFF00FF00, 0xFFFF0000)).to_equal(0x00FFFF00)
 
 #### computes SLL correctly
 
-- Verify: computes SLL correctly
-   - Expected: alu_execute(AluOp.Sll, 1, 4) equals `16)  # oracle: pinned constant asserted by this scenario`
+- computes SLL correctly
+   - Expected: alu_execute(AluOp.Sll, 1, 4) equals `16`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes SLL correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(alu_execute(AluOp.Sll, 1, 4)).to_equal(16)  # oracle: pinned constant asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes SLL correctly")
+expect(alu_execute(AluOp.Sll, 1, 4)).to_equal(16)
 ```
 
 </details>
 
 #### computes SRL correctly
 
-- Verify: computes SRL correctly
-   - Expected: alu_execute(AluOp.Srl, 256, 4) equals `16)  # oracle: pinned constant asserted by this scenario`
+- computes SRL correctly
+   - Expected: alu_execute(AluOp.Srl, 256, 4) equals `16`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes SRL correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(alu_execute(AluOp.Srl, 256, 4)).to_equal(16)  # oracle: pinned constant asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes SRL correctly")
+expect(alu_execute(AluOp.Srl, 256, 4)).to_equal(16)
 ```
 
 </details>
 
 #### computes SLT correctly
 
-- Verify: computes SLT correctly
-   - Expected: alu_execute(AluOp.Slt, 0xFFFFFFFF, 1) equals `1)  # oracle: pinned constant asserted by this scenario`
+- computes SLT correctly
+   - Expected: alu_execute(AluOp.Slt, 0xFFFFFFFF, 1) equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes SLT correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes SLT correctly")
 """
 **Given:** Signed comparison
 **When:** -1 < 1 (as 32-bit signed)
 **Then:** Returns 1
 """
-expect(alu_execute(AluOp.Slt, 0xFFFFFFFF, 1)).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(alu_execute(AluOp.Slt, 0xFFFFFFFF, 1)).to_equal(1)
 ```
 
 </details>
 
 #### computes SLTU correctly
 
-- Verify: computes SLTU correctly
-   - Expected: alu_execute(AluOp.Sltu, 0xFFFFFFFF, 1) equals `0)  # oracle: pinned constant asserted by this scenario`
+- computes SLTU correctly
+   - Expected: alu_execute(AluOp.Sltu, 0xFFFFFFFF, 1) equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes SLTU correctly")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes SLTU correctly")
 """
 **Given:** Unsigned comparison
 **When:** 0xFFFFFFFF > 1 (as unsigned)
 **Then:** Returns 0
 """
-expect(alu_execute(AluOp.Sltu, 0xFFFFFFFF, 1)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(alu_execute(AluOp.Sltu, 0xFFFFFFFF, 1)).to_equal(0)
 ```
 
 </details>
@@ -351,20 +352,19 @@ expect(alu_execute(AluOp.Sltu, 0xFFFFFFFF, 1)).to_equal(0)  # oracle: pinned con
 
 #### BEQ taken when equal
 
-- Verify: BEQ taken when equal
+- BEQ taken when equal
    - Expected: resolve_branch(BranchOp.Beq, 42, 42) is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: BEQ taken when equal")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("BEQ taken when equal")
 expect(resolve_branch(BranchOp.Beq, 42, 42)).to_equal(true)
 ```
 
@@ -372,20 +372,19 @@ expect(resolve_branch(BranchOp.Beq, 42, 42)).to_equal(true)
 
 #### BEQ not taken when unequal
 
-- Verify: BEQ not taken when unequal
+- BEQ not taken when unequal
    - Expected: resolve_branch(BranchOp.Beq, 42, 43) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: BEQ not taken when unequal")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("BEQ not taken when unequal")
 expect(resolve_branch(BranchOp.Beq, 42, 43)).to_equal(false)
 ```
 
@@ -393,20 +392,19 @@ expect(resolve_branch(BranchOp.Beq, 42, 43)).to_equal(false)
 
 #### BNE taken when unequal
 
-- Verify: BNE taken when unequal
+- BNE taken when unequal
    - Expected: resolve_branch(BranchOp.Bne, 42, 43) is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: BNE taken when unequal")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("BNE taken when unequal")
 expect(resolve_branch(BranchOp.Bne, 42, 43)).to_equal(true)
 ```
 
@@ -414,20 +412,19 @@ expect(resolve_branch(BranchOp.Bne, 42, 43)).to_equal(true)
 
 #### BLT taken for signed less-than
 
-- Verify: BLT taken for signed less-than
+- BLT taken for signed less-than
    - Expected: resolve_branch(BranchOp.Blt, 0xFFFFFFFF, 0) is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: BLT taken for signed less-than")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("BLT taken for signed less-than")
 expect(resolve_branch(BranchOp.Blt, 0xFFFFFFFF, 0)).to_equal(true)
 ```
 
@@ -435,20 +432,19 @@ expect(resolve_branch(BranchOp.Blt, 0xFFFFFFFF, 0)).to_equal(true)
 
 #### JAL always taken
 
-- Verify: JAL always taken
+- JAL always taken
    - Expected: compute_branch_target("branch", 0x1000, 0, 0) equals `0x1000`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: JAL always taken")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("JAL always taken")
 expect(compute_branch_target("branch", 0x1000, 0, 0)).to_equal(0x1000)
 ```
 
@@ -456,20 +452,19 @@ expect(compute_branch_target("branch", 0x1000, 0, 0)).to_equal(0x1000)
 
 #### computes branch target from PC+imm
 
-- Verify: computes branch target from PC+imm
+- computes branch target from PC+imm
    - Expected: compute_branch_target("branch", 0x1000, 0, 0x100) equals `0x1100`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes branch target from PC+imm")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes branch target from PC+imm")
 expect(compute_branch_target("branch", 0x1000, 0, 0x100)).to_equal(0x1100)
 ```
 
@@ -477,20 +472,19 @@ expect(compute_branch_target("branch", 0x1000, 0, 0x100)).to_equal(0x1100)
 
 #### computes JALR target from rs1+imm
 
-- Verify: computes JALR target from rs1+imm
+- computes JALR target from rs1+imm
    - Expected: compute_branch_target("jalr", 0x1000, 0x2000, 0x10) equals `0x2010`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: computes JALR target from rs1+imm")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("computes JALR target from rs1+imm")
 expect(compute_branch_target("jalr", 0x1000, 0x2000, 0x10)).to_equal(0x2010)
 ```
 
@@ -500,47 +494,45 @@ expect(compute_branch_target("jalr", 0x1000, 0x2000, 0x10)).to_equal(0x2010)
 
 #### decodes I-type positive immediate
 
-- Verify: decodes I-type positive immediate
-   - Expected: decode_imm_i(instr) equals `100)  # oracle: pinned constant asserted by this scenario`
+- decodes I-type positive immediate
+   - Expected: decode_imm_i(instr) equals `100`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: decodes I-type positive immediate")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("decodes I-type positive immediate")
 """
 **Given:** Instruction with imm=100 in I-type format
 **When:** decode_imm_i() called
 **Then:** Returns 100
 """
 val instr = 100 << 20  # imm=100 in bits [31:20]
-expect(decode_imm_i(instr)).to_equal(100)  # oracle: pinned constant asserted by this scenario
+expect(decode_imm_i(instr)).to_equal(100)
 ```
 
 </details>
 
 #### decodes U-type immediate
 
-- Verify: decodes U-type immediate
+- decodes U-type immediate
    - Expected: decode_imm_u(instr) equals `0x12345000`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: decodes U-type immediate")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("decodes U-type immediate")
 """
 **Given:** LUI with upper 20 bits = 0x12345
 **When:** decode_imm_u() called
@@ -556,7 +548,7 @@ expect(decode_imm_u(instr)).to_equal(0x12345000)
 
 #### loads a word from memory
 
-- Verify: loads a word from memory
+- loads a word from memory
    - Expected: mem_load(memory, 0, MemWidth.Word, false) equals `0x12345678`
    - Expected: mem_load(memory, 4, MemWidth.Word, false) equals `0xDEADBEEF`
 
@@ -564,13 +556,12 @@ expect(decode_imm_u(instr)).to_equal(0x12345000)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: loads a word from memory")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("loads a word from memory")
 val memory = [0x12345678, 0xDEADBEEF]
 expect(mem_load(memory, 0, MemWidth.Word, false)).to_equal(0x12345678)
 expect(mem_load(memory, 4, MemWidth.Word, false)).to_equal(0xDEADBEEF)
@@ -580,20 +571,19 @@ expect(mem_load(memory, 4, MemWidth.Word, false)).to_equal(0xDEADBEEF)
 
 #### loads a byte with sign extension
 
-- Verify: loads a byte with sign extension
+- loads a byte with sign extension
    - Expected: mem_load(memory, 0, MemWidth.Byte, true) equals `0xFFFFFFFF`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: loads a byte with sign extension")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("loads a byte with sign extension")
 val memory = [0x000000FF]
 expect(mem_load(memory, 0, MemWidth.Byte, true)).to_equal(0xFFFFFFFF)
 ```
@@ -602,8 +592,29 @@ expect(mem_load(memory, 0, MemWidth.Byte, true)).to_equal(0xFFFFFFFF)
 
 #### loads a byte without sign extension
 
-- Verify: loads a byte without sign extension
+- loads a byte without sign extension
    - Expected: mem_load(memory, 0, MemWidth.Byte, false) equals `0xFF`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("loads a byte without sign extension")
+val memory = [0x000000FF]
+expect(mem_load(memory, 0, MemWidth.Byte, false)).to_equal(0xFF)
+```
+
+</details>
+
+#### stores a word to memory
+
+- stores a word to memory
+   - Expected: updated[0] equals `0xCAFEBABE`
 
 
 <details>
@@ -613,31 +624,8 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RV32IMAC
-step("Verify: loads a byte without sign extension")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-val memory = [0x000000FF]
-expect(mem_load(memory, 0, MemWidth.Byte, false)).to_equal(0xFF)
-```
-
-</details>
-
-#### stores a word to memory
-
-- Verify: stores a word to memory
-   - Expected: updated[0] equals `0xCAFEBABE`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-RV32IMAC
-step("Verify: stores a word to memory")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("stores a word to memory")
 val memory = [0, 0]
 val updated = mem_store(memory, 0, 0xCAFEBABE, MemWidth.Word)
 expect(updated[0]).to_equal(0xCAFEBABE)
@@ -658,36 +646,58 @@ expect(updated[0]).to_equal(0xCAFEBABE)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+- `REQ-RV32IMAC`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `ca0295aa64297fda6968516a5e9347bcc23bf42e9d68cf0aafebb4c47682105b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `52435ce7602bc1f963e3e0b0df474c8c3df4ee69826b3d6791cf9e0009795860`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `ca0295aa64297fda6968516a5e9347bcc23bf42e9d68cf0aafebb4c47682105b`.
+Source SHA-256: `52435ce7602bc1f963e3e0b0df474c8c3df4ee69826b3d6791cf9e0009795860`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `ca0295aa64297fda6968516a5e9347bcc23bf42e9d68cf0aafebb4c47682105b`  
+Source SHA-256: `52435ce7602bc1f963e3e0b0df474c8c3df4ee69826b3d6791cf9e0009795860`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/02_integration/hardware/rv32imac/rv32_core_smoke_spec.spl
 mirror: doc/06_spec/02_integration/hardware/rv32imac/rv32_core_smoke_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/hardware/rv32imac/rv32_core_smoke_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=80; blocker cap makes effective=49
 doc/06_spec/02_integration/hardware/rv32imac/rv32_core_smoke_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/hardware/rv32imac/rv32_core_smoke_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/02_integration/hardware/rv32imac/rv32_core_smoke_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/hardware/rv32imac/rv32_core_smoke_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 11 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/hardware/rv32imac/rv32_core_smoke_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/02_integration/hardware/rv32imac/rv32_core_smoke_spec.spl:109:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'x0 always reads as zero' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/hardware/rv32imac/rv32_core_smoke_spec.spl:121:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'writes and reads back correctly' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/hardware/rv32imac/rv32_core_smoke_spec.spl:133:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles all 32 registers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

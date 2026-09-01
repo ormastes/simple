@@ -49,9 +49,14 @@ impl<'a> MirLowerer<'a> {
         // it printed `<value:0x5>`; a non-generic `struct IPair: a: i64` was
         // unaffected because its field slot is raw on both sides.
         // See doc/08_tracking/bug/generic_struct_field_untagged_payload_seed_2026-08-21.md.
-        if let Some(HirType::Struct { fields: decl_fields, .. }) = self.type_registry.and_then(|tr| tr.get(ty)).cloned() {
+        if let Some(HirType::Struct {
+            fields: decl_fields, ..
+        }) = self.type_registry.and_then(|tr| tr.get(ty)).cloned()
+        {
             for (i, field) in fields.iter().enumerate() {
-                let Some((_, decl_ty)) = decl_fields.get(i) else { continue };
+                let Some((_, decl_ty)) = decl_fields.get(i) else {
+                    continue;
+                };
                 let boxed = self.box_scalar_for_tagged_slot(*decl_ty, field.ty, field_regs[i])?;
                 field_regs[i] = boxed;
             }
@@ -210,7 +215,9 @@ impl<'a> MirLowerer<'a> {
                 field_index,
                 expr_ty,
                 receiver_ty,
-                self.type_registry.and_then(|tr| tr.get(receiver_ty)).map(|t| format!("{:?}", t).chars().take(40).collect::<String>()),
+                self.type_registry
+                    .and_then(|tr| tr.get(receiver_ty))
+                    .map(|t| format!("{:?}", t).chars().take(40).collect::<String>()),
                 is_tuple
             );
         }
@@ -720,11 +727,7 @@ impl<'a> MirLowerer<'a> {
     /// dict_get_or_jit_not_found) can reuse the SAME tag-boxing-safe unbox
     /// logic as `d[k]`/`d.get(k)` instead of hand-duplicating it and risking a
     /// future tag-box fix landing in only one of the two call sites.
-    pub(super) fn unbox_dict_read_result(
-        &mut self,
-        raw_result: VReg,
-        element_expr_ty: TypeId,
-    ) -> MirLowerResult<VReg> {
+    pub(super) fn unbox_dict_read_result(&mut self, raw_result: VReg, element_expr_ty: TypeId) -> MirLowerResult<VReg> {
         let needs_int_unbox = matches!(
             element_expr_ty,
             TypeId::I8

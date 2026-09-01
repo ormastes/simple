@@ -40,18 +40,21 @@ fn vec_to_runtime_byte_array(bytes: &[u8]) -> RuntimeValue {
     if array.is_nil() {
         return RuntimeValue::NIL;
     }
-    for (i, byte) in bytes.iter().enumerate() {
-        let ok = crate::value::collections::rt_bytes_u8_set(array, i as i64, *byte as i64);
-        if !ok {
-            return RuntimeValue::NIL;
-        }
+    if !crate::value::byte_array_write(array, bytes) {
+        return RuntimeValue::NIL;
     }
     array
 }
 
 #[no_mangle]
 pub extern "C" fn rt_sha256_new() -> i64 {
-    let handle = SHA256_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let Ok(handle) = SHA256_COUNTER.fetch_update(
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst,
+        |current| current.checked_add(1),
+    ) else {
+        return -1;
+    };
     SHA256_MAP.lock().unwrap().insert(handle, Sha256::new());
     handle
 }
@@ -61,9 +64,12 @@ pub unsafe extern "C" fn rt_sha256_write(handle: i64, data_ptr: *const u8, data_
     if data_ptr.is_null() {
         return;
     }
+    let Ok(data_len) = usize::try_from(data_len) else {
+        return;
+    };
     let mut map = SHA256_MAP.lock().unwrap();
     if let Some(hasher) = map.get_mut(&handle) {
-        let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+        let data = std::slice::from_raw_parts(data_ptr, data_len);
         hasher.update(data);
     }
 }
@@ -85,7 +91,7 @@ pub extern "C" fn rt_sha256_finish_bytes(handle: i64) -> RuntimeValue {
     let mut map = SHA256_MAP.lock().unwrap();
     if let Some(hasher) = map.remove(&handle) {
         let result = hasher.finalize();
-        unsafe { crate::value::collections::rt_string_new(result.as_ptr(), result.len() as u64) }
+        vec_to_runtime_byte_array(result.as_slice())
     } else {
         RuntimeValue::NIL
     }
@@ -140,6 +146,20 @@ mod tests {
 
         assert_eq!(
             hash_str,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn test_sha256_finish_bytes_is_typed_array() {
+        let handle = rt_sha256_new();
+        unsafe {
+            rt_sha256_write(handle, b"hello".as_ptr(), 5);
+        }
+        let result = rt_sha256_finish_bytes(handle);
+        let bytes = crate::value::byte_array_bytes(result).unwrap();
+        assert_eq!(
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
     }

@@ -73,30 +73,6 @@ Related env the same setup manages: `SIMPLE_TIMEOUT_SECONDS` (raise-only
 against the monitor timeout) and `SIMPLE_SYSTEM_TEST` (`1` for paths containing
 `/system/` or `/feature/`, else `0`).
 
-
-### `# @tag:in-development` — NOT parsed by this runner (yet)
-
-The in-development tag (canonical guide:
-`doc/07_guide/infra/testing.md` § Tags and Filtering) marks a spec that is
-expected to fail because the code it describes does not exist yet. Its contract
-is: expected FAIL, SKIPPED in whole-suite runs, **COUNTED** in the summary,
-selectable with `simple test --tag in-development`.
-
-**Status against `origin/main` @ `3ccf808f6f2` (2026-08-23): this layer does not
-implement any of it.** `test_runner_single.spl` still parses exactly the two
-directives in the table above; there is no `@tag:` branch. `--tag <name>`
-filtering exists only in the seed driver
-(`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at
-`execution.rs:923-925`), and `@tag:qemu` is read there solely for the timeout
-budget (`execution.rs:95`). So a spec carrying the tag today **runs normally and
-fails normally**. Do not report a tagged spec as skipped without checking the
-parser first — that is exactly the shape of false claim this wiki exists to stop.
-
-When the sibling lanes land the skip+count semantics, the natural home is the
-same header-scan in `test_runner_single.spl` that reads `# @di_test`, plus the
-summary emitter, plus the `test_db.sdn` / `test_result.md` writers so the count
-survives into the tracking artefacts.
-
 ## Statement coverage
 
 - Working `SIMPLE_COVERAGE=1` statement coverage landed as `1a6c1e362a5`
@@ -466,39 +442,63 @@ sessions queued behind each other. The client now bypasses the daemon rather tha
 **Verify:** `bin/simple test test/01_unit/app/compiler_schema/` — read the `Results: N total,
 N passed, 0 failed` line, and confirm the process exit code separately (see the exit-zero bug above).
 
-## Phase-gating principle (2026-08-23)
+## A directory target aborts before executing anything; a file target does not (2026-08-27)
 
-When the runner is invoked as a **bootstrap phase gate** rather than as the full
-suite, its scope is "the capabilities the next phase depends on", not everything.
-Measured at `origin/main` 2026-08-23: 21,228 spec files total; the
-compiler/interpreter/loader scope is 2,106 (`test/01_unit/compiler/**` 2,063 +
-`test/02_integration/compiler/**` 43 + `test/01_unit/app/cli/` 69 +
-`test/01_unit/app/compile/` 4).
+`bin/simple test <dir>` dies right after `Session setup: Nms` with **no `Results:` line and no
+`ABORTED BEFORE EXECUTION` banner** — so every file in it is UNKNOWN, not failed. `bin/simple test
+<one_file.spl>` runs fine. **The discriminator is not file count**: a single-file target never takes
+the wrapper-generation path, so it never reaches either blocker below. A two-file directory
+reproduces in ~15s, which is the cheap iteration substrate — do not debug this on the full suite.
 
-Categorically ineligible for any gate, in every tree: `test/01_unit/bugs/`
-(specs that document defects by construction and must fail), `test/fixtures/`
-(the runner's own deliberate red inputs — gating them neutralises the fixtures
-proving the runner reports failure at all), `test/tmp_repro/` (scratch repros).
+Two stacked blockers, both mechanism-level. Fixing the first only surfaces the second.
 
-A gate run must state counts and scope in its verdict, report `ERROR` if it
-executed zero specs, and hold optional-feature failures as TODOs rather than
-skipping them in source. Full statement:
-`doc/07_guide/tooling/bootstrap_phase_verification.md`.
+### 1. The generated MC/DC prelude is compiled IN MEMORY, so its `use` lines cannot load files
 
-## Companion rules (2026-08-23)
+`build_coverage_wrapper` (`test_executor_parsing.spl:771`) emits a prelude when `mcdc_enabled`.
+**No wrapper file is ever written** — `strace -f -e trace=openat` shows no `.sspec_wrapped_*` path
+opened for reading *or* writing, and the last source opened is `src/app/test_runner_new/main.spl`.
+The wrapper text is compiled in-process from memory.
 
-**The bootstrap path contains exactly what the next step requires.**
+Consequence: a prelude `use` resolves **only against modules the runner's own graph already
+loaded**. The short-form siblings (`std.io`, `std.spec`, `std.test_runner.…`) work for that reason
+alone. The odd-one-out long form at `:814`,
+`use std.nogc_sync_mut.mcdc.dynamic_probe.{…}`, matches nothing already loaded — `strace` shows
+**zero opens** of `src/lib/nogc_sync_mut/mcdc/dynamic_probe.spl`, and there is no `__init__.spl` in
+that package to re-export it. The `use` **binds nothing and raises no error**; the failure appears
+later and generically as
+`variable mcdc_dynamic_probe_controller_load_builtin_current_owner not found`.
 
-| policy | statement |
-|---|---|
-| **Scope** | Each phase's tests verify the next phase's prerequisites, not optional features. |
-| **Incomplete work** | Disable with skip or assert plus a TODO — **never delete**, never silently half-working. Skip is the authorised mechanism for excluding out-of-scope optional surface; it lives in the gate's scope declaration, not anonymously in spec files. In the Rust seed the equivalent is `#[ignore]` or an assert, plus a TODO. |
-| **rust simple** | For the Rust seed (`src/compiler_rust/**`): **do not implement optional features unless requested, or needed to build phase 2.** The phase-2 exception requires a demonstrable build failure the feature resolves — "phase 2 will probably want this" is not it — and whoever invokes it records what broke. Simple is the default implementation language per CLAUDE.md. Applies to new work; existing optional seed surface is an observation, not a defect. |
+**This is why every probe of that import "works".** In a real on-disk file the `use` triggers a
+file load and the symbol resolves. Only the in-memory wrapper context fails. Do not conclude from a
+passing standalone probe that the import is fine.
 
-Rationale for the seed rule: it is bootstrap-only tooling whose single job is to
-compile Simple until the self-hosted compiler takes over. Every optional feature
-added to it must then be maintained in two languages and eventually replicated on
-the self-hosted path — enlarging the bootstrap problem this phase exists to
-shrink.
+Fix that is confirmed to clear it: one real top-level import in `test_executor_parsing.spl` so the
+module is genuinely loaded. Writing the wrapper to disk also works but is far larger and masks the
+general defect — **an unresolvable `use` in an in-memory unit fails silently**, which is worth
+fixing at the `use` rather than at the eventual identifier.
 
-Full statement: `doc/07_guide/tooling/bootstrap_phase_verification.md`.
+### 2. `runtime_symbols.rs` and `interpreter_extern/` are DIFFERENT registries
+
+With blocker 1 cleared the run dies differently:
+`error: semantic: unknown extern function: rt_process_run_owned_observed_bounded_value`.
+
+That symbol **is** registered at `src/compiler_rust/common/src/runtime_symbols.rs:1901`, and its
+string **is** present in the deployed binary — so this is neither a missing registration nor binary
+staleness. `runtime_symbols.rs` serves **native codegen**. The tree-walk interpreter that
+`bin/simple test` uses dispatches through `src/compiler_rust/compiler/src/interpreter_extern/`,
+which has **no `rt_process_run_owned_*` handler at all**. `src/lib/nogc_sync_mut/io/resource_scope.spl:17`
+declares the extern and `:21` calls it.
+
+**Carry this distinction into any "registered but unknown" investigation** — it is the single fact
+that made this one look impossible. Registration in one registry says nothing about the other, and
+the width of the gap between them has not been audited.
+
+### Evidence discipline this cost
+
+Both symbols grep to **zero hits** in a stale working tree, which briefly supported a wrong "these
+names are synthesized at runtime" theory. Grep `origin/main` content (`git grep <pat> origin/main`),
+not the shared tree — see `.claude/memory/gate-fail-needs-clean-worktree.md`. Related: a probe
+worktree under `/mnt/data/worktrees/` was reaped mid-investigation by another session's cleanup;
+put throwaway probe trees outside that directory.
+
+Record: `doc/08_tracking/bug/full_suite_aborts_mcdc_dynamic_probe_symbol_2026-08-26.md`.

@@ -58,6 +58,21 @@ impl<'a> MirLowerer<'a> {
             || recovered_ty.is_some_and(|ty| matches!(registry.get(ty), Some(HirType::Dict { .. })))
     }
 
+    /// Return the element type for a statically valid tuple index.
+    ///
+    /// Keep this deliberately narrower than general index inference: the MIR
+    /// index path can select `rt_tuple_get` only when the receiver's own HIR
+    /// type is a tuple. Erased/dynamic receivers therefore stay on the
+    /// existing method-dispatch path instead of being speculatively rerouted.
+    fn tuple_element_type_at(&self, receiver_ty: TypeId, index: usize) -> Option<TypeId> {
+        let registry = self.type_registry?;
+        match registry.get(receiver_ty) {
+            Some(HirType::Tuple(elements)) => elements.get(index).copied(),
+            Some(HirType::LabeledTuple(fields)) => fields.get(index).map(|(_, ty)| *ty),
+            _ => None,
+        }
+    }
+
     fn enum_payload_type_for_method_receiver(&self, ty: TypeId) -> Option<TypeId> {
         let registry = self.type_registry?;
         match registry.get(ty) {
@@ -249,6 +264,26 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // A tuple `.get(constant_index)` is the same positional read as tuple
+        // indexing, but the generic dotted-name path emits bare
+        // `rt_tuple_get`. That runtime call intentionally returns the stored
+        // tagged RuntimeValue, so an i64 sink observed `5 << 3 == 40` rather
+        // than 5. Only a non-negative, in-range literal gives us an
+        // authoritative per-position type for a heterogeneous tuple; keep
+        // dynamic, negative, out-of-range, erased, and non-tuple calls on the
+        // existing dispatch/error path. `lower_index_expr` evaluates receiver
+        // and index once and applies the shared type-directed unbox tail.
+        // See doc/08_tracking/bug/jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17.md
+        if method == "get" && args.len() == 1 {
+            if let crate::hir::HirExprKind::Integer(index) = &args[0].kind {
+                if let Ok(index) = usize::try_from(*index) {
+                    if let Some(element_ty) = self.tuple_element_type_at(receiver.ty, index) {
+                        return self.lower_index_expr(receiver, &args[0], element_ty);
+                    }
+                }
+            }
+        }
+
         // `xs.get(i)` on an array is the SAME read as `xs[i]`, but the generic
         // dotted-name path emitted a bare `rt_index_get` and fed the tag-boxed
         // slot word (`rt_value_int(v) == v << 3`) straight into an int-typed
@@ -257,7 +292,7 @@ impl<'a> MirLowerer<'a> {
         // `lower_index_expr` pairs the read with an explicit
         // `UnboxInt`/`UnboxFloat` (+ `UnitNarrow` for narrow element widths).
         // Route `.get(i)` through that exact path. This sits BEFORE the receiver
-        // and args are lowered, so nothing is evaluated twice. Dict/String/tuple
+        // and args are lowered, so nothing is evaluated twice. Dict/String
         // receivers are untouched — `receiver_is_array` gates it.
         // See doc/08_tracking/bug/list_get_returns_tag_boxed_value_shifted_left_3_2026-07-28.md
         if method == "get" && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
@@ -646,7 +681,11 @@ impl<'a> MirLowerer<'a> {
                 })
                 .unwrap_or(TypeId::ANY);
             let receiver_reg = self.lower_expr(receiver)?;
-            let runtime_fn = if method == "max" { "rt_array_max" } else { "rt_array_min" };
+            let runtime_fn = if method == "max" {
+                "rt_array_max"
+            } else {
+                "rt_array_min"
+            };
             let raw_result = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -682,7 +721,11 @@ impl<'a> MirLowerer<'a> {
         {
             let receiver_reg = self.lower_expr(receiver)?;
             let n_reg = self.lower_expr(&args[0])?;
-            let runtime_fn = if method == "take" { "rt_array_take" } else { "rt_array_drop" };
+            let runtime_fn = if method == "take" {
+                "rt_array_take"
+            } else {
+                "rt_array_drop"
+            };
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -1041,9 +1084,7 @@ impl<'a> MirLowerer<'a> {
         // pointer of the SAME element type as the receiver — no unboxing
         // needed, matching the `"slice" | "filter" | "map" =>
         // Some(receiver.ty)` table entry in hir/lower/expr/mod.rs.
-        if matches!(method, "copy" | "clone")
-            && args.is_empty()
-            && self.receiver_is_array(receiver, receiver_local_ty)
+        if matches!(method, "copy" | "clone") && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty)
         {
             let receiver_reg = self.lower_expr(receiver)?;
             return self.with_func(|func, current_block| {
@@ -1466,8 +1507,8 @@ impl<'a> MirLowerer<'a> {
         // HIR type is what SELECTS this unbox, and without the unbox the tagged
         // word flows into an int-typed VReg.
         // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
-        let is_slot_yielding_accessor = (args.is_empty() && matches!(method, "first" | "last" | "pop"))
-            || (args.len() == 1 && method == "remove");
+        let is_slot_yielding_accessor =
+            (args.is_empty() && matches!(method, "first" | "last" | "pop")) || (args.len() == 1 && method == "remove");
         if is_slot_yielding_accessor {
             let element_ty = self
                 .type_registry
@@ -1640,8 +1681,8 @@ impl<'a> MirLowerer<'a> {
             // `p.push(0.1); p[0] == 0.1` was false on the JIT path. Same fix the
             // array-literal lowering already has (lowering_expr_collection.rs).
             // See doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
-            let needs_push_float_boxing = matches!(push_arg_ty, TypeId::F32 | TypeId::F64)
-                && !receiver_element_is_function;
+            let needs_push_float_boxing =
+                matches!(push_arg_ty, TypeId::F32 | TypeId::F64) && !receiver_element_is_function;
             if push_arg_ty == TypeId::U64 {
                 arg_regs[0] = self.box_u64_runtime_value(arg_regs[0])?;
             } else if needs_push_boxing || needs_push_float_boxing {
@@ -1732,7 +1773,11 @@ impl<'a> MirLowerer<'a> {
         // so `[T].index_of(v)` above is untouched; the receiver and needle
         // are tagged string handles like the one-arg `rt_index_of` route, and
         // `start` stays a raw i64 as `rt_text_find` expects.
-        if method == "index_of"
+        // `find`/`find_str` are aliases of `index_of` and take the same
+        // optional start offset. They previously fell through to the 2-arg
+        // `rt_string_find` route, which DROPPED the offset and answered from
+        // position 0 without ever failing.
+        if matches!(method, "index_of" | "find" | "find_str")
             && args.len() == 2
             && !self.receiver_is_array(receiver, receiver_local_ty)
         {
@@ -1934,7 +1979,51 @@ impl<'a> MirLowerer<'a> {
             .is_some_and(|name| name == "Result" || name == "Option")
             && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len());
 
-        let func_name = if wrapper_enum_builtin_collision {
+        // The receiver is type-erased AND the method name collides with the
+        // builtin-collection set that codegen claims BEFORE user-method
+        // resolution. Left bare, this call is routed to a tag-dispatching
+        // runtime helper (`rt_find`, `rt_index_get`, ...) that untags the
+        // receiver and reads a 32-bit type header — one that CLASS INSTANCES DO
+        // NOT CARRY. On riscv64/freestanding that misread traps and reboots the
+        // guest; on x86_64/aarch64 it silently returns the helper's `-1` miss
+        // sentinel instead of running the user's method, so the defect is
+        // LATENT on every arch rather than riscv64-specific.
+        //
+        // Recover the class from the local's single reaching definition and
+        // qualify the call, so it resolves like any other typed receiver. The
+        // narrow gate matters: this fires ONLY for names already in the
+        // collision set and ONLY for a receiver nothing else could type, so a
+        // genuine erased Dict/Array/text receiver still reaches the builtin and
+        // bug #62 is preserved untouched.
+        // doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
+        let erased_class_receiver_ty: Option<TypeId> = if !wrapper_enum_builtin_collision
+            && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len())
+            && self.type_registry.and_then(|r| r.get_type_name(receiver.ty)).is_none()
+            && receiver_local_ty
+                .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)))
+                .is_none()
+        {
+            match &receiver.kind {
+                crate::hir::HirExprKind::Local(idx) => self.erased_local_class_types.get(idx).copied(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let func_name = if let Some(class_ty) = erased_class_receiver_ty
+            .filter(|_| !wrapper_enum_builtin_collision)
+            .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)).map(|n| (t, n)))
+            .map(|(_, n)| n)
+        {
+            if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                eprintln!(
+                    "[MIR-METHOD-DISPATCH] '{}' qualified via single-assignment class '{}' (erased receiver would otherwise be claimed by the builtin-collection heuristic)",
+                    method, class_ty
+                );
+            }
+            format!("{}.{}", class_ty, method)
+        } else if wrapper_enum_builtin_collision {
             if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                 eprintln!(
                     "[MIR-METHOD-DISPATCH] '{}' receiver resolved to Result/Option wrapper; routing as erased builtin instead of a nonexistent qualified method",
@@ -2003,7 +2092,7 @@ impl<'a> MirLowerer<'a> {
                 // concrete classes that merely share a method name with a trait
                 // get static dispatch instead of a bogus vtable load.
                 let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
-                let trait_lookup = self.find_trait_for_method_on_receiver(method, recv_type_name);
+                let trait_lookup = self.find_trait_for_method_on_receiver(method, recv_type_name, args.len());
                 // Duck-typed trait (no `impl Trait for ...` anywhere in the
                 // unit, e.g. game2d's `App`/`GameBackend`): there is no vtable
                 // to dispatch through, so the old lowering emitted the

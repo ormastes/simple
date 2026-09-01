@@ -11,25 +11,32 @@
 # - Inline assembly types
 
 use compiler.common.diagnostics.span.{Span}
-# `ExprKind.CustomBlock(text, BlockValue)` below names BlockValue in an enum
-# PAYLOAD position, but this module never imported it. HIR payload-dependency
-# materialization (resolve_materialized_enum_payload_origin) therefore found no
-# declaration, re-export hop, or explicit import in the OWNER, returned
-# not-found, and the failure resurfaced much later as a hard
-# `unresolved type: BlockValue` blamed on whichever module imported ExprKind --
-# 47 poisoned modules in stage-1 run13, plus 193 [hir-payload-origin-unresolved]
-# advisories, none of which names BlockValue itself.
-# The frontend -> blocks.value edge already exists
-# (_FlatAstBridge/convert_nodes.spl:46) and blocks/value.spl imports only Span,
-# so this adds no cycle and no new layer edge.
-# See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+# `BlockValue` is used in DECLARATION position as the payload of
+# `ExprKind.CustomBlock(text, BlockValue)` below, but was never imported here --
+# it was reachable only to consumers that happened to import it themselves. The
+# cross-module dependency materialization walk in
+# `20.hir/hir_lowering/_Items/module_reexport_materialization.spl` requires a
+# declaration, an `export use` hop, or an explicit named import in the OWNER, so
+# Stage 3 emitted
+# `[hir-payload-origin-unresolved] owner=compiler.frontend.parser_types_expr payload=BlockValue`
+# and the failure resurfaced as 27 hard `unresolved type: BlockValue` fatals
+# against the modules importing this file (Stage 3 log of 2026-09-01). Same fix
+# and same reasoning as the MethodResolution / AsmConstraintKind imports
+# documented in `20.hir/hir_definitions.spl`.
+#
+# Spelled file-direct (`blocks.blocks.value` = src/compiler/15.blocks/blocks/value.spl,
+# which imports only `Span`) rather than the package-mediated `compiler.blocks.value`
+# used by hir_definitions: `15.blocks/blocks/definition.spl` references
+# parser_types_expr, so a package-mediated import from 10.frontend could close a
+# cycle back into this file. `_FlatAstBridge/convert_nodes.spl:47` already uses
+# this same file-direct spelling from inside 10.frontend.
 use compiler.blocks.blocks.value.{BlockValue}
 
 extern fn rt_enum_payload(value: TypeKind) -> i64
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 extern fn rt_println(msg: text)
-extern fn rt_env_get(key: text) -> text
 
 fn parser_types_trace_enabled() -> bool:
     """Level gate for TypeKind payload-decode tracing (default off).
@@ -38,7 +45,7 @@ fn parser_types_trace_enabled() -> bool:
     asked for an ``Array`` element but handed a different variant.  This is
     the probe that located the Stage-3 ``field access on nil receiver`` trap.
     """
-    (rt_env_get("SIMPLE_TRACE_TYPEKIND") ?? "") == "1"
+    (env_get_opt("SIMPLE_TRACE_TYPEKIND") ?? "") == "1"
 
 # ============================================================================
 # Type AST
@@ -114,13 +121,6 @@ fn parser_type_kind_array_element(kind: TypeKind, fallback: Type) -> Type:
     element
 
 fn parser_type_kind_is_array(kind: TypeKind) -> bool:
-    """True only for an `Array` kind (`[T]`).
-
-    Needed because `parser_type_kind_array_element_name` answers "" for BOTH
-    "not an array" and "an array whose element is not a plain Named type"
-    (`[(text, MirType)]`, `[[T]]`, `[T?]`). Callers that must recurse into the
-    element cannot distinguish those two on the name alone.
-    """
     rt_enum_discriminant(kind) == parser_type_kind_array_discriminant()
 
 fn parser_type_kind_array_element_name(kind: TypeKind) -> text:
@@ -153,13 +153,6 @@ fn parser_type_kind_tuple_elements(kind: TypeKind) -> [Type]:
         case _: []
 
 fn parser_type_kind_pointer_inner(kind: TypeKind, fallback: Type) -> Type:
-    """Pointee of a `Pointer` kind (`*T` / `*mut T`), else `fallback`.
-
-    Decoded HERE, beside the enum, for the same reason every other
-    `parser_type_kind_*` accessor is: a consumer that also imports
-    `HirTypeKind` gets a colliding `Named` variant on stage4, so a `match` in
-    that scope is not safe.
-    """
     val placeholder = Type(kind: TypeKind.Infer, span: fallback.span)
     if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
         return fallback
@@ -172,7 +165,6 @@ fn parser_type_kind_pointer_inner(kind: TypeKind, fallback: Type) -> Type:
     inner
 
 fn parser_type_kind_pointer_is_mutable(kind: TypeKind) -> bool:
-    """Mutability flag of a `Pointer` kind; false for any other kind."""
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
     if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
         return false
@@ -183,12 +175,10 @@ fn parser_type_kind_pointer_is_mutable(kind: TypeKind) -> bool:
     mutable
 
 fn parser_type_kind_is_pointer(kind: TypeKind) -> bool:
-    """True only for a `Pointer` kind (`*T`)."""
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
     rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Pointer(placeholder, false))
 
 fn parser_type_kind_union_members(kind: TypeKind) -> [Type]:
-    """Members of a `Union` kind (`A | B | C`), or [] for any other kind."""
     if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Union([])):
         return []
     val payload = rt_enum_payload(kind)
@@ -198,12 +188,10 @@ fn parser_type_kind_union_members(kind: TypeKind) -> [Type]:
     members
 
 fn parser_type_kind_is_function(kind: TypeKind) -> bool:
-    """True only for a `Function` kind (`fn(A, B) -> C`)."""
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
     rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Function([], placeholder))
 
 fn parser_type_kind_function_params(kind: TypeKind) -> [Type]:
-    """Parameter types of a `Function` kind, or [] for any other kind."""
     if not parser_type_kind_is_function(kind):
         return []
     val payload = rt_enum_payload(kind)
@@ -213,11 +201,6 @@ fn parser_type_kind_function_params(kind: TypeKind) -> [Type]:
     params
 
 fn parser_type_kind_function_return(kind: TypeKind, fallback: Type) -> Type:
-    """Return type of a `Function` kind, else `fallback`.
-
-    Same discriminant guard as every other `parser_type_kind_*` accessor: an
-    unguarded slot-1 decode reinterprets a foreign payload as a `Type`.
-    """
     if not parser_type_kind_is_function(kind):
         return fallback
     val payload = rt_enum_payload(kind)
@@ -228,72 +211,80 @@ fn parser_type_kind_function_return(kind: TypeKind, fallback: Type) -> Type:
         return fallback
     ret
 
-fn parser_type_named_dependencies(type_: Type) -> [text]:
-    """Collect every named type recursively from one parser-owned type.
+fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
+    """Append named types from one parser-owned type to ``names``.
 
     Multi-field ``TypeKind`` values are decoded only in this owner module via
     their typed discriminant/payload ABI. This avoids colliding staged-native
     matches in HIR scopes that also import ``HirTypeKind``.
+
+    The caller-owned accumulator keeps the recursive walk linear: nested type
+    nodes do not allocate result arrays and then copy them into their parents.
     """
     val kind = type_.kind
     val disc = rt_enum_discriminant(kind)
     if disc == rt_enum_discriminant(TypeKind.Named("", [])):
         val name = parser_type_kind_named_name(kind)
-        var names: [text] = []
-        if name != "": names = names.push(name)
+        if name != "": names.push(name)
         for arg in parser_type_kind_named_args(kind):
-            for nested in parser_type_named_dependencies(arg):
-                names = names.push(nested)
-        return names
+            parser_type_named_dependencies_into(arg, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Tuple([])):
-        var names: [text] = []
         for element in parser_type_kind_tuple_elements(kind):
-            for nested in parser_type_named_dependencies(element):
-                names = names.push(nested)
-        return names
+            parser_type_named_dependencies_into(element, names)
+        return
 
     val placeholder = Type(kind: TypeKind.Infer, span: type_.span)
     if disc == rt_enum_discriminant(TypeKind.Array(placeholder, nil)):
-        return parser_type_named_dependencies(
-            parser_type_kind_array_element(kind, placeholder))
+        parser_type_named_dependencies_into(
+            parser_type_kind_array_element(kind, placeholder), names)
+        return
     val payload = rt_enum_payload(kind)
-    if payload == nil: return []
+    if payload == nil: return
     if disc == rt_enum_discriminant(TypeKind.Function([], placeholder)):
         val params: [Type] = rt_tuple_get(payload, 0)
         val return_type: Type = rt_tuple_get(payload, 1)
-        var names: [text] = []
         for param in params:
-            for nested in parser_type_named_dependencies(param):
-                names = names.push(nested)
-        for nested in parser_type_named_dependencies(return_type):
-            names = names.push(nested)
-        return names
+            parser_type_named_dependencies_into(param, names)
+        parser_type_named_dependencies_into(return_type, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Optional(placeholder)):
         val inner: Type = payload
-        return parser_type_named_dependencies(inner)
+        parser_type_named_dependencies_into(inner, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Reference(placeholder, false)):
         val inner: Type = rt_tuple_get(payload, 0)
-        return parser_type_named_dependencies(inner)
+        parser_type_named_dependencies_into(inner, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Atomic(placeholder)):
         val inner: Type = payload
-        return parser_type_named_dependencies(inner)
+        parser_type_named_dependencies_into(inner, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Isolated(placeholder)):
         val inner: Type = payload
-        return parser_type_named_dependencies(inner)
+        parser_type_named_dependencies_into(inner, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Weak(placeholder)):
+        val inner: Type = payload
+        parser_type_named_dependencies_into(inner, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Union([])):
         val members: [Type] = payload
-        var names: [text] = []
         for member in members:
-            for nested in parser_type_named_dependencies(member):
-                names = names.push(nested)
-        return names
+            parser_type_named_dependencies_into(member, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Projection(placeholder, "")):
         val base: Type = rt_tuple_get(payload, 0)
-        return parser_type_named_dependencies(base)
+        parser_type_named_dependencies_into(base, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
         val inner: Type = rt_tuple_get(payload, 0)
-        return parser_type_named_dependencies(inner)
-    []
+        parser_type_named_dependencies_into(inner, names)
+
+fn parser_type_named_dependencies(type_: Type) -> [text]:
+    var names: [text] = []
+    parser_type_named_dependencies_into(type_, names)
+    names
 
 # ============================================================================
 # Tensor Suffix

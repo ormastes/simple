@@ -52,6 +52,7 @@ use std.io_runtime.{file_read, file_exists}
 val EXPR_DISPATCH = "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"
 val SWITCH_CALLS = "src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl"
 val FUNCTION_LOWERING = "src/compiler/50.mir/_MirLowering/function_lowering.spl"
+val LOWERING_TYPES = "src/compiler/50.mir/mir_lowering_types.spl"
 val STMTS = "src/compiler/50.mir/mir_lowering_stmts.spl"
 
 fn source_of(path: text) -> text:
@@ -61,12 +62,11 @@ fn source_of(path: text) -> text:
     return file_read(path)
 
 describe "MIR lowering has no silent HIR-expression fallback":
-    it "raises a NAMED, spanned diagnostic for each of the eleven unlowerable expression kinds":
+    it "raises a NAMED, spanned diagnostic for each remaining unlowerable expression kind":
         step("Before C6 these had no arm and reported as an opaque <enum@0x..> handle")
         val src = source_of(EXPR_DISPATCH)
         expect(src).to_contain("E-MIR-EXPR-As")
         expect(src).to_contain("E-MIR-EXPR-CharLit")
-        expect(src).to_contain("E-MIR-EXPR-Comprehension")
         expect(src).to_contain("E-MIR-EXPR-Error")
         expect(src).to_contain("E-MIR-EXPR-Lambda")
         expect(src).to_contain("E-MIR-EXPR-OptionalChain")
@@ -81,7 +81,8 @@ describe "MIR lowering has no silent HIR-expression fallback":
         val src = source_of(EXPR_DISPATCH)
         expect(src).to_contain("case As(_, _):")
         expect(src).to_contain("case CharLit(_):")
-        expect(src).to_contain("case Comprehension(_, _, _):")
+        expect(src).to_contain("case Comprehension(comp_kind, comp_expr, comp_clauses):")
+        expect(src).to_contain("lower_list_comprehension(comp_kind, comp_expr, comp_clauses")
         expect(src).to_contain("case Error:")
         expect(src).to_contain("case Lambda(_, _, _):")
         expect(src).to_contain("case OptionalChain(_, _):")
@@ -98,6 +99,27 @@ describe "MIR lowering has no silent HIR-expression fallback":
         expect(src).to_contain("t_unsupported_named")
 
 describe "MIR lowering has no silent payload-decode fallback":
+    it "materializes a signature parameter before reading its enum-bearing type":
+        step("A chained array-element field projection erased HirTypeKind to scalar zero in self-compiled Stage 2")
+        val src = source_of(FUNCTION_LOWERING)
+        expect(src).to_contain("val signature_param = fn_.params[pmi]")
+        expect(src).to_contain("self.lower_type(signature_param.type_)")
+        expect(src).to_contain("self.lower_vulkan_kernel_param_type(signature_param)")
+        expect(src).to_contain("self.lower_cuda_kernel_param_type(signature_param)")
+        expect(src.contains("self.lower_type(fn_.params[pmi].type_)")).to_be(false)
+        expect(src.contains("self.lower_vulkan_kernel_param_type(fn_.params[pmi])")).to_be(false)
+        expect(src.contains("self.lower_cuda_kernel_param_type(fn_.params[pmi])")).to_be(false)
+
+    it "bounds malformed HirType receipts without allocating on healthy parameters":
+        step("Systemic enum transport corruption must fail with bounded diagnostics")
+        val src = source_of(FUNCTION_LOWERING)
+        expect(src).to_contain("val MIR_TYPE_TRANSPORT_RECEIPT_LIMIT: i64 = 16")
+        expect(src).to_contain("self.type_transport_context = \"signature-param\"")
+        expect(src).to_contain("self.type_transport_param_index = pmi")
+        expect(src.contains("\"signature-param:\" + pmi.to_text()")).to_be(false)
+        expect(src).to_contain("E-MIR-TYPE-Unknown: unreachable HirTypeKind disc=")
+        expect(src.contains(": " + "{" + "type_.kind}")).to_be(false)
+
     it "names the variant when a discriminant-guarded expression destructure fails to bind":
         step("These wildcards were `pass`, so a misbinding was indistinguishable from an unhandled kind")
         val src = source_of(EXPR_DISPATCH)

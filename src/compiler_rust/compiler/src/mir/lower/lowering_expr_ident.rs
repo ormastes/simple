@@ -58,8 +58,10 @@ impl<'a> MirLowerer<'a> {
                 && !self.available_functions.contains(name.as_str())
             {
                 return Err(MirLowerError::Unsupported(format!(
-                    "unknown variant or method '{}' on enum {}",
-                    variant, enum_name
+                    "unknown variant or method '{}' on enum {}{}",
+                    variant,
+                    enum_name,
+                    self.declared_variants_hint(enum_name)
                 )));
             }
 

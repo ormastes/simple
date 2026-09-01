@@ -2,7 +2,6 @@
 #
 # Wiki panel, markdown editing, note embedding, task, backlinks, and vault helpers.
 
-use std.io_runtime.{read_file_text, write_file, dir_walk}
 use app.editor.editor_controller_types.*
 use app.editor.editor_controller.*
 use std.editor.core.session.*
@@ -31,7 +30,7 @@ fn ctrl_wiki_daily_note_create(ctrl: mut EditorController, payload: text) -> Edi
     val config = md_wiki_daily_note_config_with_title(folder, title_format, _editor_payload_part(payload, 4), template_body)
     val path = md_wiki_daily_note_path(config, date)
     val content = md_wiki_daily_note_content(config, date)
-    val ok = write_file(path, content)
+    val ok = rt_file_write_text(path, content)
     if not ok:
         ctrl.status_msg = "failed to create daily note"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -65,10 +64,10 @@ fn ctrl_wiki_template_insert(ctrl: mut EditorController, payload: text) -> Edito
     if template_path == "" or target_path == "":
         ctrl.status_msg = "missing template or target path"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val rendered = _editor_apply_template_text(read_file_text(template_path), title, date)
-    val existing = read_file_text(target_path)
+    val rendered = _editor_apply_template_text(rt_file_read_text(template_path) ?? "", title, date)
+    val existing = rt_file_read_text(target_path) ?? ""
     val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
-    val ok = write_file(target_path, existing + sep + rendered)
+    val ok = rt_file_write_text(target_path, existing + sep + rendered)
     if not ok:
         ctrl.status_msg = "failed to insert template"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -108,9 +107,9 @@ fn ctrl_wiki_embed_insert(ctrl: mut EditorController, payload: text) -> EditorAc
         ctrl.session.update_active_buffer(buffer)
         ctrl.status_msg = "inserted embed: " + embed_target
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val existing = read_file_text(target_path)
+    val existing = rt_file_read_text(target_path) ?? ""
     val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
-    val ok = write_file(target_path, existing + sep + embed + "\n")
+    val ok = rt_file_write_text(target_path, existing + sep + embed + "\n")
     if not ok:
         ctrl.status_msg = "failed to insert embed"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -132,10 +131,10 @@ fn ctrl_wiki_attachment_insert(ctrl: mut EditorController, payload: text) -> Edi
             ctrl.status_msg = "failed to store attachment"
             return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
         embed_path = stored
-    val existing = read_file_text(target_path)
+    val existing = rt_file_read_text(target_path) ?? ""
     val embed = _editor_attachment_embed(embed_path, label)
     val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
-    val ok = write_file(target_path, existing + sep + embed + "\n")
+    val ok = rt_file_write_text(target_path, existing + sep + embed + "\n")
     if not ok:
         ctrl.status_msg = "failed to insert attachment"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
@@ -330,14 +329,14 @@ fn ctrl_wiki_vault_task_batch(ctrl: mut EditorController, payload: text) -> Edit
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     val checked = mode == "done" or mode == "checked" or mode == "complete" or mode == "completed"
     var changed_count = 0
-    val files = dir_walk(root)
+    val files = rt_dir_walk(root)
     for file in files:
         if not _editor_is_markdown_path(file):
             continue
-        val existing = read_file_text(file)
+        val existing = rt_file_read_text(file) ?? ""
         val next = md_tasks_set_checked(existing, checked)
         if next != existing:
-            if write_file(file, next):
+            if rt_file_write_text(file, next):
                 changed_count = changed_count + 1
                 ctrl_refresh_open_document_from_disk_batch(ctrl, file, next)
     val index = md_wiki_index_documents(_editor_markdown_vault_documents(root))
@@ -385,16 +384,16 @@ fn ctrl_wiki_vault_set_property(ctrl: mut EditorController, payload: text) -> Ed
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     ctrl.wiki_property_vault_root = parsed.root
     var changed_count = 0
-    val files = dir_walk(parsed.root)
+    val files = rt_dir_walk(parsed.root)
     for file in files:
         if not _editor_is_markdown_path(file):
             continue
         if not _editor_vault_property_path_selected(file, parsed.selected_paths):
             continue
-        val existing = read_file_text(file)
+        val existing = rt_file_read_text(file) ?? ""
         val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
         if next != existing:
-            if write_file(file, next):
+            if rt_file_write_text(file, next):
                 changed_count = changed_count + 1
                 ctrl_refresh_open_document_from_disk_batch(ctrl, file, next)
     val index = md_wiki_index_documents(_editor_markdown_vault_documents(parsed.root))
@@ -409,13 +408,13 @@ fn ctrl_wiki_vault_property_review(ctrl: mut EditorController, payload: text) ->
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     ctrl.wiki_property_vault_root = parsed.root
     var rows: [WikiPanelRow] = []
-    val files = dir_walk(parsed.root)
+    val files = rt_dir_walk(parsed.root)
     for file in files:
         if not _editor_is_markdown_path(file):
             continue
         if not _editor_vault_property_path_selected(file, parsed.selected_paths):
             continue
-        val existing = read_file_text(file)
+        val existing = rt_file_read_text(file) ?? ""
         val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
         if next != existing:
             rows.push(WikiPanelRow(icon: "review", label: _editor_path_basename(file), detail: parsed.key + " -> " + parsed.value, path: file, line: 0))
@@ -543,7 +542,7 @@ fn ctrl_open_markdown_link_target(ctrl: mut EditorController, raw_target: text) 
     if should_create:
         val heading = if title == "" then md_wiki_title_from_path(path) else: title
         val note_content = "# " + heading + "\n\n"
-        val written = write_file(path, note_content)
+        val written = rt_file_write_text(path, note_content)
         if not written:
             ctrl.status_msg = "failed to create note: " + path
             return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)

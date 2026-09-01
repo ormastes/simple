@@ -1,6 +1,6 @@
 # Hosted Browser InputEvent Payload
 
-> Verifies the browser input event payload behaviour end to end so maintainers of this
+> This scenario proves that committed UTF-8 text and deletion keys keep their
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Hosted Browser InputEvent Payload
 
-Verifies the browser input event payload behaviour end to end so maintainers of this
+This scenario proves that committed UTF-8 text and deletion keys keep their
 
 ## At a Glance
 
@@ -20,18 +20,12 @@ Verifies the browser input event payload behaviour end to end so maintainers of 
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/browser/feature/browser_input_event_payload_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the browser input event payload behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+This scenario proves that committed UTF-8 text and deletion keys keep their
+InputEvent payload while crossing the hosted session, live DOM, JavaScript
+listener, Draw IR, and Engine2D boundaries.
 
 ## Scenarios
 
@@ -39,7 +33,7 @@ unrelated sibling features are out of scope.
 
 #### should preserve UTF-8 insertion and deletion payloads through pixels
 
-- Verify: should preserve UTF-8 insertion and deletion payloads through pixels
+- should preserve UTF-8 insertion and deletion payloads through pixels
    - Artifact capture: after_step
 - Open and focus the hosted text control
    - Artifact capture: after_step
@@ -49,8 +43,8 @@ unrelated sibling features are out of scope.
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: inserted.reason equals ``
-   - Expected: session.browser.text_selection_anchor_byte equals `5)  # oracle: pinned constant asserted by this scenario`
-   - Expected: session.browser.text_selection_focus_byte equals `5)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.browser.text_selection_anchor_byte equals `5`
+   - Expected: session.browser.text_selection_focus_byte equals `5`
 - Delete backward and forward before committing change
    - Artifact capture: after_step
    - Evidence: artifact verified by 6 expected checks
@@ -58,25 +52,24 @@ unrelated sibling features are out of scope.
    - Expected: deleted.reason equals ``
    - Expected: canceled_edit.semantic_target_id equals `canceled`
    - Expected: canceled.browser.current_title equals `canceled-before>`
-   - Expected: canceled.browser.text_selection_anchor_byte equals `2)  # oracle: pinned constant asserted by this scenario`
-   - Expected: canceled.browser.text_selection_focus_byte equals `3)  # oracle: pinned constant asserted by this scenario`
+   - Expected: canceled.browser.text_selection_anchor_byte equals `2`
+   - Expected: canceled.browser.text_selection_focus_byte equals `3`
 - Lower the listener mutation through Draw IR and Engine2D
    - Artifact capture: after_step
    - Evidence: artifact verified by 2 expected checks
    - Expected: probe_color equals `0xFF2563EBu32`
-   - Expected: rendered.skipped_command_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: rendered.skipped_command_count equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 151 lines folded for reproduction.
+Runnable source: 150 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
-step("Verify: should preserve UTF-8 insertion and deletion payloads through pixels")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should preserve UTF-8 insertion and deletion payloads through pixels")
 step("Open and focus the hosted text control")
 val html = (
     "<style>body{{margin:0}}input{display:block;width:48px;height:20px}" +
@@ -131,8 +124,8 @@ expect(session.browser.current_title).to_equal(
     "before:한|insertText|false>input:한|insertText|false>"
 )
 expect(session.current_body_html()).to_contain("value=\"é한\"")
-expect(session.browser.text_selection_anchor_byte).to_equal(5)  # oracle: pinned constant asserted by this scenario
-expect(session.browser.text_selection_focus_byte).to_equal(5)  # oracle: pinned constant asserted by this scenario
+expect(session.browser.text_selection_anchor_byte).to_equal(5)
+expect(session.browser.text_selection_focus_byte).to_equal(5)
 
 step("Delete backward and forward before committing change")
 val backspace = session.dispatch_key(4, 8, true)
@@ -190,8 +183,8 @@ expect(canceled.current_body_html()).to_contain("value=\"éZ\"")
 expect(canceled.current_body_html().contains(
     "data-input-dirty"
 )).to_be(false)
-expect(canceled.browser.text_selection_anchor_byte).to_equal(2)  # oracle: pinned constant asserted by this scenario
-expect(canceled.browser.text_selection_focus_byte).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(canceled.browser.text_selection_anchor_byte).to_equal(2)
+expect(canceled.browser.text_selection_focus_byte).to_equal(3)
 canceled.close()
 
 step("Lower the listener mutation through Draw IR and Engine2D")
@@ -215,14 +208,14 @@ val engine = Engine2dCompositorBackend.create_named(
 val rendered = engine.render_draw_ir_composition_resources(
     composition, session.browser.image_resources
 )
-expect(rendered.skipped_command_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(rendered.skipped_command_count).to_equal(0)
 expect(rendered.rendered_command_count).to_be_greater_than(0)
 expect(input_event_color_count(
     rendered.pixels, 0xFF2563EBu32
 )).to_be_greater_than(0)
 expect(input_event_color_count(
     rendered.pixels, 0xFFEF4444u32
-)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+)).to_equal(0)
 engine.shutdown()
 session.close()
 ```
@@ -242,39 +235,57 @@ session.close()
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-004`
+- `REQ-WEB-BROWSER-008`
+- `REQ-WEB-BROWSER-021`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `cb61837727c782aea34cf8dc66454c6f06571dc5b1c999531cd614a67387f7cd`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `48b1017f085c50fb256ee2536259fd288357f14633b82e64ef769cf4544d8daf`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `cb61837727c782aea34cf8dc66454c6f06571dc5b1c999531cd614a67387f7cd`.
+Source SHA-256: `48b1017f085c50fb256ee2536259fd288357f14633b82e64ef769cf4544d8daf`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `cb61837727c782aea34cf8dc66454c6f06571dc5b1c999531cd614a67387f7cd`  
+Source SHA-256: `48b1017f085c50fb256ee2536259fd288357f14633b82e64ef769cf4544d8daf`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/03_system/app/browser/feature/browser_input_event_payload_spec.spl
 mirror: doc/06_spec/03_system/app/browser/feature/browser_input_event_payload_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=95 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 6 blockers: 1
+  narrative=100 structure=95 oracle=70
+  traceability=60 evidence=90 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/browser/feature/browser_input_event_payload_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=82; blocker cap makes effective=49
 doc/06_spec/03_system/app/browser/feature/browser_input_event_payload_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/browser/feature/browser_input_event_payload_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/browser/feature/browser_input_event_payload_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/browser/feature/browser_input_event_payload_spec.spl:43:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve UTF-8 insertion and deletion payloads through pixels' describes the test rather than its outcome
+test/03_system/app/browser/feature/browser_input_event_payload_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/browser/feature/browser_input_event_payload_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/browser/feature/browser_input_event_payload_spec.spl:33:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve UTF-8 insertion and deletion payloads through pixels' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/browser_input_event_payload_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve UTF-8 insertion and deletion payloads through pixels' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

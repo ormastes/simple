@@ -1064,15 +1064,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # bin/simple is a symlink into gitignored bin/release/<triple>/, so a fresh
+      # checkout always leaves it dangling. Before this step existed, every run of
+      # this job died in <1s with "[simpleos-bootstrap] missing executable:
+      # .../bin/simple". Build the Rust seed and point bin/simple at it.
       - name: Setup bootstrap runtime
         run: |
-          if [ -f bin/release/simple ]; then
-            chmod +x bin/release/simple
+          set -eu
+          if [ ! -x bin/simple ]; then
+            (cd src/compiler_rust && cargo build --release --bin simple)
+            mkdir -p bin
+            rm -f bin/simple
+            ln -s ../src/compiler_rust/target/release/simple bin/simple
           fi
-          if [ -f bin/simple ]; then
-            chmod +x bin/simple
-          fi
-          ./bin/simple --version || true
+          test -x bin/simple
+          ./bin/simple --version
 
       - name: Install QEMU + LLVM toolchain
         run: |
@@ -1112,7 +1118,10 @@ jobs:
   create-release:
     name: Create GitHub Release
     needs: [build-bootstrap, build-installers, simpleos-build, whole-tests]
-    if: always() && needs.build-bootstrap.result != 'cancelled' && needs.whole-tests.result == 'success'
+    # Ref gate: publishing is TAG-ONLY. Without this, a workflow_dispatch run on a
+    # branch leaves VERSION=${GITHUB_REF#refs/tags/v} unsubstituted (it stays
+    # "refs/heads/main") and the job publishes a garbage "vrefs/heads/main" release.
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build-bootstrap.result != 'cancelled' && needs.whole-tests.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1144,6 +1153,10 @@ jobs:
       - name: Extract version
         id: version
         run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "refusing to create a release from non-tag ref: $GITHUB_REF" >&2; exit 1 ;;
+          esac
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Version: ${VERSION}"
@@ -1325,24 +1338,12 @@ jobs:
 
       - name: Extract version
         id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Publish bootstrap packages to GHCR
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-
-          for spk in artifacts/bootstrap-*/simple-bootstrap-*.spk; do
-            [ -f "$spk" ] || continue
-            PLATFORM=$(basename "$spk" | sed "s/simple-bootstrap-${VERSION}-//" | sed 's/.spk$//')
-            REF="ghcr.io/${{ github.repository_owner }}/simple-bootstrap:${VERSION}-${PLATFORM}"
-
-            echo "Publishing: $REF"
-            oras push "$REF" \
-              "$spk:application/vnd.simple.bootstrap.v1+tar" \
-              --artifact-type "application/vnd.simple.bootstrap.v1"
-
-            echo "Published: $REF"
-          done
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "refusing to publish from non-tag ref: $GITHUB_REF" >&2; exit 1 ;;
+          esac
+          echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
           # Tag latest for linux-x86_64 (most common)
           LINUX_SPK=$(find artifacts -name "*linux-x86_64.spk" | head -1)
@@ -1357,6 +1358,38 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           FULL_PKG=$(find artifacts -name "simple-full-*.tar.gz" | head -1)
+
+          if ! gh release view "$TAG" --json isDraft >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" \
+              --notes-file candidate/release-notes.md
+          fi
+          is_draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
+          test "$is_draft" = true || test "$is_draft" = false
+
+          mapfile -t expected < <(printf '%s\n' \
+            artifacts.sha256 "${receipt_names[@]}" "${names[@]}" | sort)
+          mapfile -t remote < <(gh release view "$TAG" --json assets \
+            --jq '.assets[].name' | sort)
+          for remote_name in "${remote[@]}"; do
+            printf '%s\n' "${expected[@]}" | grep -Fxq -- "$remote_name" || {
+              echo "draft contains unadmitted asset: $remote_name" >&2; exit 1;
+            }
+          done
+          for asset in "${assets[@]}"; do
+            name=${asset#candidate/}
+            if printf '%s\n' "${remote[@]}" | grep -Fxq -- "$name"; then
+              mkdir -p "$RUNNER_TEMP/release-verify"
+              gh release download "$TAG" --pattern "$name" \
+                --dir "$RUNNER_TEMP/release-verify"
+              cmp --silent "$asset" "$RUNNER_TEMP/release-verify/$name"
+              rm -f "$RUNNER_TEMP/release-verify/$name"
+            elif test "$is_draft" = true; then
+              gh release upload "$TAG" "$asset"
+            else
+              echo "⚠ Warning: Could not find simple binary in bootstrap package"
+              echo "HAVE_BOOTSTRAP=false" >> $GITHUB_ENV
+            fi
+          done
 
           if [ -n "$FULL_PKG" ]; then
             REF="ghcr.io/${{ github.repository_owner }}/simple-full:${VERSION}"

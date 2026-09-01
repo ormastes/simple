@@ -72,14 +72,14 @@ source and candidate lineage.
 | 5 | Deployment | Gate 2's exact resume invocation owns Stage 4, the internal smoke, and deployment without rebuilding Stage 2/3. | Install only after Gates 1 through 4 pass against the same lineage; retain deployed hash, pre/post-swap identity, `bin/release/<platform>/simple.pre_deploy`, and post-swap `-c 'print(1+1)'` output. Keep it deployed through source-matched Gate 6 evidence unless an isolated immutable bundle is published. |
 | 6 | Linux AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on native AArch64 Linux | Retain `build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple`, `build/bootstrap/full/aarch64-unknown-linux-gnu/simple`, hashes, logs, sanity, and all essential markers |
 | 6 | macOS x86_64/AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on macOS | Retain matching `stage3/<triple>/simple` and `full/<triple>/simple`, hashes, logs, sanity, and all essential markers |
-| 6 | Windows x86_64 native acceptance | `bash scripts/bootstrap/bootstrap-from-scratch.sh windows-entry --msvc --backend=llvm --mode=dynload --full-bootstrap --no-mcp --jobs=2` in Git Bash/MSYS2 | Retain `build/bootstrap/stage3/x86_64-pc-windows-msvc/simple.exe`, hash, logs, and scoped wrapper evidence; do not add unsupported full-CLI/deploy claims |
+| 6 | Windows x86_64 native acceptance | `bash scripts/bootstrap/bootstrap-windows.sh --msvc --backend=llvm --mode=dynload --full-bootstrap --no-mcp --jobs=2` in Git Bash/MSYS2 | Retain `build/bootstrap/stage3/x86_64-pc-windows-msvc/simple.exe`, hash, logs, and scoped wrapper evidence; do not add unsupported full-CLI/deploy claims |
 | 6 | FreeBSD x86_64 QEMU acceptance | `sh scripts/check/check-freebsd-bootstrap-qemu.shs --full --download` | Scoped FreeBSD x86_64 QEMU bootstrap PASS with preflight/full receipts, VM and guest logs, guest Stage 3 hash, source/base-image identities, and smoke markers |
 | 6 | SimpleOS x86_64 target acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --target=simpleos-x86_64 --output=build/bootstrap --jobs=2` | Retain staged artifacts, manifest, hashes, and logs; target evidence only, not a hosted full CLI |
 | 6a | SimpleOS AArch64 attested image | `sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs` | Retain image, producer manifest, compiler/source/kernel/disk/build-log hashes, and logs; image evidence only |
 | 6b | SimpleOS AArch64 QMP input | `sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` after 6a | Retain atomic evidence manifest, QMP/serial logs, watermarks, captures, and guest/capture checksum equality; QEMU input evidence only |
 | 6 | RISC-V64 scoped cross/QEMU acceptance | `sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` | Retain matrix evidence; scoped cross execution/SIMD evidence only, not hosted bootstrap PASS |
 | 6 | RISC-V32 bare-metal object acceptance | No exact command is published in the session plan. Platform sidecar owns the repository architecture-gate receipt for `riscv32-unknown-none-elf`, including ELF32/RISC-V attributes, toolchain identity, command transcript, hashes, and logs. | Bare-metal object acceptance only; never claim `riscv32-unknown-linux-gnu` or hosted bootstrap PASS |
-| 7 | Explicit rollback execution | After all selected source-matched Gate 6 evidence, run `sh scripts/bootstrap/bootstrap-from-scratch.sh rollback-deploy <canonical-triple>`. Earlier rollback is allowed only when TODO667 has published an isolated immutable bundle from which every selected Gate 6 row runs. | Distinct executable rollback receipt is mandatory and cannot predate evidence from the only deployed source-matched authority. TODO667 retains the immutable deploy+rollback bundle-publisher gap; do not create a duplicate Todo. |
+| 7 | Explicit rollback execution | After all selected source-matched Gate 6 evidence, run `sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>`. Earlier rollback is allowed only when TODO667 has published an isolated immutable bundle from which every selected Gate 6 row runs. | Distinct executable rollback receipt is mandatory and cannot predate evidence from the only deployed source-matched authority. TODO667 retains the immutable deploy+rollback bundle-publisher gap; do not create a duplicate Todo. |
 
 ### Canonical readiness checker and handoff helper
 
@@ -195,7 +195,7 @@ Stage 3, Stage 4, deployment, rollback, or platform PASS.
 - Progress: `/tmp/simple-stage4-bootstrap-4505-20260803/progress.log` and
   `output/bootstrap-build-progress.events`.
 
-## Remaining work, in order
+## Historical remaining-work snapshot
 
 | ID | Lane | Required result | Current status / owner |
 |---|---|---|---|
@@ -208,11 +208,112 @@ Stage 3, Stage 4, deployment, rollback, or platform PASS.
 | `ST4-R7` | Current-host follow-ons | After x86 admission, run FreeBSD QEMU, SimpleOS AArch64, and scoped AArch64/RISC-V cross gates named in the session plan | Pending R5; platform sidecars, merge owner reviews; Stage-4 plan/source proof assertions added in `test/01_unit/os/native_build_compiler_provenance_spec.spl` |
 | `ST4-R8` | External-host handoff | Keep native AArch64 Linux, macOS, Windows, and hosted RISC-V rows open with prerequisites, exact commands, artifacts, owner, and reviewer | Hosts unavailable here; postponement is not PASS |
 | `ST4-R9` | Backend/layer evidence | Repair remaining false-green OpenCL/Vulkan identity, digest recomputation, real multi-module build, and real failed-frontier coverage; regenerate manual and verify with fresh pure CLI | Candidate `a5fff9c14ea` is blocked/unmerged after three cycles; next scoped session |
-| `ST4-R10` | Future bootstrap SDK | Implement the post-Stage-4 frozen SDK/two-generation plan without narrowing current full-source proof | Planned in `doc/03_plan/design/bootstrap_sdk_capsule.md` |
+| `ST4-R10` | Gated compiler/backend split migration | After one admitted legacy success, preserve the canonical Stage-2/Stage-3 compiler builds and replace only Stage 4 with tools-only assembly, with exact artifact receipts and `stage4_compiler_files=0` | Preparatory module/wrapper/tests/manuals restored and reviewed; live wiring and admission remain gated before baseline success |
 
-Latest failed-run receipt: exit 1 after 37m57s, peak RSS 2,634,216 KiB;
-last green HIR module `compiler.tools.formatter.main`; no Stage 4 candidate,
-sanity, essential-tools smoke, or deployment exists.
+Historical canonical Stage-2 failed-run receipt: exit 1 after 17m04.22s, peak RSS
+2,698,352 KiB. All prior Stage-2 semantic/recursive blockers stayed cleared;
+846 modules completed and the exact first failure moved to the final-link
+`rt_file_sync` provider boundary. The core-C source archive owns the symbol,
+but the localized bootstrap capsule omitted it while native-all does not carry
+that C-only provider. The bounded projection/test fix is recorded in
+`stage2_bootstrap_rt_file_sync_provider_missing_2026-08-15.md`; its exact
+focused Rust test passed 1/1. The later authority-only correction attempt did
+not reach Stage 2: it exited 1 after 9m49.41s on self-generated fingerprint
+drift, as recorded above. After that owner is fixed in a fresh bounded session,
+the next transaction remains Phase-2-only with the preserved cache and must
+stop before Stage 3.
+
+An isolated old-seed diagnostic retry then cleared the callable-ABI failures
+and reached link, where the first diagnostic was missing `rt_native_build` and
+the first Cranelift diagnostic was missing `rt_cranelift_new_module`, followed
+by related `rt_cranelift_*` providers. Its
+full log is
+`build/mini_builds/phase4_tools_rust_seed/retry_dynamic_receiver_fixed/bootstrap_main.log`.
+Because it used the private pre-refresh Rust seed and a diagnostic mini cache,
+it is not the next canonical first failure and cannot admit any stage.
+
+Historical post-fix static audit (before the live verification above):
+
+- All other frozen dirty Rust inputs re-verified against
+  `.stage4-frozen-inputs.sha256` and reviewed by diff: `runtime_symbols.rs`
+  (+`rt_struct_alloc` registration — its definition confirmed at
+  `src/runtime/runtime_native.c:5414` and covered by the new
+  `runtime_symbol_table_contains_struct_helpers` test), `node_exec.rs`
+  (in-place `ClassInstance` indexed-field assignment), `value.rs`
+  (`ClassInstance::field_mut`), `native_all` (`--compile-stack-mib` knob),
+  plus formatting-only diffs. No additional defects found.
+- Second landmine found and fixed in the same path (2026-08-15, continued
+  hunt): re-materialization of already-completed global struct layouts was
+  unmemoized, making diamond-shaped reference graphs exponential in time —
+  Stage 2 would spin instead of overflow. Fixed with a
+  `materialized_global_structs` completed-set memo (lowerer.rs +
+  type_resolver.rs) and the
+  `test_global_struct_diamond_graph_materializes_in_linear_time` regression
+  (32 layers; only completes with the memo). Bug-doc Fix/verification
+  sections updated.
+- Third hunt pass (2026-08-15, later same session), no new defects: the
+  per-worker `register_global_enums` / `resolve_global_enum_variants` path is
+  sound under the guards (enum placeholders pre-seed before payload
+  resolution; enum identity wins over a same-named struct def); the
+  duplicate-enum bare-name variant union with Any-payload erasure is
+  deliberate lenient design. Verified facts: all 79 dirty `.spl` files are
+  byte-identical to the frozen manifest (manifest drift is exactly the three
+  Rust fix/test files, bug doc corrected accordingly); the zerocopy
+  `win-cargo.bat` checksum fix matches the on-disk file
+  (`dbde5af5…`), closing the cycle-2 exit-101 class; and
+  `bootstrap-from-scratch.sh` already passes `--compile-stack-mib 64` to
+  Stage 2, which confirms the cycle-3 overflow was true unbounded recursion,
+  not an undersized stack.
+- First post-fix Stage-2 run (2026-08-15): the advice_form overflow was gone.
+  Stage 2 stopped on `driver_build/incremental.spl` because the then-frozen
+  source used bare `case Added | Modified:`. The bounded source fix qualifies
+  `ChangeKind.Added | ChangeKind.Modified`; an isolated probe cleared that
+  diagnostic. Canonical record:
+  `doc/08_tracking/bug/stage2_incremental_change_kind_unqualified_match_2026-08-15.md`.
+- The recursion class fixed above is closed across all `resolve_type` arms:
+  Generic instantiation copies already-resolved field TypeIds; Optional/Array
+  and duplicate-variant field paths all route through the guarded Simple-name
+  materialization.
+- Known next-in-sequence risks once Stage 2 clears, both needing live runs
+  (Codex-owned, cannot be reproduced under this session's no-build rule):
+  1. Retained full-CLI planner SIGSEGV —
+     `stage4_bootstrap_receipt_planner_unavailable_2026-08-15.md` (recovery
+     receipt exception already recorded; planner crash itself unresolved).
+  2. Stage-3 vacuous-binary trap — exit 0 with a ~22 KB stub output while the
+     real `bootstrap_main.o` sits unlinked
+     (`t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`,
+     2026-08-08 update). Gate Stage-3 acceptance on a symbol/size check of the
+     emitted binary, never exit code or `error:` line count. The related
+     void-`__simple_main` exit-code hazard is already fixed in
+     `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`.
+     Static narrowing (2026-08-15): no `__simple_main` fallback definition
+     exists anywhere in the tree, and the generated C entry shim
+     (`llvm_native_link.spl` `compile_entry_point_c`) declares it as a strong
+     extern — a link with the real module object missing would fail undefined,
+     not succeed. The vacuous binary therefore implies a WRONG user-object set
+     reached the linker: some linked object carried a tiny `__simple_main`
+     while the real `bootstrap_main.o` sat beside the output unlinked. Prime
+     suspect is a stale or mis-scoped native-cache object; when it reproduces,
+     capture the exact linker argv (`SIMPLE_LLVM_LINK_TRACE`) and `nm` the
+     listed objects for `__simple_main` before anything else. The
+     driver-side object collection (`driver_aot_native_output.spl` phases 1–2)
+     and its publishability guards were reviewed and are not the drop site.
+     Note the bootstrap wrapper's Stage-3 acceptance sanity (strict `p2_add`
+     native build/execute) already fences a vacuous candidate operationally.
+     A mechanical gate now exists:
+     `scripts/check/check-native-binary-symbol-gate.shs` (added 2026-08-15;
+     shell syntax and all five fail-closed selftest fixtures pass). It verifies
+     a linked binary defines `__simple_main`
+     whenever its user objects do, and that >= 90% (`--min-coverage`) of the
+     objects' distinct defined globals are present in the binary; auto-detects
+     sibling `{binary}.*.o` objects; ERROR (exit 2) on stripped/unreadable
+     inputs or zero objects. Codex deferred verification, then wire into
+     Stage-3/Stage-4 candidate acceptance:
+     `sh scripts/check/check-native-binary-symbol-gate.shs --selftest`
+     (5 fixtures: good link PASS, incident-replay vacuous link FAIL,
+     stripped binary non-PASS, zero objects ERROR, missing binary ERROR),
+     then e.g.
+     `sh scripts/check/check-native-binary-symbol-gate.shs --binary build/bootstrap/stage3/<triple>/simple`.
 
 ## Failure handling for the live run
 
@@ -244,7 +345,14 @@ sanity, essential-tools smoke, or deployment exists.
   `BootstrapSdkModuleInterface`, `BootstrapSdkBodyArchive`, and
   `BootstrapSdkProvenance`. Their implementation is post-Stage-4 only.
 
-## Completion evidence
+## Current legacy-pipeline completion evidence
+
+This section governs only the canonical pre-migration baseline. It must not be
+used to define migrated Stage-4 admission. Post-migration completion is
+governed by REQ-BSPLIT-004/005 and requires a verified
+`CompilerArtifactManifestV1`, exact Stage-3 archive/interface/runtime hashes,
+an observed `ToolCompileJournalV1`, a revalidated `ToolingLinkReceiptV1`, and
+`stage4_compiler_files=0`.
 
 - Fresh Stage 4 native-build PASS log and progress/RSS log.
 - Exact artifact path and SHA-256.

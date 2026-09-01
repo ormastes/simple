@@ -1,0 +1,100 @@
+# codex-impl
+# Typed @rt(hal) route. Pure executes directly by default; explicitly enabled
+# foreign comparators use the task-backed owner-result executor.
+
+use std.common.rt_hal.model.*
+use std.nogc_sync_mut.rt_hal.parallel_executor.{
+    RtHalPureTaskAdapter, RtHalComparatorTaskAdapter, RtHalParallelReport
+}
+use std.nogc_sync_mut.rt_hal.parallel_executor.{RtHalParallelResult, RtHalParallelStatus}
+use std.nogc_sync_mut.rt_hal.exact_boundary.{
+    RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactReport
+}
+use std.nogc_sync_mut.rt_hal.process_task_arena.{rt_hal_process_compare_observed_exact}
+
+pub struct RtHalTagPolicy:
+    compare_c: bool
+    compare_rust: bool
+    worker_count: i64
+    queue_capacity: i64
+    timeout_ticks: i64
+    max_output_bytes: i64
+    require_all: bool
+
+impl RtHalTagPolicy:
+    static fn pure_only() -> RtHalTagPolicy:
+        RtHalTagPolicy(
+            compare_c: false, compare_rust: false,
+            worker_count: 1, queue_capacity: 64,
+            timeout_ticks: 64, max_output_bytes: 1048576,
+            require_all: true
+        )
+
+fn rt_hal_tagged_error(error: text) -> RtHalParallelReport:
+    RtHalParallelReport(
+        results: [], error: error, submitted_tasks: 0,
+        completed_tasks: 0, dispatch_rounds: 0,
+        max_parallel_width: 0, actual_parallel: false
+    )
+
+pub fn rt_hal_execute_tagged(policy: RtHalTagPolicy, requests: [RtHalRequest], pure: RtHalPureTaskAdapter, comparators: [RtHalComparatorTaskAdapter]) -> RtHalParallelReport:
+    # This callback-shaped compatibility API cannot prove that `pure` is an
+    # already-observed receipt rather than executable work, and its historical
+    # scalar encoder was collision-prone. Never invoke or encode it. Producers
+    # must use the exact registered API below with a 256-bit receipt.
+    if policy.compare_c or policy.compare_rust:
+        return rt_hal_tagged_error("RTHAL-W-PARALLEL-UNSUPPORTED")
+    val comparison = rt_hal_default_comparison(
+        false, false, policy.worker_count, policy.queue_capacity,
+        policy.timeout_ticks, policy.max_output_bytes, policy.require_all)
+    val problem = rt_hal_comparison_error(comparison)
+    if problem != "": return rt_hal_tagged_error(problem)
+    val request_problem = rt_hal_requests_error(requests)
+    if request_problem != "": return rt_hal_tagged_error(request_problem)
+    if pure.provider_id != comparison.providers[0].provider_id:
+        return rt_hal_tagged_error("RTHAL-E-PURE-OWNER")
+    if rt_hal_retained_plan_bytes(comparison, requests, 64) < 0:
+        return rt_hal_tagged_error("RTHAL-E-MEMORY-BOUND")
+    var results: [RtHalParallelResult] = []
+    var case_index = 0
+    for item in rt_hal_build_work_items(comparison, requests):
+        val receipt = if item.mode == RtHalWorkMode.ExecuteEffect:
+            pure.effect_word_fn(item)
+        else:
+            pure.query_word_fn(item)
+        results.push(RtHalParallelResult(
+            provider_ordinal: 0, case_index: case_index,
+            case_id: item.case_id, provider_id: item.provider_id,
+            status: RtHalParallelStatus.Value, receipt_word: receipt,
+            matches_pure: true, used_runtime_pool: false))
+        case_index = case_index + 1
+    RtHalParallelReport(
+        results: results, error: "", submitted_tasks: 0,
+        completed_tasks: results.len(), dispatch_rounds: 0,
+        max_parallel_width: 0, actual_parallel: false)
+
+# Canonical production boundary: provider implementations register once; each
+# tagged call resolves the current typed adapter set and missing providers flow
+# through the parallel executor as RTHAL-W-UNSUPPORTED.
+pub fn rt_hal_execute_registered(policy: RtHalTagPolicy, requests: [RtHalRequest], pure: RtHalPureTaskAdapter) -> RtHalParallelReport:
+    # Callback-shaped foreign adapters are never materialized: exact process
+    # registration is the sole foreign route.
+    rt_hal_execute_tagged(policy, requests, pure, [])
+
+# Exact public tagged route. At least one foreign comparator must be enabled.
+# Pure has already executed once under its owning thread; only registered
+# isolated C/Rust comparators are scheduled in bounded waves by the process
+# arena.
+pub fn rt_hal_execute_registered_exact(
+    policy: RtHalTagPolicy,
+    requests: [RtHalExactRequest],
+    pure_receipts: [RtHalCanonicalReceipt]
+) -> RtHalExactReport:
+    val comparison = rt_hal_default_comparison(
+        policy.compare_c, policy.compare_rust, policy.worker_count,
+        policy.queue_capacity, policy.timeout_ticks,
+        policy.max_output_bytes, policy.require_all)
+    rt_hal_process_compare_observed_exact(comparison, requests, pure_receipts)
+
+export RtHalTagPolicy, rt_hal_execute_tagged, rt_hal_execute_registered
+export rt_hal_execute_registered_exact

@@ -1,0 +1,159 @@
+# @req REQ-001 REQ-003 REQ-004 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/drivers/virtio/virtio_gpu_venus_protocol.spl 80%
+# @tag: unit, simpleos, virtio-gpu, venus, wire-format
+
+"""Device-free byte-level contract for VirtIO-GPU Venus control messages.
+
+These tests prove little-endian request layouts and fail-closed response/fence
+validation. They do not claim a working control queue, Vulkan ICD, or GPU.
+"""
+
+use std.spec.*
+use os.drivers.virtio.virtio_gpu_venus_protocol.*
+
+fn expect_exact_bytes(actual: [u8], expected: [u8]):
+    expect(actual.len()).to_equal(expected.len())
+    var index = 0
+    while index < expected.len():
+        expect(actual[index]).to_equal(expected[index])
+        index = index + 1
+
+fn fenced_ok_nodata() -> [u8]:
+    [0x00, 0x11, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+     0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+
+describe "VirtIO-GPU Venus wire encoding":
+    it "encodes capset discovery requests exactly as packed little-endian structs":
+        step("Encode capset index two and Venus version one")
+        expect_exact_bytes(venus_encode_get_capset_info(2),
+            [0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        expect_exact_bytes(venus_encode_get_capset(4, 1),
+            [0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00])
+
+    it "encodes context creation with the Venus capset and a zero-filled name":
+        # @covers VN_WIRE_CONTEXT:true VN_WIRE_CONTEXT:false
+        step("Encode context seven named vn")
+        val wire = venus_encode_context_create(7, 4, "vn").unwrap()
+        expect(wire.len()).to_equal(96)
+        expect_exact_bytes(wire[0:34],
+            [0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+             0x76, 0x6e])
+        var index = 34
+        while index < wire.len():
+            expect(wire[index]).to_equal(0)
+            index = index + 1
+        expect(venus_encode_context_create(0, 4, "vn").is_err()).to_be(true)
+        expect(venus_encode_context_create(7, 4, "").is_err()).to_be(true)
+
+    it "encodes only the zero-entry HOST3D blob profile":
+        # @covers VN_WIRE_BLOB:true VN_WIRE_BLOB:false
+        step("Encode a mappable cross-device HOST3D blob")
+        val wire = venus_encode_resource_create_blob(7, 9, 2, 5,
+            0x0102030405060708u64, 4096u64).unwrap()
+        expect_exact_bytes(wire,
+            [0x0c, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x09, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+             0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+             0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        expect(venus_encode_resource_create_blob(7, 9, 1, 5, 1u64, 4096u64).is_err()).to_be(true)
+        expect(venus_encode_resource_create_blob(7, 9, 2, 8, 1u64, 4096u64).is_err()).to_be(true)
+
+    it "encodes fenced submit and map commands with exact context correlation":
+        # @covers VN_WIRE_SUBMIT:true VN_WIRE_SUBMIT:false
+        # @covers VN_WIRE_MAP:true VN_WIRE_MAP:false
+        step("Encode a three-byte submit and a host-visible map")
+        val submit = venus_encode_submit_3d(0x11223344, [0xaa, 0xbb, 0xcc],
+            0x0102030405060708u64).unwrap()
+        expect_exact_bytes(submit,
+            [0x07, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+             0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+             0x44, 0x33, 0x22, 0x11, 0x00, 0x00, 0x00, 0x00,
+             0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0xaa, 0xbb, 0xcc])
+        val mapped = venus_encode_resource_map_blob(7, 9,
+            0x1122334455667788u64, 0x0102030405060708u64).unwrap()
+        expect_exact_bytes(mapped,
+            [0x08, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+             0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+             0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11])
+        expect(venus_encode_resource_map_blob(0, 9, 0u64, 1u64).is_err()).to_be(true)
+        expect(venus_encode_submit_3d(7, [], 1u64).is_err()).to_be(true)
+        var oversized: [u8] = []
+        var index = 0
+        while index < 4065:
+            oversized.push(0)
+            index = index + 1
+        expect(venus_encode_submit_3d(7, oversized, 1u64).is_err()).to_be(true)
+
+describe "VirtIO-GPU Venus response validation":
+    it "accepts an exact successful fence echo":
+        # @covers VN_RESPONSE_LENGTH:false VN_RESPONSE_ERROR:false
+        # @covers VN_RESPONSE_TYPE:false VN_RESPONSE_FLAGS:false
+        # @covers VN_RESPONSE_FENCE_REQUIRED:true VN_RESPONSE_FENCE_UNEXPECTED:false
+        step("Validate the device fence against the submitted fence")
+        val result = venus_validate_response(fenced_ok_nodata(), 0x1100,
+            0x0102030405060708u64)
+        expect(result.accepted).to_equal(true)
+        expect(result.reason).to_equal("ok:venus-response")
+        expect(result.response_type).to_equal(0x1100)
+        expect(result.fence_id).to_equal(0x0102030405060708u64)
+
+    it "rejects truncated, error, mismatched, and unknown-flag responses":
+        # @covers VN_RESPONSE_LENGTH:true VN_RESPONSE_ERROR:true
+        # @covers VN_RESPONSE_TYPE:true VN_RESPONSE_FLAGS:true
+        step("Corrupt each independent response-header invariant")
+        expect(venus_validate_response([], 0x1100, 0u64).reason).to_equal("blocked:response-truncated")
+        expect(venus_validate_response(fenced_ok_nodata()[0:23], 0x1100,
+            0x0102030405060708u64).reason).to_equal("blocked:response-truncated")
+        var error_response = fenced_ok_nodata()
+        error_response[0] = 0x00
+        error_response[1] = 0x12
+        expect(venus_validate_response(error_response, 0x1100,
+            0x0102030405060708u64).reason).to_equal("blocked:response-error")
+        var wrong_type = fenced_ok_nodata()
+        wrong_type[0] = 0x02
+        expect(venus_validate_response(wrong_type, 0x1100,
+            0x0102030405060708u64).reason).to_equal("blocked:response-type-mismatch")
+        var unknown_flags = fenced_ok_nodata()
+        unknown_flags[4] = 0x05
+        expect(venus_validate_response(unknown_flags, 0x1100,
+            0x0102030405060708u64).reason).to_equal("blocked:response-flags-invalid")
+
+    it "requires a fenced response to echo the exact submitted fence":
+        step("Remove and alter the response fence")
+        var missing = fenced_ok_nodata()
+        missing[4] = 0
+        expect(venus_validate_response(missing, 0x1100,
+            0x0102030405060708u64).reason).to_equal("blocked:response-fence-missing")
+        var mismatch = fenced_ok_nodata()
+        mismatch[8] = 0x09
+        expect(venus_validate_response(mismatch, 0x1100,
+            0x0102030405060708u64).reason).to_equal("blocked:response-fence-mismatch")
+
+    it "requires both flags and fence to be zero for an unfenced request":
+        # @covers VN_RESPONSE_FENCE_REQUIRED:false VN_RESPONSE_FENCE_UNEXPECTED:true
+        step("Validate clean and unexpectedly fenced unfenced responses")
+        var clean = fenced_ok_nodata()
+        clean[4] = 0
+        var index = 8
+        while index < 16:
+            clean[index] = 0
+            index = index + 1
+        expect(venus_validate_response(clean, 0x1100, 0u64).accepted).to_equal(true)
+        expect(venus_validate_response(fenced_ok_nodata(), 0x1100,
+            0u64).reason).to_equal("blocked:response-fence-unexpected")

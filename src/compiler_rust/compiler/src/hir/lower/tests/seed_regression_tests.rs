@@ -27,12 +27,8 @@ fn main():
 
 main()
 "#;
-    let module =
-        parse_and_lower(source).expect("literal braces must not leak expressions across functions");
-    assert!(module
-        .functions
-        .iter()
-        .any(|function| function.name == "open_brace"));
+    let module = parse_and_lower(source).expect("literal braces must not leak expressions across functions");
+    assert!(module.functions.iter().any(|function| function.name == "open_brace"));
     assert!(module.functions.iter().any(|function| function.name == "main"));
 }
 
@@ -114,7 +110,9 @@ fn option_none_unit_variant_resolves_under_lenient_mode() {
 
     let mut lowerer = Lowerer::new();
     lowerer.set_lenient_types(true);
-    let lowered = lowerer.lower_module(&parsed).expect("lowering must succeed under lenient mode");
+    let lowered = lowerer
+        .lower_module(&parsed)
+        .expect("lowering must succeed under lenient mode");
 
     let function = lowered.functions.iter().find(|f| f.name == "make").unwrap();
     let HirStmt::Let {
@@ -139,13 +137,21 @@ fn nested_result_option_receivers_both_route_through_static_construct() {
     else {
         panic!("expected let binding, got {:?}", function.body[0]);
     };
-    let HirExprKind::Call { func: outer_callee, args: outer_args } = &expr.kind else {
+    let HirExprKind::Call {
+        func: outer_callee,
+        args: outer_args,
+    } = &expr.kind
+    else {
         panic!("expected outer Call, got {:?}", expr.kind);
     };
     assert_eq!(outer_callee.kind, HirExprKind::Global("Result::Ok".to_string()));
     assert_eq!(outer_args.len(), 1);
 
-    let HirExprKind::Call { func: inner_callee, args: inner_args } = &outer_args[0].kind else {
+    let HirExprKind::Call {
+        func: inner_callee,
+        args: inner_args,
+    } = &outer_args[0].kind
+    else {
         panic!("expected nested Call for Option.Some(1), got {:?}", outer_args[0].kind);
     };
     assert_eq!(inner_callee.kind, HirExprKind::Global("Option::Some".to_string()));
@@ -184,9 +190,21 @@ fn struct_init_brace_form_lowers_fields_in_declared_order_regardless_of_written_
     let function = module.functions.iter().find(|f| f.name == "test").unwrap();
     let fields = struct_init_fields(function);
     assert_eq!(fields.len(), 3);
-    assert_eq!(fields[0].kind, HirExprKind::Integer(1), "declared slot 0 (x) must get the x: 1 value");
-    assert_eq!(fields[1].kind, HirExprKind::Integer(2), "declared slot 1 (y) must get the y: 2 value");
-    assert_eq!(fields[2].kind, HirExprKind::Integer(3), "declared slot 2 (z) must get the z: 3 value");
+    assert_eq!(
+        fields[0].kind,
+        HirExprKind::Integer(1),
+        "declared slot 0 (x) must get the x: 1 value"
+    );
+    assert_eq!(
+        fields[1].kind,
+        HirExprKind::Integer(2),
+        "declared slot 1 (y) must get the y: 2 value"
+    );
+    assert_eq!(
+        fields[2].kind,
+        HirExprKind::Integer(3),
+        "declared slot 2 (z) must get the z: 3 value"
+    );
 }
 
 #[test]
@@ -198,9 +216,21 @@ fn struct_init_paren_form_agrees_with_brace_form_on_declared_order() {
     let function = module.functions.iter().find(|f| f.name == "test").unwrap();
     let fields = struct_init_fields(function);
     assert_eq!(fields.len(), 3);
-    assert_eq!(fields[0].kind, HirExprKind::Integer(1), "paren form must match brace form: declared slot 0 (x)");
-    assert_eq!(fields[1].kind, HirExprKind::Integer(2), "paren form must match brace form: declared slot 1 (y)");
-    assert_eq!(fields[2].kind, HirExprKind::Integer(3), "paren form must match brace form: declared slot 2 (z)");
+    assert_eq!(
+        fields[0].kind,
+        HirExprKind::Integer(1),
+        "paren form must match brace form: declared slot 0 (x)"
+    );
+    assert_eq!(
+        fields[1].kind,
+        HirExprKind::Integer(2),
+        "paren form must match brace form: declared slot 1 (y)"
+    );
+    assert_eq!(
+        fields[2].kind,
+        HirExprKind::Integer(3),
+        "paren form must match brace form: declared slot 2 (z)"
+    );
 }
 
 #[test]
@@ -213,8 +243,16 @@ fn struct_init_partial_fields_nil_fill_missing_declared_slots() {
     let fields = struct_init_fields(function);
     assert_eq!(fields.len(), 3);
     assert_eq!(fields[0].kind, HirExprKind::Integer(10), "x provided");
-    assert_eq!(fields[1].kind, HirExprKind::Nil, "y omitted -- must nil-fill, not shift z into slot 1");
-    assert_eq!(fields[2].kind, HirExprKind::Integer(30), "z provided, must stay in its own declared slot");
+    assert_eq!(
+        fields[1].kind,
+        HirExprKind::Nil,
+        "y omitted -- must nil-fill, not shift z into slot 1"
+    );
+    assert_eq!(
+        fields[2].kind,
+        HirExprKind::Integer(30),
+        "z provided, must stay in its own declared slot"
+    );
 }
 
 /// Sibling: zero explicit fields -- every declared slot must nil-fill (not
@@ -227,9 +265,17 @@ fn struct_init_zero_fields_nil_fills_all_declared_slots() {
     .unwrap();
     let function = module.functions.iter().find(|f| f.name == "test").unwrap();
     let fields = struct_init_fields(function);
-    assert_eq!(fields.len(), 3, "all 3 declared fields must be present even with zero provided args");
+    assert_eq!(
+        fields.len(),
+        3,
+        "all 3 declared fields must be present even with zero provided args"
+    );
     for (idx, field) in fields.iter().enumerate() {
-        assert_eq!(field.kind, HirExprKind::Nil, "slot {idx} must nil-fill when nothing is provided");
+        assert_eq!(
+            field.kind,
+            HirExprKind::Nil,
+            "slot {idx} must nil-fill when nothing is provided"
+        );
     }
 }
 
@@ -247,4 +293,110 @@ fn struct_init_all_fields_named_out_of_declared_order() {
     assert_eq!(fields[1].kind, HirExprKind::Integer(2), "b");
     assert_eq!(fields[2].kind, HirExprKind::Integer(3), "c");
     assert_eq!(fields[3].kind, HirExprKind::Integer(4), "d");
+}
+
+/// stage2 native enum-dispatch wall (2026-08-28): an `if val pl = optional:`
+/// binding carries the POINTER (`T?`) type, so `match pl: case Variant(x)`
+/// must still resolve the variant's payload field types through the pointee
+/// enum. Pre-fix, the expected-type branch only unwrapped Pointer for `Some`,
+/// so every other variant fell into the wildcard "_" search — a HashMap walk
+/// returning the FIRST enum owning a same-named variant, per-process-random
+/// when a decoy enum shares the name (`Tuple` has 3+ owners in the compiler
+/// closure). That typed the binding ANY, downstream field access was
+/// index-guessed against an unrelated struct, and the compiled stage2 binary
+/// dispatched `match pat.kind` to `case _` (the `nested match pattern kind
+/// not supported inside an enum payload` wall, plus the add-two-dead-externs
+/// heisenbug).
+#[test]
+fn optional_enum_payload_binding_resolves_variant_fields_through_pointer() {
+    use crate::hir::lower::lowerer::Lowerer;
+    use crate::hir::{HirType, TypeId};
+
+    let mut lowerer = Lowerer::new();
+    // A decoy enum with the same bare variant name but a DIFFERENT payload
+    // shape. Registered FIRST so a first-match walk that ignored the expected
+    // type can plausibly land on it.
+    let decoy = lowerer.module.types.register(HirType::Enum {
+        name: "DecoyPayload".to_string(),
+        variants: vec![
+            ("Tuple".to_string(), Some(vec![TypeId::I64, TypeId::STRING])),
+            ("Other".to_string(), None),
+        ],
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: Default::default(),
+    });
+    let _ = decoy;
+    let pat_array = lowerer.module.types.register(HirType::Array {
+        element: TypeId::ANY,
+        size: None,
+    });
+    let payload_enum = lowerer.module.types.register(HirType::Enum {
+        name: "PPayload".to_string(),
+        variants: vec![("Tuple".to_string(), Some(vec![pat_array]))],
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: Default::default(),
+    });
+    let optional_payload = lowerer.module.types.register(HirType::Pointer {
+        kind: crate::hir::PointerKind::Shared,
+        capability: simple_parser::ast::ReferenceCapability::Shared,
+        inner: payload_enum,
+    });
+
+    // The subject is typed `PPayload?` (Pointer to the enum), exactly what an
+    // `if val pl = payload:` unwrap binding carries. The variant is spelled
+    // bare (`case Tuple(...)`), so enum_name is the parser's "_" placeholder.
+    let fields = lowerer.get_enum_variant_field_types_with_hint("_", "Tuple", optional_payload);
+    assert_eq!(
+        fields,
+        Some(vec![pat_array]),
+        "payload field types must come from the POINTEE enum (PPayload), not \
+         from a HashMap-order-dependent walk that can land on DecoyPayload"
+    );
+}
+
+/// Genuine-ambiguity tie-break path in the wildcard `"_"` variant-owner
+/// search: when TWO enums both own a variant of the same bare name AND their
+/// payload shapes genuinely disagree, `get_enum_variant_field_types_with_hint`
+/// cannot resolve the receiver's real owner from an ANY expected type alone.
+/// It must not silently return whichever HashMap iteration produced first
+/// (the original heisenbug); instead it must deterministically pick by
+/// smallest owner name, so a wrong pick is at least stable and diagnosable.
+/// This exercises the branch the accepted verify report flagged as untested
+/// (`VERIFY_enum_dispatch.md` §2 / §3b): "No test covers the tie-break path".
+#[test]
+fn ambiguous_wildcard_variant_owner_picks_smallest_name_deterministically() {
+    use crate::hir::lower::lowerer::Lowerer;
+    use crate::hir::{HirType, TypeId};
+
+    let mut lowerer = Lowerer::new();
+    // Two owners of a same-named variant, genuinely different payloads, and
+    // no Pointer/expected-type information to disambiguate (ANY receiver).
+    let _zeta = lowerer.module.types.register(HirType::Enum {
+        name: "ZetaKind".to_string(),
+        variants: vec![("Shared".to_string(), Some(vec![TypeId::I64]))],
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: Default::default(),
+    });
+    let _alpha = lowerer.module.types.register(HirType::Enum {
+        name: "AlphaKind".to_string(),
+        variants: vec![("Shared".to_string(), Some(vec![TypeId::STRING, TypeId::BOOL]))],
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: Default::default(),
+    });
+
+    let fields = lowerer.get_enum_variant_field_types_with_hint("_", "Shared", TypeId::ANY);
+    // "AlphaKind" < "ZetaKind" lexicographically -> deterministic pick must
+    // be AlphaKind's payload, every run, regardless of registration order or
+    // per-process HashMap RandomState.
+    assert_eq!(
+        fields,
+        Some(vec![TypeId::STRING, TypeId::BOOL]),
+        "on genuine disagreement the wildcard search must deterministically \
+         pick the smallest-named owner (AlphaKind), not a random HashMap-order \
+         first-match"
+    );
 }

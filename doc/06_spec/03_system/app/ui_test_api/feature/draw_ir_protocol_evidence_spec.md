@@ -2,31 +2,6 @@
 
 > Captures real UI test API Draw IR Protocol-v2 layout and diff responses through `handle_test_request`.
 
-<!-- sdn-diagram:id=draw_ir_protocol_evidence_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=draw_ir_protocol_evidence_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-draw_ir_protocol_evidence_spec -> std
-draw_ir_protocol_evidence_spec -> app
-draw_ir_protocol_evidence_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=draw_ir_protocol_evidence_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
@@ -48,7 +23,7 @@ Captures real UI test API Draw IR Protocol-v2 layout and diff responses through 
 | Plan | doc/03_plan/sys_test/draw_ir_protocol_evidence.md |
 | Design | doc/05_design/app/ui_test_api/draw_ir_protocol_evidence.md |
 | Source | `test/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.spl` |
-| Updated | 2026-06-06 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -86,22 +61,28 @@ Display policy: `links`
 
 #### captures layout geometry and baseline diff protocol output
 
-1.  protocol record
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-2.  protocol record
 
-3.  protocol record
+- captures layout geometry and baseline diff protocol output
+   - Expected: layout_status equals `200`
+   - Expected: layout_ctype equals `application/vnd.simple.draw-ir+json`
+   - Expected: current_status equals `200`
+   - Expected: empty_status equals `200`
    - Expected: _write_capture(capture) equals `0`
    - Expected: _capture_file_state(capture) equals `matched`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures layout geometry and baseline diff protocol output")
 val state = _make_state()
 val (layout_status, layout_ctype, layout_body) = handle_test_request(
     "/api/test/draw-ir/layout?id=root&capability=draw_ir",
@@ -163,9 +144,51 @@ expect(_capture_file_state(capture)).to_equal("matched")
 
 ## Related Documentation
 
-- **Requirements:** [doc/03_plan/sys_test/draw_ir_protocol_evidence.md](doc/03_plan/sys_test/draw_ir_protocol_evidence.md)
-- **Plan:** [doc/03_plan/sys_test/draw_ir_protocol_evidence.md](doc/03_plan/sys_test/draw_ir_protocol_evidence.md)
-- **Design:** [doc/05_design/app/ui_test_api/draw_ir_protocol_evidence.md](doc/05_design/app/ui_test_api/draw_ir_protocol_evidence.md)
+- **Requirements:** `doc/03_plan/sys_test/draw_ir_protocol_evidence.md`
+- **Plan:** `doc/03_plan/sys_test/draw_ir_protocol_evidence.md`
+- **Design:** `doc/05_design/app/ui_test_api/draw_ir_protocol_evidence.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4d4b52f4055b73db8e1912d7fa17f6bd463b03ba88285a70616d778e1bbb3acc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4d4b52f4055b73db8e1912d7fa17f6bd463b03ba88285a70616d778e1bbb3acc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4d4b52f4055b73db8e1912d7fa17f6bd463b03ba88285a70616d778e1bbb3acc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+
+SSpec documentization score: 91/100
+source: test/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.spl
+mirror: doc/06_spec/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+<!-- sspec-maintain:scorecard:end -->

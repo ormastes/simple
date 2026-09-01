@@ -1,0 +1,64 @@
+# @cover src/lib/common/ui/render_opt/draw_ir_delta.spl 80%
+# @tag: unit, ui, render_perf, render_opt, o2
+
+use std.spec
+use common.ui.draw_ir.{DrawIrCommand, draw_ir_rect}
+use common.ui.render_opt.draw_ir_delta.{
+    draw_ir_stable_upsert, draw_ir_stable_remove,
+    draw_ir_stable_transaction, draw_ir_stable_apply
+}
+
+fn stable_ids(commands: [DrawIrCommand]) -> [text]:
+    var ids: [text] = []
+    for command in commands:
+        ids.push(command.component_id)
+    ids
+
+describe "DrawIR stable identity transaction publishes atomically":
+    it "removes, reorders, inserts, and updates in one staged frame":
+        val previous = [
+            draw_ir_rect("A", 0, 0, 4, 4, 1u32),
+            draw_ir_rect("B", 4, 0, 4, 4, 2u32),
+            draw_ir_rect("C", 8, 0, 4, 4, 3u32)
+        ]
+        val transaction = draw_ir_stable_transaction("r1", "r2", ["C", "A", "D"], [
+            draw_ir_stable_remove("B"),
+            draw_ir_stable_upsert("A", draw_ir_rect("A", 1, 0, 4, 4, 9u32)),
+            draw_ir_stable_upsert("D", draw_ir_rect("D", 12, 0, 4, 4, 4u32))
+        ])
+        val applied = draw_ir_stable_apply(previous, "r1", transaction)
+        assert_true(applied.valid)
+        assert_true(applied.revision == "r2")
+        assert_true(stable_ids(applied.commands) == ["C", "A", "D"])
+        assert_true(applied.commands[1].x == 1)
+        assert_true(previous.len() == 3)
+        assert_true(previous[1].component_id == "B")
+
+    it "rejects an incomplete tombstone set without publishing a partial list":
+        val previous = [
+            draw_ir_rect("A", 0, 0, 4, 4, 1u32),
+            draw_ir_rect("B", 4, 0, 4, 4, 2u32)
+        ]
+        val malformed = draw_ir_stable_transaction("r1", "r2", ["A"], [])
+        val rejected = draw_ir_stable_apply(previous, "r1", malformed)
+        assert_true(not rejected.valid)
+        assert_true(rejected.reason == "draw-ir-stable-incomplete-remove-set")
+        assert_true(rejected.revision == "r1")
+        assert_true(stable_ids(rejected.commands) == ["A", "B"])
+
+    it "rejects duplicate target identity before staging or publication":
+        val previous = [draw_ir_rect("A", 0, 0, 4, 4, 1u32)]
+        val malformed = draw_ir_stable_transaction("r1", "r2", ["A", "A"], [])
+        val rejected = draw_ir_stable_apply(previous, "r1", malformed)
+        assert_true(not rejected.valid)
+        assert_true(rejected.reason == "draw-ir-stable-invalid-target-identity")
+        assert_true(stable_ids(rejected.commands) == ["A"])
+
+    it "rejects revision discontinuity and retains the prior executable frame":
+        val previous = [draw_ir_rect("A", 0, 0, 4, 4, 1u32)]
+        val transaction = draw_ir_stable_transaction("r1", "r2", ["A"], [])
+        val rejected = draw_ir_stable_apply(previous, "stale", transaction)
+        assert_true(not rejected.valid)
+        assert_true(rejected.reason == "draw-ir-stable-revision-mismatch")
+        assert_true(rejected.revision == "stale")
+        assert_true(stable_ids(rejected.commands) == ["A"])

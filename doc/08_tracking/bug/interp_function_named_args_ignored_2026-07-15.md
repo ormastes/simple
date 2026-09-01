@@ -1,7 +1,6 @@
 # Interpreter function calls ignored named argument order
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** Source fixed; pure-Simple execution pending  
 **Component:** compiler/core interpreter call evaluation  
 **Found:** 2026-07-15
 

@@ -1,13 +1,13 @@
 # CSS flex gap zero cascade
 
-> Static candidate manual — runtime unclaimed. This hand-reviewed mirror
-> records expected oracles from the executable SSpec; it is not generated PASS
-> evidence.
+> This scenario proves both that a later valid `gap:0` declaration resets an earlier positive Flex gap and that a later malformed declaration does not erase an earlier valid `gap:4px`. Both cases cross the dispatch and full Style reconstruction paths; an invalid-only row remains the zero-gap control.
 
-Requirements: REQ-WEB-BROWSER-003, REQ-WEB-BROWSER-004,
-REQ-WEB-BROWSER-021.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-## Fixture
+<details>
+<summary>Full Scenario Manual</summary>
 
 ```html
 <style>
@@ -66,7 +66,7 @@ html,body{margin:0;width:12px;height:22px;background:#fff}
 </div>
 ```
 
-## Parse the split-cascade zero-gap fixture
+</details>
 
 Expected semantic row nodes are `div#dispatch-row`, `div#full-row`,
 `div#duplicate-dispatch-row`, `div#duplicate-full-row`, and
@@ -74,7 +74,7 @@ Expected semantic row nodes are `div#dispatch-row`, `div#full-row`,
 both `inherit` controls. The composition source kind is expected to be
 `html_ast`.
 
-## Resolve zero-gap Web layout geometry
+## Related Documentation
 
 The zero-reset rows expose `[gap_px,row_gap_px,column_gap_px]` as `[0,0,0]`.
 Both duplicate-declaration rows expose `[4,4,4]`; the invalid-only negative
@@ -121,16 +121,17 @@ current Style input has no parent computed-gap channel.
 | `inherit-full-red` | `[0,20,4,2]` |
 | `inherit-full-blue` | `[4,20,4,2]` |
 
-## Emit adjacent canonical Draw IR rectangles
+Requirements covered by the scenarios in this manual:
 
 All twenty-two colored items are expected to remain ordinary canonical `rect`
 commands. Red commands use `0xFFDC2626`; blue commands use `0xFF2563EB`.
 Their command geometry exactly matches the child boxes above, proving that no
 private painter or backend-specific gap correction is involved.
 
-## Render exact zero-gap Engine2D pixels
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-Expected skipped-command count: `0`.
+- Canonical SPipe generation for source `b6776f4067e9b779412f184cc5800e3e774745db0fcdbf235d456e7c493aba95`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
 Expected full framebuffer length: `264`. Every pixel is checked. Each listed
 pattern occupies both scanlines of its row, with `R=0xFFDC2626`,

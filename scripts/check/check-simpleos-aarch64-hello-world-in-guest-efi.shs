@@ -1,0 +1,263 @@
+#!/bin/sh
+# check-simpleos-aarch64-hello-world-in-guest-efi.shs
+#
+# Proves that a HELLO WORLD program actually RUNS INSIDE SimpleOS on aarch64 and
+# prints ITS OWN output to the serial console — not merely that the kernel booted.
+#
+# Boot is EDK2/AAVMF pflash -> vendor/limine/BOOTAA64.EFI (a real EFI
+# application on a FAT ESP) -> kernel.elf. NEVER QEMU `-kernel`, NEVER
+# isa-debug-exit: the point of the lane is that the same artifact could boot on
+# real hardware (.claude/rules/board-runnable.md). The assembled QEMU argv is
+# self-checked for both before the VM is started.
+#
+# TWO PROGRAM ROWS ARE IN SCOPE:
+#   native      A hello world WRITTEN IN SIMPLE
+#               (examples/09_embedded/simple_os/arch/aarch64/hello_world_efi_entry.spl),
+#               compiled to a freestanding AArch64 ELF by the RUST SEED — the
+#               pure-Simple self-hosted compiler cannot compile anything in this
+#               tree yet. Its own output marker must appear on serial.
+#   interpreter Hello world evaluated by the Simple INTERPRETER running in-guest.
+#               There is NO in-guest Simple interpreter payload in this tree for
+#               aarch64 (the same gap the x86_64 sibling lane reports). This row
+#               is ADVISORY and reported RED unless SIMPLEOS_HELLO_INTERP_ELF
+#               names an interpreter payload to stage; it never contributes to
+#               the PASS count and never turns a RED lane green.
+#
+# HONEST SCOPE: the native program runs at EL1 (kernel mode), not as an EL0 user
+# task loaded off the guest's own filesystem. src/os has no aarch64 counterpart
+# to the x86_64 ring-3 map+enter path (no `_aarch64_enter_user`, and the Limine
+# aarch64 boot lane never builds a user address space). What is proven is: real
+# firmware -> real EFI application -> Simple-compiled guest code executing and
+# emitting its own marker.
+#
+# RUNGS (serial log), all required:
+#   L1  "[hello] SimpleOS aarch64 hello-world in-guest"  kernel entered from BOOTAA64.EFI
+#   L2  "[hello] serial up, invoking"                    PL011 console up
+#   L3  "HELLO_NATIVE_SIMPLEOS_AARCH64_OK"               *** THE PROGRAM'S OWN OUTPUT ***
+#   L4  "[hello] native program exited rc=0"             program returned cleanly
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> program(s) checked, ...   exit 0
+#   FAIL  — ...                           exit 1
+#   ERROR — nothing was checked: ...      exit 2
+# 0 programs executed is an ERROR, never a PASS.
+#
+# `--selftest` (also run, fatally, before every real scan) proves the serial
+# evaluator on fixture logs.
+#
+# Env: SIMPLE_BIN (fresh seed; the checked-in bin/simple is stale and
+#      manufactures phantom parse failures), SKIP_KERNEL=1, BOOT_WAIT (90),
+#      AAVMF_CODE, AAVMF_VARS, SIMPLEOS_HELLO_INTERP_ELF (opt-in).
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT"
+
+OUT=$ROOT/build/os/aarch64_hello
+KERNEL=$OUT/kernel.elf
+ESP_DIR=$OUT/esp
+WORK=$OUT/run
+LOG=$WORK/serial.log
+BOOT_WAIT=${BOOT_WAIT:-90}
+SIMPLE_BIN=${SIMPLE_BIN:-$ROOT/src/compiler_rust/target/release/simple}
+
+NATIVE_MARKER='HELLO_NATIVE_SIMPLEOS_AARCH64_OK'
+INTERP_MARKER='HELLO_INTERP_SIMPLEOS_AARCH64_OK'
+
+fail()    { printf 'FAIL — %s\n' "$1"; exit 1; }
+nothing() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+# ---------------------------------------------------------------------------
+# scan_rungs <log> — 0 when every required rung is present, 1 otherwise.
+# Anchored on the PROGRAM's own marker, deliberately not on line counts or boot
+# banners: a complete boot transcript with the program silent must FAIL.
+# ---------------------------------------------------------------------------
+scan_rungs() {
+    sl=$1
+    [ -s "$sl" ] || return 1
+    for rung in \
+        '[hello] SimpleOS aarch64 hello-world in-guest' \
+        '[hello] serial up, invoking' \
+        "$NATIVE_MARKER" \
+        '[hello] native program exited rc=0'
+    do
+        grep -aqF "$rung" "$sl" || return 1
+    done
+    return 0
+}
+
+# argv self-check: this gate's own boot rule applied to the exact bytes to run.
+# The needles are assembled from fragments so this check can neither be defeated
+# by, nor accidentally fire on, the surrounding prose (which must name the flags
+# in order to explain them).
+assert_real_firmware_argv() {
+    k_flag="-kern""el"
+    d_dev="isa-debug""-exit"
+    case " $1 " in
+        *" $k_flag "*) echo "argv uses QEMU $k_flag pass semantics"; return 1 ;;
+    esac
+    case "$1" in
+        *"$d_dev"*) echo "argv uses $d_dev"; return 1 ;;
+    esac
+    case "$1" in
+        *"if=pflash"*) ;;
+        *) echo "argv has no pflash firmware"; return 1 ;;
+    esac
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# --selftest — fatal, runs before any real work.
+# ---------------------------------------------------------------------------
+selftest() {
+    st=$(mktemp -d "${TMPDIR:-/tmp}/hello-aarch64-selftest.XXXXXX")
+    st_fail=0
+    n=0
+
+    # (1) must-PASS: every rung present.
+    {
+        echo '[hello] SimpleOS aarch64 hello-world in-guest (EDK2/AAVMF -> BOOTAA64.EFI)'
+        echo '[hello] serial up, invoking the Simple hello-world program'
+        echo "$NATIVE_MARKER hello world from Simple"
+        echo '[hello] native program exited rc=0'
+    } > "$st/good.log"
+    n=$((n+1))
+    scan_rungs "$st/good.log" || { echo "selftest: must-PASS fixture did not pass" >&2; st_fail=1; }
+
+    # (2) must-FAIL: BOOT-LOG-ONLY. The guest booted, the program never printed.
+    #     This is the exact vacuous-green this gate exists to prevent.
+    grep -av "$NATIVE_MARKER" "$st/good.log" | grep -av 'exited rc=0' > "$st/bootonly.log"
+    n=$((n+1))
+    if scan_rungs "$st/bootonly.log"; then
+        echo "selftest: boot-log-only fixture wrongly passed" >&2; st_fail=1
+    fi
+
+    # (3) must-FAIL: program ran but exited non-zero.
+    sed 's/exited rc=0/exited rc=-2/' "$st/good.log" > "$st/rc.log"
+    n=$((n+1))
+    if scan_rungs "$st/rc.log"; then
+        echo "selftest: non-zero-exit fixture wrongly passed" >&2; st_fail=1
+    fi
+
+    # (4) must-FAIL: empty log — nothing executed at all.
+    : > "$st/empty.log"
+    n=$((n+1))
+    if scan_rungs "$st/empty.log"; then
+        echo "selftest: empty fixture wrongly passed" >&2; st_fail=1
+    fi
+
+    # (5) must-FAIL: firmware banner only, no kernel at all.
+    printf 'UEFI firmware (version 1.0)\nBdsDxe: loading Boot0001\n' > "$st/fw.log"
+    n=$((n+1))
+    if scan_rungs "$st/fw.log"; then
+        echo "selftest: firmware-only fixture wrongly passed" >&2; st_fail=1
+    fi
+
+    # (6) must-PASS argv: real firmware, no forbidden flags.
+    n=$((n+1))
+    assert_real_firmware_argv "-M virt -drive if=pflash,file=CODE.fd -serial file:x" >/dev/null \
+        || { echo "selftest: clean argv wrongly rejected" >&2; st_fail=1; }
+
+    # (7) must-FAIL argv: -kernel pass semantics (needle built from fragments).
+    n=$((n+1))
+    if assert_real_firmware_argv "-M virt -drive if=pflash,file=CODE.fd -kern""el k.elf" >/dev/null 2>&1; then
+        echo "selftest: -kernel argv wrongly accepted" >&2; st_fail=1
+    fi
+
+    # (8) must-FAIL argv: isa-debug-exit.
+    n=$((n+1))
+    if assert_real_firmware_argv "-M virt -drive if=pflash,file=CODE.fd -device isa-debug""-exit" >/dev/null 2>&1; then
+        echo "selftest: isa-debug-exit argv wrongly accepted" >&2; st_fail=1
+    fi
+
+    # (9) must-FAIL argv: no pflash firmware at all.
+    n=$((n+1))
+    if assert_real_firmware_argv "-M virt -serial file:x" >/dev/null 2>&1; then
+        echo "selftest: firmware-less argv wrongly accepted" >&2; st_fail=1
+    fi
+
+    rm -rf "$st"
+    [ "$st_fail" -eq 0 ] || return 1
+    printf '[hello-aarch64] selftest OK (%s fixtures)\n' "$n"
+    return 0
+}
+
+selftest || nothing "selftest failed — the serial evaluator cannot be trusted"
+if [ "${1:-}" = "--selftest" ]; then
+    printf 'PASS — 9 selftest fixture(s) checked, serial evaluator and argv guard discriminate\n'
+    exit 0
+fi
+
+# --- build the kernel (Simple source -> AArch64 ELF, by the Rust seed) -------
+# The gate writes build logs under $OUT before $WORK is created below; on a
+# clean checkout (CI) that directory does not exist yet and the redirect fails.
+mkdir -p "$OUT"
+
+if [ "${SKIP_KERNEL:-0}" != "1" ]; then
+    SIMPLE_BIN="$SIMPLE_BIN" sh "$ROOT/scripts/os/build-simpleos-aarch64-hello-kernel.shs" >"$OUT/gate-kernel.log" 2>&1 \
+        || nothing "hello kernel build failed: $(tail -1 "$OUT/gate-kernel.log" 2>/dev/null)"
+fi
+[ -s "$KERNEL" ] || nothing "missing kernel ELF $KERNEL"
+
+# --- firmware ---------------------------------------------------------------
+command -v qemu-system-aarch64 >/dev/null 2>&1 || nothing "missing qemu-system-aarch64"
+find_fw() { for c in "$@"; do [ -s "$c" ] && { echo "$c"; return 0; }; done; return 1; }
+if [ -z "${AAVMF_CODE:-}" ]; then
+    AAVMF_CODE=$(find_fw /usr/share/AAVMF/AAVMF_CODE.fd \
+                         /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
+                         /usr/share/qemu-efi-aarch64/QEMU_EFI.fd) || AAVMF_CODE=
+fi
+[ -n "${AAVMF_CODE:-}" ] || nothing "no EDK2/AAVMF aarch64 firmware found (install qemu-efi-aarch64, or set AAVMF_CODE)"
+
+# --- ESP --------------------------------------------------------------------
+KERNEL_ELF="$KERNEL" OUT_DIR="$ESP_DIR" sh "$ROOT/scripts/os/build-simpleos-aarch64-efi-esp.shs" \
+    >"$OUT/gate-esp.log" 2>&1 \
+    || nothing "ESP build failed: $(tail -1 "$OUT/gate-esp.log" 2>/dev/null)"
+[ -s "$ESP_DIR/esp.img" ] || nothing "missing $ESP_DIR/esp.img after build"
+
+if [ -z "${AAVMF_VARS:-}" ]; then
+    AAVMF_VARS=$(find_fw "$ESP_DIR/AAVMF_VARS.fd" /usr/share/AAVMF/AAVMF_VARS.fd) || AAVMF_VARS=
+fi
+[ -n "${AAVMF_VARS:-}" ] || nothing "no AAVMF_VARS.fd found (set AAVMF_VARS)"
+
+mkdir -p "$WORK"
+cp "$AAVMF_VARS" "$WORK/VARS.fd"
+chmod u+w "$WORK/VARS.fd"
+rm -f "$LOG"
+
+# --- assemble the argv FIRST, self-check it, then boot ----------------------
+QEMU_ARGS="-M virt -cpu cortex-a72 -m 512M"
+QEMU_ARGS="$QEMU_ARGS -drive if=pflash,format=raw,file=$AAVMF_CODE,readonly=on"
+QEMU_ARGS="$QEMU_ARGS -drive if=pflash,format=raw,file=$WORK/VARS.fd"
+QEMU_ARGS="$QEMU_ARGS -drive if=none,file=$ESP_DIR/esp.img,format=raw,id=esp"
+QEMU_ARGS="$QEMU_ARGS -device virtio-blk-pci,drive=esp"
+QEMU_ARGS="$QEMU_ARGS -device ramfb -display none -serial file:$LOG"
+
+why=$(assert_real_firmware_argv "$QEMU_ARGS") \
+    || fail "$why (script bug, not an environment gap)"
+
+# The program parks in a WFE spin by design, so QEMU never exits on its own and
+# `timeout` killing it is the NORMAL path. The serial transcript is the artifact;
+# every conclusion below is drawn from the log, so the exit status is ignored.
+# shellcheck disable=SC2086
+timeout "$BOOT_WAIT" qemu-system-aarch64 $QEMU_ARGS >/dev/null 2>&1 || true
+
+[ -s "$LOG" ] || fail "serial log is empty — the guest produced no output at all (log: $LOG)"
+
+n_programs=0
+scan_rungs "$LOG" \
+    || fail "the hello-world program did not run to completion in-guest; required rungs are missing (log: $LOG)"
+n_programs=$((n_programs + 1))
+
+# Interpreter row — advisory, never contributes to the PASS count.
+interp_note='interpreter row RED: no in-guest Simple interpreter payload exists for aarch64'
+if grep -aqF "$INTERP_MARKER" "$LOG"; then
+    interp_note='interpreter row GREEN'
+    n_programs=$((n_programs + 1))
+fi
+
+[ "$n_programs" -gt 0 ] || nothing "no programs were executed (log: $LOG)"
+n_lines=$(wc -l <"$LOG" | tr -d ' ')
+
+printf 'PASS — %s program(s) checked, a Simple hello world compiled by the RUST SEED ran in-guest on SimpleOS aarch64 under EDK2/AAVMF pflash -> BOOTAA64.EFI (no -kernel, no isa-debug-exit) and printed its own output; %s; %s serial line(s); firmware %s; log %s\n' \
+    "$n_programs" "$interp_note" "$n_lines" "$AAVMF_CODE" "$LOG"

@@ -1,0 +1,118 @@
+# @req: REQ-COMPILER-ARM32-EMIT-OBJECT-001
+"""
+## Purpose and audience
+Purpose: Prove the source-level ARM32 relocatable-object target and acceptance contracts.
+Audience: compiler/backend maintainers shipping Pure Simple cross-target objects.
+"""
+
+import std.spec
+use std.spec.step
+use std.io_runtime.{read_file_text}
+use compiler.backend.backend.llvm_target.{llvm_arm32_baremetal_environment}
+
+describe "Pure Simple ARM32 emit-object contract":
+    it "preserves explicit hard-float and conservative soft-float EABI targets":
+        step("Verify: preserve the requested ARM32 bare-metal ABI")
+        expect(llvm_arm32_baremetal_environment("armv7-unknown-none-eabihf")).to_equal("eabihf")
+        expect(llvm_arm32_baremetal_environment("armv7-unknown-none-eabi")).to_equal("eabi")
+        expect(llvm_arm32_baremetal_environment("armv7")).to_equal("eabi")
+
+    it "keeps the exact CLI and Cosmos ELF acceptance regression executable":
+        step("Verify: candidate source, provenance, ELF, ABI, relocation, and link checks exist")
+        val runner = read_file_text(
+            "test/02_integration/os/cosmos/run_pure_simple_arm32_emit_object_test.shs")
+        val candidate = read_file_text(
+            "src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl")
+        expect(candidate).to_contain("@export(\"C\", name: \"cosmos_fsbl_validate_handoff\")")
+        expect(candidate).to_contain("@export(\"C\", name: \"cosmos_fsbl_selftest\")")
+        expect(runner).to_contain("src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl")
+        expect(runner).to_contain(r"SIMPLE_BINARY=${SIMPLE_BINARY:-}")
+        expect(runner).to_contain("stage4_verify_candidate_provenance")
+        expect(runner).to_contain(r"${SIMPLE_BINARY}.provenance.env")
+        expect(runner).to_contain("export SIMPLE_BINARY")
+        expect(runner).to_contain(r"*compiler_rust*|*'/bootstrap/'*)")
+        expect(runner).to_contain("Rust/bootstrap seed is forbidden")
+        expect(runner.contains("SIMPLE_BIN:-")).to_be(false)
+        expect(runner.contains("bin/simple")).to_be(false)
+        expect(runner.contains("simple_bin")).to_be(false)
+        expect(runner).to_contain("--target armv7-unknown-none-eabihf --emit-object")
+        expect(runner).to_contain("Type:[[:space:]]+REL")
+        expect(runner).to_contain("Machine:[[:space:]]+ARM")
+        expect(runner).to_contain("readelf -SW")
+        expect(runner).to_contain("cosmos_fsbl_validate_handoff")
+        expect(runner).to_contain("cosmos_fsbl_selftest")
+        expect(runner).to_contain("cosmos_fsbl_mmio_read32")
+        expect(runner).to_contain("cosmos_fsbl_platform_is_qemu")
+        expect(runner).to_contain("candidate object undefined ABI contract mismatch")
+        expect(runner).to_contain("missing candidate ABI-shim relocation")
+        expect(runner).to_contain("__aeabi_unwind_cpp_pr0")
+        expect(runner).to_contain("readelf -rW")
+        expect(runner).to_contain("ld.lld -r")
+        expect(runner).to_contain("combined Cosmos object retains undefined symbols")
+        expect(runner).to_contain("Rust-built")
+        expect(runner).to_contain("SIMPLE_BINARY")
+        expect(runner).to_contain("stage4_verify_candidate_provenance")
+
+    it "pins the candidate status and register constants to the production C contracts":
+        step("Verify: C ABI statuses, addresses, offsets, and decision masks stay equal")
+        val candidate = read_file_text(
+            "src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl")
+        val decision = read_file_text(
+            "src/os/kernel/arch/arm32/cosmos/cosmos_fsbl_decision.spl")
+        val hal_header = read_file_text(
+            "src/os/kernel/arch/arm32/cosmos/cosmos_hal.h")
+        val zynq_header = read_file_text(
+            "src/os/kernel/arch/arm32/cosmos/cosmos_zynq_regs.h")
+        val production = read_file_text(
+            "src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c")
+        expect(candidate).to_contain("val COSMOS_OK: i32 = 0")
+        expect(candidate).to_contain("val COSMOS_UNAVAILABLE: i32 = 1")
+        expect(candidate).to_contain("val COSMOS_INVALID: i32 = 2")
+        expect(candidate).to_contain("val COSMOS_HW_ERROR: i32 = 4")
+        expect(hal_header).to_contain("COSMOS_OK = 0,")
+        expect(hal_header).to_contain("COSMOS_UNAVAILABLE = 1,")
+        expect(hal_header).to_contain("COSMOS_INVALID = 2,")
+        expect(hal_header).to_contain("COSMOS_HW_ERROR = 4,")
+        expect(candidate).to_contain("val COSMOS_SLCR_BASE: u32 = 0xf8000000u32")
+        expect(candidate).to_contain("val COSMOS_DEVCFG_BASE: u32 = 0xf8007000u32")
+        expect(candidate).to_contain("val COSMOS_SLCR_LOCKSTA_OFFSET: u32 = 0x000cu32")
+        expect(candidate).to_contain("val COSMOS_SLCR_ARM_CLK_OFFSET: u32 = 0x0120u32")
+        expect(candidate).to_contain("val COSMOS_SLCR_DDR_CLK_OFFSET: u32 = 0x0124u32")
+        expect(candidate).to_contain("val COSMOS_SLCR_PSS_RST_OFFSET: u32 = 0x0200u32")
+        expect(candidate).to_contain("val COSMOS_SLCR_A9_RST_OFFSET: u32 = 0x0244u32")
+        expect(candidate).to_contain("val COSMOS_DEVCFG_INT_STS_OFFSET: u32 = 0x000cu32")
+        expect(hal_header).to_contain("#define COSMOS_SLCR_BASE      0xF8000000U")
+        expect(zynq_header).to_contain("#define COSMOS_ZYNQ_DEVCFG_BASE            0xF8007000U")
+        expect(zynq_header).to_contain("#define COSMOS_ZYNQ_SLCR_LOCKSTA_OFFSET     0x000CU")
+        expect(zynq_header).to_contain("#define COSMOS_ZYNQ_SLCR_ARM_CLK_OFFSET     0x0120U")
+        expect(zynq_header).to_contain("#define COSMOS_ZYNQ_SLCR_DDR_CLK_OFFSET     0x0124U")
+        expect(zynq_header).to_contain("#define COSMOS_ZYNQ_SLCR_PSS_RST_OFFSET     0x0200U")
+        expect(zynq_header).to_contain("#define COSMOS_ZYNQ_SLCR_A9_RST_OFFSET      0x0244U")
+        expect(zynq_header).to_contain("#define COSMOS_ZYNQ_DEVCFG_INT_STS_OFFSET  0x000CU")
+        expect(decision).to_contain("val COSMOS_FSBL_SLCR_LOCKED: u32 = 1u32")
+        expect(decision).to_contain("val COSMOS_FSBL_ARM_CLK_ACTIVE: u32 = 0x1f000000u32")
+        expect(decision).to_contain("val COSMOS_FSBL_DDR_CLK_ACTIVE: u32 = 3u32")
+        expect(decision).to_contain("val COSMOS_FSBL_PSS_PRIMARY_RESET: u32 = 1u32")
+        expect(decision).to_contain("val COSMOS_FSBL_A9_CPU0_STOPPED: u32 = 0x111u32")
+        expect(decision).to_contain("val COSMOS_FSBL_PCFG_DONE: u32 = 4u32")
+        expect(production).to_contain("#define COSMOS_SLCR_LOCKED    (1U << 0)")
+        expect(production).to_contain("#define COSMOS_ARM_CLK_ACTIVE (0x1FU << 24)")
+        expect(production).to_contain("#define COSMOS_DDR_CLK_ACTIVE ((1U << 0) | (1U << 1))")
+        expect(production).to_contain("#define COSMOS_PSS_PRIMARY_RESET (1U << 0)")
+        expect(production).to_contain("#define COSMOS_A9_CPU0_STOPPED ((1U << 0) | (1U << 4) | (1U << 8))")
+        expect(zynq_header).to_contain("#define COSMOS_ZYNQ_DEVCFG_PCFG_DONE       (1U << 2)")
+
+    it "makes the test-only C oracle fail closed on production drift":
+        step("Verify: extraction boundary and retained provenance are independently checked")
+        val producer = read_file_text(
+            "scripts/check/produce-cosmos-fsbl-fail-closed-coverage.shs")
+        val checker = read_file_text(
+            "scripts/check/check-cosmos-fsbl-fail-closed-coverage-receipt.shs")
+        val runner = read_file_text(
+            "test/02_integration/os/cosmos/run_cosmos_hal_mmio_test.shs")
+        expect(producer).to_contain("test/fixtures/os/cosmos/cosmos_fsbl_oracle.c")
+        expect(producer).to_contain("production_c_source_path=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c")
+        expect(producer).to_contain("c-oracle-production-drift")
+        expect(checker).to_contain("c_oracle_semantic_sha256")
+        expect(checker).to_contain("c-oracle-production-drift")
+        expect(runner).to_contain("Cosmos FSBL oracle has drifted from production C")

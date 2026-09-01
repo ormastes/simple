@@ -214,8 +214,9 @@ impl Parser<'_> {
         is_ghost: bool,
     ) -> Result<Node, ParseError> {
         let mut pattern = self.parse_pattern()?;
-        let ty = self.parse_optional_type_annotation()?;
+        let (ty, ty_cont_indent) = self.parse_optional_type_annotation()?;
         let (value, is_suspend) = self.parse_optional_assignment_with_suspend()?;
+        self.drain_type_continuation_indent(ty_cont_indent);
 
         // Refutable let-else: `val Ctor(x) = value else: <diverging block>`.
         // Desugar to a match so the binding is available only after success.
@@ -336,13 +337,70 @@ impl Parser<'_> {
         }))
     }
 
-    /// Parse optional type annotation `: Type`
-    fn parse_optional_type_annotation(&mut self) -> Result<Option<Type>, ParseError> {
+    /// Parse optional type annotation `: Type`.
+    ///
+    /// Supports a trailing-colon line continuation, mirroring the trailing-`=`
+    /// continuation `parse_optional_assignment_with_suspend` already accepts:
+    ///
+    /// ```text
+    /// var g_service_v1:
+    ///     AuthenticatedFsExecUserServiceV1? = nil
+    /// ```
+    ///
+    /// Without this the type parser hit the Newline directly and failed with
+    /// "expected identifier, found Newline". Item 23 of doc/08_tracking/bug/
+    /// unit_sweep_language_and_interpreter_gaps_2026-08-26.md — the reported
+    /// suspicion there was a `.?` or `==`/`!=` continuation, which is wrong: it
+    /// is the TYPE ANNOTATION that wraps.
+    ///
+    /// Returns whether a continuation Indent was consumed; the caller must
+    /// drain its compensating Dedent with `drain_type_continuation_indent`
+    /// AFTER the initializer, because `= nil` sits on the continuation line and
+    /// the Dedent only arrives once the whole declaration has been read.
+    fn parse_optional_type_annotation(&mut self) -> Result<(Option<Type>, bool), ParseError> {
         if self.check(&TokenKind::Colon) {
             self.advance();
-            Ok(Some(self.parse_type()?))
+            // Only treat a following Newline as a continuation, never as the
+            // start of a block: a `val`/`var` declaration has no block body, so
+            // there is no competing interpretation to weaken here.
+            let mut consumed_indent = false;
+            if self.check(&TokenKind::Newline) {
+                let saved_current = self.current.clone();
+                let saved_previous = self.previous.clone();
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Indent) {
+                    self.advance();
+                    consumed_indent = true;
+                } else {
+                    // Not a continuation after all — put the stream back so the
+                    // existing "expected identifier, found Newline" diagnostic
+                    // is still produced for genuinely malformed input.
+                    self.pending_tokens.push_front(self.current.clone());
+                    self.current = saved_current;
+                    self.previous = saved_previous;
+                }
+            }
+            let ty = self.parse_type()?;
+            Ok((Some(ty), consumed_indent))
         } else {
-            Ok(None)
+            Ok((None, false))
+        }
+    }
+
+    /// Drain the compensating Dedent of a trailing-colon type-annotation
+    /// continuation. Mirrors the drain at the end of the trailing-`=`
+    /// continuation in `parse_optional_assignment_with_suspend`.
+    fn drain_type_continuation_indent(&mut self, consumed_indent: bool) {
+        if !consumed_indent {
+            return;
+        }
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
         }
     }
 
@@ -448,7 +506,7 @@ impl Parser<'_> {
     /// Supports continuation on next line: `const X = \n    expr`
     fn parse_named_value(&mut self) -> Result<(String, Option<Type>, Expr), ParseError> {
         let name = self.expect_identifier()?;
-        let ty = self.parse_optional_type_annotation()?;
+        let (ty, ty_cont_indent) = self.parse_optional_type_annotation()?;
         self.expect(&TokenKind::Assign)?;
         // Skip newlines after = to allow continuation on next line
         while self.check(&TokenKind::Newline) {
@@ -472,6 +530,7 @@ impl Parser<'_> {
                 self.advance();
             }
         }
+        self.drain_type_continuation_indent(ty_cont_indent);
         Ok((name, ty, value))
     }
 
@@ -550,8 +609,9 @@ impl Parser<'_> {
 
         // Parse pattern (the identifier), optional type annotation, and assignment
         let pattern = self.parse_pattern()?;
-        let ty = self.parse_optional_type_annotation()?;
+        let (ty, ty_cont_indent) = self.parse_optional_type_annotation()?;
         let (value, is_suspend) = self.parse_optional_assignment_with_suspend()?;
+        self.drain_type_continuation_indent(ty_cont_indent);
 
         // Wrap pattern in Pattern::Typed if there's a type annotation
         let pattern = if let Some(type_annotation) = ty {
@@ -686,6 +746,7 @@ impl Parser<'_> {
             ty,
             value,
             visibility: Visibility::Private,
+            attributes: vec![],
         }))
     }
 
@@ -718,6 +779,7 @@ impl Parser<'_> {
             value,
             mutability,
             visibility: Visibility::Private,
+            attributes: vec![],
         }))
     }
 
@@ -1590,9 +1652,8 @@ mod tests {
         );
         assert!(valid.parse().is_ok());
 
-        let mut fallthrough = Parser::new(
-            "fn invalid(value: i64?) -> i64:\n    val Some(inner) = value else: pass\n    return inner\n",
-        );
+        let mut fallthrough =
+            Parser::new("fn invalid(value: i64?) -> i64:\n    val Some(inner) = value else: pass\n    return inner\n");
         assert!(fallthrough.parse().is_err());
 
         let mut shadowable_call = Parser::new(

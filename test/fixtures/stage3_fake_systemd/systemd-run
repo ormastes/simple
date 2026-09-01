@@ -1,0 +1,124 @@
+#!/bin/sh
+set -eu
+
+state=${STAGE3_FAKE_SYSTEMD_STATE:?}
+mode=${STAGE3_FAKE_SYSTEMD_MODE:-success}
+[ "${1-}" = --user ] || exit 64; shift
+[ "${1-}" = --wait ] || exit 64; shift
+[ "${1-}" = --service-type=exec ] || exit 64; shift
+[ "${1-}" = --pipe ] || exit 64; shift
+[ "${1-}" = --quiet ] || exit 64; shift
+case ${1-} in --unit=*) unit=${1#*=} ;; *) exit 64 ;; esac
+shift
+case $unit in ''|*[!A-Za-z0-9_.:-]*) exit 64 ;; esac
+
+exit_type= oom_policy= kill_mode= send_sigkill= memory_max=
+memory_swap_max= runtime_max= working_directory=
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+  [ "$1" = -p ] && [ "$#" -ge 2 ] || exit 64
+  property=$2; shift 2
+  case $property in
+    ExitType=cgroup) [ -z "$exit_type" ] || exit 64; exit_type=cgroup ;;
+    OOMPolicy=kill) [ -z "$oom_policy" ] || exit 64; oom_policy=kill ;;
+    KillMode=control-group) [ -z "$kill_mode" ] || exit 64; kill_mode=control-group ;;
+    SendSIGKILL=yes) [ -z "$send_sigkill" ] || exit 64; send_sigkill=yes ;;
+    MemoryMax=*) [ -z "$memory_max" ] || exit 64; memory_max=${property#*=} ;;
+    MemorySwapMax=0) [ -z "$memory_swap_max" ] || exit 64; memory_swap_max=0 ;;
+    RuntimeMaxSec=3900) [ -z "$runtime_max" ] || exit 64; runtime_max=3900 ;;
+    WorkingDirectory=*)
+      [ -z "$working_directory" ] || exit 64
+      working_directory=${property#*=}
+      ;;
+    *) exit 64 ;;
+  esac
+done
+[ "$#" -ge 2 ] && [ "$1" = -- ] || exit 64; shift
+[ "$exit_type:$oom_policy:$kill_mode:$send_sigkill:$memory_swap_max:$runtime_max" = \
+  cgroup:kill:control-group:yes:0:3900 ] || exit 64
+case $memory_max in ''|*[!0-9]*|0) exit 64 ;; esac
+case $working_directory in /*) ;; *) exit 64 ;; esac
+[ -d "$working_directory" ] || exit 64
+[ "$1" = /usr/bin/env ] || case "$1" in /proc/[1-9][0-9]*/fd/[0-9]*) ;; *) exit 64 ;; esac
+for executable_reference in "$@"; do
+  case $executable_reference in
+    /proc/[1-9][0-9]*/fd/[0-9]*)
+      /usr/bin/perl -e '
+        use strict; use warnings;
+        my ($path) = @ARGV;
+        $path =~ m{\A/proc/([1-9][0-9]*)/fd/([0-9]+)\z} or exit 64;
+        open(my $info, "<", "/proc/$1/fdinfo/$2") or exit 65;
+        my $flags;
+        while (<$info>) { $flags = oct($1) if /\Aflags:\s+([0-7]+)\s*\z/; }
+        close($info) or exit 65;
+        defined($flags) && ($flags & 3) == 0 or exit 66;
+      ' "$executable_reference" || exit $?
+      ;;
+  esac
+done
+
+unit_dir=$state/units/$unit
+cgroup_dir=$state/cgroup/fake/$unit
+mkdir -p "$unit_dir" "$cgroup_dir"
+had_stopped_marker=no
+if [ -e "$unit_dir/stopped" ]; then
+  had_stopped_marker=yes
+  rm -f "$unit_dir/stopped"
+fi
+if [ "$mode" != missing-control-group ]; then
+  printf '/fake/%s\n' "$unit" >"$unit_dir/ControlGroup"
+fi
+printf 'populated 1\nfrozen 0\n' >"$cgroup_dir/cgroup.events"
+printf 'max 0\noom 0\noom_kill 0\noom_group_kill 0\n' \
+  >"$cgroup_dir/memory.events"
+printf '0\n' >"$cgroup_dir/memory.current"
+printf '1048576\n' >"$cgroup_dir/memory.peak"
+printf '%s\n' "$memory_max" >"$cgroup_dir/memory.max"
+printf '0\n' >"$cgroup_dir/memory.swap.current"
+printf '0\n' >"$cgroup_dir/memory.swap.max"
+printf '1\n' >"$cgroup_dir/memory.oom.group"
+printf 'active\n' >"$unit_dir/ActiveState"
+printf '%s\n' "$$" >"$unit_dir/systemd-run.pid"
+{
+  printf 'schema=stage3-fake-systemd-run-argv-v1\n'
+  printf 'unit=%s\n' "$unit"
+  printf 'memory_max=%s\n' "$memory_max"
+  printf 'runtime_max_sec=%s\n' "$runtime_max"
+  printf 'working_directory=%s\n' "$working_directory"
+  printf 'command_count=%s\n' "$#"
+  printf 'retained_executable_access=readonly\n'
+} >"$unit_dir/launch.env"
+
+exec 9<&0
+(
+  exec 0<&9
+  exec 9<&-
+  cd "$working_directory"
+  exec "$@"
+) &
+service_pid=$!
+exec 9<&-
+printf '%s\n' "$service_pid" >"$unit_dir/service.pid"
+service_status=0
+while kill -0 "$service_pid" >/dev/null 2>&1; do
+  if [ -e "$unit_dir/stopped" ]; then
+    kill -TERM "$service_pid" >/dev/null 2>&1 || true
+  fi
+  sleep 0.01
+done
+wait "$service_pid" || service_status=$?
+
+printf 'inactive\n' >"$unit_dir/ActiveState"
+if [ "$had_stopped_marker" = yes ] && [ ! -e "$unit_dir/stopped" ]; then
+  : >"$unit_dir/stopped"
+fi
+printf 'populated 0\nfrozen 0\n' >"$cgroup_dir/cgroup.events"
+if [ "$mode" = event-delta ]; then
+  printf 'max 1\noom 0\noom_kill 0\noom_group_kill 0\n' \
+    >"$cgroup_dir/memory.events"
+fi
+if [ "$mode" = signal-systemd ]; then
+  trap - TERM
+  kill -TERM "$$"
+  exit 143
+fi
+exit "$service_status"

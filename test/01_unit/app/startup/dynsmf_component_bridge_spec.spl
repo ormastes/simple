@@ -1,0 +1,116 @@
+"""
+Checked dynSMF to canonical component-planner bridge specification.
+
+The bridge must preserve real manifest IDs, choose cached dynamic artifacts
+when the authoritative embedded table is empty, reject impossible static pins,
+and remain free of host I/O and compiler/process fallbacks.
+"""
+# @req: REQ-APP-STARTUP-001
+# @cover src/app/startup/dynsmf_component_bridge.spl 90%
+# @cover src/app/startup/startup_planner.spl 80%
+
+use std.spec.{describe, it, expect, step}
+use os.smf.dynsmf_session.{DynSmfManifestEntry, DynSmfDynloadSetting}
+use app.startup.dynsmf_autoload.{
+    dynsmf_startup_session_with_dynload_settings
+}
+use app.startup.dynsmf_component_bridge.{
+    dynsmf_component_startup_plan,
+    dynsmf_component_startup_plan_with_static_table
+}
+
+fn bridge_manifest() -> [DynSmfManifestEntry]:
+    [
+        DynSmfManifestEntry(
+            id: "compiler.frontend",
+            path: "build/dynsmf/compiler_frontend.smf",
+            source_module: "compiler.frontend",
+            artifact_kind: "precompiled_smf",
+            abi_version: "1",
+            default_autoload: false,
+            exports: ["compile"]),
+        DynSmfManifestEntry(
+            id: "aspect.log.debug",
+            path: "build/dynsmf/aspect_log_debug.smf",
+            source_module: "std.aspect.log_debug",
+            artifact_kind: "precompiled_smf",
+            abi_version: "1",
+            default_autoload: false,
+            exports: ["register"])
+    ]
+
+fn bridge_setting(id: text, placement: text,
+        activation: text) -> DynSmfDynloadSetting:
+    DynSmfDynloadSetting(library_id: id, presence: "on",
+        placement: placement, activation: activation)
+
+describe "dynSMF component startup bridge":
+    it "selects the exact startup manifest ID and leaves first-use work cold":
+        step("Plan from cached-manifest metadata without artifact or source IO")
+        val plan = dynsmf_component_startup_plan(
+            "compile", [], bridge_manifest(), [
+                bridge_setting("compiler.frontend", "auto", "startup"),
+                bridge_setting("aspect.log.debug", "dynamic", "first_use")])
+        expect(plan.ok).to_equal(true)
+        expect(plan.steps.len()).to_equal(1)
+        expect(plan.steps[0].id).to_equal("compiler.frontend")
+        expect(plan.steps[0].mode).to_equal("dynamic")
+        expect(plan.steps[0].activation).to_equal("startup")
+
+    it "fails closed when config pins a component absent from the static table":
+        step("Require an actual generated-table row for static placement")
+        val plan = dynsmf_component_startup_plan(
+            "compile", [], bridge_manifest(), [
+                bridge_setting("compiler.frontend", "static", "startup")])
+        expect(plan.ok).to_equal(false)
+        expect(plan.reason).to_equal(
+            "static_required_missing:compiler.frontend")
+        expect(plan.steps.len()).to_equal(0)
+
+    it "is reached by the production settings startup before artifact IO":
+        step("Route a static pin through the real startup session owner")
+        val session = dynsmf_startup_session_with_dynload_settings(
+            [], "", "", "spec-component-caller", bridge_manifest(), [
+                bridge_setting("compiler.frontend", "static", "startup")])
+        expect(session.loaded.len()).to_equal(0)
+        expect(session.evidence.len()).to_equal(1)
+        expect(session.evidence[0].action).to_equal("component_resolve")
+        expect(session.evidence[0].status).to_equal("failed")
+        expect(session.evidence[0].reason).to_equal(
+            "static_required_missing:compiler.frontend")
+
+    it "accepts matching real static identity and rejects a stale row":
+        val ids = ["compiler.frontend"]
+        val matching = dynsmf_component_startup_plan_with_static_table(
+            "compile", [], bridge_manifest(), [
+                bridge_setting("compiler.frontend", "static", "startup")],
+            ids, ids, ["impl-B"], ["impl-B"])
+        expect(matching.ok).to_equal(true)
+        expect(matching.steps.len()).to_equal(1)
+        expect(matching.steps[0].mode).to_equal("static")
+
+        val stale = dynsmf_component_startup_plan_with_static_table(
+            "compile", [], bridge_manifest(), [
+                bridge_setting("compiler.frontend", "static", "startup")],
+            ids, ids, ["impl-A"], ["impl-B"])
+        expect(stale.ok).to_equal(false)
+        expect(stale.reason).to_equal(
+            "static_required_stale:compiler.frontend")
+
+    it "contains no scan shell compile environment or file IO surface":
+        val source = read_file(
+            "src/app/startup/dynsmf_component_bridge.spl")
+        expect(source).to_contain("plan_startup(request")
+        expect(source).to_contain("static_table_known = true")
+        expect(source.contains("file_" + "read")).to_equal(false)
+        expect(source.contains("dir_" + "walk")).to_equal(false)
+        expect(source.contains("env_" + "get")).to_equal(false)
+        expect(source.contains("process_" + "run")).to_equal(false)
+        expect(source.contains("process_" + "spawn")).to_equal(false)
+        expect(source.contains("bin/simple compile")).to_equal(false)
+
+    it "is the production settings caller and rolls back on load failure":
+        val source = read_file("src/app/startup/dynsmf_autoload.spl")
+        expect(source).to_contain("dynsmf_component_startup_plan(")
+        expect(source).to_contain("return dynsmf_session_close(out)")
+        expect(source.contains("dynsmf_dynload_" + "load_plan(")).to_equal(false)

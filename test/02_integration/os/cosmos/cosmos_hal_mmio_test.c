@@ -22,6 +22,7 @@
 #define TEST_CONTROL_MAP_BYTES 0x00002000U
 #define TEST_TOGGLE_ADDRESS    COSMOS_NFC_TOGGLE_POOL_BASE
 #define TEST_NO_CHANNEL        UINT_MAX
+#define TEST_FSBL_READ_COUNT   6U
 
 #define CHECK(condition)                                                      \
     do {                                                                      \
@@ -63,6 +64,8 @@ struct mock_mmio {
     unsigned int pcie_irq_clear;
     unsigned int pcie_queue_clears;
     unsigned int pcie_status_reads;
+    unsigned int fsbl_read_count;
+    unsigned int fsbl_read_address[TEST_FSBL_READ_COUNT];
     unsigned int pl_reads;
     unsigned int pl_writes;
     unsigned int nfc_writes;
@@ -146,6 +149,13 @@ static void mock_valid_fsbl(int pcfg_done) {
     mock.a9_reset = 0U;
     mock.devcfg_status =
         pcfg_done ? COSMOS_ZYNQ_DEVCFG_PCFG_DONE : 0U;
+}
+
+static void mock_record_fsbl_read(unsigned int address) {
+    if (mock.fsbl_read_count < TEST_FSBL_READ_COUNT) {
+        mock.fsbl_read_address[mock.fsbl_read_count] = address;
+    }
+    mock.fsbl_read_count++;
 }
 
 static unsigned int mock_nfc_read(unsigned int address) {
@@ -276,21 +286,27 @@ static void mock_nfc_write(unsigned int address, unsigned int value) {
 unsigned int cosmos_mmio_test_read32(unsigned int address) {
     if (address == COSMOS_ZYNQ_DEVCFG_BASE +
             COSMOS_ZYNQ_DEVCFG_INT_STS_OFFSET) {
+        mock_record_fsbl_read(address);
         return mock.devcfg_status;
     }
     if (address == COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_LOCKSTA_OFFSET) {
+        mock_record_fsbl_read(address);
         return mock.slcr_lock;
     }
     if (address == COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_ARM_CLK_OFFSET) {
+        mock_record_fsbl_read(address);
         return mock.arm_clock;
     }
     if (address == COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_DDR_CLK_OFFSET) {
+        mock_record_fsbl_read(address);
         return mock.ddr_clock;
     }
     if (address == COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_PSS_RST_OFFSET) {
+        mock_record_fsbl_read(address);
         return mock.pss_reset;
     }
     if (address == COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_A9_RST_OFFSET) {
+        mock_record_fsbl_read(address);
         return mock.a9_reset;
     }
     if (mock_is_nfc(address)) {
@@ -387,13 +403,63 @@ static struct cosmos_nfc_io test_nfc_io(unsigned int channel) {
 }
 
 static int test_fsbl_handoff(void) {
+    static const unsigned int expected_reads[TEST_FSBL_READ_COUNT] = {
+        COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_LOCKSTA_OFFSET,
+        COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_ARM_CLK_OFFSET,
+        COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_DDR_CLK_OFFSET,
+        COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_PSS_RST_OFFSET,
+        COSMOS_SLCR_BASE + COSMOS_ZYNQ_SLCR_A9_RST_OFFSET,
+        COSMOS_ZYNQ_DEVCFG_BASE + COSMOS_ZYNQ_DEVCFG_INT_STS_OFFSET
+    };
+    unsigned int index;
+
     mock_valid_fsbl(1);
     CHECK_STATUS(cosmos_fsbl_validate_handoff(), COSMOS_OK);
+    CHECK(mock.fsbl_read_count == TEST_FSBL_READ_COUNT);
+    for (index = 0U; index < TEST_FSBL_READ_COUNT; index++) {
+        CHECK(mock.fsbl_read_address[index] == expected_reads[index]);
+    }
+
+    mock.fsbl_read_count = 0U;
     mock.devcfg_status = 0U;
     CHECK_STATUS(cosmos_fsbl_validate_handoff(), COSMOS_HW_ERROR);
+    CHECK(mock.fsbl_read_count == TEST_FSBL_READ_COUNT);
+
     mock_valid_fsbl(1);
+    mock.fsbl_read_count = 0U;
     mock.slcr_lock = 0U;
     CHECK_STATUS(cosmos_fsbl_validate_handoff(), COSMOS_HW_ERROR);
+    CHECK(mock.fsbl_read_count == TEST_FSBL_READ_COUNT);
+
+    mock_valid_fsbl(1);
+    for (index = 24U; index <= 28U; index++) {
+        mock.fsbl_read_count = 0U;
+        mock.arm_clock = (0x1FU << 24U) & ~(1U << index);
+        CHECK_STATUS(cosmos_fsbl_validate_handoff(), COSMOS_HW_ERROR);
+        CHECK(mock.fsbl_read_count == TEST_FSBL_READ_COUNT);
+    }
+
+    mock_valid_fsbl(1);
+    for (index = 0U; index <= 1U; index++) {
+        mock.fsbl_read_count = 0U;
+        mock.ddr_clock = 3U & ~(1U << index);
+        CHECK_STATUS(cosmos_fsbl_validate_handoff(), COSMOS_HW_ERROR);
+        CHECK(mock.fsbl_read_count == TEST_FSBL_READ_COUNT);
+    }
+
+    mock_valid_fsbl(1);
+    mock.fsbl_read_count = 0U;
+    mock.pss_reset = 1U;
+    CHECK_STATUS(cosmos_fsbl_validate_handoff(), COSMOS_HW_ERROR);
+    CHECK(mock.fsbl_read_count == TEST_FSBL_READ_COUNT);
+
+    for (index = 0U; index <= 8U; index += 4U) {
+        mock_valid_fsbl(1);
+        mock.fsbl_read_count = 0U;
+        mock.a9_reset = 1U << index;
+        CHECK_STATUS(cosmos_fsbl_validate_handoff(), COSMOS_HW_ERROR);
+        CHECK(mock.fsbl_read_count == TEST_FSBL_READ_COUNT);
+    }
     CHECK(mock.pl_reads == 0U && mock.pl_writes == 0U);
     return 0;
 }

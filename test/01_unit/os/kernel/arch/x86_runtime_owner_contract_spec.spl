@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Pins the x86_64 VMM D4 Step 6 source implementation and protects raw-runtime
+dedup for the migrated x86_32 interrupt leaf.
+
+## Operator workflow
+Run this source-contract spec after moving an x86 HAL operation. A passing
+result means each migrated leaf imports its typed package owner and does not
+declare or call the migrated raw runtime symbol directly.
+
+## Compatibility and limitations
+This spec structurally pins the VMM D4 Step 6 source implementation but does not
+prove live behavior; G-spec and G-ovmf verification remain pending. It does not
+claim global single runtime ownership. Live privileged-instruction behavior
+remains covered by the architecture boot and QEMU gates.
+"""
+# @manual: primary
+
+use std.spec
+use app.io.mod.{file_read_text}
+
+val X86_64_PAGING_PATH = "src/os/kernel/arch/x86_64/paging.spl"
+val VMM_CORE_PATH = "src/os/kernel/memory/vmm_core.spl"
+val X86_32_INTERRUPT_PATH = "src/os/kernel/arch/x86_32/interrupt.spl"
+val X86_32_CPU_PATH = "src/os/kernel/arch/x86_32/cpu.spl"
+val RAW_SFFI_BASELINE_PATH = "scripts/check/raw_sffi_unsafe_baseline.tsv"
+
+describe "x86 VMM D4 source and migrated interrupt-leaf dedup":
+    it "pins x86_64 VMM D4 Step 6 source delegation through the test-aware core owner":
+        step("Read the x86_64 paging leaf and VMM core owner")
+        val paging = file_read_text(X86_64_PAGING_PATH)
+        val core = file_read_text(VMM_CORE_PATH)
+
+        step("Require paging to import and call the package-visible VMM core owner")
+        expect(paging).to_contain("use os.kernel.memory.vmm_core.{vmm_publish_kernel_pml4, _load_cr3}")
+        expect(paging).to_contain("fn vmm_switch_address_space(pml4_phys: u64):")
+        expect(paging).to_contain("    _load_cr3(pml4_phys)")
+
+        step("Reject CPU imports, dead CR3 reads, and raw access in paging")
+        expect(paging.contains("use os.kernel.arch.x86_64.cpu")).to_be(false)
+        expect(paging.contains("read_cr3")).to_be(false)
+        expect(paging.contains("rt_read_cr3(")).to_be(false)
+        expect(paging.contains("rt_write_cr3(")).to_be(false)
+
+        step("Pin the VMM core owner and its hosted test fallback")
+        expect(core).to_contain("pub(package) fn _load_cr3(pml4_phys: u64):")
+        expect(core).to_contain("if mmio_test_mode_enabled():")
+        expect(core).to_contain("_vmm_fallback_cr3 = pml4_phys")
+        expect(core).to_contain("rt_write_cr3_raw(pml4_phys)")
+
+    it "routes x86_32 IDT loading through the canonical CPU owner":
+        step("Read the x86_32 interrupt leaf and CPU owner")
+        val interrupt = file_read_text(X86_32_INTERRUPT_PATH)
+        val cpu = file_read_text(X86_32_CPU_PATH)
+
+        step("Require the typed CPU import and LIDT wrapper call")
+        expect(interrupt).to_contain("use os.kernel.arch.x86_32.cpu.{port_outb, port_outb_wait, port_inb, cli, sti, lidt}")
+        expect(interrupt).to_contain("lidt(&g_idtr as u32)")
+
+        step("Reject a duplicate raw declaration or call in the interrupt leaf")
+        expect(interrupt.contains("rt_lidt(")).to_be(false)
+
+        step("Keep raw LIDT access behind the package-visible CPU owner")
+        expect(cpu).to_contain("extern fn rt_lidt(idtr_addr: u32)")
+        expect(cpu).to_contain("pub(package) fn lidt(idtr_addr: u32):")
+
+    it "removes migrated leaf rows from the unsafe baseline":
+        step("Read the frozen raw-SFFI unsafe baseline")
+        val baseline = file_read_text(RAW_SFFI_BASELINE_PATH)
+
+        step("Reject the migrated leaf rows")
+        expect(baseline.contains("src/os/kernel/arch/x86_64/paging.spl\trt_read_cr3\t")).to_be(false)
+        expect(baseline.contains("src/os/kernel/arch/x86_64/paging.spl\trt_write_cr3\t")).to_be(false)
+        expect(baseline.contains("src/os/kernel/arch/x86_32/interrupt.spl\trt_lidt\t")).to_be(false)

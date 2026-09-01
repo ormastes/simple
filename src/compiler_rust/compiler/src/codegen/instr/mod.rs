@@ -316,8 +316,10 @@ fn looks_like_const_data_name(name: &str) -> bool {
 /// appears in `vtable_type_ids` (the authoritative set of types that actually
 /// got a vtable data object emitted). Field access must mirror that shift, or
 /// `obj.field0` loads the vtable slot instead of the field. Keyed on the same
-/// `vtable_type_ids` map so constructor writes and field reads can never
-/// disagree. When the receiver's static type is unknown (not in `vreg_types`)
+/// map the `StructInit` arm prefers (`vtable_data_ids`, keyed on the
+/// collision-free struct NAME; `vtable_type_ids`, keyed on the per-module
+/// `TypeId`, is only the fallback when no name is available) so constructor
+/// writes and field reads can never disagree. When the receiver's static type is unknown (not in `vreg_types`)
 /// or has no vtable, the offset is returned unchanged.
 fn effective_field_offset<M: Module>(
     ctx: &InstrContext<'_, M>,
@@ -369,29 +371,17 @@ pub fn compile_instruction<M: Module>(
             byte_size,
             type_name,
             deep_fields,
+            ..
         } => {
-            // A struct that implements a trait carries an 8-byte vtable header
-            // (StructInit / FieldGet shift by +8, keyed on `vtable_data_ids`).
-            // MIR sizes the copy from the field layout only, so without the
-            // same shift a by-value `self` copy of such a struct copied ONLY
-            // the vtable word and every field read through the copy answered
-            // 0 (`self.base + n` == n). Mirror the shift here.
-            let has_vtable = type_name
-                .as_deref()
-                .is_some_and(|name| ctx.vtable_data_ids.contains_key(name));
-            if has_vtable {
-                let shifted: Vec<crate::mir::AggregateFieldCopy> = deep_fields
-                    .iter()
-                    .map(|f| crate::mir::AggregateFieldCopy {
-                        word_index: f.word_index + 1,
-                        byte_size: f.byte_size,
-                        nested: f.nested.clone(),
-                    })
-                    .collect();
-                closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size + 8, &shifted);
-            } else {
-                closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size, deep_fields);
-            }
+            closures_structs::compile_aggregate_copy(
+                ctx,
+                builder,
+                *dest,
+                *src,
+                *byte_size,
+                type_name.as_deref(),
+                deep_fields,
+            );
         }
 
         MirInst::BinOp { dest, op, left, right } => {
@@ -667,7 +657,13 @@ pub fn compile_instruction<M: Module>(
             }
         }
 
-        MirInst::InlineAsm { instructions, volatile } => {
+        MirInst::InlineAsm {
+            instructions, volatile, ..
+        } => {
+            // Cranelift has no inline asm: blocks go to a C sidecar TU with no
+            // operand binding (inline_asm_emit.rs). Operand-bound blocks keep
+            // their `$N` placeholders and are skipped there exactly as the
+            // `{name}` form was before; only `--backend llvm` binds operands.
             let symbol = crate::codegen::inline_asm::register_inline_asm(instructions, *volatile);
             let func_id = if let Some(func_id) = ctx.func_ids.get(&symbol).copied() {
                 func_id
@@ -966,11 +962,7 @@ pub fn compile_instruction<M: Module>(
                         vtable_data_id = Some(
                             ctx.module
                                 .declare_data(symbol, Linkage::Import, false, false)
-                                .map_err(|e| {
-                                    format!(
-                                        "failed to declare imported vtable data `{symbol}`: {e}"
-                                    )
-                                })?,
+                                .map_err(|e| format!("failed to declare imported vtable data `{symbol}`: {e}"))?,
                         );
                     }
                 }
@@ -1015,13 +1007,7 @@ pub fn compile_instruction<M: Module>(
             // on `vtable_type_ids`); field access must apply the identical shift or
             // it reads the vtable slot as field 0 (a truncated pointer, not the
             // field). Keyed on the same authoritative set so the two never disagree.
-            let off = effective_field_offset(
-                ctx,
-                *object,
-                owner_name.as_deref(),
-                *owner_has_vtable,
-                *byte_offset,
-            );
+            let off = effective_field_offset(ctx, *object, owner_name.as_deref(), *owner_has_vtable, *byte_offset);
             compile_field_get(ctx, builder, *dest, *object, off as usize, *field_type)?;
         }
 
@@ -1033,13 +1019,7 @@ pub fn compile_instruction<M: Module>(
             field_type,
             value,
         } => {
-            let off = effective_field_offset(
-                ctx,
-                *object,
-                owner_name.as_deref(),
-                *owner_has_vtable,
-                *byte_offset,
-            );
+            let off = effective_field_offset(ctx, *object, owner_name.as_deref(), *owner_has_vtable, *byte_offset);
             compile_field_set(ctx, builder, *object, off as usize, *field_type, *value)?;
         }
 
@@ -1638,7 +1618,42 @@ pub fn compile_instruction<M: Module>(
                 // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
-            let unboxed = helpers::call_runtime_1(ctx, builder, "rt_value_as_float", val);
+            let mut val = val;
+            let source_is_raw_float = matches!(
+                ctx.vreg_types.get(value).copied(),
+                Some(TypeId::F32) | Some(TypeId::F64)
+            );
+            // Values live across MIR blocks in uniformly-i64 Cranelift
+            // Variables. Float producers are promoted to f64 and bitcast on
+            // the outgoing edge (body::coerce_to_i64_typed), so recover that
+            // representation before deciding whether this is a tagged value.
+            // Do not do this for BoxFloat/Any: those are genuine tagged i64s.
+            if source_is_raw_float && builder.func.dfg.value_type(val) == types::I64 {
+                val = builder.ins().bitcast(types::F64, MemFlags::new(), val);
+            }
+            let val_ty = builder.func.dfg.value_type(val);
+            // Inlining can expose an already-unboxed float at this MIR
+            // boundary. Such a value cannot carry the tagged nil word and
+            // must not be passed to an integer/tag decoder (or compared with
+            // `icmp_imm`, which is invalid for F32/F64). Raw F64 is preserved
+            // bit-for-bit, including `f64::from_bits(3)`: the same bits are the
+            // in-band nil sentinel only when they came from a tagged/optional
+            // value. Callers must therefore retain the source type; no f64
+            // bit pattern can represent nil without colliding with a raw f64.
+            let (unboxed, is_nil) = if val_ty == types::F32 {
+                let unboxed = builder.ins().fpromote(types::F64, val);
+                let is_nil = builder.ins().iconst(types::I8, 0);
+                (unboxed, is_nil)
+            } else if val_ty == types::F64 {
+                let is_nil = builder.ins().iconst(types::I8, 0);
+                (val, is_nil)
+            } else {
+                let unboxed = helpers::call_runtime_1(ctx, builder, "rt_value_as_float", val);
+                let is_nil = builder
+                    .ins()
+                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 3);
+                (unboxed, is_nil)
+            };
             // NIL-PRESERVING UNBOX. `rt_value_as_float(NIL)` is 0.0, which is a
             // perfectly ordinary stored float — so a `Dict<_, f64>` MISS decoded
             // to 0.0 and `?? default` never fired, while the downstream nil test
@@ -1654,9 +1669,6 @@ pub fn compile_instruction<M: Module>(
             // arm), so miss and a stored 3.0 are now distinct. Non-nil inputs are
             // untouched: only the exact word 3 selects the sentinel.
             // Bug: doc/08_tracking/bug/native_dict_f64_get_nil_sentinel_collides_with_stored_3_2026-08-17.md
-            let is_nil = builder
-                .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 3);
             let nil_f = builder.ins().f64const(f64::from_bits(3));
             let unboxed = builder.ins().select(is_nil, nil_f, unboxed);
             ctx.vreg_values.insert(*dest, unboxed);

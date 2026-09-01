@@ -8,7 +8,7 @@ use os.kernel.ipc.syscall.{_handle_exit_state}
 use os.kernel.ipc.syscall.{_handle_yield_state}
 use os.kernel.ipc.syscall.{_handle_getpid}
 use os.kernel.ipc.syscall.{_handle_spawn_binary_state}
-use os.kernel.arch.user_entry_bridge.{dispatch_enter_user_blocking}
+use os.kernel.arch_adapt.user_entry.{dispatch_enter_user_blocking}
 use os.kernel.ipc.syscall.{_handle_wait_state}
 use os.kernel.ipc.syscall.{_handle_spawn_state}
 use os.kernel.ipc.syscall.{_handle_list_tasks}
@@ -298,15 +298,19 @@ fn spl_handle_mprotect(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
 #
 # a0 = pointer to path string (user VA)
 # a1 = path length in bytes
-# a2..a5 unused
-# returns new task ID on success, negative errno on failure
+# Legacy: a2 is priority, or a2..a5 are packed argv/envp coordinates.
+# Authenticated v1: a2=packed argv, a3=recipe, a4=argv table, a5=v1 tag.
+# Legacy returns a task ID. Authenticated v1 returns the real synchronous
+# execution result. Both return negative errno on failure.
 # ===========================================================================
 @export("C", name: "spl_handle_spawn_binary")
 fn spl_handle_spawn_binary(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_spawn_binary stub.
 
     Forwards to _handle_spawn_binary() in syscall.spl.
-    Syscall number 13: load and launch an ELF binary from the given path.
+    Syscall number 13: load and launch an executable from the given path.
+    The tagged authenticated v1 form is decoded by the process owner and can
+    consume only a loader-prearmed caller/path/recipe tuple.
     """
     log_raw_println("[shim] spawn_binary enter")
     val args = _make_args(13, a0, a1, a2, a3, a4, a5)

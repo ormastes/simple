@@ -30,6 +30,7 @@ use std.io.quic.quic_crypto.{QuicEncryptionLevel}
 use std.common.binary_inspect.{hex_to_bytes}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 
+@unsafe(reason: "raw UDP send borrows packed bytes for the call; negative result means provider failure", capabilities: [ffi])
 extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
 
 # ============================================================================
@@ -251,7 +252,8 @@ class QuicTransport:
                         case SendPacket(pkt_data, addr):
                             # Binary-safe: send directly via extern
                             if self.udp_fd >= 0:
-                                rt_io_udp_send_to(self.udp_fd, pkt_data, addr)
+                                unsafe(capabilities: [ffi]):
+                                    rt_io_udp_send_to(self.udp_fd, pkt_data, addr)
                         case StreamReady(stream_id):
                             events.push(TransportEvent.StreamReady(
                                 conn_key: key, stream_id: stream_id
@@ -302,7 +304,8 @@ class QuicTransport:
         """
         if self.udp_fd < 0:
             return -1
-        return rt_io_udp_send_to(self.udp_fd, packet, peer_addr)
+        return unsafe(capabilities: [ffi]):
+            rt_io_udp_send_to(self.udp_fd, packet, peer_addr)
 
     pub me send_stream_data(conn_key: text, stream_id: i64, data: [u8]) -> [u8]:
         """Send data on a stream. Returns the raw packet bytes produced.

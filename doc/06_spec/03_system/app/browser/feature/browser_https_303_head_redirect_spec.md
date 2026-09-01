@@ -1,6 +1,6 @@
 # HTTPS 303 HEAD Redirect Semantics
 
-> Verifies the browser https 303 head redirect behaviour end to end so maintainers of this
+> An HTTPS `303 See Other` must preserve a metadata-only `HEAD` navigation.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # HTTPS 303 HEAD Redirect Semantics
 
-Verifies the browser https 303 head redirect behaviour end to end so maintainers of this
+An HTTPS `303 See Other` must preserve a metadata-only `HEAD` navigation.
 
 ## At a Glance
 
@@ -20,18 +20,12 @@ Verifies the browser https 303 head redirect behaviour end to end so maintainers
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/browser/feature/browser_https_303_head_redirect_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the browser https 303 head redirect behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+An HTTPS `303 See Other` must preserve a metadata-only `HEAD` navigation.
+The redirected request stays encrypted, carries no body, and does not silently
+become a content-fetching `GET`.
 
 ## Scenarios
 
@@ -39,7 +33,11 @@ unrelated sibling features are out of scope.
 
 #### should preserve HEAD without a body across a same-origin HTTPS 303
 
-- Verify: should preserve HEAD without a body across a same-origin HTTPS 303
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should preserve HEAD without a body across a same-origin HTTPS 303
 - Queue an HTTPS HEAD navigation
 - Return a same-origin HTTPS 303
    - Expected: initial.method equals `HEAD`
@@ -53,13 +51,12 @@ unrelated sibling features are out of scope.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-011
-step("Verify: should preserve HEAD without a body across a same-origin HTTPS 303")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should preserve HEAD without a body across a same-origin HTTPS 303")
 step("Queue an HTTPS HEAD navigation")
 var session = BrowserSession.new()
 expect(session.begin_network_navigation(
@@ -103,39 +100,53 @@ expect(redirected.body).to_equal("")
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-010`
+- `REQ-WEB-BROWSER-011`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `14da99c49369ea70bc6a4c6951628be02df61abed0acc47dec75575be7a2174b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `be4c390779148af78b5b97e2dbd8a74cd846a3fdeb57fc031afed7bcb49d6f40`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `14da99c49369ea70bc6a4c6951628be02df61abed0acc47dec75575be7a2174b`.
+Source SHA-256: `be4c390779148af78b5b97e2dbd8a74cd846a3fdeb57fc031afed7bcb49d6f40`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `14da99c49369ea70bc6a4c6951628be02df61abed0acc47dec75575be7a2174b`  
+Source SHA-256: `be4c390779148af78b5b97e2dbd8a74cd846a3fdeb57fc031afed7bcb49d6f40`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **88/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/03_system/app/browser/feature/browser_https_303_head_redirect_spec.spl
 mirror: doc/06_spec/03_system/app/browser/feature/browser_https_303_head_redirect_spec.md (current)
-findings: 4 blockers: 0
+findings: 5 blockers: 1
   narrative=100 structure=95 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=90 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/browser/feature/browser_https_303_head_redirect_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=88; blocker cap makes effective=49
 doc/06_spec/03_system/app/browser/feature/browser_https_303_head_redirect_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/browser/feature/browser_https_303_head_redirect_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/browser/feature/browser_https_303_head_redirect_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/browser/feature/browser_https_303_head_redirect_spec.spl:32:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve HEAD without a body across a same-origin HTTPS 303' describes the test rather than its outcome
+test/03_system/app/browser/feature/browser_https_303_head_redirect_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/browser/feature/browser_https_303_head_redirect_spec.spl:22:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve HEAD without a body across a same-origin HTTPS 303' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/browser_https_303_head_redirect_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve HEAD without a body across a same-origin HTTPS 303' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

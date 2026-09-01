@@ -81,12 +81,8 @@ File: `src/lib/common/ui/window_scene_draw_ir.spl`
   cropped to the parent content rect via a pure crop helper (no
   `CompositorBackend` change), depth cap 3. Invalid child → magenta child
   rect only.
-- Child batches use IMAGE commands with `DrawIrEmbeddingConfig.surface_id` =
-  child window id and `DrawIrCommand.parent_id` = parent window id. Their
-  embedding is the cumulative visible intersection; negative local IMAGE
-  offsets retain the correct source crop. Both production executors collect
-  only reachable, visible, checksum-valid descendant resources while retaining
-  invalid descendant metadata for the projector's magenta fail-closed batch.
+- Child batches set `DrawIrEmbeddingConfig.surface_id` = child window id and
+  `DrawIrCommand.parent_id` = parent window id in the Draw IR projection.
 
 File: `src/os/compositor/simple_web_window_renderer.spl`
 - `simple_web_child_content_frame_cached(...)` — web frame stamped with

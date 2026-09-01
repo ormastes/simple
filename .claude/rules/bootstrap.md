@@ -16,7 +16,9 @@ alwaysApply: false
 > is GREEN (`Results: 1 total, 1 passed, 0 failed`), and a minimal
 > `use std.binary_io.{ByteOrder}` lazy-import probe resolves and runs clean
 > under `bin/simple run` (see `scripts/check/check-bootstrap-preflight.shs`,
-> which fences it). The BGS1 fix (`module_lowering.spl:952-955`) and the
+> which fences it). The BGS1 fix (`module_import_registration.spl:577-580` —
+> the long-standing `module_lowering.spl:952-955` citation here was WRONG; that
+> file is 503 lines and contains no such code, re-verified 2026-08-30) and the
 > `Effect` facade collision fix are on main; a 2026-08-09 full bootstrap
 > compiled all 803 Stage-2 files with 0 failures (125 MB non-vacuous binary).
 > Per the bug doc's final update, the live bootstrap concern is no longer this
@@ -94,21 +96,46 @@ bootstrap). The Rust seed (`src/compiler_rust/target/bootstrap/simple`) is
 - **`bin/release/simple` is fully self-sufficient** — in-process compilation, no subprocess calls
 - External tool calls: `clang`/`clang++`/`cl.exe`, `gcc`, `mold`/`lld`/`link.exe`, `llc`, `uname`/`cmd`, `which`/`where`
 
-## Incremental: Rebuild Only Pure-Simple
-Normal bootstrap is pure-Simple-only. It reuses the existing Rust seed/runtime
-and does not run cargo, even when Rust source hashes changed:
+## Incremental: rebuild ONLY pure-Simple
+When you changed **only `.spl` sources** (src/compiler, src/lib, src/app) and the
+Rust seed is unchanged, skip the cargo/Rust rebuild and re-run only the
+pure-Simple stages:
 ```bash
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
+scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple
 ```
+
+Bootstrap scheduling is selected separately with
+`--strategy=adhoc|normal|full`; it does not replace `--mode`:
+
+- `normal` is the default and reuses incremental caches. Once a compiler phase
+  is admitted, its tool builds and compiler/tool tests use immutable compiler
+  bytes plus isolated caches while the next compiler phase is allowed to run.
+  Memory admission may queue side work; it must never create a second writer to
+  a canonical cache.
+- `adhoc` runs only explicitly selected diagnostic work and is non-admitting by
+  default.
+- `full` promotes hash-identical normal receipts, runs the remaining complete
+  build/test DAG, terminalizes task crashes/timeouts, continues independent
+  work, marks descendants `BLOCKED_UPSTREAM`, and reports only after every task
+  is terminal. It does not imply deployment.
+
+Canonical hash mismatches remain fatal for admission, publication, release, and
+deployment. Warning-only mismatch handling is permitted solely for explicitly
+labeled temporary diagnostic rows.
+
+The ordinary `bootstrap-from-scratch.sh` entry automatically uses this
+supervisor. Explicit Stage-2 stop, Stage-3 recovery, receipt validation,
+target-VM, and diagnostic-sweep commands remain direct specialized lanes.
 - Reuses the existing `src/compiler_rust/target/bootstrap/simple` seed + runtime
-  lib; **never runs cargo** unless `--full-bootstrap` is passed. Errors out if
-  no seed exists yet.
+  lib; **never runs cargo** (even if it detects stale Rust sources — it prints a
+  note and proceeds). Errors out if no seed exists yet (build one with a full
+  bootstrap first).
 - "If the Rust seed can build the changed pure-Simple" is enforced by Stage 2: the
   seed recompiles the changed `.spl`. If Stage 2 fails, the new pure-Simple needs
-  a Rust feature the seed lacks — rerun with `--full-bootstrap`.
+  a Rust feature the seed lacks — drop `--pure-simple` and run a full bootstrap.
 - Combine with `--deploy` to swap `bin/release/<triple>/simple` (same smoke gate).
 - Pure-Simple build modes:
-  - `dynload` (default): reuse `build/bootstrap/native_cache` unless compiler/AOP/loader
+  - `dynload` (default): reuse `.simple/native_cache` unless compiler/AOP/loader
     inputs changed; native-build emits native plus SMF cache where supported.
   - `one-binary`: clear native cache and build the monolithic native executable.
 - Dependency tracing intentionally over-invalidates around AOP/MDSOC weaving,
@@ -130,10 +157,7 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   `run` rejection, and strict native build/execute of `p2_add.spl`.
 - Multiplatform bootstrap CI exercises both LLVM and Cranelift through that
   wrapper and uploads only the resulting pure-Simple Stage 2/Stage 3 binaries,
-  never the Rust seed as a platform artifact. Note (2026-07-18): the LLVM
-  stage-2 link currently fails with 62 undefined symbols (Windows CI runs that
-  step continue-on-error); Cranelift is the working stage-2/3 path. See
-  doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md.
+  never the Rust seed as a platform artifact.
 - The Linux Stage 3 artifact owns the strict x86_64/AArch64/RISC-V LLVM
   execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
   success alone is not pure-Simple architecture evidence.
@@ -258,40 +282,21 @@ has soaked. Reaching the <20s kernel-rebuild goal additionally needs incremental
 object cache does not touch (they dominate kernel build wall time).
 
 ## Bootstrap Commands
-
-**Every line below needs a receipt.** Measured 2026-08-23 by running them:
-`--deploy`, `--full-bootstrap --deploy` and `--full-bootstrap` each exit **64**
-with `bootstrap-policy-error: reason-receipt-required` and start no stage. That
-is policy, not breakage. Mint the receipt first with
-`simple run src/app/build/bootstrap_receipt_main.spl --bootstrap-reason=<typed-reason>
---bootstrap-receipt=<path> --parent-compiler-sha256=... --runtime-snapshot-sha256=...
---planner-source-closure-sha256=... --planner-sha256=...` and pass it as
-`--bootstrap-receipt=<path>`. The **sole receipt-free lane** is
-`--strategy=adhoc --full-bootstrap --stop-after-stage2 --output=<dir>`.
-
-Full option surface, the nine positional subcommands, and the
-`BOOTSTRAP_LIB_ONLY=1` sourcing contract:
-`doc/07_guide/tooling/bootstrap_options.md`. `scripts/bootstrap/` holds exactly
-two files now (`bootstrap-from-scratch.sh`, `bootstrap-windows.cmd`) — any
-reference to another `scripts/bootstrap/*.shs` is stale.
-
 ```bash
-# Normal pure-Simple bootstrap:
-scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<path> --deploy
-
-# Full Rust + pure-Simple bootstrap:
-scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<path> --full-bootstrap --deploy
-
-# Receipt-free lane (Stage 2 trust root only, no Stage 3/4, no deploy):
-scripts/bootstrap/bootstrap-from-scratch.sh --strategy=adhoc --full-bootstrap \
-  --stop-after-stage2 --output=build/bootstrap
-
+# Full bootstrap (recommended):
+scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+# WARNING: --deploy replaces bin/release/<triple>/simple with the STAGE4 CLI
+# without any smoke gate. Verified broken 2026-06-11 (lint coredumps, test
+# silent no-op, -c exit 1). After --deploy, ALWAYS smoke-test:
+#   setsid timeout 30 bin/simple -c "print(1+1)"   # expect 2
+#   bin/simple lint <any .spl>                      # must not core dump
+# If broken, restore the working seed:
+#   cp src/compiler_rust/target/release/simple bin/release/<triple>/simple.new \
+#     && mv bin/release/<triple>/simple.new bin/release/<triple>/simple
 # Windows:
-scripts/bootstrap/bootstrap-from-scratch.sh windows-entry --bootstrap-receipt=<path> --deploy
-# Manual full-bootstrap seed/runtime rebuild:
-scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<path> --full-bootstrap
-
-# Internal stage replay after a full-bootstrap seed exists:
+scripts/bootstrap/bootstrap-windows.sh --deploy
+# Manual stages:
+cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all
 SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple native-build \
   --source src/compiler --source src/lib --source src/app \
   --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/stage2/<triple>/simple
@@ -321,15 +326,3 @@ does not set it. Ensure the wrapper sets both when invoking native-build in
 hosted mode (e.g., `SIMPLE_RUNTIME_PATH="$seed_target" bin/simple native-build`).
 
 See `.claude/memory/ref_architecture.md` for detailed architecture.
-
-## Seed-sibling refresh (2026-08-18) — distinct from a self-hosted redeploy
-
-The "do not hand-roll `cargo build --release`" warning above is about faking a
-SELF-HOSTED redeploy. Refreshing the deployed RUST SEED binary with a seed-side
-fix is legitimate and was done twice on 2026-08-18 (brace-escape lexer fix,
-cleanup_old_logs statx fix): `cd src/compiler_rust && CARGO_TARGET_DIR=<warm>
-cargo build --release --bin simple`, verify the fix on the fresh binary, then
-deploy `cp <bin> bin/release/<triple>/simple.new && mv ... simple` (never plain
-cp — Text file busy). Always record binary identity (size/mtime) and rerun a
-spec proving the fix on the DEPLOYED path. This does not change that default
-tooling should ultimately be the pure-Simple self-hosted binary.

@@ -62,6 +62,14 @@ fn lower_reexport_consumer_errors() -> [text]:
     lowering.diagnostic_messages
 
 describe "HIR member and aggregate constructor visibility enforcement":
+    it "compile-allows a defining-module impl to read its private field":
+        val errors = lower_consumer_errors(
+            "fixture.placeholder", "src/fixture/placeholder.spl",
+            "fn placeholder():\n    ()",
+            "records.local", "src/records/local.spl",
+            "struct LocalRecord:\n    value: i64\n\nimpl LocalRecord:\n    fn read() -> i64:\n        self.value")
+        expect(messages_contain(errors, "field `value` is not visible")).to_be(false)
+
     it "compile-rejects a private imported field read":
         val errors = lower_consumer_errors(
             "vault.provider", "src/vault/provider.spl",
@@ -101,6 +109,15 @@ describe "HIR member and aggregate constructor visibility enforcement":
             "pkg.consumer", "src/pkg/consumer.spl",
             "use pkg.provider.\{PackageRecord\}\nfn build() -> i64:\n    val r = PackageRecord(value: 9)\n    r.value")
         expect(messages_contain(errors, "is not visible")).to_be(false)
+
+    it "compile-rejects an SFFI authority carrier with private state":
+        val errors = lower_consumer_errors(
+            "std.sffi.provider", "src/lib/nogc_sync_mut/sffi/provider.spl",
+            "pub struct AdmissionToken:\n    generation: i64\n\nimpl AdmissionToken:\n    pub fn generation_value() -> i64:\n        self.generation",
+            "app.plugin", "src/app/plugin.spl",
+            "use std.sffi.provider.\{AdmissionToken\}\nfn forge() -> AdmissionToken:\n    AdmissionToken(generation: 1)")
+        expect(messages_contain(
+            errors, "aggregate constructor `AdmissionToken` is not visible")).to_be(true)
 
     it "compile-allows an internally exported field to a declared friend":
         val errors = lower_consumer_errors(

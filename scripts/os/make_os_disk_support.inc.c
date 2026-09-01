@@ -195,6 +195,40 @@ static int alloc_clusters(const unsigned char *data, size_t len)
     return first;
 }
 
+
+/* Verify that a payload really landed in the cluster chain it was staged to.
+ *
+ * Restored 2026-08-31 alongside read_bounded_public_file: the three signed-
+ * media call sites at make_os_disk.c:439-443 referenced this helper but no
+ * definition ever landed, so make_os_disk.c failed to LINK on origin/main.
+ *
+ * The walk deliberately mirrors alloc_clusters() exactly -- same contiguous
+ * `first + i` chain, same per-cluster chunking, same cluster_offset() bounds
+ * test -- so the check compares what alloc_clusters actually wrote rather
+ * than re-deriving a layout that could agree with a bug. A zero cluster, an
+ * empty payload, or any byte mismatch is fatal: signed media must never be
+ * emitted with a member that was silently truncated or not staged at all.
+ */
+static void require_cluster_bytes(int first, struct bytes payload, const char *message)
+{
+    if (first <= 0 || !payload.len || !payload.data)
+        die(message);
+    size_t needed = (payload.len + g_cluster_size - 1) / g_cluster_size;
+    if (needed < 1)
+        needed = 1;
+    for (size_t i = 0; i < needed; ++i) {
+        int cluster = first + (int)i;
+        size_t start = i * g_cluster_size;
+        size_t chunk = payload.len > start ? payload.len - start : 0;
+        if (chunk > g_cluster_size)
+            chunk = g_cluster_size;
+        if (cluster_offset(cluster) + chunk > g_image_size)
+            die(message);
+        if (chunk > 0 &&
+            memcmp(g_image + cluster_offset(cluster), payload.data + start, chunk) != 0)
+            die(message);
+    }
+}
 static int alloc_directory(void)
 {
     return reserve_clusters(DIRECTORY_BYTES);
@@ -257,73 +291,41 @@ static struct bytes read_file(const char *path)
     return out;
 }
 
-/* Read a security-sensitive build input only after proving that its size is
- * bounded.  The generic image inputs predate this contract and may be large;
- * server credentials must never be allocated from an attacker-controlled
- * length before their limits are checked. */
-static struct bytes read_bounded_regular_file(const char *path, size_t max_len)
+
+/* Read a caller-supplied media input under an explicit size bound.
+ *
+ * Restored 2026-08-31: the three SIMPLEOS_SIMPLEBOX_* call sites at
+ * make_os_disk.c:165-167 referenced this helper but no definition ever
+ * landed, so make_os_disk.c did not compile at all on origin/main.
+ *
+ * Semantics the call sites rely on, and why each is fail-closed:
+ *  - an empty/NULL path yields an empty result (the caller treats "not
+ *    requested" and "unreadable" distinctly via simplebox_complete);
+ *  - the path must name a REGULAR file -- a directory, device or FIFO is
+ *    rejected rather than slurped, since these inputs come from the
+ *    environment and are not repo-controlled;
+ *  - a symlink is rejected (lstat, not stat): "public" here means the
+ *    bytes staged onto signed media must be the bytes at the named path;
+ *  - anything larger than `max_bytes` is rejected outright, never
+ *    truncated -- a truncated payload/SCR1/trust blob would be staged as
+ *    if whole.
+ * Every rejection returns an EMPTY struct bytes, which the caller turns
+ * into a hard "signed Simplebox inputs must be non-empty" die().
+ */
+static struct bytes read_bounded_public_file(const char *path, unsigned long max_bytes)
 {
     struct bytes out = {0};
-#ifdef _WIN32
-    /* Windows hosted builds retain the generic image writer, but server-secret
-     * staging stays disabled until a CreateFile/reparse-point owner provides
-     * the same descriptor contract as O_NOFOLLOW+fstat below. */
-    (void)path;
-    (void)max_len;
-    return out;
-#else
-    struct stat metadata;
+    struct stat st;
     if (!path || path[0] == '\0')
         return out;
-    int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (descriptor < 0 || fstat(descriptor, &metadata) != 0 ||
-        !S_ISREG(metadata.st_mode) || metadata.st_size <= 0 ||
-        (metadata.st_mode & (S_IRWXG | S_IRWXO)) != 0 ||
-        (uintmax_t)metadata.st_size > (uintmax_t)max_len) {
-        if (descriptor >= 0)
-            close(descriptor);
+    if (lstat(path, &st) != 0)
         return out;
-    }
-    size_t expected = (size_t)metadata.st_size;
-    out.len = expected;
-    out.data = (unsigned char *)xcalloc(out.len + 1, 1);
-    size_t read_total = 0;
-    while (read_total < expected) {
-        ssize_t count = read(descriptor, out.data + read_total, expected - read_total);
-        if (count <= 0)
-            break;
-        read_total += (size_t)count;
-    }
-    unsigned char extra = 0;
-    ssize_t extra_count = read(descriptor, &extra, 1);
-    if (read_total != expected || extra_count != 0 ||
-        fstat(descriptor, &metadata) != 0 || (size_t)metadata.st_size != expected) {
-        wipe_bytes(out);
-        free(out.data);
-        out.data = NULL;
-        out.len = 0;
-    }
-    close(descriptor);
-    return out;
-#endif
+    if (!S_ISREG(st.st_mode))
+        return out;
+    if (st.st_size < 0 || (unsigned long)st.st_size > max_bytes)
+        return out;
+    return read_file(path);
 }
-
-static void require_cluster_bytes(int first_cluster, const struct bytes expected,
-                                  const char *label)
-{
-    size_t consumed = 0;
-    int cluster = first_cluster;
-    while (consumed < expected.len) {
-        size_t chunk = expected.len - consumed;
-        if (chunk > g_cluster_size)
-            chunk = g_cluster_size;
-        if (memcmp(g_image + cluster_offset(cluster), expected.data + consumed, chunk) != 0)
-            die(label);
-        consumed += chunk;
-        cluster = (int)g_fat[cluster];
-    }
-}
-
 static struct bytes read_sibling_file(const char *path, const char *leaf)
 {
     char sibling[1024];

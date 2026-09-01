@@ -112,7 +112,7 @@ fn fits_inline_int_matches_the_actual_inline_capacity() {
 #[test]
 fn rt_value_unbox_int_decodes_the_wide_box() {
     for &v in &[
-        1i64 << 60,  // first value that does not fit inline
+        1i64 << 60, // first value that does not fit inline
         1i64 << 62,
         i64::MAX,
         i64::MIN,
@@ -139,9 +139,17 @@ fn wide_boxes_compare_by_value_not_by_pointer() {
     for &v in &[1i64 << 60, 1i64 << 62, i64::MAX, i64::MIN] {
         let a = RuntimeValue::from_int(v);
         let b = RuntimeValue::from_int(v);
-        assert_ne!(a.to_raw(), b.to_raw(), "{v:#x}: fixture is vacuous, both boxes are the same pointer");
+        assert_ne!(
+            a.to_raw(),
+            b.to_raw(),
+            "{v:#x}: fixture is vacuous, both boxes are the same pointer"
+        );
         assert_eq!(a.as_int(), b.as_int(), "{v:#x}: two boxes of the same value must agree");
-        assert_eq!(a.value_kind(), RuntimeValue::from_int(0).value_kind(), "{v:#x}: a wide int must still be an Int");
+        assert_eq!(
+            a.value_kind(),
+            RuntimeValue::from_int(0).value_kind(),
+            "{v:#x}: a wide int must still be an Int"
+        );
     }
 }
 
@@ -162,7 +170,11 @@ fn the_inline_boundary_is_exactly_where_it_is_claimed_to_be() {
     assert!(!RuntimeValue::from_int(first_heap_neg).is_int());
 
     for v in [last_inline_pos, first_heap_pos, last_inline_neg, first_heap_neg] {
-        assert_eq!(RuntimeValue::from_int(v).as_int(), v, "{v:#x} must round-trip on either side of the boundary");
+        assert_eq!(
+            RuntimeValue::from_int(v).as_int(),
+            v,
+            "{v:#x} must round-trip on either side of the boundary"
+        );
     }
 
     // In-range values keep the BIT-IDENTICAL pre-fix encoding, so nothing that

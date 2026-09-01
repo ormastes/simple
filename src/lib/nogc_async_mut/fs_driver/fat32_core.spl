@@ -44,6 +44,8 @@ val FAT32_DIR_ENTRY_SIZE: u32 = 32
 val FAT32_ATTR_DIRECTORY: u8 = 0x10
 val FAT32_ATTR_LONG_NAME: u8 = 0x0F
 val FAT32_MAX_OPEN_FILES: i32 = 65536
+val FAT32_MAX_FILE_GENERATIONS: i32 = 65536
+val FAT32_FILE_GENERATION_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
 val FAT32_HANDLE_GEN_SHIFT: u64 = 4294967296u64
 val FAT32_HANDLE_SLOT_MASK: u64 = 4294967295u64
 val FAT32_HANDLE_MAX_GENERATION: u32 = 0xFFFFFFFFu32
@@ -58,6 +60,19 @@ struct OpenFile:
     is_dir: bool
     is_open: bool
     generation: u32
+    file_generation_slot: i32
+
+struct Fat32FileGeneration:
+    """Persistent content epoch for one FAT cluster identity."""
+    start_cluster: u32
+    generation: u64
+    pending_unlink: bool
+
+struct Fat32ExecuteObservationV1:
+    """Core-local executable identity retained by the open-file owner."""
+    start_cluster: u32
+    content_generation: u64
+    size: u64
 
 fn _fat32_saved_open_files(files: [OpenFile], idx: i32, of: OpenFile) -> [OpenFile]:
     var updated = files
@@ -113,6 +128,7 @@ class Fat32Core:
     mounted: bool
     durable_flush_supported: bool
     open_files: [OpenFile]
+    file_generations: [Fat32FileGeneration]
     _dcache_cluster: u32
     _dcache_entries: [DirEntry]
     _dcache_valid: bool
@@ -142,6 +158,7 @@ impl Fat32Core:
             mounted: false,
             durable_flush_supported: false,
             open_files: [],
+            file_generations: [],
             _dcache_cluster: 0,
             _dcache_entries: [],
             _dcache_valid: false,
@@ -328,6 +345,7 @@ impl Fat32Core:
         self.data_start_sector = 0
         self.total_clusters = 0
         self.open_files = []
+        self.file_generations = []
         self._dcache_cluster = 0
         self._dcache_entries = []
         self._dcache_valid = false
@@ -626,7 +644,7 @@ use std.fs_driver.fat32_owned_io.{fat32_close, fat32_write, fat32_write_4k_overw
 
 export FAT32_FREE, FAT32_EOC, FAT32_DIR_ENTRY_SIZE, FAT32_ATTR_DIRECTORY, FAT32_ATTR_LONG_NAME
 export FAT32_MAX_OPEN_FILES, FAT32_HANDLE_MAX_GENERATION
-export Fat32Bpb, OpenFile, Fat32Core
+export Fat32Bpb, OpenFile, Fat32FileGeneration, Fat32ExecuteObservationV1, Fat32Core
 export _fat32_pack_handle, _fat32_handle_index, _fat32_saved_open_files
 export _fat32_path_valid
 export _fat32_cluster_bytes_to_i32

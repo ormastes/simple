@@ -89,6 +89,21 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
 # Config / environment backend selection
 # ============================================================================
 
+pub fn engine2d_vulkan_font_batch_admits(status: text, quad_count: i64,
+                                         dispatch_count: i64, batch_quads: i64) -> bool:
+    """Admission predicate for a Vulkan font-batch attempt.
+
+    The packed frame-batching lane records ONE compute dispatch that covers
+    every quad in the batch (dispatch groups on X, quads on Y), so success is
+    judged by quad coverage, never by dispatch count equalling quad count —
+    A "failed" status is never admitted, even when the fence was waited (oracle-parity or cleanup failures set status="failed" with device_executed=true). The older predicate rejected every multi-glyph packed batch and silently
+    demoted vulkan font execution to cpu (gui-vulkan-window gate red,
+    2026-08-31). dispatch_count must still be positive: zero dispatches means
+    nothing was recorded.
+    """
+    (status == "executed" or status == "recorded") and
+        quad_count == batch_quads and dispatch_count > 0
+
 fn engine2d_env_backend_override() -> text:
     """Config/environment override for the auto-selected 2D backend.
 
@@ -1635,16 +1650,14 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push(if quad_index == batch.quads.len(): "cuda:success" else: "cuda:failed")
                     if quad_index == batch.quads.len(): winner = "cuda"
             elif target == "metal":
-                val active = self.metal_backend
-                if active == nil:
-                    attempts.push("metal:unavailable")
-                else:
-                    val metal = active
+                if val Some(metal) = self.metal_backend:
                     quad_index = metal.draw_font_batch(x, y, batch)
                     self.metal_backend = Some(metal)
                     if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
                     attempts.push(if quad_index == batch.quads.len(): "metal:success" else: "metal:failed")
                     if quad_index == batch.quads.len(): winner = "metal"
+                else:
+                    attempts.push("metal:unavailable")
             elif target == "opencl":
                 val active = self.opencl_backend
                 if active == nil:
@@ -1693,8 +1706,8 @@ class Engine2D with DrawIrRenderTarget:
                         self.last_vulkan_font_evidence = evidence
                         quad_index = 0
                         continue
-                    if ((evidence.device_executed or evidence.status == "recorded") and
-                        evidence.dispatch_count == batch.quads.len()):
+                    if engine2d_vulkan_font_batch_admits(evidence.status,
+                                evidence.quad_count, evidence.dispatch_count, batch.quads.len()):
                         quad_index = batch.quads.len()
                         winner = "vulkan"
                 else:
@@ -1938,9 +1951,7 @@ class Engine2D with DrawIrRenderTarget:
             val opencl = active_opencl
             opencl.invalidate_font_atlas()
             self.opencl_backend = opencl
-        val active_metal = self.metal_backend
-        if active_metal != nil:
-            val metal = active_metal
+        if val Some(metal) = self.metal_backend:
             metal.invalidate_font_atlas()
             self.metal_backend = Some(metal)
         val active_rocm = self.rocm_backend
@@ -2003,9 +2014,7 @@ class Engine2D with DrawIrRenderTarget:
             val opencl = active_opencl
             opencl.invalidate_font_atlas()
             self.opencl_backend = opencl
-        val active_metal = self.metal_backend
-        if active_metal != nil:
-            val metal = active_metal
+        if val Some(metal) = self.metal_backend:
             metal.invalidate_font_atlas()
             self.metal_backend = Some(metal)
         val active_rocm = self.rocm_backend
@@ -2612,13 +2621,16 @@ class Engine2D with DrawIrRenderTarget:
 
     me draw_metal_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
         """Blend child pixels only through the active checked Metal path."""
-        val active = self.metal_backend
-        if active == nil:
-            return false
-        val metal = active
-        val completed = metal.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
-        self.metal_backend = Some(metal)
-        completed
+        # Destructured binding, not `val metal = <optional>` — mirrors the
+        # vulkan twin above. Binding the whole Option and re-wrapping it with
+        # `Some(metal)` stored `Some(Some(backend))`, and every later
+        # `.session`-style access on the field then failed with
+        # "unknown property or method ... on Option".
+        if val Some(metal) = self.metal_backend:
+            val completed = metal.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
+            self.metal_backend = Some(metal)
+            return completed
+        false
 
     # Concrete-typed offscreen creator. Every branch already produces an
     # Engine2D (create_shared_vulkan_offscreen / create_shared_metal_offscreen /

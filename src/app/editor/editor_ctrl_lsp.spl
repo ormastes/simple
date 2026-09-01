@@ -2,7 +2,6 @@
 #
 # LSP requests, responses, code actions, formatting, rename, and result panel management.
 
-use std.io_runtime.{read_file_text, file_exists}
 use app.editor.editor_controller_types.*
 use app.editor.editor_controller.*
 use std.editor.buffer.buffer.*
@@ -218,7 +217,7 @@ fn ctrl_show_workspace_edit_preview(ctrl: mut EditorController, edit_json: text,
 fn ctrl_mark_workspace_edit_preview_conflicts(ctrl: mut EditorController):
     var rows: [LspResultRow] = []
     for row in ctrl.lsp_result_panel.rows:
-        if row.path != "" and not file_exists(row.path):
+        if row.path != "" and not rt_file_exists(row.path):
             rows.push(LspResultRow(
                 icon: "conflict",
                 label: row.label,
@@ -403,22 +402,13 @@ fn ctrl_apply_selected_lsp_selection_range(ctrl: mut EditorController) -> Editor
     if row.icon != "selection":
         ctrl.status_msg = "no selection range"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    var buffer = ctrl.session.active_buffer()
+    val buffer = ctrl.session.active_buffer()
     if buffer == nil:
         ctrl.status_msg = "no file open"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     val end_line = _editor_parse_i64(_editor_payload_part(row.command_payload, 0), row.line)
     val end_col = _editor_parse_i64(_editor_payload_part(row.command_payload, 1), row.col)
-    var preserved_ranges: [SelectionRangeDeco] = []
-    for existing in buffer.selection_ranges:
-        # Preserve only multi-selection ranges on OTHER line spans; a range on
-        # the same span is the previous expand/shrink step being replaced.
-        val same_span = existing.start_row == row.line and existing.end_row == end_line
-        if not same_span:
-            preserved_ranges.push(existing)
     buffer.set_primary_selection_range(row.line, row.col, end_line, end_col)
-    for preserved in preserved_ranges:
-        buffer.add_selection_range(preserved.start_row, preserved.start_col, preserved.end_row, preserved.end_col)
     buffer.move_cursor(row.line, row.col)
     ctrl.session.update_active_buffer(buffer)
     ctrl.status_msg = "selection range: " + (row.line + 1).to_text() + ":" + (row.col + 1).to_text() + "-" + (end_line + 1).to_text() + ":" + (end_col + 1).to_text()
@@ -505,7 +495,7 @@ fn ctrl_request_active_code_action(ctrl: mut EditorController) -> LspResponse:
     ctrl_request_active_lsp(ctrl, "code-action")
 
 fn ctrl_notify_lsp_file_changed(ctrl: mut EditorController, path: text, change_type: i64) -> EditorAction:
-    ctrl.vault_search_index = md_vault_search_index_apply_file_change(ctrl.vault_search_index, path, read_file_text(path), change_type)
+    ctrl.vault_search_index = md_vault_search_index_apply_file_change(ctrl.vault_search_index, path, rt_file_read_text(path) ?? "", change_type)
     var notified = false
     if ctrl.md_lsp_state.running:
         ctrl.md_lsp_state = md_lsp_notify_watched_file(ctrl.md_lsp_state, path, change_type)

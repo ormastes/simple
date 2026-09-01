@@ -77,8 +77,12 @@ pub const SDL3_FNS: &[(&str, Ret, &str)] = &[
 ];
 
 /// Look up a symbol's signature in the family table.
-fn signature_of(name: &str) -> Option<(Ret, &'static str)> {
-    SDL3_FNS.iter().find(|(n, _, _)| *n == name).map(|(_, r, a)| (*r, *a))
+fn signature_of(name: &str) -> Option<(usize, Ret, &'static str)> {
+    SDL3_FNS
+        .iter()
+        .enumerate()
+        .find(|(_, (n, _, _))| *n == name)
+        .map(|(index, (_, r, a))| (index, *r, *a))
 }
 
 /// Platform-specific satellite library file name.
@@ -116,6 +120,7 @@ fn candidate_paths() -> Vec<String> {
 }
 
 static HANDLE: AtomicUsize = AtomicUsize::new(0);
+static SYMBOLS: [AtomicUsize; SDL3_FNS.len()] = [const { AtomicUsize::new(0) }; SDL3_FNS.len()];
 static LOAD_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
 
 fn load_error_slot() -> &'static Mutex<String> {
@@ -152,10 +157,18 @@ fn library_handle() -> Result<usize, CompileError> {
 }
 
 /// Resolve a symbol address in the satellite library.
-fn symbol(name: &str) -> Result<usize, CompileError> {
+fn symbol(index: usize, name: &str) -> Result<usize, CompileError> {
+    let cached = SYMBOLS[index].load(Ordering::Relaxed);
+    if cached != 0 {
+        return Ok(cached);
+    }
     let handle = library_handle()?;
     match super::dl_compat::dlsym_compat(handle as *mut std::ffi::c_void, name) {
-        Some(addr) => Ok(addr as usize),
+        Some(addr) => {
+            let resolved = addr as usize;
+            SYMBOLS[index].store(resolved, Ordering::Relaxed);
+            Ok(resolved)
+        }
         None => Err(CompileError::runtime(format!(
             "SDL3 runtime library does not export '{name}'"
         ))),
@@ -202,7 +215,7 @@ unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char, symbol: &str) -> Resul
 /// which is what made a missing registration look like a missing
 /// capability.
 pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
-    let Some((ret, spec)) = signature_of(name) else {
+    let Some((index, ret, spec)) = signature_of(name) else {
         return Err(CompileError::runtime(format!("unknown SDL3 extern function: {name}")));
     };
 
@@ -237,7 +250,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         }
     }
 
-    let fptr = symbol(name)?;
+    let fptr = symbol(index, name)?;
     let n = raw.len();
 
     // Safety: `fptr` came from dlsym on the satellite built from

@@ -89,7 +89,7 @@ fn parse_danger_block_retains_unsafe_boundary() {
     let Node::Function(function) = &items[0] else {
         panic!("expected function");
     };
-    let Node::Expression(Expr::UnsafeBlock(body)) = &function.body.statements[0] else {
+    let Node::Expression(Expr::UnsafeBlock(body, _)) = &function.body.statements[0] else {
         panic!("expected retained unsafe boundary");
     };
     assert!(matches!(&body[0], Node::If(_)));
@@ -103,7 +103,7 @@ fn parse_terminal_danger_block_keeps_all_statements() {
         panic!("expected function");
     };
     assert_eq!(function.body.statements.len(), 1);
-    let Node::Expression(Expr::UnsafeBlock(body)) = &function.body.statements[0] else {
+    let Node::Expression(Expr::UnsafeBlock(body, _)) = &function.body.statements[0] else {
         panic!("expected retained unsafe boundary");
     };
     assert_eq!(body.len(), 2);

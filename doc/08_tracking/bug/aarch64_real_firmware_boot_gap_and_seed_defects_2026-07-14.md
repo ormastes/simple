@@ -1,8 +1,5 @@
 # aarch64 SimpleOS: real-firmware boot gap + 2 seed/driver defects (launch sanity, 2026-07-14)
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 Found by Lane LAUNCH-OS-AARCH64 doing a real launch sanity check. The aarch64
 kernel boot gate (loader + FS-exec staging) reproduces GREEN
 (`ARM64_SIMPLE_TOOL_GATE_PASS` / `TEST PASSED`, `e_machine=183`, QEMU self-exit

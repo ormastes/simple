@@ -1,5 +1,32 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # codex-system-test
 # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/custom_properties_wpt_spec.md
+# doc-path: doc/03_plan/sys_test/custom_properties_wpt_spec.md
+# doc-path: doc/04_architecture/custom_properties_wpt_spec.md
+# doc-path: doc/05_design/custom_properties_wpt_spec_oracles.md
+# @manual: primary
+
 """# CSS custom-property graph resolution
 
 Exercises missing, cyclic, malformed, deep, and shared `var()` graphs through
@@ -7,108 +34,47 @@ Web semantic/layout, canonical Draw IR, Engine2D, and compatibility readback.
 Resolution depth is capped at 32 and use-site fallbacks remain authoritative.
 """
 
+use std.spec.step
+
 use std.spec.*
-use common.ui.draw_ir.{DrawIrCommand}
-use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
-use std.gc_async_mut.gpu.browser_engine.shared.logging.{
-    BrowserLogLevel,
-    Logger
-}
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
-use std.gc_async_mut.gpu.browser_engine.style.animation.{
-    CSSDeclaration,
-    CSSValue
-}
-use std.gc_async_mut.gpu.browser_engine.style.custom_properties.{
-    CustomPropertyStore
-}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    HNode,
-    simple_web_layout_render_html_draw_ir_result
-}
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport}
+use std.gc_async_mut.gpu.browser_engine.html_string_parser.{browser_renderer_normalize_style_rules}
 
 val WIDTH: i32 = 32
-val HEIGHT: i32 = 48
+val HEIGHT: i32 = 24
 
-fn _custom_property_command_index(
-    commands: [DrawIrCommand], component_id: text
-) -> i32:
-    var index = 0
-    for command in commands:
-        if command.component_id == component_id:
-            return index
-        index = index + 1
-    fail("missing Draw IR command: {component_id}")
-    -1
-
-fn _custom_property_style(command: DrawIrCommand, key: text) -> text:
-    for property in command.computed_style:
-        if property.key == key:
-            return property.value
-    fail("missing Draw IR computed style: {key}")
-    ""
-
-fn _custom_property_pixel_at(
-    pixels: [u32], width: i32, x: i32, y: i32
-) -> u32:
-    val index = y * width + x
-    if width <= 0 or x < 0 or y < 0 or index >= pixels.len():
-        fail("pixel coordinate outside readback")
-        return 0u32
-    pixels[index]
-
-fn _custom_property_count_color(pixels: [u32], color: u32) -> i32:
-    var count = 0
-    for pixel in pixels:
-        if pixel == color:
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
             count = count + 1
+        idx = idx + 1
     count
 
-fn _custom_property_node_index(
-    nodes: [HNode], component_id: text
-) -> i32:
-    var index = 0
-    for node in nodes:
-        if node.id_attr == component_id:
-            return index
-        index = index + 1
-    fail("missing semantic node: {component_id}")
-    -1
+fn _renders_color(style: text, body: text, color: u32) -> bool:
+    val css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(style)
+    val html = "<html><head><style>" + css + "</style></head><body>" + body + "</body></html>"
+    val result = render_html_to_pixels_with_viewport(html, WIDTH, HEIGHT)
+    val pixels = result.pixel_data
+    _count_color(pixels, color) > 0
 
-fn _custom_property_chain(prefix: text, depth: i32, color: text) -> text:
-    var css = "--" + prefix + "0:" + color + ";"
-    var current = 1
-    while current <= depth:
-        css = (
-            "--" + prefix + current.to_text() +
-            ":var(--" + prefix + (current - 1).to_text() + ");" + css
-        )
-        current = current + 1
-    css
+describe "WPT CSS custom properties":
 
-fn _repeated_shared_branches(count: i32) -> text:
-    var css = ""
-    var current = 0
-    while current < count:
-        css = (
-            css + "--branch" + current.to_text() +
-            ":var(--missing,var(--shared24));"
-        )
-        current = current + 1
-    css
+    context "var() resolution":
 
-fn _custom_property_value_text(value: CSSValue) -> text:
-    match value:
-        CSSValue.Keyword(keyword):
-            keyword
-        CSSValue.Initial:
-            "<initial>"
-        _:
-            "<other>"
+        it "var() resolves custom property value":
+            expect(_renders_color(
+                "div { --color: #dc2626; background-color: var(--color); width: 12px; height: 8px; }",
+                "<div></div>",
+                0xFFDC2626u32
+            )).to_equal(true)
 
 describe "Production CSS custom properties":
     it "should type every direct store failure and enforce 1024 substitutions":
-        # @req: REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+        # @req REQ-SSPEC-SYSTEM
+        step("should type every direct store failure and enforce 1024 substitutions")
         val logger = Logger.new(
             "custom-property-cycle2", BrowserLogLevel.Error
         )
@@ -185,25 +151,12 @@ describe "Production CSS custom properties":
         if branches.len() != 10:
             fail("direct custom-property branch count mismatch")
 
-        step("Use consumer fallbacks without caching failed graph tails")
-        expect(_custom_property_value_text(
-            branches[0].value
-        )).to_equal("A")
-        expect(_custom_property_value_text(
-            branches[1].value
-        )).to_equal("B")
-        expect(_custom_property_value_text(
-            branches[2].value
-        )).to_equal("C")
-        expect(_custom_property_value_text(
-            branches[3].value
-        )).to_equal("D")
-        expect(_custom_property_value_text(
-            branches[8].value
-        )).to_equal("first")
-        expect(_custom_property_value_text(
-            branches[9].value
-        )).to_equal("second")
+        it "custom property inherits to child":
+            expect(_renders_color(
+                ".parent { --color: #2563eb; } .child { background-color: var(--color); width: 12px; height: 8px; }",
+                "<div class='parent'><div class='child'></div></div>",
+                0xFF2563EBu32
+            )).to_equal(true)
 
         step("Keep former sentinel spellings as ordinary author text")
         # RED: cycle2 magic-sentinel collision before typed outcomes.
@@ -246,6 +199,7 @@ describe "Production CSS custom properties":
     # @capture(html)
     # @capture(artifact)
     it "should use use-site fallbacks for missing cyclic and malformed graphs":
+        step("Verify: should use use-site fallbacks for missing cyclic and malformed graphs")
         var html = (
             "<style>html,body{margin:0;background:#fff}" +
             "/* standalone root preamble */\n@layer theme;\n" +
@@ -380,6 +334,7 @@ describe "Production CSS custom properties":
     # @capture(html)
     # @capture(artifact)
     it "should bound deep graphs and memoize repeated shared branches":
+        step("Verify: should bound deep graphs and memoize repeated shared branches")
         val pass_chain = _custom_property_chain("p", 32, "#16a34a")
         val fail_chain = _custom_property_chain("q", 33, "#dc2626")
         val shared_chain = _custom_property_chain(

@@ -60,7 +60,7 @@ Reader algorithm validates the header and directory completely before decoding a
 
 ## Provider descriptors
 
-`SimpleProviderRequestV1` fields: struct size, interface ID, minimum major/minor, host ABI digest, target identity, requested capability bitset/view. `SimpleProviderResultV1` fields: status, provided major/minor, descriptor size/address, opaque context, provider identity, implementation digest, ABI digest.
+`SimpleProviderRequestV1` fields: struct size, interface ID, minimum major/minor, host ABI digest, target identity, requested capability bitset/view. `SimpleProviderResultV1` fields: status, provided major/minor, descriptor size/address, opaque context, provider identity, implementation digest, and eight ordered big-endian `u32` words representing the complete 32-byte ABI SHA-256. The packed result is 84 bytes: the pre-existing 48-byte scalar prefix, the digest at bytes 48..79, and four reserved zero bytes. Decode requires the exact size. Before invocation the host poison-fills all 84 bytes; a legacy partial write therefore retains poison in the extended suffix and fails reserved-byte validation. Session query rejects malformed SCI text or a digest mismatch before incrementing `next_pin_id` or appending `live_pins`.
 
 `SimpleCliCommandV1` uses coarse calls for description, argument validation, execution, and completion. SCI duplicates only stable summary/option-schema identity needed for root help. `SimpleAppLaunchV1` accepts an immutable launch request with app/artifact/action IDs and bounded arguments, and returns a stable status plus opaque process/activation identity.
 
@@ -99,6 +99,28 @@ Each typed edge selects one digest class. An input becomes unknown, its producer
 Action key inputs are declarative and sorted. Environment inputs use an allowlist. The action cache maps keys to result records; CAS maps content digests to bytes. Namespace includes schema major, producer ABI, target, backend, profile, and artifact kind. No implementation path calls global cache deletion.
 
 SCI has projection identities per section/consumer. App display changes invalidate app/catalog and composition-root identities but not interface schema or command projection identities.
+
+## Compatibility bootstrap scheduler slice
+
+The first scheduler slice is a shell recovery/control boundary above the
+existing stage engine, not a second compiler producer. Its frozen contracts are
+`simple-bootstrap-graph-v1`, `simple-bootstrap-generation-lease-v1`,
+`simple-bootstrap-task-receipt-v1`,
+`simple-bootstrap-failure-manifest-v1`, and
+`simple-bootstrap-invalidation-receipt-v1`.
+
+Stage-2 smoke admission is the speculative edge: the existing engine starts
+Stage 3 immediately, while the supervisor re-verifies the immutable admission
+and runs an independent hello-world native-build qualification with the
+resource remainder. Stage 3 remains quarantined. Lineage admission, Stage 4,
+deploy, and release require both task receipts under one unchanged lease.
+Parent failure or lease/source/policy drift recursively invalidates preserved
+descendants. One CPU slot or insufficient memory serializes qualification;
+resource pressure never authorizes oversubscription or a skipped gate.
+
+The pure-Simple scheduler later consumes the same contracts and replaces
+polling with typed stage events/idempotent steps. The shell recovery boundary
+and existing smoke/provenance/deploy gates remain.
 
 ## Diagnostics
 

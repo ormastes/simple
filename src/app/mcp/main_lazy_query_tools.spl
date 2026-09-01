@@ -12,7 +12,8 @@
 # `main()` (server never starts). The context pack is generated via a `bin/simple
 # context` subprocess below instead. See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
-use app.ponytail.audit.{ponytail_audit, ponytail_simplification_report}
+use app.ponytail.audit.{ponytail_audit, ponytail_simplification_report, ponytail_debt}
+use std.common.token_budget.{smart_truncate_bytes}
 use std.io_runtime.{env_get, file_exists, file_read}
 use std.string_core.{char_from_code}
 use .main_lazy_json.{mcp_run_argv}
@@ -374,16 +375,22 @@ fn handle_simple_ponytail(id: text, body: text) -> text:
         return make_tool_error(id, -32602, "Missing required parameter: file")
     if format != "text" and format != "markdown" and format != "json":
         return make_tool_error(id, -32602, "Invalid format: " + format)
-    if mode != "audit" and mode != "simplification":
+    if mode == "ledger":
+        mode = "debt"
+    if mode != "audit" and mode != "simplification" and mode != "debt":
         return make_tool_error(id, -32602, "Invalid mode: " + mode)
     var result = ""
     if mode == "simplification":
         result = ponytail_simplification_report(file)
+    elif mode == "debt":
+        result = ponytail_debt(file)
     else:
         result = ponytail_audit(file)
     if result == "":
         return make_tool_error(id, -32602, "Could not read file: " + file)
-    make_tool_result(id, _render_ponytail_mcp(file, mode, result, format))
+    # Cap what reaches the model's context window; head+tail keeps the counts
+    # line and the last findings, which is what a caller reads first.
+    make_tool_result(id, _render_ponytail_mcp(file, mode, smart_truncate_bytes(result, 32768), format))
 
 fn handle_simple_pipe(id: text, body: text) -> text:
     var surface = extract_field(body, "surface")

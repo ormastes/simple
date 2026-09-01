@@ -1,8 +1,5 @@
 # Deployed self-hosted binary: interpret-mode extern registration + baked module table constraints
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 ## Status
 Documented (platform facts, not a single fixable bug) — informs how new
 runtime capability must be shipped until the underlying constraints change.

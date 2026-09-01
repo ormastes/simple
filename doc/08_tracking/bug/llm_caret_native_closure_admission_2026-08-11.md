@@ -51,3 +51,14 @@ direct gate exits 1 with `failure_class=release_gate`.
 2. The resulting artifact is installed with provenance for `bin/caret`.
 3. Cached CLI, cached plain hidden-CLI, and PTY TUI system checks pass with
    retained output and ANSI evidence.
+
+## 2026-08-27: pre-existing RED confirmed during SSDOC-TRC-003 fix
+
+test/03_system/app/llm_caret/feature/llm_caret_native_closure_spec.spl scores
+49 -> 89 after repairing the mangled `# @req` block and binding
+NFR-LLM-CARET-TUI-006 (comment-only edit, no behavior change). The spec is RED
+before and after: `Results: 2 total, 0 passed, 2 failed`, both scenarios fail
+with `expected 1 to equal 0` — check-llm-caret-native-closure.shs exits 1 on
+this host. Proven pre-existing via in-place `git show HEAD:` restore
+(identical Results). Left RED. Mutation check (to_equal(0)->to_equal(7)) also
+reports 0/2 as expected but is weak evidence since the spec already fails.

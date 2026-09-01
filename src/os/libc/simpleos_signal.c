@@ -1,8 +1,10 @@
 /*
  * SimpleOS Libc Shim — Signal handling
  *
- * Provides signal handler registration and dispatch, signal set operations,
- * and kill/raise. Single-threaded; sigprocmask is a no-op.
+ * Provides signal set operations and kernel delivery through kill/raise.
+ * Kernel-owned disposition registration, user trampolines, and mask/pending
+ * delivery are not available, so those APIs fail closed rather than retain
+ * inert C-local state.
  *
  * Signal numbers match src/os/posix/signal_compat.spl and <signal.h>.
  * Syscall 7 = Kill(pid, sig).
@@ -20,24 +22,7 @@ extern int errno;
 #define MAX_SIGNALS 32
 
 /* ====================================================================
- * Signal action table
- * ==================================================================== */
-
-static struct sigaction _sig_actions[MAX_SIGNALS];
-static int _sig_initialized = 0;
-
-static void _init_signals(void) {
-    if (_sig_initialized) return;
-    for (int i = 0; i < MAX_SIGNALS; i++) {
-        _sig_actions[i].sa_handler = SIG_DFL;
-        sigemptyset(&_sig_actions[i].sa_mask);
-        _sig_actions[i].sa_flags = 0;
-    }
-    _sig_initialized = 1;
-}
-
-/* ====================================================================
- * signal() — simple handler registration (returns old handler)
+ * signal()/sigaction — unavailable without a kernel disposition owner
  * ==================================================================== */
 
 typedef void (*sighandler_t)(int);
@@ -45,10 +30,9 @@ typedef void (*sighandler_t)(int);
 sighandler_t signal(int signum, sighandler_t handler) {
     if (signum < 1 || signum >= MAX_SIGNALS) { errno = EINVAL; return SIG_ERR; }
     if (signum == SIGKILL || signum == SIGSTOP) { errno = EINVAL; return SIG_ERR; }
-    _init_signals();
-    sighandler_t old = _sig_actions[signum].sa_handler;
-    _sig_actions[signum].sa_handler = handler;
-    return old;
+    (void)handler;
+    errno = ENOSYS;
+    return SIG_ERR;
 }
 
 /* ====================================================================
@@ -59,10 +43,13 @@ int sigaction(int signum, const struct sigaction *act,
               struct sigaction *oldact) {
     if (signum < 1 || signum >= MAX_SIGNALS) { errno = EINVAL; return -1; }
     if (signum == SIGKILL || signum == SIGSTOP) { errno = EINVAL; return -1; }
-    _init_signals();
-    if (oldact) *oldact = _sig_actions[signum];
-    if (act)    _sig_actions[signum] = *act;
-    return 0;
+    /* The dispatch owner cannot install or report handler/default/ignore,
+     * masked delivery, restart, alt-stack, or reset semantics. Reporting a
+     * made-up default action is just as unsafe as accepting a new handler. */
+    (void)act;
+    (void)oldact;
+    errno = ENOSYS;
+    return -1;
 }
 
 /* ====================================================================
@@ -70,39 +57,50 @@ int sigaction(int signum, const struct sigaction *act,
  * ==================================================================== */
 
 int sigemptyset(sigset_t *set) {
+    if (!set) { errno = EFAULT; return -1; }
     set->__bits[0] = 0;
     return 0;
 }
 
 int sigfillset(sigset_t *set) {
+    if (!set) { errno = EFAULT; return -1; }
     set->__bits[0] = ~0UL;
     return 0;
 }
 
 int sigaddset(sigset_t *set, int signum) {
+    if (!set) { errno = EFAULT; return -1; }
     if (signum < 1 || signum >= MAX_SIGNALS) { errno = EINVAL; return -1; }
     set->__bits[0] |= (1UL << signum);
     return 0;
 }
 
 int sigdelset(sigset_t *set, int signum) {
+    if (!set) { errno = EFAULT; return -1; }
     if (signum < 1 || signum >= MAX_SIGNALS) { errno = EINVAL; return -1; }
     set->__bits[0] &= ~(1UL << signum);
     return 0;
 }
 
 int sigismember(const sigset_t *set, int signum) {
+    if (!set) { errno = EFAULT; return -1; }
     if (signum < 1 || signum >= MAX_SIGNALS) { errno = EINVAL; return -1; }
     return (set->__bits[0] >> signum) & 1;
 }
 
 /* ====================================================================
- * sigprocmask — no-op (single-threaded)
+ * sigprocmask — query-only until the kernel owns masking and pending delivery
  * ==================================================================== */
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    (void)how; (void)set; (void)oldset;
-    return 0;
+    if (how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK) {
+        errno = EINVAL;
+        return -1;
+    }
+    (void)set;
+    (void)oldset;
+    errno = ENOSYS;
+    return -1;
 }
 
 /*
@@ -146,9 +144,4 @@ int kill(pid_t pid, int sig) {
 
 int raise(int sig) {
     return kill(getpid(), sig);
-}
-
-char *strsignal(int sig) {
-    (void)sig;
-    return (char *)"Signal";
 }

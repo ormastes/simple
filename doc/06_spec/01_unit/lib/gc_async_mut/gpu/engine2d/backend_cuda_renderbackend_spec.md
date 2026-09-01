@@ -27,7 +27,7 @@ backend_cuda_renderbackend_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -393,8 +393,8 @@ when a replacement session is offered.
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl` |
-| Updated | 2026-07-15 (manual static synchronization) |
-| Generator | `simple spipe-docgen` baseline; manual addendum pending docgen |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -405,8 +405,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

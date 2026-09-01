@@ -31,6 +31,7 @@
 
 pub struct RawRtAccessFinding:
     code: text
+    kind: text
     severity: text
     message: text
     name: text
@@ -128,36 +129,25 @@ fn _rra_leading_indent(line: text) -> i64:
 
 pub fn raw_rt_wrapper_replacement(name: text) -> text:
     """Canonical wrapper name when a mechanical call rename is known."""
-    # Only signature-identical mappings belong here. Nullable file/env and
-    # recursive-dir wrappers deliberately remain hints, not mechanical edits.
+    # These mappings are signature-identical across the canonical facades.
+    # Nullable environment reads and recursive-dir wrappers deliberately remain
+    # hints, not mechanical edits.
     if name == "rt_process_run": return "process_run"
-    if name == "rt_readdir": return "directory_stream_open"
-    if name == "rt_readdir_count": return "directory_stream_count"
-    if name == "rt_readdir_entry": return "directory_stream_entry"
-    if name == "rt_readdir_free": return "directory_stream_close"
-    if name == "rt_remove": return "directory_remove"
-    ""
-
-pub fn raw_rt_wrapper_module(name: text) -> text:
-    """Canonical module that owns a known signature-identical wrapper."""
-    if name == "rt_process_run": return "app.io.mod"
-    if (name == "rt_readdir" or name == "rt_readdir_count" or
-        name == "rt_readdir_entry" or name == "rt_readdir_free" or
-        name == "rt_remove"):
-        return "std.nogc_sync_mut.io.dir_entry_ops"
+    if name == "rt_env_set": return "env_set"
     ""
 
 fn _rra_fix_note(name: text) -> text:
     val wrapper = raw_rt_wrapper_replacement(name)
+    if name == "rt_process_run":
+        return "replace `rt_process_run(...)` with `process_run(...)` from the canonical std/app I/O facade; it preserves `(stdout, stderr, i64 exit_code)` transport; `simple lint --fix` applies this rename only when `process_run` is already imported"
+    if name == "rt_env_set":
+        return "replace `rt_env_set(...)` with `env_set(...)` from the canonical std/app I/O facade; it preserves the boolean mutation status; `simple lint --fix` applies this rename only when `env_set` is already imported"
     if wrapper != "":
-        val module_name = raw_rt_wrapper_module(name)
-        return "replace `{name}(...)` with `{wrapper}(...)` from `{module_name}`; `simple lint --fix` applies this signature-preserving rename when `{wrapper}` is already imported and unshadowed"
-    if name == "rt_file_read_text":
-        return "use `file_read_text` from `std.nogc_sync_mut.io.file_ops` (or the owning app I/O facade); no automatic edit is offered because the raw and facade return contracts can differ"
+        return "replace `{name}(...)` with `{wrapper}(...)` from the canonical std/app I/O facade; `simple lint --fix` applies this rename when `{wrapper}` is already imported"
     if name == "rt_env_get":
-        return "use nullable `env_get_opt` from `std.io_runtime`; use nonnullable `env_get` only when collapsing unset to empty text is intentional; no automatic edit is offered because that choice is semantic"
-    if name == "rt_mkdir":
-        return "use `directory_create_mode(path, mode)` from `std.nogc_sync_mut.io.dir_entry_ops` when preserving the raw mode/status contract, or the higher-level `dir_create` facade for boolean/default-mode semantics; no automatic edit is offered because existing `rt_mkdir` signatures differ"
+        return "use `env_get_nullable` from `std.nogc_sync_mut.io_runtime` for exact `text?` transport (including explicitly empty values); choose `env_get_opt` only when empty and absent are intentionally equivalent; `simple lint --fix` keeps this warning-only because return contracts differ"
+    if name == "rt_file_read_text":
+        return "use `file_read_text` from the canonical std/app I/O facade; `simple lint --fix` keeps this as a warning-only migration because nullable return contracts can differ"
     "route `{name}` through its std semantic facade; if none exists, create a provider wrapper instead of a product-side rt_* alias"
 
 class RawRtLexState:
@@ -250,44 +240,12 @@ pub fn raw_rt_lexical_code_lines(source: text) -> [text]:
         result.push(state.clean_line(raw_line))
     result
 
-pub fn raw_rt_wrapper_binding_is_unshadowed(source: text, wrapper: text) -> bool:
-    """Conservatively prove that a bare wrapper resolves to one import."""
-    var state = RawRtLexState.new()
-    var import_mentions = 0
-    for raw_line in source.split("\n"):
-        val code_line = state.scan_line(raw_line)
-        val t = code_line.trim()
-        val is_import_line = t.starts_with("use ") or t.starts_with("export use ")
-        var search_from = 0
-        while search_from + wrapper.len() <= code_line.len():
-            val tail = code_line.substring(search_from, code_line.len())
-            val relative = tail.find(wrapper)
-            if relative < 0:
-                break
-            val at = search_from + relative
-            val before_ok = at == 0 or not _rra_is_ident_char(code_line.substring(at - 1, at))
-            val after = at + wrapper.len()
-            val after_ok = after >= code_line.len() or not _rra_is_ident_char(code_line.substring(after, after + 1))
-            if before_ok and after_ok:
-                if is_import_line:
-                    import_mentions = import_mentions + 1
-                else:
-                    return false
-            search_from = at + wrapper.len()
-    import_mentions == 1
-
-fn _rra_first_call_in_position(line: text) -> (text, i64):
-    # Public contract emits one finding per line. Jump between the rare rt_
-    # candidates rather than allocating a names array and walking every byte.
-    var search_from = 0
-    while search_from + 3 < line.len():
-        val tail = line.substring(search_from, line.len())
-        val relative = tail.find("rt_")
-        if relative < 0:
-            return ("", 0)
-        val i = search_from + relative
+fn _rra_names_in_call_position(line: text) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i + 3 < line.len():
         val boundary_ok = i == 0 or not _rra_is_ident_char(line.substring(i - 1, i))
-        if boundary_ok:
+        if boundary_ok and line.substring(i, i + 3) == "rt_":
             var j = i + 3
             while j < line.len() and _rra_is_ident_char(line.substring(j, j + 1)):
                 j = j + 1
@@ -295,54 +253,43 @@ fn _rra_first_call_in_position(line: text) -> (text, i64):
             while k < line.len() and line.substring(k, k + 1) == " ":
                 k = k + 1
             if j > i + 3 and k < line.len() and line.substring(k, k + 1) == "(":
-                return (line.substring(i, j), i + 1)
-        search_from = i + 3
-    ("", 0)
+                names.push(line.substring(i, j))
+            i = j
+        else:
+            i = i + 1
+    names
 
-fn _rra_first_direct_import_name(line: text, import_context: bool) -> text:
+fn _rra_call_column(line: text, wanted: text) -> i64:
+    var i = 0
+    while i + wanted.len() <= line.len():
+        val boundary_ok = i == 0 or not _rra_is_ident_char(line.substring(i - 1, i))
+        if boundary_ok and line.substring(i, i + wanted.len()) == wanted:
+            val end = i + wanted.len()
+            var k = end
+            while k < line.len() and line.substring(k, k + 1) == " ":
+                k = k + 1
+            if k < line.len() and line.substring(k, k + 1) == "(":
+                return i + 1
+        i = i + 1
+    0
+
+fn _rra_direct_import_names(line: text, import_context: bool) -> [text]:
+    var names: [text] = []
     val t = line.trim()
     if not import_context and not t.starts_with("use ") and not t.starts_with("export use "):
-        return ""
-    # Search imported items only. For an unbraced import the final dotted
-    # component is the imported binding; earlier rt_-looking path components
-    # identify an owner rather than a directly imported runtime symbol.
-    var candidate = line
-    if t.starts_with("use ") or t.starts_with("export use "):
-        val brace = line.find("{")
-        if brace >= 0:
-            candidate = line.substring(brace + 1, line.len())
-        else:
-            val paren = line.find("(")
-            if paren >= 0:
-                candidate = line.substring(paren + 1, line.len())
-            else:
-                var candidate_end = line.len()
-                val alias = line.find(" as ")
-                if alias >= 0:
-                    candidate_end = alias
-                var candidate_start = 0
-                var i = 0
-                while i < candidate_end:
-                    if line.substring(i, i + 1) == ".":
-                        candidate_start = i + 1
-                    i = i + 1
-                candidate = line.substring(candidate_start, candidate_end)
-    var search_from = 0
-    while search_from + 3 < candidate.len():
-        val tail = candidate.substring(search_from, candidate.len())
-        val relative = tail.find("rt_")
-        if relative < 0:
-            return ""
-        val i = search_from + relative
-        val boundary_ok = i == 0 or not _rra_is_ident_char(candidate.substring(i - 1, i))
-        if boundary_ok:
+        return names
+    var i = 0
+    while i + 3 < line.len():
+        val boundary_ok = i == 0 or not _rra_is_ident_char(line.substring(i - 1, i))
+        if boundary_ok and line.substring(i, i + 3) == "rt_":
             var j = i + 3
-            while j < candidate.len() and _rra_is_ident_char(candidate.substring(j, j + 1)):
+            while j < line.len() and _rra_is_ident_char(line.substring(j, j + 1)):
                 j = j + 1
-            if j > i + 3:
-                return candidate.substring(i, j)
-        search_from = i + 3
-    ""
+            names.push(line.substring(i, j))
+            i = j
+        else:
+            i = i + 1
+    names
 
 # ============================================================================
 # Main Entry Point
@@ -358,24 +305,21 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
     var findings: [RawRtAccessFinding] = []
     if raw_rt_provider_allowlist_allows(file_path, allowlist):
         return findings
+    if _rra_marks_runtime_intrinsics(source):
+        return findings
     # Dominant fast path: avoid line splitting and lexical work for ordinary
     # files. `contains` is the only added scan in this case.
     if not source.contains("rt_"):
         return findings
-    if _rra_marks_runtime_intrinsics(source):
-        return findings
 
-    # Stream the lexical projection; do not allocate a second cleaned full-file
-    # array only to iterate it once.
-    val lines = source.split("\n")
-    var lex_state = RawRtLexState.new()
+    val lines = raw_rt_lexical_code_lines(source)
     var line_num = 0
     var in_selective_import = false
     var pending_ffi_declaration = false
     var ffi_block_indent = -1
-    for raw_line in lines:
+    for line in lines:
         line_num = line_num + 1
-        val code_line = lex_state.scan_line(raw_line)
+        val code_line = line
         val t = code_line.trim()
         val indent = _rra_leading_indent(code_line)
         if t != "" and ffi_block_indent >= 0 and indent <= ffi_block_indent:
@@ -390,10 +334,9 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
             continue
         if not code_line.contains("rt_"):
             val starts_import = t.starts_with("use ") or t.starts_with("export use ")
-            if starts_import and ((code_line.contains("{") and not code_line.contains("}")) or
-                                  (code_line.contains("(") and not code_line.contains(")"))):
+            if starts_import and code_line.contains("{") and not code_line.contains("}"):
                 in_selective_import = true
-            if in_selective_import and (code_line.contains("}") or code_line.contains(")")):
+            if in_selective_import and code_line.contains("}"):
                 in_selective_import = false
             if t != "" and not t.starts_with("@"):
                 pending_ffi_declaration = false
@@ -404,7 +347,7 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
             pending_ffi_declaration = false
             if name.starts_with("rt_") and not acknowledged_unsafe:
                 findings.push(RawRtAccessFinding(
-                    code: "RAW-RT-001", severity: "WARNING",
+                    code: "RAW-RT-001", kind: "declaration", severity: "WARNING",
                     message: "product code must not declare raw runtime intrinsic `{name}` directly",
                     name: name, note: _rra_fix_note(name), line_num: line_num,
                     column: code_line.find(name) + 1
@@ -418,7 +361,7 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
             val stop = tail.find("(")
             val name = if stop > 0: tail.substring(0, stop).trim() else: "rt_alias"
             findings.push(RawRtAccessFinding(
-                code: "RAW-RT-003", severity: "WARNING",
+                code: "RAW-RT-003", kind: "alias", severity: "WARNING",
                 message: "product-side runtime alias `{name}` is removed; expose a semantic wrapper instead",
                 name: name, note: _rra_fix_note(name), line_num: line_num,
                 column: code_line.find(name) + 1
@@ -426,30 +369,29 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
             continue
         val starts_import = t.starts_with("use ") or t.starts_with("export use ")
         val import_context = starts_import or in_selective_import
-        if starts_import and ((code_line.contains("{") and not code_line.contains("}")) or
-                              (code_line.contains("(") and not code_line.contains(")"))):
+        if starts_import and code_line.contains("{") and not code_line.contains("}"):
             in_selective_import = true
-        val import_name = _rra_first_direct_import_name(code_line, import_context)
-        if in_selective_import and (code_line.contains("}") or code_line.contains(")")):
+        val import_names = _rra_direct_import_names(code_line, import_context)
+        if in_selective_import and code_line.contains("}"):
             in_selective_import = false
-        if import_name != "":
-            val name = import_name
+        if import_names.len() > 0:
+            val name = import_names[0]
             findings.push(RawRtAccessFinding(
-                code: "RAW-RT-002", severity: "WARNING",
+                code: "RAW-RT-002", kind: "import", severity: "WARNING",
                 message: "product code imports raw runtime intrinsic `{name}` directly",
                 name: name, note: _rra_fix_note(name), line_num: line_num,
                 column: code_line.find(name) + 1
             ))
             continue
-        val (call_name, call_column) = _rra_first_call_in_position(code_line)
+        val call_names = _rra_names_in_call_position(code_line)
         val inside_ffi_block = ffi_block_indent >= 0 and indent > ffi_block_indent
-        if call_name != "" and not inside_ffi_block:
-            val name = call_name
+        if call_names.len() > 0 and not inside_ffi_block:
+            val name = call_names[0]
             findings.push(RawRtAccessFinding(
-                code: "RAW-RT-002", severity: "WARNING",
+                code: "RAW-RT-002", kind: "call", severity: "WARNING",
                 message: "product code calls raw runtime intrinsic `{name}` directly",
                 name: name, note: _rra_fix_note(name), line_num: line_num,
-                column: call_column
+                column: _rra_call_column(code_line, name)
             ))
     findings
 

@@ -29,48 +29,12 @@ is what the honest bit-level gate uses (pure-Simple ≡ Chromium OSR, `mismatch=
 Pure-Simple pixel artifacts stamp their `engine2d_backend` from the same
 Engine2D `auto` resolution path used for rendering; do not hard-code default
 artifact provenance as `software`.
-Pure-Simple GPU paint is opt-in with `SIMPLE_WEB_GPU_PAINT=1`. The default path
-uploads the completed CPU layout image to Engine2D because small or residual-heavy
-pages can lose more time to command/upload/readback traffic than they save on
-device fill work. `web_gpu_paint_economics(frame, base)` is the local decision
-helper: it compares total CPU paint plus upload/readback cost against primitive
-fill commands plus residual upload cost, and only returns an offload win when
-estimated total work is lower. A losing opt-in job returns the CPU mirror
-without initializing the requested GPU backend. Solid-only pages retain only
-fill ops so successful offload does no duplicate CPU framebuffer raster;
-mixed pages still keep CPU ground truth for residual parity. The forced GPU paint path
-predicts the residual from the local fill list, so it avoids an extra full-frame
-GPU readback before the final pixel-returning API readback. The deterministic
-policy gate is
-`test/05_perf/web_render_chrome/web_gpu_paint_offload_matrix_spec.spl`.
 The browser backend keeps a retained one-entry pixel artifact cache for
 unchanged static full HTML at the same viewport and resolved backend. Requests
 with `data-simple-dynamic`, `data-live`, `data-ui-patch`, or WebSocket JS bypass
 that retained cache and render directly.
 `show_live_window` opens each backend's native window (chromium = live DOM;
 pure_simple has no live shell and returns false so the caller presents pixels).
-
-## WebGPU evidence boundary
-
-`WebRenderBackend("chromium")` is not the Chrome WebGPU proof path. It renders
-HTML through Electron offscreen and returns comparable pixels for web-renderer
-parity. Use `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence`
-and `tools/web-render-backend/chromium-webgpu-draw/` when the requirement is
-Chrome/Electron WebGPU drawing. That wrapper reports either positive adapter,
-non-fallback adapter, device, pipeline, draw, capture, and pixel evidence, or a
-deterministic `host-unavailable:*` status without falling back to Simple
-software replay. For WASM-originated Simple3D evidence, use
-`chrome_webgpu_draw_wasm_simple3d_triangle_payload_evidence`; it parses
-`simple3d:canvas:w,h:triangle:x1,y1,z1,x2,y2,z2,x3,y3,z3:rgba:r,g,b,a`,
-converts RGB to `#rrggbb`, and records payload byte/checksum provenance even
-when the host reports unavailable WebGPU.
-
-For in-process browser Simple-script drawing evidence, use
-`canvas_get_context_simple2d` or `canvas_get_context_simple3d` from
-`std.gc_async_mut.gpu.browser_engine.script.canvas_api`. Those facades prove the
-Simple browser command capture and software-replayed WebGPU submit path. The
-Simple3D facade records scene payload bytes/checksum and submission counters; it
-does not prove Chrome/Electron hardware-backed WebGPU pixels.
 
 ## Running the sample (macOS)
 
@@ -101,20 +65,6 @@ Use two **independently produced** artifacts + an absolute oracle, never hard-co
 captured pixels. Gate: `scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs`
 (pure-Simple Engine2D vs real Chromium OSR → `mismatch_count=0`).
 
-**Draw-IR structured items (2026-07-06).** The optimized Engine2D Draw-IR
-executor (`draw_ir_adv.spl`) now renders HTML/CSS box structure — box-shadow,
-background (solid or linear-gradient), corner-radius, and per-side borders — via
-the existing backend primitives, instead of collapsing each box to one flat
-`draw_rect_filled`. Transparent-bg boxes that have a border or shadow now paint.
-`<img>`/background-image is still not emitted as an image op (blocked:
-`doc/08_tracking/bug/engine2d_draw_ir_image_path_no_resolver_2026-07-06.md`).
-Honest backend caveats a comparison must respect: Vulkan `line`/`circle_outline`/
-`rounded_rect` are empty-shader no-ops, Metal `clip` is a no-op, and `cpu_simd`
-is the SIMD-instrumented CPU lane with native x86 row evidence, exact
-scalar-compatible RVV rows, and
-native-row proof required where enabled. Coverage plan +
-baseline: `doc/03_plan/ui/testing/gpu_draw_event_intensive_tests.md`.
-
 For GUI/web/2D Vulkan verification on macOS, run the stronger comparison through
 the RenderDoc setup wrapper. This top-level runbook is macOS-only until Windows
 and Linux get separate host notes. It exercises the same fixture across
@@ -131,10 +81,8 @@ On macOS, `vulkaninfo --summary` with `driverName = MoltenVK` only proves the
 host loader/ICD. Electron or Chrome can still render a bitmap while rejecting
 `--use-angle=vulkan`; in that case evidence records
 `vulkan-angle-unavailable` and the browser Vulkan lane remains failed. The
-wrapper records whether the Simple lane used a repo-local self-hosted driver in
-`gui_web_2d_vulkan_simple_bin_selection_reason` and
-`gui_web_2d_vulkan_simple_bin_status`; Rust seed binaries are recorded as
-forbidden and are not executed for this lane. RenderDoc proof requires
+wrapper records whether the Simple lane used a macOS Vulkan-capable fresh driver
+in `gui_web_2d_vulkan_simple_bin_selection_reason`. RenderDoc proof requires
 `.rdc` files with `RDOC` magic for the Electron, original Chrome, and Simple
 capture lanes; browser bitmaps alone are not Vulkan proof.
 The aggregate audit emits `gui_web_2d_vulkan_direct_run_source` and
@@ -155,18 +103,6 @@ revision, readback mode, p50/p95 timing, RSS or memory budget, fallback state,
 and checksum/readback proof. If the host cannot produce the row, record an
 explicit blocker such as `8k-host-unavailable`; do not convert a small viewport,
 software fallback, or cached replay into an 8K pass.
-
-Before accepting GUI/web/2D implementation, wrapper, benchmark, or platform
-agent patches, run the diff-scoped source-coupling guard:
-
-```bash
-sh scripts/check/check-rendering-source-coupling.shs
-```
-
-For a specific jj change, set `RENDERING_SOURCE_COUPLING_REVISION=<rev>`. The
-guard rejects new raw `rt_*` calls, direct backend proof/status pokes, and forced
-backend pass states in rendering-scoped files. The only raw RenderDoc helper
-exception is the canonical `scripts/tool/renderdoc-evidence.shs` path.
 
 For Metal claims, only macOS native raw Metal readback is proof. Linux and other
 non-macOS hosts must report `metal-requires-macos`, not a Metal pass. A Metal
@@ -192,52 +128,14 @@ fail-closed as `missing-simple-bin`. The wrappers emit
 `*_simple_bin` and `*_simple_bin_source` so reports can distinguish
 `explicit-env`, `in-tree-release`, `repo-bin`, `path-opt-in`, and
 `default-missing` evidence.
-The Node/Web bitmap parity wrapper follows the same fail-closed contract under
-`js_web_render_bitmap_simple_bin*`: it selects only self-hosted Simple binaries
-from the repository by default, records missing binaries as `simple-bin-missing`,
-and records any `src/compiler_rust/**` override as `simple-bin-forbidden`
-without executing the seed.
-The Simple Web Engine2D JavaScript bitmap wrapper uses the matching
-`simple_web_engine2d_js_simple_bin*` fields. A Web/Engine2D bitmap parity row is
-not production evidence unless `simple_web_engine2d_js_simple_bin_status=pass`
-and the source is a self-hosted or explicit non-seed Simple binary.
-The Chrome HTML compatibility geometry manifest uses generic summary fields
-`simple_bin`, `simple_bin_source`, and `simple_bin_status`; Chrome geometry
-manifest evidence is not production evidence if that status is `missing` or
-`forbidden`.
-The single-fixture Electron HTML compatibility geometry wrapper writes the same
-generic fields to `evidence.env`; an Electron geometry row is not production
-evidence if `simple_bin_status` is `missing` or `forbidden`, even if Electron
-itself could capture the fixture.
 
 The renderer parity wrapper also runs the Electron/Chromium event-routing probe
 before a top-level pass. Saved evidence must include
 `production_gui_web_renderer_parity_event_routing_status=pass`, readiness and
 WM discovery flags, focus/move/maximize/title-command/text-input/pointer
-counts, `production_gui_web_renderer_parity_event_routing_performance_now_available=true`,
-`production_gui_web_renderer_parity_event_routing_performance_now_delta_ms>0`,
-`production_gui_web_renderer_parity_event_routing_input_to_paint_ms>0`,
-`production_gui_web_renderer_parity_event_routing_animation_frame_count>=2`,
-`production_gui_web_renderer_parity_event_routing_css_animation_probe=true`, and
-`production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false`.
+counts, and `production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false`.
 This keeps a visually correct capture from passing when visible controls no
-longer receive DOM events or the browser timing, input-to-paint, and animation
-loop are not proven.
-
-For the production Web font receipt, the event probe validates the receipt and
-its Engine2D ARGB artifact, then separately captures the live DOM font node.
-The DOM frame must be nonempty and its dimensions, byte count, checksum, and
-nonbackground-pixel count must validate. These rows prove live font/event
-presentation and receipt correlation; they do not claim that platform-specific
-Electron bitmap bytes equal the independent Simple ARGB artifact. A portable
-production-adapter frame binding remains fail-closed until its request,
-adapter, generated HTML, and canonical RGBA artifacts pass independent
-provenance validation.
-
-The focused Electron MDI wrapper follows the same rule for the live
-Electron/Chromium shell: `electron_mdi_interaction_latency_status=pass` and
-`electron_mdi_input_to_paint_ms>0` are required alongside event routing,
-screenshot binding, `performance.now()`, and animation-frame proof.
+longer receive DOM events.
 
 The focused production web endpoint gate is:
 

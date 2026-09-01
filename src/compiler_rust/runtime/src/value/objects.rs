@@ -256,6 +256,7 @@ pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
     (hasher.finish() & 0xFFFFFFFF) as u32
 }
 
+pub(crate) const RESULT_ENUM_ID: u32 = 0;
 pub(crate) const OPTION_ENUM_ID: u32 = 1;
 
 pub(crate) fn rt_option_none() -> RuntimeValue {
@@ -349,6 +350,24 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
 /// neither Option nor Result (an arbitrary user enum) falls back to the old
 /// "return self" behavior, unchanged from `rt_unwrap_or_self` — widening
 /// unwrap-trap semantics to arbitrary user enums is out of scope here.
+/// Formation probe for heap-typed enum/Option payloads at fail-closed
+/// handoffs (2026-08-22 stage-3 streaming-owner incident: a Some-tagged
+/// Option read back with payload word 0 passed every discriminant/nil guard
+/// and SIGSEGV'd on the first field load).
+/// Answers FORMATION ONLY -- a heap-tagged pointer outside the zero page --
+/// with no registry probe, so it can never false-reject a live object. Call
+/// sites own the payload-type contract: scalar payloads are not heap-tagged
+/// and report 0 by design. Mirrors `rt_heap_ref_wellformed` in
+/// src/runtime/runtime_native.c and src/runtime/simple_core/core_enum.spl.
+#[no_mangle]
+pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
+    if !value.is_heap() {
+        return 0;
+    }
+    let addr = value.as_heap_ptr() as usize;
+    if addr < 4096 { 0 } else { 1 }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
@@ -381,25 +400,6 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
     value
 }
 
-/// Formation probe for heap-typed enum/Option payloads at fail-closed
-/// handoffs (2026-08-22 stage-3 streaming-owner incident: a Some-tagged
-/// Option read back with payload word 0 passed every discriminant/nil guard
-/// and SIGSEGV'd on the first field load — see
-/// doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md).
-/// Answers FORMATION ONLY — a heap-tagged pointer outside the zero page —
-/// with no registry probe, so it can never false-reject a live object. Call
-/// sites own the payload-type contract: scalar payloads are not heap-tagged
-/// and report 0 by design. Mirrors `rt_heap_ref_wellformed` in
-/// src/runtime/runtime_native.c and src/runtime/simple_core/core_enum.spl.
-#[no_mangle]
-pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
-    if !value.is_heap() {
-        return 0;
-    }
-    let addr = value.as_heap_ptr() as usize;
-    if addr < 4096 { 0 } else { 1 }
-}
-
 /// Unwrap the payload of a present `Result.Ok`/`Option.Some` value; return
 /// `default` (never trap) if the receiver is a genuine `Result.Err`/
 /// `Option.None`. This is `.unwrap_or(default)` METHOD-CALL semantics —
@@ -409,12 +409,13 @@ pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
 /// `.expect()` (aborts on Err/None instead of returning a fallback).
 /// `.unwrap_or(default)` was routed through `rt_unwrap_or_self` (ignoring
 /// `default` entirely), which only correctly special-cases Option: a
-/// `Result` receiver (no reserved enum_id, unlike Option) hit the "return
-/// self" branch and returned the boxed `Result` enum unchanged for BOTH
+/// `Result` receiver hit the "return self" branch and returned the boxed
+/// `Result` enum unchanged for BOTH
 /// `Ok` and `Err` receivers instead of the payload / the default — see
 /// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
-/// Uses the same discriminant-hash technique as `rt_unwrap_or_trap` to
-/// identify Ok/Err since Result has no reserved enum_id.
+/// Result and Option have reserved runtime IDs (0 and 1 respectively). Both
+/// the ID and discriminant must match: a user enum is allowed to name variants
+/// `Ok` or `Err`, and remains an opaque present value just like the interpreter.
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue) -> RuntimeValue {
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
@@ -425,20 +426,22 @@ pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue)
     let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
 
     if enum_id == OPTION_ENUM_ID {
-        if discriminant == hash_variant_discriminant("Some") {
+        if discriminant == 0 || discriminant == hash_variant_discriminant("Some") {
             return payload;
         }
-        if discriminant == hash_variant_discriminant("None") {
+        if discriminant == 1 || discriminant == hash_variant_discriminant("None") {
             return default;
         }
         return value;
     }
 
-    if discriminant == hash_variant_discriminant("Ok") {
-        return payload;
-    }
-    if discriminant == hash_variant_discriminant("Err") {
-        return default;
+    if enum_id == RESULT_ENUM_ID {
+        if discriminant == hash_variant_discriminant("Ok") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("Err") {
+            return default;
+        }
     }
 
     // Arbitrary user enum: preserve the pre-existing "return self" fallback.
@@ -529,8 +532,9 @@ pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
         return true;
     }
     let none_disc = hash_variant_discriminant("None");
-    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .is_some_and(|p| unsafe { (*p).enum_id == OPTION_ENUM_ID && (*p).discriminant == none_disc })
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
+        (*p).enum_id == OPTION_ENUM_ID && ((*p).discriminant == 1 || (*p).discriminant == none_disc)
+    })
 }
 
 /// Check if a value is Some (not None/nil).

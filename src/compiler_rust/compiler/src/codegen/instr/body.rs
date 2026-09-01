@@ -458,7 +458,13 @@ pub(super) fn build_vreg_types(
                 MirInst::BoxInt { dest, .. } | MirInst::UnboxInt { dest, .. } => {
                     types_map.insert(*dest, TypeId::I64);
                 }
-                MirInst::BoxFloat { dest, .. } | MirInst::UnboxFloat { dest, .. } => {
+                MirInst::BoxFloat { dest, .. } => {
+                    // BoxFloat produces a tagged RuntimeValue, not a raw f64.
+                    // Keeping it out of the raw-float provenance lane is
+                    // essential when it crosses a block boundary.
+                    types_map.insert(*dest, TypeId::ANY);
+                }
+                MirInst::UnboxFloat { dest, .. } => {
                     types_map.insert(*dest, TypeId::F64);
                 }
                 // Remaining variants either produce no typed value, or their

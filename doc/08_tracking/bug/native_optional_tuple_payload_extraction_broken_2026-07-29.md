@@ -1,46 +1,6 @@
 # Native lane: optional-tuple payload extraction is broken in every consumption form
 
-**Status: CLOSED — FIXED, verified by execution 2026-08-17.** The "pending seed
-redeploy" caveat below is stale: the deployed binary now carries the fix.
-
-Classified by CONTENT of current source, not by commit ancestry. The runtime
-discrimination branch this doc describes is present at
-`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs:1396-1429`
-(`enum_variant == "Some" && payload_patterns.len() == 1` ->
-`If { rt_enum_id(subj) >= 0 ? rt_enum_payload(subj) : subj }`) and again at the
-nested-pattern site near `:1521`.
-
-Re-running this doc's own repro verbatim on the deployed binary
-(`bin/simple run`, rc read on the line after the command, rc=0):
-
-```
-F1_SOME: x 7
-G1_SOME: 5 9
-```
-
-Both rows that this doc recorded as broken are correct: the `if val Some(p)`
-form no longer skips both arms, and the match form binds `5 9` instead of the
-`3 3` nil sentinel. Verified on both `SIMPLE_EXECUTION_MODE=jit` and
-`=interpreter`.
-
-**Regression coverage now exists** (the doc's "regression specs cannot cover
-this until the harness has a native lane" note is superseded — the fix is to
-shell out to a subprocess, not to wait for a harness change):
-
-- `test/01_unit/compiler/codegen/probe_optional_payload_extraction_jit.spl`
-- `test/01_unit/compiler/codegen/native_optional_payload_extraction_class_spec.spl`
-
-**The class-detection spec immediately found a LIVE sibling defect** in the same
-family that this reproducer never reached: the bare `if val x = opt` unwrap
-sugar and the `??` coalesce operator lower through
-`hir/lower/expr/control.rs`'s `rt_unwrap_or_self` and have no such
-discrimination branch, so a boxed `Some(99)` yields the raw enum pointer / 792
-(= 99<<3) on the JIT. Filed as
-`doc/08_tracking/bug/jit_optional_unwrap_sugar_boxed_some_not_unboxed_2026-08-17.md`.
-
----
-
-**Original status:** ROOT-CAUSED and FIXED in the seed's HIR lowering (pending seed
+**Status:** ROOT-CAUSED and FIXED in the seed's HIR lowering (pending seed
 redeploy to take effect in the deployed binary).
 
 **Root cause (not tuple-specific — ALL cross-function optionals):** natively
@@ -168,22 +128,3 @@ this defect, not on the MQTT logic, which is correct in isolation.
 - Any module returning optional tuples that newly gains native compilation
   (e.g. by adding type annotations) is exposed; the interpreter fallback was
   masking this.
-
-## RE-VERIFIED 2026-08-17 — fix is present in source; seed rebuild no longer blocked
-
-The doc's blocker was "root-caused and fixed in seed HIR lowering but pending a
-seed rebuild". Both halves re-checked:
-
-1. The fix is present by content. `hir/lower/stmt_lowering.rs:1384` carries a
-   comment naming THIS doc, immediately above the multi-field tuple-payload
-   indexing at :1434.
-2. The seed rebuild is no longer blocked. `cargo check --release --bin simple`
-   and a full `cargo build --release --bin simple` both completed with rc=0
-   from current `src/compiler_rust` on 2026-08-17 (binary 08:15, 59,436,360
-   bytes) in an isolated `CARGO_TARGET_DIR`. rc was read on the line after the
-   command, never through a pipe.
-
-**NOT proven:** no optional-tuple payload program was executed against that
-fresh seed in this pass, so "the fix works" is still unverified — only "the fix
-is in the tree and the tree builds". A lane closing this row must run the doc's
-own consumption forms against a freshly built seed first.

@@ -26,6 +26,28 @@ sh scripts/check/check-simpleos-mission-critical-release.shs
 
 Completion requires the release gate to report `matrix_status=pass`,
 `release_status=pass`, `release_blockers=none`, and `prereq_status=ready`.
+
+### No-direct-rt lane (mandatory, added 2026-08-28)
+
+The release gate also runs `sh scripts/check/check-no-direct-rt.shs --critical`
+as a lane: any forbidden direct `rt_*(...)` call site outside the sanctioned
+providers (`scripts/check/no_direct_rt_allowlist.txt`) fails the release with
+`release_blockers=no_direct_rt`. Unlike the mandatory pre-push gate (which
+passes `--roots src` to preserve its existing baseline-ratchet scope), this
+lane uses the DEFAULT `--roots` (`src,examples,tools,scripts,test`) and
+`--critical` mode, which has no baseline grace — a single forbidden site
+blocks. When this lane is red its name is appended to the reported
+`release_blockers=` list on every FAIL path, not only when all other lanes
+pass. `NO_DIRECT_RT_GATE` overrides the gate script path for self-test
+fakes only; production runs always use
+`scripts/check/check-no-direct-rt.shs`.
+
+Honestly RED at time of writing (2026-08-28): the widened default-roots
+`--critical` scan reports 27,685 forbidden call sites (measured 2026-08-28) (breakdown by root in
+the gate's own `forbidden_by_root:` line), so this lane currently blocks
+every mission-critical release until the `rt_*` migration lanes land. See
+`doc/03_plan/infra/binary_runtime_hardening/plan.md`.
+
 The completion target remains `simpleos_hardening_matrix_passed=26/26`; a
 lower latest snapshot is current blocker evidence, not acceptance.
 
@@ -174,24 +196,3 @@ RV32/RV64 NVMe wrapper set. Completion or release claims must run the same
 command with `--strict`. After changing wrapper coverage classification, run
 `sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs --self-test` so
 fake missing RV32/RV64 wrapper and spec fixtures prove the audit fails closed.
-
-## Memory-allocation diagnostic config (2026-08-23)
-
-Mission-critical code must not dynamically allocate memory. The steady-state
-allocation gate (`35.semantics/noalloc_checker.spl`) enforces that once the
-startup seal closes — which happens automatically at profile `critical`.
-
-That gate is now configurable, but **only as a scoped, justified opt-out**, never
-a global off-switch:
-
-```
-SIMPLE_MC_ALLOC_ALLOW="rt_arena_init=init-time arena, boot.stage1=audited"
-```
-
-Each entry names one symbol (or a dot-bounded module prefix) and MUST carry a
-justification; an unjustified entry grants nothing. Every suppressed finding is
-still reported, as `allowed[steady-state]: ... — permitted by mission-critical
-alloc config: <why>`, so a release audit can enumerate every allocation the
-build tolerates. Default is empty: the gate is fully live.
-
-Contract: `doc/07_guide/language/mission_critical_alloc_diagnostic_config.md`.

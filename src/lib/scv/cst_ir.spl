@@ -1,0 +1,223 @@
+# SCV generic CST IR — SCV-IMPL-P-05.
+#
+# Versioned generic concrete-syntax IR (`scv/cst/v1`) with node kinds
+# File / Named / List(ordered|commutative) / Atom / Trivia / Error.
+# Nodes are text-serialized (no recursive structs): the first line is
+#   kind|label|ordering|value        (label/value escaped)
+# and each child's serialization follows indented by two spaces.  A
+# DOCUMENT is "cst scv/cst/v1\n" + root node.  Commutative lists hash
+# order-insensitively (child hashes sorted before combining); ordered
+# lists do not.  Parser roots are stored keyed by revision+ContentId
+# under {meta}/cst_roots/.
+
+use app.io.mod (file_exists, file_read, dir_create)
+use std.scv.core.{scv_meta_dir}
+use std.scv.store.{scv_write_text, scv_hash_text}
+
+fn scv_cst_ir_version() -> text:
+    "scv/cst/v1"
+
+# --- field escaping (backslash first on escape; single-scan unescape) ------
+
+fn scv_cst_escape(value: text) -> text:
+    value.replace("\\", "\\b").replace("|", "\\p").replace("\n", "\\n")
+
+fn scv_cst_unescape(value: text) -> text:
+    var out = ""
+    var pending = false
+    for ch in value.chars():
+        if pending:
+            if ch == "b":
+                out = out + "\\"
+            elif ch == "p":
+                out = out + "|"
+            elif ch == "n":
+                out = out + "\n"
+            else:
+                out = out + ch
+            pending = false
+        elif ch == "\\":
+            pending = true
+        else:
+            out = out + ch
+    out
+
+# --- construction ----------------------------------------------------------
+
+fn scv_cst_make(kind: text, label: text, ordering: text, value: text, children: [text]) -> text:
+    var out = "{kind}|{scv_cst_escape(label)}|{ordering}|{scv_cst_escape(value)}"
+    for child in children:
+        for line in child.split("\n"):
+            if line == "":
+                continue
+            out = out + "\n  " + line
+    out
+
+fn scv_cst_atom(label: text, value: text) -> text:
+    scv_cst_make("atom", label, "", value, [])
+
+fn scv_cst_trivia(value: text) -> text:
+    scv_cst_make("trivia", "", "", value, [])
+
+fn scv_cst_error(value: text) -> text:
+    scv_cst_make("error", "", "", value, [])
+
+fn scv_cst_named(label: text, children: [text]) -> text:
+    scv_cst_make("named", label, "", "", children)
+
+fn scv_cst_list(label: text, ordering: text, children: [text]) -> text:
+    scv_cst_make("list", label, ordering, "", children)
+
+fn scv_cst_file(label: text, children: [text]) -> text:
+    scv_cst_make("file", label, "", "", children)
+
+# --- accessors -------------------------------------------------------------
+
+fn scv_cst_head_field(node: text, index: i64) -> text:
+    val head = node.split("\n")[0]
+    val parts = head.split("|")
+    if index < parts.len():
+        parts[index]
+    else:
+        ""
+
+fn scv_cst_kind(node: text) -> text:
+    scv_cst_head_field(node, 0)
+
+fn scv_cst_label(node: text) -> text:
+    scv_cst_unescape(scv_cst_head_field(node, 1))
+
+fn scv_cst_ordering(node: text) -> text:
+    scv_cst_head_field(node, 2)
+
+fn scv_cst_value(node: text) -> text:
+    scv_cst_unescape(scv_cst_head_field(node, 3))
+
+# Direct children, each dedented back to a standalone serialized node.
+fn scv_cst_children(node: text) -> [text]:
+    var children: [text] = []
+    var current = ""
+    val lines = node.split("\n")
+    var i = 1
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with("  "):
+            val body = line.slice(2, line.len())
+            if not body.starts_with("  ") and body != "":
+                # top-level child head line starts a new child
+                if current != "":
+                    children.push(current)
+                current = body
+            else:
+                current = current + "\n" + body
+        i = i + 1
+    if current != "":
+        children.push(current)
+    children
+
+# --- validation ------------------------------------------------------------
+
+fn scv_cst_kind_known(kind: text) -> bool:
+    kind == "file" or kind == "named" or kind == "list" or kind == "atom" or kind == "trivia" or kind == "error"
+
+fn scv_cst_node_error(node: text, depth: i64) -> text:
+    val kind = scv_cst_kind(node)
+    if not scv_cst_kind_known(kind):
+        return "ERROR unknown cst node kind: {kind}"
+    if kind == "file" and depth != 0:
+        return "ERROR file node below the root"
+    val ordering = scv_cst_ordering(node)
+    if kind == "list":
+        if ordering != "ordered" and ordering != "commutative":
+            return "ERROR bad list ordering: {ordering}"
+    elif ordering != "":
+        return "ERROR ordering on non-list node: {kind}"
+    val children = scv_cst_children(node)
+    if (kind == "atom" or kind == "trivia") and children.len() > 0:
+        return "ERROR leaf cst node with children: {kind}"
+    for child in children:
+        val error = scv_cst_node_error(child, depth + 1)
+        if error != "":
+            return error
+    ""
+
+# --- documents -------------------------------------------------------------
+
+fn scv_cst_document(node: text) -> text:
+    "cst {scv_cst_ir_version()}\n{node}\n"
+
+fn scv_cst_document_node(doc: text) -> text:
+    val idx = doc.index_of("\n")
+    if idx < 0:
+        return ""
+    var body = doc.slice(idx + 1, doc.len())
+    while body.ends_with("\n"):
+        body = body.slice(0, body.len() - 1)
+    body
+
+fn scv_cst_document_error(doc: text) -> text:
+    val header = doc.split("\n")[0]
+    if header != "cst {scv_cst_ir_version()}":
+        return "ERROR unsupported cst version: {header}"
+    val node = scv_cst_document_node(doc)
+    if node == "":
+        return "ERROR empty cst document"
+    scv_cst_node_error(node, 0)
+
+# --- hashing ---------------------------------------------------------------
+
+fn scv_cst_sorted(values: [text]) -> [text]:
+    var out: [text] = []
+    var src = values
+    while src.len() > 0:
+        var min_i = 0
+        var i = 1
+        while i < src.len():
+            if src[i] < src[min_i]:
+                min_i = i
+            i = i + 1
+        out.push(src[min_i])
+        var rest: [text] = []
+        var j = 0
+        while j < src.len():
+            if j != min_i:
+                rest.push(src[j])
+            j = j + 1
+        src = rest
+    out
+
+fn scv_cst_hash(node: text) -> text:
+    var child_hashes: [text] = []
+    for child in scv_cst_children(node):
+        child_hashes.push(scv_cst_hash(child))
+    if scv_cst_ordering(node) == "commutative":
+        child_hashes = scv_cst_sorted(child_hashes)
+    var joined = ""
+    for h in child_hashes:
+        joined = joined + h + ","
+    scv_hash_text("cst", "{scv_cst_kind(node)}|{scv_cst_label(node)}|{scv_cst_ordering(node)}|{scv_cst_value(node)}|{joined}")
+
+# --- parser roots keyed by revision + ContentId ----------------------------
+
+fn scv_cst_root_key(revision: text, content_id: text) -> text:
+    "{revision}:{content_id}"
+
+fn scv_cst_roots_dir(root: text) -> text:
+    "{scv_meta_dir(root)}/cst_roots"
+
+fn scv_cst_root_path(root: text, revision: text, content_id: text) -> text:
+    "{scv_cst_roots_dir(root)}/{revision}_{content_id}.cst"
+
+fn scv_cst_root_store(root: text, revision: text, content_id: text, doc: text) -> text:
+    val error = scv_cst_document_error(doc)
+    if error != "":
+        return "{error}\n"
+    dir_create(scv_cst_roots_dir(root), true)
+    scv_write_text(scv_cst_root_path(root, revision, content_id), doc)
+    "cst-root {scv_cst_root_key(revision, content_id)} hash={scv_cst_hash(scv_cst_document_node(doc))}\n"
+
+fn scv_cst_root_load(root: text, revision: text, content_id: text) -> text:
+    val path = scv_cst_root_path(root, revision, content_id)
+    if not file_exists(path):
+        return ""
+    file_read(path)

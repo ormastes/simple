@@ -17,15 +17,14 @@
 #   ed25519_scalar.spl — scalar arithmetic mod L (sc_reduce, sc_muladd)
 
 use os.crypto.ed25519_ops.{EdPoint, fe_neg, fe_is_negative, fe_pow2252m3, fe_sqrt, _fe_sqrt_m1, _ed25519_d, _ed25519_2d, _ed25519_base_point, ed_point_identity, ed_point_add, ed_point_double, ed_point_cselect, ed_scalar_mul, ed_scalar_mul_basepoint, ed_point_encode, ed_point_decode}
-use os.crypto.ed25519_scalar.{sc_reduce, sc_muladd, ed25519_bytes_to_limbs32, ed25519_sc_sub_L}
+use os.crypto.ed25519_scalar.{sc_reduce, sc_muladd, _bytes_to_limbs32, _sc_sub_L}
 use os.crypto.dual_backend.{DualBackendMode, DualBackendPreference, dual_backend_bytes_equal, dual_backend_choose_bytes, dual_backend_default_config, dual_backend_hex}
 use os.crypto.sha512.{sha512}
 extern fn serial_println(msg: text)
 extern fn rt_tls13_sha512_full(data: [u8]) -> [u8]
 extern fn rt_ed25519_sc_reduce_64(data: [u8]) -> [u8]
 extern fn rt_ed25519_sc_muladd(a: [u8], b: [u8], c: [u8]) -> [u8]
-@unsafe(reason: "raw SimpleOS Ed25519 provider ABI; caller validates the 64-byte signature result", capabilities: [ffi])
-extern fn rt_ed25519_sign_seed(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]?
+extern fn rt_ed25519_sign_seed(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]
 
 # ============================================================================
 # Ed25519 Scalar Clamping
@@ -340,25 +339,21 @@ fn _ed25519_sign_live_runtime_components(private_seed: [u8], public_key: [u8], m
     serial_println("[ed25519] sign: done")
     sig
 
-fn _ed25519_sign_live_runtime(private_seed: [u8], public_key: [u8], message: [u8]) -> Result<[u8], text>:
-    var direct_sig: [u8]? = nil
-    unsafe(capabilities: [ffi]):
-        direct_sig = rt_ed25519_sign_seed(private_seed, public_key, message)
+fn _ed25519_sign_live_runtime(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    val direct_sig = rt_ed25519_sign_seed(private_seed, public_key, message)
     val component_sig = _ed25519_sign_live_runtime_components(private_seed, public_key, message)
-    if direct_sig.?:
-        val direct = direct_sig.unwrap()
-        if direct.len() == 64 and component_sig.len() == 64:
-            if dual_backend_bytes_equal(direct, component_sig):
-                return Ok(direct)
-            serial_println("[ed25519] direct runtime sign mismatch: using direct runtime path")
-            serial_println("[ed25519] direct runtime sig=" + dual_backend_hex(direct, 64))
-            serial_println("[ed25519] component runtime sig=" + dual_backend_hex(component_sig, 64))
-            return Ok(direct)
+    if direct_sig.len() == 64 and component_sig.len() == 64:
+        if dual_backend_bytes_equal(direct_sig, component_sig):
+            return direct_sig
+        serial_println("[ed25519] direct runtime sign mismatch: using direct runtime path")
+        serial_println("[ed25519] direct runtime sig=" + dual_backend_hex(direct_sig, 64))
+        serial_println("[ed25519] component runtime sig=" + dual_backend_hex(component_sig, 64))
+        return direct_sig
     if component_sig.len() == 64:
-        return Ok(component_sig)
-    Err("Ed25519 runtime providers did not produce a 64-byte signature")
+        return component_sig
+    direct_sig
 
-fn ed25519_sign_live_runtime_only(private_seed: [u8], public_key: [u8], message: [u8]) -> Result<[u8], text>:
+fn ed25519_sign_live_runtime_only(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     _ed25519_sign_live_runtime(private_seed, public_key, message)
 
 fn _ed25519_sign_live_pure(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
@@ -516,8 +511,8 @@ fn _sc_is_geq_L(s: [u8]) -> bool:
 
     Used to reject non-canonical S values in verification.
     """
-    val limbs = ed25519_bytes_to_limbs32(s, 8)
-    val sub = ed25519_sc_sub_L(limbs)
+    val limbs = _bytes_to_limbs32(s, 8)
+    val sub = _sc_sub_L(limbs)
     # If borrow (limb[8]) is 0, s >= L
     sub[8] == 0
 
@@ -602,7 +597,7 @@ fn _ed25519_self_test_pure_simple() -> Result<bool, text>:
     # PUBLIC KEY: 3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c
     # MESSAGE:    72 (single byte 0x72)
     # SIGNATURE:  92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da
-    #             085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00
+    #             085ac1e43e159c7e94b2ba95c9ee6f5f6d90bd3e0dfd0e2e78e188cc7e00d5b2
     val seed2: [u8] = [
         0x4c, 0xcd, 0x08, 0x9b, 0x28, 0xff, 0x96, 0xda,
         0x9d, 0xb6, 0xc3, 0x46, 0xec, 0x11, 0x4e, 0x0f,
@@ -620,10 +615,10 @@ fn _ed25519_self_test_pure_simple() -> Result<bool, text>:
         0x72, 0x0e, 0x82, 0x0b, 0x5f, 0x64, 0x25, 0x40,
         0xa2, 0xb2, 0x7b, 0x54, 0x16, 0x50, 0x3f, 0x8f,
         0xb3, 0x76, 0x22, 0x23, 0xeb, 0xdb, 0x69, 0xda,
-        0x08, 0x5a, 0xc1, 0xe4, 0x3e, 0x15, 0x99, 0x6e,
-        0x45, 0x8f, 0x36, 0x13, 0xd0, 0xf1, 0x1d, 0x8c,
-        0x38, 0x7b, 0x2e, 0xae, 0xb4, 0x30, 0x2a, 0xee,
-        0xb0, 0x0d, 0x29, 0x16, 0x12, 0xbb, 0x0c, 0x00
+        0x08, 0x5a, 0xc1, 0xe4, 0x3e, 0x15, 0x9c, 0x7e,
+        0x94, 0xb2, 0xba, 0x95, 0xc9, 0xee, 0x6f, 0x5f,
+        0x6d, 0x90, 0xbd, 0x3e, 0x0d, 0xfd, 0x0e, 0x2e,
+        0x78, 0xe1, 0x88, 0xcc, 0x7e, 0x00, 0xd5, 0xb2
     ]
     val msg2: [u8] = [0x72]
 

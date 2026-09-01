@@ -1,0 +1,139 @@
+"""
+Executable coverage for the pure-Simple interpreter's linked if-chain arena.
+
+The first four examples run source through core_interpret, so they exercise the
+real parser, local resolver, and tree-walking evaluator. The final example is a
+structural supplement that pins the otherwise non-observable prescan/escape
+walk coverage; it is not a substitute for the executable examples.
+"""
+
+use std.spec.*
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn run_chain_int(source: text, path: text) -> i64:
+    val result = core_interpret(source, path)
+    if result < 0: return -9000001
+    val_get_int(result)
+
+fn source_section(source: text, start_marker: text, end_marker: text) -> text:
+    val start = source.index_of(start_marker)
+    val finish = source.index_of(end_marker)
+    if start < 0 or finish <= start: return ""
+    source.substring(start, finish)
+
+fn long_mixed_chain_source(arm_count: i64, selected: i64) -> text:
+    var source = "val candidate = nil\nval selected = {selected}\nvar result = -1\n" +
+        "if val item = candidate:\n    result = item\n"
+    var i = 1
+    while i < arm_count:
+        source = source + "elif selected == {i}:\n    result = {i}\n"
+        i = i + 1
+    source + "else:\n    result = -9\nresult\n"
+
+describe "linked if-chain interpreter consumers":
+    it "evaluates ordinary statement arms in first middle last and else order":
+        val source = """
+var result = 0
+if true:
+    result = result * 10 + 1
+elif never_evaluate_first_tail:
+    result = 99
+if false:
+    result = 99
+elif true:
+    result = result * 10 + 2
+elif never_evaluate_middle_tail:
+    result = 99
+if false:
+    result = 99
+elif false:
+    result = 99
+elif true:
+    result = result * 10 + 3
+if false:
+    result = 99
+elif false:
+    result = 99
+elif false:
+    result = 99
+else:
+    result = result * 10 + 4
+result
+"""
+        expect(run_chain_int(source, "flat_if_chain_stmt.spl")).to_equal(1234)
+
+    it "evaluates expression arms in first middle last and else order":
+        val source = """
+val first = if true: 1 elif never_evaluate_expr_first_tail: 9 else: 0
+val middle = if false: 9 elif true: 2 elif never_evaluate_expr_middle_tail: 9 else: 0
+val last = if false: 9 elif false: 9 elif true: 3 else: 0
+val fallback = if false: 9 elif false: 9 elif false: 9 else: 4
+first * 1000 + middle * 100 + last * 10 + fallback
+"""
+        expect(run_chain_int(source, "flat_if_chain_expr.spl")).to_equal(1234)
+
+    it "evaluates a value-binding initializer once and restores outer scope":
+        val source = """
+var calls = 0
+fn make_value() -> i64:
+    calls = calls + 1
+    return 7
+val bound = 40
+var selected = 0
+if val bound = make_value():
+    selected = bound
+elif never_evaluate_value_tail:
+    selected = 99
+selected * 100 + bound * 10 + calls
+"""
+        expect(run_chain_int(source, "flat_if_chain_value_bind.spl")).to_equal(1101)
+
+    it "discards a missed pattern scope and keeps a matched binding branch-local":
+        val source = """
+val item = 40
+var selected = 0
+if val Some(item) = nil:
+    selected = never_evaluate_pattern_miss_body
+elif val Some(item) = 7:
+    selected = item
+else:
+    selected = 99
+selected * 100 + item
+"""
+        expect(run_chain_int(source, "flat_if_chain_pattern_bind.spl")).to_equal(740)
+
+    it "executes the selected tail of a 128-arm mixed chain":
+        val source = long_mixed_chain_source(128, 127)
+        expect(run_chain_int(source, "flat_if_chain_mixed_128.spl")).to_equal(127)
+
+    it "executes the selected tail of a 256-arm mixed chain":
+        val source = long_mixed_chain_source(256, 255)
+        expect(run_chain_int(source, "flat_if_chain_mixed_256.spl")).to_equal(255)
+
+    it "pins resolver prescan and escape walks across every linked field":
+        val source = rt_file_read_text(
+            "src/compiler/10.frontend/core/interpreter/resolve.spl") ?? ""
+        val prescan = source_section(source,
+            "fn resolve_prescan_expr", "fn resolve_expr")
+        val resolver = source_section(source,
+            "fn resolve_expr", "fn resolve_function")
+        val escape = source_section(source,
+            "fn esc_collect_expr_locals", "fn esc_analyze_function")
+
+        for section in [prescan, resolver, escape]:
+            expect(section).to_contain("flat_if_chain_first_arm_get")
+            expect(section).to_contain("flat_if_arm_next_get")
+            expect(section).to_contain("flat_if_arm_head_get")
+            expect(section).to_contain("flat_if_arm_init_get")
+            expect(section).to_contain("flat_if_arm_body_at")
+            expect(section).to_contain("flat_if_chain_else_stmt_at")
+
+        expect(prescan).to_contain("flat_if_arm_then_expr_get")
+        expect(prescan).to_contain("flat_if_chain_else_expr_get")
+        expect(resolver).to_contain("flat_if_arm_then_expr_get")
+        expect(resolver).to_contain("flat_if_chain_else_expr_get")
+        expect(escape).to_contain("flat_if_arm_then_expr_get")
+        expect(escape).to_contain("flat_if_chain_else_expr_get")

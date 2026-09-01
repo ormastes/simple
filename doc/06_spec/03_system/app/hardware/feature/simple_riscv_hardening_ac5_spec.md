@@ -1,6 +1,6 @@
 # simple_riscv_hardening_ac5_spec
 
-> Verifies the simple riscv hardening ac5 behaviour end to end so maintainers of this
+> RISC-V hardening AC-5 removes the unreachable RV32 scratch array and the
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # simple_riscv_hardening_ac5_spec
 
-Verifies the simple riscv hardening ac5 behaviour end to end so maintainers of this
+RISC-V hardening AC-5 removes the unreachable RV32 scratch array and the
 
 ## At a Glance
 
@@ -20,18 +20,13 @@ Verifies the simple riscv hardening ac5 behaviour end to end so maintainers of t
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the simple riscv hardening ac5 behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+RISC-V hardening AC-5 removes the unreachable RV32 scratch array and the
+payload-specific return-address overrides from the production structured VHDL
+generator and its checked-in golden. These scenarios are source/product
+contract evidence. They do not claim FPGA, QEMU, or deployed Stage-4 evidence.
 
 ## Scenarios
 
@@ -39,7 +34,7 @@ unrelated sibling features are out of scope.
 
 #### should emit the production RV32 core without unreachable scratch RTL
 
-- Verify: should emit the production RV32 core without unreachable scratch RTL
+- should emit the production RV32 core without unreachable scratch RTL
 - Generate the production RV32 base core with debug taps enabled
 - Confirm the generated artifact is the real RV32 core and retains its ROM owners
 - Apply the fail-closed dead-scratch contract
@@ -53,8 +48,8 @@ Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Verify: should emit the production RV32 core without unreachable scratch RTL")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should emit the production RV32 core without unreachable scratch RTL")
 step("Generate the production RV32 base core with debug taps enabled")
 val generated = generate_exec_core(XlenConfig.rv32(), "", true)
 step("Confirm the generated artifact is the real RV32 core and retains its ROM owners")
@@ -70,7 +65,7 @@ expect(rv32_dead_scratch_contract_error(generated)).to_equal("")
 
 #### should keep the checked-in golden identical to production generation
 
-- Verify: should keep the checked-in golden identical to production generation
+- should keep the checked-in golden identical to production generation
 - Generate the RV32 base core and load the pinned golden
 - Reject a missing or stale golden before comparing bytes
    - Expected: rv32_dead_scratch_contract_error(golden) equals ``
@@ -85,8 +80,8 @@ Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Verify: should keep the checked-in golden identical to production generation")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should keep the checked-in golden identical to production generation")
 step("Generate the RV32 base core and load the pinned golden")
 val generated = generate_exec_core(XlenConfig.rv32(), "", true)
 val golden = file_read_text(RV32_GOLDEN_PATH)
@@ -101,7 +96,7 @@ expect(golden).to_equal(generated)
 
 #### should remain scratch-free across the optional debug-tap edge
 
-- Verify: should remain scratch-free across the optional debug-tap edge
+- should remain scratch-free across the optional debug-tap edge
 - Generate the same RV32 core with debug taps disabled and enabled
 - Confirm the aspect switch changes only the intended debug surface
    - Expected: without_debug does not contain `dbg_reg_addr`
@@ -118,8 +113,8 @@ Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Verify: should remain scratch-free across the optional debug-tap edge")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should remain scratch-free across the optional debug-tap edge")
 step("Generate the same RV32 core with debug taps disabled and enabled")
 val without_debug = generate_exec_core(XlenConfig.rv32(), "", false)
 val with_debug = generate_exec_core(XlenConfig.rv32(), "", true)
@@ -135,7 +130,7 @@ expect(rv32_dead_scratch_contract_error(with_debug)).to_equal("")
 
 #### should reject missing and historical scratch artifacts with stable errors
 
-- Verify: should reject missing and historical scratch artifacts with stable errors
+- should reject missing and historical scratch artifacts with stable errors
 - Submit an empty artifact to calibrate missing-core rejection
    - Expected: rv32_dead_scratch_contract_error("") equals `RSH-AC5-E-NOT-RV32-CORE`
 - Submit each historical stale-artifact class independently
@@ -148,13 +143,12 @@ expect(rv32_dead_scratch_contract_error(with_debug)).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-RISCV-HARDEN-005
-step("Verify: should reject missing and historical scratch artifacts with stable errors")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should reject missing and historical scratch artifacts with stable errors")
 step("Submit an empty artifact to calibrate missing-core rejection")
 expect(rv32_dead_scratch_contract_error("")).to_equal("RSH-AC5-E-NOT-RV32-CORE")
 val core = "architecture rtl of rv32_exec_core is\n"
@@ -180,48 +174,62 @@ expect(rv32_dead_scratch_contract_error(core + "x\"8002AB5C\"")).to_equal("RSH-A
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `f84fdaeb53dac76a2bbdebff98034adc8f8901a8071d7200c830a1200c709ff1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `4bd92be9d90d5e142031cd5fcca456500d83b4fd321be2da52f7277731a8ae16`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `f84fdaeb53dac76a2bbdebff98034adc8f8901a8071d7200c830a1200c709ff1`.
+Source SHA-256: `4bd92be9d90d5e142031cd5fcca456500d83b4fd321be2da52f7277731a8ae16`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `f84fdaeb53dac76a2bbdebff98034adc8f8901a8071d7200c830a1200c709ff1`  
+Source SHA-256: `4bd92be9d90d5e142031cd5fcca456500d83b4fd321be2da52f7277731a8ae16`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 91/100
+SSpec documentization score: 89/100
 source: test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl
 mirror: doc/06_spec/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.md (current)
-findings: 7 blockers: 0
+findings: 9 blockers: 0
   narrative=100 structure=80 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:50:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should emit the production RV32 core without unreachable scratch RTL' describes the test rather than its outcome
+test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:39:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should emit the production RV32 core without unreachable scratch RTL' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:64:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep the checked-in golden identical to production generation' describes the test rather than its outcome
+test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should emit the production RV32 core without unreachable scratch RTL' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:53:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep the checked-in golden identical to production generation' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:77:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should remain scratch-free across the optional debug-tap edge' describes the test rather than its outcome
+test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep the checked-in golden identical to production generation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:66:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should remain scratch-free across the optional debug-tap edge' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:91:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject missing and historical scratch artifacts with stable errors' describes the test rather than its outcome
+test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should remain scratch-free across the optional debug-tap edge' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl:80:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject missing and historical scratch artifacts with stable errors' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

@@ -33,20 +33,28 @@ The diagnostic protocol's exact-once condition was violated: the probe owner and
 4. Only after W1.5 PASS, run exactly one canonical Stage 3 resume:
 
    ```sh
-   sh scripts/bootstrap/bootstrap-from-scratch.sh resume-stage3 build/bootstrap
+   sh scripts/bootstrap/resume-stage3-from-admitted.sh build/bootstrap
    ```
 
 5. Require `Stage3AdmissionReceiptV1` with `admission_status=PASS`, exact compiler/runtime/interface/archive hashes, and the frozen source identity. Then build the CLI, MCP, and LSP journals in isolated caches and run:
 
    ```sh
-   sh scripts/bootstrap/bootstrap-from-scratch.sh stage4-tooling-matrix \
+   sh scripts/bootstrap/stage4-tooling-matrix.shs \
      --matrix-id=<frozen-id> \
      --compiler-manifest=<stage3-compiler-manifest> \
      --cli-journal=<cli-journal> \
      --mcp-journal=<mcp-journal> \
      --lsp-journal=<lsp-journal> \
+     --build-jobs=<admitted-effective-jobs> \
      --scope=full
    ```
+
+   The matrix parent uses that admitted effective count as its bounded
+   dependency-ready case-worker ceiling. Case workers have isolated
+   HOME/TMP/XDG cache and result roots; only the parent writes the deterministic
+   manifest-order schedule and summary. A signal cancels and waits for exact
+   worker process groups before cleanup. This does not permit parallel writers
+   to a native-build cache or mint a replacement Stage 3 jobs receipt.
 
 6. Resolve the C2 protocol-root contract before treating either stdio row as PASS. Preserve prior green row receipts and use `--resume`; do not rerun green criteria.
 
@@ -62,24 +70,3 @@ The diagnostic protocol's exact-once condition was violated: the probe owner and
 ## Receipt-backed auxiliary changes
 
 The Stage 3 receipt-reuse shell syntax and focused contract passed once under `build/native_probe/stage3-receipt-reuse-review-20260816/`; do not rerun them merely for confirmation. Observer-v2 passed only its host-CC fake-runner contract under `build/mini_builds/bootstrap_diagnostic_resume_verification_20260816/observer_v2/status.receipt.env`; it is not real-sweep acceptance. No Stage 3 receipt-reuse documentation file had an attributable receipt, so no such doc is included in this handoff.
-
-## Conflict-integration note
-
-The obsolete `bootstrap_flat_llvm_receiver_signature_corruption_2026-08-16.md`
-bug file was intentionally not resurrected while integrating this WIP onto
-`origin/main`. Its last cycle falsified receiver-owned signature dictionaries
-as the complete root cause and selected mixed-tail block-result payload loss as
-the active producer. Current status remains in the W1.5 row above and in
-`doc/08_tracking/bug/bootstrap_flat_function_tail_local_payload_loss_2026-08-16.md`;
-no receiver-corruption acceptance claim is carried forward.
-
-The current upstream Stage 3 resume wrapper is intentionally retained for
-output-root and recovery-artifact ownership except for the mandatory admitted
-authority fix: fresh source/Git/tool snapshots now use separate temporary files
-and must match the immutable Stage 2 receipts before the lock or build. The WIP
-lane's external allowlist helper is absent from this upstream helper bundle, so
-external-output support is deferred. Signal-race-safe lock cleanup, per-attempt
-archives, and hash/evidence-backed previous/failed candidate retention are also
-deferred blocking hardening; this handoff does not claim those recovery
-properties until their helper dependencies are ported and independently
-reviewed.

@@ -7,14 +7,14 @@ use ieee.std_logic_textio.all;
 -- rv32_exec_core_flat: full-RAM behavioral sibling of rv32_exec_core.
 --
 -- The synthesizable rv32_exec_core confines code+data to a 64 KB window
--- (word_index = off(15 downto 2)) and therefore runs only payloads linked
--- wholly inside that window, such as the 64 KB NVMe self-test firmware.
+-- (word_index = off(15 downto 2)) with a small scratch region and per-address
+-- return-address hacks, all tuned to run the 64 KB NVMe self-test firmware.
 -- The full rv32 SimpleOS kernel needs ~8.5 MB of contiguous RAM
 -- (sp=_stack_top=0x8081d010, heap=0x8081e000), so this variant keeps the SAME
 -- decode / ALU / CSR / M-extension / RVC logic but backs it with ONE flat
 -- 16 MB behavioral RAM (word_index = off(23 downto 2), covering
 -- 0x80000000..0x80FFFFFF). Memory access here is asynchronous single-cycle
--- (behavioral, NOT a BRAM model) so all the windowing/deferral/replication
+-- (behavioral, NOT a BRAM model) so all the scratch/deferral/replication
 -- machinery is gone; on silicon this 16 MB is PS DDR, not fabric BRAM.
 --
 -- Additions over the synthesizable core's memory front-end: lh/lhu/sh are
@@ -24,15 +24,7 @@ use ieee.std_logic_textio.all;
 entity rv32_exec_core_flat is
   generic (
     CLK_FREQ : natural := 100000000;
-    BAUD_RATE : natural := 115200;
-    -- Main RAM depth in 32-bit words. Default 4,194,304 = 16 MB, the historical
-    -- hardcoded size (DDR stand-in). A BRAM-only build overrides this with a
-    -- much smaller depth; see tb_rv32_simpleos_boot_tiny.vhd. Addresses at or
-    -- above BASE_ADDR + RAM_WORDS*4 simply fall outside is_ram(), so an image
-    -- that overflows the configured budget faults visibly instead of aliasing.
-    RAM_WORDS : natural := 4194304;
-    -- Ramdisk bank depth in 32-bit words. Default 262,144 = 1 MiB.
-    RDISK_WORDS : natural := 262144
+    BAUD_RATE : natural := 115200
   );
   port (
     clk : in std_logic;
@@ -52,9 +44,8 @@ architecture rtl of rv32_exec_core_flat is
   constant BASE_ADDR : unsigned(31 downto 0) := x"80000000";
   constant UART_ADDR : unsigned(31 downto 0) := x"10000000";
   constant BAUD_DIV : natural := CLK_FREQ / BAUD_RATE;
-  -- Flat RAM depth comes from the RAM_WORDS generic (default 16 MB =
-  -- 4,194,304 words). The word index is still off(23 downto 2); a smaller
-  -- RAM_WORDS narrows the decoded region rather than the index width.
+  -- 16 MB flat RAM (4,194,304 words = off(23 downto 2)).
+  constant RAM_WORDS : natural := 4194304;
   type regs_t is array(0 to 31) of unsigned(31 downto 0);
   type ram_t is array(0 to RAM_WORDS - 1) of std_logic_vector(31 downto 0);
   type state_t is (S_EXEC, S_DIVIDE, S_UART);
@@ -92,8 +83,7 @@ architecture rtl of rv32_exec_core_flat is
   -- elaborates.
   -- ------------------------------------------------------------------------
   constant RDISK_BASE  : unsigned(31 downto 0) := x"88000000";
-  -- Depth comes from the RDISK_WORDS generic (default 262,144 = 1 MiB window,
-  -- off(19 downto 2)).
+  constant RDISK_WORDS : natural := 262144;  -- 1 MiB window (off(19 downto 2))
   type rdisk_t is array(0 to RDISK_WORDS - 1) of std_logic_vector(31 downto 0);
 
   impure function init_rdisk return rdisk_t is

@@ -30,11 +30,11 @@ SCI shall be the configuration source and shall project launch/security fields i
 
 ### REQ-005 — Provider discovery contract
 
-Every dynamic provider slice shall expose `SimpleProviderQueryV1`. Requests identify interface, version, host ABI, target, and requested capabilities; results identify status, provided version, descriptor prefix, provider context/identity, and implementation/ABI digests.
+Every dynamic provider slice shall expose `SimpleProviderQueryV1`. Requests identify interface, version, host ABI, target, and requested capabilities; results identify status, provided version, descriptor prefix, provider context/identity, implementation digest, and the complete 32-byte ABI SHA-256 identity. The host shall compare that identity with the canonical SCI lock before publishing a live session pin; truncation is not compatible admission.
 
 ### REQ-006 — ABI-safe interfaces
 
-Provider contracts shall use fixed-width scalars, explicit views/buffers, opaque handles, host-supplied allocation, versioned POD descriptors, and stable status codes. They shall not expose `any`, native Simple object/text/container layout, mutable AST/HIR/MIR, unwinding, or ambiguous ownership.
+Provider contracts shall use fixed-width scalars, explicit views/buffers, opaque handles, host-supplied allocation, versioned POD descriptors, and stable status codes. The query-result wire shall preserve its original 48-byte scalar prefix, encode the complete ABI SHA-256 in bytes 48..79 in digest display order, reserve zero bytes 80..83, and reject old/trailing/malformed sizes. Provider ABIs shall not expose `any`, native Simple object/text/container layout, mutable AST/HIR/MIR, unwinding, or ambiguous ownership.
 
 ### REQ-007 — CLI provider slice
 

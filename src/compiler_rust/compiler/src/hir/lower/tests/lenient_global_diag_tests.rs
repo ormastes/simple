@@ -52,9 +52,7 @@ fn collect_stmt_globals(stmt: &crate::hir::types::HirStmt, out: &mut Vec<String>
     use crate::hir::types::HirStmt;
     match stmt {
         HirStmt::Expr(e) | HirStmt::Return(Some(e)) => collect_expr_globals(e, out),
-        HirStmt::Let {
-            value: Some(value), ..
-        } => collect_expr_globals(value, out),
+        HirStmt::Let { value: Some(value), .. } => collect_expr_globals(value, out),
         _ => {}
     }
 }
@@ -102,20 +100,14 @@ fn undefined_identifier_is_attributed_to_file_and_function() {
     assert_eq!(hit.file.as_deref(), Some("/tmp/probe.spl"));
     assert_eq!(hit.function.as_deref(), Some("probe"));
     assert_eq!(hit.kind, LenientGlobalKind::UnresolvedIdentifier);
-    assert!(
-        hit.function_line.is_some(),
-        "attribution must carry a source line"
-    );
+    assert!(hit.function_line.is_some(), "attribution must carry a source line");
 }
 
 /// A resolvable program must record nothing -- otherwise the count is noise
 /// and the population measurement is meaningless.
 #[test]
 fn fully_resolved_program_records_no_lenient_globals() {
-    let output = lower_lenient_with_file(
-        "fn probe() -> i64:\n    val x = 1\n    return x\n",
-        "/tmp/clean.spl",
-    );
+    let output = lower_lenient_with_file("fn probe() -> i64:\n    val x = 1\n    return x\n", "/tmp/clean.spl");
     assert!(
         output.lenient_globals.is_empty(),
         "a fully resolved program must produce no attributions, got {:?}",
@@ -156,10 +148,7 @@ fn animation_time_ms_class_blocker_is_diagnosed_at_its_source() {
 /// *were* such a scope bug to recur, it would now name the function.
 #[test]
 fn unregistered_binding_class_blocker_is_diagnosed_at_its_source() {
-    let source = concat!(
-        "fn eval_node(kind: i64) -> i64:\n",
-        "    return interp_list\n"
-    );
+    let source = concat!("fn eval_node(kind: i64) -> i64:\n", "    return interp_list\n");
     let output = lower_lenient_with_file(source, "/tmp/interp.spl");
     let hits = output.lenient_globals.attributions_for("interp_list");
     assert_eq!(hits.len(), 1);
@@ -274,6 +263,12 @@ fn attributions_from_separate_lowerer_runs_are_all_visible_at_link_time() {
     )
     .expect("both files' attributions must be reachable from one link failure");
 
-    assert!(report.contains("unit_a.spl") && report.contains("first_unit"), "{report}");
-    assert!(report.contains("unit_b.spl") && report.contains("second_unit"), "{report}");
+    assert!(
+        report.contains("unit_a.spl") && report.contains("first_unit"),
+        "{report}"
+    );
+    assert!(
+        report.contains("unit_b.spl") && report.contains("second_unit"),
+        "{report}"
+    );
 }

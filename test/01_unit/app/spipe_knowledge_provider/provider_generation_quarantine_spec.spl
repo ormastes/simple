@@ -1,0 +1,343 @@
+use std.spec.{describe, it, expect}
+use app.spipe_knowledge_provider.protocol.{provider_encode_frame, provider_parse_frame}
+use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1}
+use app.spipe_knowledge_provider.wire.{ProviderHostBindingV1, ProviderWireOwnedDispatchV1, provider_operation_payload_hash, provider_dispatch_frame_bound_owned}
+use app.spipe_knowledge_provider.lifecycle.{DurableLifecyclePort, PureEd25519ReceiptAuthorityV1, FileDurableLifecycleV1, provider_generation_id}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string}
+use app.io.mod.{file_atomic_write, file_delete, file_exists, file_read_text}
+
+fn quarantine_seed() -> [u8]:
+    var seed: [u8] = []
+    var i = 0
+    while i < 32:
+        seed.push(29u8)
+        i = i + 1
+    seed
+
+class QuarantineConflictLifecycleV1 with DurableLifecyclePort:
+    inner: FileDurableLifecycleV1
+    marker_path: text
+    fn available() -> bool: true
+    fn load() -> Result<text, text>: self.inner.load()
+    fn commit(canonical_state: text) -> Result<(), text>:
+        self.inner.commit(canonical_state)
+    fn commit_if_unchanged(expected_sha256: text,
+                           canonical_state: text) -> Result<(), text>:
+        if canonical_state.contains("\"operation\":\"index_publish\""):
+            return Err("lifecycle_conflict")
+        self.inner.commit_if_unchanged(expected_sha256, canonical_state)
+    fn load_generation_quarantine(provider_generation: i64) -> Result<text, text>:
+        self.inner.load_generation_quarantine(provider_generation)
+    fn commit_generation_quarantine(provider_generation: i64,
+                                    canonical_record: text) -> Result<(), text>:
+        self.inner.commit_generation_quarantine(provider_generation,
+            canonical_record)
+
+class TerminalJournalConflictLifecycleV1 with DurableLifecyclePort:
+    inner: FileDurableLifecycleV1
+    marker_path: text
+    fn available() -> bool: true
+    fn load() -> Result<text, text>: self.inner.load()
+    fn commit(canonical_state: text) -> Result<(), text>:
+        self.inner.commit(canonical_state)
+    fn commit_if_unchanged(expected_sha256: text,
+                           canonical_state: text) -> Result<(), text>:
+        if canonical_state.contains("spipe-durable-terminal-error-v1") and
+                not file_exists(self.marker_path):
+            file_atomic_write(self.marker_path, "conflict-once")
+            return Err("lifecycle_conflict")
+        self.inner.commit_if_unchanged(expected_sha256, canonical_state)
+    fn load_generation_quarantine(provider_generation: i64) -> Result<text, text>:
+        self.inner.load_generation_quarantine(provider_generation)
+    fn commit_generation_quarantine(provider_generation: i64,
+                                    canonical_record: text) -> Result<(), text>:
+        self.inner.commit_generation_quarantine(provider_generation,
+            canonical_record)
+
+class TombstonePrecommitOrderLifecycleV1 with DurableLifecyclePort:
+    inner: FileDurableLifecycleV1
+    violation_marker: text
+    provider_generation: i64
+    fn available() -> bool: true
+    fn load() -> Result<text, text>: self.inner.load()
+    fn commit(canonical_state: text) -> Result<(), text>:
+        self.inner.commit(canonical_state)
+    fn commit_if_unchanged(expected_sha256: text,
+                           canonical_state: text) -> Result<(), text>:
+        if canonical_state.contains("\"operation\":\"index_publish\""):
+            val durable_close = self.inner.load_generation_quarantine(
+                self.provider_generation)
+            if val Ok(record) = durable_close:
+                if record != "":
+                    file_atomic_write(self.violation_marker,
+                        "lifecycle CAS attempted after generation close")
+            else:
+                file_atomic_write(self.violation_marker,
+                    "generation close observation failed")
+            return Err("lifecycle_conflict")
+        self.inner.commit_if_unchanged(expected_sha256, canonical_state)
+    fn load_generation_quarantine(provider_generation: i64) -> Result<text, text>:
+        self.inner.load_generation_quarantine(provider_generation)
+    fn commit_generation_quarantine(provider_generation: i64,
+                                    canonical_record: text) -> Result<(), text>:
+        self.inner.commit_generation_quarantine(provider_generation,
+            canonical_record)
+
+# Adversarial ordering: both request CAS attempts report conflicts, then the
+# last prepared lifecycle success acquires the shared lock immediately before
+# the generation-close tombstone. The adapter must return that exact success,
+# and restart must replay the same bytes even though the generation is closed.
+class LifecycleWinnerBeforeCloseV1 with DurableLifecyclePort:
+    inner: FileDurableLifecycleV1
+    staged_etag_path: text
+    staged_state_path: text
+    fn available() -> bool: true
+    fn load() -> Result<text, text>: self.inner.load()
+    fn commit(canonical_state: text) -> Result<(), text>:
+        self.inner.commit(canonical_state)
+    fn commit_if_unchanged(expected_sha256: text,
+                           canonical_state: text) -> Result<(), text>:
+        if canonical_state.contains("\"operation\":\"index_publish\""):
+            val _ = file_atomic_write(self.staged_etag_path, expected_sha256)
+            val _ = file_atomic_write(self.staged_state_path, canonical_state)
+            return Err("lifecycle_conflict")
+        self.inner.commit_if_unchanged(expected_sha256, canonical_state)
+    fn load_generation_quarantine(provider_generation: i64) -> Result<text, text>:
+        self.inner.load_generation_quarantine(provider_generation)
+    fn commit_generation_quarantine(provider_generation: i64,
+                                    canonical_record: text) -> Result<(), text>:
+        val staged_etag = file_read_text(self.staged_etag_path)
+        val staged_state = file_read_text(self.staged_state_path)
+        self.inner.commit_if_unchanged(staged_etag, staged_state)?
+        self.inner.commit_generation_quarantine(provider_generation,
+            canonical_record)
+
+fn fresh_store(path: text, marker_path: text) -> FileDurableLifecycleV1:
+    file_delete(marker_path)
+    file_delete(path + "/provider-generation-quarantine-v1-pg-00000000000000000000000000000001.json")
+    file_delete(path + "/provider-generation-quarantine-v1-pg-00000000000000000000000000000009.json")
+    file_delete(path + "/provider-generation-quarantine-v1-pg-0000000000000000000000000000000d.json")
+    file_delete(path + "/provider-generation-quarantine-v1-pg-00000000000000000000000000000011.json")
+    val store = FileDurableLifecycleV1.configured_absolute(path).unwrap()
+    store.commit("{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}").unwrap()
+    store
+
+fn initialized_frame(request_id: text) -> text:
+    val end = "}"
+    provider_encode_frame("{\"client\":\"spipe\",\"limits\":{\"max_frame_bytes\":1048576},\"operation\":\"initialize\",\"protocol\":{\"major\":1,\"minor\":0},\"request_id\":\"" + request_id + "\",\"required\":{\"analyzer\":\"spipe-unicode-lex-v1\",\"explanation\":\"bm25-explain-v1\",\"logical_index\":\"spipe-lexical-snapshot-v1\",\"provider\":\"spipe-search-provider/1.0\",\"score\":\"bm25-fixed-v1\"}" + end).unwrap()
+
+fn bound_frame(request_id: text, operation: text, payload: text,
+               generation: i64) -> text:
+    provider_encode_frame("{\"deadline_ms\":30000,\"operation\":\"" + operation + "\",\"operation_receipt\":null,\"payload\":" + payload + ",\"protocol\":{\"major\":1,\"minor\":0},\"provider_generation\":\"" + provider_generation_id(generation) + "\",\"query_receipt\":null,\"request_id\":\"" + request_id + "\",\"scope_digest\":\"sha256:" + "1" * 64 + "\",\"snapshot\":\"spks1-" + "0" * 64 + "\",\"workspace\":\"WS-PROVIDER\"}").unwrap()
+
+fn dispatch(service: SpipeProviderServiceV1, frame: text,
+            generation: i64) -> ProviderWireOwnedDispatchV1:
+    val host = ProviderHostBindingV1.create_with_generation("WS-PROVIDER",
+        "spks1-" + "0" * 64, "sha256:" + "1" * 64, generation).unwrap()
+    provider_dispatch_frame_bound_owned(service, host, frame)
+
+fn response_payload(dispatched: ProviderWireOwnedDispatchV1) -> text:
+    provider_parse_frame(dispatched.outcome.frame).payload
+
+fn result_text(response: text, key: text) -> text:
+    val root = json_parse_with_error(response).0
+    val result = json_object_get(root, "result")
+    json_to_string(json_object_get(result, key)) ?? ""
+
+fn apply_empty(service: SpipeProviderServiceV1, operation_id: text,
+               generation: i64) -> ProviderWireOwnedDispatchV1:
+    val unhashed = "{\"base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"" + operation_id + "\",\"operations\":[]}"
+    val payload_hash = provider_operation_payload_hash(unhashed,
+        "index_apply").unwrap()
+    val payload = "{\"base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"" + operation_id + "\",\"operations\":[],\"payload_hash\":\"" + payload_hash + "\"}"
+    dispatch(service, bound_frame("request-" + operation_id, "index_apply",
+        payload, generation), generation)
+
+fn publish_payload(operation_id: text, candidate_uid: text,
+                   candidate_root: text) -> text:
+    val unhashed = "{\"action\":\"publish\",\"candidate_logical_root\":\"" + candidate_root + "\",\"candidate_uid\":\"" + candidate_uid + "\",\"expected_base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"" + operation_id + "\"}"
+    val payload_hash = provider_operation_payload_hash(unhashed,
+        "index_publish").unwrap()
+    "{\"action\":\"publish\",\"candidate_logical_root\":\"" + candidate_root + "\",\"candidate_uid\":\"" + candidate_uid + "\",\"expected_base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"" + operation_id + "\",\"payload_hash\":\"" + payload_hash + "\"}"
+
+describe "SPipe provider generation quarantine":
+    it "precommits restart denial before another lifecycle quarantine CAS":
+        val generation = 1
+        val marker = "/tmp/simple-spipe-provider-precommit-order.marker"
+        val inner = fresh_store("/tmp/simple-spipe-provider-precommit-order",
+            marker)
+        val store = TombstonePrecommitOrderLifecycleV1(inner: inner,
+            violation_marker: marker, provider_generation: generation)
+        var service = SpipeProviderServiceV1.configured(
+            PureEd25519ReceiptAuthorityV1.test_only(quarantine_seed(),
+                "AUTH-PRECOMMIT", generation).unwrap(), store).unwrap()
+        service = dispatch(service, initialized_frame("init-precommit"),
+            generation).service
+        val applied = apply_empty(service, "apply-precommit", generation)
+        service = applied.service
+        val candidate_uid = result_text(response_payload(applied),
+            "candidate_uid")
+        val candidate_root = result_text(response_payload(applied),
+            "candidate_logical_root")
+        val payload = publish_payload("publish-precommit", candidate_uid,
+            candidate_root)
+        val published = dispatch(service, bound_frame(
+            "request-publish-precommit", "index_publish", payload,
+            generation), generation)
+        val first = response_payload(published)
+        expect(first).to_contain("\"code\":\"fatal_provider_error\"")
+        expect(file_exists(marker)).to_be(false)
+        expect(inner.load_generation_quarantine(generation).unwrap()).to_contain(
+            "\"schema\":\"spipe-provider-generation-quarantine-v1\"")
+        expect(inner.load().unwrap()).to_contain("\"state\":\"staged\"")
+        var restarted = SpipeProviderServiceV1.configured(
+            PureEd25519ReceiptAuthorityV1.test_only(quarantine_seed(),
+                "AUTH-PRECOMMIT", generation).unwrap(), inner).unwrap()
+        restarted = dispatch(restarted, initialized_frame("init-precommit-restart"),
+            generation).service
+        expect(response_payload(dispatch(restarted, bound_frame(
+            "request-publish-precommit", "index_publish", payload,
+            generation), generation))).to_equal(first)
+
+    it "returns the exact lifecycle winner that linearized before generation close":
+        val generation = 17
+        val staged_etag = "/tmp/simple-spipe-provider-close-race.etag"
+        val staged_state = "/tmp/simple-spipe-provider-close-race.state"
+        file_delete(staged_etag)
+        file_delete(staged_state)
+        val inner = fresh_store("/tmp/simple-spipe-provider-close-race",
+            "/tmp/simple-spipe-provider-close-race.marker")
+        val store = LifecycleWinnerBeforeCloseV1(inner: inner,
+            staged_etag_path: staged_etag, staged_state_path: staged_state)
+        var service = SpipeProviderServiceV1.configured(
+            PureEd25519ReceiptAuthorityV1.test_only(quarantine_seed(),
+                "AUTH-CLOSE-RACE", generation).unwrap(), store).unwrap()
+        service = dispatch(service, initialized_frame("init-close-race"),
+            generation).service
+        val applied = apply_empty(service, "apply-close-race", generation)
+        service = applied.service
+        val candidate_uid = result_text(response_payload(applied),
+            "candidate_uid")
+        val candidate_root = result_text(response_payload(applied),
+            "candidate_logical_root")
+        val payload = publish_payload("publish-close-race", candidate_uid,
+            candidate_root)
+        val published = dispatch(service, bound_frame(
+            "request-publish-close-race", "index_publish", payload,
+            generation), generation)
+        val first = response_payload(published)
+        expect(first).to_contain("\"status\":\"published\"")
+        expect(inner.load().unwrap()).to_contain("\"state\":\"published\"")
+        expect(inner.load_generation_quarantine(generation).unwrap()).to_contain(
+            "\"schema\":\"spipe-provider-generation-quarantine-v1\"")
+        var restarted = SpipeProviderServiceV1.configured(
+            PureEd25519ReceiptAuthorityV1.test_only(quarantine_seed(),
+                "AUTH-CLOSE-RACE", generation).unwrap(), inner).unwrap()
+        restarted = dispatch(restarted,
+            initialized_frame("init-close-race-restart"), generation).service
+        val replayed = dispatch(restarted, bound_frame(
+            "request-publish-close-race", "index_publish", payload,
+            generation), generation)
+        expect(response_payload(replayed)).to_equal(first)
+
+    it "persists generation closure through lifecycle contention and restart":
+        val generation = 9
+        val marker = "/tmp/simple-spipe-provider-generation-quarantine.marker"
+        val inner = fresh_store("/tmp/simple-spipe-provider-generation-quarantine",
+            marker)
+        val store = QuarantineConflictLifecycleV1(inner: inner,
+            marker_path: marker)
+        var service = SpipeProviderServiceV1.configured(
+            PureEd25519ReceiptAuthorityV1.test_only(quarantine_seed(),
+                "AUTH-QUARANTINE", generation).unwrap(), store).unwrap()
+        service = dispatch(service, initialized_frame("init-quarantine"),
+            generation).service
+        expect(service.state.provider_generation).to_equal(generation)
+        val applied = apply_empty(service, "apply-quarantine", generation)
+        service = applied.service
+        val apply_response = response_payload(applied)
+        val candidate_uid = result_text(apply_response, "candidate_uid")
+        val candidate_root = result_text(apply_response,
+            "candidate_logical_root")
+        # This process loaded the still-open generation before another
+        # process wins the generation-close tombstone.
+        var stale_writer = SpipeProviderServiceV1.configured(
+            PureEd25519ReceiptAuthorityV1.test_only(quarantine_seed(),
+                "AUTH-QUARANTINE", generation).unwrap(), inner).unwrap()
+        stale_writer = dispatch(stale_writer,
+            initialized_frame("init-stale-writer"), generation).service
+        val payload = publish_payload("publish-quarantine", candidate_uid,
+            candidate_root)
+        val published = dispatch(service, bound_frame("request-publish-quarantine",
+            "index_publish", payload, generation), generation)
+        service = published.service
+        val first = response_payload(published)
+        expect(first).to_contain("\"code\":\"fatal_provider_error\"")
+        expect(first).to_contain("provider generation closed")
+        expect(service.state.generation_quarantined).to_be(true)
+        expect(service.state.request_allowed()).to_be(false)
+        expect(inner.load().unwrap()).to_contain("\"state\":\"staged\"")
+        val denied = apply_empty(service, "apply-after-quarantine", generation)
+        expect(response_payload(denied)).to_contain(
+            "\"code\":\"fatal_provider_error\"")
+        var restarted = SpipeProviderServiceV1.configured(
+            PureEd25519ReceiptAuthorityV1.test_only(quarantine_seed(),
+                "AUTH-QUARANTINE", generation).unwrap(), inner).unwrap()
+        restarted = dispatch(restarted, initialized_frame("init-restart"),
+            generation).service
+        expect(restarted.state.generation_quarantined).to_be(true)
+        val replayed = dispatch(restarted,
+            bound_frame("request-publish-quarantine", "index_publish", payload,
+                generation), generation)
+        expect(response_payload(replayed)).to_equal(first)
+        val stale_payload = publish_payload("publish-stale-writer",
+            candidate_uid, candidate_root)
+        val stale_result = dispatch(stale_writer, bound_frame(
+            "request-publish-stale-writer", "index_publish", stale_payload,
+            generation), generation)
+        val stale_response = response_payload(stale_result)
+        expect(stale_response).to_contain("\"code\":\"fatal_provider_error\"")
+        expect(response_payload(dispatch(restarted, bound_frame(
+            "request-publish-stale-writer", "index_publish", stale_payload,
+            generation), generation))).to_equal(stale_response)
+
+    it "retries terminal loser journaling until the exact response is durable":
+        val generation = 13
+        val marker = "/tmp/simple-spipe-provider-terminal-journal.marker"
+        val inner = fresh_store("/tmp/simple-spipe-provider-terminal-journal",
+            marker)
+        var service = SpipeProviderServiceV1.configured(
+            PureEd25519ReceiptAuthorityV1.test_only(quarantine_seed(),
+                "AUTH-JOURNAL", generation).unwrap(), inner).unwrap()
+        service = dispatch(service, initialized_frame("init-journal"),
+            generation).service
+        val applied = apply_empty(service, "apply-journal", generation)
+        service = applied.service
+        val candidate_uid = result_text(response_payload(applied),
+            "candidate_uid")
+        val candidate_root = result_text(response_payload(applied),
+            "candidate_logical_root")
+        val winner_payload = publish_payload("publish-winner", candidate_uid,
+            candidate_root)
+        service = dispatch(service, bound_frame("request-publish-winner",
+            "index_publish", winner_payload, generation), generation).service
+        var contender = SpipeProviderServiceV1.configured(
+            PureEd25519ReceiptAuthorityV1.test_only(quarantine_seed(),
+                "AUTH-JOURNAL", generation).unwrap(),
+            TerminalJournalConflictLifecycleV1(inner: inner,
+                marker_path: marker)).unwrap()
+        contender = dispatch(contender, initialized_frame("init-contender"),
+            generation).service
+        val loser_payload = publish_payload("publish-loser", candidate_uid,
+            candidate_root)
+        val loser = dispatch(contender, bound_frame("request-publish-loser",
+            "index_publish", loser_payload, generation), generation)
+        val loser_response = response_payload(loser)
+        expect(loser_response).to_contain("\"code\":\"stale_base\"")
+        expect(inner.load().unwrap()).to_contain("publish-loser")
+        val replayed = dispatch(loser.service,
+            bound_frame("request-publish-loser", "index_publish", loser_payload,
+                generation), generation)
+        expect(response_payload(replayed)).to_equal(loser_response)

@@ -1,0 +1,178 @@
+"""Focused production-runner MC/DC evidence transport and aggregation coverage."""
+# @req: REQ-MCDC-ENFORCEMENT-005
+
+use std.spec
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use std.test_runner.test_runner_types.{TestFileResult}
+use std.test_runner.test_runner_mcdc_report.{
+    test_runner_extract_mcdc_evidence_v1,
+    test_runner_aggregate_mcdc_evidence,
+    test_runner_finalize_mcdc_results
+}
+use std.test_runner.test_executor_parsing.{make_result_from_output}
+use std.test_runner.test_executor_parsing.{extract_compiler_mcdc_obligation_manifest}
+use std.test_runner.test_runner_execute.{mcdc_manifest_transport_args}
+
+fn result(path: text, evidence: text, cached: bool = false) -> TestFileResult:
+    TestFileResult(
+        path: path, passed: 1, failed: 0, skipped: 0, pending: 0,
+        duration_ms: 1, setup_ms: 0, error: "", timed_out: false,
+        cached: cached, mcdc_evidence_v1: evidence
+    )
+
+fn obligation(version: text = "v1") -> text:
+    "obligation|7|decision-a|{version}|0|0|0|0|0|false|compiler-boolean-projection-v1"
+
+fn evaluation(owner: i64, sequence: i64, outcome: bool, value: bool) -> text:
+    val outcome_text = if outcome: "true" else: "false"
+    val value_mask = if value: 1 else: 0
+    "evaluation|7|{owner}|{sequence}|{outcome_text}|1|0|0|0|" +
+        "{value_mask}|0|0|0|0|0|0|0"
+
+describe "test runner MC/DC evidence transport":
+    it "carries an enabled manifest beyond extraction scope and omits a disabled one":
+        val enabled = mcdc_manifest_transport_args("/private/manifest.sdn", "abc")
+        expect(enabled.len()).to_equal(3)
+        expect(enabled[0]).to_equal("--simple-mcdc-manifest=/private/manifest.sdn")
+        expect(enabled[1]).to_equal("--simple-mcdc-manifest-length=3")
+        expect(enabled[2]).to_start_with("--simple-mcdc-manifest-sha256=")
+        expect(mcdc_manifest_transport_args("", "unbound-neighbor")).to_equal([])
+
+    it "extracts exactly one compiler obligation manifest for child injection":
+        step("Verify: compiler identities persist across the compile-run process boundary")
+        val (manifest, valid) = extract_compiler_mcdc_obligation_manifest(
+            "compile log\n__SIMPLE_MCDC_OBLIGATION_MANIFEST_BEGIN__\n" +
+            "schema: simple-mcdc-obligations-v1\n" +
+            "condition|7|decision-a|v1|0|0|0|0|0|false|compiler-boolean-projection-v1\n" +
+            "__SIMPLE_MCDC_OBLIGATION_MANIFEST_END__\n"
+        )
+        expect(valid).to_equal(true)
+        expect(manifest).to_contain("condition|7|decision-a|v1|0|0|0|0|0|false|compiler-boolean-projection-v1")
+        val (_, duplicate_valid) = extract_compiler_mcdc_obligation_manifest(
+            "__SIMPLE_MCDC_OBLIGATION_MANIFEST_BEGIN__\nx\n" +
+            "__SIMPLE_MCDC_OBLIGATION_MANIFEST_END__\n" +
+            "__SIMPLE_MCDC_OBLIGATION_MANIFEST_BEGIN__\ny\n" +
+            "__SIMPLE_MCDC_OBLIGATION_MANIFEST_END__"
+        )
+        expect(duplicate_valid).to_equal(false)
+
+    it "extracts one explicit child envelope and rejects ambiguity":
+        step("Verify: bounded child output carries only the typed MC/DC envelope")
+        val extracted = test_runner_extract_mcdc_evidence_v1(
+            "noise\n__SIMPLE_MCDC_EVIDENCE_BEGIN__\n" +
+            "MCDC-EVIDENCE-v1\ncounters|0|0\n" +
+            obligation() + "\n" + evaluation(1, 1, false, false) + "\n" +
+            "__SIMPLE_MCDC_EVIDENCE_END__\nsummary"
+        )
+        expect(extracted).to_contain("obligation|7|decision-a|v1|0")
+        val duplicate = test_runner_extract_mcdc_evidence_v1(
+            "MCDC-EVIDENCE-v1\ncounters|0|0\nnoise\n" +
+            "MCDC-EVIDENCE-v1\ncounters|0|0"
+        )
+        expect(duplicate).to_equal("MCDC-EVIDENCE-invalid")
+
+    it "attaches the child envelope at the shared result-parser boundary":
+        step("Verify: subprocess fork async and native lanes retain MC/DC evidence")
+        val parsed = make_result_from_output(
+            "sample_spec.spl",
+            "MCDC-EVIDENCE-v1\ncounters|0|0\n" + obligation() + "\n" +
+                evaluation(1, 1, false, false) + "\n" +
+                "1 examples, 0 failures",
+            "", 0, 1, 5
+        )
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.mcdc_evidence_v1).to_contain("obligation|7|decision-a|v1|0")
+
+    it "forms an independence pair whose A and B vectors came from different children":
+        step("Verify: suite aggregation precedes MC/DC independence analysis")
+        val first = "MCDC-EVIDENCE-v1\ncounters|0|0\n" +
+            obligation() + "\n" + evaluation(1, 1, false, false)
+        val second = "MCDC-EVIDENCE-v1\ncounters|0|0\n" +
+            obligation() + "\n" + evaluation(2, 1, true, true)
+        val left = test_runner_finalize_mcdc_results(
+            "on", AssuranceStrictness.Moderate,
+            [result("b", first), result("a", second)]
+        )
+        val right = test_runner_finalize_mcdc_results(
+            "on", AssuranceStrictness.Moderate,
+            [result("a", second), result("b", first)]
+        )
+        expect(left.accepted).to_equal(true)
+        expect(right.accepted).to_equal(true)
+        expect(left.machine_diagnostic).to_equal(right.machine_diagnostic)
+
+    it "never passes missing cached malformed or saturated evidence":
+        step("Verify: blocked and invalid runtime states fail closed")
+        val missing = test_runner_finalize_mcdc_results(
+            "dynamic", AssuranceStrictness.Critical, [result("missing", "")]
+        )
+        expect(missing.accepted).to_equal(false)
+        expect(missing.machine_diagnostic).to_contain("MCDC-E-EVIDENCE-MISSING")
+        val cached = test_runner_aggregate_mcdc_evidence([
+            result("cached", "MCDC-EVIDENCE-v1\ncounters|0|0\n" + obligation(), true)
+        ])
+        expect(cached.valid).to_equal(false)
+        expect(cached.error).to_contain("MCDC-E-CACHED")
+        val saturated = test_runner_finalize_mcdc_results(
+            "on", AssuranceStrictness.Moderate, [result(
+                "saturated",
+                "MCDC-EVIDENCE-v1\ncounters|1|0\n" + obligation() + "\n" +
+                    evaluation(1, 1, false, false) + "\n" +
+                    evaluation(1, 2, true, true)
+            )]
+        )
+        expect(saturated.accepted).to_equal(false)
+        expect(saturated.machine_diagnostic).to_contain("MCDC-E-EVIDENCE-DROPPED")
+        expect(saturated.machine_diagnostic).to_contain("dropped=1")
+
+        val overwritten = test_runner_finalize_mcdc_results(
+            "on", AssuranceStrictness.Moderate, [result(
+                "overwritten",
+                "MCDC-EVIDENCE-v1\ncounters|0|2\n" + obligation()
+            )]
+        )
+        expect(overwritten.machine_diagnostic).to_contain("MCDC-E-EVIDENCE-OVERWRITTEN")
+        expect(overwritten.machine_diagnostic).to_contain("overwritten=2")
+
+    it "rejects conflicting identity versions across children":
+        step("Verify: aggregation does not choose one conflicting child nondeterministically")
+        val conflict = test_runner_aggregate_mcdc_evidence([
+            result("one", "MCDC-EVIDENCE-v1\ncounters|0|0\n" + obligation("v1")),
+            result("two", "MCDC-EVIDENCE-v1\ncounters|0|0\n" + obligation("v2"))
+        ])
+        expect(conflict.valid).to_equal(false)
+        expect(conflict.error).to_contain("MCDC-E-POLICY-CONFLICT")
+
+    it "rejects missing duplicate and malformed condition policies":
+        step("Verify: every condition has exactly one valid policy per child")
+        val missing = test_runner_aggregate_mcdc_evidence([
+            result("missing", "MCDC-EVIDENCE-v1\ncounters|0|0\nobligation|7|decision-a|v1|0")
+        ])
+        expect(missing.valid).to_equal(false)
+        val duplicate = test_runner_aggregate_mcdc_evidence([
+            result("duplicate", "MCDC-EVIDENCE-v1\ncounters|0|0\n" + obligation() + "\n" + obligation())
+        ])
+        expect(duplicate.error).to_contain("MCDC-E-POLICY-DUPLICATE")
+        val malformed = test_runner_aggregate_mcdc_evidence([
+            result("malformed", "MCDC-EVIDENCE-v1\ncounters|0|0\nobligation|7|decision-a|v1|0|0|0|0|0|maybe|reason")
+        ])
+        expect(malformed.valid).to_equal(false)
+
+    it "reports strong coupling distinctly from a missing independence pair":
+        step("Verify: reviewed strong coupling remains a blocking classification")
+        val strong = "obligation|7|decision-a|v1|0|0|0|0|0|true|reviewed-strong-coupling"
+        val completion = test_runner_finalize_mcdc_results(
+            "on", AssuranceStrictness.Moderate,
+            [result("strong", "MCDC-EVIDENCE-v1\ncounters|0|0\n" + strong)]
+        )
+        expect(completion.accepted).to_equal(false)
+        expect(completion.machine_diagnostic).to_contain("MCDC-E-STRONG-COUPLING")
+
+    it "fails an unobserved required decision without indexing absent analysis":
+        step("Verify: zero evaluations produce a stable uncovered condition row")
+        val completion = test_runner_finalize_mcdc_results(
+            "on", AssuranceStrictness.Moderate,
+            [result("unobserved", "MCDC-EVIDENCE-v1\ncounters|0|0\n" + obligation())]
+        )
+        expect(completion.accepted).to_equal(false)
+        expect(completion.machine_diagnostic).to_contain("MCDC-E-MISSING-PAIR")

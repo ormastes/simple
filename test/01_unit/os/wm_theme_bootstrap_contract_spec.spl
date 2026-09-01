@@ -1,36 +1,30 @@
 use std.io_runtime.{file_read}
 use std.spec.*
-use os.compositor.host_wm_theme_bootstrap.{install_host_wm_theme, apply_host_wm_css_theme_override, active_host_wm_theme_snapshot}
-use common.ui.wm_chrome_theme.{active_wm_theme_id}
+
 
 describe "WM theme bootstrap ownership":
 
     it "installs the resolved host package before backend and compositor creation":
         val source = file_read("src/os/hosted/hosted_entry.spl")
         val install = source.index_of("install_default_host_wm_theme()")
-        val css_override = source.index_of("apply_host_wm_css_theme_override(")
         val backend = source.index_of("HostedWinitBufferBackend.create(")
         val compositor = source.index_of("HostCompositor.new_headless(")
-        expect(source).to_contain("install_default_host_wm_theme")
-        expect(source).to_contain("apply_host_wm_css_theme_override")
+        val expected_import = "use os.compositor.host_wm_theme_bootstrap." +
+            "{" + "install_default_host_wm_theme" + "}"
+        expect(source).to_contain(expected_import)
         expect(install).to_be_greater_than(0)
         expect(install).to_be_less_than(backend)
         expect(install).to_be_less_than(compositor)
-        expect(css_override).to_be_greater_than(install)
-        expect(css_override).to_be_less_than(backend)
-        expect(source).to_contain("rt_env_get(\"SIMPLE_WM_THEME_FILE\")")
-        expect(source).to_contain("file_read(theme_file)")
 
     it "prefers active state then the package-owned snapshot projection":
         val source = file_read("src/os/compositor/host_wm_theme_bootstrap.spl")
-        val active = source.index_of("active_wm_theme_snapshot_present()")
-        val unchecked = source.index_of("active_wm_theme_snapshot_unchecked()")
-        val fallback = source.index_of("install_host_wm_theme(default_theme_id())")
-        val projected = source.index_of("theme_package_render_snapshot(theme_id)")
+        val active = source.index_of("active_wm_theme_render_snapshot()")
+        val package_load = source.index_of("load_theme_package(default_theme_id()).snapshot")
+        val generated = source.index_of("aetheric_dark_theme_render_snapshot()")
         expect(active).to_be_greater_than(0)
-        expect(unchecked).to_be_greater_than(active)
-        expect(fallback).to_be_greater_than(unchecked)
-        expect(projected).to_be_greater_than(0)
+        expect(active).to_be_less_than(package_load)
+        expect(package_load).to_be_less_than(generated)
+        expect(source).to_contain("aetheric_dark_theme_render_snapshot()")
         expect(source).to_contain("apply_theme_render_snapshot_to_wm_chrome")
         expect(source.contains("load_theme_package(")).to_be(false)
         expect(source.contains("aetheric_dark_theme_render_snapshot()")).to_be(false)
@@ -75,15 +69,11 @@ describe "WM theme bootstrap ownership":
     it "installs the same generated Aetheric snapshot before ARM64 compositor creation":
         val source = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
         val install = source.index_of("install_generated_simpleos_wm_theme()")
-        val mount = source.index_of("val vfs_mounted = vfs_boot_init_virtio_fat32()")
-        val theme_css = source.index_of("val theme_css = if vfs_mounted:")
-        val override = source.index_of("val theme_override_applied = if vfs_mounted:")
         val framebuffer = source.index_of("val framebuffer_address = raw_alloc(")
         val engine = source.index_of("var engine = create_fb_engine_sized(")
         val expected_import = "use os.compositor.simpleos_wm_theme_bootstrap." +
             "{" + "install_generated_simpleos_wm_theme" + "}"
         expect(source).to_contain(expected_import)
-        expect(source).to_contain("use os.services.vfs.vfs_init.{vfs_boot_init_virtio_fat32, g_vfs_read_file_text}")
         expect(install).to_be_greater_than(0)
         expect(install).to_be_less_than(framebuffer)
         expect(install).to_be_less_than(engine)
@@ -133,6 +123,8 @@ describe "WM theme bootstrap ownership":
         expect(source).to_contain("[theme-override] path=/THEME.CSS mount=")
 
     it "keeps boot FAT32 THEME.CSS short-name routing for both root-case variants":
+        # @req REQ-SSPEC-OS
+        step("keeps boot FAT32 THEME.CSS short-name routing for both root-case variants")
         val source = (file_read("src/os/services/vfs/vfs_boot_init.spl") + file_read("src/os/services/vfs/vfs_boot_core.spl") + file_read("src/os/services/vfs/vfs_boot_state.spl") + file_read("src/os/services/vfs/vfs_ambient_context.spl") + file_read("src/os/services/vfs/nvme_boot_runtime_owner.spl") + file_read("src/os/services/vfs/nvme_filesystem_direct_io.spl") + file_read("src/os/services/vfs/nvme_q35_lease_perf.spl") + file_read("src/os/services/vfs/direct_fat32_boot_reader.spl"))
         expect(source.contains("if path == \"/THEME.CSS\" or path == \"/theme.css\":")).to_equal(true)
         expect(source.contains("return \"THEME.CSS\"")).to_equal(true)

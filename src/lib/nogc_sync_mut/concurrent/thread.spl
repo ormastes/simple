@@ -91,6 +91,7 @@ extern fn rt_thread_is_done(handle: i64) -> i64
 extern fn rt_thread_id(handle: i64) -> i64
 extern fn rt_thread_free(handle: i64)
 extern fn rt_thread_available_parallelism() -> i64
+@unsafe(reason: "raw scheduler sleep provider; duration is caller-bounded", capabilities: [ffi])
 extern fn rt_thread_sleep(millis: i64)
 extern fn rt_thread_yield()
 
@@ -105,8 +106,11 @@ class ThreadHandle:
 
     # Blocks until thread completes and returns its result value.
     # Thread handle is consumed - cannot call join() twice.
+    # Optional: the spawned closure may legitimately produce no value, in
+    # which case the runtime hands back nil. Declaring this non-optional made
+    # that path abort under the non-optional return contract (E-SFFI-016).
     # @tag:api
-    fn join() -> i64:
+    fn join() -> i64?:
         rt_thread_join(self.handle)
 
     # Non-blocking check if thread has completed.
@@ -151,7 +155,7 @@ fn thread_spawn_with_args(data1: Any, data2: Any, closure: fn(Any, Any) -> Any) 
 fn thread_spawn_with_i64_args_id(data1: i64, data2: i64, closure: fn(Any, Any) -> Any) -> i64:
     rt_thread_spawn_isolated_with_args(closure, data1, data2)
 
-fn thread_join_by_id(handle: i64) -> i64:
+fn thread_join_by_id(handle: i64) -> i64?:
     rt_thread_join(handle)
 
 # Returns number of CPU cores available for parallel execution.
@@ -166,7 +170,8 @@ fn thread_available_parallelism() -> i64:
 # Minimum sleep duration is OS-dependent (typically 1ms).
 # @tag:api
 fn thread_sleep(millis: i64):
-    rt_thread_sleep(millis)
+    unsafe(capabilities: [ffi]):
+        rt_thread_sleep(millis)
 
 # Voluntarily yields CPU to other threads.
 # Useful in spin loops to reduce CPU usage.

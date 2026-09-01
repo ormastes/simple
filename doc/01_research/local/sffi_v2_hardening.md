@@ -1522,807 +1522,308 @@ Implementations found are C++ 219, C 2,323, Rust 2,161, and Simple 558.
 `rt_torch` remains 162 unsafe rows, 35 minimized, zero untouched, and zero
 verified/signed. Therefore Torch and SFFI globally are not yet verified safe.
 
-The editor DAP client no longer redeclares five raw piped-process symbols.
-It imports the canonical process owner, whose raw declarations are explicitly
-tagged `unsafe(ffi)` with their sentinel contracts. Spawn, write, and close are
-lifted locally to typed `Result` values. A failed write no longer increments the
-DAP sequence, appends a sent frame, or publishes a pending request, and a
-failed piped cleanup no longer fabricates a stopped client. Cleanup now uses
-`process_close_piped`, which owns pipe-table and descriptor cleanup, instead of
-generic PID kill.
-
-### Checked piped-process status ABI follow-up
-
-The additive checked ABI now separates nonblocking read outcomes:
-`1=data`, `0=would-block`, `2=EOF`, `-1=null status output`, `-2=invalid
-handle`, and `-3=OS/read failure`; checked liveness returns `1=alive`,
-`0=exited`, `-2=invalid handle`, or `-3=OS/wait failure`. C, Rust interpreter,
-runtime symbol/version metadata, native/JIT signatures, Stage4 closure, and the
-canonical Simple owner agree on the two new symbols. Safe-facing wrappers lift
-them to `Result<Option<text>, text>` and `Result<bool, text>` without converting
-valid `false` or no-data states into numeric workarounds.
-
-The hot path is bounded: POSIX performs one read with EINTR retry, Windows one
-pipe availability query and at most one read, and the Rust interpreter performs
-one 8192-byte read while holding the existing registry mutex. No per-poll
-symbol lookup, hash, retry sleep, map addition, or unbounded buffer growth was
-introduced. Windows no longer performs a process wait on every empty poll or
-infers EOF from leader exit while a descendant can retain stdout. POSIX tracks
-whether the leader was reaped so cleanup does not signal a reused PID/PGID.
-
-The native C behavioral fixture passes invalid-handle, would-block, data, EOF,
-liveness, post-close, slot-recycle, and cleanup checks. Static contract gates
-pass. Compiled-interpreter execution remains unverified because the available
-runner launches the pre-change main-worktree binary, which reports the new
-symbol unknown; rebuilding an admitted compiler is required. Global/static
-returned buffers and unlocked slot lookup also leave a thread-policy proof
-obligation. This boundary therefore remains `unsafe_unsigned`.
-
-The refreshed census is 12,295 declaration rows and 3,172 distinct symbols:
-810 unsafe-tagged, 626 contract-documented, 352 unsafe-minimized, 11,943
-unsafe-unminimized, 11,211 untouched, and zero evidence-verified,
-signature-verified, or verified-and-signed. Implementations are C++ 219, C
-2,325, Rust 2,161, and Simple 558. `rt_process` has 1,031 rows, 31 minimized,
-994 untouched, and zero signed/verified admissions.
-
-### Evidence admission v2 and first clock-provider ratchet
-
-The v1 admission gate verified Ed25519 authenticity and file digests but still
-trusted a signed `evidence_verified=true` field and a five-line report whose
-`result=pass` was not bound to source, exact build input, compiler, target, or
-machine receipts. It also hashed the ABI registry without parsing its closure
-or confirming that the exact artifact strongly defined the admitted symbols.
-
-Evidence v2 removes the caller-provided verification boolean. Admission now
-requires an immutable private snapshot of every input, a Linux ELF provider
-matching the declared Linux target, exact function-only `rt_*` closure, a
-canonical ABI registry whose
-provider/target/count/sorted symbol-signature rows exactly match the manifest,
-and a canonical v2 report bound to the artifact, source snapshot, exact build
-input, compiler artifact, ABI registry, and at least one actual canonical
-machine-receipt file whose bytes, tool/config identity, result, and build
-identities are checked. Hash-shaped assertions are not receipts.
-The trust store remains separately provisioned and provider-scoped; production
-code never generates or trusts an adjacent key.
-
-The clock-provider gate additionally requires a signed report to bind a
-canonical native-link receipt for the exact provider, final consumer, linker,
-link map, target, and ABI-registry bytes, then
-admits exactly `rt_time_now_micros`, `rt_time_now_nanos`, and
-`rt_time_now_unix_micros` with the compiler inventory fingerprint for
-`() -> i64`. Missing production trust/evidence reports `STATUS: BLOCKED`, not
-PASS or SKIP. The test-generated Ed25519 key is explicitly fixture-only.
-
-Sabotage coverage rejects a signed report without receipts, false receipt
-content, ABI signature mismatch, missing/data/extra artifact exports, wrong
-artifact architecture or OS format, artifact or
-report tampering, a signed failing report, malformed canonical order, duplicate
-trust entries, an untrusted key, and signature substitution. The fixture census
-reports 273 declaration rows matching fixture symbol/signature evidence, but
-only the three canonical tagged and contracted fixture clock declarations
-become `fixture_verified`; production `verified_and_signed` remains zero until
-external trust and real release artifacts are supplied. The other 12,281 rows
-remain fail-closed unsafe. All proof, hashing,
-symbol inspection, and signature work is admission-time. Clock calls retain one
-direct provider call, one negative-sentinel branch, and no lookup, allocation,
-lock, hash, retry, or retained evidence state.
-
-### Piped-process concurrency ratchet
-
-Checked read/liveness statuses removed fabricated outcomes but did not make the
-provider concurrency-safe. Native read results use a process-global writable
-array, so concurrent callers could overwrite one another. The Rust interpreter
-held its registry mutex across child pipe I/O,
-so one slow child could stall every unrelated child.
-
-Native checked-read result storage now has thread-local lifetime. The Rust
-interpreter uses 16 stable, contiguous process slots with atomic PID tags and
-one child mutex per slot. Lookup scans the fixed tag array, rechecks the tag
-after taking that slot's mutex, and never retains a global registry guard.
-Close therefore waits only for operations on the selected child.
-The native read path still uses one fixed 8 KiB buffer per native thread, with
-no per-call allocation, lookup, or global lock. Raw PID handles are not thereby
-safe: Windows/POSIX slot lookup, close, and PID reuse still require generation-
-bearing opaque handles and per-slot lifecycle locks. The legacy editor DAP
-accumulator and browser-renderer stdin buffers also remain global and unsafe;
-making them TLS would both confuse process/session identity and reserve about
-72 KiB more per thread. Until proper owners land, these entry points remain
-explicitly `unsafe(ffi)`.
-Rust stdin remains a potentially blocking compatibility surface on every host;
-changing it to nonblocking under the current boolean `write_all` ABI could
-publish a partial prefix and then report only `false`. Consumers must migrate
-to the existing bounded progress-count API before close can be cancellable
-without data duplication. This remains a stated unsafe obligation.
-`process-piped-concurrency-contract.shs` retains these source-shape invariants
-and rejects reintroduction of registry-owned I/O or unbounded Rust reads.
-The final performance evidence shows the same observed 2,048 KiB peak-RSS
-floor. A nonblocking-read model changes from 685.76 to 717.39 ns/op for one
-child (+4.6%) and from 995.75 to 263.57 ns/op for four independent children
-(-73.5%). The small
-single-child synchronization cost buys same-child serialization; removing the
-global registry from the I/O critical section eliminates unrelated-child
-contention. No per-operation heap allocation or data copy was introduced.
-
-### Editor DAP process ownership and bounded polling
-
-The editor still carried four convenience `rt_editor_*simple_dap` symbols that
-duplicated the canonical process facade. Their C provider selected a Rust-seed
-binary, retained one process-global 64 KiB parser buffer across all sessions,
-searched accumulated text with `strstr`, and exposed a wait operation that
-could sleep for four seconds on the editor path. This was neither session-safe
-nor compatible with the repository's Pure Simple/self-hosted ownership rule.
-
-The existing Pure Simple `EditorDebugDapClient` now owns process creation,
-framing, incremental parsing, and message dispatch. Initialize and launch are
-admitted only after both checked writes succeed; failure closes the process,
-and successful startup continues at sequence three without reusing protocol
-identifiers. The parser retains the same 64 KiB
-wire-buffer bound per client, caps declared frame bodies at 65,000 bytes so the
-standard header also fits, and fails closed on overflow. Error polling marks
-the client stopped while retaining its PID as cleanup-pending; kill and
-close/reap occur only on explicit session termination. The UI hot poll therefore
-cannot enter either the POSIX five-second close budget, the Windows one-second
-kill wait, or the interpreter's synchronous reap. Queue draining is one linear
-pass, and offset parsing performs one final suffix copy instead of copying the
-remaining frame buffer after every message. Polling retains one nonblocking
-checked read and adds no lookup, lock,
-sleep, retry, hash, signature work, or C/Rust replacement of Pure Simple code.
-The underlying canonical process SFFI remains unsafe and unsigned until exact
-artifact-bound evidence admission succeeds.
-
-On the same 2,048-frame interpreter fixture, the source-equivalent legacy
-front-removal/parser path measured 8,031,399 microseconds and the final
-implementation path measured 1,377,245 microseconds (82.9% lower). Hoisting
-stable text lengths reduced the implementation path from 1,504,368
-microseconds by another 8.4%. The final compiler/test process peaked at
-172,640 KiB RSS, 116 KiB below the pre-hoist run; this RSS difference is small
-enough to treat as noise, while the per-client retained parser state is bounded
-at 64 KiB and the global C 64 KiB accumulator is gone.
-
-The focused stage4 process-provider example accepts the reduced 15-symbol
-closure, but its six-example file still has two unrelated source-introspection
-failures: the FreeBSD `closefrom` assertion reports `find == -1` even though the
-exact guarded source is present, and the native-link orchestration assertion
-selects an earlier `if stage4_requested` block. The stage4 module lint also has
-25 pre-existing `primitive_api` errors on public boolean/text parameters. The
-editor DAP gate therefore checks removal from the stage4 closure directly;
-these compiler-test/lint debts remain release blockers rather than being
-misreported as SFFI verification.
-
-The real editor DAP command smoke also exposes a deployed-runtime skew after
-its stale nonexistent `std.editor.services.debug_session` import is removed:
-the current self-hosted runtime reports `unknown extern function:
-rt_process_is_alive_checked`. The source registry and provider contract contain
-that checked symbol, so the deployed `bin/simple` must be rebuilt from the
-current compiler/runtime closure before this end-to-end lane can pass. The
-failing attempt took 9.55 seconds and peaked at 260,968 KiB RSS; the Rust seed
-was deliberately not substituted.
-
-A cache-preserving Pure Simple rebuild with stub fallback disabled was attempted
-to remove that deployment skew. The launcher first reported an unresolved
-`runtime_file_rename` JIT symbol and fell back to interpretation. With
-`--threads 8`, the native-build then duplicated whole source-closure, load, and
-parse progress across eight workers instead of sharing the 1,865-file closure.
-After about 168 seconds the workers were only around parse entries 99-138 of
-1,865, projecting tens of minutes before code generation. The runaway guard
-stopped the build and preserved `build/bootstrap/native_cache`; no candidate
-binary was produced. This is a build-orchestration performance blocker, not
-evidence that the editor DAP lane is verified.
-
-A smaller single-worker build then reduced the closure to 173 files and reused
-the dedicated editor-DAP cache. Parsing completed in 656.85 seconds (73 cache
-hits, 100 misses), but HIR lowering immediately poisoned the build with 44
-unresolved editor types in the smoke entry (`EditorBufferId`, `EditorViewport`,
-`EditorDocumentId`, and `EditorMode`) and then cascaded into imported editor
-modules. The attempt was stopped at 730.82 seconds after 121 accumulated HIR
-errors because a poisoned build cannot produce an executable. This isolates a
-second self-hosted closure/import blocker; no smoke artifact was produced and
-the DAP lane must not be described as end-to-end verified.
-
-The first identity fix pinned the resolver-transparent `NN.name` rule in the
-shared module-name helper (9/9 focused examples pass), but a second cached
-single-worker build proved that module surfaces retained a private duplicate
-normalizer. It parsed 173 files in 892.92 seconds (2 cache hits, 171 misses),
-entered HIR at 899.26 seconds, and repeated the 44 entry errors; the poisoned
-build was stopped at 1,005.66 seconds. The duplicate surface normalizer has now
-been replaced by the canonical helper, deleting an allocation-heavy repeated
-path scan. The three-cycle verification cap prevents another build in this
-session; the preserved cache is the next-session verification input.
-
-The next focused resolver change added numbered-directory fallback only after
-ordinary fixed probes fail. Its driver spec passes 5/5 and the rebuilt closure
-grew correctly from 173 to 178 physical sources, explicitly including editor
-`types`, `config`, `keybindings`, `settings_schema`, and `platform`. Parsing
-completed in 968.60 seconds. HIR then recognized
-`std.editor.common.types`, eliminating the former 44 unresolved editor-type
-errors, but exposed a narrower surface-index failure: each physical
-`src/std/editor/00.common/*.spl` owner reports `missing importing module
-surface`, and the entry now separately lacks `MdMotionResult`. The poisoned
-build was stopped after 1,037.82 seconds. This is progress, not an end-to-end
-verification receipt; no artifact was produced.
-
-The surface lookup fix replaced a third private importer-name normalizer with
-the canonical helper; its new numbered-physical-owner example passes. The
-32-example resolver file remains 26/32 because six unrelated historical cases
-are already red. Explicit imports were also added to `md_dispatch` for
-`MdMotionResult` and its actual buffer/document owners.
-
-During verification, process inspection found that Ctrl-C had stopped only the
-native-build launchers' foreground interaction: three earlier single workers
-and all eight workers from the abandoned full build were still alive. They
-were concurrently consuming roughly 39 GiB RSS and writing the same caches,
-which explains the extreme timing variance. Only those exact abandoned PIDs
-were terminated; the unrelated stage1 performance worker was preserved. The
-final worker was later terminated explicitly with its launcher, leaving no
-editor-DAP native-build process alive.
-
-The final closure kept all 178 owners and entry HIR lowered with zero errors;
-the numbered common owners also lowered with zero errors. It then exposed the
-next independent import-hygiene layer: view modules such as `file_tree`,
-`outline_panel`, `lsp_result_panel`, `wiki_panel`, and `settings_view` rely on
-undeclared `EditorDocumentId`/`EditorBuffer` owners, while `preview_pane` also
-lacks `render_block_line_span`. The poisoned build stopped at 1,930.86 seconds
-after 32 accumulated errors. No artifact exists, so end-to-end SFFI admission
-is still unverified.
-
-Focused view-module lint then identified a quadratic source-line marker in
-`preview_pane`: each character appended by rebuilding the accumulated text.
-The Pure Simple implementation now uses `StringBuilder`, reducing the loop
-from quadratic copying to a linear append/build path without changing its API
-or rendered escape sequences. Focused lint passes for both repaired view
-owners; end-to-end native verification remains deferred by the three-cycle
-guard rather than being represented as complete.
-
-The next fresh-turn cached build closed that view failure but exposed a second
-surface-owner leak: `debug_session_registry` returned `WikiPanel` without an
-explicit owner import, causing sibling-origin fallback to inject `WikiPanel`
-into unrelated service modules. Adding the explicit owner removed that
-cascade. Lint also found `_ed_join_text` rebuilding its result on every append;
-it now uses the Pure Simple `StringBuilder` and hoists the input length,
-preserving output while removing quadratic copying.
-
-Three bounded native-build cycles provided additional evidence. The cold
-179-file parse completed in 660.35 seconds; preserved-cache parses completed in
-97.98 and 94.27 seconds, an 85.2% to 85.7% reduction. The final HIR run proved
-the view and `WikiPanel` repairs, then found the concurrent editor process
-migration importing from the ambiguous `std.io` facade. Entry-closure HIR
-resolved none of the requested process names through that alias, including the
-legacy names. DAP and LSP transports now import the canonical checked owner,
-`std.nogc_sync_mut.io.process_ops`, directly. This adds no runtime dispatch or
-allocation and removes an alias-only compiler hop. The three-cycle cap prevents
-another build in this turn, so no native artifact or end-to-end smoke receipt
-is claimed yet.
-
-Focused lint of the newly touched LSP transport also rejected quadratic text
-accumulation. Content lengths and numeric JSON fields now parse directly into
-integers without temporary strings; string and scalar-value extraction use
-`StringBuilder`, with input lengths hoisted out of loops. This preserves the
-transport API and wire representation while removing repeated prefix copies.
-The focused transport lint passes and the optimizer reports only advisory
-follow-up opportunities, not a remaining quadratic-loop error. The canonical
-LSP transport system spec passes all 48 examples after the parser and owner
-changes, including checked read/liveness and owning cleanup assertions.
-
-The following three-cycle native audit confirmed the direct process-owner fix
-in HIR and reduced the entry closure from 179 to 153 sources (14.5% fewer).
-Warm parse remained stable at 93.77 to 95.18 seconds. It then exposed missing
-explicit application owners: `edit_quit`, preview-pane update functions, and
-the debug runtime's process functions. Those owners now resolve and lower.
-`md_buffer_content` was also quadratic; it now uses `StringBuilder` with a
-hoisted line count, preserving newline behavior.
-
-The last cycle found that nine `md_vim_*` calls had been attributed to
-`extensions.builtin.md_vim_motions`, whose actual surface owns only four
-`md_vim_motion_*` scalar helpers. The called typed motion functions belong to
-`std.editor.view.md_editing`; the explicit import now names that real owner and
-focused lint passes. The three-cycle cap prevents another native run this turn,
-so this correction remains focused-verified rather than artifact-verified.
-
-After rebasing onto `bc48cdc4ecb`, the corrected 153-source graph completed
-HIR 153/153. The missing `md_editing` owner, controller debug-registry owners,
-and DAP receiver scope are now proven at HIR. The repeated `me` errors were a
-source-structure defect: methods starting at `_send_framed_json` followed
-top-level free functions without a second `impl EditorDebugDapClient:` block.
-Restoring that impl boundary preserves the API and correctly binds receivers.
-
-The same audit removed direct editor calls to `rt_file_write_text` and
-`rt_dir_walk`; the existing semantic `write_file` and `dir_walk` owners are now
-used with unchanged call counts. Explicit LSP, DAP, diagnostics, palette,
-outline, settings, wiki, and extension-host owners eliminate the remaining HIR
-surface fallbacks. Focused lint passes and the closure remains 153 sources.
-
-The final bounded cycle then failed closed in MIR rather than emitting an
-artifact. Its authoritative blockers include unresolved editor/office/window/
-SIMD method and type ownership, ending at `undefined variable EditSession`.
-The log also records attempted unresolved-method constant-zero placeholders as
-`silent-null risk`; because `SIMPLE_NO_STUB_FALLBACK=1` ultimately rejects the
-build, no unsafe artifact was published. The MIR closure must be repaired
-before a native DAP smoke or signing claim is possible.
-
-The existing send/poll hot paths add no map, symbol lookup, hash, retry, sleep,
-heap allocation, or atomic reference-count operation. Lookup is a bounded scan
-of at most 16 contiguous atomic tags followed by one per-child lock.
-Each send retains one liveness query and one write;
-each poll retains one read. The source-shape gate reports the stdout contract
-as `unsafe_ambiguous`: the current raw ABI still maps no data, EOF, invalid
-handle, and read failure to empty text. A future additive status-bearing read
-ABI is required before this family can be called safe. The focused module check,
-lint, nine system examples, and the new static gate pass. Census falls to
-12,291 declaration rows: 350 unsafe-minimized, 11,941 unsafe-unminimized,
-11,211 untouched, and zero evidence/signature verified. `rt_process` is 1,027
-rows, 29 minimized, 994 untouched, and zero verified/signed.
-
-## 2026-08-22 current-tree census and typed DAP lifecycle results
-
-The post-sync authoritative owned-code census now contains 12,065 Simple
-`rt_*` declaration rows and 3,162 distinct declared symbols. All 12,065 remain
-fail-closed unsafe: 353 are minimized by both an unsafe tag and a contract,
-11,712 are unminimized, 10,987 are completely untouched, and zero have
-artifact-bound evidence verification, signature verification, or admission.
-Implementation definitions span Simple (558), Rust (2,161), C (2,321), and
-C++ (219). The largest untouched families are `rt_file` (2,616), `rt_process`
-(971), `rt_env` (462), `rt_time` (357), and `rt_cuda`/`rt_dir` (265 each).
-
-The editor DAP lifecycle now consumes canonical typed results for piped spawn,
-stdin write, and close rather than locally interpreting raw PID and boolean
-sentinels. Compatibility functions remain unchanged. Each new result wrapper
-performs exactly one existing raw provider call, with no registry lookup,
-retry, sleep, copy, or success-path error allocation. This is unsafe
-minimization, not verification: the provider is still unsigned and the raw
-PID lifecycle still needs generation-bearing handles and cross-platform
-concurrency proof before it can be classified safe.
-
-The focused source contract passes and proves exactly one raw provider call in
-each typed lifecycle wrapper. The canonical editor DAP system spec passes 10/10
-under the configured runtime, but that runtime identifies itself as the Rust
-bootstrap seed, so this is seed-only behavioral evidence. Focused lint exposes
-pre-existing `process_ops` primitive-API and direct-runtime-owner debt; it is
-not a green production lint receipt. No self-hosted artifact, production
-signature, or memory/performance admission is claimed from these checks.
-
-## Live SFFI consumer/authority census
-
-The call-authority tool now emits summary, per-symbol, per-family, and per-scope
-reports from one source scan. This keeps analysis linear in source bytes plus
-call sites and avoids four additional repository traversals. The current tree
-contains 21,371 raw SFFI call sites in 3,117 files and 3,270 called symbols:
-350 calls have lexical FFI authority, 508 are inside explicitly FFI-unsafe
-functions, and 20,513 lack explicit authority. Production owns 12,903 calls,
-bootstrap-library code 820, and tests 7,648.
-
-This consumer view changes migration priority. Production calls are led by
-`rt_torch` (1,027), `rt_file` (820), `serial_println` (767), `rt_env` (529),
-and `rt_array` (280). Initially all 1,027 Torch calls lacked explicit authority,
-even though its declaration inventory had no untouched rows. That is direct
-evidence that declaration tagging alone is not boundary safety. The next Torch
-migration must place each raw call in a minimal lexical FFI scope or route it
-through a checked semantic wrapper, without adding availability probes,
-dynamic lookup, allocation, synchronization, or extra device transfers.
-
-The first call-authority slice covers all eight status/out scalar reductions.
-Their checked raw calls now have minimal lexical `[ffi, raw_ptr]` scopes after
-handle validation and before status validation. The before/after census keeps
-21,371 calls constant while lexical authority rises from 350 to 358 and
-missing authority falls from 20,513 to 20,505; `rt_torch` now has eight
-explicitly authorized and 1,019 missing calls. The static ABI gate confirms
-one checked call, cached lookup after initialization, and no explicit wrapper
-allocation for every operation. No provider or CUDA work changed.
-The focused readiness spec passes 15/15 under the configured bootstrap seed;
-this remains seed-only evidence. A checked-in authority baseline now fails the
-census if missing-authority calls rise above 19,486, so the migration is a
-one-way source-safety ratchet with no runtime or hot-path cost.
-
-The complete dynamic Torch wrapper slice then placed all 69 availability
-probes and all 60 operation calls in minimal lexical FFI scopes. The source
-still contains exactly 129 raw calls; none were added, removed, cached, or
-duplicated. Global lexical authority rises to 487 and total explicit authority
-to 995, while missing authority falls to 20,376. `rt_torch` now has 137
-explicitly authorized calls and 890 remaining missing-authority calls. This is
-lexical unsafe minimization only; the foreign provider remains unsigned and
-unverified.
-
-The three direct Torch backend implementations are real runtime-family copies,
-not re-export facades. Their 66 nogc-sync, 66 nogc-async, and 64 gc-async raw
-calls now each have a minimal lexical FFI scope. Call counts and backend method
-signatures are unchanged, so this adds no provider dispatch, lookup,
-allocation, synchronization, or device work. Global explicit authority rises
-to 1,191 and missing authority falls to 20,180; `rt_torch` is now 333 explicit
-and 694 missing. Because these methods still expose raw integer handles, they
-remain unsafe-minimized rather than verified-safe APIs.
-
-The next runtime-family sweep covers `torch_training`, `optim`, `ops`, and
-`mod` across nogc-sync, nogc-async, and gc-async. All 290 source calls are now
-lexically scoped; two were already explicitly authorized by their surrounding
-function state, so the global missing count decreases by 288 to 19,892 and
-explicit authority rises to 1,479. `rt_torch` now has 621 explicit and 406
-missing calls. The gate locks all 486 direct runtime-family call sites at their
-existing counts, so this authority migration adds no provider calls or device
-work.
-
-The final Torch authority pass scopes the remaining 338 embedded calls in the
-runtime-family modules plus 68 calls in dynamic tensor and GPU owners. The
-global census is still exactly 21,371 calls, now 1,885 explicitly authorized
-and 19,486 missing. `rt_torch` reaches 1,027 of 1,027 calls with explicit
-lexical authority and zero missing. The gate fixes their combined raw call
-count at 1,021 across the dynamic and runtime-family owners, proving this pass
-did not add provider calls. This completes call-authority tagging only:
-raw-handle, ownership, nullability, artifact evidence, and signature work still
-prevent any global Torch safe/verified claim.
-
-## Compiler CAS semantic-owner migration evidence
-
-The compiler CAS previously duplicated eight raw file, environment, process-ID,
-and wall-clock declarations and called them directly. It now imports the
-canonical `std.io_runtime` semantic owners instead. Successful reads, writes,
-moves, existence checks, deletes, PID reads, and clock reads retain one
-provider call; the canonical write owner adds only its existing failure-only
-parent-create/retry recovery. No lookup, process launch, sleep, collection, or
-unsafe scope was added to the CAS path.
-
-`cas-store-runtime-owner-contract.shs` records this ownership and hot-path
-source shape and passes one positive case plus three sabotage cases for a raw
-call, raw declaration, and dynamic lookup. Initial behavioral execution exposed
-the stale-seed `file_rename` alias defect rather than laundering it into a false
-success. The owner now provides the uniquely named
-`file_move_cross_device` wrapper over the same `rt_file_move` ABI CAS used
-before migration; this preserves rename-then-copy/delete behavior and one-call
-dispatch while avoiding alias de-JIT. The focused CAS spec then passes 12/12
-under the bootstrap seed in 4.77 seconds with 174,304 KiB peak RSS. This is not
-self-hosted evidence.
-
-The CAS optimizer run reports only generic MIR bounds/dead-code/loop-hoisting
-opportunities; the public shim reports none. CAS lint passes with zero errors
-and seven unrelated-shape warnings. The broader canonical `io_runtime` owner
-still fails lint with 39 primitive-API errors and 65 warnings across its legacy
-surface, including raw-runtime debt, so the owner is not globally lint-clean.
-The one-scan census falls from 21,371 to 21,337 raw calls and from 19,486 to
-19,451 missing-authority calls; production falls from 12,903 to 12,869 calls.
-Lexically authorized calls rise by one to 1,378 because the single centralized
-move call is scoped. These are source and seed-behavior receipts only: the
-runtime provider remains unsigned and evidence-unadmitted.
-
-## Linear entry-import dirname prerequisite
-
-The source-loading lint blocker at `_driver_entry_import_dirname` is removed.
-The old implementation allocated a split array and repeatedly concatenated an
-ever-growing directory string, making path length work quadratic. The new
-implementation performs one `rfind("/")` scan and one substring, O(n) time with
-no intermediate parts collection. Edge coverage includes leaf, root-level,
-ordinary relative, trailing-slash, and repeated-separator paths and passes 6/6
-with the surrounding source-loading behavior. The bootstrap-seed observation
-is 9.77 seconds and 473,616 KiB peak RSS; it is not a self-hosted performance
-admission. Optimizer opportunities fall from 246 to 243 and the lint no longer
-reports `COLL006`; six unrelated public primitive-API errors remain.
-
-## Driver scalar runtime authority
-
-Three `rt_string_len` calls are removed from source loading: native text length
-replaces two one-shot calls and the import-path loop hoists length once before
-iteration. Four environment, five canonical-path, and six monotonic-clock calls
-now have minimal lexical FFI scopes. Provider-call counts for those operations
-are unchanged. The optional trace timers additionally ignore negative/falling
-clock samples instead of accumulating a fabricated duration; those validation
-branches execute only when closure timing is enabled.
-
-The source authority spec passes 3/3 and source-loading behavior passes 6/6.
-The measured source-spec invocation is 4.91 seconds at 174,184 KiB peak RSS
-under the bootstrap seed. Optimizer general allocation/collection findings stay
-at 14; the lexical statement form adds no lookup, collection, provider call, or
-explicit heap allocation. Census drops from 21,337 to 21,334 raw calls, raises
-lexical authority from 1,401 to 1,416, and lowers missing authority from 19,428
-to 19,410. This owner now has 38 authorized calls and two missing: one
-array-returning directory listing and one tuple-returning process capture.
-Those remain pending a typed owner because the expression-form unsafe parser
-gap would otherwise force a success-path collection initializer or wider
-function authority. Lint reports exactly those two raw-call warnings plus the
-six older public primitive-API errors. No artifact is signed or admitted.
-
-The final two calls in this owner now also have lexical authority without a
-forwarding function. The directory-list scope encloses its single traversal so
-the array result needs no empty success-path initializer. The process scope
-encloses one tuple capture and copies only stdout plus status into existing
-locals before ordinary safe filtering resumes. Raw call counts, process
-launches, directory traversals, retries, and lookup behavior are unchanged.
-Both focused suites remain green (3/3 source authority, 6/6 behavior); the
-source-spec observation is 5.73 seconds at 172,956 KiB peak RSS under the seed.
-Optimizer general patterns remain 14. Lint now reports zero raw-runtime warnings
-for this owner and only the six older primitive-API errors. Census is 21,334
-raw / 1,926 explicit / 19,408 missing, with all 40 calls in this owner lexical.
-This closes call authority only, not the list/tuple ABI ambiguity or signed
-artifact admission.
-
-## Incremental-cache file authority
-
-All 20 raw file operations in `driver_build/incremental.spl` now have minimal
-lexical FFI authority and explicit declaration contracts. Compiler-source and
-runtime-provider fingerprint loops retain exactly one size and one SHA-256 call
-per artifact. Manifest creation retains one write, one digest, and one delete;
-no facade, lookup, retry, or extra provider call was introduced. Nullable text,
-negative size, false write/delete/existence, and empty digest remain explicit
-unsafe sentinels rather than being relabeled verified.
-
-Missing/non-UTF-8 cache behavior passes 7/7 and producer identity passes 2/2.
-The seed-only observation is 5.04 seconds at 173,128 KiB peak RSS. Optimizer
-reports 15 general patterns, all existing loop/preallocation opportunities.
-Census holds 21,334 raw calls, raises lexical authority from 1,418 to 1,438,
-and lowers missing authority from 19,408 to 19,388; all 20 file calls in this
-owner are lexical. Lint has no remaining raw-file warning here, but the owner's
-env/dir/time/PID/CLI/hash calls and three public primitive APIs remain open.
-The runtime artifact is still unsigned and evidence-unadmitted.
-
-## Incremental-cache remaining runtime authority and census ergonomics
-
-The remaining incremental-cache environment, directory, CLI, PID, and wall-
-clock calls now carry explicit raw-sentinel contracts and minimal lexical FFI
-authority. Branch-local PID/time reads preserve failure-only call cardinality;
-the compiler-source fallback reuses one process-stable PID for its identity and
-temporary path, removing one redundant provider call. Directory probes retain
-their previous short-circuit order. The collision-prone `rt_hash_text` source
-fingerprint is removed in favor of the existing SHA-256 text path, without an
-extra file read or traversal.
-
-Focused behavior passes 7/7 after correcting a source assertion that matched
-`incremental_hash_text` as though it were the removed `rt_hash_text` extern.
-The measured seed invocation changed from 5.04 s / 173,128 KiB to 3.16 s /
-189,752 KiB. The lower elapsed time is favorable, but the 9.6% peak-RSS increase
-is not isolated from compiler/test-runner startup and the newly imported crypto
-module, so this is not a production performance admission. Optimizer analysis
-finds 14 general collection/length opportunities, one fewer than the earlier
-file-only slice; no new lookup or dispatch is introduced.
-
-The call-authority census now has `--summary`, which retains the identical one-
-scan and baseline checks while keeping the large call-site table off stdout.
-It completes in 14.04 s at 14,080 KiB peak RSS and reports 21,331 raw calls,
-1,970 explicitly authorized calls, and 19,361 missing-authority calls. The
-incremental owner is lexically authorized, but its providers and the SHA-256
-runtime fast path remain unsigned and evidence-unadmitted.
-
-## Driver source-loading file-call authority
-
-The largest remaining production `rt_file` caller,
-`driver_source_loading.spl`, now keeps all 23 file probes/reads under minimal
-lexical FFI scopes. The raw declarations state their false/empty sentinel
-contracts. No forwarding facade, dynamic dispatch, provider lookup, retry, or
-additional provider call was added. Candidate `.spl`, `mod.spl`, and
-`__init__.spl` paths are constructed once and reused for both the probe and
-successful return, removing one duplicate string construction on each
-successful candidate.
-
-The deployed parser still rejects expression-form unsafe bindings; the already
-open `unsafe_block_expression_binding_parser_gap_2026-08-21.md` records that
-compiler defect. This slice uses the supported statement form with initialized
-scalar/text locals. Optimizer analysis reports the existing MIR dead-code,
-bounds, and loop-hoisting opportunities; it does not report a new dispatch or
-collection pattern. The source-shape spec passes 3/3 in 5.10 seconds at 173,704
-KiB peak RSS, and source-loading behavior passes 5/5 in 11.09 seconds at
-472,824 KiB peak RSS, both under the bootstrap seed only.
-
-Lint now parses the whole file but remains red on seven older non-boundary
-findings: six public bare-primitive API findings and the quadratic dirname
-concatenation at `_driver_entry_import_dirname`. Those are not accepted as a
-global lint pass and the latter remains a concrete performance follow-up. The
-one-scan census keeps 21,337 raw calls constant, raises lexical authority from
-1,378 to 1,401, and lowers missing authority from 19,451 to 19,428. All 23 file
-calls in this owner are lexical and zero are missing. The provider artifact is
-still unsigned and evidence-unadmitted.
-
-## Canonical SHA-256 text boundary
-
-`sha256_text` and `crypto.types` no longer duplicate the raw
-`rt_text_to_bytes` declaration. Both use the existing `common.string_core`
-owner, whose text/byte declarations now document the empty-result ambiguity and
-whose seven direct provider calls have minimal lexical FFI authority. The SHA
-accelerator declaration documents its non-32-byte failure sentinel and its one
-call is lexical; the existing pure-Simple fallback remains mandatory.
-
-The hot path still performs one text conversion and one SHA provider call, with
-no symbol lookup, retry, or payload copy added. Both 64-character hex lifts now
-fill a fixed 64-slot text buffer and join once instead of repeatedly copying a
-growing string. SHA-2 vectors pass 8/8, string-core codepoint behavior passes
-112/112, and the ownership contract passes 3/3. Focused SHA/spec lint passes
-with zero errors. The source-contract invocation measured 4.65 s / 173,696 KiB
-before the bounded-buffer follow-up and 8.43 s / 173,620 KiB after; this
-startup-dominated seed result does not prove a latency improvement, while the
-unchanged RSS and removal of repeated output copies provide the retained memory
-shape evidence.
-
-The call census is now 21,329 raw, 1,978 explicit, and 19,351 missing. The
-repaired declaration census completes in 28.13 s at 75,832 KiB instead of
-blocking on `cat /dev/stdout`: 12,053 declaration rows are still unsafe, 365
-are minimized, 10,954 are untouched, and zero are evidence-verified, signature-
-verified, or admitted. Implementation definitions are Simple 558, Rust 2,161,
-C 2,321, and C++ 219. These are definition counts, not safety claims.
-
-## Shared-library driver authority
-
-All 27 live runtime calls in `driver_public_shared.spl` now have minimal lexical
-FFI authority and all eight declarations state their raw sentinel/error
-contracts. The unused `rt_getpid` declaration is removed. Shared-library build
-paths keep one source read, one wrapper write, one child process, one best-effort
-delete, and one success output probe. Binary discovery keeps the same ordered,
-short-circuiting probes and introduces no candidate collection or lookup table.
-
-The focused authority and pure guard/output behavior spec passes 4/4 in 4.77 s
-at 174,332 KiB peak RSS under the seed. Optimizer analysis reports the existing
-12 general loop/preallocation findings and no new dispatch class. Lint reports
-zero raw-runtime errors but remains red on three pre-existing public primitive-
-API findings. The call census remains 21,329 raw and moves 27 calls from missing
-to lexical: 2,005 explicit and 19,324 missing. Declaration rows fall to 12,052;
-842 are tagged, 368 are minimized, 10,945 are untouched, and zero are signed or
-admitted.
-
-## File-stamp cache authority
-
-The Option-C file-stamp owner now documents and lexically scopes all 13 file
-provider calls. The fast check preserves existence-first and size-before-mtime
-short-circuiting. Each torn-read attempt preserves size/mtime/hash/size/mtime,
-and the final fallback preserves one hash followed by one size and one mtime;
-there is no additional probe, hash, retry, collection, lookup, or allocation.
-
-Focused behavior and authority pass 11/11. The seed observation improves from
-5.21 s / 173,372 KiB to 5.15 s / 172,836 KiB. Optimizer general findings remain
-zero, and lint moves from 17 raw-runtime warnings to zero errors/warnings for
-the touched boundary. The call census is 21,329 raw, 2,018 explicit, and 19,311
-missing. Declaration totals remain 12,052; 846 are tagged, 370 minimized,
-10,941 untouched, and zero signed/admitted.
-
-## Fast-GC mutation authority
-
-`cache/gc/fast_gc.spl` now documents all 12 raw provider declarations and
-places every live call under lexical `unsafe(ffi)` authority. Destructive
-accounting no longer fabricates success: tmp/quarantine counters advance only
-after confirmed file deletion, trash counts require confirmed recursive
-removal, and move-to-trash rejects failed directory creation plus invalid PID
-or clock sentinels. Negative modification-time sentinels cannot expire or
-select a candidate.
-
-The candidate-selection algorithm remains the existing O(n²) selection scan,
-with the same arrays and no new lookup, retry, payload copy, or provider call.
-The valid-mtime scan calls the provider at most once per remaining candidate,
-matching the prior call bound. Optimizer general findings remain six (three
-existing collection preallocation suggestions and three length hoists).
-
-The focused cache-GC spec passes 10/10 after repairing the lease authority
-oracle's stale scope count and whitespace-sensitive assertion. The executable
-still identifies itself as the Rust bootstrap seed, so this is seed-only
-evidence rather than the required self-hosted verification. The measured
-baseline was 6.25 s / 175,104 KiB; the final run was 5.09 s / 175,624 KiB.
-Timing improved and peak RSS remained within 0.30%, with no source-level memory
-growth mechanism introduced.
-
-The current call census is 21,382 raw, 2,066 explicit, and 19,316 missing.
-The declaration census reports 12,077 unsafe rows: 867 tagged, 642 contract-
-documented, 377 minimized, 10,945 untouched, and zero evidence-verified,
-signature-verified, or admitted. Implementation definition counts are Simple
-558, Rust 2,166, C 2,327, and C++ 219. These remain inventory counts, not proof.
-
-## Mark-sweep mutation authority
-
-`cache/gc/mark_sweep.spl` now documents its eight raw declarations and scopes
-all 13 live calls. It counts a manifest or blob as trashed only when the
-provider confirms the move. Trash-directory creation, PID, and clock sentinels
-fail closed before the destination path is constructed.
-
-The owner retains one action-tree walk, one blob-tree walk, one read per
-manifest, and its existing arrays and nested digest matching. No retry, lookup,
-copy, allocation, or additional provider call was introduced. Optimizer general
-findings remain four existing collection-preallocation suggestions. The shared
-focused spec passes 11/11 at 5.99 s / 173,636 KiB under the bootstrap seed. Its
-elapsed comparison includes a newly added eleventh authority example and is not
-a runtime-path regression measurement; RSS decreased from the preceding
-10-example observation.
-
-The authoritative totals are now 21,382 raw calls, 2,079 explicit, and 19,303
-missing. Of 12,077 declaration rows, 875 are tagged, 645 contract-documented,
-380 minimized, 10,937 untouched, and zero evidence-verified, signature-
-verified, or admitted.
-
-## Cache admission authority
-
-`cache/gc/admission.spl` now documents its five legacy filesystem contracts and
-scopes all eight live calls. Directory and cache totals are optional internally;
-an unavailable root or file-size result returns `accounting_unavailable` and
-rejects the write rather than fabricating zero usage. Owner-qualified helper
-names remove a real cross-module dispatch collision with fast GC.
-
-The algorithm keeps one traversal and one size observation per discovered file,
-plus the existing pin array. It adds one scalar validity flag and no retry,
-lookup, copy, collection, or provider call. Optimizer general findings remain
-one existing pin-collection preallocation suggestion. Focused seed-only
-coverage passes 12/12. The owner-rename comparison is 3.17 s / 192,228 KiB to
-3.24 s / 192,300 KiB; the 72 KiB RSS delta and startup-dominated 2.2% timing
-delta show no meaningful memory/performance regression.
-
-Legacy `rt_file_exists`, `rt_file_read_text`, and `rt_dir_walk` still collapse
-provider failure with valid absence/empty data, so this owner remains explicitly
-unsafe rather than verified. A status-bearing filesystem ABI is required before
-promotion. After rebasing, upstream had added 55 missing-authority calls; this
-slice removes eight, leaving a net repository increase of 47 recorded in
-`sffi_authority_rebase_regression_2026-08-24.md`. Current totals are 21,436 raw,
-2,086 explicit, 19,350 missing; 12,112 declaration rows, 880 tagged, 382
-minimized, 10,966 untouched, and zero signed/admitted.
-
-## Retained-dictionary HIR authority and optimizer evidence
-
-All 24 live `rt_dict_contains` calls in
-`hir_lowering/_Expressions/expression_support.spl` now execute within narrow
-lexical `unsafe(ffi)` scopes under one documented raw declaration contract.
-The change preserves boolean results, lookup order, short-circuit behavior,
-provider-call cardinality, and existing dictionary storage. It introduces no
-new collection, payload copy, retry, or dispatch layer.
-
-The focused module-qualified composite-field specification passes 5/5 under
-the available bootstrap seed at 10.96 s / 372,164 KiB. The authority census is
-now 21,436 raw, 2,110 explicit, and 19,326 missing. This improves the rebase
-regression from +47 to +23 missing calls but does not make the module verified:
-there is still no signed provider-artifact admission evidence.
-The declaration census is 12,112 rows: 881 tagged, 648 contract-documented,
-382 minimized, 10,965 untouched, and zero evidence-verified, signature-
-verified, or admitted.
-
-Optimizer analysis initially appeared to regress from 95 to 107 opportunities.
-The exact 12-count delta was a tooling defect: every
-`unsafe(capabilities: [ffi])` metadata list was misclassified as an indexed
-value access. The classifier now excludes unsafe capability metadata while
-retaining real `values[index]` and `fields[field_name]` accesses; its focused
-spec passes 2/2. Corrected analysis reports 93 opportunities, 4.81 s, and
-272,196 KiB versus the pre-change 95 opportunities, 4.69 s, and 278,984 KiB.
-The two removed findings are pre-existing unsafe metadata false positives, not
-elided runtime checks.
-
-## MIR diagnostic and trace authority
-
-The four debug-only MIR return-type discriminant probes now use expression-
-scoped `unsafe(ffi)` calls under a documented `-1` sentinel contract. Their
-debug gate, call count, values, and formatting are unchanged. Focused source
-coverage passes 1/1; optimizer findings remain 137 before and after, with
-11.75 s / 271,504 KiB before and 11.41 s / 270,432 KiB after.
-
-`method_calls_literals.spl` now reads each of its two trace environment flags
-once and caches the boolean result. Seven repeated raw environment call sites
-become two lexically scoped calls, reducing provider dispatch on traced method
-paths without changing normal lowering results. The added state is one `i64`;
-there are no collections, copies, retries, or dynamic lookups. Its focused spec
-passes 1/1. Optimizer findings remain 404; measurement changes from 11.30 s /
-273,004 KiB to 11.00 s / 274,620 KiB (+0.59% RSS).
-
-After a concurrent mainline change added five missing-authority calls, these
-two MIR owners leave the repository at 21,435 raw calls, 2,116 explicit, and
-19,319 missing. Declaration totals are 12,112: 883 tagged, 648 contract-
-documented, 382 minimized, 10,963 untouched, and zero signed/admitted.
-
-## HIR phase-profile flush authority
-
-Both profiler `rt_stderr_flush` calls now retain their exact positions and
-cardinality inside narrow lexical `unsafe(ffi)` scopes. The provider contract
-records that the unit-return ABI cannot distinguish flush failure from success;
-the owner therefore remains unsafe rather than verified. No buffer, string,
-clock, environment, or profiling-state operation changed.
-
-The existing scalar-profile source specification passes 3/3 after repairing
-its stale unescaped interpolation literals. Optimizer findings remain 72 before
-and after; measurement is 10.50 s / 270,228 KiB before and 10.52 s /
-272,372 KiB after. The 0.2% timing and 0.8% RSS deltas are startup noise with no
-source-level allocation or complexity change. Current totals are 21,435 raw,
-2,118 explicit, 19,317 missing; 12,112 declarations, 884 tagged, 382 minimized,
-10,962 untouched, and zero signed/admitted.
-
-## Safety-severity subprocess-policy authority
-
-All three `driver_safety_severity.spl` environment reads now execute inside
-lexical `unsafe(ffi)` blocks under an explicit empty/unset/provider-failure
-contract. Reads remain uncached because the existing functional specification
-mutates the subprocess serialization variables between calls; caching would
-change public behavior. Call cardinality, normalization, downgrade ordering,
-and severity values are unchanged.
-
-The profile-severity specification passes 12/12. Optimizer findings remain 5;
-measurement changes from 9.70 s / 267,656 KiB to 9.71 s / 268,816 KiB. The
-0.1% timing and 0.43% RSS differences have no source-level allocation or
-complexity mechanism. Expression-form `val x = unsafe(...):` failed executed
-import lowering as `function unsafe not found`; the supported block form is
-used and the language defect is recorded in
-`unsafe_expression_import_lowering_2026-08-24.md` with a no-overhead fix
-requirement. Current totals are 21,435 raw, 2,121 explicit, 19,314 missing;
-12,112 declarations, 885 tagged, 382 minimized, 10,961 untouched, and zero
-signed/admitted.
+### Interpreter debug boundary audit (2026-08-26)
+
+`src/lib/nogc_sync_mut/debug/interpreter_backend.spl` and its app mirror used
+15 direct raw declarations. The repository-owned Rust provider proves that
+`rt_debug_add_breakpoint` returns `-1` for a null/invalid UTF-8/negative input,
+and `rt_debug_remove_breakpoint` returns `-1` for the same rejected contract,
+but each facade previously converted those failures into `Result.Ok`. The
+facades now retain only their twelve used declarations, label each
+`unsafe(ffi)`, use minimal lexical scopes, and map run/non-positive add/negative
+remove statuses to `Result.Err`. The normal activation, stack, locals, and
+successful-breakpoint paths retain the same direct calls, data layout, loops,
+and public boolean API; there is no per-call allocation, registry lookup,
+hashing, or generic dispatch. The bootstrap source check and new static
+authority audit pass. Both optimizer reports identify only two pre-existing
+collection-capacity opportunities in conversion loops; no unsupported
+micro-optimization was applied. This is source-level containment and contract
+repair, not provider verification or signed admission.
+
+### Advanced scalar math boundary audit (2026-08-26)
+
+The canonical `std.nogc_sync_mut.io.math` facade has twelve fixed-`f64` Rust
+exports for logarithmic, inverse-trigonometric, hyperbolic, and rounding
+operations. The provider delegates each directly to Rust IEEE-754 operations;
+NaN and infinities are valid results, not null/error sentinels. A pure-Simple
+floor/ceil counterpart exists, but replacing the native scalar operation would
+add cast/branch work and risk a hot-path regression. The facade therefore keeps
+direct scalar calls, marks every raw declaration `unsafe(ffi)`, and places every
+call in a minimal lexical FFI scope. The static authority audit verifies all
+twelve declarations, thirteen call sites (including `math_round`), provider
+exports, and absence of per-call admission/lookup/hash/dispatch. The existing
+math specification passes 13/13; the optimizer reports no general pattern.
+This preserves values and performance shape but is not an artifact signature or
+semantic verification claim.
+
+### Interpreter error-handle boundary audit (2026-08-26)
+
+The legacy `std.ffi.error` module duplicated all nine raw error-handle
+declarations from `std.sffi.error`. It is now a compile-time re-export of the
+canonical owner. The canonical declarations are explicitly `unsafe(ffi)` and
+their wrappers use minimal lexical scopes; the compatibility-named
+`error_index_out_of_bounds` now routes through the checked wrapper instead of
+bypassing that scope. The interpreter provider rejects invalid handles by
+raising `CompileError`, rather than returning a fabricated message or handle.
+The owner audit and source check pass, and optimizer review reports no general
+pattern. These remain opaque interpreter-owned handles with no artifact-bound
+signature/evidence admission, so the public wrappers are contained but not
+verified safe across all execution lanes.
+
+### Counterpart ABI boundary audit (2026-08-26)
+
+The canonical counterpart provider shim performs dlopen/dlsym, ABI negotiation,
+opaque-handle lifecycle, and caller-owned text buffering in C. Its Simple owner
+now marks all nine raw calls `unsafe(ffi)` and scopes each call lexically. The
+wrapper no longer coerces a missing foreign manifest/response/trace/loader
+detail to empty text; an empty manifest remains a documented fail-closed
+rejection. The static guard prevents unscoped calls, nil-to-empty coercion, and
+per-call admission work. Source check passes, while the executable counterpart
+spec is blocked because the deployed bootstrap artifact lacks source-registered
+`rt_counterpart_*` handlers (7/8 examples fail before provider invocation).
+Optimizer review reports one pre-existing collection-capacity suggestion. This
+is not signed-provider admission or cross-lane verification.
+
+### Ed25519 evidence-admission algorithm policy (2026-08-26)
+
+The canonical evidence-admission verifier recomputes every artifact, source,
+build-input, compiler, ABI-registry, and verification-report digest, scopes the
+trust-store key to a provider, and checks a raw 64-byte signature. Its prior
+`pkeyutl -rawin` invocation nevertheless did not prove that the trusted public
+key was Ed25519, despite reporting an Ed25519 admission. The verifier now
+inspects the public-key algorithm first and rejects every non-Ed25519 key
+before signature processing. The focused contract test admits the normal
+Ed25519 fixture and rejects an otherwise trusted RSA key, along with its
+existing tamper, stale-report, trust-scope, canonicalization, and substituted
+signature cases. This is load-time-only admission work: it adds no per-call
+hashing, lookup, allocation, copy, loop, or dispatch. Repository-wide signed
+admission remains zero because no exact provider artifact job has yet been
+supplied.
+
+### AES-XTS raw boundary containment (2026-08-26)
+
+`os.crypto.aes_xts` has three direct runtime ABI declarations: byte-array
+access, capacity allocation, and inverse AES block transformation. All are now
+explicitly `unsafe(ffi)` and their sixteen uses are lexical FFI scopes. The
+new authority audit fixes this exact declaration/call inventory, confirms the
+Rust inverse-block export, and rejects per-call hash, signature, lookup, or
+generic-dispatch additions. The source check passes. Optimizer review reports
+113 existing MIR opportunities and zero general patterns; no copy, allocation,
+loop, data-layout, or direct-call behavior was changed. The existing IEEE 1619
+KAT is still blocked upstream by interpreter `u8` array lifting, so this is
+boundary containment only—not behavioral cryptographic proof, artifact signing,
+or global SFFI verification.
+
+### Channel admission-status boundary repair (2026-08-26)
+
+The channel provider already defines `rt_channel_send` as `1` only for an
+admitted message and `0` for full, closed, disconnected, invalid, or
+non-transferable inputs. The Simple declaration discarded that result and
+`Channel.try_send` first queried closed state, then fabricated `true` after a
+rejected send. The declaration now carries the status, `try_send` consumes it
+directly, and all six raw channel declarations plus thirteen uses are lexical
+`unsafe(ffi)`. The Rust interpreter and both concurrent provider backends now
+preserve the same boolean admission result instead of laundering it through
+unit/nil. This removes the extra closed-state call from `try_send`; it adds no
+allocation, copy, lookup, hash, generic dispatch, or loop. The static guard and
+optimizer review pass (19 MIR-only, zero general patterns). Focused Rust tests
+are blocked by unrelated missing imports in `interpreter/expr/collections.rs`,
+and the deployed bootstrap binary remains stale, so this is not a completed
+cross-lane verification or signed-admission claim.
+
+### MIR actor and synchronization ABI follow-up (2026-08-26)
+
+The MIR runtime actor bridge now matches the Rust provider ABI for `spawn`
+(handler plus context) and `recv` (no timeout argument), and the direct mutex
+and read/write-lock owners retain their actual `i64` release/store status rather
+than declaring it as `Any`. Every direct raw call in these narrow owners is
+lexical `unsafe(ffi)`. The synchronization static authority audit records the
+status ABI and prevents a silent `Any` regression.
+
+This is declaration/call containment, not a global safety conclusion. In
+particular, the higher-level `actor_hooks.spl` facade still declares an
+incompatible actor ABI (`spawn(Any)` and `recv(actor_id)`) relative to the Rust
+runtime provider. It must be migrated to the scheduler-owned pure-Simple actor
+boundary or a separately generated contract; tagging it alone would be a
+cosmetic and unsafe workaround. No provider artifact is signed/admitted by
+this follow-up.
+
+### Legacy actor-hook ABI retirement (2026-08-27)
+
+A direct `extern fn rt_*` scan of owned `src` still finds 5,337 declarations.
+The broader source-only contract ledger records 12,739 foreign declarations
+(11,115 `rt_*` rows): 3,407 explicitly unsafe-tagged, zero signed-admitted,
+and 8,940 untouched. It observes no provider implementation language because
+it intentionally avoids loading binaries. The repository is therefore not
+globally SFFI-safe, verified, or signed. One especially unsafe legacy island
+was removed: `nogc_sync_mut.concurrent.actor_hooks` used an `Any`
+handler/message plus actor-id ABI that does not match the only Rust provider
+(`function_pointer + context`, current-inbox receive). The module now contains
+no raw actor declaration or call and fails closed with the stable
+`E-SFFI-ACTOR-LEGACY-ABI` diagnostic. Migration is to the scheduler-owned
+pure-Simple `std.actor.spawn`/`ActorRef` API.
+
+The static authority guard and affected-source check pass. Full optimizer
+analysis finds no opportunity in the retired module. The change removes an
+invalid call path; it adds no hot-path allocation, copy, lookup, hash, loop, or
+dispatch. It remains a targeted containment repair, not evidence that the
+remaining inventory has artifact-bound signature or semantic proof.
+
+### Canonical I/O ambiguous-return scope repair (2026-08-27)
+
+The canonical `std.nogc_sync_mut.sffi.io` owner retains four deliberately
+unsafe facades for raw runtime-owned text/hash results: their ABI has no
+separate failure or ownership state, so they cannot be promoted to safe
+`text` APIs. Each raw call is now nevertheless inside a smallest lexical
+`unsafe(ffi)` scope. The authority audit ratchets all 28 lexical owners and
+checks these four direct call shapes. Source check and full optimizer analysis
+pass with no reported optimization opportunity. No return type, allocation,
+copy, loop, lookup, hash, or dispatch changed; this is visibility and boundary
+containment, not signed admission.
+
+### Compiler CAS raw-owner consolidation (2026-08-27)
+
+The compiler cache CAS store had six filesystem/process/time raw declarations
+invoked from 31 source sites. They are now six private `@always_inline` helpers
+with minimal lexical FFI scopes, preserving the existing boolean, timestamp,
+and process-id contracts. Direct callers retain one ABI call after inlining;
+the change adds no retry, lock, lookup, heap allocation, copy, or dispatch.
+The new CAS authority audit and source check pass.
+
+Full optimizer analysis reports 70 opportunities in this existing cache module
+(64 MIR and six general: preallocation/length-hoisting). They are not caused by
+the wrapper consolidation, whose diff adds no collection or loop. They remain a
+separate cache-performance backlog and must be measured against a representative
+CAS workload before an optimization claim is made. This containment does not
+provide provider signing or global verification.
+
+### Compiler fast-GC raw-owner consolidation (2026-08-27)
+
+The cache fast-GC owner now isolates its twelve filesystem/directory/time raw
+contracts in private `@always_inline` lexical wrappers. The raw calls were
+previously spread through expiry, trash, traversal, and eviction paths. Their
+nullable size, boolean status, and runtime-owned list/walk representations are
+unchanged, while direct callers retain one ABI call after inlining. The static
+authority guard and source check pass; no retry, allocation, copy, lock,
+lookup, or dispatch was added.
+
+The focused GC spec executes nine functional examples successfully but its
+tenth, `Lease nullable-read facade ownership`, fails with
+`semantic: variable dir not found`. That test reads `lease.spl` source text and
+does not import or call `fast_gc.spl`; its failure is an existing test/compiler
+semantic issue, not evidence for this patch. It is recorded as WARN, not PASS.
+Optimizer analysis reports 58 existing fast-GC opportunities (including the
+pre-existing selection sweep); no throughput claim is made without a bounded
+CAS benchmark. This remains unsigned boundary containment.
+
+### Compiler cache-admission raw-owner consolidation (2026-08-27)
+
+The cache admission owner now contains four unsafe-tagged raw
+filesystem/directory contracts, each reached through a private always-inline
+lexical helper. Its pins read no longer declares a duplicate raw text ABI; it
+uses the canonical nullable read owner. This retains the existing missing-pin
+policy (`nil` normalizes to an empty pin set), so it is not a new signed or
+fail-closed ownership proof. A future contract migration must distinguish
+missing pins from an unreadable existing pins file before it can claim
+mission-critical admission safety.
+
+The new static authority audit and source check pass. Full optimizer analysis
+reports 22 existing opportunities (21 MIR, one collection preallocation); no
+loop, allocation, copy, lookup, or dispatch was added by the wrapper change.
+The already-recorded `gc_spec` lease-source-text test failure prevents claiming
+a full cache-GC test pass for this adjacent module.
+
+### Compiler mark-sweep raw-owner consolidation (2026-08-27)
+
+The cache mark-sweep owner now has seven unsafe-tagged raw
+filesystem/directory/process/time declarations, isolated behind private
+always-inline lexical wrappers. Its two raw text reads were removed in favor
+of the canonical nullable file-read facade. This preserves the existing mark
+and trash policy and its direct ABI-call shape, without adding retries, locks,
+allocations, copies, lookups, or dispatch.
+
+The authority audit and source check pass. Optimizer analysis reports 46
+existing opportunities (42 MIR, four preallocation) for separate benchmarked
+work. `nil` still normalizes to empty pin/manifest content, so unreadable
+existing input remains an explicit unverified contract limitation; this change
+does not mark mark-sweep or global SFFI safe/signed.
+
+### Cache unreadable-input fail-closed repair (2026-08-27)
+
+The prior nullable read handling in cache admission and mark-sweep normalized
+an unreadable existing pins/manifest file to empty text. That could hide
+protected pins or treat a read failure as a malformed manifest eligible for
+trash. Both owners now keep normal missing-file behavior but fail closed on an
+unreadable existing pins file with `E-SFFI-CACHE-PINS-READ`, and mark-sweep
+fails closed on an unreadable existing manifest with
+`E-SFFI-CACHE-MANIFEST-READ`. The values are unwrapped only after the explicit
+nil guard; no empty fallback remains on those paths.
+
+Both authority audits and the affected two-file source check pass. Optimizer
+findings remain 22 (admission) and 46 (mark-sweep), unchanged from the prior
+review. The new branches execute only on foreign-read failure; normal paths
+retain their direct call shape and add no allocation, copy, loop, lookup, lock,
+or dispatch. This is fail-closed contract repair, not artifact signing or
+global provider verification.
+
+### Compiler cache-lease raw-owner and unreadable-read repair (2026-08-27)
+
+The cache lease owner now isolates eight raw filesystem/directory/process/time
+contracts in private always-inline lexical wrappers. Existing unreadable lease
+files fail closed with `E-SFFI-CACHE-LEASE-READ` for heartbeat/read/list paths;
+the reclaim path conservatively leaves an unreadable lease in place rather than
+deleting it. Normal missing leases retain their existing API behavior. The
+authority audit and source check pass. Optimizer analysis reports 49 existing
+opportunities (48 MIR, one preallocation); no normal-path allocation, copy,
+lookup, lock, retry, or dispatch was added. This remains unsigned containment.
+
+### Authority census after cache-family containment (2026-08-27)
+
+The source authority census now records 14,064 missing raw call sites, 2,298
+lexical FFI scopes, and 1,625 function-wide unsafe scopes. The cache-family
+repairs reduced missing call sites by 96 from the previous 14,160 snapshot and
+increased lexical scopes by 37. This is source classification only—not ABI,
+provider-language, artifact, or signature proof. The next largest unresolved
+production families are SSH session (136 missing call sites) and Torch dynamic
+operations (129); both need provider-specific ABI/ownership design rather than
+bulk annotation.
+
+### SSH AES-GCM contract defect recorded before migration (2026-08-27)
+
+The first SSH-family contract review found that
+`rt_ssh_aes256_gcm_decrypt_packet` maps invalid input and GCM authentication
+failure to an empty byte array in both the Rust native export and the Rust
+interpreter handler.  The Simple SSH wrapper then treats empty as failure.  It
+is a cross-lane fabricated-value contract and cannot be repaired by consulting
+the companion payload-length symbol: that would decrypt/authenticate every
+packet twice on the hot path.  The required one-pass status/out v2 migration,
+cross-lane owners, and performance acceptance criteria are tracked in
+`doc/08_tracking/bug/sffi_ssh_aes256_gcm_decrypt_empty_failure_2026-08-27.md`.
+No code was changed in this review, so the provider remains unsafe, unsigned,
+and unverified.
+
+### SSH AES-GCM v2 tagged carrier containment (2026-08-27)
+
+The SSH packet decrypt migration now uses
+`rt_ssh_aes256_gcm_decrypt_packet_v2` consistently in the Simple wrapper,
+native Rust runtime, interpreter dispatch, runtime-symbol inventory, and JIT
+runtime-function table.  It returns a mandatory trailing tag: `0x00` invalid
+input, `0x01` authentication failure, or `0x02` success.  The Simple wrapper
+removes the trailing tag with in-place `pop()`, preserving the owned payload
+array with no second decrypt, per-call lookup/hash, or payload copy.  Legacy
+interpreter handlers that fabricated an empty array or `-1` are no longer
+registered.  The dedicated source authority audit passes and the focused
+Simple check passes under the bootstrap seed.  Focused Rust test execution is
+blocked by unrelated missing imports in `interpreter/expr/collections.rs`; do
+not claim full cross-lane verification, signing, or global SFFI safety.
+
+### Dynamic Torch lexical-owner gap (2026-08-27)
+
+The next unresolved family is the optional libtorch facade. Its canonical raw
+declarations are unsafe-tagged, and its result wrappers reject unavailable
+providers and nonpositive handles, but 129 shared-facade calls bypass lexical
+`unsafe(ffi)` ownership. The provider has no signed artifact or ABI/evidence
+admission path. This requires private inline raw owners that retain the current
+one availability decision plus one typed provider call, not bulk annotation.
+The detailed migration and acceptance criteria are tracked in
+`doc/08_tracking/bug/sffi_torch_dynamic_facade_lexical_owner_gap_2026-08-27.md`.

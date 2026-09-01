@@ -24,6 +24,7 @@
 //! Return values are interpreted as `i64` and wrapped back as `Value::Int`.
 
 use crate::error::{codes, CompileError, ErrorContext};
+use crate::codegen::runtime_sffi;
 use crate::plugin_manifest;
 use crate::value::Value;
 use simple_simd::{active_simd_tier, SimdTier};
@@ -32,6 +33,12 @@ use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+#[derive(Clone, Copy)]
+struct CachedDynamicSymbol {
+    address: usize,
+    arity: usize,
+}
+
 /// Global state for the dynamically loaded runtime library.
 struct DynamicRuntime {
     /// Handle from dlopen (0 if not loaded or failed)
@@ -39,7 +46,7 @@ struct DynamicRuntime {
     /// Active tier used for the current handle/symbol cache
     active_tier: Option<SimdTier>,
     /// Cached symbol lookups: function name -> function pointer address
-    symbols: HashMap<String, usize>,
+    symbols: HashMap<String, CachedDynamicSymbol>,
 }
 
 static DYNAMIC_RUNTIME: std::sync::LazyLock<Mutex<DynamicRuntime>> = std::sync::LazyLock::new(|| {
@@ -81,7 +88,7 @@ struct SatelliteLibrary {
     /// Whether we already attempted to load (to avoid repeated failures)
     attempted: bool,
     /// Cached symbol lookups: function name -> function pointer address
-    symbols: HashMap<String, usize>,
+    symbols: HashMap<String, CachedDynamicSymbol>,
 }
 
 /// Global map of satellite prefix -> library state.
@@ -359,18 +366,35 @@ fn try_call_satellite(prefix: &str, name: &str, evaluated_args: &[Value]) -> Opt
 
     // Look up the symbol (with caching)
     let fptr = if let Some(&cached) = sat.symbols.get(name) {
-        if cached == 0 {
+        if cached.address == 0 {
             return None; // Previously looked up and not found
         }
-        cached
+        if cached.arity != evaluated_args.len() {
+            return Some(Err(unsupported_conversion(format!(
+                "dynamic SFFI cached ABI arity mismatch for function '{name}': admitted {}, call {}",
+                cached.arity,
+                evaluated_args.len()
+            ))));
+        }
+        cached.address
     } else {
+        if let Err(error) = validate_dynamic_i64_contract(name, evaluated_args.len()) {
+            return Some(Err(error));
+        }
         match dlsym_lookup(sat.handle, name) {
             Some(addr) => {
-                sat.symbols.insert(name.to_string(), addr);
+                sat.symbols.insert(
+                    name.to_string(),
+                    CachedDynamicSymbol {
+                        address: addr,
+                        arity: evaluated_args.len(),
+                    },
+                );
                 addr
             }
             None => {
-                sat.symbols.insert(name.to_string(), 0);
+                sat.symbols
+                    .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
                 return None;
             }
         }
@@ -553,7 +577,7 @@ fn try_call_manifest_library(
     }
 
     let fptr = if let Some(&cached) = state.symbols.get(name) {
-        if cached == 0 {
+        if cached.address == 0 {
             // Symbol not found as a flat function — try class dispatch before failing
             drop(libraries);
             if let Some(result) = try_call_manifest_class_method(library_path, name, evaluated_args) {
@@ -564,15 +588,33 @@ fn try_call_manifest_library(
                 name, library_path
             ))));
         }
-        cached
+        if cached.arity != evaluated_args.len() {
+            return Some(Err(unsupported_conversion(format!(
+                "dynamic SFFI cached ABI arity mismatch for function '{name}': admitted {}, call {}",
+                cached.arity,
+                evaluated_args.len()
+            ))));
+        }
+        cached.address
     } else {
+        if let Err(error) = validate_dynamic_i64_contract(name, evaluated_args.len()) {
+            return Some(Err(error));
+        }
         match dlsym_lookup(state.handle, name) {
             Some(addr) => {
-                state.symbols.insert(name.to_string(), addr);
+                state.symbols.insert(
+                    name.to_string(),
+                    CachedDynamicSymbol {
+                        address: addr,
+                        arity: evaluated_args.len(),
+                    },
+                );
                 addr
             }
             None => {
-                state.symbols.insert(name.to_string(), 0);
+                state
+                    .symbols
+                    .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
                 // Symbol not found as a flat function — try class dispatch before failing
                 drop(libraries);
                 if let Some(result) = try_call_manifest_class_method(library_path, name, evaluated_args) {
@@ -667,17 +709,9 @@ fn dlsym_lookup(handle: usize, name: &str) -> Option<usize> {
 /// the narrow integer ABI supported by this legacy path. Other values must use
 /// a typed interpreter adapter.
 /// - Int -> direct i64
-/// - Bool -> 0 or 1
 fn value_to_i64(val: &Value) -> Result<i64, CompileError> {
     match val {
         Value::Int(n) => Ok(*n),
-        Value::Bool(b) => {
-            if *b {
-                Ok(1)
-            } else {
-                Ok(0)
-            }
-        }
         other => Err(unsupported_conversion(format!(
             "dynamic SFFI dispatch does not admit argument type '{}' without a typed ABI contract",
             other.type_name()
@@ -691,6 +725,31 @@ fn value_to_i64(val: &Value) -> Result<i64, CompileError> {
 /// The caller (Simple code) will interpret it appropriately.
 fn i64_to_value(v: i64) -> Value {
     Value::Int(v)
+}
+
+/// Admit only contracts that exactly match the legacy dispatcher's physical
+/// `extern "C" fn(i64, ...) -> i64` call shape. Name-only manifests and mixed
+/// integer widths are not sufficient ABI evidence.
+fn validate_dynamic_i64_contract(name: &str, arity: usize) -> Result<(), CompileError> {
+    let spec = runtime_sffi::spec_for(name).ok_or_else(|| {
+        unsupported_conversion(format!(
+            "dynamic SFFI dispatch has no compiler-owned ABI contract for function '{name}'"
+        ))
+    })?;
+    if spec.params.len() != arity {
+        return Err(unsupported_conversion(format!(
+            "dynamic SFFI dispatch ABI arity mismatch for function '{name}': contract {}, call {arity}",
+            spec.params.len()
+        )));
+    }
+    if spec.params.iter().any(|ty| *ty != cranelift_codegen::ir::types::I64)
+        || spec.returns != [cranelift_codegen::ir::types::I64]
+    {
+        return Err(unsupported_conversion(format!(
+            "dynamic SFFI dispatch requires an exact all-i64 -> i64 contract for function '{name}'"
+        )));
+    }
+    Ok(())
 }
 
 fn strict_i64_array(value: &Value, name: &str) -> Result<Vec<i64>, CompileError> {
@@ -1031,19 +1090,35 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
         } else {
             // Look up the symbol (with caching)
             if let Some(&cached) = rt.symbols.get(name) {
-                if cached == 0 {
+                if cached.address == 0 {
                     None // Previously looked up and not found
+                } else if cached.arity != evaluated_args.len() {
+                    return Some(Err(unsupported_conversion(format!(
+                        "dynamic SFFI cached ABI arity mismatch for function '{name}': admitted {}, call {}",
+                        cached.arity,
+                        evaluated_args.len()
+                    ))));
                 } else {
-                    Some(cached)
+                    Some(cached.address)
                 }
             } else {
+                if let Err(error) = validate_dynamic_i64_contract(name, evaluated_args.len()) {
+                    return Some(Err(error));
+                }
                 match dlsym_lookup(rt.handle, name) {
                     Some(addr) => {
-                        rt.symbols.insert(name.to_string(), addr);
+                        rt.symbols.insert(
+                            name.to_string(),
+                            CachedDynamicSymbol {
+                                address: addr,
+                                arity: evaluated_args.len(),
+                            },
+                        );
                         Some(addr)
                     }
                     None => {
-                        rt.symbols.insert(name.to_string(), 0); // Cache the miss
+                        rt.symbols
+                            .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
                         None
                     }
                 }
@@ -1068,8 +1143,19 @@ mod tests {
     use super::*;
 
     unsafe extern "C" fn sum13(
-        a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64, a8: i64, a9: i64, a10: i64,
-        a11: i64, a12: i64,
+        a0: i64,
+        a1: i64,
+        a2: i64,
+        a3: i64,
+        a4: i64,
+        a5: i64,
+        a6: i64,
+        a7: i64,
+        a8: i64,
+        a9: i64,
+        a10: i64,
+        a11: i64,
+        a12: i64,
     ) -> i64 {
         a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12
     }
@@ -1207,15 +1293,26 @@ mod tests {
     }
 
     #[test]
-    fn generic_dispatch_retains_integer_and_bool_scalars() {
+    fn generic_dispatch_accepts_integers_and_rejects_boolean_coercion() {
         assert_eq!(
             call_fptr(echo_i64 as usize, "echo_i64", &[Value::Int(42)]).unwrap(),
             Value::Int(42)
         );
-        assert_eq!(
-            call_fptr(echo_i64 as usize, "echo_i64", &[Value::Bool(true)]).unwrap(),
-            Value::Int(1)
-        );
+        assert!(call_fptr(echo_i64 as usize, "echo_i64", &[Value::Bool(true)]).is_err());
+    }
+
+    #[test]
+    fn generic_dynamic_resolution_requires_an_exact_compiler_owned_i64_contract() {
+        validate_dynamic_i64_contract("rt_close_fd", 1).expect("exact i64 contract is admitted");
+
+        for (name, arity) in [("rt_decision_probe", 2), ("rt_close_fd", 0), ("rt_not_registered", 1)] {
+            let error = validate_dynamic_i64_contract(name, arity)
+                .expect_err("missing, mixed-width, and wrong-arity contracts must fail closed");
+            assert_eq!(
+                error.context().and_then(|context| context.code.as_deref()),
+                Some(codes::SFFI_UNSUPPORTED_CONVERSION)
+            );
+        }
     }
 
     #[test]

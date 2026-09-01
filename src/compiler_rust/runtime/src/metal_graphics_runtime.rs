@@ -18,7 +18,7 @@ fn empty_cstr() -> *const c_char {
 // macOS implementation
 // ============================================================================
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 mod metal_impl {
     use crate::value::heap::with_typed_ptr;
     use crate::value::{rt_interp_cstr, HeapObjectType, RuntimeString, RuntimeValue};
@@ -444,17 +444,21 @@ mod metal_impl {
     // -------------------------------------------------------------------------
 
     pub fn compile_shader(device_handle: i64, source: i64) -> i64 {
+        let src_str = match runtime_text(source, "compile_shader source") {
+            Ok(value) => value,
+            Err(error) => {
+                set_last_error(&error);
+                return 0;
+            }
+        };
+        compile_shader_text(device_handle, &src_str)
+    }
+
+    pub fn compile_shader_text(device_handle: i64, source: &str) -> i64 {
         let dev = with_devices(|m| m.get(&device_handle).map(|w| w.0.clone()));
         match dev {
             Some(dev) => {
-                let src_str = match runtime_text(source, "compile_shader source") {
-                    Ok(value) => value,
-                    Err(error) => {
-                        set_last_error(&error);
-                        return 0;
-                    }
-                };
-                let ns_src = NSString::from_str(&src_str);
+                let ns_src = NSString::from_str(source);
                 match dev.newLibraryWithSource_options_error(&ns_src, None) {
                     Ok(lib) => {
                         let id = next_id();
@@ -508,18 +512,22 @@ mod metal_impl {
     }
 
     pub fn create_compute_pipeline(device_handle: i64, library_handle: i64, entry: i64) -> i64 {
+        let entry_str = match runtime_text(entry, "create_compute_pipeline entry") {
+            Ok(value) => value,
+            Err(error) => {
+                set_last_error(&error);
+                return 0;
+            }
+        };
+        create_compute_pipeline_text(device_handle, library_handle, &entry_str)
+    }
+
+    pub fn create_compute_pipeline_text(device_handle: i64, library_handle: i64, entry: &str) -> i64 {
         let dev = with_devices(|m| m.get(&device_handle).map(|w| w.0.clone()));
         let lib = with_libraries(|m| m.get(&library_handle).map(|w| w.0.clone()));
         match (dev, lib) {
             (Some(dev), Some(lib)) => {
-                let entry_str = match runtime_text(entry, "create_compute_pipeline entry") {
-                    Ok(value) => value,
-                    Err(error) => {
-                        set_last_error(&error);
-                        return 0;
-                    }
-                };
-                let ns_entry = NSString::from_str(&entry_str);
+                let ns_entry = NSString::from_str(entry);
                 let func: Option<Retained<ProtocolObject<dyn MTLFunction>>> =
                     unsafe { lib.newFunctionWithName(&ns_entry) };
                 match func {
@@ -907,11 +915,11 @@ mod metal_impl {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_init() -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::init()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -919,11 +927,11 @@ pub extern "C" fn rt_metal_init() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_is_available() -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::is_available()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -931,11 +939,11 @@ pub extern "C" fn rt_metal_is_available() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_device_count() -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::device_count()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -943,11 +951,11 @@ pub extern "C" fn rt_metal_device_count() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_device_name(_device: i64) -> *const c_char {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::device_name(_device)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         empty_cstr()
     }
@@ -955,11 +963,11 @@ pub extern "C" fn rt_metal_device_name(_device: i64) -> *const c_char {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_device_memory(_device: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::device_memory(_device)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -967,11 +975,11 @@ pub extern "C" fn rt_metal_device_memory(_device: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_create_device(_device: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::create_device(_device)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -979,11 +987,11 @@ pub extern "C" fn rt_metal_create_device(_device: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_destroy_device(_device: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::destroy_device(_device)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -995,11 +1003,11 @@ pub extern "C" fn rt_metal_destroy_device(_device: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_alloc_buffer(_device: i64, _size: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::alloc_buffer(_device, _size)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1007,11 +1015,11 @@ pub extern "C" fn rt_metal_alloc_buffer(_device: i64, _size: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_free_buffer(_buffer: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::free_buffer(_buffer)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1019,26 +1027,42 @@ pub extern "C" fn rt_metal_free_buffer(_buffer: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_buffer_upload(_buffer: i64, _data: i64, _size: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::buffer_upload(_buffer, _data, _size)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
 }
 
 #[no_mangle]
+pub extern "C" fn rt_metal_buffer_upload_raw(buffer: i64, data: i64, size: i64) -> i64 {
+    if data == 0 || size <= 0 || size > 268_435_456 {
+        return 0;
+    }
+    rt_metal_buffer_upload(buffer, data, size)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_metal_buffer_download(_data: i64, _buffer: i64, _size: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::buffer_download(_data, _buffer, _size)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_metal_buffer_download_raw(data: i64, buffer: i64, size: i64) -> i64 {
+    if data == 0 || size <= 0 || size > 268_435_456 {
+        return 0;
+    }
+    rt_metal_buffer_download(data, buffer, size)
 }
 
 // ============================================================================
@@ -1047,12 +1071,32 @@ pub extern "C" fn rt_metal_buffer_download(_data: i64, _buffer: i64, _size: i64)
 
 #[no_mangle]
 pub extern "C" fn rt_metal_compile_shader(_device: i64, _source: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::compile_shader(_device, _source)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
+        0
+    }
+}
+
+/// Provider ABI: length-delimited UTF-8 MSL. The pointer is borrowed only for
+/// this call; no Simple RuntimeValue or core heap address crosses the dylib.
+#[no_mangle]
+pub extern "C" fn rt_metal_compile_shader_raw(device: i64, source: i64, source_len: i64) -> i64 {
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    {
+        if source == 0 || source_len <= 0 || source_len > 268_435_456 {
+            return 0;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(source as *const u8, source_len as usize) };
+        let Ok(text) = std::str::from_utf8(bytes) else { return 0 };
+        metal_impl::compile_shader_text(device, text)
+    }
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
+    {
+        let _ = (device, source, source_len);
         0
     }
 }
@@ -1063,24 +1107,42 @@ pub extern "C" fn rt_metal_load_library_array(device: i64, data: RuntimeValue) -
     let Some(bytes) = byte_array_bytes(data) else {
         return 0;
     };
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         return metal_impl::load_library_bytes(device, &bytes);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         let _ = (device, bytes);
         0
     }
 }
 
+/// Provider ABI: call-scoped metallib bytes, independent of RuntimeValue.
+#[no_mangle]
+pub extern "C" fn rt_metal_load_library_raw(device: i64, data: i64, data_len: i64) -> i64 {
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    {
+        if data == 0 || data_len <= 0 || data_len > 268_435_456 {
+            return 0;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, data_len as usize) };
+        metal_impl::load_library_bytes(device, bytes)
+    }
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
+    {
+        let _ = (device, data, data_len);
+        0
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_metal_destroy_shader(_shader: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::destroy_shader(_shader)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1088,23 +1150,42 @@ pub extern "C" fn rt_metal_destroy_shader(_shader: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_create_compute_pipeline(_device: i64, _shader: i64, _entry: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::create_compute_pipeline(_device, _shader, _entry)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
+        0
+    }
+}
+
+/// Provider ABI: length-delimited UTF-8 entry point name.
+#[no_mangle]
+pub extern "C" fn rt_metal_create_compute_pipeline_raw(device: i64, shader: i64, entry: i64, entry_len: i64) -> i64 {
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    {
+        if entry == 0 || entry_len <= 0 || entry_len > 1_048_576 {
+            return 0;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(entry as *const u8, entry_len as usize) };
+        let Ok(text) = std::str::from_utf8(bytes) else { return 0 };
+        metal_impl::create_compute_pipeline_text(device, shader, text)
+    }
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
+    {
+        let _ = (device, shader, entry, entry_len);
         0
     }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_metal_destroy_pipeline(_pipeline: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::destroy_pipeline(_pipeline)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1121,11 +1202,11 @@ pub extern "C" fn rt_metal_dispatch_compute(
     _by: i64,
     _bz: i64,
 ) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::dispatch_compute(_encoder, _pipeline, _gx, _gy, _gz, _bx, _by, _bz)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1137,11 +1218,11 @@ pub extern "C" fn rt_metal_dispatch_compute(
 
 #[no_mangle]
 pub extern "C" fn rt_metal_create_compute_encoder(_cmd: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::create_compute_encoder(_cmd)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1149,11 +1230,11 @@ pub extern "C" fn rt_metal_create_compute_encoder(_cmd: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_end_compute_encoder(_encoder: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::end_compute_encoder(_encoder)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1161,11 +1242,11 @@ pub extern "C" fn rt_metal_end_compute_encoder(_encoder: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_destroy_compute_encoder(_encoder: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::destroy_compute_encoder(_encoder)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1173,11 +1254,11 @@ pub extern "C" fn rt_metal_destroy_compute_encoder(_encoder: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_set_buffer(_encoder: i64, _buffer: i64, _offset: i64, _index: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::set_buffer(_encoder, _buffer, _offset, _index)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1185,23 +1266,31 @@ pub extern "C" fn rt_metal_set_buffer(_encoder: i64, _buffer: i64, _offset: i64,
 
 #[no_mangle]
 pub extern "C" fn rt_metal_set_bytes(_encoder: i64, _data: i64, _length: i64, _index: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::set_bytes(_encoder, _data, _length, _index)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
 }
 
 #[no_mangle]
+pub extern "C" fn rt_metal_set_bytes_raw(encoder: i64, data: i64, length: i64, index: i64) -> i64 {
+    if data == 0 || length <= 0 || length > 268_435_456 || index < 0 {
+        return 0;
+    }
+    rt_metal_set_bytes(encoder, data, length, index)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_metal_get_last_error() -> *const c_char {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::get_last_error()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         empty_cstr()
     }
@@ -1268,11 +1357,11 @@ pub extern "C" fn rt_metal_draw_primitives(_encoder: i64, _vertex_count: i64) ->
 
 #[no_mangle]
 pub extern "C" fn rt_metal_create_command_queue(_device: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::create_command_queue(_device)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1280,11 +1369,11 @@ pub extern "C" fn rt_metal_create_command_queue(_device: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_destroy_command_queue(_queue: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::destroy_command_queue(_queue)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1292,11 +1381,11 @@ pub extern "C" fn rt_metal_destroy_command_queue(_queue: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_create_command_buffer(_queue: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::create_command_buffer(_queue)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1304,11 +1393,11 @@ pub extern "C" fn rt_metal_create_command_buffer(_queue: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_commit_command_buffer(_cmd: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::commit_command_buffer(_cmd)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1316,11 +1405,11 @@ pub extern "C" fn rt_metal_commit_command_buffer(_cmd: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_wait_completed(_cmd: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::wait_completed(_cmd)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1328,11 +1417,11 @@ pub extern "C" fn rt_metal_wait_completed(_cmd: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_metal_destroy_command_buffer(_cmd: i64) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::destroy_command_buffer(_cmd)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1408,7 +1497,7 @@ pub extern "C" fn rt_metal_run_blit_frame(
     _by: i64,
     _bz: i64,
 ) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::run_blit_frame(
             _queue,
@@ -1426,7 +1515,7 @@ pub extern "C" fn rt_metal_run_blit_frame(
             _bz,
         )
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }
@@ -1451,7 +1540,7 @@ pub extern "C" fn rt_metal_run_compute_frame(
     _by: i64,
     _bz: i64,
 ) -> i64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     {
         metal_impl::run_compute_frame(
             _queue,
@@ -1468,7 +1557,7 @@ pub extern "C" fn rt_metal_run_compute_frame(
             _bz,
         )
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         0
     }

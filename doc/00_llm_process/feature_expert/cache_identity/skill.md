@@ -51,23 +51,3 @@ text` — each carries the full generation double-check inline; callers
 needing pairing re-read the generation after (the atlas producer does).
 The double-read staleness guarantee is preserved per projection, not per
 pair. See `doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
-
-## interface_digest_of: first callers landed (2026-08-18)
-
-Commit 1310d8790466 gave `interface_digest_of` (action_key.spl) its first real
-callers: manifest recording and a level-gated verify diagnostic. Prior notes
-describing it as defined-but-never-called are superseded on that point; full
-dependency-aware rebuild wiring (simple.sdn traversal, SmfManifest
-load-verification) remains open.
-
-## `SIMPLE_CACHE_SCOPE` without `--cache-dir` is a silent no-op (2026-08-23)
-
-Scope partitioning is a subdirectory *of the cache directory*. Export
-`SIMPLE_CACHE_SCOPE=runNN` on an invocation that passes no `--cache-dir` and
-there is nothing to partition: a hit is impossible, and nothing says so. On
-2026-08-22/23 hours went into "warming" such a cache — a 23,718-line run log
-contained zero cache-hit lines.
-
-**Diagnostic rule: zero cache-hit lines in a long log means check the
-invocation before touching the cache.**
-Record: `doc/08_tracking/bug/phase1_mislabelled_as_native_build_2026-08-23.md`.

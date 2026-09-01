@@ -1,0 +1,202 @@
+#!/bin/sh
+# Production bootstrap authority wiring shared by bootstrap-from-scratch and
+# focused behavioral tests. All mutation entrypoints require an owned lock.
+
+# Fingerprint helpers use mktemp internally. Keep that scratch traffic on the
+# bootstrap output filesystem: a full /tmp must not make an otherwise healthy
+# authority build fail, and pre/post/commit observations must share one routing
+# contract. On failure retain both a small machine-readable manifest and the
+# helper's stderr without adding anything to successful fingerprint stdout.
+bootstrap_authority_seed_inputs_fingerprint() {
+  [ "$#" -eq 9 ] || return 64
+  bootstrap_fingerprint_phase=$1
+  bootstrap_fingerprint_tmp=$2
+  bootstrap_fingerprint_manifest=$3
+  bootstrap_fingerprint_error=$4
+  shift 4
+  case "${bootstrap_fingerprint_phase}" in
+    pre|post|commit) ;;
+    *) return 64 ;;
+  esac
+  mkdir -p "${bootstrap_fingerprint_tmp}" \
+    "$(dirname -- "${bootstrap_fingerprint_manifest}")" || return 1
+  bootstrap_fingerprint_error_pending="${bootstrap_fingerprint_error}.raw.$$"
+  if TMPDIR="${bootstrap_fingerprint_tmp}" \
+    bootstrap_stage3_seed_inputs_fingerprint "$@" \
+      2>"${bootstrap_fingerprint_error_pending}"; then
+    rm -f "${bootstrap_fingerprint_manifest}" \
+      "${bootstrap_fingerprint_error}" \
+      "${bootstrap_fingerprint_error_pending}"
+    return 0
+  else
+    bootstrap_fingerprint_status=$?
+  fi
+  {
+    printf 'phase=%s\n' "${bootstrap_fingerprint_phase}"
+    cat "${bootstrap_fingerprint_error_pending}"
+  } >"${bootstrap_fingerprint_error}.tmp.$$" &&
+    mv -f "${bootstrap_fingerprint_error}.tmp.$$" \
+      "${bootstrap_fingerprint_error}"
+  rm -f "${bootstrap_fingerprint_error_pending}"
+  {
+    printf 'schema=simple-bootstrap-fingerprint-error-v1\n'
+    printf 'phase=%s\n' "${bootstrap_fingerprint_phase}"
+    printf 'status=%s\n' "${bootstrap_fingerprint_status}"
+    printf 'tmpdir=%s\n' "${bootstrap_fingerprint_tmp}"
+    printf 'error=%s\n' "${bootstrap_fingerprint_error}"
+  } >"${bootstrap_fingerprint_manifest}.tmp.$$" &&
+    mv -f "${bootstrap_fingerprint_manifest}.tmp.$$" \
+      "${bootstrap_fingerprint_manifest}"
+  return "${bootstrap_fingerprint_status}"
+}
+
+bootstrap_authority_require_owned_lock() {
+  [ "$#" -eq 1 ] || return 64
+  portable_lock_handle_is_owned "$1"
+}
+
+bootstrap_authority_materialize_legacy_file() {
+  [ "$#" -eq 2 ] || return 64
+  bootstrap_authority_handle=$1
+  bootstrap_authority_file=$2
+  bootstrap_authority_require_owned_lock "${bootstrap_authority_handle}" || return 77
+  [ -L "${bootstrap_authority_file}" ] || return 0
+  [ -f "${bootstrap_authority_file}" ] || return 1
+  bootstrap_authority_materialized="${bootstrap_authority_file}.materialized.$$"
+  cp -pL "${bootstrap_authority_file}" \
+    "${bootstrap_authority_materialized}" || return 1
+  mv -f "${bootstrap_authority_materialized}" \
+    "${bootstrap_authority_file}"
+}
+
+bootstrap_authority_recover_or_refuse() {
+  [ "$#" -eq 5 ] || return 64
+  bootstrap_authority_full=$1
+  bootstrap_authority_root=$2
+  bootstrap_authority_marker=$3
+  bootstrap_authority_compatibility=$4
+  bootstrap_authority_handle=$5
+  [ -e "${bootstrap_authority_marker}.transaction" ] || return 0
+  [ "${bootstrap_authority_full}" -eq 1 ] || return 78
+  bootstrap_authority_require_owned_lock "${bootstrap_authority_handle}" || return 77
+  bootstrap_stage3_recover_seed_transaction "${bootstrap_authority_root}" \
+    "${bootstrap_authority_marker}" "${bootstrap_authority_compatibility}"
+}
+
+bootstrap_authority_migrate_complete_legacy() {
+  [ "$#" -eq 11 ] || return 64
+  bootstrap_authority_legacy=$1
+  bootstrap_authority_root=$2
+  bootstrap_authority_marker=$3
+  bootstrap_authority_compatibility=$4
+  bootstrap_authority_inputs=$5
+  bootstrap_authority_seed_name=$6
+  bootstrap_authority_native_name=$7
+  bootstrap_authority_backfill_name=$8
+  bootstrap_authority_nonce=$9
+  bootstrap_authority_handle=${10}
+  bootstrap_authority_observed=${11}
+  [ ! -e "${bootstrap_authority_marker}.transaction" ] || return 78
+  [ ! -f "${bootstrap_authority_marker}" ] || return 0
+  bootstrap_authority_require_owned_lock "${bootstrap_authority_handle}" || return 77
+  bootstrap_stage3_verify_seed_stamp \
+    "${bootstrap_authority_legacy}/${bootstrap_authority_seed_name}.inputs.sha256" \
+    "${bootstrap_authority_inputs}" \
+    "${bootstrap_authority_legacy}/${bootstrap_authority_seed_name}" \
+    "${bootstrap_authority_legacy}/${bootstrap_authority_native_name}" \
+    "${bootstrap_authority_legacy}/${bootstrap_authority_backfill_name}" || return 1
+  bootstrap_stage3_prepare_seed_generation "${bootstrap_authority_legacy}" \
+    "${bootstrap_authority_root}" "${bootstrap_authority_inputs}" \
+    "${bootstrap_authority_seed_name}" "${bootstrap_authority_native_name}" \
+    "${bootstrap_authority_backfill_name}" "${bootstrap_authority_nonce}" || return 1
+  bootstrap_stage3_publish_seed_generation \
+    "${BOOTSTRAP_STAGE3_PREPARED_STAGING}" \
+    "${BOOTSTRAP_STAGE3_PREPARED_GENERATION}" "${bootstrap_authority_marker}" \
+    "${bootstrap_authority_inputs}" "${BOOTSTRAP_STAGE3_PREPARED_HASH}" \
+    "${bootstrap_authority_observed}" \
+    "${bootstrap_authority_compatibility}" || return 1
+  bootstrap_stage3_resolve_committed_seed "${bootstrap_authority_root}" \
+    "${bootstrap_authority_marker}"
+}
+
+# Reclaim stale immutable Rust authority generations. Each full-bootstrap
+# publish mints a NEW directory under bootstrap.generations/ named
+# <inputs>-<hash> (bootstrap_stage3_publish_seed_generation) and never removes
+# the previous one, so generations accumulate without bound -- ~3 GB each,
+# measured 17 generations / 9.4 GB on one host with only one of them current.
+# Requires the caller to hold the Rust authority lock (same discipline as
+# bootstrap_authority_materialize_legacy_file): this function only ever runs
+# AFTER portable_lock_acquire has succeeded for this process, so it can never
+# race a concurrent publish/recover that also requires the lock. It removes
+# ONLY directories that:
+#   - are not the CURRENT generation (read from the marker file's
+#     `generation=` line via bootstrap_stage3_manifest_value -- the same
+#     accessor bootstrap_stage3_recover_seed_transaction uses to trust that
+#     field), and
+#   - pass bootstrap_stage3_safe_generation_name (rejects '.', '..', empty,
+#     path separators) -- which transient entries never do: staging dirs are
+#     named `.staging.<nonce>`, in-flight snapshots `.snapshot.<nonce>` /
+#     `.publish.$$.snapshot` / `.existing.$$` / `.recover.$$`, all leading
+#     with a dot and therefore excluded by find's -name 'generation root
+#     entry' glob below AND would fail the safe-name check even if matched.
+#     A crashed run's leftover dotfile is left alone here on purpose --
+#     cleaning transient publish state is bootstrap_stage3_prepare_seed_
+#     generation's job (it rm -rf's its own staging dir before reuse), not
+#     this reaper's.
+# No marker (nothing ever published, or the transaction is still pending) ->
+# refuse to prune anything: we cannot tell "current" from "stale" without it,
+# and pruning on that guess is exactly the failure mode this function exists
+# to avoid.
+bootstrap_authority_prune_generations() {
+  [ "$#" -eq 3 ] || return 64
+  bootstrap_authority_prune_root=$1
+  bootstrap_authority_prune_marker=$2
+  bootstrap_authority_prune_handle=$3
+  bootstrap_authority_require_owned_lock \
+    "${bootstrap_authority_prune_handle}" || return 77
+  [ -d "${bootstrap_authority_prune_root}" ] || return 0
+  [ -f "${bootstrap_authority_prune_marker}" ] || return 0
+  [ -e "${bootstrap_authority_prune_marker}.transaction" ] && return 0
+  bootstrap_authority_prune_current=$(bootstrap_stage3_manifest_value \
+    generation "${bootstrap_authority_prune_marker}") || return 0
+  bootstrap_stage3_safe_generation_name \
+    "${bootstrap_authority_prune_current}" || return 0
+  bootstrap_authority_prune_count=0
+  for bootstrap_authority_prune_entry in \
+    "${bootstrap_authority_prune_root}"/*; do
+    [ -d "${bootstrap_authority_prune_entry}" ] || continue
+    [ ! -L "${bootstrap_authority_prune_entry}" ] || continue
+    bootstrap_authority_prune_name=\
+$(basename -- "${bootstrap_authority_prune_entry}")
+    bootstrap_stage3_safe_generation_name \
+      "${bootstrap_authority_prune_name}" || continue
+    case "${bootstrap_authority_prune_name}" in
+      .*) continue ;;
+    esac
+    [ "${bootstrap_authority_prune_name}" != \
+      "${bootstrap_authority_prune_current}" ] || continue
+    chmod -R u+w "${bootstrap_authority_prune_entry}" 2>/dev/null || true
+    rm -rf "${bootstrap_authority_prune_entry}" || return 1
+    bootstrap_authority_prune_count=$((bootstrap_authority_prune_count + 1))
+  done
+  [ "${bootstrap_authority_prune_count}" -eq 0 ] ||
+    echo "  rust authority: pruned ${bootstrap_authority_prune_count} stale generation(s) in ${bootstrap_authority_prune_root}"
+  return 0
+}
+
+bootstrap_authority_pin_stage4() {
+  [ "$#" -eq 4 ] || return 64
+  bootstrap_stage3_pin_private_authority "$@" || return 1
+  bootstrap_stage3_verify_hosted_runtime_authority \
+    "${BOOTSTRAP_STAGE3_PRIVATE_RUNTIME}" || return 1
+  BOOTSTRAP_STAGE4_RUNTIME_PATH=${BOOTSTRAP_STAGE3_PRIVATE_RUNTIME}
+  BOOTSTRAP_STAGE4_SEED=${BOOTSTRAP_STAGE3_PRIVATE_SEED}
+  BOOTSTRAP_STAGE4_NATIVE_ALL=${BOOTSTRAP_STAGE3_PRIVATE_NATIVE_ALL}
+  BOOTSTRAP_STAGE4_BACKFILL=${BOOTSTRAP_STAGE3_PRIVATE_BACKFILL}
+  BOOTSTRAP_STAGE4_HOSTED_RUNTIME=\
+${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_PATH}
+  BOOTSTRAP_STAGE4_HOSTED_RUNTIME_RELATIVE_PATH=\
+${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
+  BOOTSTRAP_STAGE4_HOSTED_RUNTIME_SHA256=\
+${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256}
+}

@@ -1,0 +1,45 @@
+use std.spec
+use compiler.mir_opt.mir_opt.dce_translation_validation.{
+    DceTvInstructionV1, DceTvProgramV1, dce_tv_optimize,
+    dce_tv_validate, validate_dce_translation_v1
+}
+
+fn dce_tv_fixture() -> DceTvProgramV1:
+    DceTvProgramV1([
+        DceTvInstructionV1.Const(7, 99),
+        DceTvInstructionV1.Const(1, 20),
+        DceTvInstructionV1.Const(2, 22),
+        DceTvInstructionV1.Add(0, 1, 2)
+    ], 0)
+
+describe "FV2 DCE translation validation":
+    it "accepts the exact dead-instruction elimination and issues a bound certificate":
+        val source = dce_tv_fixture()
+        val target = dce_tv_optimize(source)
+        val result = validate_dce_translation_v1(source, target, "propext-only-audit")
+        expect(result.accepted).to_equal(true)
+        expect(result.diagnostic).to_equal("")
+        expect(result.certificate.?).to_equal(true)
+        val certificate = result.certificate.unwrap()
+        expect(certificate.diagnostic()).to_equal("")
+        expect(certificate.matches_edge("mir-dce-v1", source.semantic_hash(), target.semantic_hash())).to_equal(true)
+
+    it "rejects an unsound rewrite of a live instruction":
+        val source = dce_tv_fixture()
+        val mutant = DceTvProgramV1([
+            DceTvInstructionV1.Const(1, 20),
+            DceTvInstructionV1.Const(2, 23),
+            DceTvInstructionV1.Add(0, 1, 2)
+        ], 0)
+        expect(dce_tv_validate(source, mutant)).to_equal(false)
+        val result = validate_dce_translation_v1(source, mutant, "propext-only-audit")
+        expect(result.accepted).to_equal(false)
+        expect(result.diagnostic).to_contain("REJECTED")
+        expect(result.certificate.?).to_equal(false)
+
+    it "rejects missing transitive axiom evidence":
+        val source = dce_tv_fixture()
+        val target = dce_tv_optimize(source)
+        val result = validate_dce_translation_v1(source, target, "")
+        expect(result.accepted).to_equal(false)
+        expect(result.diagnostic).to_contain("AUDIT")

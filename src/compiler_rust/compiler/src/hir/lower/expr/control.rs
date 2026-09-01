@@ -37,84 +37,9 @@ impl Lowerer {
         }
     }
 
-    /// True when `ty` is the HIR type an EMPTY array literal gets: the
-    /// configured `empty_array_default` element with a static size of 0.
-    ///
-    /// `[]` has no element to take a type from, so `lower_array`
-    /// (expr/collections.rs) stamps `Array { element: empty_array_default,
-    /// size: Some(0) }` — `TypeId::I32` by default. That signature is already
-    /// treated elsewhere as "untyped empty literal, refine me": the
-    /// `push`/`append` receiver refinement at expr/mod.rs:797 tests exactly
-    /// this pair. Reuse the same predicate rather than inventing a second one.
-    fn is_untyped_empty_array_ty(&self, ty: TypeId) -> bool {
-        match self.module.types.get(ty) {
-            Some(HirType::Array { element, size }) => {
-                *element == self.type_inference_config.empty_array_default && *size == Some(0)
-            }
-            _ => false,
-        }
-    }
-
-    /// True when `ty` is an array whose element type carries real information,
-    /// i.e. it is not the empty-literal placeholder above.
-    fn is_informative_array_ty(&self, ty: TypeId) -> bool {
-        match self.module.types.get(ty) {
-            Some(HirType::Array { element, .. }) => *element != self.type_inference_config.empty_array_default,
-            _ => false,
-        }
-    }
-
-    /// Pick the more specific of the two arm types for a value-position `if`.
-    ///
-    /// Bug (stage2_hir_codec_segv_is_i32_truncated_heap_ref_2026-08-24): this
-    /// lowering typed the whole if-expression from the THEN arm alone and
-    /// discarded the else arm. For the pervasive generated-codec shape
-    ///
-    ///     val ks3 = if node.functions == nil: [] else: node.functions.keys()
-    ///     for dk3 in ks3: ... hc_enc_symbol_id(w, dk3)
-    ///
-    /// the then arm is an empty array literal — `Array { I32, Some(0) }` —
-    /// and the else arm carries the correct `Array { Struct(SymbolId), None }`
-    /// that the `.keys()` typing in expr/mod.rs already stamps. Taking the
-    /// then arm made the Let-bound local `Array { I32, .. }`, so
-    /// `lower_for_stmt` (mir/lower/lowering_stmt.rs) read `iterable.ty`,
-    /// classified the element as I32, and emitted `UnboxInt` + a 32-bit
-    /// `UnitNarrow` on what is in fact a 64-bit tagged heap handle. LLVM folds
-    /// the resulting `zext(trunc_i32(v)) & ~7` into a single 32-bit
-    /// `and #0xfffffff8` and the truncated pointer is dereferenced — the
-    /// arm64 stage-2 `hc_enc_hir_module` SIGSEGV.
-    ///
-    /// The same defect was found and fixed first in the pure-Simple lowering
-    /// (`mir_merge_arm_types` in src/compiler/50.mir/mir_lowering_stmts.spl,
-    /// commit ba3efbee19e); this is the port to the seed, which is the
-    /// compiler that actually builds Stage 2
-    /// (`SIMPLE_NATIVE_BUILD_RUST=1`, bootstrap-from-scratch.sh:3499,3511).
-    ///
-    /// The informative arm's TypeId is adopted WHOLESALE, not just its element
-    /// type, because in the seed the HIR type is the only carrier of array
-    /// identity: keeping the empty literal's `size: Some(0)` would leave
-    /// `.len()` on the merged local answering a static 0 while the same local
-    /// iterates N elements — the second half of the same defect, which the
-    /// pure-Simple fix had to repair through its marking sets. Refinement is
-    /// one-directional (only a placeholder is replaced), so a genuinely
-    /// i32-element array is never retyped and every other merge is unchanged.
-    fn merge_if_arm_types(&self, then_ty: TypeId, else_ty: Option<TypeId>) -> TypeId {
-        let Some(else_ty) = else_ty else {
-            return then_ty;
-        };
-        if self.is_untyped_empty_array_ty(then_ty) && self.is_informative_array_ty(else_ty) {
-            return else_ty;
-        }
-        if self.is_untyped_empty_array_ty(else_ty) && self.is_informative_array_ty(then_ty) {
-            return then_ty;
-        }
-        then_ty
-    }
-
     /// Lower an if expression to HIR
     ///
-    /// Result type is the merge of the two arms (see `merge_if_arm_types`); it
-    /// used to be taken from the then branch alone.
+    /// Result type is taken from the then branch.
     /// Else branch is optional.
     pub(super) fn lower_if(
         &mut self,
@@ -149,7 +74,7 @@ impl Lowerer {
             None
         };
 
-        let ty = self.merge_if_arm_types(then_hir.ty, else_hir.as_ref().map(|e| e.ty));
+        let ty = then_hir.ty;
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -208,7 +133,7 @@ impl Lowerer {
         // whose absence caused the undeclared-global defect.
         let bindings = self.extract_pattern_bindings(pattern, subject_ty);
         let previous_bindings = self.register_match_bindings(pattern, &bindings, ctx);
-        let binding_stmts = self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+        let binding_stmts = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
 
         let then_hir = self.lower_expr(then_branch, ctx)?;
         let ty = then_hir.ty;
@@ -232,10 +157,6 @@ impl Lowerer {
         } else {
             None
         };
-
-        // Same merge as `lower_if` above: the then arm alone must not decide the
-        // type of the whole expression when it is an untyped empty literal.
-        let ty = self.merge_if_arm_types(ty, else_hir.as_ref().map(|e| e.ty));
 
         let if_expr = HirExpr {
             kind: HirExprKind::If {
@@ -1432,7 +1353,7 @@ impl Lowerer {
     /// Look up the field types for an enum variant.
     /// Returns None if the enum or variant is not found.
     /// If expected_ty is provided and is an enum type, use it directly.
-    fn get_enum_variant_field_types_with_hint(
+    pub(crate) fn get_enum_variant_field_types_with_hint(
         &self,
         enum_name: &str,
         variant_name: &str,
@@ -1447,13 +1368,35 @@ impl Lowerer {
             }
         }
 
-        // First, try to use the expected type if it's an enum
+        // First, try to use the expected type if it's an enum.
+        //
+        // ROOT FIX (stage2 native enum-dispatch wall, 2026-08-28): unwrap
+        // `Pointer` (the `T?` optional representation) for EVERY variant, not
+        // just `Some`. An `if val pl = optional_enum:` binding carries the
+        // POINTER type, so `match pl: case Variant(x)` used to skip this
+        // branch and fall into the wildcard search below, which iterates a
+        // HashMap and returns the FIRST enum owning a same-named variant —
+        // per-process-random. In the self-hosted compiler closure this typed
+        // `patterns` (from `case Tuple(patterns)` over `HirPatternPayload?`)
+        // as ANY, so `pat.kind` was index-guessed against an unrelated struct
+        // (HirSymbol, `kind` at slot 2) and the compiled stage2 read garbage —
+        // the `nested match pattern kind not supported` wall and the
+        // add-two-dead-externs heisenbug. Reproduce: probe with an optional
+        // enum payload plus a decoy enum sharing the variant name flips
+        // pass/fail across identical rebuilds before this fix.
         if expected_ty != TypeId::ANY {
+            let mut base_ty = expected_ty;
+            for _ in 0..4 {
+                match self.module.types.get(base_ty) {
+                    Some(HirType::Pointer { inner, .. }) => base_ty = *inner,
+                    _ => break,
+                }
+            }
             if let Some(HirType::Enum {
                 name: enum_type_name,
                 variants,
                 ..
-            }) = self.module.types.get(expected_ty)
+            }) = self.module.types.get(base_ty)
             {
                 for (name, fields) in variants {
                     if name == variant_name {
@@ -1463,19 +1406,55 @@ impl Lowerer {
             }
         }
 
-        // Handle wildcard enum name "_" - search all enums for the variant
+        // Handle wildcard enum name "_" - search all enums for the variant.
+        //
+        // HARDENING (same 2026-08-28 fix): the registry is a HashMap, so
+        // "first match" was per-process-random whenever more than one enum
+        // owns the variant name (`Tuple` is owned by HirPatternKind,
+        // HirPatternPayload, PatternKind, ...). Collect every candidate:
+        // when they all agree on the payload field types the answer is safe;
+        // when they disagree, pick deterministically (smallest owner name) so
+        // an eventual wrong pick is at least stable and diagnosable instead
+        // of flipping with unrelated layout changes.
         if enum_name == "_" {
-            // Search all types for an enum with this variant
+            let mut candidates: Vec<(String, Option<Vec<TypeId>>)> = Vec::new();
             for (_, hir_type) in self.module.types.iter() {
-                if let HirType::Enum { variants, .. } = hir_type {
+                if let HirType::Enum {
+                    name: owner, variants, ..
+                } = hir_type
+                {
                     for (name, fields) in variants {
                         if name == variant_name {
-                            return fields.clone();
+                            candidates.push((owner.clone(), fields.clone()));
                         }
                     }
                 }
             }
-            return None;
+            if candidates.is_empty() {
+                return None;
+            }
+            let all_agree = candidates.windows(2).all(|w| w[0].1 == w[1].1);
+            if all_agree {
+                return candidates.into_iter().next().and_then(|(_, f)| f);
+            }
+            // GENUINE AMBIGUITY: two or more enums own this variant name with
+            // DIFFERENT payload shapes and no expected type disambiguated them.
+            // The pick below is deterministic but it is still a GUESS, and a
+            // wrong guess here is exactly the defect class this fix repairs.
+            // Surface it (gated, default-off) so a recurrence is diagnosable
+            // rather than silent; the deterministic order keeps it stable.
+            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+            if crate::hir::lower::trace_field_get_enabled() {
+                let fpath = self
+                    .current_file
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                let owners: Vec<&str> = candidates.iter().map(|(o, _)| o.as_str()).collect();
+                eprintln!("[ENUM-AMBIG] variant `{variant_name}` owned by {owners:?} with DIFFERING payloads; guessing `{}` in {fpath}", owners[0]);
+            }
+            return candidates.into_iter().next().and_then(|(_, f)| f);
         }
 
         // Look up the enum type by name
@@ -1672,6 +1651,15 @@ impl Lowerer {
                             .as_ref()
                             .and_then(|types| types.get(i).copied())
                             .unwrap_or(TypeId::ANY);
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[PB] {enum_name}.{variant_name} slot{i} expected_ty={:?} field_ty={:?} ({:?}) in {fpath}", expected_ty, field_ty, self.module.types.get(field_ty), );
+                        }
                         self.collect_pattern_bindings(p, field_ty, bindings);
                     }
                 }
@@ -1855,6 +1843,7 @@ impl Lowerer {
     pub(super) fn lower_unsafe_block(
         &mut self,
         statements: &[simple_parser::ast::Node],
+        capabilities: &[String],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         let block = simple_parser::ast::Block {
@@ -1867,7 +1856,10 @@ impl Lowerer {
             _ => TypeId::NIL,
         };
         Ok(HirExpr {
-            kind: HirExprKind::UnsafeBlock(block_stmts),
+            kind: HirExprKind::UnsafeBlock {
+                statements: block_stmts,
+                capabilities: capabilities.to_vec(),
+            },
             ty: result_ty,
         })
     }
@@ -1975,6 +1967,19 @@ impl Lowerer {
             expr_hir.ty
         };
 
+        // `a ?? d` over an optional BoxInt-family scalar (`i64?` etc.) yields
+        // the RAW inner scalar, not the tagged optional. Typing the result as
+        // the `T?` Pointer kept the coalesced value in its tagged form, and
+        // every downstream consumer decoded it as a raw word: on the JIT lane
+        // `(f() ?? 0)` printed 336 (== 42 << 3, the tagged bits) and
+        // `(f() ?? 0) + 1` computed 337 — silently wrong by x8 — while the
+        // interpreter printed 42/43. With the result typed as the inner
+        // scalar, `lower_builtin_call_expr` (mir) unboxes the then-branch by
+        // its name+type, and the raw default on the else-branch needs no
+        // boxing, so both edges are raw and agree with the static type.
+        // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+        let result_ty = self.optional_boxint_scalar_inner(result_ty).unwrap_or(result_ty);
+
         // Unwrap the then-branch: if expr is Some(x), return x, not Some(x).
         // Use rt_unwrap_or_self which handles both enum and raw values.
         let unwrapped_expr = HirExpr {
@@ -2007,8 +2012,8 @@ impl Lowerer {
     /// runtime representation is a tagged `RuntimeValue` (a nullable `T?`, or
     /// `Any`). Returns the expression unchanged in every other case.
     fn box_scalar_into_tagged_result(&self, result_ty: TypeId, value: HirExpr) -> HirExpr {
-        let tagged_slot = result_ty == TypeId::ANY
-            || matches!(self.module.types.get(result_ty), Some(HirType::Pointer { .. }));
+        let tagged_slot =
+            result_ty == TypeId::ANY || matches!(self.module.types.get(result_ty), Some(HirType::Pointer { .. }));
         if !tagged_slot {
             return value;
         }
@@ -2369,6 +2374,201 @@ impl Lowerer {
                         condition: Box::new(condition),
                         then_branch: Box::new(present),
                         else_branch: Some(Box::new(absent)),
+                    },
+                    ty: payload_ty,
+                }),
+            },
+            ty: payload_ty,
+        })
+    }
+
+    /// Lower `value ?? return fallback` to a native branch with a real early return.
+    pub(super) fn lower_unwrap_or_return(
+        &mut self,
+        expr: &Expr,
+        default: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // Kept in lock-step with codegen::shared::enum_runtime_type_id.
+        const RESULT_ENUM_ID: i64 = 0;
+
+        enum AbsentCheck {
+            None,
+            Err,
+            NoneOrErr,
+            Always,
+        }
+
+        let inner_hir = self.lower_expr(expr, ctx)?;
+        let subject_ty = inner_hir.ty;
+        // This is lowered now for validation/dependency collection, but emitted
+        // only below the absent branch so evaluation remains lazy at runtime.
+        let default_hir = self.lower_expr(default, ctx)?;
+
+        let (check, payload_ty, extract_enum_payload) = match self.module.types.get(subject_ty).cloned() {
+            Some(HirType::Enum { name, .. }) if name == "Result" => (
+                AbsentCheck::Err,
+                self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
+                true,
+            ),
+            Some(HirType::Enum { name, .. }) if name == "Option" => (
+                AbsentCheck::None,
+                self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
+                true,
+            ),
+            Some(HirType::Pointer { inner, .. }) => {
+                // A nullable scalar/string remains a tagged RuntimeValue after
+                // unwrapping. Object-like values keep their concrete type so
+                // following field/member lookup still has layout provenance.
+                let payload_ty = if matches!(
+                    inner,
+                    TypeId::BOOL
+                        | TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::F32
+                        | TypeId::F64
+                        | TypeId::CHAR
+                        | TypeId::STRING
+                ) {
+                    TypeId::ANY
+                } else {
+                    inner
+                };
+                (AbsentCheck::None, payload_ty, false)
+            }
+            Some(HirType::Nil) => (AbsentCheck::Always, TypeId::ANY, false),
+            Some(HirType::Any) | None => (AbsentCheck::NoneOrErr, TypeId::ANY, false),
+            // The interpreter treats every other value as already present.
+            _ => return Ok(inner_hir),
+        };
+
+        let subject_idx = ctx.locals.len();
+        ctx.add_local(
+            "$unwrap_or_return_subject".to_string(),
+            subject_ty,
+            Mutability::Immutable,
+        );
+        let subject_ref = HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: subject_ty,
+        };
+        let builtin_check = |name: &str, args: Vec<HirExpr>| HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: name.to_string(),
+                args,
+            },
+            ty: TypeId::BOOL,
+        };
+        let is_none = || builtin_check("rt_is_none", vec![subject_ref.clone()]);
+        let is_result = || HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::Eq,
+                left: Box::new(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_id".to_string(),
+                        args: vec![subject_ref.clone()],
+                    },
+                    ty: TypeId::I64,
+                }),
+                right: Box::new(HirExpr {
+                    kind: HirExprKind::Integer(RESULT_ENUM_ID),
+                    ty: TypeId::I64,
+                }),
+            },
+            ty: TypeId::BOOL,
+        };
+        let is_err = || {
+            let err_disc: i64 = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                "Err".hash(&mut hasher);
+                (hasher.finish() & 0xFFFF_FFFF) as i64
+            };
+            builtin_check(
+                "rt_enum_check_discriminant",
+                vec![
+                    subject_ref.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(err_disc),
+                        ty: TypeId::I64,
+                    },
+                ],
+            )
+        };
+        let is_result_err = || HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::And,
+                left: Box::new(is_result()),
+                right: Box::new(is_err()),
+            },
+            ty: TypeId::BOOL,
+        };
+        let condition = match check {
+            AbsentCheck::None => is_none(),
+            AbsentCheck::Err => is_result_err(),
+            AbsentCheck::NoneOrErr => HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::Or,
+                    left: Box::new(is_none()),
+                    right: Box::new(is_result_err()),
+                },
+                ty: TypeId::BOOL,
+            },
+            AbsentCheck::Always => HirExpr {
+                kind: HirExprKind::Bool(true),
+                ty: TypeId::BOOL,
+            },
+        };
+
+        let early_return = HirExpr {
+            kind: HirExprKind::Block(vec![crate::hir::HirStmt::Return(Some(default_hir))]),
+            ty: payload_ty,
+        };
+        let present = if extract_enum_payload {
+            // A statically typed Option/Result has already passed its absent
+            // check. Use the typed payload builtin so MIR applies the native
+            // scalar unboxing required by `payload_ty`. The generic helper must
+            // remain for Any/pointer values because it deliberately preserves
+            // arbitrary user enums and raw nullable values unchanged.
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_payload".to_string(),
+                    args: vec![subject_ref],
+                },
+                ty: payload_ty,
+            }
+        } else {
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_unwrap_or_value".to_string(),
+                    args: vec![
+                        subject_ref,
+                        HirExpr {
+                            kind: HirExprKind::Nil,
+                            ty: TypeId::NIL,
+                        },
+                    ],
+                },
+                ty: payload_ty,
+            }
+        };
+
+        Ok(HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(inner_hir),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(early_return),
+                        else_branch: Some(Box::new(present)),
                     },
                     ty: payload_ty,
                 }),
@@ -3017,13 +3217,16 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
         | Expr::Try(expr)
         | Expr::ForceUnwrap(expr)
         | Expr::ExistsCheck(expr)
-        | Expr::UnwrapOrReturn { expr, .. }
         | Expr::Spread(expr)
         | Expr::DictSpread(expr)
+        | Expr::StructSpread(expr)
         | Expr::OptionalChain { expr, .. } => {
             collect_identifiers_recursive(expr, bound, identifiers);
         }
-        Expr::UnwrapOr { expr, default } | Expr::CastOr { expr, default, .. } | Expr::Coalesce { expr, default } => {
+        Expr::UnwrapOr { expr, default }
+        | Expr::UnwrapOrReturn { expr, default }
+        | Expr::CastOr { expr, default, .. }
+        | Expr::Coalesce { expr, default } => {
             collect_identifiers_recursive(expr, bound, identifiers);
             collect_identifiers_recursive(default, bound, identifiers);
         }
@@ -3087,7 +3290,7 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
             collect_identifiers_recursive(subject, bound, identifiers);
             collect_identifiers_arms(arms, bound, identifiers);
         }
-        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
             collect_identifiers_block(nodes, bound, identifiers);
         }
         // Literals and other expressions that don't contain identifiers

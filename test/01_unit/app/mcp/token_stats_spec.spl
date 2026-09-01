@@ -1,0 +1,250 @@
+"""
+# MCP Token-Savings Telemetry Specification
+
+**Requirements:** N/A
+
+## Overview
+
+Guards `simple_token_stats` and the telemetry ledger in
+`app.mcp.main_lazy_telemetry`: every `simple_ctx_*` call records the raw
+bytes it captured versus the bytes it returned, `simple_ponytail` memoizes
+findings by content hash and counts a repeat call on unchanged bytes as
+avoided work, and the rollup reports per-feature totals plus a 7-day window.
+
+Every scenario points `SIMPLE_CTX_DIR` at a scratch directory so the repo's
+own `.simple/ctx/` is never written by a test run.
+
+## Behavior
+
+- A ctx call appends one event with bytes_captured >= bytes_returned for a
+  large program output, and tokens_saved = (captured - returned) / 4.
+- A second `simple_ponytail` call on the same file bytes returns the cached
+  findings verbatim and records a cache hit; because the bytes are identical
+  the hit saves NO tokens (tokens_saved / bytes_captured unchanged) and is
+  reported as `repeat_work_avoided_bytes` instead (double-counted until
+  2026-08-28, see scratchpad/mcp_token_ab_REPORT.md §3.2).
+- Editing the file misses the memo (content hash, not path, is the key).
+- Rollup math: totals count every event; the 7-day window excludes an event
+  planted 8 days in the past.
+- Reset truncates the ledger (zeros afterwards); the memo survives.
+- Events written by one handler are visible after a store reopen.
+- `simple_ctx_stats` carries the telemetry counters next to its old fields.
+- `simple_token_stats` is routed by `dispatch_tool`.
+"""
+
+# @feature mcp_token_stats
+# tag: unit
+
+use std.spec
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_exists, file_write, file_read, time_now_unix_micros}
+use app.mcp.main_lazy_telemetry.{tok_record, tok_record_at, tok_load_events, tok_rollup, tok_tokens_saved, tok_reset, tok_stats_text, tok_memo_key, tok_memo_get, tok_telemetry_path, tok_memo_path, handle_simple_token_stats, TOK_FEATURE_CTX, TOK_FEATURE_PONYTAIL}
+use app.mcp.main_lazy_ctx_tools.{handle_simple_ctx_batch_execute, handle_simple_ctx_execute, ctx_stats_text}
+use app.mcp.main_lazy_query_tools.{handle_simple_ponytail}
+use app.mcp.main_dispatch.{dispatch_tool}
+
+fn _fresh_store() -> text:
+    var base = env_get("SIMPLE_TEST_TMP") ?? ""
+    if base == "":
+        base = "build/tmp"
+    val dir = base + "/simple_tok_spec_" + str(time_now_unix_micros())
+    dir_remove_all(dir)
+    dir_create(dir, true)
+    env_set("SIMPLE_CTX_DIR", dir)
+    dir
+
+# Pull the integer after `label=` (or `label: `) out of a stats line.
+fn _num_after(s: text, label: text) -> i64:
+    val p = s.index_of(label)
+    if p < 0:
+        return -1
+    var i = p + label.len()
+    var digits: [text] = []
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch >= "0" and ch <= "9":
+            digits.push(ch)
+        else:
+            break
+        i = i + 1
+    if digits.len() == 0:
+        return -1
+    digits.join("").to_int() ?? -1
+
+fn _smelly_source() -> text:
+    var lines: [text] = []
+    lines.push("class Foo:")
+    lines.push("    fn a(self) -> i64:")
+    lines.push("        val x = 1")
+    lines.push("        val y = x")
+    lines.push("        val z = y")
+    lines.push("        return z")
+    var i = 0
+    while i < 40:
+        lines.push("    fn f" + str(i) + "(self, v: i64) -> i64:")
+        lines.push("        if v == " + str(i) + ":")
+        lines.push("            return v * 2")
+        lines.push("        return v")
+        i = i + 1
+    lines.join("\n") + "\n"
+
+describe "ctx call recording":
+    it "records bytes_captured vs bytes_returned for a large batch output":
+        _fresh_store()
+        # ~60KB of output, returned as a handful of ranked snippets.
+        val body = "{\"commands\":[\"seq 1 12000 | sed 's/^/needle-zq line /'\"],\"queries\":[\"needle-zq\"],\"source\":\"batch:tok\"}"
+        val r = handle_simple_ctx_batch_execute("1", body)
+        assert_contains(r, "needle-zq")
+        val events = tok_load_events()
+        assert_equal(events.len(), 1)
+        val e = events[0]
+        assert_equal(e.feature, TOK_FEATURE_CTX)
+        assert_equal(e.tool, "simple_ctx_batch_execute")
+        assert_true(e.captured > 50000)
+        assert_true(e.returned < e.captured)
+        assert_false(e.hit)
+        assert_equal(tok_tokens_saved(e.captured, e.returned), (e.captured - e.returned) / 4)
+        val stats = tok_stats_text()
+        assert_equal(_num_after(stats, "ctx-mimic: calls="), 1)
+        assert_equal(_num_after(stats, "ctx-mimic: calls=1 bytes_captured="), e.captured)
+        assert_true(_num_after(stats, "total: calls=1 bytes_captured=" + str(e.captured) + " bytes_returned=" + str(e.returned) + " tokens_saved=") > 0)
+
+    it "execute counts suppressed stderr as captured but not returned":
+        _fresh_store()
+        val r = handle_simple_ctx_execute("2", "{\"language\":\"shell\",\"code\":\"echo ok; seq 1 3000 1>&2\"}")
+        assert_contains(r, "ok")
+        val e = tok_load_events()[0]
+        assert_equal(e.tool, "simple_ctx_execute")
+        assert_true(e.captured > 10000)
+        assert_true(e.returned < 1000)
+
+describe "ponytail content-hash memo":
+    it "second call on unchanged bytes returns cached findings and counts a hit":
+        val dir = _fresh_store()
+        val path = dir + "/smelly.spl"
+        file_write(path, _smelly_source())
+        val body = "{\"file\":\"" + path + "\",\"mode\":\"ladder\",\"level\":\"full\"}"
+        val first = handle_simple_ponytail("3", body)
+        assert_contains(first, "Ponytail")
+        val ev1 = tok_load_events()
+        assert_equal(ev1.len(), 1)
+        assert_equal(ev1[0].feature, TOK_FEATURE_PONYTAIL)
+        assert_false(ev1[0].hit)
+        assert_equal(ev1[0].captured, _smelly_source().len())
+        assert_true(file_exists(tok_memo_path()))
+        var memo_bytes: i64 = 0
+        match tok_memo_get(tok_memo_key(_smelly_source(), "ladder", "full")):
+            Some(m):
+                memo_bytes = m.findings.len()
+            nil:
+                pass
+        assert_equal(memo_bytes, ev1[0].returned)
+        val saved_before = tok_rollup(ev1, TOK_FEATURE_PONYTAIL, 0 - 1).saved
+
+        val second = handle_simple_ponytail("4", body)
+        assert_contains(second, "Ponytail")
+        assert_equal(second.len(), first.len())
+        val ev2 = tok_load_events()
+        assert_equal(ev2.len(), 2)
+        assert_true(ev2[1].hit)
+        # The hit counts the prior analysis (source read + findings) as avoided.
+        assert_equal(ev2[1].captured, _smelly_source().len() + ev1[0].returned)
+        val roll = tok_rollup(ev2, TOK_FEATURE_PONYTAIL, 0 - 1)
+        assert_equal(roll.calls, 2)
+        assert_equal(roll.hits, 1)
+        # A hit returns byte-identical findings: it saves NO tokens (the model
+        # receives the same bytes), so tokens_saved and bytes_captured do not
+        # grow; the prior analysis bytes are reported as repeat work avoided.
+        assert_equal(roll.saved, saved_before)
+        assert_equal(roll.captured, _smelly_source().len())
+        assert_equal(roll.avoided, _smelly_source().len() + ev1[0].returned)
+        assert_equal(roll.returned, ev1[0].returned * 2)
+        val stats = tok_stats_text()
+        assert_equal(_num_after(stats, "ponytail-mimic: calls=2 cache_hits="), 1)
+        assert_equal(_num_after(stats, "repeat_work_avoided_bytes="), _smelly_source().len() + ev1[0].returned)
+        assert_equal(_num_after(stats, "ponytail-mimic: calls=2 cache_hits=1 bytes_captured="), _smelly_source().len())
+
+    it "an edited file misses the memo (key is content, not path)":
+        val dir = _fresh_store()
+        val path = dir + "/edited.spl"
+        file_write(path, _smelly_source())
+        val body = "{\"file\":\"" + path + "\",\"mode\":\"ladder\",\"level\":\"full\"}"
+        handle_simple_ponytail("5", body)
+        file_write(path, _smelly_source() + "fn extra() -> i64:\n    return 7\n")
+        handle_simple_ponytail("6", body)
+        val ev = tok_load_events()
+        assert_equal(ev.len(), 2)
+        assert_false(ev[0].hit)
+        assert_false(ev[1].hit)
+
+describe "rollup math, 7-day window, reset, persistence":
+    it "sums totals over every event but keeps only recent events in the 7d window":
+        _fresh_store()
+        val now = time_now_unix_micros() / 1000000
+        assert_true(tok_record_at(TOK_FEATURE_CTX, "simple_ctx_batch_execute", now, 4000, 400, false))
+        assert_true(tok_record_at(TOK_FEATURE_CTX, "simple_ctx_search", now - 8 * 86400, 8000, 800, false))
+        assert_true(tok_record_at(TOK_FEATURE_PONYTAIL, "simple_ponytail", now, 1000, 200, true))
+        assert_true(tok_record_at(TOK_FEATURE_PONYTAIL, "simple_ponytail", now, 100, 400, false))
+        val ev = tok_load_events()
+        assert_equal(ev.len(), 4)
+        val ctx = tok_rollup(ev, TOK_FEATURE_CTX, now)
+        assert_equal(ctx.calls, 2)
+        assert_equal(ctx.captured, 12000)
+        assert_equal(ctx.returned, 1200)
+        assert_equal(ctx.saved, 900 + 1800)
+        assert_equal(ctx.calls_7d, 1)
+        assert_equal(ctx.saved_7d, 900)
+        val pony = tok_rollup(ev, TOK_FEATURE_PONYTAIL, now)
+        assert_equal(pony.calls, 2)
+        assert_equal(pony.hits, 1)
+        # The hit saves 0 tokens (byte-identical output); its 1000 prior bytes
+        # are repeat work avoided. The miss returned more than it captured,
+        # which never counts negative.
+        assert_equal(pony.saved, 0)
+        assert_equal(pony.avoided, 1000)
+        assert_equal(pony.captured, 100)
+        val all = tok_rollup(ev, "", now)
+        assert_equal(all.calls, 4)
+        assert_equal(all.saved, 2700)
+        assert_equal(all.saved_7d, 900)
+        val stats = tok_stats_text()
+        assert_contains(stats, "ctx-mimic: calls=2 bytes_captured=12000 bytes_returned=1200 tokens_saved=2700 last_7d: calls=1 tokens_saved=900")
+        assert_contains(stats, "ponytail-mimic: calls=2 cache_hits=1 bytes_captured=100 bytes_returned=600 tokens_saved=0 repeat_work_avoided_bytes=1000")
+        assert_contains(stats, "total: calls=4")
+
+    it "reset zeroes the ledger via the tool and keeps the memo":
+        val dir = _fresh_store()
+        val path = dir + "/keep.spl"
+        file_write(path, _smelly_source())
+        handle_simple_ponytail("7", "{\"file\":\"" + path + "\"}")
+        tok_record(TOK_FEATURE_CTX, "simple_ctx_index", 500, 50, false)
+        assert_equal(tok_load_events().len(), 2)
+        val r = handle_simple_token_stats("8", "{\"reset\":true}")
+        assert_contains(r, "token stats reset")
+        assert_contains(r, "total: calls=0")
+        assert_equal(tok_load_events().len(), 0)
+        assert_false(file_exists(tok_telemetry_path()))
+        assert_true(file_exists(tok_memo_path()))
+        val r2 = handle_simple_token_stats("9", "{\"args\":\"--reset\"}")
+        assert_contains(r2, "token stats reset")
+
+    it "events persist across a store reopen and show in simple_ctx_stats":
+        val dir = _fresh_store()
+        tok_record(TOK_FEATURE_CTX, "simple_ctx_batch_execute", 9000, 1000, false)
+        # Re-point at the same dir: every reader re-opens the SDN file from disk.
+        env_set("SIMPLE_CTX_DIR", dir)
+        val ev = tok_load_events()
+        assert_equal(ev.len(), 1)
+        assert_equal(ev[0].captured, 9000)
+        assert_contains(file_read(tok_telemetry_path()), "tok_events | id, feature, tool, ts, captured, returned, hit |")
+        val cs = ctx_stats_text()
+        assert_contains(cs, "bytes_saved:")
+        assert_contains(cs, "telemetry_calls: 1")
+        assert_contains(cs, "telemetry_bytes_captured: 9000")
+        assert_contains(cs, "telemetry_tokens_saved: 2000")
+
+describe "dispatch":
+    it "routes simple_token_stats through dispatch_tool":
+        _fresh_store()
+        val r = dispatch_tool("10", "simple_token_stats", "{}")
+        assert_contains(r, "ctx-mimic: calls=0")
+        assert_contains(r, "ponytail-mimic: calls=0")

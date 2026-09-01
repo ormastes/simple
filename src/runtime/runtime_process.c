@@ -287,15 +287,6 @@ static char* win_filtered_environment(void) {
     return filtered;
 }
 
-/* SIMPLE_RUNTIME_PROCESS_RUST_CORE: the Rust runtime crate
- * (src/compiler_rust/runtime/src/value/sffi/env_process.rs) carries its own
- * rt_process_run_timeout / rt_process_run_bounded / rt_process_wait. When this
- * file is compiled INTO that crate (src/compiler_rust/runtime/build.rs, so the
- * seed/JIT can resolve the C-only rt_process_*_piped / *_checked family), those
- * three would be duplicate symbols at link time. The macro is defined only by
- * that build; every other lane (native product build, SimpleOS sysroot,
- * standalone) keeps the C definitions unchanged. */
-#ifndef SIMPLE_RUNTIME_PROCESS_RUST_CORE
 static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
                                          int64_t timeout_ms, int64_t max_output_bytes) {
     const char* failure = NULL;
@@ -527,7 +518,6 @@ SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* ar
                                  int64_t timeout_ms, int64_t max_output_bytes) {
     return win_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
 }
-#endif /* SIMPLE_RUNTIME_PROCESS_RUST_CORE */
 
 struct WinPipedSlot {
     DWORD pid;
@@ -547,10 +537,7 @@ struct WinPipedSlot {
 #define WIN_PIPED_READ_BUF 8192
 
 static struct WinPipedSlot win_piped_slots[WIN_PIPED_MAX];
-/* Returned text remains valid until this thread's next read. TLS prevents
- * concurrent callers from overwriting each other's result without adding a
- * lock, allocation, or lookup to the read hot path. */
-__declspec(thread) static char win_piped_read_buf[WIN_PIPED_READ_BUF];
+static char win_piped_read_buf[WIN_PIPED_READ_BUF];
 static char win_browser_renderer_stdin_buf[WIN_PIPED_READ_BUF];
 
 static bool win_random_pipe_name(char* name, size_t name_size) {
@@ -845,32 +832,15 @@ int64_t rt_process_write_stdin_some(
     return 0;
 }
 
-const char* rt_process_read_stdout_checked(int64_t pid, int32_t* out_status) {
+const char* rt_process_read_stdout(int64_t pid) {
     win_piped_read_buf[0] = '\0';
-    if (!out_status) return win_piped_read_buf;
-    *out_status = -1;
-    if (pid <= 0 || pid > UINT32_MAX) {
-        *out_status = -2;
-        return win_piped_read_buf;
-    }
+    if (pid <= 0 || pid > UINT32_MAX) return win_piped_read_buf;
     struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
-    if (!slot || !slot->stdout_read) {
-        *out_status = -2;
-        return win_piped_read_buf;
-    }
+    if (!slot || !slot->stdout_read) return win_piped_read_buf;
     DWORD available = 0;
-    if (!PeekNamedPipe(slot->stdout_read, NULL, 0, NULL, &available, NULL)) {
-        DWORD error = GetLastError();
-        *out_status = (error == ERROR_BROKEN_PIPE ||
-                       error == ERROR_PIPE_NOT_CONNECTED) ? 2 : -3;
-        return win_piped_read_buf;
-    }
-    if (available == 0) {
-        /* A descendant may still own the pipe after the leader exits.  Peek
-         * succeeding with no bytes means only "not ready"; broken-pipe is the
-         * authoritative EOF observation.  This also keeps the empty-poll hot
-         * path to one pipe query. */
-        *out_status = 0;
+    if (!PeekNamedPipe(
+            slot->stdout_read, NULL, 0, NULL, &available, NULL) ||
+        available == 0) {
         return win_piped_read_buf;
     }
     DWORD request = available < WIN_PIPED_READ_BUF - 1
@@ -879,38 +849,21 @@ const char* rt_process_read_stdout_checked(int64_t pid, int32_t* out_status) {
     if (!ReadFile(
             slot->stdout_read, win_piped_read_buf, request,
             &read_count, NULL)) {
-        DWORD error = GetLastError();
-        *out_status = (error == ERROR_BROKEN_PIPE ||
-                       error == ERROR_PIPE_NOT_CONNECTED) ? 2 : -3;
         return win_piped_read_buf;
     }
     win_piped_read_buf[read_count] = '\0';
-    *out_status = read_count > 0 ? 1 : 2;
     return win_piped_read_buf;
 }
 
-const char* rt_process_read_stdout(int64_t pid) {
-    int32_t ignored = 0;
-    return rt_process_read_stdout_checked(pid, &ignored);
-}
-
-int32_t rt_process_is_alive_checked(int64_t pid) {
-    if (pid <= 0 || pid > UINT32_MAX) return -2;
-    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
-    if (!slot || !slot->process) return -2;
-    DWORD wait_result = WaitForSingleObject(slot->process, 0);
-    if (wait_result == WAIT_TIMEOUT) return 1;
-    if (wait_result == WAIT_FAILED) return -3;
-    if (wait_result != WAIT_OBJECT_0) return -3;
-    return 0;
-}
-
 bool rt_process_is_alive(int64_t pid) {
-    int32_t status = rt_process_is_alive_checked(pid);
-    if (status == 0 && pid > 0 && pid <= UINT32_MAX) {
-        win_piped_free(win_piped_find((DWORD)pid));
-    }
-    return status == 1;
+    if (pid <= 0 || pid > UINT32_MAX) return false;
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    if (!slot || !slot->process) return false;
+    DWORD wait_result = WaitForSingleObject(slot->process, 0);
+    if (wait_result == WAIT_TIMEOUT) return true;
+    if (wait_result == WAIT_FAILED) return false;
+    win_piped_free(slot);
+    return false;
 }
 
 bool rt_process_close_piped(int64_t pid) {
@@ -990,6 +943,22 @@ int64_t rt_browser_renderer_write_protocol_some(
     return -1;
 }
 
+int64_t rt_process_pin_executable(const char* canonical_path) {
+    (void)canonical_path;
+    return -1;
+}
+
+bool rt_process_close_pinned_executable(int64_t handle) {
+    (void)handle;
+    return false;
+}
+
+int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args) {
+    (void)executable_handle;
+    (void)args;
+    return -1;
+}
+
 #else /* POSIX */
 
 #include "runtime_fork.h"
@@ -997,8 +966,10 @@ int64_t rt_browser_renderer_write_protocol_some(
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <poll.h>
 #ifdef __APPLE__
@@ -1006,6 +977,7 @@ int64_t rt_browser_renderer_write_protocol_some(
 #include <spawn.h>
 #endif
 #ifdef __linux__
+#include <elf.h>
 #include <stddef.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
@@ -1028,16 +1000,14 @@ struct RtProcSlot {
     int   stdin_fd;  /* parent writes here  → child's stdin */
     int   stdout_fd; /* parent reads here   ← child's stdout */
     bool  sandboxed_renderer;
-    bool  leader_reaped;
 };
 
 static struct RtProcSlot s_procs[RT_PROC_MAX];
 static pthread_mutex_t s_proc_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned int s_renderer_slots_active;
 
-/* Returned text remains valid until this thread's next read. TLS removes the
- * cross-thread data race while retaining fixed storage and zero allocations. */
-static _Thread_local char s_read_buf[RT_PROC_READ_BUF];
+/* Static read buffer — returned pointer is valid until the next call */
+static char s_read_buf[RT_PROC_READ_BUF];
 static char s_browser_renderer_stdin_buf[RT_PROC_READ_BUF];
 
 /* ===== Internal helpers ===== */
@@ -1062,7 +1032,6 @@ static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
             s_procs[i].stdin_fd = -1;
             s_procs[i].stdout_fd = -1;
             s_procs[i].sandboxed_renderer = sandboxed_renderer;
-            s_procs[i].leader_reaped = false;
             if (sandboxed_renderer) s_renderer_slots_active++;
             (void)pthread_mutex_unlock(&s_proc_lock);
             return &s_procs[i];
@@ -1087,7 +1056,6 @@ static void proc_free(struct RtProcSlot* slot) {
     slot->stdin_fd = -1;
     slot->stdout_fd = -1;
     slot->sandboxed_renderer = false;
-    slot->leader_reaped = false;
     slot->pid = 0;
     (void)pthread_mutex_unlock(&s_proc_lock);
     if (stdin_fd >= 0) close(stdin_fd);
@@ -1270,8 +1238,152 @@ done:
     if (actions_initialized) (void)posix_spawn_file_actions_destroy(&actions);
     return pid;
 }
+
+/* Reject all runtime-loaded ELF images. Static PIE is intentionally excluded:
+ * admitting its loader/dependency closure requires a separate pinned manifest. */
+#ifdef __linux__
+static bool rt_hal_static_elf_fd(int fd, off_t size) {
+    unsigned char ident[EI_NIDENT];
+    if (pread(fd, ident, sizeof(ident), 0) != (ssize_t)sizeof(ident) ||
+        memcmp(ident, ELFMAG, SELFMAG) != 0 || ident[EI_DATA] != ELFDATA2LSB)
+        return false;
+#define RT_HAL_CHECK_ELF(bits) do { \
+    Elf##bits##_Ehdr eh; \
+    if (pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh) || \
+        eh.e_type != ET_EXEC || eh.e_phentsize != sizeof(Elf##bits##_Phdr) || \
+        eh.e_phnum == 0 || eh.e_phoff > (Elf##bits##_Off)size || \
+        (uint64_t)eh.e_phnum * sizeof(Elf##bits##_Phdr) > \
+            (uint64_t)size - eh.e_phoff) return false; \
+    for (Elf##bits##_Half i = 0; i < eh.e_phnum; i++) { \
+        Elf##bits##_Phdr ph; \
+        off_t at = (off_t)(eh.e_phoff + (Elf##bits##_Off)i * sizeof(ph)); \
+        if (pread(fd, &ph, sizeof(ph), at) != (ssize_t)sizeof(ph)) return false; \
+        if (ph.p_type == PT_INTERP || ph.p_type == PT_DYNAMIC) return false; \
+    } \
+    return true; \
+} while (0)
+    if (ident[EI_CLASS] == ELFCLASS64) RT_HAL_CHECK_ELF(64);
+    if (ident[EI_CLASS] == ELFCLASS32) RT_HAL_CHECK_ELF(32);
+#undef RT_HAL_CHECK_ELF
+    return false;
+}
+#endif
+
+/* Linux-only race-free executable pinning for the RT/HAL comparator host.
+ * The caller hashes /proc/self/fd/<returned-fd>; later spawns execute this same
+ * open file description with fexecve, so pathname replacement cannot change
+ * the admitted image. The descriptor remains caller-owned and reusable. */
+int64_t rt_process_pin_executable(const char* canonical_path) {
+#ifndef __linux__
+    (void)canonical_path;
+    return -1;
 #else
-static void proc_close_inherited_fds(void) {
+    if (!canonical_path || canonical_path[0] != '/') return -1;
+    int source = open(canonical_path, O_RDONLY | O_NOFOLLOW);
+    if (source < 0) return -1;
+    struct stat st;
+    if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size <= 0 || st.st_size > (off_t)(64 * 1024 * 1024) ||
+        (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
+        !rt_hal_static_elf_fd(source, st.st_size)) {
+        close(source);
+        return -1;
+    }
+#if !defined(SYS_memfd_create) || !defined(F_ADD_SEALS) || \
+    !defined(F_SEAL_WRITE) || !defined(F_SEAL_GROW) || \
+    !defined(F_SEAL_SHRINK) || !defined(F_SEAL_SEAL)
+    close(source);
+    return -1;
+#else
+    int pinned = (int)syscall(SYS_memfd_create, "simple-rthal", 0x0002U);
+    if (pinned < 0) { close(source); return -1; }
+    uint8_t buffer[65536];
+    for (;;) {
+        ssize_t count = read(source, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            close(source); close(pinned); return -1;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(
+                pinned, buffer + offset, (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                close(source); close(pinned); return -1;
+            }
+            offset += written;
+        }
+    }
+    close(source);
+    if (lseek(pinned, 0, SEEK_SET) < 0 || fchmod(pinned, 0500) != 0 ||
+        fcntl(pinned, F_ADD_SEALS,
+              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0 ||
+        fcntl(pinned, F_SETFD, FD_CLOEXEC) != 0) {
+        close(pinned);
+        return -1;
+    }
+    return (int64_t)pinned;
+#endif
+#endif
+}
+
+bool rt_process_close_pinned_executable(int64_t handle) {
+#ifndef __linux__
+    (void)handle;
+    return false;
+#else
+    if (handle < 3 || handle > INT_MAX) return false;
+    return close((int)handle) == 0;
+#endif
+}
+
+int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args) {
+#ifndef __linux__
+    (void)executable_handle;
+    (void)args;
+    return -1;
+#else
+    if (executable_handle < 3 || executable_handle > INT_MAX) return -1;
+    int fd = (int)executable_handle;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
+    int64_t argc = args ? rt_array_len(args) : 0;
+    if (argc < 0 || argc > 64) return -1;
+    char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
+    if (!argv) return -1;
+    argv[0] = (char*)"rt-hal-worker";
+    for (int64_t i = 0; i < argc; i++) {
+        const uint8_t* data = rt_string_data(rt_array_get(args, i));
+        argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
+    }
+    argv[argc + 1] = NULL;
+    int64_t pid = rt_process_spawn_piped_argv(
+        "rt-hal-worker", argv, false, fd);
+    free(argv);
+    return pid;
+#endif
+}
+#else
+static void proc_close_inherited_fds_except(int keep_fd) {
+    if (keep_fd >= 3) {
+#if defined(__linux__) && defined(SYS_close_range)
+        if (keep_fd > 3) {
+            (void)syscall(SYS_close_range, 3U, (unsigned int)keep_fd - 1U, 0U);
+        }
+        (void)syscall(
+            SYS_close_range, (unsigned int)keep_fd + 1U, ~0U, 0U);
+        return;
+#else
+        long max_fd = sysconf(_SC_OPEN_MAX);
+        if (max_fd < 0 || max_fd > 1048576) max_fd = 1048576;
+        for (int fd = 3; fd < max_fd; fd++) {
+            if (fd != keep_fd) close(fd);
+        }
+        return;
+#endif
+    }
 #if defined(__linux__) && defined(SYS_close_range)
     if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0) return;
 #elif defined(__FreeBSD__)
@@ -1282,12 +1394,60 @@ static void proc_close_inherited_fds(void) {
     if (max_fd < 0 || max_fd > 1048576) max_fd = 1048576;
     for (int fd = 3; fd < max_fd; fd++) close(fd);
 }
+
+#ifdef __linux__
+/* A comparator is one scalar worker, never a process/thread launcher. Denying
+ * creation and session/group escape makes the parent's process-group kill a
+ * complete containment boundary rather than a convention the child can evade. */
+static bool rt_hal_worker_contain_process_tree(void) {
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (uint32_t)offsetof(struct seccomp_data, nr)),
+#ifdef __NR_fork
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fork, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_vfork
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_vfork, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_clone
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_clone3
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone3, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_setsid
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setsid, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_setpgid
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setpgid, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_unshare
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_unshare, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program = {
+        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+        .filter = filter
+    };
+    return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
+        syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &program) == 0;
+}
+#endif
 #endif
 
 /* ===== Public API ===== */
 
 static int64_t rt_process_spawn_piped_argv(
-        const char* cmd, char** argv, bool sandboxed_renderer) {
+        const char* cmd, char** argv, bool sandboxed_renderer,
+        int pinned_executable_fd) {
     if (!cmd || !*cmd) return -1;
 #ifndef __linux__
     if (sandboxed_renderer) return -1;
@@ -1378,12 +1538,14 @@ static int64_t rt_process_spawn_piped_argv(
             dup2(
                 sandboxed_renderer ? null_fd : stdout_pipe[1],
                 STDOUT_FILENO) < 0 ||
-            (sandboxed_renderer && dup2(null_fd, STDERR_FILENO) < 0)) {
+            (sandboxed_renderer && dup2(null_fd, STDERR_FILENO) < 0) ||
+            (pinned_executable_fd >= 0 &&
+             dup2(stdout_pipe[1], STDERR_FILENO) < 0)) {
             _exit(127);
         }
 
         /* Close all parent-side fds */
-        proc_close_inherited_fds();
+        proc_close_inherited_fds_except(pinned_executable_fd);
 
         /* Reset signal handlers */
         signal(SIGINT,  SIG_DFL);
@@ -1396,6 +1558,15 @@ static int64_t rt_process_spawn_piped_argv(
             argv[0] = (char*)"simple-browser-renderer";
             if (chdir("/") != 0) _exit(127);
             execve(cmd, argv, empty_environment);
+#endif
+        } else if (pinned_executable_fd >= 0) {
+#ifdef __linux__
+            char* rt_hal_environment[] = {
+                (char*)"LANG=C", (char*)"LC_ALL=C", (char*)"TZ=UTC",
+                (char*)"PATH=/nonexistent", NULL
+            };
+            if (!rt_hal_worker_contain_process_tree()) _exit(127);
+            fexecve(pinned_executable_fd, argv, rt_hal_environment);
 #endif
         } else {
             execvp(cmd, argv);
@@ -1451,7 +1622,7 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
         argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
     }
     argv[argc + 1] = NULL;
-    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, false);
+    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, false, -1);
     free(argv);
     return pid;
 }
@@ -1473,21 +1644,12 @@ int64_t rt_browser_renderer_spawn_sandboxed(
         argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
     }
     argv[argc + 1] = NULL;
-    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, true);
+    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, true, -1);
     free(argv);
     return pid;
 #endif
 }
 
-/* SIMPLE_RUNTIME_PROCESS_RUST_CORE: the Rust runtime crate
- * (src/compiler_rust/runtime/src/value/sffi/env_process.rs) carries its own
- * rt_process_run_timeout / rt_process_run_bounded / rt_process_wait. When this
- * file is compiled INTO that crate (src/compiler_rust/runtime/build.rs, so the
- * seed/JIT can resolve the C-only rt_process_*_piped / *_checked family), those
- * three would be duplicate symbols at link time. The macro is defined only by
- * that build; every other lane (native product build, SimpleOS sysroot,
- * standalone) keeps the C definitions unchanged. */
-#ifndef SIMPLE_RUNTIME_PROCESS_RUST_CORE
 static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
                                            int64_t timeout_ms, int64_t max_output_bytes) {
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1) {
@@ -1563,7 +1725,47 @@ SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* ar
     }
     return posix_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
 }
-#endif /* SIMPLE_RUNTIME_PROCESS_RUST_CORE */
+
+int64_t rt_editor_spawn_simple_dap(void) {
+    char* argv[] = {
+        "src/compiler_rust/target/debug/simple",
+        "run",
+        "src/app/dap/simple_dap_main.spl",
+        NULL
+    };
+    return rt_process_spawn_piped_argv(argv[0], argv, false, -1);
+}
+
+bool rt_editor_start_simple_dap(int64_t pid) {
+    const char* init = "Content-Length: 84\r\n\r\n{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"adapterID\":\"simple\"}}";
+    const char* launch = "Content-Length: 113\r\n\r\n{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{\"program\":\"src/app/dap/simple_dap_main.spl\",\"cwd\":\".\"}}";
+    return rt_process_write_stdin(pid, init) && rt_process_write_stdin(pid, launch);
+}
+
+bool rt_editor_poll_simple_dap_stopped(int64_t pid) {
+    static char dap_buf[65536];
+    static size_t dap_len = 0;
+    for (int i = 0; i < 16; i++) {
+        const char* chunk = rt_process_read_stdout(pid);
+        if (!chunk || !*chunk) break;
+        size_t n = strlen(chunk);
+        if (dap_len + n >= sizeof(dap_buf)) {
+            dap_len = 0;
+        }
+        memcpy(dap_buf + dap_len, chunk, n);
+        dap_len += n;
+        dap_buf[dap_len] = '\0';
+    }
+    return strstr(dap_buf, "\"type\":\"event\"") != NULL && strstr(dap_buf, "\"event\":\"stopped\"") != NULL;
+}
+
+bool rt_editor_wait_simple_dap_stopped(int64_t pid) {
+    for (int i = 0; i < 40; i++) {
+        if (rt_editor_poll_simple_dap_stopped(pid)) return true;
+        usleep(100000);
+    }
+    return false;
+}
 
 /*
  * Write `data` to the process's stdin.
@@ -1604,78 +1806,43 @@ int64_t rt_process_write_stdin_some(
  * Returns available data (may be partial), or "" if nothing ready.
  * The returned pointer is valid until the next call.
  */
-const char* rt_process_read_stdout_checked(int64_t pid, int32_t* out_status) {
+const char* rt_process_read_stdout(int64_t pid) {
     s_read_buf[0] = '\0';
-    if (!out_status) return s_read_buf;
-    *out_status = -1;
-    pid_t native_pid = (pid_t)pid;
-    if (pid <= 0 || (int64_t)native_pid != pid) {
-        *out_status = -2;
-        return s_read_buf;
-    }
+    if (pid <= 0) return s_read_buf;
 
-    struct RtProcSlot* slot = proc_find(native_pid);
-    if (!slot || slot->stdout_fd < 0) {
-        *out_status = -2;
-        return s_read_buf;
-    }
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    if (!slot || slot->stdout_fd < 0) return s_read_buf;
 
-    ssize_t n;
-    do {
-        n = read(slot->stdout_fd, s_read_buf, RT_PROC_READ_BUF - 1);
-    } while (n < 0 && errno == EINTR);
+    ssize_t n = read(slot->stdout_fd, s_read_buf, RT_PROC_READ_BUF - 1);
     if (n > 0) {
         s_read_buf[n] = '\0';
-        *out_status = 1;
-    } else if (n == 0) {
-        *out_status = 2;
-    } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        *out_status = 0;
     } else {
-        *out_status = -3;
+        s_read_buf[0] = '\0';
     }
     return s_read_buf;
-}
-
-const char* rt_process_read_stdout(int64_t pid) {
-    int32_t ignored = 0;
-    return rt_process_read_stdout_checked(pid, &ignored);
 }
 
 /*
  * Returns true if the process is still alive.
  * Lazily closes fds and clears the table entry when death is detected.
  */
-int32_t rt_process_is_alive_checked(int64_t pid) {
-    pid_t native_pid = (pid_t)pid;
-    if (pid <= 0 || (int64_t)native_pid != pid) return -2;
-    struct RtProcSlot* slot = proc_find(native_pid);
-    if (!slot) return -2;
+bool rt_process_is_alive(int64_t pid) {
+    if (pid <= 0) return false;
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    if (!slot) return false;
 
     int status;
     pid_t result;
     do {
         result = waitpid(slot->pid, &status, WNOHANG);
     } while (result < 0 && errno == EINTR);
-    if (result == 0) return 1;   /* still running */
+    if (result == 0) return true;   /* still running */
     if (result == slot->pid || (result < 0 && errno == ECHILD)) {
-        slot->leader_reaped = true;
-        return 0;
+        if (!proc_signal_tree(slot->pid, SIGKILL, true)) return false;
+        proc_free(slot);
+        return false;
     }
-    return -3;
-}
-
-bool rt_process_is_alive(int64_t pid) {
-    int32_t status = rt_process_is_alive_checked(pid);
-    if (status == 0) {
-        pid_t native_pid = (pid_t)pid;
-        struct RtProcSlot* slot = proc_find(native_pid);
-        if (slot) {
-            (void)proc_signal_tree(slot->pid, SIGKILL, true);
-            proc_free(slot);
-        }
-    }
-    return status == 1;
+    return false;
 }
 
 bool rt_process_close_piped(int64_t pid) {
@@ -1687,28 +1854,21 @@ bool rt_process_close_piped(int64_t pid) {
         close(slot->stdin_fd);
         slot->stdin_fd = -1;
     }
-    if (!slot->leader_reaped &&
-        !proc_signal_tree(slot->pid, SIGTERM, false)) return false;
+    if (!proc_signal_tree(slot->pid, SIGTERM, false)) return false;
 
     int status = 0;
-    bool leader_reaped = slot->leader_reaped;
-    if (!leader_reaped) {
-        for (int waited_ms = 0; waited_ms < 100; waited_ms++) {
-            pid_t result = waitpid(slot->pid, &status, WNOHANG);
-            if (result == slot->pid || (result < 0 && errno == ECHILD)) {
-                leader_reaped = true;
-                slot->leader_reaped = true;
-                break;
-            }
-            if (result < 0 && errno != EINTR) return false;
-            usleep(1000);
+    bool leader_reaped = false;
+    for (int waited_ms = 0; waited_ms < 100; waited_ms++) {
+        pid_t result = waitpid(slot->pid, &status, WNOHANG);
+        if (result == slot->pid || (result < 0 && errno == ECHILD)) {
+            leader_reaped = true;
+            break;
         }
+        if (result < 0 && errno != EINTR) return false;
+        usleep(1000);
     }
 
-    /* Do not signal a process group after its leader was reaped: the PID/PGID
-     * can be reused while stdout is retained for draining. */
-    if (!leader_reaped &&
-        !proc_signal_tree(slot->pid, SIGKILL, false)) return false;
+    if (!proc_signal_tree(slot->pid, SIGKILL, leader_reaped)) return false;
     if (!leader_reaped) {
         for (int waited_ms = 0; waited_ms < 5000; waited_ms++) {
             pid_t result = waitpid(slot->pid, &status, WNOHANG);
@@ -2259,61 +2419,32 @@ bool rt_browser_renderer_sandbox_enter(void) {
 /* Backfill: runtime.h prototype with no C definition (caught by the Stage4
    runtime-capsule gate). Mirrors env_process.rs rt_process_wait semantics:
    returns child exit code, -1 on error, -2 on timeout (child keeps running). */
-/* SIMPLE_RUNTIME_PROCESS_RUST_CORE: the Rust runtime crate
- * (src/compiler_rust/runtime/src/value/sffi/env_process.rs) carries its own
- * rt_process_run_timeout / rt_process_run_bounded / rt_process_wait. When this
- * file is compiled INTO that crate (src/compiler_rust/runtime/build.rs, so the
- * seed/JIT can resolve the C-only rt_process_*_piped / *_checked family), those
- * three would be duplicate symbols at link time. The macro is defined only by
- * that build; every other lane (native product build, SimpleOS sysroot,
- * standalone) keeps the C definitions unchanged. */
-#ifndef SIMPLE_RUNTIME_PROCESS_RUST_CORE
 #ifdef _WIN32
 int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     (void)pid; (void)timeout_ms;
     return -1;
 }
 #else
-/* An EINTR-interrupted waitpid() is NOT a failed wait: the child is untouched
-   and the wait must simply be retried. Returning -1 there made a healthy,
-   still-running worker read as "exited abnormally" and (via
-   process_run_timeout_live) got its whole session killed, costing a ~70min
-   stage1 attempt. Likewise, a signal-terminated child now reports 128+signo
-   (shell convention) instead of the same -1 the error path uses, so the real
-   cause is visible. -1 is reserved for a genuinely indeterminate wait.
-   See doc/08_tracking/bug/native_build_wrapper_wait_eintr_misreported_as_abnormal_2026-08-23.md */
-static int64_t rt_process_status_to_code(int status) {
-    if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return (int64_t)(128 + WTERMSIG(status));
-    return -1;
-}
-
 int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 0) return -1;
     if (timeout_ms <= 0) {
-        for (;;) {
-            int status = 0;
-            pid_t r = waitpid((pid_t)pid, &status, 0);
-            if (r < 0) {
-                if (errno == EINTR) continue;   /* retry, never report abnormal */
-                return -1;
-            }
-            return rt_process_status_to_code(status);
-        }
+        int status = 0;
+        if (waitpid((pid_t)pid, &status, 0) < 0) return -1;
+        if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+        return -1;
     }
     int64_t waited_ms = 0;
     for (;;) {
         int status = 0;
         pid_t r = waitpid((pid_t)pid, &status, WNOHANG);
-        if (r < 0) {
-            if (errno == EINTR) continue;       /* retry, never report abnormal */
+        if (r < 0) return -1;
+        if (r > 0) {
+            if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
             return -1;
         }
-        if (r > 0) return rt_process_status_to_code(status);
         if (waited_ms >= timeout_ms) return -2;
         usleep(10 * 1000);
         waited_ms += 10;
     }
 }
 #endif
-#endif /* SIMPLE_RUNTIME_PROCESS_RUST_CORE */

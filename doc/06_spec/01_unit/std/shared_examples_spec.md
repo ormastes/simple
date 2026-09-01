@@ -1,6 +1,6 @@
-# shared_examples_spec
+# Shared Examples Specification
 
-> Verifies the shared examples behaviour end to end so maintainers of this
+> Tests covering Shared Examples (TEST-010, TEST-011), Basic shared_examples usage, Shared examples with fixtures, Multiple shared examples in same context, Nested contexts with shared examples, include_examples alias, Shared Examples Edge Cases, shared examples with no dependencies, shared examples in nested context, Shared examples with local state.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,47 +9,24 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# shared_examples_spec
-
-Verifies the shared examples behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/std/shared_examples_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the shared examples behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Shared Examples Specification
 
 ## Scenarios
 
 #### can test equality
 
-- Verify: can test equality
+- can test equality
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_SHARED_EXAMPLES-001
-step("Verify: can test equality")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-STD
+step("can test equality")
 expect 1 + 1 == 2
 ```
 
@@ -57,7 +34,24 @@ expect 1 + 1 == 2
 
 #### can test boolean
 
-- Verify: can test boolean
+- can test boolean
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect true
+```
+
+</details>
+
+#### container has items
+
+- container has items
 
 
 <details>
@@ -67,29 +61,8 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_SHARED_EXAMPLES-001
-step("Verify: can test boolean")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-expect true
-```
-
-</details>
-
-#### container has items
-
-- Verify: container has items
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-STD_SHARED_EXAMPLES-001
-step("Verify: container has items")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-STD
+step("container has items")
 val c = get_let(:container)
 expect len(c) >= 0
 ```
@@ -98,19 +71,18 @@ expect len(c) >= 0
 
 #### value is defined
 
-- Verify: value is defined
+- value is defined
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_SHARED_EXAMPLES-001
-step("Verify: value is defined")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-STD
+step("value is defined")
 val v = get_let(:value)
 expect v >= 0
 ```
@@ -149,19 +121,18 @@ expect v >= 0
 
 #### can test constants
 
-- Verify: can test constants
+- can test constants
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_SHARED_EXAMPLES-001
-step("Verify: can test constants")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-STD
+step("can test constants")
 expect 1 + 1 == 2
 ```
 
@@ -169,19 +140,18 @@ expect 1 + 1 == 2
 
 #### can test strings
 
-- Verify: can test strings
+- can test strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_SHARED_EXAMPLES-001
-step("Verify: can test strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-STD
+step("can test strings")
 expect len("hello") == 5
 ```
 
@@ -193,19 +163,18 @@ expect len("hello") == 5
 
 #### works in nested context
 
-- Verify: works in nested context
+- works in nested context
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_SHARED_EXAMPLES-001
-step("Verify: works in nested context")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-STD
+step("works in nested context")
 expect true
 ```
 
@@ -230,48 +199,62 @@ expect true
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-STD`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `a4529d2b5ef9bf0c34d2eed9c7e2a97dbafdc35aa22b6998fb3ea3d33cf46c7b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `b3f40a5c03b404a0f1cba6c875f75d18c36be11ae4f158ffab880418f1431169`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `a4529d2b5ef9bf0c34d2eed9c7e2a97dbafdc35aa22b6998fb3ea3d33cf46c7b`.
+Source SHA-256: `b3f40a5c03b404a0f1cba6c875f75d18c36be11ae4f158ffab880418f1431169`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `a4529d2b5ef9bf0c34d2eed9c7e2a97dbafdc35aa22b6998fb3ea3d33cf46c7b`  
+Source SHA-256: `b3f40a5c03b404a0f1cba6c875f75d18c36be11ae4f158ffab880418f1431169`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 91/100
+SSpec documentization score: 89/100
 source: test/01_unit/std/shared_examples_spec.spl
 mirror: doc/06_spec/01_unit/std/shared_examples_spec.md (current)
-findings: 7 blockers: 0
+findings: 9 blockers: 0
   narrative=100 structure=80 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/std/shared_examples_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/std/shared_examples_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/std/shared_examples_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/std/shared_examples_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/std/shared_examples_spec.spl:54:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can test equality' describes the test rather than its outcome
+test/01_unit/std/shared_examples_spec.spl:45:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can test equality' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/std/shared_examples_spec.spl:60:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can test boolean' describes the test rather than its outcome
+test/01_unit/std/shared_examples_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'can test equality' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/shared_examples_spec.spl:50:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can test boolean' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/std/shared_examples_spec.spl:160:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can test constants' describes the test rather than its outcome
+test/01_unit/std/shared_examples_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'can test boolean' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/shared_examples_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'container has items' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/shared_examples_spec.spl:149:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can test constants' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/std/shared_examples_spec.spl:166:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can test strings' describes the test rather than its outcome
+test/01_unit/std/shared_examples_spec.spl:154:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can test strings' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

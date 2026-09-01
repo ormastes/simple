@@ -1,91 +1,119 @@
-# Hosted Renderer Loader Environment
+# hosted_renderer_loader_environment_spec
 
-Status: **DRAFT / EXECUTION-BLOCKED**
+> Hostile loader-environment isolation at the production renderer spawn.
 
-Handwritten complete mirror of
-`test/03_system/security/hosted_renderer_loader_environment_spec.spl`. The
-scenario has not been generated or executed by an admitted current
-pure-Simple runner.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-| Metadata | Value |
-|---|---|
-| Tests | 1 |
-| Active | 1 |
-| Stubs | 0 (static source audit) |
-| Manual provenance | Handwritten complete mirror; docgen pending |
-| Runtime provenance | Pending admitted pure-Simple runner |
+<details>
+<summary>Full Scenario Manual</summary>
 
-## Requirement mapping
+# hosted_renderer_loader_environment_spec
 
-| Requirement | Coverage |
-|---|---|
-| REQ-WEB-BROWSER-014 | Renderer spawn rejects inherited loader authority |
-| REQ-WEB-BROWSER-021 | Modern SSpec and complete mirrored manual |
+Hostile loader-environment isolation at the production renderer spawn.
 
-## Scenario
+## At a Glance
 
-1. **Launch the isolated site renderer** — bind the production broker launch
-   to the sandboxed renderer spawn.
-2. **Reject inherited loader authority** — require an empty `execve`
-   environment as the general invariant and exercise six representative
-   hostile Linux loader variables, including `LD_LIBRARY_PATH`, in the real C
-   sandbox process probe.
+| Field | Value |
+|-------|-------|
+| Category | Security |
+| Status | Active |
+| Source | `test/03_system/security/hosted_renderer_loader_environment_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Boundary
+Hostile loader-environment isolation at the production renderer spawn.
 
-The six named variables are representative hostile inputs, not an exhaustive
-or canonical list. The empty child environment is the invariant that rejects
-all inherited environment authority.
+## Scenarios
 
-## Complete executable reproduction
+### Hosted renderer loader environment
+
+#### should reject inherited loader authority before renderer exec
+
+- should reject inherited loader authority before renderer exec
+   - Protocol capture: after_step
+- Launch the isolated site renderer
+   - Protocol capture: after_step
+- Reject inherited loader authority
+   - Protocol capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# codex-system-test
-# @req REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-021
-"""Hostile loader-environment isolation at the production renderer spawn."""
+# @req REQ-SSPEC-SYSTEM
+step("should reject inherited loader authority before renderer exec")
+step("Launch the isolated site renderer")
+val broker = rt_file_read_text(
+    "src/os/hosted/hosted_browser_renderer_process.spl"
+) ?? ""
+expect(broker).to_contain("browser_renderer_spawn_sandboxed(")
 
-use std.spec.*
-
-extern fn rt_file_read_text(path: text) -> text
-
-fn check_renderer_loader_env_absent():
-    val runtime = rt_file_read_text(
-        "src/runtime/runtime_process.c"
-    ) ?? ""
-    val probe = rt_file_read_text(
-        "test/01_unit/runtime/process_piped_write_test.c"
-    ) ?? ""
-    expect(runtime).to_contain("char* empty_environment[] = {NULL};")
-    expect(runtime).to_contain(
-        "execve(cmd, argv, empty_environment)"
-    )
-    expect(probe).to_contain(
-        "representative_hostile_loader_env_names"
-    )
-    expect(probe).to_contain(
-        "getenv(representative_hostile_loader_env_names[i])"
-    )
-    for name in [
-        "LD_PRELOAD",
-        "LD_AUDIT",
-        "LD_DEBUG",
-        "LD_DEBUG_OUTPUT",
-        "LD_LIBRARY_PATH",
-        "LD_ORIGIN_PATH"
-    ]:
-        expect(probe).to_contain("\"{name}\"")
-
-describe "Hosted renderer loader environment":
-    # @manual: show
-    # @capture(protocol)
-    # @req REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-021
-    it "should reject inherited loader authority before renderer exec":
-        step("Launch the isolated site renderer")
-        val broker = rt_file_read_text(
-            "src/os/hosted/hosted_browser_renderer_process.spl"
-        ) ?? ""
-        expect(broker).to_contain("browser_renderer_spawn_sandboxed(")
-
-        step("Reject inherited loader authority")
-        check_renderer_loader_env_absent()
+step("Reject inherited loader authority")
+check_renderer_loader_env_absent()
 ```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `46740ccb1faf0da084f9a281927a1783955d5b09296834baf4d2e932c68275a6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `46740ccb1faf0da084f9a281927a1783955d5b09296834baf4d2e932c68275a6`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `46740ccb1faf0da084f9a281927a1783955d5b09296834baf4d2e932c68275a6`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/03_system/security/hosted_renderer_loader_environment_spec.spl
+mirror: doc/06_spec/03_system/security/hosted_renderer_loader_environment_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=95 oracle=100
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/security/hosted_renderer_loader_environment_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/security/hosted_renderer_loader_environment_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/security/hosted_renderer_loader_environment_spec.spl:46:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject inherited loader authority before renderer exec' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/security/hosted_renderer_loader_environment_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject inherited loader authority before renderer exec' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

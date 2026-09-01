@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+for suffix in path_join path_dirname; do
+    raw="rt_$suffix"
+    owner="_sffi_$suffix"
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^fn ${owner}\\(" "$module")" -eq 1 ]
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+    grep -q "insert_simple!(\"$raw\"" "$interpreter"
+done
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 2 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 2 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 2 ]
+! grep -q '^extern fn rt_env_get(' "$module"
+! grep -q '^fn _sffi_env_get(' "$module"
+[ "$(grep -o '_sffi_path_join(' "$module" | wc -l)" -eq 43 ]
+[ "$(grep -o '_sffi_path_dirname(' "$module" | wc -l)" -eq 2 ]
+
+# SIMPLE_LIB absence is decoded before comparison/path construction.  The
+# resolver caches successful and failed resolutions, and authority ownership
+# must not add dispatch or allocation to its repeated path-probe loops.
+grep -q 'use std.io_runtime.{env_get_opt}' "$module"
+grep -q 'val simple_lib = env_get_opt("SIMPLE_LIB") ?? ""' "$module"
+! grep -q 'simple_lib != nil' "$module"
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "module-loader resolution SFFI authority audit: PASS (2 raw path ABIs confined; canonical nullable environment owner used; cached path probes retain direct-inline operations)"

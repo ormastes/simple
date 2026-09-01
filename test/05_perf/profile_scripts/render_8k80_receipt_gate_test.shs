@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../../.." && pwd)"
+gate="$root/scripts/check/check-render-8k80-receipt.shs"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/render-8k80-gate.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+
+write_receipt() {
+    local p95="$1" present="$2" checksum_kind="$3" fallback="$4"
+    printf '%s\n' \
+        "lane_status=completed" \
+        "lane_resolution=7680x4320" \
+        "lane_p95_us=$p95" \
+        "lane_fallback_used=$fallback" \
+        "lane_completion_known=true" \
+        "lane_present_scope=$present" \
+        "lane_checksum_kind=$checksum_kind" \
+        "lane_checksum=sum32:1234" >"$tmp/receipt"
+}
+
+write_receipt 12500 swapchain pixel-device-readback false
+bash "$gate" "$tmp/receipt" lane >/dev/null
+
+write_receipt 12500 framebuffer-surface pixel-framebuffer-readback false
+bash "$gate" "$tmp/receipt" lane cpu >/dev/null
+
+write_receipt 12500 qemu-display-surface pixel-qmp-screendump false
+bash "$gate" "$tmp/receipt" lane bare >/dev/null
+
+write_receipt 12501 swapchain pixel-device-readback false
+if bash "$gate" "$tmp/receipt" lane >/dev/null 2>&1; then
+    echo "FAIL: over-budget p95 was admitted" >&2
+    exit 1
+fi
+
+write_receipt 12000 none pixel-device-readback false
+if bash "$gate" "$tmp/receipt" lane >/dev/null 2>&1; then
+    echo "FAIL: missing device presentation was admitted" >&2
+    exit 1
+fi
+
+write_receipt 12000 swapchain draw-ir-composition-sha256 false
+if bash "$gate" "$tmp/receipt" lane >/dev/null 2>&1; then
+    echo "FAIL: composition-only checksum was admitted as pixel proof" >&2
+    exit 1
+fi
+
+write_receipt 12000 swapchain pixel-device-readback true
+if bash "$gate" "$tmp/receipt" lane >/dev/null 2>&1; then
+    echo "FAIL: fallback row was admitted" >&2
+    exit 1
+fi
+
+write_receipt 12000 framebuffer-surface pixel-framebuffer-readback false
+if bash "$gate" "$tmp/receipt" lane device >/dev/null 2>&1; then
+    echo "FAIL: CPU surface was admitted as device presentation" >&2
+    exit 1
+fi
+
+write_receipt 12000 qemu-display-surface pixel-qmp-screendump false
+if bash "$gate" "$tmp/receipt" lane cpu >/dev/null 2>&1; then
+    echo "FAIL: QEMU scanout was admitted as hosted CPU presentation" >&2
+    exit 1
+fi
+
+echo "PASS: render 8K/80 receipt gate"

@@ -8,9 +8,7 @@ use cranelift_module::Module;
 
 use crate::mir::VReg;
 
-use super::helpers::{
-    call_runtime_2_void, call_runtime_5_void, call_runtime_6_void,
-    create_cstring_constant};
+use super::helpers::{call_runtime_2_void, call_runtime_5_void, call_runtime_6_void, create_cstring_constant};
 use super::{InstrContext, InstrResult};
 
 /// Compile DecisionProbe instruction: records decision outcome for MC/DC coverage
@@ -37,8 +35,15 @@ pub fn compile_decision_probe<M: Module>(
     let line_value = builder.ins().iconst(types::I32, line as i64);
     let column_value = builder.ins().iconst(types::I32, column as i64);
     call_runtime_5_void(
-        ctx, builder, "rt_coverage_decision_probe", decision_id_val, result_val,
-        file_value, line_value, column_value);
+        ctx,
+        builder,
+        "rt_coverage_decision_probe",
+        decision_id_val,
+        result_val,
+        file_value,
+        line_value,
+        column_value,
+    );
 
     Ok(())
 }
@@ -70,8 +75,16 @@ pub fn compile_condition_probe<M: Module>(
     let line_value = builder.ins().iconst(types::I32, line as i64);
     let column_value = builder.ins().iconst(types::I32, column as i64);
     call_runtime_6_void(
-        ctx, builder, "rt_coverage_condition_probe", decision_id_val,
-        condition_id_val, result_val, file_value, line_value, column_value);
+        ctx,
+        builder,
+        "rt_coverage_condition_probe",
+        decision_id_val,
+        condition_id_val,
+        result_val,
+        file_value,
+        line_value,
+        column_value,
+    );
 
     Ok(())
 }
@@ -106,12 +119,14 @@ mod tests {
             let legacy = format!("\"rt_{}_probe\"", name);
             assert!(
                 !production.contains(&legacy),
-                "legacy {} probe loses the source owner and span", name
+                "legacy {} probe loses the source owner and span",
+                name
             );
         }
         assert!(
-            production.contains("create_cstring_constant(ctx, builder, file)?") &&
-                production.contains("line as i64") && production.contains("column as i64"),
+            production.contains("create_cstring_constant(ctx, builder, file)?")
+                && production.contains("line as i64")
+                && production.contains("column as i64"),
             "coverage probes must retain NUL-terminated file, line, and column"
         );
     }

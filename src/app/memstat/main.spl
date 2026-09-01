@@ -1,37 +1,10 @@
 # memstat — out-of-process memory sampler (Stage-4 memory gate, lane L5)
 #
 # Usage: simple run src/app/memstat/main.spl <pid> <out_csv> [interval_ms]
-#        simple run src/app/memstat/main.spl --by-owner
 #
 # Samples /proc/<pid>/smaps_rollup (Rss, Pss, Pss_Anon, Private_Dirty, Swap)
 # plus /proc/<pid>/stat minflt/majflt at a fixed interval (default 1000 ms) and
 # appends CSV rows to <out_csv>. Exits cleanly when the target PID disappears.
-#
-# `--by-owner` is a separate, immediate mode: it prints the per-owner
-# live/peak/alloc counts (`rt_mem_attr_report`) for the CURRENT process (i.e.
-# the memstat process itself, not a sampled <pid>) and exits. It is only
-# meaningful when run under `SIMPLE_MEM_ATTR=1` — with attribution off the
-# report is empty by design (zero-overhead-when-off).
-#
-# Three distinguishable outcomes, all non-crashing and none silently empty:
-#   1. rows printed        -> rt_mem_attr_enabled() == 1: attribution ON,
-#                              this process's owner counters are real data
-#                              (the registry always carries a default
-#                              "<unattributed>" row, so report.len()==0 does
-#                              NOT mean "off" — rt_mem_attr_enabled() is the
-#                              actual on/off signal, not the report body).
-#   2. "attribution OFF"   -> the extern resolved but rt_mem_attr_enabled()
-#                              returned 0: SIMPLE_MEM_ATTR was not 1 for this
-#                              process.
-#   3. "extern unavailable" -> rt_mem_attr_report itself could not be called
-#                              (report.len() < 0, the same negative-sentinel
-#                              convention `parse_dec` below uses for "no
-#                              digits found"): the running engine build
-#                              predates/lacks the rt_mem_attr_* extern wiring.
-#                              This is a build staleness issue, not something
-#                              --by-owner can fix by itself — see
-#                              doc/08_tracking/bug/ for the tracked
-#                              extern-availability gap.
 #
 # Dependency-light by design: only std.io_runtime facades, no app.io coupling,
 # so the same module runs under interpreter and native engines.
@@ -39,14 +12,8 @@
 use std.io_runtime.{get_args, file_read, file_exists, file_write, file_append_text, thread_sleep, time_now_unix_micros}
 
 extern fn rt_mem_attr_report(n: i64) -> text
-extern fn rt_mem_attr_enabled() -> i64
 
 val CSV_HEADER = "timestamp_us,rss_kb,pss_kb,pss_anon_kb,private_dirty_kb,swap_kb,minflt,majflt"
-
-# Workaround: native codegen string == is broken (length-only comparison),
-# matching the idiom already used in src/app/mem/main.spl.
-fn str_eq(a: text, b: text) -> bool:
-    a.len() == b.len() and a.starts_with(b)
 
 # Decimal parser over short tokens. Deliberately avoids `parse_int() ?? -1`
 # style: `??` on a raw i64 corrupts the value 3 (nil sentinel collision), and
@@ -137,20 +104,19 @@ fn cli_positional_args() -> [text]:
 
 # Prints per-owner live/peak/alloc counts for the CURRENT process (the
 # memstat process itself). Meaningful only under SIMPLE_MEM_ATTR=1 — the
-# on/off signal is rt_mem_attr_enabled(), NOT the report body (the owner
-# registry always carries a default "<unattributed>" row, so a non-empty
-# report does not by itself mean attribution is on). See module doc comment
-# for the three distinguishable outcomes this prints.
+# report is empty when attribution is off. See module doc comment for the
+# three distinguishable outcomes this prints.
 fn cmd_by_owner() -> i64:
     print "memstat --by-owner: per-owner memory report for the CURRENT process"
     print "  (meaningful under SIMPLE_MEM_ATTR=1; empty when attribution is off)"
     val report = rt_mem_attr_report(32)
-    if report.len() < 0:
+    val len = report.len()
+    if len < 0:
         print "STATUS\tEXTERN_UNAVAILABLE"
         print "  rt_mem_attr_report could not be called on this engine/build"
         print "  (no crash, no data: the extern is not wired up here yet)"
         return 0
-    if rt_mem_attr_enabled() != 1:
+    if len == 0:
         print "STATUS\tATTRIBUTION_OFF"
         print "  attribution is off for this process (SIMPLE_MEM_ATTR != 1)"
         return 0
@@ -160,14 +126,9 @@ fn cmd_by_owner() -> i64:
 
 fn main() -> i64:
     val args = cli_positional_args()
-    if args.len() >= 1 and str_eq(args[0], "--by-owner"):
-        return cmd_by_owner()
     if args.len() < 2:
         print "usage: memstat <pid> <out_csv> [interval_ms]"
         print "  samples /proc/<pid>/smaps_rollup + stat faults to CSV until <pid> exits"
-        print "usage: memstat --by-owner"
-        print "  prints rt_mem_attr_report per-owner counts for the CURRENT process"
-        print "  (meaningful under SIMPLE_MEM_ATTR=1)"
         return 2
     val pid = parse_dec(args[0])
     if pid <= 0:

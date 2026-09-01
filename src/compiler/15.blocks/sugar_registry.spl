@@ -61,6 +61,7 @@ struct DesugarRule:
 # ============================================================================
 
 var _rule_registry: RuleRegistry = RuleRegistry(rules: [])
+var _ast_rewrite_rule_generation: i64 = 0
 
 fn rule_registry() -> RuleRegistry:
     """Get the global rule registry."""
@@ -82,6 +83,9 @@ fn register_desugar_rule(rule: DesugarRule) -> bool:
         if existing.name == rule.name:
             return false
     reg.rules = reg.rules.push(rule)
+    _rule_registry = reg
+    if rule.ast_rewrite_fn != 0:
+        _ast_rewrite_rule_generation = _ast_rewrite_rule_generation + 1
     true
 
 
@@ -93,13 +97,19 @@ fn unregister_desugar_rule(name: text) -> bool:
     var reg = rule_registry()
     var new_rules: [DesugarRule] = []
     var found = false
+    var removed_ast_rule = false
     for r in reg.rules:
         if r.name == name:
             found = true
+            if r.ast_rewrite_fn != 0:
+                removed_ast_rule = true
         else:
             new_rules = new_rules.push(r)
     if found:
         reg.rules = new_rules
+        _rule_registry = reg
+        if removed_ast_rule:
+            _ast_rewrite_rule_generation = _ast_rewrite_rule_generation + 1
     found
 
 
@@ -234,6 +244,24 @@ fn apply_rule_ast(name: text, node_index: i64) -> i64:
             spl_wffi_call_i64(r.ast_rewrite_fn, [node_index], 1)
         nil:
             node_index
+
+fn has_ast_rewrite_rules() -> bool:
+    """Whether the registry currently contains an executable AST rewrite.
+
+    Sentinel-only text rules cannot affect `apply_sugar_rules_ast`, so they do
+    not make an expression-arena walk dynamic. This exact gate lets callers
+    skip one cross-module registry dispatch per node on the normal empty/static
+    compiler path.
+    """
+    var reg = rule_registry()
+    for r in reg.rules:
+        if r.ast_rewrite_fn != 0:
+            return true
+    false
+
+fn ast_rewrite_rule_generation() -> i64:
+    """Change receipt for the executable subset of the sugar registry."""
+    _ast_rewrite_rule_generation
 
 
 fn apply_sugar_rules_ast(tag: i64, node_index: i64) -> i64:

@@ -1,6 +1,6 @@
-# test_runner_types_classify_unified_spec
+# Test Runner Types Classify Unified Specification
 
-> Verifies the test runner types classify unified behaviour end to end so maintainers of this
+> Tests covering test_runner_types outcome classification is unified.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# test_runner_types_classify_unified_spec
-
-Verifies the test runner types classify unified behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Other |
-| Status | Active |
-| Source | `test/01_unit/test_runner/test_runner_types_classify_unified_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the test runner types classify unified behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Test Runner Types Classify Unified Specification
 
 ## Scenarios
 
@@ -39,19 +17,22 @@ unrelated sibling features are out of scope.
 
 #### classifies the with-colon and without-colon spellings identically
 
-- Verify: classifies the with-colon and without-colon spellings identically
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- classifies the with-colon and without-colon spellings identically
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TESTRUNNER-R3
-step("Verify: classifies the with-colon and without-colon spellings identically")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-TEST_RUNNER
+step("classifies the with-colon and without-colon spellings identically")
 """The drift that motivated this lane: 'TERMINATED:' vs 'TERMINATED'."""
 for pair in [["TERMINATED: killed by SIGTERM", "TERMINATED"],
              ["TIMEOUT: budget exceeded", "timeout"],
@@ -67,19 +48,18 @@ for pair in [["TERMINATED: killed by SIGTERM", "TERMINATED"],
 
 #### tokenises the class head so underscores and case cannot change a count
 
-- Verify: tokenises the class head so underscores and case cannot change a count
+- tokenises the class head so underscores and case cannot change a count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TESTRUNNER-R3
-step("Verify: tokenises the class head so underscores and case cannot change a count")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-TEST_RUNNER
+step("tokenises the class head so underscores and case cannot change a count")
 assert_equal(test_outcome_class_token("not_executed: nope"), "NOT EXECUTED")
 assert_equal(test_outcome_class_token("  terminated : x"), "TERMINATED")
 assert_equal(test_outcome_class_token(""), "")
@@ -90,19 +70,18 @@ assert_equal(test_file_result_outcome_class(mk("not_run: nope", 0, 0, false)), "
 
 #### never puts an unrecognised class token in the passed bucket
 
-- Verify: never puts an unrecognised class token in the passed bucket
+- never puts an unrecognised class token in the passed bucket
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TESTRUNNER-R3
-step("Verify: never puts an unrecognised class token in the passed bucket")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-TEST_RUNNER
+step("never puts an unrecognised class token in the passed bucket")
 """A reworded producer message must fail loudly, not vanish."""
 val odd = mk("WEDGED: some brand new producer message", 0, 0, false)
 assert_equal(test_file_result_outcome_class(odd), "ERROR")
@@ -115,19 +94,18 @@ assert_false(run_of(odd, 0, 0).is_ok())
 
 #### keeps CRASHED a real failure and out of the unverified bucket
 
-- Verify: keeps CRASHED a real failure and out of the unverified bucket
+- keeps CRASHED a real failure and out of the unverified bucket
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TESTRUNNER-R3
-step("Verify: keeps CRASHED a real failure and out of the unverified bucket")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-TEST_RUNNER
+step("keeps CRASHED a real failure and out of the unverified bucket")
 val crashed = mk("CRASHED: child died by SIGSEGV", 0, 0, false)
 assert_equal(test_file_result_outcome_class(crashed), "CRASHED")
 assert_false(test_file_result_is_unverified(crashed))
@@ -139,19 +117,18 @@ assert_false(run_of(crashed, 0, 0).is_ok())
 
 #### treats a no-error no-example unit as NOT_RUN, never as a pass
 
-- Verify: treats a no-error no-example unit as NOT_RUN, never as a pass
+- treats a no-error no-example unit as NOT_RUN, never as a pass
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TESTRUNNER-R3
-step("Verify: treats a no-error no-example unit as NOT_RUN, never as a pass")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-TEST_RUNNER
+step("treats a no-error no-example unit as NOT_RUN, never as a pass")
 """Exit 0 with no Results: line is the silent-green shape."""
 val silent = mk("", 0, 0, false)
 assert_equal(test_file_result_outcome_class(silent), "NOT_RUN")
@@ -164,19 +141,18 @@ assert_false(run_of(silent, 0, 0).is_ok())
 
 #### still reports a genuine pass as ok
 
-- Verify: still reports a genuine pass as ok
+- still reports a genuine pass as ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TESTRUNNER-R3
-step("Verify: still reports a genuine pass as ok")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-TEST_RUNNER
+step("still reports a genuine pass as ok")
 val ok = mk("", 3, 0, false)
 assert_equal(test_file_result_outcome_class(ok), "OK")
 assert_true(ok.is_ok())
@@ -187,19 +163,18 @@ assert_true(run_of(ok, 0, 0).is_ok())
 
 #### gives an unrecognised-token run a non-zero exit code
 
-- Verify: gives an unrecognised-token run a non-zero exit code
+- gives an unrecognised-token run a non-zero exit code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TESTRUNNER-R3
-step("Verify: gives an unrecognised-token run a non-zero exit code")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-TEST_RUNNER
+step("gives an unrecognised-token run a non-zero exit code")
 """Unverified => 5 and UsageError => 2 per the exit-code table."""
 val odd = run_of(mk("WEDGED: brand new message", 0, 0, false), 0, 0)
 val code = test_run_outcome_exit_code(classify_test_run_result(odd, false))
@@ -209,6 +184,21 @@ assert_equal(test_run_outcome_exit_code(classify_test_run_result(unver, false)),
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/01_unit/test_runner/test_runner_types_classify_unified_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering test_runner_types outcome classification is unified.
+- test_runner_types outcome classification is unified
 
 ## Scenario Summary
 
@@ -223,36 +213,56 @@ assert_equal(test_run_outcome_exit_code(classify_test_run_result(unver, false)),
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-TESTRUNNER-R3`
+- `REQ-SSPEC-TEST_RUNNER`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `36b12ab8738c838dedf3f74c2a4bc93526063db9dd28fd8e10153e46e87ef542`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `a91c55ea0f07b1c39b7c239a9f1f36ecd9e0df1abf3cc837b78ce1a0cc915f20`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `36b12ab8738c838dedf3f74c2a4bc93526063db9dd28fd8e10153e46e87ef542`.
+Source SHA-256: `a91c55ea0f07b1c39b7c239a9f1f36ecd9e0df1abf3cc837b78ce1a0cc915f20`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `36b12ab8738c838dedf3f74c2a4bc93526063db9dd28fd8e10153e46e87ef542`  
+Source SHA-256: `a91c55ea0f07b1c39b7c239a9f1f36ecd9e0df1abf3cc837b78ce1a0cc915f20`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **86/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/test_runner/test_runner_types_classify_unified_spec.spl
 mirror: doc/06_spec/01_unit/test_runner/test_runner_types_classify_unified_spec.md (current)
-findings: 3 blockers: 0
+findings: 6 blockers: 1
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/test_runner/test_runner_types_classify_unified_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=86; blocker cap makes effective=49
 doc/06_spec/01_unit/test_runner/test_runner_types_classify_unified_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/test_runner/test_runner_types_classify_unified_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/test_runner/test_runner_types_classify_unified_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/test_runner/test_runner_types_classify_unified_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/test_runner/test_runner_types_classify_unified_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'classifies the with-colon and without-colon spellings identically' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/test_runner/test_runner_types_classify_unified_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenises the class head so underscores and case cannot change a count' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/test_runner/test_runner_types_classify_unified_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'never puts an unrecognised class token in the passed bucket' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

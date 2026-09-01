@@ -1,7 +1,6 @@
 # dbfs checkpoint structs use reserved keyword `gen` as field name
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** fixed 2026-06-11 — renamed `gen` → `slot_gen` across all affected structs and consumers
 - **Found:** 2026-06-11 (during E5 pager WAL gate verification)
 - **Severity:** medium — `dbfs_checkpoint_attr_facade_spec.spl` (both gc_async_mut
   and nogc_async_mut copies) fails in interpreter mode; not introduced by E5

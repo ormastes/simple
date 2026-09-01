@@ -1,11 +1,8 @@
 # Generate SimpleOS multiarch hardening audit evidence.
 
-extern fn rt_cli_get_args() -> [text]
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_exit(code: i32) -> void
 
+use std.io.{exit_i32, file_read_text, file_write, process_run}
+use std.sffi.system.{args_get}
 struct OsHardenConfig:
     root: text
     report_path: text
@@ -100,7 +97,7 @@ fn dirname(path: text) -> text:
 
 fn ensure_parent(path: text):
     val dir = dirname(path)
-    val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "mkdir -p " + shell_quote(dir)])
+    val (_out, _err, _code) = process_run("/bin/sh", ["-c", "mkdir -p " + shell_quote(dir)])
 
 fn rel_path(path: text, root: text) -> text:
     if root != "" and root != "." and path.starts_with(root + "/"):
@@ -114,7 +111,7 @@ fn list_owned_spl_files(root: text) -> [text]:
     for base in ["src/os", "src/lib", "src/app"]:
         val scan_root = join_path(root, base)
         val command = "if [ -e " + shell_quote(scan_root) + " ]; then find " + shell_quote(scan_root) + " -type f -name '*.spl' | sort; fi"
-        val result = rt_process_run("/bin/sh", ["-c", command])
+        val result = process_run("/bin/sh", ["-c", command])
         if result.2 != 0:
             continue
         for raw in result.0.split("\n"):
@@ -125,7 +122,7 @@ fn list_owned_spl_files(root: text) -> [text]:
     files
 
 fn code_lines(path: text) -> [text]:
-    val source = rt_file_read_text(path) ?? ""
+    val source = file_read_text(path) ?? ""
     var out: [text] = []
     var line_no = 0
     for line in source.split("\n"):
@@ -208,7 +205,7 @@ fn wx_violations(files: [text], root: text) -> CountSamples:
 
 fn cap_check_coverage(root: text) -> CapCoverage:
     val path = join_path(root, "src/os/kernel/ipc/syscall.spl")
-    val source = rt_file_read_text(path) ?? ""
+    val source = file_read_text(path) ?? ""
     if source == "":
         return CapCoverage(pct: 0, uncovered: 0)
     val lines = source.split("\n")
@@ -254,17 +251,17 @@ fn cap_check_coverage(root: text) -> CapCoverage:
 
 fn check_bounds_emitted(root: text) -> bool:
     val lowering =
-        (rt_file_read_text(join_path(root, "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")) ?? "") +
+        (file_read_text(join_path(root, "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")) ?? "") +
         "\n" +
-        (rt_file_read_text(join_path(root, "src/compiler/50.mir/mir_lowering_stmts.spl")) ?? "")
+        (file_read_text(join_path(root, "src/compiler/50.mir/mir_lowering_stmts.spl")) ?? "")
     val runtime =
-        (rt_file_read_text(join_path(root, "src/runtime/runtime.c")) ?? "") +
+        (file_read_text(join_path(root, "src/runtime/runtime.c")) ?? "") +
         "\n" +
-        (rt_file_read_text(join_path(root, "src/runtime/runtime.h")) ?? "")
+        (file_read_text(join_path(root, "src/runtime/runtime.h")) ?? "")
     lowering.contains("MirInstKind.Intrinsic(nil, \"bounds_check\"") and runtime.contains("__simple_intrinsic_bounds_check")
 
 fn json_bool_file_contains(path: text, field: text) -> bool:
-    val source = rt_file_read_text(path) ?? ""
+    val source = file_read_text(path) ?? ""
     source.contains("\"" + field + "\": true")
 
 fn canary_log_ok(root: text, arch: text) -> bool:
@@ -337,9 +334,9 @@ fn write_report(path: text, root: text, arches: [text], unsafe_hits: CountSample
         "  \"wx_violations\": " + wx_hits.count.to_string() + ",\n" +
         "  \"x86_32_nx_status\": \"present_in_audit_pending_runtime_proof\"\n" +
         "}\n"
-    rt_file_write_text(path, body)
+    file_write(path, body)
 
-val config = parse_args(normalize_args(rt_cli_get_args()))
+val config = parse_args(normalize_args(args_get()))
 val files = list_owned_spl_files(config.root)
 val unsafe_hits = count_unsafe_outside_hal(files, config.root)
 val arch_imports = count_direct_arch_imports(files, config.root)
@@ -359,5 +356,5 @@ val audit_passed =
 
 write_report(config.report_path, config.root, config.arches, unsafe_hits, arch_imports, wx_hits, cap, text_trap, bounds, audit_passed)
 if audit_passed:
-    rt_exit(0)
-rt_exit(1)
+    exit_i32(0)
+exit_i32(1)

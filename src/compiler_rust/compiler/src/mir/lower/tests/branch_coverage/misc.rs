@@ -322,6 +322,25 @@ fn lowerer_get_trait_method_sig_none() {
 }
 
 #[test]
+fn bootstrap_parity_trait_lookup_filters_same_named_methods_by_explicit_arity() {
+    use crate::hir::HirTraitInfo;
+    use std::collections::HashMap;
+
+    let mut zero_arg = HirTraitInfo::new("AZeroArg".to_string());
+    zero_arg.add_method("run".to_string(), vec![], hir::TypeId::I64);
+    let mut one_arg = HirTraitInfo::new("ZOneArg".to_string());
+    one_arg.add_method("run".to_string(), vec![hir::TypeId::I64], hir::TypeId::I64);
+    let infos = HashMap::from([(zero_arg.name.clone(), zero_arg), (one_arg.name.clone(), one_arg)]);
+    let lowerer = MirLowerer::new().with_trait_infos(&infos);
+
+    let (_, params, _) = lowerer
+        .find_trait_for_method_on_receiver("run", None, 1)
+        .expect("one-argument trait method should match");
+    assert_eq!(params, vec![hir::TypeId::I64]);
+    assert!(lowerer.find_trait_for_method_on_receiver("run", None, 2).is_none());
+}
+
+#[test]
 fn lowerer_contract_mode() {
     let lowerer = MirLowerer::new();
     assert_eq!(lowerer.contract_mode(), ContractMode::All);

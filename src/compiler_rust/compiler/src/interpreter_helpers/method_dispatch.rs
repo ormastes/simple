@@ -108,17 +108,13 @@ pub(crate) fn call_method_on_value(
                 };
                 return Ok(Value::array(raw_parts.into_iter().map(Value::text).collect()));
             }
-            "index_of" => {
-                // Byte-indexed, with optional two-arg `index_of(needle,
-                // start)` byte-offset form, mirroring `rt_text_find` exactly
-                // (start < 0 clamps to 0; empty needle returns
-                // min(start, len); start past the end returns -1). The
-                // previous code returned `s[..idx].chars().count()` — a
-                // CHARACTER index, silently divergent on multi-byte text from
-                // every other index_of path in either engine — and ignored a
-                // second argument entirely. This fallthrough-free path must
-                // implement both arities inline: past the match the function
-                // ends in METHOD_NOT_FOUND, not the full string-method path.
+            "find_str" | "find" | "index_of" => {
+                // Keep nested temporary-text dispatch aligned with the ordinary
+                // string-method path. All three aliases consume the optional
+                // byte offset `(needle, start)`; `find`/`find_str` used to drop
+                // it silently and answer from position 0. Without these aliases,
+                // `source.substring(start).find(needle)` reached METHOD_NOT_FOUND
+                // even though binding the substring first dispatched correctly.
                 if let Some(Value::Str(needle)) = _args.first() {
                     let start_raw = _args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
                     let start = start_raw.max(0) as usize;
@@ -1143,10 +1139,7 @@ mod tests {
             &impl_methods,
         )
         .expect("bounded split should dispatch");
-        assert_eq!(
-            bounded,
-            Value::array(vec![Value::text("a"), Value::text("b:c")])
-        );
+        assert_eq!(bounded, Value::array(vec![Value::text("a"), Value::text("b:c")]));
 
         let unicode = call_method_on_value(
             Value::text("한글끝"),
@@ -1159,10 +1152,7 @@ mod tests {
             &impl_methods,
         )
         .expect("unicode character split should dispatch");
-        assert_eq!(
-            unicode,
-            Value::array(vec![Value::text("한"), Value::text("글끝")])
-        );
+        assert_eq!(unicode, Value::array(vec![Value::text("한"), Value::text("글끝")]));
     }
 }
 

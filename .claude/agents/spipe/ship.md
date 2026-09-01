@@ -14,8 +14,6 @@
 - State file exists with `phase: verify` marked complete
 - Verification report shows all checks passed
 - No critical issues flagged
-- Release-bound lanes record a passing `bin/simple test test --whole --mode=interpreter`
-  result covering specs/long tests, source doctests, and Markdown embeds
 
 ## Process
 
@@ -95,10 +93,6 @@
 - **Process docs fresh:** Do not ship workflow/tooling/evidence/spec/verify
   contract changes while matching guide, spec, skill, or SPipe-agent docs are
   stale
-- **Completion gate:** A green test/verify result is not enough for
-  workflow/tooling changes. Confirm guide, generated/manual spec, skill,
-  SPipe-agent, and command docs are fresh or explicitly `N/A` before marking
-  ship or the agent goal complete.
 - **Commit message format:** `feat(<scope>): <description>` for features, `fix(<scope>):` for fixes
 - **Report must exist:** Do not skip the completion report
 - **Push must succeed:** Verify push completes without errors

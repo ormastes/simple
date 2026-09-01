@@ -15,8 +15,6 @@ use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_string, ssh_put_
 val SSH_MSG_CHANNEL_OPEN: u8 = 90
 val SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91
 val SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92
-val SSH_INVALID_CHANNEL_ID: u32 = 4294967295u32
-val SSH_MAX_CHANNELS_PER_SESSION: i64 = 256
 val SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93
 val SSH_MSG_CHANNEL_DATA: u8 = 94
 val SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95
@@ -73,14 +71,12 @@ class ChannelTable:
 
 impl ChannelTable:
 
-    pub static fn new() -> ChannelTable:
+    static fn new() -> ChannelTable:
         """Create an empty channel table."""
         ChannelTable(channels: [], next_id: 0)
 
-    pub me open(channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32) -> u32:
+    me open(channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32) -> u32:
         """Allocate a new channel. Returns the local channel ID."""
-        if self.channels.len() >= SSH_MAX_CHANNELS_PER_SESSION or self.next_id == SSH_INVALID_CHANNEL_ID or self.has_remote_id(remote_id):
-            return SSH_INVALID_CHANNEL_ID
         val local_id = self.next_id
         self.channels.push(SshChannel(
             local_id: local_id,
@@ -100,17 +96,9 @@ impl ChannelTable:
 
         local_id
 
-    pub me seed_open(local_id: u32, channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32) -> bool:
+    me seed_open(local_id: u32, channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32):
         """Seed a known-open channel without touching the C-side table."""
-        if local_id == SSH_INVALID_CHANNEL_ID:
-            return false
-        val idx = self._find_local_index(local_id)
-        # A repeated/replayed CHANNEL_OPEN must never overwrite an active
-        # entry or refresh its windows.  Callers send OPEN_FAILURE instead.
-        if idx >= 0 or self.has_remote_id(remote_id):
-            return false
-        if self.channels.len() >= SSH_MAX_CHANNELS_PER_SESSION:
-            return false
+        var idx = self._find_local_index(local_id)
         val seeded = SshChannel(
             local_id: local_id,
             remote_id: remote_id,
@@ -125,10 +113,12 @@ impl ChannelTable:
             peer_eof: false,
             env_vars: []
         )
-        self.channels.push(seeded)
+        if idx >= 0:
+            self.channels[idx as u64] = seeded
+        else:
+            self.channels.push(seeded)
         if self.next_id <= local_id:
             self.next_id = local_id + 1
-        true
 
     pub fn has_remote_id(remote_id: u32) -> bool:
         for channel in self.channels:
@@ -148,8 +138,6 @@ impl ChannelTable:
         val idx = self._find_local_index(local_id)
         if idx >= 0:
             self.channels[idx as u64].state = ChannelState.Closed
-            return true
-        false
 
     pub fn find(local_id: u32) -> SshChannel?:
         """Find a channel by local ID. Returns nil if not found."""
@@ -163,17 +151,12 @@ impl ChannelTable:
         Delegates to find() which uses C-side table."""
         self.find(local_id)
 
-    pub me adjust_window(local_id: u32, bytes: u32) -> bool:
+    me adjust_window(local_id: u32, bytes: u32):
         """Increase local receive window by bytes."""
         val idx = self._find_local_index(local_id)
         if idx >= 0:
-            val current = self.channels[idx as u64].local_window
-            if bytes > 4294967295u32 - current:
-                return false
-            var new_window: u32 = current + bytes
+            var new_window: u32 = self.channels[idx as u64].local_window + bytes
             self.channels[idx as u64].local_window = new_window
-            return true
-        false
 
     pub me adjust_remote_window(local_id: u32, bytes: u32) -> bool:
         """Increase peer send window with checked u32 arithmetic."""
@@ -209,10 +192,6 @@ impl ChannelTable:
         """
         val idx = self._find_local_index(local_id)
         if idx >= 0:
-            if self.channels[idx as u64].state != ChannelState.Open or self.channels[idx as u64].peer_eof:
-                return false
-            if bytes > self.channels[idx as u64].local_max_packet:
-                return false
             var lw = self.channels[idx as u64].local_window
             if lw < bytes:
                 return false
@@ -451,6 +430,7 @@ fn ssh_build_channel_failure(recipient: u32) -> [u8]:
 
 export ChannelTable, SshChannel, ChannelType, ChannelState
 export ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request
+export ssh_parse_channel_data_header_v1, ChannelDataHeaderV1
 export ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close
 export ssh_build_channel_open_confirmation, ssh_build_channel_open_failure
 export ssh_build_channel_data, ssh_build_channel_window_adjust

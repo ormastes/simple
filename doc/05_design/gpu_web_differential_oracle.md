@@ -43,6 +43,13 @@ execution/fence/device-origin-readback; and no fallback.
 | GPU live profile suite | `test/03_system/os/qemu/*` | no fallback, actual device identity, exact pixels, environment facts |
 | Browser profile suite | `test/02_integration/rendering/*` | fixed viewport, stage projection, reviewed bitmap and negative mutations |
 
+The Chromium browser profile is further frozen by
+`doc/05_design/chromium_web_renderer_primitive_differential.md`: it has one
+test-only bridge library, caller-owned bounded JSON output, explicit handle
+release, primitive-only stage projections, and a distinct Simple GPU receipt.
+It reuses `NormalizedTrace`/`GpuEnvironmentProfile`; it does not add a generic
+Chrome display-list converter or a production browser backend.
+
 Each lane owns only the listed new file(s). Merge owner: `/root`. Lower-model
 sidecars: N/A (interfaces were frozen by the coordinating highest-capability
 agents). Final reviewer: normal/highest-capability root agent.

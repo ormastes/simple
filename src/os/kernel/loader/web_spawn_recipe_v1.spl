@@ -1,0 +1,80 @@
+"""Dedicated filesystem spawn recipe for `/WEB.ELF`.
+
+This policy envelope binds the immutable image identity, launch arguments, and
+least-authority pouch before any architecture-specific loader consumes them.
+It does not launch a task or borrow authority from `/SERVERS.ELF`.
+"""
+
+use os.kernel.ipc.cspace_spawn.{SpawnSpec, CapGrant}
+use os.kernel.loader.web_launch_grants.{
+    SIMPLEOS_WEB_EXECUTABLE_V1, SIMPLEOS_WEB_CONFIGURED_BIND_IPV4_V1,
+    WebLaunchGrantPlanV1,
+    web_launch_grant_plan_v1, web_launch_grant_plan_valid_v1
+}
+
+pub val SIMPLEOS_WEB_SPAWN_ISOLATION_V1: text = "web-service-v1"
+
+pub struct WebSpawnRecipeV1:
+    image_hash: text
+    executable_path: text
+    argv: [text]
+    envp: [text]
+    bind_ipv4_address: u32
+    spawn_spec: SpawnSpec
+
+pub fn web_spawn_launch_shape_valid_v1(
+    executable_path: text,
+    argv: [text],
+    envp: [text],
+    bind_ipv4_address: u32
+) -> bool:
+    """Accept only the canonical one-argument WEB launch shape.
+
+    The scalar filesystem-exec route has no caller-selected address parameter:
+    it always uses the one non-wildcard configured endpoint.  Keep this helper
+    equally strict so the standalone recipe cannot mint an unreachable pouch.
+    """
+    executable_path == SIMPLEOS_WEB_EXECUTABLE_V1 and
+        argv.len() == 1 and argv[0] == SIMPLEOS_WEB_EXECUTABLE_V1 and
+        envp.len() == 0 and
+        bind_ipv4_address == SIMPLEOS_WEB_CONFIGURED_BIND_IPV4_V1
+
+pub fn web_spawn_recipe_v1(
+    image_hash: text,
+    executable_path: text,
+    argv: [text],
+    envp: [text],
+    bind_ipv4_address: u32
+) -> WebSpawnRecipeV1:
+    """Build a fail-closed recipe; invalid launch shapes receive no grants."""
+    var grants: [CapGrant] = []
+    if image_hash.len() > 0 and web_spawn_launch_shape_valid_v1(
+        executable_path, argv, envp, bind_ipv4_address):
+        grants = web_launch_grant_plan_v1(
+            executable_path, bind_ipv4_address).grants
+    WebSpawnRecipeV1(
+        image_hash: image_hash,
+        executable_path: executable_path,
+        argv: argv,
+        envp: envp,
+        bind_ipv4_address: bind_ipv4_address,
+        spawn_spec: SpawnSpec(
+            image_hash: image_hash,
+            grants: grants,
+            isolation: SIMPLEOS_WEB_SPAWN_ISOLATION_V1,
+            budget: 0u64))
+
+pub fn web_spawn_recipe_valid_v1(recipe: WebSpawnRecipeV1) -> bool:
+    """Revalidate identity, launch shape, and exact authority at consumption."""
+    if recipe.image_hash.len() == 0 or
+       recipe.spawn_spec.image_hash != recipe.image_hash or
+       recipe.spawn_spec.isolation != SIMPLEOS_WEB_SPAWN_ISOLATION_V1 or
+       recipe.spawn_spec.budget != 0u64 or
+       not web_spawn_launch_shape_valid_v1(
+           recipe.executable_path, recipe.argv, recipe.envp,
+           recipe.bind_ipv4_address):
+        return false
+    web_launch_grant_plan_valid_v1(WebLaunchGrantPlanV1(
+        executable_identity: recipe.executable_path,
+        bind_ipv4_address: recipe.bind_ipv4_address,
+        grants: recipe.spawn_spec.grants))

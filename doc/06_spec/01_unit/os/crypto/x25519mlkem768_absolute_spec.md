@@ -17,20 +17,24 @@
 
 #### should pin one cross-backend NTT fixture (REQ-009 REQ-010 REQ-012)
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should pin one cross-backend NTT fixture (REQ-009 REQ-010 REQ-012)
 - Compare every backend fixture digest and boundary coefficient
-- "x25519mlkem768 ntt fixture coefficient
-- "x25519mlkem768 ntt fixture coefficient
-- "x25519mlkem768 ntt fixture coefficient
    - Expected: simd_probe does not contain `i * 17 + poly * 101 + 3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should pin one cross-backend NTT fixture (REQ-009 REQ-010 REQ-012)")
 step("Compare every backend fixture digest and boundary coefficient")
 val manifest = file_read_text(
     "test/fixtures/crypto/x25519mlkem768/manifest.sdn")
@@ -66,16 +70,19 @@ expect(simd_probe.contains("i * 17 + poly * 101 + 3")).to_equal(false)
 
 #### should separate correctness from promotion timing (NFR-009 NFR-010 NFR-011)
 
+- should separate correctness from promotion timing (NFR-009 NFR-010 NFR-011)
 - Inspect correctness receipts independently from performance promotion
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should separate correctness from promotion timing (NFR-009 NFR-010 NFR-011)")
 step("Inspect correctness receipts independently from performance promotion")
 val simd_runner = file_read_text(
     "scripts/check/check-x25519mlkem768-cpu-simd.shs")
@@ -98,19 +105,20 @@ expect(scalar_runner).to_contain("oracle_fixture_sha256")
 
 #### should keep GNU AVX2 attributes outside the MSVC branch (REQ-009)
 
+- should keep GNU AVX2 attributes outside the MSVC branch (REQ-009)
 - Inspect compiler guards around the AVX2 target attribute
-- "#if
-- "#  define SIMPLE RUNTIME TARGET AVX2   attribute
    - Expected: source does not contain `\n__attribute__((target("avx2")))\n`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should keep GNU AVX2 attributes outside the MSVC branch (REQ-009)")
 step("Inspect compiler guards around the AVX2 target attribute")
 val source = file_read_text("src/runtime/runtime_simd_dispatch.c")
 expect(source).to_contain(
@@ -126,16 +134,19 @@ expect(source).to_contain("if (simd_detect_avx2())")
 
 #### should give every ISA evidence row an exact resumable owner contract (REQ-015)
 
+- should give every ISA evidence row an exact resumable owner contract (REQ-015)
 - Validate architecture evidence ownership and resumable commands
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should give every ISA evidence row an exact resumable owner contract (REQ-015)")
 step("Validate architecture evidence ownership and resumable commands")
 val manifest = file_read_text(
     "test/fixtures/crypto/x25519mlkem768/manifest.sdn")
@@ -157,6 +168,7 @@ expect(manifest).to_contain(
 
 #### should expose the exact immutable versioned profile (REQ-001)
 
+- should expose the exact immutable versioned profile (REQ-001)
 - Read the canonical X25519MLKEM768 profile
    - Expected: profile.fips_revision equals `FIPS 203 ML-KEM-768`
    - Expected: profile.tls_revision equals `draft-ietf-tls-ecdhe-mlkem-05`
@@ -167,18 +179,18 @@ expect(manifest).to_contain(
    - Expected: profile.semantic_version equals `0.3.0`
    - Expected: config.implementation_version equals `0.3.0`
    - Expected: config.minimum_batch equals `1`
-- d:  list32
-- x25519 private key:  bytes32
    - Expected: request.batch_id equals `absolute-contract`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should expose the exact immutable versioned profile (REQ-001)")
 step("Read the canonical X25519MLKEM768 profile")
 val profile = x25519_mlkem768_profile()
 expect(profile.fips_revision).to_equal("FIPS 203 ML-KEM-768")
@@ -213,16 +225,19 @@ expect(request.batch_id).to_equal("absolute-contract")
 
 #### should match NIST ACVP ML-KEM-768 keyGen tcId 26 (REQ-002 REQ-013 REQ-014)
 
+- should match NIST ACVP ML-KEM-768 keyGen tcId 26 (REQ-002 REQ-013 REQ-014)
 - Run deterministic key generation against the normalized ACVP vector
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should match NIST ACVP ML-KEM-768 keyGen tcId 26 (REQ-002 REQ-013 REQ-014)")
 step("Run deterministic key generation against the normalized ACVP vector")
 val pair = ml_kem_keygen(_nist_d(), _nist_z())
 val (ek, dk) = pair
@@ -236,18 +251,20 @@ expect(_bytes_hex(sha256(_list_bytes(dk)))).to_equal(
 
 #### should match pinned mlkem-native keygen encapsulation and decapsulation (REQ-002 REQ-013)
 
+- should match pinned mlkem-native keygen encapsulation and decapsulation (REQ-002 REQ-013)
 - Execute the pinned native oracle keygen encapsulation and decapsulation
-- forged[0] = forged get
    - Expected: implicit.len() equals `32`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should match pinned mlkem-native keygen encapsulation and decapsulation (REQ-002 REQ-013)")
 step("Execute the pinned native oracle keygen encapsulation and decapsulation")
 val pair = ml_kem_keygen(_oracle_d(), _oracle_z())
 val (ek, dk) = pair
@@ -276,6 +293,7 @@ expect(_bytes_hex(sha256(_list_bytes(implicit))) ==
 
 #### should match every byte of the pinned mlkem-native outputs (REQ-002 REQ-012 REQ-013)
 
+- should match every byte of the pinned mlkem-native outputs (REQ-002 REQ-012 REQ-013)
 - Load the shared X25519MLKEM768 fixture
    - Expected: expected_ek.len() equals `1184`
    - Expected: expected_dk.len() equals `2400`
@@ -286,10 +304,12 @@ expect(_bytes_hex(sha256(_list_bytes(implicit))) ==
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should match every byte of the pinned mlkem-native outputs (REQ-002 REQ-012 REQ-013)")
 step("Load the shared X25519MLKEM768 fixture")
 val source = file_read_text(
     "test/fixtures/crypto/x25519mlkem768/mlkem_native_fd58_vectors.sdn")
@@ -320,6 +340,7 @@ expect(_lists_equal(recovered, expected_ss)).to_be(true)
 
 #### should preserve caller-owned inputs while cleaning owned temporaries (REQ-002 NFR-005)
 
+- should preserve caller-owned inputs while cleaning owned temporaries (REQ-002 NFR-005)
 - Prepare independently owned ML-KEM seeds and message
 - Run key generation, encapsulation, and decapsulation
 - Verify outputs and every caller-owned input remain intact
@@ -328,10 +349,12 @@ expect(_lists_equal(recovered, expected_ss)).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should preserve caller-owned inputs while cleaning owned temporaries (REQ-002 NFR-005)")
 step("Prepare independently owned ML-KEM seeds and message")
 val d = _oracle_d()
 val z = _oracle_z()
@@ -370,6 +393,7 @@ expect(_lists_equal(ciphertext, ciphertext_before)).to_be(true)
 
 #### should reject malformed normalized oracle fields (REQ-002)
 
+- should reject malformed normalized oracle fields (REQ-002)
 - Corrupt normalized oracle field lengths before decoding
    - Expected: _fixture_hex_field("other: \"00\"", "missing") equals ``
    - Expected: _fixture_hex_field("value: \"00", "value") equals ``
@@ -383,10 +407,12 @@ expect(_lists_equal(ciphertext, ciphertext_before)).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject malformed normalized oracle fields (REQ-002)")
 step("Corrupt normalized oracle field lengths before decoding")
 expect(_fixture_hex_field("other: \"00\"", "missing")).to_equal("")
 expect(_fixture_hex_field("value: \"00", "value")).to_equal("")
@@ -401,6 +427,7 @@ expect(_lists_equal([1, 2], [1, 3])).to_equal(false)
 
 #### should combine ML-KEM first and X25519 second into 64 bytes (REQ-003 REQ-004)
 
+- should combine ML-KEM first and X25519 second into 64 bytes (REQ-003 REQ-004)
 - Compose the two component secrets in protocol order
    - Expected: secret.len() equals `64`
    - Expected: secret.get(0) equals `0xA5`
@@ -413,10 +440,12 @@ expect(_lists_equal([1, 2], [1, 3])).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should combine ML-KEM first and X25519 second into 64 bytes (REQ-003 REQ-004)")
 step("Compose the two component secrets in protocol order")
 val combined = x25519_mlkem768_combine(_list32(0xA5), _bytes32(0x5A))
 match combined:
@@ -434,16 +463,19 @@ match combined:
 
 #### should reject the prohibited all-zero X25519 shared secret (REQ-004 REQ-016 NFR-004)
 
+- should reject the prohibited all-zero X25519 shared secret (REQ-004 REQ-016 NFR-004)
 - Present an all-zero X25519 component to checked composition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject the prohibited all-zero X25519 shared secret (REQ-004 REQ-016 NFR-004)")
 step("Present an all-zero X25519 component to checked composition")
 val combined = x25519_mlkem768_combine(_list32(0xA5), _bytes32(0x00))
 match combined:
@@ -455,16 +487,19 @@ match combined:
 
 #### should reject malformed component lengths (REQ-002 REQ-004 NFR-013)
 
+- should reject malformed component lengths (REQ-002 REQ-004 NFR-013)
 - Present a malformed ML-KEM component length
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject malformed component lengths (REQ-002 REQ-004 NFR-013)")
 step("Present a malformed ML-KEM component length")
 val combined = x25519_mlkem768_combine([], _bytes32(0x5A))
 match combined:
@@ -476,16 +511,19 @@ match combined:
 
 #### should reject a malformed X25519 component length (REQ-002 REQ-004 NFR-013)
 
+- should reject a malformed X25519 component length (REQ-002 REQ-004 NFR-013)
 - Present a malformed X25519 component length
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject a malformed X25519 component length (REQ-002 REQ-004 NFR-013)")
 step("Present a malformed X25519 component length")
 val combined = x25519_mlkem768_combine(_list32(0xA5), [])
 match combined:
@@ -497,19 +535,21 @@ match combined:
 
 #### should validate canonical ML-KEM keys and reject corruption (REQ-004 NFR-013)
 
+- should validate canonical ML-KEM keys and reject corruption (REQ-004 NFR-013)
 - Validate canonical keys before flipping one encoded byte
    - Expected: ml_kem_768_encapsulation_key_valid(invalid_ek) is false
-- invalid dk[2336] = invalid dk get
    - Expected: ml_kem_768_decapsulation_key_valid(invalid_dk) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should validate canonical ML-KEM keys and reject corruption (REQ-004 NFR-013)")
 step("Validate canonical keys before flipping one encoded byte")
 val pair = ml_kem_keygen(_oracle_d(), _oracle_z())
 val (ek, dk) = pair
@@ -528,16 +568,19 @@ expect(ml_kem_768_decapsulation_key_valid(invalid_dk)).to_equal(false)
 
 #### should reject malformed checked ML-KEM inputs (REQ-002 REQ-004 NFR-013)
 
+- should reject malformed checked ML-KEM inputs (REQ-002 REQ-004 NFR-013)
 - Submit malformed key ciphertext and seed lengths to checked APIs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject malformed checked ML-KEM inputs (REQ-002 REQ-004 NFR-013)")
 step("Submit malformed key ciphertext and seed lengths to checked APIs")
 match ml_kem_keygen_checked([], _oracle_z()):
     case Ok(_): fail("short ML-KEM d seed was accepted")
@@ -565,20 +608,19 @@ match ml_kem_decaps_checked([], _zero_list(1088)):
 
 #### should reject malformed hybrid public inputs (REQ-003 REQ-004 NFR-013)
 
+- should reject malformed hybrid public inputs (REQ-003 REQ-004 NFR-013)
 - Submit malformed hybrid public-share components
-- config, [],  bytes32
-- config,  zero list
-- config, [],  bytes32
-- config,  zero list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject malformed hybrid public inputs (REQ-003 REQ-004 NFR-013)")
 step("Submit malformed hybrid public-share components")
 val config = x25519_mlkem768_default_config()
 match x25519_mlkem768_keygen(config, [], _oracle_d(), _oracle_z()):
@@ -609,28 +651,19 @@ match x25519_mlkem768_decapsulate(
 
 #### should reject candidate inputs before backend access (REQ-009 REQ-010 NFR-013)
 
+- should reject candidate inputs before backend access (REQ-009 REQ-010 NFR-013)
 - Exercise candidate input guards with invalid key material
-- simd,  empty simd admission
-- simd,  empty simd admission
-- simd,  empty simd admission
--  zero list
-- cuda, cuda executor, [],  oracle d
-- cuda, cuda executor, [],  bytes32
-- cuda, cuda executor,  zero list
-- cuda executor shutdown
-- metal, metal executor, [],  oracle d
-- metal, metal executor, [],  bytes32
-- metal, metal executor,  zero list
-- metal executor shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject candidate inputs before backend access (REQ-009 REQ-010 NFR-013)")
 step("Exercise candidate input guards with invalid key material")
 val simd = _required_candidate_config(X25519MlKem768Backend.Avx2)
 match x25519_mlkem768_keygen_simd_candidate(
@@ -688,8 +721,8 @@ metal_executor.shutdown()
 
 #### should resolve Automatic to the scalar oracle before promotion (REQ-007 REQ-011)
 
+- should resolve Automatic to the scalar oracle before promotion (REQ-007 REQ-011)
 - Resolve Automatic under the unpromoted backend policy
-- x25519 mlkem768 default config
    - Expected: evidence.configuration_digest.len() equals `64`
    - Expected: evidence.fallback_used is false
 
@@ -697,10 +730,12 @@ metal_executor.shutdown()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should resolve Automatic to the scalar oracle before promotion (REQ-007 REQ-011)")
 step("Resolve Automatic under the unpromoted backend policy")
 val resolved = x25519_mlkem768_resolve_backend(
     x25519_mlkem768_default_config(), "keygen")
@@ -722,6 +757,7 @@ match resolved:
 
 #### should resolve forced scalar without fallback (REQ-007)
 
+- should resolve forced scalar without fallback (REQ-007)
 - Require the scalar backend and inspect its selection evidence
    - Expected: evidence.fallback_used is false
    - Expected: evidence.implementation_version equals `0.3.0`
@@ -731,10 +767,12 @@ match resolved:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should resolve forced scalar without fallback (REQ-007)")
 step("Require the scalar backend and inspect its selection evidence")
 val config = X25519MlKem768Config(
     implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
@@ -759,16 +797,19 @@ match x25519_mlkem768_resolve_backend(config, "keygen"):
 
 #### should reject unsupported API versions and zero batch sizes (REQ-001)
 
+- should reject unsupported API versions and zero batch sizes (REQ-001)
 - Present stale versions and invalid batch bounds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 85 lines folded for reproduction.
+Runnable source: 87 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject unsupported API versions and zero batch sizes (REQ-001)")
 step("Present stale versions and invalid batch bounds")
 val bad_version = X25519MlKem768Config(
     implementation_version: "99.0.0",
@@ -860,16 +901,19 @@ match x25519_mlkem768_resolve_backend(below_minimum, "keygen"):
 
 #### should fail closed for a forced unpromoted backend (REQ-007 REQ-008 NFR-013)
 
+- should fail closed for a forced unpromoted backend (REQ-007 REQ-008 NFR-013)
 - Require an unavailable specialized backend
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should fail closed for a forced unpromoted backend (REQ-007 REQ-008 NFR-013)")
 step("Require an unavailable specialized backend")
 val config = X25519MlKem768Config(
     implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
@@ -889,6 +933,7 @@ match x25519_mlkem768_resolve_backend(config, "encapsulate"):
 
 #### should record an explicit fallback attempt (REQ-007 REQ-008)
 
+- should record an explicit fallback attempt (REQ-007 REQ-008)
 - Suggest an unavailable backend and inspect fallback evidence
    - Expected: evidence.attempts.len() equals `2`
    - Expected: evidence.batch_size equals `8`
@@ -899,10 +944,12 @@ match x25519_mlkem768_resolve_backend(config, "encapsulate"):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should record an explicit fallback attempt (REQ-007 REQ-008)")
 step("Suggest an unavailable backend and inspect fallback evidence")
 val config = X25519MlKem768Config(
     implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
@@ -934,6 +981,7 @@ match x25519_mlkem768_resolve_backend(config, "encapsulate"):
 
 #### should reject invalid entropy request sizes (REQ-016 NFR-006 NFR-013)
 
+- should reject invalid entropy request sizes (REQ-016 NFR-006 NFR-013)
 - Request entropy below and above the exact supported length
    - Expected: zero_request_candidate[0u64] equals `0u8`
    - Expected: oversized_candidate[0u64] equals `0u8`
@@ -942,10 +990,12 @@ match x25519_mlkem768_resolve_backend(config, "encapsulate"):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject invalid entropy request sizes (REQ-016 NFR-006 NFR-013)")
 step("Request entropy below and above the exact supported length")
 val zero_request_candidate: [u8] = [0x11u8]
 match crypto_entropy_validate_candidate_for_test(
@@ -966,6 +1016,7 @@ expect(oversized_candidate[0u64]).to_equal(0u8)
 
 #### should reject malformed entropy providers (REQ-016 NFR-006 NFR-013)
 
+- should reject malformed entropy providers (REQ-016 NFR-006 NFR-013)
 - Return malformed or unauthenticated entropy candidates
    - Expected: unavailable_candidate[0u64] equals `0u8`
    - Expected: short_candidate[0u64] equals `0u8`
@@ -974,10 +1025,12 @@ expect(oversized_candidate[0u64]).to_equal(0u8)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject malformed entropy providers (REQ-016 NFR-006 NFR-013)")
 step("Return malformed or unauthenticated entropy candidates")
 val unavailable_candidate: [u8] = _bytes32(1u8)
 match crypto_entropy_validate_candidate_for_test(
@@ -997,16 +1050,19 @@ expect(short_candidate[0u64]).to_equal(0u8)
 
 #### should accept every attested exact-length byte pattern (REQ-016 NFR-006)
 
+- should accept every attested exact-length byte pattern (REQ-016 NFR-006)
 - Accept exact-length candidates without biased output health tests
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should accept every attested exact-length byte pattern (REQ-016 NFR-006)")
 step("Accept exact-length candidates without biased output health tests")
 match crypto_entropy_validate_candidate_for_test(32u64, true, _bytes32(0xA5u8)):
     case Ok(bytes): expect(bytes.len()).to_equal(32u64)
@@ -1025,7 +1081,7 @@ match crypto_entropy_validate_candidate_for_test(1u64, true, [0u8]):
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl` |
-| Updated | 2026-08-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -1048,3 +1104,95 @@ Tests covering X25519MLKEM768 SIMD static evidence contract, X25519MLKEM768 abso
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-009`
+- `REQ-010`
+- `REQ-012)":`
+- `REQ-SSPEC-OS`
+- `REQ-012)")`
+- `REQ-013`
+- `REQ-014)":`
+- `REQ-014)")`
+- `REQ-013)":`
+- `REQ-013)")`
+- `REQ-012`
+- `REQ-004)":`
+- `REQ-004)")`
+- `REQ-016`
+- `REQ-004`
+- `REQ-011)":`
+- `REQ-011)")`
+- `REQ-008`
+- `REQ-008)":`
+- `REQ-008)")`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `410643c9115e4681dfd80c79629c5b0258de94c33a94944c9d50a2d978986571`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `410643c9115e4681dfd80c79629c5b0258de94c33a94944c9d50a2d978986571`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `410643c9115e4681dfd80c79629c5b0258de94c33a94944c9d50a2d978986571`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **72/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl
+mirror: doc/06_spec/01_unit/os/crypto/x25519mlkem768_absolute_spec.md (current)
+findings: 13 blockers: 1
+  narrative=100 structure=70 oracle=20
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=72; blocker cap makes effective=49
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_absolute_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_absolute_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 18 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:51:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should pin one cross-backend NTT fixture (REQ-009 REQ-010 REQ-012)' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should pin one cross-backend NTT fixture (REQ-009 REQ-010 REQ-012)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:84:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should separate correctness from promotion timing (NFR-009 NFR-010 NFR-011)' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should separate correctness from promotion timing (NFR-009 NFR-010 NFR-011)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:104:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep GNU AVX2 attributes outside the MSVC branch (REQ-009)' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep GNU AVX2 attributes outside the MSVC branch (REQ-009)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:117:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should give every ISA evidence row an exact resumable owner contract (REQ-015)' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:272:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose the exact immutable versioned profile (REQ-001)' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl:304:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should match NIST ACVP ML-KEM-768 keyGen tcId 26 (REQ-002 REQ-013 REQ-014)' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

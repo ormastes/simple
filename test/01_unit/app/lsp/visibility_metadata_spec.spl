@@ -1,6 +1,5 @@
-# @req: REQ-APP-LSP-001 — core language semantics hold under execution. 
-"""
-## Purpose and audience
+fn check(condition: bool):
+    expect(condition).to_equal(true)
 
 Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
 reading this spec to confirm the behavior still holds.
@@ -26,10 +25,10 @@ use std.spec
 
 # @manual: primary
 
-describe "Executed behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
+describe "LSP Visibility Metadata":
+    it "formats public symbols with exported provenance":
+        val symbol = VisibilitySymbol(name: "Router", visibility: VisibilitySurface.Public)
+        val detail = format_visibility_detail(symbol, "crate.sys.http", true)
 
     it "dict get, keys and membership":
         step("Verify: dict get, keys and membership")
@@ -39,13 +38,9 @@ describe "Executed behavior oracles":
         expect(d.has("b")).to_equal(false)
         expect(d.keys()).to_equal(["a"])
 
-    it "base64 RFC 4648 vectors and roundtrip":
-        step("Verify: base64 RFC 4648 vectors and roundtrip")
-        # @req: REQ-APP-LSP-001
-        use std.common.base_encoding.base64.{base64_encode, base64_decode}
-        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
-        expect(base64_decode("TWFu")).to_equal("Man")
-        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
+    it "formats boundary symbols with boundary provenance":
+        val symbol = VisibilitySymbol(name: "route_debug", visibility: VisibilitySurface.Boundary)
+        val detail = format_visibility_detail(symbol, "crate.sys.http", false)
 
     it "array filtering and membership":
         step("Verify: array filtering and membership")
@@ -54,10 +49,9 @@ describe "Executed behavior oracles":
         expect([1, 2, 3].contains(2)).to_equal(true)
         expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-describe "Additional behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
+    it "keeps private symbols private in metadata":
+        val symbol = VisibilitySymbol(name: "internal_helper", visibility: VisibilitySurface.Private)
+        val detail = format_visibility_detail(symbol, "crate.sys.http", false)
 
     it "nil option falls to else arm":
         step("Verify: nil option falls to else arm")
@@ -69,17 +63,30 @@ describe "Additional behavior oracles":
             nil: chosen = -1
         expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-    it "numeric comparison helpers":
-        step("Verify: numeric comparison helpers")
-        # @req: REQ-APP-LSP-001
-        expect(abs(-7)).to_equal(7)  # oracle: absolute value
-        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
-        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
+    it "filters private symbols from completion and workspace symbol surfaces":
+        check(should_include_in_completion(VisibilitySurface.Public))
+        check(should_include_in_completion(VisibilitySurface.Boundary))
+        check(not should_include_in_completion(VisibilitySurface.Private))
+        check(should_include_in_workspace(VisibilitySurface.Public))
+        check(should_include_in_workspace(VisibilitySurface.Boundary))
+        check(not should_include_in_workspace(VisibilitySurface.Private))
 
-    it "function calls and closure values":
-        step("Verify: function calls and closure values")
-        # @req: REQ-APP-LSP-001
-        fn add(a: i64, b: i64) -> i64: a + b
-        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
-        val f = fn(x: i64) -> i64: x * x
-        expect(f(4)).to_equal(16)  # oracle: 4 squared
+    it "ranks public before boundary before private":
+        check(visibility_rank(VisibilitySurface.Public) < visibility_rank(VisibilitySurface.Boundary))
+        check(visibility_rank(VisibilitySurface.Boundary) < visibility_rank(VisibilitySurface.Private))
+
+    it "ranks exact workspace matches before prefix and substring matches":
+        val exact = workspace_match_rank("query", "query", VisibilitySurface.Public)
+        val prefix = workspace_match_rank("query_visibility", "query", VisibilitySurface.Public)
+        val substring = workspace_match_rank("visibility_query", "query", VisibilitySurface.Public)
+
+        check(exact < prefix)
+        check(prefix < substring)
+
+    it "prefers more visible workspace results when match quality ties":
+        val public_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Public)
+        val boundary_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Boundary)
+        val private_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Private)
+
+        check(public_rank < boundary_rank)
+        check(boundary_rank < private_rank)

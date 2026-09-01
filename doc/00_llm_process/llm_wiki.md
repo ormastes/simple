@@ -3,29 +3,26 @@
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
-## Mandatory checks and hook setup
+## SPipe Knowledge Compiler
 
-- Keep interactive push checks bounded; compiler builds, full tests, QEMU,
-  hardware, and benchmarks belong to the bootstrap-owned evidence tier.
-- Before changing hook wiring, use the check-then-install commands in
-  `doc/07_guide/tooling/must_check_tiering.md` for the current host.
-- Linked worktrees share their hooks directory. Install the stable
-  `scripts/hooks/pre-push-worktree-launcher`; never bind the shared hook to one
-  worktree's absolute dispatcher path.
-- Start detailed work at
-  `doc/00_llm_process/feature_expert/must_check_tiering/skill.md`.
-
-## Sdoctest discovery
-
-- `simple test test --whole` is the release-wide command: positional `test`
-  scopes executable specs only, while Markdown comes from
-  `config/sdoctest.sdn` and source-comment doctests come from `src/lib`,
-  `src/compiler`, and `src/app`.
-- Use `--sdoctest <file.md>` for a focused Markdown file and
-  `--spl-doctest <file.spl>` for a focused source-comment file.
-- Runnable Markdown and comment examples use closed, non-empty
-  `simple`/`spl`/`sdoctest` fences. Use `text` for illustrative snippets.
-- Primary operator guide: `doc/07_guide/infra/testing.md`.
+- **Admitted narrow kernels:** commit `6b7fc8b83f6` provides pure-library
+  `ProjectionKernelV1` deterministic immutable-inventory list/read and
+  `SnapshotLexicalSearchV1` fixed-point metadata lexical discovery. The
+  projection cursor is an unsigned local continuation, not an authorization or
+  integrity token.
+- **Deferred surfaces:** no MCP/tools, materialized view, full-text/provider
+  search, persistence, incremental index, canonical refactor, or service-backed
+  publish/open is released by those kernels.
+- **Authority:** F1/N1 selects `AuthorityServiceV1` as sole future mutable
+  owner; its durable backend and authenticated runtime are not admitted. Normal
+  Node fails closed and has no filesystem/CAS/fallback authority. F2/N2 is only
+  a private certified service backend.
+- **Trace:** the trace-kernel candidate is frozen and unadmitted after its
+  duplicate-reference validation defect; never treat it as trace evidence or
+  copy it forward.
+- **Pointers:** operator status is
+  `doc/07_guide/app/spipe/spipe_knowledge_compiler.md`; target architecture and
+  pending waves are `doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md`.
 
 ## Parent-authoritative actor/process transport
 
@@ -69,129 +66,37 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   sidecar means no retained execution provenance, not a generated evidence PASS.
 - **Primary guide:** `doc/07_guide/infra/sspec_typed_evidence.md`.
 
-## UP Squared Apollo Lake SimpleOS bring-up
+## Secure Pure-Simple web and database servers
 
-- **Current status:** OVMF boot and VFS-backed `ls /` PASS; physical-board boot
-  and physical DCI remain blocked.
-- **Canonical handoff:**
-  `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`.
-- **Safe upload:** dedicated removable GPT/FAT32 x64 UEFI media at
-  `EFI/BOOT/BOOTX64.EFI`, selected once with F7.
-- **Board-attached media:** it is invisible to the build host unless UP2
-  already runs a trusted Linux/SSH service or a PXE-booted RAM environment.
-  Preferred first light is to move the stick to the writer host. Remote mode
-  stages and hashes the image on UP2, admits one stable by-id/serial/capacity,
-  rejects root/swap/mounted/internal media, writes locally, syncs, rechecks the
-  identity, and hashes the exact image-length readback. Never pipe SSH to `dd`.
-- **Not upload paths:** UEFI Shell launches files already on accessible media;
-  UART has no assumed XMODEM protocol; Micro-B OTG needs a proven Linux UDC and
-  gadget configuration; PXE needs an isolated DHCP/TFTP network. None is
-  inferred from connector presence.
-- **Original-board storage:** eMMC and SATA/mSATA are internal; the M.2 2230
-  E-key is not a generic M-key NVMe slot. A USB NVMe enclosure normally appears
-  through USB/SCSI, so admit identity, not node spelling.
-- **Debug:** CN16 3.3 V TTL UART. Do not use CN22 as CPU JTAG; pin 4 is 1.8 V
-  and its documented JTAG is FPGA/CPLD/BIOS service, with no published CPU TAP
-  or complete signal-threshold qualification.
-- **Never write:** host system disk, UP2 internal eMMC/SATA, adapter-attached
-  NVMe, BIOS/SPI, or UEFI
-  variables during first light.
-- **Verdict rule:** offline image structure, Tigard enumeration, or retained
-  partial source is not live board evidence. PASS requires ordered UART boot
-  markers and a command-correlated VFS-backed `ls /` response.
-- **Current build state (2026-08-22):** the admitted build produced a
-  298,648-byte freestanding ELF and 256 MiB GPT/FAT32 UEFI image. OVMF reaches
-  loader admission, shim, 32/64-bit bootstrap, entry, console, filesystem, and
-  shell; injected `ls /` returns `/bin`, `/etc`, and `/README.txt`. Physical F7
-  boot is still pending because the board-attached stick is not visible to the
-  writer host.
-- **Intel DCI:** Intel lists Apollo Lake processors for proprietary DCI USB 3.x
-  DbC JTAG-like run control and access to target-authorized physical-memory
-  regions. Exact original-UP2 FAB/BIOS applicability is not proven. It requires
-  an Intel-qualified DCI DbC cable/probe, enabled/unlocked firmware and
-  architectural gates, and Intel System Debugger/System Bring-Up Toolkit. Smart
-  KM Link `0ea0:2211`, Tigard `0403:6010`, CN22, GDB, and OpenOCD are not DCI.
-  DCI can stage RAM but is not a block-storage writer; persistent I/O remains a
-  target-side driver/provisioner operation. Primary guide:
-  `doc/07_guide/platform/simpleos/up_squared_apl_intel_dci_debug.md`.
-- **Selected DCI implementation (2026-08-21):** A+B+D: DCI-assisted UEFI
-  first boot, replay-safe UEFI-resident RAM mailbox/physical-ELF admission, and
-  identity/challenge-gated target-side storage provisioning. The pure-Simple
-  policy is `src/os/kernel/arch/x86_64/up_squared/dci_mailbox.spl`; physical
-  transport, boot, and exact-length storage readback still require hardware.
-- **Current DCI host checkpoint:** Ubuntu has no authentic Intel toolkit or
-  `99-dci.rules`; Intel distributes the toolkit only after its CNDA/Registration
-  Center request. Smart KM Link `0ea0:2211` enumerates as USB 2.0 HID/storage,
-  not DCI. BIOS enablement is not inferred from cable presence.
-- **Capability evidence boundary (2026-08-22):** Intel's Target Connection
-  Agent matrix includes Apollo Lake, but that proves silicon/tool support rather
-  than UP2 port routing or BIOS consent. UEFI Debug Support and its discovery
-  table also do not implement a RAM mailbox or boot handoff. The tree now adds
-  that separate capability as a directly entered GNU-EFI PE32+ application:
-  it publishes wire-v1, admits an exact debugger-authored ELF, exits boot
-  services, enters the embedded ELF32 shim, and boots SimpleOS under OVMF.
-  This is software-path proof; physical Apollo Lake DCI and MP/AP state remain
-  unproven.
-- **UP2 boot-menu evidence:** record Secure Boot state. F7 selects one-time boot;
-  DEL or ESC enters setup. EFI-shell launch of the fallback path is a distinct
-  route and must record the mapped filesystem and exact image.
-- **UP2 UEFI topology boundary:** `BOOTX64.EFI` is now the resident GNU-EFI
-  mailbox owner; `GRUBX64.EFI` is its no-commit timeout fallback. The resident
-  image embeds the existing ELF32 shim, constructs its Multiboot2 module and
-  EFI-memory-map tags, and owns the reviewed x64-to-i386 transition. Do not
-  describe the later shim itself as UEFI-resident.
-  Its boot nonce must come from UEFI RNG or RDRAND; time/TSC fallback is
-  diagnostic-only and cannot authorize a committed payload.
-- **Free UP2 debug boundary (2026-08-22):** no open tool found implements
-  Apollo Lake's proprietary DCI ExI/JTAG/DMA plane. The practical free lane is
-  removable UEFI boot plus CN16 UART, followed by a target-resident SimpleOS
-  GDB RSP stub; xHCI DbC is only a later byte transport. CHIPSEC must run on the
-  target and cannot remotely halt it. CN16 is pin 8 GND, pin 9 board RX, pin 10
-  board TX at 3.3-V TTL/115200 8N1; never connect pins 1/5 (5 V) or use CN22.
-- **2026-08-22 live trial:** Ubuntu GDB was present and `picocom` 3.1 was
-  installed. Tigard interface 00 was verified as Port A/Serial, but passive,
-  command, and five-minute reset-window captures returned zero bytes; Tigard
-  was subsequently disconnected. Physical power/reset and CN16 wiring remain
-  the next evidence gate.
-- **UP2 COM1 first-read rule:** initialize COM1 before the first kernel marker,
-  then drain the `0xAE` loopback probe from RX before accepting shell input.
-  OVMF exposed this as `0xAEls /`; the corrected image now boots and completes
-  a fresh VFS-backed `ls /`. This is host evidence, not physical CN16 proof.
-- **UP2 free RAM monitor:** after the shell command `gdb`, SimpleOS serves
-  checksummed GDB RSP `m`/`M` packets over CN16 for only
-  `0x0a000000..0x0b000000`, capped at 1024 bytes with write readback. OVMF
-  proves `SIMP` → `53494d50` and detach. Registers, run control, reset, binary
-  `X`, preboot DCI, and physical CN16 remain outside that PASS.
-- **Fresh emulator evidence (2026-08-22):** current kernel
-  `0a8afd63…293c08`; the byte-reproducible admitted image is
-  `abffdd3f…de93fe` with loader PE `2b116981…a936e`. Two fresh parallel builds
-  compare byte-for-byte, and that exact image passes GRUB-fallback OVMF boot,
-  VFS `ls /`, GDB `M`/`m` readback, the separate scratch-NVMe
-  Identify/GPT/FAT32/flush/fresh-readback gate, and direct resident-mailbox
-  boot where GDB writes the whole kernel to RAM and no GRUB fallback occurs.
-  The paired rejection gate proves a wrong committed digest cannot admit,
-  transition, or silently fall through to GRUB.
-  Image admission pins epoch `1704067200`, GPT disk/ESP GUIDs, FAT serial, and
-  mtools timestamps; require `--image-reproducibility` before copying its hash
-  into a storage challenge or physical-media receipt.
-  Physical UP2, CN16, DCI, and physical storage remain separate.
-- **Apollo Lake reset exception:** Intel's 2020 debugger notes say OpenRC warm
-  reset can leave Apollo Lake cores unreleasable, with manual reset required.
-  Never use it as the UP2 software-reset fallback. A Power-Good reset remains
-  unqualified until proven on the exact FAB.
-- **Direct-load boundary:** the current ELF has three non-contiguous `PT_LOAD`
-  mappings and a `0x152`-byte writable file payload expanding to `0x02fc7000` in
-  memory, ending at `0x0b000000`. Contiguous ELF copy plus RIP assignment is
-  invalid. Inspect the exact artifact with
-  `scripts/check/inspect-up-squared-apl-dci-elf.shs`; prefer a UEFI-resident
-  mailbox loader that performs ELF and Multiboot transitions. That loader is
-  now implemented and exercised through `--ovmf-dci-admission`; physical DCI
-  and multi-core firmware/kernel AP-state evidence remain required.
-- **Canonical tooling:** build the exact-kernel image receipt with
-  `scripts/os/build-simpleos-up-squared-usb-image.shs`; admit/write only through
-  `scripts/os/write-simpleos-up-squared-usb.shs`; accept hardware only through
-  `scripts/check/check-simpleos-up-squared-apollo-lake.shs --live` with the
-  full-readback media receipt.
+- **Canonical web owner:** `src/lib/nogc_sync_mut/http_server/` with shared
+  parsing policy in `src/lib/common/net/http_core.spl`.
+- **Response-framing rule:** the server writer alone emits `Content-Length`,
+  `Transfer-Encoding`, and `Connection`. Application conflicts are suppressed
+  case-insensitively; invalid field names and control-bearing values are
+  rejected without displacing safe default security headers.
+- **REQ-002 executable evidence:**
+  `test/03_system/web/server/secure_pure_simple_web_server_spec.spl` contains
+  visible positive, hostile edge/error, and real-loopback step flows with
+  built-in matchers and absolute wire assertions.
+- **Operator evidence:** use
+  `doc/06_spec/03_system/web/server/secure_pure_simple_web_server_spec.md`, the
+  test plan at `doc/03_plan/sys_test/secure_pure_simple_servers.md`, and the
+  guide at `doc/07_guide/lib/pure_simple_servers.md` together. The executable
+  spec remains under `test/`; `doc/06_spec` receives Markdown only.
+- **Current status:** `TEST_BLOCKED`, not PASS, while no adjacent provenance
+  receipt admits a current-source pure-Simple Stage-4 full CLI. Never use the
+  Rust seed, an unreceipted binary, static inspection, or a hand-authored manual
+  as runtime/docgen/maintenance evidence.
+- **Expert note:**
+  `doc/00_llm_process/feature_expert/secure_pure_simple_servers/skill.md`.
+
+### Agent lookup rule
+
+When a request mentions secure server framing, bounded HTTP response writing,
+hostile response headers, production TLS fail-closed behavior, or the
+Pure-Simple database listener lifecycle, start with the expert note and its
+test plan. Preserve the exact `TEST_BLOCKED` boundary until the admitted CLI
+runs each focused command once.
 
 ## StarFive JH7110 software reset over Tigard JTAG
 
@@ -335,69 +240,19 @@ verify that the caller actually crosses the worker/library boundary.
   identity separately from the seed/driver.
 - Guide: `doc/07_guide/compiler/build.md#bootstrap-debug-and-test-modes`.
 
-## Bootstrap native-build failure classes
+## Clang/LLVM 23.1 bootstrap migration
 
-Ported 2026-08-23 from the macOS aarch64 lane (`c9ce33e2234`) and cross-checked
-on Linux x86_64. Platform labels are load-bearing — do not generalize a
-Darwin-only row.
-
-- **Hello-world SEGV has TWO classes; classify before diagnosing.**
-  *zeroed payload* (macOS lane): `arg == 0` into a live function —
-  `hir_cache_closure_digest+36`, `x0 == 0`, because
-  `streaming_module_surfaces_owner` read back Some-tagged with payload word 0
-  (nil is 3, so `== nil` guards pass). vs *NULL-GOT* (Linux lane, root-caused
-  `c4b84dc9aaf`): `rip == 0`, an undefined `rt_unwrap_or_trap` left a zero GOT
-  slot. Both present identically. Fixing one does not fix the other.
-- **Why compile time cannot see the zeroed-payload class.** The value is
-  well-typed (`ModuleSurfacesByName?`); store and read are in different `me`
-  methods with no cross-method definite-assignment tracking; the corruption is a
-  native aggregate-transport miscompile *below* the frontend; and
-  `rt_unwrap_or_trap` (`src/runtime/simple_core/core_values.spl:79`) gates only
-  on the discriminant and returns `rt_enum_payload` **without validating
-  payload != 0** — confirmed on Linux, platform-neutral. Lossy transport still
-  live: `module_surfaces_freeze` still returns
-  `Result<ModuleSurfacesByName, text>`
-  (`module_surface_registry_index.spl:291`).
-- **Two different `--timeout` flags.** Rust seed driver
-  (`src/compiler_rust/driver/src/cli/native_build.rs:129,229,584`):
-  `--timeout <secs>` sets **per-file** `file_timeout`, default 300 — this is the
-  path the bootstrap uses, so the per-file budget *is* overridable, contradicting
-  the macOS lane's "no override exists". Pure-Simple CLI
-  (`src/app/cli/native_build_main.spl:89`): `--timeout` is the **worker
-  subprocess** timeout, `DEFAULT_TIMEOUT_MS = 7200000`. The struct default
-  `file_timeout: 300` lives at
-  `pipeline/native_project/mod.rs:537`. That file's own comment (`:17`) and
-  `--help` (`:805`) both claim "default: 60" and are wrong.
-  `--jobs=full` on a small host can push a big file past 300 s; retry
-  `--jobs=half`, the cache resumes. Same file passing with fewer jobs =
-  contention, not a hang.
-- **`rt_heap_ref_wellformed`** — formation-only probe for heap-typed
-  enum/Option payloads at fail-closed handoffs: 1 only for a tag==1 heap pointer
-  with addr >= 4096; deliberately no registry/liveness probe, scalar payloads
-  report 0 by design. On `main` as `57271d9ba49`. Driver guard:
-  `E-DRIVER-HIR-OWNER-MALFORMED` in
-  `src/compiler/80.driver/driver_hir_pipeline_lowering.spl`.
-- **Fresh-seed requirement (portable).** Current `src/lib/**` has 2,245
-  `unsafe(` uses; any seed older than ~2026-08-19 fails `error[E1002]: function
-  'unsafe' not found`. Only a `--full-bootstrap` seed rebuild compiles current
-  source.
-- **macOS-only: Mach-O weak definitions.** Apple `llvm-nm -g -p` prints weak
-  *definitions* as `T`; only `-m` shows `weak external`. Seed parsers accepting
-  only ELF `W`/`V` misread weak C fallbacks as STRONG → "Stage4 runtime capsule
-  defines owner-provided runtime symbols STRONGLY". **Inert on Linux**; not
-  ported.
-- **Ops hygiene (mechanism platform-neutral).** Stale
-  `build/.simple-bootstrap-locks/` files → "timed out waiting for bootstrap
-  output ownership"; killing a bootstrap wrapper orphans its cargo/rustc
-  children at PPID 1 (check `ps -o pid,ppid` first); `native-build` buffers to
-  non-tty, so a 0-byte log is not a stall — judge by
-  `build/bootstrap/bootstrap-progress.log` and CPU.
-- **`jj` colocated.** `jj rebase -r X -d Y` moves X *and descendants only* and
-  silently drops ancestors — use `-s <stack-root>`. `(empty)` after rebase means
-  the diff collapsed; re-apply. `git worktree remove/prune` does not snapshot jj
-  state.
-- Detail: `doc/07_guide/tooling/bootstrap_phase_verification.md`,
-  `doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md`.
+- **Canonical requirement:** a Stage-4 LLVM bootstrap uses Clang/LLVM 23.1;
+  LLVM 18/20 is diagnostic evidence only.
+- **Selection contract:** platform detection must resolve one 23.1 prefix and
+  export its `llvm-config`, `clang`, `llvm-as`, `opt`, `llc`, runtime library,
+  and matching Rust `llvm-sys` binding.
+- **Do not substitute:** setting `LLVM_VERSIONS=23` while the Rust seed remains
+  on Inkwell `llvm18-0` / `llvm-sys 180`; that is an ABI-incompatible partial
+  migration.
+- **Host-unavailable status:** record `llvm23-toolchain-unavailable` with the
+  exact install/binding resume work. Do not run or claim a legacy LLVM 18
+  bootstrap as a 23.1 result.
 
 ## Spec run verdict / "did the tests pass?"
 
@@ -459,6 +314,18 @@ externs reading as `connected=false`). A digest/hash/checksum comparison that
 "passes" via `bin/simple test` alone has not exercised the engine ordinary
 `bin/simple run` uses — re-verify with `SIMPLE_EXECUTION_MODE=jit` (or plain
 `bin/simple run`) before trusting a cross-engine equality claim.
+
+### SFFI direct-runtime-hook rule
+
+Use `scripts/audit/sffi-unsafe-backlog.shs` to warn on owned direct `rt_*`
+declarations without a contract-bearing unsafe boundary. The audit is
+source-only prioritization; it does not prove ABI/null/ownership correctness,
+provider safety, artifact identity, verification, or signing. Never bulk
+autofix this queue. A rewrite needs a reviewed per-contract safe-facade mapping
+or a semantics-preserving exact annotation plus minimal lexical
+`unsafe(capabilities: [ffi])` scope. It must not change a nullable/sentinel
+result into a fabricated default or add hot-path allocation, copying, lookup,
+locking, retries, or an extra provider call.
 
 ## Evidence discipline: census, sabotage, and size
 
@@ -649,6 +516,17 @@ separate claim levels.
 - **LLVM fork:** `github.com/ormastes/llvm-project` branch `simpleos` (Clang 20),
   pinned by `LLVM_REVISION` in `src/os/port/llvm/build.spl`.
 
+### POSIX porting boundary
+
+SimpleOS provides a usable static sysroot, libc/C++ archives, ELF loader,
+filesystem syscalls, and partial POSIX/Linux-personality surfaces. That makes a
+**host cross** Clang port tractable, not an automatic guest-native Clang port.
+The in-guest driver needs `fork`/`exec` on the filesystem-exec route; dynamic
+loader, mmap, signal, and other POSIX families remain partial or unavailable.
+For 23.1, require separate positive evidence for: host cross C/C++ compile,
+guest `clang -cc1` object output, guest C/C++ link, and filesystem-launched
+ELF execution. Never infer a later tier from sysroot presence alone.
+
 ### Status rule — do not overstate
 
 In-guest **COMPILE** is proven under real OVMF-pflash firmware
@@ -687,11 +565,6 @@ build green. Require the positive marker, `nm` for `T` (not `W`), and a
 
 ## PostgreSQL mimic (compatibility surface — NOT the DB server)
 
-- **Not the DB server:** the "DB server" is Simple's PostgreSQL-like server
-  tier `std.database.server` (`src/lib/nogc_sync_mut/database/server/` —
-  sessions, deny-wins capabilities, transactions, commit-before-ack
-  durability, framed transport). `postgres_mimic` is only a PostgreSQL
-  session/query compatibility surface on top of it.
 - **Protocol/session owner:** `std.database.postgres_mimic`.
 - **Execution engine:** `std.database.pure_sql.PureDatabase`.
 - **Compatibility claim:** PostgreSQL-like startup, session, simple-query,
@@ -841,6 +714,27 @@ handwritten manual cannot claim live PASS or change the 24-row ledger.
 Canonical operator detail is
 `doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`.
 
+## VHDL GHDL/Yosys process facade
+
+Use this lane when a task mentions `vhdl_sffi`, `VhdlToolResult`, GHDL/Yosys
+availability, captured tool output, or `REQ-VHDL-SFFI-001`.
+
+- Normative requirement: `doc/02_requirements/hardware/vhdl.md`.
+- Executable acceptance: `test/03_system/feature/usage/vhdl_spec.spl`.
+- Operator manual: `doc/06_spec/03_system/feature/usage/vhdl_spec.md`.
+- Test plan: `doc/03_plan/sys_test/vhdl_process_facade.md`.
+- Detailed expert: `doc/00_llm_process/feature_expert/vhdl_exec_core_gen/skill.md`.
+- Lane state: `.spipe/vhdl-gen-backend/state.md`.
+
+The public wrapper must route through the canonical pure-Simple
+`process_ops.process_run` owner; do not add a second process extern or copy the
+wrapper into an app leaf. Qualified execution requires an admitted pure-Simple
+full CLI, `SIMPLE_VHDL_TEST=1`, GHDL, and Yosys. If any admission element is
+missing, retain `TEST_BLOCKED`; never promote the edge-only result-constructor
+scenario, source inspection, a Rust seed, or a bootstrap native probe into an
+SSpec PASS. GHDL/Yosys process acceptance is separate from generated-core
+golden parity and FPGA/board evidence.
+
 ## SSpec documentization maintenance
 
 Treat `simple sspec-maintain` as the SSpec/manual peer of lint and
@@ -895,28 +789,6 @@ improve preview/conflict/reparse/write diagnostics to stderr; machine report
 stdout stays serialization-only. Do not infer documentation-quality acceptance
 from timing output or a zero-stub count alone.
 
-## FV2 RISC-V dual-track verification
-
-Route formal-verification work through
-`doc/00_llm_process/feature_expert/formal_verification/skill.md`. The focused
-system contract is
-`test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`, mirrored as
-Markdown only at
-`doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`.
-The lane traces REQ-FV2-015, REQ-FV2-019, NFR-FV2-002, and NFR-FV2-009.
-
-The readiness checker requires all 21 canonical RVFI ports. Its synthetic
-fixture proves checker behavior only; it is not a generated-CPU, Sail-oracle,
-refinement, equivalence, or SymbiYosys proof result. Production acceptance
-requires both `sh scripts/check/check-riscv-formal-dual-track.shs` and
-`sh scripts/check/check-riscv-rtl-sby-proof.shs` to pass in a qualified
-environment.
-
-Run the SSpec, `spipe-docgen`, and `sspec-maintain` only with an admitted,
-current-source pure-Simple Stage-4 CLI. If that runtime is absent, retain
-`TEST_BLOCKED`; never substitute the Rust seed, a stale Stage-2/3 artifact,
-readiness-only output, or a hand-authored receipt for executable evidence.
-
 ## Minimal-bootstrap feature development
 
 Normal feature work starts with the smallest named target, provider artifact,
@@ -954,38 +826,53 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 
 ## UP Squared free NVMe provisioning
 
-- Common owners: `os.drivers.nvme.NvmeDriver`, `NvmeBlockAdapter`, GPT, FAT32.
-- UP2 owns PCI grant and x86 freestanding DMA/MMIO only; StarFive retains its
-  PCIe-host/PHY/cache-coherency adapter.
-- Boot Identify is read-only. Format authority is the exact live
-  `FORMAT:<serial>:<nsid>:<lba-count>` token, never a password.
-- Storage proof is GPT + bounded FAT32 + flush + fresh-adapter byte readback +
-  `ls /nvme`; emulator interoperability additionally requires host `mdir` and
-  `mtype` on a dedicated scratch image. Never point this proof at host NVMe.
-- Full raw images use a separate session: plan exact range/hash, confirm the
-  complete live-identity challenge, transfer ordered <=1 MiB RSP-staged chunks,
-  verify each chunk before write, then require NVMe Flush and streaming
-  whole-image SHA-256 over exact fresh-adapter readback. The common `BlockDevice` owner
-  is portable; UP2 owns PCI/Identify/admission/staging.
-- Keep the confirmation line bounded by hashing length-delimited canonical
-  identity fields; print full model/serial/transport/capacity separately. Keep
-  long-lived native plan/session state in module-owned scalar/text fields, not
-  aggregates stored through module-global optionals.
-- UP2 RSP UART `M` packets must be parsed with scalar state directly into the
-  bounded staging window. Materializing/slicing repeated 2 KiB text frames can
-  exhaust the 16 MiB monotonic freestanding heap. Require immediate byte
-  readback and checksum ACK; a bad checksum never authorizes storage commit.
-- A correct RSP RAM receipt does not prove the target hashing path. If staged
-  bytes pass `m` readback but chunk SHA fails, retain `media_writes=0`, stop at
-  the retry cap, and investigate the freestanding hash/array ABI separately.
-- For monotonic-heap bare metal, incremental SHA must reuse a fixed 64-byte
-  block and 64-word schedule and mutate state in place. Do not allocate a
-  schedule/result per block or rely on large-array reads at changing offsets.
-- Separate raw-image persistence from bootability: retain one receipt for
-  target write/Flush/fresh-readback plus independent host SHA, and another for
-  firmware boot from NVMe with USB absent and command-correlated VFS `ls /`.
+### Agent lookup rule
 
 ## UP Squared free debug transport qualification
+
+## Protected GitHub PR handoff
+
+Search aliases: `self approve`, `approve PR`, and `author cannot approve` all
+mean: run `spipe self-review-guide` (or
+`node .spipe/spipe/cli/spipe.js self-review-guide`). GitHub forbids author
+`APPROVED`; the supported action is the distinct `SPipe Self Review Admission`
+required status. The guide prints one copy/paste dispatch and the exact-head
+poll/remediation steps.
+
+If `spipe` is absent or reports `unknown command: self-review-guide`, the
+installed/global SPipe is stale. Use the repository-pinned implementation:
+
+```bash
+git fetch origin main
+git switch main
+git merge --ff-only origin/main
+git submodule update --init .spipe/spipe
+node .spipe/spipe/cli/spipe.js self-review-guide
+```
+
+Do not fall back to author `gh pr review --approve`. Refresh the pinned
+submodule/plugin and rerun the guide. DevHub's same-author redirect and the
+SPipe MCP `spipe_self_review_privilege_evaluate` then
+`spipe_self_review_approve` sequence are alternate front doors to the same
+policy boundary.
+
+When branch protection requires a pull request, push the reviewed branch and
+open or update its PR rather than pushing directly to `main`. Record whether it
+is `unverified`, `REVIEW_REQUIRED`, `awaiting-self-review-admission`,
+`awaiting-independent-approval`, `awaiting-required-checks`, `merge-blocked`,
+or `merged`. On a repository with the live scoped policy, an exact-head
+high-capability review at `high` effort or above with zero P0/P1 findings may
+dispatch the trusted default-branch `SPipe Self Review Admission` workflow.
+Its `PASS:0:0` self-attestation produces a short-lived required status check;
+it does not create a GitHub provider `APPROVED` review and is not independent
+authentication. The author's credential must not call
+`gh pr review --approve`. Use an eligible independent provider reviewer when
+provider approval is required. A push, base/PR edit, policy/ruleset change, or
+expiry invalidates the old admission and requires a new exact-state review.
+`--no-verify` only skips local Git hooks and cannot bypass remote checks or
+protection. The operator guides are `doc/07_guide/app/devhub.md` and
+`doc/07_guide/infra/self_review_policy_db.md`; the executable review workflow
+is `tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
 
 - GNU GDB/GDB multiarch, OpenOCD, and picocom are the legitimate free host
   baseline; they do not turn an arbitrary USB cable into Intel DCI.

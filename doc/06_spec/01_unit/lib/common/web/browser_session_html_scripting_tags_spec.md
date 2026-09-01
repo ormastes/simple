@@ -1,6 +1,29 @@
-# BrowserSession HTML scripting text projection
+# Browser Session Html Scripting Tags Specification
 
-> Projects script and noscript content according to the active runtime. This is
+> <details>
+
+<!-- sdn-diagram:id=browser_session_html_scripting_tags_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=browser_session_html_scripting_tags_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+browser_session_html_scripting_tags_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=browser_session_html_scripting_tags_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,30 +32,14 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# BrowserSession HTML scripting text projection
-
-Projects script and noscript content according to the active runtime. This is
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/common/web/browser_session_html_scripting_tags_spec.spl` |
-| Updated | 2026-07-29 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-Projects script and noscript content according to the active runtime. This is
-visible-document evidence, not full JavaScript or pixel-rendering coverage.
+# Browser Session Html Scripting Tags Specification
 
 ## Scenarios
 
 ### BrowserSession HTML scripting tag semantics
 
-#### should hide noscript fallback from visible rendering when scripting is enabled
+#### hides noscript fallback from visible rendering when scripting is enabled
 
-- Project supported HTML semantics to visible text
 - var session = BrowserSession new
 - Ok
    - Expected: session.current_body_html does not contain `Fallback body`
@@ -44,11 +51,10 @@ visible-document evidence, not full JavaScript or pixel-rendering coverage.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Project supported HTML semantics to visible text")
 var session = BrowserSession.new()
 val result = session.open_html(
     "https://example.com/noscript-enabled",
@@ -66,9 +72,8 @@ match result:
 
 </details>
 
-#### should run script content and hide noscript fallback when scripting is enabled
+#### runs script content and hides noscript fallback when scripting is enabled
 
-- Project supported HTML semantics to visible text
 - var session = BrowserSession new
 - Ok
    - Expected: session.current_body_html equals `Scripted body`
@@ -81,11 +86,10 @@ match result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Project supported HTML semantics to visible text")
 var session = BrowserSession.new()
 val result = session.open_html(
     "https://example.com/scripted",
@@ -103,9 +107,8 @@ match result:
 
 </details>
 
-#### should ignore script content and keep noscript fallback visible when runtime is disabled
+#### ignores script content and keeps noscript fallback visible when runtime is disabled
 
-- Project supported HTML semantics to visible text
 - var session = BrowserSession new without runtime
 - Ok
    - Expected: session.current_body_html does not contain `Scripted body`
@@ -116,11 +119,10 @@ match result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Project supported HTML semantics to visible text")
 var session = BrowserSession.new_without_runtime()
 val result = session.open_html(
     "https://example.com/noscript",
@@ -137,6 +139,21 @@ match result:
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/common/web/browser_session_html_scripting_tags_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- BrowserSession HTML scripting tag semantics
 
 ## Scenario Summary
 

@@ -1,0 +1,69 @@
+"""Focused coverage for CLI-owned MC/DC option transport into the driver."""
+
+use std.spec
+use compiler.common.driver_core_types.{CompileOptions}
+use compiler.driver.driver_types.{CompileContext}
+use std.common.mcdc.model.{mcdc_mode_from_text, mcdc_mode_name}
+
+describe "MC/DC compile option transport":
+    it "accepts documented static and dynamic mode spellings":
+        expect(mcdc_mode_name(mcdc_mode_from_text("static-off").unwrap())).to_equal("off")
+        expect(mcdc_mode_name(mcdc_mode_from_text("static-on").unwrap())).to_equal("on")
+        expect(mcdc_mode_name(mcdc_mode_from_text("dynamic-aspect").unwrap())).to_equal("dynamic")
+
+    it "keeps the default compile path statically disabled without budgets":
+        val options = CompileOptions.default()
+        expect(options.coverage_enabled).to_equal(false)
+        expect(options.mcdc_mode_text).to_equal("")
+        expect(options.mcdc_owner_bytes).to_equal(0)
+        expect(options.mcdc_global_bytes).to_equal(0)
+        expect(options.mcdc_dynamic_dormant).to_equal(false)
+
+    it "applies explicit dynamic mode and bounded budgets at context creation":
+        var options = CompileOptions.default()
+        options.mcdc_mode_text = "dynamic-aspect"
+        options.mcdc_owner_bytes = 4096
+        options.mcdc_global_bytes = 16384
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["mcdc_mode"]).to_equal("dynamic")
+        expect(ctx.config["mcdc_owner_bytes"]).to_equal("4096")
+        expect(ctx.config["mcdc_global_bytes"]).to_equal("16384")
+        expect(ctx.config.contains_key("coverage")).to_equal(false)
+        expect(ctx.config.contains_key("mcdc_config_error")).to_equal(false)
+
+    it "transports an explicit dynamic dormant request without weakening default activation":
+        var options = CompileOptions.default()
+        options.mcdc_mode_text = "dynamic-aspect"
+        options.mcdc_dynamic_dormant = true
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["mcdc_mode"]).to_equal("dynamic")
+        expect(ctx.config["mcdc_dynamic_dormant"]).to_equal("true")
+
+    it "keeps explicit static-on separate from legacy coverage":
+        var options = CompileOptions.default()
+        options.mcdc_mode_text = "static-on"
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["mcdc_mode"]).to_equal("on")
+        expect(ctx.config.contains_key("coverage")).to_equal(false)
+
+    it "keeps legacy coverage enabled when MC/DC is explicitly disabled":
+        var options = CompileOptions.default()
+        options.coverage_enabled = true
+        options.mcdc_mode_text = "off"
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["coverage"]).to_equal("1")
+        expect(ctx.config["mcdc_mode"]).to_equal("off")
+
+    it "rejects a global budget smaller than its owner budget":
+        var options = CompileOptions.default()
+        options.mcdc_mode_text = "static-on"
+        options.mcdc_owner_bytes = 8192
+        options.mcdc_global_bytes = 4096
+        val ctx = CompileContext.create(options)
+        expect(ctx.config.contains_key("mcdc_config_error")).to_equal(true)
+
+    it "fails closed for invalid programmatic mode transport":
+        var options = CompileOptions.default()
+        options.mcdc_mode_text = "typo-mode"
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["mcdc_config_error"]).to_contain("MCDC-E-MODE")

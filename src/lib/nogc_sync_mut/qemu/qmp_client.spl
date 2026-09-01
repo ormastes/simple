@@ -10,10 +10,34 @@
 # SFFI — Unix socket and raw fd primitives (implemented in unix_common.h)
 # ============================================================================
 
+@unsafe(reason: "raw QMP Unix-socket connect status ABI", capabilities: [ffi])
 extern fn rt_unix_socket_connect(path: text) -> i64
+@unsafe(reason: "raw QMP file-descriptor write status ABI", capabilities: [ffi])
 extern fn rt_fd_write(fd: i64, data: text, len: i64) -> i64
+@unsafe(reason: "raw QMP receive ABI; native descriptor lifting remains unverified", capabilities: [ffi])
 extern fn rt_fd_read_until(fd: i64, stop_byte: i64, max: i64) -> text
+@unsafe(reason: "raw QMP file-descriptor close status ABI", capabilities: [ffi])
 extern fn rt_fd_close(fd: i64) -> bool
+
+@always_inline
+fn _qmp_sffi_connect(path: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_unix_socket_connect(path)
+
+@always_inline
+fn _qmp_sffi_write(fd: i64, data: text, len: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_fd_write(fd, data, len)
+
+@always_inline
+fn _qmp_sffi_read_until(fd: i64, stop_byte: i64, max: i64) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_fd_read_until(fd, stop_byte, max)
+
+@always_inline
+fn _qmp_sffi_close(fd: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_fd_close(fd)
 use std.io_runtime.{thread_sleep}
 
 # ============================================================================
@@ -31,13 +55,13 @@ struct QmpClient:
 fn qmp_write_line(fd: i64, json: text) -> bool:
     """Write a JSON line (appends newline) to the socket fd."""
     val line = "{json}\n"
-    val n = rt_fd_write(fd, line, line.len())
+    val n = _qmp_sffi_write(fd, line, line.len())
     n >= 0
 
 fn qmp_read_line(fd: i64) -> text:
     """Read one newline-terminated JSON response (up to 64 KB)."""
     # stop_byte = 10 = '\n'
-    rt_fd_read_until(fd, 10, 65536)
+    _qmp_sffi_read_until(fd, 10, 65536)
 
 fn qmp_read_reply(fd: i64) -> text:
     """Read until a concrete QMP reply is seen.
@@ -71,7 +95,7 @@ fn qmp_connect(socket_path: text) -> QmpClient:
     var attempt: i64 = 0
     var last_error = "connect failed"
     while attempt < 25:
-        val fd = rt_unix_socket_connect(socket_path)
+        val fd = _qmp_sffi_connect(socket_path)
         if fd >= 0:
             # Read greeting (e.g. {"QMP": {"version": {...}, "capabilities": [...]}})
             var greeting = ""
@@ -96,10 +120,10 @@ fn qmp_connect(socket_path: text) -> QmpClient:
                         return QmpClient(socket_path: socket_path, fd: fd)
                     else:
                         last_error = "empty qmp_capabilities ack"
-                rt_fd_close(fd)
+                _qmp_sffi_close(fd)
             else:
                 last_error = "no greeting"
-                rt_fd_close(fd)
+                _qmp_sffi_close(fd)
         else:
             last_error = "connect failed"
         attempt = attempt + 1
@@ -113,7 +137,7 @@ fn qmp_disconnect(client: QmpClient) -> bool:
     """Close the persistent QMP socket fd."""
     if client.fd < 0:
         return false
-    rt_fd_close(client.fd)
+    _qmp_sffi_close(client.fd)
 
 # ============================================================================
 # Internal: Send QMP Command on persistent fd

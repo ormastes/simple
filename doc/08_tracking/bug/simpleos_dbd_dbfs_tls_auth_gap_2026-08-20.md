@@ -2,28 +2,6 @@
 
 Status: open, release-blocking for REQ-014 and REQ-016
 
-## 2026-08-21 filesystem-launch production wiring
-
-The filesystem payload no longer constructs the parallel `DbServerCapsule`.
-It is a thin HTTP plus canonical DBD transport adapter: owned boot files feed
-`DbdServer.provision_service`, credential/certificate/private-key source
-buffers are zeroed with exact readback on every exit, and no credential enters
-argv or immutable text. `DbdDbfsAdapter` now accepts a least-authority
-filesystem-process VFS projection only when DBFS-root, durable-sync, and
-transactional-replace facts all originate from the mount owner. Recovery,
-TLS AUTH, mutation commit, and post-restart reads remain in `DbdServer`.
-
-The initial adapter incorrectly derived invented DBFS bits 32/64 from the
-FAT32 atomic-capability mask, which canonically stops at 31. It now consumes a
-typed mount-owner state cleared before every root mount and published only by
-a durability-ready mounted `DbFsDriver`, through read-only syscall 79. Staging
-is exclusive and generation-owned, commit syncs the namespace after rename,
-and whole-owner close wipes retained provisioning on every later exit.
-
-The record stays open until target runtimes execute that capability path and
-x86_64/AArch64/RISC-V receipts prove the authenticated commit and fresh-boot
-readback. This source closure does not fabricate those receipts.
-
 The bounded `dbd` safety slice validates and replays its whole journal before
 mutation, rejects malformed commands before journaling, and verifies exact
 write/readback bytes. It has a configured digest-only credential provider and
@@ -226,16 +204,3 @@ record already demands.
 the certificate/private-key owner, the boot credential source, the DBFS durable
 commit owner, and the wipe/native receipts in the closure list above are all
 untouched by this change.
-
-### 2026-08-21 capability correction
-
-The daemon's bounded provisioning, digest-only verifier, mutable-byte AUTH
-framing, authenticated-record ingress, and filesystem J1 write/readback path
-are implemented and wired in `src/os/apps/dbd/`.  The capability receipt now
-names the narrower code fact as
-`auth=DigestVerifierImplementedUnprovisionedV1`; it deliberately does not
-claim that boot material was provisioned. The existing
-`journal=ChecksummedBase64V1` continues to describe the J1 path. This does
-**not** promote production startup: `tls=Blocked` and
-`live_dbfs_durability=Blocked` remain explicit, and the first startup blocker
-continues to be `boot-mutable-credential-owner-unavailable`.

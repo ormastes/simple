@@ -1,6 +1,6 @@
-# guest_toolchain_execution_gate_spec
+# Guest Toolchain Execution Gate Specification
 
-> Verifies the guest toolchain execution gate behaviour end to end so maintainers of this
+> Tests covering target-native guest toolchain typed receipt.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# guest_toolchain_execution_gate_spec
-
-Verifies the guest toolchain execution gate behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the guest toolchain execution gate behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Guest Toolchain Execution Gate Specification
 
 ## Scenarios
 
@@ -39,21 +17,23 @@ unrelated sibling features are out of scope.
 
 #### accepts structurally complete candidates for each required target and filesystem
 
-- Verify: accepts structurally complete candidates for each required target and filesystem
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- accepts structurally complete candidates for each required target and filesystem
    - Expected: guest_toolchain_execution_receipt_v1_validate(receipt) equals `Ok(())`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: accepts structurally complete candidates for each required target and filesystem")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("accepts structurally complete candidates for each required target and filesystem")
 val targets = [
     SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
     SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
@@ -75,20 +55,18 @@ for target in targets:
 
 #### never promotes a structurally complete candidate directly to ledger PASS
 
-- Verify: never promotes a structurally complete candidate directly to ledger PASS
+- never promotes a structurally complete candidate directly to ledger PASS
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: never promotes a structurally complete candidate directly to ledger PASS")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("never promotes a structurally complete candidate directly to ledger PASS")
 val detail = guest_toolchain_execution_receipt_gate_detail(_x86_fat32_receipt())
 expect(detail).to_start_with("BLOCKED:")
 expect(detail).to_contain("authoritative producer signature")
@@ -99,20 +77,18 @@ expect(detail).to_contain("loader-owned consume-once token")
 
 #### rejects wrong target, ABI, filesystem, and duplicate role substitution
 
-- Verify: rejects wrong target, ABI, filesystem, and duplicate role substitution
+- rejects wrong target, ABI, filesystem, and duplicate role substitution
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: rejects wrong target, ABI, filesystem, and duplicate role substitution")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("rejects wrong target, ABI, filesystem, and duplicate role substitution")
 var receipt = _x86_fat32_receipt()
 receipt.target_triple = "x86_64-unknown-linux-gnu"
 expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_equal(
@@ -140,20 +116,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### rejects schema, receipt identity, missing roles, and per-role target substitution
 
-- Verify: rejects schema, receipt identity, missing roles, and per-role target substitution
+- rejects schema, receipt identity, missing roles, and per-role target substitution
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: rejects schema, receipt identity, missing roles, and per-role target substitution")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("rejects schema, receipt identity, missing roles, and per-role target substitution")
 var receipt = _x86_fat32_receipt()
 receipt.schema_version = 2
 expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_equal(
@@ -181,20 +155,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### requires canonical guest artifacts and nonzero content digests
 
-- Verify: requires canonical guest artifacts and nonzero content digests
+- requires canonical guest artifacts and nonzero content digests
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: requires canonical guest artifacts and nonzero content digests")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("requires canonical guest artifacts and nonzero content digests")
 var receipt = _x86_fat32_receipt()
 var role = receipt.roles[4]
 role.tool_artifact_path = "/host/usr/bin/clang"
@@ -219,20 +191,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### requires absolute argv zero and binds the filesystem source into argv
 
-- Verify: requires absolute argv zero and binds the filesystem source into argv
+- requires absolute argv zero and binds the filesystem source into argv
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: requires absolute argv zero and binds the filesystem source into argv")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("requires absolute argv zero and binds the filesystem source into argv")
 var receipt = _x86_fat32_receipt()
 var role = receipt.roles[3]
 role.argv = ["llvm-ar", role.source_path]
@@ -266,20 +236,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### rejects PATH lookup, host execution, and non-guest execution independently
 
-- Verify: rejects PATH lookup, host execution, and non-guest execution independently
+- rejects PATH lookup, host execution, and non-guest execution independently
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: rejects PATH lookup, host execution, and non-guest execution independently")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("rejects PATH lookup, host execution, and non-guest execution independently")
 var receipt = _x86_fat32_receipt()
 var role = receipt.roles[0]
 role.used_path_lookup = true
@@ -306,20 +274,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### requires exact bounded output, recomputed output digest, and exit zero
 
-- Verify: requires exact bounded output, recomputed output digest, and exit zero
+- requires exact bounded output, recomputed output digest, and exit zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: requires exact bounded output, recomputed output digest, and exit zero")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("requires exact bounded output, recomputed output digest, and exit zero")
 var receipt = _x86_fat32_receipt()
 var role = receipt.roles[2]
 role.observed_stdout = "host wrapper output\n"
@@ -356,20 +322,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### binds every simple alias and the manifest to the distinct role digests
 
-- Verify: binds every simple alias and the manifest to the distinct role digests
+- binds every simple alias and the manifest to the distinct role digests
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: binds every simple alias and the manifest to the distinct role digests")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("binds every simple alias and the manifest to the distinct role digests")
 var receipt = _x86_fat32_receipt()
 receipt.aliases.pop()
 expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_equal(
@@ -414,20 +378,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### requires canonical role and alias manifest ordering
 
-- Verify: requires canonical role and alias manifest ordering
+- requires canonical role and alias manifest ordering
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: requires canonical role and alias manifest ordering")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("requires canonical role and alias manifest ordering")
 var receipt = _x86_fat32_receipt()
 val first_role = receipt.roles[0]
 receipt.roles[0] = receipt.roles[1]
@@ -447,20 +409,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### rejects mutation after the structural receipt is frozen
 
-- Verify: rejects mutation after the structural receipt is frozen
+- rejects mutation after the structural receipt is frozen
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: rejects mutation after the structural receipt is frozen")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("rejects mutation after the structural receipt is frozen")
 var receipt = _x86_fat32_receipt()
 receipt.receipt_id = "toolchain-run-forged"
 expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_equal(
@@ -471,20 +431,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### requires the full version-interpret-compile-load-delete-rerun workflow
 
-- Verify: requires the full version-interpret-compile-load-delete-rerun workflow
+- requires the full version-interpret-compile-load-delete-rerun workflow
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: requires the full version-interpret-compile-load-delete-rerun workflow")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("requires the full version-interpret-compile-load-delete-rerun workflow")
 var receipt = _x86_fat32_receipt()
 var version = receipt.roles[7]
 version.argv = [version.tool_artifact_path, "version"]
@@ -534,20 +492,18 @@ expect(guest_toolchain_execution_receipt_v1_validate(receipt).unwrap_err()).to_e
 
 #### keeps the legacy host staging booleans fail closed even when all are true
 
-- Verify: keeps the legacy host staging booleans fail closed even when all are true
+- keeps the legacy host staging booleans fail closed even when all are true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-010
-# @req: REQ-009
-step("Verify: keeps the legacy host staging booleans fail closed even when all are true")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-OS
+step("keeps the legacy host staging booleans fail closed even when all are true")
 val detail = guest_toolchain_execution_gate_detail(true, true, true)
 expect(detail).to_start_with("blocked:")
 expect(detail).to_contain("authoritative target-native receipt producer")
@@ -556,6 +512,21 @@ expect(detail.contains("READY")).to_be(false)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering target-native guest toolchain typed receipt.
+- target-native guest toolchain typed receipt
 
 ## Scenario Summary
 
@@ -570,36 +541,56 @@ expect(detail.contains("READY")).to_be(false)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-009/010`
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `44341f2ddf9a9eb2074bb55f5b91e9dda7fd751a05a3768f9b852dda35518663`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `92400a598c65941b446ae308b3965cd45fad4ac9d0083a9244c2e410213ebc7e`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `44341f2ddf9a9eb2074bb55f5b91e9dda7fd751a05a3768f9b852dda35518663`.
+Source SHA-256: `92400a598c65941b446ae308b3965cd45fad4ac9d0083a9244c2e410213ebc7e`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `44341f2ddf9a9eb2074bb55f5b91e9dda7fd751a05a3768f9b852dda35518663`  
+Source SHA-256: `92400a598c65941b446ae308b3965cd45fad4ac9d0083a9244c2e410213ebc7e`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **86/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.spl
 mirror: doc/06_spec/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.md (current)
-findings: 3 blockers: 0
+findings: 6 blockers: 1
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=86; blocker cap makes effective=49
 doc/06_spec/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.spl:154:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts structurally complete candidates for each required target and filesystem' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.spl:173:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'never promotes a structurally complete candidate directly to ledger PASS' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.spl:181:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects wrong target, ABI, filesystem, and duplicate role substitution' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

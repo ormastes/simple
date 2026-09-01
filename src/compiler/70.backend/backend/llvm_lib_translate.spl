@@ -5,10 +5,9 @@
 # Delegates instruction translation to llvm_lib_translate_expr.spl.
 
 use compiler.mir.mir_data.*
-use compiler.backend.backend.llvm_lib_translate_expr.{translate_call}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, SwitchCase}
 use compiler.backend.backend.llvm_lib_type_mapper.{LlvmLibTypeMapper}
-use compiler.backend.backend.llvm_lib_translate_expr.{translate_instruction, translate_operand_llvm, translate_call}
+use compiler.backend.backend.llvm_lib_translate_expr.{translate_instruction, translate_operand_llvm}
 use compiler.mir.mir_coverage_probe_admission.{
     mir_coverage_probe_admission_diagnostic_module_v1
 }
@@ -249,7 +248,13 @@ fn compile_function_llvm(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLib
                     llvm_build_call2(builder, fn_ty, abort_fn, [], "")
                 llvm_build_unreachable(builder)
                 terminator_already_emitted = true
-            case CallTerminator(dest, func, args, normal, _):
+            case Throw(_, _):
+                panic("E-BACKEND-LLVM-LIB-TERM-Throw: recoverable-unwind ABI is unsupported; use the textual LLVM POSIX ELF backend")
+            case Resume(_, _):
+                panic("E-BACKEND-LLVM-LIB-TERM-Resume: recoverable-unwind ABI is unsupported; use the textual LLVM POSIX ELF backend")
+            case CallTerminator(dest, func, args, normal, unwind, _, _):
+                if unwind.?:
+                    panic("E-BACKEND-LLVM-LIB-TERM-CallTerminator-Unwind: recoverable unwind edges are unsupported; use the textual LLVM POSIX ELF backend")
                 translate_call(ctx, mod_, builder, type_mapper, dest, func, args, value_map, local_types, func_map)
                 val normal_bb = block_map[normal]
                 llvm_build_br(builder, normal_bb)
@@ -287,6 +292,7 @@ fn declare_runtime_functions(ctx: i64, mod_: i64, tm: LlvmLibTypeMapper):
     declare_fn(mod_, "rt_file_open", llvm_function_type(i32_ty, [ptr_ty, i64_ty, i32_ty], false))
     declare_fn(mod_, "rt_file_close", llvm_function_type(i8_ty, [i32_ty], false))
     declare_fn(mod_, "rt_file_read_text", llvm_function_type(ptr_ty, [ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_file_read_regular_no_follow_bounded", llvm_function_type(ptr_ty, [ptr_ty, i64_ty, i64_ty], false))
     declare_fn(mod_, "rt_file_write", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))
     declare_fn(mod_, "rt_file_read_bytes", llvm_function_type(ptr_ty, [ptr_ty, i64_ty], false))
     declare_fn(mod_, "rt_file_write_bytes", llvm_function_type(i1_ty, [ptr_ty, i64_ty, ptr_ty, i64_ty], false))
@@ -347,6 +353,7 @@ fn declare_runtime_functions(ctx: i64, mod_: i64, tm: LlvmLibTypeMapper):
     declare_fn(mod_, "rt_free_deep", llvm_function_type(i64_ty, [i64_ty], false))
     declare_fn(mod_, "rt_array_len", llvm_function_type(i64_ty, [ptr_ty], false))
     declare_fn(mod_, "rt_array_get", llvm_function_type(ptr_ty, [ptr_ty, i64_ty], false))
+    declare_fn(mod_, "rt_bytes_u8_at", llvm_function_type(i64_ty, [ptr_ty, i64_ty], false))
     declare_fn(mod_, "rt_array_set", llvm_function_type(void_ty, [ptr_ty, i64_ty, ptr_ty], false))
     declare_fn(mod_, "rt_array_push", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty], false))
     # RuntimeValue-ABI lane (sibling rt_array_push is ptr(ptr, ptr) here): the
@@ -464,7 +471,6 @@ fn declare_runtime_functions(ctx: i64, mod_: i64, tm: LlvmLibTypeMapper):
     # Native build support
     declare_fn(mod_, "rt_native_build", llvm_function_type(i64_ty, [ptr_ty], false))
     declare_fn(mod_, "rt_getpid", llvm_function_type(i64_ty, [], false))
-    declare_fn(mod_, "rt_mkdir_p", llvm_function_type(i1_ty, [ptr_ty], false))
 
     # Runtime init/shutdown
     declare_fn(mod_, "__simple_runtime_init", llvm_function_type(void_ty, [], false))

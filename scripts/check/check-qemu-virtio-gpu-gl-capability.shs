@@ -40,9 +40,14 @@ classify_probe() {
 
 run_bounded_probe() {
     qemu=$1
+    preload=${2:-}
     output_file=$(mktemp "${TMPDIR:-/tmp}/simple-qemu-gl.XXXXXX")
     trap 'rm -f "$output_file"' EXIT HUP INT TERM
-    "$qemu" -M none -device virtio-gpu-gl,help >"$output_file" 2>&1 &
+    if [ -n "$preload" ]; then
+        env LD_PRELOAD="$preload" "$qemu" -M none -device virtio-gpu-gl,help >"$output_file" 2>&1 &
+    else
+        "$qemu" -M none -device virtio-gpu-gl,help >"$output_file" 2>&1 &
+    fi
     probe_pid=$!
     (
         sleep "$PROBE_TIMEOUT_SECONDS"
@@ -58,6 +63,21 @@ run_bounded_probe() {
     classify_probe "$probe_output" "$probe_code"
 }
 
+find_opengl_provider_module() {
+    for candidate in /usr/lib/*/qemu/ui-opengl.so /usr/lib/qemu/ui-opengl.so; do
+        [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
 self_test() {
     classify_probe "qemu: failed to open module: undefined symbol: qemu_egl_display" 1
     [ "$PROBE_STATUS:$PROBE_REASON" = blocked:module-symbol-mismatch ]
@@ -71,11 +91,21 @@ self_test() {
     [ "$PROBE_STATUS:$PROBE_REASON" = blocked:probe-failed ]
     classify_probe "unexpected loader failure" 1
     [ "$PROBE_STATUS:$PROBE_REASON" = blocked:probe-failed ]
+    # The documented default invocation has no argv. Keep dispatch independent
+    # of `shift` so `set -e` cannot abort before the bounded QEMU probe starts.
+    [ "$(default_mode)" = --probe ]
     echo "qemu_virtio_gpu_gl_capability_self_test=pass"
+}
+
+default_mode() {
+    if [ "$#" -eq 0 ]; then echo --probe; else echo "$1"; fi
 }
 
 probe() {
     qemu=${1:-}
+    PROBE_ADAPTER=none
+    PROBE_ADAPTER_MODULE=none
+    PROBE_ADAPTER_MODULE_SHA256=none
     if [ -z "$qemu" ]; then
         case "$(uname -m)" in
             arm64|aarch64) qemu=$(command -v qemu-system-aarch64 2>/dev/null || true) ;;
@@ -88,16 +118,36 @@ probe() {
         qemu=missing
     else
         run_bounded_probe "$qemu"
+        if [ "$PROBE_STATUS:$PROBE_REASON" = blocked:module-symbol-mismatch ]; then
+            provider=$(find_opengl_provider_module || true)
+            if [ -n "$provider" ]; then
+                run_bounded_probe "$qemu" "$provider"
+                if [ "$PROBE_STATUS" = ready ]; then
+                    PROBE_REASON=none
+                    PROBE_ADAPTER=packaged-ui-opengl-preload
+                    PROBE_ADAPTER_MODULE=$provider
+                    PROBE_ADAPTER_MODULE_SHA256=$(hash_file "$provider")
+                fi
+            fi
+        fi
     fi
     echo "qemu_virtio_gpu_gl_status=$PROBE_STATUS"
     echo "qemu_virtio_gpu_gl_reason=$PROBE_REASON"
     echo "qemu_virtio_gpu_gl_binary=$qemu"
+    echo "qemu_virtio_gpu_gl_adapter=$PROBE_ADAPTER"
+    echo "qemu_virtio_gpu_gl_adapter_module=$PROBE_ADAPTER_MODULE"
+    echo "qemu_virtio_gpu_gl_adapter_module_sha256=$PROBE_ADAPTER_MODULE_SHA256"
     echo "qemu_virtio_gpu_gl_linux_virgl_evidence=unclaimed"
     [ "$PROBE_STATUS" = ready ]
 }
 
-case "${1:---probe}" in
+mode=$(default_mode "$@")
+case "$mode" in
     --self-test) self_test ;;
-    --probe) shift; probe "${1:-}" ;;
+    --probe)
+        if [ "$#" -gt 0 ]; then shift; fi
+        [ "$#" -le 1 ] || { echo "usage: $0 [--self-test|--probe [qemu-system path]]" >&2; exit 2; }
+        probe "${1:-}"
+        ;;
     *) echo "usage: $0 [--self-test|--probe [qemu-system path]]" >&2; exit 2 ;;
 esac

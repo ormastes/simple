@@ -1,0 +1,50 @@
+use std.spec.*
+use compiler.semantics.rt_hal_assurance_closure.{
+    RtHalAssuranceNodeV1, rt_hal_assurance_closure_check_v1
+}
+
+fn assurance_node(identity: text, callees: [text], critical_entry: bool,
+                  has_hal: bool, rank: i64) -> RtHalAssuranceNodeV1:
+    RtHalAssuranceNodeV1(identity: identity, display_name: identity,
+        callees: callees, is_critical_entry: critical_entry,
+        has_rt_hal: has_hal, assurance_rank: rank, line: 7)
+
+describe "REQ-010 rt(hal) entry-closure assurance":
+    it "rejects a transitive lower assurance operation from a Critical entry":
+        val nodes = [
+            assurance_node("app::entry", ["io::bridge"], true, false, 3),
+            assurance_node("io::bridge", ["io::legacy"], false, false, 3),
+            assurance_node("io::legacy", [], false, true, 2),
+        ]
+        val findings = rt_hal_assurance_closure_check_v1(nodes, 8, 8)
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].root).to_equal("app::entry")
+        expect(findings[0].offender).to_equal("io::legacy")
+
+    it "admits an unrelated explicitly justified lower assurance operation":
+        val nodes = [
+            assurance_node("app::entry", ["io::critical"], true, false, 3),
+            assurance_node("io::critical", [], false, true, 3),
+            assurance_node("tools::legacy", [], false, true, 1),
+        ]
+        expect(rt_hal_assurance_closure_check_v1(nodes, 8, 8).len()).to_equal(0)
+
+    it "fails closed only for unknown calls reached from a Critical entry":
+        val reachable = [
+            assurance_node("app::entry", ["<unknown:dispatch>"], true, false, 3),
+            assurance_node("tools::entry", ["<unknown:offline>"], false, false, 3),
+        ]
+        val findings = rt_hal_assurance_closure_check_v1(reachable, 8, 8)
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].offender).to_equal("<unknown:dispatch>")
+
+    it "visits shared cyclic closure nodes once":
+        val nodes = [
+            assurance_node("a::entry", ["shared::one"], true, false, 3),
+            assurance_node("b::entry", ["shared::one"], true, false, 3),
+            assurance_node("shared::one", ["shared::two"], false, false, 3),
+            assurance_node("shared::two", ["shared::one"], false, true, 2),
+        ]
+        val findings = rt_hal_assurance_closure_check_v1(nodes, 8, 8)
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].root).to_equal("a::entry")

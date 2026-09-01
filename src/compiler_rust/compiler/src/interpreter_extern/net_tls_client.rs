@@ -73,6 +73,13 @@ fn runtime_text_out(rv: RuntimeValue, symbol: &str) -> Result<Value, CompileErro
     unsafe { text_from_runtime_parts(data, len, symbol) }
 }
 
+fn runtime_optional_text_out(rv: RuntimeValue, symbol: &str) -> Result<Value, CompileError> {
+    if rv.is_nil() {
+        return Ok(Value::Nil);
+    }
+    runtime_text_out(rv, symbol)
+}
+
 unsafe fn text_from_runtime_parts(data: *const u8, len: i64, symbol: &str) -> Result<Value, CompileError> {
     if len <= 0 {
         return Ok(Value::text(String::new()));
@@ -141,26 +148,26 @@ pub fn rt_tls_client_write_timeout(args: &[Value]) -> Result<Value, CompileError
     )))
 }
 
-/// `rt_tls_client_read(conn, max_bytes) -> text`
-pub fn rt_tls_client_read(args: &[Value]) -> Result<Value, CompileError> {
-    runtime_text_out(
-        net::rt_tls_client_read(
-            int_arg(args, 0, "rt_tls_client_read")?,
-            int_arg(args, 1, "rt_tls_client_read")?,
+/// `rt_tls_client_read_checked(conn, max_bytes) -> text?`
+pub fn rt_tls_client_read_checked(args: &[Value]) -> Result<Value, CompileError> {
+    runtime_optional_text_out(
+        net::rt_tls_client_read_checked(
+            int_arg(args, 0, "rt_tls_client_read_checked")?,
+            int_arg(args, 1, "rt_tls_client_read_checked")?,
         ),
-        "rt_tls_client_read",
+        "rt_tls_client_read_checked",
     )
 }
 
-/// `rt_tls_client_read_timeout(conn, max_bytes, timeout_ms) -> text`
-pub fn rt_tls_client_read_timeout(args: &[Value]) -> Result<Value, CompileError> {
-    runtime_text_out(
-        net::rt_tls_client_read_timeout(
-            int_arg(args, 0, "rt_tls_client_read_timeout")?,
-            int_arg(args, 1, "rt_tls_client_read_timeout")?,
-            int_arg(args, 2, "rt_tls_client_read_timeout")?,
+/// `rt_tls_client_read_timeout_checked(conn, max_bytes, timeout_ms) -> text?`
+pub fn rt_tls_client_read_timeout_checked(args: &[Value]) -> Result<Value, CompileError> {
+    runtime_optional_text_out(
+        net::rt_tls_client_read_timeout_checked(
+            int_arg(args, 0, "rt_tls_client_read_timeout_checked")?,
+            int_arg(args, 1, "rt_tls_client_read_timeout_checked")?,
+            int_arg(args, 2, "rt_tls_client_read_timeout_checked")?,
         ),
-        "rt_tls_client_read_timeout",
+        "rt_tls_client_read_timeout_checked",
     )
 }
 
@@ -173,9 +180,9 @@ pub fn rt_tls_client_close(args: &[Value]) -> Result<Value, CompileError> {
     )?)))
 }
 
-/// `rt_tls_get_protocol_version(conn) -> text`
+/// `rt_tls_get_protocol_version(conn) -> text?`
 pub fn rt_tls_get_protocol_version(args: &[Value]) -> Result<Value, CompileError> {
-    runtime_text_out(
+    runtime_optional_text_out(
         net::rt_tls_get_protocol_version(int_arg(args, 0, "rt_tls_get_protocol_version")?),
         "rt_tls_get_protocol_version",
     )
@@ -198,12 +205,19 @@ mod tests {
     }
 
     #[test]
+    fn checked_read_preserves_nil_failure() {
+        let result = runtime_optional_text_out(RuntimeValue::NIL, "rt_tls_client_read_checked");
+        assert!(matches!(result, Ok(Value::Nil)));
+    }
+
+    #[test]
     fn tls_client_arguments_fail_closed() {
         assert!(rt_tls_client_connect(&[]).is_err());
         assert!(rt_tls_client_connect(&[Value::Nil, Value::Int(443)]).is_err());
         assert!(rt_tls_client_connect(&[Value::text("example.com"), Value::Bool(false)]).is_err());
         assert!(rt_tls_client_write(&[Value::Int(1), Value::Int(2)]).is_err());
-        assert!(rt_tls_client_read(&[Value::Int(1)]).is_err());
+        assert!(rt_tls_client_read_checked(&[Value::Int(1)]).is_err());
+        assert!(rt_tls_client_read_timeout_checked(&[Value::Int(1), Value::Int(2)]).is_err());
         assert!(rt_tls_client_close(&[Value::text("1")]).is_err());
     }
 

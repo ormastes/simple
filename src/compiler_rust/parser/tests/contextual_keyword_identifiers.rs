@@ -111,8 +111,8 @@ fn every_bindable_soft_keyword_reads_back_in_ordinary_expression_positions() {
     // (parser/src/expressions/primary/identifiers.rs) plus the two that were
     // historically broken. `self`/`me` are excluded: they are not bindable.
     let soft_keywords = [
-        "move", "spawn", "lazy", "skip", "into", "bind", "unwrap", "on", "with", "use", "export",
-        "requires", "auto", "where", "mod", "onto", "by", "examples", "and_then",
+        "move", "spawn", "lazy", "skip", "into", "bind", "unwrap", "on", "with", "use", "export", "requires", "auto",
+        "where", "mod", "onto", "by", "examples", "and_then",
     ];
 
     for kw in soft_keywords {
@@ -120,9 +120,7 @@ fn every_bindable_soft_keyword_reads_back_in_ordinary_expression_positions() {
         parse_ok(&format!("var {kw} = 3\nlet a = {kw} + 1"));
         parse_ok(&format!("var {kw} = 3\nlet b = 1 + {kw}"));
         // comparison in a loop condition — where `move` actually blew up
-        parse_ok(&format!(
-            "var {kw} = 0\nwhile {kw} + 1 < 4:\n    {kw} = {kw} + 1"
-        ));
+        parse_ok(&format!("var {kw} = 0\nwhile {kw} + 1 < 4:\n    {kw} = {kw} + 1"));
         // assignment target
         parse_ok(&format!("var {kw} = 1\n{kw} = {kw} * 10"));
         // call argument

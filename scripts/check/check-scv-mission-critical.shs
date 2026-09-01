@@ -1,0 +1,255 @@
+#!/bin/sh
+# check-scv-mission-critical.shs
+#
+# SCV "mission critical with allocation" gate (MCI-v2 bounded/domain-arena
+# allocation contract + critical strictness tier).
+#
+# Two halves, both fail-closed:
+#   1. Allocation bounds: an in-process probe charges each SCV bound
+#      (object bytes, tree entries, delta target bytes, parser input bytes)
+#      through the DomainArenaV1 facade at bound and at bound+1. Every bound
+#      must ADMIT the at-bound request and REJECT the over-bound request with
+#      the named error. A probe that checks 0 bounds is ERROR, never a pass.
+#   2. Critical-tier lint: `simple lint --profile=critical` over each
+#      src/lib/scv/*.spl, ONE file at a time (never batched — see
+#      .claude/rules/commands.md lint-cost notes). The CLI flag is used
+#      because the `@lint_profile(critical)` file header is unusable in
+#      product files on the current seed — see
+#      doc/08_tracking/bug/lint_profile_header_unusable_in_product_files_2026-08-25.md.
+#      scripts/check/lint-cached.shs does NOT accept a profile, so lint runs
+#      direct. Lint is EXPENSIVE (~12s startup + superlinear per-decl cost);
+#      the full sweep is opted into with --lint. Without it the gate runs the
+#      allocation half only and says so in the verdict.
+#   3. SCV-IMPL-G-04 profile row (default scan): strict / mission_critical
+#      profiles must refuse --force-unparsed and the forced_unparsed state;
+#      default keeps G-02; env requests raise but never lower / never grant
+#      mission_critical. Selftest inverts the strict row and must FAIL.
+#
+# Also emits an evidence file in the mci-allocation-domain-arena-evidence-v1
+# key=value shape (artifact_mode=fixture — the full schema's signed launcher
+# receipts are produced only by scripts/check/check-mci-v2-allocation.shs; the
+# delta is recorded inside the artifact itself).
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md convention:
+#   PASS  — <n> file(s) linted, <m> bound(s) verified, <k> profile row(s) enforced ...   exit 0
+#   FAIL  — ...                                             exit 1
+#   ERROR — nothing was checked                             exit 2
+#
+# Usage:
+#   sh scripts/check/check-scv-mission-critical.shs [--binary PATH] [--lint] [--lint-timeout SECS]
+#   sh scripts/check/check-scv-mission-critical.shs --selftest   (also runs before every scan)
+
+set -u
+
+BINARY="bin/simple"
+DO_LINT=0
+LINT_TIMEOUT=620
+SELFTEST_ONLY=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --binary) [ "$#" -ge 2 ] || { printf 'ERROR — nothing was checked (--binary needs a path)\n'; exit 2; }; BINARY=$2; shift 2 ;;
+        --lint) DO_LINT=1; shift ;;
+        --lint-timeout) [ "$#" -ge 2 ] || { printf 'ERROR — nothing was checked (--lint-timeout needs seconds)\n'; exit 2; }; LINT_TIMEOUT=$2; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) printf 'ERROR — nothing was checked (unknown argument: %s)\n' "$1"; exit 2 ;;
+    esac
+done
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+cd "$ROOT" || { printf 'ERROR — nothing was checked (cannot cd to repo root)\n'; exit 2; }
+[ -x "$BINARY" ] || { printf 'ERROR — nothing was checked (no executable at %s)\n' "$BINARY"; exit 2; }
+
+WORK=$(mktemp -d) || { printf 'ERROR — nothing was checked (mktemp failed)\n'; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+# Probe: over = extra units added to each bound for the "oversize" request.
+# The real scan uses over=1 (must be REJECTED). The selftest fixture uses
+# over=0 (an at-bound request everywhere), which the classifier must FAIL —
+# proving the oracle actually distinguishes a violated bound.
+write_probe() {
+    over=$1
+    cat > "$WORK/probe.spl" <<EOF
+use std.scv.alloc_bounds.{SCV_MAX_OBJECT_BYTES, SCV_MAX_TREE_ENTRIES, SCV_MAX_DELTA_TARGET_BYTES, SCV_MAX_PARSER_INPUT_BYTES}
+use std.scv.alloc_bounds.{scv_bound_object_bytes, scv_bound_tree_entries, scv_bound_delta_target_bytes, scv_bound_parser_input_bytes}
+fn row(name: text, admit: text, reject: text):
+    var verdict = "BAD"
+    if admit == "" and reject.contains("ERROR scv allocation bound exceeded:"):
+        verdict = "OK"
+    print("bound {name} verdict={verdict}")
+fn main():
+    row("object_bytes", scv_bound_object_bytes(SCV_MAX_OBJECT_BYTES), scv_bound_object_bytes(SCV_MAX_OBJECT_BYTES + ${over}))
+    row("tree_entries", scv_bound_tree_entries(SCV_MAX_TREE_ENTRIES), scv_bound_tree_entries(SCV_MAX_TREE_ENTRIES + ${over}))
+    row("delta_target_bytes", scv_bound_delta_target_bytes(SCV_MAX_DELTA_TARGET_BYTES), scv_bound_delta_target_bytes(SCV_MAX_DELTA_TARGET_BYTES + ${over}))
+    row("parser_input_bytes", scv_bound_parser_input_bytes(SCV_MAX_PARSER_INPUT_BYTES), scv_bound_parser_input_bytes(SCV_MAX_PARSER_INPUT_BYTES + ${over}))
+main()
+EOF
+}
+
+# Runs the probe; sets PROBE_OK / PROBE_BAD / PROBE_ERRTEXT.
+run_probe() {
+    PROBE_OUT=$(SIMPLE_LIB="$ROOT/src" timeout 600 "$BINARY" run "$WORK/probe.spl" 2>&1)
+    PROBE_RC=$?
+    PROBE_OK=$(printf '%s\n' "$PROBE_OUT" | grep -c '^bound .* verdict=OK$')
+    PROBE_BAD=$(printf '%s\n' "$PROBE_OUT" | grep -c '^bound .* verdict=BAD$')
+    PROBE_ERRTEXT=""
+    [ "$PROBE_RC" -eq 0 ] || PROBE_ERRTEXT="probe exited rc=$PROBE_RC"
+}
+
+# --- SCV-IMPL-G-04 profile row ---------------------------------------------
+# In-process probe over std.scv.profiles + the commit_policy / state_model
+# seams, on a throwaway repo: strict and mission_critical must REFUSE
+# --force-unparsed and the forced_unparsed state; default must keep the G-02
+# behaviour (allowed, audited, publication blocked); an outside request may
+# raise default->strict but never lower a pin and never grant mission_critical.
+# Runs in the DEFAULT scan (not behind --lint). The selftest fixture inverts
+# the strict expectation (strict_allows=1) and must be classified BAD.
+write_profile_probe() {
+    strict_allows=$1
+    cat > "$WORK/profile_probe.spl" <<EOF
+use app.io.mod (dir_create, file_write)
+use std.scv.store.{scv_init_repo}
+use std.scv.profiles.{scv_profile_set, scv_profile_read, scv_profile_effective, scv_profile_publication_blocked_reason}
+use std.scv.commit_policy.{scv_commit_parse_policy_forced, scv_forced_unparsed_blocks_public}
+use std.scv.state_model.{scv_state_transition_profile}
+fn row(name: text, ok: bool):
+    val verdict = if ok: "OK" else: "BAD"
+    print("profile {name} verdict={verdict}")
+fn repo(tag: text) -> text:
+    val root = "$WORK/prof-${strict_allows}-{tag}"
+    dir_create(root, true)
+    scv_init_repo(root)
+    file_write("{root}/tool.py", "print('x')\n")
+    root
+fn main():
+    val d = repo("default")
+    val d_out = scv_commit_parse_policy_forced(d, "{d}/tool.py", "legacy")
+    row("default-allows-audited-blocked", d_out.contains("policy: forced_unparsed") and scv_forced_unparsed_blocks_public(d) and scv_profile_publication_blocked_reason(d).contains("profile default"))
+    val s = repo("strict")
+    scv_profile_set(s, "strict")
+    val s_out = scv_commit_parse_policy_forced(s, "{s}/tool.py", "why")
+    val s_refused = s_out.starts_with("ERROR") and s_out.contains("profile strict") and not scv_forced_unparsed_blocks_public(s)
+    row("strict-refuses-forced", if ${strict_allows} == 1: not s_refused else: s_refused)
+    row("strict-state-unreachable", scv_state_transition_profile("strict", "private_editing", "forced_unparsed").starts_with("ERROR"))
+    val m = repo("mc")
+    scv_profile_set(m, "mission_critical")
+    val m_out = scv_commit_parse_policy_forced(m, "{m}/tool.py", "why")
+    row("mission-critical-refuses-forced", m_out.starts_with("ERROR") and m_out.contains("profile mission_critical"))
+    row("mission-critical-state-unreachable", scv_state_transition_profile("mission_critical", "private_editing", "forced_unparsed").starts_with("ERROR"))
+    val e = repo("env")
+    val e1 = scv_profile_effective(e, "strict") == "strict"
+    val e2 = scv_profile_effective(e, "mission_critical") == "default"
+    val e_set = scv_profile_set(e, "strict")
+    val e3 = e_set.starts_with("profile: strict")
+    val e4 = scv_profile_effective(e, "default") == "strict"
+    val e5 = scv_profile_read(e) == "strict"
+    row("env-raises-never-lowers-never-mc", e1 and e2 and e3 and e4 and e5)
+main()
+EOF
+}
+
+run_profile_probe() {
+    PP_OUT=$(SIMPLE_LIB="$ROOT/src" timeout 600 "$BINARY" run "$WORK/profile_probe.spl" 2>&1)
+    PP_RC=$?
+    PP_OK=$(printf '%s\n' "$PP_OUT" | grep -c '^profile .* verdict=OK$')
+    PP_BAD=$(printf '%s\n' "$PP_OUT" | grep -c '^profile .* verdict=BAD$')
+    PP_ERRTEXT=""
+    [ "$PP_RC" -eq 0 ] || PP_ERRTEXT="profile probe exited rc=$PP_RC"
+}
+
+# --- selftest: always runs first, fatal -----------------------------------
+write_profile_probe 1
+run_profile_probe
+if [ -n "$PP_ERRTEXT" ]; then
+    printf 'ERROR — nothing was checked (selftest profile probe did not run: %s)\n' "$PP_ERRTEXT"
+    exit 2
+fi
+if [ "$PP_BAD" -lt 1 ] || [ "$PP_OK" -ne 5 ]; then
+    printf 'FAIL — selftest: strict-allows-forced fixture was not classified as a failure (ok=%s bad=%s); profile oracle is inert\n' "$PP_OK" "$PP_BAD"
+    exit 1
+fi
+write_probe 0
+run_probe
+if [ -n "$PROBE_ERRTEXT" ]; then
+    printf 'ERROR — nothing was checked (selftest probe did not run: %s)\n' "$PROBE_ERRTEXT"
+    exit 2
+fi
+if [ "$PROBE_BAD" -lt 4 ] || [ "$PROBE_OK" -ne 0 ]; then
+    printf 'FAIL — selftest: bound-violation fixture was not classified as a failure (ok=%s bad=%s); oracle is inert\n' "$PROBE_OK" "$PROBE_BAD"
+    exit 1
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    printf 'PASS — selftest: 4 bound(s) probed, violation fixture FAILed as required; strict-allows-forced profile fixture FAILed as required\n'
+    exit 0
+fi
+
+# --- real scan: allocation bounds -----------------------------------------
+write_probe 1
+run_probe
+if [ -n "$PROBE_ERRTEXT" ]; then
+    printf 'ERROR — nothing was checked (bound probe did not run: %s)\n' "$PROBE_ERRTEXT"
+    exit 2
+fi
+BOUNDS_CHECKED=$((PROBE_OK + PROBE_BAD))
+FAILURES=""
+[ "$BOUNDS_CHECKED" -ge 4 ] || FAILURES="$FAILURES probe-checked-only-$BOUNDS_CHECKED-bounds"
+[ "$PROBE_BAD" -eq 0 ] || FAILURES="$FAILURES $PROBE_BAD-bound(s)-not-enforced"
+
+# --- real scan: G-04 profile row -------------------------------------------
+write_profile_probe 0
+run_profile_probe
+if [ -n "$PP_ERRTEXT" ]; then
+    printf 'ERROR — nothing was checked (profile probe did not run: %s)\n' "$PP_ERRTEXT"
+    exit 2
+fi
+PROFILES_CHECKED=$((PP_OK + PP_BAD))
+[ "$PROFILES_CHECKED" -ge 6 ] || FAILURES="$FAILURES profile-probe-checked-only-$PROFILES_CHECKED-rows"
+[ "$PP_BAD" -eq 0 ] || FAILURES="$FAILURES $PP_BAD-profile-row(s)-not-enforced:$(printf '%s\n' "$PP_OUT" | sed -n 's/^profile \(.*\) verdict=BAD$/\1/p' | tr '\n' ',')"
+
+# --- real scan: critical-tier lint, one file at a time --------------------
+LINTED=0
+if [ "$DO_LINT" -eq 1 ]; then
+    for f in src/lib/scv/*.spl; do
+        LOUT=$(timeout "$LINT_TIMEOUT" "$BINARY" lint --profile=critical "$f" 2>&1)
+        LRC=$?
+        LLAST=$(printf '%s\n' "$LOUT" | tail -1)
+        if [ "$LRC" -eq 124 ]; then
+            FAILURES="$FAILURES lint-timeout:$(basename "$f")"
+        elif [ "$LRC" -ne 0 ]; then
+            FAILURES="$FAILURES lint-fail:$(basename "$f")"
+        elif ! printf '%s' "$LLAST" | grep -q 'Lint passed'; then
+            FAILURES="$FAILURES lint-no-verdict:$(basename "$f")"
+        fi
+        LINTED=$((LINTED + 1))
+    done
+    [ "$LINTED" -gt 0 ] || FAILURES="$FAILURES lint-scanned-0-files"
+fi
+
+# --- evidence artifact ----------------------------------------------------
+EVDIR="build/scv-mci-evidence"
+mkdir -p "$EVDIR"
+RESULT=pass; [ -z "$FAILURES" ] || RESULT=fail
+{
+    echo 'artifact_schema=mci-allocation-domain-arena-evidence-v1'
+    echo 'artifact_mode=fixture'
+    echo "run_id=scv-mission-critical-$(date -u +%Y%m%dT%H%M%SZ)"
+    echo "captured_at_utc_ns=$(date +%s)000000000"
+    echo 'implementation_path=src/lib/scv/alloc_bounds.spl'
+    echo 'spec_path=test/integration/app/scv_allocation_bounds_spec.spl'
+    echo "allocation_contract_result=$RESULT"
+    echo "result=$RESULT"
+    echo 'release_eligible=false'
+    echo 'schema_delta=no signed compiler-launcher receipt/signature/trust-policy rows; produced by scripts/check/check-scv-mission-critical.shs, not the canonical check-mci-v2-allocation.shs producer'
+} > "$EVDIR/scv-allocation-evidence.env"
+
+if [ -n "$FAILURES" ]; then
+    printf 'FAIL — %s file(s) linted, %s bound(s) verified, %s profile row(s) checked, defects:%s\n' "$LINTED" "$BOUNDS_CHECKED" "$PROFILES_CHECKED" "$FAILURES"
+    exit 1
+fi
+if [ "$BOUNDS_CHECKED" -eq 0 ] && [ "$LINTED" -eq 0 ] && [ "$PROFILES_CHECKED" -eq 0 ]; then
+    printf 'ERROR — nothing was checked\n'
+    exit 2
+fi
+LINT_NOTE=""
+[ "$DO_LINT" -eq 1 ] || LINT_NOTE=" (lint sweep skipped; run with --lint)"
+printf 'PASS — %s file(s) linted, %s bound(s) verified, %s profile row(s) enforced (strict/mission_critical refuse forced_unparsed)%s\n' "$LINTED" "$BOUNDS_CHECKED" "$PROFILES_CHECKED" "$LINT_NOTE"
+exit 0

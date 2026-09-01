@@ -11,7 +11,8 @@ wiki. Use only an admitted pure-Simple full CLI for runtime/docgen/maintenance.
 
 - Isolated worktree: `/mnt/data/worktrees/restart12-compiler_perf_lane_b_20260816`
 - Branch: `codex/compiler-perf-lane-b-20260816`
-- Implementation commit after linear rebase: `e4777d21a67f5bb81f9d7951d5afa226a716cf3b`
+- Implementation commit: the lane-owned `perf(compiler): accelerate capsule
+  symbol sorting` commit; its exact post-rebase hash is a delivery receipt.
 - Production owner: `src/compiler/80.driver/driver_types.spl`
 - No shared `.codex/skills`, `.agents/skills`, or another lane's feature expert
   may be edited.
@@ -58,17 +59,26 @@ were not used.
 - Static quality: PASS — 9 scenarios, 18 visible `step("...")` calls, every
   scenario has at least two steps and one real assertion, matcher set limited
   to `to_equal` and `to_be_greater_than`, all four requirement IDs traced.
+- Manual/plan/guide/state/feature-expert integrity: PASS — all four requirement
+  IDs are present, the manual mirrors nine scenarios, and lane wiki links
+  resolve.
+- Repository LLM feature-DB reference integrity: PASS — 11 rows and 292 local
+  paths checked, with zero missing or stale paths.
 - Working direct-env guard: PASS.
 - Working numbered-artifact guard: PASS.
 - `doc/06_spec` executable-spec layout: PASS (zero `.spl` files).
 - Working conflict-marker and exact changed-file ownership scans: PASS.
 - Staged workspace-root, numbered-artifact, direct-env, diff whitespace,
   conflict-content, layout, and exact six-file ownership guards: PASS.
-- Committed-range conflict tree/marker guards: PENDING until commit.
+- Committed-range conflict tree/marker guards: PASS on the current local lane
+  range; rerun once after the final linear rebase invalidates that range.
+- Exact complete lane ownership: PASS (nine attributable paths across the
+  implementation, benchmark, report, and system-coverage commits).
 - Interpreter/native SSpec execution: TEST_BLOCKED.
 - SPipe docgen and zero-stub receipt: TEST_BLOCKED.
 - `sspec-maintain` score/findings receipt: TEST_BLOCKED.
-- Commit/push/reachability: PENDING.
+- Implementation and system-coverage commits: COMPLETE locally.
+- Final rebase/push/reachability: PENDING.
 
 ## Qualified resume sequence
 

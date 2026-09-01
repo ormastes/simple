@@ -1,21 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that LLVM-lib FFI Performance.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-LLVM_LIB_FFI-LLVM-LIB-001
-doc/01_research/llvm_lib_ffi/REQ-LLVM_LIB_FFI-LLVM-LIB-001.md
-doc/03_plan/llvm_lib_ffi/REQ-LLVM_LIB_FFI-LLVM-LIB-001.md
-doc/04_architecture/llvm_lib_ffi/REQ-LLVM_LIB_FFI-LLVM-LIB-001.md
-doc/05_design/llvm_lib_ffi/REQ-LLVM_LIB_FFI-LLVM-LIB-001.md
-"""
-
-
 # LLVM-lib FFI Performance Benchmarks
 #
 # Self-contained benchmark that directly tests FFI call patterns.
@@ -26,7 +8,7 @@ doc/05_design/llvm_lib_ffi/REQ-LLVM_LIB_FFI-LLVM-LIB-001.md
 # Run (requires natively compiled Simple binary, NOT interpreter):
 #   /path/to/native_simple test test/perf/llvm_lib_ffi_perf_spec.spl
 #
-# tag: []  # Requires native-compiled binary
+# tag: ["only-compiled"]  # Requires native-compiled binary
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_alloc(size: i64) -> i64
@@ -250,47 +232,40 @@ fn bench_uncached_build_fn() -> i64:
 # Test spec
 # ============================================================================
 
-use std.spec.step
-
 describe "LLVM-lib FFI Performance":
+    # @manual scenario evidence
     slow_it "benchmarks scratch buffer vs alloc/free (P1)":
-        # @req: REQ-LLVM
-        # @req: REQ-LLVM_LIB_FFI-LLVM-LIB-001 REQ-LLVM_LIB_FFI-LLVM-LIB-001
-        step("Verify: benchmarks scratch buffer vs alloc/free (P1)")
         print ""
         print "=== P1: Scratch Buffer vs Alloc/Free ==="
         run_bench("P1/scratch_write_4", bench_scratch_write_4)
         run_bench("P1/alloc_free_4", bench_alloc_free_4)
         run_bench("P1/scratch_write_8", bench_scratch_write_8)
         run_bench("P1/alloc_free_8", bench_alloc_free_8)
-        expect(true).to_equal(true)
+        expect(scratch_readback_ok()).to_equal(true)  # oracle: pointer writes read back exactly through the same FFI surface the benches use
 
     slow_it "benchmarks cached vs uncached FFI calls (P0)":
-        # @req: REQ-LLVM_LIB_FFI-LLVM-LIB-001
-        step("Verify: benchmarks cached vs uncached FFI calls (P0)")
         val _llvm_ok = load_llvm()
         if not _llvm_ok:
             print "[skip] libLLVM not available"
-            expect(true).to_equal(true)
+            expect(_fp_ctx_create).to_equal(0)  # oracle: an unavailable libLLVM leaves the cached pointers null (honest skip)
         else:
             print ""
             print "=== P0: Cached vs Uncached FFI Calls ==="
+            expect(_fp_ctx_create != 0 and _fp_ctx_dispose != 0).to_equal(true)  # oracle: dlsym resolved the LLVM C API entry points
+            expect(ffi_ctx_roundtrip_ok()).to_equal(true)  # oracle: a context can really be created and disposed through the wffi call path
             run_bench("P0/cached_ctx_create_dispose", bench_cached_ctx)
             run_bench("P0/uncached_ctx_create_dispose", bench_uncached_ctx)
-            expect(true).to_equal(true)
 
     slow_it "benchmarks full IR gen cached vs uncached":
-        # @req: REQ-LLVM_LIB_FFI-LLVM-LIB-001
-        step("Verify: benchmarks full IR gen cached vs uncached")
         var _llvm_ok2 = _llvm_handle != 0
         if not _llvm_ok2:
             _llvm_ok2 = load_llvm()
         if not _llvm_ok2:
             print "[skip] libLLVM not available"
-            expect(true).to_equal(true)
+            expect(_llvm_handle).to_equal(0)  # oracle: an unavailable libLLVM leaves no stale handle behind
         else:
             print ""
             print "=== Full IR Generation: Cached vs Uncached ==="
+            expect(_fp_build_add != 0 and _fp_build_ret != 0).to_equal(true)  # oracle: the IR-builder entry points resolved
             run_bench("full/cached_build_add_fn", bench_cached_build_fn)
             run_bench("full/uncached_build_add_fn", bench_uncached_build_fn)
-            expect(true).to_equal(true)

@@ -175,24 +175,8 @@ bool rt_dir_remove_all_cpath(const char* path) {
  * File Locking
  * ---------------------------------------------------------------- */
 
-/* ABI corrected 2026-08-23: a Simple `text` argument is lowered by codegen to
- * TWO arguments (rt_string_data, rt_string_len) -- verified by objdump -dr on
- * the emitted call site. The old `const char* path` / `void* addr` shapes here
- * matched no caller and no declaration, and none of these symbols had a
- * definition in any ARCHIVE-MEMBER translation unit (this header is included
- * only by runtime.c, which is deliberately not an archive member), so every
- * one of them linked as a NULL GOT slot. */
-static int rt_unix_text_to_path(const uint8_t* ptr, uint64_t len, char* buf, size_t buf_size) {
-    if (!ptr && len != 0) return 0;
-    if (len >= (uint64_t)buf_size) return 0;
-    if (len != 0) memcpy(buf, ptr, (size_t)len);
-    buf[(size_t)len] = '\0';
-    return 1;
-}
-
-int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
-    char path[4096];
-    if (!rt_unix_text_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
+    if (!path) return -1;
 
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd < 0) return -1;
@@ -317,32 +301,30 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * Memory-Mapped File I/O
  * ---------------------------------------------------------------- */
 
-int64_t rt_mmap(const uint8_t* path_ptr, uint64_t path_len, int64_t size, int64_t offset, int64_t readonly) {
-    char path[4096];
-    if (!rt_unix_text_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    if (size <= 0 || offset < 0) return 0;
+void* rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly) {
+    if (!path || size <= 0 || offset < 0) return NULL;
 
     int prot = readonly != 0 ? PROT_READ : (PROT_READ | PROT_WRITE);
     int flags = MAP_SHARED;
     int open_flags = readonly != 0 ? O_RDONLY : O_RDWR;
 
     int fd = open(path, open_flags);
-    if (fd < 0) return 0;
+    if (fd < 0) return NULL;
 
     void* addr = mmap(NULL, (size_t)size, prot, flags, fd, (off_t)offset);
     close(fd);
 
-    if (addr == MAP_FAILED) return 0;
-    return (int64_t)(uintptr_t)addr;
+    if (addr == MAP_FAILED) return NULL;
+    return addr;
 }
 
-bool rt_munmap(int64_t addr, int64_t size) {
-    if (addr == 0 || size <= 0) return false;
-    return munmap((void*)(uintptr_t)addr, (size_t)size) == 0;
+bool rt_munmap(void* addr, int64_t size) {
+    if (!addr || size <= 0) return false;
+    return munmap(addr, (size_t)size) == 0;
 }
 
-bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
-    if (addr == 0 || size <= 0) return false;
+bool rt_madvise(void* addr, int64_t size, int64_t advice) {
+    if (!addr || size <= 0) return false;
 
     /* Convert advice codes: 0=NORMAL, 1=RANDOM, 2=SEQUENTIAL, 3=WILLNEED, 4=DONTNEED */
     int posix_advice;
@@ -355,12 +337,12 @@ bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
         default: return false;
     }
 
-    return madvise((void*)(uintptr_t)addr, (size_t)size, posix_advice) == 0;
+    return madvise(addr, (size_t)size, posix_advice) == 0;
 }
 
-bool rt_msync(int64_t addr, int64_t size) {
+bool rt_msync(void* addr, int64_t size) {
     if (!addr || size <= 0) return false;
-    return msync((void*)(uintptr_t)addr, (size_t)size, MS_SYNC) == 0;
+    return msync(addr, (size_t)size, MS_SYNC) == 0;
 }
 
 /* ----------------------------------------------------------------
@@ -368,40 +350,74 @@ bool rt_msync(int64_t addr, int64_t size) {
  * ---------------------------------------------------------------- */
 
 int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags, int64_t fd, int64_t offset) {
+    if (length <= 0 || offset < 0) return -1;
+    /* SFFI executable mappings must transition RW -> RX; never admit RWX. */
+    if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
     void* result = mmap((void*)(uintptr_t)addr, (size_t)length, (int)prot, (int)flags, (int)fd, (off_t)offset);
     if (result == MAP_FAILED) return -1;
     return (int64_t)(uintptr_t)result;
 }
 
 int64_t rt_munmap_raw(int64_t addr, int64_t length) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)munmap((void*)(uintptr_t)addr, (size_t)length);
 }
 
+static bool rt_sync_instruction_cache(int64_t addr, int64_t length) {
+#if defined(__i386__) || defined(__x86_64__)
+    (void)addr;
+    (void)length;
+    return true; /* Unified/coherent instruction and data caches. */
+#elif defined(__GNUC__) || defined(__clang__)
+    uintptr_t start = (uintptr_t)addr;
+    if ((uint64_t)length > (uint64_t)(UINTPTR_MAX - start)) return false;
+    __builtin___clear_cache((char*)start, (char*)(start + (uintptr_t)length));
+    return true;
+#else
+    (void)addr;
+    (void)length;
+    return false;
+#endif
+}
+
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
-    return (int64_t)mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot);
+    if (!addr || length <= 0) return -1;
+    if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
+    if (mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot) != 0) return -1;
+    if ((prot & PROT_EXEC) != 0 && !rt_sync_instruction_cache(addr, length)) {
+        (void)mprotect((void*)(uintptr_t)addr, (size_t)length, PROT_NONE);
+        return -1;
+    }
+    return 0;
 }
 
 int64_t rt_madvise_raw(int64_t addr, int64_t length, int64_t advice) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)madvise((void*)(uintptr_t)addr, (size_t)length, (int)advice);
 }
 
 int64_t rt_msync_flags(int64_t addr, int64_t length, int64_t flags) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)msync((void*)(uintptr_t)addr, (size_t)length, (int)flags);
 }
 
 int64_t rt_mlock(int64_t addr, int64_t length) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)mlock((void*)(uintptr_t)addr, (size_t)length);
 }
 
 int64_t rt_munlock(int64_t addr, int64_t length) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)munlock((void*)(uintptr_t)addr, (size_t)length);
 }
 
 int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
+    if (!path) return -1;
     return (int64_t)open(path, (int)flags, (mode_t)mode);
 }
 
 int64_t rt_close_fd(int64_t fd) {
+    if (fd < 0) return -1;
     return (int64_t)close((int)fd);
 }
 

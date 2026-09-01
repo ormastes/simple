@@ -95,7 +95,7 @@ fn parent(path: text) -> i64:
     .unwrap();
     assert!(has_inst(&mir, |i| matches!(
         i,
-        MirInst::MethodCallStatic { func_name, .. } if func_name == "text.rfind"
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "str.rfind"
     )));
     assert_eq!(GLOBAL_REGISTRY.runtime_fn("String", "rfind"), Some("rt_string_rfind"));
     assert!(!has_inst(&mir, |i| matches!(i, MirInst::MethodCallVirtual { .. })));

@@ -2,6 +2,8 @@
 # Wraps st-flash/st-info CLI tools for STM32 debug operations.
 # Uses subprocess calls — no GDB, no OpenOCD. Direct ST-LINK communication.
 
+use std.nogc_sync_mut.debug.remote.protocol.process_command.{debug_process_output, debug_shell_output}
+
 # ST-Link probe information
 class StLinkProbeInfo:
     serial: text
@@ -18,7 +20,7 @@ class StLinkToolsClient:
 impl StLinkToolsClient:
     # Connect to a specific ST-LINK probe by serial number
     static fn connect(serial: text) -> Result<StLinkToolsClient, text>:
-        val output = rt_command_output("st-info --serial")
+        val output = debug_process_output("st-info", ["--serial"])?
         if output.len() == 0:
             return Err("st-info not found or no probes connected")
         if not output.contains(serial):
@@ -36,7 +38,7 @@ impl StLinkToolsClient:
     fn probe_info() -> Result<StLinkProbeInfo, text>:
         if not self.connected:
             return Err("not connected")
-        val all = rt_command_output("st-info --probe")
+        val all = debug_process_output("st-info", ["--probe"])?
         val info = parse_probe_info(all, self.serial)
         if info.serial.len() == 0:
             return Err("probe with serial {self.serial} not found in st-info --probe output")
@@ -67,8 +69,11 @@ impl StLinkToolsClient:
     fn read_memory(addr: i64, size: i32) -> Result<text, text>:
         if not self.connected:
             return Err("not connected")
-        val cmd = "sh -c 'tmp=$(mktemp) && st-flash --serial={self.serial} read \"$tmp\" 0x{rt_hex(addr)} {size} >/dev/null 2>&1 && od -An -t x1 \"$tmp\" && rm -f \"$tmp\"'"
-        val output = rt_command_output(cmd).trim()
+        val script = "tmp=$(mktemp) && trap 'rm -f \"$tmp\"' EXIT && st-flash --serial=\"$1\" read \"$tmp\" \"$2\" \"$3\" >/dev/null 2>&1 && od -An -t x1 \"$tmp\""
+        val output = debug_shell_output(
+            script,
+            [self.serial, "0x{rt_hex(addr)}", "{size}"]
+        )?.trim()
         if output.len() == 0:
             return Err("st-flash read produced no output")
         Ok(output)
@@ -77,25 +82,22 @@ impl StLinkToolsClient:
     fn flash_write(binary_path: text, addr: i64) -> Result<text, text>:
         if not self.connected:
             return Err("not connected")
-        val cmd = "st-flash --serial={self.serial} write {binary_path} 0x{rt_hex(addr)}"
-        val output = rt_command_output(cmd)
-        Ok(output)
+        debug_process_output(
+            "st-flash",
+            ["--serial={self.serial}", "write", binary_path, "0x{rt_hex(addr)}"]
+        )
 
     # Erase flash
     fn flash_erase() -> Result<text, text>:
         if not self.connected:
             return Err("not connected")
-        val cmd = "st-flash --serial={self.serial} erase"
-        val output = rt_command_output(cmd)
-        Ok(output)
+        debug_process_output("st-flash", ["--serial={self.serial}", "erase"])
 
     # Reset target
     fn reset() -> Result<text, text>:
         if not self.connected:
             return Err("not connected")
-        val cmd = "st-flash --serial={self.serial} reset"
-        val output = rt_command_output(cmd)
-        Ok(output)
+        debug_process_output("st-flash", ["--serial={self.serial}", "reset"])
 
     # Disconnect (no-op for CLI tools, just marks state)
     me disconnect():
@@ -183,6 +185,3 @@ fn rt_hex(value: i64) -> text:
         result = hex_chars[digit] + result
         v = v / 16
     result
-
-# SFFI declarations
-extern fn rt_command_output(cmd: text) -> text

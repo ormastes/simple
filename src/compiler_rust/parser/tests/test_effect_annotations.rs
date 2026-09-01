@@ -184,7 +184,25 @@ fn fast_add(x: i64, y: i64) -> i64:
     let func = parse_and_get_function(source);
     assert_eq!(func.effects.len(), 1);
     assert!(func.effects.contains(&Effect::Pure));
-    assert_eq!(func.decorators.len(), 1); // @inline is not an effect
+    assert_eq!(func.decorators.len(), 0);
+    assert!(func.attributes.iter().any(|attr| attr.name == "inline"));
+}
+
+#[test]
+fn test_effect_with_strong_inline_attributes() {
+    let source = r#"
+@pure
+@always_inline
+@force_inline
+fn fast_add(x: i64, y: i64) -> i64:
+    return x + y
+"#;
+
+    let func = parse_and_get_function(source);
+    assert!(func.effects.contains(&Effect::Pure));
+    assert!(func.decorators.is_empty());
+    assert!(func.attributes.iter().any(|attr| attr.name == "always_inline"));
+    assert!(func.attributes.iter().any(|attr| attr.name == "force_inline"));
 }
 
 #[test]

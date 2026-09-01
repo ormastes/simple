@@ -1,0 +1,181 @@
+# SCV warm status with zero payload reads (SCV-IMPL-E-06).
+#
+# Warm `status` runs over the persistent worktree index (E-05) and a batch
+# of watcher events instead of walking + hashing the tree:
+#   no events            -> O(0): no stat, no read, no parse; "clean"
+#   modified/created     -> stat (size + mtime). Stat equal to the index
+#                           entry => no read. Otherwise ONE FileBuffer read
+#                           (MIG-19) derives the worktree content id.
+#   deleted              -> index entry removed, zero I/O
+# Duplicate events for one path are folded before any I/O, so a path costs
+# at most one stable read per status call. The read is "stable" when the
+# post-read stat still matches the pre-read stat; a racy write leaves the
+# entry un-updated so the next status re-reads it.
+#
+# Every syscall goes through exactly one choke point (_ws_stat / _ws_read)
+# which increments ScvIoCounter — a REAL counter the spec asserts on. The
+# E-01 fswatch_scan path (sha256 of every file per poll) is never used here.
+#
+# Cold path: scv_warm_index_build walks the tree once (one read per file) to
+# seed the index; the repository content id is seeded from that same read.
+#
+# mtime is stored in ms (rt_file_stat is seconds * 1000) so the E-05 field
+# unit and the warm comparison unit agree.
+
+use std.nogc_sync_mut.io.file_ops.{file_size, file_modified_time}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk, is_dir}
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+use std.scv.core.{scv_rel_path, scv_is_repo_path}
+use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_content_id}
+use std.scv.worktree_index.{ScvWtEntry, ScvWtIndex, scv_wtindex_new, scv_wtindex_upsert, scv_wtindex_get, scv_wtindex_remove}
+
+struct ScvIoCounter:
+    stat_calls: i64
+    content_reads: i64
+    parses: i64
+
+struct ScvWarmStatusResult:
+    index: ScvWtIndex
+    io: ScvIoCounter
+    lines: [text]
+
+fn scv_io_counter_new() -> ScvIoCounter:
+    ScvIoCounter(stat_calls: 0, content_reads: 0, parses: 0)
+
+fn scv_warm_skip(root: text, path: text) -> bool:
+    val rel = scv_rel_path(root, path)
+    scv_is_repo_path(path) or rel == ".git" or rel.starts_with(".git/") or rel == ".jj" or rel.starts_with(".jj/") or rel == ".simple" or rel.starts_with(".simple/")
+
+# ---- the two I/O choke points ----
+
+# stat: (size, mtime_ms). A missing file is (-1, 0).
+fn _ws_stat(path: text, io: ScvIoCounter) -> ((i64, i64), ScvIoCounter):
+    var next = io
+    next.stat_calls = next.stat_calls + 1
+    val size = file_size(path)
+    val mtime = file_modified_time(path) * 1000
+    if size < 0 or (size == 0 and mtime == 0):
+        return ((-1, 0), next)
+    ((size, mtime), next)
+
+# read: ONE FileBuffer read -> (content_id, size)
+fn _ws_read(path: text, io: ScvIoCounter) -> ((text, i64), ScvIoCounter):
+    var next = io
+    next.content_reads = next.content_reads + 1
+    val buf = scv_file_buffer_read(path)
+    ((scv_file_buffer_content_id(buf), buf.size), next)
+
+# ---- cold path ----
+
+fn scv_warm_index_build(root: text) -> ScvWarmStatusResult:
+    var idx = scv_wtindex_new()
+    var io = scv_io_counter_new()
+    var clock: i64 = 1
+    for path in dir_walk(root):
+        if is_dir(path) or scv_warm_skip(root, path):
+            continue
+        val (st, io1) = _ws_stat(path, io)
+        val (rd, io2) = _ws_read(path, io1)
+        io = io2
+        val (size, mtime) = st
+        val (cid, _n) = rd
+        idx = scv_wtindex_upsert(idx, ScvWtEntry(path: scv_rel_path(root, path), mode: 420,
+                                                 size: size, mtime_ms: mtime, ctime_ms: mtime,
+                                                 worktree_content_id: cid, repository_content_id: cid,
+                                                 file_id: "", clock: clock,
+                                                 dirty_gen: idx.dirty_generation,
+                                                 ignore_gen: idx.ignore_generation))
+        clock = clock + 1
+    ScvWarmStatusResult(index: idx, io: io, lines: [])
+
+# ---- warm path ----
+
+# Fold events to one final kind per path (last kind wins; created then
+# deleted annihilates to deleted, deleted then created is created).
+fn scv_warm_fold_events(events: [FsWatchEvent]) -> [FsWatchEvent]:
+    var out: [FsWatchEvent] = []
+    for ev in events:
+        var found = false
+        var i = 0
+        while i < out.len():
+            if out[i].path == ev.path:
+                out[i].kind = ev.kind
+                out[i].seq = ev.seq
+                found = true
+            i = i + 1
+        if not found:
+            out.push(FsWatchEvent(seq: ev.seq, kind: ev.kind, path: ev.path, related: ""))
+        if ev.kind == "renamed" and ev.related != "":
+            var j = 0
+            var seen_src = false
+            while j < out.len():
+                if out[j].path == ev.related:
+                    out[j].kind = "deleted"
+                    seen_src = true
+                j = j + 1
+            if not seen_src:
+                out.push(FsWatchEvent(seq: ev.seq, kind: "deleted", path: ev.related, related: ""))
+    out
+
+fn scv_warm_status(root: text, idx: ScvWtIndex, events: [FsWatchEvent]) -> ScvWarmStatusResult:
+    var next = idx
+    var io = scv_io_counter_new()
+    var lines: [text] = []
+    for ev in scv_warm_fold_events(events):
+        if scv_warm_skip(root, ev.path):
+            continue
+        val rel = scv_rel_path(root, ev.path)
+        val old = scv_wtindex_get(next, rel)
+        if ev.kind == "deleted":
+            if old.path != "":
+                next = scv_wtindex_remove(next, rel)
+                lines.push("D {rel}")
+            continue
+        val (st, io1) = _ws_stat(ev.path, io)
+        io = io1
+        val (size, mtime) = st
+        if size < 0:
+            # event says touched but the file is gone: treat as delete
+            if old.path != "":
+                next = scv_wtindex_remove(next, rel)
+                lines.push("D {rel}")
+            continue
+        var entry = old
+        if old.path != "" and old.size == size and old.mtime_ms == mtime:
+            # stat-stable: no read
+            if old.worktree_content_id != old.repository_content_id:
+                lines.push("M {rel}")
+            continue
+        val (rd, io2) = _ws_read(ev.path, io)
+        io = io2
+        val (cid, read_size) = rd
+        val (st2, io3) = _ws_stat(ev.path, io)
+        io = io3
+        val (size2, mtime2) = st2
+        val stable = size2 == size and mtime2 == mtime and read_size == size
+        if old.path == "":
+            lines.push("A {rel}")
+            entry = ScvWtEntry(path: rel, mode: 420, size: size, mtime_ms: mtime, ctime_ms: mtime,
+                               worktree_content_id: cid, repository_content_id: "", file_id: "",
+                               clock: 0, dirty_gen: next.dirty_generation,
+                               ignore_gen: next.ignore_generation)
+        else:
+            entry.worktree_content_id = cid
+            entry.size = size
+            entry.mtime_ms = mtime
+            entry.dirty_gen = next.dirty_generation
+            if cid != old.repository_content_id:
+                lines.push("M {rel}")
+        if stable:
+            entry.clock = entry.clock + 1
+            next = scv_wtindex_upsert(next, entry)
+        # unstable: leave the index untouched so the next status re-reads
+    ScvWarmStatusResult(index: next, io: io, lines: lines)
+
+fn scv_warm_status_lines(res: ScvWarmStatusResult) -> text:
+    if res.lines.len() == 0:
+        return "clean\n"
+    var out = ""
+    for line in res.lines:
+        out = out + line + "\n"
+    out

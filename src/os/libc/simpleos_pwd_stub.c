@@ -1,12 +1,22 @@
 #include <errno.h>
 #include <stddef.h>
-#include "include/pwd.h"
 
 #ifndef ENOSYS
 #define ENOSYS 38
 #endif
 
-int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, unsigned long buflen,
+/* Inline forward declarations — SimpleOS has no getpwent db. */
+struct passwd {
+    char *pw_name;
+    char *pw_passwd;
+    unsigned pw_uid;
+    unsigned pw_gid;
+    char *pw_gecos;
+    char *pw_dir;
+    char *pw_shell;
+};
+
+int getpwuid_r(unsigned uid, struct passwd *pwd, char *buf, unsigned long buflen,
                struct passwd **result) {
     (void)uid; (void)pwd; (void)buf; (void)buflen;
     if (result) *result = 0;
@@ -20,5 +30,5 @@ int getpwnam_r(const char *name, struct passwd *pwd, char *buf, unsigned long bu
     return ENOSYS;
 }
 
-struct passwd *getpwuid(uid_t uid) { (void)uid; errno = ENOSYS; return 0; }
+struct passwd *getpwuid(unsigned uid) { (void)uid; errno = ENOSYS; return 0; }
 struct passwd *getpwnam(const char *name) { (void)name; errno = ENOSYS; return 0; }

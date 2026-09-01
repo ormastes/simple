@@ -1,6 +1,6 @@
-# verifier_owner_spec
+# Verifier Owner Specification
 
-> Verifies the verifier owner behaviour end to end so maintainers of this
+> Tests covering SimpleOS mutex-serialized evidence owner.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# verifier_owner_spec
-
-Verifies the verifier owner behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/01_unit/os/services/evidence/verifier_owner_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the verifier owner behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Verifier Owner Specification
 
 ## Scenarios
 
@@ -39,62 +17,37 @@ unrelated sibling features are out of scope.
 
 #### validates roots and linearizes first initialization
 
-- Verify: validates roots and linearizes first initialization
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001
-step("Verify: validates roots and linearizes first initialization")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-val empty = simpleos_evidence_trust_roots_check([])
-expect(empty.ok).to_be(false)
-val duplicate = simpleos_evidence_trust_roots_check([
-    SimpleOsTrustedEvidenceSignerV1(
-        key_id: "same", public_key: [0u8; 32]),
-    SimpleOsTrustedEvidenceSignerV1(
-        key_id: "same", public_key: [1u8; 32])
-])
-expect(duplicate.ok).to_be(false)
-var too_many: [SimpleOsTrustedEvidenceSignerV1] = []
-var root_index: i64 = 0
-while root_index < 17:
-    too_many = too_many.push(SimpleOsTrustedEvidenceSignerV1(
-        key_id: "root-" + root_index.to_text(),
-        public_key: [7u8; 32]))
-    root_index = root_index + 1
-expect(simpleos_evidence_trust_roots_check(too_many).ok).to_be(false)
-val first = simpleos_evidence_verifier_start(evidence_owner_roots())
-val repeated = simpleos_evidence_verifier_start(evidence_owner_roots())
-expect(first.ok).to_be(true)
-expect(repeated.ok).to_be(true)
-expect(simpleos_evidence_verifier_ready()).to_be(true)
-expect(simpleos_evidence_pass_admission_available()).to_be(false)
+# @req REQ-001
 ```
 
 </details>
 
 #### rejects the losing conflicting initializer without replacing roots
 
-- Verify: rejects the losing conflicting initializer without replacing roots
+- rejects the losing conflicting initializer without replacing roots
    - Expected: rejected.reason equals `trust-root-already-initialized`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001
-step("Verify: rejects the losing conflicting initializer without replacing roots")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("rejects the losing conflicting initializer without replacing roots")
 expect(simpleos_evidence_verifier_start(
     evidence_owner_roots()).ok).to_be(true)
 var conflicting = evidence_owner_roots()
@@ -113,7 +66,7 @@ expect(simpleos_evidence_verifier_ready()).to_be(true)
 
 #### linearizes competing nonce issuance to one accepted generation
 
-- Verify: linearizes competing nonce issuance to one accepted generation
+- linearizes competing nonce issuance to one accepted generation
    - Expected: losing_call.reason equals `nonce-replay`
    - Expected: invalid_time.reason equals `challenge-time`
 
@@ -121,13 +74,12 @@ expect(simpleos_evidence_verifier_ready()).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001
-step("Verify: linearizes competing nonce issuance to one accepted generation")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("linearizes competing nonce issuance to one accepted generation")
 # This is the deterministic owner model for either mutex acquisition
 # order: whichever contender enters first succeeds, the other observes
 # the committed nonce and loses without a second generation.
@@ -152,20 +104,19 @@ expect(invalid_time.reason).to_equal("challenge-time")
 
 #### retains nonce history after expiry while reusing its bounded slot
 
-- Verify: retains nonce history after expiry while reusing its bounded slot
+- retains nonce history after expiry while reusing its bounded slot
    - Expected: replay.reason equals `nonce-replay`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001
-step("Verify: retains nonce history after expiry while reusing its bounded slot")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("retains nonce history after expiry while reusing its bounded slot")
 expect(simpleos_evidence_verifier_start(
     evidence_owner_roots()).ok).to_be(true)
 val first = simpleos_evidence_issue_challenge(
@@ -188,7 +139,7 @@ expect(replay.reason).to_equal("nonce-replay")
 
 #### rejects copied generations and keeps crypto PASS disabled
 
-- Verify: rejects copied generations and keeps crypto PASS disabled
+- rejects copied generations and keeps crypto PASS disabled
    - Expected: forged.reason equals `challenge-unknown`
    - Expected: real.reason equals `artifact-rehash-required`
    - Expected: real.handle.handle_id equals ``
@@ -197,13 +148,12 @@ expect(replay.reason).to_equal("nonce-replay")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001
-step("Verify: rejects copied generations and keeps crypto PASS disabled")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("rejects copied generations and keeps crypto PASS disabled")
 expect(simpleos_evidence_verifier_start(
     evidence_owner_roots()).ok).to_be(true)
 val issued = simpleos_evidence_issue_challenge(
@@ -234,7 +184,7 @@ expect(real.handle.handle_id).to_equal("")
 
 #### caller-constructed handles cannot consume or advertise authority
 
-- Verify: caller-constructed handles cannot consume or advertise authority
+- caller-constructed handles cannot consume or advertise authority
    - Expected: first.reason equals `verified-handle-unknown`
    - Expected: second.reason equals `first.reason`
    - Expected: after.ledger.revision equals `before.ledger.revision`
@@ -244,13 +194,12 @@ expect(real.handle.handle_id).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001
-step("Verify: caller-constructed handles cannot consume or advertise authority")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("caller-constructed handles cannot consume or advertise authority")
 expect(simpleos_evidence_verifier_start(
     evidence_owner_roots()).ok).to_be(true)
 val candidate = evidence_owner_candidate("nonce-handle")
@@ -288,7 +237,7 @@ expect(simpleos_evidence_release_verified(
 
 #### enforces the live challenge bound and deterministically reuses expiry
 
-- Verify: enforces the live challenge bound and deterministically reuses expiry
+- enforces the live challenge bound and deterministically reuses expiry
    - Expected: bounded.reason equals `challenge-bound`
    - Expected: reused.challenge.session_id equals `1u64`
 
@@ -296,13 +245,12 @@ expect(simpleos_evidence_release_verified(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001
-step("Verify: enforces the live challenge bound and deterministically reuses expiry")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("enforces the live challenge bound and deterministically reuses expiry")
 expect(simpleos_evidence_verifier_start(
     evidence_owner_roots()).ok).to_be(true)
 var i: i64 = 0
@@ -323,6 +271,21 @@ expect(reused.challenge.session_id).to_equal(1u64)
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/01_unit/os/services/evidence/verifier_owner_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering SimpleOS mutex-serialized evidence owner.
+- SimpleOS mutex-serialized evidence owner
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -336,36 +299,54 @@ expect(reused.challenge.session_id).to_equal(1u64)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+- `REQ-001`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `2878d2107103bbabcedb81c36f6d0f6b03f7b38eab9545d824a4a11cb2d34d38`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `9c3bac5b1fb1832fcd1d65684b9537442d0a1d9566abec01dd4618beb7b6b1d9`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `2878d2107103bbabcedb81c36f6d0f6b03f7b38eab9545d824a4a11cb2d34d38`.
+Source SHA-256: `9c3bac5b1fb1832fcd1d65684b9537442d0a1d9566abec01dd4618beb7b6b1d9`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `2878d2107103bbabcedb81c36f6d0f6b03f7b38eab9545d824a4a11cb2d34d38`  
+Source SHA-256: `9c3bac5b1fb1832fcd1d65684b9537442d0a1d9566abec01dd4618beb7b6b1d9`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 91/100
 source: test/01_unit/os/services/evidence/verifier_owner_spec.spl
 mirror: doc/06_spec/01_unit/os/services/evidence/verifier_owner_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 6 blockers: 0
+  narrative=100 structure=90 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/services/evidence/verifier_owner_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/os/services/evidence/verifier_owner_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/services/evidence/verifier_owner_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/os/services/evidence/verifier_owner_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/services/evidence/verifier_owner_spec.spl:128:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'validates roots and linearizes first initialization' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/services/evidence/verifier_owner_spec.spl:157:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects the losing conflicting initializer without replacing roots' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/services/evidence/verifier_owner_spec.spl:173:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'linearizes competing nonce issuance to one accepted generation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/services/evidence/verifier_owner_spec.spl:195:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'retains nonce history after expiry while reusing its bounded slot' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

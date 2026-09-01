@@ -61,7 +61,11 @@ struct DtbDeviceInfo:
     clint_size: u64
     ram_base: u64
     ram_size: u64
+    # Number of CPU nodes whose status is absent, "ok", or "okay".
     hart_count: u32
+    # CPU capability metadata comes from the first enabled CPU node only.
+    first_enabled_riscv_isa: text
+    cbom_block_size: u32
     valid: bool
 
 fn dtb_device_info_empty() -> DtbDeviceInfo:
@@ -71,8 +75,22 @@ fn dtb_device_info_empty() -> DtbDeviceInfo:
         plic_base: 0, plic_size: 0,
         clint_base: 0, clint_size: 0,
         ram_base: 0, ram_size: 0,
-        hart_count: 0, valid: false
+        hart_count: 0,
+        first_enabled_riscv_isa: "",
+        cbom_block_size: 0,
+        valid: false
     )
+
+fn dtb_device_info_record_cpu(info: DtbDeviceInfo, enabled: bool, isa: text, cbom_block_size: u32) -> DtbDeviceInfo:
+    """Record one CPU node, preserving metadata from the first enabled CPU."""
+    var result = info
+    if not enabled:
+        return result
+    if result.hart_count == 0u32:
+        result.first_enabled_riscv_isa = isa
+        result.cbom_block_size = cbom_block_size
+    result.hart_count = result.hart_count + 1u32
+    result
 
 # ============================================================================
 # FDT Header
@@ -185,6 +203,21 @@ fn _mem_str_starts_with(addr: u64, prefix: text) -> bool:
         i = i + 1
     true
 
+fn _mem_ascii_to_text(addr: u64, byte_len: u32) -> text:
+    """Copy a bounded NUL-terminated DTB ASCII property into owned text."""
+    var result: text = ""
+    var i: u32 = 0u32
+    # ISA strings are small; the bound prevents a malformed property from
+    # turning boot discovery into an unbounded allocation.
+    val bounded_len = if byte_len < 256u32: byte_len else: 256u32
+    while i < bounded_len:
+        val byte = mmio_read8(addr + i as u64)
+        if byte == 0u8:
+            break
+        result = result + byte.to_char()
+        i = i + 1u32
+    result
+
 # ============================================================================
 # Node Name Classification
 # ============================================================================
@@ -261,6 +294,9 @@ struct _WalkState:
     parent_kind: _NodeKind # Kind of parent node (for /soc/... nesting)
     addr_cells: u32       # Current #address-cells (default 2)
     size_cells: u32       # Current #size-cells (default 2)
+    cpu_enabled: bool     # Current CPU node status (absent means enabled)
+    cpu_isa: text         # Current CPU node's riscv,isa property
+    cpu_cbom_block_size: u32
     result: DtbDeviceInfo # Accumulated result
 
 fn _walk_state_new(dtb_addr: u64, hdr: FdtHeader) -> _WalkState:
@@ -276,6 +312,9 @@ fn _walk_state_new(dtb_addr: u64, hdr: FdtHeader) -> _WalkState:
         parent_kind: _NodeKind.Other,
         addr_cells: 2,
         size_cells: 2,
+        cpu_enabled: true,
+        cpu_isa: "",
+        cpu_cbom_block_size: 0u32,
         result: dtb_device_info_empty()
     )
 
@@ -340,6 +379,21 @@ fn _handle_prop(state: _WalkState, prop_len: u32, nameoff: u32, data_addr: u64) 
         if prop_len >= 4:
             s.size_cells = _read_be_u32(data_addr)
         return s
+
+    if s.node_kind == _NodeKind.Cpu:
+        if _mem_str_eq(name_addr, "status"):
+            # Devicetree status is enabled only when absent, "ok", or "okay".
+            val is_ok = prop_len == 3u32 and _mem_str_eq(data_addr, "ok")
+            val is_okay = prop_len == 5u32 and _mem_str_eq(data_addr, "okay")
+            s.cpu_enabled = is_ok or is_okay
+            return s
+        if _mem_str_eq(name_addr, "riscv,isa"):
+            s.cpu_isa = _mem_ascii_to_text(data_addr, prop_len)
+            return s
+        if _mem_str_eq(name_addr, "riscv,cbom-block-size"):
+            if prop_len >= 4u32:
+                s.cpu_cbom_block_size = _read_be_u32(data_addr)
+            return s
 
     # Only process "reg" property for device nodes
     if not _mem_str_eq(name_addr, "reg"):
@@ -416,15 +470,22 @@ fn _walk_structure(state: _WalkState) -> DtbDeviceInfo:
                 addr_cells_stack[s.depth as u64] = s.addr_cells
                 size_cells_stack[s.depth as u64] = s.size_cells
 
-            val child_kind = _classify_node(name_addr)
+            var child_kind = _classify_node(name_addr)
+            # Only direct /cpus children are hart descriptions. A similarly
+            # named node elsewhere must not inflate the SMP topology.
+            if child_kind == _NodeKind.Cpu and s.node_kind != _NodeKind.Cpus:
+                child_kind = _NodeKind.Other
 
             # Track parent→child nesting for /soc/device@ patterns
             s.parent_kind = s.node_kind
             s.node_kind = child_kind
 
-            # Count CPU harts
             if child_kind == _NodeKind.Cpu:
-                s.result.hart_count = s.result.hart_count + 1
+                # A missing status property means enabled. Commit the node only
+                # at END_NODE because status may follow capability properties.
+                s.cpu_enabled = true
+                s.cpu_isa = ""
+                s.cpu_cbom_block_size = 0u32
 
             # Reset cell sizes for new node scope (inherit from parent)
             # Actual values will be overwritten if node has #address-cells/#size-cells props
@@ -432,6 +493,15 @@ fn _walk_structure(state: _WalkState) -> DtbDeviceInfo:
             s.depth = s.depth + 1
 
         else if token == FDT_END_NODE:
+            val ended_kind = s.node_kind
+            if ended_kind == _NodeKind.Cpu and s.cpu_enabled:
+                s.result = dtb_device_info_record_cpu(
+                    s.result,
+                    true,
+                    s.cpu_isa,
+                    s.cpu_cbom_block_size
+                )
+
             if s.depth > 0:
                 s.depth = s.depth - 1
 

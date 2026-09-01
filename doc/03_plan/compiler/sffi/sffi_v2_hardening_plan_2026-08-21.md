@@ -1189,172 +1189,1056 @@ free. Next harden the bounded piped-process family, then implement real signed
 evidence admission. Current global admission remains zero, so neither all
 Torch SFFI nor all SFFI may be described as verified safe.
 
-The bounded editor DAP process slice now consumes the canonical process owner
-instead of declaring five additional raw externs. Typed spawn/write/close
-helpers prevent failed writes from becoming sent/pending requests and prevent
-failed cleanup from becoming a stopped state. Piped cleanup replaces generic
-PID kill. The success path preserves one liveness query plus one write and adds
-no map, lookup, hashing, retry, sleep, or explicit allocation. Nine system
-examples, focused check/lint, and `editor-dap-process-sffi-contract.shs` pass.
-The gate intentionally labels stdout `unsafe_ambiguous`: implement an additive
-status-bearing nonblocking read/liveness ABI across C, Rust interpreter, JIT,
-native, and Simple wrappers before promoting this family beyond unsafe-
-minimized. After that, migrate `lsp_transport.spl` and editor smoke/runtime
-duplicates to the same owner, then return to signed provider admission.
+### Completed header shared-library flags authority slice
 
-The checked read/liveness ABI is now implemented across those source lanes and
-keeps a bounded one-observation poll path. Native behavioral coverage and both
-static source-shape gates pass. Do not promote it beyond `unsafe_unsigned` yet:
-the compiled interpreter artifact is stale, returned C buffers and slot access
-still need an explicit serialization/thread policy, and no provider evidence
-manifest has been signed or admitted. Next actions are:
+- [x] Remove the module-local raw environment declaration and call.
+- [x] Retain the local nullable API through canonical always-inline
+  `env_get_opt`.
+- [x] Preserve both conditional MinGW environment lookups and all platform
+  process-probe behavior.
+- [x] Add a static authority and call-count ratchet.
 
-1. rebuild the compiler and rerun checked status behavior in the compiled
-   interpreter;
-2. add and verify owning serialization plus close-after-EOF lifecycle;
-3. migrate LSP/editor duplicate read/liveness consumers to the checked owner;
-4. bind runtime artifact, compiler, ABI registry, and verification receipt to a
-   real signature and loader admission;
-5. continue `rt_file`, remaining `rt_process`, `rt_env`, and `rt_time` without
-   weakening the one-call/no-unbounded-allocation gates.
+### Completed duplicate-check scalar math authority slice
 
-Current census: 12,295 rows, 810 tagged, 626 contracted, 352 minimized, 11,211
-untouched, and zero evidence-verified, signature-verified, or admitted.
+- [x] Tag the raw square-root declaration explicitly `unsafe(ffi)`.
+- [x] Confine all calls to the existing always-inline scalar owner.
+- [x] Preserve one O(n) accumulation and exactly two roots per dense cosine.
+- [x] Add no hot-path work and add a static call-count ratchet.
+- [x] Remove the feature-vector builder's raw-symbol import and call.
+- [x] Preserve one root after its single O(n) weight accumulation.
 
-Evidence admission v2 now derives admission from a parsed ABI closure, exact
-function-only closure in a target-matched Linux ELF provider, immutable input
-snapshots, exact source/build/compiler/ABI identities, actual canonical receipt
-files rather than asserted hashes, detached
-Ed25519 signature, and separately provisioned provider trust. The first bounded
-production target is the three scalar clock contracts. Its live production gate
-must remain BLOCKED without externally supplied evidence and trust; the
-integration key is fixture-only. Next bind the real Stage4-selected runtime
-archive and release signing authority, bind the final consumer artifact, link
-map, linker, target, and ABI in its native-link receipt, then run the census
-with those evidence inputs. A fixture admission remains `fixture_verified`,
-never production `verified_and_signed`. Do not promote the remaining
-273 matching clock declaration rows unless each duplicate is also lexically
-unsafe-tagged and contract-documented. No admission operation belongs on the
-clock call path.
+### Completed MDSOC layer-document read authority slice
 
-Piped-process concurrency proceeds without weakening the bounded hot path.
-First use one fixed thread-local native checked-read buffer and stable fixed
-Rust slots with atomic PID tags and per-child locks, so unrelated children do
-not serialize behind a registry and native results
-are not shared across threads. This adds no per-call native allocation and
-keeps the 8 KiB read bound. Do not move the 64 KiB DAP accumulator to TLS:
-move it into its process/session owner. Next add generation-bearing opaque handles with
-direct slot lookup and explicit
-`RESERVED/ACTIVE/CLOSING/FREE` states, and caller-buffer checked reads. Keep
-raw PID/text-return compatibility entry points tagged unsafe until consumers
-migrate; TLS/per-child locking alone is not verification of the family.
+- [x] Remove the checker-local non-null raw file-read declaration and calls.
+- [x] Route all four reads through typed `file_read_result`.
+- [x] Return conservative query failure on `Err` without fabricating empty text.
+- [x] Preserve valid empty files, read counts, and search complexity.
+- [x] Keep the bounded typed-result lift outside line-scan loops.
+- [x] Add a static typed-read and fail-closed ratchet.
 
-Performance checkpoint: the first `Mutex<HashMap<PID, Arc<Mutex<Child>>>>`
-prototype regressed an isolated lookup/lock model from 23.56 to 51.43 ns/op at
-one thread and from 91.40 to 165.94 ns/op at four threads (2,048 KiB peak RSS
-for all runs). The final fixed-slot shape measures 24.66 ns/op at one thread
-and 40.58 ns/op at four threads in the lock-only stress model, versus 23.56 and
-91.40 ns/op. More representative nonblocking-read measurements are 685.76 ->
-717.39 ns/op at one thread (+4.6%) and 995.75 -> 263.57 ns/op across four
-independent children (-73.5%), at the same observed 2,048 KiB RSS floor.
-Lookup is bounded to 16 contiguous atomic tags, adds no allocation/copy or
-reference counting, and holds only the selected child mutex across I/O.
-The exact native fixture comparison
-was 2.02 s/2,048 KiB before and 1.96 s/2,048 KiB after, but both exited status 6
-in this environment, so it is performance evidence only and a correctness
-blocker remains recorded rather than retried.
+### Completed MDSOC module-storage contract slice
 
-The incremental-cache owner now has lexical authority for its file, directory,
-environment, CLI, PID, and time calls. Preserve branch-local failure identity,
-one traversal, and one digest per artifact. Its content fingerprint now requests
-SHA-256 rather than a collision-prone integer hash. Next harden the canonical
-`sha256_text`/text-byte conversion boundary itself: explicitly contract and
-scope its two runtime calls, retain one conversion plus one cached/direct digest
-call, keep the pure-Simple fallback, and do not call that provider verified until
-signed evidence is admitted. The summary-only call-authority census is the
-required low-output ratchet command; current counts are 21,331 raw, 1,970
-explicit, and 19,361 missing.
+- [x] Replace the untyped source callback with a typed `Result` function.
+- [x] Remove raw disk-read authority and delegate once to `file_read_result`.
+- [x] Preserve registered empty memory sources as `Ok("")` and return `Err` for
+  absence.
+- [x] Add no read or registry-scan work and add a static contract ratchet.
 
-The canonical SHA-256 text boundary is now unsafe-minimized: duplicated text-
-byte declarations are removed, string-core owns the raw conversion, and the
-accelerator retains one checked call plus pure-Simple fallback. Keep its fixed
-64-slot hex buffer; do not reintroduce growing-string concatenation. Current
-authoritative totals are 12,053 unsafe declaration rows, 365 minimized, 10,954
-untouched, and zero signed/admitted. Next prioritize `rt_file` (2,604 untouched),
-`rt_process` (970), `rt_env` (459), and `rt_time` (354), while preserving the
-one-call/no-lookup/no-unbounded-allocation rule. The repaired census must keep
-file-output mode and must never read `/dev/stdout` as an input.
+### Completed duplicate-check incremental-write authority slice
 
-`driver_public_shared.spl` is now call-authority complete without changing its
-ordered file-probe or process-call cardinality. Keep its 27 direct lexical calls
-and failure-sentinel initialization; do not replace the constant ordered binary
-probes with an allocated candidate table on this startup path. The next bounded
-`rt_file` owners are compiler cache stamp/lease/GC modules; prefer owners whose
-nullable reads and write/delete statuses can be preserved without fabricating
-empty data or adding a second provider call.
+- [x] Remove the module-local raw file-write declaration and call.
+- [x] Delegate to canonical one-call `file_write_exact` after the existing
+  parent-directory setup and serialization.
+- [x] Preserve boolean failure reporting without retry or metadata probes.
+- [x] Add a static authority and one-write-shape ratchet.
 
-The file-stamp cache owner is now call-authority complete with its exact torn-
-read observation sequence and retry bound retained. Next take `cache/lease`:
-preserve one directory listing per sweep, one liveness query per parsed lease,
-and one write/delete per state transition. Do not turn its empty read, false
-write/delete, negative clock/PID, or empty listing sentinels into success.
+### Completed duplicate-check detector-path authority slice
 
-The lease owner and fast-GC owner are now unsafe-minimized at their raw call
-sites. Fast GC must retain confirmed-mutation accounting and reject negative
-mtime/PID/clock sentinels. Its hot path remains O(n²) oldest-first selection,
-one mtime observation per remaining candidate, and the existing collection
-shape; do not add retries, generic dispatch, or per-item wrapper allocation.
-Current inventory is 21,382 calls (2,066 explicit, 19,316 missing) and 12,077
-declaration rows (867 tagged, 377 minimized, 10,945 untouched, zero signed or
-admitted). Next harden `cache/gc/mark_sweep.spl`, then `admission.spl`, using
-the same confirmed move/delete rule. Self-hosted verification remains pending
-because the available executable reports that it is the Rust bootstrap seed.
+- [x] Correct raw path canonicalization from non-null text to `text?`.
+- [x] Tag and confine the single provider call to an always-inline owner.
+- [x] Reject null/empty canonicalization before directory walking.
+- [x] Preserve one path call, one walk, and existing filtering on success.
+- [x] Add a static nullable-contract and call-count ratchet.
 
-Mark-sweep now preserves its one-read/one-walk call bounds and reports only
-confirmed moves. Current totals are 21,382 calls (2,079 explicit, 19,303
-missing) and 12,077 declarations (875 tagged, 380 minimized, 10,937 untouched,
-zero signed/admitted). Next harden `cache/gc/admission.spl`: keep its single
-tree traversal and size probes, and do not interpret absent/inaccessible/provider
-failure as proof that capacity is available.
+### Completed tiered-JIT authority slice
 
-Cache admission now rejects unknown file-size/root accounting and has unique
-private helper names, while preserving one traversal and size probe per file.
-It remains unsafe until checked filesystem existence/read/walk contracts can
-separate valid absence/empty results from provider failure. Current census:
-21,436 calls (2,086 explicit, 19,350 missing), 12,112 declarations (880 tagged,
-382 minimized, 10,966 untouched), zero signed/admitted. First reconcile the 55
-missing calls introduced by the upstream rebase (47 net after this slice), then
-design one status-bearing filesystem metadata/list ABI shared by interpreter,
-C, Rust, native, and Simple wrappers without per-call allocation or lookup.
+- [x] Remove the unused raw `rt_jit_call_i64_i64` declaration.
+- [x] Tag the remaining seven raw JIT/clock declarations `unsafe(ffi)`.
+- [x] Confine each primitive to one always-inline lexical owner.
+- [x] Preserve lazy creation, two compile clock reads, and direct native calls.
+- [x] Distinguish null compile transport from empty-text success and report
+  `E-SFFI-017` on the cold promotion path.
+- [x] Keep provider admission off hot paths and add a static call-count ratchet.
 
-The retained-dictionary HIR owner is now call-authority complete: all 24 live
-`rt_dict_contains` calls preserve their existing boolean and short-circuit
-semantics inside lexical `unsafe(ffi)` scopes. The authority census is 21,436
-calls (2,110 explicit, 19,326 missing), reducing the upstream rebase regression
-to 23. Declaration totals are 12,112 rows (881 tagged, 382 minimized, 10,965
-untouched, zero signed/admitted). Optimizer capability-list false positives are repaired and covered by a
-focused classifier spec; `[ffi]` metadata is no longer reported as indexed
-runtime access. Next assign the remaining 23 rebase-added calls by canonical
-owner, prioritizing status-bearing wrappers over additional raw call sites and
-retaining zero extra provider calls, allocations, and dynamic dispatch.
+### Completed MIR interpreter async-runtime authority slice
 
-The debug-only MIR return-type probe now scopes four raw discriminant calls,
-and MIR method tracing caches two environment flags instead of issuing seven
-repeated raw reads. Preserve the debug-off zero-call path and the two process-
-lifetime scalar caches. Current census: 21,435 calls (2,116 explicit, 19,319
-missing), 12,112 declarations (883 tagged, 382 minimized, 10,963 untouched),
-zero signed/admitted. The rebase regression is now +16; continue with the
-remaining exact owner table rather than increasing either ratchet.
+- [x] Tag actor spawn/send/receive and scheduler yield `unsafe(ffi)`.
+- [x] Confine each primitive to one always-inline lexical owner.
+- [x] Preserve runtime-name dispatch, timeout behavior, and provider calls.
+- [x] Record the legacy malformed-argument zero as an open `Result` migration.
+- [x] Add no scheduler hot-path work and add a static call-count ratchet.
 
-HIR phase profiling now scopes both stderr flushes without changing flush or
-formatting work. Current census: 21,435 calls (2,118 explicit, 19,317 missing),
-12,112 declarations (884 tagged, 382 minimized, 10,962 untouched), zero
-signed/admitted. The rebase regression is +14; continue with the exact owner
-table, preserving debug/profile-disabled zero-work behavior.
+### Completed MIR interpreter core authority slice
 
-Safety-severity subprocess reads are now lexically scoped without caching or
-changing mutation-visible behavior. Current census: 21,435 calls (2,121
-explicit, 19,314 missing), 12,112 declarations (885 tagged, 382 minimized,
-10,961 untouched), zero signed/admitted. The rebase regression is +11. Repair
-the recorded unsafe-expression lowering defect before relying on expression-
-scoped capability syntax; until then, use executed block-form coverage.
+- [x] Remove raw environment declaration/calls and retain two startup reads via
+  canonical nullable `env_get_opt`.
+- [x] Tag and confine enum discriminant to one always-inline lexical owner.
+- [x] Keep all three discriminant calls on unknown-value error paths only.
+- [x] Add no normal dispatch work and add a static call-count ratchet.
+
+### Completed compiler performance CLI authority slice
+
+- [x] Remove both duplicate raw `rt_get_args` declarations and calls.
+- [x] Route both entrypoints through the canonical explicitly unsafe CLI owner.
+- [x] Preserve one argument-array fetch per process entrypoint.
+- [x] Keep benchmark and optimizer loops unchanged and add a static ratchet.
+
+### Completed SSA and AOP environment-authority slice
+
+- [x] Remove both module-local raw environment declarations and calls.
+- [x] Route SSA debug and AOP configuration reads through canonical nullable
+  `env_get_opt`.
+- [x] Preserve two mutation-visible SSA debug checks and four AOP reads.
+- [x] Add no cache or hot-path work and add a static call-count ratchet.
+
+### Completed MIR optimizer environment-authority slice
+
+- [x] Remove the module-local raw environment declaration and call.
+- [x] Retain the shared nullable helper through canonical always-inline
+  `env_get_opt`.
+- [x] Preserve mutation-visible trace/bootstrap reads and the one-read
+  verify-each cache.
+- [x] Add a static authority, call-count, and cache-shape ratchet.
+
+### Completed C-import header-read authority slice
+
+- [x] Remove the raw non-null C-header file-read declaration.
+- [x] Make the private header reader return typed `Result<text,text>`.
+- [x] Route provider failure to the existing explicit import error.
+- [x] Preserve exactly one read and existing empty-header behavior.
+- [x] Add no retry, scan, allocation, cache, hash, lock, or dispatch.
+- [x] Add a static typed-contract and call-count ratchet.
+
+### Completed lazy module-loader authority slice
+
+- [x] Remove raw file-read and environment declarations.
+- [x] Make candidate file transport typed `Result<text,text>`.
+- [x] Preserve unreadable/empty-source eager fallback behavior.
+- [x] Cache `SIMPLE_LIB` once between existing lazy-loader resets.
+- [x] Preserve at most one file read per requested candidate and one scan.
+- [x] Add no extra search, scan, allocation, hash, lock, or dispatch.
+- [x] Add a static typed-contract, call-count, and cache-shape ratchet.
+
+### Completed interpreter CLI argument-authority slice
+
+- [x] Remove the duplicate raw `rt_cli_get_args` declaration.
+- [x] Route the sole fetch through canonical `std.io_runtime.get_args`.
+- [x] Preserve `[text]` semantics and one argument fetch per parse.
+- [x] Preserve the existing program/script-prefix skip and argv pass.
+- [x] Add no numeric workaround, second scan, cache, lock, or dispatch.
+- [x] Add a static authority and one-fetch ratchet.
+
+### Completed interpreter JIT state-authority slice
+
+- [x] Remove four raw file and PID declarations.
+- [x] Use typed reads, exact writes, canonical delete, and validated PID.
+- [x] Preserve one provider operation for every existing load/save/cleanup.
+- [x] Add no retry, metadata probe, allocation, cache, lock, or dispatch.
+- [x] Record repeated file I/O on `jit_record_call` as open measured-design debt.
+- [x] Add a static authority and operation-shape ratchet.
+
+### Completed core interpreter module-loader authority slice
+
+- [x] Remove raw environment/file declarations and unused path-join authority.
+- [x] Make the private module-source contract `Result<text,text>`.
+- [x] Preserve one read, empty rejection, depth restoration, and parse per entry.
+- [x] Cache GC-warning tracing once between existing loader resets.
+- [x] Add no path normalization, search, scan, allocation, lock, or dispatch.
+- [x] Add a static typed-contract, call-count, and cache-reset ratchet.
+
+### Completed interpreter declaration-profile authority slice
+
+- [x] Remove the duplicate raw non-null environment declaration.
+- [x] Seed the assurance profile through canonical nullable `env_get_opt`.
+- [x] Preserve one initialization read and later explicit policy reapplication.
+- [x] Preserve default behavior for unset, empty, or failed provider input.
+- [x] Add no loop work, allocation, cache, hash, lock, or dispatch.
+- [x] Add a static one-read authority ratchet.
+
+### Completed MIR bulk-ops flag spec authority slice
+
+- [x] Remove the spec-local raw environment setter declaration and calls.
+- [x] Route all three setup mutations through canonical `env_set`.
+- [x] Assert every boolean setter status before checking optimizer behavior.
+- [x] Keep compiler-runtime and optimizer hot paths unchanged.
+
+### Completed compiler performance-clock authority slice
+
+- [x] Tag profiler, trace, and benchmark monotonic clocks `unsafe(ffi)`.
+- [x] Confine each clock to a file-local always-inline lexical owner.
+- [x] Tag and confine non-status-bearing benchmark timestamp text.
+- [x] Preserve one direct provider call per sample and add no timing-path work.
+- [x] Add a static authority and call-count ratchet.
+
+### Completed builtin type-registry authority slice
+
+- [x] Tag nullable lookup and boolean membership declarations `unsafe(ffi)`.
+- [x] Confine both primitives to always-inline lexical owners.
+- [x] Preserve nullable and boolean APIs without zero/empty substitution.
+- [x] Preserve exactly one direct provider call per query.
+- [x] Add no hot-path admission, hash, lookup, allocation, lock, or dispatch.
+- [x] Record absence/provider-failure ambiguity as unverified and unsigned.
+
+### Completed SIMD capability authority slice
+
+- [x] Tag ten host/device capability primitives `unsafe(ffi)`.
+- [x] Confine every primitive to an always-inline direct lexical owner.
+- [x] Preserve architecture, CPUID, HWCAP, sysctl, RISC-V, and CUDA call counts.
+- [x] Remove two raw file-read declarations and use one typed read per path.
+- [x] Preserve empty/zero scalar fallback without fabricating successful data.
+- [x] Add no vector-loop work, admission, hashing, cache, lock, or dispatch.
+- [x] Record sentinel-bearing providers as unsafe, unsigned, and unverified.
+
+### Completed MIR statement-lowering authority slice
+
+- [x] Remove unused raw dictionary and duplicate environment declarations.
+- [x] Route both debug reads through canonical nullable `env_get_opt`.
+- [x] Tag and confine discriminant and payload projections `unsafe(ffi)`.
+- [x] Correct the expression payload contract to nullable and reject nil.
+- [x] Preserve projection counts and statement-dispatch complexity.
+- [x] Add no admission, hashing, allocation, cache, lock, or extra dispatch.
+- [x] Record the tagged runtime provider as unsafe, unsigned, and unverified.
+
+### Completed MIR function/type-lowering authority slice
+
+- [x] Tag the sole tagged-value discriminant declaration `unsafe(ffi)`.
+- [x] Confine all 22 projections to one always-inline lexical owner.
+- [x] Preserve GPU/type dispatch projection and branch counts.
+- [x] Add no admission, hashing, allocation, cache, lock, or extra dispatch.
+- [x] Record the discriminant provider as unsafe, unsigned, and unverified.
+
+### Completed MIR bootstrap process-authority slice
+
+- [x] Remove duplicate raw exit declarations from both bootstrap modules.
+- [x] Route all twelve fatal sites through the canonical exit owner.
+- [x] Remove the raw string-length declaration and unused split-based helper.
+- [x] Preserve one exit call per fatal site and add no normal-path work.
+- [x] Add a static authority and fatal-call-count ratchet.
+- [x] Record the centralized runtime provider as unsigned and unverified.
+
+### Completed MIR module-lowering environment-authority slice
+
+- [x] Remove the duplicate raw nullable environment declaration.
+- [x] Retain one always-inline helper through canonical `env_get_opt`.
+- [x] Preserve four reads and disabled fallback for unset/empty values.
+- [x] Add no loop work, cache, allocation, hash, lock, or extra dispatch.
+- [x] Add a static authority and call-count ratchet.
+- [x] Record the canonical provider as raw, unsigned, and unverified.
+
+### Completed admission identity-join hardening slice
+
+- [x] Preserve admitted symbol, source-signature, and provider identities.
+- [x] Reject admitted symbol/signature pairs absent from owned declarations.
+- [x] Join `reverified` on symbol plus canonical ABI signature, never name alone.
+- [x] Keep source evidence claims non-authoritative and fail closed on mismatch.
+- [x] Add a static regression assertion for the composite join key.
+- [x] Add zero compiler, loader, admission-hot-path, or per-call runtime work.
+
+### Completed frontend parse-cache authority slice
+
+- [x] Remove all nine cache-local raw SFFI declarations.
+- [x] Preserve four env reads, two existence probes, and one typed file read.
+- [x] Preserve one non-shell hash, exact write, move, and failure cleanup.
+- [x] Fail closed on invalid PID and keep provider failures as cache misses.
+- [x] Avoid duplicate digest validation, extra retry, scan, lock, or dispatch.
+- [x] Add a static authority and exact operation-count ratchet.
+
+### Completed frontend trace environment-authority slice
+
+- [x] Remove the frontend runner's duplicate raw environment declaration.
+- [x] Use one always-inline process-lifetime tri-state trace gate.
+- [x] Reduce two provider reads per module to at most one per process.
+- [x] Preserve boolean/default-off trace behavior and both receipts.
+- [x] Add no parse-loop scan, allocation, hash, lock, or dynamic dispatch.
+- [x] Add a static authority, call-count, and cache-shape ratchet.
+
+### Completed driver action-index authority slice
+
+- [x] Remove all eight action-index-local raw SFFI declarations.
+- [x] Preserve one existence probe and one typed read per lookup.
+- [x] Preserve two directory creates and one exact atomic publication attempt.
+- [x] Preserve failed-move cleanup and the existing lost-race re-read.
+- [x] Fail closed on invalid PID/clock without fabricated temp-file identity.
+- [x] Add no retry, scan, allocation, hash, lock, or dynamic dispatch.
+- [x] Add a static authority and exact operation-count ratchet.
+
+### Completed MIR switch/operator environment-authority slice
+
+- [x] Remove the duplicate raw nullable environment declaration.
+- [x] Retain the always-inline helper through canonical `env_get_opt`.
+- [x] Preserve all five environment and 16 discriminant query sites.
+- [x] Update the existing cross-lane audit rather than add a duplicate tool.
+- [x] Add no call, branch, allocation, cache, hash, lock, or dispatch.
+- [x] Record the remaining discriminant provider as unsafe and unverified.
+
+### Completed MIR expression-dispatch environment-authority slice
+
+- [x] Remove the duplicate raw nullable environment declaration.
+- [x] Collapse two environment wrappers into one always-inline canonical owner.
+- [x] Preserve all six environment and 115 tagged projection query sites.
+- [x] Update the existing cross-lane audit and exact call-count ratchets.
+- [x] Remove one potential call layer and add no branch/allocation/dispatch.
+- [x] Record tagged projection providers as unsafe and unverified.
+
+### Completed MIR literal-lowering dead-authority slice
+
+- [x] Remove unused raw dictionary, environment, and discriminant declarations.
+- [x] Introduce no replacement wrapper or duplicate authority.
+- [x] Preserve generated MIR, loops, dispatch, calls, and allocations exactly.
+- [x] Add a static no-raw-authority ratchet.
+
+### Completed MIR method-lowering authority and trace-cost slice
+
+- [x] Remove dead raw dictionary and duplicate environment declarations.
+- [x] Tag and confine both live discriminant projections `unsafe(ffi)`.
+- [x] Replace eight repeated debug reads with two one-read tri-state gates.
+- [x] Preserve default-off boolean behavior without integer API substitution.
+- [x] Reduce provider calls and add no allocation, hash, lock, or dispatch.
+- [x] Add a static authority, call-count, and cache-shape ratchet.
+- [x] Record both providers as unsafe, unsigned, and unverified.
+
+### Completed MIR data environment-authority slice
+
+- [x] Remove the duplicate raw non-null environment declaration.
+- [x] Remove five module-local unsafe blocks through canonical `env_get_opt`.
+- [x] Preserve all eight reads and the existing outer-scope trace cache.
+- [x] Preserve disabled behavior for unset and explicitly empty values.
+- [x] Add no loop work, allocation, hash, lock, cache, or dispatch.
+- [x] Add a static authority and call-count ratchet.
+- [x] Record the canonical provider as raw, unsigned, and unverified.
+## 2026-08-26 module-resolution environment authority follow-up
+
+- Removed the duplicate module-resolver `rt_env_get` declaration and wrapper.
+- Kept path join/dirname as direct always-inline owners with unchanged probe
+  ordering and counts.
+- Deferred any `SIMPLE_LIB` value cache because it would change visibility of
+  environment mutation; canonical ownership alone adds no intended hot-path
+  allocation, lookup, or copy.
+- Status: source-reviewed, deliberately unverified for this sync.
+## 2026-08-26 lexer nullable-environment authority follow-up
+
+- Added canonical `env_get_nullable` for exact optional transport semantics.
+- Removed the lexer's duplicate raw environment declaration and unsafe wrapper.
+- Preserved thirteen read call sites, empty-versus-nil behavior, and the
+  one-direct-call hot-path shape; added no allocation, copy, lookup, or retry.
+- Kept the remaining three lexer ABIs locally unsafe pending their own typed
+  ownership migrations.
+- Status: source-reviewed, deliberately unverified for this sync.
+## 2026-08-26 lexer nullable-file authority follow-up
+
+- Added canonical `file_read_nullable` for exact one-call optional transport.
+- Removed the lexer's duplicate raw file-read declaration and unsafe wrapper.
+- Preserved two read call sites, nil/empty behavior, and direct-call hot-path
+  shape with no Result allocation, conversion, lookup, normalization, or retry.
+- Retained and documented the layer-0 driver source raw owner as unsafe because
+  facade import would violate compiler layering.
+- Status: source-reviewed, deliberately unverified for this sync.
+## 2026-08-26 lexer environment-write authority follow-up
+
+- Made canonical `env_set` always-inline and removed the lexer duplicate.
+- Preserved twenty-eight write sites, boolean status ABI, and ignored-result
+  behavior with one direct call and no allocation, copy, lookup, lock, or retry.
+- Reduced lexer raw declarations to the locally owned array-release boundary.
+- Status: source-reviewed, deliberately unverified for this sync.
+## 2026-08-26 lexer array-release provider follow-up
+
+- Kept `rt_array_free(i64)` explicitly unsafe; the type cannot prove ownership.
+- Changed the Rust interpreter provider from wrong-type silent success to its
+  existing typed integer-conversion error path.
+- Added a static cross-provider ratchet for Rust type rejection and C/Simple
+  invalid/unregistered-handle guards.
+- Preserved the valid path's existing type match and one release dispatch; no
+  allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 CUDA I/O owner checkpoint
+
+- Tag and contract all 25 raw CUDA declarations at the canonical I/O owner.
+- Reconcile pointer-write returns with the exact unit-returning C/Rust ABI.
+- Close native/interpreter identity coverage for device-to-device copy,
+  extended launch, and error text using compiler-owned typed registrations.
+- Reuse the existing extended-launch interpreter implementation rather than
+  adding a duplicate dispatch path.
+- Remove redundant feature-path name allocation and the per-call CUDA error
+  text allocation/leak; retain direct typed calls and existing validation.
+- Cache successful device names once per actual device handle; use static text
+  for invalid devices, preserve process-lifetime pointer validity, and bound
+  retained allocations by discovered devices rather than call count.
+- Add a source-only owner ratchet that checks exact writes, both-lane identity,
+  and static error text without claiming signature admission.
+- Remaining production debt: 4,470 unsafe-tag gaps, 6,224 contract gaps, and
+  zero signed-admitted declarations.
+
+## 2026-08-26 simple-core string/Any checkpoint
+
+- Reconcile `rt_value_float` with the exact C/Rust/native `[F64] -> [I64]`
+  contract and remove the raw-bit integer workaround.
+- Tag and contract 35 bootstrap string declarations and four dynamic-Any
+  declarations without changing their direct call algorithms.
+- Ratchet exact provider signatures so future register-class drift fails a
+  source audit.
+- First minimization slice complete: all four dynamic-Any operations and the
+  string parser's float constructor use private mandatory-inline lexical
+  unsafe thunks, with no direct raw calls in their semantic bodies.
+- Bootstrap string minimization complete: all 35 raw identities have one
+  mandatory-inline lexical unsafe thunk and no additional executable raw call;
+  pointer capabilities are confined to the thunks that carry raw pointers.
+- Complete the remaining `core_values` and `core_enum` owners: 13 existing raw
+  declarations plus the exact `spl_f64_to_bits(f64)` provider dependency are
+  tagged and confined, leaving zero untagged `simple_core` externs.
+- Align the Simple `rt_value_float` provider itself to `f64`; callers and all
+  provider lanes now agree on the floating register class.
+- Remaining production debt after this pass: 4,418 unsafe-tag gaps, 6,172
+  contract gaps, and zero signed-admitted declarations.
+- Remaining production debt: 4,431 unsafe-tag gaps, 6,185 contract gaps, zero
+  signed-admitted declarations.
+
+## 2026-08-26 package owner checkpoint
+
+- Consolidate three package declaration owners into one canonical 11-contract
+  owner, one bootstrap mirror, and declaration-free compatibility facades.
+- Retire 38 unused duplicate declarations, all broken Cargo wrappers, and the
+  obsolete `rt_package_free_string` provider/symbol.
+- Preserve hash failure as `text?` and existence/directory provider failure as
+  `bool?`; do not manufacture empty text or false.
+- Confine each retained raw identity to one mandatory-inline thunk and require
+  both native/interpreter registry identities.
+- Remaining production debt: 4,356 unsafe-tag gaps, 6,110 contract gaps, zero
+  signed-admitted declarations.
+
+## 2026-08-26 repository-wide inventory checkpoint
+
+- Production source currently contains 7,259 declarations / 3,815 symbols;
+  4,495 declarations lack an FFI unsafe tag and, after the Cranelift update,
+  6,249 lack a recognized
+  return/error contract.
+- The `rt_*` production subset contains 5,806 declarations / 3,051 symbols;
+  3,332 lack an unsafe tag, 5,060 lack a contract, and zero are signed-admitted
+  without configured exact-artifact admission jobs.
+- First close owners that are already centralized and fully unsafe-tagged;
+  their contract metadata can be corrected without widening runtime hot paths.
+- Cranelift checkpoint: classify all 78 declarations as unsafe with explicit
+  empty-string or zero/false/ignored-operation semantics; retain the current
+  direct wrapper shape and add no runtime work.
+- Next prioritize live production declarations lacking unsafe authority,
+  grouped by owner/provider rather than mechanically tagging test fixtures or
+  unrelated language-level extern declarations.
+- Status: source-censused; no build, runtime, signature, or semantic
+  verification claim.
+
+## 2026-08-26 public RuntimeValue closure completion
+
+- Remove the unused public equality and print RuntimeValue wrappers rather
+  than adding interpreter dispatch solely to make asymmetric inventory appear
+  complete.
+- Keep native-backend lowering private to its existing backend owner.
+- Ratchet the canonical runtime owner to 11 both-lane contracts and the
+  compiler minimal facade to 20 both-lane contracts, with zero asymmetric or
+  providerless declarations in either scoped owner.
+- Preserve the hot path: this is deletion-only for runtime behavior and adds
+  no allocation, copy, lookup, hashing, branch, or dispatch.
+- Continue to classify retained SFFI as unsafe and unsigned until semantic
+  evidence and exact-artifact signature admission are operational.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 providerless no-GC API removal
+
+- Remove `rt_gc_init`, `rt_gc_malloc`, and `rt_gc_collect` from the no-GC and
+  compiler-minimal owners because the reference-count runtime has no provider.
+- Reject the pure-runtime zero-return placeholder as a replacement; it has no
+  shared allocator state and cannot establish collection.
+- Remove three MCP periodic hooks and their now-dead counters. This eliminates
+  one increment, modulo, and branch per request plus a delayed unresolved call
+  every 100 requests.
+- Reach zero providerless declarations in both scoped owners: canonical 11
+  both/3 one-lane; compiler-minimal 20 both/3 native-only.
+- Measure long-session MCP RSS/allocation behavior only when verification is
+  authorized, then fix the actual reference-count owner if retention remains;
+  never restore a no-op GC hook.
+- Continue closing the three one-lane/native-only functions and require signed
+  exact-artifact admission before any safe promotion.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 providerless pointer-era value API retirement
+
+- Remove active raw string/type/free/arithmetic/less-than declarations and
+  wrappers after confirming there is no C, Rust, or interpreter provider and
+  no production consumer.
+- Remove their public interning specs while retaining internal full-generator
+  provider fixtures until that generator is separately redesigned.
+- Rewrite the obsolete minimal-FFI sample to cover only both-lane tagged scalar
+  constructors, predicates, and projections; preserve semantic booleans.
+- Reduce canonical closure to 11 both, 3 one-lane, 3 providerless and
+  compiler-minimal closure to 20 both, 3 native-only, 0 interpreter-only, 3
+  providerless.
+- Add no live allocation, copy, branch, lookup, hash, dispatch, or layout work.
+- Resolve the remaining GC trio by replacing live `gc_collect` users with the
+  actual memory-owner policy or by implementing one verified owner; never add
+  a no-op success fallback.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 dead RuntimeValue inspection/clone removal
+
+- Remove unused string/array/dictionary predicates, raw string projection, and
+  raw clone from active owners, facades/exports, and both generator mirrors.
+- Preserve the live string-constructor generation test with nonnull creation
+  and release coverage only.
+- Reduce canonical RuntimeValue closure to 11 both, 3 one-lane, and 11
+  providerless; reduce compiler-minimal closure to 20 both, 3 native-only, 0
+  interpreter-only, and 11 providerless.
+- Add no runtime operation, allocation, copy, lookup, branch, hash, dispatch,
+  or layout change because the removed APIs had no consumer.
+- Next classify the providerless arithmetic/string/GC remainder against its
+  real consumers; do not delete the live arithmetic and string paths.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 dead RuntimeValue container-constructor removal
+
+- Remove `rt_value_array_new` and `rt_value_dict_new` from both active owners,
+  facades/re-exports, and mirrored SFFI generator specifications after proving
+  that no consumer exists.
+- Prefer deletion over implementing providers for unused copyable raw handles.
+- Reduce canonical RuntimeValue closure to 11 both, 3 one-lane, and 16
+  providerless; reduce compiler-minimal closure to 20 both, 3 native-only, 0
+  interpreter-only, and 16 providerless.
+- Preserve performance and memory behavior: there was no callsite, and no new
+  call, allocation, copy, lookup, branch, hash, dispatch, or layout is added.
+- Continue classifying the remaining 16 providerless declarations by actual
+  consumers before deciding whether to remove or implement them.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 file-delete ABI reconciliation
+
+- Remove the unused raw `file_delete_ptr` compiler-minimal declaration and
+  re-export instead of retaining a second conflicting signature.
+- Standardize live C and Rust `rt_file_delete` providers on `(pointer, length)`
+  and publish the exact `[I64, I64] -> [I8]` native contract.
+- Tag and lexically confine the self-hosted interpreter's live raw call.
+- Reuse the bounded stack path converter in both C providers; make
+  `rt_file_remove` delegate directly, eliminating its per-call heap allocation
+  and redundant copy.
+- Minimal-facade closure is now 20 both lanes, 3 native-only, 0
+  interpreter-only, and 18 neither. Next classify/remove the 18 providerless
+  declarations before implementing any new provider.
+- Keep deletion unsafe and unsigned until exact-artifact admission and
+  cross-lane sabotage evidence exist.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 provider-language census correction
+
+- Report every observed implementation language per extern symbol instead of
+  selecting only the first backing class in priority order.
+- Distinguish C, C++, header-owned C/C++, Rust exports, Rust interpreter
+  handlers, system C, external C ABI, freestanding, and unknown linked-native
+  provenance while preserving the existing backing/admission schema.
+- Keep implementation presence separate from safe or signed admission; only a
+  freshly reverified provider/signature/ABI identity may populate the admitted
+  count.
+- Add no production runtime work; the change is confined to offline census
+  scripts and their fixture.
+- Next regenerate the global ledger only under an authorized verification pass,
+  then prioritize multi-language signature variants and untouched live calls.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 provider-scoped census admission follow-up
+
+- Added declaration provider identity to the SFFI inventory schema.
+- Bound cryptographic admission to symbol + canonical source signature hash +
+  provider ID; missing/mismatched provider metadata fails closed.
+- Added provider-declared, provider-missing, and multi-provider-symbol census
+  metrics so provider attribution debt cannot disappear inside generic unsafe.
+- Made symbol-level admission total: every declaration must be admitted before
+  the symbol is counted as fully admitted; mixed coverage stays migration debt.
+- Preserved module-scoped textual callsite counts as an explicitly named
+  distinct-symbol estimate for prioritization, never as resolved-call or lexical
+  unsafe-minimization proof.
+- Renamed annotation-derived “minimized” counts to contract-declared unsafe and
+  reports lexical minimization as `not_measured` until resolved-call evidence
+  exists.
+- Updated census contract and ratchet names without weakening their thresholds.
+- Tooling remains offline; no runtime hot path gains hashes, signature checks,
+  provider lookup, allocation, or dispatch.
+- Status: source-reviewed, deliberately unverified; census was not executed.
+
+## 2026-08-26 multiline unsafe-authority lint follow-up
+
+- Fixed the pure-Simple lint to recognize bounded multiline
+  `@unsafe(... capabilities: [ffi])` annotations for declarations and helpers.
+- Replaced substring authority checks with exact `ffi` capability-list token
+  parsing, preventing reason text from granting foreign authority.
+- Added regression specifications for both forms without widening authority or
+  adding runtime work.
+- The scan is capped at 32 annotation lines per item and stops before ordinary
+  source, preserving linear lint complexity and bounded transient state.
+- At this slice, Rust-seed `UnsafeBlock` HIR retained no capability list; the
+  follow-up below closes that representation gap.
+- Status: source-reviewed, deliberately unverified; tests were not executed.
+
+## 2026-08-26 Rust-seed unsafe-capability retention follow-up
+
+- Extended unsafe AST/HIR blocks with compile-time capability identifiers.
+- Made raw-FFI checking require the exact `ffi` capability and reject bare or
+  `raw_ptr`-only blocks.
+- Preserved nested outer `ffi` authority without allowing an inner unrelated
+  capability block to erase it.
+- Replaced `rt_`/`spl_` prefix inference with the HIR extern-identity set, which
+  already includes imported externs and aliases; pure local prefixed functions
+  no longer acquire foreign authority accidentally.
+- Added an O(1) empty-extern bypass to strict-profile MIR admission; actual SFFI
+  modules retain one fail-fast linear HIR pass. Global gating remains sequenced
+  after callsite migration so ordinary builds are not broken prematurely.
+- Tagged and confined the five dedicated-host POSIX mmap/file calls to private
+  always-inline owners; validated byte narrowing in the existing single pass
+  and made exact size mismatch fail typed lifting.
+- Made the interpreter mmap-byte handler reject arity/read failures as typed
+  errors rather than legacy `Nil`, retaining one `fs::read` and direct buffer
+  lift on success.
+- Checked file-size `u64`-to-`i64` lifting so oversized metadata cannot wrap
+  into a fabricated negative sentinel.
+- Added a static authority contract. This family remains unverified/unsigned
+  because no owned native rich-array provider was found.
+- Kept MIR/runtime representation unchanged; capability collection is linear in
+  the already-parsed header and stores one small vector per unsafe block only
+  during compilation.
+- Added parser, HIR, and checker regression coverage; deliberately not executed.
+
+## 2026-08-26 UI WebSocket pure-Simple SHA-1 follow-up
+
+- Removed four app-local raw SHA-1 declarations and their fabricated `0`/empty
+  fallbacks; the write signature was not cross-lane ABI-compatible.
+- Routed accept-key computation through the canonical pure-Simple RFC 6455
+  handshake owner, eliminating foreign handle/return lifting in this app.
+- Kept work O(n) on the bounded connection-handshake input; frame hot paths,
+  network I/O count, and message allocations are unchanged.
+- Routed wall-clock access through the canonical fail-closed time facade,
+  removing the final raw declaration while retaining one provider call.
+- Status: source-reviewed, deliberately unverified; global signed provider
+  admission remains pending.
+## 2026-08-26 Base64/Base64url contract follow-up
+
+- Enforced exact interpreter arity, bounded explicit encode length, strict
+  alphabet decoding, and strict UTF-8 lifting; removed nil/empty/lossy failure.
+- Hardened the C oracle for null arguments, malformed length/alphabet, size
+  overflow, and allocation failure, returning null rather than corrupt output.
+- Tagged the two test-only raw declarations `unsafe(ffi)` and confined them to
+  nullable fail-closed wrappers with input-length admission.
+- Kept provider encode/decode single-pass with one output allocation; invalid
+  decode frees that allocation and no valid path gains a second traversal.
+- Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 SHA-1 return-contract follow-up
+
+- Aligned `finish(handle) -> text?` and `finish_bytes(handle) -> [u8]?` across
+  seed, interpreter, and native provider; removed the ignored out-pointer and
+  packed-integer declaration mismatches.
+- Native output is now a byte array rather than binary bytes tagged as text.
+- Removed packed-value casting and the `nil -> 0` fallback from scalar finish;
+  invalid/released handles fail closed and the scalar is a digest prefix.
+- Enforced exact interpreter arity, checked explicit prefix length, checked
+  handle growth, and checked native `u64 -> usize` conversion.
+- Preserved one payload pass/registry operation and avoided a second validity
+  lookup; scalar finish no longer formats/allocates a 40-byte hex string, and
+  native digest publication uses one packed-array bulk copy.
+- Status: source-reviewed, deliberately unverified and unsigned; SHA-1 is not
+  admitted for security use.
+## 2026-08-26 SHA-256 cross-lane return follow-up
+
+- Aligned raw finish declarations with typed text/optional byte-array provider
+  results and removed ignored out-pointer/packed-integer conversions.
+- Added the exact interpreter `finish_bytes` registration; no dynamic fallback.
+- Made invalid allocation/finish handles fail closed and checked native pointer
+  length plus atomic handle exhaustion.
+- Published native digest bytes through one packed bulk copy and derived scalar
+  finish directly from eight digest bytes, eliminating hex formatting and
+  per-element setter dispatch from that public path.
+- Preserved one registry removal and one digest finalization; no preflight
+  lookup, second lock, payload copy, or hash pass was added.
+- Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 XXH3 legacy-boundary follow-up
+
+- Tagged six raw XXH3 declarations `unsafe(ffi)` and confined their calls to
+  the existing `XxHasher` wrapper methods.
+- Replaced unchecked `u64 -> usize` pointer-length truncation with a checked
+  conversion before slice construction.
+- Preserved one registry operation, one lock, and one payload pass per valid
+  write; added no lookup, allocation, copy, hash pass, or dispatch.
+- Deferred safe publication: the legacy finish ABI aliases an invalid handle
+  with the valid digest `0`; status/out v2 is required to resolve that contract.
+- Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 transient-promotion boolean-contract follow-up
+
+- Replaced missing-argument `false` fabrication in the Rust interpreter with a
+  typed runtime error.
+- Preserved genuine provider `true`/`false` results for exactly one argument.
+- Ratcheted the Rust fail-closed path and the canonical `i64 -> i8` registry/C
+  ABI while leaving four frontend owners explicitly unsafe.
+- The valid path retains one argument bounds decision and the existing provider
+  call; no allocation, copy, lookup, hash, lock, or dispatch was added.
+- Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 transient-scope arity follow-up
+
+- Made Rust interpreter scope begin/pause/end reject extra ABI arguments.
+- Preserved valid provider booleans and canonical `() -> i8` C/registry ABI.
+- Added source coverage proving invalid calls fail before scope mutation.
+- Valid parse-boundary calls add one arity branch and retain one provider call;
+  no allocation, copy, lookup, hash, lock, or extra traversal was added.
+- Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 interpreter heap-metric contract follow-up
+
+- Enforced exact arity for six interpreter heap metric handlers.
+- Replaced two missing/wrong-kind fabricated zeros with typed errors while
+  preserving genuine out-of-range provider zero.
+- Added a static interpreter registration and contract ratchet.
+- Valid diagnostic paths retain one arity/type decision and one provider read;
+  no allocation, copy, lookup, hash, lock, retry, or traversal was added.
+- Native typed-registry coverage remains absent, so these stay unverified and
+  unsigned rather than being promoted as cross-lane safe.
+## 2026-08-26 memory-attribution contract follow-up
+
+- Enforced exact interpreter arity/types for enabled, set-owner, report, and
+  report-print.
+- Removed fabricated report limit `16` and wrong-type successful set-owner no-op.
+- Preserved valid owner-report generation, sorting, allocation, and printing.
+- Added a static lane-split ratchet: native set-owner is `(ptr,len)`, interpreter
+  is lifted text, and report functions remain without typed native registration.
+- Valid paths add only arity/type decisions before existing work; no provider
+  lookup, hash, lock, retry, or extra report traversal was added.
+- Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 memory-profile arity follow-up
+
+- Enforced exact zero-argument contracts for four interpreter profiling APIs.
+- Preserved genuine harden, guard, ABI-version, and feature results.
+- Added source coverage and a static ratchet that refuses to equate interpreter
+  registration with missing typed native registry/header coverage.
+- Valid diagnostic calls add one arity branch before unchanged provider work;
+  no allocation, copy, lookup, hash, lock, retry, or traversal was added.
+- Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 Unix-socket service contract follow-up
+
+- Tagged all six raw service socket declarations `unsafe(ffi)`.
+- Corrected close from fabricated boolean shape to its `i32` errno contract.
+- Enforced exact interpreter arity/types for listen/accept/send/recv/close and
+  rejected negative receive sizes before allocation.
+- Replaced receive failure/invalid-UTF-8 empty fabrication with typed errors;
+  valid UTF-8 now reuses the allocated buffer instead of lossy-copying it.
+- Preserved valid-path matches, locks, syscalls, and allocation count; no hash,
+  registry lookup, retry, or extra network dispatch was added.
+- Kept native recv pointer/out-length versus Simple text lifting explicitly
+  unverified/unsigned pending a generated descriptor wrapper.
+## 2026-08-26 QMP/client socket provider follow-up
+
+- Enforced exact transport for connect/write/read-until/close.
+- Rejected negative/out-of-range buffer lengths and stop bytes before I/O.
+- Replaced read errors/invalid UTF-8 empty fabrication with typed errors while
+  retaining genuine EOF empty text and genuine `-1`/`false` OS outcomes.
+- Reduced initial read capacity to `min(max, 256)` and reused the buffer for
+  valid UTF-8; no lookup, retry, extra syscall, or lossy copy was added.
+- Raw Simple caller declarations remain the next confinement slice.
+## 2026-08-26 QMP/SPM raw-call confinement follow-up
+
+- Tagged eight duplicate raw socket declarations across QMP/SPM `unsafe(ffi)`.
+- Confined them to four non-exported always-inline owners per module.
+- Preserved every caller status branch and exact raw call count/order.
+- Added no allocation, copy, hash, lookup, lock, retry, or dynamic dispatch.
+- Native receive descriptor lifting remains explicitly unverified/unsigned.
+## 2026-08-26 interpreter diagram-contract follow-up
+
+- Enforced declared arity across twelve diagram interpreter handlers.
+- Removed undeclared array filtering and wrong-type/nil-to-absence conversion.
+- Validated the free-string handle before its interpreter managed-memory no-op.
+- Used one always-inlined arity helper; valid generation/tracing work, data
+  structures, allocations, and algorithmic complexity remain unchanged.
+- Raw Simple unsafe confinement and native pointer/return lifting remain
+  explicitly unverified and unsigned.
+## 2026-08-26 diagram raw-declaration follow-up
+
+- Tagged all twelve raw seed diagram declarations `unsafe(ffi)`.
+- Confined ten live calls to their existing higher-level lexical boundaries.
+- Corrected free-string handle width from `i32` to `i64`.
+- Refused the unsafe shortcut of adding diagram functions to C-string lowering;
+  native `(ptr,len)` adapters remain required before safe promotion.
+- Added no marshalling, allocation, copy, lookup, or dispatch on valid calls.
+- Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 span-handle contract follow-up
+
+- Tagged all six untyped span-handle declarations `unsafe(ffi)`.
+- Enforced exact arity, non-negative/platform-sized fields, and `end >= start`.
+- Made handle allocation fail on ID overflow and release fail on unknown/double
+  free instead of reporting successful unit.
+- Preserved one registry operation per valid create/access/free and added no
+  lookup, allocation, copy, hash, retry, or traversal.
+- Typed native registry coverage remains absent; status is unverified/unsigned.
+## 2026-08-26 SHA-256 handle-contract follow-up
+
+- Enforced exact arity for new/write/finish/reset/free interpreter handlers.
+- Removed malformed-length fallback-to-full-payload hashing.
+- Rejected non-`i64` handles and atomic handle-counter overflow.
+- Tagged six raw seed declarations `unsafe(ffi)`; free stays explicitly
+  idempotent because both providers define that semantic.
+- Confined raw calls to the six existing `Sha256Hasher` method boundaries;
+  seed integer carrier versus interpreter array transport remains unresolved.
+- Preserved one payload pass and one registry operation per valid call; no
+  extra payload copy, traversal, lookup, hash pass, lock, or dispatch was added.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 mmap-byte provider identity correction
+
+- Corrected the stale claim that no owned native provider exists: Rust exports
+  `rt_file_mmap_read_bytes`, and pure-Simple/C-bootstrap provide the sibling
+  byte-reader implementation.
+- Changed the dedicated-host raw declaration to `[u8]?`, preserving provider
+  `NIL` as explicit absence and lifting it to `Result.Err`; a valid empty array
+  remains a successful value.
+- Matched the provider byte-array element type and removed the former O(n)
+  i64-to-u8 conversion, second allocation, and payload copy.
+- Keep status-plus-owned-output as the eventual versioned registry contract;
+  the nullable bridge is an exact existing ABI but not signed admission.
+- Reject extra stat/existence probes, duplicate reads, per-byte foreign calls,
+  and sentinel payloads: they add races, I/O, dispatch, or ambiguity.
+- Improve the current envelope to one read and the provider-owned output only;
+  keep signature and evidence verification at admission, never on the call
+  path.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 span-handle export minimization
+
+- Confirmed the six interpreter span-handle symbols have no Simple consumers.
+- Removed both direct-module and aggregate exports while retaining private,
+  explicitly `unsafe(ffi)` declarations and the hardened interpreter provider.
+- Added a static authority contract that rejects raw re-export and new
+  interpreter callsites outside the owner.
+- Avoided manufacturing an ownership wrapper for an unused API, so there is no
+  new owner allocation, lookup, branch, copy, or provider dispatch.
+- A future consumer must first introduce a typed non-copying owner with explicit
+  close/drop semantics; raw i64 handles must not be re-exported.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 font SFFI authority confinement
+
+- Tagged all twelve raw font/bitmap declarations `unsafe(ffi)` in the canonical
+  no-GC sync owner.
+- Confined all existing calls to nine lexical unsafe regions inside the current
+  high-level font and glyph wrappers; raw symbols remain unexported.
+- Preserved the exact provider-call count and order for load, glyph creation,
+  metrics, pixel reads, and release.
+- Added a static ratchet for declaration/call counts and the one-call pixel and
+  glyph hot paths; no allocation, copy, scan, hash, lookup, or dispatch added.
+- Keep the family unsafe until bitmap handles become typed non-copying owners
+  with generation/liveness validation and provider admission is signed.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 gamepad boundary deduplication
+
+- Replaced the app-local 20-declaration/roughly-400-line gamepad copy with an
+  export-only facade over the canonical Pure-Simple no-GC sync owner.
+- Preserved the complete public type/function surface and runtime-family facade
+  direction; no C/Rust implementation replaces Pure Simple.
+- Extended the existing authority ratchet to reject raw declarations, raw
+  calls, and duplicate wrapper functions in the app facade.
+- Preserved canonical provider-call counts and all polling, event, rumble, and
+  deadzone behavior; export resolution adds no runtime allocation, lookup,
+  branch, copy, or dispatch.
+- Keep all 20 symbols unsafe/unavailable until real typed providers are
+  registered, then require signed exact-artifact admission before promotion.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 volatile/MMIO boundary deduplication
+
+- Replaced the app-local eleven-declaration volatile/MMIO implementation with
+  an export-only facade over the canonical Pure-Simple no-GC owner.
+- Moved the three native-required u64 read/write/full-barrier helpers to the
+  canonical owner and tagged/confined their raw operations with `ffi` and
+  `raw_ptr` authority.
+- Preserved one direct provider operation for each host daemon call and added no
+  runtime branch, allocation, lookup, copy, hash, or dispatch.
+- Registered the three already-implemented interpreter fences, tagged all
+  eleven raw declarations, and confined all generic/native-required calls.
+- Removed hardcoded-unavailable branching and all eleven fabricated zero/no-op
+  fallbacks; missing providers now fail at resolution/link/admission.
+- Reduced each generic hot path from availability branch plus fallback/provider
+  call to exactly one provider call, with no allocation, lookup, copy, or hash.
+- Next migrate raw-address callers to capability-correct MMIO owners and add
+  signed admission while keeping verification off the MMIO hot path.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 HTTP/WebSocket boundary deduplication
+
+- Replaced both app-local HTTP implementations (52 raw declarations and about
+  one thousand repeated lines) with export-only facades over the canonical
+  Pure-Simple no-GC sync owner.
+- Preserved the full API and live `app.io.http_ffi` consumer; canonical handle
+  validation is stricter for negative client/server/WebSocket handles.
+- Updated both HTTP authority audits to require one 26-declaration owner and two
+  app facades with no raw declarations, calls, or wrapper bodies.
+- Preserved 29 canonical provider calls and added no request-path allocation,
+  lookup, branch, copy, hash, or dispatch.
+- Keep the family unsafe until incomplete providers and WebSocket nullable/error
+  contracts are replaced and exact artifacts receive signed admission.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 SQLite boundary deduplication
+
+- Replaced both app-local SQLite implementations (54 raw declarations and more
+  than one thousand repeated lines) with high-level-only facades over the
+  canonical Pure-Simple no-GC owner.
+- Preserved the live `app.io.context_ops` API while intentionally withholding
+  raw `rt_sqlite_*` handles from both app export surfaces.
+- Updated both SQLite audits to require one 27-declaration/26-call owner and two
+  export-only facades with no raw declarations, calls, or wrapper bodies.
+- Added no query-path call, allocation, lookup, copy, hash, or dispatch.
+- Keep PureDatabase preferred; migrate legacy SQLite done/error/null contracts
+  to typed status/out and require signed exact-artifact admission before any
+  safe promotion.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 legacy regex boundary deduplication
+
+- Replaced the app legacy regex implementation with an export-only facade over
+  the API-compatible no-GC async owner.
+- Removed eight duplicate raw declarations and the app copy's repeated-array
+  concatenation; the retained find-all path uses amortized-linear `push`.
+- Tagged all eight retained declarations and confined all nine raw calls.
+- Added a ratchet for provider registry presence, raw-free facade shape, and
+  linear find-all accumulation; no wrapper call or runtime dispatch added.
+- Kept the distinct no-GC sync `simple_regex_*` API separate to avoid wrapper
+  overhead and semantic drift.
+- Next replace no-match/provider-failure ambiguity and feature-gated stub
+  outputs with typed results and signed exact-artifact admission.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 compiler minimal-runtime unsafe-surface restoration
+
+- Restored explicit `unsafe(ffi)` authority on all 42 raw declarations and all
+  42 direct wrappers after a snapshot regressed the implementation while
+  retaining its authority scripts.
+- Preserved the newer bounded no-follow file-read API and included it in the
+  same one-declaration/one-wrapper policy.
+- Preserved nullable environment lookup and deep-array release results rather
+  than fabricating integer zero.
+- Retained one direct provider operation per wrapper; no allocation, copy,
+  lookup, hash, branch, generic dispatch, or registry work was added.
+- Provider closure remains incomplete (15 both lanes, 3 native-only, 6
+  interpreter-only, 18 neither); resolve or remove the 27 asymmetric/missing
+  contracts before safe promotion, then require signed exact-artifact
+  admission.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 RuntimeValue boolean registry closure
+
+- Add exact native `[I64] -> [I8]` registry contracts for boolean extraction
+  and the four RuntimeValue type predicates whose Rust exports and interpreter
+  handlers already exist.
+- Preserve semantic `bool`; do not widen the Simple API to an integer
+  workaround.
+- Add only compile-time signature rows, with no hot-path branch, conversion,
+  allocation, copy, lookup, hashing, or dispatch.
+- Remaining minimal-facade closure is 20 both lanes, 3 native-only, 1
+  interpreter-only, and 18 neither; next reconcile the one `rt_file_delete`
+  pointer/length versus text ABI before registration.
+- Keep all functions unsafe and unsigned until exact-artifact admission and
+  cross-lane semantic evidence exist.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 network boundary checkpoint
+
+- Replace two GC 41-declaration network copies with compile-time export
+  facades; retain no wrapper hop or per-call allocation, lookup, copy, branch,
+  hash, lock, or dispatch.
+- Keep the current no-GC async resolution owner and the historical no-GC sync
+  surface temporarily; collapsing the latter would remove its TCP exports.
+- Treat its 18 providerless UDP/HTTP/URL declarations as unresolved safety
+  debt, not as implementations and not as candidates for cosmetic safe tags.
+- Next reroute URL encoding/decoding to the existing Pure-Simple owner, replace
+  HTTP with a typed live transport, and design UDP around scalar/status-out
+  runtime contracts rather than passing high-level `UdpSocket` objects across
+  the ABI.
+- Require exact-artifact signed admission only at provider load time; never add
+  signature checking, registry lookup, or hashing to the network hot path.
+- Remaining production debt after this pass: 4,274 unsafe-tag gaps, 6,076
+  contract gaps, and zero signed-admitted declarations.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+### Pure-Simple URL codec follow-up
+
+- Replace both owners' `url_encode`/`url_decode` foreign declarations with
+  direct exports from their existing Pure-Simple RFC 3986 modules.
+- Preserve the public names with no forwarding wrapper and no per-call
+  allocation, lookup, copy, branch, hash, lock, or dispatch beyond the codec's
+  existing algorithm.
+- Remaining network providerless identities: 16 (14 UDP, HTTP request, and URL
+  parse). Remaining production debt: 4,270 unsafe-tag gaps, 6,072 contract
+  gaps, and zero signed-admitted declarations.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+### Pure-Simple URL parser follow-up
+
+- Remove both remaining `url_parse` foreign declarations and adapt each
+  `net.Url.parse` variant from its matching Pure-Simple fail-closed parser.
+- Preserve the public `Result<Url, SimpleError>` API and construct only the
+  required public result after the existing O(n) parse; add no foreign
+  marshalling, registry lookup, signature check, hash, lock, or dispatch.
+- Remaining network providerless identities: 15 (14 UDP and HTTP request).
+  Remaining production debt: 4,268 unsafe-tag gaps, 6,072 contract gaps, and
+  zero signed-admitted declarations.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+### Canonical UDP contract-closure follow-up
+
+- Close all eleven `rt_io_udp_*` identities across the C provider, Rust
+  provider, interpreter registry, runtime-symbol manifest, and typed JIT
+  registry before rerouting the legacy network API.
+- Preserve semantic booleans with exact i8 ABI instead of widening the public
+  API to integer status workarounds.
+- Bound receive allocations to the UDP payload limit, return nil on provider
+  failure, and make C `recv_from` return the declared `(bytes,address)` tuple.
+- Use packed interpreter byte arrays, avoiding one generic value per received
+  byte and matching the native lanes' data layout.
+- Retain one socket operation and one required bounded receive allocation; add
+  no registry lookup, signature verification, hash, retry, copy, or generic
+  dispatch to the hot path.
+- Next migrate/remove the fourteen providerless `udp_socket_*` identities,
+  then address multicast API compatibility without duplicating raw owners.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+#### Legacy UDP surface removal
+
+- Add typed multicast loop/join/leave contracts to the canonical scalar-handle
+  owner across C, Rust, interpreter, JIT registry, headers, and linker closure.
+- Replace `std.net.udp` with a compile-time facade over the typed `Result` API;
+  remove all 28 providerless `udp_socket_*` declaration occurrences.
+- Preserve one handle lookup plus one socket operation for membership/options;
+  use stack-only C address parsing and add no wrapper allocation, registry
+  lookup beyond the canonical handle lookup, hash, signature check, generic
+  dispatch, or payload copy.
+- Remaining legacy network providerless identities: one (`http_request`).
+  Remaining production debt: 4,240 unsafe-tag gaps, 6,058 contract gaps, and
+  zero signed-admitted declarations.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
+#### Language-aware census reporting
+
+- Extend `sffi-contract-inventory.shs` to report declaration and `rt_` totals
+  per observed provider language, with unsafe-tagged, freshly signed-admitted,
+  and untouched counts kept as separate dimensions.
+- Correct the symbol summary terminology: it now distinguishes symbols whose
+  declarations are all unsafe-tagged from symbols with at least one unsafe-tag
+  gap. The former report called the latter `unsafe_tagged`, which inverted the
+  meaning and could mislead a migration review.
+- Language provenance remains observational; it never upgrades ABI safety or
+  cryptographic admission. Signed admission still requires a fresh verifier
+  join on provider, symbol, and exact source-signature identity.
+- Status: source-reviewed; the census was not executed in this tranche.
+
+#### Lossless HTTP v2 boundary and legacy providerless removal
+
+- Add `rt_http_request_v2(method, url, headers, body_bytes, timeout_ms)` with a
+  total `(status, reason, raw_headers, body_bytes, transport_error)` result in
+  native C and the Rust interpreter. Status `-1` is reserved for contract or
+  transport failure; HTTP 4xx/5xx remain ordinary typed responses.
+- Preserve arbitrary binary request/response bodies and the response reason and
+  headers that the v1 text tuple discarded. Bound response collection to
+  64 MiB, header metadata to 1 MiB/1,024 fields, and status reason to 8 KiB;
+  reject malformed header/body/timeout inputs before I/O.
+- Lift the raw tuple once in the canonical no-GC sync `HttpClient`, implement
+  configured redirect limits, and replace async/GC copies with compile-time
+  facades. Remove both providerless high-level-object `http_request` externs.
+- Hot path has no admission hash/signature/symbol lookup or generic dispatch.
+  The v2 lane adds only the response metadata/body allocations required by its
+  public API; legacy v1 callers do not allocate returned metadata.
+- Estimated production inventory after this source change: 7,107 declarations,
+  2,869 unsafe-tagged, 4,238 unsafe-tag gaps, 6,056 contract gaps, zero
+  providerless legacy network identities, and zero signed admission.
+- Status: source-reviewed, deliberately unverified and unsigned.
+- Native core C still supports `http://` only and returns a typed transport
+  error for `https://`; the interpreter provider uses ureq/TLS. Cross-lane
+  HTTPS parity remains a separate TLS-provider migration requirement, not a
+  reason to fabricate a response or silently downgrade the scheme.

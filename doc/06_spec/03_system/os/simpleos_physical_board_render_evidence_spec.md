@@ -1,6 +1,6 @@
-# Simpleos Physical Board Render Evidence Specification
+# SimpleOS Physical Board Render Evidence
 
-> <details>
+> Defines the portable board qualification record and prevents QEMU, static
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,22 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Simpleos Physical Board Render Evidence Specification
+# SimpleOS Physical Board Render Evidence
+
+Defines the portable board qualification record and prevents QEMU, static
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/03_system/os/simpleos_physical_board_render_evidence_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Defines the portable board qualification record and prevents QEMU, static
+catalog, stale firmware, or incomplete transcripts from becoming board PASS.
 
 ## Scenarios
 
@@ -17,6 +32,8 @@
 
 #### should correlate board identity firmware boot receipt and exact capture
 
+- should correlate board identity firmware boot receipt and exact capture
+   - Artifact capture: after_step
 - Prepare a real board and flashed SimpleOS image
    - Artifact capture: after_step
 - Boot and capture the guest render receipt
@@ -25,17 +42,17 @@
    - Artifact capture: after_step
 - Verify exact pixels and transcript identity
    - Artifact capture: after_step
-- require live physical board evidence
-   - Artifact capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should correlate board identity firmware boot receipt and exact capture")
 step("Prepare a real board and flashed SimpleOS image")
 step("Boot and capture the guest render receipt")
 step("Capture the matching physical display or framebuffer")
@@ -128,21 +145,6 @@ expect(simpleos_render_target_status(evidence)).to_equal("qemu-verified")
 
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/03_system/os/simpleos_physical_board_render_evidence_spec.spl` |
-| Updated | 2026-07-27 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- SimpleOS physical-board rendering
 
 ## Scenario Summary
 

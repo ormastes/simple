@@ -1,20 +1,6 @@
-"""
-## Purpose and audience
-Purpose: Prove that CLI Args Default Command.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-FEATURE-CLI-ARGS-001
-doc/01_research/feature/REQ-FEATURE-CLI-ARGS-001.md
-doc/03_plan/feature/REQ-FEATURE-CLI-ARGS-001.md
-doc/04_architecture/feature/REQ-FEATURE-CLI-ARGS-001.md
-doc/05_design/feature/REQ-FEATURE-CLI-ARGS-001.md
-"""
-
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_typed_evidence_design.md
 
 """
 # CLI Args Default Command Specification
@@ -45,64 +31,68 @@ cli:
 
 """
 
-
-
-# ============================================================================
-# CLI Args Default Command
-# ============================================================================
-
+use std.spec
 use std.spec.step
+use std.cli.simple_parser_api.{simple_parser}
 
 describe "CLI Args Default Command":
-    # ## Default Behavior Without Subcommand
-    #
-    # Tests the default command block and fallback behavior.
-
+    # @manual scenario evidence
     context "default block":
-        it "uses default block when no subcommand given":
-            # @req: REQ-FEATURE-CLI-ARGS-001
-            # @req: REQ-FEATURE-CLI-ARGS-001
-            step("Verify: uses default block when no subcommand given")
-            # cli:
-            #     default:
-            #         positional file: text
-            # val args = cli.parse(["main.spl"])
-            # expect(args.file).to_equal("main.spl")
-            val file = "main.spl"
-            expect(file).to_equal("main.spl")
+        it "a bare first argument is consumed as the default positional path":
+            # @req REQ-SSPEC-SYSTEM
+            step("parse argv without any registered subcommand")
+            # evidence(protocol_json): ParsedResult positional/flag fields asserted below are the complete typed oracle
+            val parser = simple_parser("tool", "tool")
+                .positional("file", "input file", true)
+            val parsed = parser.parse(["main.spl"])
+            match parsed:
+                case Ok(result):
+                    expect(result.get_positional_at(0) ?? "").to_equal("main.spl")
+                    expect(result.has_subcommand()).to_equal(false)
+                case Err(message):
+                    expect(message).to_equal("__unreachable__")
 
-        it "prefers subcommand over default when given":
-            # @req: REQ-FEATURE-CLI-ARGS-001
-            step("Verify: prefers subcommand over default when given")
-            # cli:
-            #     default:
-            #         positional file: text
-            #     command build:
-            #         target: "debug"
-            # val args = cli.parse(["build", "--target", "release"])
-            # expect(args.command).to_equal("build")
-            val command = "build"
-            expect(command).to_equal("build")
+        it "a registered subcommand wins routing and owns the remaining args":
+            # @req REQ-SSPEC-SYSTEM
+            step("parse argv whose first token names a registered subcommand")
+            # evidence(protocol_json): subcommand/subcommand_args fields asserted below are the complete typed oracle
+            val parser = simple_parser("tool", "tool")
+                .subcommand("build", "build the project")
+                .positional("file", "input file", false)
+            val parsed = parser.parse(["build", "--target", "release"])
+            match parsed:
+                case Ok(result):
+                    expect(result.has_subcommand()).to_equal(true)
+                    expect(result.get_subcommand() ?? "").to_equal("build")
+                    expect(result.get_subcommand_args().len()).to_equal(2)  # oracle: "--target" and "release" both belong to the subcommand
+                case Err(message):
+                    expect(message).to_equal("__unreachable__")
 
     context "no default block":
-        it "shows help when no subcommand and no default":
-            # @req: REQ-FEATURE-CLI-ARGS-001
-            step("Verify: shows help when no subcommand and no default")
-            # cli:
-            #     command build:
-            #         target: "debug"
-            # Running with no args and no default block should show help
-            val shows_help = true
-            expect(shows_help).to_equal(true)
+        it "an unknown leading option with no default path is a parse error":
+            # @req REQ-SSPEC-SYSTEM
+            step("parse argv containing an unregistered long option")
+            # evidence(protocol_json): the Err side asserted below is the complete typed oracle
+            val parser = simple_parser("tool", "tool")
+                .subcommand("build", "build the project")
+            val parsed = parser.parse(["--nonexistent"])
+            match parsed:
+                case Ok(result):
+                    expect(result.has_subcommand()).to_equal("__unreachable__")
+                case Err(message):
+                    expect(message).to_contain("Unknown argument: --nonexistent")
 
-        it "accepts global options without subcommand":
-            # @req: REQ-FEATURE-CLI-ARGS-001
-            step("Verify: accepts global options without subcommand")
-            # cli:
-            #     verbose: false
-            #     command build:
-            #         target: "debug"
-            # val args = cli.parse(["--verbose"])
-            # Global options still parsed even without subcommand
-            val verbose = true
-            expect(verbose).to_equal(true)
+        it "global flags parse even when no subcommand is given":
+            # @req REQ-SSPEC-SYSTEM
+            step("parse argv carrying only a global flag")
+            # evidence(protocol_json): flag value asserted below is the complete typed oracle
+            val parser = simple_parser("tool", "tool")
+                .flag("verbose", "v", "verbose output")
+                .subcommand("build", "build the project")
+            val parsed = parser.parse(["--verbose"])
+            match parsed:
+                case Ok(result):
+                    expect(result.get_flag("verbose")).to_equal(true)
+                    expect(result.has_subcommand()).to_equal(false)
+                case Err(message):
+                    expect(message).to_equal("__unreachable__")

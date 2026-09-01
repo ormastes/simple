@@ -1,0 +1,161 @@
+# Bounded streaming cmp for the filesystem-launched SimpleOS simplebox.
+
+use os.userlib.fs.{file_open_direct, file_read_direct, file_close_direct}
+use os.tools.simplebox.simplebox_fs_applets.{
+    SIMPLEBOX_FILE_BYTES_LIMIT, SIMPLEBOX_READ_CHUNK_BYTES,
+    SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT
+}
+
+extern fn stdout_write(data: text)
+
+struct SimpleboxCmpPlan:
+    silent: bool
+    left_path: text
+    right_path: text
+    accepted: bool
+    error: text
+
+fn _simplebox_cmp_plan(args: [text]) -> SimpleboxCmpPlan:
+    var silent = false
+    var operands: [text] = []
+    var options = true
+    for arg in args:
+        if options and arg == "--":
+            options = false
+        elif options and (arg == "-s" or arg == "--silent" or arg == "--quiet"):
+            silent = true
+        elif options and arg.starts_with("-"):
+            return SimpleboxCmpPlan(silent: silent, left_path: "", right_path: "",
+                accepted: false, error: "unsupported option: " + arg)
+        else:
+            operands.push(arg)
+    if operands.len() < 2u64:
+        return SimpleboxCmpPlan(silent: silent, left_path: "", right_path: "",
+            accepted: false, error: "missing file operand")
+    if operands.len() > 2u64:
+        return SimpleboxCmpPlan(silent: silent, left_path: "", right_path: "",
+            accepted: false, error: "too many operands")
+    for path in operands:
+        if path.len() == 0u64 or path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+            return SimpleboxCmpPlan(silent: silent, left_path: "", right_path: "",
+                accepted: false, error: "invalid path length")
+    SimpleboxCmpPlan(silent: silent, left_path: operands[0], right_path: operands[1],
+        accepted: true, error: "")
+
+fn _simplebox_cmp_close(left_fd: i32, right_fd: i32) -> bool:
+    val left_closed = file_close_direct(left_fd)
+    val right_closed = file_close_direct(right_fd)
+    left_closed and right_closed
+
+pub fn simplebox_cmp(args: [text]) -> i32:
+    """Compare two bounded files without copying either whole file into memory."""
+    val plan = _simplebox_cmp_plan(args)
+    if not plan.accepted:
+        stdout_write("cmp: " + plan.error + "\n")
+        return 2
+
+    val left_opened = file_open_direct(plan.left_path, 0u32)
+    var left_fd = -1
+    match left_opened:
+        case Err(reason):
+            stdout_write("cmp: " + plan.left_path + ": " + reason + "\n")
+            return 2
+        case Ok(fd): left_fd = fd
+    val right_opened = file_open_direct(plan.right_path, 0u32)
+    var right_fd = -1
+    match right_opened:
+        case Err(reason):
+            val _closed = file_close_direct(left_fd)
+            stdout_write("cmp: " + plan.right_path + ": " + reason + "\n")
+            return 2
+        case Ok(fd): right_fd = fd
+
+    var left_chunk: [u8] = []
+    var right_chunk: [u8] = []
+    var left_index: u64 = 0u64
+    var right_index: u64 = 0u64
+    var left_read: u64 = 0u64
+    var right_read: u64 = 0u64
+    var compared: u64 = 0u64
+    var line: u64 = 1u64
+    var left_eof = false
+    var right_eof = false
+    var different = false
+    var difference_byte: u64 = 0u64
+    var difference_line: u64 = 0u64
+    var eof_path = ""
+    var failure = ""
+
+    while not different and failure == "":
+        if left_index >= left_chunk.len() and not left_eof:
+            match file_read_direct(left_fd, SIMPLEBOX_READ_CHUNK_BYTES):
+                case Err(reason): failure = plan.left_path + ": " + reason
+                case Ok(chunk):
+                    left_chunk = chunk
+                    left_index = 0u64
+                    if chunk.len() == 0u64:
+                        left_eof = true
+                    elif left_read + chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT:
+                        failure = plan.left_path + ": file exceeds simplebox byte limit"
+                    else:
+                        left_read = left_read + chunk.len()
+        if right_index >= right_chunk.len() and not right_eof and failure == "":
+            match file_read_direct(right_fd, SIMPLEBOX_READ_CHUNK_BYTES):
+                case Err(reason): failure = plan.right_path + ": " + reason
+                case Ok(chunk):
+                    right_chunk = chunk
+                    right_index = 0u64
+                    if chunk.len() == 0u64:
+                        right_eof = true
+                    elif right_read + chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT:
+                        failure = plan.right_path + ": file exceeds simplebox byte limit"
+                    else:
+                        right_read = right_read + chunk.len()
+
+        if failure == "":
+            val left_available = left_chunk.len() - left_index
+            val right_available = right_chunk.len() - right_index
+            if left_available == 0u64 or right_available == 0u64:
+                if left_eof and right_eof:
+                    break
+                if left_eof and right_available > 0u64:
+                    different = true
+                    difference_byte = compared + 1u64
+                    difference_line = line
+                    eof_path = plan.left_path
+                elif right_eof and left_available > 0u64:
+                    different = true
+                    difference_byte = compared + 1u64
+                    difference_line = line
+                    eof_path = plan.right_path
+            else:
+                val span = if left_available < right_available: left_available else: right_available
+                var offset: u64 = 0u64
+                while offset < span and not different:
+                    val left_byte = left_chunk[left_index + offset]
+                    val right_byte = right_chunk[right_index + offset]
+                    if left_byte != right_byte:
+                        different = true
+                        difference_byte = compared + offset + 1u64
+                        difference_line = line
+                    elif left_byte == 10u8:
+                        line = line + 1u64
+                    offset = offset + 1u64
+                left_index = left_index + offset
+                right_index = right_index + offset
+                compared = compared + offset
+
+    if not _simplebox_cmp_close(left_fd, right_fd) and failure == "":
+        failure = "close failed"
+    if failure != "":
+        stdout_write("cmp: " + failure + "\n")
+        return 2
+    if different:
+        if not plan.silent:
+            if eof_path != "":
+                stdout_write("cmp: EOF on " + eof_path + " after byte " + compared.to_text() + "\n")
+            else:
+                stdout_write(plan.left_path + " " + plan.right_path + " differ: byte " +
+                    difference_byte.to_text() + ", line " + difference_line.to_text() + "\n")
+        return 1
+    0

@@ -1,8 +1,7 @@
 # Array `.at(i)` returns `nil` for EVERY index — all Option call sites take the None branch
 
 **Date:** 2026-08-01
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** interpreter lane FIXED; **JIT lane FIXED**; **native LLVM (Rust seed
 `compile --native`) FIXED to JIT parity** — see
 `array_at_native_llvm_lane_2026-08-01.md`. The pure-Simple `native-build` lane
 is still OPEN (no `at` arm in its MIR lowering; fails loudly).
@@ -14,8 +13,7 @@ is still OPEN (no `at` arm in its MIR lowering; fails loudly).
 |---|---|---|---|
 | Rust-seed tree-walking interpreter | `SIMPLE_EXECUTION_MODE=interpret` | **loud** — `method 'at' not found on type 'array'` | correct Option |
 | Rust-seed JIT (**the default** for `simple foo.spl`) | default | **silent `nil` for every index** | **correct Option** (11 examples 6 failures → 11/0) |
-| Native LLVM (Rust seed) | `simple compile --native --backend llvm` | **silent absent for every index — now CONFIRMED by running a real ELF, no longer a prediction** | **correct** (`at(0)` ABSENT→PRESENT); parity with JIT |
-| Native, pure-Simple | `simple native-build` | LOUD `unresolved method call: at` at MIR lowering | still OPEN — no `at` arm in the pure-Simple MIR lowering |
+| Native LLVM | `simple compile --native` | **silent `nil` for every index** | still broken — NOT verified here, see below |
 | Pure-Simple compiler's own interpreter | n/a — cannot self-host at HEAD | implements `at` (source read; **INFERRED**, not run) | — |
 
 ### JIT lane fix — what it actually took
@@ -203,23 +201,14 @@ The only `at` binding anywhere in the seed is for **text**, not arrays:
 So `text.at(i)` works (it is `char_at`); `array.at(i)` does not exist.
 
 The pure-Simple compiler already has the correct implementation, added by an
-earlier lane, in its live method-eval path:
+earlier lane, in both of its method-eval paths:
 
 - `src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:833`
+- `src/compiler/10.frontend/core/interpreter/eval_methods.spl:300`
 
-It uses the flat Option encoding (the element itself is `Some`, `nil` is
-`None`, per `eval.spl match_pattern`) and bounds-checks `0 <= i < len`. That is
+Both use the flat Option encoding (the element itself is `Some`, `nil` is
+`None`, per `eval.spl match_pattern`) and bounds-check `0 <= i < len`. That is
 the semantics to mirror into the seed.
-
-> **Path corrected 2026-08-01.** This originally read "in **both** of its
-> method-eval paths" and also listed
-> `interpreter/eval_methods.spl:300`. There was only ever **one** live path:
-> `eval_methods.spl` was a dead duplicate shadowed by the `_EvalOps` package
-> copies (sabotage-proven in both directions) and was deleted in
-> `f97dfbbb8ee`. The conclusion is **unchanged** — the surviving `_EvalOps`
-> copy is the one that carries the `at` arm, and it is a superset of the
-> deleted one. Only the "both paths" redundancy claim was false. See
-> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 
 ## Census — CORRECTS the previously recorded figure
 
@@ -431,37 +420,3 @@ evidence about the native or JIT lanes — which is exactly why
 close this bug. Native must be verified by `simple compile --native` plus
 running the produced binary, and JIT by a default `simple foo.spl` run, as done
 in the transcripts above.
-
-
-## Adjacent finding 2026-08-17 (P0-core silent-wrong lane): `.at()` RETURN SHAPE diverges between engines
-
-Not the defect this doc tracks — the filed defect (`at` returning nil for every
-index, and the missing `at` arm in pure-Simple MIR lowering) was NOT reproduced
-and NOT re-tested on the native lane. But the probe written to check it exposed
-a different divergence in the same method, on the two engines this tree actually
-ships:
-
-```
-val a: [i64] = [10, 20, 30]
-print a.at(1)
-```
-
-| engine | output |
-|---|---|
-| `SIMPLE_EXECUTION_MODE=interpreter` | `20` |
-| `SIMPLE_EXECUTION_MODE=jit`         | `<enum@0x46988592660>` |
-
-Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
-2026-08-16 22:59:37 UTC (Rust seed). Exit 0 both times, no diagnostic.
-
-The JIT result is the *defensible* one if `at` is specified to return `T?` — it
-is handing back the Option enum unopened. The interpreter is silently unwrapping
-it. Whichever is intended, they cannot both be, and today the same source text
-yields a number on one engine and an enum handle on the other. Anything that
-pattern-matches the result works on one engine and falls through on the other;
-anything that prints it produces either a value or a pointer.
-
-Filed here rather than as a new doc because it is the same method and a reader
-of this doc needs to know it; if the owner disagrees it should be split out.
-Not investigated: which behaviour is specified, where the unwrap happens, and
-whether `.get()`/`.first()`/`.last()` share it.

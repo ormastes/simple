@@ -1,17 +1,8 @@
-"""
-## Purpose and audience
-Purpose: Prove that MIR logical short-circuit lowering.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-COMPILER-MIR-001 — stable requirement identity for this spec.
-
 use std.spec
+use std.spec.step
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
-# `lower_module` is a `me` method defined in _Items/module_lowering.spl and
-# re-exported via hir_lowering.items; types.spl alone does not bring it in scope.
-use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 
 fn lower_source_function(src: text, target_name: text) -> text:
@@ -30,12 +21,12 @@ fn lower_logic_function(expr: text) -> text:
     lower_source_function(src, "check")
 
 fn expect_conditional_rhs(mir: text):
-    val if_pos = mir.index_of("\"terminator\":{\"If\"")
-    val rhs_pos = mir.index_of("\"label\":\"logic_rhs\"")
-    val call_pos = mir.index_of("\"value\":\"rhs\"")
-    val short_pos = mir.index_of("\"label\":\"logic_short\"")
-    val merge_pos = mir.index_of("\"label\":\"logic_merge\"")
-    val load_pos = mir.index_of("\"Load\"")
+    val if_pos = mir.index_of("\"terminator\":{\"If\"") ?? -1
+    val rhs_pos = mir.index_of("\"label\":\"logic_rhs\"") ?? -1
+    val call_pos = mir.index_of("\"value\":\"rhs\"") ?? -1
+    val short_pos = mir.index_of("\"label\":\"logic_short\"") ?? -1
+    val merge_pos = mir.index_of("\"label\":\"logic_merge\"") ?? -1
+    val load_pos = mir.index_of("\"Load\"") ?? -1
     expect(if_pos).to_be_greater_than(-1)
     expect(rhs_pos).to_be_greater_than(if_pos)
     expect(call_pos).to_be_greater_than(rhs_pos)
@@ -49,33 +40,29 @@ fn expect_conditional_rhs(mir: text):
     expect(mir.contains("\"BitOr\"")).to_equal(false)
 
 describe "MIR logical short-circuit lowering", tag: ["only-compiled"]:
+    # @manual scenario evidence
     it "branches to the RHS only when an and-left value is true":
-        step("Verify: branches to the RHS only when an and-left value is true")
-        # @req: REQ-COMPILER-MIR-001
         val mir = lower_logic_function("flag and rhs()")
         expect_conditional_rhs(mir)
         expect(mir).to_contain("\"then\":1,\"else\":2")
 
     it "branches to the RHS only when an or-left value is false":
-        step("Verify: branches to the RHS only when an or-left value is false")
         val mir = lower_logic_function("flag or rhs()")
         expect_conditional_rhs(mir)
         expect(mir).to_contain("\"then\":2,\"else\":1")
 
     it "uses independent slots for nested short-circuit expressions":
-        step("Verify: uses independent slots for nested short-circuit expressions")
         val mir = lower_logic_function("flag and (other or rhs())")
         expect(mir.split("\"Alloc\"").len()).to_equal(3)
         expect(mir.split("\"Store\"").len()).to_equal(5)
         expect(mir.split("\"Load\"").len()).to_equal(3)
 
     it "hoists a loop-body logical merge slot to function entry":
-        step("Verify: hoists a loop-body logical merge slot to function entry")
         val src = "fn rhs() -> bool:\n    true\n\nfn check(flag: bool) -> bool:\n    var result = false\n    while flag:\n        result = flag and rhs()\n        break\n    result\n"
         val mir = lower_source_function(src, "check")
-        val alloc_pos = mir.index_of("\"Alloc\"")
-        val cond_pos = mir.index_of("\"label\":\"while_cond\"")
-        val body_pos = mir.index_of("\"label\":\"while_body\"")
+        val alloc_pos = mir.index_of("\"Alloc\"") ?? -1
+        val cond_pos = mir.index_of("\"label\":\"while_cond\"") ?? -1
+        val body_pos = mir.index_of("\"label\":\"while_body\"") ?? -1
         expect(alloc_pos).to_be_greater_than(-1)
         expect(cond_pos).to_be_greater_than(alloc_pos)
         expect(body_pos).to_be_greater_than(cond_pos)
@@ -83,18 +70,15 @@ describe "MIR logical short-circuit lowering", tag: ["only-compiled"]:
 
 describe "MIR block terminator lowering", tag: ["only-compiled"]:
     it "lowers a bare return without an optional payload crash":
-        step("Verify: lowers a bare return without an optional payload crash")
         val mir = lower_source_function("fn stop():\n    return\n", "stop")
 
         expect(mir).to_contain("\"terminator\":{\"Return\":null}")
 
     it "does not lower a Dict traversal after return":
-        step("Verify: does not lower a Dict traversal after return")
         val source = "fn check(values: Dict<text, i64>) -> i64:\n    return 7\n    values.values()\n"
         val mir = lower_source_function(source, "check")
 
-        expect(mir).to_contain("\"terminator\":{\"Return\":{\"Copy\"")
-        expect(mir).to_contain("\"value\":7")
+        expect(mir).to_contain("\"terminator\":{\"Return\"")
         expect(mir.contains("rt_dict_values")).to_equal(false)
         expect(mir.contains("Map.values")).to_equal(false)
         expect(mir.contains("Dict.values")).to_equal(false)

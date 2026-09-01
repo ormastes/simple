@@ -22,6 +22,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -328,6 +332,66 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
     }
 }
 
+/// Open, classify, and bounded-read one regular file through the same handle.
+///
+/// Unix uses `O_NOFOLLOW`; Windows opens the reparse point itself and rejects
+/// reparse-point and directory attributes from that handle. Unsupported hosts
+/// fail closed. `NIL` denotes every admission/read/UTF-8 failure, while an
+/// allocated empty text remains a successful empty-file result.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
+    path_ptr: *const u8,
+    path_len: u64,
+    max_bytes: i64,
+) -> RuntimeValue {
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) || path_ptr.is_null() || max_bytes < 0 {
+        return RuntimeValue::NIL;
+    }
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(path) if !path.is_empty() && !path.as_bytes().contains(&0) => path,
+        _ => return RuntimeValue::NIL,
+    };
+    let path = Path::new(path_str);
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    #[cfg(windows)]
+    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    #[cfg(not(any(unix, windows)))]
+    return RuntimeValue::NIL;
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(_) => return RuntimeValue::NIL,
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return RuntimeValue::NIL,
+    };
+    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
+        return RuntimeValue::NIL;
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x0000_0400 != 0 {
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        return RuntimeValue::NIL;
+    }
+    let read_limit = match (max_bytes as u64).checked_add(1) {
+        Some(limit) => limit,
+        None => return RuntimeValue::NIL,
+    };
+    let mut raw = Vec::new();
+    let mut bounded = file.take(read_limit);
+    if bounded.read_to_end(&mut raw).is_err() || raw.len() as i64 > max_bytes {
+        return RuntimeValue::NIL;
+    }
+    if std::str::from_utf8(&raw).is_err() {
+        return RuntimeValue::NIL;
+    }
+    rt_string_new(raw.as_ptr(), raw.len() as u64)
+}
+
 /// Read entire file as text (RuntimeValue wrapper)
 /// Takes a RuntimeValue string, extracts ptr/len, and calls rt_file_read_text.
 /// Returns the string directly on success, NIL on failure.
@@ -416,7 +480,10 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
     ));
 
     let write_result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
         file.write_all(&content_bytes)?;
         file.sync_all()?;
         Ok(())
@@ -1679,6 +1746,28 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn regular_no_follow_bounded_read_and_directory_sync_are_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("secret.hex");
+        let link = temp_dir.path().join("secret-link.hex");
+        fs::write(&target, "0011").unwrap();
+        symlink(&target, &link).unwrap();
+        let target_text = target.to_str().unwrap();
+        let link_text = link.to_str().unwrap();
+        unsafe {
+            let accepted = rt_file_read_regular_no_follow_bounded(target_text.as_ptr(), target_text.len() as u64, 4);
+            assert_eq!(extract_string(accepted), "0011");
+            assert!(rt_file_read_regular_no_follow_bounded(target_text.as_ptr(), target_text.len() as u64, 3).is_nil());
+            assert!(rt_file_read_regular_no_follow_bounded(link_text.as_ptr(), link_text.len() as u64, 4).is_nil());
+            let directory = temp_dir.path().to_str().unwrap();
+            assert!(rt_file_fsync(directory.as_ptr(), directory.len() as u64));
+        }
+    }
+
     #[test]
     fn sandbox_capability_table_gates_file_text_io() {
         let temp_dir = TempDir::new().unwrap();
@@ -2032,19 +2121,7 @@ sandbox_lowering:
         );
         let unchanged = output;
         assert_eq!(
-            unsafe {
-                rt_write_u32s_strided_to_raw(
-                    output.as_mut_ptr() as i64,
-                    6 * 4,
-                    5 * 4,
-                    values,
-                    3,
-                    1,
-                    1,
-                    2,
-                    2,
-                )
-            },
+            unsafe { rt_write_u32s_strided_to_raw(output.as_mut_ptr() as i64, 6 * 4, 5 * 4, values, 3, 1, 1, 2, 2,) },
             0
         );
         assert_eq!(output, unchanged);

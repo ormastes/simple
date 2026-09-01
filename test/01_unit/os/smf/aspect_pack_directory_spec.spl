@@ -1,0 +1,519 @@
+use std.spec.{describe, it, expect}
+use std.common.aspect_pack.{
+    ApkModuleSourceV2,
+    ApkModuleSourceV3,
+    APK_CHUNK_CODE,
+    APK_CHUNK_FLAG_NONE,
+    AspectFacetDescriptor,
+    AspectPackBinding,
+    AspectCatalogEntry,
+    AspectCatalog,
+    apk_build_pack_v2,
+    apk_build_pack_v3,
+    aspect_catalog_build
+}
+use os.smf.aspect_pack_directory.{
+    AspectPackDirectory,
+    AspectPackArtifactIdentity,
+    AspectPackExportContract,
+    AspectPackLookupRequest,
+    aspect_pack_directory_parse_from_smf_bytes,
+    aspect_pack_directory_parse_from_outer_smf_bytes,
+    aspect_pack_directory_validate_against_manifest
+}
+use os.smf.dynsmf_session.{
+    DynSmfManifestEntry,
+    dynsmf_policy_default,
+    dynsmf_session_new,
+    dynsmf_session_load_admitted,
+    dynsmf_session_unload,
+    dynsmf_session_lookup_facet,
+    dynsmf_session_validate_facet_ref
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+fn _aspect_pack_test_bytes() -> [u8]:
+    val modules = [
+        ApkModuleSourceV2(
+            module_id: "trace.module",
+            aspect_id: "trace.aspect",
+            module_abi_hash: "module-abi-7",
+            required_core_public_abi_hash: "core-abi-3",
+            variant_fingerprint: "linux-x86_64",
+            payload: [11 as u8, 22 as u8, 33 as u8]
+        )
+    ]
+    val built = apk_build_pack_v2(modules)
+    built.bytes
+
+fn _aspect_pack_other_bytes() -> [u8]:
+    val modules = [
+        ApkModuleSourceV2(
+            module_id: "trace.module",
+            aspect_id: "trace.aspect",
+            module_abi_hash: "module-abi-7",
+            required_core_public_abi_hash: "core-abi-3",
+            variant_fingerprint: "linux-x86_64",
+            payload: [99 as u8, 88 as u8, 77 as u8]
+        )
+    ]
+    val built = apk_build_pack_v2(modules)
+    built.bytes
+
+fn _aspect_fixture_append_u32(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out.push((value & 0xff) as u8)
+    out.push(((value >> 8) & 0xff) as u8)
+    out.push(((value >> 16) & 0xff) as u8)
+    out.push(((value >> 24) & 0xff) as u8)
+    out
+
+fn _aspect_fixture_append_u64(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    var index = 0
+    while index < 8:
+        out.push(((value >> (index * 8)) & 0xff) as u8)
+        index = index + 1
+    out
+
+fn _aspect_fixture_append(bytes: [u8], suffix: [u8]) -> [u8]:
+    var out = bytes
+    var index = 0
+    while index < suffix.len():
+        out.push(suffix[index])
+        index = index + 1
+    out
+
+fn _aspect_fixture_section(wire_type: i64, flags: i64, offset: i64, size: i64, alignment: i64) -> [u8]:
+    var out: [u8] = [wire_type as u8, 0 as u8, 0 as u8, 0 as u8]
+    out = _aspect_fixture_append_u32(out, flags)
+    out = _aspect_fixture_append_u64(out, offset)
+    out = _aspect_fixture_append_u64(out, size)
+    out = _aspect_fixture_append_u64(out, size)
+    out = _aspect_fixture_append_u64(out, alignment)
+    while out.len() < 64:
+        out.push(0 as u8)
+    out
+
+fn _aspect_fixture_symbol(code_size: i64) -> [u8]:
+    var out: [u8] = []
+    out = _aspect_fixture_append_u32(out, 1)  # name offset after leading NUL
+    out = _aspect_fixture_append_u32(out, 0)  # name hash is not authoritative
+    out.push(0 as u8)  # Function
+    out.push(1 as u8)  # Global
+    while out.len() < 16:
+        out.push(0 as u8)
+    out = _aspect_fixture_append_u64(out, 0)  # offset within code section
+    out = _aspect_fixture_append_u64(out, code_size)
+    while out.len() < 56:
+        out.push(0 as u8)  # reserved section index bytes select section zero
+    out
+
+fn _aspect_fixture_header(section_table: i64, symbol_table: i64) -> [u8]:
+    var out: [u8] = [83 as u8, 77 as u8, 70 as u8, 0 as u8, 1 as u8, 1 as u8, 1 as u8, 0 as u8]
+    out = _aspect_fixture_append_u32(out, 0x21)  # executable + aspect-pack
+    out = _aspect_fixture_append(out, [0 as u8, 0 as u8, 0 as u8, 0 as u8])
+    out = _aspect_fixture_append_u32(out, 2)
+    out = _aspect_fixture_append_u64(out, section_table)
+    out = _aspect_fixture_append_u64(out, symbol_table)
+    out = _aspect_fixture_append_u32(out, 1)
+    out = _aspect_fixture_append_u32(out, 1)
+    out = _aspect_fixture_append_u64(out, 0)
+    out = _aspect_fixture_append_u32(out, 0)
+    out = _aspect_fixture_append_u32(out, 0)
+    while out.len() < 128:
+        out.push(0 as u8)
+    out
+
+fn _aspect_smf_bytes(code: [u8], pack_bytes: [u8]) -> [u8]:
+    var out = code
+    while out.len() % 8 != 0:
+        out.push(0 as u8)
+    val pack_offset = out.len()
+    out = _aspect_fixture_append(out, pack_bytes)
+    val section_table = out.len()
+    out = _aspect_fixture_append(out, _aspect_fixture_section(1, 5, 0, code.len(), 16))
+    out = _aspect_fixture_append(out, _aspect_fixture_section(16, 1, pack_offset, pack_bytes.len(), 8))
+    val symbol_table = out.len()
+    out = _aspect_fixture_append(out, _aspect_fixture_symbol(code.len()))
+    out.push(0 as u8)
+    out = _aspect_fixture_append(out, [116 as u8, 114 as u8, 97 as u8, 99 as u8, 101 as u8, 95 as u8, 102 as u8, 97 as u8, 99 as u8, 101 as u8, 116 as u8, 95 as u8, 118 as u8, 49 as u8, 0 as u8])
+    _aspect_fixture_append(out, _aspect_fixture_header(section_table, symbol_table))
+
+fn _aspect_smf_test_bytes() -> [u8]:
+    # x86-64 `ret`; lookup only resolves its mapped address and never calls it.
+    _aspect_smf_bytes([195 as u8], _aspect_pack_test_bytes())
+
+fn _aspect_smf_other_bytes() -> [u8]:
+    # A distinct, still-valid code body under the same logical library id.
+    _aspect_smf_bytes([144 as u8, 195 as u8], _aspect_pack_other_bytes())
+
+fn _aspect_directory_from_smf(artifact_bytes: [u8]) -> AspectPackDirectory:
+    aspect_pack_directory_parse_from_outer_smf_bytes(artifact_bytes).directory
+
+fn _aspect_catalog_with_interface(module_abi_hash: text, export_symbol: text, interface_abi_hash: text, content_hash: text) -> AspectCatalog:
+    val entries = [
+        AspectCatalogEntry(
+            descriptor: AspectFacetDescriptor(
+                facet_id: "trace/Traceable",
+                export_symbol: export_symbol,
+                interface_abi_hash: interface_abi_hash
+            ),
+            binding: AspectPackBinding(
+                facet_id: "trace/Traceable",
+                aspect_id: "trace.aspect",
+                library_id: "trace_pack",
+                library_path: "build/dynsmf/trace_pack.smf",
+                library_abi_version: "7",
+                module_id: "trace.module",
+                module_abi_hash: module_abi_hash,
+                pack_content_hash: content_hash,
+                placement: "dynamic"
+            )
+        )
+    ]
+    val built = aspect_catalog_build(entries)
+    built.catalog
+
+fn _aspect_catalog(module_abi_hash: text, export_symbol: text, content_hash: text) -> AspectCatalog:
+    _aspect_catalog_with_interface(module_abi_hash, export_symbol, "facet-abi-2", content_hash)
+
+fn _aspect_manifest(exports: [text]) -> [DynSmfManifestEntry]:
+    [
+        DynSmfManifestEntry(
+            id: "trace_pack",
+            path: "build/dynsmf/trace_pack.smf",
+            source_module: "std.trace.aspect",
+            artifact_kind: "precompiled_smf",
+            abi_version: "7",
+            default_autoload: false,
+            exports: exports
+        )
+    ]
+
+fn _aspect_artifact(content_hash: text) -> AspectPackArtifactIdentity:
+    AspectPackArtifactIdentity(
+        library_id: "trace_pack",
+        path: "build/dynsmf/trace_pack.smf",
+        content_hash: content_hash
+    )
+
+fn _aspect_export_contracts_with_interface(interface_abi_hash: text) -> [AspectPackExportContract]:
+    [
+        AspectPackExportContract(
+            library_id: "trace_pack",
+            export_symbol: "trace_facet_v1",
+            interface_abi_hash: interface_abi_hash
+        )
+    ]
+
+fn _aspect_export_contracts() -> [AspectPackExportContract]:
+    _aspect_export_contracts_with_interface("facet-abi-2")
+
+fn _aspect_lookup_request(directory: AspectPackDirectory, catalog: AspectCatalog, manifest: [DynSmfManifestEntry], artifact_hash: text) -> AspectPackLookupRequest:
+    AspectPackLookupRequest(
+        directory: directory,
+        catalog: catalog,
+        manifest: manifest,
+        artifact: _aspect_artifact(artifact_hash),
+        export_contracts: _aspect_export_contracts(),
+        facet_id: "trace/Traceable"
+    )
+
+describe "dynamic aspect pack directory parser":
+    it "parses the exact SMFAPK1 module directory without touching naming conventions":
+        val parsed = aspect_pack_directory_parse_from_smf_bytes(_aspect_pack_test_bytes())
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.directory.schema_version).to_equal(1)
+        expect(parsed.directory.entries.len()).to_equal(1)
+        expect(parsed.directory.entries[0].module_id).to_equal("trace.module")
+        expect(parsed.directory.entries[0].aspect_id).to_equal("trace.aspect")
+        expect(parsed.directory.entries[0].module_abi_hash).to_equal("module-abi-7")
+
+    it "derives the directory from the exact admitted outer SMF bytes":
+        val outer = _aspect_smf_test_bytes()
+        val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(outer)
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.directory.content_hash).to_equal(sha256_u8_hex(_aspect_pack_test_bytes()))
+        expect(parsed.directory.entries[0].module_id).to_equal("trace.module")
+
+    it "rejects unbounded outer table offsets before constructing a general reader":
+        var outer = _aspect_smf_test_bytes()
+        val header = outer.len() - 128
+        outer[header + 27] = 128
+        val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(outer)
+        expect(parsed.ok).to_equal(false)
+        expect(parsed.error_code).to_equal("ASPECT_PACK_OUTER_TABLE_OFFSET")
+
+    it "fails closed when the aspect-pack flag is missing":
+        var corrupted = _aspect_pack_test_bytes()
+        corrupted[10] = 0
+        corrupted[11] = 0
+        val parsed = aspect_pack_directory_parse_from_smf_bytes(corrupted)
+        expect(parsed.ok).to_equal(false)
+        expect(parsed.error_code).to_equal("ASPECT_PACK_BAD_FLAGS")
+
+    it "keeps producer and consumer alignment policy identical":
+        val modules = [
+            ApkModuleSourceV3(
+                module_id: "bad.alignment",
+                aspect_id: "bad.aspect",
+                module_abi_hash: "abi",
+                required_core_public_abi_hash: "core",
+                required_core_layout_hash: "",
+                variant_fingerprint: "host",
+                cluster_id: "",
+                chunk_kind: APK_CHUNK_CODE,
+                chunk_flags: APK_CHUNK_FLAG_NONE,
+                alignment: 3,
+                payload: [1 as u8]
+            )
+        ]
+        val built = apk_build_pack_v3(modules)
+        expect(built.ok).to_equal(false)
+        expect(built.error_code).to_equal("APK_BAD_ALIGNMENT")
+
+describe "dynamic aspect pack admission":
+    it "admits only an exact directory catalog and manifest agreement":
+        val parsed = aspect_pack_directory_parse_from_smf_bytes(_aspect_pack_test_bytes())
+        val admission = aspect_pack_directory_validate_against_manifest(
+            parsed.directory,
+            _aspect_catalog("module-abi-7", "trace_facet_v1", parsed.directory.content_hash),
+            _aspect_manifest(["trace_facet_v1"]),
+            _aspect_artifact(parsed.directory.content_hash),
+            _aspect_export_contracts()
+        )
+        expect(admission.ok).to_equal(true)
+        expect(admission.admitted_facets).to_equal(1)
+
+    it "rejects module ABI mismatch rather than falling back":
+        val parsed = aspect_pack_directory_parse_from_smf_bytes(_aspect_pack_test_bytes())
+        val admission = aspect_pack_directory_validate_against_manifest(
+            parsed.directory,
+            _aspect_catalog("wrong-module-abi", "trace_facet_v1", parsed.directory.content_hash),
+            _aspect_manifest(["trace_facet_v1"]),
+            _aspect_artifact(parsed.directory.content_hash),
+            _aspect_export_contracts()
+        )
+        expect(admission.ok).to_equal(false)
+        expect(admission.error_code).to_equal("ASPECT_PACK_MODULE_ABI_MISMATCH")
+
+    it "rejects a missing export instead of inferring it from the facet id":
+        val parsed = aspect_pack_directory_parse_from_smf_bytes(_aspect_pack_test_bytes())
+        val admission = aspect_pack_directory_validate_against_manifest(
+            parsed.directory,
+            _aspect_catalog("module-abi-7", "trace_facet_v1", parsed.directory.content_hash),
+            _aspect_manifest(["different_export"]),
+            _aspect_artifact(parsed.directory.content_hash),
+            _aspect_export_contracts()
+        )
+        expect(admission.ok).to_equal(false)
+        expect(admission.error_code).to_equal("ASPECT_PACK_EXPORT_MISSING")
+
+    it "rejects duplicate manifest exports before catalog matching":
+        val parsed = aspect_pack_directory_parse_from_smf_bytes(_aspect_pack_test_bytes())
+        val admission = aspect_pack_directory_validate_against_manifest(
+            parsed.directory,
+            _aspect_catalog("module-abi-7", "trace_facet_v1", parsed.directory.content_hash),
+            _aspect_manifest(["trace_facet_v1", "trace_facet_v1"]),
+            _aspect_artifact(parsed.directory.content_hash),
+            _aspect_export_contracts()
+        )
+        expect(admission.ok).to_equal(false)
+        expect(admission.error_code).to_equal("ASPECT_PACK_EXPORT_AMBIGUOUS")
+
+    it "rejects an OS export contract with a different interface ABI":
+        val parsed = aspect_pack_directory_parse_from_smf_bytes(_aspect_pack_test_bytes())
+        val wrong_contracts = [
+            AspectPackExportContract(library_id: "trace_pack", export_symbol: "trace_facet_v1", interface_abi_hash: "wrong-facet-abi")
+        ]
+        val admission = aspect_pack_directory_validate_against_manifest(
+            parsed.directory,
+            _aspect_catalog("module-abi-7", "trace_facet_v1", parsed.directory.content_hash),
+            _aspect_manifest(["trace_facet_v1"]),
+            _aspect_artifact(parsed.directory.content_hash),
+            wrong_contracts
+        )
+        expect(admission.ok).to_equal(false)
+        expect(admission.error_code).to_equal("ASPECT_PACK_INTERFACE_ABI_MISMATCH")
+
+    it "rejects duplicate OS export contracts before facet matching":
+        val parsed = aspect_pack_directory_parse_from_smf_bytes(_aspect_pack_test_bytes())
+        val duplicate_contracts = [
+            AspectPackExportContract(library_id: "trace_pack", export_symbol: "trace_facet_v1", interface_abi_hash: "facet-abi-2"),
+            AspectPackExportContract(library_id: "trace_pack", export_symbol: "trace_facet_v1", interface_abi_hash: "facet-abi-2")
+        ]
+        val admission = aspect_pack_directory_validate_against_manifest(
+            parsed.directory,
+            _aspect_catalog("module-abi-7", "trace_facet_v1", parsed.directory.content_hash),
+            _aspect_manifest(["trace_facet_v1"]),
+            _aspect_artifact(parsed.directory.content_hash),
+            duplicate_contracts
+        )
+        expect(admission.ok).to_equal(false)
+        expect(admission.error_code).to_equal("ASPECT_PACK_EXPORT_CONTRACT_AMBIGUOUS")
+
+    it "bounds aggregate manifest exports before performing joins":
+        var exports: [text] = []
+        var index = 0
+        while index < 16385:
+            exports.push("export_" + index.to_text())
+            index = index + 1
+        val parsed = aspect_pack_directory_parse_from_smf_bytes(_aspect_pack_test_bytes())
+        val admission = aspect_pack_directory_validate_against_manifest(
+            parsed.directory,
+            _aspect_catalog("module-abi-7", "trace_facet_v1", parsed.directory.content_hash),
+            _aspect_manifest(exports),
+            _aspect_artifact(parsed.directory.content_hash),
+            _aspect_export_contracts()
+        )
+        expect(admission.ok).to_equal(false)
+        expect(admission.error_code).to_equal("ASPECT_PACK_EXPORTS_TOO_LARGE")
+
+describe "dynSMF facet reference generation":
+    it "rejects a caller directory that was not derived from the admitted outer image":
+        val artifact_bytes = _aspect_smf_test_bytes()
+        val actual_directory = _aspect_directory_from_smf(artifact_bytes)
+        val other_outer = _aspect_smf_other_bytes()
+        val forged_directory = _aspect_directory_from_smf(other_outer)
+        expect(forged_directory.content_hash).to_not_equal(actual_directory.content_hash)
+        val manifest = _aspect_manifest(["trace_facet_v1"])
+        val forged_request = _aspect_lookup_request(
+            forged_directory,
+            _aspect_catalog("module-abi-7", "trace_facet_v1", forged_directory.content_hash),
+            manifest,
+            sha256_u8_hex(artifact_bytes)
+        )
+        val loaded = dynsmf_session_load_admitted(
+            dynsmf_session_new("outer-byte-authority", dynsmf_policy_default()),
+            "trace_pack",
+            forged_request,
+            artifact_bytes
+        )
+        expect(loaded.loaded.len()).to_equal(0)
+        expect(loaded.evidence[0].reason).to_equal("trusted_aspect_admission_invalid")
+
+    it "loads exact content, issues an opaque facet ref, and revokes it on reload":
+        val artifact_bytes = _aspect_smf_test_bytes()
+        val directory = _aspect_directory_from_smf(artifact_bytes)
+        val manifest = _aspect_manifest(["trace_facet_v1"])
+        val catalog = _aspect_catalog("module-abi-7", "trace_facet_v1", directory.content_hash)
+        val admission = aspect_pack_directory_validate_against_manifest(
+            directory,
+            catalog,
+            manifest,
+            _aspect_artifact(sha256_u8_hex(artifact_bytes)),
+            _aspect_export_contracts()
+        )
+        expect(admission.ok).to_equal(true)
+        val request = _aspect_lookup_request(directory, catalog, manifest, sha256_u8_hex(artifact_bytes))
+        val empty = dynsmf_session_new("aspect-ref-generation", dynsmf_policy_default())
+        val loaded = dynsmf_session_load_admitted(empty, "trace_pack", request, artifact_bytes)
+        expect(loaded.loaded.len()).to_equal(1)
+        expect(loaded.loaded[0].content_hash).to_equal(request.artifact.content_hash)
+        val first_lease = dynsmf_session_lookup_facet(loaded, request)
+        expect(first_lease.facet_ref != nil).to_equal(true)
+        val first_session = first_lease.session
+        val first = first_lease.facet_ref!
+        expect(dynsmf_session_validate_facet_ref(first_session, first)).to_equal(true)
+        val coissued_lease = dynsmf_session_lookup_facet(first_session, request)
+        expect(coissued_lease.facet_ref != nil).to_equal(true)
+        val issued_session = coissued_lease.session
+        val coissued = coissued_lease.facet_ref!
+        expect(dynsmf_session_validate_facet_ref(issued_session, first)).to_equal(true)
+        expect(dynsmf_session_validate_facet_ref(issued_session, coissued)).to_equal(true)
+
+        # The registry binds the exact live generation, not merely the id.
+        var stale_generation = issued_session
+        var stale_library = stale_generation.loaded[0]
+        stale_library.generation = stale_library.generation + 1
+        stale_generation.loaded[0] = stale_library
+        expect(dynsmf_session_validate_facet_ref(stale_generation, first)).to_equal(false)
+
+        val first_library = issued_session.loaded[0]
+        val unloaded = dynsmf_session_unload(issued_session, "trace_pack")
+        expect(dynsmf_session_validate_facet_ref(unloaded, first)).to_equal(false)
+        expect(dynsmf_session_validate_facet_ref(unloaded, coissued)).to_equal(false)
+        val unloaded_lease = dynsmf_session_lookup_facet(unloaded, request)
+        expect(unloaded_lease.facet_ref == nil).to_equal(true)
+
+        val reloaded = dynsmf_session_load_admitted(unloaded, "trace_pack", request, artifact_bytes)
+        val second_lease = dynsmf_session_lookup_facet(reloaded, request)
+        expect(second_lease.facet_ref != nil).to_equal(true)
+        val second_session = second_lease.session
+        val second = second_lease.facet_ref!
+        val second_library = second_session.loaded[second_session.loaded.len() - 1]
+        expect(second_library.generation).to_be_greater_than(first_library.generation)
+        expect(second_library.handle).to_be_greater_than(first_library.handle)
+        expect(dynsmf_session_validate_facet_ref(second_session, first)).to_equal(false)
+        expect(dynsmf_session_validate_facet_ref(second_session, second)).to_equal(true)
+
+        # Even after issuing its own reference for the same artifact, a second
+        # session must reject the first session's token.
+        val other_empty = dynsmf_session_new("other-aspect-session", dynsmf_policy_default())
+        val other_loaded = dynsmf_session_load_admitted(other_empty, "trace_pack", request, artifact_bytes)
+        val other_lease = dynsmf_session_lookup_facet(other_loaded, request)
+        expect(other_lease.facet_ref != nil).to_equal(true)
+        expect(dynsmf_session_validate_facet_ref(other_lease.session, first)).to_equal(false)
+        expect(dynsmf_session_validate_facet_ref(other_lease.session, other_lease.facet_ref!)).to_equal(true)
+        # A valid token from a foreign session is a forged capability in this
+        # session and cannot be retargeted through the opaque reference type.
+        expect(dynsmf_session_validate_facet_ref(issued_session, other_lease.facet_ref!)).to_equal(false)
+        _ = dynsmf_session_unload(second_session, "trace_pack")
+        _ = dynsmf_session_unload(other_lease.session, "trace_pack")
+
+    it "atomically rejects forged catalog inputs instead of trusting a public admission receipt":
+        val artifact_bytes = _aspect_smf_test_bytes()
+        val directory = _aspect_directory_from_smf(artifact_bytes)
+        val artifact_hash = sha256_u8_hex(artifact_bytes)
+        val manifest = _aspect_manifest(["trace_facet_v1"])
+        val valid_catalog = _aspect_catalog("module-abi-7", "trace_facet_v1", directory.content_hash)
+        val valid_request = _aspect_lookup_request(directory, valid_catalog, manifest, artifact_hash)
+        val request = AspectPackLookupRequest(
+            directory: directory,
+            catalog: _aspect_catalog("wrong-module-abi", "trace_facet_v1", directory.content_hash),
+            manifest: manifest,
+            artifact: _aspect_artifact(artifact_hash),
+            export_contracts: _aspect_export_contracts(),
+            facet_id: "trace/Traceable"
+        )
+        val loaded = dynsmf_session_load_admitted(
+            dynsmf_session_new("rejected-aspect-admission", dynsmf_policy_default()),
+            "trace_pack",
+            valid_request,
+            artifact_bytes
+        )
+        val rejected_lease = dynsmf_session_lookup_facet(loaded, request)
+        expect(rejected_lease.facet_ref == nil).to_equal(true)
+        val self_consistent_forgery = AspectPackLookupRequest(
+            directory: directory,
+            catalog: _aspect_catalog_with_interface("module-abi-7", "trace_facet_v1", "forged-facet-abi", directory.content_hash),
+            manifest: manifest,
+            artifact: _aspect_artifact(artifact_hash),
+            export_contracts: _aspect_export_contracts_with_interface("forged-facet-abi"),
+            facet_id: "trace/Traceable"
+        )
+        val forged_lease = dynsmf_session_lookup_facet(loaded, self_consistent_forgery)
+        expect(forged_lease.facet_ref == nil).to_equal(true)
+        _ = dynsmf_session_unload(loaded, "trace_pack")
+
+    it "rejects a valid request when the same library id loaded different content":
+        val expected_bytes = _aspect_smf_test_bytes()
+        val expected_directory = _aspect_directory_from_smf(expected_bytes)
+        val manifest = _aspect_manifest(["trace_facet_v1"])
+        val expected_catalog = _aspect_catalog("module-abi-7", "trace_facet_v1", expected_directory.content_hash)
+        val expected_request = _aspect_lookup_request(expected_directory, expected_catalog, manifest, sha256_u8_hex(expected_bytes))
+
+        val other_bytes = _aspect_smf_other_bytes()
+        val other_directory = _aspect_directory_from_smf(other_bytes)
+        val other_catalog = _aspect_catalog("module-abi-7", "trace_facet_v1", other_directory.content_hash)
+        val other_request = _aspect_lookup_request(other_directory, other_catalog, manifest, sha256_u8_hex(other_bytes))
+        val loaded_other = dynsmf_session_load_admitted(
+            dynsmf_session_new("same-id-different-content", dynsmf_policy_default()),
+            "trace_pack",
+            other_request,
+            other_bytes
+        )
+        val wrong_artifact_lease = dynsmf_session_lookup_facet(loaded_other, expected_request)
+        expect(wrong_artifact_lease.facet_ref == nil).to_equal(true)
+        _ = dynsmf_session_unload(loaded_other, "trace_pack")

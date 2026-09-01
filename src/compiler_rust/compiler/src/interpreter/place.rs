@@ -311,9 +311,7 @@ fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
         (Value::Object { fields, .. }, Projection::Field(name)) => fields.get(name),
         (Value::Dict(entries), Projection::Field(name)) => entries.get(name),
         (Value::Array(items), Projection::Index(index)) => items.get(normalize_index(items.len(), index)?),
-        (Value::FixedSizeArray { data, .. }, Projection::Index(index)) => {
-            data.get(normalize_index(data.len(), index)?)
-        }
+        (Value::FixedSizeArray { data, .. }, Projection::Index(index)) => data.get(normalize_index(data.len(), index)?),
         (Value::Tuple(items), Projection::Index(index)) => items.get(normalize_index(items.len(), index)?),
         (Value::Dict(entries), Projection::Index(key)) => {
             if !key.dict_key_is_scalar() {
@@ -459,10 +457,7 @@ mod tests {
 
         let place = Place {
             root: "root".into(),
-            projections: vec![
-                Projection::Field("mid".into()),
-                Projection::Field("inner".into()),
-            ],
+            projections: vec![Projection::Field("mid".into()), Projection::Field("inner".into())],
         };
         assert!(!place_is_live(&env, &place));
         assert!(!write_place(&mut env, &place, Value::Int(1)));

@@ -1,27 +1,10 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
 # @cover src/os/apps/servers_user/main.spl 80%
-
-# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
-"""
-## Purpose and audience
-
-Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
-
-## Operator workflow
-
-1. Run `bin/simple test test/01_unit/os/apps/servers_user/dbd_filesystem_provisioning_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the behavior under test.
-
-## Compatibility and limitations
-
-Covers the behavior asserted here; platform-specific behavior is out of scope.
-"""
-
-# doc-path: doc/01_research/local/dbd_filesystem_provisioning_spec.md
-# doc-path: doc/03_plan/sys_test/dbd_filesystem_provisioning_spec.md
-# doc-path: doc/04_architecture/dbd_filesystem_provisioning_spec.md
-# doc-path: doc/05_design/dbd_filesystem_provisioning_spec_oracles.md
-# @manual: primary
-
 """
 # Filesystem-launched DBD provisioning and DBFS/VFS admission
 
@@ -31,14 +14,16 @@ admit persistence only from a DBFS VFS capability that proves durable sync and
 transactional namespace replacement.
 """
 
-use std.spec
 use std.spec.step
+
+use std.spec
 use std.io_runtime.{file_read}
 
 describe "filesystem DBD boot secret ownership":
+    # @manual scenario evidence
     it "calls the canonical provision_service and wipes every source buffer":
-        # @req: REQ-SSPEC-LOCAL-001
-        step("Verify: calls the canonical provision_service and wipes every source buffer")
+        # @req REQ-SSPEC-OS
+        step("calls the canonical provision_service and wipes every source buffer")
         val source = file_read("src/os/apps/servers_user/main.spl")
         expect(source).to_contain("server.provision_service(")
         expect(source).to_contain("read_file_bytes_direct_owned(DB_CREDENTIAL_PATH")
@@ -52,7 +37,8 @@ describe "filesystem DBD boot secret ownership":
 
 describe "filesystem DBD DBFS VFS capability":
     it "fails closed unless mount identity sync and transaction facts agree":
-        step("Verify: fails closed unless mount identity sync and transaction facts agree")
+        # @req REQ-SSPEC-OS
+        step("fails closed unless mount identity sync and transaction facts agree")
         val adapter = file_read("src/os/apps/dbd/dbd_dbfs_adapter.spl")
         expect(adapter).to_contain("if not dbfs_root:")
         expect(adapter).to_contain("if not durable_sync:")
@@ -63,14 +49,16 @@ describe "filesystem DBD DBFS VFS capability":
         expect(projection.contains("FILE_ATOMIC_DBFS_ROOT")).to_equal(false)
 
     it "admits the complete least-authority capability without a driver copy":
-        step("Verify: admits the complete least-authority capability without a driver copy")
+        # @req REQ-SSPEC-OS
+        step("admits the complete least-authority capability without a driver copy")
         val adapter = file_read("src/os/apps/dbd/dbd_dbfs_adapter.spl")
         expect(adapter).to_contain("state: DbdDbfsAdapterState.MountedDurable")
         expect(adapter).to_contain("driver: nil")
         expect(adapter).to_contain("filesystem_vfs: true")
 
     it "publishes readiness only from an actually mounted durable DBFS driver":
-        step("Verify: publishes readiness only from an actually mounted durable DBFS driver")
+        # @req REQ-SSPEC-OS
+        step("publishes readiness only from an actually mounted durable DBFS driver")
         val mount = file_read("src/os/services/vfs/vfs_init.spl")
         val owner = file_read("src/os/services/vfs/dbfs_mount_capability.spl")
         expect(mount).to_contain("case DbFs(dbfs):")
@@ -79,7 +67,8 @@ describe "filesystem DBD DBFS VFS capability":
         expect(owner).to_contain("DbfsMountedRecoveryCompleteDurableTransactionalReplace")
 
     it "shares one contract type while keeping wire encode and decode separated":
-        step("Verify: shares one contract type while keeping wire encode and decode separated")
+        # @req REQ-SSPEC-OS
+        step("shares one contract type while keeping wire encode and decode separated")
         val contract = file_read("src/lib/common/contracts/os/dbfs_vfs_mount_capability_v1.spl")
         val owner = file_read("src/os/services/vfs/dbfs_mount_capability.spl")
         val userlib = file_read("src/os/userlib/fs.spl")
@@ -91,7 +80,8 @@ describe "filesystem DBD DBFS VFS capability":
 
 describe "filesystem DBD authenticated durable transaction path":
     it "routes TLS AUTH and persistent write/read through the canonical owner":
-        step("Verify: routes TLS AUTH and persistent write/read through the canonical owner")
+        # @req REQ-SSPEC-OS
+        step("routes TLS AUTH and persistent write/read through the canonical owner")
         val source = file_read("src/os/apps/servers_user/main.spl")
         val dbd = file_read("src/os/apps/dbd/dbd.spl")
         expect(source).to_contain("db_server.replay_log()")
@@ -101,8 +91,34 @@ describe "filesystem DBD authenticated durable transaction path":
         expect(dbd).to_contain("return self.engine.dispatch(args)")
         expect(dbd).to_contain("self.engine.replay_journal(self.log_text)")
 
+    it "binds only the configured address and port through portable sockaddr framing":
+        val source = file_read("src/os/apps/servers_user/main.spl")
+        val dbd = file_read("src/os/apps/dbd/dbd.spl")
+        val net = file_read("src/os/userlib/net.spl")
+        val portable = file_read("src/os/kernel/ipc/syscall_net_portable_v1.spl")
+        val shim = file_read("src/os/kernel/abi/syscall_shim_net.spl")
+        val raw = file_read("src/os/userlib/syscall_raw.spl")
+        expect(source).to_contain("db_server.bind_listener()")
+        expect(dbd).to_contain("pub me bind_listener() -> i64:")
+        expect(dbd).to_contain("SIMPLEOS_DBD_CONFIGURED_BIND_IPV4_V1")
+        expect(dbd).to_contain("port: SIMPLEOS_SERVER_DATABASE_PORT_V1")
+        expect(dbd).to_contain("val bound_socket = bind(listener, SockAddr(")
+        expect(dbd.contains("extern fn rt_net_bind(")).to_equal(false)
+        expect(net).to_contain("rt_simpleos_socket_bind_bytes(sock.fd as u64, encoded)")
+        expect(net).to_contain("Encode a bounded POSIX sockaddr_in for syscalls 71 and 73")
+        expect(portable).to_contain("CapabilityKind.NetBindIpv4(")
+        expect(portable).to_contain("address: addr.addr, port: addr.port")
+        expect(shim).to_contain("portable_net_capability_allowed_v1(")
+        expect(shim).to_contain("g_shim_scheduler, g_shim_ipc")
+        expect(shim).to_contain("portable_net_bind_args_checked_v1(")
+        expect(portable).to_contain("portable_net_dispatch_bind_checked_v1(")
+        expect(raw).to_contain("@cfg(x86_64)")
+        expect(raw).to_contain("@cfg(arm64)")
+        expect(raw).to_contain("@cfg(riscv64)")
+
     it "uses exclusive staging namespace sync and whole-owner close":
-        step("Verify: uses exclusive staging namespace sync and whole-owner close")
+        # @req REQ-SSPEC-OS
+        step("uses exclusive staging namespace sync and whole-owner close")
         val source = file_read("src/os/apps/servers_user/main.spl")
         val dbd = file_read("src/os/apps/dbd/dbd.spl")
         val adapter = file_read("src/os/apps/dbd/dbd_dbfs_adapter.spl")

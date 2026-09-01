@@ -1,0 +1,165 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves SCV's persistent FileEntityId foundation (report
+§7.6/§7.8/§7.9, P1 items 1+3): repo-unique `file_<n>` ids persisted in
+`.scv/meta/file_identity.sdn`, immutable relation edges in
+`.scv/meta/identity_edges.sdn`, and the evidence-based file matcher that
+feeds them — exact rename keeps the id (accepted), rename+edit only
+suggests, a copy allocates a new id, delete is terminal, ambiguity never
+auto-accepts.
+Audience: Maintainers of the SCV identity layer.
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod (file_exists, file_read, dir_create, file_write)
+use std.scv.store.{scv_init_repo}
+use std.scv.core.{scv_chunk_path}
+use std.scv.identity.{scv_identity_allocate, scv_identity_lookup_by_path, scv_identity_state, scv_identity_current_path, scv_identity_record_move, scv_identity_record_copy, scv_identity_record_delete, scv_identity_history, scv_identity_rows_path, scv_identity_edges_path}
+use std.scv.entity_graph.{scv_entity_classify, scv_entity_apply, scv_entity_line_overlap_milli}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _repo(tag: text) -> text:
+    val root = "/tmp/scv-fid-{tag}-{current_time_ms()}"
+    dir_create(root, true)
+    scv_init_repo(root)
+    root
+
+fn _chunk(root: text, id: text, content: text):
+    file_write(scv_chunk_path(root, id), content)
+
+fn _joined(rows: [text]) -> text:
+    var out = ""
+    for row in rows:
+        out = out + row + "\n"
+    out
+
+describe "scv persistent file identity store":
+    # @manual scenario evidence
+    it "allocates, persists, and reloads a repo-unique file id":
+        # @req REQ-SSPEC-INTEGRATION
+        step("allocates, persists, and reloads a repo-unique file id")
+        step("Allocate an id and read it back from the persisted store")
+        val root = _repo("alloc")
+        val id = scv_identity_allocate(root, "a.txt", "c1")
+        expect(id).to_equal("file_1")
+        expect(scv_identity_lookup_by_path(root, "a.txt")).to_equal(id)
+        # idempotent: re-allocating the same live path returns the same id
+        expect(scv_identity_allocate(root, "a.txt", "c2")).to_equal(id)
+        expect(file_exists(scv_identity_rows_path(root))).to_equal(true)
+        expect(file_read(scv_identity_rows_path(root))).to_contain("file_1|a.txt|c1|new|live")
+        val second = scv_identity_allocate(root, "b.txt", "c1")
+        expect(second).to_equal("file_2")
+
+    it "keeps the id across an exact-content rename via an accepted edge":
+        # @req REQ-SSPEC-INTEGRATION
+        step("keeps the id across an exact-content rename via an accepted edge")
+        step("Classify prev->new trees where content moved byte-identically")
+        val root = _repo("move")
+        val id = scv_identity_allocate(root, "a.txt", "c1")
+        _chunk(root, "ck1", "line1\nline2\n")
+        val rows = scv_entity_apply(root, "a.txt|f1|ck1|10|0", "b.txt|f1|ck1|10|0", "c2")
+        expect(_joined(rows)).to_contain("move|a.txt|b.txt|1000")
+        step("The same id now lives at the new path, with an accepted edge")
+        expect(scv_identity_lookup_by_path(root, "b.txt")).to_equal(id)
+        expect(scv_identity_lookup_by_path(root, "a.txt")).to_equal("")
+        expect(file_read(scv_identity_edges_path(root))).to_contain("|move|c2|1000|exact_content,unique_pair|fim-1|accepted")
+
+    it "records rename+edit as a suggested edge without moving the id":
+        # @req REQ-SSPEC-INTEGRATION
+        step("records rename+edit as a suggested edge without moving the id")
+        step("Classify a deleted and an added file sharing most lines")
+        val root = _repo("moveedit")
+        val id = scv_identity_allocate(root, "a.txt", "c1")
+        _chunk(root, "ck1", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n")
+        _chunk(root, "ck2", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nCHANGED\n")
+        val rows = scv_entity_apply(root, "a.txt|f1|ck1|40|0", "b.txt|f2|ck2|40|0", "c2")
+        expect(_joined(rows)).to_contain("move_edit|a.txt|b.txt|900")
+        step("The suggested edge carries the score and the id did NOT move")
+        expect(scv_identity_current_path(root, id)).to_equal("a.txt")
+        val new_id = scv_identity_lookup_by_path(root, "b.txt")
+        expect(new_id == "" or new_id == id).to_equal(false)
+        expect(file_read(scv_identity_edges_path(root))).to_contain("|move_edit|c2|900|line_overlap|fim-1|suggested")
+
+    it "allocates a new id plus copied_from edge for a copy":
+        # @req REQ-SSPEC-INTEGRATION
+        step("allocates a new id plus copied_from edge for a copy")
+        step("Record a copy and verify a fresh id linked to the source")
+        val root = _repo("copy")
+        val src = scv_identity_allocate(root, "a.txt", "c1")
+        val cp = scv_identity_record_copy(root, "a.txt", "a_copy.txt", "c2", "user_copy")
+        expect(cp == src).to_equal(false)
+        expect(cp).to_contain("file_")
+        expect(scv_identity_lookup_by_path(root, "a.txt")).to_equal(src)
+        expect(scv_identity_lookup_by_path(root, "a_copy.txt")).to_equal(cp)
+        expect(file_read(scv_identity_rows_path(root))).to_contain("|copied_from:{src}|live")
+        expect(file_read(scv_identity_edges_path(root))).to_contain("{src}|{cp}|copy|c2|1000|user_copy|fim-1|accepted")
+
+    it "treats delete as terminal and never reuses the id":
+        # @req REQ-SSPEC-INTEGRATION
+        step("treats delete as terminal and never reuses the id")
+        step("Delete a file, then allocate a new one")
+        val root = _repo("delete")
+        val id = scv_identity_allocate(root, "a.txt", "c1")
+        expect(scv_identity_record_delete(root, "a.txt", "c2")).to_equal(id)
+        expect(scv_identity_state(root, id)).to_equal("deleted")
+        expect(scv_identity_lookup_by_path(root, "a.txt")).to_equal("")
+        step("A later file at the same path gets a FRESH id")
+        val re = scv_identity_allocate(root, "a.txt", "c3")
+        expect(re == id).to_equal(false)
+        expect(scv_identity_state(root, id)).to_equal("deleted")
+
+    it "keeps ambiguous identical-content matches suggested, never accepted":
+        # @req REQ-SSPEC-INTEGRATION
+        step("keeps ambiguous identical-content matches suggested, never accepted")
+        step("One deleted file matches two identical added files")
+        val root = _repo("ambig")
+        val id = scv_identity_allocate(root, "a.txt", "c1")
+        _chunk(root, "ck1", "same\ncontent\n")
+        val rows = scv_entity_apply(root, "a.txt|f1|ck1|12|0", "x.txt|f2|ck1|12|0\ny.txt|f3|ck1|12|0", "c2")
+        expect(_joined(rows)).to_contain("move_ambiguous|a.txt|")
+        step("The id stays at its old path; edge is suggested only")
+        expect(scv_identity_current_path(root, id)).to_equal("a.txt")
+        expect(file_read(scv_identity_edges_path(root))).to_contain("|suggested")
+        expect(file_read(scv_identity_edges_path(root)).contains("exact_content,ambiguous")).to_equal(true)
+        # both added files got their own fresh ids
+        expect(scv_identity_lookup_by_path(root, "x.txt") == "").to_equal(false)
+        expect(scv_identity_lookup_by_path(root, "y.txt") == "").to_equal(false)
+
+    it "returns ordered relation history for an id":
+        # @req REQ-SSPEC-INTEGRATION
+        step("returns ordered relation history for an id")
+        step("create -> accepted move -> delete, in order")
+        val root = _repo("history")
+        val id = scv_identity_allocate(root, "a.txt", "c1")
+        scv_identity_record_move(root, "a.txt", "b.txt", "c2", "exact_content", 1000, "accepted")
+        scv_identity_record_delete(root, "b.txt", "c3")
+        val hist = scv_identity_history(root, id)
+        expect(hist.len()).to_equal(3)
+        expect(hist[0]).to_equal("c1|create|accepted|1000")
+        expect(hist[1]).to_equal("c2|move|accepted|1000")
+        expect(hist[2]).to_equal("c3|delete|accepted|1000")
+
+    it "classifies unchanged, edited, new and deleted correctly":
+        # @req REQ-SSPEC-INTEGRATION
+        step("classifies unchanged, edited, new and deleted correctly")
+        step("Mixed tree delta")
+        val root = _repo("classify")
+        _chunk(root, "ck1", "a\n")
+        _chunk(root, "ck2", "b\n")
+        _chunk(root, "ck3", "totally\ndifferent\n")
+        val prev = "same.txt|f1|ck1|2|0\nedit.txt|f2|ck2|2|0\ngone.txt|f3|ck3|10|0"
+        val new_tree = "same.txt|f1|ck1|2|0\nedit.txt|f4|ck1|2|0\nfresh.txt|f5|ck2|2|0"
+        val rows = _joined(scv_entity_classify(root, prev, new_tree))
+        expect(rows).to_contain("unchanged|same.txt")
+        expect(rows).to_contain("edited|edit.txt")
+        expect(rows).to_contain("deleted|gone.txt")
+        expect(rows).to_contain("new|fresh.txt")
+        step("Line overlap scorer sanity")
+        expect(scv_entity_line_overlap_milli("a\nb\n", "a\nb\n")).to_equal(1000)
+        expect(scv_entity_line_overlap_milli("a\nb\n", "x\ny\n")).to_equal(0)

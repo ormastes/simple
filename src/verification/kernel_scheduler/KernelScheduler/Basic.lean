@@ -140,7 +140,7 @@ def GreenTask.unpark (t : GreenTask) (waker_cpu : Nat) : WakeDecision :=
     Assigned CPU is preserved on the first completion. -/
 def GreenTask.complete (t : GreenTask) (result : Int) : GreenTask :=
   if t.state = .done then t
-  else { t with state := .done, result_val := result }
+  else { t with state := .done, park_reason := "", result_val := result }
 
 -- ============================================================
 -- § 6  CPU affinity helper
@@ -194,37 +194,5 @@ def SchedState.runOne (s : SchedState) : SchedState :=
 def SchedState.runBatch : SchedState → SchedState
   | { ready := [] }   => { ready := [] }
   | { ready := _ :: rest } => SchedState.runBatch { ready := rest }
-
--- ============================================================
--- § 9  Bounded resource pool abstraction
--- ============================================================
-
-/-- Minimal bounded resource model for kernel/server handles.
-    `capacity` is the hard upper bound; `inUse` is the live allocation count. -/
-structure ResourcePool where
-  capacity : Nat
-  inUse    : Nat
-  deriving Repr
-
-/-- Well-formed pools never allocate more live resources than capacity. -/
-def ResourcePool.wf (p : ResourcePool) : Prop :=
-  p.inUse ≤ p.capacity
-
-/-- Result of a resource acquire attempt. -/
-structure AcquireResult where
-  pool    : ResourcePool
-  granted : Bool
-  deriving Repr
-
-/-- Acquire one resource if capacity remains; otherwise leave the pool unchanged. -/
-def ResourcePool.acquire (p : ResourcePool) : AcquireResult :=
-  if p.inUse < p.capacity then
-    { pool := { p with inUse := p.inUse + 1 }, granted := true }
-  else
-    { pool := p, granted := false }
-
-/-- Release one resource if any are live; otherwise leave the pool unchanged. -/
-def ResourcePool.release (p : ResourcePool) : ResourcePool :=
-  if p.inUse = 0 then p else { p with inUse := p.inUse - 1 }
 
 end KernelScheduler

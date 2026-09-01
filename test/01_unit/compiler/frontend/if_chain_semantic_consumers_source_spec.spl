@@ -1,0 +1,43 @@
+extern fn rt_file_read_text(path: text) -> text
+
+describe "linked if-chain semantic consumers source contract":
+    it "walks statement and expression chains without legacy materialization":
+        val calls = rt_file_read_text("src/compiler/10.frontend/core/call_edge_utils.spl") ?? ""
+        val allocs = rt_file_read_text("src/compiler/10.frontend/core/alloc_inference.spl") ?? ""
+        val closures = rt_file_read_text("src/compiler/10.frontend/core/closure_analysis.spl") ?? ""
+
+        for source in [calls, allocs, closures]:
+            expect(source).to_contain("tag == STMT_IF_CHAIN")
+            expect(source).to_contain("tag == EXPR_IF_CHAIN")
+            expect(source).to_contain("flat_if_chain_first_arm_get")
+            expect(source).to_contain("flat_if_arm_next_get")
+            expect(source).to_contain("flat_if_arm_head_get")
+            expect(source).to_contain("flat_if_arm_init_get")
+            expect(source).to_contain("flat_if_arm_then_expr_get")
+            expect(source).to_contain("flat_if_arm_body_at")
+            expect(source).to_contain("flat_if_chain_else_expr_get")
+            expect(source).to_contain("flat_if_chain_else_stmt_at")
+            expect(source.contains("materialize_legacy")).to_equal(false)
+
+    it "keeps successful binding-arm names branch-local":
+        val source = rt_file_read_text("src/compiler/10.frontend/core/closure_analysis.spl") ?? ""
+        expect(source).to_contain("analyze_expr_for_capture(flat_if_arm_init_get(arm_id), containing_fn)")
+        expect(source).to_contain("scope_enter()\n        if kind != ARM_CONDITION:\n            scope_add_if_pattern_bindings(flat_if_arm_head_get(arm_id))")
+        expect(source).to_contain("analyze_expr_for_capture(flat_if_arm_then_expr_get(arm_id), containing_fn)")
+        expect(source).to_contain("scope_exit()\n        arm_id = flat_if_arm_next_get(arm_id)")
+
+    it "infers one result type across all value-producing arms":
+        val source = rt_file_read_text("src/compiler/10.frontend/core/type_inference.spl") ?? ""
+        expect(source).to_contain("elif tag == EXPR_IF_CHAIN:")
+        expect(source).to_contain("constraint_add(condition_type, TYPE_BOOL, \"if-chain condition\")")
+        expect(source).to_contain("constraint_add(result_type, infer_expr_type(then_expr), \"if-chain arm result\")")
+        expect(source).to_contain("constraint_add(result_type, infer_expr_type(else_expr), \"if-chain else result\")")
+        expect(source.contains("materialize_legacy")).to_equal(false)
+
+    it "rebuilds placeholder chains only through the linked owner API":
+        val source = rt_file_read_text("src/compiler/10.frontend/desugar/placeholder_lambda.spl") ?? ""
+        expect(source).to_contain("flat_if_expr_chain_new(flat_if_chain_span_get(chain_id))")
+        expect(source).to_contain("flat_if_expr_arm_append(rebuilt, kind, head, init, then_expr, flat_if_arm_span_get(arm_id))")
+        expect(source).to_contain("flat_if_expr_else_set(rebuilt")
+        expect(source).to_contain("expr_if_chain_expr(rebuilt_chain, flat_if_chain_span_get(rebuilt_chain))")
+        expect(source.contains("materialize_legacy")).to_equal(false)

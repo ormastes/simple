@@ -1,89 +1,89 @@
-# @req: REQ-COMPILER-INTERPRETER-001 — core language semantics hold under execution. 
-"""
-## Purpose and audience
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
-reading this spec to confirm the behavior still holds.
 
-## Operator workflow
 
-1. Run `bin/simple test test/01_unit/compiler/interpreter/field_array_mutation_in_place_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the
-   behavior under test.
 
-## Compatibility and limitations
+# Regression: `self.field.push(x)` in the AST interpreter must mutate the field
+# array IN PLACE when it is uniquely owned, and must still honour value semantics
+# when the array is aliased.
+#
+# Pre-fix, `interpreter/expr/calls.rs` copied the field into a `__nested_field_*__`
+# temp binding, which aliased the array Arc, so every mutator cloned the whole
+# backing Vec — O(N^2) accumulation into any object field. That is the interpreter
+# cost behind doc/08_tracking/bug/interpreter_gc_root_scan_blowup_large_array_2026-07-25.md.
+#
+# This spec pins the SEMANTICS. The cost side is pinned by
+# scripts/check/check-interp-field-array-push-linear.shs.
 
-Covers the interpreter and native lanes for the constructs
-asserted here; platform-specific behavior is out of scope.
-"""
+class Box:
+    var data: Array<i64>
 
-use std.spec
+use std.spec.step
 
-# doc-path: doc/01_research/local/field_array_mutation_in_place.md
-# doc-path: doc/03_plan/sys_test/field_array_mutation_in_place.md
-# doc-path: doc/04_architecture/field_array_mutation_in_place.md
-# doc-path: doc/05_design/field_array_mutation_in_place.md
+use spec.{describe, context, it, expect}
 
-# @manual: primary
+var g_failures: i64 = 0
 
-describe "Executed behavior oracles":
+fn fail_note(msg: text):
+    g_failures = g_failures + 1
+    print(msg)
+
+fn run_suite():
+    var b = Box()
+    b.data = [1, 2, 3]
+
+    # An alias taken before the mutation must NOT observe it (value semantics).
+    var alias = b.data
+    var pushed = b.data.push(4)
+    if pushed.len() != 4:
+        fail_note("FAIL push result len ${pushed.len()}")
+        return
+    if b.data.len() != 4:
+        fail_note("FAIL field len after push ${b.data.len()}")
+        return
+    if alias.len() != 3:
+        fail_note("FAIL alias mutated: ${alias.len()}")
+        return
+
+    # `pop` yields the ELEMENT, and shrinks the field.
+    var popped = b.data.pop()
+    if popped != 4 or b.data.len() != 3:
+        fail_note("FAIL pop ${popped} len ${b.data.len()}")
+        return
+
+    b.data.insert(0, 99)
+    if b.data[0] != 99 or b.data.len() != 4:
+        fail_note("FAIL insert")
+        return
+
+    # `remove` yields the REMOVED ELEMENT.
+    var removed = b.data.remove(0)
+    if removed != 99 or b.data.len() != 3:
+        fail_note("FAIL remove ${removed}")
+        return
+
+    b.data.extend([7, 8])
+    if b.data.len() != 5 or b.data[4] != 8:
+        fail_note("FAIL extend")
+        return
+
+    b.data.clear()
+    if b.data.len() != 0 or alias.len() != 3:
+        fail_note("FAIL clear ${b.data.len()} alias ${alias.len()}")
+        return
+
+    print("PASS field array mutation in place")
+
+
+describe "Module Suite":
     """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    Executable specification evidence for module suite:
+    the module suite is executed in full and must report zero failures.
     """
-
-    it "truncating division and signed remainder":
-        step("Verify: truncating division and signed remainder")
-        # @req: REQ-COMPILER-INTERPRETER-001
-        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
-        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
-        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
-        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
-
-    it "array construction and access":
-        step("Verify: array construction and access")
-        # @req: REQ-COMPILER-INTERPRETER-001
-        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
-        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
-        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
-
-    it "for-in accumulates array elements":
-        step("Verify: for-in accumulates array elements")
-        # @req: REQ-COMPILER-INTERPRETER-001
-        var s = 0
-        for x in [1, 2, 3]:
-            s = s + x
-        expect(s).to_equal(6)  # oracle: 1+2+3
-
-describe "Additional behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
-
-    it "while with break and continue":
-        step("Verify: while with break and continue")
-        # @req: REQ-COMPILER-INTERPRETER-001
-        var i = 0
-        var acc = 0
-        while i < 10:
-            i = i + 1
-            if i == 3: continue
-            if i == 7: break
-            acc = acc + i
-        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
-
-    it "bitwise operators":
-        step("Verify: bitwise operators")
-        # @req: REQ-COMPILER-INTERPRETER-001
-        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
-        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
-        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
-        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
-        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
-
-    it "var mutation is sequentially visible":
-        step("Verify: var mutation is sequentially visible")
-        # @req: REQ-COMPILER-INTERPRETER-001
-        var acc = 1
-        acc = acc + 1
-        acc = acc * 10
-        expect(acc).to_equal(20)  # oracle: (1+1)*10
+    it "executes the full module suite with zero failures":
+        # @req REQ-SSPEC-UNIT
+        step("run the module suite module suite")
+        run_suite()
+        expect(g_failures).to_equal(0)

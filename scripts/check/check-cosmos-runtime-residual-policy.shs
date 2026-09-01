@@ -1,0 +1,218 @@
+#!/bin/sh
+# Cosmos residual runtime extraction: source, oracle, ABI, and Stage-4 gate.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SOURCE_DIR="$ROOT/src/os/kernel/arch/arm32/cosmos"
+TEST_DIR="$ROOT/test/02_integration/os/cosmos"
+SIMPLE_SOURCE="$SOURCE_DIR/cosmos_runtime_residual.spl"
+HEADER="$SOURCE_DIR/cosmos_runtime_residual.h"
+C_BRIDGE="$SOURCE_DIR/cosmos_runtime.c"
+ORACLE="$TEST_DIR/cosmos_runtime_residual_oracle.c"
+ORACLE_HEADER="$TEST_DIR/cosmos_runtime_residual_oracle.h"
+PARITY="$TEST_DIR/cosmos_runtime_residual_parity_test.c"
+BUILD="$SOURCE_DIR/build.shs"
+RECEIPT_WRITER="$SOURCE_DIR/cosmos_build_receipt.shs"
+GATE="$ROOT/scripts/check/check-cosmos-runtime-residual-policy.shs"
+EVIDENCE_DIR="$ROOT/build/coverage/cosmos-runtime-residual"
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-runtime-residual.XXXXXX")
+trap 'case ${SCRATCH:-} in /tmp/cosmos-runtime-residual.*|${TMPDIR:-/tmp}/cosmos-runtime-residual.*) [ ! -d "$SCRATCH" ] || rm -r -- "$SCRATCH" ;; esac' EXIT HUP INT TERM
+
+fail() { echo "FAIL cosmos-runtime-residual: $*" >&2; exit 1; }
+blocked() { echo "BLOCKED cosmos-runtime-residual: $*" >&2; exit 2; }
+
+SOURCE_ONLY=0
+case ${1:-} in
+    --source-only) SOURCE_ONLY=1 ;;
+    "") ;;
+    *) fail "usage: $0 [--source-only]" ;;
+esac
+
+for path in "$SIMPLE_SOURCE" "$HEADER" "$C_BRIDGE" "$ORACLE" \
+    "$ORACLE_HEADER" "$PARITY" "$BUILD" "$RECEIPT_WRITER" "$GATE"; do
+    [ -f "$path" ] || fail "missing bound input: $path"
+done
+
+[ "$(grep -c '^val D_[A-Z0-9_]*: u32 = ' "$SIMPLE_SOURCE")" -eq 27 ] ||
+    fail "Simple decision manifest is not exactly 27 sites"
+grep -F 'val COSMOS_RUNTIME_RESIDUAL_OUTCOMES_REQUIRED: u64 = 0x003FFFFFFFFFFFFFu64' \
+    "$SIMPLE_SOURCE" >/dev/null || fail "Simple outcome denominator is not 54"
+for function in memmove memcmp strlen strcmp strncmp strncpy; do
+    grep -F "return cosmos_runtime_residual_${function}" "$C_BRIDGE" >/dev/null ||
+        fail "C $function ABI shim bypasses the Simple owner"
+done
+grep -F 'cosmos_runtime_residual.spl' "$BUILD" >/dev/null ||
+    fail "production build does not emit the residual owner"
+grep -F 'cosmos_runtime_residual.spl' "$RECEIPT_WRITER" >/dev/null ||
+    fail "production receipt does not bind the residual owner"
+
+CLANG=${CLANG:-clang-18}
+LLVM_PROFDATA=${LLVM_PROFDATA:-llvm-profdata-18}
+LLVM_COV=${LLVM_COV:-llvm-cov-18}
+READELF=${READELF:-readelf}
+for tool in "$CLANG" "$LLVM_PROFDATA" "$LLVM_COV" "$READELF" awk grep sed sort sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
+done
+COMMON_FLAGS='-std=c11 -O0 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2 -fno-builtin -fno-stack-protector -ffunction-sections'
+
+"$CLANG" $COMMON_FLAGS -fprofile-instr-generate -fcoverage-mapping \
+    -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    -DCOSMOS_RUNTIME_RESIDUAL_ORACLE_ONLY=1 \
+    "$PARITY" "$ORACLE" -o "$SCRATCH/oracle"
+LLVM_PROFILE_FILE="$SCRATCH/oracle.profraw" "$SCRATCH/oracle" > \
+    "$SCRATCH/oracle-output.txt"
+grep -Fx 'COSMOS_RUNTIME_RESIDUAL_PARITY_ROWS 40' \
+    "$SCRATCH/oracle-output.txt" >/dev/null || fail "oracle row pin is not 40"
+"$LLVM_PROFDATA" merge -sparse "$SCRATCH/oracle.profraw" \
+    -o "$SCRATCH/oracle.profdata"
+"$LLVM_COV" report "$SCRATCH/oracle" \
+    -instr-profile="$SCRATCH/oracle.profdata" "$ORACLE" > \
+    "$SCRATCH/oracle-coverage.txt"
+ORACLE_BRANCH_TOTAL=$(awk '$1 == "TOTAL" { print $11 }' "$SCRATCH/oracle-coverage.txt")
+ORACLE_BRANCH_MISSED=$(awk '$1 == "TOTAL" { print $12 }' "$SCRATCH/oracle-coverage.txt")
+[ "$ORACLE_BRANCH_TOTAL" = 68 ] && [ "$ORACLE_BRANCH_MISSED" = 0 ] ||
+    fail "independent oracle LLVM branch denominator is not 68/68"
+
+"$CLANG" $COMMON_FLAGS -DCOSMOS_MMIO_TEST=1 -I"$SOURCE_DIR" \
+    -c "$C_BRIDGE" -o "$SCRATCH/runtime.host.o"
+"$CLANG" --target=armv7-none-eabi -mcpu=cortex-a9 -marm \
+    -ffreestanding -nostdlib $COMMON_FLAGS -I"$SOURCE_DIR" \
+    -c "$C_BRIDGE" -o "$SCRATCH/runtime.arm.o"
+EXPECTED_UNDEFINED='cosmos_runtime_core_copy
+cosmos_runtime_core_fill
+cosmos_runtime_core_signed_div0_value
+cosmos_runtime_core_udivmod
+cosmos_runtime_core_unsigned_div0_value
+cosmos_runtime_residual_memcmp
+cosmos_runtime_residual_memmove
+cosmos_runtime_residual_strcmp
+cosmos_runtime_residual_strlen
+cosmos_runtime_residual_strncmp
+cosmos_runtime_residual_strncpy'
+for object in "$SCRATCH/runtime.host.o" "$SCRATCH/runtime.arm.o"; do
+    actual=$($READELF -sW "$object" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+    [ "$actual" = "$EXPECTED_UNDEFINED" ] ||
+        fail "$object has unexpected C bridge closure: $actual"
+done
+
+mkdir -p "$EVIDENCE_DIR"
+SOURCE_RECEIPT_TMP="$SCRATCH/source-receipt.sdn"
+{
+    echo 'schema=cosmos-runtime-residual-source-evidence-v1'
+    echo 'claim_scope=independent-c-oracle-and-static-c-abi-only'
+    echo 'stage4_parity=not-run'
+    echo 'physical_board_evidence=separate-not-included'
+    echo 'parity_rows=40'
+    echo 'simple_decisions=27'
+    echo 'simple_outcomes_total=54'
+    echo 'c_oracle_llvm_branch_edges_hit=68'
+    echo 'c_oracle_llvm_branch_edges_total=68'
+    for path in "$SIMPLE_SOURCE" "$HEADER" "$C_BRIDGE" "$ORACLE" \
+        "$ORACLE_HEADER" "$PARITY" "$BUILD" "$RECEIPT_WRITER" "$GATE"; do
+        echo "input_sha256=$(sha256sum "$path" | awk '{print $1}') ${path#$ROOT/}"
+    done
+} > "$SOURCE_RECEIPT_TMP"
+cp "$SCRATCH/oracle-output.txt" "$EVIDENCE_DIR/oracle-output.txt"
+cp "$SCRATCH/oracle-coverage.txt" "$EVIDENCE_DIR/oracle-coverage.txt"
+mv "$SOURCE_RECEIPT_TMP" "$EVIDENCE_DIR/source-receipt.sdn"
+
+echo 'cosmos_runtime_residual_c_oracle_rows=40'
+echo 'cosmos_runtime_residual_c_oracle_llvm_branches=68/68'
+echo 'cosmos_runtime_residual_simple_denominator=27-decisions/54-outcomes'
+echo 'cosmos_runtime_residual_c_bridge_undefined_closure=11-simple-symbols'
+if [ "$SOURCE_ONLY" -eq 1 ]; then
+    echo 'STATUS: PASS cosmos-runtime-residual source/static evidence'
+    exit 0
+fi
+
+SIMPLE_BIN=${SIMPLE_BIN:-$ROOT/bin/simple}
+[ -x "$SIMPLE_BIN" ] || blocked "missing executable pure-Simple compiler"
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_CANONICAL=$(bootstrap_stage3_canonical_file "$SIMPLE_BIN") ||
+    blocked "cannot resolve pure-Simple compiler canonically"
+SIMPLE_PROVENANCE=${SIMPLE_PROVENANCE:-${SIMPLE_CANONICAL}.provenance.env}
+stage4_verify_candidate_provenance "$SIMPLE_PROVENANCE" \
+    "$SIMPLE_CANONICAL" "$ROOT" || blocked "admitted Stage-4 provenance is required"
+case $($SIMPLE_CANONICAL --version 2>&1 || true) in
+    *"Rust-built Simple binary is a bootstrap seed"*)
+        blocked "a bootstrap seed cannot prove residual policy" ;;
+esac
+COMPILER_HASH=$(sha256sum "$SIMPLE_CANONICAL" | awk '{print $1}')
+PROVENANCE_HASH=$(sha256sum "$SIMPLE_PROVENANCE" | awk '{print $1}')
+
+build_owner() {
+    target=$1
+    output=$2
+    SIMPLE_LIB="$ROOT/src" "$SIMPLE_CANONICAL" native-build \
+        --backend llvm --source "$SOURCE_DIR" --entry-closure \
+        --entry "$SIMPLE_SOURCE" --target "$target" --emit-object \
+        --no-mangle --cache-dir "$SCRATCH/cache-$target" -o "$output"
+    stage4_verify_candidate_provenance "$SIMPLE_PROVENANCE" \
+        "$SIMPLE_CANONICAL" "$ROOT" || fail "compiler provenance changed"
+    [ "$(sha256sum "$SIMPLE_CANONICAL" | awk '{print $1}')" = "$COMPILER_HASH" ] &&
+        [ "$(sha256sum "$SIMPLE_PROVENANCE" | awk '{print $1}')" = "$PROVENANCE_HASH" ] ||
+        fail "compiler or provenance changed during emission"
+}
+
+check_owner() {
+    object=$1
+    class=$2
+    machine=$3
+    header=$($READELF -hW "$object")
+    attrs=$($READELF -AW "$object")
+    symbols=$($READELF -sW "$object")
+    printf '%s\n' "$header" | grep -Eq "Class:[[:space:]]+$class" || fail "wrong ELF class"
+    printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+REL' || fail "not relocatable"
+    printf '%s\n' "$header" | grep -Eq "Machine:[[:space:]]+$machine" || fail "wrong machine"
+    if printf '%s\n' "$attrs" | grep -Eq 'Tag_FP_arch:|Tag_ABI_VFP_args:'; then
+        fail "hard-float/VFP attributes are forbidden"
+    fi
+    expected='cosmos_runtime_residual_coverage_decisions
+cosmos_runtime_residual_coverage_mask
+cosmos_runtime_residual_coverage_required
+cosmos_runtime_residual_coverage_reset
+cosmos_runtime_residual_memcmp
+cosmos_runtime_residual_memmove
+cosmos_runtime_residual_strcmp
+cosmos_runtime_residual_strlen
+cosmos_runtime_residual_strncmp
+cosmos_runtime_residual_strncpy'
+    defined=$(printf '%s\n' "$symbols" |
+        awk '$5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u)
+    [ "$defined" = "$expected" ] || fail "extra or missing Simple globals: $defined"
+    undefined=$(printf '%s\n' "$symbols" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+    [ -z "$undefined" ] || fail "Simple owner has undefined symbols: $undefined"
+}
+
+build_owner x86_64-unknown-linux-gnu "$SCRATCH/residual.host.o"
+check_owner "$SCRATCH/residual.host.o" ELF64 'Advanced Micro Devices X86-64'
+"$CLANG" $COMMON_FLAGS -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    "$PARITY" "$ORACLE" "$SCRATCH/residual.host.o" \
+    -Wl,--gc-sections -o "$SCRATCH/parity"
+"$SCRATCH/parity" > "$SCRATCH/parity-output.txt"
+grep -Fx 'COSMOS_RUNTIME_RESIDUAL_PARITY_ROWS 40' \
+    "$SCRATCH/parity-output.txt" >/dev/null || fail "C-vs-Simple parity row pin failed"
+grep -Fx 'COSMOS_RUNTIME_RESIDUAL_SIMPLE_OUTCOMES 54/54' \
+    "$SCRATCH/parity-output.txt" >/dev/null || fail "Simple outcomes are incomplete"
+build_owner armv7-unknown-none-eabi "$SCRATCH/residual.arm.o"
+check_owner "$SCRATCH/residual.arm.o" ELF32 ARM
+
+FULL_RECEIPT_TMP="$SCRATCH/receipt.sdn"
+sed 's/stage4_parity=not-run/stage4_parity=pass/' \
+    "$EVIDENCE_DIR/source-receipt.sdn" > "$FULL_RECEIPT_TMP"
+{
+    echo "stage4_compiler_sha256=$COMPILER_HASH"
+    echo "stage4_provenance_sha256=$PROVENANCE_HASH"
+    echo 'simple_outcomes_hit=54'
+} >> "$FULL_RECEIPT_TMP"
+cp "$SCRATCH/parity-output.txt" "$EVIDENCE_DIR/parity-output.txt"
+mv "$FULL_RECEIPT_TMP" "$EVIDENCE_DIR/receipt.sdn"
+echo 'cosmos_runtime_residual_simple_outcomes=54/54'
+echo 'STATUS: PASS cosmos-runtime-residual pure-Simple migration'

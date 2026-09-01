@@ -64,7 +64,11 @@ fn time_pushes(pushes: usize) -> Duration {
     let start = Instant::now();
     let result = run_program(&program(pushes));
     let elapsed = start.elapsed();
-    assert_eq!(result, Ok(0), "program with {pushes} pushes must run and keep its contents");
+    assert_eq!(
+        result,
+        Ok(0),
+        "program with {pushes} pushes must run and keep its contents"
+    );
     elapsed
 }
 
@@ -82,8 +86,14 @@ fn me_method_self_field_push_does_not_clone_the_array_per_call() {
     let calls = perf_counters::SELF_FIELD_ARR_MUT_CALLS.load(Ordering::Relaxed) - before_calls;
     let clones = perf_counters::SELF_FIELD_ARR_COW_CLONES.load(Ordering::Relaxed) - before_clones;
     eprintln!("[me-push] {n} pushes: in-place calls={calls} cow-clones={clones}");
-    assert!(calls >= n as u64, "the in-place field-array path must handle every push (got {calls})");
-    assert_eq!(clones, 0, "self.items.push inside a me method deep-copied the array {clones} times");
+    assert!(
+        calls >= n as u64,
+        "the in-place field-array path must handle every push (got {calls})"
+    );
+    assert_eq!(
+        clones, 0,
+        "self.items.push inside a me method deep-copied the array {clones} times"
+    );
 }
 
 #[test]
@@ -94,7 +104,10 @@ fn me_method_self_field_push_scales_linearly() {
     let large = time_pushes(8_000);
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.001);
     eprintln!("[me-push] 2000 pushes {small:?}, 8000 pushes {large:?}, ratio {ratio:.2} (linear ~4, quadratic ~16)");
-    assert!(ratio < 9.0, "self.items.push in a me method is super-linear: x4 pushes cost x{ratio:.1}");
+    assert!(
+        ratio < 9.0,
+        "self.items.push in a me method is super-linear: x4 pushes cost x{ratio:.1}"
+    );
 }
 
 #[test]

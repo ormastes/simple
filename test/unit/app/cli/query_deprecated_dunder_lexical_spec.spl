@@ -1,0 +1,89 @@
+"""
+## Purpose
+Prove DEPR001 uses production lexical facts, preserves match order, and reports
+original byte columns without per-character text construction.
+"""
+
+use app.cli.query_lint.{_collect_lint_diagnostics_json}
+use app.cli.query_source_mask.{deprecated_dunder_facts}
+use std.io_runtime.file_read
+use std.spec.step
+
+describe "query deprecated dunder lexical facts":
+    it "returns every real call in source order with exact spans":
+        step("Exclude lexical payload and preserve multiple calls per line")
+        val lines = [
+            "# Fake__comment()",
+            "    val a = Vec__new() + String__from(\"x\")",
+            "val note = \"Fake__string()\"",
+            "val docs = \"\"\"",
+            "Fake__doc()",
+            "\"\"\"; val resumed = Map__get()",
+            "1Fake__bad()",
+            "_foo__bar()",
+            "foo___bar()",
+            "__foo__bar()",
+            "foo__()"]
+        val facts = deprecated_dunder_facts(lines)
+        expect(facts.len()).to_equal(5)
+        expect(facts[0].name).to_equal("Vec__new")
+        expect(facts[0].line).to_equal(2)
+        expect(facts[0].start_column).to_equal(13)
+        expect(facts[0].end_column).to_equal(21)
+        expect(facts[1].name).to_equal("String__from")
+        expect(facts[1].line).to_equal(2)
+        expect(facts[1].start_column).to_equal(26)
+        expect(facts[1].end_column).to_equal(38)
+        expect(facts[2].name).to_equal("Map__get")
+        expect(facts[2].line).to_equal(6)
+        expect(facts[2].start_column).to_equal(20)
+        expect(facts[2].end_column).to_equal(28)
+        expect(facts[3].name).to_equal("_foo__bar")
+        expect(facts[3].line).to_equal(8)
+        expect(facts[3].start_column).to_equal(1)
+        expect(facts[3].end_column).to_equal(10)
+        expect(facts[4].name).to_equal("foo___bar")
+        expect(facts[4].line).to_equal(9)
+        expect(facts[4].start_column).to_equal(1)
+        expect(facts[4].end_column).to_equal(10)
+
+    it "returns no facts for comments strings docstrings and excluded names":
+        step("Reject a source containing only lexical and name-shape decoys")
+        val lines = [
+            "# Type__call()", "val x = \"Type__call()\"", "val d = \"\"\"",
+            "Type__call()", "\"\"\"", "__Type__call()", "Type__()",
+            "1Type__call()", "Type__call ()"]
+        expect(deprecated_dunder_facts(lines).len()).to_equal(0)
+
+    it "emits exact JSON spans from the production facts":
+        step("Keep indentation and identifier-exclusive end columns")
+        val source = "fn f():\n    Vec__new()\n"
+        val diagnostics = _collect_lint_diagnostics_json("sample.spl", source).1
+        var depr: [text] = []
+        for diagnostic in diagnostics:
+            if diagnostic.contains("\"code\":\"DEPR001\""):
+                depr.push(diagnostic)
+        expect(depr).to_equal([
+            "{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'Vec__new()' uses deprecated Type__method() syntax\",\"line\":2,\"col\":5,\"end_line\":2,\"end_col\":13,\"tags\":[2],\"source\":\"simple-lint\"}"])
+
+    it "uses one byte cursor and slices only accepted identifiers":
+        step("Pin linear lexical construction and one caller-owned fact list")
+        val mask = file_read("src/app/cli/query_source_mask.spl")
+        val start = mask.index_of("fn deprecated_dunder_facts(lines: [text])")
+        val finish = mask.index_of("fn first_code_pattern_columns(", start)
+        expect(start).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(start)
+        val body = mask.slice(start, finish)
+        expect(body.split("while i < n:").len()).to_equal(3)
+        expect(body).to_contain("line.byte_at(i)")
+        expect(body).to_contain("line.substring(start, i)")
+        expect(body).not.to_contain(".index_of(")
+        expect(body).not.to_contain(".contains(")
+        expect(body).not.to_contain("substring(i, i + 1)")
+
+        val lint = file_read("src/app/cli/query_lint.spl")
+        val emit_start = lint.index_of("fn _emit_basic_line_lints(")
+        val emit_end = lint.index_of("fn _emit_text_heuristic_lints(", emit_start)
+        val emit = lint.slice(emit_start, emit_end)
+        expect(emit.split("deprecated_dunder_facts(lines)").len()).to_equal(2)
+        expect(emit).not.to_contain("_check_deprecated_double_underscore")

@@ -318,6 +318,25 @@ impl Lowerer {
                 Ok(self.module.types.register(ptr_type))
             }
             Type::Tuple(types) => {
+                // `()` is the UNIT type, not a zero-element tuple. The parser
+                // produces `Type::Tuple(vec![])` for it (parser_types.rs:756),
+                // and registering that as `HirType::Tuple([])` handed back a
+                // TypeId that is not `TypeId::VOID` — so a `-> ()` function's
+                // `Return(None)` failed the `return_type == TypeId::VOID` test
+                // in codegen/instr/body.rs and fell into the fail-fast trap arm,
+                // emitting `ud2` with NO `ret` at all. In-guest on SimpleOS that
+                // is a live fault, not a diagnostic: the mcp component row died
+                // at `DispatchRegistry.register` (`me register(...) -> ():`),
+                // x86_64 serial `FAULT @ 0x0000000008005e61`, which objdump maps
+                // exactly to that function's terminating `ud2`.
+                //
+                // TypeId::VOID is the codebase's own stated home for this — see
+                // type_system.rs:93 ("Use TypeId::VOID for empty/unit types"),
+                // and the resolver already maps the bare name `unit` to VOID at
+                // line 234. This makes the `()` spelling agree with it.
+                if types.is_empty() {
+                    return Ok(TypeId::VOID);
+                }
                 let mut type_ids = Vec::new();
                 for t in types {
                     type_ids.push(self.resolve_type(t)?);
@@ -643,7 +662,16 @@ impl Lowerer {
                     }
                 }
             }
-            if let Some((idx, ty, _)) = best {
+            if let Some((idx, ty, count)) = best {
+                if crate::hir::lower::trace_field_get_enabled() {
+                    let fpath = self
+                        .current_file
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    eprintln!("[FIELD-TRACE] ANY/{field} -> LOCAL-BEST idx={idx} count={count} in {fpath}");
+                }
                 return Ok((idx, ty));
             }
             // Search global struct definitions from other compilation units.
@@ -658,7 +686,7 @@ impl Lowerer {
                 });
             }
             if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
-                if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                if crate::hir::lower::trace_field_get_enabled() {
                     let fpath = self
                         .current_file
                         .as_ref()
@@ -694,7 +722,16 @@ impl Lowerer {
                             }
                         }
                     }
-                    if let Some((idx, ty, _)) = best {
+                    if let Some((idx, ty, count)) = best {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FIELD-TRACE] AnyTy/{field} -> LOCAL-BEST idx={idx} count={count} in {fpath}");
+                        }
                         return Ok((idx, ty));
                     }
                     if !self.is_ambiguous_global_field(field) {
@@ -727,17 +764,53 @@ impl Lowerer {
                     // different fields than the one actually in scope.
                     if let Some((global_idx, global_field_ty)) = self.try_resolve_global_field_for_struct(&name, field)
                     {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] S-GLOBAL/{field} struct={name} idx={global_idx} in {fpath}");
+                        }
                         return Ok((global_idx, global_field_ty));
                     }
                     if let Some((variant_idx, variant_field_ty)) =
                         self.try_resolve_registered_same_name_field_variant(&name, field)
                     {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] S-SAMENAME/{field} struct={name} idx={variant_idx} in {fpath}");
+                        }
                         return Ok((variant_idx, variant_field_ty));
                     }
                     if let Some((idx, owner_field_ty)) = self.try_resolve_current_owner_field(field) {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] S-OWNER/{field} struct={name} idx={idx} in {fpath}");
+                        }
                         return Ok((idx, owner_field_ty));
                     }
                     if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] S-GLOBALINFO/{field} struct={name} idx={idx} in {fpath}");
+                        }
                         return Ok((idx, field_ty));
                     }
                     let mut best: Option<(usize, TypeId, usize)> = None;
@@ -757,6 +830,15 @@ impl Lowerer {
                         }
                     }
                     if let Some((idx, field_ty, _)) = best {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] S-BEST/{field} struct={name} idx={idx} in {fpath}");
+                        }
                         return Ok((idx, field_ty));
                     }
                     let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
@@ -867,7 +949,7 @@ impl Lowerer {
                             });
                         }
                         if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
-                            if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                            if crate::hir::lower::trace_field_get_enabled() {
                                 let fpath = self
                                     .current_file
                                     .as_ref()
@@ -958,42 +1040,42 @@ impl Lowerer {
     }
 
     fn try_resolve_global_field_for_struct(&mut self, struct_name: &str, field_name: &str) -> Option<(usize, TypeId)> {
-        let (field_index, field_type_spec) = self
-            .global_struct_fields_for_name(struct_name)
-            .and_then(|fields| {
-                fields
-                    .iter()
-                    .enumerate()
-                    .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
-            })
-            .or_else(|| {
-                // The nominal owner's layout lacks this field. When several
-                // modules declare same-named structs, the locally-registered
-                // definition is not necessarily the receiver's own (e.g. three
-                // `GlyphBitmap` classes; only spl_fonts' has `gbm_*` fields).
-                // Fall back to the duplicate-variant consensus scan: it
-                // resolves only when every variant that declares the field
-                // agrees on its index, and stays ambiguous (None) otherwise.
-                // Erroring here is strictly worse — it drops the whole module
-                // to the interpreter for a field exactly one variant owns.
-                self.duplicate_global_struct_defs
-                    .as_ref()
-                    .and_then(|defs| defs.get(struct_name))
-                    .and_then(|variants| {
-                        let mut matches = variants.iter().filter_map(|fields| {
-                            fields.iter().enumerate().find_map(|(idx, (fname, ftype))| {
-                                (fname == field_name).then_some((idx, ftype.clone()))
-                            })
-                        });
-                        let first = matches.next()?;
-                        for m in matches {
-                            if m.0 != first.0 {
-                                return None;
+        let (field_index, field_type_spec) =
+            self.global_struct_fields_for_name(struct_name)
+                .and_then(|fields| {
+                    fields
+                        .iter()
+                        .enumerate()
+                        .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
+                })
+                .or_else(|| {
+                    // The nominal owner's layout lacks this field. When several
+                    // modules declare same-named structs, the locally-registered
+                    // definition is not necessarily the receiver's own (e.g. three
+                    // `GlyphBitmap` classes; only spl_fonts' has `gbm_*` fields).
+                    // Fall back to the duplicate-variant consensus scan: it
+                    // resolves only when every variant that declares the field
+                    // agrees on its index, and stays ambiguous (None) otherwise.
+                    // Erroring here is strictly worse — it drops the whole module
+                    // to the interpreter for a field exactly one variant owns.
+                    self.duplicate_global_struct_defs
+                        .as_ref()
+                        .and_then(|defs| defs.get(struct_name))
+                        .and_then(|variants| {
+                            let mut matches = variants.iter().filter_map(|fields| {
+                                fields.iter().enumerate().find_map(|(idx, (fname, ftype))| {
+                                    (fname == field_name).then_some((idx, ftype.clone()))
+                                })
+                            });
+                            let first = matches.next()?;
+                            for m in matches {
+                                if m.0 != first.0 {
+                                    return None;
+                                }
                             }
-                        }
-                        Some(first)
-                    })
-            })?;
+                            Some(first)
+                        })
+                })?;
 
         let field_ty = self.resolve_type(&field_type_spec).unwrap_or(TypeId::ANY);
         Some((field_index, field_ty))
@@ -1014,14 +1096,15 @@ impl Lowerer {
             match hir_ty {
                 HirType::Array { element, .. } => Ok(*element),
                 HirType::Simd { element, .. } => Ok(*element),
-                HirType::Tuple(types) => types
-                    .first()
-                    .copied()
-                    .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string())),
-                HirType::LabeledTuple(fields) => fields
-                    .first()
-                    .map(|(_, ty)| *ty)
-                    .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string())),
+                // A bare `tuple` annotation (`fn f() -> tuple:`) lowers to a
+                // Tuple with NO element types, so there is nothing to infer
+                // from — indexing it is dynamic, exactly like `HirType::Any`
+                // below, which is what the interpreter already does. Erroring
+                // here instead made every `-> tuple` helper uncompilable in
+                // native codegen (ml_kem `kpke_keygen_params`, ml_dsa
+                // `power2round_poly`).
+                HirType::Tuple(types) => Ok(types.first().copied().unwrap_or(TypeId::ANY)),
+                HirType::LabeledTuple(fields) => Ok(fields.first().map(|(_, ty)| *ty).unwrap_or(TypeId::ANY)),
                 HirType::Pointer { inner, .. } => self.get_index_element_type(*inner),
                 // String type - indexing returns a single-char string
                 HirType::String => Ok(TypeId::STRING),

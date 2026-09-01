@@ -1,0 +1,157 @@
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_get_type}
+use std.common.search.snapshot.{SearchSnapshot}
+use std.common.search.analyzer.{AnalyzerIdentity}
+use app.spipe_knowledge_provider.protocol.{provider_parse_frame, provider_prebinding_error}
+use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1}
+use app.spipe_knowledge_provider.state.{SpipeProviderStateV1}
+use app.spipe_knowledge_provider.wire_types.{ProviderWireDispatchV1, ProviderWireOwnedDispatchV1, ProviderHostBindingV1, ProviderInitializeBindingV1, provider_owned_silent, provider_owned_response}
+use app.spipe_knowledge_provider.wire_json.{wire_jtext, wire_jint, wire_has_exact_keys, wire_valid_id, wire_canonical_json_value}
+use app.spipe_knowledge_provider.wire_core.{provider_initialize_canonical, provider_initialize_binding, provider_initialize_result, provider_valid_protocol, provider_valid_initialize, provider_dispatch_initialized, provider_payload_hash}
+use app.spipe_knowledge_provider.generation_quarantine.{generation_quarantine_is_bound}
+use app.spipe_knowledge_provider.query_clock.{QueryClockPort, SystemQueryClockV1}
+
+fn initialize_service(service: SpipeProviderServiceV1,
+                      binding: ProviderInitializeBindingV1) -> SpipeProviderServiceV1:
+    var snapshot_value = SearchSnapshot.of(binding.snapshot_id, "0",
+        AnalyzerIdentity.spipe_v1(), [])
+    var document_ids: [text] = []
+    var document_hashes: [text] = []
+    var document_hash_preimages: [text] = []
+    var candidate_index = 0
+    while candidate_index < service.candidates.len():
+        val candidate = service.candidates[candidate_index]
+        if candidate.state == "published" and candidate.candidate_root == binding.logical_root:
+            snapshot_value = candidate.snapshot
+            document_hashes = candidate.document_hashes
+            document_hash_preimages = candidate.document_hash_preimages
+            var document_index = 0
+            while document_index < snapshot_value.documents.len():
+                document_ids.push(snapshot_value.documents[document_index].id)
+                document_index = document_index + 1
+        candidate_index = candidate_index + 1
+    val initialized_state = SpipeProviderStateV1.initialized_bound(
+        binding.workspace, binding.snapshot_id, binding.scope_digest,
+        binding.provider_generation,
+        binding.logical_root, snapshot_value, service.state.capabilities_value,
+        service.state.cancelled_request_ids, false)
+    SpipeProviderServiceV1(state: initialized_state,
+        staged_snapshot_id: service.staged_snapshot_id,
+        staged_snapshot: service.staged_snapshot,
+        receipt_authority: service.receipt_authority,
+        candidate_authority: service.candidate_authority,
+        transition_authority: service.transition_authority,
+        durable_lifecycle: service.durable_lifecycle,
+        lifecycle_etag: service.lifecycle_etag,
+        replay: service.replay, candidates: service.candidates,
+        current_document_ids: document_ids,
+        current_document_hashes: document_hashes,
+        current_document_hash_preimages: document_hash_preimages)
+
+fn provider_dispatch_payload_bound_owned_controlled(service: SpipeProviderServiceV1,
+                                         host: ProviderHostBindingV1,
+                                         canonical_payload: text,
+                                         clock: QueryClockPort) -> ProviderWireOwnedDispatchV1:
+    var owned = service
+    val parsed = json_parse_with_error(canonical_payload)
+    if parsed.1 != "" or json_get_type(parsed.0) != "object":
+        return ProviderWireOwnedDispatchV1(service: owned, outcome: ProviderWireDispatchV1.silent_close())
+    val root = parsed.0
+    val canonical = wire_canonical_json_value(root)
+    if val Err(_) = canonical:
+        return ProviderWireOwnedDispatchV1(service: owned, outcome: ProviderWireDispatchV1.silent_close())
+    if canonical.unwrap() != canonical_payload:
+        return ProviderWireOwnedDispatchV1(service: owned, outcome: ProviderWireDispatchV1.silent_close())
+    val request_id = wire_jtext(root, "request_id")
+    val operation = wire_jtext(root, "operation")
+    if not wire_valid_id(request_id) or not wire_valid_id(operation) or not provider_valid_protocol(json_object_get(root, "protocol")):
+        return ProviderWireOwnedDispatchV1(service: owned, outcome: ProviderWireDispatchV1.silent_close())
+    val known = operation == "initialize" or operation == "index_open" or operation == "index_apply" or operation == "index_publish" or operation == "search" or operation == "explain" or operation == "duplicate_candidates" or operation == "symbols_snapshot" or operation == "stats" or operation == "cancel" or operation == "shutdown"
+    if not known:
+        return ProviderWireOwnedDispatchV1(service: owned, outcome: ProviderWireDispatchV1.silent_close())
+    if operation == "initialize":
+        if owned.state.initialized or not provider_valid_initialize(root):
+            return ProviderWireOwnedDispatchV1(service: owned,
+                outcome: ProviderWireDispatchV1.response(owned.prebinding_error(request_id, operation), false))
+        if not owned.lifecycle_identity_matches(host.workspace, host.snapshot_id,
+                host.scope_digest, host.provider_generation):
+            return ProviderWireOwnedDispatchV1(service: owned,
+                outcome: ProviderWireDispatchV1.response(provider_prebinding_error(
+                    request_id, operation, "incompatible_contract",
+                    "durable lifecycle host binding mismatch"), false))
+        val quarantine_record = if owned.durable_lifecycle.available():
+            owned.durable_lifecycle.load_generation_quarantine(
+                host.provider_generation)
+        else:
+            Ok("")
+        if val Err(_) = quarantine_record:
+            return ProviderWireOwnedDispatchV1(service: owned,
+                outcome: ProviderWireDispatchV1.response(provider_prebinding_error(
+                    request_id, operation, "incompatible_contract",
+                    "generation quarantine unavailable"), false))
+        val quarantine_bound = generation_quarantine_is_bound(
+            quarantine_record.unwrap(), owned.receipt_authority,
+            host.provider_generation, host.workspace, host.snapshot_id,
+            host.scope_digest)
+        if val Err(_) = quarantine_bound:
+            return ProviderWireOwnedDispatchV1(service: owned,
+                outcome: ProviderWireDispatchV1.response(provider_prebinding_error(
+                    request_id, operation, "incompatible_contract",
+                    "generation quarantine binding mismatch"), false))
+        val canonical_initialize = provider_initialize_canonical(canonical_payload).unwrap()
+        val binding = provider_initialize_binding(canonical_initialize, owned, host)
+        var initialized = initialize_service(owned, binding)
+        if quarantine_bound.unwrap(): initialized.state.quarantine_generation()
+        initialized.state.admit_request(binding.request_id)
+        initialized.state.complete_request(binding.request_id)
+        return provider_owned_response(provider_initialize_result(initialized,
+            binding.request_id), false, initialized)
+    if not owned.state.initialized:
+        return ProviderWireOwnedDispatchV1(service: owned,
+            outcome: ProviderWireDispatchV1.response(owned.prebinding_error(request_id, operation), false))
+    val admitted_at_ms = clock.now_ms()
+    val deadline_ms = wire_jint(root, "deadline_ms", -1)
+    owned.state.admit_request(request_id)
+    val dispatched = provider_dispatch_initialized(owned, root, request_id,
+        operation, admitted_at_ms, deadline_ms, clock)
+    var completed = dispatched.service
+    completed.state.complete_request(request_id)
+    ProviderWireOwnedDispatchV1(service: completed, outcome: dispatched.outcome)
+
+fn provider_dispatch_payload_bound_owned(service: SpipeProviderServiceV1,
+                                         host: ProviderHostBindingV1,
+                                         canonical_payload: text) -> ProviderWireOwnedDispatchV1:
+    provider_dispatch_payload_bound_owned_controlled(service, host,
+        canonical_payload, SystemQueryClockV1.configured())
+
+fn provider_dispatch_payload_owned(service: SpipeProviderServiceV1,
+                                   canonical_payload: text) -> ProviderWireOwnedDispatchV1:
+    if not service.state.initialized: return provider_owned_silent(service)
+    val host = ProviderHostBindingV1.create_with_generation(
+        service.state.workspace, service.state.snapshot_id,
+        service.state.scope_digest, service.state.provider_generation)
+    if val Err(_) = host: return provider_owned_silent(service)
+    provider_dispatch_payload_bound_owned(service, host.unwrap(), canonical_payload)
+
+fn provider_dispatch_frame_bound_owned(service: SpipeProviderServiceV1,
+                                       host: ProviderHostBindingV1,
+                                       frame: text) -> ProviderWireOwnedDispatchV1:
+    val decoded = provider_parse_frame(frame)
+    if not decoded.ok:
+        return ProviderWireOwnedDispatchV1(service: service, outcome: ProviderWireDispatchV1.silent_close())
+    provider_dispatch_payload_bound_owned(service, host, decoded.payload)
+
+fn provider_dispatch_frame_owned(service: SpipeProviderServiceV1,
+                                 frame: text) -> ProviderWireOwnedDispatchV1:
+    val decoded = provider_parse_frame(frame)
+    if not decoded.ok:
+        return ProviderWireOwnedDispatchV1(service: service, outcome: ProviderWireDispatchV1.silent_close())
+    provider_dispatch_payload_owned(service, decoded.payload)
+
+fn provider_operation_payload_hash(canonical_payload_without_hash: text,
+                                   operation: text) -> Result<text, text>:
+    if operation != "index_apply" and operation != "index_publish": return Err("invalid_request")
+    val parsed = json_parse_with_error(canonical_payload_without_hash)
+    if parsed.1 != "" or json_get_type(parsed.0) != "object": return Err("invalid_request")
+    provider_payload_hash(parsed.0, operation)

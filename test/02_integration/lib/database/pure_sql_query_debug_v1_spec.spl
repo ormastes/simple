@@ -1,0 +1,53 @@
+use std.spec.{describe, it, expect}
+use std.database.pure_sql.{PureDatabase}
+use std.database.pure_sql.debug_query_v1.{
+    pure_query_debug_context_v1, pure_query_debug_observe_v1,
+    pure_query_debug_service_inspect_v1,
+}
+use std.database.sql.types.{DbValue}
+use std.common.debug.contracts_v1.{debug_policy_observe_only_v1}
+use std.common.debug.service_v1.{DebugServiceV1}
+
+describe "pure-Simple SQL query debugging vertical slice":
+    it "correlates a sanitized query, plan, timing, row count, and context":
+        var db = PureDatabase.memory()?
+        db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", [])?
+        db.exec("INSERT INTO users (id, name) VALUES (1, 'alice')", [])?
+        var context = pure_query_debug_context_v1("memory", "conn-1")
+        context.transaction_id = "txn-7"
+        context.source_anchor = "src/app/example.spl:12"
+        context.trace_id = "trace-9"
+        val result = pure_query_debug_observe_v1(
+            db, "SELECT * FROM users WHERE id = ?", [DbValue.Integer(1)], context)?
+        expect(result.rows.len()).to_equal(1)
+        expect(result.debug.rows).to_equal(1)
+        expect(result.debug.statement_digest.starts_with("sha256:")).to_equal(true)
+        expect(result.debug.sanitized_template).to_equal("SELECT * FROM users WHERE id = ?")
+        expect(result.debug.bind_shape).to_equal("integer")
+        expect(result.debug.actual_plan).to_equal("pure-sql:table-scan:users")
+        expect(result.debug.transaction_id).to_equal("txn-7")
+        expect(result.debug.trace_id).to_equal("trace-9")
+        expect(result.debug.elapsed_ns >= 0).to_equal(true)
+
+    it "binds the exact debug session and build before authorized passive inspection":
+        var service = DebugServiceV1.create()
+        val session_id = service.open_session("sha256:build-7", debug_policy_observe_only_v1())?
+        var db = PureDatabase.memory()?
+        db.exec("CREATE TABLE secrets (id INTEGER PRIMARY KEY, value TEXT)", [])?
+        db.exec("INSERT INTO secrets (id, value) VALUES (7, 'never-retain-me')", [])?
+        val result = pure_query_debug_service_inspect_v1(
+            service, session_id, db,
+            "SELECT * FROM secrets WHERE id = 7 AND value = 'never-retain-me'", [],
+            pure_query_debug_context_v1("memory", "conn-service-1"),
+        )?
+        expect(result.session_id.value).to_equal(session_id.value)
+        expect(result.build_id).to_equal("sha256:build-7")
+        expect(result.debug.sanitized_template).to_equal("SELECT * FROM secrets WHERE id = ? AND value = ?")
+        expect(result.debug.sanitized_template.contains("never-retain-me")).to_equal(false)
+        val receipts = service.receipts_for(session_id)
+        expect(receipts.len()).to_equal(3)
+        expect(receipts[1].action).to_equal("pure-sql.query.inspect")
+        expect(receipts[1].allowed).to_equal(true)
+        expect(receipts[2].action).to_equal("pure-sql.query.inspect.outcome")
+        expect(receipts[2].outcome).to_equal("succeeded")
+        expect(receipts[2].execution_changed).to_equal(false)

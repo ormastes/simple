@@ -1,10 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that GPU web/db offload contract.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-LIB-NOGC-SYNC-MUT-001 — stable requirement identity for this spec.
-
 use std.spec.*
 use std.web_db_offload.contract.*
 
@@ -20,11 +13,8 @@ fn request(kind: GpuWdbWorkKind, batch_bytes: i64, queue_depth: i64,
         cpu_fallback_available: cpu_fallback_available
     )
 
-use std.spec.step
-
 describe "GPU web/db offload contract":
     it "should keep proxy forwarding on the CPU control plane":
-        # @req: REQ-LIB-NOGC-SYNC-MUT-001
         step("Classify proxy forwarding as non-GPU control plane work")
         val decision = gpu_wdb_decide(
             request(GpuWdbWorkKind.ProxyForwarding, 65536, 0, true, true, true),
@@ -32,10 +22,11 @@ describe "GPU web/db offload contract":
         )
         expect(decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
         expect(decision.reason).to_equal("control-plane-stays-on-cpu")
-        expect(decision.cpu_fallback_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(decision.gpu_hit_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(decision.cpu_fallback_count).to_equal(1)
+        expect(decision.gpu_hit_count).to_equal(0)
 
     it "should reject GPU work when CPU fallback is missing":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Submit eligible GPU work without a CPU fallback")
         val decision = gpu_wdb_decide(
             request(GpuWdbWorkKind.DbVectorSearch, 65536, 0, true, true, false),
@@ -45,6 +36,7 @@ describe "GPU web/db offload contract":
         expect(decision.reason).to_equal("cpu-fallback-required")
 
     it "should fall back for stale database generations":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Submit stale DB work that must not use GPU results")
         val decision = gpu_wdb_decide(
             request(GpuWdbWorkKind.DbScanFilterProject, 65536, 0, true, false, true),
@@ -54,6 +46,7 @@ describe "GPU web/db offload contract":
         expect(decision.reason).to_equal("stale-generation")
 
     it "should fall back when the GPU queue is full":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Submit eligible work at the queue limit")
         val budget = gpu_wdb_default_budget()
         val decision = gpu_wdb_decide(
@@ -64,6 +57,7 @@ describe "GPU web/db offload contract":
         expect(decision.reason).to_equal("gpu-queue-full")
 
     it "should reject tiny batches for GPU performance claims":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Submit a tiny vector batch")
         val budget = gpu_wdb_default_budget()
         val decision = gpu_wdb_decide(
@@ -74,6 +68,7 @@ describe "GPU web/db offload contract":
         expect(decision.reason).to_equal("batch-too-small")
 
     it "should reject invalid queue and batch inputs before GPU admission":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Submit impossible runtime accounting values")
         val budget = gpu_wdb_default_budget()
         val negative_queue = gpu_wdb_decide(
@@ -90,6 +85,7 @@ describe "GPU web/db offload contract":
         expect(empty_batch.reason).to_equal("batch-bytes-invalid")
 
     it "should report GPU evidence for eligible coarse batches":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Submit a coarse eligible rank batch")
         val budget = gpu_wdb_default_budget()
         val decision = gpu_wdb_decide(
@@ -98,10 +94,11 @@ describe "GPU web/db offload contract":
         )
         expect(decision.path).to_equal(GpuWdbDecisionPath.GpuEvidence)
         expect(decision.reason).to_equal("gpu-evidence")
-        expect(decision.gpu_hit_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(decision.cpu_fallback_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(decision.gpu_hit_count).to_equal(1)
+        expect(decision.cpu_fallback_count).to_equal(0)
 
     it "should build reusable GPU library execution plans":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Convert a runtime snapshot into a shared execution plan")
         val budget = gpu_wdb_default_budget()
         val snapshot = GpuWdbRuntimeSnapshot(
@@ -116,6 +113,7 @@ describe "GPU web/db offload contract":
         expect(plan.target).to_equal("gpu_db_vector_search_batch")
 
     it "should reserve one queue slot for an eligible reusable batch plan":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Plan a coarse DB vector batch through the shared queue accounting API")
         val budget = gpu_wdb_default_budget()
         val snapshot = GpuWdbRuntimeSnapshot(
@@ -129,9 +127,10 @@ describe "GPU web/db offload contract":
         expect(plan.execution.decision.path).to_equal(GpuWdbDecisionPath.GpuEvidence)
         expect(plan.execution.target).to_equal("gpu_db_vector_search_batch")
         expect(plan.average_item_bytes).to_equal(budget.min_gpu_batch_bytes)
-        expect(plan.queue_depth_after).to_equal(4)  # oracle: 4 — named expected value from the requirement
+        expect(plan.queue_depth_after).to_equal(4)
 
     it "should release the queue slot when a reusable batch falls back":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Plan a tiny web batch that must remain on CPU")
         val budget = gpu_wdb_default_budget()
         val snapshot = GpuWdbRuntimeSnapshot(
@@ -145,9 +144,10 @@ describe "GPU web/db offload contract":
         expect(plan.execution.decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
         expect(plan.execution.decision.reason).to_equal("batch-too-small")
         expect(plan.execution.target).to_equal("cpu_fallback")
-        expect(plan.queue_depth_after).to_equal(3)  # oracle: 3 — named expected value from the requirement
+        expect(plan.queue_depth_after).to_equal(3)
 
     it "should reject reusable batch plans with no items":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Plan a malformed empty batch")
         val budget = gpu_wdb_default_budget()
         val snapshot = GpuWdbRuntimeSnapshot(
@@ -162,6 +162,7 @@ describe "GPU web/db offload contract":
         expect(plan.execution.decision.reason).to_equal("batch-item-count-invalid")
 
     it "should require CPU-owned metadata filters in NoSQL mode":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Submit NoSQL work without CPU-owned metadata filtering")
         val decision = gpu_wdb_nosql_mode_admits(65536, false, gpu_wdb_default_budget())
         expect(decision.path).to_equal(GpuWdbDecisionPath.Reject)

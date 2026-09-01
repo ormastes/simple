@@ -267,3 +267,47 @@ close the other.** A fresh fail-closed `native-build` of
 - `src/runtime/runtime_native.c` — 39 definitions
 - `src/runtime/runtime.h` — declarations
 - `test/01_unit/runtime/c_runtime_unwrap_entrypoints_spec.spl` — extended to 11 examples
+
+## Re-verified 2026-08-26 in a fresh clone — the fix holds; the "83 undefined" figure from a later audit prompt does not reproduce
+
+An audit pass asked to confirm a claim of "83 codegen-emitted runtime entry
+names ... undefined in `build/simple-core/libsimple_runtime.a`" (close to but
+not exactly this record's 84). Re-ran the guard from a clean
+`git worktree add` off `origin/main` (no `bootstrap`/redeploy performed, per
+audit constraints).
+
+The default scan finds **0 artifacts** because no `bootstrap/**/simple` is
+tracked any more (see
+`stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`'s
+"untracked as of `d1b71d63732`" note) — `--archive-only` is required, and no
+archive exists in a fresh clone (it's a gitignored build product) so one has
+to be materialised. Copied the two most-recent archives found elsewhere on the
+host (both gitignored build outputs, not part of any tracked tree) into
+`build/simple-core/libsimple_runtime.a` with a fresh mtime to clear the
+staleness gate, one at a time:
+
+```
+$ sh scripts/check/check-no-unresolved-runtime-symbols.shs --archive-only
+binaries=skipped(--archive-only)
+archive=checked(196 codegen-emitted names; artifact=build/simple-core/libsimple_runtime.a kind=core-c-capsule members=18 defined=1161)
+PASS — 196 symbol(s) checked across 0 binary(ies) + archive, 0 unresolved
+```
+
+and, with the other archive substituted (`members=16 defined=1156`):
+
+```
+PASS — 196 symbol(s) checked across 0 binary(ies) + archive, 0 unresolved
+```
+
+Both PASS at 0 unresolved. **No live "83 undefined" defect reproduces** —
+this record's fix (link-policy fail-closed + all 84 originally-named symbols
+implemented/trapped, landed 2026-08-21) is still in effect on current
+`origin/main` content. The audit prompt's "83" figure was most likely a
+paraphrase of this record's already-resolved "84" rather than a distinct new
+regression; no new record filed. Caveat: this was checked against archives
+built by another lane at various past times, not a fresh build from the exact
+current tree tip, because building one requires the bootstrap step this audit
+was told not to run — so a genuinely new regression introduced very recently
+and not yet exercised by any build could still be missed. If a future run
+finds a real unresolved count again, extend this record rather than filing
+a new one.

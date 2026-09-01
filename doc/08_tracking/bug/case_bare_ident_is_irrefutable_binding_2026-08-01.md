@@ -1,7 +1,6 @@
 # Bare identifier in `case` position is an irrefutable binding, silently
 
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** FIXED on the Rust seed's two engines 2026-08-02 (see
   "Rust-seed fix" below). Still OPEN for the pure-Simple compiler seams
   (`50.mir/_MirLoweringExpr/expr_dispatch.spl` `lower_match_case`,
   `10.frontend/_FlatAstBridge/convert_nodes.spl` `convert_flat_pattern`).

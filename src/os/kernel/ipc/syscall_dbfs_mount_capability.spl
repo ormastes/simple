@@ -3,7 +3,24 @@
 # read-only mount-owner capability fact after the dispatcher admits the caller.
 
 use os.kernel.types.syscall_types.{SyscallResult}
-use os.services.vfs.dbfs_mount_capability.{dbfs_vfs_mount_capability_code_v1}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.server_data_namespace_owner
+use os.services.vfs.dbfs_mount_capability.{
+    dbfs_vfs_mount_capability_snapshot_v1,
+    dbfs_vfs_mount_capability_snapshot_current_v1
+}
 
-fn _handle_dbfs_vfs_mount_capability() -> SyscallResult:
-    SyscallResult(value: dbfs_vfs_mount_capability_code_v1())
+fn _handle_dbfs_vfs_mount_capability(scheduler: Scheduler) -> SyscallResult:
+    # Snapshot the global fact first, then make current-task + live mount-seal
+    # revalidation the final observation. A concurrent publish can therefore
+    # only make this answer conservatively unavailable; an old mounted fact
+    # cannot pass final revalidation after its mount identity changes.
+    val before = dbfs_vfs_mount_capability_snapshot_v1()
+    if before.code == 0: return SyscallResult(value: 0)
+    var sched = scheduler
+    if not sched.server_data_namespace_current_active_ready_v1():
+        return SyscallResult(value: 0)
+    val after = dbfs_vfs_mount_capability_snapshot_v1()
+    if not dbfs_vfs_mount_capability_snapshot_current_v1(before, after):
+        return SyscallResult(value: 0)
+    SyscallResult(value: after.code)

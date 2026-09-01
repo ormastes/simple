@@ -4,45 +4,7 @@
 
 A concise reference for the canonical public Simple syntax. Legacy or parser-compatibility forms are called out explicitly instead of being presented as current style.
 
-**See also:** [Grammar keyword reference](../../06_spec/app/compiler/modules/grammar/keyword_reference.md) — keyword/status tables generated from the grammar registry. (That generated file is currently absent from the tree; the list below is the authoritative extract until it is regenerated.)
-
----
-
-## Reserved Words (cannot be used as identifiers)
-
-Extracted from the lexer keyword table
-(`src/compiler_rust/parser/src/lexer/identifiers.rs`, 124 entries). Any of these
-lexes as a keyword token **everywhere**, so it cannot name a variable, parameter,
-field, or named argument — even where the keyword meaning would be nonsensical.
-The failure surfaces as a parse error at the *use* site (e.g. `expected
-expression, found Plus`, `expected pattern, found Pub`) and often not at the
-declaration, which makes it read like a parser bug rather than a rule.
-
-```
-_ actor alias allow and and_then as asm async auto await bim bind bitfield
-bounds break by cad case city class common comptime const context continue
-crate decreases defer dyn elif else ensures enum errdefer examples exists
-export extend extends extern false feature flat fn for forall forbid from gen
-ghost given go gpu grid handle_pool if impl import in into invariant is kernel
-lazy let literal loop macro match me mixin mock mod move music mut new newtype
-nil not not_to old on onto out out_err outline priv pub repr requires result
-return rtl scenario schema self shared slice spawn struct structured_export
-style super sync then to trait true type ui union unwrap use val var vec when
-where while with xor yield
-```
-
-Non-obvious ones that have actually broken real code: `pub`, `move`,
-`examples`, `result`, `style`, `grid`, `city`, `music`, `common`, `context`,
-`schema`, `slice`, `vec`, `outline`, `handle_pool`, `feature`, `given`, `to`,
-`by`, `on`, `in`, `is`, `new`, `gen`.
-
-Workaround: rename the identifier (`move` -> `shift`, `result` -> `res`,
-`pub` -> `published`). Related bug records live under `doc/08_tracking/bug/`
-(`pub_reserved_identifier_undocumented_2026-08-10.md`,
-`move_identifier_rejected_as_expression_2026-08-15.md`,
-`examples_identifier_rejected_in_named_argument_position_2026-08-10.md`).
-
-**Reserved keywords that cannot be used as identifiers:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`, `examples`, `and_then`, and `pub` — `pub` lexes as a keyword token everywhere, so `val pub = ...` fails with `expected pattern, found Pub`; pick another name.
+**See also:** [Grammar keyword reference](../../06_spec/app/compiler/modules/grammar/keyword_reference.md) — keyword/status tables generated from the grammar registry.
 
 ---
 
@@ -257,6 +219,11 @@ val path = 'C:\Users\name'          # Backslashes are literal
 
 # r"..." prefix also works
 val pattern = r"no\escape"
+
+# Triple-quoted strings are raw and may span lines
+val template = """Hello, {name}
+This keeps braces literal."""
+val raw_template = r"""C:\temp\{name}"""
 ```
 
 ### Typed String Literals
@@ -307,37 +274,6 @@ val duration = 2_hr                 # Time
 val weight = 5_kg                   # Mass
 val discount = 20_pct               # Percentage (stored as 0.2)
 ```
-
-### `int(text)` Semantics (Task #118)
-
-`int(text)` is a **total function** — it never errors, in interpret mode or
-compiled mode. It skips leading whitespace, an optional `+`/`-` sign, then
-parses the longest run of leading decimal digits and stops at the first
-non-digit. If no digits are found at all, the result is `0`.
-
-| Input | Result | Why |
-|-------|--------|-----|
-| `int("42")` | `42` | plain integer |
-| `int("4.2")` | `4` | parses leading digits, stops at `.` (truncation) |
-| `int("abc")` | `0` | no leading digits |
-| `int("")` | `0` | no leading digits |
-| `int(" 42 ")` | `42` | leading/trailing whitespace ignored |
-| `int("-7")` | `-7` | leading sign honored |
-
-This matrix is identical across all execution paths: the flat-AST interpreter
-(`eval_int_parse_lenient` in `eval_builtins.spl`), the Rust seed's tree-walk
-interpreter (`parse_int_lenient` in `interpreter_call/builtins.rs`), and both
-compiled backends (`cranelift_codegen_adapter.spl`'s `cl_translate_cast` and
-`codegen/instr/basic_ops.rs`), which route through the shared C-runtime
-`rt_string_to_int()` (strtoll-based). The compiled-backend assertions above
-require redeploying `bin/release/<triple>/simple` from a rebuilt bootstrap to
-take effect for the self-hosted binary; the interpreter-mode assertions are
-correct today.
-
-If you need to *detect* garbage input instead of silently coercing it to `0`,
-use the checked alternative: `text.parse_int()` returns `Option<i64>`
-(`None` on any non-numeric or partially-numeric input), typically used as
-`s.trim().parse_int() ?? -1` (see `src/lib/common/text.spl`'s `parse_i64`).
 
 ---
 
@@ -424,16 +360,8 @@ lst[:-1]                            # [10, 20, 30, 40] (all but last)
 lst[::2]                            # [10, 30, 50] (every other)
 lst[1::2]                           # [20, 40] (odd indices)
 lst[1:5:2]                          # [20, 40] (slice with step)
+lst[::-1]                           # [50, 40, 30, 20, 10] (reversed)
 ```
-
-Negative step (e.g. `lst[::-1]`) is **not supported** — it errors in both
-engines. Use `.reversed()` to reverse a list, string, or tuple:
-
-```simple
-lst.reversed()                      # [50, 40, 30, 20, 10]
-```
-
-See `doc/04_architecture/language/slicing/+adr/negative_step_not_supported_2026-07-30.md`.
 
 ### String Slicing
 
@@ -589,16 +517,6 @@ The `.?` operator checks if a value is **present** (not nil AND not empty).
 It returns `T?` — the value itself if present, `nil` if absent. This enables
 pattern binding with `if val`:
 
-Compiler/backend note: `nil` means missing metadata. Backend emitters must not
-stringify it as a target type or symbol. Normalize optional compiler metadata
-with the target backend guard (for LLVM, `valid_llvm_type(...)`) before emitting
-call, phi, cast, load/store result, or serialized MIR text. `simple lint` reports
-`LLVM001` when LLVM result type metadata is read with raw `get_local_type(...)`
-in known result-type positions.
-LLVM pointer-producing instructions must also mark the destination through
-`mark_ptr_local(...)`, so later `Copy`/`Move` lowering preserves pointer IR
-instead of falling back to integer arithmetic.
-
 ```simple
 # Returns T? (value if present, nil if absent)
 opt.?                         # T?:    pass-through (already optional)
@@ -723,18 +641,14 @@ fn greet(name: text):
 
 ### Multi-Return Tuples
 
-**NOTE:** Labeled-tuple returns (`-> (name: type, ...)`) are currently **NOT parseable** by either the seed or self-hosted parser. Use unlabeled tuples with `.0`/`.1` accessors instead. See [doc/08_tracking/bug/seed_parser_labeled_tuple_return_type_gap_2026-07-17.md](../../08_tracking/bug/seed_parser_labeled_tuple_return_type_gap_2026-07-17.md).
-
 ```simple
-fn div_rem(n: i64, d: i64) -> (i64, i64):
-    return (n / d, n % d)
+fn div_rem(n: i64, d: i64) -> (quotient: i64, remainder: i64):
+    return (quotient: n / d, remainder: n % d)
 
 val r = div_rem(10, 3)
-print r.0  # quotient
-print r.1  # remainder
+print r.quotient
+print r.remainder
 ```
-
-**⚠️ WARNING: Labeled-tuple return syntax is currently unparseable.** Both seed and self-hosted compilers reject `-> (label: type, ...)` syntax. See `doc/08_tracking/bug/seed_parser_labeled_tuple_return_type_gap_2026-07-17.md` for details. Use the anonymous tuple form below + destructure with typed bindings as the current workaround.
 
 Anonymous tuple returns remain valid when the fields are not ambiguous:
 
@@ -894,29 +808,14 @@ match person:
         print "{n} is a minor"
 ```
 
-### Binding Destructuring & Tuple Unpacking
+### Binding Destructuring
 
 ```simple
-# Tuple destructuring — both literal and non-literal initializers
-val (x, y) = get_point()                    # function result
-val (a, b, c) = (1, 2, 3)                   # literal tuple
-val (first, second, ...rest) = items        # variable destructuring
-
-# Single evaluation guarantee: non-literal initializers eval exactly once
-val (a, b) = expensive_fn()                 # fn called once, indexed results extracted
-
-# Underscore skips unwanted fields
-val (x, _, z) = get_coords()
-
-# Array & dict destructuring
+val (x, y) = get_point()
+val (first, second, ...rest) = items
 val [a, b, c] = triple
 val {name, age} = person
 ```
-
-**Native Path Support** (2026-07-11 redeploy):
-- Literal tuples: per-element lowering with arity checking.
-- Non-literal initializers: desugared to temp variable + indexed extraction, guaranteeing single evaluation.
-- Parser fix: plain identifiers in patterns no longer become literal names (was a `parse_pattern` bug).
 
 ---
 
@@ -1528,39 +1427,6 @@ internal_export HirLowering, HirBuilder
 - **Compatibility mode:** sibling access to a private symbol still warns until it is migrated to `pub(peer)`
 
 See [Friend Access Control](../design/friend_access_control.md) and [Layered Compiler Architecture](../design/layered_compiler_architecture.md).
-
-### Module Resolution: File vs Package (known-inconsistent — read before relying on it)
-
-When a directory contains both `name/__init__.spl` (a package) and a sibling
-`name.spl` file with the same leaf name, which one `use foo.name` resolves
-to is **not consistent** across the interpreter's resolution strategies, and
-for `use std.<name>` specifically a seed-bundled stdlib copy
-(`src/compiler_rust/lib/std/src`) is consulted *before* your project's own
-`src/lib/`, so a same-named package there can win regardless of what
-`src/lib/<family>/` contains. Do not assume file-wins or package-wins as a
-blanket rule. Two concrete, opposite examples in the current stdlib:
-
-- `std.spec`: the canonical BDD framework is the **file**
-  (`src/lib/<family>/spec.spl`), with a same-named `spec/` package holding
-  only the skip/ignore-decorator submodules. `print_summary`/`get_exit_code`/
-  `get_executed_test_count` currently are NOT reliably reachable via
-  `use std.spec.{...}` — see the bug doc below for why.
-- `std.io`: the canonical implementation is the **package**
-  (`src/lib/<family>/io/__init__.spl`, with real submodules like
-  `file_ops.spl`/`env_ops.spl`); the sibling `io.spl` file is a thin facade
-  that re-exports from the package via a fully-qualified import, and
-  deliberately depends on package-first resolution to avoid resolving back
-  to itself.
-
-Multi-segment imports that name a submodule directly (`use
-std.spec.decorators.{skip}`) are unaffected either way — they resolve
-`decorators.spl` inside the `spec/` directory as a plain file, never hitting
-the file/package ambiguity at the leaf name itself. A package `__init__.spl`
-can only bare-`export` names defined by files inside its own directory — it
-cannot re-export names from an external same-named sibling file.
-
-Full root-cause analysis, evidence, and what has/hasn't been fixed:
-`doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md`.
 
 ---
 

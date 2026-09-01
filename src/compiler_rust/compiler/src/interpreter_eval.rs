@@ -33,13 +33,42 @@ use super::{
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
     BLANKET_IMPL_METHODS, CLASS_OVERLOADS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS,
-    FUNCTION_MODULE_OWNER, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
-    FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS,
-    MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
-    SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    FUNCTION_MODULE_OWNER, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
+    MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
+    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY,
 };
 
 type Enums = HashMap<String, Arc<EnumDef>>;
+
+fn should_bind_module_namespace(
+    binding_name: &str,
+    target: &ImportTarget,
+    selected_binding_claims_module_name: bool,
+) -> bool {
+    let path_derived_name = matches!(target, ImportTarget::Glob | ImportTarget::Group(_));
+    if binding_name == "main" && path_derived_name {
+        return false;
+    }
+
+    !selected_binding_claims_module_name
+}
+
+fn bind_module_namespace_after_import(
+    env: &mut Env,
+    binding_name: &str,
+    target: &ImportTarget,
+    module_value: &Value,
+    selected_binding_claims_module_name: bool,
+) -> bool {
+    if !should_bind_module_namespace(binding_name, target, selected_binding_claims_module_name) {
+        return false;
+    }
+
+    env.insert(binding_name.to_string(), module_value.clone());
+    true
+}
 
 fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value) {
     MODULE_GLOBALS.with(|cell| {
@@ -145,7 +174,7 @@ fn method_with_impl_driver_attrs(method: &FunctionDef, impl_attrs: &[Attribute])
 
 /// Call a value (function or lambda) with evaluated arguments.
 /// Used for decorator application where we have Value arguments, not AST Arguments.
-pub(super) fn call_value_with_args(
+pub(crate) fn call_value_with_args(
     callee: &Value,
     args: Vec<Value>,
     _env: &Env,
@@ -317,6 +346,13 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rt_cuda_event_synchronize",
     "rt_cuda_event_elapsed_ns",
     "rt_cuda_event_destroy",
+    "rt_cuda_event_elapsed_ms",
+    "rt_cuda_stream_create",
+    "rt_cuda_stream_destroy",
+    "rt_cuda_stream_synchronize",
+    "rt_cuda_memcpy_htod_async",
+    "rt_cuda_memcpy_dtoh_async",
+    "rt_cuda_launch_kernel_ex",
     "rt_vulkan_timestamp_supported",
     "rt_vulkan_timestamp_period_fnum",
     "rt_vulkan_query_elapsed_ns",
@@ -415,12 +451,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     // Clear unit family info from previous runs
     UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
     UNIT_FAMILY_CONVERSIONS.with(|cell| cell.borrow_mut().clear());
-    crate::interpreter::USER_UNIT_SUFFIXES.with(|cell| cell.borrow_mut().clear());
-    crate::interpreter::USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     UNIT_FAMILY_ARITHMETIC.with(|cell| cell.borrow_mut().clear());
     COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
+    USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     // Clear module-level globals from previous runs
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
     crate::interpreter::reset_owned_globals_from_initial();
@@ -453,7 +489,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     // resolves qualified names through the thread-local
                     // registries, not this module-local map.
                     super::interpreter_state::GLOBAL_ENUMS.with(|cell| {
-                        cell.borrow_mut().entry(def.name.clone()).or_insert_with(|| Arc::clone(&def));
+                        cell.borrow_mut()
+                            .entry(def.name.clone())
+                            .or_insert_with(|| Arc::clone(&def));
                     });
                     enums.entry(def.name.clone()).or_insert(def);
                 }
@@ -683,141 +721,37 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 if crate::pipeline::cfg_strip::fn_inactive_cfg_arch_for_host(&f.attributes) {
                     continue;
                 }
-                // If function has decorators, apply them
-                if !f.decorators.is_empty() {
-                    // Create a function value from the original function
-                    // For top-level functions, captured_env is empty (they don't capture anything)
-                    let func_value = Value::Function {
-                        name: f.name.clone(),
-                        def: Arc::new(f.clone()),
-                        captured_env: Arc::new(Env::new()),
-                    };
-
-                    // Apply decorators in reverse order (bottom-to-top, outermost last)
-                    let mut decorated = func_value;
-                    for decorator in f.decorators.iter().rev() {
-                        // Skip compiler-directive decorators that aren't evaluated at runtime
-                        // @extern is a codegen directive, not a runtime decorator
-                        // @deprecated is handled at compile time via HIR lowering
-                        // @hardware/@clocked/@generic/@flatten_struct_output are VHDL
-                        // backend directives consumed by parse_vhdl_hardware_attrs; they
-                        // have no runtime binding and must not be looked up in env.
-                        // @noalloc is a semantic marker consumed by
-                        // src/compiler/35.semantics/noalloc_checker.spl; it likewise has
-                        // no runtime binding. Before 2026-08-08 it was missing from this
-                        // list, so ANY module carrying `@noalloc` (e.g.
-                        // src/lib/nogc_async_mut_noalloc/hash/mod.spl) failed to LOAD
-                        // under the interpreter with "variable `noalloc` not found" --
-                        // reproducible via `bin/simple test`, invisible via `bin/simple
-                        // run` (the JIT path never evaluates decorator expressions). See
-                        // doc/08_tracking/bug/noalloc_decorator_unbound_in_seed_interpreter_2026-08-08.md
-                        if let Expr::Identifier(name) = &decorator.name {
-                            if name == "extern"
-                                || name == "deprecated"
-                                || name == "gpu_kernel"
-                                || name == "gpu_device"
-                                || name == "gpu_shared"
-                                || name == "hardware"
-                                || name == "clocked"
-                                || name == "generic"
-                                || name == "flatten_struct_output"
-                                || name == "noalloc"
-                                // Allocation/mangling/GPU-kernel compiler directives --
-                                // real in-tree usage confirmed (test/01_unit/compiler/parser/alloc_attr_spec.spl,
-                                // src/os/runtime/baremetal/runtime_minimal.spl,
-                                // src/compiler_rust/lib/std/examples/graphics/vulkan/image_blur.spl)
-                                // and none of them are runtime decorator functions.
-                                || name == "alloc"
-                                || name == "no_alloc"
-                                || name == "no_mangle"
-                                || name == "gpu"
-                            {
-                                continue;
-                            }
-                        }
-
-                        // Evaluate the decorator expression. A bare `@X` that is neither
-                        // a recognised compiler-directive decorator (skip-listed above)
-                        // nor a function/value named `X` in scope is almost always a
-                        // typo'd or never-implemented annotation. Before 2026-08-08 this
-                        // fell through to the generic "variable not found" error from
-                        // deep inside expression evaluation, which does not name the
-                        // decorator or explain that decorator resolution is what failed.
-                        // Give it a decorator-specific diagnostic instead -- this is the
-                        // general fix for
-                        // doc/08_tracking/bug/unknown_function_annotation_evaluated_as_runtime_identifier_2026-08-08.md.
-                        // Genuine runtime decorators (e.g. `@double_result` defined by
-                        // the user in the same module, see
-                        // test/03_system/feature/usage/decorators_spec.spl) are
-                        // unaffected: this only fires when the identifier lookup itself
-                        // fails.
-                        let decorator_fn = evaluate_expr(
-                            &decorator.name,
-                            &mut env,
-                            &mut functions,
-                            &mut classes,
-                            &enums,
-                            &impl_methods,
-                        )
-                        .map_err(|e| {
-                            if let Expr::Identifier(name) = &decorator.name {
-                                CompileError::semantic_with_context(
-                                    format!(
-                                        "unknown decorator `@{}` on function `{}`",
-                                        name, f.name
-                                    ),
-                                    ErrorContext::new()
-                                        .with_span(decorator.span)
-                                        .with_code(codes::UNDEFINED_VARIABLE)
-                                        .with_help(format!(
-                                            "`{}` is not a recognised compiler annotation and no function named `{}` is in scope to use as a runtime decorator -- fix the typo, register `{}` as a compiler annotation, or define a `fn {}(f)` runtime decorator",
-                                            name, name, name, name
-                                        )),
-                                )
-                            } else {
-                                e
-                            }
-                        })?;
-
-                        // If decorator has arguments, call it first to get the actual decorator
-                        let actual_decorator = if let Some(args) = &decorator.args {
-                            let mut arg_values = vec![];
-                            for arg in args {
-                                arg_values.push(evaluate_expr(
-                                    &arg.value,
-                                    &mut env,
-                                    &mut functions,
-                                    &mut classes,
-                                    &enums,
-                                    &impl_methods,
-                                )?);
-                            }
-                            call_value_with_args(
-                                &decorator_fn,
-                                arg_values,
-                                &env,
-                                &mut functions,
-                                &mut classes,
-                                &enums,
-                                &impl_methods,
-                            )?
-                        } else {
-                            decorator_fn
-                        };
-
-                        // Call the decorator with the current function value
-                        decorated = call_value_with_args(
-                            &actual_decorator,
-                            vec![decorated],
-                            &env,
-                            &mut functions,
-                            &mut classes,
-                            &enums,
-                            &impl_methods,
-                        )?;
-                    }
-
-                    // Store the decorated result in the env
+                // If function has decorators, apply them. Directive/metadata
+                // decorators are skipped by the shared helper; a genuine
+                // user-defined decorator rebinds the name to `dec(original)`.
+                // For top-level functions, captured_env is empty (they don't capture anything)
+                let plain = Value::Function {
+                    name: f.name.clone(),
+                    def: Arc::new(f.clone()),
+                    captured_env: Arc::new(Env::new()),
+                };
+                if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                    f,
+                    plain,
+                    true,
+                    &mut env,
+                    &mut functions,
+                    &mut classes,
+                    &enums,
+                    &impl_methods,
+                )? {
+                    // NOTE: the entry in `functions` is deliberately left in place.
+                    // `evaluate_call` checks `functions` (Priority 5) before `env`
+                    // (Priority 6), so a MODULE-level decorator is still bypassed by
+                    // a call from inside another function -- but removing the entry
+                    // here breaks resolution outright ("function `add_one` not
+                    // found"), because a callee body does not see this top-level
+                    // `env`. Fixing the module-level case needs a real binding for
+                    // the wrapper in the function namespace and is tracked
+                    // separately; the block-level paths (nested `fn`, which is what
+                    // `test/feature/usage/decorators_spec.spl` exercises) are fixed
+                    // in `interpreter_call/block_execution.rs` and
+                    // `interpreter/node_exec.rs`.
                     env.insert(f.name.clone(), decorated);
                 }
             }
@@ -1152,9 +1086,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             let trait_def = match matched_trait {
                                 Some(def) => def,
                                 None => {
-                                    return Err(CompileError::Semantic(
-                                        best_problems.unwrap_or_default().join("; "),
-                                    ));
+                                    return Err(CompileError::Semantic(best_problems.unwrap_or_default().join("; ")));
                                 }
                             };
 
@@ -1289,6 +1221,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Unit types define a newtype wrapper with a literal suffix
                 // Register the unit type name and its suffix for later use
                 units.insert(u.suffix.clone(), u.clone());
+                UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                });
+                USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                });
                 env.insert(u.name.clone(), Value::Nil);
             }
             Node::UnitFamily(uf) => {
@@ -1312,8 +1250,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     UNIT_SUFFIX_TO_FAMILY.with(|cell| {
                         cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                     });
-                    crate::interpreter::USER_UNIT_SUFFIXES.with(|cell| {
-                        cell.borrow_mut().insert(variant.suffix.clone());
+                    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                        cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                     });
                 }
                 // Store the family with all conversion factors
@@ -1366,8 +1304,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         SI_BASE_UNITS.with(|cell| {
                             cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                         });
-                        crate::interpreter::USER_SI_BASE_UNITS.with(|cell| {
-                            cell.borrow_mut().insert(variant.suffix.clone());
+                        USER_SI_BASE_UNITS.with(|cell| {
+                            cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                         });
                         break; // Only one base unit per family
                     }
@@ -1654,6 +1592,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     &mut enums,
                 ) {
                     Ok(value) => {
+                        let mut selected_binding_claims_module_name = false;
                         // Unpack module exports into current namespace
                         // For Group imports, only import specified items
                         // For Glob imports, import everything
@@ -1676,6 +1615,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                                     MODULE_GLOBALS.with(|cell| {
                                                         cell.borrow_mut().insert(alias.clone(), export_value.clone());
                                                     });
+                                                    selected_binding_claims_module_name |= alias == &binding_name;
                                                 }
                                                 continue;
                                             }
@@ -1689,6 +1629,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                             MODULE_GLOBALS.with(|cell| {
                                                 cell.borrow_mut().insert(item_name.clone(), export_value.clone());
                                             });
+                                            selected_binding_claims_module_name |= item_name == binding_name;
                                         }
                                     }
                                 }
@@ -1730,8 +1671,10 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 // Single/Aliased: bind module dict only, do NOT unpack
                             }
                         }
-                        // Also keep the module dict under its name for qualified access.
-                        // Skip this for Glob/Group imports whose `binding_name` is only
+                        // Also keep the module dict under its name for qualified access,
+                        // unless a Group import explicitly selected that same local name.
+                        // The explicit symbol wins; callers that need both can alias the
+                        // module namespace. Also skip Glob/Group imports whose `binding_name` is only
                         // "main" because the imported module's *file* happens to be named
                         // `main.spl` (binding_name is derived from the last path segment
                         // for those two targets, not chosen by the importer) -- binding a
@@ -1741,13 +1684,13 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // though the entry file never declared its own main (e.g. any spec
                         // doing `use compiler.tools.lint.main.{Linter, ...}`). A Single or
                         // Aliased import is explicit user intent and is left untouched.
-                        let is_path_derived_main = binding_name == "main"
-                            && matches!(
-                                &use_stmt.target,
-                                ImportTarget::Glob | ImportTarget::Group(_)
-                            );
-                        if !is_path_derived_main {
-                            env.insert(binding_name.clone(), value.clone());
+                        if bind_module_namespace_after_import(
+                            &mut env,
+                            &binding_name,
+                            &use_stmt.target,
+                            &value,
+                            selected_binding_claims_module_name,
+                        ) {
                             // Sync module binding to MODULE_GLOBALS so functions can access it
                             MODULE_GLOBALS.with(|cell| {
                                 cell.borrow_mut().insert(binding_name.clone(), value);
@@ -1908,6 +1851,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 }
                 // External module declarations (no body) are handled by the module resolver
             }
+            // `on pc{...} use advice <kind> priority N` — register the advice
+            // so the call path can run it. Previously listed in the no-op arm
+            // below, which is why no advice ever executed.
+            Node::AopAdvice(advice) => {
+                super::interpreter_call::aop_runtime::register_advice(advice, &functions)?;
+            }
             Node::MultiUse(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
@@ -1915,7 +1864,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::AutoImportStmt(_)
             | Node::RequiresCapabilities(_)
             | Node::HandlePool(_)
-            | Node::AopAdvice(_)
             | Node::DiBinding(_)
             | Node::InjectGraph(_)
             | Node::SecurityPolicy(_)

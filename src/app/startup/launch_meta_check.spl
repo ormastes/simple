@@ -5,7 +5,6 @@ use app.startup.launch_metadata.{
     LaunchMetadata,
     launch_metadata_for_path,
     launch_metadata_for_simpleos_path,
-    launch_metadata_for_simpleos_baremetal_path,
     launch_metadata_sidecar_path,
     has_native_launch_metadata_trailer,
     parse_launch_metadata_from_native_bytes,
@@ -53,7 +52,7 @@ fn _dependency_is_concrete_path(dep: text) -> bool:
 fn _check_host_dependency_files(deps: [text], kind: text) -> i64:
     var missing = 0
     for dep in deps:
-        if _dependency_is_concrete_path(dep) and not file_exists(dep):
+        if _dependency_is_concrete_path(dep) and not rt_file_exists(dep):
             print "launch-meta: missing {kind} dependency: {dep}"
             missing = missing + 1
     missing
@@ -83,7 +82,11 @@ fn _verify_content_hash(path: text, expect_hash_hex: text) -> i64:
     bytes off disk, and run `manifest_verify_content_hash` for real — not a
     presence check, an actual SHA-256 comparison against real bytes. Fail
     closed on a read failure, a missing declared hash, or a digest mismatch."""
-    val bytes = rt_file_read_bytes(path) ?? []
+    val bytes = match file_read_bytes_result(path):
+        case Ok(content): content
+        case Err(error):
+            print "launch-meta: content-hash verify: {error}"
+            return 2
     if bytes.len() == 0u64:
         print "launch-meta: content-hash verify: could not read {path}"
         return 2
@@ -106,20 +109,24 @@ fn _check_path(path: text, target: text, metadata_path: text, expect_hash_hex: t
         return 2
     val simpleos_target = target == "simpleos-host" or target == "simpleos-baremetal"
     val simpleos_baremetal = target == "simpleos-baremetal"
-    if not simpleos_baremetal and not file_exists(path):
+    if not simpleos_baremetal and not rt_file_exists(path):
         print "launch-meta: path not found: {path}"
         return 2
-    if metadata_path != "" and not file_exists(metadata_path):
+    if metadata_path != "" and not rt_file_exists(metadata_path):
         print "launch-meta: metadata path not found: {metadata_path}"
         return 2
-    if simpleos_baremetal and not _is_simpleos_virtual_path(path):
+    if simpleos_target and not _is_simpleos_virtual_path(path):
         print "launch-meta: SimpleOS paths must be under /sys/apps or /sys/lib: {path}"
         return 2
     if expect_hash_hex != "" and not simpleos_baremetal:
         val hash_rc = _verify_content_hash(path, expect_hash_hex)
         if hash_rc != 0:
             return hash_rc
-    val metadata = _metadata_for_check(path, target, metadata_path)
+    val metadata = match _metadata_for_check(path, target, metadata_path):
+        case Ok(value): value
+        case Err(error):
+            print "launch-meta: metadata read failed: {error}"
+            return 2
     if simpleos_target and metadata.target_os != "simpleos":
         print "launch-meta: metadata target_os must be simpleos for --simpleos"
         return 2
@@ -128,7 +135,7 @@ fn _check_path(path: text, target: text, metadata_path: text, expect_hash_hex: t
         val missing_smf = _check_host_dependency_files(metadata.required_smf_dynlibs, "SMF dynlib")
         if missing_native + missing_smf > 0:
             return 2
-    val plan = startup_plan_from_metadata(path, [], metadata, not simpleos_baremetal, simpleos_baremetal)
+    val plan = startup_plan_from_metadata(path, [], metadata, not simpleos_target, simpleos_target)
     print "launch-meta: ok {path}"
     print startup_feature_summary(plan)
     0
@@ -152,10 +159,8 @@ fn main() -> i64:
     var i = 1
     while i < args.len():
         val arg = args[i]
-        if arg == "--simpleos" or arg == "--simpleos-baremetal":
-            target = "simpleos-baremetal"
-        elif arg == "--simpleos-host":
-            target = "simpleos-host"
+        if arg == "--simpleos":
+            target = "simpleos"
         elif arg == "--metadata":
             if i + 1 >= args.len():
                 print "launch-meta: --metadata requires a path"

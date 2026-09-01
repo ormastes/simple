@@ -1,7 +1,6 @@
 # Duplicate-check incremental cache is disconnected — 2026-07-23
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** SOURCE FIXED / FRESH STAGE-4 QUALIFICATION PENDING
 
 ## Reproduction
 

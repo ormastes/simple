@@ -76,9 +76,7 @@ fn infers_labeled_tuple_literal_and_field() {
 
 #[test]
 fn allows_process_like_anonymous_function_return() {
-    let items = parse_items(
-        "fn process_like() -> (text, text, i64):\n    return (\"out\", \"err\", 0)\nmain = 0",
-    );
+    let items = parse_items("fn process_like() -> (text, text, i64):\n    return (\"out\", \"err\", 0)\nmain = 0");
     check(&items).expect("tuple position disambiguates repeated field types");
 }
 

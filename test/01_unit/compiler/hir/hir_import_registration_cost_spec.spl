@@ -18,31 +18,7 @@
 # pre-fix code (the counter did not exist and the sweep really did repeat), and
 # a faster box cannot satisfy it.
 
-
-# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
-"""
-## Purpose and audience
-
-Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
-
-## Operator workflow
-
-1. Run `bin/simple test test/01_unit/compiler/hir/hir_import_registration_cost_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the behavior under test.
-
-## Compatibility and limitations
-
-Covers the behavior asserted here; platform-specific behavior is out of scope.
-"""
-
-# doc-path: doc/01_research/local/hir_import_registration_cost_spec.md
-# doc-path: doc/03_plan/sys_test/hir_import_registration_cost_spec.md
-# doc-path: doc/04_architecture/hir_import_registration_cost_spec.md
-# doc-path: doc/05_design/hir_import_registration_cost_spec_oracles.md
-# @manual: primary
-
 use std.io.{file_read}
-use std.spec.step
 use std.spec.{describe, it, expect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
@@ -53,6 +29,27 @@ use compiler.hir.hir_lowering.module_surface.{
     ModuleSurface,
     ModuleSurfacesByName
 }
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering._Items.module_callable_types.*
+
+fn declaring_registry() -> ModuleSurfacesByName:
+    """DEPTAIL fixture: a surface that really DECLARES `Widget`, plus an owner
+    that reaches it through an explicit named import. The `ModuleSurface.empty`
+    registry above declares nothing, so every dependency there MISSES -- and a
+    miss is deliberately never memoized by the tail memo."""
+    var modules: {text: ParserModule} = {}
+    var sources: [SourceFile] = []
+    val other_body = "pub struct Widget:\n    a: i64\n"
+    val decl_body = "use pkg.other.{{Widget}}\n\npub fn g(w: Widget) -> i64:\n    1\n"
+    modules["pkg.other"] = parse_and_build_module(other_body, "pkg/other.spl")
+    sources = sources.push(SourceFile(path: "pkg/other.spl", content: other_body, module_name: "pkg.other"))
+    modules["pkg.decl"] = parse_and_build_module(decl_body, "pkg/decl.spl")
+    sources = sources.push(SourceFile(path: "pkg/decl.spl", content: decl_body, module_name: "pkg.decl"))
+    module_surfaces_from_modules(modules, sources).unwrap()
+
 
 fn import_registry() -> ModuleSurfacesByName:
     """One declaring surface plus three importers, the shape that made the
@@ -70,8 +67,6 @@ fn import_registry() -> ModuleSurfacesByName:
 
 describe("HIR import registration resolution facts", fn():
     it("resolves a qualified type name once per (surface, name), not once per importer", fn():
-        # @req: REQ-SSPEC-LOCAL-001
-        step("Verify: resolves a qualified type name once per (surface, name), not once per importer")
         val registry = import_registry()
         var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
         val span = Span.empty()
@@ -94,7 +89,6 @@ describe("HIR import registration resolution facts", fn():
     )
 
     it("does not repeat a MISS -- the negative result is cached too", fn():
-        step("Verify: does not repeat a MISS -- the negative result is cached too")
         val registry = import_registry()
         var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
         val span = Span.empty()
@@ -110,7 +104,6 @@ describe("HIR import registration resolution facts", fn():
     )
 
     it("still resolves a different dependency name, and a different surface", fn():
-        step("Verify: still resolves a different dependency name, and a different surface")
         val registry = import_registry()
         var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
         val span = Span.empty()
@@ -124,7 +117,6 @@ describe("HIR import registration resolution facts", fn():
     )
 
     it("caches only SymbolId-free facts", fn():
-        step("Verify: caches only SymbolId-free facts")
         # The whole safety argument: the cached value is a registry INDEX plus
         # an item NAME, both stable for the frozen phase. SymbolIds are
         # allocated per module and restart at 0 on `symbols.reset_module()`, so
@@ -144,7 +136,6 @@ describe("HIR import registration resolution facts", fn():
     )
 
     it("leaves the lowered result unchanged: no symbol is defined for an unresolvable name", fn():
-        step("Verify: leaves the lowered result unchanged: no symbol is defined for an unresolvable name")
         # Correctness half. The cache changes only how the answer is FOUND;
         # every importer still runs its own registration against its own table.
         # With no explicit import to follow, no importer gains a symbol and no
@@ -163,7 +154,6 @@ describe("HIR import registration resolution facts", fn():
     )
 
     it("keeps SymbolTable.define free of a second owner of the scope dict", fn():
-        step("Verify: keeps SymbolTable.define free of a second owner of the scope dict")
         # ALIAS1 (2026-08-21). Measured with a 15-line probe: 8000 successive
         # `define` calls cost 1818 ms for the first 1000 and 8335 ms for the
         # eighth, i.e. per-call cost linear in the table already built -- the
@@ -202,7 +192,6 @@ describe("HIR import registration resolution facts", fn():
     )
 
     it("registers one (surface, name, local, enum) tuple once per importer", fn():
-        step("Verify: registers one (surface, name, local, enum) tuple once per importer")
         # RISDONE (2026-08-21). `register_imported_symbol` is idempotent within
         # one importer -- every branch re-checks `already_bound` before it
         # writes -- but a repeat still re-ran six surface name scans and
@@ -228,7 +217,6 @@ describe("HIR import registration resolution facts", fn():
     )
 
     it("never carries a completed registration across importers", fn():
-        step("Verify: never carries a completed registration across importers")
         # The safety argument. Unlike `explicit_dep_target_memo` (a pure
         # function of the frozen registry) this memo records work done against
         # ONE importer's symbol table, which `begin_module` wipes. Carrying it
@@ -241,5 +229,84 @@ describe("HIR import registration resolution facts", fn():
         expect(lowering.registered_import_memo.len()).to_equal(0)
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "Widget", span, false)
         expect(lowering.registered_import_skip_count).to_equal(0)
+    )
+)
+
+describe("HIR dependency-tail memo (DEPTAIL)", fn():
+    # The sweep behind `materialize_imported_callable_explicit_dependency` was
+    # already a one-per-phase fact (`explicit_dep_target_memo`). What still ran
+    # on every repeat was the TAIL after the memo hit: a
+    # `register_imported_symbol`, a `lookup_or_invalid` and two
+    # `bind_qualified_type` calls. The real 662-module closure's entry module
+    # issued 2,670 explicit-dependency calls against only 280 real sweeps, so
+    # ~2,390 of them re-ran a tail that had already written exactly these
+    # bindings -- 14,065 ms of 38,500 ms of imports, the single largest
+    # EXCLUSIVE slot. These are counters, not wall clocks: they cannot pass on
+    # the pre-fix code, where `dep_tail_skip_count` did not exist.
+
+    it("runs a resolved explicit dependency tail once per importer, not once per call", fn():
+        step("Verify: a repeated explicit dependency tail is skipped")
+        val registry = declaring_registry()
+        val decl_index = registry.index_by_name["pkg.decl"]
+        val decl = registry.surfaces[decl_index]
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(0)
+        # The binding the first tail published is what the repeats would redo.
+        expect(lowering.symbols.lookup_or_invalid("pkg.other::Widget").is_valid()).to_equal(true)
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(2)
+        # A different materialize_enum flag is a DIFFERENT tail and must run.
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, true)
+        expect(lowering.dep_tail_skip_count).to_equal(2)
+    )
+
+    it("never carries a completed dependency tail across importers", fn():
+        step("Verify: begin_module drops the dependency-tail memo")
+        # The safety argument, identical to RISDONE's: the tail calls
+        # `bind_qualified_type` into ONE importer's symbol table, which
+        # `begin_module` wipes. Carrying it over would leave the next importer
+        # with no qualified binding at all.
+        val registry = declaring_registry()
+        val decl_index = registry.index_by_name["pkg.decl"]
+        val decl = registry.surfaces[decl_index]
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        lowering.begin_module("pkg/imp2.spl")
+        expect(lowering.dep_tail_memo.len()).to_equal(0)
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(0)
+        # ... and importer 2 really does get its own binding.
+        expect(lowering.symbols.lookup_or_invalid("pkg.other::Widget").is_valid()).to_equal(true)
+    )
+
+    it("never memoizes an UNRESOLVED tail -- it stays retryable", fn():
+        step("Verify: an unresolved dependency is not recorded")
+        # A tail that binds nothing must stay retryable within the importer:
+        # a later registration can still make the lookup succeed. Only a tail
+        # that ran to completion AND found a valid symbol is recorded, so the
+        # `-2` ambiguity and `< 0` unresolved diagnostics keep their exact
+        # per-call multiplicity.
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(0)
+        expect(lowering.dep_tail_memo.len()).to_equal(0)
     )
 )

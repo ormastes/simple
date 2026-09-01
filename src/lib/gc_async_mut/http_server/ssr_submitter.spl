@@ -1,0 +1,85 @@
+"""Hosted SSR adapter for the canonical HTTP registry and web renderer."""
+
+use std.http_server.handler.{HandlerRegistry}
+use std.http_server.types.{HttpRequestData, HttpResponseData, LocationConfig}
+use std.gc_async_mut.gpu.browser_engine.simple_web_ssr_renderer.{
+    simple_web_ssr_render_html_to_pixels
+}
+use std.common.image.png_encode.{encode_argb_to_png}
+use std.concurrent.mutex.{mutex_new, mutex_with_lock_keeping, Mutex}
+
+class SsrAsyncConfig:
+    width: i32
+    height: i32
+    max_html_bytes: i64
+    engine2d_backend: text
+
+    static fn production(width: i32, height: i32, max_html_bytes: i64,
+                         engine2d_backend: text = "auto") -> SsrAsyncConfig:
+        SsrAsyncConfig(
+            width: width,
+            height: height,
+            max_html_bytes: max_html_bytes,
+            engine2d_backend: engine2d_backend
+        )
+
+var SSR_CONFIG = SsrAsyncConfig.production(1280, 720, 1048576, "auto")
+var SSR_RENDER_GATE: Mutex = mutex_new(0)
+
+fn _ssr_response(status: i64, reason: text, content_type: text,
+                 body: text, body_bytes: [u8] = []) -> HttpResponseData:
+    HttpResponseData(
+        status: status,
+        reason: reason,
+        headers: [("Content-Type", content_type), ("Server", "SimpleServer")],
+        body: body,
+        body_bytes: body_bytes,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _render_ssr_request_unlocked(request: HttpRequestData,
+                                config: SsrAsyncConfig) -> HttpResponseData:
+    if request.method != "POST":
+        return _ssr_response(405, "Method Not Allowed", "text/plain", "SSR requires POST")
+    if request.body.len() == 0:
+        return _ssr_response(400, "Bad Request", "text/plain", "SSR HTML body is empty")
+    if config.max_html_bytes <= 0 or request.body.len() > config.max_html_bytes:
+        return _ssr_response(413, "Payload Too Large", "text/plain", "SSR HTML body exceeds configured limit")
+    if config.width <= 0 or config.height <= 0:
+        return _ssr_response(500, "Internal Server Error", "text/plain", "SSR viewport is invalid")
+
+    val pixels = simple_web_ssr_render_html_to_pixels(
+        request.body, config.width, config.height, config.engine2d_backend
+    )
+    val expected_pixels = config.width.to_i64() * config.height.to_i64()
+    if pixels.len() != expected_pixels:
+        return _ssr_response(500, "Internal Server Error", "text/plain", "SSR Engine2D render failed")
+    val png = encode_argb_to_png(pixels, config.width, config.height)
+    if png.len() == 0:
+        return _ssr_response(500, "Internal Server Error", "text/plain", "SSR PNG encoding failed")
+    _ssr_response(200, "OK", "image/png", "", png)
+
+fn render_ssr_request(request: HttpRequestData,
+                      config: SsrAsyncConfig) -> HttpResponseData:
+    # Layout, Engine2D, font, and renderer caches are process-global owners.
+    mutex_with_lock_keeping(SSR_RENDER_GATE, 0,
+        \: _render_ssr_request_unlocked(request, config))
+
+fn _registered_ssr_handler(request: HttpRequestData,
+                           _location: LocationConfig) -> HttpResponseData:
+    render_ssr_request(request, SSR_CONFIG)
+
+fn register_ssr_async_handler(mut registry: HandlerRegistry,
+                              name: text,
+                              config: SsrAsyncConfig) -> bool:
+    """Register SSR through the currently supported synchronous registry ABI."""
+    if name == "" or config.width <= 0 or config.height <= 0 or config.max_html_bytes <= 0:
+        return false
+    SSR_CONFIG = config
+    registry.register(name, _registered_ssr_handler)
+    true
+
+export SsrAsyncConfig, render_ssr_request, register_ssr_async_handler

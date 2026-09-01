@@ -1,0 +1,108 @@
+# codex-system-test
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-018
+# @evidence-class executable-contract
+
+use std.spec.*
+use lib.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use compiler.tools.verify.mcdc_exclusion_evidence.*
+use compiler.tools.verify.mcdc_scenario_exclusion.*
+
+fn seed32() -> [u8]: [for i in 0..32: (i + 1) as u8]
+
+fn fnv(value: text) -> u64:
+    var hash: u64 = 14695981039346656037u64
+    for ch in value:
+        hash = hash ^ (ch.ord() as u64)
+        hash = hash * 1099511628211u64
+    hash
+
+fn unsigned_for(kind: i64, public_key: [u8], observed: i64 = 100,
+                local: bool = false, expiry: i64 = 200) -> [u8]:
+    val proof_code = if kind == 2 or kind == 3: 1 else: 7
+    val proof_c = if kind == 1 or kind == 2: 0u64 else: 303u64
+    val proof_count = if kind == 5: 8 elif kind == 2: 3 else: 1
+    encode_mcdc_exclusion_evidence_unsigned_v1(
+        kind, observed, expiry, fnv("irq-board"), fnv("cap-irq-v1"),
+        fnv("board.irq"), fnv("runtime-team"),
+        mcdc_exclusion_evidence_trust_key_id_v1(public_key), 909u64,
+        17u64, 23u64, 3u64, 2, proof_code,
+        101u64, if kind == 3: 202u64 else: 102u64, proof_c,
+        proof_count, local)
+
+fn directive(kind: text, predicate: text, digest: text, observed: i64 = 100) -> text:
+    "# @mcdc-exclude: scenario=irq-board | decision=u64:0000000000000011 | source=u64:0000000000000017 | conditions=u64:0000000000000003 | condition-count=2 | kind=" + kind + " | code=cap-irq-v1 | capability=board.irq | predicate=" + predicate + " | producible=false | reason=external observation proves scenario unavailable | evidence=" + digest + " | observed=" + observed.to_text() + " | owner=runtime-team | reviewed=100 | expires=200"
+
+fn validate_kind(kind: i64, kind_text: text, predicate: text) -> bool:
+    val keypair = pure_ed25519_keypair_from_seed(seed32())
+    val unsigned = unsigned_for(kind, keypair.1)
+    val signature = pure_ed25519_sign(seed32(), keypair.1, unsigned)
+    val receipt = seal_mcdc_exclusion_evidence_v1(unsigned, signature)
+    val digest = mcdc_exclusion_evidence_digest_v1(unsigned)
+    val parsed = parse_mcdc_scenario_exclusion_v1(
+        directive(kind_text, predicate, digest), 150)
+    val binary = encode_mcdc_scenario_exclusion_v1(parsed)
+    bind_mcdc_scenario_exclusions_with_evidence_v1(
+        directive(kind_text, predicate, digest), binary, receipt,
+        keypair.1, 150).exact
+
+fn validate_capability_receipt(row: [u8], key: [u8], digest: text) -> McdcExclusionEvidenceReceiptV1:
+    validate_mcdc_exclusion_evidence_v1(row, key, 1,
+        fnv("irq-board"), fnv("cap-irq-v1"), fnv("board.irq"),
+        fnv("runtime-team"), 17u64, 23u64, 3u64, 2,
+        digest, 100, 150)
+
+describe "REQ-018 authenticated external exclusion evidence":
+    it "accepts each of the five typed external proof shapes":
+        step("Validate capability, fixture, platform, safety, and nondeterminism receipts")
+        expect(validate_kind(1, "capability-unavailable", "capability.unavailable")).to_be(true)
+        expect(validate_kind(2, "fixture-unavailable", "fixture.unavailable")).to_be(true)
+        expect(validate_kind(3, "platform-inapplicable", "platform.inapplicable")).to_be(true)
+        expect(validate_kind(4, "safety-prohibited", "safety.prohibited")).to_be(true)
+        expect(validate_kind(5, "uncontrollable-nondeterminism", "nondeterminism.uncontrollable")).to_be(true)
+
+    it "fails closed for forgery, mismatch, stale evidence, and local production":
+        val keypair = pure_ed25519_keypair_from_seed(seed32())
+        val unsigned = unsigned_for(1, keypair.1)
+        val digest = mcdc_exclusion_evidence_digest_v1(unsigned)
+        val parsed = parse_mcdc_scenario_exclusion_v1(
+            directive("capability-unavailable", "capability.unavailable", digest), 150)
+        val binary = encode_mcdc_scenario_exclusion_v1(parsed)
+        val signature = pure_ed25519_sign(seed32(), keypair.1, unsigned)
+        var forged = seal_mcdc_exclusion_evidence_v1(unsigned, signature)
+        forged[319] = forged[319] ^ 1u8
+        var mismatched = seal_mcdc_exclusion_evidence_v1(unsigned, signature)
+        mismatched[96] = mismatched[96] ^ 1u8
+        val stale_unsigned = unsigned_for(1, keypair.1, 100, false, 149)
+        val stale = seal_mcdc_exclusion_evidence_v1(
+            stale_unsigned, pure_ed25519_sign(seed32(), keypair.1, stale_unsigned))
+        val local_unsigned = unsigned_for(1, keypair.1, 100, true)
+        val local = seal_mcdc_exclusion_evidence_v1(
+            local_unsigned, pure_ed25519_sign(seed32(), keypair.1, local_unsigned))
+        expect(validate_capability_receipt(forged, keypair.1, digest).status).to_equal(
+            McdcExclusionEvidenceStatusV1.InvalidSignature)
+        expect(validate_capability_receipt(mismatched, keypair.1, digest).status).to_equal(
+            McdcExclusionEvidenceStatusV1.Mismatched)
+        expect(validate_capability_receipt(stale, keypair.1, digest).status).to_equal(
+            McdcExclusionEvidenceStatusV1.Stale)
+        expect(validate_capability_receipt(local, keypair.1, digest).status).to_equal(
+            McdcExclusionEvidenceStatusV1.LocallyProducible)
+        expect(bind_mcdc_scenario_exclusions_with_evidence_v1(
+            directive("capability-unavailable", "capability.unavailable", digest),
+            binary, forged, keypair.1, 150).exact).to_be(false)
+        expect(bind_mcdc_scenario_exclusions_with_evidence_v1(
+            directive("capability-unavailable", "capability.unavailable", digest),
+            binary, stale, keypair.1, 150).exact).to_be(false)
+        expect(bind_mcdc_scenario_exclusions_with_evidence_v1(
+            directive("capability-unavailable", "capability.unavailable", digest),
+            binary, local, keypair.1, 150).exact).to_be(false)
+
+    it "rejects missing and cardinality-mismatched external receipts":
+        val keypair = pure_ed25519_keypair_from_seed(seed32())
+        val unsigned = unsigned_for(1, keypair.1)
+        val digest = mcdc_exclusion_evidence_digest_v1(unsigned)
+        val source = directive("capability-unavailable", "capability.unavailable", digest)
+        val binary = encode_mcdc_scenario_exclusion_v1(
+            parse_mcdc_scenario_exclusion_v1(source, 150))
+        expect(bind_mcdc_scenario_exclusions_with_evidence_v1(
+            source, binary, [], keypair.1, 150).exact).to_be(false)

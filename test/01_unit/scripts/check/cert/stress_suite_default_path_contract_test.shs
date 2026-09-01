@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+subject="$repo_root/scripts/check/cert/stress-suite.shs"
+
+check_source() {
+    file=$1
+    if grep -q '/home/ormastes/dev/pub/simple' "$file"; then
+        return 1
+    fi
+    grep -Fxq 'SIMPLE_BIN="${SIMPLE_BIN:-$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple}"' "$file" || return 1
+}
+
+write_fake() {
+    target=$1
+    cat > "$target" <<'FAKE_BIN'
+#!/bin/sh
+printf 'x\n' >> "$0.invoked"
+case "${2##*/}" in
+    good.spl) printf '7\n'; exit 0 ;;
+    bad.spl) exit 1 ;;
+    crash.spl) exit 139 ;;
+    wrong.spl) printf '8\n'; exit 0 ;;
+    *) exit 1 ;;
+esac
+FAKE_BIN
+    chmod 755 "$target"
+}
+
+fixture_root=$(mktemp -d)
+trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+relocated="$fixture_root/repo with owner's space"
+mkdir -p "$relocated/scripts/check/cert" "$relocated/bin/release/x86_64-unknown-linux-gnu"
+cp "$subject" "$relocated/scripts/check/cert/stress-suite.shs"
+default_bin="$relocated/bin/release/x86_64-unknown-linux-gnu/simple"
+write_fake "$default_bin"
+
+output=$(env -u SIMPLE_BIN STRESS_TIMEOUT=2 sh "$relocated/scripts/check/cert/stress-suite.shs" --self-test)
+printf '%s\n' "$output" | grep -Fxq 'SELF-TEST: OK'
+default_count=$(wc -l < "$default_bin.invoked")
+test "$default_count" -eq 5
+
+override="$fixture_root/override simple"
+write_fake "$override"
+override_output=$(SIMPLE_BIN="$override" STRESS_TIMEOUT=2 sh "$relocated/scripts/check/cert/stress-suite.shs" --self-test)
+printf '%s\n' "$override_output" | grep -Fxq 'SELF-TEST: OK'
+override_count=$(wc -l < "$override.invoked")
+test "$override_count" -eq 5
+
+check_source "$subject"
+legacy_mutant="$relocated/scripts/check/cert/legacy.shs"
+sed 's|$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple|/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple|' "$subject" > "$legacy_mutant"
+if check_source "$legacy_mutant"; then
+    echo 'error: accepted legacy-root mutant' >&2
+    exit 1
+fi
+before=$(wc -l < "$default_bin.invoked")
+wrong_default="$fixture_root/wrong-default"
+write_fake "$wrong_default"
+wrong_mutant="$relocated/scripts/check/cert/wrong-default.shs"
+sed "s|\$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple|$wrong_default|" "$subject" > "$wrong_mutant"
+wrong_output=$(env -u SIMPLE_BIN STRESS_TIMEOUT=2 sh "$wrong_mutant" --self-test)
+printf '%s\n' "$wrong_output" | grep -Fxq 'SELF-TEST: OK'
+wrong_count=$(wc -l < "$wrong_default.invoked")
+test "$wrong_count" -eq 5
+after=$(wc -l < "$default_bin.invoked")
+test "$after" -eq "$before"
+
+echo 'stress suite default-path contract: PASS'

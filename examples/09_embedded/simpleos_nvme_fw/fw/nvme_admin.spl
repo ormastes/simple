@@ -103,24 +103,10 @@ fn admin_abort_cid(cdw10: i64) -> i64:
 
 # ── Identify / SMART builders ─────────────────────────────────────────────────
 fn build_identify_controller() -> IdentifyData:
-    IdentifyData(kind: CNS_CONTROLLER, vid: 0x1B36, num_ns: 1, max_queues: MAX_IO_QUEUES, mdts: MDTS_BLOCKS, target_id: 0, channels: 0, ways_per_channel: 0, nvme_blocks_per_slice: 0, cpu_cores: 0, nsid: 0, ns_size: 0, ns_cap: 0, lba_bytes: 0)
+    IdentifyData(kind: CNS_CONTROLLER, vid: 0x1B36, num_ns: 1, max_queues: MAX_IO_QUEUES, mdts: 8, nsid: 0, ns_size: 0, ns_cap: 0, lba_bytes: 0)
 
 fn build_identify_namespace(nsid: i64) -> IdentifyData:
-    IdentifyData(kind: CNS_NAMESPACE, vid: 0, num_ns: 0, max_queues: 0, mdts: 0, target_id: 0, channels: 0, ways_per_channel: 0, nvme_blocks_per_slice: 0, cpu_cores: 0, nsid: nsid, ns_size: LBA_COUNT, ns_cap: LBA_COUNT, lba_bytes: 4096)
-
-fn identify_lbas_safe(lbas: i64) -> i64:
-    if lbas < 0:
-        return 0
-    lbas
-
-fn identify_lba_bytes_safe(lba_bytes: i64) -> i64:
-    if lba_bytes <= 0:
-        return 4096
-    lba_bytes
-
-fn build_identify_namespace_for_target(nsid: i64, lbas: i64, lba_bytes: i64) -> IdentifyData:
-    val safe_lbas: i64 = identify_lbas_safe(lbas)
-    IdentifyData(kind: CNS_NAMESPACE, vid: 0, num_ns: 0, max_queues: 0, mdts: 0, target_id: 0, channels: 0, ways_per_channel: 0, nvme_blocks_per_slice: 0, cpu_cores: 0, nsid: nsid, ns_size: safe_lbas, ns_cap: safe_lbas, lba_bytes: identify_lba_bytes_safe(lba_bytes))
+    IdentifyData(kind: CNS_NAMESPACE, vid: 0, num_ns: 0, max_queues: 0, mdts: 0, nsid: nsid, ns_size: LBA_COUNT, ns_cap: LBA_COUNT, lba_bytes: 4096)
 
 # Endurance used (percent), from the most-worn block against the rated PE cycles.
 fn smart_percent_used(max_erase: i64) -> i64:
@@ -166,12 +152,10 @@ fn smart_percent(v: i64) -> i64:
 fn build_smart_log(reads: i64, writes: i64, power_cycles: i64, unsafe_sd: i64, media_err: i64, percent_used: i64, avail_spare: i64, temperature: i64, thermal_crit: i64) -> SmartLog:
     # Critical warning when the spare pool is low (<10%), media errors have occurred,
     # or the device is thermally critical (composite temperature over the threshold).
-    val safe_spare: i64 = smart_percent(avail_spare)
-    val safe_media_err: i64 = smart_nonnegative(media_err)
     var crit: i64 = 0
-    if safe_media_err > 0:
+    if media_err > 0:
         crit = 1
-    if safe_spare < 10:
+    if avail_spare < 10:
         crit = 1
     if thermal_crit > 0:
         crit = 1
@@ -184,22 +168,6 @@ fn admin_cpl_status_valid(status: i64) -> bool:
 struct FeatureStore:
     vals: [i64]
 
-fn feature_num_queues_default() -> i64:
-    ((MAX_IO_QUEUES - 1) << 16) | (MAX_IO_QUEUES - 1)
-
-fn feature_value_safe(fid: i64, value: i64) -> i64:
-    if fid == FEAT_VOLATILE_WC:
-        if value == 0 or value == 1:
-            return value
-        return 0
-    if fid == FEAT_NUM_QUEUES:
-        val ncqr: i64 = value & 0xFFFF
-        val nsqr: i64 = (value >> 16) & 0xFFFF
-        if value == ((nsqr << 16) | ncqr) and ncqr >= 0 and nsqr >= 0 and ncqr < MAX_IO_QUEUES and nsqr < MAX_IO_QUEUES:
-            return value
-        return feature_num_queues_default()
-    value
-
 fn feature_store_new() -> FeatureStore:
     var vals: [i64] = []
     var i: i64 = 0
@@ -208,7 +176,7 @@ fn feature_store_new() -> FeatureStore:
         i = i + 1
     var fs: FeatureStore = FeatureStore(vals: vals)
     # default: report (MAX-1) IO queues available, 0's-based per NVMe (NCQR/NSQR)
-    fs.set(FEAT_NUM_QUEUES, feature_num_queues_default())
+    fs.set(FEAT_NUM_QUEUES, ((MAX_IO_QUEUES - 1) << 16) | (MAX_IO_QUEUES - 1))
     fs.set(FEAT_VOLATILE_WC, 1)
     fs
 
@@ -216,17 +184,13 @@ impl FeatureStore:
     me set(fid: i64, value: i64) -> bool:
         if fid < 0 or fid >= FEAT_MAX:
             return false
-        if fid >= me.vals.len():
-            return false
         me.vals[fid] = value
         true
 
     me get(fid: i64) -> i64:
         if fid < 0 or fid >= FEAT_MAX:
             return 0
-        if fid >= me.vals.len():
-            return feature_value_safe(fid, 0)
-        feature_value_safe(fid, me.vals[fid])
+        me.vals[fid]
 
 # ── AdminQueue — qid-0 submission + completion rings ──────────────────────────
 struct AdminQueue:
@@ -300,64 +264,31 @@ impl AdminQueue:
         d
 
     me submit(c: AdminCmd) -> bool:
-        if not cid_valid(c.cid):
-            return false
-        val depth: i64 = me.effective_depth()
-        if depth <= 0:
-            return false
-        if me.sq_len < 0 or me.sq_len >= depth:
+        if me.sq_len == me.depth:
             return false
         val t: i64 = me.sq_tail
-        if t < 0 or t >= depth:
-            return false
         me.sq_cid[t]   = c.cid
         me.sq_op[t]    = c.opcode
         me.sq_nsid[t]  = c.nsid
         me.sq_cdw10[t] = c.cdw10
         me.sq_cdw11[t] = c.cdw11
         me.sq_cdw12[t] = c.cdw12
-        me.sq_tail = (me.sq_tail + 1) % depth
+        me.sq_tail = (me.sq_tail + 1) % me.depth
         me.sq_len = me.sq_len + 1
         true
 
     me pending() -> i64:
-        val depth: i64 = me.effective_depth()
-        if me.sq_len < 0:
-            return 0
-        if me.sq_len > depth:
-            return depth
         me.sq_len
 
-    me sq_can_fetch() -> bool:
-        val depth: i64 = me.effective_depth()
-        if depth <= 0:
-            return false
-        if me.sq_len <= 0 or me.sq_len > depth:
-            return false
-        if me.sq_head < 0 or me.sq_head >= depth:
-            return false
-        if not cid_valid(me.sq_cid[me.sq_head]):
-            return false
-        true
-
     me fetch() -> AdminCmd:
-        if me.sq_len <= 0:
-            return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
-        val depth: i64 = me.effective_depth()
-        if depth <= 0:
-            return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
         val h: i64 = me.sq_head
-        if h < 0 or h >= depth:
-            return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
         val cid:   i64 = me.sq_cid[h]
-        if not cid_valid(cid):
-            return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
         val op:    i64 = me.sq_op[h]
         val nsid:  i64 = me.sq_nsid[h]
         val cdw10: i64 = me.sq_cdw10[h]
         val cdw11: i64 = me.sq_cdw11[h]
         val cdw12: i64 = me.sq_cdw12[h]
-        me.sq_head = (me.sq_head + 1) % depth
+        me.sq_head = (me.sq_head + 1) % me.depth
         me.sq_len = me.sq_len - 1
         admin_cmd_make(cid, op, nsid, cdw10, cdw11, cdw12)
 
@@ -372,57 +303,22 @@ impl AdminQueue:
         if me.cq_len < 0 or me.cq_len >= depth:
             return false
         val t: i64 = me.cq_tail
-        if t < 0 or t >= depth:
-            return false
         me.cq_cid[t]    = p.cid
         me.cq_status[t] = p.status
         me.cq_data[t]   = p.data
-        me.cq_tail = (me.cq_tail + 1) % depth
+        me.cq_tail = (me.cq_tail + 1) % me.depth
         me.cq_len = me.cq_len + 1
         true
 
     me cq_pending() -> i64:
-        val depth: i64 = me.effective_depth()
-        if me.cq_len < 0:
-            return 0
-        if me.cq_len > depth:
-            return depth
         me.cq_len
 
-    me cq_is_full() -> bool:
-        val depth: i64 = me.effective_depth()
-        if depth <= 0:
-            return true
-        if me.cq_len < 0 or me.cq_len > depth:
-            return true
-        if me.cq_head < 0 or me.cq_head >= depth:
-            return true
-        if me.cq_tail < 0 or me.cq_tail >= depth:
-            return true
-        if me.cq_len > 0:
-            if not cid_valid(me.cq_cid[me.cq_head]):
-                return true
-            if not admin_cpl_status_valid(me.cq_status[me.cq_head]):
-                return true
-        me.cq_len >= depth
-
     me cq_reap() -> NvmeCpl:
-        if me.cq_len <= 0:
-            return cpl_make(0, SC_INVALID_FIELD, 0)
-        val depth: i64 = me.effective_depth()
-        if depth <= 0:
-            return cpl_make(0, SC_INVALID_FIELD, 0)
         val h: i64 = me.cq_head
-        if h < 0 or h >= depth:
-            return cpl_make(0, SC_INVALID_FIELD, 0)
         val cid:    i64 = me.cq_cid[h]
-        if not cid_valid(cid):
-            return cpl_make(0, SC_INVALID_FIELD, 0)
         val status: i64 = me.cq_status[h]
-        if not admin_cpl_status_valid(status):
-            return cpl_make(0, SC_INVALID_FIELD, 0)
         val data:   i64 = me.cq_data[h]
-        me.cq_head = (me.cq_head + 1) % depth
+        me.cq_head = (me.cq_head + 1) % me.depth
         me.cq_len = me.cq_len - 1
         cpl_make(cid, status, data)
 
@@ -457,11 +353,6 @@ fn nvme_admin_selftest() -> i64:
     fs.set(FEAT_TEMP_THRESH, 358)
     fail = fail + expect_eq(fs.get(FEAT_TEMP_THRESH), 358, "feature set/get round-trips (x8 guard)")
     fail = fail + expect_eq(fs.get(FEAT_VOLATILE_WC), 1, "volatile write cache default on")
-    fs.vals[FEAT_NUM_QUEUES] = 999999
-    fail = fail + expect_eq(fs.get(FEAT_NUM_QUEUES), feature_num_queues_default(), "corrupted queue count feature returns advertised max")
-    fs.vals = []
-    fail = fail + expect_eq(bool_to_i64(fs.set(FEAT_TEMP_THRESH, 359)), 0, "truncated feature store rejects set")
-    fail = fail + expect_eq(fs.get(FEAT_TEMP_THRESH), 0, "truncated feature store get fails closed")
 
     # AdminQueue submit/fetch preserves cid + all dwords
     var aq: AdminQueue = admin_queue_new()

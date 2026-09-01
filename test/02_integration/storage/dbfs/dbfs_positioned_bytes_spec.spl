@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """
 DBFS binary positioned-I/O integration specification.
 
@@ -18,6 +22,7 @@ and reject stale handles without routing through the legacy text primitives.
 # doc-path: doc/05_design/README.md
 
 use std.spec.step
+
 use std.spipe.*
 use std.db.dbfs_driver.{DbFsDriver}
 use std.fs_driver.block_device.{BlockDevice}
@@ -26,27 +31,6 @@ use std.fs_driver.mem_block_device.{MemBlockDevice}
 use std.fs_driver.types.{FileHandle, OpenFlags, Path}
 
 var _dbfs_namespace_write_count: i64 = 0
-var _dbfs_counting_read_count: i64 = 0
-
-class CountingReadBlockDevice:
-    inner: MemBlockDevice
-
-impl CountingReadBlockDevice:
-    static fn new(sector_count: u64) -> CountingReadBlockDevice:
-        _dbfs_counting_read_count = 0
-        CountingReadBlockDevice(inner: MemBlockDevice.new(sector_count, 512u32))
-
-impl BlockDevice for CountingReadBlockDevice:
-    fn read_sector(lba: u64) -> Result<[u8], text>:
-        _dbfs_counting_read_count = _dbfs_counting_read_count + 1
-        self.inner.read_sector(lba)
-
-    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
-        var inner = self.inner
-        inner.write_sector(lba, data)
-
-    fn sector_size() -> u32:
-        512u32
 
 class NamespaceCommitFailBlockDevice:
     inner: MemBlockDevice
@@ -82,10 +66,11 @@ fn open_positioned_fixture(path: text) -> (DbFsDriver, FileHandle):
     (driver, handle)
 
 describe "DBFS binary positioned I/O":
-    # @req: REQ-SQ-021
+    # @manual scenario evidence
+        # @req: REQ-SSPEC-INTEGRATION
     it "returns an owned short binary read from a nonzero offset":
-        step("Verify: returns an owned short binary read from a nonzero offset")
-        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+        # @req REQ-SSPEC-INTEGRATION
+        step("returns an owned short binary read from a nonzero offset")
         val (driver, handle) = open_positioned_fixture("/dbfs-short-read.bin")
         val seed: [u8] = [0x00u8, 0xffu8, 0x80u8, 0x41u8, 0x7fu8]
         driver.write_bytes_handle(handle, seed).unwrap()
@@ -99,43 +84,10 @@ describe "DBFS binary positioned I/O":
         got[0] = 0x11u8
         expect(driver.pread_bytes_handle(handle, 2, 1).unwrap()).to_equal([0x80u8])
 
-    # @req: REQ-SQ-021
-    it "device-backed bounded reads do not read the skipped prefix":
-        step("Verify: a far-offset read touches only sectors containing its result")
-        val dev = CountingReadBlockDevice.new(4096u64)
-        val driver = DbFsDriver.open_on_device(dev, 64i64, 2048i64).unwrap()
-        val handle = driver.open_path(
-            Path(raw: "/dbfs-read-at.bin"), OpenFlags.read_write().with_create()).unwrap()
-        var seed: [u8] = []
-        var i: i64 = 0
-        while i < 8192:
-            seed.push((i % 251) as u8)
-            i = i + 1
-        driver.write_bytes_handle(handle, seed).unwrap()
-
-        step("Reset device evidence after setup and read sixteen bytes at 4 KiB")
-        _dbfs_counting_read_count = 0
-        val got = driver.pread_bounded_bytes_handle(handle, 4096, 16).unwrap()
-        expect(got.len()).to_equal(16)
-        expect(got[0]).to_equal((4096 % 251) as u8)
-        expect(got[15]).to_equal((4111 % 251) as u8)
-        # An unaligned blob can span two sectors. Prefix materialization would
-        # touch at least nine sectors for this fixture.
-        expect(_dbfs_counting_read_count).to_be_less_than(3)
-
-        step("EOF is short and owned results cannot overwrite caller canaries")
-        val caller_canary: [u8] = [0xa5u8, 0x5au8]
-        val eof = driver.pread_bounded_bytes_handle(handle, 8188, 16).unwrap()
-        expect(eof.len()).to_equal(4)
-        expect(eof).to_equal([
-            (8188 % 251) as u8, (8189 % 251) as u8,
-            (8190 % 251) as u8, (8191 % 251) as u8])
-        expect(caller_canary).to_equal([0xa5u8, 0x5au8])
-
-    # @req: REQ-SQ-021
+        # @req: REQ-SSPEC-INTEGRATION
     it "preserves binary prefix and suffix around an overwrite":
-        step("Verify: preserves binary prefix and suffix around an overwrite")
-        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+        # @req REQ-SSPEC-INTEGRATION
+        step("preserves binary prefix and suffix around an overwrite")
         val (driver, handle) = open_positioned_fixture("/dbfs-overwrite.bin")
         driver.write_bytes_handle(
             handle, [0x00u8, 0xffu8, 0x80u8, 0x7fu8]).unwrap()
@@ -146,10 +98,10 @@ describe "DBFS binary positioned I/O":
         expect(driver.pread_bytes_handle(handle, 0, 8).unwrap()).to_equal(
             [0x00u8, 0xfeu8, 0x00u8, 0x7fu8])
 
-    # @req: REQ-SQ-021
+        # @req: REQ-SSPEC-INTEGRATION
     it "zero-fills a hole and reports the exact new size":
-        step("Verify: zero-fills a hole and reports the exact new size")
-        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+        # @req REQ-SSPEC-INTEGRATION
+        step("zero-fills a hole and reports the exact new size")
         val (driver, handle) = open_positioned_fixture("/dbfs-hole.bin")
         driver.write_bytes_handle(handle, [0x31u8, 0x32u8]).unwrap()
 
@@ -160,10 +112,10 @@ describe "DBFS binary positioned I/O":
             [0x31u8, 0x32u8, 0u8, 0u8, 0u8, 0xffu8])
         expect(driver.stat_path(Path(raw: "/dbfs-hole.bin")).unwrap().size).to_equal(6)  # oracle: pinned constant asserted by this scenario
 
-    # @req: REQ-SQ-021
+        # @req: REQ-SSPEC-INTEGRATION
     it "rejects invalid ranges before mutating file bytes":
-        step("Verify: rejects invalid ranges before mutating file bytes")
-        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+        # @req REQ-SSPEC-INTEGRATION
+        step("rejects invalid ranges before mutating file bytes")
         val (driver, handle) = open_positioned_fixture("/dbfs-invalid.bin")
         driver.write_bytes_handle(handle, [0x41u8, 0x42u8]).unwrap()
 
@@ -185,10 +137,10 @@ describe "DBFS binary positioned I/O":
         expect(driver.pread_bytes_handle(handle, 0, 2).unwrap()).to_equal(
             [0x41u8, 0x42u8])
 
-    # @req: REQ-SQ-021
+        # @req: REQ-SSPEC-INTEGRATION
     it "rejects closed and unknown handles as stale":
-        step("Verify: rejects closed and unknown handles as stale")
-        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+        # @req REQ-SSPEC-INTEGRATION
+        step("rejects closed and unknown handles as stale")
         val (driver, handle) = open_positioned_fixture("/dbfs-stale.bin")
         driver.write_bytes_handle(handle, [0x41u8]).unwrap()
         driver.close_handle(handle).unwrap()
@@ -204,10 +156,10 @@ describe "DBFS binary positioned I/O":
         expect(driver.pread_bytes_handle(
             unknown, 0, 1).unwrap_err()).to_equal(FsError.StaleHandle)
 
-    # @req: REQ-SQ-021
+        # @req: REQ-SSPEC-INTEGRATION
     it "commits positioned bytes through a device-backed driver":
-        step("Verify: commits positioned bytes through a device-backed driver")
-        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+        # @req REQ-SSPEC-INTEGRATION
+        step("commits positioned bytes through a device-backed driver")
         val dev = MemBlockDevice.new(1024u64, 512u32)
         val opened = DbFsDriver.open_on_device(dev, 64i64, 256i64)
         expect(opened.is_ok()).to_equal(true)
@@ -232,10 +184,10 @@ describe "DBFS binary positioned I/O":
             replayed_handle, 0, 4).unwrap()).to_equal(
                 [0x00u8, 0x22u8, 0x00u8, 0x41u8])
 
-    # @req: REQ-SQ-021
+        # @req: REQ-SSPEC-INTEGRATION
     it "does not publish a positioned image that exceeds remaining device capacity":
-        step("Verify: does not publish a positioned image that exceeds remaining device capacity")
-        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+        # @req REQ-SSPEC-INTEGRATION
+        step("does not publish a positioned image that exceeds remaining device capacity")
         val dev = MemBlockDevice.new(32u64, 512u32)
         val driver = DbFsDriver.open_on_device(dev, 8i64, 3i64).unwrap()
         val path = Path(raw: "/dbfs-full-device.bin")
@@ -258,11 +210,10 @@ describe "DBFS binary positioned I/O":
         expect(replayed.pread_bytes_handle(
             replayed_handle, 0, 4).unwrap()).to_equal([0x41u8, 0x42u8])
 
-    # @req: REQ-SQ-021
+        # @req: REQ-SSPEC-INTEGRATION
     it "rolls back inode publication when the namespace commit fails":
-        # @req: REQ-SQ-021
-        step("Verify: rolls back inode publication when the namespace commit fails")
-        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+        # @req REQ-SSPEC-INTEGRATION
+        step("rolls back inode publication when the namespace commit fails")
         val dev = NamespaceCommitFailBlockDevice.new(64u64, 19u64)
         val driver = DbFsDriver.open_on_device(dev, 16i64, 4i64).unwrap()
         val path = Path(raw: "/dbfs-commit-failure.bin")

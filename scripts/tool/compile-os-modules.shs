@@ -1,0 +1,33 @@
+#!/bin/sh
+# compile-os-modules.shs [file...] — compile-check the listed .spl modules
+# (default: the modules recorded failing by enumerate-os-lowering-failures.shs)
+# and report one line per module: OK, or the first hir/mir/codegen error.
+# Much cheaper than a full kernel build for iterating on a fix.
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+SEED="${SEED:-src/compiler_rust/target/release/simple}"
+[ -x "$SEED" ] || { echo "ERROR — nothing was checked: seed missing at $SEED"; exit 2; }
+LIST_FILE=build/os/entstore/failed_modules.txt
+if [ "$#" -gt 0 ]; then
+    FILES="$*"
+elif [ -s "$LIST_FILE" ]; then
+    FILES=$(cut -f1 "$LIST_FILE")
+else
+    echo "ERROR — nothing was checked: no files given and $LIST_FILE is empty"; exit 2
+fi
+OUT=build/os/entstore/module_check.txt
+: > "$OUT"
+export SEED OUT ROOT
+printf '%s\n' $FILES | xargs -P 8 -n 1 sh -c '
+    f="$1"
+    msg=$(SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+          timeout 900 "$SEED" compile "$f" -o /dev/null 2>&1 \
+          | grep -m1 -oE "(hir|mir|codegen): .*" | cut -c1-160)
+    if [ -z "$msg" ]; then printf "OK\t%s\n" "$f" >> "$OUT"; else printf "FAIL\t%s\t%s\n" "$f" "$msg" >> "$OUT"; fi
+    exit 0
+  ' _
+N=$(wc -l < "$OUT")
+K=$(grep -c '^FAIL' "$OUT" || true)
+sort "$OUT"
+echo "--- $N module(s) checked, $K still failing (detail: $OUT)"

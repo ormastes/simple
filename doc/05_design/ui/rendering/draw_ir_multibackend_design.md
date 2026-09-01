@@ -256,59 +256,6 @@ body plus sw's `r<=0` guard**; `draw_line` (thick) is **deferred pending a desig
 canonical winner exists yet — see the matrix row above). This rule is what an implementer should
 apply mechanically when routing each divergent op through `SharedRaster` in the next increment.
 
-### D2 executed (2026-07-06)
-
-Applied the canonical-winner rule above op-by-op. The parity harness
-(`test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`) stayed green
-throughout (21 examples), with assertions flipped only where the fix was pixel-changing.
-
-**Consolidated (behavior-preserving; harness assertion stayed `== 0`):**
-- `draw_rect` (opaque outline) — `SoftwareBackend.draw_rect` now delegates to
-  `emu_draw_rect(self, ...)`, same idiom as the existing `draw_rounded_rect` delegation.
-- `draw_gradient_rect` (opaque) — `SoftwareBackend.draw_gradient_rect` now delegates to
-  `emu_draw_gradient_rect(self, ...)`.
-- `draw_gradient_rect_h`, `draw_rect_blend`, `draw_image_blend` were found already
-  consolidated (sw already delegates to the emu free function) — no action needed.
-- `clear` / `draw_rect_filled` / `draw_image` have no independent emu reimplementation to
-  consolidate against (emu builds ON these core primitives) — no action possible or needed.
-- `draw_line` (thin, thickness<=1) — **left unconsolidated, by design**: emu's per-point body
-  re-enters `core.draw_rect_filled(cx, cy, 1, 1, color)` for every Bresenham step (full
-  clip/mask/dirty-span overhead per pixel), whereas sw's `sw_bresenham` uses the lean
-  single-guard `sw_set_pixel` primitive. Consolidating would multiply per-pixel cost on long
-  lines for zero behavior change, so this stays a documented exception (see comment at
-  `backend_software.spl` `draw_line`).
-
-**Reconciled toward the named canonical (pixel-changing; harness assertion flipped `> 0` → `== 0`):**
-- `draw_rect` (alpha<255 outline) → **EMU**: came for free from the `draw_rect` consolidation
-  above, since `emu_draw_rect` routes all four edges through `core.draw_rect_filled`, which
-  already alpha-blends; sw's old hand-written edges wrote raw color and never blended.
-- `draw_circle` (outline) → **EMU body + SW `r<=0` guard**: changed `SoftwareBackend.draw_circle`'s
-  midpoint decision-variable test from `d <= 0` to `d < 0` (matching emu's textbook tie-break) for
-  the `r > 0` loop only; the `r <= 0` no-op guard is untouched and stays sw-canonical (still
-  diverges from emu's stray-center-pixel stamp — that sub-case was intentionally out of scope,
-  see below).
-- `draw_circle_filled` → **SW**: replaced `emu_draw_circle_filled`'s midpoint-scanline body with
-  sw's per-row exact distance test (`_emu_isqrt(r*r - dy*dy)` half-width per row), Metal-exact;
-  the `r <= 0` stray-center-pixel behavior in emu is untouched (also out of scope, see below).
-- `draw_triangle_filled` (incl. the collinear `d==0` case) → **SW**: replaced
-  `emu_draw_triangle_filled`'s y-sorted scanline algorithm with sw's integer barycentric
-  bounding-box fill (Metal-exact), including sw's `d==0` no-op guard the old scanline algorithm
-  lacked. Both the main-triangle and collinear-degenerate harness assertions flipped together
-  since they share the one fix.
-
-**Skipped, left divergent (unchanged):**
-- `draw_line` (thick) — per guide: design decision pending, no canonical winner yet.
-- `draw_circle` (`r<=0`) and `draw_circle_filled` (`r<=0`) — these two guard-only sub-cases were
-  **not** in this increment's reconciliation list (only the `r>0` bodies were); emu still stamps a
-  stray center pixel there vs sw's no-op. Left as their own tracked divergence for a future pass.
-
-Files touched: `src/lib/gc_async_mut/gpu/engine2d/backend_software.spl`,
-`src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl`,
-`test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`. (`gc_sync_mut`'s
-`backend_software.spl`/`backend_emu.spl` are pure re-export facades onto the `gc_async_mut`
-originals — no mirrored edit needed. `nogc_async_mut`/`nogc_sync_mut` have no copies of these
-files.)
-
 ---
 
 ## 4. Capability + honesty model
@@ -398,8 +345,7 @@ frame (research §6). Keep the single struct (no numbered splits); add kinds/fie
 
 The **executor stays the single dispatch point**; every new kind routes there. Default background
 `clear` should be a scene command, not the hardcoded white (engine2d_executor.spl:31), so headless
-replay is deterministic. **v2 remains the authoring/replay IR here; its dynamic arrays and textual
-style values are not a GPU-write format — the packed, no-reallocation successor is DrawIR v3 (§11).** (This gap, plus the `scene_blur_rect`-dropped-by-executor gap below, is
+replay is deterministic. (This gap, plus the `scene_blur_rect`-dropped-by-executor gap below, is
 tracked in `doc/08_tracking/bug/engine2d_facade_dead_3way_branch_and_drawir_gaps_2026-07-06.md`.)
 
 ---
@@ -443,22 +389,7 @@ stops being a special path:
 - `browser_engine/simple_web_layout_engine2d_fast.spl` and the HTML presenters become ordinary
   `Engine2D` clients.
 
-**This fold-in is the CPU-oracle / compatibility tier, not the end state.** The GPU-WebScene plan makes
-web a device-resident `GpuWebScene` (no per-widget submission, no readback) behind capsule ports — see
-§11.
-
 ---
-
-## 8b. CPU/GPU dual-algorithm mechanism & GPU dictionary (cross-ref)
-
-The per-op fork this design introduces via `BackendCapability.accelerated_ops` (§4) is extended into
-an explicit **two-algorithm-set** mechanism (CPU bulk-idiom variant vs GPU data-parallel kernel,
-selected per-op / per-`SIMPLE_2D_BACKEND` / per-`variants.ui.renderer`) plus a buffer-backed **GPU
-dictionary** primitive (`lut_lookup` MSL fn + upload-only `GpuLut`, no new extern) in
-`doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md` (research
-`doc/01_research/ui/rendering/cpu_gpu_dual_algorithm_research.md`, plan
-`doc/03_plan/ui/rendering/cpu_gpu_dual_algorithm_plan.md`). New accelerated ops (`indexed_fill`,
-`glyph_atlas_blit`) inherit this section's parity oracle and add rows to the §D2 harness.
 
 ## 9. MDSOC+ placement & module layout
 
@@ -530,42 +461,9 @@ CPU↔GPU, MEMORY 06-03), **metal readback** falling back to software silently (
 **JIT-render crash** on some winit/graphics apps (needs `SIMPLE_EXECUTION_MODE=interpret`, MEMORY
 06-06), plus the newly-filed **honesty & coherence debt** (research §9): live WebGPU dishonesty,
 Intel/OpenGL vaporware, the `cpu_simd` bare alias, orphaned fabricated-FFI files, the
-`RenderBackend` naming collision, and the dead facade branch / dual selection paths. **DrawIR v3 packed
-encoding, the capacity manifest / stable paged pools, and the device-resident `GpuWebScene` (§11) are
-designed-not-built — additive over v2, tracked in the GPU-WebScene / MDSOC+ structural-compute plan.**
+`RenderBackend` naming collision, and the dead facade branch / dual selection paths.
 
 ---
-
-## 11. DrawIR v3 packed encoding & GPU-WebScene offload (2026-07-31)
-
-The GPU-WebScene / MDSOC+ structural-compute plan
-([`doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md`](../../../03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md),
-architecture
-[`doc/04_architecture/compiler/mdsoc/mdsoc_plus_tagged_structural_compute_architecture.md`](../../../04_architecture/compiler/mdsoc/mdsoc_plus_tagged_structural_compute_architecture.md))
-layers a device-resident path **on top of** — not instead of — the design above. Invariant preserved:
-DrawIR v3 is a *packed encoding of the one shared display list* (`DrawIrComposition` = DrawIR v2), **not**
-a second display-list format (WebIR stays rejected —
-[`doc/03_plan/platform/structural_compute/webrender_gpu_offload_plan.md`](../../../03_plan/platform/structural_compute/webrender_gpu_offload_plan.md)).
-
-- **v2 stays the authoring/replay IR; v3 is the GPU-write path.** The extended §6 `SceneCommand`
-  (dynamic `stops:[(offset,color)]` arrays, `glyph_run` glyph arrays, textual style values) is **not** a
-  no-reallocation GPU-write format. Plan §6 (I1/I3) adds an *additive* fixed-width `DrawIrV3Command` plus
-  typed side tables — `GeometryTable`, `PaintTable`, `TextRunTable`, `ResourceTable`, `PathPointTable`,
-  `ClipTable`, `TransformTable`, `HitShapeTable`, `SourceProvenanceTable` — replacing runtime string
-  parsing with typed paint/text/resource IDs. New owned trees: `src/lib/common/ui/draw_ir_v3/**` and
-  `src/lib/nogc_async_mut/gpu/engine2d/draw_ir_v3/**`.
-- **Capacity manifest, no realloc after seal.** A `GpuWebCapacityManifest` drives count→scan→emit exact
-  emission (Kernels A–E) into stable paged pools (`page index + element offset`; records never move);
-  overflow is an explicit failure, and the acceptance bar is *zero allocator calls after scene/session
-  seal* (plan §6 "Capacity manifest" / "Stable paged pools", I2).
-- **GPU-MMU / Object VM residency.** WebScene device pools are Object-VM arenas
-  ([`gpu_mmu_plan.md`](../../../03_plan/platform/structural_compute/gpu_mmu_plan.md)) — no private
-  placement layer beneath the display list. §9's module map is the CPU-side layout; the arenas back it.
-- **Web-lane end state (supersedes §8's framing).** §8 folds the web path into an ordinary `Engine2D`
-  per-primitive client (the CPU-oracle / compatibility tier). The plan's target is a device-resident
-  `GpuWebScene` (GPU DOM/style/layout/text pools, GPU count/scan/emit) behind `GpuDrawIrCapsule` /
-  `GpuRenderCapsule` ports, with **no per-widget submission** and **no pixel readback** (plan §4, §9). Read
-  §8 as the compatibility tier of this larger GPU-resident pipeline, not the final boundary.
 
 ## Layering: app-level backend isolation (2026-07-06)
 
@@ -635,25 +533,3 @@ paths from this design are reached unchanged through the facades:
 The `SimpleWebHeuristicSurface` micro-fast-path (`simple_web_engine2d_renderer.spl:808`) is a known
 intentional Engine2D bypass in the backend layer; the isolation lint special-cases it (it is not an
 app-layer violation).
-
-## 12. Backend-native internal layout decision (2026-08-01)
-
-Decided in `doc/04_architecture/ui/rendering/draw_ir_backend_native_layout.md`
-(staged plan: `doc/03_plan/ui/draw_ir/draw_ir_backend_native_refactor_plan.md`):
-
-- v3 API-facing numeric domains (formats, blend, usage) become **named
-  constants with Vulkan-canonical values** — promoting the existing raw-VK
-  magic numbers (`vulkan_backend3d.spl:73-78`) to a checked contract.
-  `ResourceTable.formats` widens u16→u32 (VK extension formats overflow u16).
-- Vulkan lane reads columns with **zero conversion** and, on native, passes
-  **packed Vk records + direct SFFI to libvulkan** (Rust `ash` layer shrinks
-  to interpreter shims + instance/device bootstrap). Metal/DX read the same
-  columns through static remap accessor tables (their enum values genuinely
-  differ per API). No property-wrapper language feature is required or
-  assumed — writes stay emit-kernel-only.
-- Per-primitive descriptor-set/command-buffer/fence churn is replaced by
-  persistent descriptors + per-frame batch submission, with v3 SoA columns
-  uploaded as SSBOs as-is.
-- The capacity manifest gains a per-backend stride profile so one-time
-  allocation is sized by the selected (or embedded-target) backend.
-- v2 remains the frozen CPU oracle, unchanged — consistent with §11.

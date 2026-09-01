@@ -215,12 +215,6 @@ fn _wml_normalize(module: String) -> String:
         m = m.slice(4)
     m
 
-fn _wml_seg(m: String, idx: Int) -> String:
-    val parts = m.split(".")
-    if idx >= parts.len():
-        return ""
-    parts[idx]
-
 fn _wml_is_host_door(m: String) -> Bool:
     for door in wm_host_interface_modules():
         if m == door or m.starts_with("{door}."):
@@ -239,14 +233,21 @@ fn _wml_classify_import(module: String) -> String:
             return ""
     if _wml_is_host_door(m):
         return ""
-    val root = _wml_seg(m, 0)
+    # Only the first two path segments participate in classification. Split
+    # once here: calling split for every candidate host root allocated an array
+    # and every segment up to 26 times for one `common.*` import.
+    val parts = m.split(".")
+    val root = parts[0]
+    var sub = ""
+    if parts.len() > 1:
+        sub = parts[1]
     # The `common` tier is the pure, portable rendering lane — EXCEPT where it
     # carries a host capability of its own. `common.io.window_event` is the live
     # example: it sits in the pure tier but is still an io dependency, and the
     # audit scores it as a violation.
     if root == "common":
         for bad in _wml_host_roots():
-            if _wml_seg(m, 1) == bad:
+            if sub == bad:
                 return "portable 2D/WM lane depends on host-capability module `{module}` — the `common` tier is otherwise pure, but this submodule is an io/host seam; route it through the single WM host interface (`{wm_host_interface_summary()}`)"
         return ""
     if root == "os":
@@ -257,7 +258,6 @@ fn _wml_classify_import(module: String) -> String:
         return "portable 2D/WM lane depends on baremetal/kernel-tier module `{module}` — kernel driver tiers are not portable across hosts"
     for tier in _wml_mutable_tiers():
         if root == tier:
-            val sub = _wml_seg(m, 1)
             for ok in _wml_render_sublanes():
                 if sub == ok:
                     return ""
@@ -298,10 +298,14 @@ fn _wml_is_core_intrinsic(name: String) -> Bool:
 # considered: an import written at column 0 is the project convention, and the
 # restriction keeps prose inside docstrings from being read as an import.
 fn lint_wm_lane_boundary(path: String, content: String) -> [WmLaneWarning]:
+    lint_wm_lane_boundary_lines(path, content.split("\n"))
+
+fn lint_wm_lane_boundary_lines(
+    path: String, lines: [String]
+) -> [WmLaneWarning]:
     var warnings: [WmLaneWarning] = []
     if not wm_lane_lint_in_scope(path):
         return warnings
-    val lines = content.split("\n")
     var line_num = 1
     for line in lines:
         val trimmed = line.trim()

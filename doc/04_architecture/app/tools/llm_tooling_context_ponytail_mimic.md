@@ -8,14 +8,6 @@ Use the existing `simple context` CLI as the first replacement seam. Do not add 
 daemon, external service, or new plugin surface until context generation and
 stats are implemented and verified.
 
-The replacement contract is the shared `simple_pipe` tool surface in app MCP
-and lower MCP, backed by the compatibility `simple_context` and
-`simple_ponytail` handlers. Existing callers should converge on that surface
-instead of a parallel context-mode or ponytail plugin path. For
-`simple_context`, `file` remains required except for the persisted SQL query
-shape where `sql=true` and `query` is non-empty; invalid source-less calls must
-return the normal missing-file tool error instead of implicit defaults.
-
 ## Layers
 
 ### CLI Layer
@@ -66,9 +58,7 @@ The SQL-backed context slice stays on the same helper boundary:
 - `context_sql_index_packs(paths, target, db_path, format)` stores context pack
   rows through `app.io.sqlite_sffi`.
 - `context_sql_query_packs(paths, target, query, db_path, format)` queries rows
-  with SQL-backed candidate predicates over source, target, and content, then
-  applies a Simple literal filter so `%`, `_`, and backslash in user query text
-  are not caller-controlled wildcard patterns.
+  with SQL `LIKE` predicates over source, target, and content.
 - `context --sql --index` and `context --sql --query=<text>` select this
   backend without introducing a daemon or separate context app.
 
@@ -77,7 +67,7 @@ Interpreter support is owned by
 existing `rt_db_*` database externs. The interpreter implementation is a
 SQLite-compatible subset for the existing facade operations used here: open,
 close, create table, delete, prepared insert/bind, select, count, ordered rows,
-and bounded `LIKE` candidate scans. It is not a full SQL planner.
+and simple `LIKE`. It is not a full SQL planner.
 
 ### MCP Exposure Layer
 
@@ -87,16 +77,15 @@ Files:
 - `src/app/mcp/main_dispatch.spl`
 - `src/app/mcp/main_static_tools.spl`
 
-The app MCP surface exposes context-style query behavior and Ponytail through
-the same registry/dispatch path. `simple_pipe` is the SPipe-linked front door;
-the split tools remain compatibility entries rather than a separate plugin
-runtime.
+The app MCP surface already exposes context-style query behavior. Ponytail
+should be exposed through the same registry/dispatch path when the existing
+handler is verified, rather than as a separate plugin runtime.
 
-## Absence Policy
+## Nil Policy
 
-Internal absence may use the runtime's private absence representation.
-User-facing context output must use omitted fields or explicit domain text. The
-internal marker is not valid public output.
+Internal absence may be represented as nil. User-facing context output must use
+empty strings, omitted fields, or explicit domain text. Literal `nil` is not
+valid output.
 
 ## First Slice Contract
 
@@ -105,11 +94,11 @@ internal marker is not valid public output.
 - returns markdown by default
 - supports `text`
 - supports JSON with escaped text
-- reports missing source input without exposing the internal marker
+- returns empty string only when source cannot be read
 
 `context_stats`:
 
-- reports missing source input without exposing the internal marker
+- returns empty string only when source cannot be read
 - reports source lines, selected lines, and estimated tokens
 
 `context_sql_*`:

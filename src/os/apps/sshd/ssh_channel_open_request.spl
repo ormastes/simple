@@ -1,0 +1,123 @@
+# Bounded RFC 4254 channel-open request classification.
+#
+# This parser deliberately retains no peer-controlled strings.  The live SSHD
+# only supports `session`; every other well-formed type must receive
+# SSH_OPEN_UNKNOWN_CHANNEL_TYPE instead of being silently dropped.
+
+use os.apps.sshd.ssh_channel.{SSH_OPEN_UNKNOWN_CHANNEL_TYPE, SSH_OPEN_RESOURCE_SHORTAGE, ssh_build_channel_open_failure}
+
+val SSH_CHANNEL_OPEN_MESSAGE_V1: u8 = 90u8
+val SSH_CHANNEL_OPEN_MAX_PAYLOAD_BYTES_V1: u64 = 65536u64
+
+enum SshChannelOpenRequestKindV1:
+    Malformed
+    Session
+    RejectedSessionParameters
+    Unsupported
+
+struct SshChannelOpenRequestV1:
+    kind: SshChannelOpenRequestKindV1
+    sender_channel: u32
+    initial_window: u32
+    maximum_packet: u32
+
+fn _channel_open_u32_be(payload: [u8], offset: u64) -> u32:
+    (payload[offset].to_u32() << 24) |
+        (payload[offset + 1u64].to_u32() << 16) |
+        (payload[offset + 2u64].to_u32() << 8) |
+        payload[offset + 3u64].to_u32()
+
+fn _channel_open_type_is_session(payload: [u8], start: u64, length: u64) -> bool:
+    length == 7u64 and
+        payload[start] == 0x73u8 and
+        payload[start + 1u64] == 0x65u8 and
+        payload[start + 2u64] == 0x73u8 and
+        payload[start + 3u64] == 0x73u8 and
+        payload[start + 4u64] == 0x69u8 and
+        payload[start + 5u64] == 0x6Fu8 and
+        payload[start + 6u64] == 0x6Eu8
+
+fn _malformed_channel_open_v1() -> SshChannelOpenRequestV1:
+    SshChannelOpenRequestV1(
+        kind: SshChannelOpenRequestKindV1.Malformed,
+        sender_channel: 0u32,
+        initial_window: 0u32,
+        maximum_packet: 0u32
+    )
+
+pub fn ssh_channel_open_request_classify_v1(payload: [u8]) -> SshChannelOpenRequestV1:
+    """Classify one complete, packet-bounded RFC 4254 CHANNEL_OPEN.
+
+    Unsupported channel-specific data is permitted but never retained.  A
+    `session` request has no channel-specific fields, so trailing bytes make it
+    malformed. Long unsupported type fields are skipped by validated offset;
+    only the exact seven-byte supported name is compared.
+    """
+    if payload.len() < 17u64 or
+        payload.len() > SSH_CHANNEL_OPEN_MAX_PAYLOAD_BYTES_V1 or
+        payload[0] != SSH_CHANNEL_OPEN_MESSAGE_V1:
+        return _malformed_channel_open_v1()
+
+    val type_len = _channel_open_u32_be(payload, 1u64).to_u64()
+    if type_len == 0u64:
+        return _malformed_channel_open_v1()
+    val type_start = 5u64
+    val fixed_start = type_start + type_len
+    if fixed_start + 12u64 > payload.len():
+        return _malformed_channel_open_v1()
+
+    val sender = _channel_open_u32_be(payload, fixed_start)
+    val window = _channel_open_u32_be(payload, fixed_start + 4u64)
+    val max_packet = _channel_open_u32_be(payload, fixed_start + 8u64)
+    if _channel_open_type_is_session(payload, type_start, type_len):
+        if fixed_start + 12u64 != payload.len():
+            return _malformed_channel_open_v1()
+        if max_packet == 0u32:
+            return SshChannelOpenRequestV1(
+                kind: SshChannelOpenRequestKindV1.RejectedSessionParameters,
+                sender_channel: sender,
+                initial_window: window,
+                maximum_packet: max_packet
+            )
+        return SshChannelOpenRequestV1(
+            kind: SshChannelOpenRequestKindV1.Session,
+            sender_channel: sender,
+            initial_window: window,
+            maximum_packet: max_packet
+        )
+
+    SshChannelOpenRequestV1(
+        kind: SshChannelOpenRequestKindV1.Unsupported,
+        sender_channel: sender,
+        initial_window: window,
+        maximum_packet: max_packet
+    )
+
+pub fn ssh_channel_open_rejection_payload_v1(request: SshChannelOpenRequestV1) -> [u8]:
+    """Build the exact negative reply for a well-formed rejected request.
+
+    Malformed packets and admitted sessions have no channel-level reply. This
+    pure routing helper is also the live handler's sole rejection mapping.
+    """
+    if request.kind == SshChannelOpenRequestKindV1.Unsupported:
+        return ssh_build_channel_open_failure(
+            request.sender_channel,
+            SSH_OPEN_UNKNOWN_CHANNEL_TYPE,
+            "unsupported channel type"
+        )
+    if request.kind == SshChannelOpenRequestKindV1.RejectedSessionParameters:
+        return ssh_build_channel_open_failure(
+            request.sender_channel,
+            SSH_OPEN_RESOURCE_SHORTAGE,
+            "invalid channel packet limit"
+        )
+    []
+
+pub fn ssh_channel_open_transport_must_close_v1(request: SshChannelOpenRequestV1) -> bool:
+    """Return true only when packet structure is not safe to route."""
+    request.kind == SshChannelOpenRequestKindV1.Malformed
+
+export SshChannelOpenRequestKindV1, SshChannelOpenRequestV1
+export ssh_channel_open_request_classify_v1, ssh_channel_open_rejection_payload_v1
+export ssh_channel_open_transport_must_close_v1
+export SSH_CHANNEL_OPEN_MAX_PAYLOAD_BYTES_V1

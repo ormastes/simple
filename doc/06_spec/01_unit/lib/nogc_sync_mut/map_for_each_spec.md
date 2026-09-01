@@ -20,14 +20,8 @@
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/nogc_sync_mut/map_for_each_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
-
-# Map/dict for_each Traversal Specification
 
 `Map<K, V>` lowers to the builtin `dict`. Until 2026-08-21 the seed's dict
 method table had no traversal method at all, so `map.for_each(\k, v: ...)`
@@ -50,20 +44,23 @@ method exist and still be useless:
 
 #### visits every entry exactly once
 
-- Verify: visits every entry exactly once
-   - Expected: visits equals `3)  # oracle: pinned constant asserted by this scenario`
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- visits every entry exactly once
+   - Expected: visits equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_MAP_FOR_EACH-001
-step("Verify: visits every entry exactly once")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("visits every entry exactly once")
 var m: {i64: i64} = {}
 m[1] = 10
 m[2] = 20
@@ -72,27 +69,26 @@ var visits = 0
 m.for_each(\k, v:
     visits = visits + 1
 )
-expect(visits).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(visits).to_equal(3)
 ```
 
 </details>
 
 #### accumulates into a variable of the enclosing scope
 
-- Verify: accumulates into a variable of the enclosing scope
-   - Expected: total equals `60)  # oracle: pinned constant asserted by this scenario`
+- accumulates into a variable of the enclosing scope
+   - Expected: total equals `60`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_MAP_FOR_EACH-001
-step("Verify: accumulates into a variable of the enclosing scope")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("accumulates into a variable of the enclosing scope")
 var m: {i64: i64} = {}
 m[1] = 10
 m[2] = 20
@@ -101,28 +97,27 @@ var total = 0
 m.for_each(\k, v:
     total = total + v
 )
-expect(total).to_equal(60)  # oracle: pinned constant asserted by this scenario
+expect(total).to_equal(60)
 ```
 
 </details>
 
 #### passes both the key and the value to a two-parameter lambda
 
-- Verify: passes both the key and the value to a two-parameter lambda
+- passes both the key and the value to a two-parameter lambda
    - Expected: keys_seen equals `1;2;`
-   - Expected: value_sum equals `30)  # oracle: pinned constant asserted by this scenario`
+   - Expected: value_sum equals `30`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_MAP_FOR_EACH-001
-step("Verify: passes both the key and the value to a two-parameter lambda")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("passes both the key and the value to a two-parameter lambda")
 # The key arrives in the SAME representation `keys()` and `entries()`
 # use -- for a scalar `i64` key that is its text form, not an `i64`
 # (`m.keys()` likewise yields "1", so `k + 1` concatenates). That is a
@@ -138,27 +133,26 @@ m.for_each(\k, v:
     value_sum = value_sum + v
 )
 expect(keys_seen).to_equal("1;2;")
-expect(value_sum).to_equal(30)  # oracle: pinned constant asserted by this scenario
+expect(value_sum).to_equal(30)
 ```
 
 </details>
 
 #### supports `each` as an alias for `for_each`
 
-- Verify: supports each as an alias for for_each
-   - Expected: total equals `12)  # oracle: pinned constant asserted by this scenario`
+- supports `each` as an alias for `for_each`
+   - Expected: total equals `12`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_MAP_FOR_EACH-001
-step("Verify: supports each as an alias for for_each")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("supports `each` as an alias for `for_each`")
 var m: {i64: i64} = {}
 m[1] = 4
 m[2] = 8
@@ -166,27 +160,26 @@ var total = 0
 m.each(\k, v:
     total = total + v
 )
-expect(total).to_equal(12)  # oracle: pinned constant asserted by this scenario
+expect(total).to_equal(12)
 ```
 
 </details>
 
 #### visits entries in the same order as keys()
 
-- Verify: visits entries in the same order as keys()
+- visits entries in the same order as keys()
    - Expected: seen equals `m.keys()`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_MAP_FOR_EACH-001
-step("Verify: visits entries in the same order as keys()")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("visits entries in the same order as keys()")
 # for_each must agree with the dict's canonical iteration order, or a
 # traversal written with for_each and one written with a for loop
 # disagree about ordering.
@@ -208,20 +201,19 @@ expect(seen).to_equal(m.keys())
 
 #### does not leak its loop variables into the caller's scope
 
-- Verify: does not leak its loop variables into the caller's scope
-   - Expected: k equals `999)  # oracle: pinned constant asserted by this scenario`
+- does not leak its loop variables into the caller's scope
+   - Expected: k equals `999`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_MAP_FOR_EACH-001
-step("Verify: does not leak its loop variables into the caller's scope")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("does not leak its loop variables into the caller's scope")
 var m: {i64: i64} = {}
 m[1] = 10
 val k = 999
@@ -229,7 +221,7 @@ var total = 0
 m.for_each(\k, v:
     total = total + v
 )
-expect(k).to_equal(999)  # oracle: pinned constant asserted by this scenario
+expect(k).to_equal(999)
 ```
 
 </details>
@@ -239,20 +231,19 @@ expect(k).to_equal(999)  # oracle: pinned constant asserted by this scenario
 
 #### leaves the receiver unchanged
 
-- Verify: leaves the receiver unchanged
-   - Expected: m.len() equals `2)  # oracle: pinned constant asserted by this scenario`
+- leaves the receiver unchanged
+   - Expected: m.len() equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_MAP_FOR_EACH-001
-step("Verify: leaves the receiver unchanged")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("leaves the receiver unchanged")
 var m: {i64: i64} = {}
 m[1] = 10
 m[2] = 20
@@ -260,33 +251,32 @@ var total = 0
 m.for_each(\k, v:
     total = total + v
 )
-expect(m.len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(m.len()).to_equal(2)
 ```
 
 </details>
 
 #### is a no-op on an empty map
 
-- Verify: is a no-op on an empty map
-   - Expected: visits equals `0)  # oracle: pinned constant asserted by this scenario`
+- is a no-op on an empty map
+   - Expected: visits equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_MAP_FOR_EACH-001
-step("Verify: is a no-op on an empty map")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("is a no-op on an empty map")
 var m: {i64: i64} = {}
 var visits = 0
 m.for_each(\k, v:
     visits = visits + 1
 )
-expect(visits).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(visits).to_equal(0)
 ```
 
 </details>
@@ -304,36 +294,53 @@ expect(visits).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `86cfee1a8c2a48550d715b7dfb4ef8b894221451a0a8a209cac82af62f8659d0`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `9510911739ac2f87841776ebe1a89dde9e5a92cfba4ed17fff2ef37eb367de33`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `86cfee1a8c2a48550d715b7dfb4ef8b894221451a0a8a209cac82af62f8659d0`.
+Source SHA-256: `9510911739ac2f87841776ebe1a89dde9e5a92cfba4ed17fff2ef37eb367de33`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `86cfee1a8c2a48550d715b7dfb4ef8b894221451a0a8a209cac82af62f8659d0`  
+Source SHA-256: `9510911739ac2f87841776ebe1a89dde9e5a92cfba4ed17fff2ef37eb367de33`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 86/100
 source: test/01_unit/lib/nogc_sync_mut/map_for_each_spec.spl
 mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/map_for_each_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/nogc_sync_mut/map_for_each_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/lib/nogc_sync_mut/map_for_each_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/nogc_sync_mut/map_for_each_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/lib/nogc_sync_mut/map_for_each_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/map_for_each_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/nogc_sync_mut/map_for_each_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'visits every entry exactly once' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/map_for_each_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accumulates into a variable of the enclosing scope' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/map_for_each_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'passes both the key and the value to a two-parameter lambda' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

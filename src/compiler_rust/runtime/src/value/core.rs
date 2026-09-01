@@ -198,10 +198,7 @@ impl RuntimeValue {
     /// immutable object handle, or ownership envelope instead.
     #[inline]
     pub const fn is_inline_transfer_value(self) -> bool {
-        matches!(
-            self.tag(),
-            tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL
-        )
+        matches!(self.tag(), tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL)
     }
 
     /// Get the tag bits (lowest 3 bits)
@@ -412,6 +409,31 @@ impl RuntimeValue {
         }
     }
 
+    /// Decode this value as a collection INDEX.
+    ///
+    /// An index may legitimately arrive in any of the three integer
+    /// representations the tagged value uses: the inline 61-bit signed form
+    /// (`TAG_INT`), a heap-boxed wide signed int (`HeapObjectType::Int`), and a
+    /// heap-boxed unsigned int (`HeapObjectType::UInt`, produced by `from_u64`
+    /// for every `u64`/`usize`-typed value). `is_int()` only recognises the
+    /// first, so `rt_index_get`/`rt_index_set` used to answer NIL/false for a
+    /// `u64` index — indexing a `text`, array or tuple with a `u64` variable
+    /// silently produced nil rather than the element. This accessor is the
+    /// single decode point those entry points share.
+    #[inline]
+    pub fn as_index_i64(self) -> Option<i64> {
+        if self.is_int() {
+            return Some(self.as_int());
+        }
+        if let Some(value) = self.as_heap_i64() {
+            return Some(value);
+        }
+        if let Some(value) = self.as_heap_u64() {
+            return i64::try_from(value).ok();
+        }
+        None
+    }
+
     /// The payload of a heap-boxed wide SIGNED integer, if this is one.
     #[inline]
     pub fn as_heap_i64(self) -> Option<i64> {
@@ -577,12 +599,10 @@ impl RuntimeValue {
     pub fn clone_for_isolated_thread(self) -> Option<Self> {
         match self.tag() {
             tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL => Some(self),
-            tags::TAG_HEAP => {
-                match super::heap::registered_heap_type(self) {
-                    Some(HeapObjectType::Channel) => Some(self),
-                    _ => None,
-                }
-            }
+            tags::TAG_HEAP => match super::heap::registered_heap_type(self) {
+                Some(HeapObjectType::Channel) => Some(self),
+                _ => None,
+            },
             _ => None,
         }
     }

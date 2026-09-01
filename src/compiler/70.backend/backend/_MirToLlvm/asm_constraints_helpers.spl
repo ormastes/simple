@@ -14,24 +14,29 @@ use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
+@unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 
-var _llvm_bootstrap_string_global_text: text = ""
+# One decl per element; joined with "\n" ONCE at emission. The previous
+# `text = "{text}\n{decl}"` accumulator copied the whole accumulated text on
+# every add: O(n^2) bytes over the whole-program bootstrap IR (one IR for all
+# functions, so n = every string literal in the closure). Measured on the
+# stage2 binary (_perf_mb_text, load 38): 2k decls 414ms, 4k 2294ms, 8k
+# 10335ms vs 7-20ms for push+join at the same n. The joined text is
+# byte-identical to the old accumulator (decls are never empty).
+# Straight-line `g = g.push(x)` reassign, as in bootstrap_globals.spl: bare
+# `.push()` on a module global drops elements under the seed (rMCP17).
+var _llvm_bootstrap_string_global_decls: [text] = []
 
 fn llvm_bootstrap_string_globals_reset():
-    _llvm_bootstrap_string_global_text = ""
+    _llvm_bootstrap_string_global_decls = []
 
 fn llvm_bootstrap_string_globals_text() -> text:
-    _llvm_bootstrap_string_global_text ?? ""
+    _llvm_bootstrap_string_global_decls.join("\n")
 
 fn llvm_bootstrap_string_globals_add(decl: text):
-    val current = _llvm_bootstrap_string_global_text ?? ""
-    if current == "":
-        _llvm_bootstrap_string_global_text = decl
-    else:
-        _llvm_bootstrap_string_global_text = "{current}\n{decl}"
+    _llvm_bootstrap_string_global_decls = _llvm_bootstrap_string_global_decls.push(decl)
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -151,10 +156,11 @@ impl MirToLlvm:
         self.builder.emit("declare ptr @rt_array_new(i64)")
         self.builder.emit("declare void @rt_array_free(ptr)")
         self.builder.emit("declare i64 @rt_array_len(ptr)")
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if self.bootstrap_mode_enabled():
             self.builder.emit("declare ptr @rt_array_get(ptr, i64)")
         else:
             self.builder.emit("declare i64 @rt_array_get(ptr, i64)")
+        self.builder.emit("declare i64 @rt_bytes_u8_at(ptr, i64)")
         self.builder.emit("declare void @rt_array_set(ptr, i64, i64)")
         self.builder.emit("declare i8 @rt_array_push(ptr, i64)")
         self.builder.emit("declare i8 @rt_array_clear(ptr)")
@@ -326,6 +332,7 @@ impl MirToLlvm:
         self.remember_function_param_types("__simple_rt_string_char_code_at", ["i64", "i64"])
         self.remember_function_param_types("__simple_rt_string_byte_at", ["i64", "i64"])
         self.remember_function_param_types("rt_array_get", ["ptr", "i64"])
+        self.remember_function_param_types("rt_bytes_u8_at", ["ptr", "i64"])
         self.remember_function_param_types("rt_array_set", ["ptr", "i64", "i64"])
         self.remember_function_param_types("rt_array_push", ["ptr", "i64"])
         self.remember_function_param_types("rt_array_write_span", ["ptr", "ptr", "i64", "i64", "i64"])
@@ -355,6 +362,7 @@ impl MirToLlvm:
         self.defined_func_names["rt_array_free"] = true
         self.defined_func_names["rt_array_len"] = true
         self.defined_func_names["rt_array_get"] = true
+        self.defined_func_names["rt_bytes_u8_at"] = true
         self.defined_func_names["rt_array_set"] = true
         self.defined_func_names["rt_array_push"] = true
         self.defined_func_names["rt_array_write_span"] = true
@@ -402,13 +410,12 @@ impl MirToLlvm:
         val escaped = escape_llvm_string(value)
         val str_len = escaped_string_byte_len(value) + 1
         val decl = "{global_name} = private unnamed_addr constant [{str_len} x i8] c\"{escaped}\\00\""
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if self.bootstrap_mode_enabled():
             llvm_bootstrap_string_globals_add(decl)
+        # `string_global_text` is no longer accumulated eagerly (O(n^2) copy
+        # per add, see llvm_bootstrap_string_globals_add); readers join
+        # `string_globals` once at emission.
         self.string_globals = self.string_globals.push(decl)
-        if self.string_global_text.len() == 0:
-            self.string_global_text = decl
-        else:
-            self.string_global_text = "{self.string_global_text}\n{decl}"
         global_name
 
     me emit_unsupported_panic(message: text):
@@ -429,9 +436,35 @@ impl MirToLlvm:
         behaviour for anyone deliberately exercising the runtime-panic path.
         See doc/08_tracking/bug/llvm_backend_unlowered_mir_kind_fails_open_2026-08-23.md
         """
-        if (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") != "1":
+        var allow_unlowered = false
+        unsafe(capabilities: [ffi]):
+            allow_unlowered = (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") == "1"
+        if not allow_unlowered:
             eprint("error: {message}")
             panic("compile error: {message}")
+        self.emit_panic_trap_ir(message)
+
+    me emit_panic_trap_ir(message: text):
+        """Emit `@rt_panic(msg)` + `unreachable` -- a DIVERGING block, no build failure.
+
+        This is the correct lowering of `MirTerminator.Abort`, which is a
+        fully supported terminator deliberately emitted by MIR (see
+        50.mir/mir_data.spl `terminate_abort` and the `panic()` lowering in
+        _MirLoweringExpr/switch_operators_calls.spl). Its `message` is a
+        REASON LABEL describing why the block diverges -- it is not a
+        diagnostic and carries no file/line.
+
+        Extracted 2026-08-24. The Abort arm in core_codegen.spl used to call
+        `emit_unsupported_panic`, which was fine while that helper only
+        emitted this IR. When it was converted to FAIL THE BUILD on
+        2026-08-23 (llvm_backend_unlowered_mir_kind_fails_open), every user
+        `panic()` in any co-compiled module became a hard compile error, and
+        the abort's reason label was printed as `error: explicit panic() --
+        diverging, must not fall through`. The C backend never had this bug
+        -- its Abort arm emits `spl_panic(...)` directly -- and cranelift
+        emits a trap. See
+        doc/08_tracking/bug/native_compile_explicit_panic_diverging_process_ops_2026-08-24.md
+        """
         val global_name = self.add_string_global(message)
         val msg_len = escaped_string_byte_len(message)
         val str_len = msg_len + 1

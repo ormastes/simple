@@ -1,10 +1,8 @@
 # Repository hygiene gate for generated clutter and stale structure.
 
-extern fn rt_cli_get_args() -> [text]
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_exit(code: i32) -> void
 
+use std.io.{exit_i32, file_read_text, process_run}
+use std.sffi.system.{args_get}
 struct HygieneConfig:
     root: text
     policy_path: text
@@ -100,7 +98,7 @@ fn json_string_array(source: text, key: text) -> [text]:
     values
 
 fn load_policy(path: text) -> HygienePolicy:
-    val source = rt_file_read_text(path) ?? ""
+    val source = file_read_text(path) ?? ""
     HygienePolicy(
         dirty_dir_names: json_string_array(source, "dirty_dir_names"),
         dirty_suffixes: json_string_array(source, "dirty_suffixes"),
@@ -149,13 +147,13 @@ fn prune_expression(skip_dir_names: [text]) -> text:
 
 fn list_paths(root: text, policy: HygienePolicy, kind: text) -> [text]:
     val command = "cd " + shell_quote(root) + " && find . -mindepth 1 " + prune_expression(policy.skip_dir_names) + "-type " + kind + " -print | sort"
-    val result = rt_process_run("/bin/sh", ["-c", command])
+    val result = process_run("/bin/sh", ["-c", command])
     if result.2 != 0:
         print("Repository Hygiene Audit")
         print("========================")
         print("find failed:")
         print(result.1)
-        rt_exit(1)
+        exit_i32(1)
     var paths: [text] = []
     for raw in result.0.split("\n"):
         val path = normalize_find_path(raw.trim())
@@ -164,7 +162,7 @@ fn list_paths(root: text, policy: HygienePolicy, kind: text) -> [text]:
     paths
 
 fn git_ignored(path: text) -> bool:
-    val result = rt_process_run("git", ["check-ignore", "-q", path])
+    val result = process_run("git", ["check-ignore", "-q", path])
     result.2 == 0
 
 fn dirty_suffix(path: text, policy: HygienePolicy) -> bool:
@@ -194,7 +192,7 @@ fn find_empty_source_dirs(root: text, policy: HygienePolicy) -> [text]:
     var hits: [text] = []
     for source_root in policy.source_roots:
         val command = "cd " + shell_quote(root) + " && if [ -e " + shell_quote(source_root) + " ]; then find " + shell_quote(source_root) + " -mindepth 1 " + prune_expression(policy.skip_dir_names) + "-type d -empty -print | sort; fi"
-        val result = rt_process_run("/bin/sh", ["-c", command])
+        val result = process_run("/bin/sh", ["-c", command])
         if result.2 != 0:
             continue
         for raw in result.0.split("\n"):
@@ -211,7 +209,7 @@ fn print_group(title: text, items: [text]):
     for item in items:
         print("  - " + item)
 
-val config = parse_args(normalize_args(rt_cli_get_args()))
+val config = parse_args(normalize_args(args_get()))
 val policy = load_policy(config.policy_path)
 val dirs = list_paths(config.root, policy, "d")
 val files = list_paths(config.root, policy, "f")
@@ -226,7 +224,7 @@ print_group("Unignored temporary files", dirty_files)
 print_group("Empty source directories", empty_source_dirs)
 
 if dirty_dirs.len() > 0 or dirty_files.len() > 0:
-    rt_exit(1)
+    exit_i32(1)
 if empty_source_dirs.len() > 0 and not config.allow_empty_source_dirs:
-    rt_exit(1)
-rt_exit(0)
+    exit_i32(1)
+exit_i32(0)

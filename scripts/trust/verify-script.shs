@@ -1,0 +1,163 @@
+#!/bin/sh
+# verify-script.shs — verify FILE against FILE.sig under a committed public
+# trust root (wots-merkle-sha256-w16-h8). Needs no secrets.
+#
+#   sh scripts/trust/verify-script.shs --public config/trust/X.pub [--no-selftest] FILE...
+#   sh scripts/trust/verify-script.shs --selftest
+#
+# Verdict is the LAST stdout line (house convention):
+#   PASS — <n> file(s) verified            exit 0
+#   FAIL — <k> invalid: <names>            exit 1   (missing .sig counts as invalid)
+#   ERROR — nothing was checked            exit 2   (0 files is an ERROR, never a pass)
+#
+# --selftest runs first unless --no-selftest and is fatal. It copies the
+# committed INSECURE fixture key (test/fixtures/trust/selftest_key, seeds
+# public by design) into a private temp dir and exercises the real sign and
+# verify paths: sign -> PASS, flipped script byte -> FAIL, tampered sig ->
+# FAIL, wrong root -> FAIL, distinct leaves per signature with a monotonic
+# next_leaf, and refusal to sign an exhausted key. A fresh keygen is NOT run
+# here (275k hashes); the real keygen is exercised by
+# scripts/trust/keygen-pq.shs itself.
+
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/pq-sign-lib.shs"
+
+FIXTURE_KEY="$REPO_ROOT/test/fixtures/trust/selftest_key"
+FIXTURE_PUB="$REPO_ROOT/test/fixtures/trust/selftest_key.pub"
+
+PUBLIC=""
+RUN_SELFTEST=1
+ONLY_SELFTEST=0
+
+usage() {
+    printf '%s\n' "usage: verify-script.shs --public FILE.pub [--no-selftest] FILE... | --selftest" >&2
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --public) [ $# -ge 2 ] || usage; PUBLIC=$2; shift 2 ;;
+        --no-selftest) RUN_SELFTEST=0; shift ;;
+        --selftest) ONLY_SELFTEST=1; shift ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        -*) usage ;;
+        *) break ;;
+    esac
+done
+
+st_fail() {
+    printf '%s\n' "selftest: FAIL — $*"
+    printf '%s\n' "ERROR — nothing was checked (selftest failed: $*)"
+    exit 2
+}
+
+run_selftest() {
+    [ -d "$FIXTURE_KEY" ] || st_fail "fixture key dir $FIXTURE_KEY missing"
+    [ -f "$FIXTURE_PUB" ] || st_fail "fixture pub $FIXTURE_PUB missing"
+    _tmp=$(mktemp -d "${TMPDIR:-/tmp}/pq-selftest.XXXXXX") || st_fail "mktemp failed"
+    chmod 700 "$_tmp"
+    cp -R "$FIXTURE_KEY" "$_tmp/key" || st_fail "cannot copy fixture key"
+    chmod 700 "$_tmp/key"
+    printf '%s\n' '#!/bin/sh' 'echo selftest fixture' > "$_tmp/script.shs"
+
+    # 1. sign -> PASS
+    sh "$SCRIPT_DIR/sign-script.shs" --key-dir "$_tmp/key" "$_tmp/script.shs" > "$_tmp/sign1.log" 2>&1
+    _rc=$?
+    [ "$_rc" -eq 0 ] || st_fail "sign of fixture failed rc=$_rc: $(cat "$_tmp/sign1.log")"
+    _r=$(pq_verify_file "$_tmp/script.shs" "$_tmp/script.shs.sig" "$FIXTURE_PUB")
+    [ "$_r" = ok ] || st_fail "valid signature rejected: $_r"
+
+    # 2. flipped script byte -> FAIL
+    printf '%s\n' '#!/bin/sh' 'echo selftest fixturf' > "$_tmp/flipped.shs"
+    cp "$_tmp/script.shs.sig" "$_tmp/flipped.shs.sig"
+    _r=$(pq_verify_file "$_tmp/flipped.shs" "$_tmp/flipped.shs.sig" "$FIXTURE_PUB")
+    [ "$_r" = "root mismatch" ] || st_fail "flipped script accepted or wrong reason: $_r"
+
+    # 3. tampered signature (one hex digit of sig) -> FAIL
+    sed 's/^sig=\(.\{100\}\)\(.\)/sig=\1X/' "$_tmp/script.shs.sig" | \
+        awk 'BEGIN{FS=OFS="="} /^sig=/{ c=substr($2,101,1); n=(c=="0")?"1":"0"; $2=substr($2,1,100) n substr($2,102) } {print}' \
+        > "$_tmp/tampered.sig"
+    _r=$(pq_verify_file "$_tmp/script.shs" "$_tmp/tampered.sig" "$FIXTURE_PUB")
+    [ "$_r" = "root mismatch" ] || st_fail "tampered sig accepted or wrong reason: $_r"
+
+    # 4. wrong root -> FAIL
+    sed 's/^root=./root=0/; s/^root=0/root=1/' "$FIXTURE_PUB" > "$_tmp/wrong.pub"
+    _r=$(pq_verify_file "$_tmp/script.shs" "$_tmp/script.shs.sig" "$_tmp/wrong.pub")
+    [ "$_r" = "root mismatch" ] || st_fail "wrong root accepted or wrong reason: $_r"
+
+    # 5. leaf reuse refusal: second signature uses a different leaf, counter moves
+    _l1=$(pq_kv "$_tmp/script.shs.sig" leaf)
+    sh "$SCRIPT_DIR/sign-script.shs" --key-dir "$_tmp/key" "$_tmp/flipped.shs" > "$_tmp/sign2.log" 2>&1
+    _rc=$?
+    [ "$_rc" -eq 0 ] || st_fail "second sign failed rc=$_rc"
+    _l2=$(pq_kv "$_tmp/flipped.shs.sig" leaf)
+    [ "$_l2" -eq $((_l1 + 1)) ] || st_fail "leaf reused or non-monotonic: $_l1 then $_l2"
+    read -r _nl < "$_tmp/key/next_leaf"
+    [ "$_nl" -eq $((_l2 + 1)) ] || st_fail "next_leaf did not advance past used leaf"
+
+    # 6. exhaustion refusal
+    printf '%s\n' 256 > "$_tmp/key/next_leaf"
+    rm -f "$_tmp/script.shs.sig"
+    sh "$SCRIPT_DIR/sign-script.shs" --key-dir "$_tmp/key" "$_tmp/script.shs" > "$_tmp/sign3.log" 2>&1
+    _rc=$?
+    [ "$_rc" -ne 0 ] || st_fail "exhausted key still signed"
+    grep -q exhausted "$_tmp/sign3.log" || st_fail "exhaustion not reported: $(cat "$_tmp/sign3.log")"
+    [ ! -f "$_tmp/script.shs.sig" ] || st_fail "exhausted key emitted a signature"
+
+    # 7. seeds never printed by sign
+    if grep -q "$(cat "$_tmp/key/sk_seed")" "$_tmp/sign1.log" "$_tmp/sign2.log" "$_tmp/sign3.log"; then
+        st_fail "sk_seed leaked to sign output"
+    fi
+
+    rm -rf "$_tmp"
+    printf '%s\n' "selftest: PASS — 7 fixtures (sign/verify, flipped byte, tampered sig, wrong root, leaf monotonic, exhaustion, no seed leak)"
+}
+
+if [ "$ONLY_SELFTEST" -eq 1 ]; then
+    run_selftest
+    printf '%s\n' "PASS — 7 file(s) verified (selftest fixtures)"
+    exit 0
+fi
+
+[ -n "$PUBLIC" ] || usage
+[ -f "$PUBLIC" ] || { printf '%s\n' "ERROR — nothing was checked (public root $PUBLIC missing)"; exit 2; }
+
+if [ "$RUN_SELFTEST" -eq 1 ]; then
+    run_selftest
+fi
+
+if [ $# -eq 0 ]; then
+    printf '%s\n' "ERROR — nothing was checked (no files given)"
+    exit 2
+fi
+
+checked=0
+bad=0
+badnames=""
+for f in "$@"; do
+    checked=$((checked + 1))
+    _r=$(pq_verify_file "$f" "$f.sig" "$PUBLIC")
+    if [ "$_r" = ok ]; then
+        printf '%s\n' "ok    $f (leaf=$(pq_kv "$f.sig" leaf))"
+    else
+        printf '%s\n' "FAIL  $f: $_r"
+        bad=$((bad + 1))
+        badnames="$badnames $f"
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    printf '%s\n' "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$bad" -gt 0 ]; then
+    printf '%s\n' "FAIL — $bad invalid:${badnames}"
+    exit 1
+fi
+printf '%s\n' "PASS — $checked file(s) verified"
+exit 0

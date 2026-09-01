@@ -5,8 +5,7 @@
   `src/lib/common/crypto/typed/aead.spl`
 - **Severity:** medium (blocks all examples that call seal/open in both
   affected specs).
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** OPEN.
 
 ## Symptom
 

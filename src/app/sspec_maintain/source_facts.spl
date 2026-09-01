@@ -41,7 +41,19 @@ fn _is_real_assertion(line: text) -> bool:
             expected = expected[:-1].trim()
         if actual == expected:
             return false
+        # expect(<literal>).to_equal(<literal>) compares two constants —
+        # compiler knowledge, not a system oracle (2026-08-27).
+        if (_is_numeric_literal(actual) and _is_numeric_literal(expected)) or
+                (_is_quoted_literal(actual) and _is_quoted_literal(expected)):
+            return false
     true
+
+fn _is_quoted_literal(value: text) -> bool:
+    # A double-quoted string constant, e.g. "abc". Origin/main's 2026-08-27
+    # literal-comparison check called this helper without ever defining it;
+    # definition supplied at merge time (2026-09-01).
+    val candidate = value.trim()
+    candidate.len() >= 2 and candidate.starts_with("\"") and candidate.ends_with("\"")
 
 fn _count_sub(haystack: text, needle: text) -> i64:
     # Non-overlapping occurrence count; needle is never empty at call sites.
@@ -153,7 +165,11 @@ fn _contains_requirement(line: text) -> bool:
 
 fn _requirement_ids(line: text) -> [text]:
     var normalized = line
-    for separator in ["\"", "'", "(", ")", "[", "]", "{", "}", ":", ",", ";", "#"]:
+    # "\\" strips escape suffixes so an id embedded in a string literal
+    # ("REQ-X\\n") tokenizes as REQ-X instead of a phantom unbindable id.
+    # "." strips sentence-final punctuation ("required by REQ-F3-003." -->
+    # REQ-F3-003) — no REQ id alphabet contains a dot, so this is total.
+    for separator in ["\"", "'", "(", ")", "[", "]", "{", "}", ":", ",", ";", ".", "#", "\\"]:
         normalized = normalized.replace(separator, " ")
     var ids: [text] = []
     for token in normalized.split():
@@ -281,6 +297,15 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     var scenario_local_arithmetic = false
     var scenario_magic_expected: i64 = 0
     var scenario_bindings: Dict<text, text> = {}
+    # T3 (2026-08-27): names assigned from a file_read("src/...") inside the
+    # scenario; asserting <name>.contains(...) downstream is the same
+    # source-text pseudo-oracle as the direct expect(source.contains(...)).
+    var scenario_source_vars: [text] = []
+    # Duplicated-narrative boilerplate detection (2026-08-27): the same long
+    # Purpose/plan/design comment pasted 3+ times marks generated filler.
+    # (Origin/main used these two without declaring them; declared at merge.)
+    var narrative_comment_counts: Dict<text, i64> = {}
+    var has_duplicated_narrative = false
     var scenario_requirement_ids: [text] = []
     var bound_requirement_ids: [text] = []
     var all_requirement_ids: [text] = []
@@ -316,6 +341,16 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             current_line = 0
             current_name = ""
         if line.starts_with("@step "): has_bare_step = true
+        if not has_duplicated_narrative and line.starts_with("#") and line.len() > 20 and
+                (line_lower.contains("purpose") or line_lower.contains("audience") or
+                    line_lower.contains("research:") or line_lower.contains("plan:") or
+                    line_lower.contains("architecture:") or line_lower.contains("design:")):
+            if narrative_comment_counts.has(line):
+                narrative_comment_counts[line] = narrative_comment_counts[line] + 1
+            else:
+                narrative_comment_counts[line] = 1
+            if narrative_comment_counts[line] >= 3:
+                has_duplicated_narrative = true
         # slow_it / ignore_it are the same scenario construct as it (slow lane /
         # expected-failure variants of the spec DSL) — treating them as
         # non-scenarios left 44k scenarios invisible to every per-scenario rule.
@@ -343,10 +378,14 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             scenario_local_arithmetic = false
             scenario_magic_expected = 0
             scenario_bindings = {}
+            scenario_source_vars = []
             scenario_requirement_ids = []
         val (assigned_name, assigned_value) = _assignment(line)
         if current_line > 0 and assigned_name != "":
             scenario_bindings[assigned_name] = assigned_value
+            if assigned_value.contains("file_read(") and assigned_value.contains("src/") and
+                    not scenario_source_vars.contains(assigned_name):
+                scenario_source_vars.push(assigned_name)
         if current_line > 0 and line_lower.contains("step(\""):
             steps = steps + 1
             scenario_steps = scenario_steps + 1
@@ -445,13 +484,23 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     lifecycle_paths.sort()
     SspecSourceFacts(path: path, source_hash: sha256_text(source),
         line_count: lines.len(),
-        has_purpose: lower.contains("purpose and audience") or lower.contains("## purpose"),
+        # T2 (2026-08-27): a Purpose heading alone is generated-adjacent; the
+        # manual-first bar requires user voice — a `"""` docstring — alongside
+        # (or instead of) the heading.
+        has_purpose: (lower.contains("purpose and audience") or
+            lower.contains("## purpose")) and _count_sub(source, "\"\"\"") > 0,
+        has_duplicated_narrative_boilerplate: has_duplicated_narrative,
         has_placeholder_narrative: lower.contains("todo: describe") or
             lower.contains("todo: author") or
             lower.contains("description of this block") or lower.contains("lorem ipsum"),
         has_manual_sections: lower.contains("## operator workflow") or
-            lower.contains("## scenario narratives") or lower.contains("@manual"),
-        has_folding: lower.contains("@fold") or lower.contains("@manual"),
+            lower.contains("## scenario narratives") or lower.contains("@manual") or
+            # @manual_section groups scenarios for MD generation (2026-08-26):
+            # a spec that organizes scenarios into manual sections is
+            # manual-structured even without the legacy @manual tag.
+            lower.contains("@manual_section"),
+        has_folding: lower.contains("@fold") or lower.contains("@manual") or
+            lower.contains("@manual_section"),
         has_troubleshooting: lower.contains("troubleshoot") or lower.contains("verification guidance"),
         has_internal_reader_tags: lower.contains("@internal") or lower.contains("@qa-only") or
             lower.contains("@execution-only"),

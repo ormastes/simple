@@ -1,0 +1,83 @@
+# CPU-0 bounded physical-page access owner.
+
+use os.kernel.arch.x86_32.paging.{
+    X86_32_KMAP_VA, x86_32_kmap_install_frame, x86_32_kmap_remove_frame
+}
+use os.kernel.boot.mmio.{mmio_read8, mmio_write8}
+
+val X86_32_KMAP_BYTES: u32 = 4096
+
+struct X86_32KmapLease:
+    generation: u32
+    frame_phys: u32
+
+var g_x86_32_kmap_busy: bool = false
+var g_x86_32_kmap_generation: u32 = 0
+var g_x86_32_kmap_frame: u32 = 0
+
+fn x86_32_kmap_acquire(frame_phys: u32) -> X86_32KmapLease?:
+    if g_x86_32_kmap_busy or not x86_32_kmap_install_frame(frame_phys):
+        return nil
+    var generation = g_x86_32_kmap_generation + 1
+    if generation == 0: generation = 1
+    g_x86_32_kmap_generation = generation
+    g_x86_32_kmap_frame = frame_phys
+    g_x86_32_kmap_busy = true
+    X86_32KmapLease(generation: generation, frame_phys: frame_phys)
+
+fn x86_32_kmap_matches(lease: X86_32KmapLease) -> bool:
+    g_x86_32_kmap_busy and lease.generation != 0 and
+        lease.generation == g_x86_32_kmap_generation and lease.frame_phys == g_x86_32_kmap_frame
+
+fn x86_32_kmap_zero(lease: X86_32KmapLease) -> bool:
+    if not x86_32_kmap_matches(lease): return false
+    var i: u32 = 0
+    while i < X86_32_KMAP_BYTES:
+        mmio_write8((X86_32_KMAP_VA + i) as u64, 0)
+        i = i + 1
+    true
+
+fn x86_32_kmap_copy_in(lease: X86_32KmapLease, bytes: [u8]) -> bool:
+    if not x86_32_kmap_matches(lease) or bytes.len() == 0 or bytes.len() > X86_32_KMAP_BYTES:
+        return false
+    var i: u32 = 0
+    while i < bytes.len():
+        mmio_write8((X86_32_KMAP_VA + i) as u64, bytes[i])
+        i = i + 1
+    true
+
+fn x86_32_kmap_readback(lease: X86_32KmapLease, length: u32) -> [u8]?:
+    if not x86_32_kmap_matches(lease) or length == 0 or length > X86_32_KMAP_BYTES:
+        return nil
+    var bytes: [u8] = []
+    var i: u32 = 0
+    while i < length:
+        bytes.push(mmio_read8((X86_32_KMAP_VA + i) as u64))
+        i = i + 1
+    Some(bytes)
+
+fn x86_32_kmap_read32(lease: X86_32KmapLease, offset: u32) -> u32?:
+    if not x86_32_kmap_matches(lease) or offset > X86_32_KMAP_BYTES - 4 or (offset & 3) != 0:
+        return nil
+    val base = (X86_32_KMAP_VA + offset) as u64
+    Some((mmio_read8(base) as u32) |
+        ((mmio_read8(base + 1) as u32) << 8) |
+        ((mmio_read8(base + 2) as u32) << 16) |
+        ((mmio_read8(base + 3) as u32) << 24))
+
+fn x86_32_kmap_write32(lease: X86_32KmapLease, offset: u32, value: u32) -> bool:
+    if not x86_32_kmap_matches(lease) or offset > X86_32_KMAP_BYTES - 4 or (offset & 3) != 0:
+        return false
+    val base = (X86_32_KMAP_VA + offset) as u64
+    mmio_write8(base, (value & 0xFF) as u8)
+    mmio_write8(base + 1, ((value >> 8) & 0xFF) as u8)
+    mmio_write8(base + 2, ((value >> 16) & 0xFF) as u8)
+    mmio_write8(base + 3, ((value >> 24) & 0xFF) as u8)
+    true
+
+fn x86_32_kmap_revoke(lease: X86_32KmapLease) -> bool:
+    if not x86_32_kmap_matches(lease) or not x86_32_kmap_remove_frame():
+        return false
+    g_x86_32_kmap_busy = false
+    g_x86_32_kmap_frame = 0
+    true

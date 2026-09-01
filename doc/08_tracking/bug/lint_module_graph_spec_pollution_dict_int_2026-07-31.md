@@ -3,8 +3,7 @@
 **Date:** 2026-07-31
 **Severity:** spec-verdict pollution — example results stay correct, but every
 affected spec FILE reports one extra failure
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** ROOT-CAUSED 2026-08-01 — **and it is not a lint bug.** The trigger is
 a test-runner defect: a **wildcard-imported top-level symbol named `main`** makes
 `bin/simple test`'s outer pass emit a phantom file-level failure. The lint facade
 is merely the messenger — `main.spl:11` wildcard-re-exports `entry_and_fixes.*`,

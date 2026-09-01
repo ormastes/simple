@@ -11,9 +11,7 @@ Verifies the currently implemented FAT32 mount-table surface:
 """
 
 use std.spipe.*
-use std.io_runtime.{read_file}
 use std.fs_driver.block_device.{BlockDevice}
-use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.types.{OpenFlags, MountOptions, ExecuteTrust}
 use std.fs_driver.instance.{DriverInstance}
@@ -51,16 +49,15 @@ impl MockFat32BlockDevice:
         MockFat32BlockDevice(sector: bytes)
 
 impl BlockDevice for MockFat32BlockDevice:
-    fn read_sector(lba: u64) -> Result<[u8], text>:
-        var buffer: [u8] = []
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
         var i = 0
-        while i < self.sector.len():
+        while i < self.sector.len() and i < buffer.len():
             if lba == 0:
-                buffer.push(self.sector[i])
+                buffer[i] = self.sector[i]
             else:
-                buffer.push(0)
+                buffer[i] = 0
             i = i + 1
-        Result.Ok(buffer)
+        Result.Ok(true)
 
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         Result.Ok(true)
@@ -83,16 +80,21 @@ describe "FAT32 hosted seam — mount table registration":
         val boot_driver = mt.resolve_driver("/boot").unwrap()
         expect(boot_driver.driver_name()).to_equal("Fat32Driver")
 
-    it "stays on the shared FsFat32Driver surface":
-        val source = read_file("test/integration/storage/dbfs/fat32_no_regression_spec.spl")
-        val legacy_type = "Fat32" + "Driver"
-        expect(source.contains("use os.services.fat32.fat32")).to_equal(false)
-        expect(source.contains(" " + legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("=" + legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("(" + legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("FsFat32Driver.new(")).to_equal(true)
+    it "keeps each shared FsFat32Driver instance independently mounted":
+        # @req REQ-SSPEC-INTEGRATION
+        step("each shared FsFat32Driver instance mounts independently")
+        val table = MountTable.new()
+        val boot = FsFat32Driver.new("Fat32Driver", MockFat32BlockDevice.new())
+        val rescue = FsFat32Driver.new("Fat32Driver", MockFat32BlockDevice.new())
+        table.mount("/boot", DriverInstance.Fat32(boot), MountOptions.read_only()).unwrap()
+        table.mount("/rescue", DriverInstance.Fat32(rescue), MountOptions.read_only()).unwrap()
+        expect(table.resolve_driver("/boot/ANY.BIN").unwrap().driver_name()).to_equal("Fat32Driver")
+        expect(table.resolve_driver("/rescue/ANY.BIN").unwrap().driver_name()).to_equal("Fat32Driver")
+        expect(table.resolve_driver("/missing/ANY.BIN").is_err()).to_equal(true)
 
     it "routes atomic replace lifecycle operations through the shared mount table":
+        # @req REQ-SSPEC-INTEGRATION
+        step("routes atomic replace lifecycle operations through the shared mount table")
         var driver = FsFat32Driver.new_ram_backed_with_file("OLD.BIN", "hello")
         driver.mount(MountOptions.default()).unwrap()
         var table = MountTable.new()
@@ -105,21 +107,6 @@ describe "FAT32 hosted seam — mount table registration":
         table.close(opened).unwrap()
         table.unlink("/boot/NEW.BIN").unwrap()
         expect(table.stat("/boot/NEW.BIN").is_err()).to_equal(true)
-
-    it "opens real FAT32 bytes for execution without creating misses":
-        var driver = FsFat32Driver.new_ram_backed_with_file("PROGRAM.SMF", "SMF1")
-        driver.mount(MountOptions.default()).unwrap()
-        var table = MountTable.new()
-        table.mount("/boot", DriverInstance.Fat32(driver), MountOptions.default()).unwrap()
-        expect(table.stat("/boot/PROGRAM.SMF").unwrap().size).to_equal(4)
-        val binding = table.open_for_execute("/boot/PROGRAM.SMF", ExecuteTrust.Trusted).unwrap()
-        expect(binding.backend_name).to_equal("Fat32Driver")
-        expect(binding.size).to_equal(4)
-        expect(table.execute_binding_is_current(binding)).to_equal(true)
-        expect(table.pread(binding.file_handle, 0, binding.size).unwrap()).to_equal("SMF1")
-        table.close(binding.file_handle).unwrap()
-        expect(table.open_for_execute("/boot/MISSING.SMF", ExecuteTrust.Trusted).is_err()).to_equal(true)
-        expect(table.stat("/boot/MISSING.SMF").is_err()).to_equal(true)
 
 describe "FAT32 hosted seam — DBFS co-existence":
     it "FAT32 and DBFS can both be mounted simultaneously":

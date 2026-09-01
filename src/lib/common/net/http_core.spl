@@ -72,6 +72,9 @@ fn content_length_from_text(s: text) -> i32:
 #   - duplicate Content-Length is a request-smuggling vector -> 400
 #   - invalid (negative/non-numeric/overflow) Content-Length -> 400
 #   - Content-Length above max_body -> 413
+#   - duplicate or ambiguous Transfer-Encoding -> 400
+#   - only the exact supported coding `chunked` is accepted; substring matches
+#     and unsupported coding chains are never interpreted as chunked
 #   - Transfer-Encoding: chunked when allow_chunked=false -> 501, never misparsed
 #   - Content-Length together with chunked (smuggling ambiguity) -> 400
 #   - duplicate singleton security headers (Host, Authorization, Origin,
@@ -83,6 +86,7 @@ fn _is_singleton_security_header(name: text) -> bool:
 fn body_decision(headers: [(text, text)], max_body: i32, allow_chunked: bool) -> (text, i32, bool):
     var content_length: i32 = 0
     var seen_content_length = false
+    var seen_transfer_encoding = false
     var chunked = false
     var security_names: [text] = []
     var security_values: [text] = []
@@ -109,10 +113,23 @@ fn body_decision(headers: [(text, text)], max_body: i32, allow_chunked: bool) ->
                 return ("413 Content-Length too large: {parsed_len}", 0, false)
             content_length = parsed_len
         elif lname == "transfer-encoding":
-            if h.1.to_lower().contains("chunked"):
-                if not allow_chunked:
-                    return ("501 Transfer-Encoding: chunked is not supported", 0, false)
-                chunked = true
+            # This server implements only the single `chunked` transfer
+            # coding.  Substring matching here is unsafe: `xchunked` and a
+            # non-final `chunked, identity` can be framed differently by a
+            # proxy, enabling request smuggling.  Multiple field lines are
+            # equally ambiguous after intermediary combination, so reject
+            # them rather than trying to normalize them.
+            if seen_transfer_encoding:
+                return ("400 Duplicate Transfer-Encoding header", 0, false)
+            seen_transfer_encoding = true
+            val coding = h.1.trim().to_lower()
+            if coding == "":
+                return ("400 Empty Transfer-Encoding header", 0, false)
+            if coding != "chunked":
+                return ("501 Unsupported Transfer-Encoding: {h.1}", 0, false)
+            if not allow_chunked:
+                return ("501 Transfer-Encoding: chunked is not supported", 0, false)
+            chunked = true
     # RFC 7230 §3.3.3: a message carrying both Content-Length and chunked
     # Transfer-Encoding is a request-smuggling vector — reject outright.
     if chunked and seen_content_length:

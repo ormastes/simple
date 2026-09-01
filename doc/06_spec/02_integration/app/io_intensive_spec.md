@@ -1,6 +1,6 @@
-# io_intensive_spec
+# Io Intensive Specification
 
-> Verifies the io intensive behaviour end to end so maintainers of this
+> Tests covering File I/O - Intensive, Directory Operations - Intensive, Process Execution - Intensive, Stream Processing - Intensive, Path Operations - Intensive, Error Handling - Intensive, Performance Testing - Intensive, Resource Management - Intensive.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# io_intensive_spec
-
-Verifies the io intensive behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/02_integration/app/io_intensive_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the io intensive behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Io Intensive Specification
 
 ## Scenarios
 
@@ -44,19 +22,18 @@ unrelated sibling features are out of scope.
 
 #### simulates writing 100 files _(slow)_
 
-- Verify: simulates writing 100 files
+- simulates writing 100 files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: simulates writing 100 files")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("simulates writing 100 files")
 var files = []
 
 for i in 0..100:
@@ -76,19 +53,18 @@ check(files.len() == 100)
 
 #### handles large file content _(slow)_
 
-- Verify: handles large file content
+- handles large file content
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: handles large file content")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles large file content")
 var parts: [text] = []
 for i in 0..1000:
     parts.push("line {i}\n")
@@ -109,19 +85,18 @@ check(large_content.len() > 5000)
 
 #### simulates reading 100 files _(slow)_
 
-- Verify: simulates reading 100 files
+- simulates reading 100 files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: simulates reading 100 files")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("simulates reading 100 files")
 var reads = 0
 
 for i in 0..100:
@@ -142,19 +117,18 @@ check(reads == 100)
 
 #### processes file contents _(slow)_
 
-- Verify: processes file contents
+- processes file contents
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: processes file contents")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("processes file contents")
 var files = [
     {"path": "a.txt", "size": 100},
     {"path": "b.txt", "size": 200},
@@ -180,19 +154,18 @@ check(total_size == 600)
 
 #### simulates file copy operations _(slow)_
 
-- Verify: simulates file copy operations
+- simulates file copy operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: simulates file copy operations")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("simulates file copy operations")
 var operations = []
 
 for i in 0..50:
@@ -212,19 +185,18 @@ check(operations.len() == 50)
 
 #### tracks file modifications _(slow)_
 
-- Verify: tracks file modifications
+- tracks file modifications
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: tracks file modifications")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tracks file modifications")
 var modifications = []
 
 for i in 0..200:
@@ -249,19 +221,18 @@ check(modifications.len() == 200)
 
 #### lists 500 directory entries _(slow)_
 
-- Verify: lists 500 directory entries
+- lists 500 directory entries
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: lists 500 directory entries")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("lists 500 directory entries")
 var entries = []
 
 for i in 0..500:
@@ -282,19 +253,18 @@ check(entries.len() == 500)
 
 #### filters entries by type _(slow)_
 
-- Verify: filters entries by type
+- filters entries by type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: filters entries by type")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("filters entries by type")
 var all_entries = []
 
 for i in 0..300:
@@ -326,19 +296,18 @@ check(dir_count == 150)
 
 #### traverses nested directory structure _(slow)_
 
-- Verify: traverses nested directory structure
+- traverses nested directory structure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: traverses nested directory structure")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("traverses nested directory structure")
 var paths = []
 
 for depth in 0..10:
@@ -348,6 +317,20 @@ for depth in 0..10:
 
 check(paths.len() == 100)
 ```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> var paths = []<br>
+> <br>
+> for depth in 0..10:<br>
+>     for item in 0..10:<br>
+>         val path = "level{depth}/ite$item$"<br>
+>         paths = paths.append(path)<br>
+> <br>
+> check(paths.len() == 100)
+
+</details>
 
 </details>
 
@@ -359,19 +342,18 @@ check(paths.len() == 100)
 
 #### builds directory tree _(slow)_
 
-- Verify: builds directory tree
+- builds directory tree
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: builds directory tree")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("builds directory tree")
 var tree = []
 
 for i in 0..50:
@@ -395,19 +377,18 @@ check(tree.len() == 50)
 
 #### simulates spawning 100 processes _(slow)_
 
-- Verify: simulates spawning 100 processes
+- simulates spawning 100 processes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: simulates spawning 100 processes")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("simulates spawning 100 processes")
 var processes = []
 
 for i in 0..100:
@@ -427,19 +408,18 @@ check(processes.len() == 100)
 
 #### tracks process lifecycle _(slow)_
 
-- Verify: tracks process lifecycle
+- tracks process lifecycle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: tracks process lifecycle")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tracks process lifecycle")
 var states = []
 
 for i in 0..200:
@@ -469,19 +449,18 @@ check(states.len() == 200)
 
 #### captures 100 process outputs _(slow)_
 
-- Verify: captures 100 process outputs
+- captures 100 process outputs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: captures 100 process outputs")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("captures 100 process outputs")
 var outputs = []
 
 for i in 0..100:
@@ -501,19 +480,18 @@ check(outputs.len() == 100)
 
 #### parses process exit codes _(slow)_
 
-- Verify: parses process exit codes
+- parses process exit codes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: parses process exit codes")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses process exit codes")
 var exit_codes = []
 
 for i in 0..500:
@@ -542,19 +520,18 @@ check(success_count == 100)
 
 #### reads 1000 lines from stream _(slow)_
 
-- Verify: reads 1000 lines from stream
+- reads 1000 lines from stream
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: reads 1000 lines from stream")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("reads 1000 lines from stream")
 var lines = []
 
 for i in 0..1000:
@@ -573,19 +550,18 @@ check(lines.len() == 1000)
 
 #### buffers stream data _(slow)_
 
-- Verify: buffers stream data
+- buffers stream data
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: buffers stream data")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("buffers stream data")
 var buffer = []
 var buffer_size = 100
 
@@ -611,19 +587,18 @@ check(buffer.len() < buffer_size)
 
 #### writes 1000 chunks to stream _(slow)_
 
-- Verify: writes 1000 chunks to stream
+- writes 1000 chunks to stream
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: writes 1000 chunks to stream")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("writes 1000 chunks to stream")
 var chunks = []
 
 for i in 0..1000:
@@ -643,19 +618,18 @@ check(chunks.len() == 1000)
 
 #### manages stream buffer _(slow)_
 
-- Verify: manages stream buffer
+- manages stream buffer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: manages stream buffer")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("manages stream buffer")
 var total_written = 0
 var chunk_sizes = [100, 200, 150, 300, 250]
 
@@ -679,19 +653,18 @@ check(total_written == 1000)
 
 #### builds 500 file paths _(slow)_
 
-- Verify: builds 500 file paths
+- builds 500 file paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: builds 500 file paths")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("builds 500 file paths")
 var paths = []
 
 for i in 0..500:
@@ -712,19 +685,18 @@ check(paths[0].contains("/"))
 
 #### normalizes paths _(slow)_
 
-- Verify: normalizes paths
+- normalizes paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: normalizes paths")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("normalizes paths")
 var paths = [
     "a/b/../c",
     "x/./y/z",
@@ -747,19 +719,18 @@ for path in paths:
 
 #### extracts path components from 200 paths _(slow)_
 
-- Verify: extracts path components from 200 paths
+- extracts path components from 200 paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: extracts path components from 200 paths")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("extracts path components from 200 paths")
 var components = []
 
 for i in 0..200:
@@ -780,19 +751,18 @@ check(components.len() == 200)
 
 #### determines file extensions _(slow)_
 
-- Verify: determines file extensions
+- determines file extensions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: determines file extensions")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("determines file extensions")
 var files = [
     "test.spl",
     "data.sdn",
@@ -823,19 +793,18 @@ check(extensions.len() == 4)
 
 #### simulates 100 file not found errors _(slow)_
 
-- Verify: simulates 100 file not found errors
+- simulates 100 file not found errors
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: simulates 100 file not found errors")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("simulates 100 file not found errors")
 var errors = []
 
 for i in 0..100:
@@ -855,19 +824,18 @@ check(errors.len() == 100)
 
 #### handles permission errors _(slow)_
 
-- Verify: handles permission errors
+- handles permission errors
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: handles permission errors")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles permission errors")
 val error_types = [
     "PermissionDenied",
     "FileNotFound",
@@ -891,19 +859,18 @@ for err_type in error_types:
 
 #### tracks failed process executions _(slow)_
 
-- Verify: tracks failed process executions
+- tracks failed process executions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: tracks failed process executions")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tracks failed process executions")
 var failures = []
 
 for i in 0..200:
@@ -928,19 +895,18 @@ check(failures.len() == 20)
 
 #### processes 2000 file operations _(slow)_
 
-- Verify: processes 2000 file operations
+- processes 2000 file operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: processes 2000 file operations")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("processes 2000 file operations")
 var operations = 0
 
 for i in 0..2000:
@@ -966,19 +932,18 @@ check(operations == 2000)
 
 #### handles concurrent operations _(slow)_
 
-- Verify: handles concurrent operations
+- handles concurrent operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: handles concurrent operations")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles concurrent operations")
 var concurrent = []
 
 for i in 0..500:
@@ -1003,19 +968,18 @@ check(concurrent.len() == 500)
 
 #### tracks 200 file handle allocations _(slow)_
 
-- Verify: tracks 200 file handle allocations
+- tracks 200 file handle allocations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: tracks 200 file handle allocations")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tracks 200 file handle allocations")
 var handles = []
 
 for i in 0..200:
@@ -1036,19 +1000,18 @@ check(handles.len() == 200)
 
 #### simulates handle cleanup _(slow)_
 
-- Verify: simulates handle cleanup
+- simulates handle cleanup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_IO_INTENSIVE-001
-step("Verify: simulates handle cleanup")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("simulates handle cleanup")
 var open_handles = 100
 var closed = 0
 
@@ -1078,36 +1041,50 @@ check(closed == 100)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `c98b9e4d7f5ce83d07566d3f05ea7ed3c8c8ad8decae5875317251c88d0bb123`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `efa99f21bc6fd27fcdf04cf75298debc8d4eb50c977eaccba80de9b37b7ae3bc`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `c98b9e4d7f5ce83d07566d3f05ea7ed3c8c8ad8decae5875317251c88d0bb123`.
+Source SHA-256: `efa99f21bc6fd27fcdf04cf75298debc8d4eb50c977eaccba80de9b37b7ae3bc`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `c98b9e4d7f5ce83d07566d3f05ea7ed3c8c8ad8decae5875317251c88d0bb123`  
+Source SHA-256: `efa99f21bc6fd27fcdf04cf75298debc8d4eb50c977eaccba80de9b37b7ae3bc`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/02_integration/app/io_intensive_spec.spl
 mirror: doc/06_spec/02_integration/app/io_intensive_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/app/io_intensive_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/02_integration/app/io_intensive_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/app/io_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/02_integration/app/io_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/app/io_intensive_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'simulates writing 100 files' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/io_intensive_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles large file content' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/io_intensive_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'simulates reading 100 files' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

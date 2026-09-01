@@ -692,12 +692,13 @@ fn _wm_draw_ir_chrome_revision(scene: SharedWmScene, taskbar: TaskbarModel, dpi_
 fn _wm_draw_ir_window_revision(window: SharedWmWindow) -> text:
     val focused = if window.focused: "1" else: "0"
     val minimized = if window.minimized: "1" else: "0"
+    val maximized = if window.maximized: "1" else: "0"
     # Scalar accessor, not the Option-returning snapshot helper: the Some
     # payload masks to null across the hosted cranelift ABI (instruction-
     # proven here — first hosted-WM frame died on this exact line).
     val active_material_sha = active_wm_theme_material_sha256()
     val material_revision = if active_material_sha != "": active_material_sha else: "wm-chrome-default-solid"
-    "wm.window:{window.window_id}:surface={window.surface_id}:xy={window.x},{window.y}:size={window.width}x{window.height}:z={window.z_index}:focused={focused}:minimized={minimized}:title={window.title}:lang={window.language}:material={material_revision}"
+    "wm.window:{window.window_id}:surface={window.surface_id}:xy={window.x},{window.y}:size={window.width}x{window.height}:z={window.z_index}:focused={focused}:minimized={minimized}:maximized={maximized}:title={window.title}:lang={window.language}:material={material_revision}"
 
 fn _wm_draw_ir_window_opacity(window: SharedWmWindow) -> i32:
     if window.focused:
@@ -1073,6 +1074,8 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
         commands.push(draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32))
         commands.push(draw_ir_rect("{window.window_id}-traffic-yellow", 30, 9, 10, 10, 0xFFF1C40Fu32))
         commands.push(draw_ir_rect("{window.window_id}-traffic-green", 48, 9, 10, 10, 0xFF27AE60u32))
+        val maximize_label = if window.maximized: "-" else: "+"
+        commands.push(_wm_draw_ir_text("{window.window_id}-maximize-state", 49, 18, 2, 10, maximize_label, chrome_snapshot.material.text_rgba, "und"))
         commands.push(_wm_draw_ir_window_title_text(chrome_snapshot, window, chrome_snapshot.material.text_rgba))
         commands.push(draw_ir_rect("{window.window_id}-close", window.width - 24, 2, 20, 20, theme.close_button))
         commands.push(_wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", chrome_snapshot.material.text_rgba, "und"))
@@ -1085,6 +1088,8 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
         commands.push(draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32))
         commands.push(draw_ir_rect("{window.window_id}-traffic-yellow", 30, 9, 10, 10, 0xFFF1C40Fu32))
         commands.push(draw_ir_rect("{window.window_id}-traffic-green", 48, 9, 10, 10, 0xFF27AE60u32))
+        val maximize_label = if window.maximized: "-" else: "+"
+        commands.push(_wm_draw_ir_text("{window.window_id}-maximize-state", 49, 18, 2, 10, maximize_label, theme.text_primary, "und"))
         commands.push(_wm_draw_ir_text("{window.window_id}-title", 66, 19, 0, 28, window.title, theme.text_primary, window.language))
         commands.push(draw_ir_rect("{window.window_id}-close", window.width - 24, 2, 20, 20, theme.close_button))
         commands.push(_wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", theme.text_primary, "und"))
@@ -1151,15 +1156,13 @@ fn _wm_draw_ir_child_content_frame_batch(frame: WmContentFrame, parent_window_id
         _wm_draw_ir_source("wm.content.{frame.window_id}", "wm.content", "rev={frame.content_revision};checksum={frame.checksum}")
     )
 
-fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarModel, backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrComposition:
+fn _shared_wm_scene_draw_ir_composition_ordered(scene: SharedWmScene, taskbar: TaskbarModel, backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32, windows: [SharedWmWindow]) -> DrawIrComposition:
     # Phase receipts: this builder is where the pointer-release render stalls
     # ([wm-comp] at=base-begin with no at=base-done, then total guest silence),
     # having completed for the press render moments earlier. Six lines per
     # composition, negligible beside a 4K repaint.
     if _WM_TRACE: print("[wm-base] at=desktop-batch")
     val desktop_batch = _wm_draw_ir_desktop_batch(scene, backend_target)
-    if _WM_TRACE: print("[wm-base] at=visible-windows-by-layer")
-    val windows = _wm_draw_ir_visible_windows_by_layer(scene)
     val dbg_layer_windows = windows.len()
     if _WM_TRACE: print("[wm-base] at=chrome-batch layer_windows={dbg_layer_windows}")
     var batches: [DrawIrBatch] = [desktop_batch, _wm_draw_ir_chrome_batch(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count)]
@@ -1173,6 +1176,11 @@ fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarMod
     val dbg_layout_key = shared_wm_scene_layout_key(scene)
     if _WM_TRACE: print("[wm-base] at=compose")
     draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, dbg_layout_key, backend_target, batches)
+
+fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarModel, backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrComposition:
+    if _WM_TRACE: print("[wm-base] at=visible-windows-by-layer")
+    val windows = _wm_draw_ir_visible_windows_by_layer(scene)
+    _shared_wm_scene_draw_ir_composition_ordered(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count, windows)
 
 # Recursively collects Draw IR batches for the content frames nested under
 # `parent_id` (parent_window_id == parent_id), one batch per child via
@@ -1217,18 +1225,22 @@ fn shared_wm_scene_draw_ir_composition_with_content(scene: SharedWmScene, taskba
     # same call with an identical scene_revision. base is built by a far larger
     # builder than the loop below, so both need to be distinguishable.
     if _WM_TRACE: print("[wm-comp] at=base-begin")
-    val base = shared_wm_scene_draw_ir_composition(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count)
+    val windows = _wm_draw_ir_visible_windows_by_layer(scene)
+    val base = _shared_wm_scene_draw_ir_composition_ordered(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count, windows)
     val dbg_base_batches = base.batches.len()
     val dbg_frames = content_frames.len()
     if _WM_TRACE: print("[wm-comp] at=base-done base_batches={dbg_base_batches} frames={dbg_frames}")
     if content_frames.len() == 0:
         return base
     var batches: [DrawIrBatch] = []
+    var window_index = 0
     for batch in base.batches:
         if _WM_TRACE: print("[wm-comp] at=batch id={batch.batch_id}")
         batches.push(batch)
-        for window in scene.windows:
-            if not window.minimized and batch.batch_id == "window-{window.window_id}":
+        if window_index < windows.len():
+            val window = windows[window_index]
+            if batch.batch_id == "window-{window.window_id}":
+                window_index = window_index + 1
                 val content = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
                 if content.width > 0 and content.height > 0:
                     if val frame = shared_wm_content_frame_for_window(content_frames, 0, window, 28):

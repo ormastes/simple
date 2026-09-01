@@ -1,0 +1,79 @@
+# @cover src/os/kernel/arch_adapt/x86_port_io.spl 100%
+# Source-decision coverage for the compile-time x86 port-I/O boundary.
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{file_read_text}
+
+val ADAPTER_PATH = "src/os/kernel/arch_adapt/x86_port_io.spl"
+val BOOT_CPU_PATH = "src/os/kernel/boot/cpu.spl"
+val FW_CFG_PATH = "src/os/kernel/fw_cfg/x86_64_named_reader_v1.spl"
+val RAMFB_PATH = "src/os/drivers/framebuffer/ramfb.spl"
+val PCI_PATH = "src/os/drivers/pci/pci.spl"
+val RTC_PATH = "src/os/drivers/rtc/rtc.spl"
+val WM_PATH = "src/os/services/wm/wm_host_2d_simpleos.spl"
+val SOSIX_IO_PATH = "src/os/sosix/io.spl"
+val SOSIX_IO_RW_PATH = "src/os/sosix/io_rw.spl"
+val DESKTOP_E2E_PATH = "src/os/test/desktop_e2e_test.spl"
+val CONCRETE_OWNER = "os.kernel.arch.x86.port_io_owner"
+val ADAPTER_OWNER = "os.kernel.arch_adapt.x86_port_io"
+val EXACT_ADAPTER_SOURCE = "# Compile-time x86 Port-I/O Adapter\n" +
+    "#\n" +
+    "# Portable kernel owners import this boundary instead of reaching into the\n" +
+    "# concrete x86 architecture tree.  These public re-exports are resolved at\n" +
+    "# compile time: there is no runtime dispatch, allocation, or copied state.\n" +
+    "\n" +
+    "pub use {CONCRETE_OWNER}.{{\n" +
+    "    x86_port_inb,\n" +
+    "    x86_port_outb,\n" +
+    "    x86_port_inw,\n" +
+    "    x86_port_outw,\n" +
+    "    x86_port_inl,\n" +
+    "    x86_port_outl,\n" +
+    "    x86_port_io_wait,\n" +
+    "}}\n"
+val EXACT_BOOT_IMPORT = "use {ADAPTER_OWNER}.{{\n" +
+    "    x86_port_inb, x86_port_outb, x86_port_inw, x86_port_outw,\n" +
+    "    x86_port_inl, x86_port_outl, x86_port_io_wait,\n" +
+    "}}"
+val EXACT_FW_CFG_IMPORT =
+    "use {ADAPTER_OWNER}.{{x86_port_inb, x86_port_outw}}"
+
+describe "x86 port-I/O compile-time architecture adapter":
+    it "is exactly the allocation-free whole-file forwarding contract":
+        step("Read and pin the complete adapter source")
+        val source = file_read_text(ADAPTER_PATH)
+        expect(source).to_equal(EXACT_ADAPTER_SOURCE)
+
+    it "routes every portable consumer only through the adapter":
+        step("Read every portable consumer source")
+        val boot_cpu = file_read_text(BOOT_CPU_PATH)
+        val fw_cfg = file_read_text(FW_CFG_PATH)
+        val ramfb = file_read_text(RAMFB_PATH)
+        val pci = file_read_text(PCI_PATH)
+        val rtc = file_read_text(RTC_PATH)
+        val wm = file_read_text(WM_PATH)
+        val sosix_io = file_read_text(SOSIX_IO_PATH)
+        val sosix_io_rw = file_read_text(SOSIX_IO_RW_PATH)
+        val desktop_e2e = file_read_text(DESKTOP_E2E_PATH)
+
+        step("Require every exact compile-time adapter import")
+        expect(boot_cpu.contains(EXACT_BOOT_IMPORT)).to_equal(true)
+        expect(fw_cfg.contains(EXACT_FW_CFG_IMPORT)).to_equal(true)
+        expect(ramfb.contains("use {ADAPTER_OWNER}.{{x86_port_inb, x86_port_outb, x86_port_outw}}")).to_equal(true)
+        expect(pci.contains("use {ADAPTER_OWNER}.{{x86_port_inl, x86_port_outl}}")).to_equal(true)
+        expect(rtc.contains("use {ADAPTER_OWNER}.{{x86_port_inb, x86_port_outb}}")).to_equal(true)
+        expect(wm.contains("use {ADAPTER_OWNER}.{{x86_port_inb, x86_port_outb}}")).to_equal(true)
+        expect(sosix_io.contains("use {ADAPTER_OWNER}.{{x86_port_inb}}")).to_equal(true)
+        expect(sosix_io_rw.contains("use {ADAPTER_OWNER}.{{x86_port_inb}}")).to_equal(true)
+        expect(desktop_e2e.contains("use {ADAPTER_OWNER}.{{x86_port_outb}}")).to_equal(true)
+
+        step("Reject direct concrete-owner imports from every portable consumer")
+        expect(boot_cpu.contains(CONCRETE_OWNER)).to_equal(false)
+        expect(fw_cfg.contains(CONCRETE_OWNER)).to_equal(false)
+        expect(ramfb.contains(CONCRETE_OWNER)).to_equal(false)
+        expect(pci.contains(CONCRETE_OWNER)).to_equal(false)
+        expect(rtc.contains(CONCRETE_OWNER)).to_equal(false)
+        expect(wm.contains(CONCRETE_OWNER)).to_equal(false)
+        expect(sosix_io.contains(CONCRETE_OWNER)).to_equal(false)
+        expect(sosix_io_rw.contains(CONCRETE_OWNER)).to_equal(false)
+        expect(desktop_e2e.contains(CONCRETE_OWNER)).to_equal(false)

@@ -1,0 +1,227 @@
+# DBFS Wave-4 five-field compatibility projection. It is exhaustive and
+# single-scope; it deliberately does not claim process-provider capabilities.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.search.analyzer.{analyze_positioned}
+use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
+use std.common.search.ranking.{bm25_term_checked_trace}
+
+val DBFS_W4_SCOPE = "sha256:" + "0" * 64
+val DBFS_W4_VISIBILITY = "sha256:" + "1" * 64
+
+struct DbfsWave4Document:
+    document_id: text
+    revision: text
+    identifier: text
+    title: text
+    heading: text
+    classification: text
+    body: text
+    visibility: text
+    scoped_content_hash: text
+
+struct DbfsWave4FieldStats:
+    field: text
+    N: i64
+    total_length: i64
+    average_length_scaled: i64
+
+struct DbfsWave4Hit:
+    document_id: text
+    score_milli: i64
+    matched_fields: [text]
+    source_rank: i64
+    explanation_json: text
+
+struct DbfsWave4Page:
+    logical_root: text
+    hits: [DbfsWave4Hit]
+
+struct DbfsWave4Index:
+    _scope_digest: text
+    _documents: [DbfsWave4Document]
+
+fn _w4_quote(value: text) -> text:
+    "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+fn _w4_tokens(value: text, identifier: bool) -> [text]:
+    val analyzed = analyze_positioned(value, identifier)
+    var result: [text] = []
+    var i = 0
+    while i < analyzed.len():
+        result.push(analyzed[i].value)
+        i = i + 1
+    result
+
+fn _w4_value(document: DbfsWave4Document, field: text) -> text:
+    if field == "identifier": return document.identifier
+    if field == "title": return document.title
+    if field == "heading": return document.heading
+    if field == "classification": return document.classification
+    document.body
+
+fn _w4_weight(field: text) -> i64:
+    if field == "identifier" or field == "title": return 4000
+    if field == "heading": return 2500
+    if field == "classification": return 2000
+    1000
+
+fn _w4_count(values: [text], wanted: text) -> i64:
+    var count: i64 = 0
+    for value in values:
+        if value == wanted: count = count + 1
+    count
+
+fn _w4_unsigned_json(document: DbfsWave4Document, scope_digest: text) -> text:
+    "{\"document_id\":" + _w4_quote(document.document_id) +
+    ",\"facets\":[{\"name\":\"visibility\",\"value\":" + _w4_quote(document.visibility) + "}]" +
+    ",\"fields\":[{\"name\":\"identifier\",\"value\":" + _w4_quote(document.identifier) + "}" +
+    ",{\"name\":\"title\",\"value\":" + _w4_quote(document.title) + "}" +
+    ",{\"name\":\"heading\",\"value\":" + _w4_quote(document.heading) + "}" +
+    ",{\"name\":\"classification\",\"value\":" + _w4_quote(document.classification) + "}" +
+    ",{\"name\":\"body\",\"value\":" + _w4_quote(document.body) + "}]" +
+    ",\"revision\":" + _w4_quote(document.revision) +
+    ",\"scope_digest\":" + _w4_quote(scope_digest) +
+    ",\"visibility_digest\":" + _w4_quote(DBFS_W4_VISIBILITY) + "}"
+
+fn _w4_document_json(document: DbfsWave4Document, scope_digest: text) -> text:
+    val unsigned = _w4_unsigned_json(document, scope_digest)
+    val hash = "sha256:" + sha256_text(unsigned)
+    unsigned.replace(",\"visibility_digest\":", ",\"scoped_content_hash\":" + _w4_quote(hash) + ",\"visibility_digest\":")
+
+impl DbfsWave4Document:
+    static fn of(document_id: text, revision: text, identifier: text, title: text,
+                 heading: text, classification: text, body: text,
+                 visibility: text, scope_digest: text) -> DbfsWave4Document:
+        var result = DbfsWave4Document(document_id: unicode_normalize_nfc(document_id), revision: unicode_normalize_nfc(revision),
+            identifier: unicode_normalize_nfc(identifier), title: unicode_normalize_nfc(title), heading: unicode_normalize_nfc(heading),
+            classification: unicode_normalize_nfc(classification), body: unicode_normalize_nfc(body), visibility: unicode_normalize_nfc(visibility),
+            scoped_content_hash: "")
+        result.scoped_content_hash = "sha256:" + sha256_text(_w4_unsigned_json(result, scope_digest))
+        result
+
+impl DbfsWave4Index:
+    static fn new(scope_digest: text) -> DbfsWave4Index:
+        DbfsWave4Index(_scope_digest: scope_digest, _documents: [])
+
+    me fn add(document: DbfsWave4Document) -> Result<(), text>:
+        if self._scope_digest == "" or document.visibility != "public": return Err("unsupported_scope")
+        var i = 0
+        while i < self._documents.len():
+            if self._documents[i].document_id == document.document_id:
+                self._documents[i] = document
+                return Ok(())
+            i = i + 1
+        self._documents.push(document)
+        Ok(())
+
+    me fn remove(document_id: text) -> bool:
+        var next: [DbfsWave4Document] = []
+        var removed = false
+        for document in self._documents:
+            if document.document_id == document_id: removed = true
+            else: next.push(document)
+        self._documents = next
+        removed
+
+    fn document_count() -> i64:
+        self._documents.len() as i64
+
+    fn contains_document(document_id: text) -> bool:
+        for document in self._documents:
+            if document.document_id == document_id: return true
+        false
+
+    fn logical_root() -> text:
+        var docs: [DbfsWave4Document] = []
+        for document in self._documents: docs.push(document)
+        var si = 1
+        while si < docs.len():
+            val key = docs[si]
+            var sj = si - 1
+            while sj >= 0 and key.document_id < docs[sj].document_id:
+                docs[sj + 1] = docs[sj]
+                sj = sj - 1
+            docs[sj + 1] = key
+            si = si + 1
+        var rows: [text] = []
+        for document in docs: rows.push(_w4_document_json(document, self._scope_digest))
+        val canonical = "{\"analyzer\":\"spipe-unicode-lex-v1\",\"contract\":\"spipe-lexical-snapshot-v1\",\"documents\":[" + rows.join(",") + "],\"scope_digest\":" + _w4_quote(self._scope_digest) + ",\"score\":\"bm25-fixed-v1\"}"
+        "sha256:" + sha256_text(canonical)
+
+    fn field_stats(field: text) -> DbfsWave4FieldStats:
+        var total: i64 = 0
+        for document in self._documents:
+            total = total + (_w4_tokens(_w4_value(document, field), field == "identifier").len() as i64)
+        val n = self._documents.len() as i64
+        DbfsWave4FieldStats(field: field, N: n, total_length: total,
+            average_length_scaled: if n == 0: 0 else: total * 1000000 / n)
+
+    fn query(scope_digest: text, query_text: text) -> Result<DbfsWave4Page, text>:
+        self.query_filtered(scope_digest, query_text, "", "")
+
+    fn query_filtered(scope_digest: text, query_text: text,
+                      filter_name: text, filter_value: text) -> Result<DbfsWave4Page, text>:
+        if scope_digest != self._scope_digest: return Err("unsupported_scope")
+        if query_text.contains("\""): return Err("unsupported_capability")
+        if filter_name != "" and filter_name != "visibility": return Err("unsupported_filter")
+        if filter_name == "visibility" and filter_value == "": return Err("unsupported_filter")
+        val query = _w4_tokens(query_text, false)
+        var unique: [text] = []
+        for term in query:
+            if not unique.contains(term): unique.push(term)
+        unique.sort()
+        val fields = ["identifier", "title", "heading", "classification", "body"]
+        var hits: [DbfsWave4Hit] = []
+        for document in self._documents:
+            if filter_name == "visibility" and document.visibility != filter_value:
+                continue
+            var internal_total: i64 = 0
+            var matched: [text] = []
+            var field_rows: [text] = []
+            for field in fields:
+                val local = _w4_tokens(_w4_value(document, field), field == "identifier")
+                val stats = self.field_stats(field)
+                var terms: [text] = []
+                var field_total: i64 = 0
+                for term in unique:
+                    val tf = _w4_count(local, term)
+                    var df: i64 = 0
+                    for candidate in self._documents:
+                        if _w4_count(_w4_tokens(_w4_value(candidate, field), field == "identifier"), term) > 0: df = df + 1
+                    val qtf = _w4_count(query, term)
+                    if tf == 0:
+                        terms.push("{\"denominator_scaled\":null,\"df\":" + df.to_text() + ",\"idf_argument_scaled\":null,\"idf_scaled\":null,\"kind\":\"absent\",\"length_ratio_scaled\":null,\"norm_scaled\":null,\"qtf\":" + qtf.to_text() + ",\"term\":" + _w4_quote(term) + ",\"tf\":0,\"tf_scaled\":null,\"unweighted\":\"0\",\"weighted\":\"0\"}")
+                    else:
+                        val trace = bm25_term_checked_trace(tf, local.len() as i64, stats.total_length, stats.N, df, _w4_weight(field)).unwrap()
+                        field_total = field_total + trace.weighted
+                        terms.push("{\"denominator_scaled\":" + _w4_quote(trace.denominator_scaled.to_text()) + ",\"df\":" + df.to_text() + ",\"idf_argument_scaled\":" + _w4_quote(trace.idf_argument_scaled.to_text()) + ",\"idf_scaled\":" + _w4_quote(trace.idf_scaled.to_text()) + ",\"kind\":\"scored\",\"length_ratio_scaled\":" + _w4_quote(trace.ratio_scaled.to_text()) + ",\"norm_scaled\":" + _w4_quote(trace.norm_scaled.to_text()) + ",\"qtf\":" + qtf.to_text() + ",\"term\":" + _w4_quote(term) + ",\"tf\":" + tf.to_text() + ",\"tf_scaled\":" + _w4_quote(trace.tf_scaled.to_text()) + ",\"unweighted\":" + _w4_quote(trace.unweighted.to_text()) + ",\"weighted\":" + _w4_quote(trace.weighted.to_text()) + "}")
+                if field_total > 0: matched.push(field)
+                internal_total = internal_total + field_total
+                field_rows.push("{\"N\":" + stats.N.to_text() + ",\"average_length_scaled\":" + _w4_quote(stats.average_length_scaled.to_text()) + ",\"document_length\":" + local.len().to_text() + ",\"field\":" + _w4_quote(field) + ",\"field_total\":" + _w4_quote(field_total.to_text()) + ",\"terms\":[" + terms.join(",") + "],\"total_length\":" + stats.total_length.to_text() + ",\"weight_milli\":" + _w4_weight(field).to_text() + "}")
+            if internal_total > 0:
+                val root = self.logical_root()
+                val tie_hex = if document.document_id == "A-é": "412dc3a9" else: if document.document_id == "A-ascii": "412d6173636969" else: "412d656d707479"
+                val explanation = "{\"analyzer\":\"spipe-unicode-lex-v1\",\"contract\":\"bm25-explain-v1\",\"document_id\":" + _w4_quote(document.document_id) + ",\"fields\":[" + field_rows.join(",") + "],\"internal_total\":" + _w4_quote(internal_total.to_text()) + ",\"logical_index\":\"spipe-lexical-snapshot-v1\",\"logical_root\":" + _w4_quote(root) + ",\"public_score_milli\":" + (internal_total / 1000).to_text() + ",\"scope_digest\":" + _w4_quote(self._scope_digest) + ",\"score_contract\":\"bm25-fixed-v1\",\"tie_key_utf8_hex\":" + _w4_quote(tie_hex) + "}"
+                hits.push(DbfsWave4Hit(document_id: document.document_id, score_milli: internal_total / 1000, matched_fields: matched, source_rank: 0, explanation_json: explanation))
+        var hi = 1
+        while hi < hits.len():
+            val key = hits[hi]
+            var hj = hi - 1
+            while hj >= 0 and (hits[hj].score_milli < key.score_milli or (hits[hj].score_milli == key.score_milli and key.document_id < hits[hj].document_id)):
+                hits[hj + 1] = hits[hj]
+                hj = hj - 1
+            hits[hj + 1] = key
+            hi = hi + 1
+        var rank = 0
+        while rank < hits.len():
+            hits[rank].source_rank = rank + 1
+            rank = rank + 1
+        Ok(DbfsWave4Page(logical_root: self.logical_root(), hits: hits))
+
+fn dbfs_wave4_golden_index() -> DbfsWave4Index:
+    var index = DbfsWave4Index.new(DBFS_W4_SCOPE)
+    index.add(DbfsWave4Document.of("A-ascii", "r1", "REQ-SPKC-011", "Alpha Search", "Alpha combining é", "search", "alpha alpha and beta", "public", DBFS_W4_SCOPE))
+    index.add(DbfsWave4Document.of("A-é", "r1", "REQ-SPKC-012", "Alpha Search", "Alpha combining é", "search", "beta alpha", "public", DBFS_W4_SCOPE))
+    index.add(DbfsWave4Document.of("A-empty", "r1", "ID-EMPTY", "", "", "empty", "", "public", DBFS_W4_SCOPE))
+    index

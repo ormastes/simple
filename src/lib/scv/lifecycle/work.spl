@@ -1,0 +1,32 @@
+# codex-impl
+# Durable work graph validation; ephemeral runs cannot replace features/tasks.
+
+use std.scv.lifecycle.model.{Feature, Task, LifecycleRun, LifecycleResult, lifecycle_ok, lifecycle_error}
+use std.scv.lifecycle.codec.{LifecycleRecord, lifecycle_record}
+
+fn lifecycle_feature_validate(feature: Feature) -> LifecycleResult:
+    if not feature.feature_id.starts_with("FEAT-") or feature.title == "" or feature.goal == "":
+        return lifecycle_error("LIFECYCLE_FEATURE", "feature identity, title, and goal are required")
+    if feature.acceptance_ids.len() == 0 or feature.document_paths.len() == 0:
+        return lifecycle_error("LIFECYCLE_FEATURE_LINKS", "feature requires acceptance criteria and layer documents")
+    lifecycle_ok("feature_valid", feature.feature_id)
+
+fn lifecycle_task_validate(task: Task, feature: Feature) -> LifecycleResult:
+    if not task.task_id.starts_with("TASK-") or task.feature_id != feature.feature_id:
+        return lifecycle_error("LIFECYCLE_TASK", "task must have its own identity and link one feature")
+    lifecycle_ok("task_valid", task.task_id)
+
+fn lifecycle_run_validate(run: LifecycleRun, task: Task) -> LifecycleResult:
+    if not run.run_id.starts_with("RUN-") or run.task_id != task.task_id:
+        return lifecycle_error("LIFECYCLE_RUN", "run must remain an ephemeral execution linked to one task")
+    if run.run_id == run.feature_id or run.run_id == run.task_id:
+        return lifecycle_error("LIFECYCLE_RUN_IDENTITY", "run identity cannot replace durable feature or task identity")
+    lifecycle_ok("run_valid", run.run_id)
+
+fn lifecycle_feature_record(feature: Feature) -> LifecycleRecord:
+    lifecycle_record("feature", feature.feature_id, [
+        feature.title, feature.state, feature.owner, feature.goal,
+        feature.acceptance_ids.join(","), feature.document_paths.join(","), feature.task_ids.join(",")
+    ])
+
+export lifecycle_feature_validate, lifecycle_task_validate, lifecycle_run_validate, lifecycle_feature_record

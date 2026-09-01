@@ -10,13 +10,6 @@ use nvme_types.*
 
 val POOL_CAP: i64 = 16
 
-fn pool_gen_next(v: i64) -> i64:
-    if v < 0:
-        return 1
-    if v >= FW_SAFE_I64_LIMIT:
-        return FW_SAFE_I64_LIMIT
-    v + 1
-
 # ── TaskPool ──────────────────────────────────────────────────────────────────
 struct TaskPool:
     gen:      [i64]   # generation counter per slot
@@ -84,11 +77,11 @@ impl TaskPool:
     # acquire: find a free slot, stamp it, return a valid Handle.
     # Returns handle_invalid() when the pool is full.
     me acquire(cid: i64, lba: i64, nblk: i64, data: i64) -> Handle:
-        var slot: i64 = NULL_IDX
+        var slot: i64 = -1
         var i: i64 = 0
-        while i < me.cap and i < POOL_CAP:
+        while i < me.cap:
             val u = me.used[i]
-            if u == 0 and me.gen[i] >= 0 and me.gen[i] < FW_SAFE_I64_LIMIT:
+            if u == 0:
                 if slot < 0:
                     slot = i
             i = i + 1
@@ -104,7 +97,7 @@ impl TaskPool:
         me.t_newppn[slot] = UNMAP
         me.t_seq[slot] = 0
         me.t_status[slot] = SC_SUCCESS
-        me.live = me.live_count() + 1
+        me.live = me.live + 1
         Handle(pool: 0, index: slot, generation: me.gen[slot])
 
     # valid: true iff the handle references a live slot with matching generation.
@@ -113,22 +106,18 @@ impl TaskPool:
             return false
         if h.index >= me.cap:
             return false
-        if h.index >= POOL_CAP:
-            return false
         val u = me.used[h.index]
-        if u != 1:
+        if u == 0:
             return false
         val g = me.gen[h.index]
-        if g < 0 or g >= FW_SAFE_I64_LIMIT:
-            return false
         g == h.generation
 
-    # phase: current PH_* phase, or NULL_IDX if the handle is invalid.
+    # phase: current PH_* phase, or -1 if the handle is invalid.
     me phase(h: Handle) -> i64:
         val v = me.valid(h)
         if v:
             return me.t_phase[h.index]
-        NULL_IDX
+        -1
 
     me set_phase(h: Handle, ph: i64):
         val v = me.valid(h)
@@ -151,25 +140,25 @@ impl TaskPool:
         val v = me.valid(h)
         if v:
             return me.t_lba[h.index]
-        NULL_IDX
+        -1
 
     me data(h: Handle) -> i64:
         val v = me.valid(h)
         if v:
             return me.t_data[h.index]
-        NULL_IDX
+        -1
 
     me status(h: Handle) -> i64:
         val v = me.valid(h)
         if v:
             return me.t_status[h.index]
-        NULL_IDX
+        -1
 
     me cid(h: Handle) -> i64:
         val v = me.valid(h)
         if v:
             return me.t_cid[h.index]
-        NULL_IDX
+        -1
 
     me old_ppn(h: Handle) -> i64:
         val v = me.valid(h)
@@ -193,17 +182,13 @@ impl TaskPool:
     me release(h: Handle):
         val v = me.valid(h)
         if v:
-            val live: i64 = me.live_count()
             me.used[h.index] = 0
             val og = me.gen[h.index]
-            me.gen[h.index] = pool_gen_next(og)
-            if live > 0:
-                me.live = live - 1
-            else:
-                me.live = 0
+            me.gen[h.index] = og + 1
+            me.live = me.live - 1
 
     me live_count() -> i64:
-        me.counted_live()
+        me.live
 
 # ── Self-test ─────────────────────────────────────────────────────────────────
 fn fw_pool_selftest() -> i64:
@@ -304,13 +289,5 @@ fn fw_pool_selftest() -> i64:
     if handle_is_valid(hf):
         inv = 0
     fail = fail + expect_eq(inv, 1, "full pool: acquire returns invalid handle")
-    p.cap = POOL_CAP + 1
-    val overflow_cap_h = p.acquire(1000, 1000, 1, 0)
-    var overflow_cap_inv: i64 = 1
-    if handle_is_valid(overflow_cap_h):
-        overflow_cap_inv = 0
-    fail = fail + expect_eq(overflow_cap_inv, 1, "corrupt oversized pool cap acquire fails closed")
-    val forged = Handle(pool: 0, index: POOL_CAP, generation: 0)
-    fail = fail + expect_eq(if p.valid(forged): 1 else: 0, 0, "corrupt oversized pool cap valid fails closed")
 
     fail

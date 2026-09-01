@@ -1,0 +1,134 @@
+# SCV-IMPL-D-06 — merge validation ladder.
+#
+# Every aggressive merge stage's output must be VALIDATED before acceptance:
+#   bytes -> parse -> entity_uniqueness -> interface -> compile -> tests
+#
+# The first four rungs always run in-process:
+#   bytes             non-empty, no NUL, no conflict-marker text
+#   parse             P-05 text-block scan + D-05 line-balance check
+#   entity_uniqueness no duplicate top-level declaration names
+#   interface         the compile-interface digest is derivable from the
+#                     merged surface (hir_fingerprint.spl, G-05)
+#
+# HONESTY (spec-pinned): the compile and tests rungs CANNOT be run from
+# stdlib under the seed — library code must not invoke the compiler or the
+# test runner. They are therefore PLUGGABLE: the caller passes each rung's
+# status ("pass" | "fail" | "unavailable"); the default is "unavailable".
+# "unavailable" DOWNGRADES the overall claim to `validated_partial` — it is
+# never treated as a pass and the ladder never claims `clean` over a failed
+# or unavailable rung. Any unknown status is a FAILURE (fail-closed), and any
+# failing rung yields `rejected` with later rungs reported `skipped`.
+#
+# merge.spl gates its aggressive stages (structural anchor merge, D-05 region
+# merge) on scv_merge_validation_accept — the always-available rungs — before
+# a merged file is written; a rejected result falls through toward conflict.
+
+use std.scv.structural_match.{scv_text_block_names}
+use std.scv.region_merge.{scv_region_line_balance_ok}
+use std.scv.hir_fingerprint.{scv_syntactic_interface_id}
+
+fn scv_merge_validation_version() -> text:
+    "scv/merge-validation/v1"
+
+fn scv_merge_validation_rungs() -> [text]:
+    ["bytes", "parse", "entity_uniqueness", "interface", "compile", "tests"]
+
+fn scv_validate_bytes(content: text) -> text:
+    if content == "":
+        return "fail: empty merge output"
+    if content.contains("\u0000"):
+        return "fail: NUL byte in merge output"
+    for line in content.split("\n"):
+        if line.starts_with("<<<<<<<") or line.starts_with("=======") or line.starts_with(">>>>>>>"):
+            return "fail: conflict marker text"
+    "pass"
+
+fn scv_validate_parse(content: text) -> text:
+    if not scv_region_line_balance_ok(content):
+        return "fail: unbalanced delimiters"
+    "pass"
+
+fn scv_validate_entity_uniqueness(content: text) -> text:
+    val names = scv_text_block_names(content)
+    # the P-05 scanner de-duplicates names, so duplicates are found by count
+    var counts = ""
+    for line in content.split("\n"):
+        for name in names:
+            if line.trim().starts_with("fn {name}(") or line.trim() == "fn {name}():":
+                counts = counts + name + "\n"
+    for name in names:
+        var seen = 0
+        for row in counts.split("\n"):
+            if row == name:
+                seen = seen + 1
+        if seen > 1:
+            return "fail: duplicate entity {name}"
+    "pass"
+
+fn scv_validate_interface(content: text) -> text:
+    val digest = scv_syntactic_interface_id("scv.merge.validation", content)
+    if digest == "":
+        return "fail: no interface digest derivable"
+    "pass"
+
+fn scv_mv_status_ok(status: text) -> bool:
+    status == "pass" or status == "fail" or status == "unavailable"
+
+# Report rows "rung: status" plus a final "verdict:" row.
+# verdict: clean (all six pass) | validated_partial (no failure, but at least
+# one pluggable rung unavailable) | rejected (any failure; later rungs skipped).
+fn scv_merge_validation_ladder(content: text, compile_status: text, tests_status: text) -> text:
+    var report = ""
+    var failed = false
+    var partial = false
+    val cs = if scv_mv_status_ok(compile_status): compile_status else: "fail: invalid status {compile_status}"
+    val ts = if scv_mv_status_ok(tests_status): tests_status else: "fail: invalid status {tests_status}"
+    val rungs = scv_merge_validation_rungs()
+    for rung in rungs:
+        if failed:
+            report = report + "{rung}: skipped\n"
+            continue
+        var status = "pass"
+        if rung == "bytes":
+            status = scv_validate_bytes(content)
+        elif rung == "parse":
+            status = scv_validate_parse(content)
+        elif rung == "entity_uniqueness":
+            status = scv_validate_entity_uniqueness(content)
+        elif rung == "interface":
+            status = scv_validate_interface(content)
+        elif rung == "compile":
+            status = cs
+        else:
+            status = ts
+        report = report + "{rung}: {status}\n"
+        if status.starts_with("fail"):
+            failed = true
+        elif status == "unavailable":
+            partial = true
+    if failed:
+        report + "verdict: rejected\n"
+    elif partial:
+        report + "verdict: validated_partial\n"
+    else:
+        report + "verdict: clean\n"
+
+fn scv_merge_validation_verdict(report: text) -> text:
+    for line in report.split("\n"):
+        if line.starts_with("verdict: "):
+            return line[9:]
+    ""
+
+# Acceptance gate for aggressive merge stages: the always-available rungs.
+fn scv_merge_validation_accept(content: text) -> bool:
+    if scv_validate_bytes(content) != "pass":
+        return false
+    if scv_validate_parse(content) != "pass":
+        return false
+    if scv_validate_entity_uniqueness(content) != "pass":
+        return false
+    scv_validate_interface(content) == "pass"
+
+export scv_merge_validation_version, scv_merge_validation_rungs
+export scv_validate_bytes, scv_validate_parse, scv_validate_entity_uniqueness, scv_validate_interface
+export scv_merge_validation_ladder, scv_merge_validation_verdict, scv_merge_validation_accept

@@ -1,0 +1,67 @@
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate,
+    ghdl_run, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_product_to_vhdl.{
+    compile_strict_riscv_scalar_product}
+
+fn control_tb(entity_name: text, tb_name: text, rs1: text, rs2: text,
+    expect_redirect: text, target: text, expect_trap: text,
+    cause: text, tval: text, expect_write: text) -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n" +
+    "entity " + tb_name + " is end entity; architecture sim of " + tb_name + " is\n" +
+    " signal clk,rst,in_valid,retire_ready: std_logic := '0'; signal in_ready,redirect_valid,retire_valid,retire_trap,retire_rd_write,protocol_fault: std_logic;\n" +
+    " signal redirect_target,retire_pc_after,retire_cause,retire_tval: std_logic_vector(31 downto 0); begin clk<=not clk after 5 ns;\n" +
+    " dut: entity work." + entity_name + " port map(clk=>clk,rst=>rst,retire_ready=>retire_ready," +
+    "illegal_valid=>'0',interrupt_valid=>'0',interrupt_cause=>(others=>'0'),interrupt_event_id=>(others=>'0')," +
+    "provider_event_id=>std_logic_vector(to_unsigned(41,64)),decode_event_id=>std_logic_vector(to_unsigned(41,64))," +
+    "interrupt_held=>'0',between_events=>'0',in_order=>std_logic_vector(to_unsigned(41,64)),in_privilege=>\"11\"," +
+    "in_pc=>x\"00001000\",rs1_index=>\"00001\",rs1_value=>x\"" + rs1 + "\"," +
+    "rs2_index=>\"00010\",rs2_value=>x\"" + rs2 + "\",in_valid=>in_valid,in_ready=>in_ready," +
+    "redirect_valid=>redirect_valid,redirect_target=>redirect_target,dispatch_accept=>open," +
+    "retire_valid=>retire_valid,retire_order=>open,protocol_fault=>protocol_fault,retire_xlen=>open," +
+    "retire_privilege=>open,retire_original_instruction=>open,retire_canonical_instruction=>open," +
+    "retire_instruction_length_bytes=>open,retire_pc_before=>open,retire_pc_after=>retire_pc_after," +
+    "retire_rd=>open,retire_rd_write=>retire_rd_write,retire_rd_value=>open,retire_memory_address=>open," +
+    "retire_memory_read_mask=>open,retire_memory_write_mask=>open,retire_memory_read_data=>open," +
+    "retire_memory_write_data=>open,retire_trap=>retire_trap,retire_interrupt=>open," +
+    "retire_cause=>retire_cause,retire_tval=>retire_tval);\n" +
+    " process begin rst<='1'; wait until rising_edge(clk); wait until rising_edge(clk); rst<='0'; wait for 1 ns;\n" +
+    # The provider payload is captured into the skid on this edge. Redirect is
+    # intentionally observed afterward from arbitration.provider_accept, not
+    # from raw combinational in_valid.
+    " assert in_ready='1' report \"control product not ready\" severity failure; in_valid<='1'; wait until rising_edge(clk); in_valid<='0'; wait for 1 ns;\n" +
+    " assert redirect_valid='" + expect_redirect + "' and redirect_target=x\"" + target + "\" report \"control redirect acceptance mismatch\" severity failure;\n" +
+    " wait until rising_edge(clk); wait for 1 ns; assert redirect_valid='0' report \"control redirect duplicated while retirement stalled\" severity failure;\n" +
+    " for i in 0 to 5 loop exit when retire_valid='1'; wait until rising_edge(clk); wait for 1 ns; end loop;\n" +
+    " assert retire_valid='1' and retire_trap='" + expect_trap + "' and retire_rd_write='" + expect_write + "' report \"control retirement effects mismatch\" severity failure;\n" +
+    " assert retire_pc_after=x\"" + target + "\" and retire_cause=x\"" + cause + "\" and retire_tval=x\"" + tval + "\" report \"control retirement payload mismatch\" severity failure;\n" +
+    " wait until rising_edge(clk); wait for 1 ns; assert retire_valid='1' and redirect_valid='0' report \"control retirement not held or redirect repeated\" severity failure;\n" +
+    " retire_ready<='1'; wait until rising_edge(clk); retire_ready<='0'; wait for 1 ns; assert retire_valid='0' and protocol_fault='0' report \"control retirement did not consume cleanly\" severity failure; finish; end process; end architecture;\n"
+
+fn run_control(entity_name: text, tb_name: text, instruction: u32,
+    rs1: text, rs2: text, redirect: text, target: text,
+    trap: text, cause: text, tval: text, write: text) -> bool:
+    val emitted = compile_strict_riscv_scalar_product(entity_name, CoreConfig.rv32(),
+        instruction, LsuConfig.rv32_product_default())
+    if not emitted.is_success(): return false
+    val path = "/tmp/" + entity_name + ".vhd"
+    if not vhdl_write_file(path, emitted.vhdl + "\n" + control_tb(entity_name,
+            tb_name, rs1, rs2, redirect, target, trap, cause, tval, write)): return false
+    if not ghdl_analyze(path).success: return false
+    if not ghdl_elaborate(tb_name).success: return false
+    ghdl_run(tb_name, Some("500ns")).success
+
+describe "RISC-V Gen2 integrated control-flow cycle evidence":
+    # @req REQ-G2-012 NFR-G2-013
+    slow_it "accepts one redirect atomically and suppresses redirect on IALIGN trap when GHDL exists":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+        expect(run_control("scalar_beq_product_cycle", "scalar_beq_product_cycle_tb",
+            0x00208463, "00000007", "00000007", "1", "00001008",
+            "0", "00000000", "00000000", "0")).to_equal(true)
+        expect(run_control("scalar_jal_misaligned_cycle", "scalar_jal_misaligned_cycle_tb",
+            0x002002EF, "00000000", "00000000", "0", "00001002",
+            "1", "00000000", "00001002", "0")).to_equal(true)

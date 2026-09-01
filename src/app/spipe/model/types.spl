@@ -1,0 +1,134 @@
+# SPipe Slice-1 frozen record model (S1-E owns this file).
+#
+# These are the frozen shapes from
+# doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md §6. Every
+# other Slice-1 package (S1-A/B/C/D) imports these types rather than declaring
+# local copies. A shape change here requires a request against the plan, not a
+# unilateral edit.
+#
+# DEVIATION FROM THE PLAN (recorded loudly, per instructions): §6 writes two
+# fields as `evidence: sdn` / `details: sdn`. There is no `sdn` type in Simple
+# -- the real type is `SdnValue` (src/lib/common/sdn/value.spl). Both fields
+# are declared as `SdnValue` below. This is a typo fix, not a semantic change:
+# `SdnValue` is exactly "a free-form SDN value" per the plan's own prose.
+#
+# No inheritance. Enums for closed sets. Generics use `<>`.
+
+use std.common.sdn.value.SdnValue
+
+# --- 6.1 SourceRange + LinkRecord (S1-A -> S1-B) ---------------------------
+
+pub enum LinkForm:
+    Inline
+    ReferenceDefinition
+    ReferenceUse
+    Autolink
+
+# Rule: S1-B rewrites only [target_start, target_end). Offsets are BYTE
+# offsets of the raw file content as read -- no NFC pre-normalization in
+# slice 1 (see plan §6.1 note). Char-indexed `s[i]` must never be used against
+# these offsets; slice raw bytes instead.
+pub struct SourceRange:
+    path: text           # canonical_path, POSIX separators
+    start_offset: i64     # BYTE offset, >= 0, first byte of the whole link
+    end_offset: i64        # BYTE offset, exclusive; > start_offset
+    target_start: i64      # rewritable target substring within [start, end)
+    target_end: i64        # exclusive
+    link_form: LinkForm
+    raw_target: text     # verbatim, pre-resolution, e.g. "../x/y.md#a-heading"
+    fragment: Option<text>
+
+# --- 6.2 EdgeRecord (S1-E) --------------------------------------------------
+
+# The 19 JS EDGE_TYPES (examples/05_stdlib/spipe/src/model/edge.js), ported
+# 1:1 as a closed enum. Order is not significant; kept in the JS source order
+# for auditability.
+pub enum EdgeType:
+    Contains
+    Classifies
+    EvidenceFor
+    Derives
+    Satisfies
+    Realizes
+    Schedules
+    Specifies
+    Implements
+    Verifies
+    Covers
+    Produces
+    LinksTo
+    Aliases
+    Supersedes
+    Extends
+    PromotedFrom
+    DependsOn
+    MountedAs
+
+pub enum EdgeOrigin:
+    Explicit
+    Inferred
+    Trace
+
+pub enum EdgeStatus:
+    Accepted
+    Candidate
+    Rejected
+
+pub struct EdgeRecord:
+    uid: text                     # derived, model/uid.spl
+    edge_type: EdgeType           # 19-variant enum incl. LinksTo -- model/edge.spl
+    from_uid: text
+    to_uid: text
+    origin: EdgeOrigin
+    status: EdgeStatus
+    source_range: Option<SourceRange>   # present on every LinksTo edge
+
+# --- 6.3 ScoreReport (S1-C -> S1-D) -- points in int TENTHS -----------------
+
+pub struct ComponentScore:
+    name: text          # "cohesion" | "trace_alignment" | "shape" | "axis_coverage"
+    weight: i64          # 43 / 21 / 21 / 15
+    raw_permille: i64    # 0..1000
+    points_tenths: i64   # weight * raw_permille / 100, half-up
+
+pub struct Deduction:
+    code: text            # "SPK511"
+    component: text
+    points_tenths: i64
+    evidence: SdnValue    # free-form SDN value: paths, counts, thresholds
+
+pub struct ScoreReport:
+    schema: text          # "spipe-balance/1"
+    scope: text           # "" = global
+    score_tenths: i64     # 0..1000; sum of components' points_tenths
+    components: [ComponentScore]
+    deductions: [Deduction]
+    scopes: [ScoreReport] # children, depth-first, path-sorted
+
+# --- 6.4 AdmissionVerdict (S1-D) -------------------------------------------
+
+pub enum Verdict:
+    Accept
+    AcceptWithDebt
+    Reject
+
+pub struct AdmissionReason:
+    code: text            # SPK530-549
+    scope: text
+    message_key: text
+    details: SdnValue
+
+pub struct Thresholds:        # research §13.4, tenths
+    target: i64                # 850
+    floor: i64                 # 800
+    deny: i64                  # 700
+    max_global_regression_tenths: i64   # 5
+    max_scope_regression_tenths: i64    # 10
+    legacy_required_improvement_tenths: i64  # 20
+
+pub struct AdmissionVerdict:
+    schema: text          # "spipe-admission/1"
+    verdict: Verdict
+    reasons: [AdmissionReason]
+    thresholds: Thresholds
+    hard_diagnostic_count: i64   # non-zero forces Reject

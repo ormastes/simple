@@ -1,0 +1,41 @@
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+describe "driver AOT environment and process facade ownership":
+    it "uses exact one-call compiler-safe facades without hidden aliases":
+        val source = file_read(
+            "src/compiler/80.driver/driver_aot_native_output.spl")
+
+        expect(source).to_contain(
+            "use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, process_run}")
+
+        # Positive cardinalities prevent this contract passing after the native
+        # build controls or linker invocations are accidentally deleted.
+        expect(source.split("env_get_nullable(").len() - 1).to_equal(15)
+        expect(source.split("env_set(").len() - 1).to_equal(1)
+        expect(source.split("process_run(").len() - 1).to_equal(3)
+
+        # Nullable lookup preserves the raw transport contract, including an
+        # explicitly empty value. env_get_opt would intentionally collapse it.
+        expect(source).to_contain(
+            "env_get_nullable(\"SIMPLE_NATIVE_BUILD_THREADS\") ?? \"\"")
+        expect(source).to_contain(
+            "env_get_nullable(\"SIMPLE_NATIVE_BUILD_CLEAN\") ?? \"\"")
+        expect(source).to_contain(
+            "if not env_set(\"SIMPLE_NATIVE_BUILD_CLEAN\", \"\"):")
+
+        # Preserve command/argument shape and signed tuple ordering.
+        expect(source).to_contain(
+            "val (_stdout, stderr, code) = process_run(\"ld.lld\", args)")
+        expect(source).to_contain(
+            "val (_stdout, stderr, code) = process_run(archiver, args)")
+        expect(source).to_contain(
+            "val (_cc_out, cc_err, cc_code) = process_run(\"cc\", [\"-c\", c_path, \"-o\", obj_path])")
+
+        expect(source.contains("_sffi_env_get")).to_equal(false)
+        expect(source.contains("_sffi_env_set")).to_equal(false)
+        expect(source.contains("_sffi_process_run")).to_equal(false)
+        expect(source.contains("rt_env_get")).to_equal(false)
+        expect(source.contains("rt_env_set")).to_equal(false)
+        expect(source.contains("rt_process_run")).to_equal(false)
+        expect(source.contains("env_get_opt(")).to_equal(false)

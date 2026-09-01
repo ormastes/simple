@@ -1,7 +1,6 @@
 # `for ch in <text>` iterates BYTES, not characters (2026-08-01)
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: **FIXED on the Rust seed JIT/MIR lane (measured)**; pure-Simple lanes
 corrected earlier by inspection. Native AOT is UNVERIFIED — see "Native AOT lane
 is unmeasurable" below; it shares the fixed MIR lowering site.
 
@@ -60,14 +59,13 @@ at the single lowering site") is **the wrong shape**:
 
 Per-engine state:
 
-| Engine | Site | Before | After (2026-08-01) |
-|---|---|---|---|
-| pure-Simple MIR | `src/compiler/50.mir/mir_lowering_stmts.spl:1988-2004` | **already correct** — emits `rt_string_chars` | unchanged; not executable today |
-| pure-Simple AST interpreter | `src/compiler/10.frontend/core/interpreter/eval_stmts.spl:471` | **BUG** — `substring(i, i+1)` stepped over `len()` (byte length) | fixed by inspection (commit `872138917991`); still not executable |
-| Rust seed AST interpreter | `interpreter_helpers/collections.rs:403`, `interpreter_call/block_execution.rs:149` | correct (Rust `.chars()`) | unchanged |
-| **Rust seed MIR/JIT** | `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` (`HirStmt::For`) | **BUG** — `rt_for_iterable` + `rt_array_len` + `IndexGet`; no string case | **FIXED and MEASURED GREEN** — normalizes with `rt_string_chars` when the iterable's `HirType` is `String` (or `Struct` named `String`/`text`/`str`) |
-| Rust seed native AOT | same MIR site as above | **BUG** (same lowering) | **fix applied, but UNVERIFIED** — the `--native` emit path is dead on this build (live control fails, see below) |
-| runtime `rt_for_iterable` | `src/runtime/runtime_native.c:5583`, `src/runtime/simple_core/core_array.spl:388` | **BUG** — dicts converted, strings passed through to byte indexing | backstop left as-is; it still cannot fire for unregistered string handles, which is exactly why the fix had to move to the lowering site |
+| Engine | Site | Before |
+|---|---|---|
+| pure-Simple MIR | `src/compiler/50.mir/mir_lowering_stmts.spl:1988-2004` | **already correct** — emits `rt_string_chars` |
+| pure-Simple AST interpreter | `src/compiler/10.frontend/core/interpreter/eval_stmts.spl:471` | **BUG** — `substring(i, i+1)` stepped over `len()` (byte length) |
+| Rust seed AST interpreter | `interpreter_helpers/collections.rs:403`, `interpreter_call/block_execution.rs:149` | correct (Rust `.chars()`) |
+| Rust seed MIR/JIT + native AOT | `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs:1388` | **BUG** — `rt_for_iterable` + `rt_array_len` + `IndexGet`; no string case |
+| runtime `rt_for_iterable` | `src/runtime/runtime_native.c:5583`, `src/runtime/simple_core/core_array.spl:388` | **BUG** — dicts converted, strings passed through to byte indexing |
 
 The real seam for the index-based for-loop path is **`rt_for_iterable`**, not a
 `.chars()` desugar.
@@ -98,79 +96,19 @@ execution:
   change is still correct for registered-core-string callers, but it does not
   close the measured defect.
 
-## CLOSED on the seed JIT/MIR lane (2026-08-01) — option (a) taken
+## STILL OPEN
 
-`src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`, `HirStmt::For`: the
-iterable normalization now selects the runtime helper by static type —
-`rt_string_chars` for text, `rt_for_iterable` for everything else. The existing
-counted `rt_array_len` / `IndexGet` loop is correct unchanged, because
-`rt_string_chars` returns an array of 1-codepoint texts.
+**The Rust seed JIT/MIR + native AOT path remains broken.** This is the engine
+everyone actually hits via `simple run` / `--native`. Closing it needs either:
 
-Option (b) (making the seed string representation visible to `rt_core_as_string`)
-was NOT taken: it changes a runtime-wide invariant to fix one call site.
+(a) a string case in `lowering_stmt.rs:1388` (emit `rt_string_chars` before the
+    `rt_array_len`/`IndexGet` loop, mirroring `mir_lowering_stmts.spl:1988`), or
+(b) making the seed/native string representation visible to
+    `rt_core_as_string` so the `rt_for_iterable` backstop actually fires.
 
-Text detection mirrors the existing idiom at `lowering_expr_call.rs:247` —
-`HirType::String`, or `HirType::Struct` named `String`/`text`/`str`.
-
-### Measured, seed rebuilt with `cargo build --profile bootstrap --features llvm`
-(binary 154,459,120 B — canonical WITH-LLVM size, not the 32 MB no-LLVM build)
-
-`simple run` (JIT/MIR), probe carries a deliberately-failing SENTINEL row:
-
-```
-                          BEFORE                    AFTER
-for_in_text_iters         FAIL got=6 want=5         PASS got=5
-for_in_text_acc_len       FAIL got=-1 want=6        PASS got=6
-for_in_chars_iters        PASS got=5                PASS got=5
-for_in_chars_acc_len      PASS got=6                PASS got=6
-for_in_ascii_iters        PASS got=3                PASS got=3
-for_in_ascii_acc_len      PASS got=3                PASS got=3
-SENTINEL_must_fail        FAIL got=1 want=2         FAIL got=1 want=2
-```
-
-The SENTINEL still fails after the fix, so the green rows are not a harness
-that stopped asserting. Note the ASCII rows PASS even when the bug is present
-(bytes == chars for ASCII) — they are a regression guard, **not** diagnostic.
-
-Regression probe (same falsifiable shape) confirms the non-text paths still
-route through `rt_for_iterable`:
-
-```
-PASS for_in_int_array got=60
-PASS for_in_str_array_len got=4      (for s in ["ab","cd"] — array of str, not str)
-PASS for_in_dict_pairs got=2         (dict->tuple conversion still fires)
-FAIL SENTINEL_must_fail got=7 want=8
-```
-
-## Native AOT lane: original claim CORRECTED (2026-08-01)
-
-This section previously claimed the `--native` emit path was broken outright,
-citing a 3768-byte stripped ELF that ran, printed nothing and exited 0 "including
-for a trivial `fn main(): print("HELLO_CONTROL")`". **That scope was wrong.**
-Root-caused and corrected in
-`doc/08_tracking/bug/native_emit_silent_empty_binary_2026-08-01.md`. Summary:
-
-- On the **canonical Rust bootstrap seed**
-  (`src/compiler_rust/target/bootstrap/simple`, 154 MB with LLVM), the
-  hello-world control **PASSES**: a 2.6 MB binary that prints and exits 0.
-  Verified across both flag orders, absolute paths inside and outside the repo,
-  `--backend=cranelift`, `--opt-level none`, and both `native-build` forms.
-- The real defect was confined to the **compiled pure-Simple CLI lane**
-  (`src/app/cli/bootstrap_main.spl`): the enum `options.mode` did not survive
-  struct transport into the driver, `compile()` fell through with no mode
-  matched, and returned Success having emitted nothing while exiting 0. Fixed at
-  origin `e1150d003b7c4e39f170ce40626b7155e087faa6` via `options.cli_mode_text =
-  "aot"`, plus a positive-artifact assertion so it can never be silent again.
-- `nm -g` reporting no symbols was a **red herring** — host `--native` output is
-  auto-stripped by default, so working binaries look identical.
-- The **absolute-path trap did not fire** here; absolute paths compiled and ran
-  correctly. Disregard the earlier note in this section that claimed otherwise.
-
-**Still unproven:** the claim that this for-in defect "reproduced identically on
-the native AOT path". Native AOT shares the MIR lowering site that was fixed, so
-it is expected to be corrected too — but that remains inference, not
-measurement. Re-measure on the canonical seed, asserting a positive artifact
-(non-trivial size + expected stdout from a live control), not exit 0.
+(a) is the direct analogue of the already-correct pure-Simple lowering and is
+the recommended fix. It is Rust and bootstrap-only, which is why it was not
+taken here.
 
 ## Blast radius (measured, owned source only)
 

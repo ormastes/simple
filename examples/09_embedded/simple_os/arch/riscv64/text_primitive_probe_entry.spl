@@ -1,0 +1,220 @@
+# SimpleOS riscv64 in-guest TEXT PRIMITIVE probe (OpenSBI real-firmware lane).
+#
+# Diagnostic entry, not a component row. It exists because the caret component
+# row stalls in-guest with no trap message immediately after printing its
+# built message — i.e. inside app.llm_caret.json_helpers.json_find, whose only
+# loop is `while i <= slen - nlen` around `s.substring(i, i + nlen) == needle`.
+# A silent stall there means one of the text primitives that loop depends on is
+# returning a wrong value under the freestanding riscv64 runtime, and the
+# component row cannot say WHICH. This probe calls them one at a time and
+# prints after each, so the last line printed names the culprit.
+#
+# Every value is reported by WHICH literal is printed, never by interpolating an
+# integer: `"n={n}"` emits rt_raw_i64_to_string, which the freestanding riscv64
+# runtime does not provide, and the link dies with an undefined symbol.
+#
+# Boot chain and forbidden-flag policy identical to hello_world_sbi_entry.spl:
+# real OpenSBI v1.4 fw_payload via -bios only, NEVER -kernel, NEVER
+# isa-debug-exit.
+
+@unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
+extern fn serial_println(msg: text)
+
+fn _say_num(label: text, n: i64, expect: i64):
+    if n == expect:
+        serial_println(label + " = EXPECTED")
+    else:
+        serial_println(label + " = WRONG")
+
+fn spl_start():
+    serial_println("")
+    serial_println("[probe] SimpleOS riscv64 text primitive probe (OpenSBI fw_payload)")
+
+    val s = "{\"role\":\"user\"}"
+    serial_println("[probe] subject: " + s)
+
+    # 1. byte length. The subject is pure ASCII, so bytes == characters == 15:
+    # { " r o l e " : " u s e r " }. The first run of this probe asserted 14 and
+    # reported len WRONG, which would have been filed as an rt_len defect — the
+    # miscount was in the probe, not the runtime. Counting it out longhand here
+    # so the next reader can check the expectation without trusting it.
+    serial_println("[probe] step 1: len()")
+    _say_num("[probe] len", s.len(), 15)
+    # Tag-mismatch discriminator. rt_len (baremetal_runtime_core.inc.c:481)
+    # returns the RAW byte count. If codegen treats an extern's return as a
+    # TAGGED value and decodes it (v >> 3), a raw 15 is read back as 1. So:
+    # "len-decoded-as-1 = EXPECTED" pins the defect to the encoding convention
+    # and makes the fix a one-liner (return ENCODE_INT(len)); "WRONG" means the
+    # value is corrupt for some other reason and the encoding theory is dead.
+    _say_num("[probe] len-decoded-as-1", s.len(), 1)
+
+    # 2. substring — the operation json_find calls in its loop body. This is
+    # rt_slice, one of the entry points ported into the baremetal runtime.
+    serial_println("[probe] step 2: substring(0, 6)")
+    val head = s.substring(0, 6)
+    serial_println("[probe] substring(0,6) = " + head)
+
+    serial_println("[probe] step 3: substring(1, 5)")
+    serial_println("[probe] substring(1,5) = " + s.substring(1, 5))
+
+    # 3. text equality — json_find's loop exits via this comparison.
+    serial_println("[probe] step 4: equality")
+    if head == "{\"role":
+        serial_println("[probe] equality = EXPECTED")
+    else:
+        serial_println("[probe] equality = WRONG")
+
+    # 4. the loop shape json_find actually uses, bounded independently so a
+    # wrong len() cannot make THIS loop run away.
+    serial_println("[probe] step 5: bounded scan")
+    var i = 0
+    var found = -1
+    while i <= 8:
+        if s.substring(i, i + 6) == "\"role\"":
+            found = i
+            i = 9
+        else:
+            i = i + 1
+    _say_num("[probe] scan found index", found, 1)
+
+    serial_println("[probe] step 6: trim + starts_with")
+    val t = "  padded  ".trim()
+    if t == "padded":
+        serial_println("[probe] trim = EXPECTED")
+    else:
+        serial_println("[probe] trim = WRONG")
+    if s.starts_with("{"):
+        serial_println("[probe] starts_with = EXPECTED")
+    else:
+        serial_println("[probe] starts_with = WRONG")
+
+    serial_println("[probe] step 7: chars() iteration")
+    var count = 0
+    for ch in "abcde".chars():
+        count = count + 1
+    _say_num("[probe] chars count", count, 5)
+
+    # 8. The exact tail of app.llm_caret.json_helpers.extract_json_string, which
+    # is where the caret row actually stalls: a SINGLE-ARGUMENT substring
+    # (open-ended slice) followed by character accumulation into a growing
+    # string. Both are separated from the steps above so the last line printed
+    # names which of the two hangs.
+    serial_println("[probe] step 8: single-arg substring")
+    val tail = s.substring(8)
+    serial_println("[probe] substring(8) = " + tail)
+
+    # Step 9 splits three candidate causes of "accumulating into a string in a
+    # loop loses content", which the first probe run showed as `Q` where
+    # `QuserQ}` was due. 9a varies only the SOURCE of the appended piece (a
+    # constant, not the loop variable); 9b varies only the LOOP FORM (while, not
+    # for). Whichever of 9a/9b/9c misbehaves names the axis.
+    serial_println("[probe] step 9a: for-loop, constant append")
+    var acc_a = ""
+    for ch in tail.chars():
+        acc_a = acc_a + "x"
+    serial_println("[probe] 9a accumulated = " + acc_a)
+
+    serial_println("[probe] step 9b: while-loop, constant append")
+    var acc_b = ""
+    var k = 0
+    while k < 5:
+        acc_b = acc_b + "y"
+        k = k + 1
+    serial_println("[probe] 9b accumulated = " + acc_b)
+
+    # 9d discriminates the two variables 9c confounds: it appends the LOOP
+    # VARIABLE with NO branch. If 9d is right and 9c is wrong, the defect is
+    # branch/phi codegen; if 9d is also wrong, it is append-of-a-runtime-produced
+    # string (9a/9b append only literals, and both are correct).
+    serial_println("[probe] step 9d: for-loop, loop-variable append, NO branch")
+    var acc_d = ""
+    for ch in tail.chars():
+        acc_d = acc_d + ch
+    serial_println("[probe] 9d accumulated = " + acc_d)
+
+    serial_println("[probe] step 9c: for-loop, loop-variable append")
+    var acc = ""
+    for ch in tail.chars():
+        if ch == "\"":
+            acc = acc + "Q"
+        else:
+            acc = acc + ch
+    serial_println("[probe] 9c accumulated = " + acc)
+
+
+    # --- Discriminator matrix added 2026-08-31 (loop-variable append lane) ---
+    # 9a/9b (literal append) are correct; 9c/9d (loop-variable append) keep only
+    # iteration 1. These four steps split the remaining candidate axes.
+
+    # 9g: concat of TWO RUNTIME-PRODUCED strings, NO loop at all. If this is
+    # wrong, the defect is plain concat of non-literal operands and the loop is
+    # innocent. If right, the loop shape is implicated.
+    serial_println("[probe] step 9g: concat two runtime strings, no loop")
+    val g1 = tail.substring(0, 2)
+    val g2 = tail.substring(2, 4)
+    serial_println("[probe] 9g g1 = " + g1)
+    serial_println("[probe] 9g g2 = " + g2)
+    serial_println("[probe] 9g g1+g2 = " + (g1 + g2))
+
+    # 9e: per-iteration trace of the failing shape. Prints the loop variable and
+    # the accumulator EVERY iteration, so the transcript says whether `ch` goes
+    # bad after iteration 1 or whether `acc` simply stops absorbing it.
+    serial_println("[probe] step 9e: for-loop, loop-variable append, traced")
+    var acc_e = ""
+    for ch in tail.chars():
+        serial_println("[probe] 9e ch = " + ch)
+        acc_e = acc_e + ch
+        serial_println("[probe] 9e acc = " + acc_e)
+    serial_println("[probe] 9e accumulated = " + acc_e)
+
+    # 9f: WHILE loop with an index, appending a runtime substring. Same appended
+    # kind as 9d (a runtime string) but no for/chars() iteration. Splits
+    # "for-loop lowering" from "appending a runtime string in any loop".
+    serial_println("[probe] step 9f: while-loop, runtime-substring append")
+    var acc_f = ""
+    var fi = 0
+    while fi < 7:
+        acc_f = acc_f + tail.substring(fi, fi + 1)
+        fi = fi + 1
+    serial_println("[probe] 9f accumulated = " + acc_f)
+
+    # 9h: same as 9d but the concat result goes through an explicit temporary
+    # before the loop-carried store. Splits "concat is wrong" from "the
+    # loop-carried store of a concat result is dropped".
+    serial_println("[probe] step 9h: for-loop, loop-variable append via temp")
+    var acc_h = ""
+    for ch2 in tail.chars():
+        val t = acc_h + ch2
+        acc_h = t
+    serial_println("[probe] 9h accumulated = " + acc_h)
+
+
+    # 9i: EXPLICIT INDEXING of the same chars() array, no for-loop. If cs[1] and
+    # cs[2] are right while `for` iteration 2 yields empty, the defect is in
+    # for-loop lowering, not in the array or its element storage.
+    serial_println("[probe] step 9i: explicit chars() indexing")
+    val cs = tail.chars()
+    _say_num("[probe] 9i cs.len", cs.len(), 7)
+    serial_println("[probe] 9i cs[0] = " + cs[0])
+    serial_println("[probe] 9i cs[1] = " + cs[1])
+    serial_println("[probe] 9i cs[2] = " + cs[2])
+    serial_println("[probe] 9i cs[6] = " + cs[6])
+
+    # 9j: while-loop over an explicit index into the SAME array. Splits
+    # "for-loop lowering" from "any loop that reads an array element".
+    serial_println("[probe] step 9j: while-loop over chars() by index")
+    var acc_j = ""
+    var ji = 0
+    while ji < 7:
+        acc_j = acc_j + cs[ji]
+        ji = ji + 1
+    serial_println("[probe] 9j accumulated = " + acc_j)
+
+    # 9k: for-loop over the array, printing each element's LENGTH. Says whether
+    # a bad element is a valid empty string (len 0) or a corrupt handle.
+    serial_println("[probe] step 9k: for-loop element lengths")
+    for ck in cs:
+        _say_num("[probe] 9k ch.len", ck.len(), 1)
+
+    serial_println("PROBE_TEXT_PRIMITIVES_SIMPLEOS_RISCV64_DONE")
+    serial_println("[probe] parking")

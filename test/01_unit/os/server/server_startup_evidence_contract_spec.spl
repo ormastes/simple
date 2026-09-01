@@ -1,0 +1,117 @@
+use std.spec
+use os.userlib.server_startup.{server_startup_result_admitted_v1}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "SimpleOS current-task server startup evidence":
+    it "binds loader evidence to task lifecycle and execution generation":
+        val registry = rt_file_read_text(
+            "src/os/kernel/scheduler/server_data_launch_grant_registry.spl")
+        expect(registry).to_contain("exec_generation: u64")
+        expect(registry).to_contain("startup_evidence_consumed: bool")
+        expect(registry).to_contain(
+            "slot.exec_generation != exec_generation")
+        expect(registry).to_contain(
+            "task.id.id, task.lifecycle_generation, task.exec_generation")
+
+    it "admits no caller identity or executable claims through the syscall":
+        val kernel = rt_file_read_text(
+            "src/os/kernel/ipc/syscall_server_startup_evidence.spl")
+        val user = rt_file_read_text("src/os/userlib/server_startup.spl")
+        expect(kernel).to_contain(
+            "consume_current_server_startup_evidence_v1()")
+        expect(user).to_contain(
+            "syscall(116u64, 0u64, 0u64, 0u64, 0u64, 0u64)")
+
+    it "interprets only the exact ABI success result as admission":
+        expect(server_startup_result_admitted_v1(1)).to_equal(true)
+        expect(server_startup_result_admitted_v1(0)).to_equal(false)
+        expect(server_startup_result_admitted_v1(-1)).to_equal(false)
+        expect(server_startup_result_admitted_v1(2)).to_equal(false)
+
+    it "blocks secrets DBFS and listeners until canonical consumption":
+        val dbd = rt_file_read_text("src/os/apps/dbd/dbd.spl")
+        val server = rt_file_read_text("src/os/apps/servers_user/main.spl")
+        expect(dbd).to_contain("new_filesystem_launched_v1()")
+        val legacy_constructor = dbd.split(
+            "pub static fn new() -> DbdServer:")[1].split(
+                "pub static fn new_filesystem_launched_v1")[0]
+        expect(legacy_constructor).to_contain(
+            "startup_evidence_consumed: false")
+        expect(legacy_constructor.index_of(
+            "server_startup_evidence_consume_v1()")).to_equal(-1)
+        expect(dbd).to_contain("if not self.startup_evidence_consumed")
+        val consume = server.index_of(
+            "val startup_admission = server_startup_admission_consume_v1()")
+        val construct = server.index_of(
+            "var db_server = DbdServer.new_combined_filesystem_launched_v1(")
+        val startup = server.index_of("startup_evidence_ready_v1()", construct)
+        val secret = server.index_of("provision_database_service(db_server)", construct)
+        val dbfs = server.index_of("simpleos_database_dbfs_vfs_caps()", construct)
+        val listener = server.index_of("bind_listener(HTTP_PORT)", construct)
+        expect(consume).to_be_greater_than(-1)
+        expect(consume).to_be_less_than(construct)
+        expect(construct).to_be_less_than(startup)
+        expect(startup).to_be_less_than(secret)
+        expect(secret).to_be_less_than(dbfs)
+        expect(dbfs).to_be_less_than(listener)
+
+    it "hands one opaque package admission to DBD without re-consuming":
+        val user = rt_file_read_text("src/os/userlib/server_startup.spl")
+        val dbd = rt_file_read_text("src/os/apps/dbd/dbd.spl")
+        val server = rt_file_read_text("src/os/apps/servers_user/main.spl")
+        expect(user).to_contain(
+            "pub(package) class ServerStartupAdmissionV1:")
+        expect(user).to_contain(
+            "pub(package) fn server_startup_admission_consume_v1(")
+        expect(user.index_of("pub class ServerStartupAdmissionV1:")).to_equal(-1)
+        expect(user.index_of(
+            "pub fn server_startup_admission_consume_v1(")).to_equal(-1)
+        val combined = dbd.split(
+            "pub(package) static fn new_combined_filesystem_launched_v1")[1].split(
+                "pub fn startup_evidence_ready_v1")[0]
+        expect(combined).to_contain(
+            "server_startup_admission_ready_v1(admission)")
+        expect(combined.index_of(
+            "server_startup_evidence_consume_v1()")).to_equal(-1)
+        expect(server.split(
+            "server_startup_admission_consume_v1()").len()).to_equal(2)
+        expect(server.index_of(
+            "server_startup_evidence_consume_v1()")).to_equal(-1)
+
+    it "routes every filesystem-server ISA through the canonical evidence handler":
+        val state = rt_file_read_text("src/os/kernel/ipc/syscall.spl")
+        val x86 = rt_file_read_text("src/os/kernel/arch/x86_32/interrupt.spl")
+        val rv32 = rt_file_read_text(
+            "src/os/kernel/arch/riscv32/trap_runtime_v1.spl")
+        val rv64 = rt_file_read_text("src/os/kernel/arch/riscv64/syscall.spl")
+        val rv32_entry = rt_file_read_text(
+            "src/os/kernel/arch/riscv32/user_entry_v1.spl")
+        val arm64 = rt_file_read_text(
+            "examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        val shim = rt_file_read_text("src/os/kernel/abi/syscall_shim.spl")
+        expect(state).to_contain("case 116")
+        expect(x86).to_contain("if args.id == 116")
+        expect(rv32).to_contain("syscall_handler_ipc_state(")
+        expect(rv32_entry).to_contain("id == 116u32")
+        expect(rv64).to_contain("if args.id == 116u64")
+        expect(arm64).to_contain("case 116:")
+        expect(arm64).to_contain(
+            "spl_handle_server_startup_evidence_consume_v1")
+        expect(shim).to_contain(
+            "if not g_shim_server_startup_runtime_owner_available_v1: return -38")
+        expect(shim).to_contain(
+            "_handle_server_startup_evidence_consume(g_shim_scheduler).value")
+
+    it "keeps kernel server entries from bypassing the admitted DBD owner":
+        val x86 = rt_file_read_text(
+            "examples/09_embedded/simple_os/arch/x86_64/servers_entry.spl")
+        val arm = rt_file_read_text(
+            "examples/09_embedded/simple_os/arch/arm64/servers_entry.spl")
+        val rv = rt_file_read_text(
+            "examples/09_embedded/simple_os/arch/riscv64/servers_entry.spl")
+        expect(x86.index_of("dbd_bind(")).to_equal(-1)
+        expect(x86.index_of("[dbd] serving")).to_equal(-1)
+        expect(x86).to_contain("filesystem-launch-evidence-required")
+        expect(arm).to_contain("must never bind or advertise DBD directly")
+        expect(rv).to_contain("must never bind or advertise DBD directly")

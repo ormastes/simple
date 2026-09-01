@@ -1,83 +1,112 @@
 # Browser Sandbox Form Navigation Authorization
 
-> A local typed HTTPS fixture proves that CSP sandbox `allow-forms` does not
-> grant top-level form navigation, while the explicitly authorized POST path
-> remains functional.
+> Proves with local typed HTTPS fixtures that `allow-forms` does not grant
 
 | Tests | Active | Skipped | Pending |
-|-------|--------|---------|---------|
+|-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Browser Sandbox Form Navigation Authorization
+
+Proves with local typed HTTPS fixtures that `allow-forms` does not grant
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
 | Category | Security |
-| Requirement | `REQ-WEB-BROWSER-012` |
+| Status | Active |
 | Source | `test/03_system/security/browser_sandbox_form_navigation_authorization_spec.spl` |
-| Evidence | Typed HTTPS/certificate fixture, exact request state, canonical Draw IR, literal full framebuffer |
-| Provenance | Static/manual review of the committed executable SSpec; runtime PASS is unclaimed |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Scenario
+Proves with local typed HTTPS fixtures that `allow-forms` does not grant
+top-level navigation. A denied submission cannot queue or leak its POST body
+and cannot replace the authorized document's Draw IR or final pixels. The
+positive control retains the canonical form request path when both sandbox
+capabilities are present.
 
-### should render only the document authorized for top navigation
+## Scenarios
 
-1. **Resolve the HTTPS destination**
-   - Start the typed browser navigation at
-     `https://account.test/profile`.
-   - Take the document request and require that exact canonical HTTPS URL.
+### REQ-WEB-BROWSER-012: sandboxed form navigation authorization
 
-2. **Validate the authenticated peer**
-   - Validate the typed `account.test` certificate fixture against the local
-     `ISRG Root X1` trust-anchor fixture.
-   - Commit an injected HTTPS response with
-     `Content-Security-Policy: sandbox allow-forms` and a collector POST form.
-   - Capture the committed URL and HTML body.
-   - Require the `authorized` Draw IR command to have kind `rect`, component
-     `authorized`, parent `surface`, box `(0,0,8,4)`, present clip
-     `(0,0,8,4)`, and color `0xFF2563EB`.
-   - Require the complete 8-by-4 framebuffer to be the literal array of 32
-     `0xFF2563EB` pixels.
-
-3. **Apply redirect and sandbox policy**
-   - Require `allow_forms=true` and `allow_top_navigation=false`.
-   - Click the denied form submit button and require exactly zero pending
-     requests, no request/body value, and the exact warning array
-     `["CSP sandbox blocked top navigation"]`.
-   - Load the positive control with
-     `sandbox allow-forms allow-top-navigation`.
-   - Require its exact authorized request to be
-     `POST https://account.test/save` with body `name=Ada`.
-
-4. **Render only the authorized response**
-   - Require the denied session URL and HTML body to remain byte-for-byte
-     unchanged.
-   - Require the full serialized `DrawIrComposition` to remain unchanged.
-   - Recheck the absolute `rect` / `authorized` / `surface` identity, box,
-     present clip, and `0xFF2563EB` color.
-   - Recheck the complete framebuffer against the literal 32-pixel blue
-     oracle rather than comparing the renderer only to itself.
-
-## Pass/Fail Oracle
-
-PASS requires the denied collector request and `token-123` body never to enter
-the pending queue; the exact warning array, URL, HTML, Draw IR, and complete
-framebuffer must remain fixed; and the explicitly authorized `/save` POST must
-retain its exact method and body. Any queued denied request, document or render
-mutation, warning drift, or positive-control mismatch is FAIL.
-
-## Companion Integration Controls
-
-`test/02_integration/rendering/browser_session_dom_input_spec.spl` exercises
-both button-click and implicit-Enter denial with `sandbox allow-forms`, plus
-button and keyboard positive controls with
-`sandbox allow-forms allow-top-navigation`.
+#### should render only the document authorized for top navigation
 
 <details>
 <summary>Executable SSpec</summary>
 
-The complete executable source, including the literal 32-pixel framebuffer
-oracle and all direct assertions, is maintained at
-`test/03_system/security/browser_sandbox_form_navigation_authorization_spec.spl`.
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-WEB-BROWSER-012
+```
 
 </details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-012`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `2a14d607c3ee6bada9b7c2aa2fc5e3b5a2e04ca953563d0e0b031b75041626ac`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `2a14d607c3ee6bada9b7c2aa2fc5e3b5a2e04ca953563d0e0b031b75041626ac`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `2a14d607c3ee6bada9b7c2aa2fc5e3b5a2e04ca953563d0e0b031b75041626ac`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/security/browser_sandbox_form_navigation_authorization_spec.spl
+mirror: doc/06_spec/03_system/security/browser_sandbox_form_navigation_authorization_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=85 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/03_system/security/browser_sandbox_form_navigation_authorization_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/security/browser_sandbox_form_navigation_authorization_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/security/browser_sandbox_form_navigation_authorization_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/security/browser_sandbox_form_navigation_authorization_spec.spl:53:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should render only the document authorized for top navigation' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/security/browser_sandbox_form_navigation_authorization_spec.spl:53:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should render only the document authorized for top navigation' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -686,11 +686,6 @@ impl ExecCore {
 
     /// Execute a loaded module and collect GC afterward
     fn execute_and_gc(&self, module: &LoadedModule) -> Result<i32, String> {
-        // Engine receipt: the loaded-module lane executes compiled code out of
-        // an SMF, so it is neither the tree-walk interpreter nor the JIT and
-        // must not be reported as either. Stamped here, immediately before the
-        // module's own entry points are called.
-        simple_common::engine_receipt::stamp(simple_common::engine_receipt::Engine::Native);
         run_module_init(module)?;
         let exit = run_main(module)?;
         self.collect_gc();
@@ -1000,11 +995,7 @@ impl ExecCore {
             "smf" => self.run_smf_with_args(path, args),
             "spl" | "simple" | "sscript" | "shs" | "" => {
                 if self.execution_mode.is_jit()
-                    && should_prefer_interpreter_for_source(
-                        path,
-                        extension,
-                        self.jit_runtime_provides_cli_args(),
-                    )
+                    && should_prefer_interpreter_for_source(path, extension, self.jit_runtime_provides_cli_args())
                 {
                     return self.run_file_interpreted_with_args(path, args);
                 }
@@ -1030,10 +1021,6 @@ impl ExecCore {
                             if jit_err.contains("SIMPLE_JIT_STRICT:") {
                                 return Err(jit_err);
                             }
-                            simple_common::engine_receipt::record_demotion(
-                                "jit-compile-error",
-                                &jit_err,
-                            );
                             jit_coverage_report(path, "jit-compile-error");
                             eprintln!(
                                 "[INFO] JIT compilation failed, falling back to interpreter: {}",
@@ -1042,10 +1029,6 @@ impl ExecCore {
                             self.run_file_interpreted_with_args(path, args)
                         }
                         Err(payload) => {
-                            simple_common::engine_receipt::record_demotion(
-                                "jit-panic",
-                                &panic_payload_to_string(payload.as_ref()),
-                            );
                             jit_coverage_report(path, "jit-panic");
                             eprintln!(
                                 "[INFO] JIT panicked, falling back to interpreter: {}",
@@ -1206,15 +1189,6 @@ impl ExecCore {
             // bridge instead of being unboxed to a raw i64 — see
             // compile_interp_call in codegen/instr/core.rs.
             let boxed_returns = simple_compiler::compilability::boxed_return_functions(&ast.items);
-            // A PARTIAL demotion: these calls are spliced back into the
-            // interpreter while the rest of the module stays JIT'd. It is not a
-            // whole-module drop, so the engine field still reads `cranelift-jit`
-            // — but a receipt claiming an unqualified JIT run would overstate
-            // what executed, so the splice is named.
-            simple_common::engine_receipt::record_demotion(
-                "hybrid-interp-splice",
-                &unresolvable_externs.iter().cloned().collect::<Vec<_>>().join(","),
-            );
             simple_compiler::mir::apply_hybrid_transform(&mut mir_module, &unresolvable_externs, &boxed_returns);
         }
 
@@ -1222,15 +1196,6 @@ impl ExecCore {
         let has_main = mir_module.functions.iter().any(|f| f.name == "main");
 
         if !has_main {
-            // A demotion too: the JIT entry point calls `main`, so with no
-            // `main` the entire module is handed to the tree-walk interpreter
-            // right here, without ever reaching the caller's fallback arm.
-            // Recorded so the receipt cannot report `cranelift-jit` for a run
-            // in which no machine code was executed.
-            simple_common::engine_receipt::record_demotion(
-                "jit-bail:no-main-fn",
-                &path.display().to_string(),
-            );
             // Never exit 0 silently — see `reject_silent_no_op_module`.
             Self::reject_silent_no_op_module(&ast.items)?;
             let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
@@ -1526,11 +1491,7 @@ fn should_force_interpreter_for_source(path: &Path) -> bool {
     normalized.ends_with("src/app/simpleos_nvme_serial_check/main.spl")
 }
 
-fn should_prefer_interpreter_for_source(
-    path: &Path,
-    extension: &str,
-    cli_args_backed: bool,
-) -> bool {
+fn should_prefer_interpreter_for_source(path: &Path, extension: &str, cli_args_backed: bool) -> bool {
     match interpreter_preference_reason(path, extension, cli_args_backed) {
         Some(reason) => {
             jit_coverage_report(path, reason);
@@ -1550,11 +1511,7 @@ fn should_prefer_interpreter_for_source(
 /// per-function JIT/interpreter split on this path. Because it fired silently,
 /// the cost it imposes on the self-hosted compiler sat unmeasured; see
 /// doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md.
-fn interpreter_preference_reason(
-    path: &Path,
-    extension: &str,
-    cli_args_backed: bool,
-) -> Option<&'static str> {
+fn interpreter_preference_reason(path: &Path, extension: &str, cli_args_backed: bool) -> Option<&'static str> {
     if should_force_interpreter_for_source(path) {
         return Some("forced-source-allowlist");
     }
@@ -1596,12 +1553,6 @@ fn interpreter_preference_reason(
 /// env var is read once per decision and the common case is a single
 /// `var_os` miss.
 pub(crate) fn jit_coverage_report(path: &Path, reason: &str) {
-    // The engine receipt is recorded BEFORE the `SIMPLE_JIT_COVERAGE` gate, and
-    // deliberately outside it. The census below is a debugging convenience and
-    // may stay off; the demotion RECORD may not, because a demotion nobody can
-    // see is the defect this exists to fix. See
-    // `simple_common::engine_receipt::record_demotion`.
-    simple_common::engine_receipt::record_demotion(reason, &path.display().to_string());
     if std::env::var_os("SIMPLE_JIT_COVERAGE").is_none() {
         return;
     }
@@ -1652,8 +1603,7 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
 mod tests {
     use super::{
         interpreter_preference_reason, panic_payload_to_string, should_force_interpreter_for_source,
-        should_prefer_interpreter_for_source, source_uses_cli_args,
-        source_uses_jit_unsafe_graphics_runtime,
+        should_prefer_interpreter_for_source, source_uses_cli_args, source_uses_jit_unsafe_graphics_runtime,
     };
 
     /// The de-JIT census must NAME the gate that fired, not just return a bool.
@@ -1669,8 +1619,11 @@ mod tests {
     fn interpreter_preference_reason_names_the_unbacked_cli_args_gate() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("entry.spl");
-        fs::write(&path, "use std.cli.cli_util (get_cli_args)\n\nfn main():\n    print \"hi\"\n")
-            .expect("write fixture");
+        fs::write(
+            &path,
+            "use std.cli.cli_util (get_cli_args)\n\nfn main():\n    print \"hi\"\n",
+        )
+        .expect("write fixture");
         // Guard against a stray ambient override in the test environment.
         std::env::remove_var("SIMPLE_EXECUTION_MODE");
         // Capability ABSENT: the divert still happens, and is still named.
@@ -1713,10 +1666,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("script.shs");
         fs::write(&path, "fn main():\n    print \"hi\"\n").expect("write fixture");
-        assert_eq!(
-            interpreter_preference_reason(&path, "shs", true),
-            Some("shs-extension")
-        );
+        assert_eq!(interpreter_preference_reason(&path, "shs", true), Some("shs-extension"));
     }
     use std::fs;
     use std::path::Path;
@@ -2018,7 +1968,10 @@ mod execution_mode_validation_tests {
     #[test]
     fn empty_and_junk_modes_are_rejected() {
         assert!(ExecutionMode::parse_str_checked("").is_err());
-        assert!(ExecutionMode::parse_str_checked("JIT").is_err(), "match is case-sensitive");
+        assert!(
+            ExecutionMode::parse_str_checked("JIT").is_err(),
+            "match is case-sensitive"
+        );
         assert!(ExecutionMode::parse_str_checked("native").is_err());
     }
 }

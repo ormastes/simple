@@ -204,8 +204,12 @@ fn component_descriptor_v1(body: ComponentDescriptor) -> ComponentDescriptorV1:
 # embedded_impl_hash / configured_impl_hash drive the placement=auto fold:
 # matching non-empty hashes fold static; a stale static (hash mismatch)
 # picks dynamic; placement=dynamic never folds; presence=off is ABSENT.
-# Any empty digest on the placement=auto path is an explicit error.
-fn resolve_component(catalog: [ComponentDescriptorV1], id: text, embedded_impl_hash: text, configured_impl_hash: text) -> Result<ComponentChoice, ComponentResolveError>:
+# Any empty digest on the legacy placement=auto path is an explicit error.
+# The production overload additionally receives authoritative static-table
+# presence; a known-absent row selects dynamic admission without fake hashes.
+fn resolve_component_impl(catalog: [ComponentDescriptorV1], id: text,
+        embedded_impl_hash: text, configured_impl_hash: text,
+        static_presence_known: bool, static_present: bool) -> Result<ComponentChoice, ComponentResolveError>:
     var bodies: [ComponentDescriptor] = []
     var idx = 0
     while idx < catalog.len():
@@ -240,19 +244,48 @@ fn resolve_component(catalog: [ComponentDescriptorV1], id: text, embedded_impl_h
     if found.presence == "off":
         mode = "absent"
     elif found.placement == "static":
+        # The legacy resolver did not receive a static-table presence bit.
+        # Keep that API's behavior unchanged, while letting the production
+        # startup planner fail closed when its generated table says the
+        # component is not embedded or its digest is stale.
+        if static_presence_known:
+            if not static_present:
+                return Err(ComponentResolveError(code: "static_required_missing", detail: id))
+            if embedded_impl_hash == "" or configured_impl_hash == "":
+                return Err(ComponentResolveError(code: "missing_impl_digest", detail: id))
+            if embedded_impl_hash != configured_impl_hash:
+                return Err(ComponentResolveError(code: "static_required_stale", detail: id))
         mode = "static"
     elif found.placement == "dynamic":
         # placement=dynamic never folds, regardless of digests.
         mode = "dynamic"
     else:
         # placement=auto: fold static only on a verified digest match.
-        if embedded_impl_hash == "" or configured_impl_hash == "":
+        if static_presence_known and not static_present:
+            mode = "dynamic"
+        elif embedded_impl_hash == "" or configured_impl_hash == "":
             return Err(ComponentResolveError(code: "missing_impl_digest", detail: id))
-        if embedded_impl_hash == configured_impl_hash:
+        elif embedded_impl_hash == configured_impl_hash:
             mode = "static"
         else:
             mode = "dynamic"
     Ok(ComponentChoice(id: found.id, version: found.version, mode: mode, activation: found.activation, dynload_setting: component_effective_dynload_setting(found)))
+
+# Backward-compatible public resolver: callers that predate the generated
+# static-table contract retain the original digest-only decision semantics.
+fn resolve_component(catalog: [ComponentDescriptorV1], id: text,
+        embedded_impl_hash: text, configured_impl_hash: text) -> Result<ComponentChoice, ComponentResolveError>:
+    resolve_component_impl(catalog, id, embedded_impl_hash,
+        configured_impl_hash, false, false)
+
+# Production startup resolver. `static_present` is an authoritative lookup
+# result from the generated static table, so absence can select the checked
+# dynamic artifact without inventing placeholder implementation hashes.
+fn resolve_component_with_static_presence(catalog: [ComponentDescriptorV1],
+        id: text, static_present: bool, embedded_impl_hash: text,
+        configured_impl_hash: text) -> Result<ComponentChoice, ComponentResolveError>:
+    resolve_component_impl(catalog, id, embedded_impl_hash,
+        configured_impl_hash, true, static_present)
 
 # --- Spec-facing accessor helpers ---
 #

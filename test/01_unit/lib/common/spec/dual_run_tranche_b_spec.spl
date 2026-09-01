@@ -1,0 +1,75 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Tranche B of doc/08_tracking/data/rt_dual_implementation_paydown_plan.md:
+# recorded twins that ALREADY EXIST, wired as dual-run pairs. Only twins whose
+# existence AND whose oracle's interpreter EXTERN_DISPATCH registration were
+# both verified are annotated here — the plan's own warning is that "each needs
+# its twin's existence verified first", which is what shrank an earlier tranche
+# from 31 candidates to 7.
+#
+# NOT WIRED, deliberately: rt_base64url_encode. Its interpreter oracle takes
+# TWO arguments (a pointer/length pair), not one `text`, so a value-compare
+# against the one-argument Simple `base64url_encode` cannot be built without
+# inventing an adapter — and an adapter written to make the two agree is
+# exactly the kind of twin that would make this harness certify a lie. Left
+# uncovered until the buffer-mode (shadow-buffer) contract is used for it.
+#
+# HONEST LIMITATION (same as the sibling shadow specs): this dual-runs both
+# sides only inside test specs, not on live traffic.
+#
+# @dual_pair: dict_has_key_text_vs_rt_dict_contains mode=value-legacy ref=rt_dict_contains cand=std.common.dict_contains_pure.dict_has_key_text id=C-MIG-0041
+# @dual_pair: repeat_int_pure_vs_rt_array_repeat mode=value-legacy ref=rt_array_repeat cand=std.common.array_repeat_pure.repeat_int_pure id=C-MIG-0042
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_true, assert_equal}
+use std.common.spec.dual_run.{dual_check_bool, dual_check_text, dual_check_bytes, dual_summarize}
+use std.common.dict_contains_pure.{dict_has_key_text}
+use std.common.array_repeat_pure.{repeat_int_pure}
+
+extern fn rt_dict_contains(d: {text: i64}, key: text) -> bool
+extern fn rt_array_repeat(value: i64, count: i64) -> [i64]
+
+describe "dual_run tranche B — existing recorded twins wired as pairs":
+    # @manual scenario evidence
+    it "dict_has_key_text vs rt_dict_contains agrees on hits, misses and empty dicts":
+        # @req REQ-SSPEC-LIB
+        step("dict_has_key_text vs rt_dict_contains agrees on hits, misses and empty dicts")
+        val d = {"a": 1, "bb": 2, "": 3, "日本": 4}
+        val empty: {text: i64} = {}
+        val keys = ["a", "bb", "", "日本", "z", "A", "b"]
+        var verdicts = [dual_check_bool("dict_contains", dict_has_key_text(d, keys[0]), rt_dict_contains(d, keys[0]))]
+        var i = 1
+        while i < keys.len():
+            verdicts = verdicts.push(dual_check_bool(
+                "dict_contains", dict_has_key_text(d, keys[i]), rt_dict_contains(d, keys[i])))
+            i = i + 1
+        verdicts = verdicts.push(dual_check_bool(
+            "dict_contains_empty", dict_has_key_text(empty, "a"), rt_dict_contains(empty, "a")))
+        val summary = dual_summarize(verdicts)
+        assert_equal(summary.total, 8)
+        assert_equal(summary.divergent, 0)
+        # Non-vacuity: the case set must contain both answers.
+        assert_true(dict_has_key_text(d, "a"))
+        assert_true(not dict_has_key_text(d, "z"))
+
+    it "repeat_int_pure vs rt_array_repeat agrees on length and every element":
+        # @req REQ-SSPEC-LIB
+        step("repeat_int_pure vs rt_array_repeat agrees on length and every element")
+        # dual_check_bytes compares length FIRST and then element-wise, so a
+        # shared-prefix agreement is a divergence, not a pass.
+        val counts = [0, 1, 2, 7, 33]
+        val value = 0 - 5
+        var verdicts = [dual_check_bytes(
+            "array_repeat", repeat_int_pure(value, counts[0]), rt_array_repeat(value, counts[0]))]
+        var i = 1
+        while i < counts.len():
+            verdicts = verdicts.push(dual_check_bytes(
+                "array_repeat", repeat_int_pure(value, counts[i]), rt_array_repeat(value, counts[i])))
+            i = i + 1
+        val summary = dual_summarize(verdicts)
+        assert_equal(summary.total, 5)
+        assert_equal(summary.divergent, 0)
+        assert_equal(repeat_int_pure(value, 7).len(), 7)

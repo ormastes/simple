@@ -1,0 +1,48 @@
+# Divergence class (g): the two hardening-gate parsers reading REAL tracked
+# .sdn text through a `case Some(x)` binding.
+#
+# On 2026-08-24 both check-critical-package-pins and check-completeness-seal
+# reported `ERROR — nothing was checked (selftest failed: ...)`. Neither gate
+# was wrong: under JIT, `_parse_waivers` found zero waivers (waivers=0,
+# parse_fail=0, no missing-field error) and `parse_manifest_text` failed valid
+# manifests with `module.extends.schema_abi missing`, while the interpreter
+# read both correctly. Both parsers now hoist the matched node into a `var`
+# before reading (6d35617d429); the JIT defect itself was fixed later
+# (3b676a17736). Their unit specs construct values in process and never touch
+# this path — this fixture drives the real text parsers over the same tracked
+# fixtures the gates use, so the two engines' answers are compared.
+#
+# Every value printed is a count or a field the fixture file pins, so the
+# interpreter's line is the oracle and a JIT regression reads as a diff.
+
+use std.io_runtime.{read_file}
+use compiler.common.assurance.package_pins.{parse_package_pin}
+use compiler.loader.completeness_seal.{parse_manifest_text}
+
+fn main() -> i64:
+    # --- package pins: the waiver block is the regression point ---
+    val pin_path = "test/fixtures/package_pins/waiver_no_owner/simple.sdn"
+    match parse_package_pin(read_file(pin_path), pin_path, "test/fixtures/package_pins/waiver_no_owner"):
+        case Ok(pin):
+            print("pin_waivers=" + pin.waivers.len().to_text())
+            if pin.waivers.len() > 0:
+                print("pin_waiver_rule=" + pin.waivers[0].rule)
+                print("pin_waiver_owner_empty=" + (pin.waivers[0].owner == "").to_text())
+        case Err(errs):
+            print("pin_parse_errors=" + errs.len().to_text())
+
+    # --- completeness-seal manifest: extends.schema_abi is the regression point ---
+    val man_path = "spec/compiler_schema/extensions/hir_async.sdn"
+    match parse_manifest_text(read_file(man_path), man_path):
+        case Ok(doc):
+            print("man_extensions=" + doc.extensions.len().to_text())
+            print("man_modules=" + doc.modules.len().to_text())
+            if doc.modules.len() > 0:
+                val m = doc.modules[0]
+                print("man_module_id=" + m.id)
+                print("man_extends=" + m.extends_list.len().to_text())
+                if m.extends_list.len() > 0:
+                    print("man_schema_abi=" + m.extends_list[0].schema_abi.to_text())
+        case Err(errs):
+            print("man_parse_errors=" + errs.len().to_text())
+    0

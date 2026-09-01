@@ -1,0 +1,196 @@
+#!/bin/sh
+# Source-only contract tests for the RISC-V HAL migration evidence producers.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+HELPER=$ROOT_DIR/scripts/check/lib/riscv-hal-migration-evidence.shs
+AUDIT=$ROOT_DIR/test/fixtures/os/rv64_freestanding_policy_decision_audit.sdn
+FREESTANDING_OWNER=$ROOT_DIR/src/os/kernel/arch/riscv64/freestanding_policy.spl
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/riscv-hal-evidence-contract.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+
+fail() {
+    echo "riscv_hal_migration_evidence_contract status=FAIL reason=$1" >&2
+    exit 1
+}
+
+require_line() {
+    pattern=$1
+    file=$2
+    grep -F "$pattern" "$file" >/dev/null || fail "missing-contract:$file:$pattern"
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+require_inputs() {
+    input_producer=$1
+    shift
+    for input_label in "$@"; do
+        require_line "hal_migration_capture_input $input_label" "$input_producer"
+    done
+}
+
+require_freeze_before() {
+    input_producer=$1
+    first_action=$2
+    awk -v action="$first_action" '
+        /hal_migration_seal_input_freeze/ && !seal { seal = NR }
+        index($0, action) && !action_line { action_line = NR }
+        END { if (!seal || !action_line || seal >= action_line) exit 1 }
+    ' "$input_producer" || fail "input-freeze-not-before-execution:$input_producer:$first_action"
+}
+
+PRODUCERS='scripts/check/check-rv32-boot-layout-branch-coverage.shs
+scripts/check/check-rv64-boot-tcp-policy-migration.shs
+scripts/check/check-rv64-freestanding-policy-migration.shs
+scripts/check/check-rv64-noalloc-pmm-migration.shs'
+
+for rel in $PRODUCERS; do
+    producer=$ROOT_DIR/$rel
+    sh -n "$producer" || fail "shell-syntax:$rel"
+    require_line 'riscv-hal-migration-evidence.shs' "$producer"
+    require_line 'hal_migration_parse_admission "$@"' "$producer"
+    require_line 'hal_migration_require_stage4' "$producer"
+    require_line 'hal_migration_bind_target_runtime' "$producer"
+    require_line 'hal_migration_begin_input_freeze' "$producer"
+    require_line 'hal_migration_capture_input checker' "$producer"
+    require_line 'hal_migration_seal_input_freeze' "$producer"
+    require_line 'hal_migration_revalidate_before_receipt' "$producer"
+    require_line 'hal_migration_revalidate_inputs_before_receipt' "$producer"
+    require_line 'hal_migration_publish_receipt' "$producer"
+    require_line 'receipt_sha256=' "$producer"
+    if sh "$producer" >"$WORK/no-admit.out" 2>"$WORK/no-admit.err"; then
+        fail "producer-ran-without-stage4-admission:$rel"
+    fi
+    grep -F 'stage4-admission-required' "$WORK/no-admit.err" >/dev/null ||
+        fail "missing-stage4-rejection:$rel"
+    awk '
+        /hal_migration_publish_receipt/ {
+            if (previous !~ /hal_migration_revalidate_inputs_before_receipt/ ||
+                before_previous !~ /hal_migration_revalidate_before_receipt/) exit 1
+            publications++
+        }
+        $0 !~ /^[[:space:]]*$/ { before_previous = previous; previous = $0 }
+        END { if (publications != 1) exit 1 }
+    ' "$producer" || fail "receipt-publication-not-immediately-revalidated:$rel"
+done
+
+RV32_PRODUCER=$ROOT_DIR/scripts/check/check-rv32-boot-layout-branch-coverage.shs
+BOOT_TCP_PRODUCER=$ROOT_DIR/scripts/check/check-rv64-boot-tcp-policy-migration.shs
+NOALLOC_PRODUCER=$ROOT_DIR/scripts/check/check-rv64-noalloc-pmm-migration.shs
+FREESTANDING_PRODUCER=$ROOT_DIR/scripts/check/check-rv64-freestanding-policy-migration.shs
+require_inputs "$RV32_PRODUCER" evidence_helper checker owner_source coverage_driver
+require_inputs "$BOOT_TCP_PRODUCER" evidence_helper checker owner_source runtime_consumer_source oracle_source simple_probe focused_spec tool_cc
+require_inputs "$NOALLOC_PRODUCER" evidence_helper checker owner_source abi_runtime_source runtime_consumer_source coverage_pin oracle_source simple_probe abi_harness_source focused_spec tool_cc tool_gcov tool_nm tool_readelf
+require_inputs "$FREESTANDING_PRODUCER" evidence_helper checker owner_source runtime_consumer_source decision_audit oracle_source simple_probe abi_harness_source focused_spec tool_cc tool_cross_cc tool_nm tool_readelf
+require_freeze_before "$RV32_PRODUCER" 'SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT='
+require_freeze_before "$BOOT_TCP_PRODUCER" '"$CC_BIN" -std=c11'
+require_freeze_before "$NOALLOC_PRODUCER" '"$CC_BIN" -std=c11'
+require_freeze_before "$FREESTANDING_PRODUCER" '# Closed source audit:'
+
+sh -n "$HELPER" || fail helper-shell-syntax
+require_line 'stage4_requirement=admitted-current-tree-pure-simple-full-cli' "$HELPER"
+require_line 'stage4_provenance_sha256=' "$HELPER"
+require_line 'target_runtime_sha256=' "$HELPER"
+require_line 'receipt_payload_sha256=' "$HELPER"
+require_line 'hal_migration_verify_expected_hash' "$HELPER"
+require_line 'evidence_input_manifest_sha256=' "$HELPER"
+. "$HELPER"
+
+hal_migration_is_sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ||
+    fail lowercase-sha256-rejected
+for malformed_hash in \
+    0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde \
+    0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0 \
+    0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeG \
+    0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF; do
+    if hal_migration_is_sha256 "$malformed_hash"; then
+        fail malformed-sha256-admitted
+    fi
+done
+
+FAKE_SHA_DIR=$WORK/fake-sha
+mkdir -p "$FAKE_SHA_DIR"
+printf '%s\n' '#!/bin/sh' 'printf "%064d  %s\\n" 0 "$1"' 'exit 73' >"$FAKE_SHA_DIR/sha256sum"
+chmod +x "$FAKE_SHA_DIR/sha256sum"
+if PATH="$FAKE_SHA_DIR:$PATH" hal_migration_hash_file "$HELPER" >/dev/null 2>&1; then
+    fail sha256sum-failure-masked
+fi
+
+audit_owner=$(awk '$1 == "meta" && $2 == "owner_source_sha256" {print $3; count++} END {if (count != 1) exit 1}' "$AUDIT") ||
+    fail freestanding-audit-source-hash-field-invalid
+hal_migration_is_sha256 "$audit_owner" || fail freestanding-audit-source-hash-format-invalid
+current_owner=$(hash_file "$FREESTANDING_OWNER")
+[ "$audit_owner" = "$current_owner" ] ||
+    fail "freestanding-audit-source-hash-stale:expected=$current_owner:actual=$audit_owner"
+
+# Exercise receipt publication with synthetic files only. This proves the
+# payload hash and provenance/runtime bindings survive the temporary workspace.
+HAL_MIGRATION_LANE=contract_fixture
+printf 'stage4 fixture\n' >"$WORK/stage4"
+printf 'provenance fixture\n' >"$WORK/stage4.provenance.env"
+printf 'runtime fixture\n' >"$WORK/runtime"
+HAL_MIGRATION_SIMPLE_BIN=$WORK/stage4
+HAL_MIGRATION_SIMPLE_SHA256=$(hash_file "$HAL_MIGRATION_SIMPLE_BIN")
+HAL_MIGRATION_STAGE4_PROVENANCE=$WORK/stage4.provenance.env
+HAL_MIGRATION_STAGE4_PROVENANCE_SHA256=$(hash_file "$HAL_MIGRATION_STAGE4_PROVENANCE")
+hal_migration_bind_target_runtime contract-runtime "$WORK/runtime"
+stage4_verify_candidate_provenance() {
+    [ "$1" = "$HAL_MIGRATION_STAGE4_PROVENANCE" ] &&
+        [ "$2" = "$HAL_MIGRATION_SIMPLE_BIN" ] && [ "$3" = "$WORK" ]
+}
+hal_migration_revalidate_before_receipt "$WORK"
+original_runtime_sha=$HAL_MIGRATION_TARGET_RUNTIME_SHA256
+HAL_MIGRATION_TARGET_RUNTIME_SHA256=ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789
+if (hal_migration_revalidate_before_receipt "$WORK") >/dev/null 2>&1; then
+    fail uppercase-expected-runtime-hash-admitted
+fi
+HAL_MIGRATION_TARGET_RUNTIME_SHA256=$original_runtime_sha
+printf 'runtime changed\n' >"$WORK/runtime"
+if (hal_migration_revalidate_before_receipt "$WORK") >/dev/null 2>&1; then
+    fail changed-runtime-admitted-before-receipt
+fi
+printf 'runtime fixture\n' >"$WORK/runtime"
+hal_migration_revalidate_before_receipt "$WORK"
+printf 'frozen input fixture\n' >"$WORK/frozen-input"
+hal_migration_begin_input_freeze "$WORK/evidence-inputs.tsv"
+hal_migration_capture_input checker "$0"
+hal_migration_capture_input fixture "$WORK/frozen-input"
+hal_migration_seal_input_freeze
+frozen_input_sha=$(hash_file "$WORK/frozen-input")
+[ "$(hal_migration_frozen_hash fixture "$WORK/frozen-input")" = "$frozen_input_sha" ] ||
+    fail frozen-input-hash-not-recovered
+hal_migration_revalidate_inputs_before_receipt
+printf 'changed frozen input\n' >"$WORK/frozen-input"
+if (hal_migration_revalidate_inputs_before_receipt) >/dev/null 2>&1; then
+    fail changed-evidence-input-admitted-before-receipt
+fi
+printf 'frozen input fixture\n' >"$WORK/frozen-input"
+hal_migration_revalidate_inputs_before_receipt
+cp "$WORK/evidence-inputs.tsv" "$WORK/evidence-inputs.saved"
+printf 'tamper\n' >>"$WORK/evidence-inputs.tsv"
+if (hal_migration_revalidate_inputs_before_receipt) >/dev/null 2>&1; then
+    fail changed-input-manifest-admitted-before-receipt
+fi
+mv "$WORK/evidence-inputs.saved" "$WORK/evidence-inputs.tsv"
+hal_migration_revalidate_inputs_before_receipt
+PAYLOAD=$WORK/payload.env
+{
+    hal_migration_write_common_fields contract-fixture "$0"
+    printf 'evidence_scope=contract-only\n'
+} >"$PAYLOAD"
+RECEIPT=$WORK/durable/receipt.env
+hal_migration_revalidate_before_receipt "$WORK"
+hal_migration_revalidate_inputs_before_receipt
+hal_migration_publish_receipt "$RECEIPT" "$PAYLOAD"
+[ -s "$RECEIPT" ] && [ ! -L "$RECEIPT" ] || fail durable-receipt-missing
+require_line "stage4_binary_sha256=$HAL_MIGRATION_SIMPLE_SHA256" "$RECEIPT"
+require_line "stage4_provenance_sha256=$HAL_MIGRATION_STAGE4_PROVENANCE_SHA256" "$RECEIPT"
+require_line "target_runtime_sha256=$HAL_MIGRATION_TARGET_RUNTIME_SHA256" "$RECEIPT"
+require_line "evidence_input_manifest_sha256=$HAL_MIGRATION_INPUT_MANIFEST_SHA256" "$RECEIPT"
+published_payload_hash=$(sed -n 's/^receipt_payload_sha256=//p' "$RECEIPT")
+[ "$published_payload_hash" = "$(hash_file "$PAYLOAD")" ] || fail receipt-payload-hash-mismatch
+
+echo "riscv_hal_migration_evidence_contract status=PASS producers=4 stage4_rejections=4 freestanding_owner_sha256=$current_owner durable_receipt=PASS qemu=not-run runtime_gates=not-run"

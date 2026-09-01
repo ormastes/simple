@@ -23,14 +23,23 @@ use std.common.spec.evidence.counterpart.model.{ProviderStatus}
 # Raw shim declarations — the only externs in the counterpart lane
 # ============================================================================
 
+@unsafe(reason: "raw counterpart dynamic-library and opaque-handle ABI", capabilities: [ffi])
 extern fn rt_counterpart_open(path: text, config: text) -> i64
+@unsafe(reason: "raw counterpart dynamic-library ABI probe", capabilities: [ffi])
 extern fn rt_counterpart_probe_abi(path: text, requested_abi: i64) -> i64
+@unsafe(reason: "raw counterpart manifest text ABI", capabilities: [ffi])
 extern fn rt_counterpart_manifest_text(handle: i64) -> text
+@unsafe(reason: "raw counterpart invocation status ABI", capabilities: [ffi])
 extern fn rt_counterpart_invoke(handle: i64, component: text, request: text) -> i64
+@unsafe(reason: "raw counterpart response text ABI", capabilities: [ffi])
 extern fn rt_counterpart_response_text(handle: i64) -> text
+@unsafe(reason: "raw counterpart trace text ABI", capabilities: [ffi])
 extern fn rt_counterpart_trace_text(handle: i64) -> text
+@unsafe(reason: "raw counterpart loader-error text ABI", capabilities: [ffi])
 extern fn rt_counterpart_last_error_text() -> text
+@unsafe(reason: "raw counterpart opaque-handle reset ABI", capabilities: [ffi])
 extern fn rt_counterpart_reset(handle: i64) -> i64
+@unsafe(reason: "raw counterpart opaque-handle release ABI", capabilities: [ffi])
 extern fn rt_counterpart_close(handle: i64) -> i64
 
 # ============================================================================
@@ -169,16 +178,20 @@ impl CounterpartLibrary:
     static fn open(path: text, config: text) -> Result<CounterpartLibrary, CounterpartFailure>:
         if path == "":
             return Err(counterpart_failure(COUNTERPART_ERR_BAD_ARG, "empty adapter path"))
-        val handle = rt_counterpart_open(path, config)
+        val handle = unsafe(capabilities: [ffi]):
+            rt_counterpart_open(path, config)
         if handle <= 0:
-            return Err(counterpart_failure(handle, rt_counterpart_last_error_text() ?? ""))
+            val detail = unsafe(capabilities: [ffi]):
+                rt_counterpart_last_error_text()
+            return Err(counterpart_failure(handle, detail))
         Ok(CounterpartLibrary(path: path, handle: handle))
 
     # Ask the adapter at `path` whether it serves `requested_abi`, without
     # opening an instance. Returns Ok(true) when served, Ok(false) when the
     # adapter refuses that version, Err when the library cannot be loaded.
     static fn serves_abi(path: text, requested_abi: i64) -> Result<bool, CounterpartFailure>:
-        val probed = rt_counterpart_probe_abi(path, requested_abi)
+        val probed = unsafe(capabilities: [ffi]):
+            rt_counterpart_probe_abi(path, requested_abi)
         if probed < 0:
             return Err(counterpart_failure(probed, "probe of " + path + " failed"))
         Ok(probed == 1)
@@ -192,7 +205,8 @@ impl CounterpartLibrary:
     fn manifest() -> Result<text, CounterpartFailure>:
         if self.handle <= 0:
             return Err(counterpart_failure(COUNTERPART_ERR_BAD_HANDLE, "library is closed"))
-        val text_value = rt_counterpart_manifest_text(self.handle) ?? ""
+        val text_value = unsafe(capabilities: [ffi]):
+            rt_counterpart_manifest_text(self.handle)
         if text_value == "":
             return Err(counterpart_failure(COUNTERPART_ERR_WRITER, "adapter produced an empty manifest"))
         Ok(text_value)
@@ -204,20 +218,26 @@ impl CounterpartLibrary:
             return Err(counterpart_failure(COUNTERPART_ERR_BAD_HANDLE, "library is closed"))
         if component_id == "":
             return Err(counterpart_failure(COUNTERPART_ERR_BAD_ARG, "empty component_id"))
-        val status = rt_counterpart_invoke(self.handle, component_id, request)
+        val status = unsafe(capabilities: [ffi]):
+            rt_counterpart_invoke(self.handle, component_id, request)
         if status != COUNTERPART_OK:
             return Err(counterpart_failure(status, "invoke " + component_id + " failed"))
+        val response = unsafe(capabilities: [ffi]):
+            rt_counterpart_response_text(self.handle)
+        val trace = unsafe(capabilities: [ffi]):
+            rt_counterpart_trace_text(self.handle)
         Ok(CounterpartResponse(
             component_id: component_id,
-            response: rt_counterpart_response_text(self.handle) ?? "",
-            trace: rt_counterpart_trace_text(self.handle) ?? ""
+            response: response,
+            trace: trace
         ))
 
     # Return the instance to its post-open state between corpus cases.
     fn reset() -> Result<bool, CounterpartFailure>:
         if self.handle <= 0:
             return Err(counterpart_failure(COUNTERPART_ERR_BAD_HANDLE, "library is closed"))
-        val status = rt_counterpart_reset(self.handle)
+        val status = unsafe(capabilities: [ffi]):
+            rt_counterpart_reset(self.handle)
         if status != COUNTERPART_OK:
             return Err(counterpart_failure(status, "reset failed"))
         Ok(true)
@@ -227,7 +247,8 @@ impl CounterpartLibrary:
         if self.handle <= 0:
             self.handle = 0
             return Ok(false)
-        val status = rt_counterpart_close(self.handle)
+        val status = unsafe(capabilities: [ffi]):
+            rt_counterpart_close(self.handle)
         self.handle = 0
         if status != COUNTERPART_OK:
             return Err(counterpart_failure(status, "close failed"))

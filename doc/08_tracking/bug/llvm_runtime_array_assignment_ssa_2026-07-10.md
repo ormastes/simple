@@ -1,8 +1,7 @@
 # LLVM Runtime-Array Assignment Reuses SSA Local
 
 - **Date:** 2026-07-10
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** fixed
 - **Area:** MIR assignment and LLVM SSA
 
 **Fix:** `ssa_alloca_transform_blocks` (`src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl`)

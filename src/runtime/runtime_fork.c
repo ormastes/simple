@@ -36,6 +36,9 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
 
 bool rt_fork_parent_timed_out(void) { return false; }
 bool rt_fork_parent_signaled(void) { return false; }
+int64_t rt_fork_parent_user_cpu_micros(void) { return 0; }
+int64_t rt_fork_parent_system_cpu_micros(void) { return 0; }
+int64_t rt_fork_parent_peak_rss_bytes(void) { return 0; }
 
 const char* rt_fork_parent_stdout(void) { return ""; }
 const char* rt_fork_parent_stderr(void) { return "fork not supported on Windows"; }
@@ -55,6 +58,7 @@ void rt_fork_child_exit(int64_t exit_code) {
 #include <string.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #include <poll.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -69,6 +73,7 @@ static char* s_result_stdout = NULL;
 static char* s_result_stderr = NULL;
 static bool s_result_timed_out = false;
 static bool s_result_signaled = false;
+static struct rusage s_result_rusage;
 
 /* Each stream retains at most 4 MiB of child output, split head/tail. */
 #define FORK_CAPTURE_LIMIT (4U * 1024U * 1024U)
@@ -190,10 +195,10 @@ static void free_results(void) {
     if (s_result_stderr) { SPL_FREE(s_result_stderr); s_result_stderr = NULL; }
 }
 
-static pid_t waitpid_nointr(pid_t pid, int* status, int options) {
+static pid_t wait4_nointr(pid_t pid, int* status, int options) {
     pid_t waited;
     do {
-        waited = waitpid(pid, status, options);
+        waited = wait4(pid, status, options, &s_result_rusage);
     } while (waited < 0 && errno == EINTR);
     return waited;
 }
@@ -280,6 +285,7 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
     free_results();
     s_result_timed_out = false;
     s_result_signaled = false;
+    memset(&s_result_rusage, 0, sizeof(s_result_rusage));
 
     int stdout_fd = s_stdout_read_fd;
     int stderr_fd = s_stderr_read_fd;
@@ -297,7 +303,7 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
             (void)kill((pid_t)child_pid, SIGKILL);
         }
         int status;
-        (void)waitpid_nointr((pid_t)child_pid, &status, 0);
+        (void)wait4_nointr((pid_t)child_pid, &status, 0);
         close(stdout_fd);
         close(stderr_fd);
         return -1;
@@ -344,7 +350,7 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
 
     while (stdout_open || stderr_open) {
         if (!child_exited) {
-            pid_t waited = waitpid_nointr((pid_t)child_pid, &child_status, WNOHANG);
+            pid_t waited = wait4_nointr((pid_t)child_pid, &child_status, WNOHANG);
             if (waited == (pid_t)child_pid) child_exited = 1;
         }
         struct pollfd fds[2];
@@ -459,7 +465,7 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
             (void)kill((pid_t)child_pid, SIGKILL);
         }
         if (!child_exited) {
-            pid_t waited = waitpid_nointr((pid_t)child_pid, &child_status, 0);
+            pid_t waited = wait4_nointr((pid_t)child_pid, &child_status, 0);
             child_exited = waited == (pid_t)child_pid;
         }
         /* The post-kill drain can only observe EOF because we killed the
@@ -503,7 +509,7 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
 
     /* Wait for child to finish */
     int status = child_status;
-    pid_t waited = child_exited ? (pid_t)child_pid : waitpid_nointr((pid_t)child_pid, &status, 0);
+    pid_t waited = child_exited ? (pid_t)child_pid : wait4_nointr((pid_t)child_pid, &status, 0);
 
     if (waited < 0) {
         return -1;
@@ -580,6 +586,24 @@ bool rt_fork_parent_timed_out(void) {
 
 bool rt_fork_parent_signaled(void) {
     return s_result_signaled;
+}
+
+int64_t rt_fork_parent_user_cpu_micros(void) {
+    return (int64_t)s_result_rusage.ru_utime.tv_sec * 1000000LL +
+           (int64_t)s_result_rusage.ru_utime.tv_usec;
+}
+
+int64_t rt_fork_parent_system_cpu_micros(void) {
+    return (int64_t)s_result_rusage.ru_stime.tv_sec * 1000000LL +
+           (int64_t)s_result_rusage.ru_stime.tv_usec;
+}
+
+int64_t rt_fork_parent_peak_rss_bytes(void) {
+#if defined(__APPLE__)
+    return (int64_t)s_result_rusage.ru_maxrss;
+#else
+    return (int64_t)s_result_rusage.ru_maxrss * 1024LL;
+#endif
 }
 
 const char* rt_fork_parent_stdout(void) {

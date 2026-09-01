@@ -1,8 +1,20 @@
-# Aspect dynload: no producer exists, and `--mode dynload` downgrades silently (2026-08-23)
+# Aspect dynload: producer and loader bridge exist; CLI packaging remains open (2026-08-23)
 
-Status: **OPEN**, both halves. Audited on `origin/main` `c1efb59cf09` with
-running evidence, not by reading code. **Nothing was deleted** — the working
-half is real and green.
+Status: **PARTIAL** — the producer/writer/reader slice is implemented;
+automatic `--mode dynload` packaging and the typed `aspect_facet` language
+surface remain **OPEN**. The original audit ran on `origin/main` `c1efb59cf09`
+with running evidence, not by reading code. **Nothing was deleted** — the
+working half is real and green.
+
+Update 2026-08-24: the smallest producer slice is now implemented in Pure
+Simple. `compiler.driver.smf_writer.generate_aspect_pack_smf` delegates to the
+canonical linker byte-serialization primitives, which register `.aspect_pack`
+as wire type 16, use extension flag `0x40` (leaving `0x20` to note.sdn), and
+preserve the SMFAPK1 payload byte-for-byte without widening it through `[i64]`.
+The automatic `--mode dynload` input/packaging decision remains OPEN.
+`ModuleLoader.load` now performs fail-closed standalone-pack admission and
+registers the pack with its lazy lifecycle owner; this does not claim the
+broader CLI or typed-facet path.
 
 ## 1. What `--mode dynload` is supposed to do vs `--mode one-binary`
 
@@ -35,12 +47,12 @@ the Rust seed defaults to `one-binary`
 |---|---|
 | `std.common.aspect_pack` (`src/lib/common/aspect_pack.spl`) | **implemented, green** — container, catalog, lazy facet load/unload, signature verification, operational seal |
 | Facet registry (`src/compiler/10.frontend/aspect_registry.spl` et al.) | **implemented, green** |
-| Loader-side section bridge (`src/compiler/99.loader/aspect_pack_section.spl`) | **implemented, but has no producer to read from** |
-| SMF **writer** (`src/compiler/70.backend/linker/smf_writer.spl`) | **ABSENT** — zero occurrences of `aspect_pack`; `SectionType.AspectPackDirectory` does not exist |
-| `ModuleLoader` integration | **ABSENT** — `loader_aspect_*` has zero occurrences anywhere in `src/`; `src/compiler/99.loader/aspect_acquisition.spl` does not exist on main |
+| Loader-side section bridge (`src/compiler/99.loader/aspect_pack_section.spl`) | **IMPLEMENTED** — reads the producer's `.aspect_pack` section |
+| SMF writer/driver producer | **IMPLEMENTED** — emits wire type 16, sets extension flag `0x0040`, keeps standalone packs non-executable, and preserves payload bytes directly |
+| `ModuleLoader` integration | **IMPLEMENTED** — validates standalone pack geometry before publication, lazily owns one provider, and unregisters it on unload/reload |
 | Rust seed | does not implement dynload at all (documented at `native_build.rs:44-49`) |
 
-## 3. Running evidence
+## 3. Historical running evidence (2026-08-23, before the producer slice)
 
 Measured 2026-08-23, load average 22-38, seed built from `c1efb59cf09`.
 
@@ -63,16 +75,19 @@ SPEC FILE VERDICT: test/01_unit/compiler/loader/aspect_pack_smf_section_wiring_s
   REQ-APKW-05  semantic: class `ModuleLoader` has no field named `last_load_aspect_pack_modules`
 ```
 
-**Verdict: aspects load and dispatch; nothing produces a pack for them to load
-from.** The spec is an honest, correctly-failing RED that names exactly what is
-missing. Do not green it by weakening it.
+**Historical verdict:** aspects loaded and dispatched, but nothing produced a
+pack for them to load from. The producer part of that verdict is superseded by
+the 2026-08-24 update. Automatic CLI packaging and typed-facet language routing
+remain open; the explicit ModuleLoader-to-pack provider bridge is implemented.
 
-## 4. Defect A — a false claim in a source comment
+## 4. Defect A — producer absence (closed 2026-08-24)
 
-`src/compiler/99.loader/aspect_pack_section.spl:5-7` states the section is
-"written by compiler.backend.linker.smf_writer". It is not: the writer has no
-aspect_pack support of any kind. Corrected in this commit to state the producer
-is unimplemented, with a TODO. The code itself is unchanged and kept.
+The original audit found that
+`src/compiler/99.loader/aspect_pack_section.spl:5-7` claimed the section was
+written by `compiler.backend.linker.smf_writer` when no producer existed. The
+Pure Simple writer/driver producer now makes that claim true. This closes only
+the production/readback slice, not automatic loader registration or facet
+routing.
 
 ## 5. Defect B — `--mode dynload` downgrades SILENTLY on the real path
 
@@ -97,8 +112,9 @@ notice's own doc comment says the policy forbids.
 TODO(dynload-visible-skip): emit a named skip diagnostic from the path
 `bin/simple native-build` actually takes (the pure-Simple worker), so
 `--mode dynload` cannot succeed silently while producing a one-binary artifact.
-Not implemented here: the correct fix is either that diagnostic or the real
-producer (§2), and choosing between them is a design call, not a patch.
+Not implemented here: automatic `--mode dynload` packaging and the typed
+facet-language surface remain open even though the producer and explicit
+ModuleLoader registration bridge now exist (§2).
 
 ## 6. Prior art
 

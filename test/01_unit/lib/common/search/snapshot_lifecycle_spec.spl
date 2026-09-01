@@ -1,0 +1,92 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md
+
+"""
+## Purpose and audience
+Purpose: prove the P2 candidate lifecycle state machine (create -> publish |
+expire | terminal error) built over the frozen §14.16/§14.17 wire records.
+Audience: engineers wiring `index_apply`/`index_publish` providers (P5-P6)
+against this state machine.
+"""
+
+use std.spec.step
+use std.spec
+
+use lib.common.search.candidate_lifecycle.{
+    create_candidate, publish_candidate, expire_candidate, terminal_error,
+    is_expired_at, CANDIDATE_STATUS_PENDING,
+}
+use lib.common.search.snapshot.{CandidateRecordV1}
+
+describe "candidate lifecycle: create":
+    it "creates a pending candidate with expires_at = created_at + ttl":
+        val candidate = create_candidate("cand-1", "op-1", "payload-hash-1", "root-0", "root-1", 1000, 500)
+        expect(candidate.status).to_equal(CANDIDATE_STATUS_PENDING)
+        expect(candidate.created_at_ms).to_equal(1000)
+        expect(candidate.expires_at_ms).to_equal(1500)
+        return ()
+
+describe "candidate lifecycle: publish":
+    it "publishes a pending, unexpired candidate whose base matches":
+        val candidate = create_candidate("cand-1", "op-1", "payload-hash-1", "root-0", "root-1", 1000, 500)
+        val publication = publish_candidate(candidate, "root-0", 1200).unwrap()
+        expect(publication.candidate_uid).to_equal("cand-1")
+        expect(publication.previous_logical_root).to_equal("root-0")
+        expect(publication.logical_root).to_equal("root-1")
+        expect(publication.published_at_ms).to_equal(1200)
+        return ()
+
+    it "rejects publishing after expiry":
+        val candidate = create_candidate("cand-1", "op-1", "payload-hash-1", "root-0", "root-1", 1000, 500)
+        val result = publish_candidate(candidate, "root-0", 1500)
+        expect(result.is_err()).to_be_true()
+        return ()
+
+    it "rejects publishing when the base logical root no longer matches":
+        val candidate = create_candidate("cand-1", "op-1", "payload-hash-1", "root-0", "root-1", 1000, 500)
+        val result = publish_candidate(candidate, "root-DIFFERENT", 1100)
+        expect(result.is_err()).to_be_true()
+        return ()
+
+    it "rejects publishing a candidate that is not pending":
+        val candidate = create_candidate("cand-1", "op-1", "payload-hash-1", "root-0", "root-1", 1000, 500)
+        val closed = CandidateRecordV1(
+            candidate_uid: candidate.candidate_uid,
+            operation_id: candidate.operation_id,
+            payload_hash: candidate.payload_hash,
+            base_logical_root: candidate.base_logical_root,
+            candidate_logical_root: candidate.candidate_logical_root,
+            created_at_ms: candidate.created_at_ms,
+            expires_at_ms: candidate.expires_at_ms,
+            status: "published",
+        )
+        val result = publish_candidate(closed, "root-0", 1100)
+        expect(result.is_err()).to_be_true()
+        return ()
+
+describe "candidate lifecycle: expire":
+    it "expires a pending candidate once its TTL has passed":
+        val candidate = create_candidate("cand-1", "op-1", "payload-hash-1", "root-0", "root-1", 1000, 500)
+        expect(is_expired_at(candidate, 1499)).to_be_false()
+        expect(is_expired_at(candidate, 1500)).to_be_true()
+        val receipt = expire_candidate(candidate, 1500).unwrap()
+        expect(receipt.candidate_uid).to_equal("cand-1")
+        expect(receipt.base_logical_root).to_equal("root-0")
+        expect(receipt.expired_at_ms).to_equal(1500)
+        return ()
+
+    it "rejects expiring a candidate before its TTL has passed":
+        val candidate = create_candidate("cand-1", "op-1", "payload-hash-1", "root-0", "root-1", 1000, 500)
+        val result = expire_candidate(candidate, 1200)
+        expect(result.is_err()).to_be_true()
+        return ()
+
+describe "candidate lifecycle: terminal error":
+    it "records a durable terminal error binding operation_id and payload_hash":
+        val error = terminal_error("op-1", "payload-hash-1", "invalid_utf8", "malformed frame", 1300)
+        expect(error.operation_id).to_equal("op-1")
+        expect(error.payload_hash).to_equal("payload-hash-1")
+        expect(error.code).to_equal("invalid_utf8")
+        expect(error.occurred_at_ms).to_equal(1300)
+        return ()

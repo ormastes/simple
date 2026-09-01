@@ -1,0 +1,145 @@
+"""Contract coverage for the bounded FAT32 executable identity owner."""
+
+use std.spec.*
+use os.kernel.fs.fat32_executable_identity_owner_v1.*
+
+fn _dirent_v1(name: text, cluster: u32, size: u32) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < 32:
+        result.push(0u8)
+        i = i + 1
+    var ni = 0
+    while ni < 11:
+        result[ni] = if ni < name.len(): name.slice(ni, ni + 1).ord().to_u8() else: 0x20u8
+        ni = ni + 1
+    result[11] = 0x20u8
+    result[20] = ((cluster >> 16) & 0xffu32).to_u8()
+    result[21] = ((cluster >> 24) & 0xffu32).to_u8()
+    result[26] = (cluster & 0xffu32).to_u8()
+    result[27] = ((cluster >> 8) & 0xffu32).to_u8()
+    result[28] = (size & 0xffu32).to_u8()
+    result[29] = ((size >> 8) & 0xffu32).to_u8()
+    result[30] = ((size >> 16) & 0xffu32).to_u8()
+    result[31] = ((size >> 24) & 0xffu32).to_u8()
+    result
+
+fn _observation_v1(
+    name: text, sector: u64, offset: i32, cluster: u32,
+    size: u32, lfn: [u16]
+) -> Fat32ExecutableObjectObservationV1:
+    Fat32ExecutableObjectObservationV1(
+        directory_cluster: 2u32, dirent_sector: sector,
+        dirent_offset: offset, dirent: _dirent_v1(name, cluster, size),
+        lfn_utf16: lfn)
+
+fn _mount_v1(device: u64, serial: u32) -> Fat32ExecutableMountSealV1:
+    fat32_executable_identity_open_mount_v1(Fat32ExecutableMountRequestV1(
+        device_id: device, volume_serial: serial, root_cluster: 2u32)).unwrap()
+
+describe "FAT32 executable identity owner v1":
+    it "invalidates an old proof when the same directory slot is replaced":
+        val mount = _mount_v1(101u64, 0xa101u32)
+        val first = fat32_executable_identity_observe_v1(
+            mount, _observation_v1("HELLO   ELF", 80u64, 0, 12u32, 48u32, [])).unwrap()
+        expect(fat32_executable_identity_snapshot_current_v1(first)).to_be(true)
+        val replacement = fat32_executable_identity_observe_v1(
+            mount, _observation_v1("HELLO   ELF", 80u64, 0, 19u32, 51u32, [])).unwrap()
+        expect(fat32_executable_identity_snapshot_current_v1(first)).to_be(false)
+        expect(fat32_executable_identity_snapshot_current_v1(replacement)).to_be(true)
+        expect(replacement.identity.object_generation > first.identity.object_generation).to_be(true)
+        expect(fat32_executable_identity_close_mount_v1(mount).unwrap()).to_be(true)
+
+    it "rejects ASCII case-folded long-name aliases at different locators":
+        val mount = _mount_v1(102u64, 0xa102u32)
+        val lower: [u16] = [104u16, 101u16, 108u16, 108u16, 111u16, 46u16, 101u16, 108u16, 102u16]
+        val upper: [u16] = [72u16, 69u16, 76u16, 76u16, 79u16, 46u16, 69u16, 76u16, 70u16]
+        val first = fat32_executable_identity_observe_v1(
+            mount, _observation_v1("HELLO~1 ELF", 81u64, 0, 21u32, 1u32, lower))
+        expect(first.is_ok()).to_be(true)
+        val collision = fat32_executable_identity_observe_v1(
+            mount, _observation_v1("HELLO~2 ELF", 81u64, 32, 22u32, 1u32, upper))
+        expect(collision.is_err()).to_be(true)
+        expect(fat32_executable_identity_close_mount_v1(mount).unwrap()).to_be(true)
+
+    it "rejects short-name to long-name aliases in both observation orders":
+        val alias: [u16] = [72u16, 69u16, 76u16, 76u16, 79u16, 46u16, 69u16, 76u16, 70u16]
+        val mount_a = _mount_v1(105u64, 0xa105u32)
+        expect(fat32_executable_identity_observe_v1(
+            mount_a, _observation_v1("HELLO   ELF", 84u64, 0, 50u32, 1u32, [])).is_ok()).to_be(true)
+        expect(fat32_executable_identity_observe_v1(
+            mount_a, _observation_v1("HELLO~1 ELF", 84u64, 32, 51u32, 1u32, alias)).is_err()).to_be(true)
+        expect(fat32_executable_identity_close_mount_v1(mount_a).unwrap()).to_be(true)
+        val mount_b = _mount_v1(106u64, 0xa106u32)
+        expect(fat32_executable_identity_observe_v1(
+            mount_b, _observation_v1("HELLO~1 ELF", 85u64, 0, 52u32, 1u32, alias)).is_ok()).to_be(true)
+        expect(fat32_executable_identity_observe_v1(
+            mount_b, _observation_v1("HELLO   ELF", 85u64, 32, 53u32, 1u32, [])).is_err()).to_be(true)
+        expect(fat32_executable_identity_close_mount_v1(mount_b).unwrap()).to_be(true)
+
+    it "checks later aliases after remembering an earlier reusable slot":
+        val mount = _mount_v1(110u64, 0xa110u32)
+        expect(fat32_executable_identity_observe_v1(
+            mount, _observation_v1(
+                "FIRST   ELF", 89u64, 0, 70u32, 9u32, [])).is_ok()).to_be(true)
+        expect(fat32_executable_identity_observe_v1(
+            mount, _observation_v1(
+                "CLANG   ELF", 89u64, 32, 71u32, 9u32, [])).is_ok()).to_be(true)
+        expect(fat32_executable_identity_forget_v1(
+            mount, 2u32, 89u64, 0).unwrap()).to_be(true)
+
+        # Slot zero is reusable, but the one-pass resolver must keep scanning
+        # and reject the live alias in the later slot instead of claiming it.
+        expect(fat32_executable_identity_observe_v1(
+            mount, _observation_v1(
+                "CLANG   ELF", 89u64, 64, 72u32, 9u32, [])).is_err()).to_be(true)
+        expect(fat32_executable_identity_close_mount_v1(mount).unwrap()).to_be(true)
+
+    it "binds non-ASCII long names by exact UTF-16 identity":
+        val mount = _mount_v1(103u64, 0xa103u32)
+        val unicode_name: [u16] = [0x03bbu16, 0x002eu16, 0x0065u16, 0x006cu16, 0x0066u16]
+        val proof = fat32_executable_identity_observe_v1(
+            mount, _observation_v1("UNICOD~1ELF", 82u64, 0, 31u32, 2u32, unicode_name)).unwrap()
+        expect(proof.identity.has_long_name).to_be(true)
+        expect(proof.identity.long_name_ascii_only).to_be(false)
+        expect(fat32_executable_identity_snapshot_current_v1(proof)).to_be(true)
+        expect(fat32_executable_identity_close_mount_v1(mount).unwrap()).to_be(true)
+
+    it "invalidates all object proofs on mount teardown":
+        val mount = _mount_v1(104u64, 0xa104u32)
+        val proof = fat32_executable_identity_observe_v1(
+            mount, _observation_v1("CLANG   ELF", 83u64, 0, 40u32, 9u32, [])).unwrap()
+        expect(fat32_executable_identity_close_mount_v1(mount).unwrap()).to_be(true)
+        expect(fat32_executable_identity_snapshot_current_v1(proof)).to_be(false)
+
+    it "rejects duplicate device ownership and stale seals":
+        val mount = _mount_v1(107u64, 0xa107u32)
+        val duplicate = fat32_executable_identity_open_mount_v1(
+            Fat32ExecutableMountRequestV1(
+                device_id: 107u64, volume_serial: 0xb107u32,
+                root_cluster: 2u32))
+        expect(duplicate.is_err()).to_be(true)
+        expect(fat32_executable_identity_close_mount_v1(mount).unwrap()).to_be(true)
+        expect(fat32_executable_identity_observe_v1(
+            mount, _observation_v1("STALE   ELF", 86u64, 0, 60u32, 1u32, [])).is_err()).to_be(true)
+
+    it "forgets an object and safely reuses bounded storage":
+        val mount = _mount_v1(108u64, 0xa108u32)
+        val first = fat32_executable_identity_observe_v1(
+            mount, _observation_v1("FIRST   ELF", 87u64, 0, 61u32, 1u32, [])).unwrap()
+        expect(fat32_executable_identity_forget_v1(
+            mount, 2u32, 87u64, 0).unwrap()).to_be(true)
+        expect(fat32_executable_identity_snapshot_current_v1(first)).to_be(false)
+        val second = fat32_executable_identity_observe_v1(
+            mount, _observation_v1("SECOND  ELF", 87u64, 32, 62u32, 1u32, [])).unwrap()
+        expect(fat32_executable_identity_snapshot_current_v1(second)).to_be(true)
+        expect(fat32_executable_identity_close_mount_v1(mount).unwrap()).to_be(true)
+
+    it "rejects a volume-label directory entry":
+        val mount = _mount_v1(109u64, 0xa109u32)
+        var observation = _observation_v1(
+            "VOLUME     ", 88u64, 0, 0u32, 0u32, [])
+        observation.dirent[11] = 0x08u8
+        expect(fat32_executable_identity_observe_v1(
+            mount, observation).is_err()).to_be(true)
+        expect(fat32_executable_identity_close_mount_v1(mount).unwrap()).to_be(true)

@@ -41,12 +41,20 @@
 
 set -u
 
+# `sort` and `comm` must use one bytewise order everywhere. Developer machines
+# commonly have a locale whose collation ignores punctuation, while GitHub's
+# runner uses C.UTF-8/C ordering. Mixing those orders made a valid candidate
+# appear as both NEW and STALE instead of comparing the same two sets.
+LC_ALL=C
+export LC_ALL
+
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BASELINE="$ROOT/scripts/check/pid_keyed_build_artifact_baseline.txt"
 SCAN_DIRS="src/compiler/70.backend src/compiler/80.driver src/compiler/10.frontend src/app/cli"
 
 fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
 oops() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+baseline_is_sorted() { sort -c "$1" >/dev/null 2>&1; }
 
 # Core detector. $1 = root dir to scan. Emits `path:content` lines, path
 # relative to $1, sorted. Kept as one function so the selftest exercises the
@@ -93,6 +101,10 @@ selftest() {
     cat > "$st/src/compiler/70.backend/backend/bad.spl" <<'EOF'
 fn f():
     val object_prefix = "{tmp_dir}/simple_rt_{compile_pid}_{target}_"
+    val dir = "{root}/queue-{getpid()}"
+    val (out, _err, code) = process_run_timeout("readlink", ["-f", "/proc/{pid}/exe"], 2000)
+    val stage_dir = "{tmp_dir}/simple_stage4_{provider}_{pid}"
+    val stage_dir = "{tmp_dir}/simple_stage4_runtime_native_{pid}"
 EOF
     # non-offender: write-temp-then-rename staging name
     cat > "$st/src/compiler/70.backend/backend/ok_tmp.spl" <<'EOF'
@@ -114,6 +126,11 @@ EOF
     echo "$out" | grep -q 'ok_tmp.spl|'  && { echo "selftest: .tmp staging false-positived" >&2; rc=1; }
     echo "$out" | grep -q 'ok_log.spl|'  && { echo "selftest: diagnostic false-positived" >&2; rc=1; }
     echo "$out" | grep -q 'ok_hash.spl|' && { echo "selftest: content-keyed path false-positived" >&2; rc=1; }
+    printf '%s\n' "$out" | sort -c >/dev/null 2>&1 || { echo "selftest: scan output is not bytewise sorted" >&2; rc=1; }
+    printf 'z|last\na|first\n' > "$st/unsorted-baseline.txt"
+    baseline_is_sorted "$st/unsorted-baseline.txt" && { echo "selftest: unsorted baseline was accepted" >&2; rc=1; }
+    sort "$st/unsorted-baseline.txt" > "$st/sorted-baseline.txt"
+    baseline_is_sorted "$st/sorted-baseline.txt" || { echo "selftest: sorted baseline was rejected" >&2; rc=1; }
     # empty tree must yield zero candidates so the caller is forced to ERROR
     empty=$(mktemp -d); n=$(scan "$empty" | grep -c . ); rm -rf "$empty"
     [ "$n" = "0" ] || { echo "selftest: empty tree yielded $n" >&2; rc=1; }
@@ -137,6 +154,7 @@ fi
 
 [ "$N" -gt 0 ] || oops "0 candidate lines found — the scan matched nothing, which is not credible for this tree"
 [ -f "$BASELINE" ] || oops "no baseline at $BASELINE"
+baseline_is_sorted "$BASELINE" || oops "baseline is not bytewise sorted; review and regenerate it with --generate-baseline"
 
 NEW=$(comm -23 "$CUR" "$BASELINE" | sed 's/|.*//' | sort -u | tr '\n' ' ')
 STALE=$(comm -13 "$CUR" "$BASELINE" | sed 's/|.*//' | sort -u | tr '\n' ' ')

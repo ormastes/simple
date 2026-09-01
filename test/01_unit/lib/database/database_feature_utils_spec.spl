@@ -1,9 +1,9 @@
-# @req: REQ-LIB-DATABASE-001 — core language semantics hold under execution. 
-"""
-## Purpose and audience
+# Feature Database Utilities Tests
+#
+# Parser-safe local coverage for metadata helpers.
 
-Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
-reading this spec to confirm the behavior still holds.
+use nogc_sync_mut.database.feature_utils.{parse_spipe_metadata, parse_attr_list,
+    extract_quoted_string, extract_category_from_path, compare_feature_id}
 
 ## Operator workflow
 
@@ -19,32 +19,34 @@ asserted here; platform-specific behavior is out of scope.
 
 use std.spec
 
-# doc-path: doc/01_research/local/database_feature_utils.md
-# doc-path: doc/03_plan/sys_test/database_feature_utils.md
-# doc-path: doc/04_architecture/database_feature_utils.md
-# doc-path: doc/05_design/database_feature_utils.md
+describe "Database Feature Utils":
+    it "parses attribute lists":
+        val modes = parse_attr_list("modes(\"pure\", \"hybrid\")", "modes")
+        check(modes.len() == 2)
+        check(modes[0] == "pure")
+        check(modes[1] == "hybrid")
 
-# @manual: primary
+    it "extracts quoted names":
+        check(extract_quoted_string("describe \"My Feature\":") == "My Feature")
 
-describe "Executed behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
+    it "extracts categories from feature paths":
+        check(extract_category_from_path("test/system/features/control_flow/loops_spec.spl") == "control_flow")
+        check(extract_category_from_path("spec.spl") == "uncategorized")
 
-    it "dict get, keys and membership":
-        step("Verify: dict get, keys and membership")
-        # @req: REQ-LIB-DATABASE-001
-        val d = {"a": 1}
-        expect(d.get("a")).to_equal(1)  # oracle: stored value
-        expect(d.has("b")).to_equal(false)
-        expect(d.keys()).to_equal(["a"])
+    it "compares feature ids semantically":
+        check(compare_feature_id("1.2", "1.10") < 0)
+        check(compare_feature_id("1.10.1", "1.2.20") > 0)
+        check(compare_feature_id("alpha", "beta") < 0)
 
-    it "string case and strip methods":
-        step("Verify: string case and strip methods")
-        # @req: REQ-LIB-DATABASE-001
-        expect("AbC".to_lower()).to_equal("abc")
-        expect("AbC".to_upper()).to_equal("ABC")
-        expect("  x ".trim()).to_equal("x")
+    it "parses spipe metadata from a temp file":
+        val path = write_spec("metadata", """
+#[id("feature_001")]
+#[modes("pure", "hybrid")]
+#[skip_modes("jit")]
+#[platforms("linux", "macos")]
+#[ignore]
+describe "My Feature":
+    pass
 
     it "Option payload binding":
         step("Verify: Option payload binding")
@@ -56,26 +58,5 @@ describe "Executed behavior oracles":
             nil: chosen = -1
         expect(chosen).to_equal(99)  # oracle: Some arm binds payload
 
-describe "Additional behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
-
-    it "dict literal access":
-        step("Verify: dict literal access")
-        # @req: REQ-LIB-DATABASE-001
-        val d = {"k": "v"}
-        expect(d["k"]).to_equal("v")
-
-    it "array construction and access":
-        step("Verify: array construction and access")
-        # @req: REQ-LIB-DATABASE-001
-        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
-        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
-        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
-
-    it "array sorting and mapping":
-        step("Verify: array sorting and mapping")
-        # @req: REQ-LIB-DATABASE-001
-        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
-        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
+    it "returns empty metadata for missing file":
+        check(parse_spipe_metadata("/nonexistent/database_feature_utils_spec.spl").len() == 0)

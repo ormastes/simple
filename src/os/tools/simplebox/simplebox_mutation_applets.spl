@@ -1,0 +1,162 @@
+# Bounded namespace-mutation applets for filesystem-launched Simplebox.
+
+use os.userlib.fs_mutation.{
+    VFS_MUTATION_PATH_MAX_BYTES, vfs_mkdir_checked, vfs_unlink_checked,
+    vfs_rmdir_checked, vfs_chmod_checked, vfs_symlink_checked
+}
+use os.userlib.fs.{file_open_direct, file_close_direct}
+use os.userlib.ipc_protocol.{VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT}
+
+extern fn stdout_write(data: text)
+
+pub const SIMPLEBOX_MUTATION_OPERAND_LIMIT: u64 = 128u64
+pub const SIMPLEBOX_MUTATION_TOTAL_PATH_BYTES_LIMIT: u64 = 65536u64
+
+enum SimpleboxMutationKind:
+    Mkdir
+    Unlink
+    Rmdir
+
+fn _mutation_operands(command: text, args: [text]) -> Result<[text], text>:
+    var start: u64 = 0u64
+    if args.len() > 0u64 and args[0] == "--":
+        start = 1u64
+    if start == args.len():
+        return Err("{command}: missing operand")
+    val count = args.len() - start
+    if count > SIMPLEBOX_MUTATION_OPERAND_LIMIT:
+        return Err("{command}: too many operands")
+    var paths: [text] = []
+    var total_bytes: u64 = 0u64
+    var index = start
+    while index < args.len():
+        val path = args[index]
+        if path.starts_with("-"):
+            return Err("{command}: unsupported option: {path}")
+        if path.len() == 0u64 or path.len() > VFS_MUTATION_PATH_MAX_BYTES:
+            return Err("{command}: invalid path length")
+        if path.len() > SIMPLEBOX_MUTATION_TOTAL_PATH_BYTES_LIMIT - total_bytes:
+            return Err("{command}: operand bytes exceed 65536-byte limit")
+        total_bytes = total_bytes + path.len()
+        paths.push(path)
+        index = index + 1u64
+    Ok(paths)
+
+fn _run_mutations(
+    command: text, args: [text], kind: SimpleboxMutationKind
+) -> i32:
+    val parsed = _mutation_operands(command, args)
+    match parsed:
+        case Err(reason):
+            stdout_write(reason + "\n")
+            1
+        case Ok(paths):
+            for path in paths:
+                val result = match kind:
+                    case SimpleboxMutationKind.Mkdir: vfs_mkdir_checked(path)
+                    case SimpleboxMutationKind.Unlink: vfs_unlink_checked(path)
+                    case SimpleboxMutationKind.Rmdir: vfs_rmdir_checked(path)
+                match result:
+                    case Err(reason):
+                        stdout_write("{command}: {path}: {reason}\n")
+                        return 1
+                    case Ok(_): pass
+            0
+
+pub fn simplebox_mkdir(args: [text]) -> i32:
+    """Create each named directory; parent synthesis (-p) is not claimed."""
+    _run_mutations("mkdir", args, SimpleboxMutationKind.Mkdir)
+
+pub fn simplebox_rm(args: [text]) -> i32:
+    """Unlink files only; recursive and force semantics are intentionally absent."""
+    _run_mutations("rm", args, SimpleboxMutationKind.Unlink)
+
+pub fn simplebox_rmdir(args: [text]) -> i32:
+    """Remove empty directories only through the VFS rmdir operation."""
+    _run_mutations("rmdir", args, SimpleboxMutationKind.Rmdir)
+
+pub fn simplebox_touch(args: [text]) -> i32:
+    """Create missing files without truncating existing file contents.
+
+    SimpleOS VFS does not yet expose timestamp mutation, so an existing file is
+    opened and closed through the canonical filesystem-launched descriptor API.
+    """
+    val parsed = _mutation_operands("touch", args)
+    match parsed:
+        case Err(reason):
+            stdout_write(reason + "\n")
+            1
+        case Ok(paths):
+            val flags = VFS_OPEN_O_WRONLY | VFS_OPEN_O_CREAT
+            for path in paths:
+                match file_open_direct(path, flags):
+                    case Err(reason):
+                        stdout_write("touch: {path}: {reason}\n")
+                        return 1
+                    case Ok(fd):
+                        if not file_close_direct(fd):
+                            stdout_write("touch: {path}: close failed\n")
+                            return 1
+            0
+
+pub fn simplebox_ln(args: [text]) -> i32:
+    """Create one symbolic link; hard-link authority is not exposed by VFS IPC."""
+    var start: u64 = 0u64
+    if args.len() > 0u64 and (args[0] == "-s" or args[0] == "--symbolic"):
+        start = 1u64
+    else:
+        stdout_write("ln: only symbolic links (-s) are supported\n")
+        return 1
+    if args.len() != start + 2u64:
+        stdout_write("ln: expected TARGET LINK_NAME\n")
+        return 1
+    val target = args[start]
+    val link_path = args[start + 1u64]
+    match vfs_symlink_checked(target, link_path):
+        case Err(reason):
+            stdout_write("ln: {link_path}: {reason}\n")
+            1
+        case Ok(_): 0
+
+fn _chmod_mode(mode_text: text) -> Result<u16, text>:
+    if mode_text.len() == 0u64 or mode_text.len() > 4u64:
+        return Err("chmod: mode must be 0 through 7777")
+    var mode: u16 = 0u16
+    for byte in mode_text.bytes():
+        if byte < 48u8 or byte > 55u8:
+            return Err("chmod: mode must be octal")
+        mode = mode * 8u16 + (byte - 48u8).to_u16()
+    Ok(mode)
+
+pub fn simplebox_chmod(args: [text]) -> i32:
+    """Apply one bounded octal mode to each named path."""
+    if args.len() < 2u64:
+        stdout_write("chmod: missing mode or operand\n")
+        return 1
+    if args.len() - 1u64 > SIMPLEBOX_MUTATION_OPERAND_LIMIT:
+        stdout_write("chmod: too many operands\n")
+        return 1
+    val parsed_mode = _chmod_mode(args[0])
+    match parsed_mode:
+        case Err(reason):
+            stdout_write(reason + "\n")
+            1
+        case Ok(mode):
+            var total_bytes: u64 = 0u64
+            var index: u64 = 1u64
+            while index < args.len():
+                val path = args[index]
+                if path.len() == 0u64 or path.len() > VFS_MUTATION_PATH_MAX_BYTES:
+                    stdout_write("chmod: invalid path length\n")
+                    return 1
+                if path.len() > SIMPLEBOX_MUTATION_TOTAL_PATH_BYTES_LIMIT - total_bytes:
+                    stdout_write("chmod: operand bytes exceed 65536-byte limit\n")
+                    return 1
+                total_bytes = total_bytes + path.len()
+                match vfs_chmod_checked(path, mode):
+                    case Err(reason):
+                        stdout_write("chmod: {path}: {reason}\n")
+                        return 1
+                    case Ok(_): pass
+                index = index + 1u64
+            0

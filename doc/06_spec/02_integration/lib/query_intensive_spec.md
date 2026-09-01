@@ -1,6 +1,6 @@
-# query_intensive_spec
+# Query Intensive Specification
 
-> Verifies the query intensive behaviour end to end so maintainers of this
+> Tests covering BugDatabase Queries - Intensive.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# query_intensive_spec
-
-Verifies the query intensive behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/02_integration/lib/query_intensive_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the query intensive behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Query Intensive Specification
 
 ## Scenarios
 
@@ -44,19 +22,18 @@ unrelated sibling features are out of scope.
 
 #### retrieves all bugs _(slow)_
 
-- Verify: retrieves all bugs
+- retrieves all bugs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_QUERY_INTENSIVE-001
-step("Verify: retrieves all bugs")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("retrieves all bugs")
 val test_file = "/tmp/test_query_all.sdn"
 cleanup_test_file(test_file)
 
@@ -80,19 +57,18 @@ cleanup_test_file(test_file)
 
 #### retrieves open bugs _(slow)_
 
-- Verify: retrieves open bugs
+- retrieves open bugs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_QUERY_INTENSIVE-001
-step("Verify: retrieves open bugs")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("retrieves open bugs")
 val test_file = "/tmp/test_query_open.sdn"
 cleanup_test_file(test_file)
 
@@ -153,19 +129,18 @@ cleanup_test_file(test_file)
 
 #### gets bug statistics _(slow)_
 
-- Verify: gets bug statistics
+- gets bug statistics
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_QUERY_INTENSIVE-001
-step("Verify: gets bug statistics")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("gets bug statistics")
 val test_file = "/tmp/test_query_stats.sdn"
 cleanup_test_file(test_file)
 
@@ -213,19 +188,18 @@ cleanup_test_file(test_file)
 
 #### filters bugs by severity manually _(slow)_
 
-- Verify: filters bugs by severity manually
+- filters bugs by severity manually
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_QUERY_INTENSIVE-001
-step("Verify: filters bugs by severity manually")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("filters bugs by severity manually")
 val test_file = "/tmp/test_filter_severity.sdn"
 cleanup_test_file(test_file)
 
@@ -288,19 +262,18 @@ cleanup_test_file(test_file)
 
 #### filters bugs by file field _(slow)_
 
-- Verify: filters bugs by file field
+- filters bugs by file field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_QUERY_INTENSIVE-001
-step("Verify: filters bugs by file field")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("filters bugs by file field")
 val test_file = "/tmp/test_filter_file.sdn"
 cleanup_test_file(test_file)
 
@@ -365,19 +338,18 @@ cleanup_test_file(test_file)
 
 #### handles retrieving 50 bugs _(slow)_
 
-- Verify: handles retrieving 50 bugs
+- handles retrieving 50 bugs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_QUERY_INTENSIVE-001
-step("Verify: handles retrieving 50 bugs")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles retrieving 50 bugs")
 val test_file = "/tmp/test_bulk_50.sdn"
 cleanup_test_file(test_file)
 
@@ -401,19 +373,18 @@ cleanup_test_file(test_file)
 
 #### handles mixed status queries with 20 bugs _(slow)_
 
-- Verify: handles mixed status queries with 20 bugs
+- handles mixed status queries with 20 bugs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_QUERY_INTENSIVE-001
-step("Verify: handles mixed status queries with 20 bugs")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles mixed status queries with 20 bugs")
 val test_file = "/tmp/test_bulk_mixed.sdn"
 cleanup_test_file(test_file)
 
@@ -472,6 +443,21 @@ cleanup_test_file(test_file)
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/02_integration/lib/query_intensive_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering BugDatabase Queries - Intensive.
+- BugDatabase Queries - Intensive
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -485,36 +471,50 @@ cleanup_test_file(test_file)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `52c0928c7e5fa30830f5522d150466472a37eb28b5ba69df814cc5fbd47b9d55`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `fab524205e009908f3c5da122a9fd2bd027ccd0fc5f141c760aa20f97ba780e8`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `52c0928c7e5fa30830f5522d150466472a37eb28b5ba69df814cc5fbd47b9d55`.
+Source SHA-256: `fab524205e009908f3c5da122a9fd2bd027ccd0fc5f141c760aa20f97ba780e8`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `52c0928c7e5fa30830f5522d150466472a37eb28b5ba69df814cc5fbd47b9d55`  
+Source SHA-256: `fab524205e009908f3c5da122a9fd2bd027ccd0fc5f141c760aa20f97ba780e8`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/02_integration/lib/query_intensive_spec.spl
 mirror: doc/06_spec/02_integration/lib/query_intensive_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/lib/query_intensive_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/02_integration/lib/query_intensive_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/lib/query_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/02_integration/lib/query_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/lib/query_intensive_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'retrieves all bugs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/query_intensive_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'retrieves open bugs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/query_intensive_spec.spl:156:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'gets bug statistics' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

@@ -1,7 +1,6 @@
 # native-build timeout discards successfully compiled object cache
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** NO-MANGLE SOURCE FIXED / DEPLOY QUALIFICATION PENDING
 **Severity:** P1 — prevents bounded incremental builds from converging
 **Owner:** `src/compiler_rust/compiler/src/pipeline/native_project/`
 

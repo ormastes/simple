@@ -14,27 +14,6 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
 extern fn rt_transient_heap_promote(value: Any) -> bool
-extern fn rt_heap_ref_wellformed(value: Any) -> bool
-
-# FORMATION probe for a heap-typed field word, wrapped once here so consumers
-# in layer 20 do not each add a direct `rt_*` call site (no_direct_rt ratchet).
-# Answers 1 only for a HEAP-tagged word whose payload is outside the zero page
-# — see runtime_native.c rt_heap_ref_wellformed. It is a formation check, NOT
-# a liveness proof, so it can never false-reject a live object; equally it
-# cannot catch a wild pointer that happens to be large.
-fn hir_heap_ref_wellformed(value: Any) -> bool:
-    rt_heap_ref_wellformed(value)
-
-# DO NOT add a second-level probe that takes the struct BY VALUE. It was tried
-# (`fn hir_type_span_wellformed(t: HirType) -> bool: rt_heap_ref_wellformed(t.span)`)
-# and is actively unsafe: a struct-typed PARAMETER is deep-cloned on entry, and
-# the emitted clone recurses into the nested `span` behind nothing but the
-# tag==HEAP && !=0 test — `rt_alloc #0x30` then `ldr [x8]` on the very word the
-# probe exists to validate. The probe therefore crashes exactly where it is
-# meant to guard. Any deeper formation check must take the raw word as `Any`
-# (which is passed verbatim, no clone — verified in the disassembly of the
-# probes in _Expressions/block_and_asm_lowering.spl) and do the field read on
-# the runtime side.
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
 # wrapper are OPTIONAL — every call site below already uses the optional-safe
@@ -70,9 +49,6 @@ type HirImportedEnumOwners = {text: text}
 type HirMaterializedPayloadOrigins = {text: bool}
 type HirMaterializedPayloadBindings = {text: text}
 type HirFieldTypesByName = {text: {text: HirType}}
-type HirFieldAccessByName = {text: {text: bool}}
-type HirConstructorAccessByName = {text: bool}
-type HirCompositeNameByOwner = {i64: text}
 type HirLocalStructTypes = {i64: text}
 type HirFieldOrderByName = {text: [text]}
 type HirLocalTupleTypes = {i64: [HirType]}
@@ -88,6 +64,7 @@ class HirLowering:
     loop_depth: i64
     type_inference_config: TypeInferenceConfig?
     module_filename: text          # Filename/path for visibility matching and defining_module population
+    allow_ambient_bootstrap_policy: bool
     module_resolver: ModuleResolverPort?   # Optional resolver for 2-pass import resolution (FR-COMPILER-003)
     loaded_modules: [text]         # Paths of modules already loaded (for cycle detection in A2 resolve pass)
     module_surfaces: ModuleSurfacesByName   # Compact declaration-only import resolver state
@@ -134,11 +111,6 @@ class HirLowering:
     # up, since the actual Field-expr type_ consumer lives in a file this lane
     # may not edit (see doc/... nestedfield lane notes).
     struct_field_types_by_name: HirFieldTypesByName
-    # Access decisions are computed once while declarations/import surfaces
-    # are registered. Field reads and aggregate calls remain O(1) Dict probes.
-    struct_field_access_by_name: HirFieldAccessByName
-    struct_constructor_access_by_name: HirConstructorAccessByName
-    composite_name_by_owner_symbol: HirCompositeNameByOwner
     local_struct_types: HirLocalStructTypes
     # Declared field NAME order per struct (parallels MIR's own
     # struct_field_order). CallArg.has_name/.name are not reliably populated
@@ -294,6 +266,11 @@ class HirLowering:
     # Registrations skipped by the memo. Observable mechanism counter: a spec
     # pins that repeating one (module, name, local, enum) query registers once.
     registered_import_skip_count: i64
+    # Per-importer callable-dependency tail memo. It is cleared by begin_module
+    # because the tail writes into that importer's symbol table.
+    dep_tail_memo: {text: bool}
+    dep_tail_memo_owner: text
+    dep_tail_skip_count: i64
     # IMPLIDX (2026-08-22): impl positions per (frozen surface, implemented
     # type name). `register_imported_type_methods_inner` swept EVERY impl of
     # the declaring module per imported composite/enum, copying each impl row
@@ -409,9 +386,6 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_materialized_payload_origins: HirMaterializedPayloadOrigins = {}
     val empty_materialized_payload_bindings: HirMaterializedPayloadBindings = {}
     val empty_struct_field_types: HirFieldTypesByName = {}
-    val empty_struct_field_access: HirFieldAccessByName = {}
-    val empty_struct_constructor_access: HirConstructorAccessByName = {}
-    val empty_composite_name_by_owner: HirCompositeNameByOwner = {}
     val empty_local_struct_types: HirLocalStructTypes = {}
     val empty_struct_field_order: HirFieldOrderByName = {}
     val empty_local_tuple_types: HirLocalTupleTypes = {}
@@ -425,16 +399,17 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_package_sibling_canons: {text: [text]} = {}
     val empty_surface_index_by_name: {text: i64} = {}
     val empty_explicit_dep_target_memo: {text: i64} = {}
-    val empty_payload_origin_miss_memo: {text: bool} = {}
     val empty_explicit_dep_item_memo: {text: text} = {}
+    val empty_payload_origin_miss_memo: {text: bool} = {}
+    val empty_glob_reachable_miss_memo: {text: bool} = {}
     val empty_registered_import_memo: {text: bool} = {}
+    val empty_dep_tail_memo: {text: bool} = {}
     val empty_impl_index_built: {text: bool} = {}
     val empty_impl_index_positions: {text: [i64]} = {}
     val empty_impl_method_name_index: {text: [text]} = {}
     val empty_impl_trait_name_index: {text: text} = {}
     val empty_name_index_built: {text: bool} = {}
     val empty_name_index_positions: {text: i64} = {}
-    val empty_glob_reachable_miss_memo: {text: bool} = {}
     val empty_reexport_root_memo_index: {text: i64} = {}
     val empty_reexport_root_memo_item: {text: text} = {}
     val empty_imported_type_methods_in_progress: [text] = []
@@ -450,6 +425,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         loop_depth: 0,
         type_inference_config: nil,
         module_filename: "",
+        allow_ambient_bootstrap_policy: true,
         module_resolver: nil,
         loaded_modules: empty_loaded_modules,
         module_surfaces: empty_module_surfaces,
@@ -465,9 +441,6 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         materialized_payload_bindings: empty_materialized_payload_bindings,
         imported_type_methods_in_progress: empty_imported_type_methods_in_progress,
         struct_field_types_by_name: empty_struct_field_types,
-        struct_field_access_by_name: empty_struct_field_access,
-        struct_constructor_access_by_name: empty_struct_constructor_access,
-        composite_name_by_owner_symbol: empty_composite_name_by_owner,
         local_struct_types: empty_local_struct_types,
         struct_field_order_by_name: empty_struct_field_order,
         local_tuple_types: empty_local_tuple_types,
@@ -496,6 +469,9 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registered_import_memo: empty_registered_import_memo,
         registered_import_memo_owner: "",
         registered_import_skip_count: 0,
+        dep_tail_memo: empty_dep_tail_memo,
+        dep_tail_memo_owner: "",
+        dep_tail_skip_count: 0,
         impl_index_built: empty_impl_index_built,
         impl_index_positions: empty_impl_index_positions,
         impl_method_name_index: empty_impl_method_name_index,
@@ -552,6 +528,13 @@ impl HirLowering:
         var lowering: HirLowering = hirlowering_new()
         lowering.type_inference_config = Some(config)
         lowering
+
+    me use_explicit_semantic_policy():
+        self.allow_ambient_bootstrap_policy = false
+
+    me ambient_bootstrap_enabled() -> bool:
+        self.allow_ambient_bootstrap_policy and
+            (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
 
     me error(message: text, span: Span):
         if hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":

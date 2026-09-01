@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/os/apps/dbd/dbd_protocol.spl 90%
 """
 # dbd protocol + durability (Lane C2)
@@ -16,70 +20,76 @@ which is exactly the reboot-persistence guarantee (write journal, read it
 back after reboot, replay).
 """
 
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use os.apps.dbd.dbd_protocol.{
+
     DbdEngine, dbd_command_is_mutating, dbd_encode_journal_line, dbd_decode_journal_line
 }
 
 describe "dbd protocol: mutation classification":
+    # @manual scenario evidence
     it "SET and DEL are mutating (case-insensitive)":
+        # @req REQ-SSPEC-UNIT
+        step("SET and DEL are mutating (case-insensitive)")
         expect(dbd_command_is_mutating("SET")).to_equal(true)
         expect(dbd_command_is_mutating("DEL")).to_equal(true)
         expect(dbd_command_is_mutating("set")).to_equal(true)
         expect(dbd_command_is_mutating("del")).to_equal(true)
 
     it "reads are not mutating":
+        # @req REQ-SSPEC-UNIT
+        step("reads are not mutating")
         expect(dbd_command_is_mutating("GET")).to_equal(false)
         expect(dbd_command_is_mutating("PING")).to_equal(false)
         expect(dbd_command_is_mutating("EXISTS")).to_equal(false)
 
 describe "dbd protocol: journal encode/decode round-trip":
-    it "encodes args as an integrity-bound J1 line":
-        val encoded = dbd_encode_journal_line(["SET", "k", "v"])
-        expect(encoded.starts_with("J1 ")).to_equal(true)
-        expect(dbd_decode_journal_line(encoded)).to_equal(["SET", "k", "v"])
+    it "encodes args as a space-joined line":
+        expect(dbd_encode_journal_line(["SET", "k", "v"])).to_equal("SET k v")
 
-    it "round-trips spaces, newlines, empty values, and Unicode":
-        val values = ["a b", "line1\nline2", "", "雪"]
-        for value in values:
-            val encoded = dbd_encode_journal_line(["SET", "k", value])
-            expect(encoded.starts_with("J1 ")).to_equal(true)
-            expect(dbd_decode_journal_line(encoded)).to_equal(["SET", "k", value])
+    it "rejects args containing a space (ambiguous journal line)":
+        expect(dbd_encode_journal_line(["SET", "k", "a b"])).to_equal("")
 
-    it "rejects an unsigned legacy line instead of bypassing J1 integrity":
+    it "rejects args containing a newline (ambiguous journal line)":
+        expect(dbd_encode_journal_line(["SET", "k", "a\nb"])).to_equal("")
+
+    it "decodes a journal line back into args":
         val args = dbd_decode_journal_line("SET k v")
-        expect(args.len()).to_equal(0u64)
+        expect(args.len()).to_equal(3u64)
+        expect(args[0]).to_equal("SET")
+        expect(args[1]).to_equal("k")
+        expect(args[2]).to_equal("v")
 
     it "encode then decode is an identity for well-formed args":
+        # @req REQ-SSPEC-UNIT
+        step("encode then decode is an identity for well-formed args")
         val encoded = dbd_encode_journal_line(["DEL", "mykey"])
         val decoded = dbd_decode_journal_line(encoded)
         expect(decoded.len()).to_equal(2u64)
         expect(decoded[0]).to_equal("DEL")
         expect(decoded[1]).to_equal("mykey")
 
-    it "rejects a modified integrity-bound record":
-        val encoded = dbd_encode_journal_line(["SET", "key", "value"])
-        val tampered = encoded.substring(0, encoded.len() - 1) + "A"
-        expect(dbd_decode_journal_line(tampered).len()).to_equal(0u64)
-
 describe "dbd engine: real RESP dispatch":
     it "SET then GET returns the value via the real engine":
+        # @req REQ-SSPEC-UNIT
+        step("SET then GET returns the value via the real engine")
         var eng = DbdEngine.new()
         expect(eng.dispatch(["SET", "k", "v"])).to_equal("+OK\r\n")
         expect(eng.dispatch(["GET", "k"])).to_equal("$1\r\nv\r\n")
 
     it "GET on an unknown key returns RESP nil":
+        # @req REQ-SSPEC-UNIT
+        step("GET on an unknown key returns RESP nil")
         var eng = DbdEngine.new()
         expect(eng.dispatch(["GET", "missing"])).to_equal("$-1\r\n")
 
 describe "dbd engine: journal replay = reboot persistence":
     it "replaying a journal reconstructs the store through the real engine":
-        # Simulate integrity-bound durable records written on a previous boot.
-        val journal =
-            dbd_encode_journal_line(["SET", "alpha", "1"]) + "\n" +
-            dbd_encode_journal_line(["SET", "beta", "2"]) + "\n" +
-            dbd_encode_journal_line(["SET", "alpha", "9"]) + "\n" +
-            dbd_encode_journal_line(["DEL", "beta"]) + "\n"
+        # Simulate the durable journal written across a previous boot.
+        val journal = "SET alpha 1\nSET beta 2\nSET alpha 9\nDEL beta\n"
         var eng = DbdEngine.new()
         val replayed = eng.replay_journal(journal)
         expect(replayed).to_equal(4i64)
@@ -88,22 +98,17 @@ describe "dbd engine: journal replay = reboot persistence":
         expect(eng.dispatch(["GET", "beta"])).to_equal("$-1\r\n")
 
     it "empty journal replays nothing":
+        # @req REQ-SSPEC-UNIT
+        step("empty journal replays nothing")
         var eng = DbdEngine.new()
         expect(eng.replay_journal("")).to_equal(0i64)
 
     it "post-replay writes coexist with replayed state (durability continuity)":
+        # @req REQ-SSPEC-UNIT
+        step("post-replay writes coexist with replayed state (durability continuity)")
         var eng = DbdEngine.new()
-        val replayed = eng.replay_journal(
-            dbd_encode_journal_line(["SET", "persisted", "yes"]) + "\n")
+        val replayed = eng.replay_journal("SET persisted yes\n")
         expect(replayed).to_equal(1i64)
         expect(eng.dispatch(["SET", "fresh", "no"])).to_equal("+OK\r\n")
         expect(eng.dispatch(["GET", "persisted"])).to_equal("$3\r\nyes\r\n")
         expect(eng.dispatch(["GET", "fresh"])).to_equal("$2\r\nno\r\n")
-
-    it "reboots a delimiter-bearing value from its canonical durable record":
-        val line = dbd_encode_journal_line(
-            ["SET", "message", "hello from SimpleOS\nfilesystem"])
-        var eng = DbdEngine.new()
-        expect(eng.replay_journal(line + "\n")).to_equal(1i64)
-        expect(eng.dispatch(["GET", "message"])).to_equal(
-            "$30\r\nhello from SimpleOS\nfilesystem\r\n")

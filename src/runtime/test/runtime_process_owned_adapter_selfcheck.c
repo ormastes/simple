@@ -102,6 +102,36 @@ int main(void) {
     assert(rt_array_get(receipt, 3) > 0 && rt_array_get(receipt, 5) > 0);
     assert(rt_array_get(receipt, 10) == 0 && rt_array_get(receipt, 15) == 1);
 
+    int64_t* observed_tuple = rt_process_run_owned_observed_bounded_value("/bin/sh", 7, args, 2000, 32);
+    assert(observed_tuple);
+    SplArray* observed = (SplArray*)(uintptr_t)observed_tuple[2];
+    assert(rt_array_len(observed) == 30);
+    assert(rt_array_get(observed, 19) == RT_OWNED_PROCESS_OBSERVATION_VERSION);
+    assert(rt_array_get(observed, 20) & RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE);
+    assert(rt_array_get(observed, 23) > 0);
+    assert(rt_array_get(observed, 28) == 0);
+
+    const uint8_t tree_script[] = "sleep 0.2 & wait";
+    int64_t tree_values[] = {test_text(dash_c, 2), test_text(tree_script, 16)};
+    int64_t* tree_tuple = rt_process_run_owned_observed_bounded_value(
+        "/bin/sh", 7, args_of(tree_values, 2), 2000, 32);
+    assert(tree_tuple);
+    SplArray* tree_observed = (SplArray*)(uintptr_t)tree_tuple[2];
+    assert(rt_array_get(tree_observed, 20) & RT_PROCESS_EVIDENCE_SAMPLED_TREE);
+    assert(rt_array_get(tree_observed, 24) > 0);
+    assert(rt_array_get(tree_observed, 27) >= 2);
+
+    const uint8_t signal_script[] = "kill -SEGV $$";
+    int64_t signal_values[] = {test_text(dash_c, 2), test_text(signal_script, 13)};
+    int64_t* signal_tuple = rt_process_run_owned_observed_bounded_value(
+        "/bin/sh", 7, args_of(signal_values, 2), 2000, 32);
+    assert(signal_tuple);
+    SplArray* signal_observed = (SplArray*)(uintptr_t)signal_tuple[2];
+    /* The typed signal is the oracle.  The compatibility exit code remains
+     * diagnostic evidence and must never be used to infer this cause. */
+    assert(rt_array_get(signal_observed, 28) == SIGSEGV);
+    assert(rt_array_get(signal_observed, 29) == 0);
+
     assert(!rt_process_run_owned_bounded_value("/bin/sh", 7, NULL, 10, 1));
     int64_t malformed[] = {42};
     assert(!rt_process_run_owned_bounded_value("/bin/sh", 7, args_of(malformed, 1), 10, 1));

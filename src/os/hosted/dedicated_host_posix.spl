@@ -23,10 +23,39 @@ use std.io_runtime.{ file_exists }
 
 extern fn rt_file_mmap_read_bytes(path: text) -> [i64]
 extern fn rt_file_size(path: text) -> i64
+@unsafe(reason: "raw mapped-address ABI; -1 is MAP_FAILED", capabilities: [ffi, raw_ptr])
 extern fn rt_mmap_raw(address: i64, length: i64, protection: i64, flags: i64, fd: i64, offset: i64) -> i64
+@unsafe(reason: "raw mapped-address protection status ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_mprotect(address: i64, length: i64, protection: i64) -> i64
+@unsafe(reason: "raw mapped-address release status ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_munmap_raw(address: i64, length: i64) -> i64
-extern fn rt_platform_name() -> text
+
+@always_inline
+fn _sffi_file_mmap_read_bytes(path: text) -> [u8]?:
+    unsafe(capabilities: [ffi]):
+        rt_file_mmap_read_bytes(path)
+
+@always_inline
+fn _sffi_file_size(path: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_file_size(path)
+
+@always_inline
+fn _sffi_mmap_raw(
+    address: i64, length: i64, protection: i64, flags: i64, fd: i64, offset: i64
+) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_mmap_raw(address, length, protection, flags, fd, offset)
+
+@always_inline
+fn _sffi_mprotect(address: i64, length: i64, protection: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_mprotect(address, length, protection)
+
+@always_inline
+fn _sffi_munmap_raw(address: i64, length: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_munmap_raw(address, length)
 
 pub fn posix_native_map_flags(flags: i64, platform: text) -> i64:
     if (flags & HOST_MAP_ANONYMOUS) == 0 or platform == "linux":
@@ -46,12 +75,11 @@ pub class PosixDedicatedHost:
         val effective_page_size = if page_size > 0: page_size else: 4096
         PosixDedicatedHost(identity: "posix", page_bytes: effective_page_size)
 
-fn _posix_mmap_bytes(path: text) -> [u8]:
-    val raw = rt_file_mmap_read_bytes(path)
-    var bytes: [u8] = []
-    for value in raw:
-        bytes.push(value as u8)
-    bytes
+fn _posix_mmap_bytes(path: text) -> Result<[u8], text>:
+    val raw = _sffi_file_mmap_read_bytes(path)
+    if raw == nil:
+        return Err("mmap-read-failed")
+    Ok(raw ?? [])
 
 impl DedicatedHost for PosixDedicatedHost:
     fn host_name() -> text:
@@ -70,11 +98,11 @@ impl DedicatedHost for PosixDedicatedHost:
         val validation_error = host_map_request_error(request, self.page_size())
         if validation_error != "":
             return host_map_error(self.identity, -22, validation_error)
-        val address = rt_mmap_raw(
+        val address = _sffi_mmap_raw(
             request.address_hint,
             request.length,
             request.protection,
-            posix_native_map_flags(request.flags, rt_platform_name()),
+            posix_native_map_flags(request.flags, platform_name()),
             request.fd,
             request.offset
         )
@@ -84,11 +112,11 @@ impl DedicatedHost for PosixDedicatedHost:
 
     me mprotect(region: HostMappedRegion, protection: i64) -> bool:
         host_mapped_region_releasable(region) and host_protection_error(protection) == "" and
-            rt_mprotect(region.address, region.length, protection) == 0
+            _sffi_mprotect(region.address, region.length, protection) == 0
 
     me munmap(region: HostMappedRegion) -> bool:
         host_mapped_region_releasable(region) and
-            rt_munmap_raw(region.address, region.length) == 0
+            _sffi_munmap_raw(region.address, region.length) == 0
 
     me preload_readonly_file(path: text, page_size: i64) -> HostFilePreload:
         if path == "":
@@ -97,10 +125,13 @@ impl DedicatedHost for PosixDedicatedHost:
             return host_file_preload_error(path, self.identity, -22, "page-size-must-be-positive")
         if not file_exists(path):
             return host_file_preload_error(path, self.identity, -2, "file-not-found")
-        val expected_size = rt_file_size(path)
+        val expected_size = _sffi_file_size(path)
         if expected_size < 0:
             return host_file_preload_error(path, self.identity, -2, "file-not-found")
-        val bytes = _posix_mmap_bytes(path)
-        if expected_size > 0 and bytes.len() as i64 != expected_size:
-            return host_file_preload_error(path, self.identity, -5, "mmap-read-size-mismatch")
-        host_file_preload_success(path, bytes, page_size, self.identity, "mmap", true)
+        match _posix_mmap_bytes(path):
+            case Err(error):
+                return host_file_preload_error(path, self.identity, -5, error)
+            case Ok(bytes):
+                if bytes.len() as i64 != expected_size:
+                    return host_file_preload_error(path, self.identity, -5, "mmap-read-size-mismatch")
+                host_file_preload_success(path, bytes, page_size, self.identity, "mmap", true)

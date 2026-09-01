@@ -50,9 +50,8 @@ Simple의 답은 **시스템 테스트 mock 정책**이다. 지원되는 Sspec �
 Simple은 중복을 리뷰어의 곁다리 임무로 남기는 대신 품질 게이트에 통합한다:
 
 ```bash
-simple lint <변경된 .spl 파일>
-simple duplicate-check <소유 디렉터리> --mode token --min-lines 5
-simple test <범위>
+simple build check          # format + lint + test
+simple build check --full   # 커버리지 + 중복 탐지 추가
 ```
 
 사람 리뷰어는 중복을 *잡을 수도* 있다. 게이트는 실행될 때마다 매번 잡는다. 여기서부터 Simple은 "언어"라기보다 생성 코드를 위한 **울타리 쳐진 공사장**처럼 느껴지기 시작한다. 모델은 여전히 무엇이든 제안할 수 있지만, 같은 아이디어를 열 군데에서 들키지 않고 계속 키울 수는 없다.
@@ -233,7 +232,7 @@ git submodule update --init --recursive
 | `.spipe/spipe` | 외부 SPipe 러너와 BDD 워크플로 소스 | 초기화됨. 단, 작업 HEAD `ee79ffb71447`이 기록된 커밋 `c2a50b9f7b00`과 다름 |
 | `examples/06_io/restaurant_webapp` | 레스토랑 웹 애플리케이션 예제 | 등록됐지만 초기화되지 않음 |
 | `examples/07_ml/simple_deeplearning_study` | 딥러닝 학습 예제 | 등록됐지만 초기화되지 않음 |
-| `examples/07_ml/slang` | Simple 기반 LLM 실험 | 등록됐지만 초기화되지 않음 |
+| `examples/07_ml/svllm` | Simple 기반 LLM 실험 | 등록됐지만 초기화되지 않음 |
 | `examples/08_gpu/simple_cuda_example` | CUDA/GPU 예제 프로젝트 | 등록됐지만 초기화되지 않음 |
 | `examples/10_tooling/korean_stock_mcp` | 한국 주식 MCP 툴링 예제 | 등록됐지만 초기화되지 않음 |
 | `examples/10_tooling/llm_cli_tools` | LLM CLI 툴링 예제 | 등록됐지만 초기화되지 않음 |

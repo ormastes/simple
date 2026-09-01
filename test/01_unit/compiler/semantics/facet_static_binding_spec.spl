@@ -1,0 +1,234 @@
+# Compiler-only closed-world facet vertical slice.
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.facet_static_registry.*
+use compiler.core.parser.{par_had_error_get}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.semantics.facet_static_binding.{validate_static_facet_bindings}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.common.config.{Logger}
+
+fn facet_test_logger() -> Logger:
+    Logger(level: 0)
+
+fn facet_lower_current_invocation(src: text, path: text) -> HirModule:
+    val parsed = parse_full_frontend(src, path, path, facet_test_logger())
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(parsed)
+
+fn facet_validate(src: text, path: text) -> (HirModule, [text]):
+    facet_static_begin_compilation()
+    val hir = facet_lower_current_invocation(src, path)
+    val errors = validate_static_facet_bindings({path: hir})
+    (hir, errors)
+
+fn facet_probe_has_typed_acquisition(hir: HirModule, function_name: text, facet_name: text) -> bool:
+    # Resolve the canonical SymbolId first. Iterating Dict<SymbolId, _> keys
+    # and feeding them back through bracket lookup makes this type probe test
+    # the seed's struct-key round-trip instead of the retained HIR metadata.
+    if val function_symbol = hir.symbols.lookup(function_name):
+        val function: HirFunction = hir.functions[function_symbol]
+        if not function.body.has:
+            return false
+        val value = function.body.value
+        match value.kind:
+            case HirExprKind.MethodCall(_, method, args, _):
+                if method != "__facet_try$" + facet_name or args.len() != 0 or value.type_ == nil:
+                    return false
+                val result_type = value.type_ ?? HirType(kind: HirTypeKind.Error, span: value.span)
+                match result_type.kind:
+                    case HirTypeKind.Optional(inner):
+                        match inner.kind:
+                            case HirTypeKind.FacetRef(facet, _):
+                                match facet.kind:
+                                    case HirTypeKind.Named(facet_symbol, _):
+                                        if val facet_def = hir.symbols.get_symbol_raw(facet_symbol.id):
+                                            return facet_def.name == facet_name
+                                    case _: return false
+                            case _: return false
+                    case _: return false
+            case _: return false
+    false
+
+fn facet_mir_error_text(hir: HirModule) -> text:
+    var lowering = MirLowering.new(hir.symbols)
+    val _mir = lowering.lower_module(hir)
+    var errors = ""
+    for error in lowering.errors:
+        errors = errors + error.message + "\n"
+    errors
+
+fn facet_probe_has_lazy_result(hir: HirModule, function_name: text, facet_name: text) -> bool:
+    if val function_symbol = hir.symbols.lookup(function_name):
+        val function: HirFunction = hir.functions[function_symbol]
+        if not function.body.has:
+            return false
+        val value = function.body.value
+        match value.kind:
+            case HirExprKind.MethodCall(_, method, args, _):
+                if method != "__facet_load$" + facet_name or args.len() != 0 or not value.has_type_:
+                    return false
+                match value.type_.kind:
+                    case HirTypeKind.Result(ok, err):
+                        match err.kind:
+                            case HirTypeKind.Named(error_symbol, _):
+                                if val error_definition = hir.symbols.get_symbol_raw(error_symbol.id):
+                                    if error_definition.name != "FacetLoadError" or
+                                            (error_definition.defining_module ?? "") != "common.facet_runtime":
+                                        return false
+                                else:
+                                    return false
+                            case _: return false
+                        match ok.kind:
+                            case HirTypeKind.Optional(inner):
+                                match inner.kind:
+                                    case HirTypeKind.FacetRef(facet, witness):
+                                        if witness != "":
+                                            return false
+                                        match facet.kind:
+                                            case HirTypeKind.Named(symbol, _):
+                                                if val definition = hir.symbols.get_symbol_raw(symbol.id):
+                                                    return definition.name == facet_name
+                                            case _: return false
+                                    case _: return false
+                            case _: return false
+                    case _: return false
+            case _: return false
+    false
+
+val FACET_OK = "struct Item:\n    value: i64\n\nfacet interface Named:\n    fn name(self) -> i64:\n        0\n\nfacet impl ItemNamed for Item implements Named:\n    fn name(self) -> i64:\n        self.value\n\nbind facet Named\n    to Item\n    using ItemNamed\n\nfn acquire(item: Item):\n    item.try_facet<Named>()\n\nfn call_name(item: Item) -> i64:\n    item.try_facet<Named>().unwrap().name()\n"
+
+val FACET_MISMATCH = "struct Item:\n    value: i64\n\nfacet interface Named:\n    fn name(self) -> i64:\n        0\n\nfacet interface Ranked:\n    fn rank(self) -> i64:\n        0\n\nfacet impl ItemRanked for Item implements Ranked:\n    fn rank(self) -> i64:\n        self.value\n\nbind facet Named to Item using ItemRanked\n"
+
+val FACET_DUPLICATE = "struct Item:\n    value: i64\n\nfacet interface Named:\n    fn name(self) -> i64:\n        0\n\nfacet impl ItemNamed for Item implements Named:\n    fn name(self) -> i64:\n        self.value\n\nbind facet Named to Item using ItemNamed\nbind facet Named to Item using ItemNamed\n"
+
+val FACET_TWO_IMPLS = "struct Item:\n    value: i64\n\nfacet interface Named:\n    fn name(self) -> i64:\n        0\n\nfacet impl FirstNamed for Item implements Named:\n    fn name(self) -> i64:\n        11\n\nfacet impl SelectedNamed for Item implements Named:\n    fn name(self) -> i64:\n        self.value\n\nbind facet Named to Item using SelectedNamed\n\nfn call_name(item: Item) -> i64:\n    item.try_facet<Named>().unwrap().name()\n"
+
+val FACET_STORED = "struct Item:\n    value: i64\n\nstruct Holder:\n    saved: Option<FacetRef<Named>>\n\nfacet interface Named:\n    fn name(self) -> i64:\n        0\n\nfacet impl ItemNamed for Item implements Named:\n    fn name(self) -> i64:\n        self.value\n\nbind facet Named to Item using ItemNamed\n\nfn acquire(item: Item) -> Option<FacetRef<Named>>:\n    item.try_facet<Named>()\n\nfn forward(saved: Option<FacetRef<Named>>) -> Option<FacetRef<Named>>:\n    saved\n\nfn store(saved: Option<FacetRef<Named>>) -> Holder:\n    Holder(saved: saved)\n\nfn use_saved(saved: Option<FacetRef<Named>>) -> i64:\n    var held: Option<FacetRef<Named>> = saved\n    held = saved\n    held.unwrap().name()\n\nfn stored(item: Item) -> i64:\n    val acquired = acquire(item)\n    val forwarded = forward(acquired)\n    val holder = store(forwarded)\n    val restored = holder.saved\n    use_saved(restored)\n"
+
+val FACET_DYNAMIC = "struct Item:\n    value: i64\n\nfacet interface Named:\n    fn name(self) -> i64:\n        0\n\nfn lazy(item: Item):\n    item.facet<Named>()\n\nfn resident(item: Item):\n    item.try_facet<Named>()\n\nfn invoke(loaded: FacetRef<Named>) -> i64:\n    loaded.name()\n"
+
+describe "closed-world facet parser, binder, witness, and direct MIR lowering":
+    it "lowers lazy and resident source forms to distinct HIR and loaded witness/advice MIR metadata":
+        val (hir, errors) = facet_validate(FACET_DYNAMIC, "facet_dynamic.spl")
+        expect(errors.len()).to_equal(0)
+        expect(facet_probe_has_lazy_result(hir, "lazy", "Named")).to_equal(true)
+        expect(facet_probe_has_typed_acquisition(hir, "resident", "Named")).to_equal(true)
+        var lowering = MirLowering.new(hir.symbols)
+        val mir_text = serialize_mir_module(lowering.lower_module(hir))
+        expect(lowering.errors.len()).to_equal(0)
+        expect(mir_text).to_contain("facet_lookup_lazy")
+        expect(mir_text).to_contain("facet_lookup_loaded")
+        expect(mir_text).to_contain("facet_dispatch_loaded")
+        expect(mir_text).to_contain("facet_dynamic::Named::name")
+
+    it "keeps a matched and unmatched acquisition typed as Option<FacetRef<F>>":
+        val (matched, errors) = facet_validate(FACET_OK, "facet_ok.spl")
+        expect(errors.len()).to_equal(0)
+        expect(facet_probe_has_typed_acquisition(matched, "acquire", "Named")).to_equal(true)
+        val absent_src = "struct Item:\n    value: i64\n\nfacet interface Ranked:\n    fn rank(self) -> i64:\n        0\n\nfn absent(item: Item):\n    item.try_facet<Ranked>()\n"
+        val (absent, absent_errors) = facet_validate(absent_src, "facet_absent.spl")
+        expect(absent_errors.len()).to_equal(0)
+        expect(facet_probe_has_typed_acquisition(absent, "absent", "Ranked")).to_equal(true)
+        expect(facet_static_resolved_count(facet_static_key("facet_absent.spl", "Ranked"), facet_static_key("facet_absent.spl", "Item"))).to_equal(0)
+
+    it "publishes the selected impl's exact method SymbolId when two impls collide":
+        val (hir, errors) = facet_validate(FACET_TWO_IMPLS, "facet_two_impls.spl")
+        expect(errors.len()).to_equal(0)
+        val facet_key = facet_static_key("facet_two_impls.spl", "Named")
+        val target_key = facet_static_key("facet_two_impls.spl", "Item")
+        val route_key = facet_static_resolved_route_key_for(facet_key, target_key)
+        val route_id = facet_static_resolved_route_id(route_key)
+        var first_id: i64 = -1
+        var selected_id: i64 = -1
+        for impl_ in hir.impls:
+            if impl_.facet_impl_key.ends_with("::FirstNamed"):
+                first_id = impl_.methods["name"].id
+            if impl_.facet_impl_key.ends_with("::SelectedNamed"):
+                selected_id = impl_.methods["name"].id
+        expect(first_id >= 0).to_equal(true)
+        expect(selected_id >= 0).to_equal(true)
+        expect(first_id == selected_id).to_equal(false)
+        expect(facet_static_method_symbol_id(route_id, "name")).to_equal(selected_id)
+        if val selected_symbol = hir.symbols.get_symbol_raw(selected_id):
+            expect(facet_static_method_symbol_matches(
+                route_id, "name", selected_id,
+                selected_symbol.defining_module ?? "", selected_symbol.name)).to_equal(true)
+            expect(facet_static_method_symbol_matches(
+                route_id, "name", selected_id,
+                "other/module.spl", selected_symbol.name)).to_equal(false)
+        else:
+            expect(false).to_equal(true)
+
+    it "uses fully-qualified keys so identical short names in two modules do not collide":
+        facet_static_begin_compilation()
+        val left = facet_lower_current_invocation(FACET_OK, "pkg/left.spl")
+        val right = facet_lower_current_invocation(FACET_OK, "pkg/right.spl")
+        val errors = validate_static_facet_bindings({"left": left, "right": right})
+        expect(errors.len()).to_equal(0)
+        val left_facet = facet_static_key("pkg/left.spl", "Named")
+        val right_facet = facet_static_key("pkg/right.spl", "Named")
+        expect(left_facet == right_facet).to_equal(false)
+        expect(facet_static_resolved_count(left_facet, facet_static_key("pkg/left.spl", "Item"))).to_equal(1)
+        expect(facet_static_resolved_count(right_facet, facet_static_key("pkg/right.spl", "Item"))).to_equal(1)
+
+    it "resets declaration and resolved rows at each compiler invocation boundary":
+        val (_, first_errors) = facet_validate(FACET_OK, "first_run.spl")
+        expect(first_errors.len()).to_equal(0)
+        val old_facet = facet_static_key("first_run.spl", "Named")
+        val old_target = facet_static_key("first_run.spl", "Item")
+        expect(facet_static_resolved_count(old_facet, old_target)).to_equal(1)
+        val second_src = "struct Other:\n    value: i64\n\nfacet interface Ranked:\n    fn rank(self) -> i64:\n        0\n"
+        val (_, second_errors) = facet_validate(second_src, "second_run.spl")
+        expect(second_errors.len()).to_equal(0)
+        expect(facet_static_resolved_count(old_facet, old_target)).to_equal(0)
+        expect(facet_static_interfaces.contains(old_facet)).to_equal(false)
+        facet_static_declare_bind(
+            "consumer.spl", "provider.Named", "consumer.Item", "consumer.ItemNamed")
+        expect(facet_static_bind_modules).to_equal(["consumer"])
+        facet_static_reset_module("consumer.spl")
+        expect(facet_static_bind_facets.len()).to_equal(0)
+        expect(facet_static_bind_modules.len()).to_equal(0)
+
+    it "preserves the physical FacetRef witness through assignment, pass, store, and return":
+        val (hir, errors) = facet_validate(FACET_STORED, "facet_stored.spl")
+        expect(errors.len()).to_equal(0)
+        var lowering = MirLowering.new(hir.symbols)
+        val mir_text = serialize_mir_module(lowering.lower_module(hir))
+        expect(lowering.errors.len()).to_equal(0)
+        expect(mir_text.contains("rt_tuple_new")).to_equal(true)
+        expect(mir_text.contains("rt_tuple_get")).to_equal(true)
+        expect(mir_text.contains("__facet_impl$facet_stored$ItemNamed$name")).to_equal(true)
+        expect(mir_text.contains("facet_lookup")).to_equal(false)
+
+    it "rejects wrong facet kinds and a method absent from the selected witness":
+        val wrong_kind = "struct Item:\n    value: i64\n\nstruct NotFacet:\n    value: i64\n\nfn bad(item: Item):\n    item.try_facet<NotFacet>()\n"
+        facet_static_begin_compilation()
+        val parsed = parse_full_frontend(wrong_kind, "facet_wrong_kind.spl", "facet_wrong_kind.spl", facet_test_logger())
+        var kind_lowering = HirLowering.with_filename("facet_wrong_kind.spl")
+        val _kind_hir = kind_lowering.lower_module(parsed)
+        expect(kind_lowering.errors.len() > 0).to_equal(true)
+
+        val wrong_method = FACET_OK + "\nfn wrong(item: Item) -> i64:\n    item.try_facet<Named>().unwrap().rank()\n"
+        val (wrong_hir, bind_errors) = facet_validate(wrong_method, "facet_wrong_method.spl")
+        expect(bind_errors.len()).to_equal(0)
+        expect(facet_mir_error_text(wrong_hir)).to_contain("has no selected method 'rank'")
+
+    it "keeps facet and bind contextual unless exact declaration lookahead matches":
+        facet_static_begin_compilation()
+        val src = "fn maybe() -> i64:\n    1\n\nfacet()\nbind value = maybe()\n"
+        val _parsed = parse_full_frontend(src, "facet_contextual.spl", "facet_contextual.spl", facet_test_logger())
+        expect(par_had_error_get()).to_equal(false)
+
+    it "rejects impl/interface mismatch and duplicate bindings without partial publication":
+        val (_, mismatch_errors) = facet_validate(FACET_MISMATCH, "facet_mismatch.spl")
+        expect(mismatch_errors.len() > 0).to_equal(true)
+        expect(mismatch_errors.join("\n")).to_contain("not bound facet")
+        val (_, duplicate_errors) = facet_validate(FACET_DUPLICATE, "facet_duplicate.spl")
+        expect(duplicate_errors.len() > 0).to_equal(true)
+        expect(duplicate_errors.join("\n")).to_contain("incoherent overlapping bindings")

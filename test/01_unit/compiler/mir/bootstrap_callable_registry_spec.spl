@@ -1,0 +1,60 @@
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.mir.mir_data.{BootstrapCallableRegistration, bootstrap_callable_identity, bootstrap_callable_lookup, bootstrap_callable_register}
+
+fn registry_i32() -> HirType:
+    HirType(kind: HirTypeKind.Int(bits: 32, signed: true), span: Span.empty())
+
+fn registry_i64() -> HirType:
+    HirType(kind: HirTypeKind.Int(bits: 64, signed: true), span: Span.empty())
+
+describe "bootstrap callable registry":
+    it "uses owner-qualified methods and module-qualified free functions":
+        expect(bootstrap_callable_identity("pkg.alpha", "Builder::build", true, false)).to_equal("Builder.build")
+        expect(bootstrap_callable_identity("pkg.alpha", "run", false, false)).to_equal("pkg.alpha.run")
+
+    it "is idempotent for the same canonical declaration and exports its ABI":
+        val identity = "registry.contract.Builder.build"
+        val first = bootstrap_callable_register(identity, "Builder::build", registry_i32(), "registry.contract::Builder", [registry_i64()], true, false)
+        val second = bootstrap_callable_register(identity, "Builder::build", registry_i32(), "registry.contract::Builder", [registry_i64()], true, false)
+        var first_inserted = false
+        match first:
+            case Inserted: first_inserted = true
+            case _: ()
+        expect(first_inserted).to_equal(true)
+        var second_identical = false
+        match second:
+            case Identical: second_identical = true
+            case _: ()
+        expect(second_identical).to_equal(true)
+
+        val found = bootstrap_callable_lookup(identity)
+        expect(found != nil).to_equal(true)
+        if found != nil:
+            expect(found.link_name).to_equal("Builder.build")
+            expect(found.return_shape).to_equal("registry.contract::Builder")
+            expect(found.param_hir.len()).to_equal(1)
+            expect(found.is_method).to_equal(true)
+            expect(found.is_static).to_equal(false)
+
+    it "rejects a differing ABI instead of overwriting the declaration":
+        val identity = "registry.contract.conflict"
+        val first = bootstrap_callable_register(identity, "conflict", registry_i32(), "", [], false, true)
+        val conflict = bootstrap_callable_register(identity, "conflict", registry_i64(), "", [], false, true)
+        var first_inserted = false
+        match first:
+            case Inserted: first_inserted = true
+            case _: ()
+        expect(first_inserted).to_equal(true)
+        var conflict_found = false
+        match conflict:
+            case Conflict(existing_abi, incoming_abi):
+                conflict_found = true
+                expect(existing_abi == incoming_abi).to_equal(false)
+            case _: ()
+        expect(conflict_found).to_equal(true)
+
+        val found = bootstrap_callable_lookup(identity)
+        expect(found != nil).to_equal(true)
+        if found != nil:
+            expect(found.abi_key).to_contain("Int(32, true)")

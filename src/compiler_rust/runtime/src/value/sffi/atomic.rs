@@ -68,6 +68,50 @@ pub extern "C" fn rt_atomic_bool_swap(handle: i64, value: bool) -> bool {
         .unwrap_or(false)
 }
 
+/// Compare and exchange an atomic boolean with one provider operation.
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_compare_exchange(handle: i64, current: bool, new: bool) -> bool {
+    ATOMIC_BOOL_MAP
+        .lock()
+        .get(&handle)
+        .map(|atomic| {
+            atomic
+                .compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        })
+        .unwrap_or(false)
+}
+
+/// Fetch-and an atomic boolean with one provider operation.
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_fetch_and(handle: i64, value: bool) -> bool {
+    ATOMIC_BOOL_MAP
+        .lock()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_and(value, Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// Fetch-or an atomic boolean with one provider operation.
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_fetch_or(handle: i64, value: bool) -> bool {
+    ATOMIC_BOOL_MAP
+        .lock()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_or(value, Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// Fetch-not an atomic boolean with one provider operation.
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_fetch_not(handle: i64) -> bool {
+    ATOMIC_BOOL_MAP
+        .lock()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_xor(true, Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
 /// Free atomic boolean
 #[no_mangle]
 pub extern "C" fn rt_atomic_bool_free(handle: i64) {
@@ -209,6 +253,16 @@ pub extern "C" fn rt_atomic_flag_test_and_set(handle: i64) -> bool {
         .unwrap_or(false)
 }
 
+/// Read an atomic flag without changing it.
+#[no_mangle]
+pub extern "C" fn rt_atomic_flag_load(handle: i64) -> bool {
+    ATOMIC_FLAG_MAP
+        .lock()
+        .get(&handle)
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
 /// Clear atomic flag
 #[no_mangle]
 pub extern "C" fn rt_atomic_flag_clear(handle: i64) {
@@ -310,6 +364,40 @@ mod tests {
     }
 
     #[test]
+    fn test_atomic_bool_rmw_operations() {
+        let handle = rt_atomic_bool_new(false);
+
+        assert!(rt_atomic_bool_compare_exchange(handle, false, true));
+        assert!(!rt_atomic_bool_compare_exchange(handle, false, true));
+        assert!(rt_atomic_bool_fetch_and(handle, false));
+        assert!(!rt_atomic_bool_load(handle));
+        assert!(!rt_atomic_bool_fetch_or(handle, true));
+        assert!(rt_atomic_bool_load(handle));
+        assert!(rt_atomic_bool_fetch_not(handle));
+        assert!(!rt_atomic_bool_load(handle));
+
+        rt_atomic_bool_free(handle);
+    }
+
+    #[test]
+    fn test_atomic_bool_compare_exchange_has_one_winner() {
+        let handle = rt_atomic_bool_new(false);
+        let winners = std::thread::scope(|scope| {
+            let joins: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| rt_atomic_bool_compare_exchange(handle, false, true)))
+                .collect();
+            joins
+                .into_iter()
+                .map(|join| join.join().expect("atomic worker panicked"))
+                .filter(|won| *won)
+                .count()
+        });
+
+        assert_eq!(winners, 1);
+        rt_atomic_bool_free(handle);
+    }
+
+    #[test]
     fn test_atomic_int_basic() {
         let handle = rt_atomic_int_new(42);
         assert_eq!(rt_atomic_int_load(handle), 42);
@@ -405,14 +493,22 @@ mod tests {
     fn test_atomic_flag() {
         let handle = rt_atomic_flag_new();
 
+        // Observation must not mutate the flag.
+        assert!(!rt_atomic_flag_load(handle));
+        assert!(!rt_atomic_flag_load(handle));
+
         // First test_and_set should return false (was clear)
         assert!(!rt_atomic_flag_test_and_set(handle));
+
+        assert!(rt_atomic_flag_load(handle));
+        assert!(rt_atomic_flag_load(handle));
 
         // Second test_and_set should return true (was set)
         assert!(rt_atomic_flag_test_and_set(handle));
 
         // Clear the flag
         rt_atomic_flag_clear(handle);
+        assert!(!rt_atomic_flag_load(handle));
 
         // After clear, test_and_set should return false again
         assert!(!rt_atomic_flag_test_and_set(handle));

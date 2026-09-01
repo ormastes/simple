@@ -4,21 +4,22 @@ mod bdd;
 mod block_execution;
 mod builtins;
 mod core;
+pub(crate) use core::aop_runtime;
 mod mock;
 
 // Re-export public items
 pub use bdd::{clear_bdd_state, get_ignored_tests, get_test_results};
 pub use core::clear_class_instantiation_state;
 pub(crate) use bdd::{
-    exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,
+    exec_block_value, BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,
     BDD_EXPECT_PROVISIONAL, BDD_EXPECT_SEQ, BDD_FAILURE_MSG, BDD_INDENT, BDD_LAZY_VALUES, BDD_MATCHER_COUNT,
-    BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ,
-    BDD_SHARED_EXAMPLES,
+    BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ, BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
-    bind_args, bind_args_with_injected, bind_args_with_values, reorder_named_arg_values, captured_env_with_live_globals, exec_function, exec_function_with_bound_args,
-    exec_function_with_captured_env, exec_function_with_values, exec_function_with_values_and_self, exec_lambda,
-    execute_function_body, instantiate_class, publish_and_repoint, publish_live_bound_globals, refresh_live_bound_globals,
+    bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named,
+    captured_env_with_live_globals, exec_function, exec_function_with_bound_args, exec_function_with_captured_env,
+    exec_function_with_values, exec_function_with_values_and_self, exec_lambda, execute_function_body,
+    instantiate_class, publish_and_repoint, publish_live_bound_globals, refresh_live_bound_globals,
     sync_live_bound_globals, sync_owned_captured_globals, ProceedContext, IN_NEW_METHOD,
 };
 pub(crate) use core::bitfield_support::instantiate_bitfield_from_args;
@@ -31,7 +32,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
     CLASS_OVERLOADS, FUNCTION_OVERLOADS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, BITFIELDS, CURRENT_EXEC_MODULE,
-    FUNCTION_MODULE_OWNER,
+    FUNCTION_MODULE_OWNER, TRAIT_IMPLS,
 };
 use crate::interpreter::module_cache::MODULE_CLASSES_CACHE;
 use crate::runtime_profile;
@@ -64,9 +65,25 @@ fn debug_dupdispatch() -> bool {
 }
 
 fn value_type_matches_name(value: &Value, expected: &str) -> bool {
-    let matched = value.type_name() == expected
+    let matched = expected == "Any"
+        || value.type_name() == expected
         || value.matches_type(expected)
-        || matches!((value, expected), (Value::Str(_), "text"));
+        || matches!((value, expected), (Value::Str(_), "text"))
+        // A concrete object's class name never equals a TRAIT-typed parameter's
+        // name verbatim (`fn run(h: ScreenHost)` called with a `Screen2dHost`
+        // that does `impl ScreenHost for Screen2dHost`). Fall back to
+        // TRAIT_IMPLS so trait-typed params accept any concrete type that
+        // implements the trait — the same fallback
+        // interpreter_method/special/objects.rs applies to trait-typed
+        // constructor params (fat32_core_lfn_static_new_trait_param_2026-07-20).
+        // Without it, EVERY overloaded free function with a trait-typed
+        // parameter failed overload scoring with "no caller-authorized
+        // overload ... matches the supplied arguments".
+        || match value {
+            Value::Object { class, .. } => TRAIT_IMPLS
+                .with(|cell| cell.borrow().contains_key(&(expected.to_string(), class.clone()))),
+            _ => false,
+        };
     if debug_overload_select() {
         println!(
             "[type-match] expected={expected} runtime={} display={} matched={matched}",
@@ -97,6 +114,15 @@ fn value_matches_type(value: &Value, ty: &Type) -> bool {
             // arrays.
             Value::Array(items) => items.first().is_none_or(|item| value_matches_type(item, element)),
             Value::FrozenArray(items) => items.first().is_none_or(|item| value_matches_type(item, element)),
+            // A `[u8]` parameter receives a packed byte buffer at runtime, not
+            // a Value::Array — and a byte buffer can ONLY hold u8 elements, so
+            // the element check is discharged by construction. Without these
+            // arms every `[u8]` parameter (file blobs, digests, framebuffers)
+            // failed overload scoring when the fn had any co-compiled overload.
+            Value::ByteArray(_) | Value::FrozenByteArray(_) => {
+                matches!(element.as_ref(), Type::Simple(name) if name == "u8")
+                    || matches!(element.as_ref(), Type::Simple(name) if name == "Any")
+            }
             // Tuples may be heterogeneous, but are bounded by (small) declared
             // arity rather than data size, so keep the exhaustive check to
             // preserve dispatch semantics for tuple-as-array-argument matches.
@@ -108,7 +134,12 @@ fn value_matches_type(value: &Value, ty: &Type) -> bool {
 }
 
 fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
-    if func.params.len() != values.len() {
+    // Defaulted parameters are optional at the call site: `fn f(a, b = 1)`
+    // called with one value must still score, otherwise any overloaded fn
+    // whose signature carries a default becomes uncallable with the defaults
+    // omitted ("no caller-authorized overload ... matches").
+    let required = func.params.iter().filter(|p| p.default.is_none()).count();
+    if values.len() < required || values.len() > func.params.len() {
         return None;
     }
 
@@ -475,7 +506,9 @@ pub(crate) fn call_value_as_callable(
     }
 }
 
-#[allow(clippy::borrowed_box)] // reason: Box<dyn Trait> is the required storage type for this dispatch point
+// NOTE: no #[allow] here. An attribute on a `thread_local!` invocation is
+// applied to the macro call, not the items it expands to, so rustc ignores it
+// and clippy reports `unused attribute `allow``, which is denied in CI.
 thread_local! {
     /// Prelude names already reported by `warn_prelude_shadow_once`, so a
     /// shadowed builtin called in a loop warns once rather than per call.
@@ -636,16 +669,11 @@ pub(crate) fn evaluate_call(
         let user_defined = functions.contains_key(name.as_str())
             || FUNCTION_OVERLOADS.with(|cell| cell.borrow().contains_key(name.as_str()));
         let builtin_wins = builtin_wins_over_user_fn(name.as_str(), user_defined);
-        if user_defined
-            && !builtin_wins
-            && super::interpreter_eval::is_user_facing_prelude(name.as_str())
-        {
+        if user_defined && !builtin_wins && super::interpreter_eval::is_user_facing_prelude(name.as_str()) {
             warn_prelude_shadow_once(name.as_str(), functions, false);
         }
         if builtin_wins {
-            if let Some(result) =
-                builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)?
-            {
+            if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
                 return Ok(result);
             }
         }
@@ -706,9 +734,31 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        // Priority 4.5: a function rebound by a user-defined decorator. The
+        // decorated closure lives in `env` under `name`, but the undecorated
+        // definition is still in `functions` (the original body needs it to
+        // recurse), and Priority 5 below would therefore shadow the wrapper.
+        // The sentinel is written by crate::decorator_apply and is scoped to
+        // the same Env as the binding.
+        if env.get(&crate::decorator_apply::decorated_fn_key(name)).is_some() {
+            if let Some(val) = env.get(name).cloned() {
+                if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
+                    return Ok(result);
+                }
+            }
+        }
+
         // Priority 5: Check regular functions (user-defined) — most common case
         if let Some(func) = functions.get(name).cloned() {
             if debug_dupdispatch() { eprintln!("[dupdispatch] P5-flat name={name} owner={:?} current={:?}", function_module_owner(&func), CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())); }
+            // AOP join point. `has_advice()` is a thread-local emptiness check,
+            // so a program with no `on pc{...}` declaration pays nothing.
+            if core::aop_runtime::has_advice() {
+                core::aop_runtime::run_before(&func, env, functions, classes, enums, impl_methods)?;
+                let result = core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None)?;
+                core::aop_runtime::run_after(&func, &result, env, functions, classes, enums, impl_methods)?;
+                return Ok(result);
+            }
             return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
 
@@ -749,128 +799,6 @@ pub(crate) fn evaluate_call(
         let context_obj = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
         if let Some(ctx) = context_obj {
             return dispatch_context_method(&ctx, name, args, env, functions, classes, enums, impl_methods);
-        }
-
-        // An aliased import (`use m.{f as g}`) binds `g` in the IMPORTING
-        // module only. Flattening already records that edge as an owner
-        // binding (`record_flattened_import_binding`), but until now ONLY
-        // globals ever consulted it: a CALL of `g` looked `g` up in
-        // `functions`, missed, and fell straight through to E1002. That is why
-        // `use std.io_runtime.{file_rename as runtime_file_rename}`
-        // (src/lib/nogc_sync_mut/io/file_ops.spl:218) made every module
-        // reaching `io/file_ops` die with
-        // `function `runtime_file_rename` not found` -- including
-        // `update_test_database`, which is why a fully passing
-        // `simple test <dir>` still exited 1 and wrote no test DB.
-        //
-        // This is the interpreter-side half of the HIR fix in
-        // `hir/lower/lowerer.rs::collect_flattened_import_aliases`
-        // (c0c4e707789); that one taught CODEGEN to resolve the alias, this
-        // teaches the INTERPRETER, and both read the SAME recorded binding so
-        // they cannot disagree about which definition an alias names.
-        //
-        // Selection is by module OWNER, never by bare name. Flattening mangles
-        // only `main`, so all four `file_rename` definitions share one bare
-        // key; binding the alias to `functions["file_rename"]` picks whichever
-        // landed there -- for `runtime_file_rename` that is `io/file_ops`'s own
-        // one-line wrapper, i.e. the alias resolves back to its own caller and
-        // recurses until `stack overflow: recursion depth 1000 exceeded in
-        // function 'file_rename'`. Measured, not hypothetical. Matching
-        // `function_module_owner` against the binding's owner is what makes the
-        // choice unambiguous; when no candidate matches we fall through to
-        // E1002 rather than guess, because guessing is the defect above.
-        if let Some(current) = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone()) {
-            if let Some((source_owner, source_name)) = crate::interpreter::owner_bindings(&current)
-                .and_then(|bindings| bindings.get(name).cloned())
-            {
-                if std::env::var("SIMPLE_DEBUG_ALIAS").is_ok() {
-                    eprintln!("[alias] name={name} current={current} source_owner={source_owner} source_name={source_name}");
-                    for c in all_candidates(&source_name, functions) {
-                        eprintln!("[alias]   cand {} owner={:?}", c.name, function_module_owner(&c));
-                    }
-                    eprintln!("[alias]   mangled={} present={}",
-                        crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name),
-                        functions.contains_key(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name)));
-                    if let Some(b) = crate::interpreter::owner_bindings(&source_owner).and_then(|x| x.get(&source_name).cloned()) {
-                        eprintln!("[alias]   next-hop={:?}", b);
-                    } else {
-                        eprintln!("[alias]   next-hop=NONE");
-                    }
-                }
-                // MEASURED shape of this lookup (SIMPLE_DEBUG_ALIAS=1), for
-                // `use std.io_runtime.{file_rename as runtime_file_rename}`:
-                //
-                //   current      = .../nogc_sync_mut/io/file_ops.spl
-                //   source_owner = .../src/lib/io_runtime.spl        <- FACADE
-                //   source_name  = file_rename
-                //   candidates   = file_rename @ io/file_ops.spl     <- the CALLER's own wrapper
-                //                  file_rename @ nogc_sync_mut/io_runtime.spl   <- the real one
-                //                  (each registered twice)
-                //   mangled(facade, file_rename) -> absent
-                //   next hop from the facade -> (io/file_ops.spl, file_rename)
-                //
-                // Two facts drive the rule below, and both are why the earlier
-                // attempts failed. (a) `source_owner` is the FACADE
-                // `src/lib/io_runtime.spl`, never the declaring module, so
-                // owner equality alone never matches. (b) The facade's own
-                // binding for `file_rename` points BACK at `io/file_ops.spl`,
-                // so following the chain walks straight into the caller's
-                // wrapper and recurses until the stack overflows. The chain is
-                // therefore NOT trustworthy here and is deliberately not walked.
-                let mut target: Option<Arc<FunctionDef>> = functions
-                    .get(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name))
-                    .cloned()
-                    .or_else(|| candidate_declared_by(&source_owner, &source_name, functions));
-
-                if target.is_none() {
-                    // An alias in module M can never legitimately denote M's own
-                    // same-named function -- that is the wrapper whose body
-                    // issued this very call -- so candidates owned by `current`
-                    // are rejected outright. A candidate whose owner is UNKNOWN
-                    // is also rejected: accepting unknown owners is exactly how
-                    // the wrapper slipped back in through an `is_none_or` filter.
-                    //
-                    // Among what survives, prefer the module whose file stem
-                    // matches the facade's (`src/lib/io_runtime.spl` ->
-                    // `.../nogc_sync_mut/io_runtime.spl`), which is what a
-                    // re-export facade actually names. Duplicate registrations
-                    // of one module are common (see the dump above: two rows per
-                    // owner), so this selects a MODULE, not a unique candidate.
-                    let facade_stem = std::path::Path::new(&*source_owner).file_stem().map(|s| s.to_owned());
-                    let mut outside: Vec<Arc<FunctionDef>> = all_candidates(&source_name, functions)
-                        .into_iter()
-                        .filter(|candidate| {
-                            function_module_owner(candidate)
-                                .is_some_and(|owner| *owner != *current)
-                        })
-                        .collect();
-                    if let Some(stem) = facade_stem {
-                        let matching: Vec<Arc<FunctionDef>> = outside
-                            .iter()
-                            .filter(|candidate| {
-                                function_module_owner(candidate).is_some_and(|owner| {
-                                    std::path::Path::new(&*owner).file_stem() == Some(stem.as_os_str())
-                                })
-                            })
-                            .cloned()
-                            .collect();
-                        if !matching.is_empty() {
-                            outside = matching;
-                        }
-                    }
-                    // All survivors owned by ONE module means the choice is
-                    // unambiguous even when that module registered several.
-                    let owners: Vec<Arc<str>> =
-                        outside.iter().filter_map(function_module_owner).collect();
-                    if !owners.is_empty() && owners.iter().all(|o| *o == owners[0]) {
-                        target = outside.into_iter().next();
-                    }
-                }
-
-                if let Some(func) = target {
-                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
-                }
-            }
         }
 
         // If we reach here with an identifier name, the function is not found
@@ -1059,7 +987,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(module_name.clone()), &(field.clone()), &payload,
+                        "variant-construction",
+                        &(module_name.clone()),
+                        &(field.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: module_name.clone(),
@@ -1096,7 +1027,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(module_name.clone()), &(field.clone()), &payload,
+                        "variant-construction",
+                        &(module_name.clone()),
+                        &(field.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: module_name.clone(),
@@ -1253,7 +1187,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(type_name.clone()), &(method_name.clone()), &payload,
+                        "variant-construction",
+                        &(type_name.clone()),
+                        &(method_name.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: type_name.clone(),
@@ -1394,7 +1331,10 @@ pub(crate) fn evaluate_call(
                 // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                 // `EnumName.Variant(args)` construction path.
                 crate::interpreter::note_enum_payload_function_opt(
-                    "variant-construction", &("Option".to_string()), &(method_name.clone()), &payload,
+                    "variant-construction",
+                    &("Option".to_string()),
+                    &(method_name.clone()),
+                    &payload,
                 );
                 return Ok(Value::Enum {
                     enum_name: "Option".to_string(),
@@ -1422,7 +1362,10 @@ pub(crate) fn evaluate_call(
                 // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                 // `EnumName.Variant(args)` construction path.
                 crate::interpreter::note_enum_payload_function_opt(
-                    "variant-construction", &("Result".to_string()), &(method_name.clone()), &payload,
+                    "variant-construction",
+                    &("Result".to_string()),
+                    &(method_name.clone()),
+                    &payload,
                 );
                 return Ok(Value::Enum {
                     enum_name: "Result".to_string(),
@@ -1562,7 +1505,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(type_name.clone()), &(method_name.clone()), &payload,
+                        "variant-construction",
+                        &(type_name.clone()),
+                        &(method_name.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: type_name.clone(),

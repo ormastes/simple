@@ -1,6 +1,9 @@
 # ActorScheduler Tests
 #
 # Tests for reductions-based fair scheduling.
+# Typed transport cases below are contract coverage: they call the exported
+# production ActorScheduler constructor and methods directly. They are not a
+# claim that the bootstrap runner executed an end-to-end scheduler process.
 
 from actor_scheduler import {
     ActorScheduler,
@@ -11,6 +14,7 @@ from actor_scheduler import {
     ActorState,
     RunQueue
 }
+from message_transfer import {SafeTransferResult}
 
 describe "SchedulerConfig":
     it "creates default config":
@@ -354,6 +358,29 @@ describe "ActorScheduler - Messaging":
         val success = scheduler.send_message(999, 12345, 100, nil)
 
         assert not success
+
+    it "round-trips typed scalar through the bounded mailbox":
+        var scheduler = ActorScheduler.default()
+        val id = scheduler.spawn_actor(nil)
+        assert scheduler.send_typed_int(id, 4242, nil)
+        match scheduler.receive_typed_int(id):
+            case SafeTransferResult.SafeSuccess(value): assert value == 4242
+            case _: assert false
+        assert scheduler.receive_typed_int(id) == SafeTransferResult.Rejected
+
+    it "mints, consumes, rejects replay, and supports revoke":
+        var scheduler = ActorScheduler.default()
+        val id = scheduler.spawn_actor(nil)
+        val minted = scheduler.mint_typed_handle(7, 3)
+        assert minted.ok
+        assert scheduler.send_typed_handle(id, minted.handle)
+        assert scheduler.receive_typed_handle(id)
+        assert not scheduler.receive_typed_handle(id)
+
+        val revoked = scheduler.mint_typed_handle(8, 4)
+        assert revoked.ok
+        assert scheduler.revoke_typed_handle(revoked.handle)
+        assert not scheduler.send_typed_handle(id, revoked.handle)
 
 describe "ActorScheduler - Linking":
     it "links actors":

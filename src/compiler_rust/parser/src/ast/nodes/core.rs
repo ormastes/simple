@@ -601,6 +601,17 @@ pub enum Expr {
     Spread(Box<Expr>),
     /// Spread expression in dict: **expr
     DictSpread(Box<Expr>),
+    /// Struct-update spread in a PAREN-form constructor argument list:
+    /// `MirFunction(..base, blocks: bs)`.
+    ///
+    /// Deliberately a distinct variant from `Spread` (postfix `args...`,
+    /// which means *variadic* argument splatting and is consumed as such by
+    /// `interpreter_call/core/arg_binding.rs`). Reusing `Spread` here would
+    /// silently turn a struct update into a variadic splat.
+    ///
+    /// Only ever produced by `parse_arguments`; every other `..` position
+    /// still goes through `parse_range` and stays a `Expr::Range`.
+    StructSpread(Box<Expr>),
     StructInit {
         name: String,
         fields: Vec<(String, Expr)>,
@@ -767,9 +778,10 @@ pub enum Expr {
     /// Used for colon-block syntax in BDD DSL: `describe "name": body`
     DoBlock(Vec<Node>),
 
-    /// Lexical unsafe authorization block: `danger:` or canonical `unsafe:`.
-    /// The boundary is retained through HIR, then erased when its body is lowered.
-    UnsafeBlock(Vec<Node>),
+    /// Lexical unsafe authorization block and its explicitly requested
+    /// capabilities. Bare `unsafe:`/`danger:` blocks carry an empty list.
+    /// The boundary is retained through HIR, then erased before MIR execution.
+    UnsafeBlock(Vec<Node>, Vec<String>),
 
     // Simple Math literals (#1910-#1969)
     /// Grid literal: grid device="cuda": | row | row |

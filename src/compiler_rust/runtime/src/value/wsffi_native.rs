@@ -14,6 +14,15 @@ const WFFI_NULL_FUNCTION: i64 = 2;
 const WFFI_UNSUPPORTED_SIGNATURE: i64 = 3;
 const WFFI_INVALID_OUTPUT: i64 = 4;
 
+unsafe extern "C" {
+    /// Native C twin compiled from `runtime_backend_plugin.c`.
+    pub fn spl_backend_plugin_run_v1(
+        path_bytes: RuntimeValue,
+        request_bytes: RuntimeValue,
+        mir_bytes: RuntimeValue,
+    ) -> RuntimeValue;
+}
+
 fn store_i64_output(out: RuntimeValue, value: i64) -> bool {
     if rt_array_len(out) < 1 {
         return false;
@@ -54,8 +63,12 @@ pub extern "C" fn rt_host_dynlib_open(path_ptr: *const u8, path_len: i64, mode: 
     }
     #[cfg(windows)]
     unsafe {
-        use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
-        LoadLibraryA(path.as_ptr() as *const u8) as i64
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+        let Ok(path_utf8) = path.to_str() else {
+            return 0;
+        };
+        let wide: Vec<u16> = path_utf8.encode_utf16().chain(std::iter::once(0)).collect();
+        LoadLibraryW(wide.as_ptr()) as i64
     }
 }
 
@@ -106,20 +119,41 @@ pub extern "C" fn rt_host_dynlib_close(handle: i64) -> i64 {
 /// Returns the handle as a raw i64 (not tagged).
 #[no_mangle]
 pub extern "C" fn spl_dlopen(path_rv: RuntimeValue) -> i64 {
+    let mut handle = 0i64;
+    if spl_dlopen_checked(path_rv, &mut handle) == 0 {
+        handle
+    } else {
+        0
+    }
+}
+
+/// Status/out dynamic-library admission primitive.
+///
+/// Returns zero only when `out_handle` receives a non-null library handle.
+/// Failure initializes `out_handle` to zero.
+#[no_mangle]
+pub extern "C" fn spl_dlopen_checked(path_rv: RuntimeValue, out_handle: *mut i64) -> i64 {
+    if out_handle.is_null() {
+        return 1;
+    }
+    unsafe { out_handle.write(0) };
     let raw_ptr = rt_string_data(path_rv);
     if raw_ptr.is_null() {
-        return 0;
+        return 1;
     }
 
     // rt_string_data returns a pointer to the string bytes (not necessarily
     // null-terminated). We need a null-terminated C string for dlopen.
     let len = rt_string_len(path_rv);
-    if len < 0 {
-        return 0;
+    if len <= 0 {
+        return 1;
     }
 
     // Build a null-terminated copy
     let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len as usize) };
+    if slice.contains(&0) {
+        return 1;
+    }
     let mut buf = Vec::with_capacity(len as usize + 1);
     buf.extend_from_slice(slice);
     buf.push(0); // null terminator
@@ -127,12 +161,30 @@ pub extern "C" fn spl_dlopen(path_rv: RuntimeValue) -> i64 {
     #[cfg(unix)]
     {
         let handle = unsafe { libc::dlopen(buf.as_ptr() as *const libc::c_char, libc::RTLD_NOW) };
-        handle as i64
+        if handle.is_null() {
+            return 2;
+        }
+        unsafe { out_handle.write(handle as i64) };
+        0
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
-        unsafe { LoadLibraryA(buf.as_ptr()) as i64 }
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+        let Ok(path_utf8) = std::str::from_utf8(slice) else {
+            return 1;
+        };
+        let wide: Vec<u16> = path_utf8.encode_utf16().chain(std::iter::once(0)).collect();
+        let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
+        if handle.is_null() {
+            return 2;
+        }
+        unsafe { out_handle.write(handle as i64) };
+        0
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = buf;
+        4
     }
 }
 
@@ -143,18 +195,36 @@ pub extern "C" fn spl_dlopen(path_rv: RuntimeValue) -> i64 {
 /// Returns the symbol address as a raw i64.
 #[no_mangle]
 pub extern "C" fn spl_dlsym(handle: i64, name_rv: RuntimeValue) -> i64 {
+    let mut symbol = 0i64;
+    if spl_dlsym_checked(handle, name_rv, &mut symbol) == 0 {
+        symbol
+    } else {
+        0
+    }
+}
+
+/// Status/out symbol-resolution primitive.
+#[no_mangle]
+pub extern "C" fn spl_dlsym_checked(handle: i64, name_rv: RuntimeValue, out_symbol: *mut i64) -> i64 {
+    if out_symbol.is_null() {
+        return 1;
+    }
+    unsafe { out_symbol.write(0) };
     let raw_ptr = rt_string_data(name_rv);
     if raw_ptr.is_null() || handle == 0 {
-        return 0;
+        return 1;
     }
 
     let len = rt_string_len(name_rv);
-    if len < 0 {
-        return 0;
+    if len <= 0 {
+        return 1;
     }
 
     // Build a null-terminated copy
     let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len as usize) };
+    if slice.contains(&0) {
+        return 1;
+    }
     let mut buf = Vec::with_capacity(len as usize + 1);
     buf.extend_from_slice(slice);
     buf.push(0);
@@ -162,14 +232,81 @@ pub extern "C" fn spl_dlsym(handle: i64, name_rv: RuntimeValue) -> i64 {
     #[cfg(unix)]
     {
         let result = unsafe { libc::dlsym(handle as *mut libc::c_void, buf.as_ptr() as *const libc::c_char) };
-        result as i64
+        if result.is_null() {
+            return 3;
+        }
+        unsafe { out_symbol.write(result as i64) };
+        0
     }
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
-        unsafe { GetProcAddress(handle as _, buf.as_ptr()) }
-            .map(|symbol| symbol as *const () as i64)
-            .unwrap_or(0)
+        let result = unsafe { GetProcAddress(handle as _, buf.as_ptr()) };
+        let Some(symbol) = result else {
+            return 3;
+        };
+        unsafe { out_symbol.write(symbol as *const () as i64) };
+        0
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = buf;
+        4
+    }
+}
+
+/// Checked current-process symbol resolution without overloading a null handle.
+#[no_mangle]
+pub extern "C" fn spl_dlsym_process_checked(name_rv: RuntimeValue, out_symbol: *mut i64) -> i64 {
+    if out_symbol.is_null() {
+        return 1;
+    }
+    unsafe { out_symbol.write(0) };
+    let raw_ptr = rt_string_data(name_rv);
+    let len = rt_string_len(name_rv);
+    if raw_ptr.is_null() || len <= 0 {
+        return 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len as usize) };
+    if slice.contains(&0) {
+        return 1;
+    }
+    let mut buf = Vec::with_capacity(len as usize + 1);
+    buf.extend_from_slice(slice);
+    buf.push(0);
+
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::dlsym(std::ptr::null_mut(), buf.as_ptr() as *const libc::c_char) };
+        if result.is_null() {
+            return 3;
+        }
+        unsafe { out_symbol.write(result as i64) };
+        0
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        let process = unsafe { GetModuleHandleW(std::ptr::null()) };
+        // windows-sys models HMODULE as `*mut c_void` (it was `isize` in older
+        // releases), so the `== 0` this used to do no longer type-checks. This
+        // whole block is `#[cfg(windows)]`, so the break was invisible to every
+        // Linux and macOS build and only surfaces when the seed is compiled on
+        // Windows -- which is exactly the lane that had not been reachable.
+        if process.is_null() {
+            return 3;
+        }
+        let result = unsafe { GetProcAddress(process, buf.as_ptr()) };
+        let Some(symbol) = result else {
+            return 3;
+        };
+        unsafe { out_symbol.write(symbol as *const () as i64) };
+        0
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = buf;
+        4
     }
 }
 
@@ -214,6 +351,38 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
     try_call_i64_value(fptr, args_rv, nargs).unwrap_or(0)
 }
 
+/// Allocation-free typed C-boolean call with no arguments.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_bool0_checked(fptr: i64, out_value: *mut bool) -> i64 {
+    if out_value.is_null() {
+        return WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_value.write(false) };
+    if fptr == 0 {
+        return WFFI_NULL_FUNCTION;
+    }
+    type Fn = unsafe extern "C" fn() -> bool;
+    let value = unsafe { std::mem::transmute::<usize, Fn>(fptr as usize)() };
+    unsafe { out_value.write(value) };
+    WFFI_OK
+}
+
+/// Allocation-free typed C-boolean call with one i64 argument.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_bool1_checked(fptr: i64, arg0: i64, out_value: *mut bool) -> i64 {
+    if out_value.is_null() {
+        return WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_value.write(false) };
+    if fptr == 0 {
+        return WFFI_NULL_FUNCTION;
+    }
+    type Fn = unsafe extern "C" fn(i64) -> bool;
+    let value = unsafe { std::mem::transmute::<usize, Fn>(fptr as usize)(arg0) };
+    unsafe { out_value.write(value) };
+    WFFI_OK
+}
+
 /// Checked integer WFFI transport.
 ///
 /// Returns a bridge status and writes the foreign result to `out[0]` only on
@@ -228,6 +397,22 @@ pub extern "C" fn spl_wffi_try_call_i64(fptr: i64, args_rv: RuntimeValue, nargs:
         WFFI_OK
     } else {
         WFFI_INVALID_OUTPUT
+    }
+}
+
+/// Allocation-free checked integer transport using caller-owned scalar output.
+#[no_mangle]
+pub extern "C" fn spl_wffi_try_call_i64_out(fptr: i64, args_rv: RuntimeValue, nargs: i64, out_value: *mut i64) -> i64 {
+    if out_value.is_null() {
+        return WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_value.write(0) };
+    match try_call_i64_value(fptr, args_rv, nargs) {
+        Ok(value) => {
+            unsafe { out_value.write(value) };
+            WFFI_OK
+        }
+        Err(status) => status,
     }
 }
 
@@ -470,11 +655,7 @@ pub extern "C" fn spl_wffi_call_f64(fptr: i64, args_rv: RuntimeValue, nargs: i64
 /// Interpreter/native-equivalent checked float transport. The second element
 /// is the exact IEEE-754 bit pattern and is meaningful only for status zero.
 #[no_mangle]
-pub extern "C" fn spl_wffi_call_f64_checked(
-    fptr: i64,
-    args_rv: RuntimeValue,
-    nargs: i64,
-) -> RuntimeValue {
+pub extern "C" fn spl_wffi_call_f64_checked(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> RuntimeValue {
     match try_call_f64_value(fptr, args_rv, nargs) {
         Ok(value) => checked_i64_result(WFFI_OK, value.to_bits() as i64),
         Err(status) => checked_i64_result(status, 0),
@@ -607,7 +788,7 @@ pub extern "C" fn spl_str_ptr(value_rv: RuntimeValue) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::collections::{rt_array_new, rt_array_push};
+    use super::super::collections::{rt_array_new, rt_array_push, rt_string_new};
 
     unsafe extern "C" fn i64_two_args(a: i64, b: i64) -> i64 {
         a + b
@@ -615,6 +796,41 @@ mod tests {
 
     unsafe extern "C" fn i64_zero() -> i64 {
         0
+    }
+
+    unsafe extern "C" fn bool_true() -> bool {
+        true
+    }
+
+    unsafe extern "C" fn bool_is_positive(value: i64) -> bool {
+        value > 0
+    }
+
+    #[test]
+    fn checked_dynload_initializes_output_and_rejects_invalid_contracts() {
+        let empty = rt_string_new(std::ptr::NonNull::<u8>::dangling().as_ptr(), 0);
+        let mut handle = 99i64;
+        assert_eq!(spl_dlopen_checked(empty, &mut handle), 1);
+        assert_eq!(handle, 0);
+        assert_eq!(spl_dlopen_checked(empty, std::ptr::null_mut()), 1);
+    }
+
+    #[test]
+    fn checked_symbol_lookup_initializes_output_and_rejects_null_handle() {
+        let name = rt_string_new(b"rt_probe".as_ptr(), 8);
+        let mut symbol = 99i64;
+        assert_eq!(spl_dlsym_checked(0, name, &mut symbol), 1);
+        assert_eq!(symbol, 0);
+        assert_eq!(spl_dlsym_checked(0, name, std::ptr::null_mut()), 1);
+    }
+
+    #[test]
+    fn checked_process_symbol_lookup_initializes_output_on_failure() {
+        let name = rt_string_new(b"simple_missing_process_symbol".as_ptr(), 29);
+        let mut symbol = 99i64;
+        assert_eq!(spl_dlsym_process_checked(name, &mut symbol), 3);
+        assert_eq!(symbol, 0);
+        assert_eq!(spl_dlsym_process_checked(name, std::ptr::null_mut()), 1);
     }
 
     #[test]
@@ -645,6 +861,28 @@ mod tests {
         let args = rt_array_new(0);
         let rejected = spl_wffi_call_i64_checked(i64_zero as usize as i64, args, 1);
         assert_eq!(rt_array_get(rejected, 0).as_int(), WFFI_INVALID_ARGUMENT);
+    }
+
+    #[test]
+    fn checked_boolean_transport_preserves_bool_and_failure_identity() {
+        let mut value = false;
+        assert_eq!(
+            spl_wffi_call_bool0_checked(bool_true as usize as i64, &mut value),
+            WFFI_OK
+        );
+        assert!(value);
+        assert_eq!(
+            spl_wffi_call_bool1_checked(bool_is_positive as usize as i64, -1, &mut value),
+            WFFI_OK
+        );
+        assert!(!value);
+        value = true;
+        assert_eq!(spl_wffi_call_bool0_checked(0, &mut value), WFFI_NULL_FUNCTION);
+        assert!(!value);
+        assert_eq!(
+            spl_wffi_call_bool0_checked(bool_true as usize as i64, std::ptr::null_mut()),
+            WFFI_INVALID_ARGUMENT
+        );
     }
 
     unsafe extern "C" fn f64_no_args() -> f64 {

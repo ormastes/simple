@@ -1,0 +1,59 @@
+"""Source ownership contract for the fixed pgwire frontend worker lane."""
+
+use std.spec
+use std.io.file_read_text
+
+describe "Postgres mimic fixed frontend worker prerequisites":
+    it "provides an owned listener that applies reuseport before bind":
+        val source = file_read_text("src/lib/nogc_sync_mut/io/tcp.spl")
+        val constructor = source.index_of("static fn bind_reuseport")
+        val reusable_bind = source.index_of("tcp_backend_bind_with_reuseport(addr)")
+        val option = source.index_of("tcp_backend_set_reuseport(fd, true)")
+        val bind_position = source.index_of("rt_io_tcp_bind_fd(fd, addr)")
+        expect(constructor).to_be_greater_than(0)
+        expect(reusable_bind).to_be_greater_than(constructor)
+        expect(option).to_be_greater_than(0)
+        expect(bind_position).to_be_greater_than(option)
+
+    it "keeps database execution behind the atomic dispatch gate":
+        val owner = file_read_text(
+            "src/lib/nogc_sync_mut/database/postgres_mimic/database_owner.spl")
+        val gate = file_read_text(
+            "src/lib/nogc_sync_mut/database/postgres_mimic/dispatch_gate.spl")
+        expect(owner).to_contain("dispatch: PgDispatchGate")
+        expect(owner).to_contain("self.dispatch.claim_next(now_ms)")
+        expect(gate).to_contain("mutex_lock(self.gate)")
+        expect(gate).to_contain("self.lifecycle.submit")
+
+    it "keeps the scalar-port pump on the parent database owner":
+        val worker = file_read_text(
+            "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
+        expect(worker).to_contain("class PgScalarParallelOwnerV1:")
+        expect(worker).to_contain(
+            "me pump_one(owner: PgDatabaseOwner, now_ms: i64,")
+        expect(worker).to_contain("current_owner.dispatch.submit_startup")
+        expect(worker).to_contain("current_owner.dispatch.submit(connection")
+        expect(worker).to_contain("current_owner.process_bounded(now_ms, 1)")
+        expect(worker).to_contain("current_owner.dispatch.take(job_id)")
+        expect(worker).to_contain(
+            "if current_owner.process_bounded(now_ms, 1) != 1:\n            val _ = current_owner.dispatch.take(job_id)\n            val _ = self.scalar.abort_claim(claim, 1)")
+        expect(worker).to_contain("self.scalar.publish_encoded(claim, operation,")
+        expect(worker).to_contain("self.scalar.abort_claim(claim, 1)")
+        expect(worker.contains("scalar: PgScalarDispatchOwner\n    gate:")).to_equal(false)
+
+    it "holds the public threaded entrypoint on the caller-owned path until scalar workers are admitted":
+        val worker = file_read_text(
+            "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
+        val entry = file_read_text("src/app/postgres_mimic_server/main.spl")
+        expect(worker).to_contain("The former multi-threaded path transported")
+        expect(worker).to_contain("self.serve_inline_bounded(max_connections)")
+        expect(worker).to_contain("frontend = inline_result.1")
+        expect(worker).to_contain("inline_owner = inline_result.2")
+        expect(entry).to_contain("PgWireParallelLinuxServer")
+        expect(entry).to_contain("--workers")
+
+    it "does not advertise the old aggregate handoff as an admitted worker boundary":
+        val worker = file_read_text(
+            "src/lib/nogc_async_mut/database/postgres_mimic/parallel_linux_server.spl")
+        expect(worker).to_contain("violates the native one-word boundary")
+        expect(worker).to_contain("until the separate scalar port/descriptor vertical slice")

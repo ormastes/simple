@@ -1,0 +1,95 @@
+"""Executable source-to-rich-AST coverage for GPU shared declarations."""
+
+# @req REQ-GPU-SHARED-DECL-001
+use std.spec
+use compiler.core.ast.*
+use compiler.core.ast_stmt.{flat_stmt_pools_dump, flat_stmt_pools_restore, stmt_reset}
+use compiler.core.ast_traversal.{flat_stmt_child_exprs}
+use compiler.core.flat_pool_codec.{FlatPoolReader}
+use compiler.core.parser.{parser_error_count, parser_has_errors, parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.types.{span_end, span_start}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.*
+
+fn parse_shared_flat(source: text) -> [i64]:
+    parser_init_with_path(source, "shared_gpu_decl.spl")
+    parse_module_body()
+    val decls = module_get_decls()
+    decl_get_body(decls[0])
+
+describe "GPU shared declaration source reachability", tag: ["only-compiled"]:
+    it "maps let and var to mutable SharedVar and val to immutable SharedVal":
+        val source = "fn kernel_body():\n" +
+            "    shared let legacy: i64\n" +
+            "    shared val frozen: i64 = 7\n" +
+            "    shared var scratch: i64\n"
+        val body = parse_shared_flat(source)
+        expect(parser_has_errors()).to_equal(false)
+        expect(body.len()).to_equal(3)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_SHARED_VAR_DECL)
+        expect(stmt_get_tag(body[1])).to_equal(STMT_SHARED_VAL_DECL)
+        expect(stmt_get_tag(body[2])).to_equal(STMT_SHARED_VAR_DECL)
+        expect(stmt_get_name(body[0])).to_equal("legacy")
+        expect(stmt_get_name(body[1])).to_equal("frozen")
+        expect(stmt_get_expr(body[0])).to_equal(-1)
+        expect(stmt_get_expr(body[1]) >= 0).to_equal(true)
+
+    it "retains real spans and initializer traversal through the flat codec":
+        val body = parse_shared_flat("fn k():\n    shared val data: i64 = 9\n")
+        val shared = body[0]
+        val span = stmt_get_span(shared)
+        expect(span_start(span)).to_equal(12)
+        expect(span_end(span) > span_start(span)).to_equal(true)
+        val children = flat_stmt_child_exprs(shared)
+        expect(children.len()).to_equal(1)
+        expect(children[0]).to_equal(stmt_get_expr(shared))
+        val blob = flat_stmt_pools_dump()
+        stmt_reset()
+        expect(flat_stmt_pools_restore(FlatPoolReader.new(blob))).to_equal(true)
+        expect(stmt_get_tag(shared)).to_equal(STMT_SHARED_VAL_DECL)
+        expect(stmt_get_name(shared)).to_equal("data")
+        expect(stmt_get_span(shared)).to_equal(span)
+        expect(stmt_get_expr(shared)).to_equal(children[0])
+
+    it "bridges all spellings without losing mutability, initializer, or span":
+        val source = "fn k():\n" +
+            "    shared let legacy: i64\n" +
+            "    shared val frozen: i64 = 7\n" +
+            "    shared var scratch: i64 = 8\n"
+        val module = parse_and_build_module(source, "shared_bridge.spl")
+        val fn_ = module.functions["k"] ?? panic("missing k")
+        expect(fn_.body.stmts.len()).to_equal(3)
+        match fn_.body.stmts[0].kind:
+            case StmtKind.SharedVar(name, _, init):
+                expect(name).to_equal("legacy")
+                expect(init == nil).to_equal(true)
+            case _: fail("shared let did not bridge as SharedVar")
+        match fn_.body.stmts[1].kind:
+            case StmtKind.SharedVal(name, _, init):
+                expect(name).to_equal("frozen")
+                expect(init != nil).to_equal(true)
+            case _: fail("shared val did not bridge as SharedVal")
+        match fn_.body.stmts[2].kind:
+            case StmtKind.SharedVar(name, _, init):
+                expect(name).to_equal("scratch")
+                expect(init != nil).to_equal(true)
+            case _: fail("shared var did not bridge as SharedVar")
+        expect(fn_.body.stmts[0].span.start).to_equal(12)
+        expect(fn_.body.stmts[2].span.end > fn_.body.stmts[2].span.start).to_equal(true)
+
+    it "synchronizes malformed declarations and parses the following statement":
+        val body = parse_shared_flat("fn k():\n    shared val broken = 1\n    val after = 7\n")
+        expect(parser_has_errors()).to_equal(true)
+        expect(parser_error_count() > 0).to_equal(true)
+        expect(body.len()).to_equal(2)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_SHARED_VAL_DECL)
+        expect(stmt_get_tag(body[1])).to_equal(STMT_VAL_DECL)
+        expect(stmt_get_name(body[1])).to_equal("after")
+
+    it "keeps shared available as an ordinary identifier":
+        val body = parse_shared_flat("fn k():\n    var shared = 1\n    shared = shared + 1\n")
+        expect(parser_has_errors()).to_equal(false)
+        expect(body.len()).to_equal(2)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_VAR_DECL)
+        expect(stmt_get_tag(body[1])).to_equal(STMT_ASSIGN)

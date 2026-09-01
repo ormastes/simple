@@ -49,10 +49,12 @@ Tests for class definitions, instance creation, field access, methods, impl bloc
 
 ## Overview
 
+```simple
 Tests for class definitions, instance creation, field access, methods,
 impl blocks, context blocks, method_missing, auto-forwarding properties,
 and static polymorphism with interface bindings.
 
+```
 ## Syntax
 
 ```simple

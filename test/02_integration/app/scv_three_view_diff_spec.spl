@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-D-02 — one comparison rendered as
+`--view raw|syntax|entity|semantic|all`, plus `--git-patch`: an
+always-applicable Git patch export built from whole-file hunks. The entity
+view relabels rows by persistent FileEntityId so a rename stays the same
+entity; an invalid view name is an honest ERROR.
+Audience: Maintainers of the SCV diff layer.
+"""
+# @req: REQ-SCV-THREE-VIEW-DIFF-001
+use std.spec.{describe, it, expect, step}
+use app.io.mod (dir_create, file_write, file_delete)
+use std.scv.store.{scv_init_repo}
+use std.scv.file_history.{scv_snapshot_with_identity}
+use std.scv.identity.{scv_identity_lookup_by_path}
+use std.scv.three_view_diff.{scv_diff_views, scv_git_patch}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn _repo(tag: text) -> text:
+    val root = "/tmp/scv-3vd-{tag}-{current_time_ms()}"
+    dir_create(root, true)
+    scv_init_repo(root)
+    root
+
+fn _no_hints() -> [text]:
+    []
+
+describe "scv three-view diff (D-02)":
+    it "rejects an unknown view name":
+        val root = _repo("badview")
+        val out = scv_diff_views(root, "bogus", false)
+        expect(out.starts_with("ERROR")).to_be(true)
+
+    it "renders raw, syntax, entity, and semantic sections from one comparison":
+        step("Snapshot, modify one file, render --view all")
+        val root = _repo("all")
+        file_write("{root}/a.txt", "one\ntwo\n")
+        scv_snapshot_with_identity(root, _no_hints())
+        file_write("{root}/a.txt", "one\ntwo\nthree\n")
+        val out = scv_diff_views(root, "all", false)
+        expect(out).to_contain("view=raw")
+        expect(out).to_contain("view=syntax")
+        expect(out).to_contain("view=entity")
+        expect(out).to_contain("view=semantic")
+        expect(out).to_contain("modified a.txt")
+        val id = scv_identity_lookup_by_path(root, "a.txt")
+        expect(out).to_contain("entity {id} modified a.txt")
+
+    it "labels the syntax view with structural_source provenance":
+        val root = _repo("syntax")
+        file_write("{root}/s.txt", "alpha\n")
+        scv_snapshot_with_identity(root, _no_hints())
+        file_write("{root}/s.txt", "alpha\nbeta\n")
+        val out = scv_diff_views(root, "syntax", false)
+        expect(out).to_contain("view=syntax")
+        expect(out).to_contain("structural_source=")
+
+    it "exports an always-applicable git patch with whole-file hunks":
+        step("Modify + add + delete, then check the patch shape")
+        val root = _repo("patch")
+        file_write("{root}/keep.txt", "k1\nk2\n")
+        file_write("{root}/gone.txt", "g1\n")
+        scv_snapshot_with_identity(root, _no_hints())
+        file_write("{root}/keep.txt", "k1\nk2-edited\n")
+        file_write("{root}/new.txt", "n1\nn2\nn3\n")
+        file_delete("{root}/gone.txt")
+        val patch = scv_git_patch(root)
+        expect(patch).to_contain("diff --git a/keep.txt b/keep.txt")
+        expect(patch).to_contain("@@ -1,2 +1,2 @@")
+        expect(patch).to_contain("-k2\n")
+        expect(patch).to_contain("+k2-edited\n")
+        expect(patch).to_contain("diff --git a/new.txt b/new.txt")
+        expect(patch).to_contain("new file mode 100644")
+        expect(patch).to_contain("@@ -0,0 +1,3 @@")
+        expect(patch).to_contain("diff --git a/gone.txt b/gone.txt")
+        expect(patch).to_contain("deleted file mode 100644")
+        expect(patch).to_contain("@@ -1,1 +0,0 @@")
+
+    it "appends the patch to a view with --git-patch and reports empty honestly":
+        val root = _repo("combined")
+        file_write("{root}/c.txt", "c1\n")
+        scv_snapshot_with_identity(root, _no_hints())
+        val clean = scv_diff_views(root, "raw", true)
+        expect(clean).to_contain("git-patch")
+        expect(clean).to_contain("(empty)")
+        file_write("{root}/c.txt", "c1\nc2\n")
+        val dirty = scv_diff_views(root, "raw", true)
+        expect(dirty).to_contain("view=raw")
+        expect(dirty).to_contain("git-patch")
+        expect(dirty).to_contain("+c2\n")

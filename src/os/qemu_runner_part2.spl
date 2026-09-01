@@ -1,5 +1,6 @@
 # Part 2 of src/os/qemu_runner.spl
 use os.qemu_runner.*
+use os._QemuRunner.runner_targets.{OsTarget, QemuRunOptions}
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
 #
 # Provides build + run + test functionality for all 6 architectures.
@@ -49,7 +50,6 @@ use os.toolchain_vfs_probe_contract.{
 }
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
-use std.io_runtime.{ dir_create_all, file_exists }
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_delete(path: text) -> bool
@@ -173,7 +173,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val arch_label = arch_display_name(target.arch)
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
     val cached_build_matches = _last_successful_build_entry == target.entry and _last_successful_build_output == target.output and _last_successful_build_backend == backend_name and _last_successful_build_target == target.target_triple
-    if cached_build_matches and file_exists(target.output):
+    if cached_build_matches and rt_file_exists(target.output):
         print "[build][{arch_label}] phase=native-build cached output={target.output}"
         return true
     val build_marker = if _is_riscv64_live_helper_target(target): _ssh_live_build_marker_value(backend) else: ""
@@ -236,7 +236,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
         return false
     print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         _write_bootstrap_result(target, false, false, backend_name)
         print "[build][{arch_label}] phase=artifact FAILED output missing: {target.output}"
         _cleanup_generated_build_helpers(build_marker)
@@ -274,7 +274,7 @@ fn _write_native_build_stamp(target: OsTarget, content: text):
         print "[build] warning: could not write native-build stamp: {stamp_path}"
 
 fn _path_newer_than_output(path: text, output: text) -> bool:
-    if not file_exists(path):
+    if not rt_file_exists(path):
         return false
     val (stdout, _stderr, exit_code) = rt_process_run_timeout("find", [path, "-newer", output, "-print", "-quit"], 10000)
     exit_code != 0 or stdout != ""
@@ -290,10 +290,10 @@ fn _native_build_inputs_newer_than_output(target: OsTarget, simple_bin: text) ->
     false
 
 fn _native_build_cache_hit(target: OsTarget, expected_stamp: text, simple_bin: text) -> bool:
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         return false
     val stamp_path = _native_build_stamp_path(target)
-    if not file_exists(stamp_path):
+    if not rt_file_exists(stamp_path):
         return false
     if rt_file_read_text(stamp_path) != expected_stamp:
         return false
@@ -301,20 +301,20 @@ fn _native_build_cache_hit(target: OsTarget, expected_stamp: text, simple_bin: t
 
 fn _objcopy_path_prefix() -> text:
     # macOS Homebrew locations
-    if file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
+    if rt_file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
         return "/opt/homebrew/opt/llvm/bin"
-    if file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
         return "/usr/local/opt/llvm/bin"
     # Linux system locations (Debian/Ubuntu packaged LLVM)
-    if file_exists("/usr/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/bin/llvm-objcopy"):
         return "/usr/bin"
-    if file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
         return "/usr/lib/llvm-20/bin"
-    if file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
         return "/usr/lib/llvm-19/bin"
-    if file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
         return "/usr/lib/llvm-18/bin"
-    if file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
         return "/usr/lib/llvm-17/bin"
     ""
 
@@ -326,7 +326,7 @@ fn _simple_binary_is_valid(candidate: text) -> bool:
     the Linux bootstrap binary at src/compiler_rust/target/release/simple
     was observed to do on 2026-04-13).
     """
-    if not file_exists(candidate):
+    if not rt_file_exists(candidate):
         return false
     val (stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 5000)
     exit_code == 0 and stdout != ""
@@ -364,15 +364,9 @@ fn _find_simple_binary() -> text:
     # Each candidate is validated via `<candidate> --version` (exit 0 +
     # non-empty stdout) so stale or segfaulting binaries fall through.
     val candidates: [text] = [
-        "src/compiler_rust/target/debug/simple.exe",
         "src/compiler_rust/target/debug/simple",
-        "src/compiler_rust/target/bootstrap/simple.exe",
         "src/compiler_rust/target/bootstrap/simple",
-        "src/compiler_rust/target/release/simple.exe",
         "src/compiler_rust/target/release/simple",
-        "bin/release/x86_64-pc-windows-msvc/simple.exe",
-        "bin/release/aarch64-pc-windows-msvc/simple.exe",
-        "bin/simple.exe",
         "bin/simple",
         "bin/release/aarch64-apple-darwin-macho/simple",
         "bin/release/macos-arm64/simple",
@@ -394,15 +388,9 @@ fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
     if env_bin != "" and _simple_binary_supports_backend(env_bin, backend_name):
         return env_bin
     val candidates: [text] = [
-        "src/compiler_rust/target/debug/simple.exe",
         "src/compiler_rust/target/debug/simple",
-        "src/compiler_rust/target/bootstrap/simple.exe",
         "src/compiler_rust/target/bootstrap/simple",
-        "src/compiler_rust/target/release/simple.exe",
         "src/compiler_rust/target/release/simple",
-        "bin/release/x86_64-pc-windows-msvc/simple.exe",
-        "bin/release/aarch64-pc-windows-msvc/simple.exe",
-        "bin/simple.exe",
         "bin/simple",
         "bin/release/aarch64-apple-darwin-macho/simple",
         "bin/release/macos-arm64/simple",
@@ -802,7 +790,7 @@ fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
 
     Checks that the binary exists, then spawns QEMU. Returns true on success.
     """
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         print "[run] ERROR: kernel binary not found: {target.output}"
         print "[run] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false

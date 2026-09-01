@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 /*
  * Simple Native Runtime Bridge
  *
@@ -18,6 +21,7 @@
 #include "runtime.h"
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
+#include "runtime_startup_args.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,9 +36,8 @@
 #if defined(_MSC_VER)
 /* MSVC ships no <unistd.h>. MinGW DOES, and the GNU-ABI Windows lane includes
  * it, so this is gated on _MSC_VER and not on _WIN32 -- widening it to _WIN32
- * would drop the header out from under the MinGW build. The POSIX I/O this
- * file uses on Windows comes from <io.h> below; the heavier POSIX headers
- * (dirent/dlfcn/sys-mman/sockets/poll/pthread) are already `#if !defined(_WIN32)`.
+ * would drop the header out from under the MinGW build. The heavier POSIX
+ * headers are already `#if !defined(_WIN32)` below.
  *
  * Without this the file failed to compile under clang-cl with
  * `fatal error: 'unistd.h' file not found`, so it never reached the core-C
@@ -54,29 +57,20 @@ typedef SSIZE_T ssize_t;
 #include <sys/types.h>
 #include <sys/stat.h>
 #if defined(_WIN32)
+#include <direct.h>
 #include <io.h>
 #include <malloc.h>
 #include <windows.h>
-/* _mkdir / _rmdir live here, not in <sys/stat.h>. Without it both were
- * implicit declarations and this whole file failed to compile on Windows --
- * which silently dropped it from the core-C archive and left the ~68 rt_*
- * symbols it defines undefined at the Stage 2 link. */
-#include <direct.h>
 #endif
 
 #if defined(_MSC_VER)
 /* POSIX entry points this file calls that MSVC does not provide. MinGW HAS all
- * of them, so every shim here is gated on _MSC_VER, never _WIN32 -- widening
- * would shadow MinGW's real implementations.
- *
- * Without these the file does not compile under clang-cl, so it never reaches
- * the core-C archive, and the ~72 rt_* symbols it defines come up undefined at
- * the Stage 2 MSVC link. */
+ * of them, so every shim is gated on _MSC_VER, never _WIN32 -- widening would
+ * shadow MinGW's real implementations. */
 #define popen  _popen
 #define pclose _pclose
 
-/* MSVC has no ftruncate; _chsize_s is the CRT equivalent and reports errno
- * directly rather than through -1. */
+/* MSVC has no ftruncate; _chsize_s is the CRT equivalent. */
 static int rt_msvc_ftruncate(int fd, long long length) {
     return _chsize_s(fd, length) == 0 ? 0 : -1;
 }
@@ -88,10 +82,10 @@ static int rt_msvc_ftruncate(int fd, long long length) {
 #ifndef CLOCK_MONOTONIC
 #define CLOCK_MONOTONIC 1
 #endif
-/* CLOCK_REALTIME comes from the system clock (Unix epoch, adjusted for the
- * FILETIME 1601 epoch); CLOCK_MONOTONIC from QueryPerformanceCounter, which is
- * the only Windows source that is genuinely monotonic. Any other clock id is
- * refused rather than silently answered with the wrong timebase. */
+/* CLOCK_REALTIME from the system clock (FILETIME's 1601 epoch rebased to
+ * 1970); CLOCK_MONOTONIC from QueryPerformanceCounter, the only genuinely
+ * monotonic Windows source. Any other clock id is refused rather than silently
+ * answered with the wrong timebase. */
 static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
     if (!ts) return -1;
     if (clock_id == CLOCK_REALTIME) {
@@ -100,7 +94,6 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
         GetSystemTimeAsFileTime(&ft);
         t.LowPart = ft.dwLowDateTime;
         t.HighPart = ft.dwHighDateTime;
-        /* 100ns ticks since 1601-01-01 -> seconds/nanos since 1970-01-01. */
         t.QuadPart -= 116444736000000000ULL;
         ts->tv_sec = (time_t)(t.QuadPart / 10000000ULL);
         ts->tv_nsec = (long)((t.QuadPart % 10000000ULL) * 100ULL);
@@ -118,11 +111,17 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
 }
 #define clock_gettime rt_msvc_clock_gettime
 #endif
-
 /* Deprecated in C17 and REMOVED in C23; MinGW's <stdatomic.h> no longer
  * defines it, while glibc/libc++ still do. Defining it only when absent keeps
  * every existing call site and every non-Windows build byte-identical.
- * `(value)` is exactly the semantics C11 gave it for static initializers. */
+ * `(value)` is exactly the semantics C11 gave it for static initializers.
+ *
+ * This guard existed at 8ca87866c61 and is ABSENT from origin/main: pristine
+ * main fails `gcc -fsyntax-only` on this file with 6 ATOMIC_VAR_INIT errors
+ * under MinGW gcc 15.2.0 (measured 2026-08-30). It was almost certainly lost
+ * to the same "snapshot current development state" commit that deleted
+ * doc/08_tracking/bug/bootstrap_stage2_windows_link_unresolved_rt_and_dup_kernel32_2026-08-24.md
+ * -- the clobber pattern .claude/rules/vcs.md warns about. Restored. */
 #ifndef ATOMIC_VAR_INIT
 #define ATOMIC_VAR_INIT(value) (value)
 #endif
@@ -138,7 +137,61 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
 #include <arpa/inet.h>
 #include <poll.h>
 #include <pthread.h>
+#if defined(__linux__)
+#include <sys/random.h>
+#include <sys/syscall.h>
+#include <linux/memfd.h>
+#include <linux/fs.h>
+#include <linux/openat2.h>
 #endif
+#endif
+
+/* OS CSPRNG bytes encoded as lowercase hexadecimal.  This is the native
+ * provider for std.nogc_sync_mut.io.crypto_sffi.random_hex. */
+const char* rt_random_hex(int64_t len) {
+    static const char hex[] = "0123456789abcdef";
+    if (len < 0 || (uint64_t)len > (SIZE_MAX - 1) / 2) return NULL;
+    size_t byte_len = (size_t)len;
+    unsigned char* random_bytes = NULL;
+    if (byte_len > 0) {
+        random_bytes = (unsigned char*)malloc(byte_len);
+        if (!random_bytes) return NULL;
+#if defined(_WIN32)
+        typedef long (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+        if (byte_len > 0xffffffffu) { free(random_bytes); return NULL; }
+        HMODULE library = LoadLibraryA("bcrypt.dll");
+        if (!library) { free(random_bytes); return NULL; }
+        BCryptGenRandomFn fill = (BCryptGenRandomFn)GetProcAddress(library, "BCryptGenRandom");
+        long status = fill ? fill(NULL, random_bytes, (unsigned long)byte_len, 0x00000002) : -1;
+        FreeLibrary(library);
+        if (status != 0) { free(random_bytes); return NULL; }
+#else
+        int fd = open("/dev/urandom", O_RDONLY);
+        if (fd < 0) { free(random_bytes); return NULL; }
+        size_t offset = 0;
+        while (offset < byte_len) {
+            ssize_t count = read(fd, random_bytes + offset, byte_len - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                close(fd);
+                free(random_bytes);
+                return NULL;
+            }
+            offset += (size_t)count;
+        }
+        close(fd);
+#endif
+    }
+    char* encoded = (char*)malloc(byte_len * 2 + 1);
+    if (!encoded) { free(random_bytes); return NULL; }
+    for (size_t i = 0; i < byte_len; i++) {
+        encoded[i * 2] = hex[random_bytes[i] >> 4];
+        encoded[i * 2 + 1] = hex[random_bytes[i] & 0x0f];
+    }
+    encoded[byte_len * 2] = '\0';
+    free(random_bytes);
+    return encoded;
+}
 
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
  * the workers in platform/unix_common.h and platform/platform_win.h. */
@@ -191,6 +244,7 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
 #define RT_VALUE_SPECIAL_NIL 0x0ULL
 #define RT_VALUE_SPECIAL_TRUE 0x1ULL
 #define RT_VALUE_SPECIAL_FALSE 0x2ULL
+#define RT_VALUE_SPECIAL_ERROR 0x3ULL
 #define RT_VALUE_HEAP_STRING 0x53545231U
 #define RT_VALUE_HEAP_ARRAY 0x02U
 #define RT_VALUE_HEAP_CLOSURE 0x03U
@@ -301,9 +355,10 @@ void rt_host_gpu_queue_reset(void);
 #define SPL_HOSTED_UNAVAILABLE_WEAK
 #endif
 
-int64_t rt_cuda_available(void) { return 0; }
-int64_t rt_cuda_device_count(void) { return 0; }
-int32_t rt_vk_available(void) { return 0; }
+#if !defined(SIMPLE_RUNTIME_DYNLOAD_OWNER)
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_available(void) { return 0; }
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_device_count(void) { return 0; }
+SPL_HOSTED_UNAVAILABLE_WEAK int32_t rt_vk_available(void) { return 0; }
 
 typedef int64_t (*spl_hosted_i64_probe_fn)(void);
 
@@ -331,6 +386,7 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_is_available(void) {
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
     return spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count");
 }
+#endif
 
 /*
  * Core-C parity for the runtime-owned Vulkan dependency-quarantine gate.
@@ -691,31 +747,20 @@ SPL_CORE_C_WEAK int64_t rt_atexit_check(void) {
 #undef SPL_CORE_C_WEAK
 
 static int64_t rt_host_gpu_queue_now_us(void) {
-    struct timespec ts;
 #if defined(_WIN32)
-    /* timespec_get/TIME_UTC are C11 and are not exposed by every MinGW
-     * <time.h> configuration (they were undeclared here). QueryPerformanceCounter
-     * is always available, and is a better fit anyway: this is a MONOTONIC
-     * elapsed-time source, which is what the POSIX branch below asks for --
-     * timespec_get(TIME_UTC) returned wall-clock time and would have jumped
-     * backwards across an NTP correction. */
     LARGE_INTEGER counter;
     LARGE_INTEGER frequency;
-    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart == 0) {
-        return 0;
-    }
-    if (!QueryPerformanceCounter(&counter)) {
-        return 0;
-    }
-    ts.tv_sec = (time_t)(counter.QuadPart / frequency.QuadPart);
-    ts.tv_nsec = (long)(((counter.QuadPart % frequency.QuadPart) * 1000000000LL)
-        / frequency.QuadPart);
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 ||
+            !QueryPerformanceCounter(&counter)) return 0;
+    return (int64_t)((counter.QuadPart / frequency.QuadPart) * 1000000LL +
+        ((counter.QuadPart % frequency.QuadPart) * 1000000LL) / frequency.QuadPart);
 #else
+    struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         return 0;
     }
-#endif
     return ((int64_t)ts.tv_sec * 1000000) + ((int64_t)ts.tv_nsec / 1000);
+#endif
 }
 
 int64_t rt_host_gpu_lane_event(int64_t lane_code, int64_t phase_code) {
@@ -748,6 +793,26 @@ int64_t rt_host_gpu_lane_begin_count(void) { return rt_host_gpu_lane_begin_total
 int64_t rt_host_gpu_lane_end_count(void) { return rt_host_gpu_lane_end_total; }
 int64_t rt_host_gpu_lane_last_lane(void) { return rt_host_gpu_lane_last_lane_code; }
 int64_t rt_host_gpu_lane_last_phase(void) { return rt_host_gpu_lane_last_phase_code; }
+
+/*
+ * Handle of the GPU backend currently bound to the host/GPU lane.
+ *
+ * Contract (src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:22):
+ *     extern fn rt_host_gpu_active_backend_handle() -> i64
+ * Its single caller (:230) feeds the result straight into
+ * rt_host_gpu_queue_emit's `backend_handle` parameter, so it lives in the
+ * SAME handle space as that parameter: 0 == no backend, >0 == a real
+ * backend, and a NEGATIVE value is rejected outright by the emit path
+ * (see the `backend_handle < 0` guard below). Completion maps a GPU-lane
+ * packet carrying handle 0 to RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE, which
+ * is exactly the "no GPU here" outcome we want reported.
+ *
+ * The core C runtime binds no GPU backend, and nothing anywhere in this
+ * tree registers an "active" one -- every real backend_handle observed by
+ * the queue arrives as a caller-supplied argument. So this is an honest
+ * no-backend answer, not a placeholder: it returns 0.
+ */
+int64_t rt_host_gpu_active_backend_handle(void) { return 0; }
 
 void rt_host_gpu_queue_reset(void) {
     rt_host_gpu_queue_next_packet_id = 1;
@@ -1063,10 +1128,6 @@ static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NUL
 static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
-static _Thread_local int64_t rt_core_transient_last_promoted_node_count = 0;
-static _Thread_local int64_t rt_core_transient_last_promoted_byte_count = 0;
-static _Thread_local int64_t rt_core_transient_scope_promoted_node_count = 0;
-static _Thread_local int64_t rt_core_transient_scope_promoted_byte_count = 0;
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
 static size_t rt_core_mutex_registry_cap = 0;
@@ -1299,9 +1360,6 @@ int8_t rt_transient_array_scope_begin(void) {
     rt_core_transient_array_scope_id = next_id;
     rt_core_transient_array_scope_active = 1;
     rt_core_transient_array_scope_paused = 0;
-    rt_transient_promotion_stats_reset();
-    rt_core_transient_scope_promoted_node_count = 0;
-    rt_core_transient_scope_promoted_byte_count = 0;
     return 1;
 }
 
@@ -1416,13 +1474,10 @@ static int rt_core_transient_raw_insert_raw(uintptr_t ptr, size_t bytes) {
     }
 }
 
-/* Rehash into a table of exactly `next_cap` slots. `next_cap` may EQUAL the
- * current capacity: linear probing cannot purge tombstones in place, so a
- * same-capacity rehash through a fresh table is the only way to reclaim them.
- * Live entries keep their `bytes` word verbatim, so the OWNED bit and the
- * size field survive a resize unchanged. */
-static int rt_core_transient_raw_resize(size_t next_cap) {
-    if (next_cap == 0) return 0;
+static int rt_core_transient_raw_grow(void) {
+    size_t next_cap = rt_core_transient_raw_alloc_cap == 0
+        ? 256
+        : rt_core_transient_raw_alloc_cap * 2;
     if (next_cap > SIZE_MAX / sizeof(RtCoreTransientRawAlloc)) return 0;
     RtCoreTransientRawAlloc* fresh = (RtCoreTransientRawAlloc*)calloc(
         next_cap, sizeof(RtCoreTransientRawAlloc));
@@ -1447,23 +1502,8 @@ static int rt_core_transient_raw_register_state(void* ptr, size_t bytes, int own
     if (!ptr || !rt_core_transient_array_scope_active) return ptr != NULL;
     if (bytes > RT_CORE_TRANSIENT_RAW_SIZE_MASK) return 0;
     if ((rt_core_transient_raw_alloc_len + rt_core_transient_raw_alloc_tombs + 1) * 10
-            >= rt_core_transient_raw_alloc_cap * 7) {
-        size_t next_cap = rt_core_transient_raw_alloc_cap == 0
-            ? 256
-            : rt_core_transient_raw_alloc_cap * 2;
-        /* PERF (stage3_hir_imports_memory_explosion_driver_riscv_gen2): same
-         * tombstone-driven doubling the immortal registry already guards
-         * against below (rt_core_register_immortal_ptr). A long-lived
-         * transient scope erases in place on every free/realloc, so capacity
-         * tracked CUMULATIVE churn rather than the live set. Purge the
-         * tombstones at the SAME capacity instead of doubling. */
-        if (rt_core_transient_raw_alloc_cap != 0 &&
-            rt_core_transient_raw_alloc_tombs > rt_core_transient_raw_alloc_len &&
-            (rt_core_transient_raw_alloc_len + 1) * 10
-                < rt_core_transient_raw_alloc_cap * 5) {
-            next_cap = rt_core_transient_raw_alloc_cap;
-        }
-        if (!rt_core_transient_raw_resize(next_cap)) return 0;
+            >= rt_core_transient_raw_alloc_cap * 7 && !rt_core_transient_raw_grow()) {
+        return 0;
     }
     size_t stored = bytes | (owned ? RT_CORE_TRANSIENT_RAW_OWNED_BIT : 0);
     return rt_core_transient_raw_insert_raw((uintptr_t)ptr, stored);
@@ -1496,19 +1536,7 @@ static void rt_core_transient_raw_erase(void* ptr) {
 }
 
 static void rt_core_transient_raw_clear(void) {
-    /* PERF (stage3_hir_imports_memory_explosion_driver_riscv_gen2): release a
-     * large table instead of retaining it at its high-water capacity. Scopes
-     * are per-source, so one big module otherwise charged every later module
-     * an O(cap) scan, a full memset, and a random probe into a huge sparse
-     * array on every rt_alloc. Post-clear this is observationally identical
-     * to the all-zero table: rt_core_transient_raw_lookup returns NULL for
-     * cap == 0, and the register path re-seeds at 256 through its cap == 0
-     * arm. Small tables are memset as before so no extra calloc is paid. */
-    if (rt_core_transient_raw_alloc_cap > 4096) {
-        free(rt_core_transient_raw_allocs);
-        rt_core_transient_raw_allocs = NULL;
-        rt_core_transient_raw_alloc_cap = 0;
-    } else if (rt_core_transient_raw_alloc_cap != 0) {
+    if (rt_core_transient_raw_alloc_cap != 0) {
         memset(rt_core_transient_raw_allocs, 0,
             rt_core_transient_raw_alloc_cap * sizeof(RtCoreTransientRawAlloc));
     }
@@ -2070,58 +2098,9 @@ static int rt_core_transient_add(RtCoreTransientPlan* plan, int64_t value) {
     return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
 }
 
-int64_t rt_transient_last_promoted_nodes(void) {
-    return rt_core_transient_last_promoted_node_count;
-}
-
-int64_t rt_transient_last_promoted_bytes(void) {
-    return rt_core_transient_last_promoted_byte_count;
-}
-
-int64_t rt_transient_scope_promoted_nodes(void) {
-    return rt_core_transient_scope_promoted_node_count;
-}
-
-int64_t rt_transient_scope_promoted_bytes(void) {
-    return rt_core_transient_scope_promoted_byte_count;
-}
-
-void rt_transient_promotion_stats_reset(void) {
-    rt_core_transient_last_promoted_node_count = 0;
-    rt_core_transient_last_promoted_byte_count = 0;
-}
-
-static size_t rt_core_transient_node_bytes(RtCoreTransientNode node) {
-    switch (node.kind) {
-        case RT_CORE_TRANSIENT_STRING: {
-            RtCoreString* string = (RtCoreString*)node.ptr;
-            return sizeof(*string) + (size_t)string->len + 1;
-        }
-        case RT_CORE_TRANSIENT_ARRAY: {
-            RtCoreArray* array = (RtCoreArray*)node.ptr;
-            size_t element = sizeof(int64_t);
-            if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) element = 1;
-            return sizeof(*array) + (size_t)array->cap * element;
-        }
-        case RT_CORE_TRANSIENT_DICT: {
-            RtCoreDict* dict = (RtCoreDict*)node.ptr;
-            return sizeof(*dict) + (size_t)dict->cap * sizeof(RtCoreDictEntry);
-        }
-        case RT_CORE_TRANSIENT_ENUM: return sizeof(RtCoreEnum);
-        case RT_CORE_TRANSIENT_FLOAT: return sizeof(RtCoreFloat);
-        case RT_CORE_TRANSIENT_CLOSURE: {
-            RtCoreClosure* closure = (RtCoreClosure*)node.ptr;
-            return sizeof(*closure) + (size_t)closure->capture_count * sizeof(int64_t);
-        }
-        case RT_CORE_TRANSIENT_RAW: return node.bytes;
-        default: return 0;
-    }
-}
-
 int8_t rt_transient_heap_promote(int64_t value) {
     if (!rt_core_transient_array_scope_active || !rt_core_transient_array_scope_paused) return 0;
     rt_core_heap_lifecycle_acquire();
-    rt_transient_promotion_stats_reset();
     RtCoreTransientPlan plan = {0};
     RtCoreTransientNode root;
     int ok = rt_core_transient_classify(value, &root) == 1 &&
@@ -2160,15 +2139,11 @@ int8_t rt_transient_heap_promote(int64_t value) {
     }
     if (ok) {
         const uint32_t scope_id = rt_core_transient_array_scope_id;
-        int64_t promoted_nodes = 0;
-        int64_t promoted_bytes = 0;
         for (size_t i = 0; i < plan.len; i++) {
             RtCoreTransientNode node = plan.nodes[i];
             uint32_t* object_scope = NULL;
-            int promoted = 0;
             switch (node.kind) {
                 case RT_CORE_TRANSIENT_STRING:
-                    promoted = ((((RtCoreString*)node.ptr)->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0);
                     ((RtCoreString*)node.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
                     break;
                 case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
@@ -2179,35 +2154,11 @@ int8_t rt_transient_heap_promote(int64_t value) {
                 case RT_CORE_TRANSIENT_RAW: {
                     RtCoreTransientRawAlloc* raw =
                         rt_core_transient_raw_lookup((uintptr_t)node.ptr);
-                    if (raw) {
-                        promoted = (raw->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
-                        raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
-                    }
+                    if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
                     break;
                 }
             }
-            if (object_scope && *object_scope == scope_id) {
-                promoted = 1;
-                *object_scope = 0;
-            }
-            if (promoted) {
-                size_t bytes = rt_core_transient_node_bytes(node);
-                promoted_nodes++;
-                if (bytes > (size_t)(INT64_MAX - promoted_bytes)) promoted_bytes = INT64_MAX;
-                else promoted_bytes += (int64_t)bytes;
-            }
-        }
-        rt_core_transient_last_promoted_node_count = promoted_nodes;
-        rt_core_transient_last_promoted_byte_count = promoted_bytes;
-        if (promoted_nodes > INT64_MAX - rt_core_transient_scope_promoted_node_count) {
-            rt_core_transient_scope_promoted_node_count = INT64_MAX;
-        } else {
-            rt_core_transient_scope_promoted_node_count += promoted_nodes;
-        }
-        if (promoted_bytes > INT64_MAX - rt_core_transient_scope_promoted_byte_count) {
-            rt_core_transient_scope_promoted_byte_count = INT64_MAX;
-        } else {
-            rt_core_transient_scope_promoted_byte_count += promoted_bytes;
+            if (object_scope && *object_scope == scope_id) *object_scope = 0;
         }
     }
     free(plan.nodes);
@@ -2354,14 +2305,17 @@ int64_t stdin_read_char(void) {
  * Windows CRT stdio defaults to TEXT mode, which rewrites every '
 ' written to
  * stdout into "
-" (and strips '' on read). That silently corrupts any
+" (and strips '
+' on read). That silently corrupts any
  * byte-counted protocol carried over stdio: a JSON-RPC / MCP "Content-Length"
  * frame terminated by CRLFCRLF leaves the process as CR CR LF CR CR LF, so the
  * header separator no longer matches and the announced byte count no longer
  * describes the bytes on the wire. Measured 2026-08-31 on the deployed native
  * bin/release/x86_64-pc-windows-msvc/simple_lsp_mcp_server.exe: it emitted
- * "Content-Length: 381
-
+ * "Content-Length: 381
+
+
+
 {...}". The Rust seed does not have this
  * defect because Rust's std never translates, which is exactly why the same
  * server answers correctly when run from source and corruptly when built native.
@@ -3986,13 +3940,6 @@ int64_t text_dot_from_char_code(int64_t code) {
     return rt_char_from_code(code);
 }
 
-/* Older admitted Stage-2 compilers lowered integer `.chr()` in generic
- * library modules to this bare helper name.  Keep the compatibility spelling
- * as an ABI alias; current compilers emit the canonical rt_char_from_code. */
-int64_t char_from_code(int64_t code) {
-    return rt_char_from_code(code);
-}
-
 int64_t rt_string_find(int64_t value, int64_t needle) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);
@@ -4003,6 +3950,12 @@ int64_t rt_string_find(int64_t value, int64_t needle) {
         if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
     }
     return -1;
+}
+
+/* Self-hosted Simple declares index_of as a raw i64 result.  Its historical
+ * fallback spelling differed from the canonical C worker only by name. */
+int64_t rt_string_index_of(int64_t value, int64_t needle) {
+    return rt_string_find(value, needle);
 }
 
 int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
@@ -4121,6 +4074,33 @@ int64_t rt_string_to_lower(int64_t value) {
 
 int64_t rt_string_to_upper(int64_t value) {
     return rt_string_ascii_case(value, 0);
+}
+
+/* Canonical RuntimeValue ASCII helpers used by std.sffi.system.  The Rust
+ * hosted runtime exposed these names while core-C only exposed the older
+ * rt_string_to_{lower,upper} spelling, leaving native tool closures with NULL
+ * GOT slots.  Keep both spellings on the same implementation. */
+int64_t rt_text_to_lower_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 1);
+}
+
+int64_t rt_text_to_upper_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 0);
+}
+
+int64_t rt_text_is_ascii(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_text_is_ascii(promoted);
+        }
+        return 0;
+    }
+    for (uint64_t i = 0; i < s->len; i++) {
+        if (((uint8_t)s->data[i]) > 0x7f) return 0;
+    }
+    return 1;
 }
 
 int64_t rt_string_to_float(int64_t value) {
@@ -4340,7 +4320,7 @@ int64_t rt_unwrap_or_self(int64_t value) {
 }
 
 /* `.unwrap_or(default)` -- real method-call semantics: return the Ok/Some
- * payload, or `default`, for ANY enum receiver (Result, Option, ...), never
+ * payload, or `default`, for Result/Option receivers, never
  * trapping. Distinct from `rt_unwrap_or_self` above, which the `??`
  * nil-coalesce operator alone must keep using (only special-cases the
  * reserved Option enum_id 1, returns every other enum -- including Result --
@@ -4348,10 +4328,9 @@ int64_t rt_unwrap_or_self(int64_t value) {
  * silently returned the boxed `Result` enum for BOTH Ok and Err instead of
  * the payload / the default -- see
  * doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
- * Result has no reserved enum_id, so Ok/Err are identified by
- * discriminant-hash comparison against the canonical variant names, the same
- * technique the Cranelift codegen already uses for is_ok/is_err and the
- * sibling Rust-runtime `rt_unwrap_or_trap`/`rt_unwrap_or_value`. These are
+ * Result and Option have reserved compiler runtime IDs 0 and 1. The ID check
+ * is required because arbitrary user enums may also name variants Ok/Err and
+ * must remain opaque present values, matching the interpreter. Discriminants are
  * `std::collections::hash_map::DefaultHasher` values over the variant name,
  * masked to 32 bits -- fixed/deterministic, precomputed here to avoid
  * reimplementing SipHash in C. */
@@ -4359,19 +4338,23 @@ int64_t rt_unwrap_or_self(int64_t value) {
 #define RT_DISC_ERR  4200179024u
 #define RT_DISC_SOME 4053299545u
 #define RT_DISC_NONE 2371748697u
+#define RT_RESULT_ENUM_ID 0u
+#define RT_OPTION_ENUM_ID 1u
 
 int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
     RtCoreEnum* e = rt_core_as_enum(value);
     if (!e) return value; /* bare/flat-nullable payload convention */
 
-    if (e->enum_id == 1) { /* canonical Option */
-        if (e->discriminant == RT_DISC_SOME) return e->payload;
-        if (e->discriminant == RT_DISC_NONE) return default_val;
+    if (e->enum_id == RT_OPTION_ENUM_ID) {
+        if (e->discriminant == 0 || e->discriminant == RT_DISC_SOME) return e->payload;
+        if (e->discriminant == 1 || e->discriminant == RT_DISC_NONE) return default_val;
         return value;
     }
 
-    if (e->discriminant == RT_DISC_OK) return e->payload;
-    if (e->discriminant == RT_DISC_ERR) return default_val;
+    if (e->enum_id == RT_RESULT_ENUM_ID) {
+        if (e->discriminant == RT_DISC_OK) return e->payload;
+        if (e->discriminant == RT_DISC_ERR) return default_val;
+    }
 
     /* Arbitrary user enum: preserve the pre-existing "return self" fallback. */
     return value;
@@ -4382,7 +4365,9 @@ int8_t rt_is_none(int64_t value) {
      * Options use enum id 1 with ordinal Some=0 / None=1, so raw zero remains
      * a valid present payload and other enum types are never classified nil. */
     if (value == rt_core_nil()) return 1;
-    return rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1;
+    if (rt_enum_id(value) != RT_OPTION_ENUM_ID) return 0;
+    int64_t discriminant = rt_enum_discriminant(value);
+    return discriminant == 1 || discriminant == RT_DISC_NONE;
 }
 int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);
@@ -5104,12 +5089,21 @@ int64_t rt_sort(int64_t receiver) {
     return receiver;
 }
 
-/* Builtin Array.sort uses the historical boolean-returning runtime ABI while
- * method lowering uses rt_sort's receiver-returning ABI.  They share exactly
- * the same stable in-place implementation. */
-int8_t rt_array_sort(int64_t array) {
-    (void)rt_sort(array);
-    return 1;
+bool rt_array_sort(int64_t receiver) {
+    (void)rt_sort(receiver);
+    return true;
+}
+
+int64_t rt_array_max(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (!arr || rt_array_len(arr) <= 0) return rt_core_nil();
+    int64_t result = rt_array_get(arr, 0);
+    int64_t count = rt_array_len(arr);
+    for (int64_t index = 1; index < count; index++) {
+        int64_t candidate = rt_array_get(arr, index);
+        if (rt_sort_cmp(result, candidate) < 0) result = candidate;
+    }
+    return result;
 }
 
 /* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.
@@ -5493,10 +5487,11 @@ void rt_eprintln_value(int64_t value) {
 
 static int rt_core_argc = 0;
 static char** rt_core_argv = NULL;
+static char** rt_core_filtered_argv = NULL;
 
 __attribute__((weak)) void spl_init_args(int argc, char** argv) {
-    rt_core_argc = argc;
-    rt_core_argv = argv;
+    rt_core_argc = simple_runtime_filter_startup_args(
+        argc, argv, &rt_core_filtered_argv, &rt_core_argv);
 }
 
 __attribute__((weak)) int64_t spl_arg_count(void) {
@@ -5508,9 +5503,84 @@ __attribute__((weak)) const char* spl_get_arg(int64_t idx) {
     return rt_core_argv && rt_core_argv[idx] ? rt_core_argv[idx] : "";
 }
 
+/* Windows-only: NOT weak there. On this repo's Windows GNU (MinGW/
+ * binutils) toolchain, a PE/COFF weak-external function symbol never
+ * resolves against a caller in a different translation unit -- verified
+ * directly (binutils 2.42, gcc 15.2.0): `__attribute__((weak)) void
+ * foo(void){}` in one .o/.a and `foo();` in another fails to link with
+ * "undefined reference to `foo'" even with the object linked directly
+ * (not through an archive), with `-Wl,-u,foo`, and with
+ * `-Wl,--whole-archive` -- unlike ELF, where a weak archive member is
+ * pulled normally. `rt_set_args` is the only rt_* weak function used as a
+ * retention root (see `runtime_retention_symbols` in
+ * compiler/src/pipeline/native_project/linker.rs); the other roots
+ * (`rt_function_not_found`, `rt_string_bytes`, `__simple_runtime_init`)
+ * are plain strong definitions and link fine.
+ *
+ * Kept weak on non-Windows deliberately: the Stage4 dual-capsule Linux/
+ * FreeBSD/macOS path (linker.rs ~1444-1461, `exact_stage4`) can link this
+ * C runtime archive alongside the Rust runtime capsule
+ * (`compiler_rust/runtime/src/value/args.rs` also defines `rt_set_args`)
+ * WITHOUT `-Wl,-z,muldefs` (that flag is only added when `!exact_stage4`,
+ * lines ~1280-1283) and without `--allow-multiple-definition` on that
+ * lazy-resolution path, so a strong definition here could collide with
+ * the Rust capsule's strong definition on exactly that lane -- the same
+ * "archive members resolve at OBJECT granularity" duplicate-symbol class
+ * documented a few hundred lines below in this file's own git history
+ * (8ca87866c6, ~475 collisions). ELF/Mach-O extract a weak archive member
+ * normally (unlike the Windows GNU case above), so keeping it weak there
+ * costs nothing and avoids that risk. See the Windows bootstrap
+ * rt_set_args unresolved-reference investigation, 2026-09-01. */
+#if defined(_WIN32)
+void rt_set_args(int argc, char** argv) {
+#else
 __attribute__((weak)) void rt_set_args(int argc, char** argv) {
+#endif
     spl_init_args(argc, argv);
 }
+
+#if defined(_WIN32)
+/* Wide-argv counterpart used by the generated MSVC wmain() entry point
+ * (compile_main_stub in linker.rs). wmain receives argv as UTF-16;
+ * convert each element to UTF-8 and hand it to the same argv storage
+ * rt_set_args uses, so downstream CLI-arg access is unaffected by which
+ * entry point ran. Previously undeclared/undefined -- any native-build
+ * output linking this MSVC main stub failed with LNK2019 for
+ * rt_set_args_wide (unresolved external referenced by wmain). */
+/* Not weak: same reason as rt_set_args above -- weak function symbols
+ * don't resolve on this Windows GNU toolchain. Single definition here. */
+void rt_set_args_wide(int argc, const wchar_t** argv) {
+    if (argc <= 0 || !argv) {
+        spl_init_args(argc > 0 ? argc : 0, NULL);
+        return;
+    }
+    char** utf8_argv = (char**)calloc((size_t)argc, sizeof(char*));
+    if (!utf8_argv) {
+        spl_init_args(0, NULL);
+        return;
+    }
+    for (int i = 0; i < argc; i++) {
+        const wchar_t* wide = argv[i];
+        if (!wide) {
+            utf8_argv[i] = _strdup("");
+            continue;
+        }
+        int needed = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+        if (needed <= 0) {
+            utf8_argv[i] = _strdup("");
+            continue;
+        }
+        char* converted = (char*)malloc((size_t)needed);
+        if (!converted) {
+            utf8_argv[i] = _strdup("");
+            continue;
+        }
+        WideCharToMultiByte(CP_UTF8, 0, wide, -1, converted, needed, NULL, NULL);
+        utf8_argv[i] = converted;
+    }
+    spl_init_args(argc, utf8_argv);
+}
+#endif /* _WIN32 */
 
 __attribute__((weak)) int32_t rt_get_argc(void) {
     return (int32_t)spl_arg_count();
@@ -5816,6 +5886,11 @@ static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
     return found;
 }
 
+/* runtime_memory.c is the canonical allocator/pointer ABI member whenever it
+ * is part of the composition.  Keep this ownership flag separate from
+ * SIMPLE_CORE_C_STANDALONE: a native-all link needs the hosted providers below
+ * even though it still compiles runtime_memory.c beside runtime_native.c. */
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 void* rt_alloc(int64_t size) {
     if (size < 0) return NULL;
     if (rt_mem_guard_should_sample((size_t)size)) {
@@ -5847,7 +5922,7 @@ void* rt_alloc(int64_t size) {
 }
 
 void* rt_struct_alloc(int64_t size) {
-    if (size < 0) return NULL;
+    if (size <= 0) return NULL;
     void* ptr = rt_alloc(size);
     if (ptr && !rt_struct_alloc_register(ptr, (size_t)size)) {
         rt_free(ptr);
@@ -5858,6 +5933,7 @@ void* rt_struct_alloc(int64_t size) {
 
 int8_t rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t access_width) {
     if (receiver == 0 || byte_offset < 0 || access_width <= 0) return 0;
+    if ((((uint64_t)receiver) & RT_VALUE_TAG_MASK) > 1) return 0;
     uintptr_t ptr = (uintptr_t)(((uint64_t)receiver) & ~RT_VALUE_TAG_MASK);
     if (ptr == 0) return 0;
 
@@ -5967,6 +6043,7 @@ void* copy_mem(void* dst, const void* src, int64_t n) {
 void* rt_memset(void* dst, int8_t val, int64_t n) {
     return memset(dst, (int)val, (size_t)n);
 }
+#endif
 
 int64_t rt_memcmp(const void* a, const void* b, int64_t n) {
     return (int64_t)memcmp(a, b, (size_t)n);
@@ -6034,8 +6111,99 @@ void rt_memory_barrier(void) {
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
+/*
+ * rt_black_box -- optimization barrier for constant-time code.
+ *
+ * Contract: `extern fn rt_black_box(value: i64) -> i64`
+ *   - src/os/crypto/scram_common.spl:17           (-> i64)
+ *   - src/lib/common/crypto/constant_time.spl:7   (-> i64?)
+ * The two spellings are the SAME C ABI: an `i64?` extern return is a
+ * Simple-side nullability annotation, not a tagged value (cf.
+ * `extern fn rt_free(ptr: i64) -> i64?` against `void rt_free(void*)` at
+ * :5816, and `rt_io_tcp_set_read_timeout(fd: i64, ms: i64?)` against
+ * `int64_t rt_io_tcp_set_read_timeout(int64_t, int64_t)` at :11338).
+ * The Simple wrapper's `?? value` merely supplies a fallback.
+ *
+ * Semantically the identity function; the whole point is that the
+ * optimizer must not be able to prove that. Callers are constant-time
+ * comparisons (ct_eq / HTTP Basic auth / SCRAM) that XOR-accumulate a
+ * difference and then test it once -- without a barrier the compiler is
+ * free to rewrite that into an early-exit branch and reintroduce the
+ * data-dependent timing the loop exists to remove.
+ *
+ * A bare `return value;` is NOT sufficient: it is opaque only until
+ * someone enables LTO or inlines across the TU. The inline-asm form below
+ * forces the value through a register the compiler must treat as
+ * clobbered, which is what makes it a real barrier.
+ *
+ * WEAK on GNUC/clang for the same reason as rt_heap_live_bytes in
+ * runtime_memtrack.c: the Rust runtime (lib.rs) defines this symbol
+ * strongly via std::hint::black_box, and two strong definitions are a hard
+ * lld duplicate-symbol error in any link that carries both. Weak means
+ * standalone C links keep this fallback and mixed links get Rust's, which
+ * is the correct precedence. MSVC has no weak attribute; Windows builds do
+ * not whole-archive this file into the Rust cdylib, so a strong definition
+ * is fine there.
+ */
+#if defined(_MSC_VER)
+/* MSVC (incl. clang-cl in MS mode) rejects GNU inline asm. A volatile
+ * round-trip cannot be elided or constant-folded, so it is a genuine
+ * barrier here. MinGW is deliberately NOT routed here -- it has the GNU
+ * asm and takes the branch below, exactly like Linux/macOS/FreeBSD. */
+static volatile int64_t rt_black_box_sink;
+int64_t rt_black_box(int64_t value) {
+    rt_black_box_sink = value;
+    return rt_black_box_sink;
+}
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) int64_t rt_black_box(int64_t value) {
+    __asm__ __volatile__("" : "+r"(value) : : "memory");
+    return value;
+}
+#else
+static volatile int64_t rt_black_box_sink;
+int64_t rt_black_box(int64_t value) {
+    rt_black_box_sink = value;
+    return rt_black_box_sink;
+}
+#endif
+
 double rt_math_pow(double base, double exponent) {
     return pow(base, exponent);
+}
+
+/* Fault limits are process policy for the pure-Simple runner and its child
+ * compiler/test processes. Keep this provider independent from the legacy
+ * Rust CLI CGU (which also owns seed-delegating rt_cli_run_tests). The names
+ * are the canonical variables consumed by compiler initialization. */
+static void rt_fault_set_env_i64(const char* name, int64_t value) {
+    char text[32];
+    snprintf(text, sizeof(text), "%lld", (long long)value);
+#if defined(_WIN32)
+    _putenv_s(name, text);
+#else
+    setenv(name, text, 1);
+#endif
+}
+
+void rt_fault_set_stack_overflow_detection(uint8_t enabled) {
+#if defined(_WIN32)
+    _putenv_s("SIMPLE_STACK_OVERFLOW_DETECTION", enabled ? "1" : "0");
+#else
+    setenv("SIMPLE_STACK_OVERFLOW_DETECTION", enabled ? "1" : "0", 1);
+#endif
+}
+
+void rt_fault_set_max_recursion_depth(int64_t depth) {
+    rt_fault_set_env_i64("SIMPLE_MAX_RECURSION_DEPTH", depth);
+}
+
+void rt_fault_set_timeout(int64_t secs) {
+    rt_fault_set_env_i64("SIMPLE_TIMEOUT_SECONDS", secs);
+}
+
+void rt_fault_set_execution_limit(int64_t limit) {
+    rt_fault_set_env_i64("SIMPLE_EXECUTION_LIMIT", limit);
 }
 
 /* ================================================================
@@ -6996,6 +7164,57 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
     return 1;
 }
 
+/* Canonical half-open integer range `[start, end)`, matching the RuntimeValue
+ * array contract used by MIR range lowering. */
+/* Upper bound on elements rt_range will materialise; see the rationale at the
+ * check inside rt_range below. */
+#define RT_RANGE_MAX_LEN ((uint64_t)1 << 28)
+
+int64_t rt_range(int64_t start, int64_t end) {
+    if (end <= start) return (int64_t)(uintptr_t)rt_array_new(0);
+    uint64_t len = (uint64_t)end - (uint64_t)start;
+    if (len > (uint64_t)INT64_MAX) return rt_core_nil();
+    /* FAIL FAST on an absurd bound. rt_range MATERIALISES its range -- one
+     * rt_array_push per element -- so a bogus `end` does not error, it spins
+     * for hours while allocating, which reads as a compiler HANG with no
+     * diagnostic. That is exactly how a mis-parsed paren-form struct spread
+     * (`T(..base, f: v)`, which parses as `Range{start: None, end: base}` --
+     * see the bug doc below) cost a full profiling session to localise.
+     *
+     * RT_RANGE_MAX_LEN = 1<<28 (268,435,456). Chosen for a wide separation,
+     * not a tight fit: materialising that many elements already costs >2 GB,
+     * so no legitimate range reaches it through this path, while any heap
+     * object value -- the actual failure mode -- is >= 0x100000000
+     * (4,294,967,296), a 16x margin above the cap.
+     *
+     * Deliberately a LOUD ABORT naming the operands, never a clamp: clamping
+     * would convert a hang into a silently wrong answer, which is worse.
+     * doc/08_tracking/bug/struct_spread_paren_form_parses_as_range_2026-08-30.md */
+    if (len > RT_RANGE_MAX_LEN) {
+        fprintf(stderr,
+                "simple runtime: rt_range(%lld, %lld) would materialise %llu elements, "
+                "over the %llu limit.\n"
+                "  A bound this large is a bogus operand, not a real range -- an object "
+                "value used where an integer was expected.\n"
+                "  Common cause: paren-form struct spread `T(..base, f: v)`, which parses "
+                "as a range, not a spread. See\n"
+                "  doc/08_tracking/bug/struct_spread_paren_form_parses_as_range_2026-08-30.md\n",
+                (long long)start, (long long)end,
+                (unsigned long long)len, (unsigned long long)RT_RANGE_MAX_LEN);
+        fflush(stderr);
+        abort();
+    }
+    SplArray* result = rt_array_new((int64_t)len);
+    if (!result) return rt_core_nil();
+    for (int64_t value = start; value < end; value++) {
+        if (!rt_array_push(result, rt_value_int(value))) {
+            rt_array_free(result);
+            return rt_core_nil();
+        }
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
 /* Receiver-dispatched push parity with the hosted RuntimeValue provider.
  * Arrays mutate in place and return their receiver; text remains immutable and
  * returns the concatenated value. Other receiver kinds fail closed to nil. */
@@ -7204,24 +7423,139 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
  * missing library. Because the bundle links runtime_native.o BEFORE
  * runtime_dynload.o under -z muldefs, THIS weaker copy was the one that won.
  * rt_interp_cstr accepts both encodings and is a strict superset. */
-int64_t spl_dlopen(int64_t path_value) {
-    const char* path = rt_interp_cstr(path_value);
-    if (!path) return 0;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)LoadLibraryA(path);
+static HMODULE runtime_dynload_open_utf8(const char *path) {
+    int wide_len;
+    wchar_t *wide_path;
+    HMODULE handle;
+    if (!path || !path[0]) return NULL;
+    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            path, -1, wide_path, wide_len) != wide_len) {
+        free(wide_path);
+        return NULL;
+    }
+    handle = LoadLibraryW(wide_path);
+    free(wide_path);
+    return handle;
+}
+#endif
+
+int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
+#if defined(__linux__)
+    const char* path = rt_interp_cstr(path_value);
+    if (!path) return -1;
+    int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (source < 0) return -1;
+    struct stat source_stat;
+    if (fstat(source, &source_stat) != 0 || !S_ISREG(source_stat.st_mode) ||
+        source_stat.st_size < 0 || (uint64_t)source_stat.st_size > UINT64_C(1073741824)) {
+        close(source);
+        return -1;
+    }
+    int snapshot = (int)syscall(SYS_memfd_create, "simple-sffi-provider",
+                                MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (snapshot < 0) { close(source); return -1; }
+    uint8_t buffer[65536];
+    uint64_t total = 0;
+    for (;;) {
+        ssize_t got = read(source, buffer, sizeof(buffer));
+        if (got == 0) break;
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            close(source); close(snapshot); return -1;
+        }
+        if ((uint64_t)got > UINT64_C(1073741824) - total) {
+            close(source); close(snapshot); return -1;
+        }
+        total += (uint64_t)got;
+        ssize_t offset = 0;
+        while (offset < got) {
+            ssize_t put = write(snapshot, buffer + offset, (size_t)(got - offset));
+            if (put < 0 && errno == EINTR) continue;
+            if (put <= 0) { close(source); close(snapshot); return -1; }
+            offset += put;
+        }
+    }
+    if (total != (uint64_t)source_stat.st_size || close(source) != 0 ||
+        lseek(snapshot, 0, SEEK_SET) < 0 ||
+        fcntl(snapshot, F_ADD_SEALS,
+              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+        close(snapshot);
+        return -1;
+    }
+    return (int64_t)snapshot;
 #else
-    return (int64_t)(intptr_t)dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    (void)path_value;
+    return -1;
 #endif
 }
 
-int64_t spl_dlsym(int64_t handle, int64_t name_value) {
-    const char* name = rt_interp_cstr(name_value);
-    if (!handle || !name) return 0;
+int64_t spl_dlopen(int64_t path_value) {
+    int64_t handle = 0;
+    return spl_dlopen_checked(path_value, &handle) == 0 ? handle : 0;
+}
+
+int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle) {
+    if (!out_handle) return 1;
+    *out_handle = 0;
+    const char* path = rt_interp_cstr(path_value);
+    if (!path || !path[0]) return 1;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)GetProcAddress((HMODULE)(intptr_t)handle, name);
+    HMODULE handle = runtime_dynload_open_utf8(path);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #else
-    return (int64_t)(intptr_t)dlsym((void*)(intptr_t)handle, name);
+    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #endif
+    return 0;
+}
+
+int64_t spl_dlsym(int64_t handle, int64_t name_value) {
+    int64_t symbol = 0;
+    return spl_dlsym_checked(handle, name_value, &symbol) == 0 ? symbol : 0;
+}
+
+int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbol) {
+    if (!out_symbol) return 1;
+    *out_symbol = 0;
+    const char* name = rt_interp_cstr(name_value);
+    if (!handle || !name || !name[0]) return 1;
+#ifdef _WIN32
+    FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#else
+    void* symbol = dlsym((void*)(intptr_t)handle, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#endif
+    return 0;
+}
+
+int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol) {
+    if (!out_symbol) return 1;
+    *out_symbol = 0;
+    const char* name = rt_interp_cstr(name_value);
+    if (!name || !name[0]) return 1;
+#ifdef _WIN32
+    HMODULE process = GetModuleHandleA(NULL);
+    if (!process) return 3;
+    FARPROC symbol = GetProcAddress(process, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#else
+    void* symbol = dlsym(NULL, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#endif
+    return 0;
 }
 
 int64_t spl_dlclose(int64_t handle) {
@@ -7261,6 +7595,83 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
         case 8: return ((Fn8)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
         default: return 0;
     }
+}
+
+/* Checked integer-only WFFI transport: [status, value]. */
+#define SPL_WFFI_OK 0
+#define SPL_WFFI_INVALID_ARGUMENT 1
+#define SPL_WFFI_NULL_FUNCTION 2
+#define SPL_WFFI_UNSUPPORTED_SIGNATURE 3
+
+int64_t spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value) {
+    typedef bool (*Fn)(void);
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
+    *out_value = ((Fn)(uintptr_t)fptr)() ? 1 : 0;
+    return SPL_WFFI_OK;
+}
+
+int64_t spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0, int8_t* out_value) {
+    typedef bool (*Fn)(int64_t);
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
+    *out_value = ((Fn)(uintptr_t)fptr)(arg0) ? 1 : 0;
+    return SPL_WFFI_OK;
+}
+
+static int64_t spl_wffi_i64_checked_result(int64_t status, int64_t value) {
+    SplArray* result = rt_array_new(2);
+    if (!result) return rt_core_nil();
+    if (!rt_array_push(result, rt_value_int(status)) ||
+        !rt_array_push(result, rt_value_int(value))) {
+        rt_array_free(result);
+        return rt_core_nil();
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
+int64_t spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value, int64_t nargs) {
+    if (fptr == 0) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_NULL_FUNCTION, 0);
+    }
+    if (nargs < 0) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    if (nargs > 8) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_UNSUPPORTED_SIGNATURE, 0);
+    }
+    RtCoreArray* args = rt_core_as_array(args_value);
+    if (!args || (args->flags & RT_CORE_ARRAY_FLAG_BYTES) || !args->data || nargs > args->len) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    for (int64_t i = 0; i < nargs; i++) {
+        if (!rt_core_is_int(((int64_t*)args->data)[i])) {
+            return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+        }
+    }
+    return spl_wffi_i64_checked_result(SPL_WFFI_OK, spl_wffi_call_i64(fptr, args_value, nargs));
+}
+
+int64_t spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
+                                  int64_t nargs, int64_t* out_value) {
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (fptr == 0) return SPL_WFFI_NULL_FUNCTION;
+    if (nargs < 0) return SPL_WFFI_INVALID_ARGUMENT;
+    if (nargs > 8) return SPL_WFFI_UNSUPPORTED_SIGNATURE;
+    RtCoreArray* args = rt_core_as_array(args_value);
+    if (!args || (args->flags & RT_CORE_ARRAY_FLAG_BYTES) || !args->data || nargs > args->len) {
+        return SPL_WFFI_INVALID_ARGUMENT;
+    }
+    for (int64_t i = 0; i < nargs; i++) {
+        if (!rt_core_is_int(((int64_t*)args->data)[i])) {
+            return SPL_WFFI_INVALID_ARGUMENT;
+        }
+    }
+    *out_value = spl_wffi_call_i64(fptr, args_value, nargs);
+    return SPL_WFFI_OK;
 }
 
 int64_t rt_array_header_ptr(SplArray* a) {
@@ -7635,7 +8046,7 @@ int64_t rt_enum_payload(int64_t value) {
  * Some-tagged Option whose payload word was 0: every discriminant/nil guard
  * passed and the first field load SIGSEGV'd at 0x0. A heap payload must be a
  * tagged pointer outside the zero page; this answers exactly that, with no
- * registry probe — a FORMATION check, not a liveness proof, so it can never
+ * registry probe -- a FORMATION check, not a liveness proof, so it can never
  * false-reject a live object. Call sites own the payload-type contract
  * (heap/aggregate payloads only; scalar payloads are not heap-tagged by
  * design and report 0 here). */
@@ -8627,6 +9038,77 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
+/* Canonical descriptor provider for std.nogc_sync_mut.io.FileHandle. Mode
+ * encoding matches runtime/src/value/sffi/file_io/io_file.rs exactly:
+ * 0 read, 1 write/create/truncate, 2 read/write/create, 3 append/create. */
+int64_t rt_io_file_open(const uint8_t* path_ptr, uint64_t path_len, int64_t mode) {
+    char path[RT_TEXT_PATH_MAX];
+    int flags;
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+    switch (mode) {
+        case 0: flags = O_RDONLY; break;
+        case 1: flags = O_WRONLY | O_CREAT | O_TRUNC; break;
+        case 2: flags = O_RDWR | O_CREAT; break;
+        case 3: flags = O_WRONLY | O_CREAT | O_APPEND; break;
+        default: return -1;
+    }
+#if defined(_WIN32)
+    flags |= _O_BINARY;
+    return (int64_t)_open(path, flags, _S_IREAD | _S_IWRITE);
+#else
+    return (int64_t)open(path, flags, 0666);
+#endif
+}
+
+/* Canonical FileHandle close ABI. The descriptor originates from
+ * rt_io_file_open above; invalid descriptors fail closed. */
+bool rt_io_file_close(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return false;
+#if defined(_WIN32)
+    return _close((int)fd) == 0;
+#else
+    return close((int)fd) == 0;
+#endif
+}
+
+/* Read from the descriptor's current position through EOF into the canonical
+ * packed-byte array representation used by `[u8]`. The descriptor remains
+ * open and retains its advanced position. */
+int64_t rt_io_file_read_all(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return rt_core_nil();
+    size_t len = 0;
+    size_t cap = 4096;
+    uint8_t* bytes = (uint8_t*)malloc(cap);
+    if (!bytes) return rt_core_nil();
+    for (;;) {
+        if (len == cap) {
+            if (cap > SIZE_MAX / 2) { free(bytes); return rt_core_nil(); }
+            size_t next_cap = cap * 2;
+            uint8_t* grown = (uint8_t*)realloc(bytes, next_cap);
+            if (!grown) { free(bytes); return rt_core_nil(); }
+            bytes = grown;
+            cap = next_cap;
+        }
+#if defined(_WIN32)
+        int count = _read((int)fd, bytes + len,
+            (unsigned int)((cap - len) > UINT_MAX ? UINT_MAX : (cap - len)));
+#else
+        ssize_t count = read((int)fd, bytes + len, cap - len);
+#endif
+        if (count > 0) { len += (size_t)count; continue; }
+        if (count == 0) break;
+        if (errno == EINTR) continue;
+        free(bytes);
+        return rt_core_nil();
+    }
+    SplArray* result = rt_byte_array_new_len((uint64_t)len);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array) { free(bytes); return rt_core_nil(); }
+    if (len != 0) memcpy(array->data, bytes, len);
+    free(bytes);
+    return (int64_t)(uintptr_t)result;
+}
+
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
  * runtime_sffi.rs:1852 declares `&[I64, I64] -> &[I64]`; the result is a
@@ -8645,6 +9127,111 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     if (!content) return rt_nil;
     int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)strlen(content));
     free(content);
+    return result;
+}
+
+/* Memory-map a file and copy its bytes into the canonical runtime string.
+ * The mapping is released before return; rt_string_new owns its copy. */
+int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
+#if defined(_WIN32)
+    int fd = _open(path, _O_RDONLY | _O_BINARY);
+    if (fd < 0) return rt_core_nil();
+    struct _stat64 st;
+    if (_fstat64(fd, &st) != 0 || st.st_size <= 0) { _close(fd); return rt_core_nil(); }
+    intptr_t os_handle = _get_osfhandle(fd);
+    if (os_handle == -1) { _close(fd); return rt_core_nil(); }
+    HANDLE mapping = CreateFileMappingA((HANDLE)os_handle, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mapping) { _close(fd); return rt_core_nil(); }
+    const uint8_t* data = (const uint8_t*)MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (!data) { CloseHandle(mapping); _close(fd); return rt_core_nil(); }
+    int64_t result = rt_string_new(data, (uint64_t)st.st_size);
+    UnmapViewOfFile(data);
+    CloseHandle(mapping);
+    _close(fd);
+    return result;
+#else
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return rt_core_nil();
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return rt_core_nil(); }
+    if ((uint64_t)st.st_size > (uint64_t)SIZE_MAX) { close(fd); return rt_core_nil(); }
+    size_t len = (size_t)st.st_size;
+    const uint8_t* data = (const uint8_t*)mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED) { close(fd); return rt_core_nil(); }
+    int64_t result = rt_string_new(data, (uint64_t)len);
+    munmap((void*)data, len);
+    close(fd);
+    return result;
+#endif
+}
+
+int64_t rt_file_read_regular_no_follow_bounded(
+        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    const int64_t rt_nil = 3;
+    char path[RT_TEXT_PATH_MAX];
+    if (max_bytes < 0 || path_len == 0 ||
+        !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return rt_nil;
+    size_t capacity = (size_t)max_bytes + 1;
+    uint8_t* bytes = (uint8_t*)malloc(capacity);
+    if (!bytes) return rt_nil;
+    size_t total = 0;
+#if defined(_WIN32)
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) { free(bytes); return rt_nil; }
+    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            path, -1, wide_path, wide_len)) {
+        free(wide_path); free(bytes); return rt_nil;
+    }
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wide_path);
+    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return rt_nil; }
+    BY_HANDLE_FILE_INFORMATION info;
+    LARGE_INTEGER size;
+    if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
+        CloseHandle(handle); free(bytes); return rt_nil;
+    }
+    while (total < capacity) {
+        DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
+        DWORD read_count = 0;
+        if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
+            CloseHandle(handle); free(bytes); return rt_nil;
+        }
+        if (read_count == 0) break;
+        total += (size_t)read_count;
+    }
+    CloseHandle(handle);
+#else
+#ifndef O_NOFOLLOW
+    free(bytes);
+    return rt_nil;
+#else
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) { free(bytes); return rt_nil; }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size > (uint64_t)max_bytes) {
+        close(fd); free(bytes); return rt_nil;
+    }
+    while (total < capacity) {
+        ssize_t count = read(fd, bytes + total, capacity - total);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { close(fd); free(bytes); return rt_nil; }
+        if (count == 0) break;
+        total += (size_t)count;
+    }
+    close(fd);
+#endif
+#endif
+    if (total > (size_t)max_bytes) { free(bytes); return rt_nil; }
+    int64_t result = rt_string_new(bytes, (uint64_t)total);
+    free(bytes);
     return result;
 }
 
@@ -8894,20 +9481,14 @@ int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
-int rt_file_delete(const char* path) {
-    if (!path) return 0;
+int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return remove(path) == 0 ? 1 : 0;
 }
 
 int rt_file_remove(const uint8_t* path_ptr, uint64_t path_len) {
-    if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
-    char* path = (char*)malloc((size_t)path_len + 1);
-    if (!path) return 0;
-    memcpy(path, path_ptr, (size_t)path_len);
-    path[(size_t)path_len] = '\0';
-    int ok = remove(path) == 0 ? 1 : 0;
-    free(path);
-    return ok;
+    return rt_file_delete(path_ptr, path_len);
 }
 
 /* Non-accelerator native bridges. Text parameters use the ABI selected by
@@ -8922,6 +9503,29 @@ int64_t rt_path_parent(const uint8_t* path_ptr, int64_t path_len) {
     if (slash < 0) return rt_string_new((const uint8_t*)".", 1);
     if (slash == 0) return rt_string_new(path_ptr, 1);
     return rt_string_new(path_ptr, (uint64_t)slash);
+}
+
+/* Canonical dirname ABI used by the pure-Simple module resolver. Unlike the
+ * older path_parent helper, a separator-free relative path has an empty
+ * parent, matching Path::parent in the bootstrap runtime. */
+int64_t rt_path_dirname(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr || path_len == 0) return rt_string_new(NULL, 0);
+    uint64_t end = path_len;
+    while (end > 1 && (path_ptr[end - 1] == '/' || path_ptr[end - 1] == '\\')) {
+        end--;
+    }
+    if (end == 1 && (path_ptr[0] == '/' || path_ptr[0] == '\\')) {
+        return rt_string_new(NULL, 0);
+    }
+    uint64_t slash = end;
+    while (slash > 0) {
+        slash--;
+        if (path_ptr[slash] == '/' || path_ptr[slash] == '\\') {
+            if (slash == 0) return rt_string_new(path_ptr, 1);
+            return rt_string_new(path_ptr, slash);
+        }
+    }
+    return rt_string_new(NULL, 0);
 }
 
 int64_t rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len) {
@@ -9014,6 +9618,31 @@ static int64_t rt_http_tuple(int64_t status, const uint8_t* body, uint64_t body_
     rt_tuple_set(tuple, 1, rt_string_new(body, body_len));
     rt_tuple_set(tuple, 2, rt_string_new((const uint8_t*)(error ? error : ""),
                                          error ? (uint64_t)strlen(error) : 0));
+    return tuple;
+}
+
+static int64_t rt_http_v2_tuple(int64_t status,
+                                const uint8_t* reason, uint64_t reason_len,
+                                const uint8_t* headers, uint64_t headers_len,
+                                const uint8_t* body, uint64_t body_len,
+                                const char* error) {
+    int64_t tuple = rt_tuple_new(5);
+    if (tuple == rt_core_nil()) abort();
+    SplArray* body_array = rt_byte_array_new_len(body_len);
+    RtCoreArray* body_storage = rt_core_array_ptr(body_array);
+    if (!body_storage || (body_len > 0 && !body_storage->data)) abort();
+    if (body_len > 0) memcpy(body_storage->data, body, (size_t)body_len);
+    int64_t reason_value = rt_string_new(reason, reason_len);
+    int64_t headers_value = rt_string_new(headers, headers_len);
+    int64_t error_value = rt_string_new((const uint8_t*)(error ? error : ""),
+                                         error ? (uint64_t)strlen(error) : 0);
+    if (reason_value == rt_core_nil() || headers_value == rt_core_nil() ||
+        error_value == rt_core_nil()) abort();
+    rt_tuple_set(tuple, 0, rt_value_int(status));
+    rt_tuple_set(tuple, 1, reason_value);
+    rt_tuple_set(tuple, 2, headers_value);
+    rt_tuple_set(tuple, 3, (int64_t)(uintptr_t)body_array);
+    rt_tuple_set(tuple, 4, error_value);
     return tuple;
 }
 
@@ -9297,6 +9926,32 @@ static int rt_http_has_header(const char* headers, size_t len, const char* name)
     return 0;
 }
 
+static int rt_http_header_has_token(const char* headers, size_t len,
+                                    const char* name, const char* token) {
+    size_t name_len = strlen(name);
+    size_t token_len = strlen(token);
+    const char* line = headers;
+    const char* end = headers + len;
+    while (line < end) {
+        const char* next = strstr(line, "\r\n");
+        if (!next || next > end) next = end;
+        if ((size_t)(next - line) > name_len &&
+            strncasecmp(line, name, name_len) == 0 && line[name_len] == ':') {
+            const char* value = line + name_len + 1;
+            while (value < next) {
+                while (value < next && (*value == ' ' || *value == '\t' || *value == ',')) value++;
+                const char* token_end = value;
+                while (token_end < next && *token_end != ',' && *token_end != ' ' && *token_end != '\t') token_end++;
+                if ((size_t)(token_end - value) == token_len &&
+                    strncasecmp(value, token, token_len) == 0) return 1;
+                value = token_end < next ? token_end + 1 : next;
+            }
+        }
+        line = next < end ? next + 2 : end;
+    }
+    return 0;
+}
+
 static int64_t rt_http_content_length(const char* headers, size_t len) {
     const char* line = headers;
     const char* end = headers + len;
@@ -9306,9 +9961,13 @@ static int64_t rt_http_content_length(const char* headers, size_t len) {
         if ((size_t)(next - line) >= 15 && strncasecmp(line, "Content-Length:", 15) == 0) {
             const char* value = line + 15;
             while (value < next && (*value == ' ' || *value == '\t')) value++;
+            if (value == next || *value < '0' || *value > '9') return -2;
             char* parse_end = NULL;
             unsigned long long parsed = strtoull(value, &parse_end, 10);
-            if (parse_end == value || parsed > (unsigned long long)INT64_MAX) return -1;
+            if (parse_end == value || parse_end > next ||
+                parsed > (unsigned long long)INT64_MAX) return -2;
+            while (parse_end < next && (*parse_end == ' ' || *parse_end == '\t')) parse_end++;
+            if (parse_end != next) return -2;
             return (int64_t)parsed;
         }
         line = next < end ? next + 2 : end;
@@ -9353,11 +10012,36 @@ static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
     *out = result; *out_len = used; return 1;
 }
 
+static int rt_http_token_char(unsigned char value) {
+    return ('0' <= value && value <= '9') || ('A' <= value && value <= 'Z') ||
+           ('a' <= value && value <= 'z') || strchr("!#$%&'*+-.^_`|~", value);
+}
+
 static int rt_http_method_is_token(const char* method) {
     if (!method || !*method) return 0;
     for (const unsigned char* p = (const unsigned char*)method; *p; p++) {
-        if (!(('0' <= *p && *p <= '9') || ('A' <= *p && *p <= 'Z') ||
-              ('a' <= *p && *p <= 'z') || strchr("!#$%&'*+-.^_`|~", *p))) return 0;
+        if (!rt_http_token_char(*p)) return 0;
+    }
+    return 1;
+}
+
+static int rt_http_headers_valid(RtCoreArray* headers) {
+    if (!headers || headers->len < 0 ||
+        (headers->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) ||
+        (headers->len > 0 && !headers->data) || headers->len > 1024) return 0;
+    uint64_t total_bytes = 0;
+    for (int64_t i = 0; i < headers->len; i++) {
+        RtCoreString* header = rt_core_as_string(((int64_t*)headers->data)[i]);
+        const char* separator = header ? memchr(header->data, ':', header->len) : NULL;
+        if (!header || !separator || separator == header->data ||
+            memchr(header->data, '\r', header->len) ||
+            memchr(header->data, '\n', header->len)) return 0;
+        if (header->len > 1024 * 1024 - total_bytes) return 0;
+        total_bytes += header->len;
+        for (const unsigned char* p = (const unsigned char*)header->data;
+             p < (const unsigned char*)separator; p++) {
+            if (!rt_http_token_char(*p)) return 0;
+        }
     }
     return 1;
 }
@@ -9365,8 +10049,15 @@ static int rt_http_method_is_token(const char* method) {
 static int rt_http_perform(const char* method, const char* url, RtCoreArray* headers,
                            const uint8_t* body, size_t body_len, int64_t timeout_ms,
                            int64_t* status_out,
-                           uint8_t** body_out, size_t* body_len_out, char* error, size_t error_cap) {
+                           uint8_t** body_out, size_t* body_len_out,
+                           uint8_t** reason_out, size_t* reason_len_out,
+                           uint8_t** headers_out, size_t* headers_len_out,
+                           char* error, size_t error_cap) {
     *status_out = -1; *body_out = NULL; *body_len_out = 0;
+    if (reason_out) *reason_out = NULL;
+    if (reason_len_out) *reason_len_out = 0;
+    if (headers_out) *headers_out = NULL;
+    if (headers_len_out) *headers_len_out = 0;
     int64_t deadline_ms = 0;
     if (timeout_ms > 0) {
         int64_t now = rt_time_now_monotonic_ms();
@@ -9500,26 +10191,83 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     const char* header_end = rt_http_header_end(response, received);
     if (!header_end) { free(response); snprintf(error, error_cap, "invalid HTTP response"); return 0; }
     int status = 0;
-    if (sscanf((const char*)response, "HTTP/%*s %d", &status) != 1) {
+    if (sscanf((const char*)response, "HTTP/%*s %d", &status) != 1 ||
+        status < 100 || status > 999) {
         free(response); snprintf(error, error_cap, "invalid HTTP status"); return 0;
     }
     const char* header_start = strchr((const char*)response, '\n');
     if (!header_start || header_start >= header_end) { free(response); snprintf(error, error_cap, "invalid HTTP headers"); return 0; }
     header_start++; size_t header_len = (size_t)(header_end - header_start);
+    const char* status_line_end = header_start - 1;
+    if ((reason_out && status_line_end - (const char*)response > 8192) ||
+        (headers_out && header_len > 1024 * 1024)) {
+        free(response); snprintf(error, error_cap, "HTTP response metadata too large"); return 0;
+    }
+    if (headers_out) {
+        size_t response_header_count = header_len > 0 ? 1 : 0;
+        for (size_t i = 0; i < header_len; i++) {
+            if (header_start[i] == '\n' && ++response_header_count > 1024) {
+                free(response); snprintf(error, error_cap, "too many HTTP response headers"); return 0;
+            }
+        }
+    }
+    size_t status_reason_len = 0;
+    const char* status_reason = NULL;
+    uint8_t* reason_copy = NULL;
+    uint8_t* headers_copy = NULL;
+    if (reason_out) {
+        const char* status_first_space = memchr(
+            response, ' ', (size_t)(status_line_end - (const char*)response));
+        status_reason = status_first_space
+            ? memchr(status_first_space + 1, ' ',
+                     (size_t)(status_line_end - status_first_space - 1))
+            : NULL;
+        if (status_reason) {
+            status_reason++;
+            const char* reason_end = status_line_end;
+            if (reason_end > status_reason && reason_end[-1] == '\r') reason_end--;
+            status_reason_len = (size_t)(reason_end - status_reason);
+            if (status_reason_len > 0) {
+                reason_copy = (uint8_t*)malloc(status_reason_len);
+                if (!reason_copy) { free(response); snprintf(error, error_cap, "out of memory"); return 0; }
+                memcpy(reason_copy, status_reason, status_reason_len);
+            }
+        }
+    }
+    if (headers_out && header_len > 0) {
+        headers_copy = (uint8_t*)malloc(header_len);
+        if (!headers_copy) { free(reason_copy); free(response); snprintf(error, error_cap, "out of memory"); return 0; }
+        memcpy(headers_copy, header_start, header_len);
+    }
     const uint8_t* payload = (const uint8_t*)header_end + 4;
     size_t payload_len = received - (size_t)(payload - response);
-    if (rt_http_has_header(header_start, header_len, "Transfer-Encoding") && strcasestr(header_start, "chunked")) {
+    if (rt_http_header_has_token(header_start, header_len,
+                                 "Transfer-Encoding", "chunked")) {
         uint8_t* decoded = NULL; size_t decoded_len = 0;
         if (!rt_http_decode_chunked(payload, payload_len, &decoded, &decoded_len)) {
-            free(response); snprintf(error, error_cap, "invalid chunked HTTP response"); return 0;
+            free(headers_copy); free(reason_copy); free(response);
+            snprintf(error, error_cap, "invalid chunked HTTP response"); return 0;
         }
         free(response); response = decoded; payload = response; payload_len = decoded_len;
     } else {
         int64_t declared = rt_http_content_length(header_start, header_len);
+        if (declared == -2) {
+            free(headers_copy); free(reason_copy); free(response);
+            snprintf(error, error_cap, "invalid HTTP Content-Length"); return 0;
+        }
+        if (declared >= 0 && (uint64_t)declared > payload_len) {
+            free(headers_copy); free(reason_copy); free(response);
+            snprintf(error, error_cap, "truncated HTTP response body"); return 0;
+        }
         if (declared >= 0 && (uint64_t)declared < payload_len) payload_len = (size_t)declared;
         memmove(response, payload, payload_len); payload = response;
     }
-    *status_out = status; *body_out = response; *body_len_out = payload_len; return 1;
+    *status_out = status; *body_out = response; *body_len_out = payload_len;
+    if (reason_out) *reason_out = reason_copy; else free(reason_copy);
+    if (reason_len_out) *reason_len_out = status_reason_len;
+    if (headers_out) *headers_out = headers_copy; else free(headers_copy);
+    if (headers_len_out) *headers_len_out = header_len;
+    return 1;
 }
 #endif
 
@@ -9531,7 +10279,8 @@ int64_t rt_http_get(int64_t url_value) {
 #else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
-                             &status, &body, &body_len, error, sizeof(error));
+                             &status, &body, &body_len, NULL, NULL, NULL, NULL,
+                             error, sizeof(error));
     int64_t result = ok ? rt_http_tuple(status, body, body_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(body); return result;
@@ -9552,7 +10301,8 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
     int ok = rt_http_perform(method->data, url->data, rt_core_as_array(headers_value),
                              body ? (const uint8_t*)body->data : NULL, body ? (size_t)body->len : 0,
                              timeout_ms,
-                             &status, &response, &response_len, error, sizeof(error));
+                             &status, &response, &response_len, NULL, NULL, NULL, NULL,
+                             error, sizeof(error));
     int64_t result = ok ? rt_http_tuple(status, response, response_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(response); return result;
@@ -9562,6 +10312,46 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
 int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers_value,
                         int64_t body_value) {
     return rt_http_request_with_timeout(method_value, url_value, headers_value, body_value, 0);
+}
+
+int64_t rt_http_request_v2(int64_t method_value, int64_t url_value,
+                           int64_t headers_value, int64_t body_value,
+                           int64_t timeout_ms) {
+    RtCoreString* method = rt_core_as_string(method_value);
+    RtCoreString* url = rt_core_as_string(url_value);
+    RtCoreArray* headers = rt_core_as_array(headers_value);
+    RtCoreArray* body = rt_core_as_array(body_value);
+    if (!method || !url || timeout_ms < 0 || !body ||
+        !(body->flags & RT_CORE_ARRAY_FLAG_BYTES) ||
+        body->len < 0 || (body->len > 0 && !body->data)) {
+        return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
+                                "invalid HTTP v2 argument");
+    }
+#if defined(_WIN32)
+    (void)headers; (void)headers_value; (void)timeout_ms;
+    return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
+                            "native HTTP is unavailable on Windows core runtime");
+#else
+    if (!rt_http_headers_valid(headers)) {
+        return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
+                                "invalid HTTP v2 headers");
+    }
+    int64_t status = -1;
+    uint8_t *reason = NULL, *response_headers = NULL, *response = NULL;
+    size_t reason_len = 0, response_headers_len = 0, response_len = 0;
+    char error[160] = {0};
+    int ok = rt_http_perform(method->data, url->data, headers,
+                             (const uint8_t*)body->data, (size_t)body->len,
+                             timeout_ms, &status, &response, &response_len,
+                             &reason, &reason_len, &response_headers,
+                             &response_headers_len, error, sizeof(error));
+    int64_t result = ok
+        ? rt_http_v2_tuple(status, reason, reason_len, response_headers,
+                           response_headers_len, response, response_len, "")
+        : rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0, error);
+    free(reason); free(response_headers); free(response);
+    return result;
+#endif
 }
 
 int64_t rt_http_client_request(int64_t client, int64_t method, int64_t url,
@@ -9582,7 +10372,8 @@ int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
 #else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
-                             &status, &body, &body_len, error, sizeof(error));
+                             &status, &body, &body_len, NULL, NULL, NULL, NULL,
+                             error, sizeof(error));
     if (ok) {
         FILE* file = fopen(output_path->data, "wb");
         if (!file) {
@@ -10907,6 +11698,7 @@ double rt_pow(double a, double b) { return pow(a, b); }
  * Pointer Read/Write Operations (for relocation patching, FFI interop)
  * ================================================================ */
 
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
     if (addr <= 0 || offset < 0) abort();
     int64_t value;
@@ -10952,6 +11744,7 @@ int64_t rt_ptr_write_bytes_raw(int64_t addr, int64_t offset, const void* src, in
     memcpy((char*)(uintptr_t)addr + offset, src, (size_t)len);
     return len;
 }
+#endif
 
 /* Call a raw code address as a zero-argument int64_t function. */
 int64_t rt_call_ptr_0(int64_t addr) {
@@ -11004,6 +11797,27 @@ int32_t rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
         (uint64_t)result_ptr, (uint32_t)result_capacity);
 }
 
+#if defined(_WIN32)
+static HMODULE simple_load_library_utf8(const char *path) {
+    int wide_len;
+    wchar_t *wide_path;
+    HMODULE handle;
+    if (!path || !path[0]) return NULL;
+    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+            wide_path, wide_len) != wide_len) {
+        free(wide_path);
+        return NULL;
+    }
+    handle = LoadLibraryW(wide_path);
+    free(wide_path);
+    return handle;
+}
+#endif
+
 int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t mode) {
     if (!path_ptr || path_len <= 0 || path_len > 1048576) return 0;
     char *path = (char*)malloc((size_t)path_len + 1);
@@ -11011,20 +11825,14 @@ int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t m
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
 #if defined(_WIN32)
-    /* <dlfcn.h> is POSIX-only and is not included on Windows, so RTLD_* and
-     * dlopen were undeclared here. LoadLibraryA is the Win32 equivalent; it
-     * has no lazy/now distinction (imports are always resolved at load), so
-     * `mode` is accepted and ignored rather than silently changing meaning. */
     (void)mode;
-    HMODULE handle = LoadLibraryA(path);
-    free(path);
-    return (int64_t)(intptr_t)handle;
+    void *handle = (void*)simple_load_library_utf8(path);
 #else
     int flags = ((mode & 2) ? RTLD_NOW : RTLD_LAZY) | RTLD_LOCAL;
     void *handle = dlopen(path, flags);
+#endif
     free(path);
     return (int64_t)(intptr_t)handle;
-#endif
 }
 
 int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t name_len) {
@@ -11034,21 +11842,17 @@ int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t n
     memcpy(name, name_ptr, (size_t)name_len);
     name[name_len] = '\0';
 #if defined(_WIN32)
-    FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
-    free(name);
-    return (int64_t)(intptr_t)symbol;
+    void *symbol = (void*)(uintptr_t)GetProcAddress((HMODULE)(intptr_t)handle, name);
 #else
     void *symbol = dlsym((void*)(intptr_t)handle, name);
+#endif
     free(name);
     return (int64_t)(intptr_t)symbol;
-#endif
 }
 
 int64_t rt_host_dynlib_close(int64_t handle) {
     if (handle <= 0) return -1;
 #if defined(_WIN32)
-    /* FreeLibrary returns nonzero on SUCCESS, dlclose returns 0 on success.
-     * Normalize to dlclose's convention so callers keep one contract. */
     return FreeLibrary((HMODULE)(intptr_t)handle) ? 0 : -1;
 #else
     return (int64_t)dlclose((void*)(intptr_t)handle);
@@ -11265,11 +12069,24 @@ int64_t rt_kqueue_close(int64_t h) { return rt_event_loop_close(h); }
 
 int64_t rt_iocp_create(void) { return -1; }
 int64_t rt_iocp_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+/* Omitted when this family was written: create/register/poll/close were all
+ * present but deregister was not, while the kqueue family above defines all
+ * five. The gap is invisible until a NATIVE link -- the interpreter resolves
+ * externs by name at call time -- so it first surfaced as an undefined symbol
+ * at the Windows Stage 2 link, referenced from
+ * src/lib/nogc_async_mut/io/platform_event.spl:364.
+ * Returns -1 (failure) to match every other entry point in this
+ * unavailable-backend family; it must NOT report success. */
+int64_t rt_iocp_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
 int64_t rt_iocp_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
 int64_t rt_iocp_close(int64_t h) { (void)h; return -1; }
 
 int64_t rt_event_ports_create(void) { return -1; }
 int64_t rt_event_ports_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+/* Same omission as the IOCP family above; referenced from
+ * src/lib/nogc_async_mut/io/platform_event.spl:365. Returns -1 to match the
+ * rest of this unavailable-backend family. */
+int64_t rt_event_ports_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
 int64_t rt_event_ports_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
 int64_t rt_event_ports_close(int64_t h) { (void)h; return -1; }
 
@@ -11315,7 +12132,8 @@ static int64_t rt_make_addr_string(struct sockaddr_in* sa) {
 }
 
 int64_t rt_io_tcp_socket_create(int64_t family) {
-    int af = (family == 6) ? AF_INET6 : AF_INET;
+    if (family != 0 && family != 1) return -1;
+    int af = family == 1 ? AF_INET6 : AF_INET;
     return (int64_t)socket(af, SOCK_STREAM, 0);
 }
 
@@ -11332,7 +12150,7 @@ int64_t rt_io_tcp_bind(int64_t addr_val) {
     return (int64_t)fd;
 }
 
-int64_t rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
+bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return 0;
     struct sockaddr_in sa;
@@ -11340,8 +12158,8 @@ int64_t rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
     return bind((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_listen(int64_t fd, int64_t backlog) {
-    return listen((int)fd, (int)backlog) == 0 ? 1 : 0;
+bool rt_io_tcp_listen(int64_t fd, int64_t backlog) {
+    return listen((int)fd, (int)backlog) == 0;
 }
 
 int64_t rt_io_tcp_accept(int64_t fd) {
@@ -11351,6 +12169,7 @@ int64_t rt_io_tcp_accept(int64_t fd) {
 }
 
 int64_t rt_io_tcp_accept_timeout(int64_t fd, int64_t ms) {
+    if (ms <= 0) return -1;
     struct pollfd pfd;
     memset(&pfd, 0, sizeof(pfd));
     pfd.fd = (int)fd; pfd.events = POLLIN;
@@ -11370,16 +12189,62 @@ int64_t rt_io_tcp_connect(int64_t addr_val) {
 }
 
 int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
-    (void)ms;
-    return rt_io_tcp_connect(addr_val);
+    if (ms <= 0) return -1;
+    const char* address = rt_extract_cstr(addr_val);
+    if (!address) return -1;
+    struct sockaddr_in socket_address;
+    if (rt_parse_addr_port(address, &socket_address) < 0) return -1;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int original_flags = fcntl(fd, F_GETFL, 0);
+    if (original_flags < 0 || fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) != 0) {
+        close(fd);
+        return -1;
+    }
+    int connected = connect(fd, (struct sockaddr*)&socket_address,
+                            sizeof(socket_address));
+    if (connected != 0 && errno != EINPROGRESS) {
+        close(fd);
+        return -1;
+    }
+    if (connected != 0) {
+        struct pollfd pfd;
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        if (poll(&pfd, 1, (int)ms) <= 0) {
+            close(fd);
+            return -1;
+        }
+        int socket_error = 0;
+        socklen_t error_length = sizeof(socket_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) != 0 ||
+            socket_error != 0) {
+            close(fd);
+            return -1;
+        }
+    }
+    if (fcntl(fd, F_SETFL, original_flags) != 0) {
+        close(fd);
+        return -1;
+    }
+    return (int64_t)fd;
 }
 
 int64_t rt_io_tcp_read(int64_t fd, int64_t size) {
+    if (size < 0) return rt_core_nil();
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    if (!ca || (size > 0 && !ca->data)) {
+        if (arr) rt_array_free(arr);
+        return rt_core_nil();
+    }
     ssize_t n = read((int)fd, ca->data, (size_t)size);
-    ca->len = n > 0 ? n : 0;
+    if (n < 0) {
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    ca->len = n;
     return (int64_t)(uintptr_t)arr;
 }
 
@@ -11412,16 +12277,15 @@ int64_t rt_io_tcp_write_bytes(int64_t fd, int64_t data_val) {
     return rt_io_tcp_write(fd, data_val);
 }
 
-int64_t rt_io_tcp_flush(int64_t fd) {
+bool rt_io_tcp_flush(int64_t fd) {
     int flag = 1;
-    setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    if (setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) != 0) return false;
     flag = 0;
-    setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-    return 1;
+    return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == 0;
 }
 
-int64_t rt_io_tcp_close(int64_t fd) {
-    return close((int)fd) == 0 ? 1 : 0;
+bool rt_io_tcp_close(int64_t fd) {
+    return close((int)fd) == 0;
 }
 
 int64_t rt_io_tcp_local_addr(int64_t fd) {
@@ -11438,19 +12302,19 @@ int64_t rt_io_tcp_peer_addr(int64_t fd) {
     return rt_make_addr_string(&sa);
 }
 
-int64_t rt_io_tcp_set_nonblocking(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_nonblocking(int64_t fd, bool enabled) {
     int flags = fcntl((int)fd, F_GETFL, 0);
     if (flags < 0) return 0;
     if (enabled) flags |= O_NONBLOCK; else flags &= ~O_NONBLOCK;
     return fcntl((int)fd, F_SETFL, flags) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_nodelay(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_nodelay(int64_t fd, bool enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseport(int64_t fd, bool enabled) {
 #ifdef SO_REUSEPORT
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEPORT, &flag, sizeof(flag)) == 0 ? 1 : 0;
@@ -11459,25 +12323,25 @@ int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
 #endif
 }
 
-int64_t rt_io_tcp_set_reuseaddr(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
+bool rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
     tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
+bool rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
     tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_shutdown(int64_t fd, int64_t how) {
-    return shutdown((int)fd, (int)how) == 0 ? 1 : 0;
+bool rt_io_tcp_shutdown(int64_t fd, int64_t how) {
+    return shutdown((int)fd, (int)how) == 0;
 }
 
 /* ================================================================
@@ -11501,7 +12365,8 @@ int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return -1;
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
-    if (!ca || !ca->data || ca->len <= 0) return 0;
+    if (!ca || !(ca->flags & RT_CORE_ARRAY_FLAG_BYTES) || ca->len < 0 ||
+        ca->len > 65535 || (ca->len > 0 && !ca->data)) return -1;
     struct sockaddr_in sa;
     if (rt_parse_addr_port(a, &sa) < 0) return -1;
     return (int64_t)sendto((int)fd, ca->data, (size_t)ca->len, 0, (struct sockaddr*)&sa, sizeof(sa));
@@ -11509,20 +12374,29 @@ int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
 
 int64_t rt_io_udp_send(int64_t fd, int64_t data_val) {
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
-    if (!ca || !ca->data || ca->len <= 0) return 0;
+    if (!ca || !(ca->flags & RT_CORE_ARRAY_FLAG_BYTES) || ca->len < 0 ||
+        ca->len > 65535 || (ca->len > 0 && !ca->data)) return -1;
     return (int64_t)send((int)fd, ca->data, (size_t)ca->len, 0);
 }
 
 int64_t rt_io_udp_recv(int64_t fd, int64_t size) {
+    if (size < 0 || size > 65535) return rt_core_nil();
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    if (!ca || (size > 0 && !ca->data)) {
+        if (arr) rt_array_free(arr);
+        return rt_core_nil();
+    }
     ssize_t n = recv((int)fd, ca->data, (size_t)size, 0);
-    ca->len = n > 0 ? n : 0;
+    if (n < 0) {
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    ca->len = n;
     return (int64_t)(uintptr_t)arr;
 }
 
-int64_t rt_io_udp_connect(int64_t fd, int64_t addr_val) {
+bool rt_io_udp_connect(int64_t fd, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return 0;
     struct sockaddr_in sa;
@@ -11531,61 +12405,135 @@ int64_t rt_io_udp_connect(int64_t fd, int64_t addr_val) {
 }
 
 int64_t rt_io_udp_local_addr(int64_t fd) { return rt_io_tcp_local_addr(fd); }
-int64_t rt_io_udp_set_broadcast(int64_t fd, int64_t e) {
+bool rt_io_udp_set_broadcast(int64_t fd, bool e) {
     int flag = e ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_BROADCAST, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
-int64_t rt_io_udp_set_read_timeout(int64_t fd, int64_t ms) { return rt_io_tcp_set_read_timeout(fd, ms); }
-int64_t rt_io_udp_close(int64_t fd) { return close((int)fd) == 0 ? 1 : 0; }
-int64_t rt_io_udp_set_nonblocking(int64_t fd, int64_t e) { return rt_io_tcp_set_nonblocking(fd, e); }
+bool rt_io_udp_set_read_timeout(int64_t fd, int64_t ms) {
+    struct timeval timeout = {0, 0};
+    if (ms > 0) {
+        timeout.tv_sec = ms / 1000;
+        timeout.tv_usec = (ms % 1000) * 1000;
+    }
+    return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0;
+}
+bool rt_io_udp_close(int64_t fd) { return close((int)fd) == 0; }
+bool rt_io_udp_set_nonblocking(int64_t fd, bool e) { return rt_io_tcp_set_nonblocking(fd, e); }
+
+bool rt_io_udp_set_multicast_loop(int64_t fd, bool enabled) {
+    struct sockaddr_storage local;
+    socklen_t local_len = sizeof(local);
+    if (getsockname((int)fd, (struct sockaddr*)&local, &local_len) != 0) return 0;
+    int flag = enabled ? 1 : 0;
+    if (local.ss_family == AF_INET6) {
+        return setsockopt((int)fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP,
+                          &flag, sizeof(flag)) == 0;
+    }
+    return setsockopt((int)fd, IPPROTO_IP, IP_MULTICAST_LOOP,
+                      &flag, sizeof(flag)) == 0;
+}
+
+static bool rt_io_udp_multicast_membership(int64_t fd, int64_t addr_val,
+                                           bool join) {
+    const char* address = rt_extract_cstr(addr_val);
+    if (!address) return 0;
+    if (strchr(address, ':')) {
+        struct ipv6_mreq request;
+        memset(&request, 0, sizeof(request));
+        if (inet_pton(AF_INET6, address, &request.ipv6mr_multiaddr) != 1) return 0;
+        request.ipv6mr_interface = 0;
+        return setsockopt((int)fd, IPPROTO_IPV6,
+                          join ? IPV6_JOIN_GROUP : IPV6_LEAVE_GROUP,
+                          &request, sizeof(request)) == 0;
+    }
+    struct ip_mreq request;
+    memset(&request, 0, sizeof(request));
+    if (inet_pton(AF_INET, address, &request.imr_multiaddr) != 1) return 0;
+    request.imr_interface.s_addr = htonl(INADDR_ANY);
+    return setsockopt((int)fd, IPPROTO_IP,
+                      join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP,
+                      &request, sizeof(request)) == 0;
+}
+
+bool rt_io_udp_join_multicast(int64_t fd, int64_t addr_val) {
+    return rt_io_udp_multicast_membership(fd, addr_val, true);
+}
+
+bool rt_io_udp_leave_multicast(int64_t fd, int64_t addr_val) {
+    return rt_io_udp_multicast_membership(fd, addr_val, false);
+}
 
 int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
+    if (size < 0 || size > 65535) return rt_core_nil();
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    if (!ca || (size > 0 && !ca->data)) {
+        if (arr) rt_array_free(arr);
+        return rt_core_nil();
+    }
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);
     ssize_t n = recvfrom((int)fd, ca->data, (size_t)size, 0, (struct sockaddr*)&from, &fromlen);
-    ca->len = n > 0 ? n : 0;
-    return (int64_t)(uintptr_t)arr;
+    if (n < 0) {
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    ca->len = n;
+    int64_t address = rt_make_addr_string(&from);
+    if (address == rt_core_nil()) {
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    int64_t tuple = rt_tuple_new(2);
+    if (tuple == rt_core_nil()) {
+        rt_string_free(address);
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    rt_tuple_set(tuple, 0, (int64_t)(uintptr_t)arr);
+    rt_tuple_set(tuple, 1, address);
+    return tuple;
 }
 
 #else /* _WIN32 stubs */
 int64_t rt_io_tcp_socket_create(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_bind(int64_t a) { (void)a; return -1; }
-int64_t rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
-int64_t rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return 0; }
+bool rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return false; }
+bool rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return false; }
 int64_t rt_io_tcp_accept(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_accept_timeout(int64_t f, int64_t m) { (void)f; (void)m; return -1; }
 int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
 int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; return -1; }
-int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
-int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-int64_t rt_io_tcp_flush(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_close(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_nodelay(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_reuseport(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_reuseaddr(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
-int64_t rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
-int64_t rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return 0; }
+int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
+int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
+int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
+int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
+int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
+bool rt_io_tcp_flush(int64_t f) { (void)f; return false; }
+bool rt_io_tcp_close(int64_t f) { (void)f; return false; }
+int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
+int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
+bool rt_io_tcp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_nodelay(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_reuseport(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_reuseaddr(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
+bool rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
+bool rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return false; }
 int64_t rt_io_udp_bind(int64_t a) { (void)a; return -1; }
-int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return 0; }
-int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
-int64_t rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
-int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return 0; }
-int64_t rt_io_udp_set_broadcast(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
-int64_t rt_io_udp_close(int64_t f) { (void)f; return 0; }
-int64_t rt_io_udp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
+int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return -1; }
+int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
+int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
+bool rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return false; }
+int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
+bool rt_io_udp_set_broadcast(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
+bool rt_io_udp_close(int64_t f) { (void)f; return false; }
+bool rt_io_udp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_udp_set_multicast_loop(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_udp_join_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
+bool rt_io_udp_leave_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
+int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
 #endif /* !_WIN32 */
 
 /* ================================================================
@@ -11785,6 +12733,181 @@ int32_t rt_cpu_is_riscv64(void) {
 void __simple_runtime_init(void) {
 }
 
+/* ----------------------------------------------------------------
+ * Startup aspect dynload — definition of the pre-main hook
+ *
+ * `llvm_native_link_hosted_support.spl:116,126` emits a WEAK declaration of
+ * `__simple_startup_before_main(argc, argv)` into the generated C `main` and
+ * calls it before `spl_init_args`'s successors — before `__simple_runtime_init`,
+ * before module initializers, before `__simple_main`. Until now NOTHING in the
+ * tree defined it, so the weak symbol resolved to NULL and the slot was
+ * permanently dead.
+ *
+ * This defines it: at startup, load the shared libraries named by the
+ * environment variable `SIMPLE_STARTUP_ASPECTS` (a `:`-separated list of
+ * paths, `;` on Windows), followed by repeatable
+ * `--startup-extension=PATH` / `--startup-extension PATH` argv entries, and
+ * call each one's `simple_aspect_pack_init(void)`
+ * entry. That is the runtime primitive underneath the "startup" activation
+ * mode of doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+ * §9.4 ("startup — before application publication") and Phase 6 ("load startup
+ * packs before application publication").
+ *
+ * Deliberate choices:
+ *   - FAIL CLOSED, loudly (design §1809). A path that cannot be opened, or a
+ *     pack with no `simple_aspect_pack_init`, or an init that returns non-zero,
+ *     prints the offending path and reason to stderr and returns non-zero —
+ *     the generated `main` then exits 125. A startup aspect that silently did
+ *     not load is exactly the silent-nil failure this repo bans.
+ *   - RTLD_GLOBAL, not RTLD_LOCAL (unlike `spl_dlopen`): a startup aspect pack
+ *     exists to be visible to the program it is woven into.
+ *   - Unset or empty variable = no packs = success. Loading nothing is the
+ *     normal case, not an error; only a *named* pack that fails is fatal.
+ *   - This lives in runtime_native.c rather than in its own translation unit,
+ *     and that is load-bearing, not tidiness. A weak UNDEFINED reference does
+ *     NOT pull a member out of a static archive, so a definition sitting alone
+ *     in a new TU would never be linked and the hook would stay NULL — this
+ *     was measured, not assumed: a probe `main` whose only reference to the
+ *     runtime was the weak one linked fine and silently skipped the hook.
+ *     runtime_native.o is pulled in because the SAME generated `main` also
+ *     strongly references `spl_init_args`, `__simple_runtime_init` and
+ *     `__simple_runtime_shutdown`, which this TU owns; once the member is in
+ *     the link, the weak reference resolves to the definition below.
+ *     Moving this function out of this TU therefore silently disables it.
+ * ---------------------------------------------------------------- */
+
+#define SIMPLE_STARTUP_ASPECT_ENV  "SIMPLE_STARTUP_ASPECTS"
+#define SIMPLE_ASPECT_PACK_INIT    "simple_aspect_pack_init"
+
+#if defined(_WIN32)
+#define SIMPLE_STARTUP_ASPECT_SEP ';'
+#else
+#define SIMPLE_STARTUP_ASPECT_SEP ':'
+#endif
+
+static int simple_startup_load_aspect_pack(const char *path) {
+    void *library = NULL;
+    /* Casting a data pointer to a function pointer is undefined in C99 but
+     * required by POSIX dlsym; routed through a union, matching the existing
+     * convention in counterpart_abi_runtime.c:263. */
+    union { void *object; int (*init)(void); } bridge;
+
+#if defined(_WIN32)
+    library = (void *)simple_load_library_utf8(path);
+#else
+    library = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+#endif
+    if (!library) {
+        fprintf(stderr,
+                "simple runtime: startup aspect pack `%s` failed to load.\n",
+                path);
+#if !defined(_WIN32)
+        {
+            const char *why = dlerror();
+            if (why) fprintf(stderr, "  dlopen: %s\n", why);
+        }
+#endif
+        return 1;
+    }
+
+#if defined(_WIN32)
+    bridge.object = (void *)GetProcAddress((HMODULE)library,
+                                           SIMPLE_ASPECT_PACK_INIT);
+#else
+    bridge.object = dlsym(library, SIMPLE_ASPECT_PACK_INIT);
+#endif
+    if (!bridge.object) {
+        fprintf(stderr,
+                "simple runtime: startup aspect pack `%s` exports no `%s`.\n",
+                path, SIMPLE_ASPECT_PACK_INIT);
+#if defined(_WIN32)
+        FreeLibrary((HMODULE)library);
+#else
+        dlclose(library);
+#endif
+        return 1;
+    }
+
+    if (bridge.init() != 0) {
+        fprintf(stderr,
+                "simple runtime: startup aspect pack `%s`: %s returned non-zero.\n",
+                path, SIMPLE_ASPECT_PACK_INIT);
+#if defined(_WIN32)
+        FreeLibrary((HMODULE)library);
+#else
+        dlclose(library);
+#endif
+        return 1;
+    }
+    return 0;
+}
+
+static int simple_startup_load_aspect_spec(const char *spec) {
+    size_t start = 0;
+    size_t i;
+    size_t len;
+
+    if (!spec || !spec[0]) return 0;
+    len = strlen(spec);
+    for (i = 0; i <= len; i++) {
+        if (i != len && spec[i] != SIMPLE_STARTUP_ASPECT_SEP) continue;
+        if (i > start) {
+            size_t n = i - start;
+            char *path = (char *)malloc(n + 1);
+            int rc;
+            if (!path) {
+                fprintf(stderr,
+                        "simple runtime: out of memory reading %s.\n",
+                        SIMPLE_STARTUP_ASPECT_ENV);
+                return 1;
+            }
+            memcpy(path, spec + start, n);
+            path[n] = '\0';
+            rc = simple_startup_load_aspect_pack(path);
+            free(path);
+            if (rc != 0) return rc;
+        }
+        start = i + 1;
+    }
+    return 0;
+}
+
+int __simple_startup_before_main(int argc, char **argv) {
+    const char *spec = getenv(SIMPLE_STARTUP_ASPECT_ENV);
+    const char *option = "--startup-extension";
+    size_t option_len = strlen(option);
+    int i;
+
+    /* Stable order: environment list first, then argv from left to right. */
+    if (simple_startup_load_aspect_spec(spec) != 0) return 1;
+    for (i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *path = NULL;
+        if (strcmp(arg, "--") == 0) break;
+        if (strcmp(arg, option) == 0) {
+            if (i + 1 >= argc || !argv[i + 1][0] ||
+                strcmp(argv[i + 1], "--") == 0) {
+                fprintf(stderr,
+                        "simple runtime: %s requires a non-empty PATH.\n",
+                        option);
+                return 1;
+            }
+            path = argv[++i];
+        } else if (strncmp(arg, option, option_len) == 0 &&
+                   arg[option_len] == '=') {
+            path = arg + option_len + 1;
+            if (!path[0]) {
+                fprintf(stderr,
+                        "simple runtime: %s requires a non-empty PATH.\n",
+                        option);
+                return 1;
+            }
+        }
+        if (path && simple_startup_load_aspect_pack(path) != 0) return 1;
+    }
+    return 0;
+}
+
 void __simple_runtime_shutdown(void) {
     fflush(stdout);
     fflush(stderr);
@@ -11867,44 +12990,6 @@ int64_t rt_unwrap_or_trap(int64_t value) {
         abort();
     }
     return value;
-}
-
-/* `.expect(msg)` on Option/Result: same Ok/Some-payload-or-trap semantics as
- * rt_unwrap_or_trap above, but the trap prints the CALLER'S message instead of
- * the fixed ".unwrap() called on None/Err" text. Cranelift emits a call to this
- * exact name from codegen/instr/closures_structs.rs (the `"expect"` arm, which
- * declare_function()s it as Import on demand) and runtime_sffi.rs lists it as
- * RuntimeFuncSpec("rt_expect_or_trap", [I64, I64] -> [I64]) -- but the C
- * runtime, the one the bootstrap/native lane actually links, defined it
- * nowhere. That is the rt_unwrap_or_trap incident class exactly: an undefined
- * symbol the native link tolerates, leaving a NULL GOT slot that SEGVs at the
- * first `.expect(...)` call. Semantics transcribed from the Rust runtime's
- * rt_expect_or_trap (value/objects.rs), including its non-enum passthrough and
- * its arbitrary-user-enum "return self" fallback. */
-int64_t rt_expect_or_trap(int64_t value, int64_t msg) {
-    int64_t enum_id = rt_enum_id(value);
-    int64_t discriminant;
-    const uint8_t* text;
-    int64_t len;
-    if (enum_id < 0) return value;
-    discriminant = rt_enum_discriminant(value);
-    if (enum_id == SPL_OPTION_ENUM_ID) {
-        if (discriminant == 0 || discriminant == (int64_t)SPL_HASH_SOME) return rt_enum_payload(value);
-        if (discriminant != 1 && discriminant != (int64_t)SPL_HASH_NONE) return value;
-    } else if (discriminant == (int64_t)SPL_HASH_OK) {
-        return rt_enum_payload(value);
-    } else if (discriminant != (int64_t)SPL_HASH_ERR) {
-        return value;
-    }
-    text = rt_string_data(msg);
-    len = rt_string_len(msg);
-    if (text == NULL || len < 0) {
-        fprintf(stderr, "expect() called on Err/None\n");
-    } else {
-        fprintf(stderr, "%.*s\n", (int)len, (const char*)text);
-    }
-    fflush(stderr);
-    abort();
 }
 
 int64_t rt_option_some(int64_t payload) {
@@ -12207,12 +13292,86 @@ SPL_RT_TRAP1(rt_wait)
 /* Dynamic dispatch: the emitter passes no vtable identity the C runtime can
  * resolve, so any answer would be a wrong method address. */
 SPL_RT_TRAP2(rt_vtable_lookup)
-/* io_print.rs:437 takes (value, fmt_ptr, fmt_len) -- the format spec is a raw
- * pointer the C runtime cannot validate; naming the trap beats a wrong string. */
+/* Format a tagged RuntimeValue using the canonical core-C representation.
+ * `fmt` is the compiler-emitted byte span ABI, copied into a bounded local
+ * buffer before parsing.  The value itself is never treated as a generic
+ * pointer: strings and boxed floats go through registry-gated core helpers. */
 int64_t rt_value_format_string(int64_t v, const uint8_t* fmt, uint64_t fmt_len) {
-    (void)v; (void)fmt; (void)fmt_len;
-    rt_trap_unimplemented("rt_value_format_string");
-    return 0;
+    char spec[65];
+    uint64_t n = 0;
+    if (fmt != NULL) {
+        n = fmt_len < sizeof(spec) - 1 ? fmt_len : sizeof(spec) - 1;
+        if (n > 0) memcpy(spec, fmt, (size_t)n);
+    }
+    spec[n] = '\0';
+
+    char type = n > 0 ? spec[n - 1] : '\0';
+    int precision = -1;
+    int width = 0;
+    int zero_pad = n > 0 && spec[0] == '0';
+    for (uint64_t i = 0; i < n; i++) {
+        if (spec[i] == '.') {
+            precision = 0;
+            for (uint64_t j = i + 1; j < n && spec[j] >= '0' && spec[j] <= '9'; j++) {
+                int digit = spec[j] - '0';
+                precision = precision > (64 - digit) / 10 ? 64 : precision * 10 + digit;
+            }
+            break;
+        }
+        if (spec[i] >= '0' && spec[i] <= '9') {
+            int digit = spec[i] - '0';
+            width = width > (256 - digit) / 10 ? 256 : width * 10 + digit;
+        }
+    }
+
+    if (type == '\0' || type == 's') {
+        if (rt_core_is_special(v)) {
+            switch (rt_core_special_payload(v)) {
+                case RT_VALUE_SPECIAL_NIL: return rt_string_new((const uint8_t*)"nil", 3);
+                case RT_VALUE_SPECIAL_ERROR: return rt_string_new((const uint8_t*)"error", 5);
+                default: break;
+            }
+        }
+        return rt_to_string(v);
+    }
+
+    char out[512];
+    int len = -1;
+    if (rt_core_is_int(v)) {
+        long long value = (long long)rt_core_as_int(v);
+        switch (type) {
+            case 'd': break;
+            case 'x': len = snprintf(out, sizeof(out), zero_pad ? "%0*llx" : "%*llx", width, (unsigned long long)value); break;
+            case 'X': len = snprintf(out, sizeof(out), zero_pad ? "%0*llX" : "%*llX", width, (unsigned long long)value); break;
+            case 'o': len = snprintf(out, sizeof(out), zero_pad ? "%0*llo" : "%*llo", width, (unsigned long long)value); break;
+            default: break;
+        }
+        if (type == 'd')
+            len = snprintf(out, sizeof(out), zero_pad ? "%0*lld" : "%*lld", width, value);
+        if (type == 'b') {
+            uint64_t bits = (uint64_t)value;
+            char digits[65];
+            int used = 0;
+            do { digits[used++] = (char)('0' + (bits & 1)); bits >>= 1; } while (bits && used < 64);
+            int pad_count = width > used ? width - used : 0;
+            len = 0;
+            while (pad_count-- > 0 && len < (int)sizeof(out) - 1) out[len++] = zero_pad ? '0' : ' ';
+            while (used > 0 && len < (int)sizeof(out) - 1) out[len++] = digits[--used];
+            out[len] = '\0';
+        }
+    } else if (rt_core_is_float(v) && (type == 'f' || type == 'F' || type == 'e' || type == 'E' || type == '%')) {
+        double value = rt_core_as_float(v);
+        if (type == '%') value *= 100.0;
+        int p = precision >= 0 ? precision : 6;
+        if (type == 'e' || type == 'E')
+            len = snprintf(out, sizeof(out), type == 'E' ? "%.*E" : "%.*e", p, value);
+        else
+            len = snprintf(out, sizeof(out), "%.*f", p, value);
+        if (type == '%' && len >= 0 && len < (int)sizeof(out) - 1) out[len++] = '%';
+    }
+    if (len < 0) return rt_to_string(v);
+    if (len >= (int)sizeof(out)) len = (int)sizeof(out) - 1;
+    return rt_string_new((const uint8_t*)out, (uint64_t)len);
 }
 SPL_RT_TRAP2(rt_fstring_format)
 /* interpreter_bridge.rs:112 -- requires a hosted interpreter. */
@@ -12242,3 +13401,118 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
 
 /* collections.rs:1708 -- remove by key/index from array or dict. */
 SPL_RT_TRAP2(rt_collection_remove)
+
+/* Wave17: one-owner, exact-byte artifact bundle publication.  Handles are
+ * random registry tokens, never descriptors.  The Linux implementation keeps
+ * every lookup beneath an already-open destination root and publishes the
+ * containing directory with one RENAME_NOREPLACE operation. */
+#if defined(__linux__)
+typedef struct RtArtifactBundleTxn {
+    uint64_t token;
+    int root_fd, source_fd, temp_fd, payload_fd, scr1_fd;
+    char temp_leaf[40], bundle_leaf[256], payload_leaf[256], scr1_leaf[256];
+    struct stat source_identity;
+    uint64_t max_bytes, bytes_read;
+    int eof_seen, scr1_staged;
+    struct RtArtifactBundleTxn* next;
+} RtArtifactBundleTxn;
+
+static RtArtifactBundleTxn* rt_artifact_bundle_txns;
+static pthread_mutex_t rt_artifact_bundle_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int rt_ab_leaf(const uint8_t* p, uint64_t n, char out[256]) {
+    if (!p || n == 0 || n >= 256 || (n == 1 && p[0] == '.') ||
+        (n == 2 && p[0] == '.' && p[1] == '.')) return 0;
+    for (uint64_t i = 0; i < n; ++i) if (p[i] == '/' || p[i] == '\0') return 0;
+    memcpy(out, p, (size_t)n); out[n] = 0; return 1;
+}
+
+static char* rt_ab_path(const uint8_t* p, uint64_t n) {
+    if (!p || n == 0 || n > (uint64_t)PATH_MAX) return NULL;
+    for (uint64_t i = 0; i < n; ++i) if (p[i] == '\0') return NULL;
+    char* s = (char*)malloc((size_t)n + 1); if (!s) return NULL;
+    memcpy(s, p, (size_t)n); s[n] = 0; return s;
+}
+
+static int rt_ab_close(int fd) { int r; if (fd < 0) return 0; do r = close(fd); while (r < 0 && errno == EINTR); return r; }
+static int rt_ab_fsync(int fd) { int r, tries = 0; do r = fsync(fd); while (r < 0 && errno == EINTR && ++tries < 8); return r; }
+static ssize_t rt_ab_read(int fd, void* p, size_t n) { ssize_t r; int tries = 0; do r = read(fd, p, n); while (r < 0 && errno == EINTR && ++tries < 8); return r; }
+static int rt_ab_write_all(int fd, const uint8_t* p, size_t n) {
+    size_t off = 0; int tries = 0;
+    while (off < n) { ssize_t w = write(fd, p + off, n - off); if (w > 0) { off += (size_t)w; tries = 0; continue; } if (w < 0 && errno == EINTR && ++tries < 8) continue; return 0; }
+    return 1;
+}
+static int rt_ab_same_stat(const struct stat* a, const struct stat* b) {
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_mode == b->st_mode &&
+           a->st_size == b->st_size && a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+}
+static void rt_ab_destroy(RtArtifactBundleTxn* t, int remove_temp) {
+    rt_ab_close(t->payload_fd); rt_ab_close(t->scr1_fd); rt_ab_close(t->source_fd);
+    if (remove_temp && t->temp_fd >= 0) { unlinkat(t->temp_fd, t->payload_leaf, 0); unlinkat(t->temp_fd, t->scr1_leaf, 0); }
+    rt_ab_close(t->temp_fd);
+    if (remove_temp && t->root_fd >= 0) unlinkat(t->root_fd, t->temp_leaf, AT_REMOVEDIR);
+    rt_ab_close(t->root_fd); free(t);
+}
+static RtArtifactBundleTxn* rt_ab_take(uint64_t token) {
+    RtArtifactBundleTxn** p = &rt_artifact_bundle_txns;
+    while (*p && (*p)->token != token) p = &(*p)->next;
+    if (!*p) return NULL; RtArtifactBundleTxn* t = *p; *p = t->next; t->next = NULL; return t;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_begin_v1(const uint8_t* root, uint64_t root_len,
+    const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len,
+    const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1, uint64_t scr1_len, int64_t max_bytes) {
+    if (max_bytes < 0) return 0;
+    RtArtifactBundleTxn* t = (RtArtifactBundleTxn*)calloc(1, sizeof(*t)); if (!t) return 0;
+    t->root_fd=t->source_fd=t->temp_fd=t->payload_fd=t->scr1_fd=-1; t->max_bytes=(uint64_t)max_bytes;
+    char* root_path = rt_ab_path(root, root_len); char* source_path = rt_ab_path(source, source_len);
+    if (!root_path || !source_path || !rt_ab_leaf(bundle,bundle_len,t->bundle_leaf) || !rt_ab_leaf(payload,payload_len,t->payload_leaf) || !rt_ab_leaf(scr1,scr1_len,t->scr1_leaf) || !strcmp(t->payload_leaf,t->scr1_leaf)) goto fail;
+    t->root_fd=open(root_path,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW); if(t->root_fd<0) goto fail;
+    if (faccessat(t->root_fd,t->bundle_leaf,F_OK,AT_SYMLINK_NOFOLLOW)==0 || errno!=ENOENT) goto fail;
+    struct open_how how={.flags=O_RDONLY|O_CLOEXEC|O_NOFOLLOW,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};
+    t->source_fd=(int)syscall(SYS_openat2,t->root_fd,source_path,&how,sizeof(how)); if(t->source_fd<0 || fstat(t->source_fd,&t->source_identity)<0 || !S_ISREG(t->source_identity.st_mode) || (uint64_t)t->source_identity.st_size>t->max_bytes) goto fail;
+    for (int tries=0;tries<16;t->token=0,++tries) { if(getrandom(&t->token,sizeof(t->token),0)!=(ssize_t)sizeof(t->token) || !t->token) continue; snprintf(t->temp_leaf,sizeof(t->temp_leaf),".simple-bundle-%016llx",(unsigned long long)t->token); if(mkdirat(t->root_fd,t->temp_leaf,0700)==0) break; }
+    if (!t->token || !t->temp_leaf[0]) goto fail;
+    t->temp_fd=openat(t->root_fd,t->temp_leaf,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW); if(t->temp_fd<0) goto fail;
+    t->payload_fd=openat(t->temp_fd,t->payload_leaf,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600); if(t->payload_fd<0) goto fail;
+    pthread_mutex_lock(&rt_artifact_bundle_lock); for(RtArtifactBundleTxn* q=rt_artifact_bundle_txns;q;q=q->next) if(q->token==t->token){pthread_mutex_unlock(&rt_artifact_bundle_lock);goto fail;} t->next=rt_artifact_bundle_txns;rt_artifact_bundle_txns=t; pthread_mutex_unlock(&rt_artifact_bundle_lock);
+    free(root_path); free(source_path); return (int64_t)t->token;
+fail: free(root_path); free(source_path); rt_ab_destroy(t,1); return 0;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t token, int64_t bound) {
+    if (bound <= 0 || bound > 16*1024*1024) return 0;
+    pthread_mutex_lock(&rt_artifact_bundle_lock); RtArtifactBundleTxn* t=rt_ab_take((uint64_t)token); pthread_mutex_unlock(&rt_artifact_bundle_lock); if(!t)return 0;
+    if(t->eof_seen){rt_ab_destroy(t,1);return 0;}
+    size_t want=(size_t)bound; if((uint64_t)want>t->max_bytes-t->bytes_read)want=(size_t)(t->max_bytes-t->bytes_read);
+    SplArray* a=rt_byte_array_new_len(want); RtCoreArray* ar=rt_core_array_ptr(a); ssize_t n=ar?rt_ab_read(t->source_fd,ar->data,want):-1;
+    if(n<0 || (n>0 && !rt_ab_write_all(t->payload_fd,ar->data,(size_t)n))){if(a)rt_array_free(a);rt_ab_destroy(t,1);return 0;}
+    ar->len=n; t->bytes_read+=(uint64_t)n; if(n==0)t->eof_seen=1;
+    pthread_mutex_lock(&rt_artifact_bundle_lock);t->next=rt_artifact_bundle_txns;rt_artifact_bundle_txns=t;pthread_mutex_unlock(&rt_artifact_bundle_lock); return (int64_t)(uintptr_t)a;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t token, int64_t field) {
+    pthread_mutex_lock(&rt_artifact_bundle_lock); RtArtifactBundleTxn* t=rt_artifact_bundle_txns;while(t&&t->token!=(uint64_t)token)t=t->next;
+    int64_t v=t?(field==0?(int64_t)t->source_identity.st_dev:field==1?(int64_t)t->source_identity.st_ino:field==2?(int64_t)t->source_identity.st_size:field==3?(int64_t)t->source_identity.st_mtim.tv_sec:field==4?(int64_t)t->source_identity.st_mtim.tv_nsec:field==5?(int64_t)t->bytes_read:-1):-1; pthread_mutex_unlock(&rt_artifact_bundle_lock);return v;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t token,const uint8_t* bytes,uint64_t len,int64_t max_bytes){
+    if(max_bytes<0||len>(uint64_t)max_bytes)return 0; pthread_mutex_lock(&rt_artifact_bundle_lock);RtArtifactBundleTxn*t=rt_ab_take((uint64_t)token);pthread_mutex_unlock(&rt_artifact_bundle_lock);if(!t)return 0;
+    if(!t->eof_seen||t->scr1_staged){rt_ab_destroy(t,1);return 0;} t->scr1_fd=openat(t->temp_fd,t->scr1_leaf,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);
+    if(t->scr1_fd<0||!rt_ab_write_all(t->scr1_fd,bytes,(size_t)len)){rt_ab_destroy(t,1);return 0;}t->scr1_staged=1;pthread_mutex_lock(&rt_artifact_bundle_lock);t->next=rt_artifact_bundle_txns;rt_artifact_bundle_txns=t;pthread_mutex_unlock(&rt_artifact_bundle_lock);return 1;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t token,int64_t commit){
+    pthread_mutex_lock(&rt_artifact_bundle_lock);RtArtifactBundleTxn*t=rt_ab_take((uint64_t)token);pthread_mutex_unlock(&rt_artifact_bundle_lock);if(!t)return 0;
+    if(!commit){rt_ab_destroy(t,1);return 1;} struct stat now; if(!t->eof_seen||!t->scr1_staged||fstat(t->source_fd,&now)<0||!rt_ab_same_stat(&t->source_identity,&now)||rt_ab_fsync(t->payload_fd)<0||rt_ab_fsync(t->scr1_fd)<0||rt_ab_fsync(t->temp_fd)<0){rt_ab_destroy(t,1);return 0;}
+    rt_ab_close(t->payload_fd);t->payload_fd=-1;rt_ab_close(t->scr1_fd);t->scr1_fd=-1;
+    int renamed, tries=0; do renamed=(int)syscall(SYS_renameat2,t->root_fd,t->temp_leaf,t->root_fd,t->bundle_leaf,RENAME_NOREPLACE);while(renamed<0&&errno==EINTR&&++tries<8);
+    if(renamed<0){rt_ab_destroy(t,1);return 0;} int durable=rt_ab_fsync(t->root_fd)==0;rt_ab_destroy(t,0);return durable?1:-2;
+}
+#else
+int64_t rt_hosted_safe_artifact_bundle_begin_v1(const uint8_t*a,uint64_t b,const uint8_t*c,uint64_t d,const uint8_t*e,uint64_t f,const uint8_t*g,uint64_t h,const uint8_t*i,uint64_t j,int64_t k){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;return 0;}
+int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}
+int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t a,int64_t b){(void)a;(void)b;return -1;}
+int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t a,const uint8_t*b,uint64_t c,int64_t d){(void)a;(void)b;(void)c;(void)d;return 0;}
+int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}
+#endif

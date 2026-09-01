@@ -1,0 +1,116 @@
+use std.spec
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, ManifestResourceLimits, SimpleArtifactManifest
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootRecordV1
+}
+use os.kernel.loader.simplebox_primary_tool_catalog_bundle_v1.{
+    SimpleboxPrimaryToolBundlePlanErrorV1,
+    simplebox_primary_tool_catalog_bundle_plan_v1,
+    simplebox_primary_tool_catalog_bundle_plan_valid_v1
+}
+use os.tools.simplebox.simplebox_artifact_contract.{
+    SIMPLEBOX_CANONICAL_PATH_V1, SIMPLEBOX_CANONICAL_ALIAS_COUNT_V1,
+    simplebox_canonical_aliases_v1
+}
+
+fn target(arch: text) -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: arch, abi: "simpleos")
+
+fn signed_candidate(path: text, arch: text) -> InstalledArtifactBootRecordV1:
+    val signature = "ed25519:primary-tools-key:" + "2" * 128
+    val manifest = SimpleArtifactManifest(
+        format_version: 1, artifact_kind: "elf", target: target(arch),
+        entrypoint: path, required_abi_features: [], required_services: [],
+        required_capabilities: 0u32,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: 1048576, max_open_handles: 8,
+            max_threads: 1, cpu_budget_us: 1000000),
+        namespace_template: "primary-tools", native_libraries: [],
+        smf_libraries: [], interpreter: "", argument_schema: [],
+        startup_preloads: [], content_hashes: ["1" * 64],
+        signature: signature, debug_identity: "")
+    InstalledArtifactBootRecordV1(
+        canonical_path: path, aliases: simplebox_canonical_aliases_v1(),
+        content_sha256: "1" * 64, detached_signature: signature,
+        expected_trust_root_sha256: "3" * 64, manifest: manifest)
+
+fn roots() -> [ExecutableManifestTrustedSignerV1]:
+    [ExecutableManifestTrustedSignerV1(
+        key_id: "primary-tools-key", public_key: [4u8] * 32)]
+
+describe "Simplebox primary-tool catalog bundle plan":
+    it "represents the 42 primary-tool paths as aliases of one payload":
+        val plan = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target("x86_64"), roots(),
+            [signed_candidate(SIMPLEBOX_CANONICAL_PATH_V1, "x86_64")])
+        expect(plan.ok).to_be(true)
+        expect(plan.records.len()).to_equal(1)
+        expect(plan.records[0].aliases).to_equal(simplebox_canonical_aliases_v1())
+        expect(plan.records[0].aliases.len()).to_equal(
+            SIMPLEBOX_CANONICAL_ALIAS_COUNT_V1)
+        expect(plan.records[0].aliases.len()).to_equal(42)
+        expect(plan.policy.required_canonical_paths).to_equal(["/bin/simplebox"])
+
+    it "rejects a missing record and fabricated per-alias payload records":
+        val missing = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target("aarch64"), roots(), [])
+        expect(missing.ok).to_be(false)
+        expect(missing.error).to_equal(
+            SimpleboxPrimaryToolBundlePlanErrorV1.RecordCountMismatch)
+        val expanded = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target("aarch64"), roots(), [
+                signed_candidate("/bin/simplebox", "aarch64"),
+                signed_candidate("/bin/echo", "aarch64")])
+        expect(expanded.ok).to_be(false)
+
+    it "rejects alias drift and cross-target signed candidates":
+        var alias_drift = signed_candidate("/bin/simplebox", "riscv64")
+        alias_drift.aliases = ["/bin/echo"]
+        val wrong_aliases = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target("riscv64"), roots(), [alias_drift])
+        expect(wrong_aliases.error).to_equal(
+            SimpleboxPrimaryToolBundlePlanErrorV1.CanonicalIdentityMismatch)
+        val wrong_target = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target("riscv64"), roots(),
+            [signed_candidate("/bin/simplebox", "x86_64")])
+        expect(wrong_target.error).to_equal(
+            SimpleboxPrimaryToolBundlePlanErrorV1.SignedRecordShapeInvalid)
+
+    it "does not promote a signature-shaped candidate to authenticated state":
+        val forged = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target("riscv32"), roots(),
+            [signed_candidate("/bin/simplebox", "riscv32")])
+        expect(forged.ok).to_be(true)
+        # Planning is shape-only. The package-private population owner still
+        # performs Ed25519 verification before opening the catalog session.
+        expect(forged.records[0].detached_signature).to_start_with("ed25519:")
+
+    it "rejects every post-plan identity mutation at consumption":
+        var changed_path = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target("x86_64"), roots(),
+            [signed_candidate("/bin/simplebox", "x86_64")])
+        changed_path.records[0].canonical_path = "/bin/other"
+        changed_path.records[0].manifest.entrypoint = "/bin/other"
+        changed_path.policy.required_canonical_paths = ["/bin/other"]
+        expect(simplebox_primary_tool_catalog_bundle_plan_valid_v1(
+            changed_path)).to_be(false)
+
+        var changed_aliases = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target("x86_64"), roots(),
+            [signed_candidate("/bin/simplebox", "x86_64")])
+        changed_aliases.records[0].aliases = ["/bin/echo"]
+        expect(simplebox_primary_tool_catalog_bundle_plan_valid_v1(
+            changed_aliases)).to_be(false)
+
+        var extra_record = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target("x86_64"), roots(),
+            [signed_candidate("/bin/simplebox", "x86_64")])
+        extra_record.records.push(signed_candidate("/bin/other", "x86_64"))
+        extra_record.policy.required_canonical_paths.push("/bin/other")
+        expect(simplebox_primary_tool_catalog_bundle_plan_valid_v1(
+            extra_record)).to_be(false)

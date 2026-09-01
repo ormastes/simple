@@ -1,0 +1,46 @@
+use std.test.*
+use std.fs.{file_read}
+
+val TYPE_PATH = "src/os/kernel/types/x86_32_mapping_handle_v1.spl"
+val TYPES_PATH = "src/os/kernel/scheduler/scheduler_types.spl"
+val EXEC_PATH = "src/os/kernel/scheduler/scheduler_exec.spl"
+
+describe "x86-32 scheduler mapping handle static contract":
+    it "keeps only an opaque slot locator and generation":
+        val body = file_read(TYPE_PATH)
+        expect(body).to_contain("slot_plus_one: u32")
+        expect(body).to_contain("handle_generation: u64")
+        expect(body).not.to_contain("root_phys")
+        expect(body).not.to_contain("cr3")
+
+    it "exposes no present-handle constructor before transfer ownership exists":
+        val body = file_read(TYPE_PATH)
+        expect(body).to_contain("scheduler_x86_32_mapping_handle_absent_v1")
+        expect(body).to_contain("scheduler_x86_32_mapping_handle_present_v1")
+        expect(body).not.to_contain("mapping_handle_create")
+        expect(body).not.to_contain("mapping_handle_from_receipt")
+
+    it "treats either partial locator form as occupied and fail closed":
+        val body = file_read(TYPE_PATH)
+        expect(body).to_contain("handle.slot_plus_one != 0u32 or handle.handle_generation != 0u64")
+
+    it "appends the handle to the canonical TCB ABI":
+        val body = file_read(TYPES_PATH)
+        expect(body).to_contain("TASK_CONTROL_BLOCK_ABI_REVISION_V1: u32 = 4u32")
+        expect(body).to_contain("x86_32_mapping_handle: SchedulerX8632MappingHandleV1")
+
+    it "makes every current create and fork path start without authority":
+        val exec = file_read(EXEC_PATH)
+        val task_mgmt = file_read("src/os/kernel/scheduler/scheduler_task_mgmt.spl")
+        val adoption = file_read("src/os/kernel/scheduler/scheduler_executable_adoption.spl")
+        val bootstrap = file_read("src/os/kernel/scheduler/scheduler_arm_bootstrap.spl")
+        val absent = "x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1()"
+        expect(bootstrap.count(absent)).to_equal(1)
+        expect(task_mgmt.count(absent)).to_equal(1)
+        expect(exec.count(absent)).to_equal(4)
+        expect(adoption.count(absent)).to_equal(1)
+
+    it "fails closed when legacy exec sees an owned x86-32 locator":
+        val body = file_read(EXEC_PATH)
+        expect(body).to_contain("scheduler_x86_32_mapping_handle_present_v1(old_task.x86_32_mapping_handle)")
+        expect(body).to_contain("return (-16, tasks)")

@@ -9,8 +9,7 @@ use app.pkg.resolver.{resolve_all, ResolvedDep, ResolutionResult, get_cache_dir}
 use app.pkg.lock.{LockFile, LockEntry, parse_lock_file, write_lock_file, generate_lock_content}
 use app.io.mod.{env_get, process_run}
 
-use std.io_runtime.{file_exists}
-extern fn rt_file_read_text(path: text) -> text
+use std.io_runtime.{file_exists, read_file_text_result}
 use std.io_runtime.{file_write}
 
 # Shell helper
@@ -29,6 +28,10 @@ fn shell_run(command: text) -> (text, text, i64):
 fn get_cwd() -> text:
     val (out, _, _) = shell_run("pwd")
     out.trim()
+
+@always_inline
+fn _read_package_source(path: text) -> Result<text, text>:
+    read_file_text_result(path)
 
 
 # Create symlink from packages/ dir to cache
@@ -79,13 +82,21 @@ fn do_install(project_dir: text, frozen: bool, dry_run: bool, include_dev: bool)
     var lock: LockFile? = nil
 
     if frozen:
-        lock = parse_lock_file(lock_path)
+        match parse_lock_file(lock_path):
+            case Ok(value): lock = value
+            case Err(error):
+                print "pkg install: {error}"
+                return 1
         if not lock.?:
             print "pkg install: --frozen requires package.lock.sdn to exist"
             return 1
 
     if not frozen:
-        lock = parse_lock_file(lock_path)
+        match parse_lock_file(lock_path):
+            case Ok(value): lock = value
+            case Err(error):
+                print "pkg install: {error}"
+                return 1
 
     # Dry run: just show what would be installed
     if dry_run:
@@ -164,11 +175,6 @@ fn do_install(project_dir: text, frozen: bool, dry_run: bool, include_dev: bool)
 fn do_add(project_dir: text, package_spec: text, git_url: text, git_branch: text,
           git_tag: text, path_dep: text, is_dev: bool) -> i64:
     val manifest_path = "{project_dir}/package.sdn"
-    if not file_exists(manifest_path):
-        print "pkg add: no package.sdn found in {project_dir}"
-        print "Run 'simple pkg init' to create a project."
-        return 1
-
     # Parse name and optional version from spec
     var name = package_spec
     var version_constraint = "*"
@@ -179,7 +185,11 @@ fn do_add(project_dir: text, package_spec: text, git_url: text, git_branch: text
             version_constraint = parts[1]
 
     # Read and parse current manifest
-    val source = rt_file_read_text(manifest_path)
+    val source = match _read_package_source(manifest_path):
+        case Ok(content): content
+        case Err(error):
+            print "pkg add: {error}"
+            return 1
     val manifest_result = parse_manifest(source)
     var manifest: PackageManifest = PackageManifest.empty()
     match manifest_result:
@@ -261,11 +271,11 @@ fn do_add(project_dir: text, package_spec: text, git_url: text, git_branch: text
 
 fn do_remove(project_dir: text, package_name: text, dev_only: bool) -> i64:
     val manifest_path = "{project_dir}/package.sdn"
-    if not file_exists(manifest_path):
-        print "pkg remove: no package.sdn found in {project_dir}"
-        return 1
-
-    val source = rt_file_read_text(manifest_path)
+    val source = match _read_package_source(manifest_path):
+        case Ok(content): content
+        case Err(error):
+            print "pkg remove: {error}"
+            return 1
 
     # Remove the dependency from manifest text
     val lines = source.split("\n")

@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+OUT="${MCDC_RT_HAL_PERF_OUT:-$ROOT/build/perf/mcdc_rt_hal}"
+RUNS="${MCDC_RT_HAL_RUNS:-7}"
+FIXTURE="$ROOT/test/05_perf/mcdc_rt_hal/mcdc_decision_fixture.spl"
+RT_FIXTURE="$ROOT/test/05_perf/mcdc_rt_hal/rt_hal_fixture.spl"
+RT_BUILD_FIXTURE="$ROOT/test/05_perf/mcdc_rt_hal/build_rt_hal_providers.spl"
+ANALYZER_FIXTURE="$ROOT/test/05_perf/mcdc_rt_hal/mcdc_analyzer_fixture.spl"
+CSV="$OUT/evidence.csv"
+mkdir -p "$OUT/bin" "$OUT/raw" "$OUT/heaptrack"
+mkdir -p "$OUT/providers"
+
+FINAL_STATUS="BLOCKED"
+FINAL_DETAIL="run-did-not-complete"
+ACTIVE_SAMPLE_GROUP=""
+
+write_final_receipt() {
+    receipt_revision="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
+    {
+        printf 'revision=%s\n' "$receipt_revision"
+        printf 'runs=%s\n' "$RUNS"
+        printf 'thresholds=test/05_perf/mcdc_rt_hal/thresholds.sdn\n'
+        printf 'evidence=%s\n' "${CSV#$ROOT/}"
+        printf 'status=%s\n' "$FINAL_STATUS"
+        printf 'detail=%s\n' "$FINAL_DETAIL"
+    } >"$OUT/run.receipt"
+}
+
+emergency_cgroup_cleanup() {
+    [ -n "$ACTIVE_SAMPLE_GROUP" ] || return 0
+    cleanup_ok=true
+    if [ -w "$ACTIVE_SAMPLE_GROUP/cgroup.kill" ]; then
+        printf '1\n' >"$ACTIVE_SAMPLE_GROUP/cgroup.kill" 2>/dev/null || cleanup_ok=false
+    fi
+    populated="$(awk '$1=="populated" {print $2}' "$ACTIVE_SAMPLE_GROUP/cgroup.events" 2>/dev/null || true)"
+    [ "$populated" = 0 ] || cleanup_ok=false
+    rmdir "$ACTIVE_SAMPLE_GROUP" 2>/dev/null || cleanup_ok=false
+    ACTIVE_SAMPLE_GROUP=""
+    [ "$cleanup_ok" = true ]
+}
+
+on_exit() {
+    exit_code="$1"
+    trap - EXIT INT TERM HUP
+    if ! emergency_cgroup_cleanup; then
+        FINAL_STATUS="BLOCKED"
+        FINAL_DETAIL="$FINAL_DETAIL;cgroup-cleanup-failed"
+    fi
+    if [ "$FINAL_STATUS" = "RUNNING" ]; then
+        if [ "$exit_code" -eq 1 ]; then FINAL_STATUS="FAIL"; else FINAL_STATUS="BLOCKED"; fi
+        FINAL_DETAIL="unexpected-exit-$exit_code"
+    fi
+    write_final_receipt
+}
+
+on_signal() {
+    FINAL_STATUS="BLOCKED"
+    FINAL_DETAIL="interrupted-signal-$1"
+    exit 2
+}
+
+FINAL_STATUS="RUNNING"
+trap 'on_exit $?' EXIT
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+trap 'on_signal HUP' HUP
+
+blocked() { FINAL_STATUS="BLOCKED"; FINAL_DETAIL="$*"; echo "BLOCKED: $*" >&2; exit 2; }
+command -v size >/dev/null 2>&1 || blocked "binutils size is required"
+command -v heaptrack >/dev/null 2>&1 || blocked "heaptrack is required for allocation evidence"
+command -v heaptrack_print >/dev/null 2>&1 || blocked "heaptrack_print is required"
+[ -x "$SIMPLE_BIN" ] || blocked "Pure Simple compiler not executable: $SIMPLE_BIN"
+case "$RUNS" in ''|*[!0-9]*) blocked "MCDC_RT_HAL_RUNS must be an odd integer >= 3" ;; esac
+[ "$RUNS" -ge 3 ] && [ $((RUNS % 2)) -eq 1 ] || blocked "MCDC_RT_HAL_RUNS must be an odd integer >= 3"
+
+compile_lane() {
+    lane="$1" mode="$2" owner_bytes="$3" output="$4"
+    shift 4
+    "$SIMPLE_BIN" compile "$FIXTURE" --native --release \
+        --mcdc-mode="$mode" --mcdc-owner-bytes="$owner_bytes" \
+        --mcdc-global-bytes=67108864 "$@" -o "$output" \
+        >"$OUT/raw/build-$lane.out" 2>"$OUT/raw/build-$lane.err" || blocked "compile failed for $lane"
+}
+
+compile_lane off static-off 1048576 "$OUT/bin/mcdc-off"
+compile_lane static-on static-on 1048576 "$OUT/bin/mcdc-static-on"
+compile_lane dynamic-dormant dynamic-aspect 1048576 "$OUT/bin/mcdc-dynamic-dormant" --mcdc-dynamic-dormant
+compile_lane dynamic-enabled dynamic-aspect 1048576 "$OUT/bin/mcdc-dynamic"
+compile_lane static-saturation static-on 8192 "$OUT/bin/mcdc-static-saturation"
+"$SIMPLE_BIN" compile "$RT_FIXTURE" --native --release --mcdc-mode=static-off \
+    -o "$OUT/bin/rt-hal" >"$OUT/raw/build-rt-hal.out" \
+    2>"$OUT/raw/build-rt-hal.err" || blocked "compile failed for rt(hal) fixture"
+"$SIMPLE_BIN" compile "$RT_BUILD_FIXTURE" --native --release --mcdc-mode=static-off \
+    -o "$OUT/bin/build-rt-hal-providers" >"$OUT/raw/build-rt-hal-providers.out" \
+    2>"$OUT/raw/build-rt-hal-providers.err" || blocked "compile failed for typed rt(hal) provider builder"
+"$SIMPLE_BIN" compile "$ANALYZER_FIXTURE" --native --release --mcdc-mode=static-off \
+    -o "$OUT/bin/mcdc-analyzer" >"$OUT/raw/build-analyzer.out" \
+    2>"$OUT/raw/build-analyzer.err" || blocked "compile failed for analyzer fixture"
+
+median() { sort -n "$1" | awk '{v[++n]=$1} END {if (!n) exit 1; print v[(n+1)/2]}'; }
+field() {
+    awk -v key="$2" '{for (i=1; i<=NF; i++) if (index($i, key "=")==1) {sub("^" key "=", "", $i); value=$i}} END {print value}' "$1"
+}
+text_bytes() { size -A "$1" | awk '$1==".text" {print $2; found=1} END {if(!found) exit 1}'; }
+allocation_calls() {
+    report="$1"
+    sed -n 's/.*calls to allocation functions:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$report" | head -1
+}
+
+select_exact_trace() {
+    prefix="$1"
+    shopt -s nullglob
+    traces=("$prefix"*.gz)
+    shopt -u nullglob
+    [ "${#traces[@]}" -eq 1 ] || return 1
+    SELECTED_TRACE="${traces[0]}"
+}
+
+echo 'lane,elapsed_ns_p50,whole_tree_peak_kib,parent_pure_allocation_calls,parent_pure_hot_allocation_delta,artifact_bytes,text_bytes,checksum,recorded,dropped,overwritten,saturated,status' >"$CSV"
+
+measure_lane() {
+    lane="$1" binary="$2" argument_name="$3" argument_value="$4"
+    [ -n "$cgroup_parent" ] || blocked "$cgroup_reason"
+    lane_argument="--$argument_name=$argument_value"
+    elapsed_file="$OUT/raw/$lane.elapsed"
+    : >"$elapsed_file"
+    "$binary" "$lane_argument" >"$OUT/raw/$lane.warm.out" 2>"$OUT/raw/$lane.warm.err" || blocked "$lane warm run failed"
+    max_peak=0
+    sample=1
+    checksum=""
+    while [ "$sample" -le "$RUNS" ]; do
+        output="$OUT/raw/$lane.$sample.out"
+        TREE_PEAK_BYTES=""
+        tree_sample "$lane-$sample" "$binary" "$lane_argument" >"$output" 2>"$OUT/raw/$lane.$sample.err" || blocked "$lane sample $sample failed"
+        case "$TREE_PEAK_BYTES" in ''|*[!0-9]*) blocked "$lane $cgroup_reason" ;; esac
+        peak_kib=$((TREE_PEAK_BYTES / 1024)); [ "$peak_kib" -gt "$max_peak" ] && max_peak="$peak_kib"
+        value="$(field "$output" elapsed_ns)"; [ -n "$value" ] || blocked "$lane emitted no elapsed_ns"
+        printf '%s\n' "$value" >>"$elapsed_file"
+        current_checksum="$(field "$output" checksum)"; [ -n "$current_checksum" ] || blocked "$lane emitted no checksum"
+        if [ -n "$checksum" ] && [ "$checksum" != "$current_checksum" ]; then blocked "$lane checksum changed"; fi
+        checksum="$current_checksum"
+        sample=$((sample + 1))
+    done
+
+    heap_prefix="$OUT/heaptrack/$lane.full.$$"
+    empty_prefix="$OUT/heaptrack/$lane.empty.$$"
+    heaptrack -o "$heap_prefix" "$binary" "$lane_argument" >/dev/null 2>"$OUT/raw/$lane.heaptrack.err" || blocked "$lane Heaptrack run failed"
+    heaptrack -o "$empty_prefix" "$binary" "$lane_argument" --empty >/dev/null 2>"$OUT/raw/$lane.heaptrack-empty.err" || blocked "$lane empty Heaptrack run failed"
+    select_exact_trace "$heap_prefix" || blocked "$lane expected exactly one full Heaptrack trace"
+    full_trace="$SELECTED_TRACE"
+    select_exact_trace "$empty_prefix" || blocked "$lane expected exactly one empty Heaptrack trace"
+    empty_trace="$SELECTED_TRACE"
+    heaptrack_print "$full_trace" >"$OUT/heaptrack/$lane.full.txt" || blocked "$lane Heaptrack report failed"
+    heaptrack_print "$empty_trace" >"$OUT/heaptrack/$lane.empty.txt" || blocked "$lane empty Heaptrack report failed"
+    full_alloc="$(allocation_calls "$OUT/heaptrack/$lane.full.txt")"
+    empty_alloc="$(allocation_calls "$OUT/heaptrack/$lane.empty.txt")"
+    [ -n "$full_alloc" ] && [ -n "$empty_alloc" ] || blocked "$lane allocation totals were not parseable"
+    hot_alloc=$((full_alloc - empty_alloc)); [ "$hot_alloc" -ge 0 ] || blocked "$lane allocation delta was negative"
+
+    final="$OUT/raw/$lane.$RUNS.out"
+    recorded="$(field "$final" recorded)"; dropped="$(field "$final" dropped)"
+    overwritten="$(field "$final" overwritten)"; saturated="$(field "$final" saturated)"
+    lane_status="$(field "$final" status)"; [ -n "$lane_status" ] || lane_status="ok"
+    row_status="PASS"
+    if [ "$lane" = dynamic-dormant ]; then
+        dynamic_load_ok="$(field "$final" dynamic_load_ok)"
+        dynamic_published="$(field "$final" dynamic_published)"
+        if [ "$dynamic_load_ok" != false ] || [ "$dynamic_published" != false ] || [ "$recorded" != 0 ]; then row_status="FAIL"; fi
+    elif [ "$lane" = dynamic-enabled ]; then
+        dynamic_load_ok="$(field "$final" dynamic_load_ok)"
+        dynamic_published="$(field "$final" dynamic_published)"
+        case "$recorded" in ''|*[!0-9]*) row_status="FAIL" ;; *) [ "$recorded" -gt 0 ] || row_status="FAIL" ;; esac
+        if [ "$dynamic_load_ok" != true ] || [ "$dynamic_published" != true ]; then row_status="FAIL"; fi
+    elif [ "$lane" = static-on ]; then
+        case "$recorded" in ''|*[!0-9]*) row_status="FAIL" ;; *) [ "$recorded" -gt 0 ] || row_status="FAIL" ;; esac
+    fi
+    case "$lane" in rt-hal-*) [ "$lane_status" = "ok" ] || blocked "$lane unavailable: $lane_status" ;; esac
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$lane" "$(median "$elapsed_file")" "$max_peak" "$full_alloc" "$hot_alloc" \
+        "$(stat -c %s "$binary")" "$(text_bytes "$binary")" "$checksum" \
+        "$recorded" "$dropped" "$overwritten" "$saturated" "$row_status" >>"$CSV"
+}
+
+# Build both fixed providers exactly once. Tool identities are passed to the
+# typed executor and are never printed into benchmark output.
+rt_provider_status="ok"
+cc_path="$(command -v cc || true)"; rustc_path="$(command -v rustc || true)"
+if [ -z "$cc_path" ] || [ -z "$rustc_path" ]; then
+    rt_provider_status="BLOCKED:RTHAL-BUILD-E-TOOLCHAIN"
+else
+    resolved_cc="$(readlink -f "$cc_path" 2>/dev/null || true)"
+    resolved_rustc="$(readlink -f "$rustc_path" 2>/dev/null || true)"
+    cc_hash="$(sha256sum "$resolved_cc" 2>/dev/null | awk '{print $1}' || true)"
+    rustc_hash="$(sha256sum "$resolved_rustc" 2>/dev/null | awk '{print $1}' || true)"
+    if [ -z "$resolved_cc" ] || [ -z "$resolved_rustc" ] || [ -z "$cc_hash" ] || [ -z "$rustc_hash" ]; then
+        rt_provider_status="BLOCKED:RTHAL-BUILD-E-IDENTITY"
+    fi
+    if [ "$rt_provider_status" = ok ]; then
+    "$OUT/bin/build-rt-hal-providers" --repo="$ROOT" --cc="$resolved_cc" --cc-sha256="$cc_hash" \
+        --rustc="$resolved_rustc" --rustc-sha256="$rustc_hash" \
+        --c-output="$OUT/providers/rthal-c-v1" --rust-output="$OUT/providers/rthal-rust-v1" \
+        >"$OUT/raw/rt-hal-provider-build.out" 2>"$OUT/raw/rt-hal-provider-build.err" || rt_provider_status="BLOCKED:RTHAL-BUILD-E-RUN"
+    if [ "$rt_provider_status" = ok ] && [ "$(field "$OUT/raw/rt-hal-provider-build.out" status)" != ok ]; then
+        provider_code="$(field "$OUT/raw/rt-hal-provider-build.out" code)"
+        [ -n "$provider_code" ] || provider_code="RTHAL-BUILD-E-OUTPUT"
+        rt_provider_status="BLOCKED:$provider_code"
+    fi
+    fi
+    if [ "$rt_provider_status" = ok ]; then
+        c_provider_hash="$(sha256sum "$OUT/providers/rthal-c-v1" 2>/dev/null | awk '{print $1}' || true)"
+        rust_provider_hash="$(sha256sum "$OUT/providers/rthal-rust-v1" 2>/dev/null | awk '{print $1}' || true)"
+        if [ -z "$c_provider_hash" ] || [ -z "$rust_provider_hash" ]; then
+            rt_provider_status="BLOCKED:RTHAL-BUILD-E-OUTPUT-IDENTITY"
+        fi
+    fi
+fi
+
+# A fresh child cgroup captures the benchmark and all comparator descendants.
+# Parent-only /usr/bin/time is deliberately not substituted when unavailable.
+cgroup_parent=""
+cgroup_reason="RTHAL-MEM-E-CGROUP-V2"
+cgroup_rel="$(awk -F: '$1=="0" {print $3; exit}' /proc/self/cgroup 2>/dev/null || true)"
+if [ -n "$cgroup_rel" ] && [ -e "/sys/fs/cgroup$cgroup_rel/cgroup.procs" ] \
+        && [ -e "/sys/fs/cgroup$cgroup_rel/memory.peak" ] \
+        && [ -w "/sys/fs/cgroup$cgroup_rel" ]; then
+    cgroup_parent="/sys/fs/cgroup$cgroup_rel"
+fi
+
+finish_sample_group() {
+    group="$1"
+    populated="$(awk '$1=="populated" {print $2}' "$group/cgroup.events" 2>/dev/null || true)"
+    if [ "$populated" != 0 ]; then
+        [ -w "$group/cgroup.kill" ] || return 126
+        printf '1\n' >"$group/cgroup.kill" 2>/dev/null || return 126
+        populated="$(awk '$1=="populated" {print $2}' "$group/cgroup.events" 2>/dev/null || true)"
+        [ "$populated" = 0 ] || return 126
+    fi
+    TREE_PEAK_BYTES="$(cat "$group/memory.peak" 2>/dev/null || true)"
+    case "$TREE_PEAK_BYTES" in ''|*[!0-9]*) return 127 ;; esac
+    rmdir "$group" 2>/dev/null || return 124
+    ACTIVE_SAMPLE_GROUP=""
+    return 0
+}
+
+tree_sample() {
+    sample_group="$cgroup_parent/simple-rthal-perf-$$-$1"
+    shift
+    mkdir "$sample_group" 2>/dev/null || return 125
+    ACTIVE_SAMPLE_GROUP="$sample_group"
+    ( printf '%s\n' "$BASHPID" >"$sample_group/cgroup.procs" || exit 125; exec "$@" )
+    tree_rc=$?
+    if finish_sample_group "$sample_group"; then
+        :
+    else
+        cleanup_rc=$?
+        emergency_cgroup_cleanup || true
+        return "$cleanup_rc"
+    fi
+    return "$tree_rc"
+}
+
+# Every numeric memory column is a fresh cgroup-v2 process-tree peak. This is
+# intentionally shared by MC/DC, analyzer, and RT/HAL rows so the RSS gates
+# never compare parent-only values against descendant-inclusive values.
+measure_lane off "$OUT/bin/mcdc-off" lane off
+measure_lane static-on "$OUT/bin/mcdc-static-on" lane static-on
+measure_lane dynamic-dormant "$OUT/bin/mcdc-dynamic-dormant" lane dynamic-dormant
+measure_lane dynamic-enabled "$OUT/bin/mcdc-dynamic" lane dynamic-enabled
+measure_lane static-saturation "$OUT/bin/mcdc-static-saturation" lane static-on
+
+append_rt_blocked() {
+    artifact_bytes="$(stat -c %s "$OUT/bin/rt-hal" 2>/dev/null || true)"
+    rt_text_bytes="$(text_bytes "$OUT/bin/rt-hal" 2>/dev/null || true)"
+    [ -n "$artifact_bytes" ] || artifact_bytes=0
+    [ -n "$rt_text_bytes" ] || rt_text_bytes=0
+    printf '%s,0,0,0,0,%s,%s,0,,,,,%s\n' "$1" \
+        "$artifact_bytes" "$rt_text_bytes" "$2" >>"$CSV"
+}
+
+measure_rt_lane() {
+    rt_lane="$1"; lane="rt-hal-$rt_lane"
+    if [ "$rt_lane" != pure ] && [ "$rt_provider_status" != ok ]; then
+        append_rt_blocked "$lane" "$rt_provider_status"; return
+    fi
+    if [ -z "$cgroup_parent" ]; then
+        append_rt_blocked "$lane" "BLOCKED:$cgroup_reason"; return
+    fi
+    args=(--lane="$rt_lane")
+    if [ "$rt_lane" != pure ]; then
+        args+=(--repo="$ROOT" --c-provider="$OUT/providers/rthal-c-v1" --c-sha256="$c_provider_hash"
+            --rust-provider="$OUT/providers/rthal-rust-v1" --rust-sha256="$rust_provider_hash")
+    fi
+    "$OUT/bin/rt-hal" "${args[@]}" >"$OUT/raw/$lane.warm.out" 2>"$OUT/raw/$lane.warm.err" || {
+        append_rt_blocked "$lane" "BLOCKED:RTHAL-E-WARM-RUN"; return; }
+    warm_status="$(field "$OUT/raw/$lane.warm.out" status 2>/dev/null || true)"
+    if [ "$warm_status" != ok ]; then
+        [ -n "$warm_status" ] || warm_status="BLOCKED:RTHAL-E-WARM-OUTPUT"
+        append_rt_blocked "$lane" "$warm_status"; return
+    fi
+    elapsed_file="$OUT/raw/$lane.elapsed"; : >"$elapsed_file"
+    max_peak=0; checksum=""; sample=1
+    while [ "$sample" -le "$RUNS" ]; do
+        output="$OUT/raw/$lane.$sample.out"
+        TREE_PEAK_BYTES=""
+        tree_sample "$lane-$sample" "$OUT/bin/rt-hal" "${args[@]}" >"$output" 2>"$OUT/raw/$lane.$sample.err" || {
+            append_rt_blocked "$lane" "BLOCKED:RTHAL-E-SAMPLE"; return; }
+        case "$TREE_PEAK_BYTES" in ''|*[!0-9]*) append_rt_blocked "$lane" "BLOCKED:$cgroup_reason"; return ;; esac
+        peak_kib=$((TREE_PEAK_BYTES / 1024)); [ "$peak_kib" -gt "$max_peak" ] && max_peak="$peak_kib"
+        lane_status="$(field "$output" status 2>/dev/null || true)"; [ -n "$lane_status" ] || lane_status="BLOCKED:RTHAL-E-SAMPLE-STATUS"
+        [ "$lane_status" = ok ] || {
+            append_rt_blocked "$lane" "$lane_status"; return; }
+        value="$(field "$output" elapsed_ns 2>/dev/null || true)"; current="$(field "$output" checksum 2>/dev/null || true)"
+        [ -n "$value" ] && [ -n "$current" ] || { append_rt_blocked "$lane" "BLOCKED:RTHAL-E-OUTPUT"; return; }
+        [ -z "$checksum" ] || [ "$checksum" = "$current" ] || { append_rt_blocked "$lane" "BLOCKED:RTHAL-E-CHECKSUM"; return; }
+        checksum="$current"; printf '%s\n' "$value" >>"$elapsed_file"; sample=$((sample + 1))
+    done
+    # Heaptrack observes this parent Pure process only. Static comparator child
+    # allocations are intentionally neither measured nor claimed.
+    heap_prefix="$OUT/heaptrack/$lane.parent-pure.full.$$"
+    empty_prefix="$OUT/heaptrack/$lane.parent-pure.empty.$$"
+    heaptrack -o "$heap_prefix" "$OUT/bin/rt-hal" "${args[@]}" >/dev/null 2>"$OUT/raw/$lane.heaptrack.err" || {
+        append_rt_blocked "$lane" "BLOCKED:RTHAL-ALLOC-E-HEAPTRACK"; return; }
+    heaptrack -o "$empty_prefix" "$OUT/bin/rt-hal" "${args[@]}" --empty >/dev/null 2>"$OUT/raw/$lane.heaptrack-empty.err" || {
+        append_rt_blocked "$lane" "BLOCKED:RTHAL-ALLOC-E-HEAPTRACK"; return; }
+    select_exact_trace "$heap_prefix" || { append_rt_blocked "$lane" "BLOCKED:RTHAL-ALLOC-E-FULL-TRACE-COUNT"; return; }
+    full_trace="$SELECTED_TRACE"
+    select_exact_trace "$empty_prefix" || { append_rt_blocked "$lane" "BLOCKED:RTHAL-ALLOC-E-EMPTY-TRACE-COUNT"; return; }
+    empty_trace="$SELECTED_TRACE"
+    heaptrack_print "$full_trace" >"$OUT/heaptrack/$lane.parent-pure.full.txt" || {
+        append_rt_blocked "$lane" "BLOCKED:RTHAL-ALLOC-E-FULL-REPORT"; return; }
+    heaptrack_print "$empty_trace" >"$OUT/heaptrack/$lane.parent-pure.empty.txt" || {
+        append_rt_blocked "$lane" "BLOCKED:RTHAL-ALLOC-E-EMPTY-REPORT"; return; }
+    full_alloc="$(allocation_calls "$OUT/heaptrack/$lane.parent-pure.full.txt" 2>/dev/null || true)"
+    empty_alloc="$(allocation_calls "$OUT/heaptrack/$lane.parent-pure.empty.txt" 2>/dev/null || true)"
+    [ -n "$full_alloc" ] && [ -n "$empty_alloc" ] || { append_rt_blocked "$lane" "BLOCKED:RTHAL-ALLOC-E-PARSE"; return; }
+    hot_alloc=$((full_alloc - empty_alloc)); [ "$hot_alloc" -ge 0 ] || { append_rt_blocked "$lane" "BLOCKED:RTHAL-ALLOC-E-DELTA"; return; }
+    lane_median="$(median "$elapsed_file" 2>/dev/null || true)"
+    artifact_bytes="$(stat -c %s "$OUT/bin/rt-hal" 2>/dev/null || true)"
+    rt_text_bytes="$(text_bytes "$OUT/bin/rt-hal" 2>/dev/null || true)"
+    [ -n "$lane_median" ] && [ -n "$artifact_bytes" ] && [ -n "$rt_text_bytes" ] || {
+        append_rt_blocked "$lane" "BLOCKED:RTHAL-E-FINALIZE"; return; }
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,,,,,PASS\n' "$lane" "$lane_median" "$max_peak" \
+        "$full_alloc" "$hot_alloc" "$artifact_bytes" "$rt_text_bytes" "$checksum" >>"$CSV"
+}
+
+for lane in pure c rust c-rust; do measure_rt_lane "$lane"; done
+for scale in base double-e double-c; do
+    measure_lane "analyzer-$scale" "$OUT/bin/mcdc-analyzer" scale "$scale"
+done
+
+awk -F, '
+NR==1 {next}
+{time[$1]=$2; rss[$1]=$3; alloc[$1]=$5; text[$1]=$7; sum[$1]=$8; sat[$1]=$12; status[$1]=$13}
+END {
+  fail=0
+  required["off"]=1; required["static-on"]=1
+  required["dynamic-dormant"]=1; required["dynamic-enabled"]=1
+  required["static-saturation"]=1
+  required["analyzer-base"]=1; required["analyzer-double-e"]=1
+  required["analyzer-double-c"]=1
+  for (lane in required) {
+    if (status[lane] != "PASS") {
+      print "FAIL: required evidence row did not pass: " lane > "/dev/stderr"; fail=1
+    }
+  }
+  if (sum["off"] != sum["static-on"] || sum["off"] != sum["dynamic-dormant"] || sum["off"] != sum["dynamic-enabled"]) {print "FAIL: checksum parity" > "/dev/stderr"; fail=1}
+  if (status["static-on"] == "FAIL") {print "FAIL: static-on recorded no MC/DC evidence" > "/dev/stderr"; fail=1}
+  if (status["dynamic-dormant"] == "FAIL") {print "FAIL: dynamic dormant aspect was active or recorded evidence" > "/dev/stderr"; fail=1}
+  if (status["dynamic-enabled"] == "FAIL") {print "FAIL: dynamic enabled aspect was not published/recording" > "/dev/stderr"; fail=1}
+  if (text["off"] != text["static-saturation"] && text["off"] != text["static-on"]) { } # static-on is expected to contain probes
+  if (alloc["off"] != 0 || alloc["static-on"] != 0 || alloc["dynamic-dormant"] != 0 || alloc["dynamic-enabled"] != 0) {print "FAIL: hot-path allocation delta" > "/dev/stderr"; fail=1}
+  if ((time["static-on"]-time["off"])*10000 > time["off"]*500) {print "FAIL: NFR-002 time" > "/dev/stderr"; fail=1}
+  if ((rss["static-on"]-rss["off"])*10000 > rss["off"]*500) {print "FAIL: NFR-002 RSS" > "/dev/stderr"; fail=1}
+  if ((time["dynamic-dormant"]-time["off"])*10000 > time["off"]*100) {print "FAIL: NFR-003 dormant time" > "/dev/stderr"; fail=1}
+  if ((rss["dynamic-dormant"]-rss["off"])*10000 > rss["off"]*100) {print "FAIL: NFR-003 dormant RSS" > "/dev/stderr"; fail=1}
+  if ((time["dynamic-enabled"]-time["off"])*10000 > time["off"]*1000) {print "FAIL: NFR-003 enabled time" > "/dev/stderr"; fail=1}
+  if ((rss["dynamic-enabled"]-rss["off"])*10000 > rss["off"]*500) {print "FAIL: NFR-003 enabled RSS" > "/dev/stderr"; fail=1}
+  if (sat["static-saturation"] != "true") {print "FAIL: NFR-004 saturation not observed" > "/dev/stderr"; fail=1}
+  if (time["analyzer-double-e"]*10000 > time["analyzer-base"]*25000) {print "FAIL: NFR-005 evaluation scaling" > "/dev/stderr"; fail=1}
+  if (time["analyzer-double-c"]*10000 > time["analyzer-base"]*25000) {print "FAIL: NFR-005 condition scaling" > "/dev/stderr"; fail=1}
+  if (rss["analyzer-double-e"]*10000 > rss["analyzer-base"]*25000) {print "FAIL: NFR-005 evaluation RSS scaling" > "/dev/stderr"; fail=1}
+  if (rss["analyzer-double-c"]*10000 > rss["analyzer-base"]*25000) {print "FAIL: NFR-005 condition RSS scaling" > "/dev/stderr"; fail=1}
+  if (status["rt-hal-pure"] == "PASS" && status["rt-hal-c"] == "PASS" &&
+      status["rt-hal-rust"] == "PASS" && status["rt-hal-c-rust"] == "PASS" &&
+      (sum["rt-hal-pure"] != sum["rt-hal-c"] || sum["rt-hal-pure"] != sum["rt-hal-rust"] ||
+       sum["rt-hal-pure"] != sum["rt-hal-c-rust"])) {print "FAIL: RT/HAL Pure receipt checksum parity" > "/dev/stderr"; fail=1}
+  exit fail
+}' "$CSV" || { FINAL_STATUS="FAIL"; FINAL_DETAIL="nfr-gate-failed"; exit 1; }
+
+# Static-off is compared against a second explicit static-off build to make
+# the zero attributable text-size gate independent of timestamps/build IDs.
+"$SIMPLE_BIN" compile "$FIXTURE" --native --release \
+    -o "$OUT/bin/mcdc-off-control" >"$OUT/raw/build-off-control.out" \
+    2>"$OUT/raw/build-off-control.err" || blocked "compile failed for no-MC/DC control"
+[ "$(text_bytes "$OUT/bin/mcdc-off")" = "$(text_bytes "$OUT/bin/mcdc-off-control")" ] || {
+    FINAL_STATUS="FAIL"; FINAL_DETAIL="NFR-001-static-off-text-delta"
+    echo "FAIL: NFR-001 static-off .text delta" >&2; exit 1; }
+
+rt_blocked_rows="$(awk -F, '$1 ~ /^rt-hal-/ && $13 != "PASS" {print $1 "=" $13}' "$CSV")"
+if [ -n "$rt_blocked_rows" ]; then
+    FINAL_STATUS="BLOCKED"
+    FINAL_DETAIL="$(printf '%s' "$rt_blocked_rows" | tr '\n' ';')"
+    echo "BLOCKED: RT/HAL evidence incomplete; all lanes were retained in ${CSV#$ROOT/}" >&2
+    exit 2
+fi
+FINAL_STATUS="PASS"
+FINAL_DETAIL="all-required-evidence-passed"
+echo "PASS: evidence written to ${CSV#$ROOT/}"

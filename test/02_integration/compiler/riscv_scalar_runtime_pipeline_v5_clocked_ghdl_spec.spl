@@ -1,0 +1,199 @@
+# codex-system-test
+#
+# Clocked, black-box evidence for the strict v5 top.  This deliberately uses
+# the frozen public ABI and the backend entrypoint: it does not reach into a
+# child or rely on the construction-only receipt.  Fixed-cycle timing is not
+# part of the public contract, so the bench uses bounded handshake deadlines
+# and verifies stability while each visible handshake is backpressured.
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_unique_workdir, ghdl_analyze_in,
+    ghdl_elaborate_in, ghdl_run_in, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v5_to_vhdl.{
+    compile_strict_riscv_scalar_runtime_pipeline_v5}
+
+fn runtime_pipeline_v5_clocked_tb(entity_name: text) -> text:
+    """
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.env.all;
+entity {entity_name}_tb is end entity;
+architecture sim of {entity_name}_tb is
+  signal clk, rst, in_valid, completion_ready : std_logic := '0';
+  signal instruction : std_logic_vector(31 downto 0) := (others => '0');
+  signal instruction_length_bytes : std_logic_vector(2 downto 0) := "100";
+  signal rs1_value, rs2_value, pc_before, fallthrough_pc : std_logic_vector(31 downto 0) := (others => '0');
+  signal privilege : std_logic_vector(1 downto 0) := "11";
+  signal provider_event_id, decode_event_id : std_logic_vector(63 downto 0) := (others => '0');
+  signal bus_request_ready, bus_response_valid, bus_response_fault, fence_effect_ready : std_logic := '0';
+  signal bus_response_id : std_logic_vector(63 downto 0) := (others => '0');
+  signal bus_response_data, bus_response_cause, bus_response_tval : std_logic_vector(31 downto 0) := (others => '0');
+  signal in_ready, completion_valid, completion_rd_write, runtime_protocol_fault : std_logic;
+  signal completion_rd : std_logic_vector(4 downto 0);
+  signal completion_rd_value : std_logic_vector(31 downto 0);
+  signal bus_request_valid, bus_request_write, bus_response_ready : std_logic;
+  signal bus_request_id : std_logic_vector(63 downto 0);
+  signal bus_request_address : std_logic_vector(31 downto 0);
+  signal bus_request_byte_mask : std_logic_vector(3 downto 0);
+  signal bus_request_write_data : std_logic_vector(31 downto 0);
+  signal fence_effect_valid : std_logic;
+  signal fence_effect_kind : std_logic_vector(1 downto 0);
+  signal fence_effect_fm, fence_effect_pred, fence_effect_succ : std_logic_vector(3 downto 0);
+begin
+  dut: entity work.{entity_name} port map(
+    clk=>clk, rst=>rst, in_valid=>in_valid, instruction=>instruction,
+    instruction_length_bytes=>instruction_length_bytes, rs1_value=>rs1_value,
+    rs2_value=>rs2_value, pc_before=>pc_before, fallthrough_pc=>fallthrough_pc,
+    privilege=>privilege, provider_event_id=>provider_event_id,
+    decode_event_id=>decode_event_id, completion_ready=>completion_ready,
+    bus_request_ready=>bus_request_ready, bus_response_valid=>bus_response_valid,
+    bus_response_id=>bus_response_id, bus_response_data=>bus_response_data,
+    bus_response_fault=>bus_response_fault, bus_response_cause=>bus_response_cause,
+    bus_response_tval=>bus_response_tval, fence_effect_ready=>fence_effect_ready,
+    in_ready=>in_ready, completion_valid=>completion_valid,
+    completion_rd=>completion_rd, completion_rd_write=>completion_rd_write,
+    completion_rd_value=>completion_rd_value,
+    runtime_protocol_fault=>runtime_protocol_fault,
+    bus_request_valid=>bus_request_valid, bus_request_id=>bus_request_id,
+    bus_request_address=>bus_request_address, bus_request_write=>bus_request_write,
+    bus_request_byte_mask=>bus_request_byte_mask,
+    bus_request_write_data=>bus_request_write_data, bus_response_ready=>bus_response_ready,
+    fence_effect_valid=>fence_effect_valid, fence_effect_kind=>fence_effect_kind,
+    fence_effect_fm=>fence_effect_fm, fence_effect_pred=>fence_effect_pred,
+    fence_effect_succ=>fence_effect_succ,
+    completion_privilege=>open, completion_original_instruction=>open,
+    completion_canonical_instruction=>open, completion_instruction_length_bytes=>open,
+    completion_pc_before=>open, completion_pc_after=>open,
+    completion_memory_address=>open, completion_memory_read_mask=>open,
+    completion_memory_write_mask=>open, completion_memory_read_data=>open,
+    completion_memory_write_data=>open, completion_execute_trap_valid=>open,
+    completion_execute_trap_cause=>open, completion_execute_trap_tval=>open,
+    completion_memory_trap_valid=>open, completion_memory_trap_cause=>open,
+    completion_memory_trap_tval=>open, completion_redirect_valid=>open,
+    completion_redirect_target=>open, completion_provider_event_id=>open,
+    completion_decode_event_id=>open, completion_illegal_valid=>open);
+  process
+    procedure tick is begin
+      wait for 1 ns; clk<='1'; wait for 1 ns; clk<='0'; wait for 1 ns;
+    end procedure;
+    procedure drive(constant insn : std_logic_vector(31 downto 0);
+      constant lhs, rhs, pc : std_logic_vector(31 downto 0); constant id : natural) is begin
+      in_valid<='1'; instruction<=insn; rs1_value<=lhs; rs2_value<=rhs;
+      pc_before<=pc; fallthrough_pc<=std_logic_vector(unsigned(pc)+4);
+      provider_event_id<=std_logic_vector(to_unsigned(id,64));
+      decode_event_id<=std_logic_vector(to_unsigned(id,64));
+    end procedure;
+    procedure await_completion(constant label_text : string) is begin
+      for n in 1 to 12 loop
+        if completion_valid='1' then return; end if;
+        tick;
+      end loop;
+      assert false report label_text severity failure;
+    end procedure;
+    procedure await_request(constant label_text : string) is begin
+      for n in 1 to 12 loop
+        if bus_request_valid='1' then return; end if;
+        tick;
+      end loop;
+      assert false report label_text severity failure;
+    end procedure;
+    procedure await_effect(constant label_text : string) is begin
+      for n in 1 to 12 loop
+        if fence_effect_valid='1' then return; end if;
+        tick;
+      end loop;
+      assert false report label_text severity failure;
+    end procedure;
+    variable request_id : std_logic_vector(63 downto 0);
+  begin
+    rst<='1'; tick; rst<='0'; wait for 1 ns;
+    assert in_ready='1' and completion_valid='0' and runtime_protocol_fault='0'
+      report "v5 reset state is invalid" severity failure;
+
+    -- ADD x5,x6,x7: retain its completion until the explicit consume.
+    assert in_ready='1' report "ADD was driven without an accepted input slot" severity failure;
+    drive(x"007302B3", x"00000011", x"00000022", x"00000100", 1);
+    tick; in_valid<='0'; await_completion("ADD did not complete within bounded v5 latency");
+    assert completion_rd="00101" and completion_rd_write='1' and
+      completion_rd_value=x"00000033" report "ADD completion payload mismatch" severity failure;
+    tick;
+    assert completion_valid='1' and completion_rd_value=x"00000033"
+      report "ADD completion was not held under backpressure" severity failure;
+    completion_ready<='1'; tick; completion_ready<='0';
+    assert completion_valid='0' report "ADD completion was not consumed once" severity failure;
+
+    -- LW x1,0(x2): request and response are independent public handshakes.
+    assert in_ready='1' report "LW was driven without an accepted input slot" severity failure;
+    drive(x"00012083", x"00000200", x"00000000", x"00000200", 2);
+    tick; in_valid<='0'; await_request("LW did not issue a bus request within bounded v5 latency");
+    request_id:=bus_request_id;
+    assert bus_request_write='0' and bus_request_address=x"00000200" and
+      bus_request_byte_mask="1111" report "LW request metadata mismatch" severity failure;
+    tick;
+    assert bus_request_valid='1' and bus_request_id=request_id
+      report "LW request was not held under bus backpressure" severity failure;
+    bus_request_ready<='1'; tick; bus_request_ready<='0';
+    assert bus_request_valid='0' and bus_response_ready='1'
+      report "LW request acceptance did not enable response ownership" severity failure;
+    bus_response_id<=request_id; bus_response_data<=x"AABBCCDD"; bus_response_valid<='1';
+    tick; bus_response_valid<='0'; await_completion("LW response did not retire through v5");
+    assert completion_rd="00001" and completion_rd_write='1' and
+      completion_rd_value=x"AABBCCDD" report "LW completion payload mismatch" severity failure;
+    tick; assert completion_valid='1' and completion_rd_value=x"AABBCCDD"
+      report "LW completion was not held under backpressure" severity failure;
+    completion_ready<='1'; tick; completion_ready<='0';
+    assert completion_valid='0' report "LW completion was not consumed once" severity failure;
+
+    -- FENCE: its effect holds until accepted, then its completion holds separately.
+    assert in_ready='1' report "FENCE was driven without an accepted input slot" severity failure;
+    drive(x"0FF0000F", x"00000000", x"00000000", x"00000300", 3);
+    tick; in_valid<='0'; await_effect("FENCE did not present an effect within bounded v5 latency");
+    assert fence_effect_kind="01" and fence_effect_fm="0000" and
+      fence_effect_pred="1111" and fence_effect_succ="1111"
+      report "FENCE effect payload mismatch" severity failure;
+    tick; assert fence_effect_valid='1' report "FENCE effect was not held under backpressure" severity failure;
+    fence_effect_ready<='1'; tick; fence_effect_ready<='0';
+    assert fence_effect_valid='0' report "FENCE effect was not consumed once" severity failure;
+    await_completion("FENCE did not complete after accepted effect");
+    assert completion_rd_write='0' report "FENCE wrote a register" severity failure;
+    tick; assert completion_valid='1' report "FENCE completion was not held under backpressure" severity failure;
+    completion_ready<='1'; tick; completion_ready<='0';
+    assert completion_valid='0' report "FENCE completion was not consumed once" severity failure;
+
+    -- A response with no outstanding request must fail-stop, and reset is recovery.
+    assert bus_response_ready='0' report "orphan response was injected while a request was still owned" severity failure;
+    bus_response_id<=x"0000000000000042"; bus_response_valid<='1'; tick; bus_response_valid<='0';
+    assert runtime_protocol_fault='1' and in_ready='0' and completion_valid='0' and
+      bus_request_valid='0' and fence_effect_valid='0'
+      report "v5 fault gate did not suppress public handshakes" severity failure;
+    tick; assert runtime_protocol_fault='1' report "v5 fault was not sticky" severity failure;
+    rst<='1'; tick; rst<='0'; wait for 1 ns;
+    assert runtime_protocol_fault='0' and in_ready='1' and completion_valid='0'
+      report "reset did not recover v5 fault gate" severity failure;
+    finish;
+  end process;
+end architecture;
+"""
+
+fn simulate_runtime_pipeline_v5_clocked(entity_name: text) -> bool:
+    val emitted = compile_strict_riscv_scalar_runtime_pipeline_v5(entity_name,
+        CoreConfig.rv32(), LsuConfig.xlen(32))
+    if not emitted.is_success(): return false
+    val workdir = ghdl_unique_workdir(entity_name)
+    if workdir.is_err(): return false
+    val isolated = workdir.ok().unwrap()
+    val path = isolated + "/" + entity_name + ".vhd"
+    if not vhdl_write_file(path, emitted.vhdl + "\n" + runtime_pipeline_v5_clocked_tb(entity_name)):
+        return false
+    if not ghdl_analyze_in(path, isolated).success: return false
+    if not ghdl_elaborate_in(entity_name + "_tb", isolated).success: return false
+    ghdl_run_in(entity_name + "_tb", Some("2us"), isolated).success
+
+describe "runtime scalar pipeline v5 clocked GHDL integration":
+    slow_it "hard-fails without GHDL and proves ADD, LW, FENCE, sticky fault and reset through the v5 top":
+        val available = ghdl_available()
+        expect(available).to_equal(true)
+        if not available: return
+        expect(simulate_runtime_pipeline_v5_clocked("runtime_pipeline_v5_clocked_rv32")).to_equal(true)

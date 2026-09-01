@@ -546,10 +546,22 @@ impl BridgeValue {
         match self.tag {
             bridge_tags::NIL => Value::Nil,
             bridge_tags::INT => Value::Int(self.payload as i64),
-            bridge_tags::UINT8 => Value::UInt { value: self.payload, width: 8 },
-            bridge_tags::UINT16 => Value::UInt { value: self.payload, width: 16 },
-            bridge_tags::UINT32 => Value::UInt { value: self.payload, width: 32 },
-            bridge_tags::UINT64 => Value::UInt { value: self.payload, width: 64 },
+            bridge_tags::UINT8 => Value::UInt {
+                value: self.payload,
+                width: 8,
+            },
+            bridge_tags::UINT16 => Value::UInt {
+                value: self.payload,
+                width: 16,
+            },
+            bridge_tags::UINT32 => Value::UInt {
+                value: self.payload,
+                width: 32,
+            },
+            bridge_tags::UINT64 => Value::UInt {
+                value: self.payload,
+                width: 64,
+            },
             bridge_tags::FLOAT => Value::Float(f64::from_bits(self.payload)),
             bridge_tags::BOOL => Value::Bool(self.payload != 0),
             bridge_tags::STRING => {
@@ -810,7 +822,13 @@ mod tests {
         assert_eq!(narrow, wide);
         assert_eq!(narrow, signed);
         assert_eq!(wide, signed);
-        assert_ne!(Value::UInt { value: u64::MAX, width: 64 }, Value::Int(-1));
+        assert_ne!(
+            Value::UInt {
+                value: u64::MAX,
+                width: 64
+            },
+            Value::Int(-1)
+        );
     }
 
     #[test]

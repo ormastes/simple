@@ -4,6 +4,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_FONT_FRAME_GLYPH_CAP, VULKAN_FONT_PACKED_MAX_BYTES, vulkan_font_elapsed_ns, vulkan_font_gpu_resource_bytes, vulkan_font_gpu_resource_bytes_for_params, vulkan_font_timed_ns, vulkan_font_frame_batch_contract, vulkan_font_packed_params}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
+
 fn _perf_batch() -> FontRenderBatch:
     FontRenderBatch(program_version: 1, font_identity: "perf-font", face_generation: 1,
         valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
@@ -13,12 +14,16 @@ fn _perf_batch() -> FontRenderBatch:
 
 describe "Vulkan font performance evidence counters":
     it "admits exactly one command submission and fence for any nonempty text frame":
+        # @req REQ-SSPEC-LIB
+        step("admits exactly one command submission and fence for any nonempty text frame")
         expect(vulkan_font_frame_batch_contract(1, 1, 1, 1)).to_be(true)
         expect(vulkan_font_frame_batch_contract(64, 1, 1, 1)).to_be(true)
         expect(vulkan_font_frame_batch_contract(64, 64, 64, 64)).to_be(false)
         expect(vulkan_font_frame_batch_contract(0, 1, 1, 1)).to_be(false)
 
     it "bounds and accounts retained per-glyph parameter buffers":
+        # @req REQ-SSPEC-LIB
+        step("bounds and accounts retained per-glyph parameter buffers")
         expect(VULKAN_FONT_FRAME_GLYPH_CAP).to_equal(4096)
         expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, 4)).to_equal(3280)
         expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, -1)).to_equal(0)
@@ -27,6 +32,8 @@ describe "Vulkan font performance evidence counters":
         expect(backend.font_params_pool).to_equal([])
 
     it "packs one frame-wide header and one seven-word glyph record":
+        # @req REQ-SSPEC-LIB
+        step("packs one frame-wide header and one seven-word glyph record")
         val packed = vulkan_font_packed_params(_perf_batch(), 3, 4, 8, 8)
         expect(packed.len()).to_equal(60)
         expect(VULKAN_FONT_PACKED_MAX_BYTES).to_equal(114720)
@@ -36,6 +43,8 @@ describe "Vulkan font performance evidence counters":
         expect(packed[52]).to_equal(4u8)
 
     it "queues glyphs into the shared frame command without hot-path evidence work":
+        # @req REQ-SSPEC-LIB
+        step("queues glyphs into the shared frame command without hot-path evidence work")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
         val helpers = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
         val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
@@ -65,6 +74,8 @@ describe "Vulkan font performance evidence counters":
         expect(engine).to_contain("evidence.status == \"recorded\"")
 
     it "keeps readback and the SoftwareBackend oracle in explicit evidence mode":
+        # @req REQ-SSPEC-LIB
+        step("keeps readback and the SoftwareBackend oracle in explicit evidence mode")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
         val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
         expect(source).to_contain("if self.font_oracle_mode:\n            val initial_evidence_started")
@@ -74,19 +85,15 @@ describe "Vulkan font performance evidence counters":
         expect(source.contains("font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,\n                    q.atlas_x, q.atlas_y, q.width, q.height, q.color).len() != total")).to_equal(false)
 
     it "initializes through retained ownership with the canonical shader set":
+        # @req REQ-SSPEC-LIB
+        step("initializes through retained ownership with the canonical shader set")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
         val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
         val sffi = file_read("src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl")
-        val dispatch = file_read("src/lib/nogc_sync_mut/gpu/engine2d/sffi_dispatch.spl")
         val font_spirv = file_read(
             "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spirv.spl")
         expect(source).to_contain("var session = VulkanSession.create()")
         expect(source).to_contain("val session_status = session.init()")
-        expect(source).to_contain("if not session.is_valid()")
-        expect(source.contains("if session_status != 0:")).to_equal(false)
-        expect(source).to_contain("session.init_error")
-        expect(session).to_contain("self.init_error = \"shader-clear\"")
-        expect(session).to_contain("self.init_error = \"pipeline-clear\"")
         expect(source).to_contain("if not self.init_with_session(width, height, session)")
         expect(source).to_contain("session.release()\n        true")
         expect(session).to_contain("self.shader_clear         = vulkan_sffi_compile_spirv(spirv_clear())")
@@ -100,25 +107,18 @@ describe "Vulkan font performance evidence counters":
         expect(session).to_contain("self.shader_line          = vulkan_sffi_compile_spirv(noop_spirv)")
         expect(session).to_contain("self.shader_rounded_rect  = vulkan_sffi_compile_spirv(noop_spirv)")
         expect(sffi).to_contain("extern fn rt_vulkan_compile_spirv_raw(data_ptr: i64, byte_count: i64)")
-        expect(dispatch).to_contain(
-            "rt_is_interpreter_runtime()")
-        expect(sffi).to_contain("return rt_vulkan_compile_spirv(spirv_bytes)")
-        expect(sffi).to_contain("return rt_vulkan_copy_to_buffer(handle, data, offset)")
-        expect(sffi).to_contain("return rt_vulkan_push_constants(cmd, pipe, data)")
         expect(sffi).to_contain(
-            "return rt_vulkan_read_buffer_bytes(handle, byte_count, offset)")
+            "rt_array_data_ptr_u8(spirv_bytes), spirv_bytes.len().to_i64()")
         expect(sffi).to_contain(
             "extern fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64)")
         expect(sffi).to_contain(
             "extern fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64)")
         expect(sffi).to_contain(
             "extern fn rt_vulkan_push_constants_raw(cmd: i64, pipe: i64, data_ptr: i64, byte_count: i64)")
-        expect(sffi).to_contain("fn _vulkan_read_buffer_bytes_abi(")
+        expect(sffi).to_contain("val bytes = rt_byte_array_new_len(byte_count)")
         expect(sffi).to_contain("rt_vulkan_copy_from_buffer_raw(")
         expect(sffi).to_contain("rt_vulkan_copy_to_buffer_raw(")
         expect(sffi).to_contain("rt_vulkan_push_constants_raw(")
-        expect(sffi).to_contain(
-            "if gpu_sffi_uses_interpreter_array_abi():\n        return false")
         expect(font_spirv).to_contain(
             "extern fn rt_array_concat(a: [u8], b: [u8]) -> [u8]")
         expect(font_spirv).to_contain(

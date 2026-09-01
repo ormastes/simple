@@ -114,9 +114,15 @@ impl<'a> Parser<'a> {
                         self.parse_expression()?
                     }
                 } else {
-                    // Inline expression - disable forced indentation after parsing
-                    let expr = self.parse_expression()?;
+                    // Inline expression continuing onto later lines (e.g. a
+                    // trailing `and`/`or`) must not see forced Indent/Dedent
+                    // tokens for its continuation -- disable BEFORE parsing,
+                    // not after. See the matching fix + comment in
+                    // parse_lambda_body (expressions/helpers.rs) and
+                    // doc/08_tracking/bug/
+                    // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md
                     self.lexer.disable_forced_indentation();
+                    let expr = self.parse_expression()?;
                     expr
                 };
 

@@ -1,0 +1,28 @@
+# codex-impl
+# Release-candidate and immutable publication transitions.
+
+use std.scv.lifecycle.model.{ReleaseCandidate, ReleaseIdentity, LifecycleResult, lifecycle_ok, lifecycle_error}
+
+fn lifecycle_candidate_transition(candidate: ReleaseCandidate, next_state: text) -> LifecycleResult:
+    val allowed =
+        (candidate.state == "planned" and next_state == "candidate_created") or
+        (candidate.state == "candidate_created" and (next_state == "source_frozen" or next_state == "abandoned")) or
+        (candidate.state == "source_frozen" and (next_state == "verified" or next_state == "abandoned")) or
+        (candidate.state == "verified" and (next_state == "reviewed" or next_state == "abandoned")) or
+        (candidate.state == "reviewed" and (next_state == "publication_ready" or next_state == "abandoned"))
+    if not allowed:
+        return lifecycle_error("LIFECYCLE_CANDIDATE_TRANSITION", "invalid release candidate transition: " + candidate.state + " -> " + next_state)
+    lifecycle_ok(next_state, candidate.candidate_id)
+
+fn lifecycle_release_transition(release: ReleaseIdentity, next_state: text) -> LifecycleResult:
+    if release.immutable and release.state == "published" and next_state != "withdrawn":
+        return lifecycle_error("LIFECYCLE_RELEASE_IMMUTABLE", "published releases may only be withdrawn")
+    if release.state == "published" and next_state == "withdrawn":
+        return lifecycle_ok("withdrawn", release.release_id)
+    if release.state == "publication_ready" and next_state == "published":
+        if release.source_revision_id == "" or release.source_tree_hash == "" or release.git_commit_oid == "" or release.git_tag_object_oid == "" or release.gate_bundle_id == "" or release.artifact_set_id == "" or release.sbom_ids.len() == 0 or release.provenance_ids.len() == 0 or release.publication_ids.len() == 0 or not release.immutable:
+            return lifecycle_error("LIFECYCLE_RELEASE_IDENTITY", "publication identity is incomplete")
+        return lifecycle_ok("published", release.release_id)
+    lifecycle_error("LIFECYCLE_RELEASE_TRANSITION", "invalid release transition: " + release.state + " -> " + next_state)
+
+export lifecycle_candidate_transition, lifecycle_release_transition

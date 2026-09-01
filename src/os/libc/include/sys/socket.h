@@ -4,24 +4,8 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-/* Address families.
- * AF_INET/AF_INET6 numeric values match the domain check in the kernel
- * network syscall handlers (src/os/kernel/ipc/syscall_net.spl
- * _handle_net_socket: "arg0 != 2" rejects anything but AF_INET; the
- * comment there documents AF_INET6=10). AF_UNIX is a SimpleOS-local
- * value (no kernel unix-domain backend exists yet). */
-#define AF_UNSPEC   0
-#define AF_UNIX     1
-#define AF_LOCAL    AF_UNIX
-#define AF_INET     2
-#define AF_INET6    10
-#define PF_UNSPEC   AF_UNSPEC
-#define PF_UNIX     AF_UNIX
-#define PF_INET     AF_INET
-#define PF_INET6    AF_INET6
-
-/* Socket types. Numeric values match the kernel's proto mapping in
- * _handle_net_socket (type==1 -> TCP proto 1, type==2 -> UDP proto 2). */
+#define AF_UNIX 1
+#define AF_LOCAL AF_UNIX
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
 #define SOCK_RAW    3
@@ -52,19 +36,43 @@
 #define MSG_NOSIGNAL  0x4000
 #define MSG_DONTWAIT  0x40
 
-typedef unsigned int socklen_t;
+/* AF_INET / AF_INET6 and sa_family_t were MISSING from this header while
+ * <netinet/in.h> included it and used `sa_family_t` for sockaddr_in::sin_family
+ * and sockaddr_in6::sin6_family, and src/runtime/runtime_native.c used AF_INET
+ * directly. The result was
+ *   netinet/in.h:44:5: error: unknown type name 'sa_family_t'
+ *   runtime_native.c:5537:23: error: use of undeclared identifier 'AF_INET'
+ * so the Simple runtime could never be cross-compiled for SimpleOS.
+ *
+ * The VALUES are not invented: AF_UNIX is already 1 here (the Linux number), and
+ * the kernel's own shim pins AF_INET — `val _AF_INET: u16 = 2` at
+ * src/os/kernel/abi/syscall_shim_net.spl:17, with the comment at :73 spelling
+ * out "AF_INET=2, AF_INET6=10". These match Linux, which is what the rest of the
+ * header already assumed. sa_family_t is `unsigned short` so that
+ * sockaddr_in::sin_family lands at offset 0 with size 2, exactly what
+ * spl_handle_net_bind/connect read, and so struct sockaddr's own `unsigned short
+ * sa_family` below stays layout-identical. */
+#define AF_INET  2
+#define AF_INET6 10
+
 typedef unsigned short sa_family_t;
+typedef unsigned int socklen_t;
 
 struct sockaddr {
-    sa_family_t sa_family;
+    unsigned short sa_family;
     char sa_data[14];
 };
 
-/* Generic storage large enough for sockaddr_in / sockaddr_in6 (matches
- * the BSD/llvm-libc convention referenced for conformance). */
+/* struct sockaddr_storage was missing while src/runtime/runtime_native.c:12245
+ * declares one ("variable has incomplete type"). It is the POSIX
+ * "big enough for any address family, correctly aligned" type; 128 bytes and
+ * 8-byte alignment are the standard Linux/BSD choices, and 128 comfortably holds
+ * this libc's largest family (sockaddr_in6, 28 bytes). */
 struct sockaddr_storage {
     sa_family_t ss_family;
-    char ss_padding[126];
+    char        __ss_padding[126];
+    /* Force 8-byte alignment without depending on <stdalign.h>. */
+    long long   __ss_align_dummy[0];
 };
 
 #ifdef __cplusplus
@@ -79,19 +87,19 @@ int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 int shutdown(int sockfd, int how);
 int setsockopt(int sockfd, int level, int optname, const void *optval,
                socklen_t optlen);
+/* The send/recv family was likewise absent while runtime_native.c calls it,
+ * producing "call to undeclared function 'sendto'" and friends. Signatures are
+ * the POSIX ones; simpleos_socket.c provides the definitions. */
+long send(int sockfd, const void *buf, unsigned long len, int flags);
+long recv(int sockfd, void *buf, unsigned long len, int flags);
+long sendto(int sockfd, const void *buf, unsigned long len, int flags,
+            const struct sockaddr *dest_addr, socklen_t addrlen);
+long recvfrom(int sockfd, void *buf, unsigned long len, int flags,
+              struct sockaddr *src_addr, socklen_t *addrlen);
 int getsockopt(int sockfd, int level, int optname, void *optval,
                socklen_t *optlen);
-
-long send(int sockfd, const void *buf, size_t len, int flags);
-long recv(int sockfd, void *buf, size_t len, int flags);
-long sendto(int sockfd, const void *buf, size_t len, int flags,
-            const struct sockaddr *dest_addr, socklen_t addrlen);
-long recvfrom(int sockfd, void *buf, size_t len, int flags,
-              struct sockaddr *src_addr, socklen_t *addrlen);
-
 int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
-int socketpair(int domain, int type, int protocol, int sv[2]);
 
 #ifdef __cplusplus
 }

@@ -61,12 +61,30 @@ fn app_extract_after(s: text, search: text) -> text:
         return ""
     s.substring(pos + search.len())
 
+fn _app_is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
 # Extract a JSON string value for a key: "key":"value" → value (unquoted).
+# Whitespace (space, tab, CR, LF) is allowed around the colon, so a
+# pretty-printed request (`json.dumps(x)` — `"name": "x"` —, or
+# `JSON.stringify(x, null, 2)` — multi-line) is accepted, not just the
+# compact form. Until 2026-08-28 the literal `"key":"` search rejected every
+# spec-conformant pretty-printed tools/call with `-32602 Missing tool name`.
 fn app_extract_str(msg: text, key: text) -> text:
-    val search = "\"" + key + "\":\""
-    val after = app_extract_after(msg, search)
-    if after == "":
+    val after_key = app_extract_after(msg, "\"" + key + "\"")
+    if after_key == "":
         return ""
+    var p = 0
+    while p < after_key.len() and _app_is_ws(after_key[p:p + 1]):
+        p = p + 1
+    if p >= after_key.len() or after_key[p:p + 1] != ":":
+        return ""
+    p = p + 1
+    while p < after_key.len() and _app_is_ws(after_key[p:p + 1]):
+        p = p + 1
+    if p >= after_key.len() or after_key[p:p + 1] != "\"":
+        return ""
+    val after = after_key.substring(p + 1)
     var end = 0
     var escaped = false
     while end < after.len():

@@ -1,6 +1,29 @@
-# BrowserSession HTML edit text projection
+# Browser Session Html Edit Tags Specification
 
-> Projects the supported `del` and `ins` semantics to visible text. This is
+> <details>
+
+<!-- sdn-diagram:id=browser_session_html_edit_tags_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=browser_session_html_edit_tags_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+browser_session_html_edit_tags_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=browser_session_html_edit_tags_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,9 +32,41 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# BrowserSession HTML edit text projection
+# Browser Session Html Edit Tags Specification
 
-Projects the supported `del` and `ins` semantics to visible text. This is
+## Scenarios
+
+### BrowserSession HTML edit tag text semantics
+
+#### marks inserted and deleted text in plain text extraction
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<p>Before <del cite='/old'>old</del><ins datetime='2026-06-06'>new</ins> after</p>"
+expect(html_to_text(html)).to_equal("Before [-old][+new] after")
+```
+
+</details>
+
+#### keeps nested inline text inside edit annotations
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<del><strong>removed</strong> text</del><ins><em>added</em> text</ins>"
+expect(html_to_text(html)).to_equal("[-removed text][+added text]")
+```
+
+</details>
 
 ## At a Glance
 
@@ -20,55 +75,13 @@ Projects the supported `del` and `ins` semantics to visible text. This is
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_html_edit_tags_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Projects the supported `del` and `ins` semantics to visible text. This is
-focused text-projection evidence, not complete HTML parsing or rendering.
+## Overview
 
-## Scenarios
-
-### BrowserSession HTML edit tag text semantics
-
-#### should mark inserted and deleted text in plain text extraction
-
-- Project supported HTML semantics to visible text
-   - Expected: html_to_text(html) equals `Before [-old][+new] after`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Project supported HTML semantics to visible text")
-val html = "<p>Before <del cite='/old'>old</del><ins datetime='2026-06-06'>new</ins> after</p>"
-expect(html_to_text(html)).to_equal("Before [-old][+new] after")
-```
-
-</details>
-
-#### should keep nested inline text inside edit annotations
-
-- Project supported HTML semantics to visible text
-   - Expected: html_to_text(html) equals `[-removed text][+added text]`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Project supported HTML semantics to visible text")
-val html = "<del><strong>removed</strong> text</del><ins><em>added</em> text</ins>"
-expect(html_to_text(html)).to_equal("[-removed text][+added text]")
-```
-
-</details>
+Tests covering:
+- BrowserSession HTML edit tag text semantics
 
 ## Scenario Summary
 

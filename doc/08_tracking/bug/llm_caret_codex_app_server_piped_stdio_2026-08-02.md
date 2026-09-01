@@ -1,8 +1,7 @@
 # LLM Caret Codex App Server piped-stdio blocker
 
 Date: 2026-08-02
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Status: Open
 
 ## Scope
 
@@ -30,11 +29,3 @@ diagnostic evidence for spawn, aliveness, and write failures.
 3. Prove `thread/start`, `thread/inject_items`, structured `turn/start`,
    preconditioned `turn/steer`, and `turn/interrupt`.
 4. Only then connect `CodexAppServerAdapter` to the live process client.
-
-## Re-verification 2026-08-17 (app-rest lane) — LIVE as a MISSING FEATURE
-
-This doc's own "Required resolution" item 1 asks for a piped-spawn diagnostic
-that does not exist in the tree, and the reproducing spec it referenced has been
-deleted. There is nothing in `src/app/llm_caret/messaging/cli.spl` to verify
-statically, and reproduction needs an installed `codex` CLI, which this host
-lacks. Classify as a missing-feature record, not a silent-wrong-result defect.

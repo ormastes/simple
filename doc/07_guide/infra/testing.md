@@ -34,7 +34,7 @@ SPipe is a BDD (Behavior-Driven Development) testing framework for Simple, inspi
 ### Quick Start
 
 ```simple
-use std.spec
+use std.spec.*
 
 describe "Calculator":
     context "addition":
@@ -133,6 +133,12 @@ describe "Feature":
 
 Embed markdown documentation in test files using triple-quoted strings. The `simple spipe-docgen` command extracts these blocks and generates markdown documentation in `doc/06_spec/`.
 
+New or updated scenario specs use modern SSpec only:
+`use std.spec.*`, `describe`, `it`, `step`, `expect`, and built-in matchers.
+Use direct value assertions; do not add Given/When/Then helper flows,
+boolean-wrapper assertions, placeholder passes, or silent missing-evidence
+branches.
+
 Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
 UI-facing specs must capture visible state when practical: GUI screenshots or rendered-image captures go under `doc/06_spec/image/<spec-relative-path>/`; TUI text/ANSI captures, logs, JSON summaries, and other non-image artifacts go under `build/test-artifacts/<spec-relative-path>/`.
 Interactive GUI specs must also use actual GUI access when available. Prefer `ui_access_snapshot`, `ui_access_surface`, `ui_access_find`, `ui_access_act`, `ui_access_history`, `ui_access_observe`, `ui_access_state`, or adapter wrappers such as `simple play wm-text-*` and `play_wm_text_*` to locate a real surface, perform the action, and assert the resulting state. Screenshots prove visual evidence; they do not replace interaction coverage.
@@ -140,6 +146,14 @@ SGTTI evidence is test/debug-only. Production entrypoints must not import `std.u
 After adding or moving a UI-facing app feature spec, run `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl`. That audit verifies the critical UI SSPEC lane has executable specs, mirrored generated manuals under `doc/06_spec/03_system/app/...`, and concrete UI evidence markers.
 The generated Evidence section renders a compact category summary plus per-category tables. Image paths in `**Screenshots:**` and `**TUI Captures:**` are embedded as Markdown images, and text TUI captures are embedded in details blocks when the file exists.
 For CI/publication, use `simple spipe-docgen ... --output doc/06_spec` so generated specification docs stay in the numbered documentation tree required by `FILE.md`. The `simple test --doc` flow writes summary pages to `doc/08_tracking/test/test-spec.md` and `doc/08_tracking/test/test-spec.html`, and also regenerates SPipe docs under `doc/06_spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/06_spec/image/` and non-image evidence under `build/test-artifacts/`.
+
+Evidence-producing scenarios persist a validated versioned manifest at
+`build/test-artifacts/<spec-relative-path>/evidence.sdn`. The manifest owns
+status, freshness, provenance, integrity, and artifact links. Generated
+manuals may embed bounded text, still, motion, inert HTML, and decoded
+protocol evidence, but they must preserve accessible summaries and must never
+derive `live-pass` from prose or an unvalidated artifact. See
+[`Evidence Showcase`](../app/spipe/evidence_showcase.md).
 
 ```simple
 """
@@ -690,29 +704,6 @@ simple test --unit          # test/01_unit/
 simple test --integration   # test/02_integration/
 simple test --system        # test/03_system/
 simple test --all           # entire test/
-simple test --whole         # all specs/long tests + .spl and Markdown doctests
-```
-
-`--all` expands spec discovery. `--whole` is the release gate: it also runs
-comment-embedded `.spl` doctests and executable `simple`, `spl`, and
-`sdoctest` fences from the configured Markdown sources.
-The conventional positional `test` in `simple test test --whole` applies only
-to spec discovery. It does not narrow either documentation lane: Markdown is
-loaded from `config/sdoctest.sdn`, while source-comment doctests are discovered
-under the production `src/lib`, `src/compiler`, and `src/app` roots. This is a
-`--whole` contract, not an alias for `--all`; focused `--sdoctest` and
-`--spl-doctest` commands continue to honor their explicit targets.
-
-Source doctests use the existing docstring form:
-
-```simple
-fn add_one(value: i64) -> i64:
-    """Add one.
-
-    sdoctest:
-        expect(add_one(1)).to_equal(2)
-    """
-    value + 1
 ```
 
 ### Advanced Test Layers (opt-in)
@@ -814,30 +805,6 @@ Available helpers: `skip_on_baremetal`, `only_on_baremetal`, `skip_on_remote`, `
 
 Default pattern: `test/**/*_spec.spl`
 
-Doctest discovery has two executable lanes:
-
-- Markdown fences use ` ```simple `, ` ```spl `, or ` ```sdoctest ` and may
-  carry supported modifiers such as `:skip`, `:should_fail`, `:init=...`, and
-  `:env=...`. The configured repository sweep comes from
-  `config/sdoctest.sdn`; an explicit `.md` target is scanned directly.
-- Simple source documentation uses closed, non-empty `#`, `##`, or `///`
-  fences, fenced blocks inside triple-quoted docstrings, or an indented
-  `sdoctest:` section inside a docstring. Spec/test source files are excluded
-  from this comment lane.
-
-Registration and execution share the same extractors. The test manifest stores
-only files with runnable, closed, non-empty blocks; modifier fences and source
-comments therefore cannot disappear because a separate counter recognizes a
-smaller syntax. Normal Markdown and comment-doctest runs rescan their configured
-or explicit inputs at the run event. Manifest-backed test discovery refreshes
-on its five-minute TTL and reuses unchanged entries by file size and mtime;
-`--refresh-manifest` forces an immediate scan after bulk edits or file moves.
-
-Use a prose fence such as ` ```text ` for illustrative code that must never
-run. Use `:skip` only when the example is intentionally registered but cannot
-run in the current environment. Unclosed or empty executable fences are not
-registered and an explicitly targeted file with no runnable block fails closed.
-
 ### Commands
 
 ```bash
@@ -848,36 +815,13 @@ simple test --seed 12345           # Deterministic order
 simple test --format json          # JSON output
 simple test --format doc           # Documentation format
 simple test --list                 # List tests
-simple test doc/path/guide.md      # Run one Markdown doctest file
-simple test --spl-doctest src/path/module.spl # Run source-comment doctests
-simple test --refresh-manifest     # Force manifest rescan
 simple test --only-slow            # Slow tests only
 simple test --screenshots          # Capture GUI screenshots
 simple test --refresh-screenshots  # Force recapture
 simple test --screenshot-output doc/06_spec/image/custom
 ```
 
-`--format json` is a machine-output contract: stdout contains one final object
-with `success`, `spec`, `spl_doctest`, and `sdoctest`; disabled lanes are
-`null`. Progress and diagnostics go to stderr. Wrapper failures use the same
-single-object envelope with `success=false`, `worker_exit_code`, and `error`.
-The pure-Simple implementation is source-reviewed but remains unqualified
-until the tracked Stage 4 parser timeout is fixed and the whole-stdout contract
-passes on the fresh candidate.
-
 ### Exit Codes
-
-For child-run wrappers, `simple test` treats the parsed BDD summary line
-(`N example(s), M failure(s)`) as authoritative when present. Some interpreter
-child paths can return a stale nonzero process code after printing
-`0 failures`; do not classify those as file failures unless no BDD summary was
-parsed.
-
-Subprocess interpreter children are wrapped after matcher and coverage
-preprocessing; fork children receive the same result wrapper before `fork()`.
-The wrapper prints the shared spec summary, rejects failed examples, and rejects
-a run where no examples executed. A raw child exit code without that result
-contract is not test evidence.
 
 | Code | Meaning |
 |------|---------|
@@ -1136,11 +1080,9 @@ bin/simple test test/03_system/gui/ui/shared_ui_contract_spec.spl --tag slow
 - Skip tests without marking `pending`
 - Over-verify mocks -- verify behavior, not call counts
 
-### Interpreter Mode
+### Interpreter Mode Limitation
 
-Interpreter mode executes supported `it` bodies and fails closed on red or
-zero-executed specs. Use native mode as additional coverage for syntax or
-runtime behavior that is not implemented by the interpreter.
+The interpreter mode test runner only verifies file loading. The `it` block bodies do not execute in interpreter mode. Use compiled mode for actual execution of test logic.
 
 ---
 

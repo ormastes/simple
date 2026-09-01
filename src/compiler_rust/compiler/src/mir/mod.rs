@@ -1,4 +1,5 @@
 pub mod arena;
+pub mod asm_operands;
 mod async_sm;
 pub mod closure_call_types;
 mod blocks;
@@ -38,9 +39,7 @@ pub use parallel::{
     lower_modules_parallel, lower_modules_parallel_with_config, BatchMirLowerer, MirLowerStats, ParallelMirConfig,
     ParallelMirLowerer,
 };
-pub use string_accum::{
-    apply_string_accumulation, apply_string_accumulation_to_module, StringAccumStats,
-};
+pub use string_accum::{apply_string_accumulation, apply_string_accumulation_to_module, StringAccumStats};
 pub use simple_parser::Visibility;
 
 /// Sentinel vtable slot for virtual calls through a trait with no

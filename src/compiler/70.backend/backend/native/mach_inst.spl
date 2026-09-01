@@ -393,6 +393,15 @@ val X86_OP_CALL_INDIRECT: i64 = 80
 # scalar opcodes so register allocation and encoding cannot silently treat a
 # YMM value as a GPR. Unaligned and spill forms are not admitted yet.
 val X86_OP_VMOVAPS_LOAD_YMM: i64 = 81
+val X86_OP_MOVZX_REG_MEM8: i64 = 87
+val X86_OP_MOVZX_REG_MEM16: i64 = 88
+val X86_OP_MOV_REG_MEM32: i64 = 89
+val X86_OP_MOV_MEM8_REG: i64 = 90
+val X86_OP_MOV_MEM16_REG: i64 = 91
+val X86_OP_MOV_MEM32_REG: i64 = 92
+val X86_OP_MOVSX_REG_MEM8: i64 = 93
+val X86_OP_MOVSX_REG_MEM16: i64 = 94
+val X86_OP_MOVSX_REG_MEM32: i64 = 95
 val X86_OP_VMOVAPS_STORE_YMM: i64 = 82
 val X86_OP_VADDPS_YMM: i64 = 83
 val X86_OP_VSUBPS_YMM: i64 = 84
@@ -444,6 +453,8 @@ val A64_OP_REV: i64 = 137
 # BRK #0 -- the aarch64 trap used to lower MirTerminator.Abort. A trap, not a
 # NOP: an aborting path must halt, never fall through into the next block.
 val A64_OP_BRK: i64 = 138
+val A64_OP_LDR_W: i64 = 139
+val A64_OP_STR_W: i64 = 140
 
 # ============================================================================
 # RISC-V Opcodes
@@ -492,6 +503,7 @@ val RV_OP_REV8: i64 = 239
 # EBREAK -- the RISC-V trap used to lower MirTerminator.Abort. A trap, not a
 # NOP: an aborting path must halt, never fall through into the next block.
 val RV_OP_EBREAK: i64 = 240
+val RV_OP_LWU: i64 = 241
 
 # ============================================================================
 # Machine Instruction
@@ -532,6 +544,10 @@ struct MachFunction:
     frame_size: i64
     num_virtual_regs: i64
     used_callee_saved: [i64]
+    # Target-owned bytes required at sp+0 while making a call. Most targets
+    # leave this at zero; RV64 uses it to separate outgoing stack arguments
+    # from allocator-owned nonvolatile-register saves.
+    outgoing_arg_size: i64 = 0
 
 fn new_mach_function(name: text) -> MachFunction:
     MachFunction(
@@ -539,7 +555,8 @@ fn new_mach_function(name: text) -> MachFunction:
         blocks: [],
         frame_size: 0,
         num_virtual_regs: 0,
-        used_callee_saved: []
+        used_callee_saved: [],
+        outgoing_arg_size: 0
     )
 
 fn mach_func_add_block(func: MachFunction, block: MachBlock) -> MachFunction:
@@ -550,7 +567,8 @@ fn mach_func_add_block(func: MachFunction, block: MachBlock) -> MachFunction:
         blocks: new_blocks,
         frame_size: func.frame_size,
         num_virtual_regs: func.num_virtual_regs,
-        used_callee_saved: func.used_callee_saved
+        used_callee_saved: func.used_callee_saved,
+        outgoing_arg_size: func.outgoing_arg_size
     )
 
 fn mach_func_set_frame_size(func: MachFunction, size: i64) -> MachFunction:
@@ -559,7 +577,8 @@ fn mach_func_set_frame_size(func: MachFunction, size: i64) -> MachFunction:
         blocks: func.blocks,
         frame_size: size,
         num_virtual_regs: func.num_virtual_regs,
-        used_callee_saved: func.used_callee_saved
+        used_callee_saved: func.used_callee_saved,
+        outgoing_arg_size: func.outgoing_arg_size
     )
 
 struct MachModule:
@@ -572,6 +591,11 @@ struct DataEntry:
     name: text
     data: [i64]
     is_readonly: bool
+    # Object layout metadata.  String literals retain the defaults; MIR
+    # statics set these explicitly so every object writer consumes the same
+    # alignment and linkage facts as instruction selection.
+    alignment: i64 = 1
+    is_global: bool = false
 
 fn new_mach_module(name: text) -> MachModule:
     MachModule(name: name, functions: [], data_sections: [], extern_symbols: [])
@@ -615,6 +639,7 @@ struct EncodedReloc:
     symbol_name: text
     reloc_type: i64
     addend: i64
+    anchor_offset: i64 = -1
 
 struct EncodedFunction:
     name: text
@@ -652,6 +677,9 @@ export X86_XMM_ALLOCATABLE, X86_YMM_ALLOCATABLE
 
 # x86_64 opcodes
 export X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG
+export X86_OP_MOVZX_REG_MEM8, X86_OP_MOVZX_REG_MEM16, X86_OP_MOV_REG_MEM32
+export X86_OP_MOV_MEM8_REG, X86_OP_MOV_MEM16_REG, X86_OP_MOV_MEM32_REG
+export X86_OP_MOVSX_REG_MEM8, X86_OP_MOVSX_REG_MEM16, X86_OP_MOVSX_REG_MEM32
 export X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV, X86_OP_AND, X86_OP_OR, X86_OP_XOR
 export X86_OP_SHL, X86_OP_SAR, X86_OP_SHR, X86_OP_NEG, X86_OP_NOT, X86_OP_BSWAP, X86_OP_POPCNT
 export X86_OP_CMP, X86_OP_TEST
@@ -684,6 +712,7 @@ export A64_OP_LSL, A64_OP_ASR, A64_OP_LSR, A64_OP_NEG, A64_OP_CMP, A64_OP_CSET
 export A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE
 export A64_OP_BL, A64_OP_RET, A64_OP_LDR, A64_OP_STR, A64_OP_STP, A64_OP_LDP, A64_OP_ADRP
 export A64_OP_ADD_IMM
+export A64_OP_LDR_W, A64_OP_STR_W
 
 # RISC-V registers
 export RV_X0, RV_X1, RV_X2, RV_X3, RV_X4, RV_X5, RV_X6, RV_X7
@@ -699,6 +728,7 @@ export RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL
 export RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC
 export RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE
 export RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_RET
+export RV_OP_LWU
 export RV_OP_CALL, RV_OP_NEG
 export A64_OP_BRK, RV_OP_EBREAK
 

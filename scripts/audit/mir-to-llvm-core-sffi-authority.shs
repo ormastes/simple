@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+raws="string_builder_len string_builder_push env_get enum_discriminant enum_payload tuple_get value_as_int"
+for suffix in $raws; do
+    raw="rt_$suffix"
+    owner="_sffi_$suffix"
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^fn ${owner}\\(" "$module")" -eq 1 ]
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+    grep -q "insert_simple!(\"$raw\"" "$interpreter"
+done
+
+grep -q '^extern fn rt_env_get(key: text) -> text?$' "$module"
+! grep -q '^extern fn rt_string_len' "$module"
+[ "$(grep -c '^@unsafe(' "$module")" -eq 7 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 7 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 7 ]
+
+for expected in string_builder_len:2 string_builder_push:10 env_get:15 \
+    enum_discriminant:10 enum_payload:3 tuple_get:6 value_as_int:2; do
+    suffix=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "_sffi_${suffix}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+# These owners sit in instruction/code emission paths. Mandatory inlining is
+# the performance contract: no extra runtime dispatch, lookup, allocation, or
+# data copy may be introduced around the existing primitive calls.
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "MIR-to-LLVM core SFFI authority audit: PASS (7 raw ABIs confined; nullable env truthful; unused declaration removed; hot paths remain direct-inline)"

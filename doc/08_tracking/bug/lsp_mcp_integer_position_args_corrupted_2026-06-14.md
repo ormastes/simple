@@ -1,7 +1,6 @@
 # LSP MCP: integer position args (line/character) corrupted in deployed server
 
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** Open — root cause is a **`native-build` codegen/runtime bug**, not a `tools.spl` logic bug
 - **Severity:** P1 (server currently fully unusable — see 2026-06-14 PM update)
 - **Date:** 2026-06-14
 - **Component:** `bin/simple native-build` codegen+runtime (`text.to_int()`, text `>=`, `str(negative i64)`); surfaces in `src/app/simple_lsp_mcp/`
@@ -120,16 +119,3 @@ bin/simple src/lib/nogc_sync_mut/lsp/lsp_query.spl definition src/lib/common/bas
 bin/simple native-build --runtime-bundle core-c-bootstrap --entry doc/08_tracking/bug/repro/native_text_ordering_to_int_repro.spl --output /tmp/r && /tmp/r
 bin/simple run doc/08_tracking/bug/repro/native_text_ordering_to_int_repro.spl
 ```
-
-## Re-verification 2026-08-17 (app-rest lane) — consumer DEFENDED; codegen root UNVERIFIABLE
-
-`src/app/simple_lsp_mcp/tools.spl:229-232` carries an explicit comment that
-`text.to_int()` and text ordering (`>=` / `<=`) both miscompile on the
-native-build path, so integer args must be parsed with `==` digit comparison
-exclusively; `_digit_val` (`:233-254`) and `arg_int_field` (`:255+`) hand-roll
-that parse. The LSP layer is therefore no longer corrupting positions.
-
-The underlying codegen defect (native-build `to_int`, text `>=`, `str(-i64)`)
-is UNVERIFIABLE in this lane — it needs `bin/simple native-build` plus running
-the produced artifact. Recommend re-filing the codegen half against the backend
-and closing the LSP-layer half.

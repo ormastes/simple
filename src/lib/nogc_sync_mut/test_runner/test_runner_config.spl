@@ -91,6 +91,43 @@ fn resolve_effective_profile(options: TestOptions) -> text:
         return options.profile
     read_sdn_lints_profile("simple.sdn")
 
+fn _mcdc_waiver_atom_valid(value: text, max_bytes: i64) -> bool:
+    value.trim() != "" and value.len() <= max_bytes and
+        not value.contains("|") and not value.contains("\n") and
+        not value.contains("\r")
+
+fn resolve_mcdc_mode_for_profile(
+    requested_mode: text,
+    profile: text,
+    waiver_reason: text,
+    waiver_reviewer: text,
+    waiver_review_id: text,
+    waiver_version: text
+) -> text:
+    # The current assurance ladder starts at Moderate, which is the canonical
+    # normal tier. An unresolved/default profile is also normal, never a way
+    # to bypass exact MC/DC.
+    # Only two explicit development spellings sit below normal. Unknown
+    # profiles fail toward enforcement rather than becoming a bypass.
+    val below_normal = profile == "dev" or profile == "advisory"
+    val normal_or_stricter = not below_normal
+    val normalized_mode = requested_mode.trim().to_lower()
+    if normalized_mode == "dynamic" or normalized_mode == "dynamic-aspect":
+        return "dynamic"
+    if normalized_mode == "on" or normalized_mode == "static-on":
+        return "on"
+    if normalized_mode == "off" or normalized_mode == "static-off":
+        if not normal_or_stricter: return "off"
+        if (_mcdc_waiver_atom_valid(waiver_reason, 2048) and
+            _mcdc_waiver_atom_valid(waiver_reviewer, 256) and
+            _mcdc_waiver_atom_valid(waiver_review_id, 256) and
+            _mcdc_waiver_atom_valid(waiver_version, 128)):
+            return "off"
+        return "invalid-off"
+    if normalized_mode != "": return "invalid-mode"
+    if normal_or_stricter: return "on"
+    "off"
+
 # =========================================================================
 # Editions plumbing -- decision-free manifest slice (lane ED1). See scoping
 # doc doc/01_research/language/editions_mechanism_scoping_2026-07-29.md for
@@ -197,6 +234,19 @@ fn propagate_env_vars(options: TestOptions):
     val resolved_profile = resolve_effective_profile(options)
     if resolved_profile != "":
         env_set("SIMPLE_SAFETY_PROFILE", resolved_profile)
+
+    val effective_mcdc_mode = resolve_mcdc_mode_for_profile(
+        env_get("SIMPLE_MCDC_MODE") ?? "",
+        resolved_profile,
+        env_get("SIMPLE_MCDC_OFF_WAIVER_REASON") ?? "",
+        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEWER") ?? "",
+        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID") ?? "",
+        env_get("SIMPLE_MCDC_OFF_WAIVER_VERSION") ?? "")
+    if effective_mcdc_mode == "invalid-off" or effective_mcdc_mode == "invalid-mode":
+        env_set("SIMPLE_MCDC_MODE_ERROR", effective_mcdc_mode)
+    else:
+        env_set("SIMPLE_MCDC_MODE_ERROR", "")
+        env_set("SIMPLE_MCDC_MODE", effective_mcdc_mode)
 
     if options.only_slow:
         env_set("SIMPLE_TEST_FILTER", "slow")

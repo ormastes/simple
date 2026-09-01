@@ -89,11 +89,7 @@ pub fn closure_value_regs(function: &MirFunction) -> std::collections::HashSet<V
     reg_sig.into_keys().collect()
 }
 
-type ClosureFlow = (
-    HashMap<VReg, SigSlot>,
-    HashMap<VReg, usize>,
-    HashMap<usize, SigSlot>,
-);
+type ClosureFlow = (HashMap<VReg, SigSlot>, HashMap<VReg, usize>, HashMap<usize, SigSlot>);
 
 /// Blocks belonging to an outlined body (lambda / generator / future / actor).
 ///

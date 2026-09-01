@@ -1,0 +1,159 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-GPU-PORT-008
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Acceptance: the CUDA tutorial as a teaching artefact that cannot rot silently.
+#
+# @manual_section GPU tutorial curriculum
+
+use std.spec.step
+
+use std.spipe.*
+use std.io_runtime.{file_exists, read_file_text}
+
+val TUTORIAL_ROOT = "examples/08_gpu/simple_cuda_example"
+
+# The curriculum the workbook promises, tier by tier. Written out by hand rather than
+# discovered by listing the directory: a list read off the filesystem agrees with the
+# filesystem by construction, so it can never notice a module that was dropped.
+fn expected_modules() -> [text]:
+    ["10.cuda_basic/11.Foundations",
+     "10.cuda_basic/12.First_Kernel",
+     "10.cuda_basic/15.Unit_Testing",
+     "10.cuda_basic/16.Error_Handling",
+     "10.cuda_basic/17.Memory_Hierarchy",
+     "10.cuda_basic/18.Thread_Hierarchy",
+     "10.cuda_basic/19.Memory_API",
+     "20.cuda_intermediate/21.Sync_and_Atomics",
+     "20.cuda_intermediate/22.Streams_and_Async",
+     "20.cuda_intermediate/23.Shared_Memory",
+     "20.cuda_intermediate/24.Memory_Coalescing",
+     "20.cuda_intermediate/25.Dynamic_Parallelism",
+     "20.cuda_intermediate/26.Cooperative_Groups",
+     "20.cuda_intermediate/27.Multi_GPU",
+     "30.cuda_libraries/31.cuBLAS_Equivalent",
+     "30.cuda_libraries/32.cuFFT",
+     "30.cuda_libraries/33.cuRAND",
+     "30.cuda_libraries/34.cuSPARSE",
+     "30.cuda_libraries/35.Parallel_Iterators",
+     "30.cuda_libraries/36.cuDNN",
+     "30.cuda_libraries/37.GPUDirect_Storage",
+     "30.cuda_libraries/38.Tensor_Cores",
+     "60.llm_implementation/61.Tokenization_Embeddings",
+     "60.llm_implementation/62.Attention_Mechanisms",
+     "60.llm_implementation/63.Transformer_Blocks",
+     "60.llm_implementation/64.GPT_Architecture",
+     "60.llm_implementation/65.Training_Infrastructure",
+     "60.llm_implementation/66.Model_Loading",
+     "70.gpu_optimization/71.MatMul_SIMD_vs_GPU",
+     "70.gpu_optimization/72.Backprop",
+     "70.gpu_optimization/73.Attention",
+     "80.transformer/81.Core_GEMM",
+     "80.transformer/82.Attention_Kernels"]
+
+fn tutorial_present() -> bool:
+    file_exists("{TUTORIAL_ROOT}/README.md")
+
+describe "The CUDA tutorial is a teaching artefact, not a folder of prose":
+    """
+    Purpose: prove the CUDA curriculum under examples/08_gpu/simple_cuda_example
+    still teaches what it claims to. Every module must be documented, every
+    document must carry runnable examples, every runnable example must be
+    covered by a spec, and no tier may quietly lose a chapter.
+
+    Audience: whoever maintains the GPU tutorial and anyone learning from it.
+    Nothing here touches a GPU -- these checks are pure filesystem reads and run
+    identically on a machine with no device at all.
+
+    Run: bin/simple test test/03_system/acceptance/gpu_tutorial_curriculum_acceptance_spec.spl
+    """
+
+    # @manual_section Every chapter is documented
+    it "gives every module of the curriculum a README a learner can open":
+        # @req REQ-GPU-PORT-008
+        # @req REQ-GPU-PORT-012
+        if not tutorial_present():
+            step("SKIP: the tutorial submodule is not checked out at {TUTORIAL_ROOT} -- reported explicitly rather than passing silently")
+            skip("tutorial submodule absent: {TUTORIAL_ROOT}")
+        else:
+            step("Walk every module the workbook promises and open its README")
+            var missing = 0
+            for module in expected_modules():
+                if not file_exists("{TUTORIAL_ROOT}/{module}/README.md"):
+                    print("MISSING README: {module}")
+                    missing = missing + 1
+
+            step("Confirm not one chapter is left undocumented")
+            expect(missing).to_equal(0)
+
+    it "backs every README with at least one runnable sdoctest, so the teaching text fails when it goes stale":
+        # @req REQ-GPU-PORT-009
+        # @req REQ-GPU-PORT-012
+        if not tutorial_present():
+            step("SKIP: the tutorial submodule is not checked out at {TUTORIAL_ROOT}")
+            skip("tutorial submodule absent: {TUTORIAL_ROOT}")
+        else:
+            step("Read each module README and look for an executable sdoctest fence")
+            var proseonly = 0
+            var checked = 0
+            for module in expected_modules():
+                val path = "{TUTORIAL_ROOT}/{module}/README.md"
+                if file_exists(path):
+                    checked = checked + 1
+                    val body = read_file_text(path)
+                    if not body.contains("```sdoctest"):
+                        print("NO SDOCTEST FENCE: {module}")
+                        proseonly = proseonly + 1
+
+            step("Confirm the scan was not vacuous -- a zero-file run must never read as a pass")
+            expect(checked).to_equal(expected_modules().len())
+
+            step("Confirm every chapter's documentation is fail-closed rather than untested prose")
+            expect(proseonly).to_equal(0)
+
+    # @manual_section Every runnable example is a tested example
+    it "ships a spec alongside every module that ships a runnable program":
+        # @req REQ-GPU-PORT-010
+        # @req REQ-GPU-PORT-012
+        if not tutorial_present():
+            step("SKIP: the tutorial submodule is not checked out at {TUTORIAL_ROOT}")
+            skip("tutorial submodule absent: {TUTORIAL_ROOT}")
+        else:
+            step("Find every module that offers a learner a main.spl to run")
+            var runnable = 0
+            var uncovered = 0
+            for module in expected_modules():
+                if file_exists("{TUTORIAL_ROOT}/{module}/main.spl"):
+                    runnable = runnable + 1
+                    if not file_exists("{TUTORIAL_ROOT}/{module}/spec.spl"):
+                        print("RUNNABLE BUT UNCOVERED: {module}")
+                        uncovered = uncovered + 1
+
+            step("Confirm the curriculum actually contains runnable programs")
+            expect(runnable).to_be_greater_than(0)
+
+            step("Confirm not one runnable example is shipped without a spec covering it")
+            expect(uncovered).to_equal(0)
+
+    # @manual_section No tier loses a chapter
+    it "still covers all six tiers of the workbook, so a dropped module fails this spec":
+        # @req REQ-GPU-PORT-011
+        # @req REQ-GPU-PORT-012
+        if not tutorial_present():
+            step("SKIP: the tutorial submodule is not checked out at {TUTORIAL_ROOT}")
+            skip("tutorial submodule absent: {TUTORIAL_ROOT}")
+        else:
+            step("Confirm every tier directory of the curriculum is present")
+            for tier in ["10.cuda_basic", "20.cuda_intermediate", "30.cuda_libraries",
+                         "60.llm_implementation", "70.gpu_optimization", "80.transformer"]:
+                assert_true(file_exists("{TUTORIAL_ROOT}/{tier}"))
+
+            step("Confirm the expected module set 11..19, 21..27, 31..38, 61..66, 71..73, 81..82 is complete")
+            var present = 0
+            for module in expected_modules():
+                if file_exists("{TUTORIAL_ROOT}/{module}"):
+                    present = present + 1
+                else:
+                    print("DROPPED MODULE: {module}")
+            expect(present).to_equal(33)
+            expect(present).to_equal(expected_modules().len())

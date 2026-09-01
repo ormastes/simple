@@ -1,7 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum}
-use compiler.hir.hir_lowering._Items.lowering_helpers.{bootstrap_hir_symbol_for_name}
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -11,6 +9,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is not an import-origin for surface projection
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -22,11 +21,12 @@ use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult,
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
-use compiler.core.ast_stmt.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_enum_payload(value: StmtKind) -> Expr
-use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
+use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN}
+use compiler.frontend.core._AstExpr.accessors.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
 use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, TYPE_DICT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, custom_primitive_bind_symbol, custom_primitive_is_name}
@@ -40,8 +40,8 @@ impl HirLowering:
         # Closure builds need this pass even under SIMPLE_BOOTSTRAP=1 (see the
         # call site in lower_module) so a module's own struct/enum/class/
         # trait names resolve inside its own function bodies.
-        val declare_bootstrap_closure = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not declare_bootstrap_closure:
+        val declare_bootstrap_closure = self.ambient_bootstrap_enabled() and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if self.ambient_bootstrap_enabled() and not declare_bootstrap_closure:
             return
         # Pass module filename for visibility tracking
         val mod_name = if self.module_filename != "": Some(self.module_filename) else: nil
@@ -50,7 +50,19 @@ impl HirLowering:
 
         # Use while loops instead of for-in (for-in doesn't work in compiled native code)
         val module_classes = module.classes
-        val cls_keys = module_classes.keys()
+        # DETERMINISM (2026-08-30). `rt_dict_keys` (src/runtime/runtime_native.c:8652)
+        # walks the table in BUCKET order -- `for (i = 0; i < d->cap; i++)` -- which is
+        # neither insertion order nor a stable order across processes. Measured: the SAME
+        # stage-2 binary on the SAME fixture, three fresh-cache runs, produced 4 / 4 / 20
+        # MIR lowering errors, attributed to two DIFFERENT functions of this module. That
+        # makes every error count and every "which function failed" attribution unreliable,
+        # and it silently invalidates any measure-then-compare loop across rebuilds.
+        # Sorting cannot change behaviour that was already well-defined: no correct code can
+        # depend on bucket order, because bucket order is arbitrary. It only removes the
+        # run-to-run variation. (This repo has been here before -- bootstrap reproducibility
+        # previously required SORTED function iteration.)
+        var cls_keys = module_classes.keys()
+        cls_keys.sort()
         var idx = 0
         while idx < cls_keys.len():
             val name = cls_keys[idx]
@@ -58,7 +70,8 @@ impl HirLowering:
             idx = idx + 1
 
         val module_structs = module.structs
-        val str_keys = module_structs.keys()
+        var str_keys = module_structs.keys()
+        str_keys.sort()
         idx = 0
         while idx < str_keys.len():
             val name = str_keys[idx]
@@ -66,7 +79,8 @@ impl HirLowering:
             idx = idx + 1
 
         val module_enums = module.enums
-        val enum_keys = module_enums.keys()
+        var enum_keys = module_enums.keys()
+        enum_keys.sort()
         idx = 0
         while idx < enum_keys.len():
             val name = enum_keys[idx]
@@ -74,7 +88,8 @@ impl HirLowering:
             idx = idx + 1
 
         val module_bitfields = module.bitfields
-        val bf_keys = module_bitfields.keys()
+        var bf_keys = module_bitfields.keys()
+        bf_keys.sort()
         idx = 0
         while idx < bf_keys.len():
             val name = bf_keys[idx]
@@ -82,7 +97,8 @@ impl HirLowering:
             idx = idx + 1
 
         val module_traits = module.traits
-        val trait_keys = module_traits.keys()
+        var trait_keys = module_traits.keys()
+        trait_keys.sort()
         idx = 0
         while idx < trait_keys.len():
             val name = trait_keys[idx]
@@ -104,7 +120,8 @@ impl HirLowering:
         # Must run BEFORE the function-signature loop below, which lowers param and
         # return annotations and would otherwise still miss the alias.
         val module_type_aliases = module.type_aliases
-        val alias_keys = module_type_aliases.keys()
+        var alias_keys = module_type_aliases.keys()
+        alias_keys.sort()
         idx = 0
         while idx < alias_keys.len():
             val name = alias_keys[idx]
@@ -114,7 +131,8 @@ impl HirLowering:
         # ParserFunction signatures are lowered after type symbols so named returns
         # and recursive calls are typed before any function body is lowered.
         val module_functions = module.functions
-        val fn_keys = module_functions.keys()
+        var fn_keys = module_functions.keys()
+        fn_keys.sort()
         idx = 0
         while idx < fn_keys.len():
             val name = fn_keys[idx]

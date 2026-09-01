@@ -1,0 +1,79 @@
+"""Static behavioral coverage for the boot-sealed CPU identity owner.
+
+# @manual: primary
+REQ-SIMPLEOS-CPU-TOPOLOGY-IDENTITY-V1
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.kernel.smp.cpu_topology_identity_owner_v1.{
+    CPU_TOPOLOGY_IDENTITY_CAPACITY_V1,
+    CpuHardwareIdentityKindV1,
+    CpuTopologyIdentityOwnerV1,
+    cpu_hardware_identity_canonical_v1,
+}
+
+describe "boot-sealed CPU topology identity owner":
+    it "seals dense x2APIC identities and supports exact bidirectional lookup":
+        step("Build and seal the canonical x86 logical CPU table")
+        var owner = CpuTopologyIdentityOwnerV1.create(CpuHardwareIdentityKindV1.X86Apic)
+        expect(owner.register_x86_apic(0u32, 4u32)).to_equal(true)
+        expect(owner.register_x86_apic(1u32, 260u32)).to_equal(true)
+        val receipt = owner.seal()
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.snapshot.cpu_count()).to_equal(2u32)
+        expect(receipt.snapshot.logical_cpu_for_hardware_id(260u64).unwrap()).to_equal(1u32)
+        expect(receipt.snapshot.contains_exact(
+            0u32, CpuHardwareIdentityKindV1.X86Apic, 4u64)).to_equal(true)
+        expect(receipt.snapshot.logical_cpu_for_hardware_id(0x100000004u64)).to_be_nil()
+        expect(receipt.snapshot.contains_exact(
+            0u32, CpuHardwareIdentityKindV1.X86Apic, 0x100000004u64)).to_equal(false)
+
+    it "rejects wide x86 identities before registration or lookup":
+        step("Do not truncate a foreign identity into an APIC alias")
+        var owner = CpuTopologyIdentityOwnerV1.create(CpuHardwareIdentityKindV1.X86Apic)
+        expect(owner.register(
+            0u32, CpuHardwareIdentityKindV1.X86Apic, 0x100000004u64)).to_equal(false)
+        expect(owner.register_x86_apic(0u32, 4u32)).to_equal(true)
+        val receipt = owner.seal()
+        expect(receipt.snapshot.logical_cpu_for_hardware_id(0x100000004u64)).to_be_nil()
+
+    it "rejects gaps duplicates mixed architectures and post-seal mutation":
+        step("Exercise fail-closed boot registration transitions")
+        var owner = CpuTopologyIdentityOwnerV1.create(CpuHardwareIdentityKindV1.RiscvHart)
+        expect(owner.register_riscv_hart(1u32, 7u64)).to_equal(false)
+        expect(owner.register_riscv_hart(0u32, 7u64)).to_equal(true)
+        expect(owner.register_riscv_hart(1u32, 7u64)).to_equal(false)
+        expect(owner.register(1u32, CpuHardwareIdentityKindV1.ArmMpidr, 8u64)).to_equal(false)
+        expect(owner.register_riscv_hart(1u32, 8u64)).to_equal(true)
+        val receipt = owner.seal()
+        expect(receipt.accepted).to_equal(true)
+        expect(owner.register_riscv_hart(2u32, 9u64)).to_equal(false)
+
+    it "canonicalizes MPIDR affinity fields and rejects affinity aliases":
+        step("Discard MPIDR control bits from processing-element identity")
+        val with_control_bits = 0xC000000001020304u64
+        expect(cpu_hardware_identity_canonical_v1(
+            CpuHardwareIdentityKindV1.ArmMpidr, with_control_bits
+        )).to_equal(0x0000000100020304u64)
+        var owner = CpuTopologyIdentityOwnerV1.create(CpuHardwareIdentityKindV1.ArmMpidr)
+        expect(owner.register_arm_mpidr(0u32, with_control_bits)).to_equal(true)
+        expect(owner.register_arm_mpidr(1u32, 0x0000000100020304u64)).to_equal(false)
+
+    it "fails to seal an empty table and remains available for registration":
+        step("Do not publish a topology with no boot CPU")
+        var owner = CpuTopologyIdentityOwnerV1.create(CpuHardwareIdentityKindV1.X86Apic)
+        val rejected = owner.seal()
+        expect(rejected.accepted).to_equal(false)
+        expect(rejected.snapshot.is_sealed()).to_equal(false)
+        expect(owner.register_x86_apic(0u32, 0u32)).to_equal(true)
+
+    it "enforces the fixed topology capacity":
+        step("Bound identity storage and IRQ lookup work")
+        var owner = CpuTopologyIdentityOwnerV1.create(CpuHardwareIdentityKindV1.RiscvHart)
+        var i: i32 = 0
+        while i < CPU_TOPOLOGY_IDENTITY_CAPACITY_V1:
+            expect(owner.register_riscv_hart(i.to_u32(), i.to_u64())).to_equal(true)
+            i = i + 1
+        expect(owner.register_riscv_hart(
+            CPU_TOPOLOGY_IDENTITY_CAPACITY_V1.to_u32(), 100u64)).to_equal(false)

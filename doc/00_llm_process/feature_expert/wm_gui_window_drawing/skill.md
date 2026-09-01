@@ -180,35 +180,29 @@ parsed as size), not a general WM feature area.
 
 ## Multi-App Launch + Working Taskbar (live GPU capture lane)
 
-A sibling, LIVE (on-screen winit-buffer backend) capture lane proves the Simple WM
+A sibling, LIVE (on-screen winit + Metal GPU) capture lane proves the Simple WM
 can launch MULTIPLE GUI apps as internal windows and that the TASKBAR works
 (clicking a taskbar item focuses/restores its window). Distinct from the
-headless PPM lanes above — it runs a real host window and screencaptures
+headless PPM lanes above — it runs a real fullscreen window and screencaptures
 it.
 
 - Demo: [examples/06_io/ui/wm_multiapp_taskbar_gui.spl](../../../../examples/06_io/ui/wm_multiapp_taskbar_gui.spl)
-  — opens a 512x384 winit window, creates the common
-  `HostedWinitBufferBackend`, constructs a real `HostCompositor`, launches
-  Terminal/Editor/File Manager/Calculator via
-  `apply_bridge_request(COMP_CREATE_WINDOW)`, renders frames through the shared
-  compositor backend, and drives taskbar interactions on the REAL compositor.
+  — opens a winit window, `MetalBackend` (engine2d Metal GPU), a `HostCompositor`
+  (state model over `HeadlessHostCompositorBackend`), launches Terminal/Editor/
+  File Manager/Calculator via `apply_bridge_request(COMP_CREATE_WINDOW)`, goes
+  fullscreen, renders each WM frame on the GPU (512x384 buffer, upscaled to the
+  fullscreen window), and drives taskbar interactions on the REAL compositor.
 - Check script: [scripts/check/check-wm-multiapp-taskbar-evidence.shs](../../../../scripts/check/check-wm-multiapp-taskbar-evidence.shs)
   (output dir `build/wm_multiapp_taskbar/` — distinct from `build/wm_gui_window_drawing/`).
 - Pixel validator: [scripts/check/measure_wm_multiapp_taskbar.spl](../../../../scripts/check/measure_wm_multiapp_taskbar.spl)
-  — validates the captured WM client frame, self-calibrates logical->physical
-  scale from the actual capture, checks each window's titlebar band, title text,
-  close button, and taskbar item, and writes per-window crops.
+  — locates the WM window in a full-screen BMP via a magenta locator frame,
+  self-calibrates logical->physical scale, checks each window's titlebar band
+  differs from the desktop backdrop and the taskbar shows >= N colored segments,
+  writes per-window crops.
 - Contract spec: [test/03_system/check/wm_multiapp_taskbar_spec.spl](../../../../test/03_system/check/wm_multiapp_taskbar_spec.spl)
   — exercises the pure compositor state machine (launch grows count; taskbar
   click focuses a background window; minimize + taskbar-restore) plus the gate's
   fail-closed contract.
-
-Resolution/performance rule: never speed up this lane by shrinking the window,
-lowering physical pixels, reducing DPI, dropping text, replacing widgets with
-markers, or bypassing theme/rendering quality. WM targets must be engineered for
-8K-class and larger desktops plus at least 300 DPI readable output. Acceptable
-optimizations remove real overhead only: duplicate full-frame copies, per-pixel
-FFI, avoidable allocations, missing dirty-state, or scalar hot loops.
 
 Hard-won lessons for this live lane (each cost hours):
 
@@ -288,11 +282,6 @@ Hard-won lessons for this live lane (each cost hours):
   `build/sffi/libspl_winit.<dylib|so|dll>`; the facade resolution order is
   `$SIMPLE_SPL_WINIT_PATH` override, then that staged path. Drag/click/close
   proven live on macOS with a real interactive window.
-  **AMENDED 2026-08-04:** the cdylib at `src/runtime/spl_winit/src/lib.rs:536+`
-  holds the CANONICAL semantics for the staging-present protocol, which the
-  interpreter's own SFFI shim did not implement for two years' worth of
-  callers — see the 2026-08-04 session update below before touching either
-  side.
 - This removed `RT:src/app/ui.browser/app.spl` from
   `scripts/check/ui_backend_isolation_baseline.txt` (app.spl now goes through
   the facade only, per `doc/04_architecture/ui/rendering/backend_isolation_architecture.md`).
@@ -361,25 +350,17 @@ Hard-won lessons for this live lane (each cost hours):
   stdlib module, and for the general interpret-mode-extern /
   baked-module-table constraints behind it.
 
-- **Current frame/font ownership correction (2026-07-14):** the canonical
-  selected-font funnel is `SharedWmScene -> DrawIrComposition -> Engine2D`,
-  using `shared_wm_scene_draw_ir_composition_with_content` and an Engine2D frame
-  executor. The canonical SimpleOS desktop uses it. Hosted
-  `HostCompositor.render_frame` still ends in
-  `shared_wm_scene_render_taskbar_context_to_{backend,pixel_buffer}`, and legacy
-  architecture `wm_entry.spl` targets still draw bitmap text directly. Those
-  functions are compatibility renderers, not an equivalent Draw IR executor;
-  migrate their frame owners rather than adding a backend-private font loader,
-  atlas, cache, or draw path. Production evidence must cover the real hosted
-  frame owner and retain the independent SimpleOS QEMU framebuffer crop; a
-  builder-only composition fixture is supporting evidence.
-
-- **Historical shared compatibility funnel (task #27):**
-  `src/lib/common/ui/window_scene.spl` added a
-  `shared_wm_scene_render_to_backend` path that consolidated titlebar/background
-  paint logic before the canonical composition executor existed. It remains
-  useful for bitmap compatibility and pixel-parity tests, but must not be cited
-  as selected-font completion. Per-window `chrome_kind` is
+- **Common.ui window-scene render executor is now the single render funnel
+  for host + SimpleOS internal windows (task #27):**
+  `src/lib/common/ui/window_scene.spl` gained a `shared_wm_scene_render_to_backend`
+  executor path (backed by the Draw IR builder in
+  `src/lib/common/ui/window_scene_draw_ir.spl`) that both the host compositor
+  lane (`os.compositor.host_compositor_entry`, via the
+  `shared_mdi_scene_from_render_windows` /
+  `shared_mdi_render_windows_from_simple_gui_scene` bridge functions in
+  `src/os/compositor/shared_mdi_framebuffer_scene.spl`) and SimpleOS's
+  internal-window rendering now funnel through, instead of each lane building
+  its own titlebar/background paint logic. Per-window `chrome_kind` is
   `"titled"` (default, paints the titlebar band) or `"borderless"` (no
   titlebar chrome pixels — for taskbar-like or frameless windows). Background
   painting goes through a `BackgroundSpec` provider: `kind: "color"` is
@@ -643,89 +624,6 @@ origin before citing either as shipped.
   truth-in-messaging fix only, not a functional fix. Do not cite
   `cpu_simd` as a perf lever (e.g. for the `SIMPLE_GUI_BACKEND` knob above)
   until that bug is closed.
-
-## Session update 2026-08-04 (winit interpreter SFFI staging-present, functional gui-driver probe, live fullscreen run)
-
-Landed in `177754a3ee`. All of this concerns the LIVE winit lane (the
-`--open` / Metal-demo path), not the headless PPM lanes.
-
-- **The staging-present protocol was missing from the interpreter SFFI.**
-  Launching the Metal demo did not fail gracefully — it ABORTED the whole
-  process with `internal error: entered unreachable code: dispatch_window
-  called with unexpected name: rt_winit_window_staging_ptr`. The pure-Simple
-  present path
-  ([src/lib/nogc_sync_mut/io/window_winit.spl](../../../../src/lib/nogc_sync_mut/io/window_winit.spl):102-114
-  and [src/os/compositor/hosted_backend_winit.spl](../../../../src/os/compositor/hosted_backend_winit.spl):38-55)
-  uses a three-step **staging_ptr → fill → present_staged** protocol; only
-  the cdylib implemented it. Canonical semantics:
-  [src/runtime/spl_winit/src/lib.rs](../../../../src/runtime/spl_winit/src/lib.rs):536+
-  — read that before changing either implementation, and keep them in step.
-  FIX in `src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/`:
-  `present_pixels()` extracted as a helper out of `present_rgba`; implemented
-  `rt_winit_window_staging_ptr` (per-window `Vec<u32>`, reallocated on a
-  `w*h` mismatch), `stage_clear`, `stage_fill_rect`, `present_staged`,
-  `position_x`/`position_y`, and the flat
-  `rt_winit_event_key_*`/`text_*`/`wheel_*`/`mouse_*` externs; staging
-  buffers are freed in `window_free`/`event_loop_free`; routing prefixes
-  added in `mod.rs`.
-  **Residual, flagged not fixed:** `rt_winit_event_mouse_button` has two
-  incompatible callers — the interpreter arm returns a tuple
-  `(button, pressed)` while the flat cdylib API declares `-> i64`.
-- **Five `unreachable!` dispatch fallbacks were aborting the interpreter
-  process.** `_ => unreachable!(...)` at window:384, events:92, input:165,
-  display:39 and buffer:504 meant that ANY unimplemented winit extern killed
-  the process instead of surfacing an error. All five now return
-  `Err(unknown_function(name))` — catchable, diagnosable, and the reason the
-  staging gap presented as a process abort rather than a message. Treat a
-  bare `unreachable!` in an extern dispatch table as a defect class, not an
-  assertion.
-- **Probe gui-drivers FUNCTIONALLY, never by grepping the binary.**
-  `scripts/check/check-macos-wm-fullscreen-metal-evidence.shs` decided
-  whether a build had gui support by grepping the binary for the literal
-  string `rt_winit_window_set_fullscreen`. Release LLVM lowers that
-  extern-name literal into immediate-operand compares, so the string is not
-  in the binary and a perfectly good gui build was reported
-  `gui-driver-missing-or-stale` — a **false stale verdict**. FIX: run a tiny
-  `.spl` that calls the extern; a gui driver validates the arg types, a
-  non-gui driver says "unknown extern". Any future capability probe on a
-  compiled binary should follow this pattern.
-- **Live-verified windowed → fullscreen → restore (computer-use, real
-  on-screen window):** demo ran windowed 320x200 → fullscreen 3420x2146 at
-  `scale_factor 2.0` (`frame native ... pixels=7339320`,
-  `fit_bg_corners=ok bg=14141c`) → `restored_size=320x200
-  is_fullscreen_after=false` → `[wm-fullscreen] done`. That is the window/
-  present/fullscreen chain proven end to end with real pixels.
-- **The Metal harness's downstream gate is still RED, for an unrelated
-  reason:** `web-engine-capture-not-accent-blue-pct=0` — the titlebar CSS
-  accent `0xff2563eb` is absent because the capture fell back to logical
-  dimensions (`web_engine_dims=logical
-  reason=physical-render-exceeded-90s`). So: winit/fullscreen green, web
-  engine capture still failing on a render-time budget. Do not read the
-  fullscreen success as a green gate.
-- **Verification honesty note.** The new/updated specs in this area cannot
-  go green on this host: the deployed
-  `bin/release/aarch64-apple-darwin-macho/simple` (dated Jul 25) has an
-  extern registry lacking `rt_raw_i64_to_string`, so every spec importing
-  `src/lib/common/ui/native_scalar_text.spl` dies with
-  `semantic: unknown extern function: rt_raw_i64_to_string`. Bug doc:
-  `doc/08_tracking/bug/deployed_binary_missing_rt_raw_i64_to_string_extern_2026-08-04.md`.
-  The same binary also predates grammar fix `023a60a05aa`
-  (`doc/08_tracking/bug/stale_seed_binary_blocks_gpu_web_layout_specs_2026-08-01.md`,
-  `doc/08_tracking/bug/parser_trailing_comparison_line_continuation_2026-08-04.md`).
-  Unblock = a real stage4 deploy;
-  `build/bootstrap/stage3/aarch64-apple-darwin/simple` CANNOT substitute
-  (bootstrap-only, `error: unknown command 'run'`). The rebuild was
-  deliberately deferred by the user. This supersedes the 2026-07-03
-  "Stale self-hosted binary" handoff note above (that one was about
-  `rt_u32s_from_raw` on a 2026-06-05 build; the fail-closed +
-  `WM_ALLOW_SEED_DRIVER=1` opt-in design it describes is unchanged and still
-  the right shape).
-- Cross-references for the SimpleOS/QEMU side of the same arc (owned
-  elsewhere — link, don't duplicate):
-  [simpleos_wm_qemu_evidence](../simpleos_wm_qemu_evidence/skill.md) and the
-  [os_compositor](../../layer_expert/os_compositor/skill.md) layer expert.
-  Input routing into GUI-content windows on the hosted winit WM is owned by
-  [interaction_input_routing](../interaction_input_routing/skill.md).
 
 ## Update Rule
 

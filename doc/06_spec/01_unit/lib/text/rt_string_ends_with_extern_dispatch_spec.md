@@ -1,6 +1,6 @@
 # rt_string_ends_with_extern_dispatch_spec
 
-> Category: Stdlib
+> Feature: Text Extern Dispatch Parity
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # rt_string_ends_with_extern_dispatch_spec
 
-Category: Stdlib
+Feature: Text Extern Dispatch Parity
 
 ## At a Glance
 
@@ -20,13 +20,10 @@ Category: Stdlib
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
-
+Feature: Text Extern Dispatch Parity
 Category: Stdlib
 Status: Active
 
@@ -36,41 +33,27 @@ Status: Active
 
 #### matches a present suffix
 
-- Verify: matches a present suffix
-   - Expected: rt_string_ends_with("notes.md", ".md") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: matches a present suffix")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(rt_string_ends_with("notes.md", ".md")).to_equal(true)
+# @req REQ-SSPEC-UNIT
 ```
 
 </details>
 
 #### rejects a near-miss suffix
 
-- Verify: rejects a near-miss suffix
-   - Expected: rt_string_ends_with("notes.mdx", ".md") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: rejects a near-miss suffix")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(rt_string_ends_with("notes.mdx", ".md")).to_equal(false)
 ```
 
@@ -78,20 +61,13 @@ expect(rt_string_ends_with("notes.mdx", ".md")).to_equal(false)
 
 #### rejects a suffix longer than the subject
 
-- Verify: rejects a suffix longer than the subject
-   - Expected: rt_string_ends_with("md", ".md") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: rejects a suffix longer than the subject")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(rt_string_ends_with("md", ".md")).to_equal(false)
 ```
 
@@ -99,20 +75,13 @@ expect(rt_string_ends_with("md", ".md")).to_equal(false)
 
 #### treats the whole subject as its own suffix
 
-- Verify: treats the whole subject as its own suffix
-   - Expected: rt_string_ends_with(".md", ".md") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: treats the whole subject as its own suffix")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(rt_string_ends_with(".md", ".md")).to_equal(true)
 ```
 
@@ -120,20 +89,13 @@ expect(rt_string_ends_with(".md", ".md")).to_equal(true)
 
 #### accepts the empty suffix
 
-- Verify: accepts the empty suffix
-   - Expected: rt_string_ends_with("anything", "") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: accepts the empty suffix")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(rt_string_ends_with("anything", "")).to_equal(true)
 ```
 
@@ -141,20 +103,13 @@ expect(rt_string_ends_with("anything", "")).to_equal(true)
 
 #### finds no suffix in the empty subject
 
-- Verify: finds no suffix in the empty subject
-   - Expected: rt_string_ends_with("", ".md") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: finds no suffix in the empty subject")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(rt_string_ends_with("", ".md")).to_equal(false)
 ```
 
@@ -164,126 +119,84 @@ expect(rt_string_ends_with("", ".md")).to_equal(false)
 
 #### returns the LAST byte index, not the first
 
-- Verify: returns the LAST byte index, not the first
-   - Expected: rt_string_rfind("a/b/c", "/") equals `3)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: returns the LAST byte index, not the first")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(rt_string_rfind("a/b/c", "/")).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(rt_string_rfind("a/b/c", "/")).to_equal(3)
 ```
 
 </details>
 
 #### returns the last of overlapping-free repeats
 
-- Verify: returns the last of overlapping-free repeats
-   - Expected: rt_string_rfind("abcabc", "abc") equals `3)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: returns the last of overlapping-free repeats")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(rt_string_rfind("abcabc", "abc")).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(rt_string_rfind("abcabc", "abc")).to_equal(3)
 ```
 
 </details>
 
 #### returns 0 when the needle is the whole subject
 
-- Verify: returns 0 when the needle is the whole subject
-   - Expected: rt_string_rfind("abc", "abc") equals `0)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: returns 0 when the needle is the whole subject")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(rt_string_rfind("abc", "abc")).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(rt_string_rfind("abc", "abc")).to_equal(0)
 ```
 
 </details>
 
 #### returns -1 on a miss
 
-- Verify: returns -1 on a miss
-   - Expected: rt_string_rfind("abc", "zz") equals `-1)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: returns -1 on a miss")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(rt_string_rfind("abc", "zz")).to_equal(-1)  # oracle: pinned constant asserted by this scenario
+expect(rt_string_rfind("abc", "zz")).to_equal(-1)
 ```
 
 </details>
 
 #### returns -1 when the needle is longer than the subject
 
-- Verify: returns -1 when the needle is longer than the subject
-   - Expected: rt_string_rfind("ab", "abc") equals `-1)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: returns -1 when the needle is longer than the subject")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(rt_string_rfind("ab", "abc")).to_equal(-1)  # oracle: pinned constant asserted by this scenario
+expect(rt_string_rfind("ab", "abc")).to_equal(-1)
 ```
 
 </details>
 
 #### returns the subject length for an empty needle
 
-- Verify: returns the subject length for an empty needle
-   - Expected: rt_string_rfind("abc", "") equals `3)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-TEXT_RT_STRING_ENDS_WITH_EXT-001
-step("Verify: returns the subject length for an empty needle")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(rt_string_rfind("abc", "")).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(rt_string_rfind("abc", "")).to_equal(3)
 ```
 
 </details>
@@ -301,36 +214,59 @@ expect(rt_string_rfind("abc", "")).to_equal(3)  # oracle: pinned constant assert
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `c120ebb49eb052a4998dd24657930db7663a6c0c179998d38da876bd796cc8cb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `e57d26d91ee7d50a33e815c4977f4b6028efae0ce6493ec53873386425958dec`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `c120ebb49eb052a4998dd24657930db7663a6c0c179998d38da876bd796cc8cb`.
+Source SHA-256: `e57d26d91ee7d50a33e815c4977f4b6028efae0ce6493ec53873386425958dec`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `c120ebb49eb052a4998dd24657930db7663a6c0c179998d38da876bd796cc8cb`  
+Source SHA-256: `e57d26d91ee7d50a33e815c4977f4b6028efae0ce6493ec53873386425958dec`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **83/100**; effective score: **83/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 83/100
 source: test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl
 mirror: doc/06_spec/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 8 blockers: 0
+  narrative=100 structure=60 oracle=70
+  traceability=100 evidence=100 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl:59:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'matches a present suffix' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl:64:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'rejects a near-miss suffix' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl:67:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'rejects a suffix longer than the subject' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl:70:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'treats the whole subject as its own suffix' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->

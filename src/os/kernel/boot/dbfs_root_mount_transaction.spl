@@ -1,0 +1,66 @@
+# Canonical pure-Simple DBFS boot root transaction.
+#
+# Both hosted boot_fs and the freestanding lease-backed selector use this
+# owner.  Superblock validation, arena bounds, device-owner cleanup, VFS root
+# publication, and SOSIX positioned routing therefore cannot drift apart.
+
+use os.services.block_device.{BlockDevice}
+use os.kernel.abi.syscall_shim_positioned.{
+    shim_positioned_install_backend_route_v1
+}
+use os.sosix.fs.positioned_backend_composition_v1.{
+    SosixPositionedBackendKindV1
+}
+use os.services.vfs.vfs_dbfs_root_transaction.{
+    vfs_dbfs_root_mount_stage_v1,
+    vfs_dbfs_root_mount_commit_v1,
+    vfs_dbfs_root_mount_rollback_committed_v1
+}
+use std.db.dbfs_engine.superblock.{
+    dbfs_superblock_set_device,
+    dbfs_superblock_probe_disk,
+    dbfs_superblock_read_from_disk,
+    dbfs_superblock_validate
+}
+use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
+
+pub val DBFS_BOOT_ARENA_BASE_LBA_V1: i64 = 4
+pub val DBFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1: u64 = 9223372036854775807u64
+
+pub fn boot_dbfs_root_mount_transaction_v1(
+    dev: BlockDevice,
+    max_arena_blocks: u64
+) -> Result<DbFsDriver, text>:
+    """Validate and publish one DBFS root within a caller-proven LBA bound."""
+    if (max_arena_blocks < 4u64 or
+        max_arena_blocks > DBFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1):
+        return Err("dbfs-root: invalid-arena-bound")
+    dbfs_superblock_set_device(dev)
+    if not dbfs_superblock_probe_disk():
+        return Err("dbfs-root: no-superblock")
+    val sb = dbfs_superblock_read_from_disk()
+    if not dbfs_superblock_validate(sb):
+        return Err("dbfs-root: invalid-superblock")
+    if (sb.block_count < 4u64 or
+        sb.block_count > max_arena_blocks or
+        sb.block_count > DBFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1):
+        return Err("dbfs-root: arena-out-of-bounds")
+    val opened = DbFsDriver.open_on_device(
+        dev, DBFS_BOOT_ARENA_BASE_LBA_V1, sb.block_count.to_i64())
+    if opened.is_err():
+        return Err("dbfs-root: driver-open-failed")
+    val staged = vfs_dbfs_root_mount_stage_v1(opened.unwrap())
+    if staged.is_err():
+        return Err("dbfs-root: " + staged.unwrap_err())
+    val committed = vfs_dbfs_root_mount_commit_v1(staged.unwrap())
+    if committed.is_err():
+        return Err("dbfs-root: " + committed.unwrap_err())
+    val driver = committed.unwrap()
+    val route = shim_positioned_install_backend_route_v1(
+        SosixPositionedBackendKindV1.Dbfs)
+    if not route.accepted:
+        val rolled_back = vfs_dbfs_root_mount_rollback_committed_v1(driver)
+        if rolled_back.is_err():
+            return Err("dbfs-root: positioned-route-failed:" + rolled_back.unwrap_err())
+        return Err("dbfs-root: positioned-route-failed")
+    Ok(driver)

@@ -1,6 +1,6 @@
 # @req REQ-DNS-WIRE-QTYPE
 
-> DNS query byte dump and deciding which two bytes are the QTYPE.
+> DNS QTYPE wire-encoding detection spec — every record type, not just AAAA.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # @req REQ-DNS-WIRE-QTYPE
 
-DNS query byte dump and deciding which two bytes are the QTYPE.
+DNS QTYPE wire-encoding detection spec — every record type, not just AAAA.
 
 ## At a Glance
 
@@ -20,13 +20,12 @@ DNS query byte dump and deciding which two bytes are the QTYPE.
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
+DNS QTYPE wire-encoding detection spec — every record type, not just AAAA.
 
+Audience: anyone changing `src/lib/nogc_sync_mut/dns/wire.spl`, or reading a
 DNS query byte dump and deciding which two bytes are the QTYPE.
 
 Why this spec exists: `dns_spec.spl`'s "AAAA query has QTYPE=28" example read
@@ -43,15 +42,17 @@ every record type the library declares — A=1, NS=2, CNAME=5, MX=15, TXT=16,
 AAAA=28, SRV=33 — which is what makes it a class detector rather than a
 one-record regression test.
 
-# @req REQ-DNS-WIRE-QTYPE
-
 ## Scenarios
 
 ### DNS query QTYPE encoding, across every declared record type
 
 #### places QTYPE immediately before QCLASS for all seven record types
 
-- Verify: places QTYPE immediately before QCLASS for all seven record types
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- places QTYPE immediately before QCLASS for all seven record types
 - Encode one query per record type and inspect the question tail
    - Expected: qtype_tail_reason("A", DNS_TYPE_A) equals ``
    - Expected: qtype_tail_reason("NS", DNS_TYPE_NS) equals ``
@@ -65,13 +66,12 @@ one-record regression test.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-DNS-WIRE-QTYPE
-step("Verify: places QTYPE immediately before QCLASS for all seven record types")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("places QTYPE immediately before QCLASS for all seven record types")
 """A DNS client asks for each record type in turn and checks the bytes
 it is about to put on the wire: the QTYPE it requested, followed by the
 IN class. Any record type encoded at the wrong offset names itself."""
@@ -90,64 +90,62 @@ expect(qtype_tail_reason("SRV", DNS_TYPE_SRV)).to_equal("")
 
 #### pins the IANA record-type numbers the encoder writes
 
-- Verify: pins the IANA record-type numbers the encoder writes
+- pins the IANA record-type numbers the encoder writes
 - Compare each declared constant against its IANA assignment
-   - Expected: DNS_TYPE_A equals `1)  # oracle: pinned constant asserted by this scenario`
-   - Expected: DNS_TYPE_NS equals `2)  # oracle: pinned constant asserted by this scenario`
-   - Expected: DNS_TYPE_CNAME equals `5)  # oracle: pinned constant asserted by this scenario`
-   - Expected: DNS_TYPE_MX equals `15)  # oracle: pinned constant asserted by this scenario`
-   - Expected: DNS_TYPE_TXT equals `16)  # oracle: pinned constant asserted by this scenario`
-   - Expected: DNS_TYPE_AAAA equals `28)  # oracle: pinned constant asserted by this scenario`
-   - Expected: DNS_TYPE_SRV equals `33)  # oracle: pinned constant asserted by this scenario`
+   - Expected: DNS_TYPE_A equals `1`
+   - Expected: DNS_TYPE_NS equals `2`
+   - Expected: DNS_TYPE_CNAME equals `5`
+   - Expected: DNS_TYPE_MX equals `15`
+   - Expected: DNS_TYPE_TXT equals `16`
+   - Expected: DNS_TYPE_AAAA equals `28`
+   - Expected: DNS_TYPE_SRV equals `33`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-DNS-WIRE-QTYPE
-step("Verify: pins the IANA record-type numbers the encoder writes")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("pins the IANA record-type numbers the encoder writes")
 """The offsets above only matter if the constants themselves are the
 registered values. These are IANA DNS RR TYPE assignments, not
 implementation choices, so they are asserted directly."""
 
 step("Compare each declared constant against its IANA assignment")
-expect(DNS_TYPE_A).to_equal(1)  # oracle: pinned constant asserted by this scenario
-expect(DNS_TYPE_NS).to_equal(2)  # oracle: pinned constant asserted by this scenario
-expect(DNS_TYPE_CNAME).to_equal(5)  # oracle: pinned constant asserted by this scenario
-expect(DNS_TYPE_MX).to_equal(15)  # oracle: pinned constant asserted by this scenario
-expect(DNS_TYPE_TXT).to_equal(16)  # oracle: pinned constant asserted by this scenario
-expect(DNS_TYPE_AAAA).to_equal(28)  # oracle: pinned constant asserted by this scenario
-expect(DNS_TYPE_SRV).to_equal(33)  # oracle: pinned constant asserted by this scenario
+expect(DNS_TYPE_A).to_equal(1)
+expect(DNS_TYPE_NS).to_equal(2)
+expect(DNS_TYPE_CNAME).to_equal(5)
+expect(DNS_TYPE_MX).to_equal(15)
+expect(DNS_TYPE_TXT).to_equal(16)
+expect(DNS_TYPE_AAAA).to_equal(28)
+expect(DNS_TYPE_SRV).to_equal(33)
 ```
 
 </details>
 
 #### reads back QCLASS, not QTYPE, from the final two bytes
 
-- Verify: reads back QCLASS, not QTYPE, from the final two bytes
+- reads back QCLASS, not QTYPE, from the final two bytes
 - Encode an AAAA query and read its final two bytes
-   - Expected: q[last] equals `1)  # oracle: pinned constant asserted by this scenario`
-   - Expected: q[last - 1] equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: q[last] equals `1`
+   - Expected: q[last - 1] equals `0`
 - Read the QTYPE from the two bytes before that
-   - Expected: q[last - 2] equals `28)  # oracle: pinned constant asserted by this scenario`
-   - Expected: q[last - 3] equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: q[last - 2] equals `28`
+   - Expected: q[last - 3] equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-DNS-WIRE-QTYPE
-step("Verify: reads back QCLASS, not QTYPE, from the final two bytes")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("reads back QCLASS, not QTYPE, from the final two bytes")
 """This is the exact confusion that produced the AAAA bug report. The
 last two bytes of a query are always 0,1 — the IN class — no matter
 which record type was requested. A reader that expects 0,28 there for
@@ -156,12 +154,12 @@ an AAAA query is reading the wrong field, and this example says so."""
 step("Encode an AAAA query and read its final two bytes")
 val q = dns_wire_encode_query(1, "example.com", DNS_TYPE_AAAA)
 val last = q.length() - 1
-expect(q[last]).to_equal(1)  # oracle: pinned constant asserted by this scenario
-expect(q[last - 1]).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(q[last]).to_equal(1)
+expect(q[last - 1]).to_equal(0)
 
 step("Read the QTYPE from the two bytes before that")
-expect(q[last - 2]).to_equal(28)  # oracle: pinned constant asserted by this scenario
-expect(q[last - 3]).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(q[last - 2]).to_equal(28)
+expect(q[last - 3]).to_equal(0)
 ```
 
 </details>
@@ -179,36 +177,54 @@ expect(q[last - 3]).to_equal(0)  # oracle: pinned constant asserted by this scen
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+- `REQ-DNS-WIRE-QTYPE`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `8424108a856c5ce0dc93c8eb904c581256cc61e291ac6da9209c37aceba93540`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `455889e0343327eb552756bdb986c0bf552c7052382b69214fc24c38437e9b6d`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `8424108a856c5ce0dc93c8eb904c581256cc61e291ac6da9209c37aceba93540`.
+Source SHA-256: `455889e0343327eb552756bdb986c0bf552c7052382b69214fc24c38437e9b6d`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `8424108a856c5ce0dc93c8eb904c581256cc61e291ac6da9209c37aceba93540`  
+Source SHA-256: `455889e0343327eb552756bdb986c0bf552c7052382b69214fc24c38437e9b6d`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 86/100
 source: test/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.spl
 mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 11 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'places QTYPE immediately before QCLASS for all seven record types' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pins the IANA record-type numbers the encoder writes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/dns/dns_qtype_encoding_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reads back QCLASS, not QTYPE, from the final two bytes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

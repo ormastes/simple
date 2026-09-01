@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+for raw in rt_enum_discriminant rt_enum_payload rt_tuple_get; do
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+done
+
+if grep -q '^extern fn rt_env_get' "$module"; then
+    echo "MIR expression dispatch regained duplicate raw environment authority" >&2
+    exit 1
+fi
+grep -q '^use std.io_runtime.{env_get_opt}$' "$module"
+grep -q '^[[:space:]]+env_get_opt(key)$' "$module"
+if grep -q '^extern fn rt_dict_contains' "$module"; then
+    echo "MIR expression dispatch regained unused rt_dict_contains boundary" >&2
+    exit 1
+fi
+[ "$(grep -c '^@unsafe(' "$module")" -eq 3 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 4 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 3 ]
+for expected in mir_expr_env_get:7 _sffi_enum_discriminant:96 \
+    _sffi_enum_payload:7 _sffi_tuple_get:15; do
+    owner=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "MIR expression-dispatch SFFI authority audit: PASS (tagged raw calls confined; canonical nullable env; probe counts unchanged)"

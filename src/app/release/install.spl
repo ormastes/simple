@@ -14,11 +14,10 @@ use std.io_runtime.{cwd}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.encoding.font_registry.{selected_font_bundle_asset_pins}
 
-use std.io_runtime.{file_exists}
-extern fn rt_file_read_bytes(path: text) -> [u8]
+use std.io_runtime.{file_exists, file_read_bytes_result}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_copy}
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
 use std.io_runtime.{dir_walk}
 use std.io_runtime.{get_args}
 
@@ -49,11 +48,11 @@ fn main() -> i64:
 
     # Create directories
     print "Creating directories..."
-    rt_dir_create(prefix + "/bin", true)
-    rt_dir_create(prefix + "/lib", true)
-    rt_dir_create(prefix + "/include", true)
-    rt_dir_create(prefix + "/share/simple/src", true)
-    rt_dir_create(prefix + "/share/simple/assets/fonts", true)
+    if not dir_create(prefix + "/bin", true): return 1
+    if not dir_create(prefix + "/lib", true): return 1
+    if not dir_create(prefix + "/include", true): return 1
+    if not dir_create(prefix + "/share/simple/src", true): return 1
+    if not dir_create(prefix + "/share/simple/assets/fonts", true): return 1
 
     print "Installing bundled fonts and notices..."
     if not copy_font_tree(src: script_dir + "/assets/fonts", dst: prefix + "/share/simple/assets/fonts"):
@@ -98,19 +97,25 @@ fn main() -> i64:
     print "Installing libraries..."
     val lib_src = script_dir + "/lib/libsimple_sffi_wrapper.so"
     if file_exists(lib_src):
-        file_copy(lib_src, prefix + "/lib/libsimple_sffi_wrapper.so")
+        if not file_copy(lib_src, prefix + "/lib/libsimple_sffi_wrapper.so"):
+            print "  ERROR: SFFI wrapper copy failed"
+            return 1
         print "  Installed libsimple_sffi_wrapper.so"
 
     # Install headers
     print "Installing headers..."
     val header_src = script_dir + "/include/simple_sffi.h"
     if file_exists(header_src):
-        file_copy(src: header_src, dst: prefix + "/include/simple_sffi.h")
+        if not file_copy(src: header_src, dst: prefix + "/include/simple_sffi.h"):
+            print "  ERROR: SFFI header copy failed"
+            return 1
         print "  Installed simple_sffi.h"
 
     # Install source files
     print "Installing source files..."
-    copy_source_tree(src: script_dir + "/src", dst: prefix + "/share/simple/src")
+    if not copy_source_tree(src: script_dir + "/src", dst: prefix + "/share/simple/src"):
+        print "  ERROR: source installation incomplete"
+        return 1
 
     print ""
     print "Installation complete!"
@@ -122,7 +127,7 @@ fn main() -> i64:
     print "  simple --version"
     0
 
-fn copy_source_tree(src: text, dst: text):
+fn copy_source_tree(src: text, dst: text) -> bool:
     val files = dir_walk(src)
     var count = 0
     for f in files:
@@ -130,10 +135,17 @@ fn copy_source_tree(src: text, dst: text):
             val rel = f.slice(src.len() + 1)
             val dst_file = dst + "/" + rel
             val parent = get_parent(dst_file)
-            rt_dir_create(parent, true)
-            file_copy(f, dst_file)
+            if not dir_create(parent, true): return false
+            if not file_copy(f, dst_file): return false
             count = count + 1
     print "  Copied " + count.to_text() + " source files"
+    true
+
+@always_inline
+fn _file_hash_matches(path: text, expected: text) -> bool:
+    match file_read_bytes_result(path):
+        case Ok(bytes): sha256_u8_hex(bytes) == expected
+        case Err(_): false
 
 fn copy_font_tree(src: text, dst: text) -> bool:
     val pins = selected_font_bundle_asset_pins()
@@ -154,22 +166,28 @@ fn copy_font_tree(src: text, dst: text) -> bool:
         val rel = pin.path.slice(prefix.len(), pin.path.len())
         val source_path = src + "/" + rel
         if not file_exists(source_path): return false
-        if sha256_u8_hex(rt_file_read_bytes(source_path)) != pin.sha256: return false
+        if not _file_hash_matches(source_path, pin.sha256): return false
 
     for pin in pins:
         val prefix = "assets/fonts/"
         val rel = pin.path.slice(prefix.len(), pin.path.len())
         val source_path = src + "/" + rel
         val dst_file = dst + "/" + rel
-        rt_dir_create(get_parent(dst_file), true)
+        if not dir_create(get_parent(dst_file), true): return false
         if not file_copy(source_path, dst_file): return false
-        if sha256_u8_hex(rt_file_read_bytes(dst_file)) != pin.sha256: return false
+        if not _file_hash_matches(dst_file, pin.sha256): return false
     print "  Copied " + pins.len().to_text() + " resource files"
     true
 
 fn copy_file_unchanged(src: text, dst: text) -> bool:
     if not file_copy(src, dst): return false
-    sha256_u8_hex(rt_file_read_bytes(src)) == sha256_u8_hex(rt_file_read_bytes(dst))
+    val source_bytes = file_read_bytes_result(src)
+    match source_bytes:
+        case Err(_): false
+        case Ok(source):
+            match file_read_bytes_result(dst):
+                case Err(_): false
+                case Ok(destination): sha256_u8_hex(source) == sha256_u8_hex(destination)
 
 fn get_parent(p: text) -> text:
     var i = p.len() - 1

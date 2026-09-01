@@ -1,0 +1,224 @@
+# Bounded parallel line merge for filesystem-launched SimpleOS Simplebox.
+
+use os.userlib.fs.{file_open_direct, file_read_direct, file_close_direct}
+use os.tools.simplebox.simplebox_fs_applets.{
+    SIMPLEBOX_FILE_LIMIT, SIMPLEBOX_FILE_BYTES_LIMIT,
+    SIMPLEBOX_READ_CHUNK_BYTES, SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT
+}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+
+extern fn stdout_write(data: text)
+
+pub const SIMPLEBOX_PASTE_TOTAL_INPUT_BYTES_LIMIT: u64 = 67108864u64
+pub const SIMPLEBOX_PASTE_LINE_BYTES_LIMIT: u64 = 1048576u64
+pub const SIMPLEBOX_PASTE_LINE_LIMIT: u64 = 1000000u64
+pub const SIMPLEBOX_PASTE_OUTPUT_BYTES_LIMIT: u64 = 67108864u64
+pub const SIMPLEBOX_PASTE_ROWS_PER_BLOCK: u64 = 1024u64
+
+struct SimpleboxPastePlan:
+    delimiter: text
+    paths: [text]
+    accepted: bool
+    error: text
+
+struct SimpleboxPasteReadState:
+    lines: [text]
+    pending: [u8]
+    consumed: u64
+    failure: text
+
+struct SimpleboxPasteOutputState:
+    blocks: [text]
+    buffered_rows: [text]
+    output_bytes: u64
+    failure: text
+
+fn _paste_delimiter(spec: text) -> text:
+    if spec == "\\t":
+        return "\t"
+    if spec == "\\n":
+        return "\n"
+    if spec == "\\\\":
+        return "\\"
+    if spec.bytes().len() == 1u64:
+        return spec
+    ""
+
+fn _paste_plan(args: [text]) -> SimpleboxPastePlan:
+    var delimiter = "\t"
+    var delimiter_set = false
+    var paths: [text] = []
+    var options = true
+    var index: u64 = 0u64
+    while index < args.len():
+        val arg = args[index]
+        if options and arg == "--":
+            options = false
+        elif options and arg == "-d":
+            if delimiter_set or index + 1u64 >= args.len():
+                return SimpleboxPastePlan(delimiter: "", paths: [],
+                    accepted: false, error: "-d requires one delimiter")
+            delimiter = _paste_delimiter(args[index + 1u64])
+            if delimiter == "":
+                return SimpleboxPastePlan(delimiter: "", paths: [],
+                    accepted: false, error: "delimiter must be exactly one supported byte")
+            delimiter_set = true
+            index = index + 1u64
+        elif options and arg.starts_with("-d") and arg.len() > 2u64:
+            if delimiter_set:
+                return SimpleboxPastePlan(delimiter: "", paths: [],
+                    accepted: false, error: "delimiter specified more than once")
+            delimiter = _paste_delimiter(arg.slice(2, arg.len()))
+            if delimiter == "":
+                return SimpleboxPastePlan(delimiter: "", paths: [],
+                    accepted: false, error: "delimiter must be exactly one supported byte")
+            delimiter_set = true
+        elif options and arg.starts_with("-"):
+            return SimpleboxPastePlan(delimiter: "", paths: [],
+                accepted: false, error: "unsupported option: " + arg)
+        else:
+            options = false
+            paths.push(arg)
+        index = index + 1u64
+    if paths.len() == 0u64:
+        return SimpleboxPastePlan(delimiter: "", paths: [],
+            accepted: false, error: "missing FILE operand")
+    if paths.len() > SIMPLEBOX_FILE_LIMIT.to_u64():
+        return SimpleboxPastePlan(delimiter: "", paths: [],
+            accepted: false, error: "too many file operands")
+    for path in paths:
+        val path_bytes = path.bytes().len()
+        if path_bytes == 0u64 or
+            path_bytes > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+            return SimpleboxPastePlan(delimiter: "", paths: [],
+                accepted: false, error: "invalid path length")
+    SimpleboxPastePlan(delimiter: delimiter, paths: paths,
+        accepted: true, error: "")
+
+fn _paste_finish_line(
+    prior: SimpleboxPasteReadState, path: text
+) -> SimpleboxPasteReadState:
+    var state = prior
+    if state.lines.len() >= SIMPLEBOX_PASTE_LINE_LIMIT:
+        state.failure = path + ": input exceeds simplebox line limit"
+        return state
+    state.lines.push(bytes_to_string(state.pending))
+    state.pending = []
+    state
+
+fn _paste_read_file(path: text) -> SimpleboxPasteReadState:
+    var state = SimpleboxPasteReadState(lines: [], pending: [], consumed: 0u64,
+        failure: "")
+    val opened = file_open_direct(path, 0u32)
+    match opened:
+        case Err(reason):
+            state.failure = path + ": " + reason
+            state
+        case Ok(fd):
+            var complete = false
+            while not complete and state.failure == "":
+                match file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES):
+                    case Err(reason): state.failure = path + ": " + reason
+                    case Ok(chunk):
+                        if chunk.len() == 0u64:
+                            complete = true
+                        elif state.consumed > SIMPLEBOX_FILE_BYTES_LIMIT or
+                            chunk.len() >
+                                SIMPLEBOX_FILE_BYTES_LIMIT - state.consumed:
+                            state.failure = path + ": file exceeds simplebox byte limit"
+                        else:
+                            state.consumed = state.consumed + chunk.len()
+                            var index: u64 = 0u64
+                            while index < chunk.len() and state.failure == "":
+                                if chunk[index] == 10u8:
+                                    state = _paste_finish_line(state, path)
+                                elif state.pending.len() >= SIMPLEBOX_PASTE_LINE_BYTES_LIMIT:
+                                    state.failure = path + ": line exceeds simplebox byte limit"
+                                else:
+                                    state.pending.push(chunk[index])
+                                index = index + 1u64
+            if state.failure == "" and state.pending.len() > 0u64:
+                state = _paste_finish_line(state, path)
+            if not file_close_direct(fd) and state.failure == "":
+                state.failure = path + ": close failed"
+            state
+
+fn _paste_push_row(
+    prior: SimpleboxPasteOutputState, row: text
+) -> SimpleboxPasteOutputState:
+    var state = prior
+    val row_bytes = row.bytes().len()
+    if state.output_bytes > SIMPLEBOX_PASTE_OUTPUT_BYTES_LIMIT or
+        row_bytes > SIMPLEBOX_PASTE_OUTPUT_BYTES_LIMIT - state.output_bytes:
+        state.failure = "output exceeds simplebox byte limit"
+        return state
+    state.buffered_rows.push(row)
+    if state.buffered_rows.len() == SIMPLEBOX_PASTE_ROWS_PER_BLOCK:
+        state.blocks.push(state.buffered_rows.join(""))
+        state.buffered_rows = []
+    state.output_bytes = state.output_bytes + row_bytes
+    state
+
+fn _paste_merge(files: [[text]], delimiter: text) -> SimpleboxPasteOutputState:
+    var state = SimpleboxPasteOutputState(blocks: [], buffered_rows: [],
+        output_bytes: 0u64, failure: "")
+    var row_count: u64 = 0u64
+    for lines in files:
+        if lines.len() > row_count:
+            row_count = lines.len()
+    var row_index: u64 = 0u64
+    while row_index < row_count and state.failure == "":
+        var parts: [text] = []
+        var file_index: u64 = 0u64
+        while file_index < files.len():
+            if file_index > 0u64:
+                parts.push(delimiter)
+            if row_index < files[file_index].len():
+                parts.push(files[file_index][row_index])
+            file_index = file_index + 1u64
+        parts.push("\n")
+        state = _paste_push_row(state, parts.join(""))
+        row_index = row_index + 1u64
+    if state.failure == "" and state.buffered_rows.len() > 0u64:
+        state.blocks.push(state.buffered_rows.join(""))
+        state.buffered_rows = []
+    state
+
+pub fn simplebox_paste(args: [text]) -> i32:
+    """Merge corresponding lines from bounded files.
+
+    Supported forms are `paste [-d BYTE] [--] FILE...` and `-dBYTE`.
+    The default delimiter is tab; one literal byte or `\\t`, `\\n`, and `\\\\`
+    are accepted. Empty and exhausted inputs contribute empty columns, and an
+    unterminated final input line remains a row. File count, aggregate input,
+    individual lines, line counts, and output are bounded. Every input closes
+    before the single-pass row merge or stdout.
+    """
+    val plan = _paste_plan(args)
+    if not plan.accepted:
+        stdout_write("paste: " + plan.error + "\n")
+        return 2
+    var files: [[text]] = []
+    var total_input: u64 = 0u64
+    var total_lines: u64 = 0u64
+    for path in plan.paths:
+        val read = _paste_read_file(path)
+        if read.failure != "":
+            stdout_write("paste: " + read.failure + "\n")
+            return 2
+        if read.consumed > SIMPLEBOX_PASTE_TOTAL_INPUT_BYTES_LIMIT - total_input:
+            stdout_write("paste: aggregate input exceeds simplebox byte limit\n")
+            return 2
+        if read.lines.len() > SIMPLEBOX_PASTE_LINE_LIMIT - total_lines:
+            stdout_write("paste: aggregate input exceeds simplebox line limit\n")
+            return 2
+        total_input = total_input + read.consumed
+        total_lines = total_lines + read.lines.len()
+        files.push(read.lines)
+    val output = _paste_merge(files, plan.delimiter)
+    if output.failure != "":
+        stdout_write("paste: " + output.failure + "\n")
+        return 2
+    for block in output.blocks:
+        stdout_write(block)
+    0

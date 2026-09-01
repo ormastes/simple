@@ -1,14 +1,16 @@
 # CompilerDriver HIR resolution, type checking, and monomorphization passes.
 
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.hir.hir.*
-use compiler.driver.driver_log_helpers.{log_debug, log_build_progress}
-use compiler.semantics.resolve.{resolve_methods}
+use compiler.driver.driver_log_helpers.{log_debug}
+use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.mono.monomorphize_integration.*
 use compiler.driver.driver_safety_severity.{
     SafetyPassSeverity,
-    safety_pass_severity
+    safety_pass_severity_phased
 }
 use compiler.driver.driver_typecheck_severity.{
     TypecheckPassSeverity,
@@ -33,7 +35,6 @@ use compiler.mono.verify.post_mono_verify.{
     post_mono_report_diagnostics
 }
 
-extern fn rt_env_get(key: text) -> text
 
 impl CompilerDriver:
     fn resolve_methods_impl() -> (CompileContext, bool):
@@ -53,6 +54,32 @@ impl CompilerDriver:
 
         (ctx, not ctx.has_errors())
 
+    me run_resolve_methods_quiet_gated():
+        """SIMPLE_RESOLVE_METHODS=1 experiment (default OFF, 2026-09-01).
+
+        Runs the QUIET method-resolution pass over every assembled HIR module
+        — the pass real multi-source builds structurally never ran (see
+        doc/08_tracking/bug/resolve_methods_never_runs_on_real_compile_path_2026-09-01.md,
+        Fix scoping). Called from compile orchestration AFTER phase 3
+        succeeds, so it covers both the streaming and the non-streaming
+        lowering branches, and runs after every hir_cache store/load — the
+        cache therefore carries unresolved modules on both flag settings and
+        cannot be poisoned by the flag. Quiet mode records zero errors by
+        construction (MethodResolver.add_error early-returns), so a build
+        with the flag on can only gain resolved calls, never new failures."""
+        val quiet_module_names = self.ctx.hir_modules.keys()
+        var quiet_resolved_count = 0
+        for quiet_name in quiet_module_names:
+            val quiet_hir_module = self.ctx.hir_modules[quiet_name]
+            val (quiet_resolved_module, quiet_errors) = resolve_methods_quiet(quiet_hir_module)
+            self.ctx.hir_modules[quiet_name] = quiet_resolved_module
+            quiet_resolved_count = quiet_resolved_count + 1
+            if quiet_errors.len() > 0:
+                # Cannot happen (quiet add_error is a no-op); loud if it does,
+                # because silent error loss is this repo's worst failure class.
+                eprint("[resolve-methods-quiet] INVARIANT BREAK: {quiet_errors.len()} error(s) recorded in quiet mode for module {quiet_name}")
+        print "[resolve-methods-quiet] SIMPLE_RESOLVE_METHODS=1: {quiet_resolved_count} module(s) re-resolved"
+
     fn type_check_impl() -> (CompileContext, bool):
         var ctx = self.ctx
         # Type inference runs inside lower_and_check_impl() for Check mode.
@@ -60,6 +87,15 @@ impl CompilerDriver:
         (ctx, not ctx.has_errors())
 
     me monomorphize_impl(hir_phase_admitted: bool) -> bool:
+        self.monomorphize_with_policy(hir_phase_admitted, true)
+
+    me monomorphize_for_explicit_compilation(hir_phase_admitted: bool) -> bool:
+        self.monomorphize_with_policy(hir_phase_admitted, false)
+
+    me monomorphize_with_policy(
+        hir_phase_admitted: bool,
+        allow_ambient_bootstrap_policy: bool
+    ) -> bool:
         """Run monomorphization pass on all HIR modules.
 
         This creates specialized versions of generic functions, structs, and
@@ -67,12 +103,6 @@ impl CompilerDriver:
         rewritten to use the mangled names of specialized definitions.
         """
         log_debug("running monomorphization")
-        # Step-3 receipt. Monomorphization used to emit nothing at all until
-        # its `[mono]` summary line, so a build that died inside it -- or that
-        # never entered it because admission was already false -- left no trace
-        # between `hir N/N step 2/6` and the process exit status.
-        log_build_progress("monomorphize", "modules", 0,
-            self.ctx.hir_modules.len(), "start", 3, 6, 0, 0, "running")
         # Phase admission is produced only after HIR lowering and every
         # post-HIR validator succeeds. Do not reconstruct that authority by
         # rereading CompileContext.error_count_value after a 609-module
@@ -80,28 +110,20 @@ impl CompilerDriver:
         # that adjacent scalar even though the canonical owner completed with
         # zero errors.
         if not hir_phase_admitted:
-            print "error[E-DRV-MONO-001]: monomorphization refused: phase 3 (HIR lowering + post-HIR validators) did not admit this build; {self.ctx.error_count_value} recorded error(s), {self.ctx.hir_modules.len()} HIR module(s)"
-            log_build_progress("monomorphize", "modules", -1,
-                self.ctx.hir_modules.len(), "not-admitted", 3, 6, 1, 0, "failed")
             return false
-        val skip_mono = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") ?? ""
+        val skip_mono = if allow_ambient_bootstrap_policy:
+            env_get("SIMPLE_BOOTSTRAP_SKIP_MONO")
+        else:
+            ""
         # SIMPLE_BOOTSTRAP=1 used to skip the pass too. That was only safe while
         # HIR lowering refused every generic fn; with that gate open (#158
         # Phase B, 2026-08-22) a skipped pass would hand generic templates to
         # MIR. Only the explicit SIMPLE_BOOTSTRAP_SKIP_MONO=1 escape remains.
         if skip_mono == "1":
             print "[bootstrap] skipping monomorphization (SIMPLE_BOOTSTRAP_SKIP_MONO=1)"
-            log_build_progress("monomorphize", "modules", 0,
-                self.ctx.hir_modules.len(), "skipped-by-env", 3, 6, 0, 0, "running")
             return true
-        log_build_progress("monomorphize", "modules", 0,
-            self.ctx.hir_modules.len(), "specialize", 3, 6, 0, 0, "running")
         val (mono_modules, mono_stats, mono_diags) =
             run_monomorphization_with_diagnostics(self.ctx.hir_modules)
-        log_build_progress("monomorphize", "modules",
-            self.ctx.hir_modules.len(), self.ctx.hir_modules.len(),
-            "specializations={mono_stats.specializations_created}",
-            3, 6, 0, 0, "running")
         # Phase B receipt: printed so a stage log proves the pass ran and what
         # it did (the pass was a no-op for months while looking wired).
         print "[mono] generic_fns={mono_stats.generic_functions_found} call_sites={mono_stats.call_sites_found} specializations={mono_stats.specializations_created} unresolved={mono_stats.unresolved_generic_calls}"
@@ -128,16 +150,12 @@ impl CompilerDriver:
         ))
         if mono_pass_errors > 0:
             print "error[E-MONO-033]: monomorphization left {mono_pass_errors} generic call site(s) unspecialized; refusing to lower non-monomorphic HIR to MIR"
-            log_build_progress("monomorphize", "modules", -1,
-                self.ctx.hir_modules.len(), "E-MONO-033", 3, 6, 1, 0, "failed")
             return false
         # Section 9.5 post-monomorphization invariants (E-MONO-031). Runs on
         # the MONOMORPHIZED modules -- the whole point is that nothing generic,
         # unsubstituted, or type-erased survived, so it cannot run before this
         # assignment. Under `critical` ANY non-zero counter is fatal; every
         # other profile warns, so the inventory is visible during migration.
-        log_build_progress("post_mono_verify", "modules", 0,
-            self.ctx.hir_modules.len(), "invariants", 3, 6, 0, 0, "running")
         val mono_report = post_mono_verify_modules(self.ctx.hir_modules)
         val mono_total = post_mono_report_total(mono_report)
         val mono_strictness = self.ctx.assurance_policy.strictness
@@ -164,12 +182,7 @@ impl CompilerDriver:
         log_debug("monomorphization done")
         if mono_critical and mono_total > 0:
             print "error[E-MONO-031]: post-monomorphization invariants violated: {mono_total} diagnostic(s) across {self.ctx.hir_modules.len()} module(s) under profile {mono_strictness.name()}; refusing to lower to MIR"
-            log_build_progress("post_mono_verify", "modules", -1,
-                self.ctx.hir_modules.len(), "E-MONO-031", 3, 6, 1, 0, "failed")
             return false
-        log_build_progress("post_mono_verify", "modules",
-            self.ctx.hir_modules.len(), self.ctx.hir_modules.len(),
-            "diagnostics={mono_total}", 3, 6, 0, 0, "running")
         true
 
 pub fn run_typecheck_warn_pass(
@@ -240,7 +253,10 @@ pub fn run_safety_warn_pass(
     ctx: CompileContext,
     hir_modules: Dict<text, HirModule>
 ) -> [text]:
-    val severity = safety_pass_severity()
+    # Phased: under SIMPLE_ASSURANCE_WARNING_PHASE a critical Deny becomes
+    # Warn, so a mission-critical tree keeps building while every violation
+    # stays visible (allocatable-MC migration step 1, 2026-08-28).
+    val severity = safety_pass_severity_phased()
     val parallel_policy = ResolvedParallelPolicyV1.for_assurance(
         ctx.assurance_policy.strictness)
     var out: [text] = []
@@ -277,6 +293,26 @@ pub fn run_safety_warn_pass(
                             ctx.add_error(msg)
                 case RawPointerOutsideUnsafe(span):
                     val msg = "[safety raw-pointer-outside-unsafe] {name}: raw pointer operation used outside an `unsafe:` block at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case StaticReferenceOutsideUnsafe(span):
+                    val msg = "[safety static-reference-outside-unsafe] {name}: reference to module static taken outside an `unsafe:` block at {span.line}:{span.col}; fix: wrap the reference-taking expression in the smallest valid `unsafe:` block"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case MutableReferenceToImmutableStatic(span):
+                    val msg = "[safety mutable-reference-to-immutable-static] {name}: mutable reference requested for an immutable module static at {span.line}:{span.col}; fix: use `&STATIC`, or declare the static mutable when shared mutation is intended"
                     out = out.push(msg)
                     match severity:
                         case SafetyPassSeverity.Advisory:
@@ -407,4 +443,3 @@ pub fn run_enum_contract_pass(
     ))
     out
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

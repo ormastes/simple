@@ -1,7 +1,11 @@
+#define _GNU_SOURCE
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "cosmos_nvme_pcie_adapter.h"
+#include "cosmos_nfc_regs.h"
 #include "cosmos_pcie_regs.h"
 
 #define CHECK(condition)                                                      \
@@ -58,9 +62,39 @@ struct media_mock {
 };
 
 static struct pcie_mock g_pcie;
+static int g_dma_submit_results[4];
+static int g_dma_poll_results[4];
+static unsigned int g_dma_submit_count;
+static unsigned int g_dma_poll_count;
+static int g_admin_init_result;
+
+#ifdef COSMOS_NVME_PCIE_ADAPTER_COVERAGE_ONLY
+int cosmos_nvme_service_init(struct cosmos_nvme_service *service,
+                             const struct cosmos_nvme_adapter *adapter,
+                             unsigned int namespace_blocks_low,
+                             unsigned int namespace_blocks_high,
+                             unsigned int block_bytes) {
+    service->adapter = *adapter;
+    service->namespace_blocks_low = namespace_blocks_low;
+    service->namespace_blocks_high = namespace_blocks_high;
+    service->block_bytes = block_bytes;
+    return COSMOS_OK;
+}
+#endif
 
 static void reset_pcie(void) {
     memset(&g_pcie, 0, sizeof(g_pcie));
+}
+
+static void reset_dma(void) {
+    unsigned int index;
+
+    for (index = 0U; index < 4U; ++index) {
+        g_dma_submit_results[index] = COSMOS_INVALID;
+        g_dma_poll_results[index] = COSMOS_INVALID;
+    }
+    g_dma_submit_count = 0U;
+    g_dma_poll_count = 0U;
 }
 
 static void reset_media(struct media_mock *media) {
@@ -143,6 +177,71 @@ enum cosmos_pcie_nvme_completion_result cosmos_pcie_nvme_post_completion_fields(
         g_pcie.committed_count++;
     }
     return result;
+}
+
+int cosmos_pcie_nvme_configure_io_sq(
+    unsigned int queue_id, unsigned int valid,
+    unsigned int completion_queue_id, unsigned int entries,
+    unsigned int address_low, unsigned int address_high) {
+    (void)queue_id;
+    (void)valid;
+    (void)completion_queue_id;
+    (void)entries;
+    (void)address_low;
+    (void)address_high;
+    return COSMOS_OK;
+}
+
+int cosmos_pcie_nvme_configure_io_cq(
+    unsigned int queue_id, unsigned int valid,
+    unsigned int irq_enable, unsigned int irq_vector,
+    unsigned int entries, unsigned int address_low,
+    unsigned int address_high) {
+    (void)queue_id;
+    (void)valid;
+    (void)irq_enable;
+    (void)irq_vector;
+    (void)entries;
+    (void)address_low;
+    (void)address_high;
+    return COSMOS_OK;
+}
+
+int cosmos_pcie_host_dma_submit_device_to_host(
+    unsigned int device_address, unsigned int host_address_high,
+    unsigned int host_address_low, unsigned int length) {
+    (void)device_address;
+    (void)host_address_high;
+    (void)host_address_low;
+    (void)length;
+    if (g_dma_submit_count < 4U) {
+        return g_dma_submit_results[g_dma_submit_count++];
+    }
+    return COSMOS_INVALID;
+}
+
+int cosmos_pcie_host_dma_poll_direct(
+    enum cosmos_pcie_host_dma_direction direction) {
+    (void)direction;
+    if (g_dma_poll_count < 4U) {
+        return g_dma_poll_results[g_dma_poll_count++];
+    }
+    return COSMOS_INVALID;
+}
+
+int cosmos_nvme_admin_init(struct cosmos_nvme_admin_service *service,
+                           const struct cosmos_nvme_admin_adapter *adapter,
+                           unsigned int namespace_blocks_low,
+                           unsigned int namespace_blocks_high,
+                           unsigned int block_bytes) {
+    if (g_admin_init_result != COSMOS_OK) {
+        return g_admin_init_result;
+    }
+    service->adapter = *adapter;
+    service->namespace_blocks_low = namespace_blocks_low;
+    service->namespace_blocks_high = namespace_blocks_high;
+    service->block_bytes = block_bytes;
+    return COSMOS_OK;
 }
 
 static int media_read(
@@ -311,6 +410,14 @@ static int test_init_rejects_missing_media(void) {
 
     reset_media(&media);
     CHECK(cosmos_nvme_pcie_service_init(
+              0, &bridge, &media, media_read, media_program, media_flush,
+              media_write_zeroes, media_deallocate, 1U, 0U,
+              TEST_BLOCK_BYTES) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_service_init(
+              &service, 0, &media, media_read, media_program, media_flush,
+              media_write_zeroes, media_deallocate, 1U, 0U,
+              TEST_BLOCK_BYTES) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_service_init(
               &service, &bridge, &media, 0, media_program, media_flush,
               media_write_zeroes, media_deallocate, 1U, 0U,
               TEST_BLOCK_BYTES) == COSMOS_INVALID);
@@ -321,6 +428,10 @@ static int test_init_rejects_missing_media(void) {
     CHECK(cosmos_nvme_pcie_service_init(
               &service, &bridge, 0, media_read, media_program, media_flush,
               media_write_zeroes, media_deallocate, 1U, 0U,
+              TEST_BLOCK_BYTES) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_service_init(
+              &service, &bridge, &media, media_read, media_program,
+              0, media_write_zeroes, media_deallocate, 1U, 0U,
               TEST_BLOCK_BYTES) == COSMOS_INVALID);
     CHECK(cosmos_nvme_pcie_service_init(
               &service, &bridge, &media, media_read, media_program,
@@ -342,6 +453,212 @@ static int test_init_rejects_missing_media(void) {
               &service, &bridge, &media, media_read, media_program,
               media_flush, media_write_zeroes, 0, 1U, 0U,
               TEST_BLOCK_BYTES) == COSMOS_INVALID);
+    return 0;
+}
+
+static int test_pointer_and_scalar_marshalling_edges(void) {
+    struct cosmos_nvme_pcie_bridge bridge;
+    struct cosmos_pcie_nvme_command raw;
+    struct cosmos_nvme_command command;
+    struct cosmos_nvme_admin_command admin;
+
+    memset(&bridge, 0, sizeof(bridge));
+    bridge.block_bytes = TEST_BLOCK_BYTES;
+    raw = make_raw_command(1U, 2U, 3U, 0xFFU, 4U, 0U,
+                           0U, 0U, 0U, 0U, 0U, 0U, 0U);
+    CHECK(cosmos_nvme_pcie_decode_io(0, &raw, &command) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_decode_io(&bridge, 0, &command) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_decode_io(&bridge, &raw, 0) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_decode_io(&bridge, &raw, &command) == COSMOS_OK);
+    CHECK(command.opcode == 0xFFU);
+
+    raw = make_raw_command(1U, 2U, 3U, COSMOS_NVME_OPCODE_FLUSH, 4U,
+                           COSMOS_NVME_NAMESPACE_ID, 0U, 0U, 0U, 0U,
+                           0U, 0U, 0U);
+    CHECK(cosmos_nvme_pcie_decode_io(&bridge, &raw, &command) == COSMOS_OK);
+    raw = make_raw_command(1U, 2U, 3U, COSMOS_NVME_OPCODE_WRITE_ZEROES, 4U,
+                           COSMOS_NVME_NAMESPACE_ID, 0U, 0U, 0U, 0U,
+                           0U, 0U, 0U);
+    CHECK(cosmos_nvme_pcie_decode_io(&bridge, &raw, &command) == COSMOS_OK);
+    raw = make_raw_command(1U, 2U, 3U,
+                           COSMOS_NVME_OPCODE_DATASET_MANAGEMENT, 4U,
+                           COSMOS_NVME_NAMESPACE_ID, 0x00200000U, 0U,
+                           0U, 0U, 0U, 0U, 0U);
+    CHECK(cosmos_nvme_pcie_decode_io(&bridge, &raw, &command) == COSMOS_OK);
+    raw = make_raw_command(1U, 2U, 3U, COSMOS_NVME_OPCODE_READ, 4U,
+                           COSMOS_NVME_NAMESPACE_ID, 0x00200000U, 0U,
+                           0U, 0U, 0U, 0U, 0U);
+    raw.raw_dword[2] = 1U;
+    CHECK(cosmos_nvme_pcie_decode_io(&bridge, &raw, &command) == COSMOS_OK);
+    CHECK(command.opcode == COSMOS_NVME_OPCODE_FLUSH);
+
+    CHECK(cosmos_nvme_pcie_decode_admin(0, &admin) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_decode_admin(&raw, 0) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_decode_admin(&raw, &admin) == COSMOS_OK);
+    CHECK(admin.payload_bytes == 0U);
+
+    raw = make_raw_command(0U, 2U, 3U, COSMOS_NVME_ADMIN_CREATE_IO_SQ,
+                           5U, 0U, 0x00200000U, 1U, 0U, 0U,
+                           0U, 0U, 0U);
+    CHECK(cosmos_nvme_pcie_decode_admin(&raw, &admin) == COSMOS_OK);
+    CHECK(admin.payload_address_low == 0x00200000U);
+
+    raw = make_raw_command(0U, 2U, 3U, COSMOS_NVME_ADMIN_IDENTIFY,
+                           6U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U);
+    CHECK(cosmos_nvme_pcie_decode_admin(&raw, &admin) == COSMOS_OK);
+    CHECK(admin.invalid_field == 1U);
+    CHECK(admin.payload_bytes == 0U);
+    return 0;
+}
+
+static int test_callback_pointer_guards(void) {
+    struct cosmos_nvme_service service;
+    struct cosmos_nvme_pcie_bridge bridge;
+    struct media_mock media;
+    struct cosmos_nvme_command command;
+    struct cosmos_nvme_completion completion;
+    cosmos_nvme_pcie_media_io_fn saved_io;
+    cosmos_nvme_pcie_media_flush_fn saved_flush;
+    cosmos_nvme_pcie_media_zeroes_fn saved_zeroes;
+    cosmos_nvme_pcie_media_deallocate_fn saved_deallocate;
+
+    reset_media(&media);
+    memset(&command, 0, sizeof(command));
+    memset(&completion, 0, sizeof(completion));
+    CHECK(bridge_init(&service, &bridge, &media) == COSMOS_OK);
+
+    CHECK(service.adapter.post_completion(0, &completion) ==
+          COSMOS_NVME_POST_HARD_FAILED);
+    CHECK(service.adapter.post_completion(&bridge, 0) ==
+          COSMOS_NVME_POST_HARD_FAILED);
+    CHECK(service.adapter.post_completion(&bridge, &completion) ==
+          COSMOS_NVME_POST_COMMITTED);
+
+    CHECK(service.adapter.media_read(0, &command) == COSMOS_INVALID);
+    saved_io = bridge.media_read;
+    bridge.media_read = 0;
+    CHECK(service.adapter.media_read(&bridge, &command) == COSMOS_INVALID);
+    bridge.media_read = saved_io;
+    CHECK(service.adapter.media_read(&bridge, &command) == COSMOS_OK);
+
+    CHECK(service.adapter.media_program(0, &command) == COSMOS_INVALID);
+    saved_io = bridge.media_program;
+    bridge.media_program = 0;
+    CHECK(service.adapter.media_program(&bridge, &command) == COSMOS_INVALID);
+    bridge.media_program = saved_io;
+    CHECK(service.adapter.media_program(&bridge, &command) == COSMOS_OK);
+
+    CHECK(service.adapter.media_flush(0) == COSMOS_INVALID);
+    saved_flush = bridge.media_flush;
+    bridge.media_flush = 0;
+    CHECK(service.adapter.media_flush(&bridge) == COSMOS_INVALID);
+    bridge.media_flush = saved_flush;
+    CHECK(service.adapter.media_flush(&bridge) == COSMOS_OK);
+
+    CHECK(service.adapter.media_write_zeroes(0, &command) == COSMOS_INVALID);
+    saved_zeroes = bridge.media_write_zeroes;
+    bridge.media_write_zeroes = 0;
+    CHECK(service.adapter.media_write_zeroes(&bridge, &command) ==
+          COSMOS_INVALID);
+    bridge.media_write_zeroes = saved_zeroes;
+    CHECK(service.adapter.media_write_zeroes(&bridge, &command) == COSMOS_OK);
+
+    CHECK(service.adapter.media_deallocate(0, &command) == COSMOS_INVALID);
+    saved_deallocate = bridge.media_deallocate;
+    bridge.media_deallocate = 0;
+    CHECK(service.adapter.media_deallocate(&bridge, &command) ==
+          COSMOS_INVALID);
+    bridge.media_deallocate = saved_deallocate;
+    CHECK(service.adapter.media_deallocate(&bridge, &command) == COSMOS_OK);
+    return 0;
+}
+
+static int test_admin_adapter_and_dma_guards(void) {
+    struct cosmos_nvme_admin_service service;
+    struct cosmos_nvme_pcie_bridge bridge;
+    struct cosmos_nvme_admin_completion completion;
+    struct cosmos_nvme_admin_command command;
+    unsigned char payload[32];
+    void *mapping;
+
+    memset(&service, 0, sizeof(service));
+    memset(&bridge, 0, sizeof(bridge));
+    memset(&completion, 0, sizeof(completion));
+    memset(&command, 0, sizeof(command));
+    memset(payload, 0x5A, sizeof(payload));
+    g_admin_init_result = COSMOS_OK;
+    CHECK(cosmos_nvme_pcie_admin_service_init(
+              0, &bridge, 1U, 0U, TEST_BLOCK_BYTES) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_admin_service_init(
+              &service, 0, 1U, 0U, TEST_BLOCK_BYTES) == COSMOS_INVALID);
+    CHECK(cosmos_nvme_pcie_admin_service_init(
+              &service, &bridge, 1U, 0U, TEST_BLOCK_BYTES) == COSMOS_OK);
+    g_admin_init_result = COSMOS_HW_ERROR;
+    CHECK(cosmos_nvme_pcie_admin_service_init(
+              &service, &bridge, 1U, 0U, TEST_BLOCK_BYTES) ==
+          COSMOS_HW_ERROR);
+    g_admin_init_result = COSMOS_OK;
+
+    CHECK(cosmos_nvme_pcie_post_admin_completion(0, &completion) ==
+          COSMOS_NVME_POST_HARD_FAILED);
+    CHECK(cosmos_nvme_pcie_post_admin_completion(&bridge, 0) ==
+          COSMOS_NVME_POST_HARD_FAILED);
+    CHECK(cosmos_nvme_pcie_post_admin_completion(&bridge, &completion) ==
+          COSMOS_NVME_POST_COMMITTED);
+    CHECK(service.adapter.configure_io_sq(
+              0, 1U, 1U, 1U, 2U, 3U, 4U) == COSMOS_INVALID);
+    CHECK(service.adapter.configure_io_sq(
+              &bridge, 1U, 1U, 1U, 2U, 3U, 4U) == COSMOS_OK);
+    CHECK(service.adapter.configure_io_cq(
+              0, 1U, 1U, 1U, 1U, 2U, 3U, 4U) == COSMOS_INVALID);
+    CHECK(service.adapter.configure_io_cq(
+              &bridge, 1U, 1U, 1U, 1U, 2U, 3U, 4U) == COSMOS_OK);
+    CHECK(service.adapter.poll_async_event(&bridge, 0) == COSMOS_UNAVAILABLE);
+
+    mapping = mmap((void *)(uintptr_t)COSMOS_NFC_DATA_POOL_BASE, 4096U,
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(mapping != MAP_FAILED);
+    command.payload_address_low = 0x00200FF0U;
+    command.payload_address_high = 1U;
+    command.payload_address2_low = 0x00201000U;
+    command.payload_address2_high = 1U;
+    CHECK(service.adapter.write_payload(0, &command, payload, 32U) ==
+          COSMOS_NVME_ADMIN_PAYLOAD_HARD_FAILED);
+    CHECK(service.adapter.write_payload(&bridge, 0, payload, 32U) ==
+          COSMOS_NVME_ADMIN_PAYLOAD_HARD_FAILED);
+    CHECK(service.adapter.write_payload(&bridge, &command, 0, 32U) ==
+          COSMOS_NVME_ADMIN_PAYLOAD_HARD_FAILED);
+    CHECK(service.adapter.write_payload(&bridge, &command, payload, 0U) ==
+          COSMOS_NVME_ADMIN_PAYLOAD_HARD_FAILED);
+
+    reset_dma();
+    CHECK(service.adapter.write_payload(&bridge, &command, payload, 32U) ==
+          COSMOS_NVME_ADMIN_PAYLOAD_HARD_FAILED);
+    reset_dma();
+    g_dma_submit_results[0] = COSMOS_OK;
+    CHECK(service.adapter.write_payload(&bridge, &command, payload, 32U) ==
+          COSMOS_NVME_ADMIN_PAYLOAD_HARD_FAILED);
+    reset_dma();
+    command.payload_address_low = 0x00200000U;
+    g_dma_submit_results[0] = COSMOS_OK;
+    g_dma_poll_results[0] = COSMOS_OK;
+    CHECK(service.adapter.write_payload(&bridge, &command, payload, 16U) ==
+          COSMOS_NVME_ADMIN_PAYLOAD_COMMITTED);
+    reset_dma();
+    command.payload_address_low = 0x00200FF0U;
+    g_dma_submit_results[0] = COSMOS_OK;
+    g_dma_poll_results[0] = COSMOS_OK;
+    CHECK(service.adapter.write_payload(&bridge, &command, payload, 32U) ==
+          COSMOS_NVME_ADMIN_PAYLOAD_HARD_FAILED);
+    reset_dma();
+    g_dma_submit_results[0] = COSMOS_OK;
+    g_dma_submit_results[1] = COSMOS_OK;
+    g_dma_poll_results[0] = COSMOS_OK;
+    g_dma_poll_results[1] = COSMOS_OK;
+    CHECK(service.adapter.write_payload(&bridge, &command, payload, 32U) ==
+          COSMOS_NVME_ADMIN_PAYLOAD_COMMITTED);
+    CHECK(munmap(mapping, 4096U) == 0);
     return 0;
 }
 
@@ -505,10 +822,21 @@ static int test_auto_dma_prp_and_control_contract(void) {
 }
 
 int main(void) {
-#ifdef COSMOS_NVME_PRP_CONTROL_ONLY
+#if defined(COSMOS_NVME_PCIE_ADAPTER_COVERAGE_ONLY)
+    CHECK(test_auto_dma_prp_and_control_contract() == 0);
+    CHECK(test_pointer_and_scalar_marshalling_edges() == 0);
+    CHECK(test_callback_pointer_guards() == 0);
+    CHECK(test_admin_adapter_and_dma_guards() == 0);
+    CHECK(test_init_rejects_missing_media() == 0);
+    puts("cosmos NVMe PCIe adapter contract: PASS");
+#elif defined(COSMOS_NVME_PRP_CONTROL_ONLY)
     CHECK(test_auto_dma_prp_and_control_contract() == 0);
     puts("cosmos NVMe PRP/control contract: PASS");
 #else
+    CHECK(test_auto_dma_prp_and_control_contract() == 0);
+    CHECK(test_pointer_and_scalar_marshalling_edges() == 0);
+    CHECK(test_callback_pointer_guards() == 0);
+    CHECK(test_admin_adapter_and_dma_guards() == 0);
     CHECK(test_exact_decode_and_forwarding() == 0);
     CHECK(test_prp2_and_sgl_validation() == 0);
     CHECK(test_init_rejects_missing_media() == 0);

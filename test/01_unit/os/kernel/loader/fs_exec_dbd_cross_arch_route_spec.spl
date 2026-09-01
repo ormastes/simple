@@ -1,0 +1,31 @@
+use std.spec.{describe, it, expect}
+use os.kernel.loader.fs_exec_launch_caps_v1.{fs_exec_launch_caps_with_launch_v1}
+use os.kernel.loader.dbd_launch_grants_v1.{SIMPLEOS_DBD_EXECUTABLE_V1}
+use os.kernel.types.capability_types.{CapabilityKind}
+
+describe("x86_64 and RV64 authenticated DBD route policy"):
+    it("uses the common adoption owner for both architecture dispatch routes"):
+        val x86 = file_read("src/os/kernel/loader/x86_64_fs_exec_spawn.spl")
+        val rv64 = file_read("src/os/kernel/loader/riscv64_fs_exec_spawn.spl")
+        val common = file_read("src/os/kernel/loader/fs_exec_spawn.spl")
+        expect(x86).to_contain("fs_exec_adopt_authenticated_with_launch_v1(")
+        expect(rv64).to_contain("fs_exec_adopt_authenticated_with_launch_v1(")
+        expect(common).to_contain("if privileged_recipe:")
+        expect(common).to_contain("val canonical_caps = fs_exec_launch_caps_with_launch_v1(")
+        expect(common).to_contain("fs_exec_launch_caps_attenuated_by_v1(")
+        expect(common).to_contain("val minted_caps = spawn_authority_spawn_caps")
+        expect(common).to_contain("SPAWN_RECIPE_DEDICATED_DBD")
+
+    it("gives both routes the exact canonical DBD runtime policy"):
+        val caps = fs_exec_launch_caps_with_launch_v1(
+            SIMPLEOS_DBD_EXECUTABLE_V1, [SIMPLEOS_DBD_EXECUTABLE_V1], [], 0u64)
+        expect(caps.has(CapabilityKind.NetListen(port: 5433u16))).to_equal(true)
+        expect(caps.has(CapabilityKind.NetListen(port: 8080u16))).to_equal(false)
+        expect(caps.has(CapabilityKind.NetListen(port: 0u16))).to_equal(false)
+        expect(caps.has(CapabilityKind.FileRead(path_prefix: "/SYS/SERVER.HTM"))).to_equal(false)
+
+    it("falls back without listener authority on an altered tuple"):
+        val caps = fs_exec_launch_caps_with_launch_v1(
+            SIMPLEOS_DBD_EXECUTABLE_V1, [SIMPLEOS_DBD_EXECUTABLE_V1], ["PATH=/bin"], 0u64)
+        expect(caps.has(CapabilityKind.NetListen(port: 5433u16))).to_equal(false)
+        expect(caps.has(CapabilityKind.NetListen(port: 0u16))).to_equal(false)

@@ -39,7 +39,11 @@ unrelated sibling features are out of scope.
 
 #### admits exact CUDA and Vulkan rows and keeps Metal blocked
 
-- Verify: admits exact CUDA and Vulkan rows and keeps Metal blocked
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- admits exact CUDA and Vulkan rows and keeps Metal blocked
 - Bind qualification execution lifecycle and canonical build tuple
 
 
@@ -50,8 +54,8 @@ Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-007 REQ-010 REQ-011 REQ-012
-step("Verify: admits exact CUDA and Vulkan rows and keeps Metal blocked")
+# @req REQ-SSPEC-OS
+step("admits exact CUDA and Vulkan rows and keeps Metal blocked")
 step("Bind qualification execution lifecycle and canonical build tuple")
 for backend in [X25519MlKem768EvidenceBackend.Cuda,
         X25519MlKem768EvidenceBackend.Vulkan]:
@@ -69,7 +73,7 @@ expect(_gpu_reason(metal, _gpu_config(metal),
 
 #### rejects invalid qualification policy version and batch first
 
-- Verify: rejects invalid qualification policy version and batch first
+- rejects invalid qualification policy version and batch first
 
 
 <details>
@@ -79,8 +83,8 @@ Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-007 REQ-010 REQ-011 REQ-012
-step("Verify: rejects invalid qualification policy version and batch first")
+# @req REQ-SSPEC-OS
+step("rejects invalid qualification policy version and batch first")
 val qualification = _gpu_qualification(
     X25519MlKem768EvidenceBackend.Cuda)
 val evidence = _gpu_evidence(qualification)
@@ -113,7 +117,7 @@ expect(_gpu_reason(
 
 #### rejects execution substitution fallback and lifecycle gaps
 
-- Verify: rejects execution substitution fallback and lifecycle gaps
+- rejects execution substitution fallback and lifecycle gaps
 
 
 <details>
@@ -123,8 +127,8 @@ Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-007 REQ-010 REQ-011 REQ-012
-step("Verify: rejects execution substitution fallback and lifecycle gaps")
+# @req REQ-SSPEC-OS
+step("rejects execution substitution fallback and lifecycle gaps")
 val qualification = _gpu_qualification(
     X25519MlKem768EvidenceBackend.Cuda)
 val config = _gpu_config(qualification)
@@ -177,7 +181,7 @@ expect(_gpu_reason(
 
 #### rejects forged cross-runner and cross-device build admissions
 
-- Verify: rejects forged cross-runner and cross-device build admissions
+- rejects forged cross-runner and cross-device build admissions
 
 
 <details>
@@ -187,8 +191,8 @@ Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-007 REQ-010 REQ-011 REQ-012
-step("Verify: rejects forged cross-runner and cross-device build admissions")
+# @req REQ-SSPEC-OS
+step("rejects forged cross-runner and cross-device build admissions")
 val qualification = _gpu_qualification(
     X25519MlKem768EvidenceBackend.Cuda)
 val config = _gpu_config(qualification)
@@ -208,6 +212,21 @@ expect(x25519_mlkem768_qualified_gpu_measurement_reason(
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/01_unit/os/crypto/x25519mlkem768_gpu_measurement_qualification_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering X25519MLKEM768 fail-closed GPU measurement qualification.
+- X25519MLKEM768 fail-closed GPU measurement qualification
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -221,36 +240,50 @@ expect(x25519_mlkem768_qualified_gpu_measurement_reason(
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-007`
+- `REQ-010`
+- `REQ-011`
+- `REQ-012`
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `ea4e8b562103757f5e6702ba0fb8823b9694e00afdf84f0ab0cdae84ed13d8dd`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `ee00cde0c3a8dfaddfad9b640939e2b08b392c55b9b5d7db5355c3889d46c403`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `ea4e8b562103757f5e6702ba0fb8823b9694e00afdf84f0ab0cdae84ed13d8dd`.
+Source SHA-256: `ee00cde0c3a8dfaddfad9b640939e2b08b392c55b9b5d7db5355c3889d46c403`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `ea4e8b562103757f5e6702ba0fb8823b9694e00afdf84f0ab0cdae84ed13d8dd`  
+Source SHA-256: `ee00cde0c3a8dfaddfad9b640939e2b08b392c55b9b5d7db5355c3889d46c403`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **91/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/os/crypto/x25519mlkem768_gpu_measurement_qualification_spec.spl
 mirror: doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_measurement_qualification_spec.md (current)
-findings: 3 blockers: 0
+findings: 3 blockers: 1
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=100 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_measurement_qualification_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=91; blocker cap makes effective=49
 doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_measurement_qualification_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_measurement_qualification_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_measurement_qualification_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/crypto/x25519mlkem768_gpu_measurement_qualification_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 5 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
 <!-- sspec-maintain:scorecard:end -->

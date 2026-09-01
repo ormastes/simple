@@ -1,0 +1,142 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
+
+# @req REQ-SSPEC-APP
+"""
+STARTTLS negotiation for the LLM Caret mail tools, proven against scripted
+server transcripts (no TLS server, no network).
+
+Who: an operator pointing `[mail]` at SMTP submission (587) or IMAP with
+STARTTLS (143). Why: the client must send the right command sequence, must
+parse the capability advertisement before asking to upgrade, and must refuse
+to continue in cleartext when the server never offered STARTTLS. The socket
+upgrade itself is not possible on this runtime (no `rt_tls_client_from_fd`),
+so `mail_send` refuses 587 before connecting and names the missing symbol.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use app.llm_caret.infra_mail_starttls.{
+    STARTTLS_SMTP, STARTTLS_IMAP, STARTTLS_MISSING_RUNTIME_SYMBOL,
+    starttls_begin, starttls_feed, starttls_run_script,
+    smtp_ehlo_advertises_starttls, imap_capability_advertises_starttls, starttls_runtime_gap_error
+}
+use app.llm_caret.infra_mail.{mail_send}
+use app.llm_caret.config.{parse_config_text, reset_config}
+
+# Scripted server replies (one group per client command), greenmail-shaped.
+fn smtp_ehlo_with_starttls() -> [text]:
+    ["250-localhost Hello localhost", "250-STARTTLS", "250-AUTH PLAIN LOGIN", "250 SIZE 10485760"]
+
+fn smtp_ehlo_without_starttls() -> [text]:
+    ["250-localhost Hello localhost", "250-AUTH PLAIN LOGIN", "250 SIZE 10485760"]
+
+fn imap_capability_with_starttls() -> [text]:
+    ["* CAPABILITY IMAP4rev1 LITERAL+ SORT UIDPLUS IDLE STARTTLS AUTH=PLAIN", "A1 OK CAPABILITY completed."]
+
+fn imap_capability_without_starttls() -> [text]:
+    ["* CAPABILITY IMAP4rev1 LITERAL+ AUTH=PLAIN", "A1 OK CAPABILITY completed."]
+
+describe "SMTP STARTTLS negotiation (RFC 3207)":
+    # @manual scenario evidence
+    it "sends EHLO, reads STARTTLS from the 250 block, sends STARTTLS and stops at 220 ready to upgrade":
+        # @req REQ-SSPEC-APP
+        step("sends EHLO, reads STARTTLS from the 250 block, sends STARTTLS and stops at 220 ready to upgrade")
+        step("Client opens with EHLO")
+        val st0 = starttls_begin(STARTTLS_SMTP, "localhost")
+        expect(st0.next_command).to_equal("EHLO localhost\r\n")
+        expect(st0.ready).to_equal(false)
+        step("Server advertises STARTTLS in the multiline 250 reply")
+        val st1 = starttls_feed(st0, smtp_ehlo_with_starttls())
+        expect(st1.error).to_equal("")
+        expect(st1.advertised).to_equal(true)
+        expect(st1.next_command).to_equal("STARTTLS\r\n")
+        step("Server answers 220 Ready to start TLS: the socket must now be wrapped")
+        val st2 = starttls_feed(st1, ["220 Ready to start TLS"])
+        expect(st2.error).to_equal("")
+        expect(st2.ready).to_equal(true)
+        expect(st2.next_command).to_equal("")
+        expect(st2.sent).to_equal(["EHLO localhost\r\n", "STARTTLS\r\n"])
+
+    it "refuses to continue when the server does not advertise STARTTLS":
+        # @req REQ-SSPEC-APP
+        step("refuses to continue when the server does not advertise STARTTLS")
+        val st = starttls_run_script(STARTTLS_SMTP, "localhost", [smtp_ehlo_without_starttls()])
+        expect(st.ready).to_equal(false)
+        expect(st.advertised).to_equal(false)
+        expect(st.error).to_contain("does not advertise STARTTLS")
+        step("Only EHLO was ever sent; STARTTLS and credentials never left the client")
+        expect(st.sent).to_equal(["EHLO localhost\r\n"])
+
+    it "treats a non-220 answer to STARTTLS as a refusal, and a bad EHLO as fatal":
+        # @req REQ-SSPEC-APP
+        step("treats a non-220 answer to STARTTLS as a refusal, and a bad EHLO as fatal")
+        val refused = starttls_run_script(STARTTLS_SMTP, "localhost", [smtp_ehlo_with_starttls(), ["454 TLS not available due to temporary reason"]])
+        expect(refused.ready).to_equal(false)
+        expect(refused.error).to_contain("STARTTLS refused (454)")
+        val bad_ehlo = starttls_run_script(STARTTLS_SMTP, "localhost", [["502 Command not implemented"]])
+        expect(bad_ehlo.error).to_contain("EHLO was not accepted (502)")
+        expect(bad_ehlo.sent.len()).to_equal(1)
+
+    it "parses the EHLO keyword list exactly (dash and space separators, case-insensitive)":
+        # @req REQ-SSPEC-APP
+        step("parses the EHLO keyword list exactly (dash and space separators, case-insensitive)")
+        expect(smtp_ehlo_advertises_starttls(["250-x", "250 STARTTLS"])).to_equal(true)
+        expect(smtp_ehlo_advertises_starttls(["250-starttls", "250 SIZE 1"])).to_equal(true)
+        expect(smtp_ehlo_advertises_starttls(["250-x", "250 SIZE 1", "STARTTLS"])).to_equal(false)
+        expect(smtp_ehlo_advertises_starttls(["250-STARTTLS-LIKE", "250 x"])).to_equal(false)
+
+describe "IMAP STARTTLS negotiation (RFC 3501 §6.2.1)":
+    it "sends CAPABILITY, finds STARTTLS, sends a tagged STARTTLS and stops at the tagged OK":
+        # @req REQ-SSPEC-APP
+        step("sends CAPABILITY, finds STARTTLS, sends a tagged STARTTLS and stops at the tagged OK")
+        val st0 = starttls_begin(STARTTLS_IMAP, "")
+        expect(st0.next_command).to_equal("A1 CAPABILITY\r\n")
+        val st1 = starttls_feed(st0, imap_capability_with_starttls())
+        expect(st1.error).to_equal("")
+        expect(st1.next_command).to_equal("A2 STARTTLS\r\n")
+        val st2 = starttls_feed(st1, ["A2 OK Begin TLS negotiation now."])
+        expect(st2.ready).to_equal(true)
+        expect(st2.sent).to_equal(["A1 CAPABILITY\r\n", "A2 STARTTLS\r\n"])
+
+    it "refuses when CAPABILITY lacks STARTTLS or the tagged STARTTLS reply is NO":
+        # @req REQ-SSPEC-APP
+        step("refuses when CAPABILITY lacks STARTTLS or the tagged STARTTLS reply is NO")
+        val missing = starttls_run_script(STARTTLS_IMAP, "", [imap_capability_without_starttls()])
+        expect(missing.ready).to_equal(false)
+        expect(missing.error).to_contain("does not advertise STARTTLS")
+        expect(missing.sent).to_equal(["A1 CAPABILITY\r\n"])
+        val no = starttls_run_script(STARTTLS_IMAP, "", [imap_capability_with_starttls(), ["A2 NO STARTTLS unavailable"]])
+        expect(no.ready).to_equal(false)
+        expect(no.error).to_contain("STARTTLS refused")
+
+    it "reads STARTTLS from a greeting-style [CAPABILITY ...] code as well":
+        # @req REQ-SSPEC-APP
+        step("reads STARTTLS from a greeting-style [CAPABILITY ...] code as well")
+        expect(imap_capability_advertises_starttls(["* OK [CAPABILITY IMAP4rev1 STARTTLS] ready"])).to_equal(true)
+        expect(imap_capability_advertises_starttls(["* CAPABILITY IMAP4rev1"])).to_equal(false)
+        step("A transcript that ends mid-negotiation is an error, never a silent success")
+        val short = starttls_run_script(STARTTLS_IMAP, "", [])
+        expect(short.error).to_contain("transcript ended before the server answered 'A1 CAPABILITY'")
+
+describe "mail_send on the STARTTLS port":
+    it "refuses 587 before any connect, naming the missing runtime symbol":
+        # @req REQ-SSPEC-APP
+        step("refuses 587 before any connect, naming the missing runtime symbol")
+        reset_config()
+        parse_config_text("mail:\n    smtp_host: smtp.invalid\n    smtp_port: 587\n    user: u\n    secret_env: X\n")
+        val (ok, err) = mail_send("a@b.test", "s", "b")
+        expect(ok).to_equal(false)
+        expect(err).to_contain("587")
+        expect(err).to_contain("STARTTLS")
+        expect(err).to_contain(STARTTLS_MISSING_RUNTIME_SYMBOL)
+        expect(err).to_contain("tls_no_fd_upgrade_blocks_starttls_2026-08-25.md")
+        expect(starttls_runtime_gap_error(587)).to_contain("rt_tls_client_from_fd")
+        reset_config()

@@ -1,7 +1,6 @@
 # Cosine duplicate check ignored same-file fuzzy clones
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** SOURCE FIXED; RUNTIME QUALIFICATION PENDING
 **Severity:** P1 — renamed duplicate blocks in one file were silently omitted
 
 ## Reproduction

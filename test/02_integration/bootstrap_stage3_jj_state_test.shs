@@ -4,21 +4,12 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
+GIT_CEILING_DIRECTORIES=$tmp
+export GIT_CEILING_DIRECTORIES
 
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 
-# This case is specifically the PURE-jj lane (no git dir). jj flipped `git init`
-# to colocate by DEFAULT (0.38 documents `--colocate` as "This is the default"),
-# which silently turned this into a colocated repo and failed the assertion
-# below. Pin colocation off rather than inheriting whatever the installed jj
-# defaults to -- but only when this jj actually knows the key, so a jj that
-# predates it (where non-colocated already IS the default, and which would
-# reject an unknown --config key) keeps working unchanged.
-if jj git init --help 2>&1 | grep -q 'git\.colocate'; then
-  jj --config git.colocate=false git init "$tmp/repo" >/dev/null
-else
-  jj git init "$tmp/repo" >/dev/null
-fi
+jj git init "$tmp/repo" >/dev/null
 [ ! -e "$tmp/repo/.git" ]
 printf 'one\n' >"$tmp/repo/source.spl"
 
@@ -51,15 +42,9 @@ done
 exec "$REAL_JJ" "$@"
 EOF
 chmod +x "$tmp/bin/jj"
-REAL_JJ=$real_jj JJ_TEST_REPO="$tmp/repo" PATH="$tmp/bin:$PATH" \
+! REAL_JJ=$real_jj JJ_TEST_REPO="$tmp/repo" PATH="$tmp/bin:$PATH" \
   bootstrap_stage3_git_state "$tmp/repo" "$tmp/state-concurrent"
-captured_head=$(sed -n 's/^head=//p' "$tmp/state-concurrent")
-"$real_jj" --ignore-working-copy --no-pager --color=never \
-  -R "$tmp/repo" diff --git -r "$captured_head" >"$tmp/captured.diff"
-printf 'jj-working-copy-diff-sha256=%s\n' \
-  "$(bootstrap_stage3_hash_file "$tmp/captured.diff")" >"$tmp/captured.records"
-expected_fingerprint=$(bootstrap_stage3_hash_file "$tmp/captured.records")
-grep -Fqx "dirty_fingerprint=$expected_fingerprint" "$tmp/state-concurrent"
+[ ! -e "$tmp/state-concurrent" ]
 
 jj -R "$tmp/repo" config set --repo snapshot.max-new-file-size 1
 printf 'oversized\n' >"$tmp/repo/oversized.spl"

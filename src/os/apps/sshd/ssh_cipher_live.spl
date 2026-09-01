@@ -1,15 +1,14 @@
 #![allow(unnamed_duplicate_typed_args)]
 # SSH Cipher Layer — live-safe AES-256-GCM only.
 
-use os.apps.sshd.ssh_packet.{ssh_get_u32}
-use os.apps.sshd.ssh_session_helpers.{_bytes_to_hex}
+use os.apps.sshd.ssh_packet.{ssh_get_u32, SSH_MAX_PACKET}
 use os.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_tls13_aes256_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
 extern fn rt_tls13_aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
-extern fn rt_ssh_aes256_gcm_decrypt_packet(key: [u8], iv: [u8], seq: i64, packet: [u8]) -> [u8]
-extern fn serial_println(msg: text)
+@unsafe(reason: "raw SSH AES-256-GCM packet provider; tagged v2 response is lifted immediately", capabilities: [ffi])
+extern fn rt_ssh_aes256_gcm_decrypt_packet_v2(key: [u8], iv: [u8], seq: i64, packet: [u8]) -> [u8]
 
 val GCM_TAG_LEN: u64 = 16
 
@@ -43,6 +42,8 @@ fn _push_byte(arr: [u8], byte_val: u8) -> [u8]:
 fn _make_nonce(iv: [u8], seq: u32) -> [u8]:
     # RFC 5647 increments the AES-GCM invocation counter after each packet, so
     # encrypted packet sequence 0 uses the KDF IV unchanged.
+    if iv.len() != 12u64:
+        return []
     var carry: u64 = seq.to_u64()
     val s11 = (if iv.len() > 11: _u8_at(iv, 11).to_u64() else: 0) + (carry & 0xFF)
     val b11 = (s11 & 0xFF).to_u8()
@@ -166,7 +167,7 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
     var aad: [u8] = []
     var i: u64 = 0
     while i < 4:
-        aad.push(_u8_at(data, i))
+        aad.push(data[i])
         i = i + 1
 
     val ct_with_tag_len = data.len() - 4
@@ -177,26 +178,22 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
     var ciphertext: [u8] = []
     i = 0
     while i < ct_len:
-        ciphertext.push(_u8_at(data, 4 + i))
+        ciphertext.push(data[4 + i])
         i = i + 1
 
     var tag: [u8] = []
     i = 0
     while i < GCM_TAG_LEN:
-        tag.push(_u8_at(data, 4 + ct_len + i))
+        tag.push(data[4 + ct_len + i])
         i = i + 1
 
     val nonce = _make_nonce(iv_c2s, seq_c2s)
-    serial_println("[sshd-cipher] decrypt256 seq={seq_c2s} key_len={enc_key_c2s.len()} iv={_bytes_to_hex(iv_c2s)} nonce={_bytes_to_hex(nonce)} aad={_bytes_to_hex(aad)} ct={_bytes_to_hex(ciphertext)} tag={_bytes_to_hex(tag)}")
-    val result = rt_tls13_aes256_gcm_decrypt(enc_key_c2s, nonce, ciphertext, aad, tag)
-    var status: u8 = 0x00
-    if result.len() > 0:
-        status = _u8_at(result, 0)
-        serial_println("[sshd-cipher] decrypt256 result_len={result.len()} status=0x{_bytes_to_hex([status])}")
-    else:
-        serial_println("[sshd-cipher] decrypt256 result_len=0")
+    var result: [u8] = []
+    unsafe(capabilities: [ffi]):
+        result = rt_tls13_aes256_gcm_decrypt(enc_key_c2s, nonce, ciphertext, aad, tag)
     if result.len() == 0:
         return Err("GCM decryption failed: invalid input")
+    val status = _u8_at(result, 0)
     if status == 0x00:
         return Err("GCM decryption failed: authentication tag mismatch")
 
@@ -206,13 +203,11 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
     if 2 + padding_len > result.len():
         return Err("invalid padding in decrypted packet")
     val payload_len = result.len() - 2 - padding_len
-    serial_println("[sshd-cipher] decrypt256 padding_len={padding_len} payload_len={payload_len}")
     var payload: [u8] = []
     i = 0
     while i < payload_len:
         payload.push(_u8_at(result, 2 + i))
         i = i + 1
-    serial_println("[sshd-cipher] decrypt256 payload_ready len={payload.len()}")
     Ok(payload)
 
 fn ssh_decrypt_packet_aes256_gcm_payload_direct(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2s: [u8]) -> Result<[u8], text>:

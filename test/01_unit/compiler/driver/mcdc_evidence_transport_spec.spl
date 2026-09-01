@@ -1,0 +1,64 @@
+"""Focused typed transport coverage for completed MC/DC runtime evidence."""
+# @req: REQ-MCDC-ENFORCEMENT-005
+
+use std.spec
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.driver.driver_mcdc_report_gate.{
+    driver_complete_mcdc_report, driver_parse_mcdc_runtime_evidence_v1
+}
+use std.common.mcdc.model.{McdcEvaluation}
+use std.nogc_sync_mut.test_runner.test_runner_mcdc_report.{
+    test_runner_build_mcdc_evidence, test_runner_mcdc_evidence_v1_text
+}
+
+describe "MC/DC runtime evidence transport":
+    it "admits a non-empty exact-coverage artifact":
+        step("Verify: typed condition evidence reaches the exact gate")
+        val evidence = driver_parse_mcdc_runtime_evidence_v1(
+            "MCDC-EVIDENCE-v1\nsaturated|false\ncondition|decision-a|v1|0|true"
+        )
+        expect(evidence != nil).to_equal(true)
+        val completion = driver_complete_mcdc_report(
+            "on", AssuranceStrictness.Moderate, evidence
+        )
+        expect(completion.accepted).to_equal(true)
+
+    it "rejects an empty or malformed artifact":
+        step("Verify: no zero-of-zero MC/DC pass is possible")
+        val empty = driver_parse_mcdc_runtime_evidence_v1(
+            "MCDC-EVIDENCE-v1\nsaturated|false"
+        )
+        expect(empty != nil).to_equal(true)
+        val completion = driver_complete_mcdc_report(
+            "dynamic", AssuranceStrictness.Moderate, empty
+        )
+        expect(completion.accepted).to_equal(false)
+        expect(completion.machine_diagnostic).to_contain("MCDC-E-EVIDENCE-EMPTY")
+        expect(driver_parse_mcdc_runtime_evidence_v1("bad") == nil).to_equal(true)
+
+    it "joins runtime rows to deterministic compiler obligations":
+        step("Verify: runtime IDs become semantic exact-coverage evidence")
+        val manifest = "schema: simple-mcdc-obligations-v1\n" +
+            "condition|7|10:sample.spl:4|source-offset-v1|0|0|0|0|0|false|compiler-boolean-projection-v1"
+        val rows = [
+            McdcEvaluation(
+                decision_id: 7, owner_id: 1, sequence: 1, outcome: false,
+                evaluated_mask0: 1, evaluated_mask1: 0,
+                evaluated_mask2: 0, evaluated_mask3: 0,
+                true_mask0: 0, true_mask1: 0, true_mask2: 0, true_mask3: 0,
+                masked_mask0: 0, masked_mask1: 0,
+                masked_mask2: 0, masked_mask3: 0
+            ),
+            McdcEvaluation(
+                decision_id: 7, owner_id: 1, sequence: 2, outcome: true,
+                evaluated_mask0: 1, evaluated_mask1: 0,
+                evaluated_mask2: 0, evaluated_mask3: 0,
+                true_mask0: 1, true_mask1: 0, true_mask2: 0, true_mask3: 0,
+                masked_mask0: 0, masked_mask1: 0,
+                masked_mask2: 0, masked_mask3: 0
+            )
+        ]
+        val evidence = test_runner_build_mcdc_evidence(manifest, rows, [], false)
+        expect(evidence != nil).to_equal(true)
+        val artifact = test_runner_mcdc_evidence_v1_text(evidence.unwrap())
+        expect(artifact).to_contain("condition|10:sample.spl:4|source-offset-v1|0|true")

@@ -159,9 +159,7 @@ pub extern "C" fn rt_is_error(v: RuntimeValue) -> bool {
 mod u64_boundary_tests {
     use super::{rt_value_as_u64, rt_value_u64};
     use crate::value::sffi::equality::{rt_value_compare, rt_value_eq, value_hash};
-    use crate::value::{
-        rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set, rt_enum_new, rt_enum_payload, RuntimeValue,
-    };
+    use crate::value::{rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set, rt_enum_new, rt_enum_payload, RuntimeValue};
 
     #[test]
     fn boxed_u64_has_lossless_value_semantics_and_signed_int_parity() {

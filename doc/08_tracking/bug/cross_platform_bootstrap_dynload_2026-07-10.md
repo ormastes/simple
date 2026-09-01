@@ -1,8 +1,5 @@
 # Cross-Platform Bootstrap and Dynload Status (2026-07-10)
 
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 ## Contract
 
 Ordinary `.spl` edits use:
@@ -25,7 +22,7 @@ full CLI relink. Expensive boundaries are explicit:
 
 | Platform | Fixed | Verification |
 |---|---|---|
-| Linux | Portable fingerprint pruning; LLVM vtable/object dispatch; canonical PTX/ELF/runtime symbols | PASS: clean-cache Stage 2/3 dynload and compiler sanity |
+| Linux | Portable fingerprint pruning; dynload-only default | PASS: Stage 2/3, no Cargo, no Stage 4; 54 seconds |
 | macOS | `shasum`, `gtimeout`, Homebrew prefix, LLVM-major validation | Static contract only; no macOS host available |
 | Windows | Git Bash/`.cmd` entrypoints, MinGW/MSVC triples, `.exe`/`.lib`, WFFI/DLL names | Rust host check PASS; no Windows host available |
 | FreeBSD | Shared wrapper, portable hashes/timeouts, canonical QEMU flow, 900-second pristine-image SSH wait, nested-worktree rsync exclusions | Smoke PASS on FreeBSD 14.3; full mode remains pending |
@@ -86,34 +83,3 @@ sh scripts/check/check-freebsd-bootstrap-qemu.shs --full
   fixture successfully, then `bin/simple <refreshed-main.smf>` exited 1 with
   `file not found`. No fake or knowingly failing spec was committed; production
   SMF dispatch remains a concrete loader/runtime blocker.
-
-## Current-Main Recheck (2026-07-25)
-
-- Clean Linux full-bootstrap cycles initially rejected 40 LLVM modules carrying
-  vtable metadata, then six modules containing real virtual calls.
-- LLVM now emits vtable globals, stores the vtable pointer in an eight-byte
-  object header, shifts direct field access, and lowers virtual calls through
-  the selected slot. The focused Rust IR test passes.
-- The third bounded full-bootstrap cycle compiled all Stage 2 objects and
-  reached the linker. It now fails only on `f64.to_hex`,
-  `ElfReloc.reloc_type_to_elf_value`, and `rt_dict_insert`.
-- A fresh bounded session replaced those calls with existing owners and added
-  focused regressions. Linux Stage 2 and Stage 3 then passed from a clean
-  cache; Stage 3 passed compiler sanity and became the verified downstream
-  compiler.
-- The FreeBSD checker now defaults to 8 GiB, selects the matching SSH private
-  key, grows and verifies guest root space, preserves package command status,
-  and requests guest shutdown before force cleanup.
-- GitHub run `30146430112` owns the fresh canonical FreeBSD full pass. Run
-  `30146430121` owns native Intel/Apple Silicon macOS and Windows MSVC
-  bootstrap evidence.
-- Commit `744bcf9be648` upgrades the Windows workflow from optional Stage 2
-  compilation to strict Stage 2/3 dynload bootstrap for both MSVC and MinGW;
-  run `30146474227` owns that evidence.
-- Production consumer tracing confirmed that the current pure-Simple CLI
-  delegates `.smf` execution to the Rust seed. `dynsmf_session` only validates
-  artifact bytes and records handles; it does not execute refreshed module
-  behavior. The watcher and startup manifest also disagree on `build/smf`
-  versus `build/dynsmf` ownership. TODO 533 remains open until one canonical
-  cache/loader path executes changed behavior without seed fallback or
-  launcher replacement.

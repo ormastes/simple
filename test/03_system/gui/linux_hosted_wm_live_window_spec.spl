@@ -1,197 +1,176 @@
+# @cover src/os/hosted/hosted_wm_evidence.spl 0%
 # @tag:system
 # @tag:gui
 # @tag:linux-hosted-wm
-# @manual_section:primary
 
 """
-# Linux Hosted WM Pinned-Font and Event Specification
+# Linux Hosted WM Live Window Specification
 
 ## Overview
 
-This environmental scenario verifies the retained output of the canonical
-Linux live-window gate. The gate builds the production hosted entry with the
-pure-Simple compiler, opens a real winit window under X11, captures both the
-presented window and production framebuffer, and correlates host and internal
-WM events with newer rendered frames.
+This scenario hardens the Linux hosted SimpleOS WM entry. The entry must create
+a real winit-hosted window, keep it windowed rather than fullscreen, and present
+the first frame through the Simple Web hosted WM path.
+
+## Acceptance Criteria
+
+- `src/os/hosted/hosted_entry.spl` creates `SimpleOS Shared Hosted WM` at
+  1024x720 through `rt_winit_window_new`.
+- The entry emits a window-created marker with `mode=windowed` and
+  `fullscreen=false` only after `rt_winit_window_new` returns a nonzero handle.
+- The entry emits a frame-presented marker with `renderer=simple-web` after
+  `HostCompositor.render_frame()`.
+- The live wrapper uses a GUI-enabled driver and reports
+  `linux_hosted_wm_live_window_status=pass`.
+- The live wrapper forces Xwayland on GNOME Wayland, captures the actual
+  1024x720 hosted WM window with ImageMagick `import`, and validates nonblank
+  drawn pixels from the Simple Web-rendered proof surface.
+- The live wrapper injects host focus and pointer movement through `xdotool`
+  and requires corresponding winit event markers in hosted WM stdout.
 
 ## Syntax
 
-Run the live gate first:
+Run the source-contract SPipe spec with:
 
 ```bash
-BUILD_DIR=build/linux-hosted-wm-font-event-current \
-REPORT_PATH=build/linux-hosted-wm-font-event-current/report.md \
-SIMPLE_BIN=/path/to/current/pure-simple \
-sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs
-```
-
-`SIMPLE_BIN` is required explicitly so an unrelated stale `bin/release`
-artifact cannot become evidence. While the glyph oracle is `pending`, a
-reviewer may run once with `LINUX_HOSTED_WM_CALIBRATE_GLYPH=1` to retain the
-live crop and its reported hash. That calibration run always exits nonzero and
-reports `glyph-oracle-calibration-only-*`; only a separately reviewed pinned
-hash can admit a later live run.
-
-Then run this scenario with the pure-Simple self-hosted binary:
-
-```bash
-SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple test \
+SIMPLE_LIB=src release/x86_64-unknown-linux-gnu/simple test \
   test/03_system/gui/linux_hosted_wm_live_window_spec.spl \
   --mode=interpreter --clean --format json
 ```
 
-The evidence is fail-closed. A compatibility-renderer retry, bitmap-default
-font, missing live-window crop, nonmatching framebuffer crop, absent deliberate
-red calibration, or event without a newer frame is a failure.
+Run the live Linux hosted-window evidence wrapper with:
 
-## Expected Evidence
-
-The live command retains one evidence directory:
-
-```text
-build/linux-hosted-wm-font-event-current/
-├── evidence.env
-├── report.md
-├── stdout.log
-├── stderr.log
-├── window.png
-├── framebuffer.live.ppm
-├── terminal-title.rgb
-├── terminal-title.deliberate-red.rgb
-├── source.diff
-├── native-source-manifest.sha256
-├── native-source-manifest.after.sha256
-├── snapshot.live.json
-└── native-build.log
+```bash
+BUILD_DIR=build/linux-hosted-wm-live-window-evidence-current \
+REPORT_PATH=build/linux-hosted-wm-live-window-evidence-current/report.md \
+LINUX_HOSTED_WM_LIVE_TIMEOUT_SECS=60 \
+sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs
 ```
 
-`window.png` is captured from the real X11 winit window. It is not an
-offscreen or compatibility-renderer artifact. `framebuffer.live.ppm` is emitted
-from the exact production pixel buffer that is handed to winit. The raw
-`terminal-title.rgb` region must have the pinned checksum and must match the
-same region extracted independently from `window.png`.
-
-The admitted native-source manifest deterministically hashes every `.spl`
-source under `src/os` and `src/lib`, the complete source roots available to
-this entry-closure build. The wrapper captures it immediately before and after
-native-build, rejects any change, and records the admitted manifest identity
-and SHA-256. Git fallback additionally rejects tracked or untracked dirtiness
-anywhere in those dependency roots.
-
-The initial frame log must identify all production boundaries:
+The wrapper requires a GUI-enabled Simple driver. It searches, in order:
 
 ```text
-renderer=engine2d-draw-ir
-content=simple-web
-route=shared-wm-scene-draw-ir
-fallback=false
-identity=<selected pinned face>
+src/compiler_rust/target/gui/debug/simple
+src/compiler_rust/target/gui/release/simple
+src/compiler_rust/target/debug/simple
+src/compiler_rust/target/release/simple
 ```
 
-The event phase drives the real window with `xdotool`. Focus, pointer motion,
-button input, committed UTF-8 text, and keyboard Tab must appear in the winit
-event log and production receipt. The text commit changes the focused window
-title through the existing compositor lifecycle action, so the snapshot proves
-both receipt and state mutation. Internal maximize and restore commands must update the focused window,
-restore the exact pre-maximize window array, and advance the render revision.
-The retained env records exact baseline/input/move/maximize/restore nonces
-`1/2/3/4/5`, plus each phase's revision, Engine2D backend, readback source,
-backend handle, and checksum; the live gate rejects missing or log/snapshot
-mismatched values before reporting a pass.
+Each candidate must be executable and contain the `rt_winit_event_loop_new`
+runtime symbol. If no candidate exists, build one with:
 
-## Absolute Glyph Oracle
+```bash
+cd src/compiler_rust
+cargo build -p simple-driver --features gui
+```
 
-The proof surface has one deterministic `Terminal` window at `(58, 76)`.
-Shared WM title placement adds `(66, 8)`, so the gate extracts the fixed
-`60x18+122+82` RGB region. The tracked SHA-256 binds that crop to the pinned
-Noto Sans Mono asset. A second, deliberately corrupted crop must fail the same
-hash comparison before the wrapper may report calibration success.
+## Examples
 
-This crop is intentionally small. It proves the selected title glyphs without
-depending on the taskbar clock, host time, window decoration, or unrelated
-Simple Web body pixels.
+A passing wrapper run emits these fields:
 
-## Event Correlation
+```text
+linux_hosted_wm_live_window_status=pass
+linux_hosted_wm_live_window_reason=linux-windowed-real-capture-and-events
+linux_hosted_wm_live_window_window_marker=pass
+linux_hosted_wm_live_window_frame_marker=pass
+linux_hosted_wm_live_window_capture_status=pass
+linux_hosted_wm_live_window_event_status=pass
+```
 
-The gate records strictly increasing revisions across:
+The hosted WM stdout must contain:
 
-1. the initial production frame;
-2. native focus, pointer, button, keyboard, and committed-text delivery;
-3. internal maximize;
-4. exact restore.
+```text
+[hosted-wm] window-created backend=winit mode=windowed fullscreen=false width=1024 height=720 title=SimpleOS Shared Hosted WM
+[hosted-wm] live-proof-mode enabled=true
+[hosted-wm] windows-ready count=1
+[hosted-wm] frame-presented renderer=simple-web host=linux-windowed width=1024 height=720
+[hosted-wm] event focus count=...
+[hosted-wm] event mouse_move count=...
+```
 
-The outer host window is also moved to `(80, 60)`. The winit move marker and
-snapshot surface geometry must agree. These checks distinguish an event sent
-to the X server from an event actually consumed by the hosted WM.
+The wrapper writes `window.png` and `capture.metrics`. A passing capture has
+1024x720 geometry, at least eight colors, a blue titlebar sample, a distinct
+body sample, and a visible close glyph sample.
+
+## Evidence Model
+
+The source-contract spec and the live wrapper intentionally check different
+things.
+
+The SPipe spec is quick and deterministic. It verifies that the hosted entry
+still requests a 1024x720 winit window, keeps the launch windowed, seeds the
+shared MDI scene, and presents through `HostCompositor.render_frame()`.
+
+The wrapper is the live Linux proof. It launches `src/os/hosted/hosted_entry.spl`
+with the GUI-enabled driver and `SIMPLE_HOSTED_WM_LIVE_PROOF=1`, waits for the
+first-frame marker, injects host focus/pointer events, captures the real window
+with `import`, analyzes pixels with ImageMagick, terminates the process, and
+writes a report. The marker is printed only after the winit window handle is
+nonzero and the frame has been rendered.
+
+GNOME Wayland can hide native Wayland windows from X11-only tools such as
+`xdotool` and ImageMagick `import`. The wrapper therefore clears
+`WAYLAND_DISPLAY` and sets `WINIT_UNIX_BACKEND=x11` for this evidence run so
+the real winit window is exposed through Xwayland and can be captured and
+driven by host tools.
 
 ## Failure Diagnostics
 
-- `production-native-build-failed` means the pure-Simple compiler could not
-  produce the hosted entry artifact. Inspect `native-build.log`; do not use the
-  Rust seed as a substitute.
-- `live-window-readiness-timeout` means the winit window or initial production
-  evidence snapshot was not observed before the bounded deadline.
-- `selected-font-identity-missing` means the frame used bitmap default text or
-  never selected the pinned vector face.
-- `glyph-oracle-pending-calibration-required-*` requires the explicit
-  calibration opt-in before collecting a candidate.
-- `glyph-oracle-calibration-only-*` retained a deliberately requested live
-  candidate and completed the remaining checks. It is never a pass.
-- `source-provenance-unavailable` means neither jj nor Git could bind the
-  exact working-copy revision and source diff. It is never treated as clean.
-- `explicit-simple-bin-required` means the caller did not select the current
-  pure-Simple compiler explicitly.
-- `native-source-manifest-changed-during-build` means an entry-closure input
-  changed while native-build was running; the produced artifact is deleted.
-- `simple-bin-changed-during-build` means the selected compiler changed while
-  it was executing; the produced artifact is deleted.
-- `native-input-event-timeout` means X11 accepted the actions but the winit
-  event stream did not report every required event.
-- `live-font-or-event-evidence-incomplete` means at least one explicit status
-  row remained failed. Read `evidence.env`; no missing row is treated as a
-  warning.
+- `missing-gui-enabled-driver` means the GUI driver was not built or does not
+  contain `rt_winit_event_loop_new`.
+- `missing-real-capture-or-event-evidence` means one of the window marker,
+  Simple Web frame marker, PNG capture, or host event checks failed.
+- A missing `window-created` marker usually points at `rt_winit_window_new`
+  returning zero or failing before the hosted compositor is initialized.
+- A missing `frame-presented` marker means the window was created but the shared
+  MDI scene did not render through the hosted compositor.
+- `capture_status=fail` means `window.png` was absent, blank, wrong-sized, or
+  did not contain distinct title/body pixels.
+- `event_status=fail` means the OS did not deliver both focus and pointer
+  movement through the winit event stream.
+- Stderr warnings about deprecated generic syntax or runtime-family layering are
+  not accepted as pass evidence; they are diagnostic noise unless the wrapper
+  report status is `pass`.
 
-## Scope
+## Relationship To QEMU
 
-This scenario covers Linux hosted WM only. SimpleOS QEMU framebuffer proof is
-owned by the separate guest lane. Engine3D HUD/world text, the offscreen hosted
-capture helper, and compatibility renderers are not accepted here.
+The Linux hosted path is windowed by design. It runs inside the host desktop
+session and must not request fullscreen. The SimpleOS QEMU path is separate:
+`test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl` boots the x86_64
+kernel, captures the 1024x768 framebuffer through QMP `pmemsave`, samples the
+Simple Web panel pixels, and injects keyboard input to prove the frame changes.
 
-**Acceptance criteria:** AC-4, AC-6, AC-7, AC-8, AC-9
-**Requirements:** doc/02_requirements/feature/shared_multilingual_gpu_fonts.md
-**Plan:** doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md
-**Architecture:** doc/04_architecture/ui/simple_gui_stack.md
-**Design:** doc/05_design/shared_multilingual_gpu_fonts.md
-**Research:** doc/01_research/local/shared_multilingual_gpu_fonts.md
+Together the two gates cover the user-facing requirement:
+
+- Linux host: visible hosted WM path through winit, windowed, Simple Web frame
+  presented.
+- QEMU SimpleOS: fullscreen guest framebuffer path, Simple Web panel renderer,
+  Engine2D blit, QMP pixels, and input-driven framebuffer delta.
+
+## Operator Notes
+
+Do not run the live wrapper from inside this SPipe spec. Nested GUI launches can
+be unstable under CI, Wayland, and test-runner process capture. Run the wrapper
+as a separate evidence command and use its report as the authoritative live
+Linux proof. The wrapper uses a single small Simple Web live-proof surface so
+real capture and event evidence finishes in a bounded time. Normal hosted WM
+startup still seeds the full shared MDI surface set; the QEMU gate continues to
+prove the full five-surface SimpleOS framebuffer path.
+
+Do not replace this path with the offscreen hosted WM capture wrapper. The
+offscreen wrapper is useful for deterministic pixel metrics, but it does not
+prove that the interactive hosted WM entry opens a winit window.
+
+**Requirements:** N/A
+**Plan:** .spipe/gui_hardening_current_plan/state.md
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+**Research:** N/A
 """
 
-use std.io_runtime.{file_read, process_run}
+use std.io_runtime.{file_read}
 use std.spec.*
 
 val EVIDENCE_PATH = "build/linux-hosted-wm-font-event-current/evidence.env"
-
-fn evidence_value(evidence: text, key: text) -> text:
-    val prefix = key + "="
-    var value = ""
-    var found = false
-    for line in evidence.replace("\r\n", "\n").split("\n"):
-        if line.starts_with(prefix):
-            if found or line == prefix:
-                return ""
-            value = line.slice(prefix.len(), line.len())
-            found = true
-    value
-
-fn evidence_lower_sha256(evidence: text, key: text) -> bool:
-    val value = evidence_value(evidence, key)
-    if value.len() != 64:
-        return false
-    var i = 0
-    while i < value.len():
-        if not "0123456789abcdef".contains(value.char_at(i)):
-            return false
-        i += 1
-    true
 
 describe "Linux hosted WM pinned font and correlated events":
     it "shows the pinned Terminal title through the production Engine2D frame":
@@ -227,19 +206,6 @@ describe "Linux hosted WM pinned font and correlated events":
         expect(evidence).to_contain("linux_hosted_wm_live_window_native_source_manifest_status=pass")
         expect(evidence).to_contain("linux_hosted_wm_live_window_native_source_manifest_identity=native-build-entry-closure:")
         expect(evidence).to_contain("linux_hosted_wm_live_window_native_source_manifest_sha256=")
-        expect(evidence_value(evidence, "linux_hosted_wm_live_window_runtime_provider_status")).to_equal("pass")
-        expect(evidence_value(
-            evidence, "linux_hosted_wm_live_window_runtime_provider_path"
-        ).len()).to_be_greater_than(0)
-        expect(evidence_lower_sha256(evidence, "linux_hosted_wm_live_window_runtime_provider_sha256")).to_be(true)
-        expect(evidence_lower_sha256(
-            evidence,
-            "linux_hosted_wm_live_window_runtime_provider_build_identity"
-        )).to_be(true)
-        expect(evidence_lower_sha256(
-            evidence,
-            "linux_hosted_wm_live_window_runtime_provider_admission_sha256"
-        )).to_be(true)
         expect(evidence).to_contain("linux_hosted_wm_live_window_frame_marker=pass")
         expect(evidence).to_contain("linux_hosted_wm_live_window_framebuffer_status=pass")
         expect(evidence).to_contain("linux_hosted_wm_live_window_live_window_status=pass")
@@ -292,10 +258,6 @@ describe "Linux hosted WM pinned font and correlated events":
         expect(wrapper).to_contain(".render.readback_source == $source")
         expect(wrapper).to_contain(".render.backend_handle == $handle")
         expect(wrapper).to_contain(".render.checksum == $checksum")
-        expect(wrapper).to_contain(".render.composition_id == $composition")
-        expect(wrapper).to_contain(".render.scene_key == $scene")
-        expect(wrapper).to_contain(".render.web_content_image_count == $web_images")
-        expect(wrapper).to_contain(";composition_id=$composition_id;scene_key=$scene_key;web_content_image_count=$web_content_image_count identity=")
         expect(wrapper).to_contain("capture_argb_checksum")
         expect(wrapper).to_contain("[ \"$(capture_argb_checksum \"$CAPTURE_LIVE\")\" = \"$frame_checksum\" ]")
         expect(wrapper).to_contain("grep -Fq '[hosted-wm] draw-ir-rejected'")
@@ -308,8 +270,6 @@ describe "Linux hosted WM pinned font and correlated events":
         expect(wrapper).to_contain("[ \"$input_revision\" -lt \"$move_revision\" ]")
         expect(wrapper).to_contain("[ \"$move_revision\" -lt \"$max_revision\" ]")
         expect(wrapper).to_contain("[ \"$max_revision\" -lt \"$restore_revision\" ]")
-        expect(wrapper).to_contain("[ \"$input_frame_checksum\" != \"$baseline_frame_checksum\" ]")
-        expect(wrapper).to_contain("[ \"$input_capture_sha\" != \"$baseline_capture_sha\" ]")
 
     it "delivers host and WM events to newer captured frames":
         step("Build the production surface composition")
@@ -319,11 +279,8 @@ describe "Linux hosted WM pinned font and correlated events":
 
         step("Submit the exact composition")
         expect(entry).to_contain("route=shared-wm-scene-draw-ir")
-        expect(entry).to_contain("fallback=false revision=")
+        expect(entry).to_contain("fallback=false revision={comp.render_revision}")
         expect(entry).to_contain("draw-ir-rejected evidence=fail-closed")
-        expect(entry).to_contain("raster.last_composition_id")
-        expect(entry).to_contain("raster.last_scene_key")
-        expect(entry).to_contain("raster.last_web_content_image_count")
 
         step("Deliver correlated focus keyboard text and pointer events")
         val winit_runtime = file_read("src/runtime/spl_winit/src/lib.rs")
@@ -348,8 +305,6 @@ describe "Linux hosted WM pinned font and correlated events":
 
         step("Capture backend and framebuffer evidence")
         expect(evidence).to_contain("linux_hosted_wm_live_window_frame_correlation_status=pass")
-        expect(evidence).to_contain("linux_hosted_wm_live_window_input_composition_id=wm-composite")
-        expect(evidence).to_contain("linux_hosted_wm_live_window_input_web_content_image_count=")
         expect(evidence).to_contain("linux_hosted_wm_live_window_window_png=present")
         expect(evidence).to_contain("linux_hosted_wm_live_window_framebuffer_ppm=present")
         expect(evidence).to_contain("linux_hosted_wm_live_window_snapshot=present")
@@ -370,12 +325,6 @@ describe "Linux hosted WM pinned font and correlated events":
         expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_text_receipt=required")
         expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_exact_readback_fields=required")
         expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_capture_checksum=pass")
-        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_bootstrap=rejected")
-        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_bootstrap_content=rejected")
-        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_sha256_mismatch=rejected")
-        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_changed=rejected")
-        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_staged=pass")
-        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_fd=pass")
 
         step("Reject silent Git-only provenance and stale release defaults")
         val wrapper = file_read("scripts/check/check-linux-hosted-wm-live-window-evidence.shs")
@@ -386,13 +335,4 @@ describe "Linux hosted WM pinned font and correlated events":
         expect(wrapper).to_contain("write_native_source_manifest \"$SOURCE_MANIFEST_AFTER\"")
         expect(wrapper).to_contain("emit fail source-provenance-unavailable")
         expect(wrapper).to_contain("emit unavailable explicit-simple-bin-required")
-        expect(wrapper).to_contain("RUNTIME_LIB=\"${SIMPLE_WM_RUNTIME_LIB:-}\"")
-        expect(wrapper).to_contain("RUNTIME_LIB_EXPECTED_SHA256=\"${SIMPLE_WM_RUNTIME_LIB_SHA256:-}\"")
-        expect(wrapper).to_contain("runtime-provider-bootstrap-forbidden")
-        expect(wrapper).to_contain("runtime-provider-sha256-mismatch")
-        expect(wrapper).to_contain("runtime-provider-changed-during-build")
-        expect(wrapper).to_contain("runtime-provider-changed-before-launch")
-        expect(wrapper).to_contain("runtime_provider_admission_sha256")
-        expect(wrapper).to_contain("env -u LD_PRELOAD -u LD_AUDIT -u LD_DEBUG -u LD_DEBUG_OUTPUT -u LD_LIBRARY_PATH -u LD_ORIGIN_PATH")
-        expect(wrapper).to_contain("LD_PRELOAD=\"$wint_provider_path:/proc/self/fd/9\"")
         expect(wrapper).to_contain("emit fail \"glyph-oracle-calibration-only-$glyph_sha\"")

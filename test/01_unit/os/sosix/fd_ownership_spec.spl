@@ -1,0 +1,64 @@
+"""
+@cover src/os/sosix/fd_ownership.spl 80%
+
+SOSIX file-descriptor ownership records reject stale handles and move ownership
+only through the explicit transfer lifecycle.
+"""
+
+use std.spec.{describe, it, expect}
+use os.sosix.fd_ownership.{
+    SOSIX_FD_OWN_HELD,
+    SOSIX_FD_OWN_TRANSFERRING,
+    SOSIX_FD_OWN_TRANSFERRED,
+    sosix_fd_ownership_init,
+    sosix_fd_own_create,
+    sosix_fd_own_begin_transfer,
+    sosix_fd_own_complete_transfer,
+    sosix_fd_own_cancel_transfer,
+    sosix_fd_own_get_owner,
+    sosix_fd_own_get_fd,
+    sosix_fd_own_get_state,
+    sosix_fd_own_close,
+    sosix_fd_own_handle_slot,
+    sosix_fd_own_handle_generation
+}
+
+describe "SOSIX file descriptor ownership":
+    it "moves ownership only after an explicit completed transfer":
+        sosix_fd_ownership_init()
+        val handle = sosix_fd_own_create(41, 7)
+        expect(handle).to_be_greater_than(-1)
+        expect(sosix_fd_own_get_owner(handle as u64)).to_equal(41)
+        expect(sosix_fd_own_get_fd(handle as u64)).to_equal(7)
+        expect(sosix_fd_own_get_state(handle as u64)).to_equal(SOSIX_FD_OWN_HELD as i64)
+
+        expect(sosix_fd_own_begin_transfer(handle as u64, 73)).to_equal(0)
+        expect(sosix_fd_own_get_owner(handle as u64)).to_equal(41)
+        expect(sosix_fd_own_get_state(handle as u64)).to_equal(
+            SOSIX_FD_OWN_TRANSFERRING as i64)
+
+        expect(sosix_fd_own_complete_transfer(handle as u64)).to_equal(0)
+        expect(sosix_fd_own_get_owner(handle as u64)).to_equal(73)
+        expect(sosix_fd_own_get_state(handle as u64)).to_equal(
+            SOSIX_FD_OWN_TRANSFERRED as i64)
+
+    it "cancels a pending transfer without changing the owner":
+        sosix_fd_ownership_init()
+        val handle = sosix_fd_own_create(9, 3)
+        expect(sosix_fd_own_begin_transfer(handle as u64, 10)).to_equal(0)
+        expect(sosix_fd_own_cancel_transfer(handle as u64)).to_equal(0)
+        expect(sosix_fd_own_get_owner(handle as u64)).to_equal(9)
+        expect(sosix_fd_own_get_state(handle as u64)).to_equal(SOSIX_FD_OWN_HELD as i64)
+
+    it "rejects a closed generation after its slot is reused":
+        sosix_fd_ownership_init()
+        val stale = sosix_fd_own_create(1, 4)
+        val slot = sosix_fd_own_handle_slot(stale as u64)
+        val generation = sosix_fd_own_handle_generation(stale as u64)
+        expect(sosix_fd_own_close(stale as u64)).to_equal(0)
+
+        val current = sosix_fd_own_create(2, 5)
+        expect(sosix_fd_own_handle_slot(current as u64)).to_equal(slot)
+        expect(sosix_fd_own_handle_generation(current as u64)).to_equal(generation + 1)
+        expect(sosix_fd_own_get_owner(stale as u64)).to_equal(-9)
+        expect(sosix_fd_own_get_owner(current as u64)).to_equal(2)

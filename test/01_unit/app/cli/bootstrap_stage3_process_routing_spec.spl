@@ -1,0 +1,55 @@
+"""Focused contract for bounded Stage3 process/cache shard routing."""
+
+use std.spec.{describe, it, assert_false, assert_true, expect}
+use app.cli.bootstrap_main.{
+    bootstrap_internal_native_build_entry,
+    bootstrap_internal_native_build_run_requested,
+    bootstrap_native_build_worker_args,
+    bootstrap_stage3_process_route_requested
+}
+use app.cli.shard_mem_clamp.{shard_threads_cap_for}
+
+describe "bootstrap Stage3 process shard routing":
+    it "routes only multi-worker Stage3 parents":
+        val args = ["simple", "native-build", "--threads", "31",
+            "src/app/cli/bootstrap_main.spl"]
+        assert_true(bootstrap_stage3_process_route_requested(
+            args, "", ""))
+        assert_false(bootstrap_stage3_process_route_requested(
+            args, "1", ""))
+        assert_false(bootstrap_stage3_process_route_requested(
+            args, "", "1"))
+        assert_false(bootstrap_stage3_process_route_requested(
+            ["simple", "native-build", "--threads=1", "main.spl"],
+            "", ""))
+
+    it "passes only native-build arguments into the existing coordinator":
+        val stripped = bootstrap_native_build_worker_args([
+            "/opt/simple", "native-build", "--backend", "llvm",
+            "--threads", "31", "src/app/cli/bootstrap_main.spl"])
+        expect(stripped.len()).to_equal(5)
+        expect(stripped[0]).to_equal("--backend")
+        expect(stripped[4]).to_equal("src/app/cli/bootstrap_main.spl")
+
+    it "allows only coordinator children and clamps their process fanout":
+        assert_true(bootstrap_internal_native_build_entry(
+            "src/app/cli/parse_shard_main.spl"))
+        assert_true(bootstrap_internal_native_build_entry(
+            "/repo/src/app/cli/native_build_worker.spl"))
+        assert_false(bootstrap_internal_native_build_entry(
+            "src/app/cli/arbitrary_tool.spl"))
+        # Sixty percent of 10 GB admits exactly two 3 GB HIR processes.
+        expect(shard_threads_cap_for(31, 3000000, 10000000)).to_equal(2)
+
+    it "leaves ordinary run to canonical unsupported command handling":
+        val ordinary = ["simple", "run", "src/app/ordinary.spl"]
+        assert_false(bootstrap_internal_native_build_run_requested(
+            ordinary, ""))
+        assert_false(bootstrap_internal_native_build_run_requested(
+            ordinary, "1"))
+        assert_false(bootstrap_internal_native_build_run_requested(
+            ["simple", "run"], "1"))
+        assert_true(bootstrap_internal_native_build_run_requested(
+            ["simple", "run", "src/app/cli/parse_shard_main.spl"], "1"))
+        assert_true(bootstrap_internal_native_build_run_requested(
+            ["simple", "run", "src/app/cli/native_build_worker.spl"], "1"))

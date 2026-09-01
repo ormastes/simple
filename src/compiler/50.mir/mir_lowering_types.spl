@@ -9,7 +9,7 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.mir_target_context.{MirTargetContext}
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
 
 # ============================================================================
 # MIR Lowering Types
@@ -24,6 +24,11 @@ struct MirLowering:
     # mutations to a Dict stored inside MirLowering.
     local_symbol_ids: [i64]
     local_symbol_values: [LocalId]
+    # Symbol-id -> local_symbol_ids/local_symbol_values slot. A primitive-array
+    # open-address table avoids the staged-native Dict-field mutation failure
+    # while removing linear binding/name lookup from MIR lowering.
+    # -1 is empty; symbol ids and LocalIds are already rejected when negative.
+    local_symbol_index_slots: [i64]
     # MIR local ID -> declared HIR value type for erased generic call results.
     # Parallel arrays are authoritative for the same Stage4 reason as
     # local_symbol_ids/local_symbol_values above.
@@ -46,7 +51,38 @@ struct MirLowering:
     current_function_symbols: [SymbolId]
     current_function_names: [text]
     loop_stack: [(BlockId, BlockId)]  # (continue_block, break_block)
+    # Lexical finally blocks active at the current lowering point. This is
+    # compiler state only and adds no runtime storage in functions without EH.
+    finally_stack: [HirBlock]
+    # Lexical unsafe-block nesting. This prerequisite tracks authority only;
+    # reference/address MIR semantics remain unchanged.
+    unsafe_depth: i64
     errors: [MirError]
+    current_module_id: text
+    composite_layout_digests: Dict<text, text>
+    composite_layout_owner_counts: Dict<text, i64>
+    external_layout_traces: [MirExternalLayoutTraceV1]
+    # Per-lowering-session malformed HirType receipt state. Keeping this on
+    # the owner prevents one compilation's cap from making a later one pass.
+    type_transport_receipts: i64
+    type_transport_owner: text
+    type_transport_context: text
+    type_transport_param_index: i64
+    # MC/DC instrumentation is compiler-owned and entirely absent when mode is
+    # zero.  Modes 1/2 mean static recorder / dynamic-aspect patchpoint.
+    # The active decision fields are compile-time lowering state only; they do
+    # not become program storage and therefore add no runtime allocation.
+    mcdc_mode: i64
+    mcdc_owner_bytes: i64
+    mcdc_global_bytes: i64
+    mcdc_include_csv: text
+    mcdc_exclude_csv: text
+    mcdc_next_runtime_id: i64
+    mcdc_active_decision_id: i64
+    mcdc_active_decision_semantic: text
+    mcdc_next_condition_ordinal: i64
+    mcdc_active_dynamic_token: LocalId
+    mcdc_active_tokens: [LocalId]
     field_map: Dict<i64, [text]>  # type symbol ID -> ordered field names
     bitfield_map: Dict<i64, [HirBitfieldField]>  # type symbol ID -> bitfield fields
     # MIR local ID -> bitfield type symbol ID, for locals holding a value
@@ -383,6 +419,10 @@ struct MirLowering:
     # mir_lowering_stmts.spl's `lower_assign_var` write hook (to emit
     # `StoreGlobal` for the mutable subset).
     global_symbol_ids: Dict<i64, bool>
+    # O(1), allocation-free hot lookup mirrors for the struct-keyed module
+    # dictionaries. i64 identity avoids the seed's SymbolId-key lookup bug.
+    global_statics_by_id: Dict<i64, MirStatic>
+    global_constants_by_id: Dict<i64, MirConstant>
     # array_global_2026-07-25: companion map, symbol id -> the module-level
     # `val`/`var` binding's ORIGINAL HIR initializer expression. Populated
     # alongside `global_symbol_ids` (see `lower_const`, function_lowering.spl).
@@ -411,6 +451,9 @@ struct MirLowering:
     # per symbol instead of once per reference site.
     array_global_mutation_warned: Dict<i64, bool>
     target_context: MirTargetContext
+    # Compiler-owned source compilation must not inherit bootstrap shortcuts
+    # from the process environment. Legacy driver entrypoints leave this true.
+    allow_ambient_bootstrap_policy: bool
     # WP-E (resource ownership): every MIR local, in the CURRENT function,
     # that owns an affine `resource`-typed value (an `iso`-wrapped Named
     # type registered in compiler.frontend.resource_registry -- see
@@ -425,24 +468,86 @@ struct MirLowering:
     consumed_resource_locals: Dict<i64, bool>
 
 impl MirLowering:
+    fn local_symbol_slot(symbol_id: i64) -> i64:
+        if symbol_id < 0:
+            return -1
+        if self.local_symbol_index_slots.len() == 0:
+            if self.local_symbol_ids.len() > 0:
+                return -2
+            return -1
+        val capacity = self.local_symbol_index_slots.len()
+        var bucket = symbol_id % capacity
+        var probes = 0
+        while probes < capacity:
+            val slot = self.local_symbol_index_slots[bucket]
+            if slot < 0:
+                return -1
+            if slot >= self.local_symbol_ids.len() or slot >= self.local_symbol_values.len():
+                return -2
+            if self.local_symbol_ids[slot] == symbol_id:
+                return slot
+            bucket = (bucket + 1) % capacity
+            probes = probes + 1
+        -1
+
+    fn linear_local_symbol_slot(symbol_id: i64) -> i64:
+        var slot = self.local_symbol_ids.len() - 1
+        while slot >= 0:
+            if self.local_symbol_ids[slot] == symbol_id:
+                return slot
+            slot = slot - 1
+        -1
+
+    me rebuild_local_symbol_index(min_capacity: i64):
+        var capacity = 16
+        while capacity < min_capacity or
+              (self.local_symbol_ids.len() + 1) * 10 >= capacity * 7:
+            capacity = capacity * 2
+        var slots: [i64] = []
+        var fill = 0
+        while fill < capacity:
+            slots.push(-1)
+            fill = fill + 1
+        var slot = 0
+        while slot < self.local_symbol_ids.len():
+            val symbol_id = self.local_symbol_ids[slot]
+            var bucket = symbol_id % capacity
+            while slots[bucket] >= 0:
+                bucket = (bucket + 1) % capacity
+            slots[bucket] = slot
+            slot = slot + 1
+        self.local_symbol_index_slots = slots
+
     me bind_local(symbol_id: i64, local: LocalId):
         if symbol_id < 0 or local.id < 0:
             return
-        var i = 0
-        while i < self.local_symbol_ids.len():
-            if self.local_symbol_ids[i] == symbol_id:
-                self.local_symbol_values[i] = local
-                return
-            i = i + 1
+        var existing_slot = self.local_symbol_slot(symbol_id)
+        if existing_slot == -2:
+            self.rebuild_local_symbol_index(self.local_symbol_ids.len() * 2)
+            existing_slot = self.local_symbol_slot(symbol_id)
+        if existing_slot >= 0:
+            self.local_symbol_values[existing_slot] = local
+            return
+        if self.local_symbol_index_slots.len() == 0 or
+           (self.local_symbol_ids.len() + 1) * 10 >= self.local_symbol_index_slots.len() * 7:
+            self.rebuild_local_symbol_index(self.local_symbol_index_slots.len() * 2)
+        val capacity = self.local_symbol_index_slots.len()
+        var bucket = symbol_id % capacity
+        while self.local_symbol_index_slots[bucket] >= 0:
+            bucket = (bucket + 1) % capacity
+        val new_slot = self.local_symbol_ids.len()
         self.local_symbol_ids.push(symbol_id)
         self.local_symbol_values.push(local)
+        self.local_symbol_index_slots[bucket] = new_slot
 
     fn find_local(symbol_id: i64) -> LocalId:
-        var i = self.local_symbol_ids.len() - 1
-        while i >= 0:
-            if self.local_symbol_ids[i] == symbol_id:
-                return self.local_symbol_values[i]
-            i = i - 1
+        val slot = self.local_symbol_slot(symbol_id)
+        if slot >= 0:
+            return self.local_symbol_values[slot]
+        if slot == -2:
+            val authoritative_slot = self.linear_local_symbol_slot(symbol_id)
+            if authoritative_slot >= 0 and authoritative_slot < self.local_symbol_values.len():
+                return self.local_symbol_values[authoritative_slot]
         LocalId(id: -1)
 
     me remember_local_hir_type(local_id: i64, type_: HirType, isolation_state: i64, resource_state: i64):

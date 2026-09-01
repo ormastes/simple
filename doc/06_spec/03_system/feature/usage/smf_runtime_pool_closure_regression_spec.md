@@ -104,7 +104,7 @@ fn spawn_worker() -> MulticoreGreenHandle:
 ```
 
 The direct shape below is intentionally not enough regression coverage because
-it already passes on this checkout:
+this already passes on this checkout:
 
 ```simple
 val handle = multicore_green_spawn(\: worker())

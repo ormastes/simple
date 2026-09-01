@@ -7,7 +7,7 @@
 use os.apps.sshd.ssh_packet.{SshTextResult, SshStringResult, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_transport.{SshKexInit, SSH_MSG_NEWKEYS, SSH_MSG_IGNORE, SSH_MSG_DEBUG}
-use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_INIT, ssh_build_ed25519_host_key_blob}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_INIT, ssh_build_ed25519_host_key_blob, _append_byte}
 use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_version_text, rt_net_close}
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
 extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
@@ -47,7 +47,7 @@ struct _SshFieldRange:
     end: u64
     next_offset: u64
 
-pub fn ssh_session_u8_at(data: [u8], idx: u64) -> u8:
+fn _u8_at(data: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(data, idx.to_i64()).to_u8()
 
 fn _slice_range(data: [u8], start: u64, end: u64) -> [u8]:
@@ -76,7 +76,7 @@ fn _copy_bytes_stable(data: [u8]) -> [u8]:
     var out: [u8] = []
     var i: u64 = 0
     while i < data.len():
-        out.push(ssh_session_u8_at(data, i))
+        out.push(_u8_at(data, i))
         i = i + 1
     out
 
@@ -84,7 +84,7 @@ fn _copy_prefix_stable(data: [u8], limit: u64) -> [u8]:
     var out: [u8] = []
     var i: u64 = 0
     while i < data.len() and i < limit:
-        out = rt_push_byte(out, ssh_session_u8_at(data, i).to_i64())
+        out = rt_push_byte(out, _u8_at(data, i).to_i64())
         i = i + 1
     out
 
@@ -119,7 +119,7 @@ fn _copy_range_stable(data: [u8], start: u64, count: u64) -> [u8]:
     var out: [u8] = []
     var i: u64 = 0
     while i < count and start + i < data.len():
-        out.push(ssh_session_u8_at(data, start + i))
+        out.push(_u8_at(data, start + i))
         i = i + 1
     out
 
@@ -185,10 +185,10 @@ fn _build_channel_exit_status_stable(recipient: u32, exit_status: u32) -> [u8]:
     payload
 
 fn _read_u32_stable(data: [u8], offset: u64) -> u32:
-    var b0: u32 = ssh_session_u8_at(data, offset).to_u32()
-    var b1: u32 = ssh_session_u8_at(data, offset + 1).to_u32()
-    var b2: u32 = ssh_session_u8_at(data, offset + 2).to_u32()
-    var b3: u32 = ssh_session_u8_at(data, offset + 3).to_u32()
+    var b0: u32 = _u8_at(data, offset).to_u32()
+    var b1: u32 = _u8_at(data, offset + 1).to_u32()
+    var b2: u32 = _u8_at(data, offset + 2).to_u32()
+    var b3: u32 = _u8_at(data, offset + 3).to_u32()
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
 fn _read_text_field_fast(data: [u8], offset: u64) -> Result<_SshTextField, text>:
@@ -212,7 +212,9 @@ fn _read_field_range_fast(data: [u8], offset: u64) -> Result<_SshFieldRange, tex
     if offset + 4 > data.len():
         return Err("truncated length")
     val field_len = _read_u32_stable(data, offset).to_u64()
-    val start = offset + 4
+    val start = offset + 4u64
+    if field_len > data.len() - start:
+        return Err("truncated data")
     val end = start + field_len
     if end > data.len():
         return Err("truncated data")
@@ -230,7 +232,7 @@ fn _token_equals_bytes(data: [u8], start: u64, end: u64, expected: [u8]) -> bool
         return false
     var i: u64 = 0
     while i < expected.len():
-        if ssh_session_u8_at(data, start + i) != ssh_session_u8_at(expected, i):
+        if _u8_at(data, start + i) != _u8_at(expected, i):
             return false
         i = i + 1
     true
@@ -239,12 +241,36 @@ fn _field_has_token(data: [u8], start: u64, end: u64, expected: [u8]) -> bool:
     var token_start = start
     var i = start
     while i < end:
-        if ssh_session_u8_at(data, i) == 0x2C:
+        if _u8_at(data, i) == 0x2C:
             if _token_equals_bytes(data, token_start, i, expected):
                 return true
             token_start = i + 1
         i = i + 1
     _token_equals_bytes(data, token_start, end, expected)
+
+fn _name_list_range_is_well_formed(data: [u8], start: u64, end: u64) -> bool:
+    """Validate a wire name-list before the fast path filters known names.
+
+    The fast parser deliberately discards unsupported names.  Validate first,
+    otherwise an empty or whitespace-only member adjacent to a known name
+    could disappear before negotiation sees it.
+    """
+    if start >= end:
+        return false
+    var previous_was_comma = true
+    var i = start
+    while i < end:
+        val byte = ssh_session_u8_at(data, i)
+        if byte == 0x2C:
+            if previous_was_comma:
+                return false
+            previous_was_comma = true
+        elif byte < 0x21 or byte > 0x7E:
+            return false
+        else:
+            previous_was_comma = false
+        i = i + 1
+    not previous_was_comma
 
 fn _known_kex_list(data: [u8], start: u64, end: u64) -> text:
     var out = ""
@@ -261,7 +287,7 @@ fn _known_host_key_list(data: [u8], start: u64, end: u64) -> text:
     var token_start = start
     var i = start
     while i < end:
-        if ssh_session_u8_at(data, i) == 0x2C:
+        if _u8_at(data, i) == 0x2C:
             if _token_equals_bytes(data, token_start, i, [0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39, 0x2D, 0x63, 0x65, 0x72, 0x74, 0x2D, 0x76, 0x30, 0x31, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
                 out = _append_algo_name(out, "ssh-ed25519-cert-v01@openssh.com")
             elif _token_equals_bytes(data, token_start, i, [0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39]):
@@ -299,7 +325,7 @@ fn _known_cipher_list(data: [u8], start: u64, end: u64) -> text:
     var token_start = start
     var i = start
     while i < end:
-        if ssh_session_u8_at(data, i) == 0x2C:
+        if _u8_at(data, i) == 0x2C:
             if _token_equals_bytes(data, token_start, i, [0x61, 0x65, 0x73, 0x32, 0x35, 0x36, 0x2D, 0x67, 0x63, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
                 out = _append_algo_name(out, "aes256-gcm@openssh.com")
             elif _token_equals_bytes(data, token_start, i, [0x61, 0x65, 0x73, 0x31, 0x32, 0x38, 0x2D, 0x67, 0x63, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
@@ -321,7 +347,7 @@ fn _known_mac_list(data: [u8], start: u64, end: u64) -> text:
     var token_start = start
     var i = start
     while i < end:
-        if ssh_session_u8_at(data, i) == 0x2C:
+        if _u8_at(data, i) == 0x2C:
             if _token_equals_bytes(data, token_start, i, [0x68, 0x6D, 0x61, 0x63, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x35, 0x31, 0x32, 0x2D, 0x65, 0x74, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
                 out = _append_algo_name(out, "hmac-sha2-512-etm@openssh.com")
             elif _token_equals_bytes(data, token_start, i, [0x68, 0x6D, 0x61, 0x63, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x32, 0x35, 0x36, 0x2D, 0x65, 0x74, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
@@ -344,11 +370,9 @@ fn _known_compress_list(data: [u8], start: u64, end: u64) -> text:
     ""
 
 fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
-    log_raw_println("[sshd-session] fast kex begin len={data.len()}")
     if data.len() < 17:
-        log_raw_println("[sshd-session] fast kex err=too_short")
         return Err("KEXINIT too short")
-    if ssh_session_u8_at(data, 0) != 20:
+    if _u8_at(data, 0) != 20:
         return Err("not a KEXINIT message")
 
     var off: u64 = 17
@@ -445,14 +469,24 @@ fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
     if off + 5 > data.len():
         log_raw_println("[sshd-session] fast kex err=truncated_tail off={off} len={data.len()}")
         return Err("truncated tail")
-    val first_follows = ssh_session_u8_at(data, off) != 0
+    val first_follows = _u8_at(data, off) != 0
     off = off + 1
     if _read_u32_stable(data, off) != 0:
         log_raw_println("[sshd-session] fast kex err=nonzero_reserved off={off}")
         return Err("non-zero reserved")
     off = off + 4
     if off != data.len():
-        log_raw_println("[sshd-session] fast kex trailing_bytes off={off} len={data.len()}")
+        return Err("trailing data")
+
+    if not _name_list_range_is_well_formed(data, kex.start, kex.end) or
+        not _name_list_range_is_well_formed(data, host.start, host.end) or
+        not _name_list_range_is_well_formed(data, enc_c2s.start, enc_c2s.end) or
+        not _name_list_range_is_well_formed(data, enc_s2c.start, enc_s2c.end) or
+        not _name_list_range_is_well_formed(data, mac_c2s.start, mac_c2s.end) or
+        not _name_list_range_is_well_formed(data, mac_s2c.start, mac_s2c.end) or
+        not _name_list_range_is_well_formed(data, comp_c2s.start, comp_c2s.end) or
+        not _name_list_range_is_well_formed(data, comp_s2c.start, comp_s2c.end):
+        return Err("malformed algorithm name-list")
 
     val kex_list = _known_kex_list(data, kex.start, kex.end)
     val host_list = _known_host_key_list(data, host.start, host.end)
@@ -482,14 +516,14 @@ fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
 fn _is_ssh_userauth_service_request(payload: [u8]) -> bool:
     if payload.len() != 17:
         return false
-    if ssh_session_u8_at(payload, 0) != 5:
+    if _u8_at(payload, 0) != 5:
         return false
-    if ssh_session_u8_at(payload, 1) != 0 or ssh_session_u8_at(payload, 2) != 0 or ssh_session_u8_at(payload, 3) != 0 or ssh_session_u8_at(payload, 4) != 12:
+    if _u8_at(payload, 1) != 0 or _u8_at(payload, 2) != 0 or _u8_at(payload, 3) != 0 or _u8_at(payload, 4) != 12:
         return false
     val expected: [u8] = [0x73, 0x73, 0x68, 0x2D, 0x75, 0x73, 0x65, 0x72, 0x61, 0x75, 0x74, 0x68]
     var i: u64 = 0
     while i < expected.len():
-        if ssh_session_u8_at(payload, 5 + i) != ssh_session_u8_at(expected, i):
+        if _u8_at(payload, 5 + i) != _u8_at(expected, i):
             return false
         i = i + 1
     true
@@ -500,7 +534,7 @@ fn _text_equals_bytes(value: text, expected: [u8]) -> bool:
         return false
     var i: u64 = 0
     while i < expected.len():
-        if ssh_session_u8_at(bytes, i) != ssh_session_u8_at(expected, i):
+        if _u8_at(bytes, i) != _u8_at(expected, i):
             return false
         i = i + 1
     true
@@ -516,7 +550,7 @@ fn _payload_text_field_equals_bytes(payload: [u8], field_offset: u64, expected: 
         return false
     var i: u64 = 0
     while i < expected.len():
-        if ssh_session_u8_at(payload, start + i) != ssh_session_u8_at(expected, i):
+        if _u8_at(payload, start + i) != _u8_at(expected, i):
             return false
         i = i + 1
     true
@@ -526,30 +560,30 @@ fn _payload_field_is_ssh_connection(payload: [u8], field_offset: u64) -> bool:
         return false
     if _read_u32_stable(payload, field_offset) != 14:
         return false
-    ssh_session_u8_at(payload, field_offset + 4) == 0x73 and
-        ssh_session_u8_at(payload, field_offset + 5) == 0x73 and
-        ssh_session_u8_at(payload, field_offset + 6) == 0x68 and
-        ssh_session_u8_at(payload, field_offset + 7) == 0x2D and
-        ssh_session_u8_at(payload, field_offset + 8) == 0x63 and
-        ssh_session_u8_at(payload, field_offset + 9) == 0x6F and
-        ssh_session_u8_at(payload, field_offset + 10) == 0x6E and
-        ssh_session_u8_at(payload, field_offset + 11) == 0x6E and
-        ssh_session_u8_at(payload, field_offset + 12) == 0x65 and
-        ssh_session_u8_at(payload, field_offset + 13) == 0x63 and
-        ssh_session_u8_at(payload, field_offset + 14) == 0x74 and
-        ssh_session_u8_at(payload, field_offset + 15) == 0x69 and
-        ssh_session_u8_at(payload, field_offset + 16) == 0x6F and
-        ssh_session_u8_at(payload, field_offset + 17) == 0x6E
+    _u8_at(payload, field_offset + 4) == 0x73 and
+        _u8_at(payload, field_offset + 5) == 0x73 and
+        _u8_at(payload, field_offset + 6) == 0x68 and
+        _u8_at(payload, field_offset + 7) == 0x2D and
+        _u8_at(payload, field_offset + 8) == 0x63 and
+        _u8_at(payload, field_offset + 9) == 0x6F and
+        _u8_at(payload, field_offset + 10) == 0x6E and
+        _u8_at(payload, field_offset + 11) == 0x6E and
+        _u8_at(payload, field_offset + 12) == 0x65 and
+        _u8_at(payload, field_offset + 13) == 0x63 and
+        _u8_at(payload, field_offset + 14) == 0x74 and
+        _u8_at(payload, field_offset + 15) == 0x69 and
+        _u8_at(payload, field_offset + 16) == 0x6F and
+        _u8_at(payload, field_offset + 17) == 0x6E
 
 fn _payload_field_is_none(payload: [u8], field_offset: u64) -> bool:
     if field_offset + 8 > payload.len():
         return false
     if _read_u32_stable(payload, field_offset) != 4:
         return false
-    ssh_session_u8_at(payload, field_offset + 4) == 0x6E and
-        ssh_session_u8_at(payload, field_offset + 5) == 0x6F and
-        ssh_session_u8_at(payload, field_offset + 6) == 0x6E and
-        ssh_session_u8_at(payload, field_offset + 7) == 0x65
+    _u8_at(payload, field_offset + 4) == 0x6E and
+        _u8_at(payload, field_offset + 5) == 0x6F and
+        _u8_at(payload, field_offset + 6) == 0x6E and
+        _u8_at(payload, field_offset + 7) == 0x65
 
 fn _payload_field_is_password(payload: [u8], field_offset: u64) -> bool:
     if field_offset + 12 > payload.len():
@@ -570,21 +604,21 @@ fn _payload_field_is_publickey(payload: [u8], field_offset: u64) -> bool:
         return false
     if _read_u32_stable(payload, field_offset) != 9:
         return false
-    ssh_session_u8_at(payload, field_offset + 4) == 0x70 and
-        ssh_session_u8_at(payload, field_offset + 5) == 0x75 and
-        ssh_session_u8_at(payload, field_offset + 6) == 0x62 and
-        ssh_session_u8_at(payload, field_offset + 7) == 0x6c and
-        ssh_session_u8_at(payload, field_offset + 8) == 0x69 and
-        ssh_session_u8_at(payload, field_offset + 9) == 0x63 and
-        ssh_session_u8_at(payload, field_offset + 10) == 0x6b and
-        ssh_session_u8_at(payload, field_offset + 11) == 0x65 and
-        ssh_session_u8_at(payload, field_offset + 12) == 0x79
+    _u8_at(payload, field_offset + 4) == 0x70 and
+        _u8_at(payload, field_offset + 5) == 0x75 and
+        _u8_at(payload, field_offset + 6) == 0x62 and
+        _u8_at(payload, field_offset + 7) == 0x6c and
+        _u8_at(payload, field_offset + 8) == 0x69 and
+        _u8_at(payload, field_offset + 9) == 0x63 and
+        _u8_at(payload, field_offset + 10) == 0x6b and
+        _u8_at(payload, field_offset + 11) == 0x65 and
+        _u8_at(payload, field_offset + 12) == 0x79
 
 fn _bytes_to_hex(data: [u8]) -> text:
     var out = ""
     var i: u64 = 0
     while i < data.len():
-        val piece = format_hex(ssh_session_u8_at(data, i).to_i64())
+        val piece = format_hex(_u8_at(data, i).to_i64())
         if piece.len() == 1:
             out = out + "0" + piece
         else:
@@ -605,7 +639,7 @@ fn ssh_validate_kex_payload(expected_type: u32, payload: [u8], strict_kex: bool)
     if payload.len() == 0:
         log_raw_println("[sshd-session] kex payload invalid: empty")
         return Err("empty kex payload")
-    val msg_type = ssh_session_u8_at(payload, 0)
+    val msg_type = _u8_at(payload, 0)
     if strict_kex and (msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_DEBUG):
         log_raw_println("[sshd-session] kex payload invalid: strict type={msg_type} expected={expected_type}")
         return Err("strict-kex unexpected pre-newkeys message")
@@ -619,7 +653,7 @@ fn ssh_validate_kex_ecdh_init_payload(payload: [u8], strict_kex: bool) -> Result
     if payload.len() == 0:
         log_raw_println("[sshd-session] kex ecdh init invalid: empty")
         return Err("empty kex payload")
-    val msg_type = ssh_session_u8_at(payload, 0)
+    val msg_type = _u8_at(payload, 0)
     if strict_kex and (msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_DEBUG):
         log_raw_println("[sshd-session] kex ecdh init invalid: strict type={msg_type}")
         return Err("strict-kex unexpected pre-newkeys message")
@@ -641,7 +675,7 @@ fn ssh_validate_newkeys_payload(payload: [u8], strict_kex: bool) -> Result<(), t
     if payload.len() == 0:
         log_raw_println("[sshd-session] newkeys invalid: empty")
         return Err("empty kex payload")
-    val msg_type = ssh_session_u8_at(payload, 0)
+    val msg_type = _u8_at(payload, 0)
     if strict_kex and (msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_DEBUG):
         log_raw_println("[sshd-session] newkeys invalid: strict type={msg_type}")
         return Err("strict-kex unexpected pre-newkeys message")
@@ -675,8 +709,32 @@ fn _build_live_host_key_blob_for_algo(algo: text, host_keys: HostKeySet, host_ce
     []
 
 # ============================================================================
-# SSH signature envelope helpers
+# Public Key Auth Helpers (RFC 4252 §7)
 # ============================================================================
+
+fn _build_publickey_signed_data(session_id: [u8], username: text, algo: text, key_blob: [u8]) -> [u8]:
+    """Build the signed_data blob for publickey auth per RFC 4252 §7.
+
+    Format:
+      string  session_id
+      byte    SSH_MSG_USERAUTH_REQUEST (50)
+      string  username
+      string  "ssh-connection"
+      string  "publickey"
+      bool    true
+      string  algorithm name
+      string  public_key_blob
+    """
+    var data: [u8] = []
+    data = ssh_put_string(data, session_id)
+    data = ssh_put_byte(data, 50)
+    data = ssh_put_text(data, username)
+    data = ssh_put_text(data, "ssh-connection")
+    data = ssh_put_text(data, "publickey")
+    data = ssh_put_bool(data, true)
+    data = ssh_put_text(data, algo)
+    data = ssh_put_string(data, key_blob)
+    data
 
 fn _unwrap_ssh_signature(sig_envelope: [u8]) -> [u8]:
     """Unwrap the SSH signature envelope to extract the raw signature bytes.

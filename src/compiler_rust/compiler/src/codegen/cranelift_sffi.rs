@@ -153,6 +153,10 @@ const CL_TYPE_F32: i64 = 5;
 const CL_TYPE_F64: i64 = 6;
 const CL_TYPE_B1: i64 = 7;
 const CL_TYPE_PTR: i64 = 8;
+/// Maximum data-object alignment admitted by the compiler provider. One page
+/// covers current ABI/static requirements without allowing malformed metadata
+/// to request impractically sparse JIT/object layouts.
+const CL_STATIC_MAX_ALIGNMENT: u64 = 4096;
 
 const CL_TARGET_X86_64: i64 = 0;
 const CL_TARGET_AARCH64: i64 = 1;
@@ -591,6 +595,30 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data(
     type_code: i64,
     initial_bits: i64,
 ) -> i64 {
+    rt_cranelift_declare_global_data_v2(module, name_ptr, name_len, type_code, initial_bits, 2, 0)
+}
+
+fn cranelift_data_linkage_from_code(code: i64) -> Option<Linkage> {
+    match code {
+        0 => Some(Linkage::Export),
+        2 => Some(Linkage::Local),
+        3 => Some(Linkage::Hidden),
+        _ => None,
+    }
+}
+
+/// Declare and define writable scalar data with explicit source linkage and
+/// alignment. An alignment of zero selects the scalar's natural alignment.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
+    module: i64,
+    name_ptr: i64,
+    name_len: i64,
+    type_code: i64,
+    initial_bits: i64,
+    linkage_code: i64,
+    alignment: i64,
+) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return 0;
@@ -602,14 +630,25 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data(
         CL_TYPE_I64 | CL_TYPE_F64 | CL_TYPE_PTR => initial_bits.to_le_bytes().to_vec(),
         _ => return 0,
     };
+    let Some(linkage) = cranelift_data_linkage_from_code(linkage_code) else {
+        return 0;
+    };
+    let natural_alignment = bytes.len().min(8) as u64;
+    let requested_alignment = if alignment == 0 {
+        natural_alignment
+    } else if alignment > 0 && (alignment as u64).is_power_of_two() && (alignment as u64) <= CL_STATIC_MAX_ALIGNMENT {
+        alignment as u64
+    } else {
+        return 0;
+    };
     let mut desc = DataDescription::new();
-    desc.set_align(bytes.len().min(8) as u64);
+    desc.set_align(requested_alignment);
     desc.define(bytes.into_boxed_slice());
 
     let data_id = {
         let mut jit = JIT_MODULES.lock().unwrap();
         if let Some(mod_ctx) = jit.get_mut(&module) {
-            let id = match mod_ctx.module.declare_data(&name, Linkage::Local, true, false) {
+            let id = match mod_ctx.module.declare_data(&name, linkage, true, false) {
                 Ok(id) => id,
                 Err(_) => return 0,
             };
@@ -623,7 +662,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data(
             let Some(mod_ctx) = aot.get_mut(&module) else {
                 return 0;
             };
-            let id = match mod_ctx.module.declare_data(&name, Linkage::Local, true, false) {
+            let id = match mod_ctx.module.declare_data(&name, linkage, true, false) {
                 Ok(id) => id,
                 Err(_) => return 0,
             };
@@ -692,14 +731,20 @@ pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64,
             }
         };
         let jit_name = JIT_MODULES.lock().unwrap().get(&module).and_then(|ctx| {
-            ctx.func_ids.iter().find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None })
+            ctx.func_ids
+                .iter()
+                .find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None })
         });
         match jit_name {
             Some(name) => name,
             None => {
                 let aot = AOT_MODULES.lock().unwrap();
                 let Some(ctx) = aot.get(&module) else { return 0 };
-                match ctx.func_ids.iter().find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None }) {
+                match ctx
+                    .func_ids
+                    .iter()
+                    .find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None })
+                {
                     Some(name) => name,
                     None => return 0,
                 }
@@ -1604,7 +1649,12 @@ fn rt_cranelift_emit_object_impl(module: i64, path: &str) -> bool {
 
 /// Define a function in an AOT module.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_aot_define_function(module: i64, _name_ptr: i64, _name_len: i64, ctx: i64) -> bool {
+pub unsafe extern "C" fn rt_cranelift_aot_define_function(
+    module: i64,
+    _name_ptr: i64,
+    _name_len: i64,
+    ctx: i64,
+) -> bool {
     let finished = FINISHED_FUNCS.lock().unwrap().remove(&ctx);
     let Some(finished) = finished else { return false };
     let name = finished.name;
@@ -1797,6 +1847,10 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
         rt_cranelift_declare_global_data as *const u8,
     );
     builder.symbol(
+        "rt_cranelift_declare_global_data_v2",
+        rt_cranelift_declare_global_data_v2 as *const u8,
+    );
+    builder.symbol(
         "rt_cranelift_data_addr_in_func",
         rt_cranelift_data_addr_in_func as *const u8,
     );
@@ -1926,7 +1980,12 @@ mod tests {
                 let result = rt_cranelift_iconst(ctx, CL_TYPE_I64, value);
                 rt_cranelift_return(ctx, result);
                 assert!(rt_cranelift_end_function(ctx) > 0);
-                assert!(rt_cranelift_aot_define_function(module, name.as_ptr() as i64, name.len() as i64, ctx));
+                assert!(rt_cranelift_aot_define_function(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    ctx
+                ));
             }
 
             let temp_dir = tempfile::tempdir().unwrap();
@@ -2135,6 +2194,115 @@ mod tests {
             let func: extern "C" fn() -> i64 = std::mem::transmute(fptr as *const ());
             assert_eq!(func(), 22);
             assert_eq!(func(), 27);
+            rt_cranelift_free_module(module);
+        }
+    }
+
+    #[test]
+    fn test_global_data_v2_address_identity_alignment_and_linkage_mapping() {
+        unsafe {
+            assert_eq!(cranelift_data_linkage_from_code(0), Some(Linkage::Export));
+            assert_eq!(cranelift_data_linkage_from_code(2), Some(Linkage::Local));
+            assert_eq!(cranelift_data_linkage_from_code(3), Some(Linkage::Hidden));
+            assert_eq!(cranelift_data_linkage_from_code(1), None);
+
+            let module_name = "test_global_addr_v2";
+            let module =
+                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, CL_TARGET_X86_64);
+            assert!(module > 0);
+            let data_name = "aligned_counter";
+            let data = rt_cranelift_declare_global_data_v2(
+                module,
+                data_name.as_ptr() as i64,
+                data_name.len() as i64,
+                CL_TYPE_I64,
+                41,
+                0,
+                32,
+            );
+            assert!(data > 0);
+
+            let sig = rt_cranelift_new_signature(0);
+            rt_cranelift_sig_set_return(sig, CL_TYPE_I64);
+            let fname = "global_address";
+            let ctx = rt_cranelift_begin_function(module, fname.as_ptr() as i64, fname.len() as i64, sig);
+            let entry = rt_cranelift_create_block(ctx);
+            rt_cranelift_switch_to_block(ctx, entry);
+            rt_cranelift_seal_block(ctx, entry);
+            let address = rt_cranelift_data_addr_in_func(ctx, data);
+            rt_cranelift_return(ctx, address);
+            let func_id = rt_cranelift_end_function(ctx);
+            assert!(rt_cranelift_define_function(module, func_id, ctx));
+            rt_cranelift_finalize_module(module);
+
+            let fptr = rt_cranelift_get_function_ptr(module, fname.as_ptr() as i64, fname.len() as i64);
+            let function: extern "C" fn() -> i64 = std::mem::transmute(fptr as *const ());
+            let first = function();
+            let second = function();
+            assert_eq!(first, second, "GlobalAddr must preserve data identity");
+            assert_eq!(first & 31, 0, "explicit 32-byte alignment must hold");
+            assert_eq!(*(first as *const i64), 41, "address must load canonical storage");
+            *(first as *mut i64) = 73;
+            assert_eq!(*(second as *const i64), 73, "store must update the same storage");
+            rt_cranelift_free_module(module);
+        }
+    }
+
+    #[test]
+    fn test_global_data_v2_rejects_invalid_metadata_decisions() {
+        unsafe {
+            let module_name = "test_global_addr_v2_invalid";
+            let module =
+                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, CL_TARGET_X86_64);
+            let name = "invalid";
+            assert_eq!(
+                rt_cranelift_declare_global_data_v2(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    CL_TYPE_I64,
+                    0,
+                    99,
+                    8
+                ),
+                0
+            );
+            assert_eq!(
+                rt_cranelift_declare_global_data_v2(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    CL_TYPE_I64,
+                    0,
+                    2,
+                    -1
+                ),
+                0
+            );
+            assert_eq!(
+                rt_cranelift_declare_global_data_v2(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    CL_TYPE_I64,
+                    0,
+                    2,
+                    3
+                ),
+                0
+            );
+            assert_eq!(
+                rt_cranelift_declare_global_data_v2(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    CL_TYPE_I64,
+                    0,
+                    2,
+                    8192
+                ),
+                0
+            );
             rt_cranelift_free_module(module);
         }
     }

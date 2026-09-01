@@ -549,9 +549,9 @@ impl<'a> Parser<'a> {
                 self.parse_pub_item_with_doc(doc_comment)
             }
             TokenKind::Mut if is_prefixed_let_decl => self.parse_mut_let(), // Legacy: mut let
-            TokenKind::Let => self.parse_let(),     // Legacy: let
-            TokenKind::Val => self.parse_val(),     // New: val (immutable)
-            TokenKind::Var => self.parse_var(),     // New: var (mutable)
+            TokenKind::Let => self.parse_let(),                             // Legacy: let
+            TokenKind::Val => self.parse_val(),                             // New: val (immutable)
+            TokenKind::Var => self.parse_var(),                             // New: var (mutable)
             TokenKind::Const => self.parse_const(),
             TokenKind::Static => self.parse_static(),
             TokenKind::Shared if is_prefixed_let_decl => self.parse_shared_let(),
@@ -787,9 +787,7 @@ impl<'a> Parser<'a> {
             TokenKind::Defer => self.parse_defer(),
             TokenKind::Errdefer => self.parse_errdefer(),
             TokenKind::Assert => self.parse_assert(),
-            TokenKind::Assume | TokenKind::Admit if soft_kw_stmt_as_ident => {
-                self.parse_expression_or_assignment()
-            }
+            TokenKind::Assume | TokenKind::Admit if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Assume => self.parse_assume(),
             TokenKind::Admit => self.parse_admit(),
             // "calc" is parsed contextually - not a reserved keyword
@@ -933,20 +931,27 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.expect(&TokenKind::Colon)?;
                     let block = self.parse_block()?;
-                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements)))
+                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements, vec![])))
+                } else if self.peek_is(&TokenKind::LParen) && self.unsafe_block_header_is_valid() {
+                    // Capability-scoped form at STATEMENT position:
+                    // `unsafe(capabilities: [ffi]):`. Delegate to the single
+                    // expression-position implementation so the header is
+                    // consumed exactly once. Parsing the header here with
+                    // `parse_expression()` would re-enter that same rule and
+                    // swallow the block's colon, breaking statement position.
+                    Ok(Node::Expression(self.parse_unsafe_block_primary()?))
                 } else if self.peek_is(&TokenKind::LParen) {
                     // Capability-scoped form:
                     // `unsafe(capabilities: [ffi, raw_ptr]): ...`
                     //
-                    // The seed AST records the unsafe block but does not yet
-                    // carry capability names. Parse the complete call-shaped
-                    // header so execution never mistakes `unsafe` for a
-                    // runtime function; the self-hosted HIR owns capability
-                    // preservation and enforcement.
+                    // Legacy call-shaped header fallback. The validated
+                    // capability-scoped form above preserves capability names;
+                    // this branch stays capability-empty and therefore cannot
+                    // grant FFI authority accidentally.
                     let _capability_header = self.parse_expression()?;
                     self.expect(&TokenKind::Colon)?;
                     let block = self.parse_block()?;
-                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements)))
+                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements, vec![])))
                 } else {
                     self.parse_expression_or_assignment()
                 }
@@ -1021,17 +1026,6 @@ impl<'a> Parser<'a> {
     /// here. See doc/08_tracking/bug/
     /// parser_while_continuation_swallows_following_declarations_2026-08-01.md.
     pub(crate) fn parse_condition_block(&mut self) -> Result<Block, ParseError> {
-        // Conditionals (`if`/`elif`/`else`/`while`/`for`) forbid an empty body:
-        // Simple has `pass` for a deliberate no-op, and the pure-Simple front
-        // end has always rejected a bodyless header. Match-arm bodies reach the
-        // same code through `parse_inline_or_block`, which passes `true`.
-        self.parse_condition_block_allowing_empty(false)
-    }
-
-    pub(crate) fn parse_condition_block_allowing_empty(
-        &mut self,
-        allow_empty_body: bool,
-    ) -> Result<Block, ParseError> {
         self.expect(&TokenKind::Newline)?;
 
         // Deep shape: the compensating DEDENT(s) appear right here, before
@@ -1050,13 +1044,12 @@ impl<'a> Parser<'a> {
         let block = if equal_column {
             self.parse_block_body()?
         } else {
-            self.parse_block_after_newline_allowing_empty(allow_empty_body)?
+            self.parse_block_after_newline()?
         };
 
         // Shallow shape: the compensating DEDENT(s) don't appear until after
         // the whole block body, alongside the block's own terminating DEDENT.
-        let deferred =
-            self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
+        let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
         self.consume_dedents_for_method_chain(deferred);
 
         Ok(block)
@@ -1066,22 +1059,6 @@ impl<'a> Parser<'a> {
     /// consumed by the caller (shared by `parse_block` and
     /// `parse_condition_block`).
     fn parse_block_after_newline(&mut self) -> Result<Block, ParseError> {
-        self.parse_block_after_newline_allowing_empty(true)
-    }
-
-    /// `allow_empty_body` gates the "empty body before Dedent/Eof" arm below.
-    /// That arm exists for `case nil:` match arms (reached via `parse_block`,
-    /// which passes `true`). It used to leak into `if`/`elif`/`else`/`while`/
-    /// `for` through `parse_condition_block`, so a BODYLESS `if cond:` whose
-    /// next line dedents was silently accepted as a no-op — while the
-    /// pure-Simple front end rejected the same source. Conditionals now pass
-    /// `false` and get a parse error; Simple has `pass` for a deliberate no-op.
-    /// See doc/08_tracking/bug/
-    /// seed_accepts_bodyless_if_native_build_rejects_2026-08-22.md
-    fn parse_block_after_newline_allowing_empty(
-        &mut self,
-        allow_empty_body: bool,
-    ) -> Result<Block, ParseError> {
         // Simple supports "flat body" pattern where block body appears on the
         // next line at the SAME indentation level (no indent token):
         //   if cond:
@@ -1112,7 +1089,7 @@ impl<'a> Parser<'a> {
             }
 
             // Empty body: `case nil:` followed by dedent or another case
-            if allow_empty_body && (self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof)) {
+            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
                 let span = self.current.span;
                 return Ok(Block {
                     span,
@@ -1169,6 +1146,49 @@ impl<'a> Parser<'a> {
                 | TokenKind::Examples
                 | TokenKind::AndThen
                 | TokenKind::Identifier { .. }
+                // `self` and `_` start a statement just as an identifier does
+                // (`self.slots[i].state = X`, `_ = f()`), but were missing from
+                // this list. Both callers ask "can a statement start here?":
+                // `parse_block_after_newline` (flat-body shape) and
+                // `header_continuation_is_equal_column`. The second is what made
+                // this visible: an `if`/`while` whose condition used a
+                // multi-line operator continuation at the SAME column as the
+                // body emits no fresh Indent for the body, so the parser must
+                // recognise the body's first token as a statement start. With
+                // `self` missing it fell through to `expect(Indent)` and failed
+                // with "expected Indent, found Self_" — the exact error in
+                // src/os/kernel/loader/authenticated_fs_exec_submission_service_v1.spl.
+                // Item 23 of doc/08_tracking/bug/
+                // unit_sweep_language_and_interpreter_gaps_2026-08-26.md.
+                | TokenKind::Self_
+                | TokenKind::Underscore
+                // Literal-expression body starts (`"completion_" + field[0]`,
+                // `1 + 2`, `[a, b]`, ...): a block body's first statement is
+                // frequently a bare expression statement, and the same "self
+                // was missing" gap applies to every literal/expression-start
+                // token kind, not just identifiers and `self`. Found via
+                // `riscv_scalar_csr_owner.spl`'s equal-column
+                // `if <multi-line cond>:\n    "completion_" + field[0]`
+                // shape, which fell through to `expect(Indent)` and failed
+                // with "expected Indent, found FString(...)" even after the
+                // `self`/`_` fix above. See doc/08_tracking/bug/
+                // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md.
+                | TokenKind::Integer(_)
+                | TokenKind::Float(_)
+                | TokenKind::TypedInteger(_, _)
+                | TokenKind::TypedFloat(_, _)
+                | TokenKind::String(_)
+                | TokenKind::FString(_)
+                | TokenKind::RawString(_)
+                | TokenKind::TypedString(_, _)
+                | TokenKind::TypedRawString(_, _)
+                | TokenKind::Bool(_)
+                | TokenKind::Nil
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::Minus
+                | TokenKind::Not
+                | TokenKind::Backslash
         )
     }
 

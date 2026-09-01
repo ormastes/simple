@@ -1,0 +1,75 @@
+use std.spec.*
+use os.kernel.scheduler.server_data_launch_grant_registry.{
+    ServerDataLaunchGrantProtocolStateV1,
+    ServerDataLaunchGrantProtocolEventV1,
+    server_data_launch_grant_protocol_transition_v1
+}
+
+fn _transition(
+    state: ServerDataLaunchGrantProtocolStateV1,
+    event: ServerDataLaunchGrantProtocolEventV1
+) -> ServerDataLaunchGrantProtocolStateV1?:
+    server_data_launch_grant_protocol_transition_v1(state, event)
+
+describe "server-data launch grant two-phase protocol":
+    it "begins, commits, and rejects replay":
+        val redeeming = _transition(
+            ServerDataLaunchGrantProtocolStateV1.Installed,
+            ServerDataLaunchGrantProtocolEventV1.BeginRedemption)
+        expect(redeeming).to_equal(Some(ServerDataLaunchGrantProtocolStateV1.Redeeming))
+        val redeemed = _transition(
+            redeeming.unwrap(),
+            ServerDataLaunchGrantProtocolEventV1.CommitRedemption)
+        expect(redeemed).to_equal(Some(ServerDataLaunchGrantProtocolStateV1.Redeemed))
+        expect(_transition(
+            redeemed.unwrap(),
+            ServerDataLaunchGrantProtocolEventV1.CommitRedemption).is_some()).to_equal(false)
+        expect(_transition(
+            redeemed.unwrap(),
+            ServerDataLaunchGrantProtocolEventV1.BeginRedemption).is_some()).to_equal(false)
+
+    it "rolls an unpublished redemption back to installed":
+        val redeeming = _transition(
+            ServerDataLaunchGrantProtocolStateV1.Installed,
+            ServerDataLaunchGrantProtocolEventV1.BeginRedemption).unwrap()
+        val restored = _transition(
+            redeeming,
+            ServerDataLaunchGrantProtocolEventV1.RollbackRedemption)
+        expect(restored).to_equal(Some(ServerDataLaunchGrantProtocolStateV1.Installed))
+        expect(_transition(
+            ServerDataLaunchGrantProtocolStateV1.Redeemed,
+            ServerDataLaunchGrantProtocolEventV1.RollbackRedemption).is_some()).to_equal(false)
+
+    it "revokes every live phase but retains terminal quarantine and retirement":
+        for state in [
+            ServerDataLaunchGrantProtocolStateV1.Installed,
+            ServerDataLaunchGrantProtocolStateV1.Redeeming,
+            ServerDataLaunchGrantProtocolStateV1.Redeemed
+        ]:
+            expect(_transition(
+                state,
+                ServerDataLaunchGrantProtocolEventV1.RevokeLifecycle)
+            ).to_equal(Some(ServerDataLaunchGrantProtocolStateV1.Empty))
+        val quarantined = _transition(
+            ServerDataLaunchGrantProtocolStateV1.Redeeming,
+            ServerDataLaunchGrantProtocolEventV1.QuarantineRedemption)
+        expect(quarantined).to_equal(Some(ServerDataLaunchGrantProtocolStateV1.Quarantined))
+        val committed_quarantine = _transition(
+            ServerDataLaunchGrantProtocolStateV1.Redeemed,
+            ServerDataLaunchGrantProtocolEventV1.QuarantineCommittedRedemption)
+        expect(committed_quarantine).to_equal(
+            Some(ServerDataLaunchGrantProtocolStateV1.Quarantined))
+        expect(_transition(
+            quarantined.unwrap(),
+            ServerDataLaunchGrantProtocolEventV1.RevokeLifecycle).is_some()).to_equal(false)
+        expect(_transition(
+            ServerDataLaunchGrantProtocolStateV1.Retired,
+            ServerDataLaunchGrantProtocolEventV1.BeginRedemption).is_some()).to_equal(false)
+
+    it "does not expose an Empty row as redeemable":
+        expect(_transition(
+            ServerDataLaunchGrantProtocolStateV1.Empty,
+            ServerDataLaunchGrantProtocolEventV1.BeginRedemption).is_some()).to_equal(false)
+        expect(_transition(
+            ServerDataLaunchGrantProtocolStateV1.Empty,
+            ServerDataLaunchGrantProtocolEventV1.CommitRedemption).is_some()).to_equal(false)

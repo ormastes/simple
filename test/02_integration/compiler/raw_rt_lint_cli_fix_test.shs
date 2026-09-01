@@ -1,0 +1,29 @@
+#!/bin/sh
+# Proves the public `simple lint --fix` path mutates a safe RAW-RT-002 call.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+SIMPLE_BINARY=${SIMPLE_BINARY:-"$ROOT/bin/release/simple"}
+if [ ! -x "$SIMPLE_BINARY" ]; then
+  echo "ERROR — deployed Pure Simple runtime is unavailable: $SIMPLE_BINARY"
+  exit 2
+fi
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+FIXTURE="$TMP_DIR/raw_rt_cli_fix.spl"
+printf '%s\n' \
+  'use std.nogc_sync_mut.io.dir_entry_ops.{directory_remove}' \
+  'fn clean(path: text):' \
+  '    rt_remove(path)' > "$FIXTURE"
+
+"$SIMPLE_BINARY" lint "$FIXTURE" --fix >/dev/null
+if ! grep -q 'directory_remove(path)' "$FIXTURE"; then
+  echo "FAIL — simple lint --fix did not apply the directory wrapper"
+  exit 1
+fi
+if grep -q 'rt_remove(path)' "$FIXTURE"; then
+  echo "FAIL — simple lint --fix left the raw runtime call in place"
+  exit 1
+fi
+echo "PASS — simple lint --fix mutated the safe RAW-RT-002 call"

@@ -56,6 +56,29 @@ pub mod vulkan;
 pub mod vulkan_graphics_runtime;
 pub mod metal_graphics_runtime;
 
+/// Stable metadata queried by the core runtime before it admits this artifact
+/// as a dynamically loaded GPU provider. Operation tables are backend-specific
+/// and append-only; version 1 never passes RuntimeValue across the boundary.
+#[no_mangle]
+pub extern "C" fn rt_simple_gpu_provider_abi_version() -> i64 {
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simple_gpu_provider_backend_bits() -> i64 {
+    let mut bits = 0;
+    if cfg!(feature = "cuda") {
+        bits |= 1;
+    }
+    if cfg!(feature = "vulkan") {
+        bits |= 2;
+    }
+    if cfg!(all(target_os = "macos", feature = "metal")) {
+        bits |= 4;
+    }
+    bits
+}
+
 // Initialize runtime thread on first use
 #[cfg(feature = "monoio-net")]
 #[ctor::ctor]
@@ -168,7 +191,8 @@ static SIMPLE_KEEP_RT_POOL_SAFEPOINT: unsafe extern "C" fn() -> i64 = rt_pool_sa
 static SIMPLE_KEEP_RT_POOL_STATE_CREATE: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_create_v1;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
-static SIMPLE_KEEP_RT_POOL_STATE_TRY_SUBMIT_I64: unsafe extern "C" fn(i64, i64, i64) -> i64 = rt_pool_state_try_submit_i64_v1;
+static SIMPLE_KEEP_RT_POOL_STATE_TRY_SUBMIT_I64: unsafe extern "C" fn(i64, i64, i64) -> i64 =
+    rt_pool_state_try_submit_i64_v1;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_POOL_TASK_STATUS_I64: unsafe extern "C" fn(i64) -> i64 = rt_pool_task_status_i64_v1;
@@ -414,6 +438,51 @@ fn runtime_symbol_table_contains_monotonic_time() {
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
+fn runtime_symbol_table_contains_char_from_code() {
+    let entry = RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .find(|entry| entry.name == "rt_char_from_code")
+        .expect("char-from-code provider must be registered so the seed JIT does not de-JIT");
+    assert!(!entry.ptr.is_null());
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table", not(feature = "runtime-tls")))]
+#[test]
+fn runtime_symbol_table_excludes_disabled_tls_providers() {
+    // `rt_tls_{new,get,set,...}` are unrelated thread-local-storage owners;
+    // pin only the cfg-gated network transport surface from net_tls.rs.
+    let transport_names = [
+        "rt_tls_client_connect",
+        "rt_tls_client_connect_with_sni",
+        "rt_tls_client_connect_address_with_sni_timeout",
+        "rt_tls_client_write",
+        "rt_tls_client_read_checked",
+        "rt_tls_client_write_timeout",
+        "rt_tls_client_read_timeout_checked",
+        "rt_tls_client_close",
+        "rt_tls_get_protocol_version",
+        "rt_tls_get_cipher_suite",
+        "rt_tls_get_negotiated_alpn",
+        "rt_tls_is_handshake_complete",
+        "rt_tls_server_accept",
+        "rt_tls_server_close_connection",
+        "rt_tls_server_create",
+        "rt_tls_server_create_from_der",
+        "rt_tls_server_read_checked",
+        "rt_tls_server_shutdown",
+        "rt_tls_server_write",
+        "rt_tls_server_write_bytes",
+    ];
+    for name in transport_names {
+        assert!(
+            !RUNTIME_SYMBOL_ENTRIES.iter().any(|entry| entry.name == name),
+            "cfg-disabled TLS transport provider leaked into the runtime table: {name}"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
 fn runtime_symbol_table_typed_memory_contracts_dispatch() {
     fn entry(name: &str) -> *const u8 {
         RUNTIME_SYMBOL_ENTRIES
@@ -452,8 +521,7 @@ fn runtime_symbol_table_atomic_contracts_dispatch() {
     }
 
     let int_new: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_int_new")) };
-    let int_add: extern "C" fn(i64, i64) -> i64 =
-        unsafe { std::mem::transmute(entry("rt_atomic_int_fetch_add")) };
+    let int_add: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_int_fetch_add")) };
     let int_load: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_int_load")) };
     let int_free: extern "C" fn(i64) = unsafe { std::mem::transmute(entry("rt_atomic_int_free")) };
     let int_handle = int_new(7);
@@ -463,8 +531,7 @@ fn runtime_symbol_table_atomic_contracts_dispatch() {
     int_free(int_handle);
 
     let bool_new: extern "C" fn(bool) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_bool_new")) };
-    let bool_swap: extern "C" fn(i64, bool) -> bool =
-        unsafe { std::mem::transmute(entry("rt_atomic_bool_swap")) };
+    let bool_swap: extern "C" fn(i64, bool) -> bool = unsafe { std::mem::transmute(entry("rt_atomic_bool_swap")) };
     let bool_free: extern "C" fn(i64) = unsafe { std::mem::transmute(entry("rt_atomic_bool_free")) };
     let bool_handle = bool_new(false);
     assert_ne!(bool_handle, 0);
@@ -503,14 +570,8 @@ fn runtime_symbol_table_signature_contracts_resolve_exact_providers() {
 #[test]
 fn runtime_symbol_table_file_lock_contracts_resolve_exact_providers() {
     for (name, expected) in [
-        (
-            "rt_file_lock",
-            value::sffi::file_io::rt_file_lock as *const u8,
-        ),
-        (
-            "rt_file_unlock",
-            value::sffi::file_io::rt_file_unlock as *const u8,
-        ),
+        ("rt_file_lock", value::sffi::file_io::rt_file_lock as *const u8),
+        ("rt_file_unlock", value::sffi::file_io::rt_file_unlock as *const u8),
     ] {
         let actual = RUNTIME_SYMBOL_ENTRIES
             .iter()
@@ -529,10 +590,7 @@ fn runtime_symbol_table_checked_offset_read_resolves_exact_provider() {
         .find(|entry| entry.name == "rt_file_read_text_at_checked")
         .expect("checked offset-read provider must be registered")
         .ptr;
-    assert_eq!(
-        actual,
-        value::sffi::file_io::rt_file_read_text_at_checked as *const u8
-    );
+    assert_eq!(actual, value::sffi::file_io::rt_file_read_text_at_checked as *const u8);
 }
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
@@ -605,6 +663,28 @@ pub extern "C" fn rt_load_barrier() {
 #[no_mangle]
 pub extern "C" fn rt_store_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+}
+
+/// Optimization barrier for constant-time code -- returns its argument.
+///
+/// Contract: `extern fn rt_black_box(value: i64) -> i64`
+/// (`src/os/crypto/scram_common.spl:17`; `src/lib/common/crypto/constant_time.spl:7`
+/// spells the return `i64?`, which is a Simple-side nullability annotation
+/// over the same raw-i64 C ABI -- cf. `extern fn rt_free(ptr: i64) -> i64?`
+/// against `void rt_free(void*)`).
+///
+/// Semantically the identity function, but the optimizer must not be able
+/// to see that: callers (`ct_eq`, HTTP Basic auth, SCRAM) XOR-accumulate a
+/// difference and test it once, and without a barrier the compiler may
+/// rewrite that into an early-exit branch, reintroducing exactly the
+/// data-dependent timing the accumulate loop removes.
+///
+/// The C runtime defines this symbol WEAKLY (`runtime_native.c`, next to
+/// `rt_memory_barrier`) so this strong definition wins in any link that
+/// carries both -- same precedence rule as `rt_heap_live_bytes`.
+#[no_mangle]
+pub extern "C" fn rt_black_box(value: i64) -> i64 {
+    std::hint::black_box(value)
 }
 
 #[no_mangle]
@@ -880,7 +960,8 @@ pub use value::{
     rt_object_field_get,
     rt_object_field_set,
     rt_object_new,
-    rt_ptr_read_i64, rt_ptr_read_u8,
+    rt_ptr_read_i64,
+    rt_ptr_read_u8,
     rt_ptr_to_value,
     rt_ptr_write_bytes_raw_shim,
     rt_ptr_write_i32,
@@ -967,19 +1048,19 @@ pub use value::{
     rt_dns_lookup, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_drain_line, rt_io_tcp_flush,
     rt_io_tcp_local_addr, rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len,
     rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout, rt_io_tcp_set_write_timeout,
-    rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len,
-    rt_tls_client_close, rt_tls_client_config_add_root_cert, rt_tls_client_config_enable_sni,
-    rt_tls_client_config_free, rt_tls_client_config_new, rt_tls_client_config_set_alpn,
-    rt_tls_client_config_set_verify_mode, rt_tls_client_connect, rt_tls_client_connect_with_sni,
-    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_read, rt_tls_client_read_timeout,
-    rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_free_cert, rt_tls_generate_self_signed_cert,
-    rt_tls_get_cert_expiry,
-    rt_tls_get_cert_issuer, rt_tls_get_cert_subject, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
-    rt_tls_get_peer_cert, rt_tls_get_protocol_version, rt_tls_hash_cert, rt_tls_is_handshake_complete,
-    rt_tls_load_cert, rt_tls_load_key, rt_tls_server_accept, rt_tls_server_close_connection, rt_tls_server_config_free,
-    rt_tls_server_config_new, rt_tls_server_config_require_client_cert, rt_tls_server_config_set_alpn,
-    rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_read, rt_tls_server_shutdown,
-    rt_tls_server_write, rt_tls_server_write_bytes, rt_tls_verify_cert,
+    rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len, rt_io_udp_bind,
+    rt_io_udp_close, rt_io_udp_connect, rt_io_udp_local_addr, rt_io_udp_recv, rt_io_udp_recv_from, rt_io_udp_send,
+    rt_io_udp_send_to, rt_io_udp_set_broadcast, rt_io_udp_set_nonblocking, rt_io_udp_set_read_timeout,
+};
+
+#[cfg(feature = "runtime-tls")]
+pub use value::{
+    rt_tls_client_close, rt_tls_client_connect, rt_tls_client_connect_with_sni,
+    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_read_checked, rt_tls_client_read_timeout_checked,
+    rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
+    rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept, rt_tls_server_close_connection,
+    rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_read_checked, rt_tls_server_shutdown,
+    rt_tls_server_write, rt_tls_server_write_bytes,
 };
 
 // Re-export contract violation types and SFFI functions (CTR-050-054)
@@ -1146,8 +1227,9 @@ pub use parallel::{
 
 // Re-export coverage instrumentation types and SFFI functions
 pub use coverage::{
-    rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_dump_sdn, rt_coverage_dump_sdn_cstr,
-    rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize, rt_coverage_path_probe, CoverageData,
+    rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_dump_sdn,
+    rt_coverage_dump_sdn_cstr, rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize,
+    rt_coverage_path_probe, CoverageData,
 };
 
 // Re-export debug SFFI functions

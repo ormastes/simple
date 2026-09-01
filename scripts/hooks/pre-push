@@ -4,6 +4,28 @@
 # validation while retaining the bounded committed-tree guards.
 set -u
 
+# --- re-entry guard (OLDGUARD_DEPTH) ---
+# 2026-08-26: a recursive pre-push probe (nicknamed "oldguard" in session
+# memory) was observed spawning thousands of timeout/sh processes and hanging
+# the host. The exact recursing artifact could not be located by static
+# search of the current tree (see
+# doc/08_tracking/bug/oldguard_prepush_probe_recursion_2026-08-26.md), but any
+# chain where this dispatcher (or a guard it calls) ends up invoking a real
+# `git push`/`jj git push` that re-triggers this same hook is exactly the
+# recursion shape described. This sentinel bounds that shape unconditionally,
+# as defense-in-depth, regardless of which script turns out to be the
+# original offender: each invocation increments OLDGUARD_DEPTH and refuses to
+# continue past a small hard cap, so a self-reentrant chain dies in a handful
+# of hops instead of forking until the box falls over.
+: "${OLDGUARD_DEPTH:=0}"
+OLDGUARD_DEPTH=$((OLDGUARD_DEPTH + 1))
+export OLDGUARD_DEPTH
+OLDGUARD_MAX_DEPTH=3
+if [ "$OLDGUARD_DEPTH" -gt "$OLDGUARD_MAX_DEPTH" ]; then
+    echo "pre-push dispatcher: OLDGUARD_DEPTH=$OLDGUARD_DEPTH exceeds cap ($OLDGUARD_MAX_DEPTH) — refusing, this hook (or something it calls) is re-entering itself" >&2
+    exit 1
+fi
+
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
     echo "pre-push dispatcher: cannot locate repository root" >&2
     exit 1

@@ -32,6 +32,32 @@ The merge owner freezes the candidate and is the only agent that publishes the
 combined readiness result. A final reviewer checks the frozen receipts before a
 release or platform claim.
 
+## Producer-bound incremental tool caches
+
+Keep compiler-capsule caches separate from tool-closure caches. For every
+requested compiler generation, build the full CLI and test runner with distinct
+writable caches:
+
+```text
+build/bootstrap/tool_cache/
+  phase2/<compiler-sha>/{full-cli,test-runner}/
+  phase3/<compiler-sha>/{full-cli,test-runner}/
+  phase4/<compiler-sha>/{full-cli,test-runner}/
+```
+
+Each producer directory must retain the compiler SHA-256, frozen source
+revision, entry path, target, backend, runtime authority, and exact argv. Reuse
+the same directory for incremental retries of that lineage. Never let parallel
+writers or different compiler hashes share a cache.
+
+Stage 2 and Stage 3 `bootstrap_main` artifacts are intentionally compiler-only.
+They can native-build self-running specs but do not expose suite discovery. Run
+`test test --whole --mode=interpreter` only with the non-vacuous full CLI built
+by the requested producer. A zero exit without a `Results:` line is vacuous and
+must fail the gate. Phase 4 repeats the two tool builds with Phase 4 as producer
+before self-host or release claims; a Phase 3-built tool does not prove a Phase
+4-produced tool.
+
 ## Current x86 transaction status (2026-08-14)
 
 Historical cycle 3 repaired two source frontiers and published Stage 2,
@@ -81,7 +107,7 @@ candidate between gates.
    returns host identity, toolchain, source/compiler hashes, artifact hashes,
    logs, sanity, and essential-marker receipts.
 7. **Gate 7, rollback:** only after all selected Gate 6 evidence, run
-   `sh scripts/bootstrap/bootstrap-from-scratch.sh rollback-deploy <canonical-triple>`.
+   `sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>`.
    Retain the command, exit status, receipt path, restored hash, and
    post-rollback arithmetic smoke. An earlier rollback is valid only when
    Gate 6 ran from TODO667's isolated immutable bundle. Publication of that

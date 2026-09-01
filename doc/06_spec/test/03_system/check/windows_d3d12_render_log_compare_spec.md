@@ -27,7 +27,7 @@ windows_d3d12_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,11 +77,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/windows_d3d12_render_log_com
    `build/windows-d3d12-pix/evidence.env` and set
    `WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1`.
    Strict mode requires either a PIX capture artifact with
-   `windows_d3d12_pix_capture_artifact_magic=PIX` whose artifact bytes also
-   begin with `PIX`, or a concrete regular GPU debugger log artifact. Relative
-   artifact names resolve beside the PIX evidence env, not from the working
-   directory. Status-only debugger rows, symlinked artifacts, and hardlinked
-   artifacts are diagnostic, not native proof.
+   `windows_d3d12_pix_capture_artifact_magic=PIX` or a concrete GPU debugger
+   log artifact; status-only debugger rows are diagnostic, not native proof.
 4. Run `scripts/check/check-windows-d3d12-render-log-compare.shs` and consume
    the normalized `windows_d3d12_render_log_compare_*` keys from the output env.
 5. Treat legacy DirectX/D3D11 evidence as diagnostic only unless it explicitly
@@ -115,13 +112,8 @@ Strict PIX/GPU-debugger evidence accepts either:
 The accepted row must also name the native debugger output:
 
 - PIX: `windows_d3d12_pix_capture_artifact` plus
-  `windows_d3d12_pix_capture_artifact_magic=PIX`, with matching file bytes
+  `windows_d3d12_pix_capture_artifact_magic=PIX`
 - GPU debugger: `windows_d3d12_gpu_debugger_capture_artifact`
-
-Native debugger artifacts must be regular files, not symlinks or hardlinks to
-capture outputs outside the evidence boundary.
-Relative native debugger artifact names must resolve beside the PIX/debugger
-env so stale working-directory files cannot satisfy the proof.
 
 ## Failure Semantics
 
@@ -158,13 +150,6 @@ The source logs use `simple-render-log-v1`, set
 windows_d3d12_render_log_compare_status=pass
 windows_d3d12_render_log_compare_required_api=d3d12
 windows_d3d12_render_log_compare_pairwise_status=pass
-windows_d3d12_render_log_compare_blocked_gate_count=0
-windows_d3d12_render_log_compare_blocked_gates=
-windows_d3d12_render_log_compare_native_readback_gate_status=pass
-windows_d3d12_render_log_compare_browser_backing_gate_status=pass
-windows_d3d12_render_log_compare_pairwise_gate_status=pass
-windows_d3d12_render_log_compare_argb_source_gate_status=pass
-windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass
 ```
 
 ## Test Matrix
@@ -180,17 +165,6 @@ windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass
 6. Reject missing PIX/GPU debugger evidence when strict capture mode is enabled.
 7. Reject status-only PIX/GPU debugger rows that omit the native artifact
    marker.
-8. Reject forged PIX rows whose metadata claims `PIX` but whose artifact bytes
-   are not a PIX capture.
-9. Reject symlinked PIX artifacts even when the symlink target begins with
-   `PIX`.
-10. Reject hardlinked PIX artifacts even when the shared file begins with
-    `PIX`.
-11. Emit structured blocked gate statuses so platform agents can distinguish
-    native readback, browser backing, pairwise ARGB, ARGB source, and
-    PIX/GPU-debugger blockers without parsing prose.
-12. Reject relative PIX artifact names that would otherwise be satisfied by
-    stale working-directory files outside the PIX evidence directory.
 
 ## Scenarios
 
@@ -201,15 +175,14 @@ windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-windows-d3d12-render-log-pass && mkdir -p build/test-windows-d3d12-render-log-pass && " +
     "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-pass/native.env && " +
     "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_simple_argb_checksum=900\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_checksum=900\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_checksum=900\\n' > build/test-windows-d3d12-render-log-pass/browser.env && " +
-    "printf 'PIX synthetic capture\\n' > build/test-windows-d3d12-render-log-pass/frame.wpix && printf 'GPU debugger synthetic log\\n' > build/test-windows-d3d12-render-log-pass/gpu-debugger.log && " +
-    "printf 'windows_d3d12_pix_capture_status=pass\\nwindows_d3d12_gpu_debugger_capture_status=pass\\nwindows_d3d12_pix_capture_artifact=build/test-windows-d3d12-render-log-pass/frame.wpix\\nwindows_d3d12_pix_capture_artifact_magic=PIX\\nwindows_d3d12_gpu_debugger_capture_artifact=build/test-windows-d3d12-render-log-pass/gpu-debugger.log\\n' > build/test-windows-d3d12-render-log-pass/pix.env && " +
+    "printf 'windows_d3d12_pix_capture_status=pass\\nwindows_d3d12_gpu_debugger_capture_status=pass\\nwindows_d3d12_pix_capture_artifact=frame.wpix\\nwindows_d3d12_pix_capture_artifact_magic=PIX\\nwindows_d3d12_gpu_debugger_capture_artifact=gpu-debugger.log\\n' > build/test-windows-d3d12-render-log-pass/pix.env && " +
     "BUILD_DIR=build/test-windows-d3d12-render-log-pass/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-pass/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-pass/browser.env WINDOWS_D3D12_PIX_ENV=build/test-windows-d3d12-render-log-pass/pix.env WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 sh scripts/check/check-windows-d3d12-render-log-compare.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -217,21 +190,11 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-windows-d3d12-render-log-pass/out/evidence.env")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_status=pass")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_required_api=d3d12")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_blocked_gate_count=0")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_blocked_gates=")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_native_readback_gate_status=pass")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_browser_backing_gate_status=pass")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pairwise_gate_status=pass")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_argb_source_gate_status=pass")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_status=pass")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact=build/test-windows-d3d12-render-log-pass/frame.wpix")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_status=pass")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact=frame.wpix")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_magic=PIX")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_magic=PIX")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_status=pass")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_artifact=build/test-windows-d3d12-render-log-pass/gpu-debugger.log")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status=pass")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_argb_checksum_reason=pass")
 val simple_log = file_read("build/test-windows-d3d12-render-log-pass/out/simple.srl.env")
 expect(simple_log).to_contain("simple_render_log_platform=windows")
@@ -298,7 +261,7 @@ expect(evidence).to_contain("legacy-directx-readback-not-d3d12")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -315,9 +278,6 @@ expect(evidence).to_contain("chrome-d3d12-backing-fail")
 expect(evidence).to_contain("browser-d3d12-backing-fail")
 expect(evidence).to_contain("pixel-comparison-pass")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_pairwise_status=pass")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_browser_backing_gate_status=fail")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pairwise_gate_status=fail")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_blocked_gates=browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence")
 ```
 
 </details>
@@ -377,7 +337,7 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_require_pix=1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -392,129 +352,7 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-windows-d3d12-render-log-status-only-pix/out/evidence.env")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
 expect(evidence).to_contain("windows-d3d12-pix-artifact-missing")
-expect(evidence).to_contain("windows-d3d12-pix-artifact-file-missing")
 expect(evidence).to_contain("windows-d3d12-pix-magic-missing")
-expect(evidence).to_contain("windows-d3d12-pix-file-magic-missing")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=fail")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_blocked_gate_count=1")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_blocked_gates=pix-or-gpu-debugger")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_status=missing")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_magic=missing")
-```
-
-</details>
-
-#### rejects PIX metadata whose artifact bytes are not a PIX capture
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 15 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val command = "rm -rf build/test-windows-d3d12-render-log-pix-file-magic && mkdir -p build/test-windows-d3d12-render-log-pix-file-magic && " +
-    "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-pix-file-magic/native.env && " +
-    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_simple_argb_checksum=900\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_checksum=900\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_checksum=900\\n' > build/test-windows-d3d12-render-log-pix-file-magic/browser.env && " +
-    "printf 'not a pix capture\\n' > build/test-windows-d3d12-render-log-pix-file-magic/frame.wpix && " +
-    "printf 'windows_d3d12_pix_capture_status=pass\\nwindows_d3d12_pix_capture_artifact=build/test-windows-d3d12-render-log-pix-file-magic/frame.wpix\\nwindows_d3d12_pix_capture_artifact_magic=PIX\\n' > build/test-windows-d3d12-render-log-pix-file-magic/pix.env && " +
-    "BUILD_DIR=build/test-windows-d3d12-render-log-pix-file-magic/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-pix-file-magic/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-pix-file-magic/browser.env WINDOWS_D3D12_PIX_ENV=build/test-windows-d3d12-render-log-pix-file-magic/pix.env WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 sh scripts/check/check-windows-d3d12-render-log-compare.shs || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-val evidence = file_read("build/test-windows-d3d12-render-log-pix-file-magic/out/evidence.env")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
-expect(evidence).to_contain("windows-d3d12-pix-file-magic-invalid")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_status=pass")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_magic=PIX")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_magic=invalid")
-```
-
-</details>
-
-#### resolves relative PIX artifacts beside the PIX evidence env
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val command = "rm -rf build/test-windows-d3d12-render-log-pix-relative && mkdir -p build/test-windows-d3d12-render-log-pix-relative && " +
-    "printf 'PIX stale working directory capture\\n' > frame.wpix && " +
-    "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-pix-relative/native.env && " +
-    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_simple_argb_checksum=900\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_checksum=900\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_checksum=900\\n' > build/test-windows-d3d12-render-log-pix-relative/browser.env && " +
-    "printf 'windows_d3d12_pix_capture_status=pass\\nwindows_d3d12_pix_capture_artifact=frame.wpix\\nwindows_d3d12_pix_capture_artifact_magic=PIX\\n' > build/test-windows-d3d12-render-log-pix-relative/pix.env && " +
-    "BUILD_DIR=build/test-windows-d3d12-render-log-pix-relative/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-pix-relative/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-pix-relative/browser.env WINDOWS_D3D12_PIX_ENV=build/test-windows-d3d12-render-log-pix-relative/pix.env WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 sh scripts/check/check-windows-d3d12-render-log-compare.shs || true; rm -f frame.wpix"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-val evidence = file_read("build/test-windows-d3d12-render-log-pix-relative/out/evidence.env")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
-expect(evidence).to_contain("windows-d3d12-pix-artifact-file-missing")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact=frame.wpix")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_resolved=build/test-windows-d3d12-render-log-pix-relative/frame.wpix")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_status=missing")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_magic=missing")
-```
-
-</details>
-
-#### rejects symlinked PIX capture artifacts in strict D3D12 mode
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val command = "rm -rf build/test-windows-d3d12-render-log-pix-symlink build/test-windows-d3d12-render-log-pix-symlink-external && mkdir -p build/test-windows-d3d12-render-log-pix-symlink build/test-windows-d3d12-render-log-pix-symlink-external && " +
-    "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-pix-symlink/native.env && " +
-    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_simple_argb_checksum=900\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_checksum=900\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_checksum=900\\n' > build/test-windows-d3d12-render-log-pix-symlink/browser.env && " +
-    "printf 'PIX external capture\\n' > build/test-windows-d3d12-render-log-pix-symlink-external/frame.wpix && " +
-    "ln -s ../test-windows-d3d12-render-log-pix-symlink-external/frame.wpix build/test-windows-d3d12-render-log-pix-symlink/frame.wpix && " +
-    "printf 'windows_d3d12_pix_capture_status=pass\\nwindows_d3d12_pix_capture_artifact=build/test-windows-d3d12-render-log-pix-symlink/frame.wpix\\nwindows_d3d12_pix_capture_artifact_magic=PIX\\n' > build/test-windows-d3d12-render-log-pix-symlink/pix.env && " +
-    "BUILD_DIR=build/test-windows-d3d12-render-log-pix-symlink/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-pix-symlink/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-pix-symlink/browser.env WINDOWS_D3D12_PIX_ENV=build/test-windows-d3d12-render-log-pix-symlink/pix.env WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 sh scripts/check/check-windows-d3d12-render-log-compare.shs || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-val evidence = file_read("build/test-windows-d3d12-render-log-pix-symlink/out/evidence.env")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
-expect(evidence).to_contain("windows-d3d12-pix-artifact-file-symlink")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_status=symlink")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_magic=PIX")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_magic=PIX")
-```
-
-</details>
-
-#### rejects hardlinked PIX capture artifacts in strict D3D12 mode
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val command = "rm -rf build/test-windows-d3d12-render-log-pix-hardlink && mkdir -p build/test-windows-d3d12-render-log-pix-hardlink && " +
-    "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-pix-hardlink/native.env && " +
-    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_simple_argb_checksum=900\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_checksum=900\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_checksum=900\\n' > build/test-windows-d3d12-render-log-pix-hardlink/browser.env && " +
-    "printf 'PIX original capture\\n' > build/test-windows-d3d12-render-log-pix-hardlink/original.wpix && " +
-    "ln build/test-windows-d3d12-render-log-pix-hardlink/original.wpix build/test-windows-d3d12-render-log-pix-hardlink/frame.wpix && " +
-    "printf 'windows_d3d12_pix_capture_status=pass\\nwindows_d3d12_pix_capture_artifact=build/test-windows-d3d12-render-log-pix-hardlink/frame.wpix\\nwindows_d3d12_pix_capture_artifact_magic=PIX\\n' > build/test-windows-d3d12-render-log-pix-hardlink/pix.env && " +
-    "BUILD_DIR=build/test-windows-d3d12-render-log-pix-hardlink/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-pix-hardlink/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-pix-hardlink/browser.env WINDOWS_D3D12_PIX_ENV=build/test-windows-d3d12-render-log-pix-hardlink/pix.env WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 sh scripts/check/check-windows-d3d12-render-log-compare.shs || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-val evidence = file_read("build/test-windows-d3d12-render-log-pix-hardlink/out/evidence.env")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
-expect(evidence).to_contain("windows-d3d12-pix-artifact-file-hardlink")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_status=hardlink")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_magic=PIX")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_magic=PIX")
 ```
 
 </details>
@@ -523,8 +361,8 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

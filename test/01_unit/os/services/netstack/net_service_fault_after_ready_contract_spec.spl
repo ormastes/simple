@@ -1,0 +1,37 @@
+# @cover src/os/services/netstack/net_service_fault_after_ready_main.spl 100%
+# @cover scripts/os/build_root_service_catalog.shs 100%
+# @cover src/os/port/pid1_catalog_disk_bake.spl 100%
+# @req REQ-005
+"""# Test-only net fault payload contract
+
+The strict PID1 QEMU lane needs one genuine service failure. The alternate
+payload is selected only by explicit test-media configuration, creates the
+real named net endpoint, gives PID1 time to observe readiness, then exits
+through the ordinary task-exit ABI. It does not manufacture lifecycle logs.
+"""
+
+use std.spec.{describe, it, expect}
+use std.fs.{read_file}
+
+describe "test-only net fault payload contract":
+    it "initializes the real net endpoint before normal task exit":
+        val source = read_file("src/os/services/netstack/net_service_fault_after_ready_main.spl")
+        expect(source).to_contain("service.init_port()")
+        expect(source).to_contain("if not service.running:")
+        expect(source).to_contain("while yields < TEST_READY_YIELDS:")
+        expect(source).to_contain("syscall(SYS_EXIT, TEST_NET_FAULT_EXIT_CODE")
+        expect(source).to_not_contain("[pid1]")
+        expect(source).to_not_contain("job-teardown")
+
+    it "selects the fault payload only through an explicit test catalogue option":
+        val source = read_file("scripts/os/build_root_service_catalog.shs")
+        expect(source).to_contain("TEST_NET_FAULT_AFTER_READY=false")
+        expect(source).to_contain("--test-net-fault-after-ready")
+        expect(source).to_contain("NET_ENTRY=\"src/os/services/netstack/net_service_main.spl\"")
+        expect(source).to_contain("NET_ENTRY=\"src/os/services/netstack/net_service_fault_after_ready_main.spl\"")
+
+    it "marks only explicitly configured test media for the strict harness":
+        val source = read_file("src/os/port/pid1_catalog_disk_bake.spl")
+        expect(source).to_contain("SIMPLEOS_PID1_CATALOG_TEST_NET_FAULT_AFTER_READY")
+        expect(source).to_contain("if _test_net_fault_after_ready():")
+        expect(source).to_contain("FAULTNETCFG")

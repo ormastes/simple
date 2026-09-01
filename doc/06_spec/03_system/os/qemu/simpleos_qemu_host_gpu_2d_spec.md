@@ -192,7 +192,7 @@ the CPU/software fallback and report a stable reason.
     CUDA daemon is valid ivshmem offload evidence only. It cannot promote VFIO,
     virtio-gpu/Venus, or guest-native Vulkan/CUDA.
 
-### Keep native Metal ProcessingIR separate from Engine2D rendering
+## Failure and fallback checks
 
 The daemon imports `processing_ir_execute_metal`, probes the Metal backend with
 a nonzero FillU32 operation, compares the returned values with the CPU oracle,
@@ -200,7 +200,7 @@ and publishes the same negotiated mask used for the HELLO backend label. The
 executor uses `metal_sffi_run_compute_frame` and canonical pointer readback; it
 does not import `Engine2D` or `MetalSession`.
 
-## Failure and fallback checks
+## Platform matrix
 
 - Missing service/backend reports `unsupported` or `blocked` and leaves the
   guest bootable on its existing CPU/software path.
@@ -224,7 +224,7 @@ selects CUDA or Vulkan ProcessingIR independently. Cross-ISA TCG rows
 prove correctness and honest provenance; they are exempt from native-ISA
 latency and speedup targets.
 
-## Verification
+## Executable source
 
 Run the parser contract without hardware:
 

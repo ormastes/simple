@@ -1,0 +1,114 @@
+# Exact-identity dominance tier (plan §3.5, frozen §5.5).
+#
+# `resolve(value)` returns the ONE authorized unambiguous match and stops:
+# it never invokes candidate providers, graph ranking, or RRF (hazard §6.11 /
+# design §3.5). No match -> `NotFound`. Multiple authorized matches ->
+# `AmbiguousIdentity`. Unauthorized candidates are neither returned nor
+# counted (so an unauthorized record cannot even manufacture an ambiguity).
+#
+# Ported from `examples/05_stdlib/spipe/src/index/exact.js`
+# (`resolveExactIdentity`).
+
+use app.spipe.identity.registry.{IdentityRegistryV1, IdentityRecordV1, AliasStatusV1, record_matches}
+use lib.common.search.fusion_types.{IdentityExplanationV1, SourceRankingV1, FusedHitV1}
+use app.spipe.fusion.rrf.{FusionErrorV1, remove_document_from_sources, fuse}
+
+pub enum IdentityErrorV1:
+    NotFound
+    AmbiguousIdentity
+
+# Resolves `value` against `registry`, returning the matched record. Only
+# `record.authorized == true` records are ever considered — an unauthorized
+# record does not count toward "found" OR toward "ambiguous".
+fn resolve_identity_record(registry: IdentityRegistryV1, value: text) -> Result<IdentityRecordV1, IdentityErrorV1>:
+    var matches: [IdentityRecordV1] = []
+    var i = 0
+    while i < registry.records.len():
+        val record = registry.records[i]
+        if record.authorized and record_matches(record, value):
+            matches.push(record)
+        i = i + 1
+    if matches.len() == 0:
+        return Err(IdentityErrorV1.NotFound)
+    if matches.len() > 1:
+        return Err(IdentityErrorV1.AmbiguousIdentity)
+    Ok(matches[0])
+
+# Which key/alias on the matched record actually matched `value` — used to
+# populate `IdentityExplanationV1.matched_key`/`.alias_authority`/`.alias_status`.
+# (`record_matches` already guaranteed a real match exists before this runs.)
+fn _matched_alias_authority_and_status(record: IdentityRecordV1, value: text) -> (text, text):
+    if record.uid == value or record.key == value:
+        return ("registry", "accepted")
+    var i = 0
+    while i < record.aliases.len():
+        val alias = record.aliases[i]
+        if alias.value == value and alias.status == AliasStatusV1.Accepted:
+            return (alias.authority, "accepted")
+        i = i + 1
+    ("registry", "accepted")
+
+# Builds the frozen `IdentityExplanationV1` for a resolved record. `pinned_rank`
+# is always 1 (frozen invariant); see `IdentityExplanationV1.has_frozen_pinned_rank`.
+fn identity_explanation_for(registry: IdentityRegistryV1, record: IdentityRecordV1, value: text) -> IdentityExplanationV1:
+    val authority_and_status = _matched_alias_authority_and_status(record, value)
+    IdentityExplanationV1(
+        resolved_uid: record.uid,
+        matched_key: value,
+        alias_authority: authority_and_status.0,
+        alias_status: authority_and_status.1,
+        registry_generation: registry.generation,
+        visibility_decision: "visible",
+        pinned_rank: 1,
+    )
+
+# Public `resolve(value)` operation (design §3.5): the one authorized
+# unambiguous identity match, and nothing else. Never touches providers,
+# graph ranking, or RRF.
+fn resolve(registry: IdentityRegistryV1, value: text) -> Result<IdentityExplanationV1, IdentityErrorV1>:
+    match resolve_identity_record(registry, value):
+        Ok(record):
+            Ok(identity_explanation_for(registry, record, value))
+        Err(e):
+            Err(e)
+
+pub enum SearchDominanceErrorV1:
+    Fusion
+
+pub struct SearchDominanceResultV1:
+    identity_ambiguity: bool
+    pinned: IdentityExplanationV1?
+    hits: [FusedHitV1]
+
+# `search(query)` (design §3.5): performs the identity lookup FIRST. An
+# unambiguous authorized match is pinned at final rank 1 with
+# `match_tier = exact_identity`, its document ID is removed from every source
+# list, and RRF runs only over what remains, numbered starting at rank 2. An
+# ambiguous match does NOT pin a guessed artifact — plain fused results are
+# returned (design §3.5: "does not pin a guessed artifact; policy may then
+# show ordinary fused discovery results ... separated from that ambiguity"),
+# with `identity_ambiguity = true` so the caller can render the distinction.
+# A `not_found` identity result is silently plain fusion (no ambiguity flag).
+fn search_with_identity_dominance(registry: IdentityRegistryV1, query_value: text,
+                                   source_rankings: [SourceRankingV1], k: i64, source_k: i64) -> Result<SearchDominanceResultV1, FusionErrorV1>:
+    match resolve_identity_record(registry, query_value):
+        Ok(record):
+            val explanation = identity_explanation_for(registry, record, query_value)
+            val filtered = remove_document_from_sources(source_rankings, record.uid)
+            match fuse(filtered, k, source_k, 2):
+                Ok(hits):
+                    return Ok(SearchDominanceResultV1(identity_ambiguity: false, pinned: explanation, hits: hits))
+                Err(e):
+                    return Err(e)
+        Err(IdentityErrorV1.AmbiguousIdentity):
+            match fuse(source_rankings, k, source_k, 1):
+                Ok(hits):
+                    return Ok(SearchDominanceResultV1(identity_ambiguity: true, pinned: nil, hits: hits))
+                Err(e):
+                    return Err(e)
+        Err(IdentityErrorV1.NotFound):
+            match fuse(source_rankings, k, source_k, 1):
+                Ok(hits):
+                    return Ok(SearchDominanceResultV1(identity_ambiguity: false, pinned: nil, hits: hits))
+                Err(e):
+                    return Err(e)

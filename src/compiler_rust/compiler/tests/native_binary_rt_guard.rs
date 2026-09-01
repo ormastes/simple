@@ -212,7 +212,10 @@ int spl_main(void) {{
         .arg(&c_path)
         .status()
         .expect("invoke cc");
-    assert!(status.success(), "failed to compile fabricated-extern object for {symbol}");
+    assert!(
+        status.success(),
+        "failed to compile fabricated-extern object for {symbol}"
+    );
     std::fs::read(&o_path).expect("read fabricated-extern object")
 }
 

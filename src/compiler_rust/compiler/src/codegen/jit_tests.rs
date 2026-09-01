@@ -61,7 +61,10 @@ fn test_jit_char_code_at_as_u8_and_enum_eq() {
     eprintln!("CC_U8_REPRO cc_u8_7={u7} pol_self={e} pol_other={e2}");
     assert_eq!(u7, 72, "index7 'H' as u8 (buggy=9)");
     assert_eq!(e, 1, "enum == self (buggy=0)");
-    assert_eq!(e2, 0, "enum == other variant must be false (discriminant must discriminate)");
+    assert_eq!(
+        e2, 0,
+        "enum == other variant must be false (discriminant must discriminate)"
+    );
 }
 
 #[test]

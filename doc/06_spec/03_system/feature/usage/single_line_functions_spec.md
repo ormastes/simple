@@ -32,10 +32,12 @@ single_line_functions_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # Single-Line Function Definitions Specification
 
 fn name(): implicit_return_expr
 
+```
 ## At a Glance
 
 | Field | Value |

@@ -1,0 +1,317 @@
+#!/bin/sh
+# Focused, network-free contract tests for the GitHub policy/ref authorities.
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+mkdir -p "$tmp/bin"
+
+fail() { echo "test-github-policy-contracts: FAIL — $*" >&2; exit 1; }
+expect_fail() {
+    _needle=$1
+    shift
+    if "$@" >"$tmp/out" 2>"$tmp/err"; then
+        fail "command unexpectedly passed: $*"
+    fi
+    grep -F "$_needle" "$tmp/err" >/dev/null || {
+        sed -n '1,12p' "$tmp/err" >&2
+        fail "missing failure text: $_needle"
+    }
+}
+
+cat >"$tmp/bin/gh" <<'EOF'
+#!/bin/sh
+set -eu
+root=${MOCK_ROOT:?}
+actor=${MOCK_ACTOR:-2378857}
+mode=${MOCK_MODE:-valid}
+args="$*"
+
+if [ "$args" = "api user --jq .id" ]; then printf '%s\n' "$actor"; exit 0; fi
+
+case $args in
+  "api repos/"*" --jq .default_branch") echo main ;;
+  "api repos/"*"/git/ref/heads/main --jq .object.sha") git -C "$root" rev-parse HEAD ;;
+  "api --paginate repos/"*"/rulesets")
+    if [ "$mode" = missing ]; then echo '[]'; exit 0; fi
+    jq -s 'to_entries | map(.value + {id:(.key + 1)})' "$root"/.github/rulesets/spipe-vcs-v3-*.json
+    ;;
+  "api repos/"*"/rulesets/"*)
+    id=${args##*/}
+    file=$(find "$root/.github/rulesets" -name 'spipe-vcs-v3-*.json' -print | LC_ALL=C sort | sed -n "${id}p")
+    [ -n "$file" ] || exit 1
+    if [ "$mode" = drift ] && [ "$id" = 1 ]; then jq '.enforcement="disabled"' "$file"; else cat "$file"; fi
+    ;;
+  "api repos/"*"/environments/"*)
+    environment=${args##*/}
+    jq '{protection_rules:((if .wait_timer > 0 then [{type:"wait_timer",wait_timer:.wait_timer}] else [] end) + (if (.reviewers|length)>0 then [{type:"required_reviewers",prevent_self_review:.prevent_self_review,reviewers:[.reviewers[]|{type,reviewer:{id}}]}] else [] end)),deployment_branch_policy}' "$root/.github/$environment-environment.json"
+    ;;
+  "api repos/"*"/actions/permissions/workflow")
+    cat "$root/.github/actions-workflow-permissions.json"
+    ;;
+  "api repos/"*"/immutable-releases --jq .enabled") echo true ;;
+  "api repos/"*"/pulls/28")
+    printf '%s\n' '{"number":28,"base":{"ref":"main"},"head":{"sha":"0123456789abcdef0123456789abcdef01234567"}}'
+    ;;
+  "api --paginate --slurp repos/"*"/commits/"*"/check-runs?per_page=100")
+    printf '%s\n' '[{"check_runs":[{"name":"Code Idiom & Structural Ratchet Gates","status":"completed","conclusion":"success","head_sha":"0123456789abcdef0123456789abcdef01234567","app":{"id":15368}},{"name":"SPipe Self Review Admission","status":"completed","conclusion":"success","head_sha":"0123456789abcdef0123456789abcdef01234567","app":{"id":15368}}]}]'
+    ;;
+  "api repos/"*"/git/ref/heads/candidate/"*) [ "${MOCK_CANDIDATE_EXISTS:-0}" = 1 ] ;;
+  "api repos/"*"/git/commits/"*" --jq .sha") printf '%s\n' "${MOCK_COMMIT_SHA:-}" ;;
+  "api repos/"*"/git/ref/heads/release/"*" --jq .object.sha") printf '%s\n' "${MOCK_TARGET_SHA:-}" ;;
+  "api --method POST repos/"*"/git/refs --input -") cat >"${MOCK_POST_CAPTURE:?}" ;;
+  "api --method PUT repos/"*"/actions/permissions/workflow --input "*)
+    input=${args##* --input }
+    jq -e '.default_workflow_permissions == "read" and .can_approve_pull_request_reviews == false' "$input" >/dev/null
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf '%s\n' workflow-permissions >>"$MOCK_APPLY_LOG"
+    ;;
+  "api --method PUT repos/"*"/environments/self-review-admission --input "*)
+    input=${args##* --input }
+    jq -e '.wait_timer == 0 and .prevent_self_review == false and .reviewers == [] and
+      .deployment_branch_policy == {protected_branches:true,custom_branch_policies:false}' "$input" >/dev/null
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf '%s\n' self-review-admission-environment >>"$MOCK_APPLY_LOG"
+    ;;
+  "api --method PUT repos/"*"/environments/owner-convergence-admission --input "*)
+    input=${args##* --input }
+    jq -e '.wait_timer == 0 and .prevent_self_review == false and
+      .reviewers == [{type:"User",id:2378857}]' "$input" >/dev/null
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf '%s\n' owner-convergence-admission-environment >>"$MOCK_APPLY_LOG"
+    ;;
+  "api --method PUT repos/"*"/rulesets/"*" --input "*)
+    input=${args##* --input }
+    name=$(jq -r '.name' "$input")
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf 'ruleset:%s\n' "$name" >>"$MOCK_APPLY_LOG"
+    if [ "${MOCK_MUTATE_SOURCE_AFTER_PUT:-0}" = 1 ] && [ "$name" = spipe-vcs-v3-main ]; then
+      changed=$(mktemp)
+      jq '(.rules[] | select(.type == "required_status_checks") |
+        .parameters.required_status_checks[1]) =
+        {context:"Substituted Self Review",integration_id:999}' \
+        "$root/.github/rulesets/spipe-vcs-v3-main.json" >"$changed"
+      mv "$changed" "$root/.github/rulesets/spipe-vcs-v3-main.json"
+    fi
+    ;;
+  "api --method POST repos/"*"/rulesets --input "*)
+    input=${args##* --input }
+    name=$(jq -r '.name' "$input")
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf 'ruleset:%s\n' "$name" >>"$MOCK_APPLY_LOG"
+    ;;
+  "api --method "*) exit 0 ;;
+  *) echo "mock gh: unsupported: $args" >&2; exit 90 ;;
+esac
+EOF
+chmod +x "$tmp/bin/gh"
+
+make_policy_repo() {
+    _destination=$1
+    mkdir -p "$_destination/scripts/release" "$_destination/.github/rulesets"
+    cp "$root/scripts/release/github-policy.shs" "$_destination/scripts/release/github-policy.shs"
+    cp "$root/.github/actions-workflow-permissions.json" \
+       "$root/.github/review-admission-broker.json" \
+       "$root"/.github/*-environment.json "$_destination/.github/"
+    cp "$root"/.github/rulesets/spipe-vcs-v3-*.json "$_destination/.github/rulesets/"
+    git -C "$_destination" init -q
+    git -C "$_destination" add .github scripts/release/github-policy.shs
+    git -C "$_destination" -c user.name=contract -c user.email=contract@example.invalid \
+        commit -qm "canonical policy fixture"
+}
+
+commit_policy_mutation() {
+    _repository=$1
+    _message=$2
+    git -C "$_repository" add .github
+    git -C "$_repository" -c user.name=contract -c user.email=contract@example.invalid \
+        commit -qm "$_message"
+}
+
+run_policy_in() {
+    _repository=$1
+    shift
+    (cd "$_repository" && exec ./scripts/release/github-policy.shs "$@")
+}
+
+export PATH="$tmp/bin:$PATH" MOCK_ROOT="$root"
+policy="$root/scripts/release/github-policy.shs"
+candidate="$root/scripts/release/candidate-ref-create.shs"
+repo=example/project
+commit=0123456789abcdef0123456789abcdef01234567
+
+# Rendering is deterministic and contains every managed ruleset exactly once.
+[ "$("$policy" render | jq 'length')" -eq 7 ] || fail "render did not contain seven rulesets"
+[ "$("$policy" review-plan | jq -r '.configured')" = false ] || fail "unresolved review broker was not rendered as blocked"
+
+MOCK_MODE=missing; export MOCK_MODE
+expect_fail "MISSING ruleset" "$policy" verify-live "$repo"
+MOCK_MODE=drift; export MOCK_MODE
+expect_fail "DRIFT ruleset" "$policy" verify-live "$repo"
+
+apply_root="$tmp/canonical-apply-repo"
+make_policy_repo "$apply_root"
+MOCK_ROOT="$apply_root" policy="$apply_root/scripts/release/github-policy.shs"
+MOCK_MODE=valid MOCK_ACTOR=2378857 MOCK_APPLY_LOG="$tmp/apply.log"
+export MOCK_MODE MOCK_ACTOR MOCK_APPLY_LOG
+: >"$MOCK_APPLY_LOG"
+run_policy_in "$apply_root" apply-live --yes "$repo" >"$tmp/apply.out"
+[ "$(cat "$MOCK_APPLY_LOG")" = "workflow-permissions
+self-review-admission-environment
+owner-convergence-admission-environment
+ruleset:spipe-vcs-v3-main
+ruleset:spipe-vcs-v3-release-lines" ] || fail "self-attested apply mutated an unexpected projection"
+grep -E 'PASS live projection sha256 [0-9a-f]{64}$' "$tmp/apply.out" >/dev/null ||
+  fail "self-attested apply did not finish with a verified live digest"
+MOCK_ACTOR=99; export MOCK_ACTOR
+: >"$MOCK_APPLY_LOG"
+expect_fail "authenticated GitHub actor is not the authorized policy dispatcher" \
+  run_policy_in "$apply_root" apply-live --yes "$repo"
+[ ! -s "$MOCK_APPLY_LOG" ] || fail "unauthorized actor reached a live mutation"
+MOCK_ACTOR=2378857; export MOCK_ACTOR
+
+substitute_broker_root="$tmp/substituted-broker-repo"
+make_policy_repo "$substitute_broker_root"
+changed="$tmp/substituted-broker.json"
+jq '.privileged_self_review.required_check =
+      {context:"Substituted Self Review",integration_id:999}' \
+  "$substitute_broker_root/.github/review-admission-broker.json" >"$changed"
+mv "$changed" "$substitute_broker_root/.github/review-admission-broker.json"
+commit_policy_mutation "$substitute_broker_root" "substitute broker identity"
+MOCK_ROOT="$substitute_broker_root" policy="$substitute_broker_root/scripts/release/github-policy.shs"
+: >"$MOCK_APPLY_LOG"
+expect_fail "self_attested generic Actions trust is not fully configured" \
+  run_policy_in "$substitute_broker_root" apply-live --yes "$repo"
+[ ! -s "$MOCK_APPLY_LOG" ] || fail "substituted broker identity reached a live mutation"
+
+substitute_ruleset_root="$tmp/substituted-ruleset-repo"
+make_policy_repo "$substitute_ruleset_root"
+changed="$tmp/substituted-ruleset.json"
+jq '(.rules[] | select(.type == "required_status_checks") |
+      .parameters.required_status_checks[1]) =
+      {context:"Substituted Self Review",integration_id:999}' \
+  "$substitute_ruleset_root/.github/rulesets/spipe-vcs-v3-main.json" >"$changed"
+mv "$changed" "$substitute_ruleset_root/.github/rulesets/spipe-vcs-v3-main.json"
+commit_policy_mutation "$substitute_ruleset_root" "substitute ruleset identity"
+MOCK_ROOT="$substitute_ruleset_root" policy="$substitute_ruleset_root/scripts/release/github-policy.shs"
+: >"$MOCK_APPLY_LOG"
+expect_fail "canonical normalized ruleset mismatch: spipe-vcs-v3-main" \
+  run_policy_in "$substitute_ruleset_root" apply-live --yes "$repo"
+[ ! -s "$MOCK_APPLY_LOG" ] || fail "substituted ruleset identity reached a live mutation"
+
+removed_guards_root="$tmp/removed-guards-repo"
+make_policy_repo "$removed_guards_root"
+changed="$tmp/removed-guards.json"
+jq '.rules |= map(select(.type != "deletion" and .type != "non_fast_forward")) |
+    (.conditions.ref_name.include) = ["refs/heads/**"] |
+    (.rules[] | select(.type == "pull_request") |
+      .parameters.required_review_thread_resolution) = false |
+    (.rules[] | select(.type == "pull_request") |
+      .parameters.allowed_merge_methods) = ["merge","squash"] |
+    (.rules[] | select(.type == "required_status_checks") |
+      .parameters.do_not_enforce_on_create) = true' \
+  "$removed_guards_root/.github/rulesets/spipe-vcs-v3-release-lines.json" >"$changed"
+mv "$changed" "$removed_guards_root/.github/rulesets/spipe-vcs-v3-release-lines.json"
+commit_policy_mutation "$removed_guards_root" "remove protected ref guards"
+MOCK_ROOT="$removed_guards_root" policy="$removed_guards_root/scripts/release/github-policy.shs"
+: >"$MOCK_APPLY_LOG"
+expect_fail "canonical normalized ruleset mismatch: spipe-vcs-v3-release-lines" \
+  run_policy_in "$removed_guards_root" apply-live --yes "$repo"
+[ ! -s "$MOCK_APPLY_LOG" ] || fail "removed protected-ref guards reached a live mutation"
+
+post_drift_root="$tmp/post-apply-drift-repo"
+make_policy_repo "$post_drift_root"
+MOCK_ROOT="$post_drift_root" policy="$post_drift_root/scripts/release/github-policy.shs"
+MOCK_MUTATE_SOURCE_AFTER_PUT=1; export MOCK_MUTATE_SOURCE_AFTER_PUT
+: >"$MOCK_APPLY_LOG"
+expect_fail "DRIFT ruleset spipe-vcs-v3-main" \
+  run_policy_in "$post_drift_root" apply-live --yes "$repo"
+unset MOCK_MUTATE_SOURCE_AFTER_PUT
+
+broker_root="$tmp/broker-signed-repo"
+mkdir -p "$broker_root/scripts/release" "$broker_root/.github"
+git -C "$broker_root" init -q
+cp "$policy" "$broker_root/scripts/release/github-policy.shs"
+jq '.privileged_self_review.review_evidence_mode="broker_signed" |
+    .configured=false | .signed_receipt_protocol="unimplemented"' \
+  "$root/.github/review-admission-broker.json" >"$broker_root/.github/review-admission-broker.json"
+expect_fail "broker_signed live apply requires a configured external signed broker" \
+  sh -c 'cd "$1" && exec ./scripts/release/github-policy.shs apply-live --yes "$2"' \
+  sh "$broker_root" "$repo"
+
+MOCK_ROOT="$root" policy="$root/scripts/release/github-policy.shs"
+
+forward_port_verifier="$root/scripts/release/verify-forward-port-authority.shs"
+forward_port_required=$(jq -cS '
+  [.rules[] | select(.type == "required_status_checks") |
+   .parameters.required_status_checks[] | {context,integration_id}]' \
+  "$root/.github/rulesets/spipe-vcs-v3-main.json")
+"$forward_port_verifier" owner_attested_actions \
+  "$root/.github/review-admission-broker.json" "$forward_port_required" \
+  "$root/test/fixture/release/owner_forward_ports_zero.json" >"$tmp/owner-zero.out"
+"$forward_port_verifier" owner_attested_actions \
+  "$root/.github/review-admission-broker.json" "$forward_port_required" \
+  "$root/test/fixture/release/owner_forward_ports_one.json" >"$tmp/owner-one.out"
+jq '.[0].review_admission.app={id:98765,slug:"spipe-review-broker"}' \
+  "$root/test/fixture/release/owner_forward_ports_one.json" >"$tmp/owner-broker-spoof.json"
+expect_fail "owner-attested forward-port evidence is invalid" \
+  "$forward_port_verifier" owner_attested_actions \
+  "$root/.github/review-admission-broker.json" "$forward_port_required" \
+  "$tmp/owner-broker-spoof.json"
+jq '.configured=true | .apply_live=true |
+    .implementation_status="implemented_external_signed_broker" |
+    .signed_receipt_protocol="implemented" | .github_app_integration_id=98765' \
+  "$root/.github/review-admission-broker.json" >"$tmp/external-broker.json"
+"$forward_port_verifier" external_broker "$tmp/external-broker.json" \
+  "$forward_port_required" \
+  "$root/test/fixture/release/external_forward_ports_one.json" >"$tmp/external-one.out"
+
+issued=$(date -u -d '1 minute ago' '+%Y-%m-%dT%H:%M:%SZ')
+expires=$(date -u -d '1 hour' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_issued=$(date -u -d '20 minutes ago' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_expires=$(date -u -d '7 hours' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_overlong_expires=$(date -u -d '8 hours 1 minute' '+%Y-%m-%dT%H:%M:%SZ')
+required='[{"context":"Code Idiom & Structural Ratchet Gates","integration_id":15368},{"context":"SPipe Self Review Admission","integration_id":15368}]'
+jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
+  --argjson required "$required" '
+  {schema:"spipe-review-admission/1",mode:"independent_verifier",
+   repository:$repo,pull_request_number:28,session_id:"feature/release-hardening",
+   head_sha:"0123456789abcdef0123456789abcdef01234567",
+   required_checks:$required,issued_at:$issued,expires_at:$expires,
+   audit_receipt_sha256:("a"*64),review_receipt_sha256:("b"*64),
+   verifier:{kind:"high_capability_model",identity:"codex/gpt-5.6-sol",
+             effort:"xhigh",verdict:"pass"}}' >"$tmp/independent.json"
+"$policy" verify-review "$tmp/independent.json" feature/release-hardening "$repo" \
+  >"$tmp/review.out"
+
+jq -cnS --arg repo "$repo" --arg issued "$fallback_issued" --arg expires "$fallback_expires" \
+  --argjson required "$required" '
+  {schema:"spipe-review-admission/1",mode:"owner_attested_fallback",
+   repository:$repo,pull_request_number:28,session_id:"feature/release-hardening",
+   head_sha:"0123456789abcdef0123456789abcdef01234567",
+   required_checks:$required,issued_at:$issued,expires_at:$expires,
+   audit_receipt_sha256:("c"*64),reason:"no eligible independent reviewer",
+   attestor:{type:"User",id:2378857},
+   unavailable_verifier_receipt_sha256:("d"*64)}' >"$tmp/fallback.json"
+"$policy" verify-review "$tmp/fallback.json" feature/release-hardening "$repo" \
+  >"$tmp/fallback.out"
+jq --arg issued "$issued" --arg expires "$fallback_overlong_expires" \
+  '.issued_at=$issued | .expires_at=$expires' "$tmp/fallback.json" >"$tmp/overlong-fallback.json"
+expect_fail "invalid closed spipe-review-admission/1 receipt" \
+  "$policy" verify-review "$tmp/overlong-fallback.json" feature/release-hardening "$repo"
+jq '.reason="owner chose to bypass review"' "$tmp/fallback.json" >"$tmp/bad-fallback.json"
+expect_fail "invalid closed spipe-review-admission/1 receipt" \
+  "$policy" verify-review "$tmp/bad-fallback.json" feature/release-hardening "$repo"
+
+MOCK_ACTOR=2378857 MOCK_COMMIT_SHA=$commit MOCK_TARGET_SHA=$commit MOCK_POST_CAPTURE="$tmp/post.json"
+export MOCK_ACTOR MOCK_COMMIT_SHA MOCK_TARGET_SHA MOCK_POST_CAPTURE
+
+expect_fail "candidate version does not match target line" "$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.3
+expect_fail "invalid candidate name" "$candidate" --yes "$repo" candidate/v1.4.0-BETA.2/a001 "$commit" release/1.4
+MOCK_TARGET_SHA=abcdef0123456789abcdef0123456789abcdef01; export MOCK_TARGET_SHA
+expect_fail "not the exact protected target tip" "$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.4
+
+MOCK_TARGET_SHA=$commit; export MOCK_TARGET_SHA
+"$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.4 >"$tmp/create.out"
+jq -e --arg ref refs/heads/candidate/v1.4.0-beta.2/a001 --arg sha "$commit" '.ref==$ref and .sha==$sha' "$tmp/post.json" >/dev/null || fail "created ref payload was not exact"
+
+MOCK_CANDIDATE_EXISTS=1; export MOCK_CANDIDATE_EXISTS
+expect_fail "candidate already exists; refusing update" "$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.4
+
+echo "test-github-policy-contracts: PASS — canonical render/apply/readback, authority-specific forward ports, adversarial identity and guard rejection, signed-broker fail-close, closed review receipts, target binding, and create-once"

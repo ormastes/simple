@@ -1,11 +1,8 @@
 # Bootstrap parser quadratic source refetch
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 ## Status
 
-Parser scaling fixed; full bootstrap acceptance remains open. Blocks bounded pure-Simple bootstrap and therefore the imported-enum,
+Partially fixed; absolute-performance acceptance remains open. Blocks bounded pure-Simple bootstrap and therefore the imported-enum,
 UI/TUI, GUI, and WM runtime evidence gates.
 
 ## Evidence
@@ -38,26 +35,6 @@ UI/TUI, GUI, and WM runtime evidence gates.
 - The approved post-root oracle measured 12.276s/27.631s (2.25x), so linearity
   remains acceptable but the 22 KiB absolute ceiling still fails. The
   493-source bootstrap was not launched.
-- A current SharedText seed initially failed before the oracle because valid
-  `self.field` syntax produced hundreds of false Python-mistake hints, then an
-  unavailable monotonic-millisecond extern forced JIT/interpreter double load.
-  Removing the invalid hint and using the exported microsecond clock made the
-  oracle complete in 1.061s/4.172s. The 22 KiB absolute ceiling now passes;
-  the 3.93x ratio and 968,524 KiB maximum RSS remain open.
-- One equal-size discriminator parsed two 440-function modules with disjoint
-  identifier vocabularies in 500ms/504ms. This rejects cumulative
-  `core_token_text_intern` growth as the ratio owner; the cache stays.
-  Static review also rejects bootstrap environment mirrors, duplicate-name
-  scans, and native arena-array copying on this ordinary JIT path. The bounded
-  three-cycle lane is exhausted. Next fresh cycle: time lexer-only 440/880
-  inputs through public `lex_init`/`lex_next`/`TOK_EOF`; only then select a
-  lexer or parser/AST fix.
-- The fresh lexer-only probe measured 539ms/5,272ms and isolated the owner:
-  `scan_ident` and `scan_number` each bound `self.source_chars` to a local
-  array, so value-copy lowering cloned the entire source once per identifier
-  or number token. Direct indexed field reads remove those copies without
-  changing array semantics. The unchanged parser oracle now passes at
-  33ms/75ms (2.27x), 205,192 KiB max RSS, and exit 0.
 - A higher-requested, environment-gated mutable-object COW diagnostic was
   attempted three times against an isolated 22 KiB parse (exact generator and
   warm-up variants). Each SIGSEGVed before emitting a counter. All diagnostic
@@ -82,25 +59,6 @@ UI/TUI, GUI, and WM runtime evidence gates.
 - Runtime slice offsets now follow lexer character indices, translating to
   UTF-8 byte boundaries in Rust and C. The prior byte-offset behavior was
   wrong for non-ASCII source; focused ownership/Unicode tests pass.
-- The live parser now reads token text directly from `lex_cur_text_direct`;
-  `parser_lex_source_cached()` and its environment generation counter had no
-  callers. That obsolete cache, its generation update sites, and its two module
-  slots were removed on 2026-07-25, confirming that the live parser no longer
-  uses the original whole-source refetch mechanism. This does not yet satisfy
-  the 22 KiB absolute-time gate.
-- The available generation-1 pure-Simple candidate could not execute the
-  scaling fixture: its HIR resolver reported exported `parse_module` and
-  `parser_has_errors` unresolved. Both the implementation-path and canonical
-  parser imports produced the same failure. The three-cycle cap stopped further
-  retries, so no new timing receipt is claimed. Four stray consumers were
-  normalized to the canonical `compiler.core.parser` spelling as source hygiene,
-  not as a claimed fix.
-- Read-only tracing isolated the unresolved imports to the CLI entry-closure
-  BFS: it probed literal `src/compiler/core/...` paths and never reused the
-  driver's numbered compiler resolver. The BFS now delegates `compiler.*`
-  imports to that shared resolver and accepts the result only under a supplied
-  source root. A fresh pure-Simple candidate is required before rerunning the
-  exhausted timing fixture.
 
 ## Rejected fixes
 
@@ -112,12 +70,6 @@ UI/TUI, GUI, and WM runtime evidence gates.
 - Parallel parsing is unsafe while lexer/parser state remains module-global.
 - Existing pre-parse cache mode does not bypass `parse_all_impl()` and cannot
   accelerate the first cold build.
-- The unused `SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE` prototype was removed on
-  2026-07-25. It checked SHB freshness (and SMF freshness for combined output)
-  but only checked native cache-record existence; it did not prove that native
-  outputs existed or belonged to the exact backend/target/compiler/source
-  scope, parser-confirmed facade/alias object set, and final link. It therefore
-  could not safely authorize a link bypass.
 
 ## Required fix and acceptance
 

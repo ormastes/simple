@@ -1,0 +1,127 @@
+# @tag: system, llm_caret, tmux, worktree, workspace_cli
+"""Operator drives agent sessions and worktrees from the LLM Caret command line.
+
+An operator supervising several coding agents uses
+`simple run src/app/llm_caret/main.spl workspace <id> <command>` as the dev
+toolset over the infrastructure: attach agents (one detached git worktree +
+one tmux window each), broadcast a command to every agent pane, read a pane
+back, and tear everything down. Every example here spawns the REAL CLI as a
+child process against a throwaway git repository and a private tmux socket,
+so the verdict is about the shipped command surface, not the library.
+"""
+
+use std.spec.{describe, it, expect, step, pending}
+use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, file_exists, cwd, env_set}
+use app.llm_caret.agent_workspace.{agent_workspace, tmux_available, session_kill, session_alive}
+
+val CLI = "src/app/llm_caret/main.spl"
+
+fn _scratch(name: text) -> text:
+    cwd() + "/build/test-artifacts/llm_caret/workspace_cli_" + name
+
+fn _fixture_repo(root: text) -> text:
+    val repo = root + "/repo"
+    dir_create_all(repo)
+    process_run("git", ["-C", repo, "init", "-q"])
+    process_run("git", ["-C", repo, "config", "user.email", "caret@test"])
+    process_run("git", ["-C", repo, "config", "user.name", "caret"])
+    file_write(repo + "/README.md", "fixture\n")
+    process_run("git", ["-C", repo, "add", "README.md"])
+    process_run("git", ["-C", repo, "commit", "-q", "-m", "init"])
+    repo
+
+struct CliRun:
+    code: i64
+    out: text
+
+# Run the real CLI: `bin/simple run main.spl workspace <id> <args...> --repo <repo>`.
+fn _cli(id: text, repo: text, args: [text]) -> CliRun:
+    val (out, err, code) = process_run("bin/simple",
+        ["run", CLI, "workspace", id] + args + ["--repo", repo])
+    CliRun(code: code, out: out + err)
+
+fn _lines_with(out: text, prefix: text) -> [text]:
+    var hits: [text] = []
+    for line in out.split("\n"):
+        if line.starts_with(prefix):
+            hits = hits + [line]
+    hits
+
+describe "LLM Caret workspace CLI":
+    it "prints usage and exits 2 when no command is given":
+        val r = _cli("", cwd(), [])
+        expect(r.code).to_equal(2)
+        expect(r.out).to_contain("Usage: llm_caret workspace")
+        expect(r.out).to_contain("broadcast <cmd...>")
+
+    it "attaches three agents, isolates their worktrees, broadcasts, and tears down":
+        if not tmux_available():
+            pending("BLOCKED: tmux not installed on this host")
+            return
+        val root = _scratch("team")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val id = "cli-team"
+        session_kill(agent_workspace(id, repo, ""))
+
+        step("Attach agent-1, agent-2, agent-3 through the CLI")
+        for agent in ["agent-1", "agent-2", "agent-3"]:
+            val r = _cli(id, repo, ["attach", agent])
+            expect(r.code).to_equal(0)
+            expect(r.out).to_contain("window " + id + ":" + agent)
+
+        step("status lists one worktree and one pane per agent")
+        val status = _cli(id, repo, ["status"])
+        expect(status.code).to_equal(0)
+        expect(status.out).to_contain("session " + id + " alive=true")
+        expect(_lines_with(status.out, "worktree ").len()).to_equal(4)
+        expect(_lines_with(status.out, "pane ").len()).to_equal(4)
+
+        step("Each worktree is a real detached checkout and edits do not leak between them")
+        val wt1 = repo + "/build/caret_worktrees/" + id + "/agent-1"
+        val wt2 = repo + "/build/caret_worktrees/" + id + "/agent-2"
+        expect(file_exists(wt1 + "/README.md")).to_be(true)
+        file_write(wt1 + "/only_in_agent_1.txt", "x\n")
+        expect(file_exists(wt2 + "/only_in_agent_1.txt")).to_be(false)
+        val (head1, _e1, _c1) = process_run("git", ["-C", wt1, "symbolic-ref", "-q", "HEAD"])
+        expect(head1.trim()).to_equal("")
+
+        step("broadcast reaches every pane and every agent pane shows the marker")
+        val b = _cli(id, repo, ["broadcast", "echo", "TEAM_BCAST_OK"])
+        expect(b.code).to_equal(0)
+        expect(_lines_with(b.out, "sent ").len()).to_equal(4)
+        for agent in ["agent-1", "agent-2", "agent-3"]:
+            val w = _cli(id, repo, ["wait", id + ":" + agent, "TEAM_BCAST_OK", "8000"])
+            expect(w.code).to_equal(0)
+            expect(w.out).to_contain("found TEAM_BCAST_OK")
+
+        step("capture returns the pane's scrollback")
+        val cap = _cli(id, repo, ["capture", id + ":agent-2"])
+        expect(cap.code).to_equal(0)
+        expect(cap.out).to_contain("TEAM_BCAST_OK")
+
+        step("detach removes window and worktree; kill leaves no session")
+        val d = _cli(id, repo, ["detach", "agent-1"])
+        expect(d.code).to_equal(0)
+        expect(dir_exists(wt1)).to_be(false)
+        expect(_lines_with(_cli(id, repo, ["panes"]).out, id + ":").len()).to_equal(3)
+        expect(_cli(id, repo, ["kill"]).code).to_equal(0)
+        expect(session_alive(agent_workspace(id, repo, ""))).to_be(false)
+        dir_remove_all(root)
+
+    it "reports a failing worktree operation with a non-zero exit":
+        val r = _cli("cli-bad", "/nonexistent/repo", ["add", "agent-x"])
+        expect(r.code).to_equal(1)
+        expect(r.out).to_contain("error worktree_add_failed")
+
+    it "refuses a nested suite launch from a workspace-launched child":
+        if not tmux_available():
+            pending("BLOCKED: tmux not installed on this host")
+            return
+        step("The child inherits LLM_CARET_WORKSPACE_DEPTH=1 from its launcher")
+        env_set("LLM_CARET_WORKSPACE_DEPTH", "1")
+        val r = _cli("cli-nested", cwd(), ["suite", "test/01_unit/app/llm_caret/agent_vcs_spec.spl"])
+        env_set("LLM_CARET_WORKSPACE_DEPTH", "")
+        expect(r.code).to_equal(1)
+        expect(r.out).to_contain("error recursion_limit")
+        expect(session_alive(agent_workspace("cli-nested", cwd(), ""))).to_be(false)

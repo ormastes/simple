@@ -46,21 +46,32 @@ val _OP_UDP_SEND: i64 = 13
 val _OP_UDP_BIND: i64 = 14
 val _OP_SEND_BYTES: i64 = 15
 
+@unsafe(reason: "raw accepted descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+@unsafe(reason: "raw connected descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+@unsafe(reason: "raw TCP byte-write count; negative or short result means incomplete send", capabilities: [ffi])
 extern fn rt_io_tcp_write_bytes(fd: i64, data: [u8]) -> i64
+@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
-extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
+@unsafe(reason: "raw scalar timeout status; non-positive milliseconds clear the timeout", capabilities: [ffi])
+extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64) -> bool
+@unsafe(reason: "raw descriptor option status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+@unsafe(reason: "raw descriptor flush status; false means flush failed", capabilities: [ffi])
 extern fn rt_io_tcp_flush(fd: i64) -> bool
-extern fn rt_file_read_text(path: text) -> text
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{time_now_unix_micros}
 use std.common.string_core.{bytes_to_text}
 use std.common.string_core.{text_to_bytes}
+@unsafe(reason: "raw UDP receive writes one bounded runtime buffer; nil means provider failure or no datagram", capabilities: [ffi])
 extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
+@unsafe(reason: "raw UDP send borrows packed bytes for the call; negative result means provider failure", capabilities: [ffi])
 extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
 
 extern fn rt_event_loop_create() -> i64
@@ -489,7 +500,8 @@ class IoDriver:
                 accept_scan = accept_scan + 1
         if accept_fast_index >= 0 and max > 0:
             val accept_ms = if self._p_id.len() > 1: 1 elif timeout_ms > 0: timeout_ms else: 1
-            val accept_res = rt_io_tcp_accept_timeout(self._p_fd[accept_fast_index], accept_ms)
+            val accept_res = unsafe(capabilities: [ffi]):
+                rt_io_tcp_accept_timeout(self._p_fd[accept_fast_index], accept_ms)
             if accept_res >= 0:
                 self._complete_fd(self._p_id[accept_fast_index], accept_res, 0, "", self._p_fd[accept_fast_index])
                 var keep_id: [i64] = []
@@ -580,7 +592,8 @@ class IoDriver:
 
             if ot == _OP_ACCEPT:
                 val a_ms = if self._c_id.len() > 0: 1 elif timeout_ms > 0: timeout_ms else: 1
-                val res = rt_io_tcp_accept_timeout(fd, a_ms)
+                val res = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_accept_timeout(fd, a_ms)
                 if res >= 0:
                     self._complete_fd(oid, res, 0, "", fd)
                     i = i + 1
@@ -600,7 +613,8 @@ class IoDriver:
 
             elif ot == _OP_SEND:
                 val send_ready = self._ready_contains(ready_fds, fd)
-                val res = rt_io_tcp_write_text(fd, self._p_data[i])
+                val res = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_write_text(fd, self._p_data[i])
                 if res > 0 or (ev_has_results and send_ready):
                     self._ev_complete_fd_interest(fd, oid)
                     self._complete_fd(oid, res, 0, "", fd)
@@ -612,7 +626,8 @@ class IoDriver:
                 val bdata = self._load_send_bytes(oid)
                 var bres: i64 = 0
                 if bdata.len() > 0:
-                    bres = rt_io_tcp_write_bytes(fd, bdata)
+                    unsafe(capabilities: [ffi]):
+                        bres = rt_io_tcp_write_bytes(fd, bdata)
                 if bres > 0 or (ev_has_results and send_ready):
                     self._store_send_bytes(oid, [])
                     self._ev_complete_fd_interest(fd, oid)
@@ -623,19 +638,26 @@ class IoDriver:
             elif ot == _OP_CONNECT:
                 val timeout = if self._p_fd2[i] > 0: self._p_fd2[i] else: 1
                 val addr = self._p_data[i]
-                val connect_fd = rt_io_tcp_connect_timeout(addr, timeout)
+                val connect_fd = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_connect_timeout(addr, timeout)
                 self._complete_fd(oid, connect_fd, 0, "", connect_fd)
                 i = i + 1
                 continue
 
             elif ot == _OP_RECV:
                 val recv_ready = self._ready_contains(ready_fds, fd)
-                val bytes = rt_io_tcp_read(fd, self._p_size[i])
-                if bytes.len() > 0:
-                    val txt = bytes_to_text(bytes)
-                    self._store_recv_bytes(oid, bytes)
+                val bytes = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_read(fd, self._p_size[i])
+                if bytes == nil:
                     self._ev_complete_fd_interest(fd, oid)
-                    self._complete_fd_bytes(oid, bytes.len(), 0, txt, fd, bytes)
+                    self._complete_fd(oid, -1, 0, "", fd)
+                    i = i + 1
+                    continue
+                if bytes!.len() > 0:
+                    val txt = bytes_to_text(bytes!)
+                    self._store_recv_bytes(oid, bytes!)
+                    self._ev_complete_fd_interest(fd, oid)
+                    self._complete_fd_bytes(oid, bytes!.len(), 0, txt, fd, bytes!)
                     i = i + 1
                     continue
                 if ev_has_results and recv_ready:
@@ -649,7 +671,7 @@ class IoDriver:
                 if file_exists(path):
                     val fh = self._next_fh
                     self._next_fh = fh + 1
-                    val content = rt_file_read_text(path)
+                    val content = file_read_text(path)
                     self._fh_ids.push(fh)
                     self._fh_data.push(content)
                     self._complete(oid, fh, 0, "")
@@ -665,7 +687,8 @@ class IoDriver:
                 if end_pos > content.len():
                     end_pos = content.len()
                 val chunk = content.slice(off, end_pos)
-                val res = rt_io_tcp_write_text(fd, chunk)
+                val res = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_write_text(fd, chunk)
                 self._complete_fd(oid, res, 0, "", fd)
                 i = i + 1
                 continue
@@ -676,7 +699,8 @@ class IoDriver:
                     self._remove_file(fd)
                 else:
                     self._ev_deregister(fd)
-                    rt_io_tcp_close(fd)
+                    unsafe(capabilities: [ffi]):
+                        rt_io_tcp_close(fd)
                 self._complete(oid, 0, 0, "")
                 i = i + 1
                 continue
@@ -695,14 +719,16 @@ class IoDriver:
 
             elif ot == _OP_UDP_SEND:
                 val udp_bytes = text_to_bytes(self._p_data[i])
-                val udp_sent = rt_io_udp_send_to(fd, udp_bytes, self._p_path[i])
+                val udp_sent = unsafe(capabilities: [ffi]):
+                    rt_io_udp_send_to(fd, udp_bytes, self._p_path[i])
                 self._complete_fd(oid, udp_sent, 0, "", fd)
                 i = i + 1
                 continue
 
             elif ot == _OP_UDP_RECV:
                 if (not ev_has_results) or self._ready_contains(ready_fds, fd):
-                    val udp_result = rt_io_udp_recv_from(fd, self._p_size[i])
+                    val udp_result = unsafe(capabilities: [ffi]):
+                        rt_io_udp_recv_from(fd, self._p_size[i])
                     if udp_result != nil:
                         val udp_data = udp_result.0
                         val udp_addr = udp_result.1

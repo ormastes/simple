@@ -1,0 +1,327 @@
+#!/bin/sh
+# check-llm-caret-infra-live.shs — turn the BLOCKED live rows of
+# test/03_system/app/llm_caret/infra_servers_system_spec.spl into real PASS
+# evidence against REAL servers, reproducibly, on any host with docker.
+#
+# What it does:
+#   1. picks free localhost ports (never 465/993/995: infra_mail.spl switches
+#      to implicit TLS purely on the port number, and the test servers here
+#      speak plaintext);
+#   2. starts a private MinIO container (S3-compatible) and creates the bucket
+#      by `docker exec mkdir -p /data/<bucket>` (MinIO's single-disk FS backend
+#      picks it up), waits for the "API:" readiness line in `docker logs`;
+#   3. starts a private SMTP+IMAP container — first candidate that pulls within
+#      120s and speaks IMAP wins: greenmail/standalone (SMTP 3025 / IMAP 3143,
+#      auth disabled = any user, mailbox auto-created), then rnwood/smtp4dev
+#      (SMTP 25 / IMAP 143). axllent/mailpit is deliberately NOT a candidate:
+#      it has no IMAP, and the mail row needs IMAP. If none can be pulled the
+#      mail row is reported as SKIP with the exact reason — never a pass;
+#   4. writes a temporary llm_caret.sdn (secrets ONLY in env vars, per
+#      config.spl's secret_env / *_key_env contract), exports LLM_CARET_CONFIG
+#      and the *_LIVE=1 gates, runs the spec through `bin/simple test`, and
+#      reads BOTH the `Results:` line and the `SPEC FILE VERDICT:` line (ANSI
+#      stripped, never `tail -1`);
+#   5. ALWAYS tears down its own containers (trap on EXIT/INT/TERM). It never
+#      touches a container it did not create, and never the tmux server.
+#
+# Verdict (last stdout line):
+#   PASS  — <n> live row(s) executed, 0 skipped, 0 failed (...)      exit 0
+#   FAIL  — ...                                                       exit 1
+#   ERROR — nothing was checked (<reason>)                            exit 2
+#
+# "live rows" = the two gated examples (mail, storage). The third example (ftp)
+# is unconditionally `pending()` in the spec — rt_ftp_* is an unbacked extern —
+# so exactly ONE skipped example is expected on a fully-live run and is named
+# in the verdict; the "0 skipped" claim is about the live rows. Any other
+# skipped count is a FAIL (a gate did not take, or a server was unavailable).
+#
+# Usage:
+#   sh scripts/check/check-llm-caret-infra-live.shs            # full live run
+#   sh scripts/check/check-llm-caret-infra-live.shs --selftest # verdict logic on fixture logs
+#   The spec log path is printed (spec exit=N log=...) and kept under
+#   /mnt/data/tmp/claude-1000/llm-caret-infra-live/ for inspection.
+case "$0" in */*) . "${0%/*}/../lib/recursion_guard.shs" ;; *) . ./scripts/lib/recursion_guard.shs ;; esac
+
+case "$0" in
+  */*) REPO_ROOT=$(cd "${0%/*}/../.." && pwd) ;;
+  *)   REPO_ROOT=$(pwd) ;;
+esac
+SPEC="test/03_system/app/llm_caret/infra_servers_system_spec.spl"
+TMP_BASE="/mnt/data/tmp/claude-1000/llm-caret-infra-live"
+MAIL_PULL_TIMEOUT=120
+READY_TIMEOUT=60
+
+# ----------------------------------------------------------------------------
+# Verdict logic (pure; shared by the real run and --selftest)
+# ----------------------------------------------------------------------------
+
+strip_ansi() {
+  esc=$(printf "\033")
+  LC_ALL=C sed "s/$esc\[[0-9;?]*[@-~]//g"
+}
+
+# classify_log <log> <mail_state> <storage_state>
+#   mail_state / storage_state: "live" or a skip reason ("SKIP: ...")
+# Prints ONE verdict line on stdout and returns 0 / 1 / 2.
+#
+# Runner shapes (measured 2026-08-25 on the ungated spec, all 3 rows pending):
+#   Results: 6 total, 6 passed, 0 failed, 3 skipped
+#   SPEC FILE VERDICT: <path> outcome=OK declared>=3 executed=6 passed=3 failed=0 skipped=3 dropped=0
+# A pending() row is counted as BOTH passed and skipped by `Results:`, so
+# "passed" alone can never prove a live row ran. The SPEC FILE VERDICT line
+# is the authoritative BDD table: live rows executed = passed - skipped.
+classify_log() {
+  log=$1; mail_state=$2; storage_state=$3
+  if [ ! -s "$log" ]; then
+    echo "ERROR — nothing was checked (spec log missing or empty: $log)"
+    return 2
+  fi
+  clean=$(strip_ansi < "$log")
+  results=$(printf '%s\n' "$clean" | grep '^Results: ' | tail -n 1)
+  verdict=$(printf '%s\n' "$clean" | grep 'SPEC FILE VERDICT:' | tail -n 1)
+  if [ -z "$results" ]; then
+    echo "ERROR — nothing was checked (no 'Results:' line in $log)"
+    return 2
+  fi
+  if [ -z "$verdict" ]; then
+    echo "ERROR — nothing was checked (no 'SPEC FILE VERDICT:' line in $log; cannot separate live rows from pending ones)"
+    return 2
+  fi
+  r_failed=$(printf '%s' "$results" | sed -n 's/.* \([0-9][0-9]*\) failed.*/\1/p')
+  r_skipped=$(printf '%s' "$results" | sed -n 's/.* \([0-9][0-9]*\) skipped.*/\1/p')
+  [ -n "$r_skipped" ] || r_skipped=0
+  : "${r_failed:=0}"
+  v_passed=$(printf '%s' "$verdict" | sed -n 's/.* passed=\([0-9][0-9]*\).*/\1/p')
+  v_failed=$(printf '%s' "$verdict" | sed -n 's/.* failed=\([0-9][0-9]*\).*/\1/p')
+  v_skipped=$(printf '%s' "$verdict" | sed -n 's/.* skipped=\([0-9][0-9]*\).*/\1/p')
+  : "${v_passed:=0}" "${v_failed:=0}" "${v_skipped:=0}"
+  live_expected=0; skip_reasons=""
+  case "$mail_state" in live) live_expected=$((live_expected + 1)) ;; *) skip_reasons="$skip_reasons; mail: $mail_state" ;; esac
+  case "$storage_state" in live) live_expected=$((live_expected + 1)) ;; *) skip_reasons="$skip_reasons; storage: $storage_state" ;; esac
+  if [ "$r_failed" -ne "$v_failed" ] || [ "$r_skipped" -ne "$v_skipped" ]; then
+    echo "FAIL — Results ($results) and SPEC FILE VERDICT ($verdict) disagree on failed/skipped counts"
+    return 1
+  fi
+  live_executed=$((v_passed - v_skipped))
+  [ "$live_executed" -lt 0 ] && live_executed=0
+  if [ "$live_expected" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 live rows executed$skip_reasons)"
+    return 2
+  fi
+  if [ "$v_failed" -ne 0 ]; then
+    echo "FAIL — $v_failed live row(s) failed against a real server, $live_executed executed ($results; $verdict)"
+    return 1
+  fi
+  # The two gated live rows (mail, storage) must BOTH have executed for real:
+  # live rows executed = passed - skipped (a pending row counts in both).
+  # Permanently-BLOCKED rows (ftp; wiki since 2026-08-25) may skip in any
+  # number — a gated live row that silently goes pending still drops
+  # live_executed below 2, and a blocked row that starts passing raises it
+  # above 2, so both drifts stay FAIL without a hardcoded skip count.
+  if [ "$live_executed" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 live rows executed, $v_skipped skipped$skip_reasons; $results)"
+    return 2
+  fi
+  if [ "$live_executed" -ne 2 ] || [ "$live_expected" -ne 2 ]; then
+    echo "FAIL — $live_executed live row(s) executed, $v_skipped row(s) skipped, 0 failed (need exactly the 2 gated live rows: mail + storage)$skip_reasons ($results; $verdict)"
+    return 1
+  fi
+  echo "PASS — $live_executed live row(s) executed, 0 failed (mail + storage live; $v_skipped permanently-blocked row(s) excluded; $results; $verdict)"
+  return 0
+}
+
+# ----------------------------------------------------------------------------
+# --selftest: prove the verdict logic on fixture logs (no docker needed)
+# ----------------------------------------------------------------------------
+selftest() {
+  d=$(mktemp -d "${TMPDIR:-/mnt/data/tmp/claude-1000}/caret-infra-selftest.XXXXXX") || { echo "selftest: FAIL — mktemp"; return 1; }
+  n=0; bad=0
+  chk() { # name expected_rc mail storage log
+    n=$((n + 1))
+    out=$(classify_log "$5" "$3" "$4"); rc=$?
+    if [ "$rc" -ne "$2" ]; then bad=$((bad + 1)); echo "selftest: fixture '$1' expected rc=$2 got rc=$rc: $out"; fi
+    case "$2:$out" in 0:PASS*|1:FAIL*|2:ERROR*) ;; *) bad=$((bad + 1)); echo "selftest: fixture '$1' rc/verdict prefix mismatch: $out" ;; esac
+  }
+  V="SPEC FILE VERDICT: $SPEC outcome=OK declared>=3"
+  # 1. the real ungated shape (measured): 3 pending rows count as passed AND skipped -> never PASS
+  printf 'Results: 6 total, 6 passed, 0 failed, 3 skipped\n%s executed=6 passed=3 failed=0 skipped=3 dropped=0\n' "$V" > "$d/all_skipped.log"
+  chk all-skipped-live-claimed 2 live live "$d/all_skipped.log"
+  chk all-skipped-no-live 2 "SKIP: no image" "SKIP: no docker" "$d/all_skipped.log"
+  # 2. full live pass (mail + storage executed, ftp permanently pending), ANSI in the log
+  printf '\033[32mResults: 4 total, 4 passed, 0 failed, 1 skipped\033[0m\n%s executed=4 passed=3 failed=0 skipped=1 dropped=0\n' "$V" > "$d/pass.log"
+  chk full-pass 0 live live "$d/pass.log"
+  # 3. one real failure against a server
+  printf 'Results: 3 total, 2 passed, 1 failed, 1 skipped\n%s executed=3 passed=2 failed=1 skipped=1 dropped=0\n' "$V" > "$d/fail.log"
+  chk one-failed 1 live live "$d/fail.log"
+  # 4. mail server unavailable: only storage went live -> never PASS
+  printf 'Results: 5 total, 5 passed, 0 failed, 2 skipped\n%s executed=5 passed=3 failed=0 skipped=2 dropped=0\n' "$V" > "$d/mail_skip.log"
+  chk mail-skipped 1 "SKIP: no IMAP image pulled in 120s" live "$d/mail_skip.log"
+  # 4b. both gates exported but the mail row still went pending (gate did not take) -> FAIL
+  chk gate-did-not-take 1 live live "$d/mail_skip.log"
+  # 4c. two permanently-blocked rows (ftp + wiki, the shape since 2026-08-25) -> PASS
+  printf 'Results: 6 total, 6 passed, 0 failed, 2 skipped\n%s executed=6 passed=4 failed=0 skipped=2 dropped=0\n' "$V" > "$d/two_blocked.log"
+  chk two-blocked-rows-pass 0 live live "$d/two_blocked.log"
+  # 4d. a blocked row started passing for real (3 live rows) -> FAIL until the wrapper is reviewed
+  printf 'Results: 6 total, 6 passed, 0 failed, 1 skipped\n%s executed=6 passed=4 failed=0 skipped=1 dropped=0\n' "$V" > "$d/blocked_went_live.log"
+  chk blocked-row-went-live 1 live live "$d/blocked_went_live.log"
+  # 5. no Results line at all (crash / timeout)
+  printf 'Session setup...\nsegfault\n' > "$d/noresults.log"
+  chk no-results 2 live live "$d/noresults.log"
+  # 6. empty log
+  : > "$d/empty.log"
+  chk empty-log 2 live live "$d/empty.log"
+  # 7. Results and the verdict line disagree on skipped
+  printf 'Results: 4 total, 4 passed, 0 failed, 1 skipped\n%s executed=6 passed=3 failed=0 skipped=3 dropped=0\n' "$V" > "$d/disagree.log"
+  chk disagree 1 live live "$d/disagree.log"
+  # 8. Results present but no SPEC FILE VERDICT line -> cannot separate live from pending
+  printf 'Results: 4 total, 4 passed, 0 failed, 1 skipped\n' > "$d/noverdict.log"
+  chk no-verdict-line 2 live live "$d/noverdict.log"
+  rm -rf "$d"
+  if [ "$bad" -ne 0 ]; then echo "selftest: FAIL — $bad of $n fixture(s) wrong"; return 1; fi
+  echo "selftest: PASS — $n fixture(s)"
+  return 0
+}
+# ----------------------------------------------------------------------------
+# Live run
+# ----------------------------------------------------------------------------
+MINIO_C=""; MAIL_C=""; RUN_DIR=""
+cleanup() {
+  for c in $MINIO_C $MAIL_C; do
+    docker rm -f "$c" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup EXIT INT TERM
+
+free_port() {
+  # random high port not in use and not an implicit-TLS mail port
+  i=0
+  while [ $i -lt 50 ]; do
+    p=$(( 20000 + ($(od -An -N2 -tu2 /dev/urandom | tr -d ' ') % 30000) ))
+    case "$p" in 465|993|995) i=$((i + 1)); continue ;; esac
+    if ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$p\$"; then
+      echo "$p"; return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_log() { # container pattern timeout_s
+  t=0
+  while [ $t -lt "$3" ]; do
+    if docker logs "$1" 2>&1 | grep -Eq "$2"; then return 0; fi
+    sleep 1; t=$((t + 1))
+  done
+  return 1
+}
+
+main() {
+  if ! selftest; then echo "ERROR — nothing was checked (selftest failed)"; exit 2; fi
+  cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to $REPO_ROOT)"; exit 2; }
+  [ -f "$SPEC" ] || { echo "ERROR — nothing was checked (spec missing: $SPEC)"; exit 2; }
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    echo "ERROR — nothing was checked (docker missing or daemon unreachable)"; exit 2
+  fi
+  mkdir -p "$TMP_BASE" || { echo "ERROR — nothing was checked (cannot create $TMP_BASE)"; exit 2; }
+  RUN_DIR=$(mktemp -d "$TMP_BASE/run.XXXXXX")
+  LOG="$RUN_DIR/spec.log"
+  T0=$(date +%s)
+
+  # --- storage: MinIO ---------------------------------------------------------
+  STORAGE_STATE="live"
+  MINIO_PORT=$(free_port) || { echo "ERROR — nothing was checked (no free port)"; exit 2; }
+  MINIO_USER="caretminio"
+  MINIO_PASS="caret-minio-secret-$$"
+  BUCKET="caret-live"
+  MINIO_C="caret-minio-$$"
+  if ! docker run -d --name "$MINIO_C" -p "127.0.0.1:$MINIO_PORT:9000" \
+      -e MINIO_ROOT_USER="$MINIO_USER" -e MINIO_ROOT_PASSWORD="$MINIO_PASS" \
+      minio/minio:latest server /data >/dev/null 2>"$RUN_DIR/minio_run.err"; then
+    STORAGE_STATE="SKIP: docker run minio/minio failed: $(head -n 1 "$RUN_DIR/minio_run.err")"
+  elif ! wait_for_log "$MINIO_C" "API: http" "$READY_TIMEOUT"; then
+    STORAGE_STATE="SKIP: minio did not report API readiness within ${READY_TIMEOUT}s"
+  else
+    docker exec "$MINIO_C" mkdir -p "/data/$BUCKET" >/dev/null 2>&1 || STORAGE_STATE="SKIP: could not create bucket dir in minio container"
+    sleep 1
+  fi
+  echo "storage: minio/minio:latest on 127.0.0.1:$MINIO_PORT bucket=$BUCKET state=$STORAGE_STATE"
+
+  # --- mail: first IMAP-capable image that pulls in time ---------------------
+  MAIL_STATE="SKIP: no SMTP+IMAP image could be pulled within ${MAIL_PULL_TIMEOUT}s"
+  MAIL_IMAGE=""; SMTP_IN=""; IMAP_IN=""; READY_PAT=""
+  for cand in "greenmail/standalone:latest 3025 3143 Starting.*IMAP|imap.*started|GreenMail" "rnwood/smtp4dev:latest 25 143 Now listening|smtp4dev"; do
+    set -- $cand
+    img=$1
+    if docker image inspect "$img" >/dev/null 2>&1 || timeout "$MAIL_PULL_TIMEOUT" docker pull "$img" >/dev/null 2>&1; then
+      MAIL_IMAGE=$img; SMTP_IN=$2; IMAP_IN=$3; READY_PAT=$4; break
+    fi
+  done
+  if [ -n "$MAIL_IMAGE" ]; then
+    SMTP_PORT=$(free_port); IMAP_PORT=$(free_port)
+    while [ "$IMAP_PORT" = "$SMTP_PORT" ]; do IMAP_PORT=$(free_port); done
+    MAIL_C="caret-mail-$$"
+    if docker run -d --name "$MAIL_C" -p "127.0.0.1:$SMTP_PORT:$SMTP_IN" -p "127.0.0.1:$IMAP_PORT:$IMAP_IN" \
+        "$MAIL_IMAGE" >/dev/null 2>"$RUN_DIR/mail_run.err"; then
+      if wait_for_log "$MAIL_C" "$READY_PAT" "$READY_TIMEOUT"; then
+        sleep 2
+        MAIL_STATE="live"
+      else
+        MAIL_STATE="SKIP: $MAIL_IMAGE did not report readiness within ${READY_TIMEOUT}s"
+      fi
+    else
+      MAIL_STATE="SKIP: docker run $MAIL_IMAGE failed: $(head -n 1 "$RUN_DIR/mail_run.err")"
+    fi
+  fi
+  echo "mail: ${MAIL_IMAGE:-none} smtp=127.0.0.1:${SMTP_PORT:-?} imap=127.0.0.1:${IMAP_PORT:-?} state=$MAIL_STATE"
+
+  # --- config + gates ---------------------------------------------------------
+  CFG="$RUN_DIR/llm_caret.sdn"
+  {
+    echo "# generated by check-llm-caret-infra-live.shs — secrets live in env vars only"
+    if [ "$MAIL_STATE" = "live" ]; then
+      echo "mail:"
+      echo "  imap_host: 127.0.0.1"
+      echo "  imap_port: $IMAP_PORT"
+      echo "  smtp_host: 127.0.0.1"
+      echo "  smtp_port: $SMTP_PORT"
+      echo "  user: caret@localhost"
+      echo "  secret_env: CARET_LIVE_MAIL_SECRET"
+    fi
+    if [ "$STORAGE_STATE" = "live" ]; then
+      echo "storage:"
+      echo "  backend: minio"
+      echo "  endpoint: http://127.0.0.1:$MINIO_PORT"
+      echo "  bucket: $BUCKET"
+      echo "  access_key_env: CARET_LIVE_MINIO_ACCESS"
+      echo "  secret_key_env: CARET_LIVE_MINIO_SECRET"
+      echo "  tls: false"
+    fi
+  } > "$CFG"
+  export LLM_CARET_CONFIG="$CFG"
+  export CARET_LIVE_MAIL_SECRET="caret@localhost"
+  export CARET_LIVE_MINIO_ACCESS="$MINIO_USER" CARET_LIVE_MINIO_SECRET="$MINIO_PASS"
+  export LLM_CARET_MAIL_TO="caret@localhost"
+  [ "$MAIL_STATE" = "live" ] && export LLM_CARET_MAIL_LIVE=1
+  [ "$STORAGE_STATE" = "live" ] && export LLM_CARET_STORAGE_LIVE=1
+  if [ "$MAIL_STATE" != "live" ] && [ "$STORAGE_STATE" != "live" ]; then
+    echo "ERROR — nothing was checked (0 live rows executed; mail: $MAIL_STATE; storage: $STORAGE_STATE)"; exit 2
+  fi
+
+  # --- run the spec -----------------------------------------------------------
+  SIMPLE_TIMEOUT_SECONDS=900 timeout 900 bin/simple test "$SPEC" --no-session-daemon --timeout 600 > "$LOG" 2>&1
+  SPEC_RC=$?
+  echo "spec exit=$SPEC_RC log=$LOG"
+  strip_ansi < "$LOG" | grep -E '^Results: |SPEC FILE VERDICT:' | sed 's/^/  /'
+  strip_ansi < "$LOG" | grep -E 'Expected|expected|Error|error:|FAIL' | grep -v 'SPEC FILE' | head -n 12 | sed 's/^/  /'
+  WALL=$(( $(date +%s) - T0 ))
+  echo "wall: ${WALL}s (containers up + spec run)"
+  out=$(classify_log "$LOG" "$MAIL_STATE" "$STORAGE_STATE"); rc=$?
+  echo "$out"
+  exit $rc
+}
+
+case "${1:-}" in
+  --selftest) selftest; exit $? ;;
+  -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+esac
+main

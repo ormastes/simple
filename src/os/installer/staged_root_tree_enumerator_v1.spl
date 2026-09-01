@@ -1,0 +1,403 @@
+"""Bounded deterministic admission for one retained staged-root walk.
+
+The hosted runtime currently exposes retained/no-follow opens for known files,
+but no descriptor-relative directory iterator.  Consequently this module does
+not reopen names or pretend that pathname listing is safe.  It consumes only a
+metadata snapshot produced while a provider retains the root and every walked
+directory.  File bodies remain descriptor-owned by that provider and can be
+streamed/digested later using each admitted row's identity.
+
+Sorting is a stable bottom-up merge sort: O(n log n) comparisons, O(n) row
+storage, and no file-body allocation.  Exact and portable ASCII-folded path
+collisions are rejected before a plan is returned.
+"""
+
+pub const STAGED_ROOT_TREE_MAX_ENTRIES_V1: i64 = 4096
+pub const STAGED_ROOT_TREE_MAX_DEPTH_V1: i64 = 32
+pub const STAGED_ROOT_TREE_MAX_PATH_BYTES_V1: i64 = 4095
+pub const STAGED_ROOT_TREE_MAX_FILE_BYTES_V1: i64 = 1073741824
+pub const STAGED_ROOT_TREE_MAX_AGGREGATE_BYTES_V1: i64 = 4294967296
+
+pub enum StagedRootTreeEntryKindV1:
+    Directory
+    Regular
+    Symlink
+    Special
+
+pub class StagedRootTreeProviderEntryV1:
+    relative_path: text
+    kind: StagedRootTreeEntryKindV1
+    device: i64
+    inode: i64
+    link_count: i64
+    size_bytes: i64
+    modified_seconds: i64
+    modified_nanoseconds: i64
+    provider_receipt: u64
+    provider_slot: i64
+    provider_digest_sha256: text
+
+pub class StagedRootTreeProviderSnapshotV1:
+    root_device: i64
+    provider_receipt: u64
+    root_retained: bool
+    directories_retained: bool
+    nofollow_walk: bool
+    walk_complete: bool
+    entries: [StagedRootTreeProviderEntryV1]
+
+pub class StagedRootTreeBoundsV1:
+    max_depth: i64
+    max_entries: i64
+    max_file_bytes: i64
+    max_aggregate_bytes: i64
+
+pub class StagedRootTreeEntryV1:
+    relative_path: text
+    kind: StagedRootTreeEntryKindV1
+    device: i64
+    inode: i64
+    size_bytes: i64
+    modified_seconds: i64
+    modified_nanoseconds: i64
+    provider_receipt: u64
+    provider_slot: i64
+    provider_digest_sha256: text
+
+class StagedRootTreeIdentityV1:
+    device: i64
+    inode: i64
+    relative_path: text
+
+class StagedRootTreeProviderSlotV1:
+    receipt: u64
+    slot: i64
+    relative_path: text
+
+pub class StagedRootTreeEnumerationV1:
+    ok: bool
+    error_code: text
+    error_path: text
+    entries: [StagedRootTreeEntryV1]
+    regular_file_count: i64
+    directory_count: i64
+    aggregate_file_bytes: i64
+
+pub fn staged_root_tree_default_bounds_v1() -> StagedRootTreeBoundsV1:
+    StagedRootTreeBoundsV1(
+        max_depth: STAGED_ROOT_TREE_MAX_DEPTH_V1,
+        max_entries: STAGED_ROOT_TREE_MAX_ENTRIES_V1,
+        max_file_bytes: STAGED_ROOT_TREE_MAX_FILE_BYTES_V1,
+        max_aggregate_bytes: STAGED_ROOT_TREE_MAX_AGGREGATE_BYTES_V1)
+
+fn _staged_tree_error_v1(code: text, path: text) -> StagedRootTreeEnumerationV1:
+    StagedRootTreeEnumerationV1(
+        ok: false, error_code: code, error_path: path, entries: [],
+        regular_file_count: 0, directory_count: 0,
+        aggregate_file_bytes: 0)
+
+fn _staged_tree_bounds_valid_v1(bounds: StagedRootTreeBoundsV1) -> bool:
+    bounds.max_depth > 0 and
+        bounds.max_depth <= STAGED_ROOT_TREE_MAX_DEPTH_V1 and
+        bounds.max_entries > 0 and
+        bounds.max_entries <= STAGED_ROOT_TREE_MAX_ENTRIES_V1 and
+        bounds.max_file_bytes >= 0 and
+        bounds.max_file_bytes <= STAGED_ROOT_TREE_MAX_FILE_BYTES_V1 and
+        bounds.max_aggregate_bytes >= 0 and
+        bounds.max_aggregate_bytes <= STAGED_ROOT_TREE_MAX_AGGREGATE_BYTES_V1
+
+fn _staged_tree_component_valid_v1(component: text) -> bool:
+    val bytes = component.bytes()
+    if bytes.len() == 0 or bytes.len() > 255 or
+        component == "." or component == "..":
+        return false
+    for byte in bytes:
+        val code = byte.to_i64()
+        # Portable shared-filesystem subset.  FAT32/Windows forbids these
+        # bytes and aliases names ending in dot/space.
+        if code < 32 or code > 126 or code == 34 or code == 42 or
+            code == 47 or code == 58 or code == 60 or code == 62 or
+            code == 63 or code == 92 or code == 124:
+            return false
+    if component.ends_with(".") or component.ends_with(" "): return false
+    true
+
+pub fn staged_root_tree_relative_path_depth_v1(path: text) -> i64:
+    val bytes = path.bytes()
+    if bytes.len() == 0 or bytes.len() > STAGED_ROOT_TREE_MAX_PATH_BYTES_V1 or
+        path.starts_with("/") or path.ends_with("/") or
+        path.contains("\0"):
+        return -1
+    var depth: i64 = 0
+    for component in path.split("/"):
+        if not _staged_tree_component_valid_v1(component): return -1
+        depth = depth + 1
+    depth
+
+fn _staged_tree_text_lt_v1(left: text, right: text) -> bool:
+    var index: i64 = 0
+    while index < left.len() and index < right.len():
+        val a = left.char_code_at(index)
+        val b = right.char_code_at(index)
+        if a < b: return true
+        if a > b: return false
+        index = index + 1
+    left.len() < right.len()
+
+fn _staged_tree_ascii_fold_v1(path: text) -> text:
+    var folded: [u8] = []
+    for byte in path.bytes():
+        val code = byte.to_i64()
+        if code >= 65 and code <= 90:
+            folded.push((code + 32).to_u8())
+        else:
+            folded.push(byte)
+    text.from_bytes(folded)
+
+fn _staged_tree_copy_entry_v1(
+    source: StagedRootTreeProviderEntryV1,
+) -> StagedRootTreeEntryV1:
+    StagedRootTreeEntryV1(
+        relative_path: source.relative_path, kind: source.kind,
+        device: source.device, inode: source.inode,
+        size_bytes: source.size_bytes,
+        modified_seconds: source.modified_seconds,
+        modified_nanoseconds: source.modified_nanoseconds,
+        provider_receipt: source.provider_receipt,
+        provider_slot: source.provider_slot,
+        provider_digest_sha256: source.provider_digest_sha256)
+
+fn _staged_tree_identity_lt_v1(
+    left: StagedRootTreeIdentityV1, right: StagedRootTreeIdentityV1,
+) -> bool:
+    if left.device != right.device: return left.device < right.device
+    if left.inode != right.inode: return left.inode < right.inode
+    _staged_tree_text_lt_v1(left.relative_path, right.relative_path)
+
+fn _staged_tree_sort_identities_v1(
+    identities: [StagedRootTreeIdentityV1],
+) -> [StagedRootTreeIdentityV1]:
+    var source = identities
+    var width: i64 = 1
+    while width < source.len():
+        var merged: [StagedRootTreeIdentityV1] = []
+        var base: i64 = 0
+        while base < source.len():
+            val middle = if base + width < source.len(): base + width else: source.len()
+            val end = if middle + width < source.len(): middle + width else: source.len()
+            var left = base
+            var right = middle
+            while left < middle or right < end:
+                if right >= end or (left < middle and
+                    not _staged_tree_identity_lt_v1(source[right], source[left])):
+                    merged.push(source[left])
+                    left = left + 1
+                else:
+                    merged.push(source[right])
+                    right = right + 1
+            base = end
+        source = merged
+        width = width * 2
+    source
+
+fn _staged_tree_provider_slot_lt_v1(
+    left: StagedRootTreeProviderSlotV1, right: StagedRootTreeProviderSlotV1,
+) -> bool:
+    if left.receipt != right.receipt: return left.receipt < right.receipt
+    if left.slot != right.slot: return left.slot < right.slot
+    _staged_tree_text_lt_v1(left.relative_path, right.relative_path)
+
+fn _staged_tree_sort_provider_slots_v1(
+    slots: [StagedRootTreeProviderSlotV1],
+) -> [StagedRootTreeProviderSlotV1]:
+    var source = slots
+    var width: i64 = 1
+    while width < source.len():
+        var merged: [StagedRootTreeProviderSlotV1] = []
+        var base: i64 = 0
+        while base < source.len():
+            val middle = if base + width < source.len(): base + width else: source.len()
+            val end = if middle + width < source.len(): middle + width else: source.len()
+            var left = base
+            var right = middle
+            while left < middle or right < end:
+                if right >= end or (left < middle and
+                    not _staged_tree_provider_slot_lt_v1(source[right], source[left])):
+                    merged.push(source[left])
+                    left = left + 1
+                else:
+                    merged.push(source[right])
+                    right = right + 1
+            base = end
+        source = merged
+        width = width * 2
+    source
+
+fn _staged_tree_sort_v1(rows: [StagedRootTreeEntryV1]) -> [StagedRootTreeEntryV1]:
+    var source = rows
+    var width: i64 = 1
+    while width < source.len():
+        var merged: [StagedRootTreeEntryV1] = []
+        var base: i64 = 0
+        while base < source.len():
+            val middle = if base + width < source.len(): base + width else: source.len()
+            val end = if middle + width < source.len(): middle + width else: source.len()
+            var left = base
+            var right = middle
+            while left < middle or right < end:
+                if right >= end or (left < middle and
+                    not _staged_tree_text_lt_v1(
+                        source[right].relative_path, source[left].relative_path)):
+                    merged.push(source[left])
+                    left = left + 1
+                else:
+                    merged.push(source[right])
+                    right = right + 1
+            base = end
+        source = merged
+        width = width * 2
+    source
+
+fn _staged_tree_parent_v1(path: text) -> text:
+    var slash: i64 = -1
+    var index: i64 = 0
+    for byte in path.bytes():
+        if byte.to_i64() == 47: slash = index
+        index = index + 1
+    if slash < 0: return ""
+    path.slice(0, slash)
+
+fn _staged_tree_find_path_v1(
+    rows: [StagedRootTreeEntryV1], path: text,
+) -> i64:
+    var low: i64 = 0
+    var high = rows.len()
+    while low < high:
+        val middle = low + ((high - low) / 2)
+        val candidate = rows[middle].relative_path
+        if candidate == path: return middle
+        if _staged_tree_text_lt_v1(candidate, path):
+            low = middle + 1
+        else:
+            high = middle
+    -1
+
+pub fn staged_root_tree_enumerate_v1(
+    snapshot: StagedRootTreeProviderSnapshotV1,
+    bounds: StagedRootTreeBoundsV1,
+) -> StagedRootTreeEnumerationV1:
+    if not _staged_tree_bounds_valid_v1(bounds):
+        return _staged_tree_error_v1("invalid-bounds", "")
+    if (not snapshot.root_retained or not snapshot.directories_retained or
+        not snapshot.nofollow_walk or not snapshot.walk_complete or
+        snapshot.root_device <= 0 or snapshot.provider_receipt == 0u64):
+        return _staged_tree_error_v1("unproven-retained-nofollow-walk", "")
+    if snapshot.entries.len() > bounds.max_entries:
+        return _staged_tree_error_v1("entry-limit-exceeded", "")
+
+    var rows: [StagedRootTreeEntryV1] = []
+    var aggregate: i64 = 0
+    var file_count: i64 = 0
+    var directory_count: i64 = 0
+    var identities: [StagedRootTreeIdentityV1] = []
+    var provider_slots: [StagedRootTreeProviderSlotV1] = []
+    for source in snapshot.entries:
+        val depth = staged_root_tree_relative_path_depth_v1(source.relative_path)
+        if depth < 1 or depth > bounds.max_depth:
+            return _staged_tree_error_v1("invalid-path-or-depth", source.relative_path)
+        if source.device != snapshot.root_device:
+            return _staged_tree_error_v1("cross-root-entry", source.relative_path)
+        if source.inode <= 0 or source.link_count <= 0 or
+            source.modified_nanoseconds < 0 or source.modified_nanoseconds >= 1000000000:
+            return _staged_tree_error_v1("invalid-identity-metadata", source.relative_path)
+        if source.kind == StagedRootTreeEntryKindV1.Symlink:
+            return _staged_tree_error_v1("symlink-entry", source.relative_path)
+        if source.kind == StagedRootTreeEntryKindV1.Special:
+            return _staged_tree_error_v1("special-entry", source.relative_path)
+        if source.kind == StagedRootTreeEntryKindV1.Directory:
+            if source.size_bytes != 0:
+                return _staged_tree_error_v1("directory-size-nonzero", source.relative_path)
+            directory_count = directory_count + 1
+        elif source.kind == StagedRootTreeEntryKindV1.Regular:
+            if source.link_count != 1:
+                return _staged_tree_error_v1("hardlink-entry", source.relative_path)
+            if source.provider_receipt == 0u64 or source.provider_slot < 0:
+                return _staged_tree_error_v1("invalid-retained-file-token", source.relative_path)
+            if source.provider_receipt != snapshot.provider_receipt:
+                return _staged_tree_error_v1("foreign-provider-receipt", source.relative_path)
+            if source.provider_digest_sha256.len() != 64:
+                return _staged_tree_error_v1("invalid-provider-digest", source.relative_path)
+            if source.size_bytes < 0 or source.size_bytes > bounds.max_file_bytes:
+                return _staged_tree_error_v1("file-size-limit-exceeded", source.relative_path)
+            if source.size_bytes > bounds.max_aggregate_bytes - aggregate:
+                return _staged_tree_error_v1("aggregate-size-limit-exceeded", source.relative_path)
+            aggregate = aggregate + source.size_bytes
+            file_count = file_count + 1
+            identities.push(StagedRootTreeIdentityV1(
+                device: source.device, inode: source.inode,
+                relative_path: source.relative_path))
+            provider_slots.push(StagedRootTreeProviderSlotV1(
+                receipt: source.provider_receipt,
+                slot: source.provider_slot,
+                relative_path: source.relative_path))
+        else:
+            return _staged_tree_error_v1("unsupported-entry-kind", source.relative_path)
+        rows.push(_staged_tree_copy_entry_v1(source))
+
+    val sorted_identities = _staged_tree_sort_identities_v1(identities)
+    var identity_index: i64 = 1
+    while identity_index < sorted_identities.len():
+        val current = sorted_identities[identity_index]
+        val prior = sorted_identities[identity_index - 1]
+        if current.device == prior.device and current.inode == prior.inode:
+            return _staged_tree_error_v1("hardlink-identity-alias", current.relative_path)
+        identity_index = identity_index + 1
+    val sorted_slots = _staged_tree_sort_provider_slots_v1(provider_slots)
+    var slot_index: i64 = 1
+    while slot_index < sorted_slots.len():
+        val current = sorted_slots[slot_index]
+        val prior = sorted_slots[slot_index - 1]
+        if current.receipt == prior.receipt and current.slot == prior.slot:
+            return _staged_tree_error_v1("duplicate-retained-file-token", current.relative_path)
+        slot_index = slot_index + 1
+
+    val sorted = _staged_tree_sort_v1(rows)
+    var duplicate_index: i64 = 1
+    while duplicate_index < sorted.len():
+        if sorted[duplicate_index].relative_path ==
+            sorted[duplicate_index - 1].relative_path:
+            return _staged_tree_error_v1(
+                "duplicate-path", sorted[duplicate_index].relative_path)
+        duplicate_index = duplicate_index + 1
+    var folded_paths: [text] = []
+    for row in sorted:
+        folded_paths.push(_staged_tree_ascii_fold_v1(row.relative_path))
+    # ASCII text sorting is bounded by the same path/count limits as the row
+    # merge.  A separate order is necessary: folded collisions need not be
+    # adjacent in the original lexical order (for example A, B, a).
+    folded_paths.sort()
+    var folded_index: i64 = 1
+    while folded_index < folded_paths.len():
+        if folded_paths[folded_index] == folded_paths[folded_index - 1]:
+            return _staged_tree_error_v1(
+                "portable-path-collision", folded_paths[folded_index])
+        folded_index = folded_index + 1
+
+    var index: i64 = 0
+    while index < sorted.len():
+        val row = sorted[index]
+        val parent = _staged_tree_parent_v1(row.relative_path)
+        if parent != "":
+            val parent_index = _staged_tree_find_path_v1(sorted, parent)
+            if parent_index < 0:
+                return _staged_tree_error_v1("missing-parent-directory", row.relative_path)
+            if sorted[parent_index].kind != StagedRootTreeEntryKindV1.Directory:
+                return _staged_tree_error_v1("non-directory-parent", row.relative_path)
+            if parent_index >= index:
+                return _staged_tree_error_v1("parent-order-invalid", row.relative_path)
+        index = index + 1
+
+    StagedRootTreeEnumerationV1(
+        ok: true, error_code: "", error_path: "", entries: sorted,
+        regular_file_count: file_count, directory_count: directory_count,
+        aggregate_file_bytes: aggregate)

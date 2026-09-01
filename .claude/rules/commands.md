@@ -6,18 +6,13 @@ alwaysApply: false
 ```bash
 # Build
 bin/simple build                    # Prints bootstrap HELP and exits (~0.02s). Does NOT build.
-bin/simple build bootstrap          # Seed-side Rust 3-stage self-compilation check ONLY.
-                                    # NOT the sanctioned bootstrap: it never invokes
-                                    # scripts/bootstrap/bootstrap-from-scratch.sh, skips the
-                                    # receipt gate and planner admission, and builds no Stage 4
-                                    # full CLI (misc_commands.rs:341). Use the script instead.
+bin/simple build bootstrap          # 3-stage self-compilation verification
 
 # Quality
 bin/simple lint <changed .spl files> # Pure-Simple source linter
 bin/simple build fmt                # Rust formatter
 bin/simple build check              # Rust clippy + rustfmt check + Rust tests
 sh scripts/check/check-dual-run-shadow.shs # C/Simple dual-run shadow gate (goal 6, binary_runtime_hardening plan)
-sh scripts/check/check-perf-regression-tests.shs # Pins every landed perf fix by its mechanism (**176 mechanisms** as of 2026-08-23 — the long-standing "16 rows" figure here was stale; fail-closed, --selftest); caught f13adc2eca5 silently reverting the O(n^2) test-manifest reindex fix 8f3efdfbd65. Audit: doc/09_report/perf_regression_test_audit_2026-08-21.md
 
 # Documentation Coverage
 bin/simple stats                    # Doc coverage in stats
@@ -31,48 +26,11 @@ bin/simple bug-add --id=X           # Add bug
 bin/simple bug-gen                  # Generate bug report
 ```
 
-## The CLI `--help` is incomplete and partly wrong (measured 2026-08-23)
-
-Do not treat `simple --help` as the command list. Measured by RUNNING the
-deployed `bin/release/x86_64-unknown-linux-gnu/simple` (60,650,360 bytes,
-2026-08-23 04:47), which announces itself as a **bootstrap seed**:
-
-- **`--help` prints to stderr, not stdout.** `simple --help | grep x` returns
-  nothing (measured: 0 lines on stdout, 226 on stderr). Redirect with `2>&1`.
-- **39 commands listed vs 85 registered** in `src/app/cli/dispatch/table.spl`.
-  Undocumented but working: `run`, `repl`, `fmt`, `check`, `fix`, `search`,
-  `todo-scan`, `todo-gen`, `bug-add`/`bug-gen`/`bug-resolve`, `stats`,
-  `doc-coverage`, `clean`, and ~44 more.
-- **`build` is absent from `--help`** and is not a project build — its
-  subcommands (`bootstrap`/`lint`/`fmt`/`check`) are Rust-workspace tooling.
-  Compiling a program is `compile` / `native-build` / `run`.
-- **`list`, `tree`, `install` are self-referential stubs**: `simple list` prints
-  `Package management is handled by the Simple app. / Run: simple list`
-  (`driver/src/cli/commands/pkg_commands.rs:9`). `update` and `cache` are
-  advertised in `--help` and registered nowhere.
-- **An unknown command is reported as a missing file** — `simple nosuchcmd` says
-  `error: file not found: nosuchcmd`, because the argument falls through to the
-  script-path route. A typo'd subcommand yields a nonsense diagnostic.
-
-`table.spl` carries no help strings at all (`CommandEntry` is
-`(name, app_path, env_override, needs_rust_flags)`); the help text lives in
-`src/compiler_rust/driver/src/cli/help.rs`, which is why the two drift with
-nothing to catch it. Record, REOPENED with these counts:
-`doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md`.
-
 ## A `src/lib/**` change needs NO build (measured 2026-08-09)
 
 Editing the stdlib requires **no build step at all** for `run` / `test` / lint /
 LSP. The stdlib is read as SOURCE on every process start — measured by strace:
-**82 opens of `src/lib/**.spl`, zero `.smf`**. **The 82 figure was corrected
-2026-08-23 and must not be re-cited for startup cost:** re-measured with
-`strace -f -c -e trace=openat,open,stat,mmap bin/simple run hello.spl`, a
-hello-world run does **89 openat totalling 1.13 ms, of which 5 are `.spl`** —
-file I/O is under 2 ms of a 76-144 ms run, and the startup floor is the 60.6 MB
-binary (page-fault + reloc), not `.spl` reading. The **zero `.smf`** half, which
-is what makes the no-build conclusion true, is unaffected. Evidence:
-`doc/10_metrics/startup/cross_language_startup_benchmark_2026-08-18.md`
-§Re-measurement 2026-08-23. Nothing is baked into the binary
+**82 opens of `src/lib/**.spl`, zero `.smf`**. Nothing is baked into the binary
 (no `include_str!` of `src/lib`; only 3 `src/lib` strings, all path literals),
 so no relink is needed either.
 
@@ -159,96 +117,13 @@ bin/simple --version 2>&1 | head -2
 /usr/bin/grep -rn "pattern" src/       # exhaustive scans / censuses
 ```
 
-- **`bin/simple lint` cost is FIXED STARTUP, not per-declaration and not
-  superlinear (re-measured 2026-08-23).** ~37s of a ~44s lint is startup that
-  happens before the linted file matters at all. The superlinear-in-content term
-  the rows further down assert **no longer exists**, and the file those rows call
-  unlintable now lints clean in under a minute.
-
-  Measured on the deployed seed (`bin/release/x86_64-unknown-linux-gnu/simple`,
-  60,536,008 bytes, mtime 2026-08-22 15:29:00,
-  md5 `51cd42a27916f8d36f02f31d31fbe390`), shared box at load 43-53 / 32 cores —
-  an idle box is faster, so treat wall numbers as an envelope. Every run printed
-  `Lint passed: all files clean`, so these are completed runs, not early bails:
-
-  | fixture | lines | top-level fns | wall | max RSS |
-  |---|---|---|---|---|
-  | trivial 1-fn | 2 | 1 | 37.9s | 397 MB |
-  | `zca_rows.spl` prefix | 48 | 1 | 36.4s | 400 MB |
-  | `zca_rows.spl` prefix | 293 | 5 | 39.2s | 390 MB |
-  | `zca_rows.spl` prefix | 633 | 10 | 39.1s | 391 MB |
-  | `zca_rows.spl` prefix | 1,170 | 16 | 37.0s | 450 MB |
-  | **`zca_rows.spl` FULL** | **1,901** | **30** | **44.3s** | **587 MB** |
-
-  Cost is **flat**: a ~950x growth in declaration content adds ~6.4s total. The
-  full file went from the `>2400s (killed)` recorded below to **44.3s — >54x**.
-
-  **Root cause of the ~37s, located 2026-08-23 and fixed in `617b58a9ffa`.** It
-  is not the linter and not the linted file: it is the HIR import loader
-  re-PARSING imported modules. `preregister_imported_type_names` and
-  `load_imported_types` (`hir/lower/import_loader.rs`) each did
-  `read_to_string -> CRLF normalize -> Parser::new -> parse()` on **every `use`
-  statement naming a module**. On a lint of a **two-line** file that is **3,819
-  successful `.spl` `openat` over 423 distinct files**, with
-  `10.frontend/core/ast.spl` **fully parsed 866 times**. Cost is driven by the
-  COMPILER's own import graph, not by your input — which is exactly why the
-  trivial and the 1,901-line fixture cost the same, and why `test` and `run` pay
-  it too. `parsed_imported_module()` memoizes the parsed module per PROCESS
-  (never on disk — the "edit `src/lib`, no build needed" property above is
-  load-bearing): **3,819 -> 676 opens (5.65x)**, same 423 distinct files,
-  `ast.spl` 866 -> <=4, heavy-file wall median 33.86s -> 24.45s (~28%), at a cost
-  of **+~110 MB max RSS**. On the trivial fixture the wall change is within
-  noise and no gain is claimed.
-
-  **You will not feel this until a seed redeploy.** The fix is in
-  `src/compiler_rust`; the deployed `bin/simple` predates it.
-
-  **Do not batch files** — 2 files exceeded 600s vs 119s for 1 (2026-08-17
-  measurement, not re-checked).
-  Cost is pinned by `sh scripts/check/check-lint-cost-budget.shs` (fail-closed,
-  `--selftest`, treats a silent exit 0 with no verdict line as FAIL); its
-  thresholds were calibrated to the pre-fix regime and should be re-derived.
-  Startup is **not** the ~310s fixed `Session setup` cost seen in
-  `bin/simple test`; lint does not share that path. Don't conflate the two.
-  Audit: `doc/09_report/tooling_latency_audit_2026-08-23.md`. Resolved record:
-  `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
-
-- **Profiling trap: `SIMPLE_INTERP_SAMPLE` and `SIMPLE_LOADER_TRACE` emit
-  NOTHING from the deployed seed** (measured 2026-08-23 on runs lasting 37-44s:
-  no `$SIMPLE_INTERP_SAMPLE_OUT.<pid>` file, no stderr dump, no loader summary).
-  Both exist in `src/compiler_rust` at `main`; the deployed binary predates them.
-  Attach-based profiling is separately blocked on this host (`ptrace_scope=1`,
-  `perf_event_paranoid=4`). Two lanes have now been defeated by this. What works
-  today, without any cooperation from the binary:
-
-  ```bash
-  # WHERE the reads come from — level-gated call-site attribution, default OFF.
-  SIMPLE_READ_TRACE=1 bin/simple lint file.spl 2>&1 | grep '^\[read\]' \
-    | awk '{print $2}' | sort | uniq -c | sort -rn | head
-  # HOW MANY — needs nothing built in.
-  strace -f -e trace=openat -o /tmp/st.txt bin/simple lint file.spl
-  ```
-
-  `SIMPLE_PERF_COUNTERS=1` prints the interpreter counter table at exit,
-  including `IMPORT_AST_PARSES`/`IMPORT_AST_HITS` and
-  `PROBE_SOURCE_READS`/`PROBE_SOURCE_HITS` — pin perf work by these COUNTS, not
-  by wall clock: identical work measured 15.05s-27.95s on this box, a spread
-  wider than most fixes.
-
-- **SUPERSEDED 2026-08-23 — retained for history, do NOT delete, do NOT use for
-  planning.** The rows below assert a superlinear-in-content term and call
-  `zca_rows.spl` unlintable. Both claims were true when measured and are false
-  now (see the flat table above: the same full file, 44.3s, clean). The
-  2026-08-18 caveat that these rows "MUST be re-measured before use" has now been
-  discharged by that re-measurement, so the claim is replaced rather than
-  re-caveated.
-
-  <details><summary>Historical: 2026-08-17 rows (superseded)</summary>
-
-  `bin/simple lint` cost ~12s fixed startup, then a per-declaration cost that
-  **depends on what is IN the declaration**. The older "~3.3-4.0s per function
-  decl" figure was measured on simple declarations. Re-measured 2026-08-17
-  (shared box, load 33-55, 21-30 concurrent `simple` processes):
+- `bin/simple lint` costs ~12s fixed startup, then a per-declaration cost that
+  **depends on what is IN the declaration**. The old "~3.3-4.0s per function
+  decl" figure here was measured on simple declarations and is roughly right for
+  those, but it is NOT what makes a big file unlintable, and reading it as a
+  general rule under-predicts real compiler files by more than an order of
+  magnitude. Re-measured 2026-08-17 (shared box, load 33-55, 21-30 concurrent
+  `simple` processes — an idle box is faster, so treat these as an envelope):
 
   | fixture | decls | lines | wall | per decl |
   |---|---|---|---|---|
@@ -260,19 +135,32 @@ bin/simple --version 2>&1 | head -2
   | `zca_rows.spl` first 2 fns | 2 | 182 | 210s | ~99s |
   | `zca_rows.spl` first 8 fns | 8 | 443 | **>2400s** (killed) | >300s |
 
-  Conclusions drawn at the time — the first still holds, the second does not:
+  Two conclusions the old line got wrong:
   - **Declaration count alone scales LINEARLY** (15 -> 90 decls leaves per-decl
     cost flat or falling). Splitting a file into more functions does not help.
-  - ~~**Content complexity is the real driver, and it is superlinear in the
-    file.**~~ **REFUTED 2026-08-23**: cost is flat across 2..1,901 lines of the
-    very file this claimed was unlintable.
+  - **Content complexity is the real driver, and it is superlinear in the file.**
+    Two real hwir row-builder functions cost 20x two trivial ones, and going
+    from 182 to 443 lines of the same file multiplied cost by more than 11x for
+    2.4x the lines. That is why `src/compiler/50.mir/hwir/zca_rows.spl` (30 such
+    functions, 1901 lines) exceeds any practical budget — it is a cost problem,
+    **not a hang**: the linter does terminate and does print a verdict.
+  - Startup is ~12s and is **not** the ~310s fixed `Session setup` cost seen in
+    `bin/simple test`; lint does not share that path. Don't conflate the two.
 
-  Interim note (2026-08-18): after the 06:12 seed redeploy (env-cache + parser
-  fixes), a 501-line / 125-fn generated arithmetic file linted in ~76s and a
-  tracked fixture went 49s -> 14s. Numbers:
+  **Do not batch files** — 2 files exceeded 600s vs 119s for 1.
+  Cost is pinned by `sh scripts/check/check-lint-cost-budget.shs` (fail-closed,
+  `--selftest`, treats a silent exit 0 with no verdict line as FAIL).
+  Open: the superlinear term has not been located — attach-based profiling is
+  blocked on this host (`ptrace_scope=1`, `perf_event_paranoid=4`). See
+  `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
+  **Dated note (2026-08-18): the table above predates the 2026-08-18 06:12 seed
+  redeploy (env-cache + parser fixes) and MUST be re-measured before use.** The
+  root cause tracked in that bug is now fixed and deployed; remeasured on the
+  new binary, a 501-line / 125-fn generated arithmetic file lints in ~76s (vs
+  the pre-fix 436s for a smaller 90-fn fixture), and a tracked fixture went
+  49s -> 14s. Old rows are retained for history only; do NOT delete them. Fresh
+  numbers:
   `doc/10_metrics/startup/cross_language_compute_compile_benchmark_2026-08-18.md`.
-
-  </details>
 - Lint IS pure Simple and IS wired — the old "no pure-Simple binary can
   lint" claim here was a category error. `bootstrap/stage3/simple lint` does
   say `unknown command` (exit 1), but stage3 is built from

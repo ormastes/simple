@@ -20,11 +20,8 @@ fn run_program(source: &str) -> (Result<i32, String>, u64) {
 
     interpreter::clear_module_cache();
     interpreter::clear_interpreter_state();
-    let module = simple_compiler::pipeline::module_loader::load_module_with_imports(
-        &main_path,
-        &mut HashSet::new(),
-    )
-    .unwrap();
+    let module =
+        simple_compiler::pipeline::module_loader::load_module_with_imports(&main_path, &mut HashSet::new()).unwrap();
     interpreter::set_current_file(Some(main_path.to_path_buf()));
     simple_compiler::reset_execution_count();
     let result = interpreter::evaluate_module(&module.items);
@@ -79,7 +76,11 @@ fn vmm_sparse_phase_op_counts_fit_default_limit() {
     for (label, source) in &phases {
         let (result, ops) = run_program(source);
         println!("[l1-opcount] {label}: ops={ops} result={result:?}");
-        assert_eq!(result.as_ref().ok(), Some(&0), "phase '{label}' failed: {result:?} (ops={ops})");
+        assert_eq!(
+            result.as_ref().ok(),
+            Some(&0),
+            "phase '{label}' failed: {result:?} (ops={ops})"
+        );
         full_ops = ops;
     }
 

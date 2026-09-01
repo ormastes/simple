@@ -1,8 +1,7 @@
 # Multi-line trailing-`or` condition + inline `: return` body — known parser grammar limitation (re-encountered via a corrupt shared-WC edit, origin unaffected)
 
 **Date:** 2026-07-30
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** CORRECTED same day — see "Correction" below. The parse failure
 this doc originally reported as a pipeline blocker was **not** present at
 origin; it was a corrupt, uncommitted edit in the shared working copy from
 another session. What remains valid and durable: a real parser grammar

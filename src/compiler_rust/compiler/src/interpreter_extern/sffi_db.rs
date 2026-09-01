@@ -957,7 +957,9 @@ fn sqlite_parse_create(sql: &str) -> Option<(String, Vec<String>, Vec<String>)> 
     let mut columns = Vec::new();
     let mut unique_cols = Vec::new();
     for part in sql[open + 1..close].split(',') {
-        let Some(name) = part.split_whitespace().next() else { continue };
+        let Some(name) = part.split_whitespace().next() else {
+            continue;
+        };
         let name = name.trim_matches('"').to_string();
         if name.is_empty() {
             continue;
@@ -1007,9 +1009,15 @@ fn sqlite_like(value: &str, pattern: &str) -> bool {
 /// AND/OR/other operators). Returns None for anything more complex.
 fn sqlite_parse_eq_predicate(clause: &str) -> Option<(String, String)> {
     let lower = clause.to_ascii_lowercase();
-    if lower.contains(" and ") || lower.contains(" or ") || lower.contains(" not ")
-        || clause.contains('<') || clause.contains('>') || clause.contains("!=")
-        || lower.contains(" like ") || lower.contains(" in ") || clause.contains('(')
+    if lower.contains(" and ")
+        || lower.contains(" or ")
+        || lower.contains(" not ")
+        || clause.contains('<')
+        || clause.contains('>')
+        || clause.contains("!=")
+        || lower.contains(" like ")
+        || lower.contains(" in ")
+        || clause.contains('(')
     {
         return None;
     }
@@ -1095,7 +1103,11 @@ fn sqlite_execute_statement(conn: &mut SqlConn, sql: &str) -> i64 {
         return sqlite_tx_rollback(conn);
     }
     if lower.starts_with("delete from ") {
-        let table_name = sql["DELETE FROM ".len()..].split_whitespace().next().unwrap_or("").to_string();
+        let table_name = sql["DELETE FROM ".len()..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
         let where_clause = lower
             .find(" where ")
             .map(|idx| sql[idx + " where ".len()..].trim().to_string());
@@ -1106,10 +1118,7 @@ fn sqlite_execute_statement(conn: &mut SqlConn, sql: &str) -> i64 {
             Some(clause) => match sqlite_parse_eq_predicate(clause) {
                 Some(p) => Some(p),
                 None => {
-                    return sqlite_set_error(
-                        conn,
-                        format!("unsupported DELETE WHERE clause (emulation): {clause}"),
-                    );
+                    return sqlite_set_error(conn, format!("unsupported DELETE WHERE clause (emulation): {clause}"));
                 }
             },
         };
@@ -1187,10 +1196,7 @@ fn sqlite_insert_row(conn: &mut SqlConn, table_name: &str, columns: &[String], v
         (row, violation)
     };
     if let Some(unique_col) = violation {
-        return sqlite_set_error(
-            conn,
-            format!("UNIQUE constraint failed: {table_name}.{unique_col}"),
-        );
+        return sqlite_set_error(conn, format!("UNIQUE constraint failed: {table_name}.{unique_col}"));
     }
     let table = conn.db.tables.get_mut(table_name).expect("checked above");
     conn.last_insert_rowid = table.next_id;

@@ -77,6 +77,74 @@ independently so that lane can be *migrated onto it* rather than blessed.
    .../linker_limine.ld`) is not invoked by the builder, which fails loudly
    rather than inventing a kernel. So the ESP is reproducible; the kernel inside
    it is not yet.
+
+   **CLOSED for the Limine kernel, 2026-08-24** by
+   `scripts/os/build-simpleos-aarch64-limine-kernel.shs`, which runs exactly
+   that seed `native-build` command and structurally verifies the result
+   (non-empty, AArch64 ELF, has `.text`, read back with `readelf`). It fails
+   loudly rather than inventing a kernel, same contract as the ESP builder.
+
+   **CORRECTION, same day, and the correction is the important part.** The
+   evidence below was produced in a shared working tree that was ~22 commits
+   behind `origin/main`, with a warm object cache (`Build complete: 1 compiled,
+   8 cached`). Re-run on a PRISTINE `git worktree` checked out at `origin/main`,
+   the producer **FAILS**, reproducibly (two independent runs, rc=1):
+
+   ```
+   Build failed: link failed: ld.lld: error: undefined symbol: rt_struct_alloc
+   >>> referenced by mod_7.o:(__module_init_os__kernel__memory__pmm)
+   ```
+
+   `rt_struct_alloc` is a genuine hosted runtime API — declared at
+   `src/runtime/runtime.h:321` — that the aarch64 freestanding runtime
+   (`examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c`)
+   does not define. It is codegen-emitted, not written in any `.spl`, so it is
+   invisible to source grep; `src/os/kernel/memory/pmm.spl` is byte-identical
+   between the two trees. This is the SAME defect class as the
+   `rt_raw_i64_to_string` gap fixed earlier
+   (`scripts/check/check-no-unresolved-runtime-symbols.shs`, ADVISORY-RED).
+
+   So the honest state is: **the producer script and the ESP/boot chain are
+   correct, but the aarch64 Limine kernel does not currently build from a clean
+   checkout of `origin/main`.** The lane is RED upstream, and was only ever
+   green against stale sources plus a stale object cache — which is a sharper
+   version of the very defect this bug record was filed about. Fixing it means
+   defining `rt_struct_alloc` in the freestanding runtime; NOT done here, and
+   deliberately not hand-rolled under time pressure in a shared tree.
+
+   The superseded evidence, retained so the two runs can be compared, was
+   produced from a WIPED `build/os/aarch64_limine/` in the STALE tree:
+
+   ```
+   $ rm -rf build/os/aarch64_limine
+   $ sh scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs
+   ERROR — nothing was checked: ESP build failed ... missing kernel ELF
+   .../build/os/aarch64_limine/kernel.elf      (exit 2)
+
+   $ sh scripts/os/build-simpleos-aarch64-limine-kernel.shs
+   PASS — aarch64 Limine kernel built: .../kernel.elf (105768 bytes, AArch64 ELF with .text)
+   $ sh scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs
+   PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64
+   boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit),
+   76 serial line(s) captured; firmware /usr/share/AAVMF/AAVMF_CODE.fd
+   ```
+
+   Note on the compiler: this uses the Rust bootstrap seed deliberately. The
+   aarch64 UNIFIED desktop kernel refuses the seed, but this Limine kernel is a
+   different, much smaller artifact and links cleanly with it.
+
+   Note on a near-miss worth recording, since it is the exact hazard
+   `.claude/rules/vcs.md` warns about: the first attempt at this build failed
+   with `ld.lld: error: undefined symbol: rt_raw_i64_to_string`, and a fix was
+   written for `freestanding_runtime.c` — but that error came from a **stale
+   working copy**. The tracked file already carried `rt_raw_i64_to_string`
+   (landed by another session, found the same way, by a real ld.lld error). The
+   working copy was 1562 lines behind. The file was restored to tracked content
+   and the whole chain re-verified on it; the kernel is byte-identical in size
+   either way. Nothing in this change touches the C runtime.
+
+   The UNIFIED arm64 kernel still has no from-source build here; that half of
+   item 2 stays open, as does item 1.
 3. Physical board bring-up for aarch64 remains filed as before.
 
 ## Evidence — red then green
@@ -429,3 +497,31 @@ EFI-application half is fixed and gated; the `-kernel` half of
 `scripts/check/check-simpleos-arm64-unified-live.shs` is explicitly blocked on a
 self-hosted `bin/simple` that can build the unified kernel. Not actionable by this
 lane — a bootstrap is live at ~98% CPU and this lane is forbidden from running one.
+
+## Re-verification 2026-08-31 (boot-lane audit)
+
+Blocker for the lane migration is STILL TRUE. Measured on this host:
+
+- `bin/release/x86_64-unknown-linux-gnu/simple --version` answers
+  "WARNING: this Rust-built Simple binary is a bootstrap seed only" — the lane's
+  own admission (`compiler-is-bootstrap-seed` /
+  `pure-simple-compiler-missing`) rejects it before any build, and no
+  `simple.provenance.env` with `artifact_kind=pure-simple-bootstrap-compiler`
+  exists. Prior receipt at
+  `build/verify/simpleos-arm64-unified-live/evidence.env`:
+  `status=fail reason=compiler-is-bootstrap-seed`.
+- Kernel-side half remains green:
+  `sh scripts/check/check-simpleos-arm64-unified-boot-contract.shs` →
+  `PASS — 10 marker(s) checked in each of 2 boot paths ... via Limine
+  BOOTAA64.EFI `protocol: linux` (no -kernel, no isa-debug-exit)`.
+- The EFI real-firmware lane
+  (`check-simpleos-arm64-efi-real-firmware-boot.shs`) also PASSes on this host
+  (4 boot-stage markers, 76 serial lines).
+
+The lane-script edit (swap `-kernel "$kernel"` for the AAVMF pflash + Limine
+ESP chain, embedding the unified kernel with `protocol: linux`) remains the
+only open piece, and deliberately was NOT made blind: the unified kernel
+artifact cannot be produced until a pure-Simple bootstrap compiler is
+deployed, so an edited lane could not be verified end-to-end and would risk
+masking the real blocker behind a plumbing failure. Migrate the QEMU argv the
+day `pure-simple-bootstrap-compiler` provenance lands.

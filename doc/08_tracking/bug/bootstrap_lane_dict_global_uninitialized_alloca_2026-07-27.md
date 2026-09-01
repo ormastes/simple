@@ -1,8 +1,7 @@
 # Bug: module-level Dict global lowers to uninitialized alloca in the stage-4 bootstrap lane
 
 **Date:** 2026-07-27
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** unconfirmed
 **Area:** native codegen / MIR lowering (module-level global initializers, bootstrap lane)
 **Severity:** High — segfaults on first read, no compile-time diagnostic
 

@@ -1,6 +1,6 @@
-# browser_runtime_in_qemu_spec
+# Browser Runtime In Qemu Specification
 
-> Verifies the browser runtime in qemu behaviour end to end so maintainers of this
+> Tests covering Browser runtime in QEMU Simple OS guest.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,9 +9,91 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# browser_runtime_in_qemu_spec
+# Browser Runtime In Qemu Specification
 
-Verifies the browser runtime in qemu behaviour end to end so maintainers of this
+## Scenarios
+
+### Browser runtime in QEMU Simple OS guest
+
+#### builds the browser runtime probe kernel with Cranelift
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- builds the browser runtime probe kernel with Cranelift
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("builds the browser runtime probe kernel with Cranelift")
+_assert_browser_runtime_build("cranelift")
+```
+
+</details>
+
+#### builds the browser runtime probe kernel with LLVM
+
+- builds the browser runtime probe kernel with LLVM
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("builds the browser runtime probe kernel with LLVM")
+_assert_browser_runtime_build("llvm")
+```
+
+</details>
+
+#### boots the Cranelift guest and reaches the browser runtime probe success marker
+
+- boots the Cranelift guest and reaches the browser runtime probe success marker
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("boots the Cranelift guest and reaches the browser runtime probe success marker")
+_assert_browser_runtime_boot("cranelift")
+```
+
+</details>
+
+#### boots the LLVM guest and reaches the browser runtime probe success marker
+
+- boots the LLVM guest and reaches the browser runtime probe success marker
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("boots the LLVM guest and reaches the browser runtime probe success marker")
+_assert_browser_runtime_boot("llvm")
+```
+
+</details>
 
 ## At a Glance
 
@@ -20,102 +102,13 @@ Verifies the browser runtime in qemu behaviour end to end so maintainers of this
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/browser_runtime_in_qemu_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the browser runtime in qemu behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+## Overview
 
-## Scenarios
-
-### Browser runtime in QEMU Simple OS guest
-
-#### builds the browser runtime probe kernel with Cranelift
-
-- Verify: builds the browser runtime probe kernel with Cranelift
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-APP-APP_BROWSER_RUNTIME_IN_QEMU-001
-step("Verify: builds the browser runtime probe kernel with Cranelift")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-_assert_browser_runtime_build("cranelift")
-```
-
-</details>
-
-#### builds the browser runtime probe kernel with LLVM
-
-- Verify: builds the browser runtime probe kernel with LLVM
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-APP-APP_BROWSER_RUNTIME_IN_QEMU-001
-step("Verify: builds the browser runtime probe kernel with LLVM")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-_assert_browser_runtime_build("llvm")
-```
-
-</details>
-
-#### boots the Cranelift guest and reaches the browser runtime probe success marker
-
-- Verify: boots the Cranelift guest and reaches the browser runtime probe success marker
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-APP-APP_BROWSER_RUNTIME_IN_QEMU-001
-step("Verify: boots the Cranelift guest and reaches the browser runtime probe success marker")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-_assert_browser_runtime_boot("cranelift")
-```
-
-</details>
-
-#### boots the LLVM guest and reaches the browser runtime probe success marker
-
-- Verify: boots the LLVM guest and reaches the browser runtime probe success marker
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-APP-APP_BROWSER_RUNTIME_IN_QEMU-001
-step("Verify: boots the LLVM guest and reaches the browser runtime probe success marker")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-_assert_browser_runtime_boot("llvm")
-```
-
-</details>
+Tests covering Browser runtime in QEMU Simple OS guest.
+- Browser runtime in QEMU Simple OS guest
 
 ## Scenario Summary
 
@@ -130,36 +123,50 @@ _assert_browser_runtime_boot("llvm")
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `82b312f1abeac6b7b18b53fd8d1836ae70af1dc977c574374257f9fdf7e06e4f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `148359f176bd887ce4558037e14ddf6808f2262b2e0b34ede47761431aef4086`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `82b312f1abeac6b7b18b53fd8d1836ae70af1dc977c574374257f9fdf7e06e4f`.
+Source SHA-256: `148359f176bd887ce4558037e14ddf6808f2262b2e0b34ede47761431aef4086`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `82b312f1abeac6b7b18b53fd8d1836ae70af1dc977c574374257f9fdf7e06e4f`  
+Source SHA-256: `148359f176bd887ce4558037e14ddf6808f2262b2e0b34ede47761431aef4086`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/03_system/app/browser_runtime_in_qemu_spec.spl
 mirror: doc/06_spec/03_system/app/browser_runtime_in_qemu_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/browser_runtime_in_qemu_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/03_system/app/browser_runtime_in_qemu_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/browser_runtime_in_qemu_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/browser_runtime_in_qemu_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser_runtime_in_qemu_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds the browser runtime probe kernel with Cranelift' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser_runtime_in_qemu_spec.spl:90:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds the browser runtime probe kernel with LLVM' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser_runtime_in_qemu_spec.spl:95:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'boots the Cranelift guest and reaches the browser runtime probe success marker' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

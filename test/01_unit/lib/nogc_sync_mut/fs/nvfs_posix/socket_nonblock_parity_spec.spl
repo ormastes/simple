@@ -1,0 +1,65 @@
+# STATUS: AUTHORED-UNEXECUTED. Frozen parity oracle; do not claim runtime evidence.
+use std.spec
+use std.fs.nvfs_posix.socket_nonblock.{
+    socket_nonblock_target_flags, socket_nonblock_windows_mode,
+    socket_nonblock_prepare_failed, socket_nonblock_windows_completed,
+    socket_nonblock_commit_succeeded,
+    SOCKET_NONBLOCK_FAILED, SOCKET_NONBLOCK_WINDOWS_COMPLETE
+}
+
+val ORACLE_FLAGS: i64 = 0x10
+val ORACLE_NONBLOCK: i64 = 0x4
+
+# Frozen model of the removed C policy, independent of the Simple owner.
+fn frozen_c_target_flags(flags: i64, enabled: bool) -> i64:
+    if enabled: flags | ORACLE_NONBLOCK
+    else: flags & ~ORACLE_NONBLOCK
+
+fn frozen_c_posix_result(get_status: i64, set_status: i64) -> bool:
+    if get_status < 0: return false
+    set_status == 0
+
+fn frozen_c_windows_mode(enabled: bool) -> i64:
+    if enabled: 1
+    else: 0
+
+fn frozen_c_windows_status(ioctl_rc: i64) -> i64:
+    if ioctl_rc == 0: -2
+    else: -1
+
+describe "runtime socket nonblock frozen C-vs-Simple parity":
+    # Exercised Pure policy denominator: target-flags branch outcomes 2/2,
+    # condition outcomes 2/2, MC/DC pairs 1/1; prepare-failure predicate
+    # outcomes 2/2 and commit predicate outcomes 2/2, one MC/DC pair each.
+    # Public wrapper (two early-return decisions) remains authored-unexecuted:
+    # branch outcomes 0/4, condition outcomes 0/4, MC/DC pairs 0/2.
+    it "matches enable and disable success policy":
+        val enabled = socket_nonblock_target_flags(ORACLE_FLAGS, true, ORACLE_NONBLOCK)
+        val disabled = socket_nonblock_target_flags(ORACLE_FLAGS | ORACLE_NONBLOCK, false, ORACLE_NONBLOCK)
+        expect(enabled).to_equal(frozen_c_target_flags(ORACLE_FLAGS, true))
+        expect(disabled).to_equal(frozen_c_target_flags(ORACLE_FLAGS | ORACLE_NONBLOCK, false))
+        expect(socket_nonblock_target_flags(ORACLE_FLAGS | ORACLE_NONBLOCK, true, ORACLE_NONBLOCK)).to_equal(frozen_c_target_flags(ORACLE_FLAGS | ORACLE_NONBLOCK, true))
+        expect(socket_nonblock_target_flags(ORACLE_FLAGS, false, ORACLE_NONBLOCK)).to_equal(frozen_c_target_flags(ORACLE_FLAGS, false))
+        expect(socket_nonblock_commit_succeeded(0)).to_equal(frozen_c_posix_result(ORACLE_FLAGS, 0))
+
+    it "matches F_GETFL and F_SETFL failure policy":
+        expect(socket_nonblock_prepare_failed(-1)).to_equal(frozen_c_posix_result(-1, 0) == false)
+        expect(socket_nonblock_prepare_failed(-2)).to_equal(false)
+        expect(socket_nonblock_prepare_failed(ORACLE_FLAGS)).to_equal(false)
+        expect(socket_nonblock_commit_succeeded(-1)).to_equal(frozen_c_posix_result(ORACLE_FLAGS, -1))
+
+    # Windows contract predicates are separate from POSIX coverage: enabled
+    # maps to nonzero u_long and disabled to zero in the shim; ioctl rc==0
+    # maps to WINDOWS_COMPLETE and rc!=0 to FAILED. Simple must accept only
+    # the former. Pure/model denominator: mode branch outcomes 2/2 and MC/DC
+    # 1/1; ioctl-status model branch outcomes 2/2 and MC/DC 1/1; completion
+    # predicate true/false outcomes 2/2 and MC/DC 1/1. No POSIX wrapper
+    # execution is claimed.
+    it "freezes the Windows completion and failure predicates":
+        expect(socket_nonblock_windows_mode(true)).to_equal(frozen_c_windows_mode(true))
+        expect(socket_nonblock_windows_mode(false)).to_equal(frozen_c_windows_mode(false))
+        expect(SOCKET_NONBLOCK_WINDOWS_COMPLETE).to_equal(frozen_c_windows_status(0))
+        expect(SOCKET_NONBLOCK_FAILED).to_equal(frozen_c_windows_status(-1))
+        expect(socket_nonblock_windows_completed(-2)).to_equal(true)
+        expect(socket_nonblock_windows_completed(-1)).to_equal(false)
+        expect(socket_nonblock_windows_completed(ORACLE_FLAGS)).to_equal(false)

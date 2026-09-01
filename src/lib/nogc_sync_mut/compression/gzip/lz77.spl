@@ -69,6 +69,20 @@ fn lz77_find_match(data, pos, window_start, max_len) -> [i64]:
 # Compress data using LZ77 algorithm
 # Returns: array of tokens [(type, value, extra)]
 # type: 0 = literal byte, 1 = match (distance, length)
+#
+# PERF (2026-08-26): match finding uses a 3-byte hash chain, not a linear scan
+# of the whole sliding window.  The old implementation called
+# `lz77_find_match`, which walked EVERY window position for EVERY output
+# position — O(n * window) — so incompressible input (where no match ever lets
+# `pos` skip ahead) cost O(n^2) byte comparisons.  `max_search` was computed
+# from `level` and then never used, so the level knob bounded nothing.
+# `head[h]` holds the most recent position whose 3-byte prefix hashes to `h`;
+# `prev[p]` chains to the previous such position.  Chain walks are bounded by
+# `max_search`, which is what finally wires the level knob to real work.
+# Both tables are allocated once and mutated in place through their single
+# owner — never `val t = head; t[h] = v; head = t`, which would deep-copy the
+# whole table per write (see .claude/rules/code-style.md, COW alias trap).
+# `lz77_find_match` is kept for API compatibility and is no longer hot-path.
 fn lz77_compress(data, level) -> [Any]:
     if data == nil:
         return []
@@ -77,12 +91,34 @@ fn lz77_compress(data, level) -> [Any]:
     if data_len == 0:
         return []
 
-    # Adjust search based on level
+    # Chain-walk bound, by level.  Previously dead code.
     var max_search = 128
     if level >= 6:
         max_search = 4096
     if level >= 9:
         max_search = 32768
+
+    val HASH_BITS = 13
+    val HASH_SIZE = 8192
+    val HASH_MASK = 8191
+
+    # head[h] = most recent position with this 3-byte hash, or -1
+    var head: [i64] = []
+    var hi = 0
+    loop:
+        if hi >= HASH_SIZE:
+            break
+        head.push(-1)
+        hi = hi + 1
+
+    # prev[p] = previous position sharing p's hash bucket, or -1
+    var prev: [i64] = []
+    var pi = 0
+    loop:
+        if pi >= data_len:
+            break
+        prev.push(-1)
+        pi = pi + 1
 
     var tokens = []
     var pos = 0
@@ -91,26 +127,73 @@ fn lz77_compress(data, level) -> [Any]:
         if pos >= data_len:
             break
 
-        # Calculate window start
-        var window_start = pos - WINDOW_SIZE
-        if window_start < 0:
-            window_start = 0
-
-        # Find longest match
         var max_len = MAX_MATCH
         if pos + max_len > data_len:
             max_len = data_len - pos
 
-        val match_result = lz77_find_match(data, pos, window_start, max_len)
-        val distance = match_result[0]
-        val length = match_result[1]
+        var best_dist = 0
+        var best_len = 0
 
-        if length >= MIN_MATCH:
-            # Encode as match
-            tokens.push([1, distance, length])
-            pos = pos + length
+        # A 3-byte prefix is required both to hash and to reach MIN_MATCH.
+        if pos + MIN_MATCH <= data_len:
+            val h = (((data[pos].to_i64() << 10) ^ (data[pos + 1].to_i64() << 5) ^ data[pos + 2].to_i64()) & HASH_MASK)
+
+            var cand = head[h]
+            var searched = 0
+            loop:
+                if cand < 0:
+                    break
+                if searched >= max_search:
+                    break
+                val dist = pos - cand
+                if dist <= 0:
+                    break
+                if dist > WINDOW_SIZE:
+                    break
+
+                # Extend the candidate match.  Overlapping matches (cand + j
+                # reaching past pos) are legal in DEFLATE and are how runs are
+                # encoded, so j is bounded only by max_len and the input end.
+                var match_len = 0
+                var j = 0
+                loop:
+                    if j >= max_len:
+                        break
+                    if data[cand + j] != data[pos + j]:
+                        break
+                    match_len = match_len + 1
+                    j = j + 1
+
+                if match_len > best_len:
+                    best_len = match_len
+                    best_dist = dist
+                    if best_len >= max_len:
+                        break
+
+                cand = prev[cand]
+                searched = searched + 1
+
+            # Insert pos into its bucket.  Mutate through the owner.
+            prev[pos] = head[h]
+            head[h] = pos
+
+        if best_len >= MIN_MATCH:
+            tokens.push([1, best_dist, best_len])
+            # Insert every position covered by the match, else the chains go
+            # stale and match quality collapses on repetitive input.
+            var k = 1
+            loop:
+                if k >= best_len:
+                    break
+                val ip = pos + k
+                if ip + MIN_MATCH > data_len:
+                    break
+                val ih = (((data[ip].to_i64() << 10) ^ (data[ip + 1].to_i64() << 5) ^ data[ip + 2].to_i64()) & HASH_MASK)
+                prev[ip] = head[ih]
+                head[ih] = ip
+                k = k + 1
+            pos = pos + best_len
         else:
-            # Encode as literal
             tokens.push([0, data[pos], 0])
             pos = pos + 1
 

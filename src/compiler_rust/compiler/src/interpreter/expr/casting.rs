@@ -48,10 +48,7 @@ pub(super) fn cast_value(val: Value, target_type: &Type) -> Result<Value, Compil
 /// copy. Keep packed storage intact so the lift adds no per-byte work.
 fn cast_to_dynamic_array(val: Value, element: &Type) -> Result<Value, CompileError> {
     match (element, val) {
-        (
-            Type::Simple(name),
-            value @ (Value::ByteArray(_) | Value::FrozenByteArray(_)),
-        ) if name == "u8" => Ok(value),
+        (Type::Simple(name), value @ (Value::ByteArray(_) | Value::FrozenByteArray(_))) if name == "u8" => Ok(value),
         (_, value @ (Value::Array(_) | Value::FrozenArray(_))) => Ok(value),
         (_, value) => {
             let actual = value.type_name();

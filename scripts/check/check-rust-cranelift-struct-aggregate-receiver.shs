@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+# This is intentionally a Rust-authority probe. It is scoped to one fixture;
+# it never invokes bootstrap or rebuilds the compiler.
+RUST_SIMPLE_BIN="${RUST_SIMPLE_BIN:-src/compiler_rust/target/debug/simple}"
+RUST_SOURCE="src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs"
+BUILD_DIR="${BUILD_DIR:-build/check/rust-cranelift-struct-aggregate-receiver}"
+ENTRY="test/fixtures/compiler/native_struct_aggregate_receiver.spl"
+
+[ -x "$RUST_SIMPLE_BIN" ] || {
+    echo "rust cranelift struct aggregate receiver: missing RUST_SIMPLE_BIN" >&2
+    exit 2
+}
+case "$RUST_SIMPLE_BIN" in
+    src/compiler_rust/*) ;;
+    *) echo "rust cranelift struct aggregate receiver: Rust authority required" >&2; exit 2 ;;
+esac
+
+struct_init=$(sed -n '/pub(crate) fn compile_struct_init/,/pub(crate) fn compile_aggregate_copy/p' "$RUST_SOURCE")
+aggregate_copy=$(sed -n '/fn emit_aggregate_block_copy/,/fn widen_struct_field_value/p' "$RUST_SOURCE")
+printf '%s\n' "$struct_init" | grep -Fq 'call_runtime_1(ctx, builder, "rt_struct_alloc"'
+if printf '%s\n' "$struct_init" | grep -Fq 'call_runtime_1(ctx, builder, "rt_alloc"'; then exit 1; fi
+printf '%s\n' "$aggregate_copy" | grep -Fq 'call_runtime_1(ctx, builder, "rt_struct_alloc"'
+if printf '%s\n' "$aggregate_copy" | grep -Fq 'call_runtime_1(ctx, builder, "rt_alloc"'; then exit 1; fi
+
+mkdir -p "$BUILD_DIR/cache"
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 "$RUST_SIMPLE_BIN" native-build \
+    --backend cranelift --source test/fixtures/compiler --entry-closure --entry "$ENTRY" \
+    --cache-dir "$BUILD_DIR/cache" --output "$BUILD_DIR/probe" \
+    >"$BUILD_DIR/native-build.log" 2>&1
+[ "$(grep -Fic 'invalid field receiver' "$BUILD_DIR/native-build.log" || true)" -eq 0 ]
+[ -x "$BUILD_DIR/probe" ]
+actual="$("$BUILD_DIR/probe" 2>"$BUILD_DIR/probe.stderr")"
+[ "$actual" = cranelift-struct-aggregate-receiver-ok ]
+test ! -s "$BUILD_DIR/probe.stderr"
+echo "rust_cranelift_struct_aggregate_receiver=PASS"

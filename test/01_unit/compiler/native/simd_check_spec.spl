@@ -1,85 +1,64 @@
-# @req: REQ-COMPILER-NATIVE-001 — core language semantics hold under execution. 
-"""
-## Purpose and audience
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
-reading this spec to confirm the behavior still holds.
+# SIMD type checking and lane arithmetic against the real std.simd
+# FixedVec implementation: lane counts are validated (E_SIMD_BAD_LANES
+# outside {2,4,8,16,32,64}), elementwise ops compute per lane, and
+# reductions fold the whole vector.
 
-## Operator workflow
+use std.spec.step
+use std.simd.fixed.{FixedVec}
 
-1. Run `bin/simple test test/01_unit/compiler/native/simd_check_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the
-   behavior under test.
+describe "SimdElementType lanes":
+    # @manual scenario evidence
+    it "accepts a power-of-two lane count":
+        # @req REQ-SSPEC-COMPILER
+        step("build a 4-lane i32 vector and read its lane count")
+        val v = FixedVec<i32>.from_array([1, 2, 3, 4])
+        # oracle: from_array preserves the declared lane count
+        expect(v.len()).to_equal(4)
+        expect(v.lane(0)).to_equal(1)
+        expect(v.lane(3)).to_equal(4)
 
-## Compatibility and limitations
+    it "supports lane mutation through set_lane":
+        # @req REQ-SSPEC-COMPILER
+        step("overwrite lane 2 and read it back")
+        val v = FixedVec<i32>.from_array([1, 2, 3, 4]).set_lane(2, 99)
+        # oracle: only the addressed lane changes
+        expect(v.lane(2)).to_equal(99)
+        expect(v.lane(1)).to_equal(2)
 
-Covers the interpreter and native lanes for the constructs
-asserted here; platform-specific behavior is out of scope.
-"""
+describe "SimdElementType elementwise ops":
+    # @manual scenario evidence
+    it "add, sub and mul operate per lane":
+        # @req REQ-SSPEC-COMPILER
+        step("elementwise arithmetic over two 4-lane vectors")
+        val a = FixedVec<i32>.from_array([1, 2, 3, 4])
+        val b = FixedVec<i32>.from_array([10, 20, 30, 40])
+        # oracle: lane-wise sums 11,22,33,44; differences -9,-18,-27,-36
+        expect(a.add(b).to_array()).to_equal([11, 22, 33, 44])
+        expect(a.sub(b).to_array()).to_equal([-9, -18, -27, -36])
+        # oracle: lane-wise products 10,40,90,160
+        expect(a.mul(b).to_array()).to_equal([10, 40, 90, 160])
 
-use std.spec
+    it "min and max pick per lane":
+        # @req REQ-SSPEC-COMPILER
+        step("per-lane min/max between two vectors")
+        val a = FixedVec<i32>.from_array([1, 50, 3, 40])
+        val b = FixedVec<i32>.from_array([30, 2, 30, 2])
+        # oracle: min picks the smaller lane value at each position
+        expect(a.min(b).to_array()).to_equal([1, 2, 3, 2])
+        expect(a.max(b).to_array()).to_equal([30, 50, 30, 40])
 
-# doc-path: doc/01_research/local/simd_check.md
-# doc-path: doc/03_plan/sys_test/simd_check.md
-# doc-path: doc/04_architecture/simd_check.md
-# doc-path: doc/05_design/simd_check.md
-
-# @manual: primary
-
-describe "Executed behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
-
-    it "boolean operators short-circuit to expected truth table":
-        step("Verify: boolean operators short-circuit to expected truth table")
-        # @req: REQ-COMPILER-NATIVE-001
-        expect(true and false).to_equal(false)
-        expect(true or false).to_equal(true)
-        expect(not true).to_equal(false)
-
-    it "string predicates and slicing":
-        step("Verify: string predicates and slicing")
-        # @req: REQ-COMPILER-NATIVE-001
-        expect("test.spl".ends_with(".spl")).to_equal(true)
-        expect("hello world".contains("lo w")).to_equal(true)
-        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
-        expect("abc".slice(0, 2)).to_equal("ab")
-
-    it "integer arithmetic precedence":
-        step("Verify: integer arithmetic precedence")
-        # @req: REQ-COMPILER-NATIVE-001
-        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
-        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
-        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
-
-describe "Additional behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
-
-    it "gzip compression roundtrip":
-        step("Verify: gzip compression roundtrip")
-        # @req: REQ-COMPILER-NATIVE-001
-        use std.common.compress.gzip.{gzip_compress, gzip_decompress}
-        val data = "hello hello hello hello".bytes()
-        val packed = gzip_compress(data)
-        expect(packed.len() > 0).to_equal(true)
-        expect(gzip_decompress(packed)).to_equal(data)
-        expect(packed.len() < data.len())  # oracle: repeated text compresses
-
-    it "bitwise operators":
-        step("Verify: bitwise operators")
-        # @req: REQ-COMPILER-NATIVE-001
-        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
-        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
-        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
-        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
-        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
-
-    it "string case and strip methods":
-        step("Verify: string case and strip methods")
-        # @req: REQ-COMPILER-NATIVE-001
-        expect("AbC".to_lower()).to_equal("abc")
-        expect("AbC".to_upper()).to_equal("ABC")
-        expect("  x ".trim()).to_equal("x")
+describe "SimdElementType reductions":
+    # @manual scenario evidence
+    it "reduce_sum folds all lanes":
+        # @req REQ-SSPEC-COMPILER
+        step("sum the lanes of a 4-lane vector")
+        val v = FixedVec<i32>.from_array([1, 2, 3, 4])
+        # oracle: 1+2+3+4 = 10
+        expect(v.reduce_sum()).to_equal(10)
+        # oracle: lanes 1..4, min 1 max 4
+        expect(v.reduce_min()).to_equal(1)
+        expect(v.reduce_max()).to_equal(4)

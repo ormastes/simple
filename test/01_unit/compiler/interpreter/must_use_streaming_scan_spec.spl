@@ -1,0 +1,120 @@
+"""
+## Purpose and audience
+Purpose: Pin the interpreter annotation scanner's behavior and bounded scratch-memory structure.
+Audience: compiler engineers maintaining interpreter startup and annotation handling.
+"""
+
+use compiler.core.interpreter.eval_tables.{
+    init_functions,
+    must_use_get_reason,
+    must_use_is_critical,
+    must_use_is_registered,
+    must_use_scan_source,
+    teardown_functions,
+    when_disabled_decls
+}
+use std.io_runtime.{file_read}
+use std.spec.step
+
+fn check_mixed_streaming_annotations() -> text:
+    val init_before = init_functions.len()
+    val teardown_before = teardown_functions.len()
+    val disabled_before = when_disabled_decls.len()
+    # Annotation and declaration lines exercise CRLF, but the intervening
+    # comment/blank carry case is deliberately LF: historically a CRLF blank
+    # retains `\r` after spaces/tabs-only trimming and therefore cancels.
+    val source = "# @profile(critical)\r\n\t# @must_use(\"keep this value\")\r\n# ordinary comment\n\n\tfn required_value() -> i64:\r\n    1\r\n# @init\r\nfn start_runtime():\r\n    pass\r\n# @teardown\r\nfn stop_runtime():\r\n    pass\r\n# @when(false)\r\nval disabled_value = 1\r\n@cfg(false)\r\nvar cfg_disabled = 2\r\n@cfg(unknown(nested))\r\nvar nested_unknown_kept = 3"
+
+    must_use_scan_source(source)
+
+    if not must_use_is_critical():
+        return "critical profile annotation was not retained"
+    if not must_use_is_registered("required_value"):
+        return "tab-indented must_use function was not registered"
+    if must_use_get_reason("required_value") != "keep this value":
+        return "must_use reason changed"
+    if init_functions.len() != init_before + 1 or init_functions[init_before] != "start_runtime":
+        return "init registration order changed"
+    if teardown_functions.len() != teardown_before + 1 or teardown_functions[teardown_before] != "stop_runtime":
+        return "teardown registration order changed"
+    if when_disabled_decls.len() != disabled_before + 2:
+        return "false when/cfg declarations were not both disabled"
+    if when_disabled_decls[disabled_before] != "disabled_value":
+        return "@when registration order changed"
+    if when_disabled_decls[disabled_before + 1] != "cfg_disabled":
+        return "@cfg registration order changed"
+    ""
+
+fn check_pending_cancellation_and_reset() -> text:
+    must_use_scan_source("# @must_use(\"cancel on CRLF blank\")\r\n\r\nfn crlf_cancelled() -> i64:\r\n    0")
+    if must_use_is_registered("crlf_cancelled"):
+        return "CRLF blank line no longer cancels pending must_use"
+
+    must_use_scan_source("# @must_use(\"cancel me\")\nval intervening = 1\nfn cancelled() -> i64:\n    1\n# @must_use\n\n# retained comment\nfn eof_required() -> i64:\n    2\n# @profile(critical)")
+    if must_use_is_registered("cancelled"):
+        return "non-comment declaration did not cancel pending must_use"
+    if not must_use_is_registered("eof_required"):
+        return "blank/comment lines cancelled pending must_use"
+    if not must_use_is_critical():
+        return "EOF annotation without newline was skipped"
+
+    # must_use_scan_source owns these registries and must invalidate them on
+    # every pipeline invocation; lifecycle lists remain eval_init-owned.
+    must_use_scan_source("fn plain() -> i64:\n    0")
+    if must_use_is_registered("eof_required"):
+        return "second scan retained stale must_use registration"
+    if must_use_is_critical():
+        return "second scan retained stale critical profile state"
+    ""
+
+fn check_cfg_annotation_state_machine() -> text:
+    val init_before = init_functions.len()
+    val teardown_before = teardown_functions.len()
+    val disabled_before = when_disabled_decls.len()
+    val source = "# @must_use(\"cfg value\")\n# @init\n# @teardown\n@cfg(false)\nfn cfg_disabled_required() -> i64:\n    1\n@cfg(unknown(nested(value)))\nvar nested_unknown_true = 2\n@cfg(false)\nclass InterveningDecl:\n    value: i64\nvar cancelled_after_decl = 3"
+
+    must_use_scan_source(source)
+
+    if not must_use_is_registered("cfg_disabled_required"):
+        return "@cfg annotation cancelled pending must_use"
+    if must_use_get_reason("cfg_disabled_required") != "cfg value":
+        return "@cfg annotation changed pending must_use reason"
+    if init_functions.len() != init_before + 1 or init_functions[init_before] != "cfg_disabled_required":
+        return "@cfg annotation cancelled pending init"
+    if teardown_functions.len() != teardown_before + 1 or teardown_functions[teardown_before] != "cfg_disabled_required":
+        return "@cfg annotation cancelled pending teardown"
+    if when_disabled_decls.len() != disabled_before + 1:
+        return "false, nested-unknown, or cancellation cfg behavior changed"
+    if when_disabled_decls[disabled_before] != "cfg_disabled_required":
+        return "@cfg(false) did not disable its declaration"
+
+    # Pending state belongs to one scan.  A cfg at EOF must not bind a
+    # declaration supplied by the next source invocation.
+    must_use_scan_source("@cfg(false)")
+    must_use_scan_source("var next_scan_value = 4")
+    if when_disabled_decls.len() != disabled_before + 1:
+        return "consecutive scan retained stale cfg state"
+    ""
+
+describe "streaming interpreter annotation scan":
+    it "preserves mixed annotation behavior across CRLF and EOF input":
+        step("Verify: stream scanning preserves reasons, lifecycle order, nested cfg, CRLF, and EOF")
+        expect(check_mixed_streaming_annotations()).to_equal("")
+
+    it "preserves pending cancellation and resets scan-owned state":
+        step("Verify: cancellation, blank/comment carry, and consecutive-scan invalidation remain exact")
+        expect(check_pending_cancellation_and_reset()).to_equal("")
+
+    it "keeps cfg annotations pending until the intended declaration":
+        step("Verify: cfg false, nested unknown-true, declaration cancellation, and scan reset remain exact")
+        expect(check_cfg_annotation_state_machine()).to_equal("")
+
+    it "does not retain whole-source lines or allocate a trim character array":
+        step("Verify: scanner scratch is bounded by one line and leading trim uses an index")
+        val source = file_read("src/compiler/10.frontend/core/interpreter/eval_tables.spl") ?? ""
+        expect(source.contains("var lines: [text] = []")).to_equal(false)
+        expect(source.contains("trimmed_chars")).to_equal(false)
+        expect(source.contains("for line in lines:")).to_equal(false)
+        expect(source.contains("var line_chars: [text] = []")).to_equal(true)
+        expect(source.contains("var trim_start: i64 = 0")).to_equal(true)
+        expect(source.contains("state.scan_line(line_chars.join(\"\"))")).to_equal(true)

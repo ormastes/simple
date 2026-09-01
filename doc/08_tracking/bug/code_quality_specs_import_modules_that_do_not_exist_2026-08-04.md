@@ -1,7 +1,6 @@
 # `test/system/code_quality` specs import three modules/types that exist nowhere in the tree
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** OPEN
 **Found:** 2026-08-04
 
 ## Symptom

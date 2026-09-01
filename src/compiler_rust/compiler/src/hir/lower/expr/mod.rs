@@ -173,7 +173,7 @@ impl Lowerer {
             Expr::MethodCall {
                 receiver, method, args, ..
             } => self.lower_method_call(receiver, method, args, ctx),
-            Expr::StructInit { name, fields, .. } => self.lower_struct_init(name, fields, ctx),
+            Expr::StructInit { name, fields, spread } => self.lower_struct_init(name, fields, spread.as_deref(), ctx),
             // Simple Math: Grid and Tensor literals (#1920-#1929)
             Expr::GridLiteral { rows, device } => self.lower_grid_literal(rows, device, ctx),
             Expr::TensorLiteral {
@@ -194,7 +194,7 @@ impl Lowerer {
             Expr::Match { subject, arms } => self.lower_match(subject, arms, ctx),
             // Do block: do: statements... (block as expression)
             Expr::DoBlock(statements) => self.lower_do_block(statements, ctx),
-            Expr::UnsafeBlock(statements) => self.lower_unsafe_block(statements, ctx),
+            Expr::UnsafeBlock(statements, capabilities) => self.lower_unsafe_block(statements, capabilities, ctx),
             // Null coalescing: expr ?? default
             Expr::Coalesce { expr, default } => self.lower_coalesce(expr, default, ctx),
             // Existence check: expr.? (is present/non-empty)
@@ -215,6 +215,8 @@ impl Lowerer {
             Expr::Try(inner) => self.lower_try(inner, ctx),
             // Force unwrap: expr! - unwrap or panic (lowered same as try for codegen)
             Expr::ForceUnwrap(inner) => self.lower_try(inner, ctx),
+            // Diverging coalesce fallback: expr ?? return default
+            Expr::UnwrapOrReturn { expr, default } => self.lower_unwrap_or_return(expr, default, ctx),
             // Range expression: start..end or start..=end
             Expr::Range { start, end, bound } => self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx),
             _ => {
@@ -633,9 +635,7 @@ impl Lowerer {
             Some(HirType::Pointer { inner, .. }) => {
                 // One pointer-strip: `T?` / `&T` text receivers are common.
                 let inner = *inner;
-                if inner == TypeId::STRING
-                    || matches!(self.module.types.get(inner), Some(HirType::String))
-                {
+                if inner == TypeId::STRING || matches!(self.module.types.get(inner), Some(HirType::String)) {
                     "TEXT"
                 } else {
                     "OTHER"
@@ -791,6 +791,31 @@ impl Lowerer {
         // Lower arguments for generic method call
         let hir_args = self.lower_call_args(args, ctx)?;
 
+        // A statically typed tuple `.get(constant_index)` has a precise
+        // per-position result type. Leaving it as the generic ANY return type
+        // makes MIR either retain a tagged RuntimeValue for an integer sink or
+        // unbox it while an ANY consumer (notably print) still expects the
+        // tagged representation. Keep this gate identical to MIR lowering:
+        // only one non-negative, in-range integer literal on a direct
+        // Tuple/LabeledTuple receiver is refined. Every dynamic/error shape
+        // retains generic method typing and dispatch.
+        let tuple_get_return_ty = if method == "get" && hir_args.len() == 1 {
+            match &hir_args[0].kind {
+                HirExprKind::Integer(index) => {
+                    usize::try_from(*index)
+                        .ok()
+                        .and_then(|index| match self.module.types.get(receiver_hir.ty) {
+                            Some(HirType::Tuple(elements)) => elements.get(index).copied(),
+                            Some(HirType::LabeledTuple(fields)) => fields.get(index).map(|(_, ty)| *ty),
+                            _ => None,
+                        })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         if (method == "append" || method == "push") && hir_args.len() == 1 {
             if let HirExprKind::Local(local_idx) = receiver_hir.kind {
                 if let Some(HirType::Array { element, size }) = self.module.types.get(receiver_hir.ty).cloned() {
@@ -809,7 +834,7 @@ impl Lowerer {
 
         // Look up return type from module functions
         let recv_ty = receiver_hir.ty;
-        let return_ty = self.lookup_method_return_type(recv_ty, method);
+        let return_ty = tuple_get_return_ty.unwrap_or_else(|| self.lookup_method_return_type(recv_ty, method));
 
         // Generate generic method call for user-defined methods
         // Uses dynamic dispatch since we don't know the concrete type at compile time
@@ -826,6 +851,21 @@ impl Lowerer {
 
     /// Look up the return type of a method from pre-registered signatures.
     fn lookup_method_return_type(&self, recv_ty: TypeId, method: &str) -> TypeId {
+        let ret = self.lookup_method_return_type_inner(recv_ty, method);
+        if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+            eprintln!(
+                "[HIR-METHOD-RET] .{} recv_ty={:?} recv_hir={:?} -> {:?} ({:?})",
+                method,
+                recv_ty,
+                self.module.types.get(recv_ty),
+                ret,
+                self.module.types.get(ret)
+            );
+        }
+        ret
+    }
+
+    fn lookup_method_return_type_inner(&self, recv_ty: TypeId, method: &str) -> TypeId {
         // Optional unwrap: `T?` is represented as `Pointer { inner: T }`
         // (type_resolver.rs). `.unwrap()`/`.expect(...)` on such a value yields
         // the inner `T`. Genuine `Option<T>`/`Result<T,E>` enum cases are already
@@ -953,8 +993,10 @@ impl Lowerer {
         // doc/08_tracking/bug/native_char_code_at_tag_shift_2026-07-19.md.
         // Only applies as a last-resort fallback (a genuine user method of the
         // same name matched above), and only on a string/erased receiver.
-        if matches!(method, "char_code_at" | "byte_at" | "ord" | "codepoint" | "code_point" | "hash")
-            && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY)
+        if matches!(
+            method,
+            "char_code_at" | "byte_at" | "ord" | "codepoint" | "code_point" | "hash"
+        ) && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY)
         {
             return TypeId::I64;
         }
@@ -1049,7 +1091,14 @@ impl Lowerer {
         if method == "abs"
             && matches!(
                 recv_ty,
-                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
             )
         {
             return recv_ty;
@@ -1141,6 +1190,25 @@ impl Lowerer {
         if args.is_empty() {
             match method {
                 "unwrap" => {
+                    // `.unwrap()` on an optional over a BoxInt-family scalar
+                    // (`i64?`): the JIT-lane value is a TAGGED word (raw
+                    // migration form), not necessarily an enum, so it must go
+                    // through `rt_unwrap_or_self` (which handles both forms) —
+                    // NOT `rt_enum_payload`, which returns nil for a non-enum.
+                    // Typed as the raw inner scalar, the name-keyed unbox in
+                    // mir `lower_builtin_call_expr` decodes it; before this,
+                    // `f().unwrap() + 1` computed 337 (== (42<<3)+1) on the
+                    // JIT lane while the interpreter said 43.
+                    // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+                    if let Some(inner) = self.optional_boxint_scalar_inner(receiver.ty) {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_self".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: inner,
+                        }));
+                    }
                     if let Some(payload_ty) = self.enum_payload_type_for_builtin_method(receiver.ty) {
                         return Ok(Some(HirExpr {
                             kind: HirExprKind::BuiltinCall {
@@ -1308,34 +1376,30 @@ impl Lowerer {
                 | "center" | "zfill" | "substr" | "rev" | "reversed" | "sorted" | "take" | "taken" | "drop"
                 | "dropped" | "skip" => Some(TypeId::STRING),
                 // `partition`/`rpartition` return [before, separator, after].
-                "partition" | "rpartition" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::STRING, size: None }),
-                ),
+                "partition" | "rpartition" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::STRING,
+                    size: None,
+                })),
                 // `find_all`/`find_indices` return an array of BYTE offsets,
                 // the same shape as `.bytes()`.
-                "find_all" | "find_indices" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::I64, size: None }),
-                ),
-                "split" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::STRING, size: None }),
-                ),
+                "find_all" | "find_indices" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::I64,
+                    size: None,
+                })),
+                "split" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::STRING,
+                    size: None,
+                })),
                 // One `chars()` element is a one-codepoint String in both the
                 // interpreter and `rt_string_chars`.  Keep that element type
                 // precise so indexing the result remains a String receiver;
                 // otherwise a following text builtin (for example
                 // `s.chars()[0].char_code_at(0)`) is lowered from ANY and can
                 // be stolen by an unrelated custom method owner.
-                "chars" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::STRING, size: None }),
-                ),
+                "chars" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::STRING,
+                    size: None,
+                })),
                 // `.lines()` / `.split_lines()` had NO codegen mapping at all
                 // until `rt_string_lines` was added alongside the sibling
                 // `rt_string_bytes`/`rt_string_chars` unary string->array
@@ -1343,11 +1407,10 @@ impl Lowerer {
                 // with `Function 'str.lines' not found` and the nil result made
                 // `.len()` report `-1`. That `-1` is the ordinary "len of a nil
                 // receiver" answer, NOT the `Dict.len()` native sentinel.
-                "lines" | "split_lines" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::STRING, size: None }),
-                ),
+                "lines" | "split_lines" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::STRING,
+                    size: None,
+                })),
                 // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
                 "find" | "index_of" | "find_str" | "rfind" | "last_index_of" => Some(TypeId::I64),
                 // `s.count(needle)` (interpreter_method/string.rs "count") is
@@ -1376,11 +1439,10 @@ impl Lowerer {
                 // results (bug
                 // seed_interp_bytes_u8_relational_boxtag_shift_2026-07-17.md;
                 // marker: seed_bytes_u8_boxtag_2026-07-17).
-                "bytes" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::I64, size: None }),
-                ),
+                "bytes" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::I64,
+                    size: None,
+                })),
                 // `parse_int` and its `to_int`/`to_i64` aliases all lower to the
                 // runtime's `rt_string_to_int`, which returns a RAW (untagged)
                 // i64 — see the identical

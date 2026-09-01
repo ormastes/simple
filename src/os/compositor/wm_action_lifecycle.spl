@@ -203,6 +203,41 @@ fn wm_lifecycle_focus_top_visible_window(windows: [WmLifecycleWindowState]) -> [
         i = i - 1
     windows
 
+fn wm_lifecycle_reconcile_display_focus(windows: [WmLifecycleWindowState]) -> [WmLifecycleWindowState]:
+    """Restore the single-focus invariant after a display topology change.
+
+    Display removal can arrive between a minimize/focus transition and its
+    next frame.  In that interval the old display may leave either no visible
+    focused window, more than one focused window, or focus on a minimized
+    window.  Keep the topmost visible focused window when it is valid;
+    otherwise focus the topmost visible window.  When every window is
+    minimized, clear focus rather than retaining an invisible input owner.
+    """
+    var keep_id: i64 = 0
+    var i = windows.len() - 1
+    while i >= 0:
+        if windows[i].focused and not windows[i].minimized:
+            keep_id = windows[i].id
+            i = -1
+        else:
+            i = i - 1
+    if keep_id == 0:
+        i = windows.len() - 1
+        while i >= 0:
+            if not windows[i].minimized:
+                keep_id = windows[i].id
+                i = -1
+            else:
+                i = i - 1
+    var out: [WmLifecycleWindowState] = []
+    i = 0
+    while i < windows.len():
+        var window = windows[i]
+        window.focused = keep_id != 0 and window.id == keep_id
+        out.push(window)
+        i = i + 1
+    out
+
 fn wm_lifecycle_destroy_window(windows: [WmLifecycleWindowState], window_id: i64) -> [WmLifecycleWindowState]:
     var out: [WmLifecycleWindowState] = []
     var destroyed_focused = false
@@ -248,6 +283,58 @@ fn wm_lifecycle_bounded_window_height(height: i32, desktop_height: i32) -> i32:
     if desktop_height > 0 and bounded > desktop_height:
         bounded = desktop_height
     bounded
+
+fn wm_lifecycle_clamp_to_work_area(window: WmLifecycleWindowState, desktop_width: i32, desktop_height: i32) -> WmLifecycleWindowState:
+    """Clamp lifecycle geometry to the current display work area.
+
+    Restore rectangles are intentionally stored in normal-window coordinates,
+    so a display-size change can make them stale.  Resize also preserves the
+    old origin.  Keeping both transitions here prevents either path from
+    reviving an unreachable or larger-than-display window.
+    """
+    var out = window
+    val work_width = if desktop_width > 0: desktop_width else: 1
+    var work_top = WM_WORK_AREA_TOP
+    if work_top >= desktop_height:
+        work_top = 0
+    var work_height = desktop_height - work_top - WM_WORK_AREA_BOTTOM
+    if work_height < 1:
+        work_height = if desktop_height > work_top: desktop_height - work_top else: 1
+    out.w = wm_lifecycle_bounded_window_width(out.w, work_width)
+    out.h = wm_lifecycle_bounded_window_height(out.h, work_height)
+    val max_x = work_width - out.w
+    val max_y = work_top + work_height - out.h
+    if out.x < 0:
+        out.x = 0
+    elif out.x > max_x:
+        out.x = max_x
+    if out.y < work_top:
+        out.y = work_top
+    elif out.y > max_y:
+        out.y = max_y
+    # A maximized window keeps its normal geometry in the restore fields.
+    # Display hotplug/resize must migrate that dormant rectangle too: only
+    # clamping the live maximized rectangle lets a later restore resurrect
+    # geometry from the departed display.  Zero-sized restore state means no
+    # saved rectangle yet and is deliberately left untouched.
+    if out.restore_w > 0 and out.restore_h > 0:
+        out.restore_w = wm_lifecycle_bounded_window_width(
+            out.restore_w, work_width
+        )
+        out.restore_h = wm_lifecycle_bounded_window_height(
+            out.restore_h, work_height
+        )
+        val restore_max_x = work_width - out.restore_w
+        val restore_max_y = work_top + work_height - out.restore_h
+        if out.restore_x < 0:
+            out.restore_x = 0
+        elif out.restore_x > restore_max_x:
+            out.restore_x = restore_max_x
+        if out.restore_y < work_top:
+            out.restore_y = work_top
+        elif out.restore_y > restore_max_y:
+            out.restore_y = restore_max_y
+    out
 
 fn wm_lifecycle_resize_grip_hit(window_x: i32, window_y: i32, window_width: i32, window_height: i32, x: i32, y: i32) -> bool:
     (x >= window_x + window_width - WM_WINDOW_RESIZE_GRIP_PX and
@@ -349,16 +436,20 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
     elif action.kind == "resize":
         win.w = action.width
         win.h = action.height
+        win = wm_lifecycle_clamp_to_work_area(win, desktop_width, desktop_height)
     elif action.kind == "move":
         win.x = action.x
         win.y = action.y
     elif action.kind == "set_title":
         win.title = action.title
     elif action.kind == "minimize":
+        val was_focused = win.focused
         win.minimized = true
         win.focused = false
         out_windows[i] = win
-        return WmLifecycleApplyResult(windows: wm_lifecycle_focus_top_visible_window(out_windows), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
+        if was_focused:
+            out_windows = wm_lifecycle_focus_top_visible_window(out_windows)
+        return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     elif action.kind == "maximize":
         if not win.maximized:
             win.restore_x = win.x
@@ -372,6 +463,7 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
         win.y = WM_WORK_AREA_TOP
         win.w = desktop_width
         win.h = desktop_height - WM_WORK_AREA_TOP - WM_WORK_AREA_BOTTOM
+        win = wm_lifecycle_clamp_to_work_area(win, desktop_width, desktop_height)
         out_windows[i] = win
         return WmLifecycleApplyResult(windows: wm_lifecycle_focus_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     elif action.kind == "restore":
@@ -380,6 +472,7 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
             win.y = win.restore_y
             win.w = win.restore_w
             win.h = win.restore_h
+        win = wm_lifecycle_clamp_to_work_area(win, desktop_width, desktop_height)
         win.minimized = false
         win.focused = true
         win.maximized = false

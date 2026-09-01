@@ -1,25 +1,5 @@
 # Bug: HPACK huffman single-symbol decode returns empty; concat-built [u8] encodes wrong
 
-Status: RESOLVED 2026-08-17 (verified by EXECUTION, not inspection).
-
-Binary: `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
-(59537240 bytes, 2026-08-17 12:58:51 UTC).
-
-```
-$ bin/simple run <scratch>/h1.spl
-enc_len=1
-dec_len=1
-dec0=97
-concat=97
-fg1=97
-EXIT=0
-```
-
-Repro source: doc's own repro plus the `[u8]` concat cases — `hpack_huffman_decode`
-of `hpack_huffman_encode([97])` returns `[97]` (was `Ok([])`); `var p:[u8]=[]; p=p+[97]`
-gives 97 (was 8); `var f:[u8]=[10]; var g:[u8]=[97]; (f+g)[1]` gives 97 (was 0).
-No `src/lib` change was required or made.
-
 **Date:** 2026-06-30
 **Severity:** Medium — `hpack_huffman_decode` drops short payloads; blocks
 `hpack/huffman_h2_spec` "round-trips 256-byte indexed payload".
@@ -151,24 +131,3 @@ concat corrupts, with a minimal non-huffman repro; fix in the interpreter (seed)
 or rework the huffman loops to avoid the offending array pattern (e.g. index
 assignment into a pre-sized array instead of push/concat). Multi-hour; same
 class as the other interpreter array bugs.
-
-## ALREADY_FIXED 2026-08-17
-
-Re-run of the doc's own repro plus every corruption value it tabulates, on
-`bin/simple run` (seed binary), scratch file `repro/h1.spl` / `h2.spl`:
-
-```
-hpack_huffman_encode([97])        -> len 1        (was 1, still correct)
-hpack_huffman_decode([0x1F],0,1)  -> len 1, [0] = 97   (was Ok([]), len 0)
-var d: [u8] = []; d = d + [97]; d[0] -> 97       (was 8)
-[] + [0,1,8,200,255]              -> 0,1,8,200,255   (was 0,8,64,64,248)
-var f:[u8]=[10]; var g:[u8]=[97]; (f+g)[1] -> 97 (was 0)
-```
-
-All six documented `[u8]`-concat corruption cases (`0->0, 1->8, 8->64, 97->8,
-200->64, 255->248`, i.e. `v*8 mod 256`) now return the identity value, and the
-single-symbol huffman decode returns `[97]`. The huffman source was never the
-defect (the doc already established that); the seed-interpreter `[u8]`
-element coercion on typed-variable reassignment no longer mis-packs.
-
-Closing as fixed. No `src/lib` change was required or made.

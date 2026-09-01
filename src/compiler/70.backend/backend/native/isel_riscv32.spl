@@ -330,6 +330,8 @@ fn rv32_isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
             panic("riscv32 isel: unlowered DecisionProbe '{semantic_id}' reached instruction selection")
         case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
             panic("riscv32 isel: unlowered ConditionProbe '{semantic_id}' reached instruction selection")
+        case GlobalAddr(_, _, _):
+            panic("riscv32 isel: GlobalAddr lowering is not implemented")
         case Nop:
             ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
         case _:
@@ -678,7 +680,11 @@ fn rv32_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult
             # ran straight on into whatever block was laid out next, with exactly
             # the corrupt state the abort existed to stop. EBREAK traps.
             ISelInstResult(insts: [new_mach_inst(RV_OP_EBREAK, [])], ctx: ctx)
-        case CallTerminator(dest, func, args, normal, unwind):
+        case Throw(_, _):
+            panic("E-BACKEND-RISCV32-UNWIND-ABI: recoverable exceptions require a proven RV32 two-register i64 payload ABI")
+        case Resume(_, _):
+            panic("E-BACKEND-RISCV32-UNWIND-ABI: recoverable exceptions require a proven RV32 two-register i64 payload ABI")
+        case CallTerminator(dest, func, args, normal, unwind, _, _):
             # Contract (mir_interpreter.spl `case CallTerminator`): perform the
             # call, bind the return value into `dest` when present, then
             # transfer to `normal`. The NOP this used to emit dropped both the
@@ -686,13 +692,13 @@ fn rv32_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult
             if unwind.?:
                 # The native backend has no landing pads. Silently discarding
                 # the unwind edge would send an unwinding call into `normal`.
-                panic("riscv32 isel: CallTerminator with an unwind edge has no lowering (native backend has no exception handling)")
+                panic("E-BACKEND-RISCV32-UNWIND-ABI: unwind edges require a proven RV32 two-register i64 payload ABI")
             val call_res = rv32_isel_call(ctx, dest, func, args)
             var insts = call_res.insts
             insts.push(new_mach_inst(RV_OP_JAL, [op_phys(RV_X0), op_label(normal.id)]))
             ISelInstResult(insts: insts, ctx: call_res.ctx)
         case _:
-            # All seven MirTerminator variants are handled above. Returning a
+            # All nine MirTerminator variants are handled above. Returning a
             # NOP here would silently delete a terminator; fail loudly instead.
             panic("riscv32 isel: unhandled MirTerminator variant -- terminator lowered to nothing")
 

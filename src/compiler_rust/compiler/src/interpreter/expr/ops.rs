@@ -279,16 +279,10 @@ fn unsigned_ordering(left: &Value, right: &Value) -> Option<std::cmp::Ordering> 
     use std::cmp::Ordering;
     match (left, right) {
         (Value::UInt { value: a, .. }, Value::UInt { value: b, .. }) => Some(a.cmp(b)),
-        (Value::UInt { value: a, .. }, Value::Int(b)) => Some(if *b < 0 {
-            Ordering::Greater
-        } else {
-            a.cmp(&(*b as u64))
-        }),
-        (Value::Int(a), Value::UInt { value: b, .. }) => Some(if *a < 0 {
-            Ordering::Less
-        } else {
-            (*a as u64).cmp(b)
-        }),
+        (Value::UInt { value: a, .. }, Value::Int(b)) => {
+            Some(if *b < 0 { Ordering::Greater } else { a.cmp(&(*b as u64)) })
+        }
+        (Value::Int(a), Value::UInt { value: b, .. }) => Some(if *a < 0 { Ordering::Less } else { (*a as u64).cmp(b) }),
         _ => None,
     }
 }
@@ -634,11 +628,17 @@ pub(super) fn eval_op_expr(
                         Ok(result_family) => {
                             // Operation allowed - perform it on inner values
                             let result_val = evaluate_unit_binary_inner(lv, rv, *op)?;
-                            // Return unit with result family (or left family if same-family operation)
-                            let result_suffix = if let Some(ref fam) = result_family {
-                                fam.clone()
-                            } else {
-                                ls.clone()
+                            // Return unit with result family (or left family if same-family operation).
+                            //
+                            // The result SUFFIX is the left operand's suffix whenever the
+                            // operation stays in the same family (`42_ms + 2_ms` is still
+                            // `ms`). Only a derived family — `length / time = velocity`,
+                            // where no operand suffix names the result — falls back to the
+                            // family name. Using the family name unconditionally made
+                            // `(a + b).suffix()` report the family instead of the unit.
+                            let result_suffix = match result_family {
+                                Some(ref fam) if Some(fam.as_str()) != Some(left_family) => fam.clone(),
+                                _ => ls.clone(),
                             };
                             return Ok(Some(Value::Unit {
                                 value: Box::new(result_val),
@@ -773,8 +773,7 @@ pub(super) fn eval_op_expr(
                     (Value::Array(a), Value::ByteArray(b) | Value::FrozenByteArray(b))
                         if a.iter().all(|v| matches!(v.as_int(), Ok(0..=255))) =>
                     {
-                        let mut joined: Vec<u8> =
-                            a.iter().map(|v| v.as_int().unwrap_or(0) as u8).collect();
+                        let mut joined: Vec<u8> = a.iter().map(|v| v.as_int().unwrap_or(0) as u8).collect();
                         joined.extend_from_slice(b);
                         Ok(Value::ByteArray(Arc::new(joined)))
                     }
@@ -2193,10 +2192,7 @@ mod tests {
             value: u64::MAX,
             width: 64,
         };
-        let zero = Value::UInt {
-            value: 0,
-            width: 64,
-        };
+        let zero = Value::UInt { value: 0, width: 64 };
 
         assert_eq!(integer_ordering(&below, &zero), Some(Ordering::Greater));
         assert_eq!(integer_ordering(&edge, &zero), Some(Ordering::Greater));
@@ -2213,13 +2209,7 @@ mod tests {
         assert_eq!(integer_ordering(&max, &Value::Int(i64::MAX)), Some(Ordering::Greater));
         assert_eq!(integer_ordering(&Value::Int(-1), &max), Some(Ordering::Less));
         assert_eq!(
-            integer_ordering(
-                &Value::Int(7),
-                &Value::UInt {
-                    value: 7,
-                    width: 64,
-                },
-            ),
+            integer_ordering(&Value::Int(7), &Value::UInt { value: 7, width: 64 },),
             Some(Ordering::Equal)
         );
     }

@@ -1,0 +1,56 @@
+"""Bounded PostgreSQL v3 frontend framing remains incremental and fail closed."""
+
+use std.spec
+use std.database.postgres_mimic.{
+    PgWireDecodeStatus, PgWireMessageKind, PgWireErrorCode,
+    pgwire_decode_startup, pgwire_decode_frontend
+}
+
+fn pgwire_be32(value: i64) -> [i64]:
+    [value / 16777216, (value / 65536) % 256, (value / 256) % 256, value % 256]
+
+fn pgwire_startup(user: text, database: text) -> [i64]:
+    val payload = [0, 3, 0, 0] + "user".bytes() + [0] + user.bytes() + [0] +
+        "database".bytes() + [0] + database.bytes() + [0, 0]
+    pgwire_be32(payload.len() + 4) + payload
+
+fn pgwire_query(sql: text) -> [i64]:
+    val payload = sql.bytes() + [0]
+    [81] + pgwire_be32(payload.len() + 4) + payload
+
+describe "Postgres mimic wire codec":
+    it "decodes bounded SSLRequest and startup frames incrementally":
+        val partial = pgwire_decode_startup([0, 0, 0])
+        expect(partial.status).to_equal(PgWireDecodeStatus.NeedMore)
+        expect(partial.required).to_equal(4)
+        val ssl = pgwire_decode_startup([0, 0, 0, 8, 4, 210, 22, 47])
+        expect(ssl.status).to_equal(PgWireDecodeStatus.Decoded)
+        expect(ssl.message.kind).to_equal(PgWireMessageKind.SslRequest)
+        val startup = pgwire_decode_startup(pgwire_startup("simple", "app"))
+        expect(startup.message.kind).to_equal(PgWireMessageKind.Startup)
+        expect(startup.message.user).to_equal("simple")
+        expect(startup.message.database).to_equal("app")
+
+    it "decodes simple query and terminate frames":
+        val query = pgwire_decode_frontend(pgwire_query("SELECT 1"))
+        expect(query.status).to_equal(PgWireDecodeStatus.Decoded)
+        expect(query.message.kind).to_equal(PgWireMessageKind.SimpleQuery)
+        expect(query.message.query).to_equal("SELECT 1")
+        val terminate = pgwire_decode_frontend([88, 0, 0, 0, 4])
+        expect(terminate.message.kind).to_equal(PgWireMessageKind.Terminate)
+
+    it "rejects oversized malformed and unsupported frames without consumption":
+        val oversized = pgwire_decode_frontend([81, 0, 0, 4, 0], 64)
+        expect(oversized.status).to_equal(PgWireDecodeStatus.Rejected)
+        expect(oversized.error).to_equal(PgWireErrorCode.FrameTooLarge)
+        expect(oversized.consumed).to_equal(0)
+        val unterminated = pgwire_decode_frontend([81, 0, 0, 0, 6, 65])
+        expect(unterminated.error).to_equal(PgWireErrorCode.MalformedPayload)
+        val unsupported = pgwire_decode_frontend([80, 0, 0, 0, 4])
+        expect(unsupported.error).to_equal(PgWireErrorCode.UnsupportedMessage)
+
+    it "rejects invalid protocol and invalid UTF-8":
+        val protocol = pgwire_decode_startup([0, 0, 0, 8, 0, 2, 0, 0])
+        expect(protocol.error).to_equal(PgWireErrorCode.UnsupportedProtocol)
+        val invalid_query = pgwire_decode_frontend([81, 0, 0, 0, 6, 195, 0])
+        expect(invalid_query.error).to_equal(PgWireErrorCode.InvalidUtf8)

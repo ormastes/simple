@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+canonical="$root/src/lib/nogc_sync_mut/io/graphics2d_sffi.spl"
+app_facade="$root/src/app/io/graphics2d_sffi.spl"
+
+if [ "$(grep -c '^[[:space:]]*extern fn rt_lyon_' "$canonical")" -ne 49 ]; then
+    echo "canonical graphics2d declaration inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_lyon_/ {
+        if (previous_is_ffi) tagged++
+    }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$canonical")
+if [ "$tagged" -ne 49 ]; then
+    echo "every canonical graphics2d declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+if grep -n -E 'extern fn rt_|^[[:space:]]*fn |handle != 0' "$app_facade"; then
+    echo "application graphics2d facade duplicates providers, wrappers, or unsafe handle semantics" >&2
+    exit 1
+fi
+if ! grep -q '^export use std\.nogc_sync_mut\.io\.graphics2d_sffi\.\*$' "$app_facade"; then
+    echo "application graphics2d facade must re-export the canonical owner" >&2
+    exit 1
+fi
+
+echo "graphics2d SFFI owner audit: PASS"

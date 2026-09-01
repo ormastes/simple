@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+os_owner=src/os/kernel/boot/mmio_hardware.spl
+semihost=src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl
+rust_provider=src/compiler_rust/compiler/src/interpreter_extern/memory.rs
+
+owner_decls=$(grep -c '^extern fn rt_' "$os_owner")
+owner_tags=$(grep -c '^@unsafe(reason: .*unsigned target provider.*, capabilities: \[ffi' "$os_owner")
+test "$owner_decls" -eq 13 && test "$owner_tags" -eq 13 || {
+    echo "FAIL: OS MMIO owner needs 13 tagged raw declarations ($owner_decls declarations, $owner_tags tags)" >&2
+    exit 1
+}
+
+owner_raw_calls=$(grep -c 'unsafe(capabilities: \[ffi' "$os_owner")
+test "$owner_raw_calls" -eq 13 || {
+    echo "FAIL: OS MMIO owner needs 13 lexical raw calls, found $owner_raw_calls" >&2
+    exit 1
+}
+
+owner_inlines=$(grep -c '^@inline$' "$os_owner")
+test "$owner_inlines" -eq 17 || {
+    echo "FAIL: OS MMIO hot wrappers need 17 inline markers, found $owner_inlines" >&2
+    exit 1
+}
+
+semihost_tags=$(grep -c '^@unsafe(reason: "raw volatile UART .*", capabilities: \[ffi, raw_ptr\])$' "$semihost")
+semihost_calls=$(grep -c 'unsafe(capabilities: \[ffi, raw_ptr\]):' "$semihost")
+test "$semihost_tags" -eq 2 && test "$semihost_calls" -eq 3 || {
+    echo "FAIL: semihost UART needs 2 tagged declarations and 3 lexical calls" >&2
+    exit 1
+}
+
+checked_calls=$(grep -c 'checked_mmio_addr(args,.*"rt_volatile_' "$rust_provider")
+test "$checked_calls" -eq 8 || {
+    echo "FAIL: Rust interpreter needs 8 checked volatile address lifts, found $checked_calls" >&2
+    exit 1
+}
+grep -Fq 'volatile_rejects_null_and_misaligned_addresses_before_access' "$rust_provider" || {
+    echo 'FAIL: Rust volatile null/alignment sabotage test is missing' >&2
+    exit 1
+}
+
+if grep -Eiq '(malloc|calloc|realloc|dlsym|dlopen|mutex|sleep|retry|hash\(|signature)' "$os_owner"; then
+    echo 'FAIL: OS MMIO hot owner gained allocation, lookup, lock, retry, or admission work' >&2
+    exit 1
+fi
+
+echo 'PASS: volatile MMIO declarations are tagged, raw calls confined, and hot wrappers inline'

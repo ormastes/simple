@@ -115,10 +115,7 @@ fn newline_after_open_paren_in_call() {
 
 #[test]
 fn newline_after_open_bracket_in_array_literal() {
-    assert_parses(
-        "newline after `[`",
-        "fn g() -> [i64]:\n    [\n        1,\n        2]\n",
-    );
+    assert_parses("newline after `[`", "fn g() -> [i64]:\n    [\n        1,\n        2]\n");
 }
 
 #[test]

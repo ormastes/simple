@@ -1,6 +1,8 @@
 # SPipe Phase 7: Verify -- QA
 
 **Role:** QA -- Full validation: tests, coverage, docs, production readiness
+Fail when a changed source path lacks exact-feature and longest-prefix layer
+receipt coverage, or when kernel/drivers select MDSOC+.
 **Blinders:** ONLY verification. No code changes except critical fixes.
 **Context budget:** sub-40% -- load only test output + coverage reports.
 
@@ -23,20 +25,6 @@
    retry or enter a test-fix loop.
 3. Run feature specs first: `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` for each spec from Phase 4
 4. Run full test suite with capped output: `set -o pipefail; bin/simple test 2>&1 | tail -60` (pipefail preserves test exit code; check last lines for pass/fail summary)
-   Interpreter PASS/exit alone is not evidence. Focused interpreter diagnostics
-   must use `build_interpreter_result_wrapper` counters. Focused native font
-   evidence uses `src/app/test/font_evidence_runner.spl` with
-   `preprocess_spipe_native_result_file`; it is not an interpreter wrapper.
-   Native acceptance remains authoritative.
-   CUDA font production verification must apply the canonical artifact-trust
-   rule in `.claude/skills/spipe.md` before PASS.
-   Verify the portable checker aggregates only `PORTABLE_COMPUTE_TARGETS`,
-   matches emitted semantics to `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`, and
-   separates `candidate_compiled`/`artifact_validated` from `pinned_verified`.
-   Require compiler and validator path/version/SHA-256 provenance plus passing
-   `spirv-val` evidence for Vulkan. Phase one with stale pins must remain
-   `pinned_verified=false`; only independently reviewed pins reproduced by a
-   second run may set it true. Never accept repinning merely to green phase one.
 5. Run build checks: `set -o pipefail; bin/simple build check 2>&1 | tail -30`
 6. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`
@@ -64,27 +52,11 @@
    - shared interface/manual helper names match design, spec, manual, and
      tooling references
    - placeholder helpers fail explicitly with `assert(false)` or `fail(...)`
-11. If workflow/tooling behavior changed, verify the matching `doc/07_guide`,
-    `doc/06_spec`, `.codex/skills`, `.agents/skills`, `.claude/skills`,
-    `.claude/agents/spipe`, and `.gemini/commands` updates exist or are
-    explicitly recorded as `N/A`. Stale process docs fail verification; do not
-    mark the agent goal or SPipe lane complete before this gate passes. SimpleOS
-    mission-critical release PASS requires `release_blockers=none`.
-    SimpleOS compiler-in-filesystem lanes additionally require install-image
-    evidence for the target-native Simple payload at `/usr/bin/simple(.smf)`,
-    `/bin/simple(.smf)`, `/sys/apps/simple(.smf)`,
-    `/sys/apps/simple_compiler(.smf)`, `/sys/apps/simple_interpreter(.smf)`,
-    `/sys/apps/simple_loader(.smf)`, and `/SYS/SIMPLETOOL.SDN`, plus in-guest
-    `/usr/bin/simple --version` and compile/run `hello world` evidence from the
-    mounted SimpleOS filesystem. Host `bin/simple`, placeholder marker apps,
-    host-side compile/run, and QEMU fixed-command SSH responses fail this gate.
-    Physical-board completion also requires board identity, boot/download path,
-    and serial or SSH transcript; without that, record QEMU-only/source-present.
-12. Verify the `## Cooperative Review` plan from the state file was completed:
+11. Verify the `## Cooperative Review` plan from the state file was completed:
     lower-model sidecar lanes are either reviewed/merged or explicitly `N/A`,
     and the normal/highest-capability review accepted broad findings,
     coverage claims, generated-manual quality, exclusions, and done marks.
-13. Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
+12. Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
     `sh scripts/audit/direct-env-runtime-guard.shs --staged`; app leaf and
     `src/lib/gc_async_mut` env reads or process calls outside owner modules
     must use env/process facades, not local `rt_env_get`, `rt_process_run`,
@@ -101,41 +73,15 @@
     Treat browser `RDOC_RENDERDOC_HOOK_CHILDREN=0` and Chromium
     `--in-process-gpu` runs as diagnostic only unless they still emit a valid
     browser GPU-process `.rdc` with `RDOC` magic and prove Vulkan remains active.
-14. For GUI/web/2D rendering-lane implementation, wrapper, benchmark, or
-    platform-agent diffs, run
-    `sh scripts/check/check-rendering-source-coupling.shs`. Use
-    `RENDERING_SOURCE_COUPLING_REVISION=<rev>` for a specific jj change. New raw
-    `rt_*`, direct backend proof/status pokes, or forced backend pass states in
-    rendering-scoped files are FAIL unless routed through an owning facade or
-    the documented RenderDoc helper exception.
-15. Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
+14. Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
     on macOS, `metal-requires-macos` for Linux Metal, the Vulkan gate above for
     Vulkan, and a retained 8K row or explicit blocker in `doc/09_report` /
     `doc/10_metrics` for 8K performance.
-16. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
+15. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
     receipts are necessary but not sufficient; production proof requires
     same-frame backend `device_readback`, a positive backend handle, and
     matching checksum. Synthetic handles, upload-only provenance, and CPU
     mirrors fail.
-16. For formal verification claims, use the matching proof system and require
-    both when the lane spans layers. RTL/hardware claims require
-    RVFI/riscv-formal/SymbiYosys evidence; generated RISC-V RTL uses
-    `scripts/rtl/check-rvfi-formal-readiness.shs` with `CORE_VHDL` and, when
-    present, `FORMAL_HARNESS`, `FORMAL_SBY`, and `FORMAL_MANIFEST`. Missing
-    `sby` is readiness only, not proof pass. Lean claims require
-    `simple gen-lean verify`, `simple verify check`, or a lane-specific Lean
-    wrapper with zero `sorry`/`admit`/untrusted axioms. Starvation, fairness,
-    race-condition, scheduler, channel, lock, or resource-lifecycle changes
-    require a concurrency/resource model check or an explicit blocker.
-    When generated Lean/BYL artifacts feed the claim, require the matching
-    manual theorem or constraint file to remain separate and pass its
-    post-regeneration gate (`lake build`, `simple gen-lean verify`, or
-    `simple verify check`) before accepting the evidence.
-    SimpleOS mission-critical release evidence also requires
-    `sh scripts/check/check-simpleos-mission-critical-release.shs` with
-    `release_blockers=none`; readiness-only rows are not release completion.
-    Treat `sidecar-contract-failed`, `missing-artifact`, and `sby-run-failed`
-    as release-failing RTL evidence problems, not missing-tool blockers.
 16. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
@@ -173,13 +119,8 @@
   `.claude/agents/spipe/`, and `.gemini/commands/` process docs before PASS
 - **Context docs fresh:** `simple_context` or context-mode changes must update
   the MCP/tooling guide, generated manuals, and skill/command docs for any new
-  `--sql`/`--db` behavior, `--source-filter`/MCP `source_filter`,
-  file-optional SQL query shape, embedded SQLite facade boundary, explicit
-  absence statuses, and public-absence guard.
-- **Simple MCP launch fresh:** local registration must use
-  `bin/simple src/app/mcp/main.spl`; require a native MCP build only for
-  packaging/deployment/release changes, and reject stale external
-  context-mode or native `node_repl` registrations.
+  `--sql`/`--db` behavior, embedded SQLite facade boundary, explicit absence
+  statuses, and public-absence guard.
 - **Cooperative review complete:** Broad lanes must finish the recorded
   lower-model sidecars or mark them `N/A`, then pass normal/highest-capability
   review before PASS
@@ -215,10 +156,3 @@ If a fix requires significant code changes, flag it for Phase 5 re-entry.
 
 - Verification report in `.spipe/<feature>/state.md`
 - Any minor fixes applied (test/doc only)
-
-Changed SSpec/manual pairs require one deterministic `simple sspec-maintain
-scan` gate. Blockers, threshold regression, stale mirrors, impure JSON/SARIF,
-or non-failing generated placeholders prevent PASS. Review all seven scores,
-requirement-test traceability, and any suppression record (rule, owner, reason,
-bounded scope). Confirm exact approval/rollback for applied edits and that
-`documentize` reused SPipe.

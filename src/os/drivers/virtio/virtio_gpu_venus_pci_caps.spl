@@ -1,0 +1,288 @@
+"""Pure, authority-aware VirtIO PCI capability snapshot parser for Venus."""
+
+val VIRTIO_PCI_CAP_VENDOR_ID: u8 = 0x09
+val VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1
+val VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2
+val VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4
+val VIRTIO_PCI_CAP_SHARED_MEMORY_CFG: u8 = 8
+val VIRTIO_GPU_SHM_ID_HOST_VISIBLE: u8 = 1
+
+struct VirtioPciBarAperture:
+    bar: u8
+    memory: bool
+    physical_base: u64
+    byte_len: u64
+
+struct VirtioPciBarGrant:
+    bar: u8
+    physical_base: u64
+    mapped_base: u64
+    byte_len: u64
+    cap_token: u64
+
+struct VirtioPciSnapshot:
+    config_bytes: [u8]
+    first_cap: u8
+    bars: [VirtioPciBarAperture]
+    grants: [VirtioPciBarGrant]
+
+struct VirtioGpuPciSnapshotDiscovery:
+    two_d_ready: bool
+    venus_ready: bool
+    reason: text
+    common_virt: u64
+    common_len: u64
+    notify_virt: u64
+    notify_len: u64
+    notify_multiplier: u32
+    device_cfg_virt: u64
+    device_cfg_len: u64
+    host_visible_virt: u64
+    host_visible_len: u64
+    host_visible_cap_token: u64
+
+struct _VirtioPciParsedRow:
+    cap_len: u8
+    cfg_type: u8
+    bar: u8
+    id: u8
+    offset: u64
+    length: u64
+    notify_multiplier: u32
+
+struct _VirtioPciMappedRange:
+    valid: bool
+    reason: text
+    mapped_base: u64
+    byte_len: u64
+    cap_token: u64
+
+fn _pci_u32(bytes: [u8], offset: i64) -> u32:
+    bytes[offset].to_u32() |
+        (bytes[offset + 1].to_u32() << 8) |
+        (bytes[offset + 2].to_u32() << 16) |
+        (bytes[offset + 3].to_u32() << 24)
+
+fn _pci_u64(low: u32, high: u32) -> u64:
+    low.to_u64() | (high.to_u64() << 32)
+
+fn _pci_seen(positions: [u8], position: u8) -> bool:
+    for prior in positions:
+        if prior == position:
+            return true
+    false
+
+fn _pci_map_blocked(reason: text) -> _VirtioPciMappedRange:
+    _VirtioPciMappedRange(valid: false, reason: reason,
+        mapped_base: 0u64, byte_len: 0u64, cap_token: 0u64)
+
+fn _pci_map_range(row: _VirtioPciParsedRow,
+        bars: [VirtioPciBarAperture], grants: [VirtioPciBarGrant]) -> _VirtioPciMappedRange:
+    # @decision VP_BAR_ROW
+    var bar_count: i64 = 0
+    var aperture = VirtioPciBarAperture(bar: 0u8, memory: false,
+        physical_base: 0u64, byte_len: 0u64)
+    for candidate in bars:
+        if candidate.bar == row.bar:
+            bar_count = bar_count + 1
+            aperture = candidate
+    if bar_count == 0:
+        return _pci_map_blocked("blocked:bar-aperture-missing")
+    # @decision VP_BAR_VALID
+    if bar_count != 1 or not aperture.memory or aperture.physical_base == 0u64 or
+            aperture.byte_len == 0u64:
+        return _pci_map_blocked("blocked:bar-aperture-invalid")
+    # @decision VP_RANGE_ADD
+    if row.length == 0u64 or row.offset + row.length < row.offset:
+        return _pci_map_blocked("blocked:range-overflow")
+    # @decision VP_APERTURE_CONTAIN
+    if row.offset > aperture.byte_len or row.length > aperture.byte_len - row.offset:
+        return _pci_map_blocked("blocked:range-outside-aperture")
+    val region_phys = aperture.physical_base + row.offset
+    if region_phys < aperture.physical_base:
+        return _pci_map_blocked("blocked:range-overflow")
+
+    # @decision VP_GRANT_ROW
+    var grant_count: i64 = 0
+    var grant = VirtioPciBarGrant(bar: 0u8, physical_base: 0u64,
+        mapped_base: 0u64, byte_len: 0u64, cap_token: 0u64)
+    for candidate in grants:
+        if candidate.bar == row.bar:
+            grant_count = grant_count + 1
+            grant = candidate
+    if grant_count == 0:
+        return _pci_map_blocked("blocked:bar-grant-missing")
+    # @decision VP_GRANT_VALID
+    if grant_count != 1 or grant.physical_base == 0u64 or
+            grant.mapped_base == 0u64 or grant.byte_len == 0u64 or
+            grant.cap_token == 0u64:
+        return _pci_map_blocked("blocked:bar-grant-invalid")
+    val grant_end = grant.physical_base + grant.byte_len
+    val aperture_end = aperture.physical_base + aperture.byte_len
+    if grant_end < grant.physical_base or aperture_end < aperture.physical_base:
+        return _pci_map_blocked("blocked:range-overflow")
+    if grant.physical_base < aperture.physical_base or grant_end > aperture_end:
+        return _pci_map_blocked("blocked:bar-grant-invalid")
+    val region_end = region_phys + row.length
+    if region_end < region_phys:
+        return _pci_map_blocked("blocked:range-overflow")
+    # @decision VP_GRANT_CONTAIN
+    if region_phys < grant.physical_base or region_end > grant_end:
+        return _pci_map_blocked("blocked:range-outside-grant")
+    val grant_offset = region_phys - grant.physical_base
+    val mapped = grant.mapped_base + grant_offset
+    if mapped < grant.mapped_base:
+        return _pci_map_blocked("blocked:range-overflow")
+    _VirtioPciMappedRange(valid: true, reason: "ok:pci-range",
+        mapped_base: mapped, byte_len: row.length, cap_token: grant.cap_token)
+
+fn _pci_discovery(reason: text, two_d_ready: bool,
+        common: _VirtioPciMappedRange, notify: _VirtioPciMappedRange,
+        notify_multiplier: u32) -> VirtioGpuPciSnapshotDiscovery:
+    VirtioGpuPciSnapshotDiscovery(two_d_ready: two_d_ready, venus_ready: false,
+        reason: reason, common_virt: common.mapped_base, common_len: common.byte_len,
+        notify_virt: notify.mapped_base, notify_len: notify.byte_len,
+        notify_multiplier: notify_multiplier, device_cfg_virt: 0u64,
+        device_cfg_len: 0u64, host_visible_virt: 0u64,
+        host_visible_len: 0u64, host_visible_cap_token: 0u64)
+
+fn virtio_gpu_parse_venus_pci_caps(snapshot: VirtioPciSnapshot) -> VirtioGpuPciSnapshotDiscovery:
+    var rows: [_VirtioPciParsedRow] = []
+    var positions: [u8] = []
+    var position = snapshot.first_cap
+    var hops: i64 = 0
+    var ignored_rows: i64 = 0
+    val limit: i64 = if snapshot.config_bytes.len() < 256:
+        snapshot.config_bytes.len().to_i64()
+    else:
+        256
+
+    while position != 0u8:
+        val pos = position.to_i64()
+        # @decision VP_CHAIN
+        if pos < 0x40 or (pos & 3) != 0 or pos + 4 > limit or hops >= 64:
+            return _pci_discovery("blocked:cap-chain-invalid", false,
+                _pci_map_blocked("none"), _pci_map_blocked("none"), 0u32)
+        # @decision VP_CYCLE
+        if _pci_seen(positions, position):
+            return _pci_discovery("blocked:cap-cycle", false,
+                _pci_map_blocked("none"), _pci_map_blocked("none"), 0u32)
+        positions.push(position)
+        val cap_id = snapshot.config_bytes[pos]
+        val next = snapshot.config_bytes[pos + 1]
+        if cap_id == VIRTIO_PCI_CAP_VENDOR_ID:
+            val cap_len = snapshot.config_bytes[pos + 2]
+            val cfg_type = snapshot.config_bytes[pos + 3]
+            # @decision VP_TRUNCATED
+            if cap_len < 4u8 or pos + cap_len.to_i64() > limit:
+                return _pci_discovery("blocked:cap-truncated", false,
+                    _pci_map_blocked("none"), _pci_map_blocked("none"), 0u32)
+            if cfg_type == VIRTIO_PCI_CAP_COMMON_CFG or
+                    cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG or
+                    cfg_type == VIRTIO_PCI_CAP_DEVICE_CFG or
+                    cfg_type == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG:
+                val bar = if cap_len >= 5u8: snapshot.config_bytes[pos + 4] else: 0xffu8
+                val id = if cap_len >= 6u8: snapshot.config_bytes[pos + 5] else: 0u8
+                var offset = 0u64
+                var length = 0u64
+                var notify_multiplier = 0u32
+                if cap_len >= 16u8:
+                    offset = _pci_u32(snapshot.config_bytes, pos + 8).to_u64()
+                    length = _pci_u32(snapshot.config_bytes, pos + 12).to_u64()
+                if cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG and cap_len >= 20u8:
+                    notify_multiplier = _pci_u32(snapshot.config_bytes, pos + 16)
+                if cfg_type == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG and cap_len >= 24u8:
+                    offset = _pci_u64(_pci_u32(snapshot.config_bytes, pos + 8),
+                        _pci_u32(snapshot.config_bytes, pos + 16))
+                    length = _pci_u64(_pci_u32(snapshot.config_bytes, pos + 12),
+                        _pci_u32(snapshot.config_bytes, pos + 20))
+                rows.push(_VirtioPciParsedRow(cap_len: cap_len, cfg_type: cfg_type,
+                    bar: bar, id: id, offset: offset, length: length,
+                    notify_multiplier: notify_multiplier))
+            else:
+                ignored_rows = ignored_rows + 1
+        position = next
+        hops = hops + 1
+
+    var common_rows: [_VirtioPciParsedRow] = []
+    var notify_rows: [_VirtioPciParsedRow] = []
+    var device_rows: [_VirtioPciParsedRow] = []
+    var shm_rows: [_VirtioPciParsedRow] = []
+    var shm_ids: [u8] = []
+    for row in rows:
+        if row.cfg_type == VIRTIO_PCI_CAP_COMMON_CFG:
+            common_rows.push(row)
+        elif row.cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG:
+            notify_rows.push(row)
+        elif row.cfg_type == VIRTIO_PCI_CAP_DEVICE_CFG:
+            device_rows.push(row)
+        elif row.cfg_type == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG:
+            # @decision VP_DUP_SHM
+            if _pci_seen(shm_ids, row.id):
+                return _pci_discovery("blocked:duplicate-shm-id", false,
+                    _pci_map_blocked("none"), _pci_map_blocked("none"), 0u32)
+            shm_ids.push(row.id)
+            if row.id == VIRTIO_GPU_SHM_ID_HOST_VISIBLE:
+                shm_rows.push(row)
+
+    var common = _pci_map_blocked("blocked:common-missing")
+    var notify = _pci_map_blocked("blocked:notify-missing")
+    var notify_multiplier = 0u32
+    if common_rows.len() > 0:
+        val row = common_rows[0]
+        if row.cap_len >= 16u8 and row.bar <= 5u8:
+            common = _pci_map_range(row, snapshot.bars, snapshot.grants)
+    if notify_rows.len() > 0:
+        val row = notify_rows[0]
+        if row.cap_len >= 20u8 and row.bar <= 5u8 and row.notify_multiplier != 0u32:
+            notify = _pci_map_range(row, snapshot.bars, snapshot.grants)
+            notify_multiplier = row.notify_multiplier
+    val two_d_ready = common.valid and notify.valid
+
+    # @decision VP_DEVICE_ROW
+    if device_rows.len() == 0:
+        return _pci_discovery("blocked:device-cfg-missing", two_d_ready,
+            common, notify, notify_multiplier)
+    val device_row = device_rows[0]
+    # @decision VP_DEVICE_VALID
+    if device_row.cap_len < 16u8 or device_row.bar > 5u8 or
+            (device_row.offset & 3u64) != 0u64 or device_row.length < 16u64:
+        return _pci_discovery("blocked:device-cfg-malformed", two_d_ready,
+            common, notify, notify_multiplier)
+    val device_map = _pci_map_range(device_row, snapshot.bars, snapshot.grants)
+    if not device_map.valid:
+        return _pci_discovery(device_map.reason, two_d_ready,
+            common, notify, notify_multiplier)
+
+    # @decision VP_SHM_ROW
+    if shm_rows.len() == 0:
+        return _pci_discovery("blocked:host-visible-shm-missing", two_d_ready,
+            common, notify, notify_multiplier)
+    val shm_row = shm_rows[0]
+    # @decision VP_SHM_VALID
+    if shm_rows.len() != 1 or shm_row.cap_len < 24u8 or shm_row.bar > 5u8 or
+            shm_row.length == 0u64:
+        return _pci_discovery("blocked:host-visible-shm-malformed", two_d_ready,
+            common, notify, notify_multiplier)
+    val shm_map = _pci_map_range(shm_row, snapshot.bars, snapshot.grants)
+    if not shm_map.valid:
+        return _pci_discovery(shm_map.reason, two_d_ready,
+            common, notify, notify_multiplier)
+    if not two_d_ready:
+        return _pci_discovery("blocked:controlq-caps-missing", false,
+            common, notify, notify_multiplier)
+    VirtioGpuPciSnapshotDiscovery(two_d_ready: true, venus_ready: true,
+        reason: "ready:venus-pci-caps", common_virt: common.mapped_base,
+        common_len: common.byte_len, notify_virt: notify.mapped_base,
+        notify_len: notify.byte_len, notify_multiplier: notify_multiplier,
+        device_cfg_virt: device_map.mapped_base, device_cfg_len: device_map.byte_len,
+        host_visible_virt: shm_map.mapped_base, host_visible_len: shm_map.byte_len,
+        host_visible_cap_token: shm_map.cap_token)
+
+export VIRTIO_PCI_CAP_COMMON_CFG, VIRTIO_PCI_CAP_NOTIFY_CFG
+export VIRTIO_PCI_CAP_DEVICE_CFG, VIRTIO_PCI_CAP_SHARED_MEMORY_CFG
+export VIRTIO_GPU_SHM_ID_HOST_VISIBLE
+export VirtioPciBarAperture, VirtioPciBarGrant, VirtioPciSnapshot
+export VirtioGpuPciSnapshotDiscovery, virtio_gpu_parse_venus_pci_caps
+
+# @req REQ-001 REQ-003 REQ-004 NFR-001 NFR-002 NFR-007

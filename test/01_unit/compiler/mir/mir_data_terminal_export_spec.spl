@@ -1,0 +1,46 @@
+"""
+# MIR data terminal-export regression
+
+The compatibility `mir_data` surface remains usable by existing MIR, optimizer,
+and backend consumers while its high-volume instruction/helper exports retain
+their declaring-module identity during strict staged lowering.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.mir.mir_data.{
+    LocalId, MirInstKind, MirOperandKind, MirConstValue,
+    mir_operand_copy, mir_operand_const_int
+}
+
+fn copied_local_id(local: LocalId) -> i64:
+    match mir_operand_copy(local).kind:
+        case MirOperandKind.Copy(copied): copied.id
+        case _: -1
+
+fn constant_int_value(value: i64) -> i64:
+    match mir_operand_const_int(value).kind:
+        case MirOperandKind.Const(constant, _):
+            match constant:
+                case MirConstValue.Int(found): found
+                case _: -1
+        case _: -1
+
+fn instruction_copy_shape(kind: MirInstKind) -> text:
+    match kind:
+        case MirInstKind.Copy(destination, source): "{destination.id}:{source.id}"
+        case _: "wrong-kind"
+
+describe "mir_data terminal exports":
+    it "constructs support helpers and instruction kinds through mir_data":
+        expect(copied_local_id(LocalId(id: 7))).to_equal(7)
+        expect(constant_int_value(41)).to_equal(41)
+        expect(instruction_copy_shape(MirInstKind.Copy(
+            LocalId(id: 2), LocalId(id: 3)))).to_equal("2:3")
+
+    it "pins the three exports to their canonical terminal imports":
+        val source = file_read("src/compiler/50.mir/mir_data.spl")
+        expect(source).to_contain(
+            "use compiler.mir.mir_instruction_kinds.\{MirInstKind\}")
+        expect(source).to_contain(
+            "mir_operand_copy, mir_operand_const_int")

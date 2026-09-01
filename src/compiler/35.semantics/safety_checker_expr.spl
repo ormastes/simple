@@ -2,6 +2,8 @@
 # preserves receiver-first MethodCall traversal without copying receivers.
 
 use compiler.hir.hir_definitions.*
+use compiler.hir.sffi_identity.{hir_type_is_sffi_raw_callable,
+    sffi_method_resolution_symbol}
 use compiler.semantics.safety_checker.*
 
 
@@ -23,15 +25,14 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
     match expr.kind:
         # Unsafe block - enter unsafe context
         case UnsafeBlock(body):
-            val was_unsafe = self.context.in_unsafe
-            self.context.in_unsafe = true
+            val saved_unsafe_depth = self.context.unsafe_depth
+            self.context.unsafe_depth = saved_unsafe_depth + 1
             safetychecker_check_block(self, body)
-            if not was_unsafe:
-                self.context.in_unsafe = false
+            self.context.unsafe_depth = saved_unsafe_depth
 
         # Inline assembly - must be in unsafe block
         case InlineAsm(asm_code):
-            if not self.context.in_unsafe:
+            if self.context.unsafe_depth <= 0:
                 self.context.errors = self.context.errors.push(SafetyError.InlineAsmOutsideUnsafe(expr.span))
             # Type check constraint expressions
             for constraint in asm_code.constraints:
@@ -41,7 +42,7 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
         # plain InlineAsm; previously fell through the wildcard unchecked
         # (doc/08_tracking/bug/safety_checker_pass_never_invoked_2026-07-27.md).
         case InlineAsmMatch(_):
-            if not self.context.in_unsafe:
+            if self.context.unsafe_depth <= 0:
                 self.context.errors = self.context.errors.push(SafetyError.InlineAsmOutsideUnsafe(expr.span))
 
         # Binary operations
@@ -50,7 +51,9 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
             safetychecker_check_expr(self, right)
 
         # Unary operations
-        case Unary(_, operand):
+        case Unary(op, operand):
+            if op == HirUnaryOp.Ref or op == HirUnaryOp.RefMut:
+                safetychecker_flag_static_reference(self, op, operand, expr.span)
             safetychecker_check_expr(self, operand)
 
         # Control flow
@@ -116,16 +119,34 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
         # Function calls: direct calls to raw-pointer primitives or module
         # extern fns outside an `unsafe:` block violate the safety boundary.
         case Call(callee, args, _):
-            if not self.context.in_unsafe:
+            if self.context.unsafe_depth <= 0:
                 match callee.kind:
-                    case NamedVar(_, callee_name):
-                        safetychecker_flag_callee(self, callee_name, expr.span)
+                    case NamedVar(callee_symbol, callee_name):
+                        safetychecker_flag_callee(self, callee_symbol, callee_name, expr.span)
+                    case Field(_, field_name, Some(callee_symbol)):
+                        if safety_is_extern_fn(self, callee_symbol):
+                            safetychecker_flag_callee(
+                                self, callee_symbol, field_name, expr.span)
+                        elif callee.has_type_ and
+                                hir_type_is_sffi_raw_callable(Some(callee.type_)):
+                            self.context.errors = self.context.errors.push(
+                                SafetyError.UnsafeFfiOutsideUnsafe(expr.span))
                     case _:
-                        pass
+                        if callee.has_type_ and
+                                hir_type_is_sffi_raw_callable(Some(callee.type_)):
+                            self.context.errors = self.context.errors.push(
+                                SafetyError.UnsafeFfiOutsideUnsafe(expr.span))
             safetychecker_check_expr(self, callee)
             safetychecker_check_args(self, args)
 
-        case MethodCall(receiver, method_name, args, _):
+        case MethodCall(receiver, method_name, args, resolution):
+            if self.context.unsafe_depth <= 0:
+                match sffi_method_resolution_symbol(resolution):
+                    case Some(callee_symbol):
+                        safetychecker_flag_callee(
+                            self, callee_symbol, method_name, expr.span)
+                    case nil:
+                        pass
             # Receiver-first traversal is required for chained MethodCalls:
             # inspect the inner call before its outer mutation rule, and do
             # not materialize another HirExpr temporary that can detach a
@@ -133,6 +154,16 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
             safetychecker_check_expr(self, receiver)
             safetychecker_flag_param_method_call(self, receiver, method_name, expr.span)
             safetychecker_flag_iter_method_call(self, receiver, method_name, expr.span)
+            safetychecker_check_args(self, args)
+
+        case StaticCall(_, method_name, args, resolution):
+            if self.context.unsafe_depth <= 0:
+                match sffi_method_resolution_symbol(resolution):
+                    case Some(callee_symbol):
+                        safetychecker_flag_callee(
+                            self, callee_symbol, method_name, expr.span)
+                    case nil:
+                        pass
             safetychecker_check_args(self, args)
 
         # Collections

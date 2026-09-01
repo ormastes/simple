@@ -1,0 +1,25 @@
+#!/bin/sh
+# The cache fast-GC owner must keep all raw runtime calls in inlined lexical
+# wrappers. Its sweep algorithm and direct runtime-call count must not drift.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/80.driver/cache/gc/fast_gc.spl"
+
+test "$(grep -c '^extern fn rt_' "$module")" -eq 12
+tagged=$(awk '/^@unsafe\(.*capabilities: \[ffi\]\)$/ { tagged=1; next }
+    /^extern fn rt_/ { if (tagged) count++ }
+    { tagged=0 }
+    END { print count + 0 }' "$module")
+test "$tagged" -eq 12
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 12
+test "$(grep -Ec '^        rt_' "$module")" -eq 12
+
+for helper in gc_file_exists_raw gc_file_delete_raw gc_file_size_raw \
+    gc_file_modified_time_raw gc_file_move_raw gc_dir_create_all_raw \
+    gc_dir_exists_raw gc_dir_list_raw gc_dir_walk_raw gc_dir_remove_all_raw \
+    gc_time_now_unix_micros_raw gc_process_id_raw; do
+    grep -q "^fn $helper" "$module"
+done
+
+echo 'cache fast-GC SFFI authority: PASS (12 inlined lexical raw owners)'

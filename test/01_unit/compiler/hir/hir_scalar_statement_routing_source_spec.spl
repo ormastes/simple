@@ -1,0 +1,156 @@
+"""
+Source contract for scalar HIR statement routing.
+
+Ordinary 1:1 statements must not cross the temporary `[HirStmt]` expansion
+boundary. Only parser-encoded tuple Val/Var statements use multi lowering;
+value tails retain the fresh scalar extraction introduced for bootstrap.
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use std.env.variables.{env_get, env_has, env_set, env_unset}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.{HirExprKind, HirStmtKind}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val STATEMENTS = "src/compiler/20.hir/hir_lowering/statements.spl"
+val BLOCKS = "src/compiler/20.hir/hir_lowering/_Expressions/block_and_asm_lowering.spl"
+val BOOTSTRAP_MAIN = "src/app/cli/bootstrap_main.spl"
+
+fn bootstrap_compile_source_fixture() -> text:
+    """Read the exact target and its direct option-classification dependency."""
+    val source = read_file_text(BOOTSTRAP_MAIN)
+    val start = source.index_of("fn bootstrap_compile_option_takes_value(arg: text) -> bool:")
+    val finish = source.index_of("fn bootstrap_compile_output_from_args(args: [text], i: i64) -> text:", start)
+    if start < 0 or finish <= start:
+        return ""
+    source.substring(start, finish)
+
+describe "HIR scalar statement routing source contract":
+    it "classifies only the existing tuple Val and Var marker":
+        step("Inspect the shared multi-lowering predicate")
+        val statements = read_file_text(STATEMENTS)
+
+        expect(statements).to_contain("me hir_stmt_requires_multi_lowering(s: Stmt) -> bool:")
+        expect(statements).to_contain("return v_name.len() > 1 and v_name[0:1] == \"(\"")
+        expect(statements).to_contain("return vr_name.len() > 1 and vr_name[0:1] == \"(\"")
+        expect(statements.contains("v_name.ends_with")).to_be(false)
+        expect(statements.contains("vr_name.ends_with")).to_be(false)
+
+    it "classifies every final scalar statement by its lowered HIR kind":
+        step("Inspect value-block scalar and lowered-HIR tail routing")
+        val blocks = read_file_text(BLOCKS)
+        val classify = blocks.index_of("val requires_multi = self.hir_stmt_requires_multi_lowering(src_stmt)")
+        val scalar = blocks.index_of("val lowered_scalar = self.lower_hir_stmt(src_stmt)")
+        val tail = blocks.index_of("if stmt_idx == stmt_count - 1:")
+        val hir_kind = blocks.index_of("if rt_enum_discriminant(lowered_scalar.kind) == HIR_STMT_EXPR_TAG:")
+        val multi = blocks.index_of("val lowered_list = self.lower_hir_stmt_multi(src_stmt)")
+
+        expect(classify).to_be_greater_than(-1)
+        expect(scalar).to_be_greater_than(classify)
+        expect(tail).to_be_greater_than(scalar)
+        expect(hir_kind).to_be_greater_than(tail)
+        expect(multi).to_be_greater_than(hir_kind)
+        expect(blocks.contains("source_expr_disc")).to_be(false)
+        expect(blocks.contains("val source_kind: StmtKind = src_stmt.kind")).to_be(false)
+        expect(blocks.contains("stmts = stmts.push(self.lower_hir_stmt(src_stmt))")).to_be(false)
+        expect(blocks).to_contain("if rt_enum_discriminant(expr.kind) == HIR_EXPR_RETURN_TAG:")
+        expect(blocks).to_contain("stmts = stmts.push(lowered_scalar)")
+        expect(blocks.contains("val lowered_tail = lowered_scalar")).to_be(false)
+
+    it "uses the same split in bootstrap and ordinary unit blocks":
+        step("Inspect both unit-block lowering loops")
+        val blocks = read_file_text(BLOCKS)
+
+        expect(blocks).to_contain("if self.hir_stmt_requires_multi_lowering(boot_stmt):")
+        expect(blocks).to_contain("boot_stmts = boot_stmts.push(self.lower_hir_stmt(boot_stmt))")
+        expect(blocks).to_contain("if self.hir_stmt_requires_multi_lowering(unit_stmt):")
+        expect(blocks).to_contain("stmts = stmts.push(self.lower_hir_stmt(unit_stmt))")
+        expect(blocks).to_contain("self.lower_hir_stmt_multi(boot_stmt)")
+        expect(blocks).to_contain("self.lower_hir_stmt_multi(unit_stmt)")
+
+    it "keeps the exact bootstrap compile-source selector scalar through HIR and MIR":
+        step("Read and lower bootstrap_compile_source_from_args from bootstrap_main in bootstrap mode")
+        val prior_bootstrap_present = env_has("SIMPLE_BOOTSTRAP")
+        val prior_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+        expect(env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        val source = bootstrap_compile_source_fixture()
+        val parsed = parse_full_frontend(source, BOOTSTRAP_MAIN, "app.cli.bootstrap_main", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename(BOOTSTRAP_MAIN)
+        val hir = hir_lowering.lower_module(parsed)
+
+        var found = false
+        var str_return = false
+        var helper_found = false
+        var helper_bool_return = false
+        var saw_while = false
+        var saw_let_index = false
+        var terminal_string = false
+        var mir_error_count = -1
+        var type_transport_receipts = -1
+        for function_ in hir.functions.values():
+            if function_.name == "bootstrap_compile_option_takes_value":
+                helper_found = true
+                match function_.return_type.kind:
+                    case HirTypeKind.Bool: helper_bool_return = true
+                    case _: helper_bool_return = false
+            if function_.name == "bootstrap_compile_source_from_args":
+                found = true
+                match function_.return_type.kind:
+                    case HirTypeKind.Str: str_return = true
+                    case _: str_return = false
+                for stmt in function_.body.stmts:
+                    match stmt.kind:
+                        case HirStmtKind.Expr(expr):
+                            match expr.kind:
+                                case HirExprKind.While(_, loop_body, _):
+                                    saw_while = true
+                                    for loop_stmt in loop_body.stmts:
+                                        match loop_stmt.kind:
+                                            case HirStmtKind.Let(_, _, init):
+                                                match init.kind:
+                                                    case HirExprKind.Index(base, index):
+                                                        match base.kind:
+                                                            case HirExprKind.NamedVar(_, base_name):
+                                                                match index.kind:
+                                                                    case HirExprKind.NamedVar(_, index_name):
+                                                                        saw_let_index = base_name == "args" and index_name == "i"
+                                                                    case _: ()
+                                                            case _: ()
+                                                    case _: ()
+                                            case _: ()
+                                case _: ()
+                        case _: ()
+                if function_.body.has:
+                    match function_.body.value.kind:
+                        case HirExprKind.StringLit(value, _): terminal_string = value == ""
+                        case _: terminal_string = false
+
+                var mir_lowering = MirLowering.new(hir.symbols)
+                val _mir = mir_lowering.lower_function(function_)
+                mir_error_count = mir_lowering.errors.len()
+                type_transport_receipts = mir_lowering.type_transport_receipts
+
+        var env_restored = false
+        if prior_bootstrap_present:
+            env_restored = env_set("SIMPLE_BOOTSTRAP", prior_bootstrap)
+        else:
+            env_restored = env_unset("SIMPLE_BOOTSTRAP")
+
+        step("Require the exact scalar HIR shape and reject fabricated MIR transport diagnostics")
+        expect(source.len()).to_be_greater_than(0)
+        expect(env_restored).to_equal(true)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(helper_found).to_equal(true)
+        expect(helper_bool_return).to_equal(true)
+        expect(found).to_equal(true)
+        expect(str_return).to_equal(true)
+        expect(saw_while).to_equal(true)
+        expect(saw_let_index).to_equal(true)
+        expect(terminal_string).to_equal(true)
+        expect(mir_error_count).to_equal(0)
+        expect(type_transport_receipts).to_equal(0)

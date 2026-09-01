@@ -38,3 +38,17 @@ MCP app code must use Simple facades. If JIT reports an unresolved `rt_*`
 symbol, first prove the Simple facade, interpreter extern, and native runtime
 implementation exist. Only then repair the central JIT runtime provider; never
 add an MCP-local extern or accept interpreter fallback as native performance.
+
+## 2026-08-28 — context-mode/ponytail parity lane
+- `simple_ctx_execute*` now caps returned stdout at 100 KB (60/40 head+tail,
+  `ctx_smart_truncate`), indexing the full output under `exec:<ts>`;
+  `simple_ctx_search` gained query stopwords, a substring fallback
+  (`match=substring`) and byte-length BM25 with a candidate prefilter.
+- New hooks: `grep_hint.shs`, `agent_routing.shs` (routing block +
+  Bash→general-purpose subagent upgrade, jq, idempotent); Bash hint retuned
+  (recall on real >20-line results 2.9%→90.4%); net blocker heredoc-safe.
+- Research/matrix: `doc/01_research/app/mcp/context_mode_ponytail_originals_vs_mimic_2026-08-28.md`;
+  plan `doc/03_plan/app/mcp/context_ponytail_parity_plan.md`.
+- Gotchas: `.spl` string literals collapse `}}`→`}` (bug filed); source-mode
+  stdio server stalls mid-workload under load (bug filed) — measure
+  handler-level.

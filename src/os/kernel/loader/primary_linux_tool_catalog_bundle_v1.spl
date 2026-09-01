@@ -1,0 +1,172 @@
+"""Authenticated catalog plan for the implemented primary Linux-like tools.
+
+This module describes payload identity only.  It never creates artifact bytes,
+digests, signatures, mapping receipts, or loader authority.  Authentication and
+catalog mutation remain owned by the boot population transaction.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.executable_target_dispatch_v1.{
+    executable_target_process_image_ready_v1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootPolicyV1, InstalledArtifactBootRecordV1,
+    installed_artifact_boot_policy_shape_valid_v1
+}
+use os.tools.simplebox.simplebox_artifact_contract.{
+    SIMPLEBOX_CANONICAL_PATH_V1, SIMPLEBOX_APPLET_COUNT_V1,
+    simplebox_applet_names_v1, simplebox_canonical_aliases_v1
+}
+use os.tools.shell.checksum.checksum_artifact_contract.{
+    checksum_tool_canonical_path_v1
+}
+use os.tools.shell.grep.grep_artifact_contract.{text_tool_canonical_path_v1}
+use os.tools.shell.process.process_artifact_contract.{
+    process_tool_canonical_path_v1
+}
+
+pub const PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1: i64 = 5
+pub const PRIMARY_LINUX_TOOL_COMMAND_COUNT_V1: i64 = 12
+
+pub enum PrimaryLinuxToolCatalogPlanErrorV1:
+    None
+    RecordCountMismatch
+    PayloadIdentityMismatch
+    AliasIdentityMismatch
+    SignedRecordShapeInvalid
+
+pub struct PrimaryLinuxToolLaunchMatrixRowV1:
+    command: text
+    command_path: text
+    canonical_payload_path: text
+    source_owner: text
+    required_capabilities: [text]
+    authenticated_catalog_alias: bool
+    mapping_ready: bool
+
+pub struct PrimaryLinuxToolCatalogPlanV1:
+    ok: bool
+    error: PrimaryLinuxToolCatalogPlanErrorV1
+    policy: InstalledArtifactBootPolicyV1
+    records: [InstalledArtifactBootRecordV1]
+
+pub fn primary_linux_tool_catalog_required_paths_v1() -> [text]:
+    [SIMPLEBOX_CANONICAL_PATH_V1,
+     checksum_tool_canonical_path_v1("sha256sum"),
+     checksum_tool_canonical_path_v1("md5sum"),
+     text_tool_canonical_path_v1("grep"),
+     process_tool_canonical_path_v1("ps")]
+
+fn _empty_policy_v1(target: ManifestTarget) -> InstalledArtifactBootPolicyV1:
+    InstalledArtifactBootPolicyV1(
+        platform_target: target, required_canonical_paths: [], trust_roots: [])
+
+fn _fail_v1(
+    target: ManifestTarget, error: PrimaryLinuxToolCatalogPlanErrorV1
+) -> PrimaryLinuxToolCatalogPlanV1:
+    PrimaryLinuxToolCatalogPlanV1(
+        ok: false, error: error, policy: _empty_policy_v1(target), records: [])
+
+fn _find_record_v1(
+    records: [InstalledArtifactBootRecordV1], path: text
+) -> InstalledArtifactBootRecordV1?:
+    for record in records:
+        if record.canonical_path == path:
+            return Some(record)
+    nil
+
+fn _simplebox_required_capabilities_v1(command: text) -> [text]:
+    if command == "cat" or command == "head" or command == "wc":
+        return ["file-exec:/bin/simplebox", "file-read:argument-paths"]
+    ["file-exec:/bin/simplebox"]
+
+pub fn primary_linux_tool_launch_matrix_v1(
+    target: ManifestTarget
+) -> [PrimaryLinuxToolLaunchMatrixRowV1]:
+    """Return the closed implementation matrix; readiness is target policy."""
+    val ready = executable_target_process_image_ready_v1(target)
+    var rows: [PrimaryLinuxToolLaunchMatrixRowV1] = []
+    val commands = simplebox_applet_names_v1()
+    if commands.len() != SIMPLEBOX_APPLET_COUNT_V1:
+        return rows
+    var index: i64 = 0
+    while index < commands.len():
+        val command = commands[index]
+        rows.push(PrimaryLinuxToolLaunchMatrixRowV1(
+            command: command, command_path: "/bin/" + command,
+            canonical_payload_path: SIMPLEBOX_CANONICAL_PATH_V1,
+            source_owner: "os.tools.simplebox.simplebox_main",
+            required_capabilities: _simplebox_required_capabilities_v1(command),
+            authenticated_catalog_alias: true, mapping_ready: ready))
+        index = index + 1
+    rows.push(PrimaryLinuxToolLaunchMatrixRowV1(
+        command: "sha256sum",
+        command_path: checksum_tool_canonical_path_v1("sha256sum"),
+        canonical_payload_path: checksum_tool_canonical_path_v1("sha256sum"),
+        source_owner: "os.apps.coreutils.checksum.main_sha256sum",
+        required_capabilities: ["file-exec:/usr/bin/sha256sum", "file-read:argument-paths"],
+        authenticated_catalog_alias: false, mapping_ready: ready))
+    rows.push(PrimaryLinuxToolLaunchMatrixRowV1(
+        command: "md5sum",
+        command_path: checksum_tool_canonical_path_v1("md5sum"),
+        canonical_payload_path: checksum_tool_canonical_path_v1("md5sum"),
+        source_owner: "os.apps.coreutils.checksum.main_md5sum",
+        required_capabilities: ["file-exec:/usr/bin/md5sum", "file-read:argument-paths"],
+        authenticated_catalog_alias: false, mapping_ready: ready))
+    rows.push(PrimaryLinuxToolLaunchMatrixRowV1(
+        command: "grep", command_path: text_tool_canonical_path_v1("grep"),
+        canonical_payload_path: text_tool_canonical_path_v1("grep"),
+        source_owner: "os.apps.coreutils.grep.main_grep",
+        required_capabilities: ["file-exec:/usr/bin/grep", "file-read:argument-paths"],
+        authenticated_catalog_alias: false, mapping_ready: ready))
+    rows.push(PrimaryLinuxToolLaunchMatrixRowV1(
+        command: "ps", command_path: process_tool_canonical_path_v1("ps"),
+        canonical_payload_path: process_tool_canonical_path_v1("ps"),
+        source_owner: "os.apps.coreutils.ps.main_ps",
+        required_capabilities: ["file-exec:/usr/bin/ps", "process-snapshot:read"],
+        authenticated_catalog_alias: false, mapping_ready: ready))
+    rows
+
+pub fn primary_linux_tool_catalog_plan_v1(
+    target: ManifestTarget,
+    trust_roots: [ExecutableManifestTrustedSignerV1],
+    signed_records: [InstalledArtifactBootRecordV1]
+) -> PrimaryLinuxToolCatalogPlanV1:
+    if signed_records.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        return _fail_v1(target, PrimaryLinuxToolCatalogPlanErrorV1.RecordCountMismatch)
+    val required = primary_linux_tool_catalog_required_paths_v1()
+    var ordered: [InstalledArtifactBootRecordV1] = []
+    for path in required:
+        val candidate = _find_record_v1(signed_records, path)
+        if not candidate.?:
+            return _fail_v1(target, PrimaryLinuxToolCatalogPlanErrorV1.PayloadIdentityMismatch)
+        val record = candidate.unwrap()
+        if record.manifest.entrypoint != path:
+            return _fail_v1(target, PrimaryLinuxToolCatalogPlanErrorV1.PayloadIdentityMismatch)
+        if path == SIMPLEBOX_CANONICAL_PATH_V1:
+            if record.aliases != simplebox_canonical_aliases_v1():
+                return _fail_v1(target, PrimaryLinuxToolCatalogPlanErrorV1.AliasIdentityMismatch)
+        elif record.aliases.len() != 0:
+            return _fail_v1(target, PrimaryLinuxToolCatalogPlanErrorV1.AliasIdentityMismatch)
+        ordered.push(record)
+    val policy = InstalledArtifactBootPolicyV1(
+        platform_target: target, required_canonical_paths: required,
+        trust_roots: trust_roots)
+    if not installed_artifact_boot_policy_shape_valid_v1(policy, ordered):
+        return _fail_v1(target, PrimaryLinuxToolCatalogPlanErrorV1.SignedRecordShapeInvalid)
+    PrimaryLinuxToolCatalogPlanV1(
+        ok: true, error: PrimaryLinuxToolCatalogPlanErrorV1.None,
+        policy: policy, records: ordered)
+
+pub fn primary_linux_tool_catalog_plan_valid_v1(
+    plan: PrimaryLinuxToolCatalogPlanV1
+) -> bool:
+    if not plan.ok or plan.error != PrimaryLinuxToolCatalogPlanErrorV1.None:
+        return false
+    val rebuilt = primary_linux_tool_catalog_plan_v1(
+        plan.policy.platform_target, plan.policy.trust_roots, plan.records)
+    rebuilt.ok and rebuilt.policy.required_canonical_paths ==
+        plan.policy.required_canonical_paths

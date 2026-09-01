@@ -1,0 +1,43 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+"""Lifecycle operations are audit-bound and review escalation is bounded."""
+# @req: REQ-SSPEC-LIB
+# @req: REQ-SSPEC-LIB
+use std.spec.step
+
+use std.spec.{describe, it, expect, step}
+use std.scv.lifecycle.audit.{OperationAuditInput, lifecycle_operation_audit, lifecycle_operation_record}
+use std.scv.lifecycle.codec.{lifecycle_record_encode, lifecycle_record_decode}
+use std.scv.lifecycle.routing.{ReviewRoutePolicy, ReviewEscalationRequest, review_question_fingerprint, review_escalation_admit}
+
+fn standard_route() -> ReviewRoutePolicy:
+    ReviewRoutePolicy(max_model_depth: 3, max_children_per_run: 2, terminal_high_or_critical_human: true)
+
+describe "Lifecycle audit and bounded review routing":
+    # @manual scenario evidence
+    it "binds a protected operation to actor, policy, input, and output":
+        # @req REQ-SSPEC-LIB
+        step("binds a protected operation to actor, policy, input, and output")
+        val audit = lifecycle_operation_audit(OperationAuditInput(operation_kind: "integrate", entity_id: "chg_1", actor_id: "agent", authority: "maintainer", policy_digest: "policy-1", input_digest: "input-1", output_digest: "output-1", state: "planned"))
+        expect(audit.operation_id).to_start_with("op_")
+        expect(lifecycle_record_decode(lifecycle_record_encode(lifecycle_operation_record(audit))).ok).to_be(true)
+
+    it "admits one concrete evidence-driven escalation":
+        # @req REQ-SSPEC-LIB
+        step("admits one concrete evidence-driven escalation")
+        step("Name the unresolved question and missing evidence")
+        val request = ReviewEscalationRequest(parent_run_id: "RUN-1", reviewer: "fast-reviewer", depth: 1, existing_child_count: 0, question: "Can the CAS race with a refreshed workspace?", prior_question_fingerprints: [], severity: "high", missing_evidence: "concurrent transaction trace")
+        expect(review_escalation_admit(standard_route(), request).status).to_equal("model_escalation_admitted")
+
+    it "rejects cycles and routes terminal critical questions to a human":
+        # @req REQ-SSPEC-LIB
+        step("rejects cycles and routes terminal critical questions to a human")
+        val question = "Can lease ordering deadlock?"
+        val cycle = ReviewEscalationRequest(parent_run_id: "RUN-2", reviewer: "strong-reviewer", depth: 2, existing_child_count: 1, question: question, prior_question_fingerprints: [review_question_fingerprint(question)], severity: "high", missing_evidence: "lock-order model")
+        expect(review_escalation_admit(standard_route(), cycle).code).to_equal("REVIEW_ESCALATION_CYCLE")
+        val terminal = ReviewEscalationRequest(parent_run_id: "RUN-3", reviewer: "specialist", depth: 3, existing_child_count: 0, question: "Is release identity ambiguous?", prior_question_fingerprints: [], severity: "critical", missing_evidence: "independent signature verification")
+        expect(review_escalation_admit(standard_route(), terminal).status).to_equal("human_required")

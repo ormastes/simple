@@ -696,7 +696,7 @@ Level: warn (default)
 Warns when an unknown decorator (@name) is used that is not in the known whitelist.
 
 Known decorators: @async, @pure, @io, @net, @fs, @unsafe, @verify, @trusted, @ghost,
-@auto_lean, @bounds, @extern, @simd, @inline, @test, @property_test, @snapshot_test,
+@auto_lean, @bounds, @extern, @simd, @inline, @always_inline, @force_inline, @test, @property_test, @snapshot_test,
 @deprecated, @generated_by, @Lib, @inject, @sys_inject, @naked, @noreturn, @interrupt,
 @entry, @align, @gpu_intrinsic
 
@@ -715,7 +715,8 @@ Level: warn (default)
 Warns when an unknown attribute (#[name]) is used that is not in the known whitelist.
 
 Known attributes: #[allow], #[warn], #[deny], #[default], #[concurrency_mode], #[layout],
-#[pure], #[snapshot], #[deprecated], #[bypass], #[skip_todo], #[generated], #[inline]
+#[pure], #[snapshot], #[deprecated], #[bypass], #[skip_todo], #[generated], #[inline],
+#[always_inline], #[force_inline]
 
 === Suppression policy ===
 

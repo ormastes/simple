@@ -60,7 +60,9 @@ backend=llvm
 EOF
 
 drive() { # drive <candidate> <evidence>  -> echoes rc on its own line
-  ( . "${harness}"; repo_root="${REPO_ROOT_OVERRIDE}"; . "${fn}"
+  ( . "${harness}"
+    . "${repo_root}/scripts/check/lib/bootstrap-stage3/sanity.shs"
+    repo_root="${REPO_ROOT_OVERRIDE}"; . "${fn}"
     bootstrap_stage_sanity "$1" "$2" "${work}/h" "${work}/t" "$PATH" >/dev/null 2>&1
     echo "RC=$?" )
 }
@@ -138,12 +140,38 @@ check reject_missing_VERSION fail "${work}/good"
 REPO_ROOT_OVERRIDE="${repo_root}"
 
 # 6. Fail-closed on VERSION vs bootstrap_identity.spl DRIFT -- the exact defect.
-mkdir -p "${work}/drift/src/app/cli"
+mkdir -p "${work}/drift/src/app/cli" "${work}/drift/release"
 echo "9.9.9-drift" >"${work}/drift/VERSION"
+printf 'version:\n  schema: simple-release-version/1\n  semver: 9.9.9-drift\n' \
+  >"${work}/drift/release/version.sdn"
 cp "${repo_root}/src/app/cli/bootstrap_identity.spl" "${work}/drift/src/app/cli/"
 REPO_ROOT_OVERRIDE="${work}/drift"
 mk_candidate "${work}/driftbin" "9.9.9-drift" 0 "${REJECT_RUN}"
 check reject_version_drift fail "${work}/driftbin"
+REPO_ROOT_OVERRIDE="${repo_root}"
+
+# 7. Reject an authority with a second, conflicting schema declaration.
+mkdir -p "${work}/bad-schema/release" "${work}/bad-schema/src/app/cli"
+cp "${repo_root}/VERSION" "${work}/bad-schema/VERSION"
+cp "${repo_root}/release/version.sdn" "${work}/bad-schema/release/version.sdn"
+printf 'schema: attacker-schema/99\n' >>"${work}/bad-schema/release/version.sdn"
+cp "${repo_root}/src/app/cli/bootstrap_identity.spl" \
+  "${work}/bad-schema/src/app/cli/bootstrap_identity.spl"
+REPO_ROOT_OVERRIDE="${work}/bad-schema"
+check reject_ambiguous_version_schema fail "${work}/good"
+REPO_ROOT_OVERRIDE="${repo_root}"
+
+# 8. Reject a bootstrap_version body whose tail expression changes the result.
+mkdir -p "${work}/tail-identity/release" "${work}/tail-identity/src/app/cli"
+cp "${repo_root}/VERSION" "${work}/tail-identity/VERSION"
+cp "${repo_root}/release/version.sdn" "${work}/tail-identity/release/version.sdn"
+cat >"${work}/tail-identity/src/app/cli/bootstrap_identity.spl" <<EOF
+pub fn bootstrap_version() -> text:
+    "${REPO_VERSION}"
+    "9.9.9-stale"
+EOF
+REPO_ROOT_OVERRIDE="${work}/tail-identity"
+check reject_bootstrap_identity_tail fail "${work}/good"
 REPO_ROOT_OVERRIDE="${repo_root}"
 
 # --- non-vacuity + evidence completeness -----------------------------------

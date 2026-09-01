@@ -1,0 +1,588 @@
+"""Transactional FAT32 mount publication over an authenticated backend capsule.
+
+Candidate construction performs only bounded reads through one capsule I/O
+lease.  The canonical filesystem, mount generation, replace capability and
+lease are published together under one owner mutex.  Close withdraws that
+tuple only after all operation reservations drain, then consumes the capsule
+lease so copied values cannot dispatch after unmount.
+"""
+
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use std.fs_driver.block_device.{BlockDevice}
+use os.kernel.fs.fat32.{
+    Fat32Filesystem, Fat32Bpb, parse_bpb, cluster_to_lba,
+    AtomicReplaceRecoveryCaps, AtomicReplaceRecoveryLevel,
+    fat32_atomic_replace_caps_probe
+}
+use os.kernel.fs.block_device_identity_owner_v1.{
+    BlockDeviceRegionBindingV1, BlockDeviceRegistrationV1
+}
+use os.kernel.fs.block_backend_capsule_owner_v1.{
+    BlockBackendCapsuleSealV1, BlockBackendIoLeaseV1,
+    block_backend_capsule_acquire_v1, block_backend_capsule_read_v1,
+    block_backend_capsule_write_v1, block_backend_capsule_flush_v1,
+    block_backend_capsule_release_v1, block_backend_capsule_retry_release_v1,
+    block_backend_capsule_seal_matches_v1
+}
+
+pub val FAT32_CAPSULE_MOUNT_OPERATION_CAPACITY_V1: i32 = 64
+pub val FAT32_CAPSULE_MOUNT_MAX_ROOT_SECTORS_V1: u32 = 128u32
+val _FAT32_CAPSULE_COUNTER_MAX_V1: u64 = 0xffffffffffffffffu64
+val _FAT32_SECTOR_BYTES_V1: i32 = 512
+val _FAT32_REPLACE_DESCRIPTOR_LBA_V1: u64 = 2u64
+val _FAT32_MIN_DATA_CLUSTERS_V1: u64 = 65525u64
+val _FAT32_RESERVED_CLUSTER_START_V1: u64 = 0x0ffffff0u64
+
+pub enum Fat32CapsuleMountErrorV1:
+    Busy
+    NotMounted
+    StaleMount
+    StaleOperation
+    CapacityExhausted
+    CounterExhausted
+    InvalidGeometry
+    BackendFailure
+    ReleaseIndeterminate
+    Quarantined
+
+pub struct Fat32CapsuleMountSealV1:
+    _generation: u64
+    _nonce: u64
+
+impl Fat32CapsuleMountSealV1:
+    pub static fn invalid_probe() -> Fat32CapsuleMountSealV1:
+        Fat32CapsuleMountSealV1(_generation: 0u64, _nonce: 0u64)
+    pub fn generation() -> u64: self._generation
+
+pub struct Fat32CapsuleMountOperationV1:
+    _mount: Fat32CapsuleMountSealV1
+    _slot: i32
+    _generation: u64
+    _nonce: u64
+
+impl Fat32CapsuleMountOperationV1:
+    pub static fn invalid_probe() -> Fat32CapsuleMountOperationV1:
+        Fat32CapsuleMountOperationV1(
+            _mount: Fat32CapsuleMountSealV1.invalid_probe(),
+            _slot: -1, _generation: 0u64, _nonce: 0u64)
+    pub fn mount_generation() -> u64: self._mount._generation
+
+pub class Fat32CapsuleOperationDeviceV1:
+    """BlockDevice view bound to one authenticated mount operation.
+
+    The view contains no backend object or registry selector. Every dispatch
+    revalidates the operation and routes through the mount-owned backend lease,
+    so a copied view becomes inert when its operation is released.
+    """
+    _operation: Fat32CapsuleMountOperationV1
+
+impl BlockDevice for Fat32CapsuleOperationDeviceV1:
+    me read_sector(lba: u64) -> Result<[u8], text>:
+        match fat32_capsule_mount_read_v1(self._operation, lba):
+            Ok(bytes): Ok(bytes)
+            Err(_): Err("fat32 capsule read rejected")
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        match fat32_capsule_mount_write_v1(self._operation, lba, data):
+            Ok(ok): Ok(ok)
+            Err(_): Err("fat32 capsule write rejected")
+
+    me fn sector_size() -> u32: 512u32
+
+    me flush() -> Result<bool, text>:
+        match fat32_capsule_mount_flush_v1(self._operation):
+            Ok(ok): Ok(ok)
+            Err(_): Err("fat32 capsule flush rejected")
+
+pub fn fat32_capsule_mount_operation_device_v1(
+    operation: Fat32CapsuleMountOperationV1
+) -> Result<Fat32CapsuleOperationDeviceV1, Fat32CapsuleMountErrorV1>:
+    """Issue a backend-free device view for one live operation reservation."""
+    val live = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        _fat32_capsule_operation_valid_v1(operation, state))
+    if not live: return Err(Fat32CapsuleMountErrorV1.StaleOperation)
+    Ok(Fat32CapsuleOperationDeviceV1(_operation: operation))
+
+pub struct Fat32CapsuleMountSnapshotV1:
+    mounted: bool
+    generation: u64
+    device_id: u64
+    total_sectors: u32
+    root_cluster: u32
+    root_bytes: i64
+    recoverable_replace: bool
+
+pub struct Fat32CapsuleUnmountReceiptV1:
+    retired_generation: u64
+    operation_count: u64
+    capsule_lease_released: bool
+
+enum _Fat32CapsuleMountStateTagV1:
+    Empty
+    Mounting
+    Active
+    Closing
+    Quarantined
+
+enum _Fat32CapsuleOperationStateV1:
+    Free
+    Active
+    Retired
+
+struct _Fat32CapsuleOperationSlotV1:
+    state: _Fat32CapsuleOperationStateV1
+    generation: u64
+    nonce: u64
+
+fn _empty_fat32_operation_slot_v1(generation: u64) -> _Fat32CapsuleOperationSlotV1:
+    _Fat32CapsuleOperationSlotV1(
+        state: _Fat32CapsuleOperationStateV1.Free,
+        generation: generation, nonce: 0u64)
+
+struct _Fat32CapsuleCandidateV1:
+    fs: Fat32Filesystem
+    caps: AtomicReplaceRecoveryCaps
+
+struct _Fat32CapsuleMountStateV1:
+    tag: _Fat32CapsuleMountStateTagV1
+    generation: u64
+    nonce: u64
+    next_nonce: u64
+    device_id: u64
+    fs: Fat32Filesystem?
+    caps: AtomicReplaceRecoveryCaps?
+    backend_lease: BlockBackendIoLeaseV1
+    candidate_capsule: BlockBackendCapsuleSealV1
+    candidate_cleanup: bool
+    operations: [_Fat32CapsuleOperationSlotV1]
+    active_operations: i32
+    completed_operations: u64
+    last_error: Fat32CapsuleMountErrorV1?
+    last_mount: Fat32CapsuleMountSealV1
+    last_operation: Fat32CapsuleMountOperationV1
+    last_snapshot: Fat32CapsuleMountSnapshotV1
+
+fn _initial_fat32_capsule_mount_state_v1() -> _Fat32CapsuleMountStateV1:
+    _Fat32CapsuleMountStateV1(
+        tag: _Fat32CapsuleMountStateTagV1.Empty,
+        generation: 1u64, nonce: 0u64, next_nonce: 1u64,
+        device_id: 0u64, fs: nil, caps: nil,
+        backend_lease: BlockBackendIoLeaseV1.invalid_probe(),
+        candidate_capsule: BlockBackendCapsuleSealV1.invalid_probe(),
+        candidate_cleanup: false,
+        operations: [], active_operations: 0, completed_operations: 0u64,
+        last_error: nil, last_mount: Fat32CapsuleMountSealV1.invalid_probe(),
+        last_operation: Fat32CapsuleMountOperationV1.invalid_probe(),
+        last_snapshot: Fat32CapsuleMountSnapshotV1(
+            mounted: false, generation: 0u64, device_id: 0u64,
+            total_sectors: 0u32, root_cluster: 0u32, root_bytes: 0,
+            recoverable_replace: false))
+
+var _fat32_capsule_mount_owner_v1: Mutex =
+    mutex_new(_initial_fat32_capsule_mount_state_v1())
+
+fn _fat32_capsule_mount_equal_v1(
+    seal: Fat32CapsuleMountSealV1, state: _Fat32CapsuleMountStateV1
+) -> bool:
+    seal._generation != 0u64 and seal._generation == state.generation and
+    seal._nonce != 0u64 and seal._nonce == state.nonce
+
+fn _fat32_candidate_from_capsule_v1(
+    lease: BlockBackendIoLeaseV1,
+    binding: BlockDeviceRegionBindingV1,
+    device_id: u64
+) -> Result<_Fat32CapsuleCandidateV1, Fat32CapsuleMountErrorV1>:
+    val sector_result = block_backend_capsule_read_v1(lease, 0u64)
+    if not sector_result.?: return Err(Fat32CapsuleMountErrorV1.BackendFailure)
+    val sector0 = sector_result.unwrap()
+    if sector0.len() != _FAT32_SECTOR_BYTES_V1:
+        return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
+    val bpb_result = parse_bpb(sector0)
+    if not bpb_result.?: return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
+    val bpb = bpb_result.unwrap()
+    if (bpb.bytes_per_sector != 512u16 or bpb.sectors_per_cluster == 0u8 or
+        bpb.sectors_per_cluster.to_u32() > FAT32_CAPSULE_MOUNT_MAX_ROOT_SECTORS_V1 or
+        bpb.root_cluster < 2u32 or bpb.total_sectors_32 == 0u32 or
+        bpb.total_sectors_32.to_u64() > binding.sector_count):
+        return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
+    if (device_id == 0u64 or device_id != binding.backend_owner_id or
+        bpb.reserved_sectors == 0u16 or bpb.num_fats == 0u8 or
+        bpb.fat_size_32 == 0u32 or
+        (bpb.sectors_per_cluster & (bpb.sectors_per_cluster - 1u8)) != 0u8):
+        return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
+    val fat_mirroring_enabled = (bpb.ext_flags & 0x0080u16) == 0u16
+    val active_fat_index = (bpb.ext_flags & 0x000Fu16).to_u32()
+    if not fat_mirroring_enabled and active_fat_index >= bpb.num_fats.to_u32():
+        return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
+    val fat_span = bpb.num_fats.to_u64() * bpb.fat_size_32.to_u64()
+    val data_start_u64 = bpb.reserved_sectors.to_u64() + fat_span
+    if (data_start_u64 > 0xffffffffu64 or
+        data_start_u64 >= bpb.total_sectors_32.to_u64()):
+        return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
+    val data_start = data_start_u64.to_u32()
+    val data_clusters = (bpb.total_sectors_32 - data_start) /
+        bpb.sectors_per_cluster.to_u32()
+    val data_cluster_count = data_clusters.to_u64()
+    val required_fat_entries = data_cluster_count + 2u64
+    val fat_entry_capacity = bpb.fat_size_32.to_u64() * 128u64
+    if (data_cluster_count < _FAT32_MIN_DATA_CLUSTERS_V1 or
+        required_fat_entries > _FAT32_RESERVED_CLUSTER_START_V1 or
+        required_fat_entries > fat_entry_capacity or
+        bpb.root_cluster - 2u32 >= data_clusters):
+        return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
+    val root_lba = cluster_to_lba(bpb, bpb.root_cluster)
+    if (root_lba >= binding.sector_count or
+        bpb.sectors_per_cluster.to_u64() > binding.sector_count - root_lba):
+        return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
+
+    var root: [u8] = []
+    var sector_index: u32 = 0u32
+    while sector_index < bpb.sectors_per_cluster.to_u32():
+        val root_result = block_backend_capsule_read_v1(
+            lease, root_lba + sector_index.to_u64())
+        if not root_result.?: return Err(Fat32CapsuleMountErrorV1.BackendFailure)
+        val bytes = root_result.unwrap()
+        if bytes.len() != _FAT32_SECTOR_BYTES_V1:
+            return Err(Fat32CapsuleMountErrorV1.BackendFailure)
+        var byte_index: i32 = 0
+        while byte_index < _FAT32_SECTOR_BYTES_V1:
+            root.push(bytes[byte_index])
+            byte_index = byte_index + 1
+        sector_index = sector_index + 1u32
+
+    var descriptor: [u8] = []
+    if _FAT32_REPLACE_DESCRIPTOR_LBA_V1 < binding.sector_count:
+        val descriptor_result = block_backend_capsule_read_v1(
+            lease, _FAT32_REPLACE_DESCRIPTOR_LBA_V1)
+        if descriptor_result.?: descriptor = descriptor_result.unwrap()
+    # Candidate discovery never replays or writes a journal.  Therefore v1
+    # publishes RecoverableReplace only after a later recovery transaction;
+    # the initial coherent mount truth is explicitly Unsupported.
+    val caps = fat32_atomic_replace_caps_probe(
+        descriptor, bpb.total_sectors_32, bpb.reserved_sectors.to_u32(),
+        true, false)
+    val fs = Fat32Filesystem(
+        device_id: device_id, bpb_parsed: true,
+        cluster_size: bpb.sectors_per_cluster.to_u32() * 512u32,
+        fat_start_sector: bpb.reserved_sectors.to_u32(),
+        data_start_sector: data_start, root_cluster: bpb.root_cluster,
+        sectors_per_cluster: bpb.sectors_per_cluster.to_u32(),
+        bytes_per_sector: 512u32, data_clusters: data_clusters,
+        total_sectors: bpb.total_sectors_32,
+        reserved_sectors: bpb.reserved_sectors.to_u32(),
+        fat_size_sectors: bpb.fat_size_32,
+        fat_count: bpb.num_fats.to_u32(),
+        fat_mirroring_enabled: fat_mirroring_enabled,
+        active_fat_index: active_fat_index,
+        mutation_active: false,
+        root_dir_data: root)
+    Ok(_Fat32CapsuleCandidateV1(fs: fs, caps: caps))
+
+fn _reset_mount_owner_after_candidate_release_v1():
+    mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        var next = _initial_fat32_capsule_mount_state_v1()
+        next.generation = state.generation
+        next.next_nonce = state.next_nonce
+        next)
+
+fn _release_failed_candidate_v1(
+    lease: BlockBackendIoLeaseV1
+) -> Result<bool, Fat32CapsuleMountErrorV1>:
+    match block_backend_capsule_release_v1(lease):
+        Ok(_):
+            _reset_mount_owner_after_candidate_release_v1()
+            Ok(true)
+        Err(_):
+            mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+                var next = state
+                next.tag = _Fat32CapsuleMountStateTagV1.Quarantined
+                next.backend_lease = lease
+                next.candidate_cleanup = true
+                next)
+            Err(Fat32CapsuleMountErrorV1.ReleaseIndeterminate)
+
+pub fn fat32_capsule_mount_publish_v1(
+    capsule: BlockBackendCapsuleSealV1,
+    identity: BlockDeviceRegistrationV1,
+    binding: BlockDeviceRegionBindingV1,
+    device_id: u64
+) -> Result<Fat32CapsuleMountSealV1, Fat32CapsuleMountErrorV1>:
+    val reserved = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        if state.tag != _Fat32CapsuleMountStateTagV1.Empty:
+            next.last_error = Some(Fat32CapsuleMountErrorV1.Busy)
+        elif device_id == 0u64 or device_id != binding.backend_owner_id:
+            next.last_error = Some(Fat32CapsuleMountErrorV1.InvalidGeometry)
+        elif state.next_nonce == 0u64 or state.next_nonce == _FAT32_CAPSULE_COUNTER_MAX_V1:
+            next.last_error = Some(Fat32CapsuleMountErrorV1.CounterExhausted)
+        else:
+            next.tag = _Fat32CapsuleMountStateTagV1.Mounting
+            next.nonce = state.next_nonce
+            next.next_nonce = state.next_nonce + 1u64
+            next.candidate_capsule = capsule
+        next)
+    if val err = reserved.last_error: return Err(err)
+    val lease_result = block_backend_capsule_acquire_v1(capsule, identity, binding)
+    if not lease_result.?:
+        _reset_mount_owner_after_candidate_release_v1()
+        return Err(Fat32CapsuleMountErrorV1.BackendFailure)
+    val lease = lease_result.unwrap()
+    mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        var next = state
+        next.backend_lease = lease
+        next)
+    val candidate_result = _fat32_candidate_from_capsule_v1(lease, binding, device_id)
+    if not candidate_result.?:
+        val candidate_error = candidate_result.unwrap_err()
+        val released = _release_failed_candidate_v1(lease)
+        if not released.?: return Err(released.unwrap_err())
+        return Err(candidate_error)
+    val candidate = candidate_result.unwrap()
+    val updated = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        next.last_mount = Fat32CapsuleMountSealV1.invalid_probe()
+        if (state.tag != _Fat32CapsuleMountStateTagV1.Mounting or
+            not block_backend_capsule_seal_matches_v1(state.candidate_capsule, capsule)):
+            next.last_error = Some(Fat32CapsuleMountErrorV1.Busy)
+        else:
+            val seal = Fat32CapsuleMountSealV1(
+                _generation: state.generation, _nonce: state.nonce)
+            next.tag = _Fat32CapsuleMountStateTagV1.Active
+            next.device_id = device_id
+            next.fs = Some(candidate.fs)
+            next.caps = Some(candidate.caps)
+            next.backend_lease = lease
+            next.candidate_cleanup = false
+            next.operations = []
+            next.active_operations = 0
+            next.completed_operations = 0u64
+            next.last_mount = seal
+        next)
+    if val err = updated.last_error:
+        val released = _release_failed_candidate_v1(lease)
+        if not released.?: return Err(released.unwrap_err())
+        return Err(err)
+    Ok(updated.last_mount)
+
+pub fn fat32_capsule_mount_acquire_v1(
+    mount: Fat32CapsuleMountSealV1
+) -> Result<Fat32CapsuleMountOperationV1, Fat32CapsuleMountErrorV1>:
+    val updated = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        next.last_operation = Fat32CapsuleMountOperationV1.invalid_probe()
+        if state.tag != _Fat32CapsuleMountStateTagV1.Active:
+            next.last_error = Some(Fat32CapsuleMountErrorV1.NotMounted)
+        elif not _fat32_capsule_mount_equal_v1(mount, state):
+            next.last_error = Some(Fat32CapsuleMountErrorV1.StaleMount)
+        elif state.next_nonce == 0u64 or state.next_nonce == _FAT32_CAPSULE_COUNTER_MAX_V1:
+            next.last_error = Some(Fat32CapsuleMountErrorV1.CounterExhausted)
+        else:
+            var slot_index: i32 = -1
+            var i: i32 = 0
+            while i < state.operations.len():
+                if (slot_index < 0 and
+                    state.operations[i].state == _Fat32CapsuleOperationStateV1.Free):
+                    slot_index = i
+                i = i + 1
+            if (slot_index < 0 and
+                state.operations.len() >= FAT32_CAPSULE_MOUNT_OPERATION_CAPACITY_V1):
+                next.last_error = Some(Fat32CapsuleMountErrorV1.CapacityExhausted)
+            else:
+                if slot_index < 0:
+                    slot_index = state.operations.len()
+                    next.operations.push(_empty_fat32_operation_slot_v1(1u64))
+                val generation = next.operations[slot_index].generation
+                val nonce = state.next_nonce
+                next.operations[slot_index] = _Fat32CapsuleOperationSlotV1(
+                    state: _Fat32CapsuleOperationStateV1.Active,
+                    generation: generation, nonce: nonce)
+                next.active_operations = state.active_operations + 1
+                next.next_nonce = nonce + 1u64
+                next.last_operation = Fat32CapsuleMountOperationV1(
+                    _mount: mount, _slot: slot_index,
+                    _generation: generation, _nonce: nonce)
+        next)
+    if val err = updated.last_error: return Err(err)
+    Ok(updated.last_operation)
+
+fn _fat32_capsule_operation_valid_v1(
+    operation: Fat32CapsuleMountOperationV1,
+    state: _Fat32CapsuleMountStateV1
+) -> bool:
+    if (state.tag != _Fat32CapsuleMountStateTagV1.Active or
+        not _fat32_capsule_mount_equal_v1(operation._mount, state) or
+        operation._slot < 0 or operation._slot >= state.operations.len()):
+        return false
+    val slot = state.operations[operation._slot]
+    slot.state == _Fat32CapsuleOperationStateV1.Active and
+    slot.generation == operation._generation and slot.nonce == operation._nonce
+
+pub fn fat32_capsule_mount_read_v1(
+    operation: Fat32CapsuleMountOperationV1, relative_lba: u64
+) -> Result<[u8], Fat32CapsuleMountErrorV1>:
+    val lease = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        if _fat32_capsule_operation_valid_v1(operation, state):
+            Some(state.backend_lease)
+        else: nil)
+    if not lease.?: return Err(Fat32CapsuleMountErrorV1.StaleOperation)
+    match block_backend_capsule_read_v1(lease.unwrap(), relative_lba):
+        Ok(bytes): Ok(bytes)
+        Err(_): Err(Fat32CapsuleMountErrorV1.BackendFailure)
+
+pub fn fat32_capsule_mount_write_v1(
+    operation: Fat32CapsuleMountOperationV1, relative_lba: u64, bytes: [u8]
+) -> Result<bool, Fat32CapsuleMountErrorV1>:
+    val lease = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        if _fat32_capsule_operation_valid_v1(operation, state):
+            Some(state.backend_lease)
+        else: nil)
+    if not lease.?: return Err(Fat32CapsuleMountErrorV1.StaleOperation)
+    match block_backend_capsule_write_v1(lease.unwrap(), relative_lba, bytes):
+        Ok(ok): Ok(ok)
+        Err(_): Err(Fat32CapsuleMountErrorV1.BackendFailure)
+
+pub fn fat32_capsule_mount_flush_v1(
+    operation: Fat32CapsuleMountOperationV1
+) -> Result<bool, Fat32CapsuleMountErrorV1>:
+    val lease = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        if _fat32_capsule_operation_valid_v1(operation, state):
+            Some(state.backend_lease)
+        else: nil)
+    if not lease.?: return Err(Fat32CapsuleMountErrorV1.StaleOperation)
+    match block_backend_capsule_flush_v1(lease.unwrap()):
+        Ok(ok): Ok(ok)
+        Err(_): Err(Fat32CapsuleMountErrorV1.BackendFailure)
+
+pub fn fat32_capsule_mount_release_v1(
+    operation: Fat32CapsuleMountOperationV1
+) -> Result<bool, Fat32CapsuleMountErrorV1>:
+    val updated = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        if not _fat32_capsule_operation_valid_v1(operation, state):
+            next.last_error = Some(Fat32CapsuleMountErrorV1.StaleOperation)
+        elif state.active_operations <= 0:
+            next.tag = _Fat32CapsuleMountStateTagV1.Quarantined
+            next.last_error = Some(Fat32CapsuleMountErrorV1.Quarantined)
+        else:
+            val held = state.operations[operation._slot]
+            if held.generation == _FAT32_CAPSULE_COUNTER_MAX_V1:
+                next.operations[operation._slot] = _Fat32CapsuleOperationSlotV1(
+                    state: _Fat32CapsuleOperationStateV1.Retired,
+                    generation: held.generation, nonce: 0u64)
+            else:
+                next.operations[operation._slot] =
+                    _empty_fat32_operation_slot_v1(held.generation + 1u64)
+            next.active_operations = state.active_operations - 1
+            next.completed_operations = state.completed_operations + 1u64
+        next)
+    if val err = updated.last_error: return Err(err)
+    Ok(true)
+
+pub fn fat32_capsule_mount_snapshot_v1() -> Fat32CapsuleMountSnapshotV1:
+    val state = mutex_with_lock(_fat32_capsule_mount_owner_v1, \value: value)
+    if state.tag == _Fat32CapsuleMountStateTagV1.Active and state.fs != nil and state.caps != nil:
+        val fs = state.fs.unwrap()
+        val caps = state.caps.unwrap()
+        return Fat32CapsuleMountSnapshotV1(
+            mounted: true, generation: state.generation,
+            device_id: state.device_id, total_sectors: fs.total_sectors,
+            root_cluster: fs.root_cluster, root_bytes: fs.root_dir_data.len(),
+            recoverable_replace: caps.level == AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
+    Fat32CapsuleMountSnapshotV1(
+        mounted: false, generation: state.generation,
+        device_id: 0u64, total_sectors: 0u32, root_cluster: 0u32,
+        root_bytes: 0, recoverable_replace: false)
+
+pub fn fat32_capsule_mount_close_v1(
+    mount: Fat32CapsuleMountSealV1
+) -> Result<Fat32CapsuleUnmountReceiptV1, Fat32CapsuleMountErrorV1>:
+    val withdrawn = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        if state.tag != _Fat32CapsuleMountStateTagV1.Active:
+            next.last_error = Some(Fat32CapsuleMountErrorV1.NotMounted)
+        elif not _fat32_capsule_mount_equal_v1(mount, state):
+            next.last_error = Some(Fat32CapsuleMountErrorV1.StaleMount)
+        elif state.active_operations != 0:
+            next.last_error = Some(Fat32CapsuleMountErrorV1.Busy)
+        else:
+            next.tag = _Fat32CapsuleMountStateTagV1.Closing
+            next.fs = nil
+            next.caps = nil
+        next)
+    if val err = withdrawn.last_error: return Err(err)
+    val retired_generation = withdrawn.generation
+    val completed = withdrawn.completed_operations
+    val lease = withdrawn.backend_lease
+    match block_backend_capsule_release_v1(lease):
+        Ok(_):
+            val finished = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+                var next = state
+                if (state.tag == _Fat32CapsuleMountStateTagV1.Closing and
+                    _fat32_capsule_mount_equal_v1(mount, state)):
+                    if state.generation == _FAT32_CAPSULE_COUNTER_MAX_V1:
+                        next.tag = _Fat32CapsuleMountStateTagV1.Quarantined
+                    else:
+                        next = _initial_fat32_capsule_mount_state_v1()
+                        next.generation = state.generation + 1u64
+                        next.next_nonce = state.next_nonce
+                else:
+                    next.tag = _Fat32CapsuleMountStateTagV1.Quarantined
+                next)
+            if finished.tag == _Fat32CapsuleMountStateTagV1.Quarantined:
+                return Err(Fat32CapsuleMountErrorV1.Quarantined)
+            Ok(Fat32CapsuleUnmountReceiptV1(
+                retired_generation: retired_generation,
+                operation_count: completed, capsule_lease_released: true))
+        Err(_):
+            mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+                var next = state
+                next.tag = _Fat32CapsuleMountStateTagV1.Quarantined
+                next.candidate_cleanup = false
+                next)
+            Err(Fat32CapsuleMountErrorV1.ReleaseIndeterminate)
+
+pub fn fat32_capsule_mount_retry_close_v1(
+    mount: Fat32CapsuleMountSealV1
+) -> Result<Fat32CapsuleUnmountReceiptV1, Fat32CapsuleMountErrorV1>:
+    val quarantined = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        state.tag == _Fat32CapsuleMountStateTagV1.Quarantined and
+        not state.candidate_cleanup and
+        _fat32_capsule_mount_equal_v1(mount, state))
+    if not quarantined: return Err(Fat32CapsuleMountErrorV1.StaleMount)
+    val state = mutex_with_lock(_fat32_capsule_mount_owner_v1, \value: value)
+    match block_backend_capsule_retry_release_v1(state.backend_lease):
+        Ok(_):
+            val finished = mutex_with_lock(_fat32_capsule_mount_owner_v1, \value:
+                var next = _initial_fat32_capsule_mount_state_v1()
+                if value.generation < _FAT32_CAPSULE_COUNTER_MAX_V1:
+                    next.generation = value.generation + 1u64
+                    next.next_nonce = value.next_nonce
+                else:
+                    next.tag = _Fat32CapsuleMountStateTagV1.Quarantined
+                next)
+            if finished.tag == _Fat32CapsuleMountStateTagV1.Quarantined:
+                return Err(Fat32CapsuleMountErrorV1.CounterExhausted)
+            Ok(Fat32CapsuleUnmountReceiptV1(
+                retired_generation: state.generation,
+                operation_count: state.completed_operations,
+                capsule_lease_released: true))
+        Err(_): Err(Fat32CapsuleMountErrorV1.ReleaseIndeterminate)
+
+pub(package) fn fat32_capsule_mount_retry_candidate_cleanup_v1(
+    capsule: BlockBackendCapsuleSealV1
+) -> Result<bool, Fat32CapsuleMountErrorV1>:
+    val state = mutex_with_lock(_fat32_capsule_mount_owner_v1, \value: value)
+    if (state.tag != _Fat32CapsuleMountStateTagV1.Quarantined or
+        not state.candidate_cleanup or
+        not block_backend_capsule_seal_matches_v1(state.candidate_capsule, capsule)):
+        return Err(Fat32CapsuleMountErrorV1.StaleMount)
+    match block_backend_capsule_retry_release_v1(state.backend_lease):
+        Ok(_):
+            _reset_mount_owner_after_candidate_release_v1()
+            Ok(true)
+        Err(_): Err(Fat32CapsuleMountErrorV1.ReleaseIndeterminate)

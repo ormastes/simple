@@ -1,10 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that browser shared-WM config wiring (task #15 remainder item 2).
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-
-# @req: REQ-APP-UI-001 — stable requirement identity for this spec.
 # @cover src/app/ui.browser/app.spl
 # @tag: unit, ui, browser, wm, diag
 #
@@ -38,27 +31,28 @@ Audience: compiler and tooling engineers who maintain this spec.
 # this spec still proves the re-added tracer fires end-to-end without
 # needing to cross into the broken render path.
 #
-# HISTORY — facet-forced-on coverage restored 2026-08-01.
-# A second, stricter `it` ("...when the stage facet is forced on") used to be
-# omitted here because under `bin/simple test` (not `bin/simple run`) forcing
-# any std.diag facet on and calling a real dbg_stage() while
-# `os.compositor.host_compositor_entry` was co-compiled alongside the
-# `std.spec.*` wildcard aborted with
-# `semantic: type mismatch: comparing string with integer` — an instance of
-# the cross-module bare-name symbol-collision class tracked in
-# doc/08_tracking/bug/diag_stage_facet_cross_module_collision_under_test_2026-07-06.md.
-# That left the facet-ON emission path with ZERO automated coverage, proven
-# only by a hand-run `bin/simple run` recorded in a comment — which this repo
-# treats as non-evidence.
-#
-# Re-measured 2026-08-01 against the Rust seed
-# (src/compiler_rust/target/bootstrap/simple, which delegates the spec run to
-# src/compiler_rust/target/debug/simple — the engine that owns the
-# "type mismatch: comparing string with integer" wording): the abort no longer
-# reproduces, so the facet-ON `it` below is now a real runnable assertion
-# instead of a comment. Do NOT delete it to make an unrelated failure go away;
-# if it aborts again, that is the collision class regressing and belongs in the
-# bug doc above, not in this header.
+# A second, stricter `it` ("...when the stage facet is forced on") was
+# authored and manually verified to be TRUE (see below) but is NOT included
+# as a runnable assertion here: under `bin/simple test` specifically (not
+# `bin/simple run`), forcing any std.diag facet on and calling a real
+# dbg_stage() while `os.compositor.host_compositor_entry` (imported directly
+# above for HostBackendKind, and transitively by app.ui.browser.app itself)
+# is co-compiled alongside the `std.spec.*` wildcard used by every spec file
+# aborts with `semantic: type mismatch: comparing string with integer`
+# inside std.diag's dbg_stage — another instance of the same cross-module
+# symbol-collision class (repro isolated down to: `use std.spec.*` + any
+# import that pulls in the browser_engine/host_compositor module graph +
+# `dbg_force_facet(...)` + a real `dbg_stage(...)` call, independent of how
+# many names are explicitly imported from std.diag). This reproduces even
+# with zero BrowserApp/browser-app code involved — a minimal repro is just
+# those four ingredients in one spec file. Manually verified instead via
+# `SIMPLE_EXECUTION_MODE=interpret bin/simple run <script>` (not `test`,
+# which is unaffected by this collision) that BrowserApp.new_with_access_store_path
+# emits, in order: "[browser] stage parse_start", "parse_done",
+# "backend_create_start", "backend_create_done" with non-decreasing
+# monotonic deltas when SIMPLE_DIAG's stage facet is forced on — i.e. the
+# dbg_stage wiring added to app.spl is correct; only the `test`-runner-mode
+# proof of it is blocked by this out-of-bounds compiler bug.
 
 use std.spec.*
 use app.ui.browser.app.{BrowserApp, browser_shared_wm_config}
@@ -80,23 +74,19 @@ val FIXTURE_PATH = "test/03_system/gui/ui_browser/fixtures/hello.ui.sdn"
 describe "browser shared-WM config wiring (task #15 remainder item 2)":
 
     it "builds a Browser-backend HostWmConfig with the expected size and title":
-        step("Verify: builds a Browser-backend HostWmConfig with the expected size and title")
-        # @req: REQ-APP-UI-001
         val config = browser_shared_wm_config("Simple Browser")
         expect(config.backend).to_equal(HostBackendKind.Browser)
-        expect(config.initial_size.width.to_i64()).to_equal(1280)  # oracle: 1280 — named expected value from the requirement
-        expect(config.initial_size.height.to_i64()).to_equal(800)  # oracle: 800 — named expected value from the requirement
+        expect(config.initial_size.width.to_i64()).to_equal(1280)
+        expect(config.initial_size.height.to_i64()).to_equal(800)
         expect(config.title).to_equal("Simple Browser")
 
     it "threads a distinct title through unchanged":
-        step("Verify: threads a distinct title through unchanged")
         val config = browser_shared_wm_config("another title")
         expect(config.title).to_equal("another title")
 
 describe "[browser] stage logs via std.diag dbg_stage (task #15 remainder item 3)":
 
     it "emits no stage entries when SIMPLE_DIAG stage facet is off (default-off contract)":
-        step("Verify: emits no stage entries when SIMPLE_DIAG stage facet is off (default-off contract)")
         dbg_diag_reset()
         expect(dbg_stage_on()).to_equal(false)
         val app_result = BrowserApp.new_with_access_store_path(FIXTURE_PATH, 0, "software", "")
@@ -105,10 +95,9 @@ describe "[browser] stage logs via std.diag dbg_stage (task #15 remainder item 3
                 expect(e).to_equal("")
             Ok(app):
                 expect(app.file_path).to_equal(FIXTURE_PATH)
-        expect(dbg_stage_history().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(dbg_stage_history().len()).to_equal(0)
 
     it "records stage entries when the SIMPLE_DIAG stage facet is forced on":
-        step("Verify: records stage entries when the SIMPLE_DIAG stage facet is forced on")
         # The facet-ON half of the contract. This is the assertion that was
         # missing for a month (see the file header): without it, any regression
         # in dbg_stage emission lands silently, because the default-off `it`

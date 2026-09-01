@@ -68,7 +68,6 @@ fn validate_raw_span(ptr: i64, len: i64, symbol: &str) -> Result<(), CompileErro
 fn expect_f64(args: &[Value], index: usize, symbol: &str) -> Result<f64, CompileError> {
     match args.get(index) {
         Some(Value::Float(value)) => Ok(*value),
-        Some(Value::Float32(value)) => Ok(f64::from(*value)),
         Some(Value::Int(value)) => Ok(*value as f64),
         _ => Err(CompileError::runtime(format!(
             "{symbol}: argument {index} must be numeric"
@@ -273,6 +272,34 @@ pub fn rt_cranelift_declare_global_data(args: &[Value]) -> Result<Value, Compile
     let tls = expect_i64(args, 4, "rt_cranelift_declare_global_data")?;
     validate_raw_span(name_ptr, name_len, "rt_cranelift_declare_global_data")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_declare_global_data(module, name_ptr, name_len, writable, tls) };
+    Ok(Value::Int(handle))
+}
+
+pub fn rt_cranelift_declare_global_data_v2(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 7 {
+        return Err(CompileError::runtime(
+            "rt_cranelift_declare_global_data_v2: expected 7 arguments".to_string(),
+        ));
+    }
+    let module = expect_i64(args, 0, "rt_cranelift_declare_global_data_v2")?;
+    let name_ptr = expect_i64(args, 1, "rt_cranelift_declare_global_data_v2")?;
+    let name_len = expect_i64(args, 2, "rt_cranelift_declare_global_data_v2")?;
+    let type_code = expect_i64(args, 3, "rt_cranelift_declare_global_data_v2")?;
+    let initial_bits = expect_i64(args, 4, "rt_cranelift_declare_global_data_v2")?;
+    let linkage = expect_i64(args, 5, "rt_cranelift_declare_global_data_v2")?;
+    let alignment = expect_i64(args, 6, "rt_cranelift_declare_global_data_v2")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_declare_global_data_v2")?;
+    let handle = unsafe {
+        cranelift_sffi::rt_cranelift_declare_global_data_v2(
+            module,
+            name_ptr,
+            name_len,
+            type_code,
+            initial_bits,
+            linkage,
+            alignment,
+        )
+    };
     Ok(Value::Int(handle))
 }
 

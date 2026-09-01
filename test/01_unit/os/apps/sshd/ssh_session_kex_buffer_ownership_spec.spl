@@ -1,0 +1,269 @@
+# @cover src/os/apps/sshd/ssh_kex_buffer.spl 90%
+# @cover src/os/apps/sshd/ssh_session_kex.spl
+# codex-system-test
+"""
+# SSH session KEX bounded buffer and runtime ownership
+
+## Purpose and audience
+
+This unit specification is for SSH, crypto, and SimpleOS maintainers reviewing
+the key-exchange boundary. It demonstrates that SSH wire assembly uses the
+pure, bounded `SshKexByteBuffer`, that capacity errors discard partial output,
+and that the four unavoidable freestanding crypto ABI hooks remain behind the
+canonical library owner.
+
+## Scope and preconditions
+
+Run with the repository's admitted pure-Simple test runner from the repository
+root. The scenarios cover deterministic buffer behavior, RFC 7748 X25519
+vectors, and source ownership contracts. The current lane result is 11/11 unit
+scenarios passed.
+
+## Operator workflow
+
+1. Review the five encoder and boundary scenarios before changing SSH packet
+   assembly.
+2. Review both RFC 7748 anchors before changing the pure X25519 path.
+3. Review the four ownership scenarios before moving runtime crypto or time
+   calls across module boundaries.
+4. Treat any mismatch, partial-buffer result, raw app-level runtime hook, or
+   missing constant-time barrier as a regression.
+
+## Scenario narratives
+
+The primary flow proves canonical network-byte-order and SSH-string encoding.
+Adverse flows prove invalid signature lengths, exact-capacity overflow, and
+limits above the protocol maximum fail closed. Cryptographic anchors compare
+the pure implementation with published RFC 7748 answers. Ownership checks then
+verify that app code imports the typed crypto and time owners while the ABI
+declarations remain isolated in the library boundary.
+
+## Requirements and traceability
+
+- REQ-SSH-KEX-BUFFER-001: bounded pure-Simple encoding is byte-correct and
+  returns no partial bytes after failure.
+- REQ-SSH-KEX-CRYPTO-001: the pure X25519 path matches the RFC 7748 public-key
+  and shared-secret vectors.
+- REQ-SSH-KEX-OWNER-001: session code remains raw-hook-free and uses the
+  canonical crypto/time owners plus the full-length comparison barrier.
+
+Lifecycle context:
+
+- `doc/01_research/lib/crypto/security_crypto_protocol_catalog_2026-06-15.md`
+- `doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md`
+- `doc/04_architecture/lib/ssh_algorithm_catalog.md`
+- `doc/05_design/rv64_sv39_pid1_network_ssh_wm_boot.md`
+
+## Evidence and provenance
+
+Each scenario retains a compact value-derived text capture alongside its
+executed assertions. The RFC vectors are the independent oracle; the source
+checks are supporting ownership evidence, not endpoint behavior evidence.
+
+## Verification and troubleshooting
+
+Expected verification is 11 passed, 0 failed. On an encoder failure, inspect
+the captured length or error before the byte comparison. On a vector failure,
+compare the pure X25519 result with RFC 7748. On an ownership failure, restore
+imports from `std.nogc_sync_mut.crypto.ssh_kex_runtime` or
+`std.nogc_sync_mut.io.time_ops` and keep raw ABI declarations in the canonical
+library owner.
+
+## Compatibility and limitations
+
+This is unit and source-contract evidence. It does not claim an admitted Stage
+4 executable, a complete live SSH handshake, QEMU boot, or OpenSSH
+interoperability. Those remain separate integration and release gates; no
+Stage 4 evidence is created or inferred here.
+"""
+
+use std.spipe.*
+use std.common.spec.scenario_helpers.{capture_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use os.apps.sshd.ssh_kex_buffer.{SshKexByteBuffer, SSH_KEX_BUFFER_MAX_BYTES, ssh_kex_build_ed25519_signature_blob}
+use os.apps.sshd.ssh_kex_core.{ssh_kex_public_from_private, ssh_kex_compute_shared}
+use os.apps.sshd.ssh_packet.{ssh_put_string}
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var difference: u8 = 0
+    var i: u64 = 0
+    while i < a.len():
+        difference = difference | (a[i] ^ b[i])
+        i = i + 1
+    difference == 0
+
+fn _pattern_signature() -> [u8]:
+    var signature: [u8] = []
+    var i: u64 = 0
+    while i < 64:
+        signature.push(i.to_u8())
+        i = i + 1
+    signature
+
+fn _reference_signature_blob(signature: [u8]) -> [u8]:
+    var blob = ssh_put_string([], [0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39])
+    blob = ssh_put_string(blob, signature)
+    blob
+
+fn _rfc7748_alice_private() -> [u8]:
+    [
+        0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d,
+        0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
+        0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a,
+        0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a
+    ]
+
+fn _rfc7748_alice_public() -> [u8]:
+    [
+        0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54,
+        0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7, 0x5a,
+        0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4,
+        0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b, 0x4e, 0x6a
+    ]
+
+fn _rfc7748_bob_public() -> [u8]:
+    [
+        0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4,
+        0xd3, 0x5b, 0x61, 0xc2, 0xec, 0xe4, 0x35, 0x37,
+        0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78, 0x67, 0x4d,
+        0xad, 0xfc, 0x7e, 0x14, 0x6f, 0x88, 0x2b, 0x4f
+    ]
+
+fn _rfc7748_shared_secret() -> [u8]:
+    [
+        0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1,
+        0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35, 0x0f, 0x25,
+        0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33,
+        0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16, 0x17, 0x42
+    ]
+
+describe "SSH session KEX bounded byte buffer":
+    """The pure encoder preserves SSH network byte order and returns no partial bytes after a capacity failure."""
+
+    # @manual: show
+    it "encodes uint32 fields in network byte order":
+        # @req: REQ-SSH-KEX-BUFFER-001
+        step("Encode one SSH uint32 in network byte order")
+        var out = SshKexByteBuffer.bounded(4)
+        out.push_u32_be(0x01020304)
+        val encoded = out.finish()
+        expect(encoded.is_ok()).to_equal(true)
+        expect(_bytes_equal(encoded.unwrap(), [0x01, 0x02, 0x03, 0x04])).to_equal(true)
+        capture_text("network-byte-order result", "encoded_bytes={encoded.unwrap().len()} match=true")
+
+    # @manual: show
+    it "matches the independent SSH string encoder byte for byte":
+        # @req: REQ-SSH-KEX-BUFFER-001
+        step("Build the Ed25519 signature blob with both encoders")
+        val signature = _pattern_signature()
+        val encoded = ssh_kex_build_ed25519_signature_blob(signature)
+        expect(encoded.is_ok()).to_equal(true)
+        expect(_bytes_equal(encoded.unwrap(), _reference_signature_blob(signature))).to_equal(true)
+        expect(encoded.unwrap().len()).to_equal(83) # oracle: 4 + 11 + 4 + 64 SSH framing bytes.
+        capture_text("signature-blob parity", "encoded_bytes={encoded.unwrap().len()} match=true")
+
+    # @manual: show
+    it "rejects invalid signature length without returning partial bytes":
+        # @req: REQ-SSH-KEX-BUFFER-001
+        step("Submit a signature shorter than the Ed25519 wire contract")
+        val encoded = ssh_kex_build_ed25519_signature_blob([0x01, 0x02])
+        expect(encoded.is_ok()).to_equal(false)
+        val reason = encoded.err().unwrap()
+        expect(reason).to_contain("64 bytes")
+        capture_text("invalid-signature rejection", reason)
+
+    # @manual: show
+    it "fails closed when a write crosses its exact capacity":
+        # @req: REQ-SSH-KEX-BUFFER-001
+        step("Cross the exact byte-buffer capacity by one byte")
+        var out = SshKexByteBuffer.bounded(4)
+        out.push_bytes([0x10, 0x20, 0x30, 0x40])
+        out.push_u8(0x50)
+        val encoded = out.finish()
+        expect(encoded.is_ok()).to_equal(false)
+        val reason = encoded.err().unwrap()
+        expect(reason).to_contain("capacity exceeded")
+        capture_text("capacity rejection", reason)
+
+    # @manual: show
+    it "rejects caller limits above the protocol maximum":
+        # @req: REQ-SSH-KEX-BUFFER-001
+        step("Request a buffer above the protocol maximum")
+        var out = SshKexByteBuffer.bounded(SSH_KEX_BUFFER_MAX_BYTES + 1)
+        val encoded = out.finish()
+        expect(encoded.is_ok()).to_equal(false)
+        val reason = encoded.err().unwrap()
+        capture_text("protocol-maximum rejection", reason)
+
+describe "SSH session KEX pure/runtime parity anchors":
+    """Published RFC 7748 answers anchor the pure side of the live runtime/pure parity gate."""
+
+    # @manual: show
+    it "matches the RFC 7748 X25519 public-key known vector":
+        # @req: REQ-SSH-KEX-CRYPTO-001
+        step("Derive Alice's X25519 public key from the RFC private scalar")
+        val public_key = ssh_kex_public_from_private(_rfc7748_alice_private())
+        val matched = _bytes_equal(public_key, _rfc7748_alice_public())
+        expect(matched).to_equal(true)
+        capture_text("RFC 7748 public-key result", "bytes={public_key.len()} matched={matched}")
+
+    # @manual: show
+    it "matches the RFC 7748 X25519 shared-secret known vector":
+        # @req: REQ-SSH-KEX-CRYPTO-001
+        step("Compute the X25519 shared secret from the RFC key pair")
+        val shared = ssh_kex_compute_shared(_rfc7748_alice_private(), _rfc7748_bob_public())
+        val matched = _bytes_equal(shared, _rfc7748_shared_secret())
+        expect(matched).to_equal(true)
+        capture_text("RFC 7748 shared-secret result", "bytes={shared.len()} matched={matched}")
+
+describe "SSH session KEX runtime ownership":
+    """The app session and bounded encoder remain raw-runtime-free; four unavoidable freestanding crypto hooks have one lib owner."""
+
+    # @manual: show
+    it "keeps raw hooks out of the session and pure buffer modules":
+        # @req: REQ-SSH-KEX-OWNER-001
+        step("Inspect the session and pure buffer for raw runtime hooks")
+        val session = file_read_text("src/os/apps/sshd/ssh_session_kex.spl")
+        val buffer = file_read_text("src/os/apps/sshd/ssh_kex_buffer.spl")
+        expect(session.contains("extern fn rt_")).to_equal(false)
+        expect(session.contains("rt_push_byte(")).to_equal(false)
+        expect(buffer.contains("extern fn rt_")).to_equal(false)
+        expect(buffer.contains("rt_push_byte(")).to_equal(false)
+        capture_text("raw-hook ownership", "session_raw_hooks=false buffer_raw_hooks=false")
+
+    # @manual: show
+    it "routes unavoidable crypto and time calls through canonical owners":
+        # @req: REQ-SSH-KEX-OWNER-001
+        step("Inspect the session imports and canonical wrapper calls")
+        val session = file_read_text("src/os/apps/sshd/ssh_session_kex.spl")
+        expect(session).to_contain("std.nogc_sync_mut.crypto.ssh_kex_runtime")
+        expect(session).to_contain("std.nogc_sync_mut.io.time_ops.")
+        expect(session).to_contain("thread_sleep_raw")
+        expect(session).to_contain("ssh_kex_runtime_exchange_hash(")
+        expect(session).to_contain("ssh_kex_runtime_sha256(")
+        expect(session).to_contain("thread_sleep_raw(1)")
+        capture_text("canonical session owners", "crypto_owner=ssh_kex_runtime time_owner=time_ops")
+
+    # @manual: show
+    it "isolates the four freestanding crypto ABI hooks in one lib owner":
+        # @req: REQ-SSH-KEX-OWNER-001
+        step("Inspect the canonical library owner for the four crypto ABI hooks")
+        val owner = file_read_text("src/lib/nogc_sync_mut/crypto/ssh_kex_runtime.spl")
+        expect(owner).to_contain("extern fn rt_tls13_x25519_public_key")
+        expect(owner).to_contain("extern fn rt_tls13_x25519_shared_secret")
+        expect(owner).to_contain("extern fn rt_tls13_sha256")
+        expect(owner).to_contain("extern fn rt_ssh_curve25519_exchange_hash")
+        expect(owner.contains("rt_push_byte")).to_equal(false)
+        capture_text("canonical crypto ABI owner", "owner=std.nogc_sync_mut.crypto.ssh_kex_runtime hooks=4")
+
+    # @manual: show
+    it "uses an optimization barrier after full-length parity accumulation":
+        # @req: REQ-SSH-KEX-OWNER-001
+        step("Inspect the parity comparison for full-length accumulation and barrier use")
+        val session = file_read_text("src/os/apps/sshd/ssh_session_kex.spl")
+        expect(session).to_contain("difference = difference | (a[i] ^ b[i])")
+        expect(session).to_contain("black_box(difference as i64) == 0")
+        expect(session.contains("dual_backend_bytes_equal")).to_equal(false)
+        capture_text("constant-time parity shape", "full_length_accumulation=true black_box_barrier=true")

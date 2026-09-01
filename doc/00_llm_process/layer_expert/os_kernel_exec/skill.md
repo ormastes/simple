@@ -1,14 +1,5 @@
 # SimpleOS Kernel Exec / Loader Layer Expert
 
-## SSH unsupported-target status boundary (2026-08-22)
-
-`src/os/apps/sshd/ssh_exec_status_contract.spl` owns the fail-closed status for
-an admitted SSH filesystem-exec request when the target has no launcher. The
-x86_32, ARM64, ARM32, and RISC-V 32 branches return `126` (launcher unavailable),
-never success. Do not reuse `127`: that remains command/PATH not found on the
-implemented x86_64 and RISC-V 64 paths. This distinction prevents unsupported
-target stubs from fabricating successful guest execution.
-
 ## Role
 
 Own layer-specific process knowledge for the SimpleOS **execution substrate**:
@@ -292,15 +283,6 @@ pre-boot, and same-run desktop/guest receipts. There is no opt-in environment
 success path. Specs are fail-closed and `step()`-based; an unavailable row
 reports `blocked`, never `skip()`.
 
-Supporting SSpec evidence is classified, not cumulative by file count:
-`simpleos_guest_toolchain_wrapper_spec.spl` is a host-fixture check of the real
-wrapper dispatcher, and `simpleos_deploy_image_simple_toolchain_spec.spl` is an
-image-admission check of the real builder. Neither proves ring-3 filesystem
-execution or desktop readiness. Only the canonical live SSpec plus its
-production wrapper and same-run receipts may move B-DESKTOP-LIVE. Legacy
-`test/system/` duplicates, source existence, and Rust-seed artifacts are not
-additional evidence.
-
 Reject any run containing `spawn:preloaded`, `HOSTED_NETWORK_UNAVAILABLE`,
 `FABRICATED-NEW`, or `guest-toolchain-exec-gate BLOCKED`.
 
@@ -378,25 +360,3 @@ disjoint IPC/VFS, boot-owner, WM, and manual rows. The source now keeps the
 daemon accepting after WM admission and rejects later accepted sessions that
 do not complete and resume accept; this remains unexecuted. Only the primary
 RV64 owner runs the shared port-2222 live gate.
-
-## RV64 process-output owner update (2026-08-22)
-
-`process_stdout_capture.spl` remains the synchronous byte-admission and 4 KiB
-compatibility-prefix owner; `process_execution_observation.spl` remains the
-generation-bound 64 KiB canonical evidence owner. Forwarding uses fixed
-256-byte ordered batches, with an atomic seal/tail flush before the loader
-marks the child exited. Preserve the closed lock graph (capture -> scheduler
-only), immediate serial output, byte-wrapper behavior, prefix truncation, and
-consume-once evidence. The batching improvement is scheduler lock/dispatch
-count only; retained stdout grows by the fixed 256-byte pending buffer, so RSS
-and allocation claims remain blocked on the admitted-runtime campaign tracked
-by `PERF-SIMPLEOS-002`.
-
-The shared hosted initial-stack owner now uses one exact-sized zeroed byte frame
-for x86_64, AArch64, and RV64 ELF64LE images, with one UTF-8 materialization per
-argv/envp entry and sequential indexed serialization. Do not route the x86
-freestanding physical writer through this byte-array sink until its documented
-runtime boundary is fixed. Preserve 16-byte SP alignment, eight-byte words,
-existing error precedence, one argv/envp terminator each, terminal `AT_NULL`,
-and exact `AT_RANDOM` ownership. `PERF-SIMPLEOS-003` remains open until
-allocation/COW plus timing/RSS are measured with an admitted Stage-4 runtime.

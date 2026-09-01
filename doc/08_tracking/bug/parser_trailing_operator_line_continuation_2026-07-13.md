@@ -6,8 +6,9 @@
 single-line-body form now parses in the Rust seed; the earlier narrowing
 (multi-line body already fine) is retained below for history.
 **Severity:** P2 — silently-confusing parse failure on a plausible/idiomatic form
-**Component:** compiler frontend / parser (both the deployed self-hosted `bin/simple`
-and the fresh Rust seed reject the same input)
+**Component:** Rust bootstrap frontend / parser inline-`if` boundary. The
+current pure-Simple lexer suppresses continuation indentation without creating
+this pseudo-indent debt and is not affected.
 
 ## Symptom
 

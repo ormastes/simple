@@ -93,7 +93,6 @@ int main(void) {
                                    (int64_t)((uint64_t)0x80ff0000 << 3), 0};
     TestArray blend_dst = {0, 0, {0}, 3, 3, blend_dst_pixels};
     TestArray blend_src = {0, 0, {0}, 3, 3, blend_src_pixels};
-    rt_simd_engine2d_neon_reset();
     result = rt_engine2d_simd_blend_row_u32((SplArray *)&blend_dst,
                                             (SplArray *)&blend_src);
     if (result != (SplArray *)&output_array) return 8;

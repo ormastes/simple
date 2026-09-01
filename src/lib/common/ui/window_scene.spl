@@ -39,6 +39,9 @@ struct SharedWmWindow:
     focused: bool
     z_index: i32
     chrome_kind: text
+    # Lifecycle state consumed by canonical DrawIR chrome. Geometry alone is
+    # ambiguous after a desktop resize, so the renderer must not infer it.
+    maximized: bool = false
 
 # chrome_kind values: "titled" draws the standard title bar + border chrome;
 # "borderless" renders the window as a pure content surface (taskbar-like
@@ -345,19 +348,10 @@ struct WmContentFrame:
 fn _wm_lower_hex_sha256_valid(value: text) -> bool:
     if value.len() != 64:
         return false
-    # Validate the digest through one contiguous byte projection.  The former
-    # `allowed.contains(value[i].to_text())` form allocated a one-character
-    # text value for every digest byte and dispatched a substring scan 64
-    # times.  This predicate runs twice for every Simple Web content frame on
-    # every WM render, so keep it O(64) with one projection and no per-byte
-    # text allocation.
-    val bytes = value.bytes()
+    val allowed = "0123456789abcdef"
     var i = 0
-    while i < bytes.len():
-        val byte = bytes[i]
-        val decimal = byte >= 48 and byte <= 57
-        val lower_hex = byte >= 97 and byte <= 102
-        if not decimal and not lower_hex:
+    while i < value.len():
+        if not allowed.contains(value[i].to_text()):
             return false
         i = i + 1
     true
@@ -594,7 +588,7 @@ fn shared_wm_scene_layout_key(scene: SharedWmScene) -> text:
     var idx = 0
     while idx < window_count:
         val window = scene.windows[idx]
-        parts.push("{window.surface_id}:{window.window_id}:{window.x},{window.y},{window.width},{window.height}:z{window.z_index}:min{window.minimized}:focus{window.focused}")
+        parts.push("{window.surface_id}:{window.window_id}:{window.x},{window.y},{window.width},{window.height}:z{window.z_index}:min{window.minimized}:focus{window.focused}:max{window.maximized}")
         idx = idx + 1
     parts.join(";")
 
@@ -663,7 +657,8 @@ fn shared_wm_drag_window(scene: SharedWmScene, surface_id: text, dx: i32, dy: i3
                 minimized: window.minimized,
                 focused: true,
                 z_index: window.z_index,
-                chrome_kind: window.chrome_kind
+                chrome_kind: window.chrome_kind,
+                maximized: window.maximized
             ))
         else:
             moved.push(window)
@@ -705,7 +700,8 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 minimized: false,
                 focused: true,
                 z_index: raised_z,
-                chrome_kind: window.chrome_kind
+                chrome_kind: window.chrome_kind,
+                maximized: window.maximized
             ))
         else:
             val retained_z = if z_saturated and window.z_index == raised_z:
@@ -729,7 +725,8 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 minimized: window.minimized,
                 focused: false,
                 z_index: retained_z,
-                chrome_kind: window.chrome_kind
+                chrome_kind: window.chrome_kind,
+                maximized: window.maximized
             ))
         idx = idx + 1
     SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: focused, background: scene.background)
@@ -764,7 +761,8 @@ fn _shared_wm_window_with_state(window: SharedWmWindow, minimized: bool, focused
         minimized: minimized,
         focused: focused,
         z_index: window.z_index,
-        chrome_kind: window.chrome_kind
+        chrome_kind: window.chrome_kind,
+        maximized: window.maximized
     )
 
 # Topmost visible window id under the same rule pointer dispatch uses to pick
@@ -940,14 +938,22 @@ fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i
         # focused window. Keep the scan indexed at this existing by-value
         # boundary for the freestanding native-safe profile.
         var running_window_id = ""
-        var best_z = -1
+        var best_visible_z = -1
+        var minimized_window_id = ""
+        var best_minimized_z = -1
         var window_index = 0
         while window_index < scene.windows.len():
             val window = scene.windows[window_index]
-            if window.app_id == app.app_id and window.z_index > best_z:
-                running_window_id = window.window_id
-                best_z = window.z_index
+            if window.app_id == app.app_id:
+                if not window.minimized and window.z_index > best_visible_z:
+                    running_window_id = window.window_id
+                    best_visible_z = window.z_index
+                if window.minimized and window.z_index > best_minimized_z:
+                    minimized_window_id = window.window_id
+                    best_minimized_z = window.z_index
             window_index = window_index + 1
+        if running_window_id == "":
+            running_window_id = minimized_window_id
         if running_window_id != "":
             val focused_scene = shared_wm_focus_window_by_window_id(
                 scene, running_window_id
@@ -978,7 +984,7 @@ fn _wm_content_button_command(component_id: text, bx: i32, by: i32, size: i32) -
     cmd.hit_rect = draw_ir_rect_bounds(bx, by, size, size)
     cmd
 
-# Lifts window body + titlebar close/minimize hit regions into the shared 2D
+# Lifts window body + titlebar close/minimize/maximize hit regions into the shared 2D
 # interaction core (D1/D2 of the 2026-07-30 unified 2D event plan): one batch
 # per visible window, embedding layer = window.z_index so the topmost window
 # wins the hit_stack sort the SAME way the old `if window.z_index > best_z`
@@ -991,13 +997,14 @@ fn _wm_content_button_command(component_id: text, bx: i32, by: i32, size: i32) -
 # (group pushed first, then leaves), matching _shared_wm_local_in_button's
 # per-button precedence over the body/drag fallback in the old code. Buttons
 # are only added for non-borderless windows, same guard as before. Returns
-# (window_index, kind) where kind is "close", "minimize", or "body";
+# (window_index, kind) where kind is "close", "minimize", "maximize", or "body";
 # window_index is -1 when nothing was hit (-> desktop_background).
 fn _wm_content_hit_window(scene: SharedWmScene, x: i32, y: i32) -> (i32, text):
     var batches: [DrawIrBatch] = []
     var body_ids: Dict<i64, i32> = {}
     var close_ids: Dict<i64, i32> = {}
     var minimize_ids: Dict<i64, i32> = {}
+    var maximize_ids: Dict<i64, i32> = {}
     var i = 0
     val window_count = scene.windows.len()
     while i < window_count:
@@ -1011,12 +1018,15 @@ fn _wm_content_hit_window(scene: SharedWmScene, x: i32, y: i32) -> (i32, text):
                 val close_btn_cid = "wm-content-{i}-close-btn"
                 val close_traffic_cid = "wm-content-{i}-close-traffic"
                 val minimize_cid = "wm-content-{i}-minimize"
+                val maximize_cid = "wm-content-{i}-maximize"
                 commands.push(_wm_content_button_command(close_btn_cid, close_x, WM_TITLEBAR_CLOSE_Y, WM_TITLEBAR_CLOSE_SIZE))
                 commands.push(_wm_content_button_command(close_traffic_cid, WM_TITLEBAR_TRAFFIC_RED_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE))
                 commands.push(_wm_content_button_command(minimize_cid, WM_TITLEBAR_TRAFFIC_YELLOW_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE))
+                commands.push(_wm_content_button_command(maximize_cid, WM_TITLEBAR_TRAFFIC_GREEN_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE))
                 close_ids[draw_ir_node_id(close_btn_cid)] = i
                 close_ids[draw_ir_node_id(close_traffic_cid)] = i
                 minimize_ids[draw_ir_node_id(minimize_cid)] = i
+                maximize_ids[draw_ir_node_id(maximize_cid)] = i
             val embedding = draw_ir_embedding_config(body_cid, body_cid, window.x, window.y, window.width, window.height, window.z_index, 1000, true)
             batches.push(draw_ir_batch(body_cid, "", embedding, commands))
         i = i + 1
@@ -1027,6 +1037,8 @@ fn _wm_content_hit_window(scene: SharedWmScene, x: i32, y: i32) -> (i32, text):
         return (close_ids[result.primary], "close")
     if minimize_ids.contains_key(result.primary):
         return (minimize_ids[result.primary], "minimize")
+    if maximize_ids.contains_key(result.primary):
+        return (maximize_ids[result.primary], "maximize")
     if body_ids.contains_key(result.primary):
         return (body_ids[result.primary], "body")
     (-1, "")
@@ -1041,12 +1053,14 @@ fn _shared_wm_content_dispatch(scene: SharedWmScene, x: i32, y: i32) -> SharedWm
         return _shared_wm_dispatch_result("close_window", window.surface_id, window.app_id, window.window_id, shared_wm_close_window_by_window_id(scene, window.window_id))
     if hit_kind == "minimize":
         return _shared_wm_dispatch_result("minimize_window", window.surface_id, window.app_id, window.window_id, shared_wm_minimize_window_by_window_id(scene, window.window_id))
+    if hit_kind == "maximize":
+        return _shared_wm_dispatch_result("toggle_maximize_window", window.surface_id, window.app_id, window.window_id, focused_scene)
     if y < window.y + _shared_wm_scale_px(28, 1000):
         return _shared_wm_dispatch_result("begin_drag_window", window.surface_id, window.app_id, window.window_id, focused_scene)
     _shared_wm_dispatch_result("focus_window", window.window_id, window.app_id, window.window_id, focused_scene)
 
 fn _shared_wm_component_kind(action: text) -> text:
-    if action == "begin_drag_window" or action == "focus_window" or action == "close_window" or action == "minimize_window":
+    if action == "begin_drag_window" or action == "focus_window" or action == "close_window" or action == "minimize_window" or action == "toggle_maximize_window":
         return "window"
     if action == "launch_app" or action == "pin_app" or action == "unpin_app":
         return "taskbar"

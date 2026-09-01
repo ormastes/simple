@@ -6,10 +6,25 @@
 use app.cli.query_helpers.{_count_indent}
 use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name}
 use app.cli.query_lint_scan.{lint_scan_line}
+use app.cli.query_source_mask.{code_pattern_line_facts}
 
 # ============================================================================
 # MEXH001-005: Match exhaustiveness (text-based heuristic)
 # ============================================================================
+
+struct QueryEnumFacts:
+    variants: [text]
+    variant_set: Dict<text, bool>
+
+struct QueryMexhSpan:
+    start_col: i64
+    end_col: i64
+
+fn _query_enum_facts(variants: [text]) -> QueryEnumFacts:
+    var variant_set: Dict<text, bool> = {}
+    for variant in variants:
+        variant_set[variant] = true
+    QueryEnumFacts(variants, variant_set)
 
 fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for match exhaustiveness.
@@ -27,7 +42,7 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
     var count = 0
 
     # Pass 1: Collect enum definitions  { name -> [variant_names] }
-    var enum_defs: {text: [text]} = {}
+    var enum_defs: Dict<text, QueryEnumFacts> = {}
     var li = 0
     while li < lines.len():
         val line = lines[li]
@@ -52,18 +67,18 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
                     variants.push(vname)
                 vi = vi + 1
             if variants.len() > 0:
-                enum_defs[enum_name] = variants
+                enum_defs[enum_name] = _query_enum_facts(variants)
         li = li + 1
 
     # Add built-in exhaustible types
     if not enum_defs.has("bool"):
-        enum_defs["bool"] = ["true", "false"]
+        enum_defs["bool"] = _query_enum_facts(["true", "false"])
     if not enum_defs.has("Bool"):
-        enum_defs["Bool"] = ["true", "false"]
+        enum_defs["Bool"] = _query_enum_facts(["true", "false"])
     if not enum_defs.has("Option"):
-        enum_defs["Option"] = ["Some", "nil"]
+        enum_defs["Option"] = _query_enum_facts(["Some", "nil"])
     if not enum_defs.has("Result"):
-        enum_defs["Result"] = ["Ok", "Err"]
+        enum_defs["Result"] = _query_enum_facts(["Ok", "Err"])
 
     # Pass 2: Scan match expressions
     li = 0
@@ -80,16 +95,25 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
             var wildcard_pos = -1
             var arm_count = 0
             var arm_patterns: [text] = []
+            var arm_pattern_set: Dict<text, bool> = {}
+            var arm_indent = -1
             var ai = li + 1
             while ai < lines.len():
                 val aline = lines[ai]
                 val at = aline.trim()
-                if at == "":
+                if at == "" or at.starts_with("#"):
                     ai = ai + 1
                     continue
                 val aindent = _count_indent(aline)
                 if aindent <= match_indent:
                     break
+
+                # Only sibling lines at the first real arm's indentation are
+                # arms of this match. Nested body statements (including nested
+                # `case` or label-like lines) must not mutate wildcard state.
+                if arm_indent >= 0 and aindent != arm_indent:
+                    ai = ai + 1
+                    continue
 
                 # Extract the pattern name from "case PATTERN:" or "PATTERN:"
                 var pat_name = ""
@@ -97,32 +121,34 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
                     pat_name = at.substring(5).split(":")[0].split("(")[0].trim()
                 elif at.contains(":"):
                     pat_name = at.split(":")[0].split("(")[0].trim()
+                if pat_name == "":
+                    ai = ai + 1
+                    continue
+                if arm_indent < 0:
+                    arm_indent = aindent
 
-                if pat_name == "_":
-                    if not has_wildcard:
-                        has_wildcard = true
-                        wildcard_pos = arm_count
-                    else:
-                        # Duplicate wildcard — unreachable
-                        count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
-                            "unreachable match arm: duplicate wildcard '_'", format)
-                elif pat_name != "":
-                    # Check for duplicate exact pattern
-                    var is_dup = false
-                    for prev in arm_patterns:
-                        if prev == pat_name:
-                            is_dup = true
-                    if is_dup:
-                        count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
-                            "unreachable match arm: duplicate pattern '{pat_name}'", format)
-
-                # Check for unreachable arm after wildcard
-                if has_wildcard and arm_count > wildcard_pos:
-                    count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                # Classify once, before the first wildcard mutates state. One
+                # arm receives at most one MEXH004, with stable precedence:
+                # duplicate wildcard > earlier wildcard > duplicate pattern.
+                val duplicate_wildcard = pat_name == "_" and has_wildcard
+                val after_wildcard = has_wildcard and arm_count > wildcard_pos
+                if duplicate_wildcard:
+                    count = count + _emit_mexh(file, ai + 1, QueryMexhSpan(aindent + 1, aindent + at.len()), "MEXH004",
+                        "unreachable match arm: duplicate wildcard '_'", format)
+                elif after_wildcard:
+                    count = count + _emit_mexh(file, ai + 1, QueryMexhSpan(aindent + 1, aindent + at.len()), "MEXH004",
                         "unreachable match arm after wildcard '_'", format)
+                elif pat_name != "" and pat_name != "_" and arm_pattern_set.has(pat_name):
+                    count = count + _emit_mexh(file, ai + 1, QueryMexhSpan(aindent + 1, aindent + at.len()), "MEXH004",
+                        "unreachable match arm: duplicate pattern '{pat_name}'", format)
+
+                if pat_name == "_" and not has_wildcard:
+                    has_wildcard = true
+                    wildcard_pos = arm_count
 
                 if pat_name != "" and pat_name != "_":
                     arm_patterns.push(pat_name)
+                    arm_pattern_set[pat_name] = true
                 arm_count = arm_count + 1
                 ai = ai + 1
 
@@ -133,14 +159,10 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
 
                 if inferred_type != "":
                     if enum_defs.has(inferred_type):
-                        val all_variants = enum_defs[inferred_type]
+                        val all_variants = enum_defs[inferred_type].variants
                         var missing: [text] = []
                         for v in all_variants:
-                            var found = false
-                            for p in arm_patterns:
-                                if p == v:
-                                    found = true
-                            if not found:
+                            if not arm_pattern_set.has(v):
                                 missing.push(v)
 
                         if missing.len() > 0:
@@ -159,25 +181,27 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
                                 "Result<T, E>"
                             else:
                                 "enum '{inferred_type}'"
-                            count = count + _emit_mexh(file, line_num, trimmed.len(), warn_code,
+                            count = count + _emit_mexh(file, line_num, QueryMexhSpan(match_indent + 1, match_indent + trimmed.len()), warn_code,
                                 "non-exhaustive match on {type_label}: missing [{missing_text}]", format)
                 else:
                     # Unknown type — generic MEXH002
-                    count = count + _emit_mexh(file, line_num, trimmed.len(), "MEXH002",
+                    count = count + _emit_mexh(file, line_num, QueryMexhSpan(match_indent + 1, match_indent + trimmed.len()), "MEXH002",
                         "match expression has no wildcard/default case", format)
 
         li = li + 1
     count
 
-fn _emit_mexh(file: text, line_num: i64, end_col: i64, code: text, message: text, format: text) -> i64:
+fn _emit_mexh(file: text, line_num: i64, span: QueryMexhSpan, code: text, message: text, format: text) -> i64:
     """Emit a MEXH warning in the requested format. Returns 1."""
     if format == "json":
-        _diag_emit_or_collect("{\"severity\":2,\"code\":\"{code}\",\"message\":\"{message}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[],\"source\":\"simple-lint\"}")
+        _diag_emit_or_collect("{\"severity\":2,\"code\":\"{code}\",\"message\":\"{message}\",\"line\":{line_num},\"col\":{span.start_col},\"end_line\":{line_num},\"end_col\":{span.end_col},\"tags\":[],\"source\":\"simple-lint\"}")
     else:
         print "{file}:{line_num}: warning[{code}]: {message}"
     1
 
-fn _infer_type_from_patterns(patterns: [text], enums: {text: [text]}) -> text:
+fn _infer_type_from_patterns(
+    patterns: [text], enums: Dict<text, QueryEnumFacts>
+) -> text:
     """Infer the match scrutinee type from arm pattern names.
 
     Checks built-in types first (bool, Option, Result), then
@@ -216,14 +240,10 @@ fn _infer_type_from_patterns(patterns: [text], enums: {text: [text]}) -> text:
         if (enum_name == "bool" or enum_name == "Bool" or
             enum_name == "Option" or enum_name == "Result"):
             continue
-        val variants = enums[enum_name]
+        val variants = enums[enum_name].variant_set
         var is_subset = true
         for p in patterns:
-            var found = false
-            for v in variants:
-                if v == p:
-                    found = true
-            if not found:
+            if not variants.has(p):
                 is_subset = false
         if is_subset:
             matches.push(enum_name)
@@ -239,6 +259,24 @@ fn _infer_type_from_patterns(patterns: [text], enums: {text: [text]}) -> text:
 
 fn _check_closure_capture_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for closure capture modification detection."""
+    # Resolve the nearest prior lower-indent declaration boundary in logarithmic
+    # time, then advance declaration counts once per (boundary, indent) group.
+    # Sibling closures therefore share the same forward scan instead of each
+    # rebuilding a dictionary by walking the outer body backward.
+    var max_indent = 0
+    for source_line in lines:
+        val source_indent = _count_indent(source_line)
+        if source_indent > max_indent:
+            max_indent = source_indent
+    var boundary_tree: [i64] = []
+    var boundary_slot = 0
+    while boundary_slot < max_indent + 2:
+        boundary_tree.push(-1)
+        boundary_slot = boundary_slot + 1
+    var group_by_scope: Dict<text, i64> = {}
+    var group_scan_start: [i64] = []
+    var group_var_counts: Dict<text, i64> = {}
+
     var count = 0
     var clos_i = 0
     while clos_i < lines.len():
@@ -248,8 +286,39 @@ fn _check_closure_capture_text(lines: [text], file: text, format: text) -> i64:
         if (trimmed.starts_with("fn ") or trimmed.starts_with("me ")):
             val fn_indent = _count_indent(line)
             if fn_indent > 0:
-                var outer_vars: [text] = []
-                _collect_outer_vars_clos(lines, clos_i, fn_indent, outer_vars)
+                # Fenwick prefix maximum over declaration-boundary indentation.
+                # Indent d queries stored indentation ranks [0, d).
+                var boundary = -1
+                var query_slot = fn_indent
+                while query_slot > 0:
+                    if boundary_tree[query_slot] > boundary:
+                        boundary = boundary_tree[query_slot]
+                    query_slot = query_slot - (query_slot & (0 - query_slot))
+
+                val scope_key = "{boundary}:{fn_indent}"
+                var group_id = 0
+                if group_by_scope.contains_key(scope_key):
+                    group_id = group_by_scope[scope_key]
+                else:
+                    group_id = group_scan_start.len()
+                    group_by_scope[scope_key] = group_id
+                    group_scan_start.push(boundary + 1)
+
+                var scan_i = group_scan_start[group_id]
+                while scan_i < clos_i:
+                    val prior_line = lines[scan_i]
+                    val prior_trimmed = prior_line.trim()
+                    if (prior_trimmed.starts_with("var ") and
+                        _count_indent(prior_line) <= fn_indent):
+                        val var_name = _extract_decl_name(
+                            prior_trimmed.substring(4))
+                        if var_name != "":
+                            val count_key = "{group_id}:{var_name}"
+                            group_var_counts[count_key] =
+                                (group_var_counts[count_key] ?? 0) + 1
+                    scan_i = scan_i + 1
+                group_scan_start[group_id] = clos_i + 1
+
                 var body_start = clos_i + 1
                 while body_start < lines.len():
                     val bline = lines[body_start]
@@ -260,47 +329,57 @@ fn _check_closure_capture_text(lines: [text], file: text, format: text) -> i64:
                     val bindent = _count_indent(bline)
                     if bindent <= fn_indent:
                         break
-                    for ovar in outer_vars:
-                        if _is_assign_to_clos(bt, ovar):
-                            val bline_num = body_start + 1
-                            if format == "json":
-                                _diag_emit_or_collect("{\"severity\":2,\"code\":\"CLOS001\",\"message\":\"closure modifies outer variable '{ovar}' — changes won't persist (capture-by-value)\",\"line\":{bline_num},\"col\":1,\"end_line\":{bline_num},\"end_col\":{bt.len()},\"tags\":[],\"source\":\"simple-lint\"}")
-                            else:
-                                print "{file}:{bline_num}: warning[CLOS001]: closure modifies outer variable '{ovar}'"
-                            count = count + 1
+                    val assigned = _closure_assignment_target(bt)
+                    if assigned != "":
+                        val assigned_key = "{group_id}:{assigned}"
+                        if group_var_counts.contains_key(assigned_key):
+                            var occurrence = 0
+                            while occurrence < group_var_counts[assigned_key]:
+                                val bline_num = body_start + 1
+                                if format == "json":
+                                    _diag_emit_or_collect("{\"severity\":2,\"code\":\"CLOS001\",\"message\":\"closure modifies outer variable '{assigned}' — changes won't persist (capture-by-value)\",\"line\":{bline_num},\"col\":1,\"end_line\":{bline_num},\"end_col\":{bt.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                                else:
+                                    print "{file}:{bline_num}: warning[CLOS001]: closure modifies outer variable '{assigned}'"
+                                count = count + 1
+                                occurrence = occurrence + 1
                     body_start = body_start + 1
+
+        # A boundary becomes visible only to following lines. All five legacy
+        # forms participate, including top-level and nested declarations.
+        val is_boundary = (trimmed.starts_with("fn ") or
+            trimmed.starts_with("me ") or
+            trimmed.starts_with("static fn ") or
+            trimmed.starts_with("class ") or
+            trimmed.starts_with("struct "))
+        if is_boundary and trimmed != "" and not trimmed.starts_with("#"):
+            val boundary_indent = _count_indent(line)
+            var update_slot = boundary_indent + 1
+            while update_slot < boundary_tree.len():
+                if clos_i > boundary_tree[update_slot]:
+                    boundary_tree[update_slot] = clos_i
+                update_slot = update_slot + (update_slot & (0 - update_slot))
         clos_i = clos_i + 1
     count
 
-fn _collect_outer_vars_clos(lines: [text], fn_line: i64, fn_indent: i64, vars: [text]):
-    """Collect var declarations from the enclosing scope above fn_line."""
-    var si = fn_line - 1
-    while si >= 0:
-        val sline = lines[si]
-        val st = sline.trim()
-        val sindent = _count_indent(sline)
-        if sindent < fn_indent and st != "" and not st.starts_with("#"):
-            if (st.starts_with("fn ") or st.starts_with("me ") or
-                st.starts_with("static fn ") or st.starts_with("class ") or
-                st.starts_with("struct ")):
-                break
-        if st.starts_with("var ") and sindent <= fn_indent:
-            val var_name = _extract_decl_name(st.substring(4))
-            if var_name != "":
-                vars.push(var_name)
-        si = si - 1
-
-fn _is_assign_to_clos(trimmed: text, var_name: text) -> bool:
-    """Check if a trimmed line assigns to the given variable name."""
-    if trimmed.starts_with(var_name):
-        val after = trimmed.substring(var_name.len())
-        val at = after.trim()
-        if at.starts_with("= ") or at.starts_with("=\t") or at == "=":
-            return true
-        if (at.starts_with("+= ") or at.starts_with("-= ") or
-            at.starts_with("*= ") or at.starts_with("/= ")):
-            return true
-    false
+fn _closure_assignment_target(trimmed: text) -> text:
+    """Extract the leading identifier only when the line assigns to it."""
+    var end = 0
+    while end < trimmed.len():
+        val character = trimmed.substring(end, end + 1)
+        val is_identifier = (character >= "a" and character <= "z") or
+            (character >= "A" and character <= "Z") or
+            (character >= "0" and character <= "9") or character == "_"
+        if not is_identifier: break
+        end = end + 1
+    if end == 0: return ""
+    val target = trimmed.substring(0, end)
+    val operator = trimmed.substring(end).trim()
+    if (operator.starts_with("= ") or operator.starts_with("=\t") or
+        operator == "=" or operator.starts_with("+= ") or
+        operator.starts_with("-= ") or operator.starts_with("*= ") or
+        operator.starts_with("/= ")):
+        return target
+    ""
 
 # ============================================================================
 # RET001: Ignored function return value (text-based heuristic)
@@ -308,6 +387,14 @@ fn _is_assign_to_clos(trimmed: text, var_name: text) -> bool:
 
 fn _check_ignored_return_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for ignored return value detection."""
+    _check_ignored_return_text_indexed(
+        lines, file, format, _query_indent_successor_index(lines))
+
+fn _check_ignored_return_text_indexed(
+    lines: [text], file: text, format: text,
+    indent_successors: QueryIndentSuccessorIndex
+) -> i64:
+    """Emit RET001 using caller-owned indentation facts."""
     var count = 0
     val side_effects: [text] = [
         "print", "println", "eprint", "eprintln",
@@ -345,7 +432,7 @@ fn _check_ignored_return_text(lines: [text], file: text, format: text) -> i64:
                                 is_side_effect = true
                                 break
                     if not is_side_effect:
-                        if not _is_last_stmt_ret(lines, ret_i):
+                        if not indent_successors.last_statement[ret_i]:
                             if format == "json":
                                 _diag_emit_or_collect("{\"severity\":3,\"code\":\"RET001\",\"message\":\"return value of '{call_name}()' is discarded\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[1],\"source\":\"simple-lint\"}")
                             else:
@@ -418,23 +505,89 @@ fn _is_any_assign_ret(trimmed: text) -> bool:
         return true
     false
 
-fn _is_last_stmt_ret(lines: [text], idx: i64) -> bool:
-    """Check if the line at idx is the last non-empty statement at its indent level."""
-    val target_indent = _count_indent(lines[idx])
-    var ni = idx + 1
-    while ni < lines.len():
-        val next_line = lines[ni]
-        val nt = next_line.trim()
-        if nt == "":
-            ni = ni + 1
+struct QueryIndentSuccessorIndex:
+    last_statement: [bool]
+    next_same_or_shallower: [i64]
+    is_return_statement: [bool]
+    first_executable_column: [i64]
+    first_token_end_column: [i64]
+
+fn _query_first_token_end_column(line: text, first_code_column: i64) -> i64:
+    if first_code_column <= 0:
+        return 0
+    var i = first_code_column - 1
+    val n = line.len()
+    while i < n:
+        val byte = line.byte_at(i)
+        val is_ident = ((byte >= 48 and byte <= 57) or
+            (byte >= 65 and byte <= 90) or byte == 95 or
+            (byte >= 97 and byte <= 122))
+        if not is_ident:
+            break
+        i = i + 1
+    if i == first_code_column - 1:
+        return first_code_column + 1
+    i + 1
+
+fn _query_is_return_code_line(
+    line: text, first_code_column: i64, return_column: i64
+) -> bool:
+    if first_code_column <= 0 or return_column != first_code_column:
+        return false
+    val after = first_code_column - 1 + 6
+    if after >= line.len():
+        return true
+    val byte = line.byte_at(after)
+    byte == 32
+
+fn _query_indent_successor_index(lines: [text]) -> QueryIndentSuccessorIndex:
+    """Index block successors for each executable source line.
+
+    One stateful lexical projection excludes comments and string payload while
+    retaining executable string openers and original columns. A reverse stack then
+    exposes the first later executable line at the same or a shallower indent.
+    RET001 and UNREACH001 share these facts without suffix rescans.
+    """
+    val lexical = code_pattern_line_facts(lines, ["return"])
+    var last_statement: [bool] = []
+    var next_same_or_shallower: [i64] = []
+    var is_return_statement: [bool] = []
+    var first_executable_column: [i64] = []
+    var first_token_end_column: [i64] = []
+    var fill = 0
+    while fill < lines.len():
+        last_statement.push(true)
+        next_same_or_shallower.push(-1)
+        val executable_column = lexical[fill].first_executable_column
+        first_executable_column.push(executable_column)
+        first_token_end_column.push(
+            _query_first_token_end_column(lines[fill], executable_column))
+        is_return_statement.push(_query_is_return_code_line(
+            lines[fill], lexical[fill].first_code_column,
+            lexical[fill].pattern_columns[0]))
+        fill = fill + 1
+    var stack: [i64] = []
+    var line_index = lines.len() - 1
+    while line_index >= 0:
+        if first_executable_column[line_index] <= 0:
+            line_index = line_index - 1
             continue
-        val next_indent = _count_indent(next_line)
-        if next_indent < target_indent:
-            return true
-        if next_indent == target_indent:
-            return false
-        ni = ni + 1
-    true
+        val indent = _count_indent(lines[line_index])
+        while (stack.len() > 0 and
+            _count_indent(lines[stack.last()]) > indent):
+            stack.pop()
+        if stack.len() > 0:
+            val successor = stack.last()
+            next_same_or_shallower[line_index] = successor
+            last_statement[line_index] = _count_indent(lines[successor]) < indent
+        stack.push(line_index)
+        line_index = line_index - 1
+    QueryIndentSuccessorIndex(
+        last_statement, next_same_or_shallower, is_return_statement,
+        first_executable_column, first_token_end_column)
+
+fn _query_last_statement_flags(lines: [text]) -> [bool]:
+    _query_indent_successor_index(lines).last_statement
 
 # ============================================================================
 # BOOL001: Multiline boolean without parentheses (text-based heuristic)
@@ -485,33 +638,61 @@ fn _check_multiline_bool_text(lines: [text], file: text, format: text) -> i64:
 
 fn _check_safety_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for safety checking."""
+    val safety_patterns = [
+        "unsafe:", "unsafe {",
+        "asm ", "asm(", "asm",
+        "ptr_read(", "ptr_write(", "ptr_cast(", "ptr_offset(",
+        "mem_copy(", "mem_set("]
+    val facts = code_pattern_line_facts(lines, safety_patterns)
     var count = 0
-    var in_unsafe = false
-    var unsafe_indent = -1
+    var unsafe_indents: [i64] = []
     var safe_i = 0
     while safe_i < lines.len():
         val scan = lint_scan_line(lines, safe_i)
         val trimmed = scan.trimmed
         val line_num = scan.line_num
         val indent = scan.indent
-        if trimmed.starts_with("unsafe:") or trimmed.starts_with("unsafe {"):
-            in_unsafe = true
-            unsafe_indent = indent
-        if in_unsafe and indent <= unsafe_indent and trimmed != "" and not trimmed.starts_with("unsafe"):
-            in_unsafe = false
-            unsafe_indent = -1
-        if not in_unsafe and indent > 0:
-            if trimmed.starts_with("asm ") or trimmed.starts_with("asm(") or trimmed == "asm":
+        val line_facts = facts[safe_i]
+        val first_code = line_facts.first_code_column
+        val columns = line_facts.pattern_columns
+        val starts_unsafe_block = (
+            (columns[0] > 0 and columns[0] == first_code) or
+            (columns[1] > 0 and columns[1] == first_code))
+        if first_code > 0:
+            while unsafe_indents.len() > 0 and indent <= unsafe_indents[unsafe_indents.len() - 1]:
+                unsafe_indents.pop()
+        if starts_unsafe_block:
+            unsafe_indents.push(indent)
+        if unsafe_indents.len() == 0 and indent > 0:
+            var asm_col = 0
+            var asm_len = 0
+            if columns[2] > 0 and columns[2] == first_code:
+                asm_col = columns[2]
+                asm_len = 4
+            elif columns[3] > 0 and columns[3] == first_code:
+                asm_col = columns[3]
+                asm_len = 4
+            elif columns[4] > 0 and columns[4] == first_code and trimmed == "asm":
+                asm_col = columns[4]
+                asm_len = 3
+            if asm_col > 0:
                 if format == "json":
-                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE001\",\"message\":\"inline assembly outside unsafe block\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE001\",\"message\":\"inline assembly outside unsafe block\",\"line\":{line_num},\"col\":{asm_col},\"end_line\":{line_num},\"end_col\":{asm_col + asm_len},\"tags\":[],\"source\":\"simple-lint\"}")
                 else:
                     print "{file}:{line_num}: error[SAFE001]: inline assembly outside unsafe block"
                 count = count + 1
-            if (trimmed.contains("ptr_read(") or trimmed.contains("ptr_write(") or
-                trimmed.contains("ptr_cast(") or trimmed.contains("ptr_offset(") or
-                trimmed.contains("mem_copy(") or trimmed.contains("mem_set(")):
+            var pointer_col = 0
+            var pointer_len = 0
+            var pointer_i = 5
+            while pointer_i < safety_patterns.len():
+                val candidate_col = columns[pointer_i]
+                if candidate_col > 0 and (pointer_col == 0 or candidate_col < pointer_col):
+                    pointer_col = candidate_col
+                    pointer_len = safety_patterns[pointer_i].len()
+                pointer_i = pointer_i + 1
+            if pointer_col > 0:
                 if format == "json":
-                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE003\",\"message\":\"raw pointer operation outside unsafe block\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE003\",\"message\":\"raw pointer operation outside unsafe block\",\"line\":{line_num},\"col\":{pointer_col},\"end_line\":{line_num},\"end_col\":{pointer_col + pointer_len},\"tags\":[],\"source\":\"simple-lint\"}")
                 else:
                     print "{file}:{line_num}: error[SAFE003]: raw pointer operation outside unsafe block"
                 count = count + 1
