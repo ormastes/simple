@@ -45,6 +45,15 @@ typedef intptr_t RuntimeValue;
 /* Closure objects. Distinct tag so rt_closure_func_ptr can refuse a handle
  * that is not actually a closure instead of reading a foreign field. */
 #define HEAP_CLOSURE 9U
+/* Declared with the other heap kinds rather than beside the dict
+ * implementation further down, because rt_len / rt_index_get / rt_index_set
+ * above it must all recognise a dict receiver. */
+#define HEAP_DICT 11U
+
+/* Defined with the dict implementation further down this TU. */
+uint64_t     simpleos_dict_count(RuntimeValue dict);
+RuntimeValue simpleos_dict_lookup(RuntimeValue dict, RuntimeValue key);
+int8_t       simpleos_dict_store(RuntimeValue dict, RuntimeValue key, RuntimeValue item);
 
 typedef struct {
     uint32_t type;
@@ -539,6 +548,11 @@ RuntimeValue rt_len(RuntimeValue value)
     if (!hdr) return 0;
     if (hdr->type == HEAP_STRING) return (RuntimeValue)((RuntimeString *)hdr)->len;
     if (hdr->type == HEAP_ARRAY) return (RuntimeValue)((RuntimeArray *)hdr)->len;
+    /* Dicts answer their pair count rather than a flat 0. Same defect family as
+     * the rt_index_get/rt_index_set dict gaps below: a kind this function does
+     * not recognise gets a plausible-looking answer instead of an honest one,
+     * and `d.len() == 0` on a populated dict reads as "empty" everywhere. */
+    if (hdr->type == HEAP_DICT) return (RuntimeValue)simpleos_dict_count(value);
     return 0;
 }
 
@@ -548,10 +562,16 @@ RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx);
 
 RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
 {
-    if (!IS_INT(index)) return NIL_VALUE;
     if (!IS_HEAP(value)) return NIL_VALUE;
     HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
     if (!hdr) return NIL_VALUE;
+    /* DICT FIRST, and deliberately BEFORE the IS_INT(index) guard: a dict key
+     * is an arbitrary RuntimeValue (this lane's real case is
+     * `Dict<SymbolId, HirFunction>`, whose key is a heap struct handle, not an
+     * int). The old `if (!IS_INT(index)) return NIL_VALUE;` opening line
+     * rejected every such key before the receiver was even examined. */
+    if (hdr->type == HEAP_DICT) return simpleos_dict_lookup(value, index);
+    if (!IS_INT(index)) return NIL_VALUE;
     if (hdr->type == HEAP_ARRAY) return rt_array_get(value, (RuntimeValue)DECODE_INT(index));
     /* A TEXT subscript (`s[i]`) lowers to rt_index_get exactly like an array
      * subscript does, but this function used to recognise only HEAP_ARRAY and
@@ -570,6 +590,33 @@ RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
 
 RuntimeValue rt_index_set(RuntimeValue value, RuntimeValue index, RuntimeValue item)
 {
+    /* Receiver kind is decided FIRST. This function used to open with
+     * `if (!IS_INT(index)) return 0;` and then unconditionally call
+     * rt_array_set — it never looked at what it was writing INTO. For a DICT
+     * receiver with a non-int key that opening line returned 0 immediately and
+     * THE WRITE WAS SILENTLY DROPPED; for an int key it would have scribbled
+     * through the array path into a dict's memory.
+     *
+     * This is the exact mirror of the rt_index_get HEAP_ARRAY-only defect fixed
+     * directly above, one notch further along, and it is what stalled the
+     * riscv64 in-guest interpreter row: HIR lowering populates
+     * `HirModule.functions : Dict<SymbolId, HirFunction>` with `d[sym] = fn`,
+     * which lowers to rt_index_set with a heap-struct key. Every one of those
+     * writes was discarded, so the dict stayed EMPTY, `.values()` yielded
+     * nothing, the `f.name == "main"` loop body never executed once, and
+     * InterpreterBackendImpl.interpret_hir_module reported
+     * "module has no main function" — with no trap and no error, because
+     * dropping a write is silent by construction.
+     *
+     * (The `hir.functions.len() > 0` guard upstream still passed, which is why
+     * this looked like an iteration/compare defect rather than an empty dict:
+     * `.len()` did not route here at all.) */
+    if (IS_HEAP(value)) {
+        HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+        if (hdr && hdr->type == HEAP_DICT) {
+            return (RuntimeValue)simpleos_dict_store(value, index, item);
+        }
+    }
     if (!IS_INT(index)) return 0;
     return rt_array_set(value, (RuntimeValue)DECODE_INT(index), item);
 }
@@ -1823,6 +1870,39 @@ RuntimeValue rt_index_of(RuntimeValue receiver, RuntimeValue needle)
     return (RuntimeValue)(int64_t)-1;
 }
 
+/* rt_string_rfind(value, needle) -- the riscv64 freestanding definition of an
+ * EXISTING runtime symbol (src/runtime/runtime.h:684), not a new one. The
+ * interpreter row's link fails with
+ * `ld.lld: error: undefined symbol: rt_string_rfind`, referenced from
+ * compiler__hir__hir_lowering___Items__module_lowering__hir_module_package_name.
+ *
+ * Semantics copied from the hosted rt_string_rfind in src/runtime/runtime_native.c:
+ * last index at which `needle` occurs, -1 when absent or either side is not a
+ * string, and `s->len` for an EMPTY needle (not 0 — the hosted runtime returns
+ * the end position, and a package-name split that got 0 here would silently
+ * take the whole string).
+ *
+ * Return is a RAW int64, matching rt_index_of directly above and this
+ * runtime's rt_len — NOT ENCODE_INT. Getting that backwards is the
+ * rt_string_bytes tagging defect over again. */
+RuntimeValue rt_string_rfind(RuntimeValue value, RuntimeValue needle)
+{
+    if (!IS_HEAP(value) || !IS_HEAP(needle)) return (RuntimeValue)(int64_t)-1;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(value);
+    RuntimeString *n = (RuntimeString *)DECODE_PTR(needle);
+    if (!s || !n || s->hdr.type != HEAP_STRING || n->hdr.type != HEAP_STRING) {
+        return (RuntimeValue)(int64_t)-1;
+    }
+    if (n->len == 0) return (RuntimeValue)(int64_t)s->len;
+    if (n->len > s->len) return (RuntimeValue)(int64_t)-1;
+    for (uint64_t i = (uint64_t)(s->len - n->len) + 1U; i-- > 0;) {
+        uint64_t j = 0;
+        while (j < n->len && s->data[i + j] == n->data[j]) j++;
+        if (j == n->len) return (RuntimeValue)(int64_t)i;
+    }
+    return (RuntimeValue)(int64_t)-1;
+}
+
 RuntimeValue rt_sort(RuntimeValue receiver)
 {
     RuntimeArray *a = simpleos_array_from_handle(receiver);
@@ -1902,13 +1982,38 @@ int8_t rt_transient_array_scope_end(void)   { return 1; }
 int8_t rt_transient_heap_promote(int64_t value) { (void)value; return 1; }
 
 /* --- dictionaries ---------------------------------------------------------
- * No dict existed in this arch tree at all. The four entry points below are
- * the ones the interpreter closure actually references; rt_dict_set /
- * rt_dict_get are deliberately NOT defined here because nothing in this link
- * calls them, and writing an entry point no caller has pinned down is how ABI
- * drift gets introduced rather than removed. If a later link reports them
- * undefined, they are a four-line addition over this same layout. */
-#define HEAP_DICT 11U
+ * No dict existed in this arch tree at all.
+ *
+ * HISTORY, because the previous note here was actively misleading and cost a
+ * lane: it said rt_dict_set / rt_dict_get were "deliberately NOT defined here
+ * because nothing in this link calls them". The premise was wrong. The
+ * interpreter lane's dict traffic does not arrive as `.set()` / `.get()` — it
+ * arrives as SUBSCRIPT (`d[k] = v`, `d[k]`), which lowers to
+ * rt_index_set / rt_index_get, and those two DID exist and silently dropped
+ * every dict write (see the comment on rt_index_set above). So "nothing calls
+ * them" was true of the names and false of the operation, and the resulting
+ * hole was invisible precisely because a dropped write raises nothing.
+ *
+ * Both entry points are therefore defined below, over this same layout, and
+ * the subscript path routes into the shared helpers rather than duplicating
+ * the lookup rule.
+ *
+ * KEY EQUALITY is raw-handle identity first, then rt_string_eq — the rule
+ * rt_dict_contains already used, kept deliberately rather than widened. Struct
+ * keys (SymbolId) compare by handle identity, which is correct for every use on
+ * this lane: the keys handed to `d[k]` come back out of `.keys()`/`.values()`
+ * as the SAME handles, and the interpreter's `main` lookup iterates `.values()`
+ * and never re-derives a key. A structural comparator for arbitrary struct keys
+ * is a real gap, but it is a DIFFERENT one, and inventing it here unpinned
+ * would be exactly the ABI drift the old note rightly warned about.
+ *
+ * CAPACITY: rt_dict_new caps at 1024 with no growth. A store past capacity
+ * FAILS LOUD on serial and returns 0 rather than dropping the pair — a silent
+ * drop here is the very defect this block exists to end.
+ *
+ * HEAP_DICT itself is #defined up with the other heap kinds, because rt_len /
+ * rt_index_get / rt_index_set all sit above this point and must recognise a
+ * dict receiver. */
 
 typedef struct {
     HeapHeader hdr;
@@ -1952,6 +2057,99 @@ int8_t rt_dict_contains(int64_t dict, int64_t key)
         if (rt_string_eq(d->keys[i], (RuntimeValue)key)) return 1;
     }
     return 0;
+}
+
+/* Shared key rule for the store/lookup entry points below: raw handle identity
+ * first, then rt_string_eq for text keys — the identical rule rt_dict_contains
+ * above spells out inline, kept in one place here so the new paths cannot drift
+ * from each other. */
+static int simpleos_dict_key_eq(RuntimeValue a, RuntimeValue b)
+{
+    if (a == b) return 1;
+    return rt_string_eq(a, b) ? 1 : 0;
+}
+
+/* Slot index of `key`, or -1. */
+static int64_t simpleos_dict_find_slot(RuntimeDict *d, RuntimeValue key)
+{
+    for (uint64_t i = 0; i < d->len; i++) {
+        if (simpleos_dict_key_eq(d->keys[i], key)) return (int64_t)i;
+    }
+    return -1;
+}
+
+uint64_t simpleos_dict_count(RuntimeValue dict)
+{
+    RuntimeDict *d = simpleos_dict_from_handle(dict);
+    return d ? d->len : 0;
+}
+
+RuntimeValue simpleos_dict_lookup(RuntimeValue dict, RuntimeValue key)
+{
+    RuntimeDict *d = simpleos_dict_from_handle(dict);
+    if (!d) return NIL_VALUE;
+    int64_t slot = simpleos_dict_find_slot(d, key);
+    return slot < 0 ? NIL_VALUE : d->vals[slot];
+}
+
+int8_t simpleos_dict_store(RuntimeValue dict, RuntimeValue key, RuntimeValue item)
+{
+    RuntimeDict *d = simpleos_dict_from_handle(dict);
+    if (!d) return 0;
+    int64_t slot = simpleos_dict_find_slot(d, key);
+    if (slot >= 0) { d->vals[slot] = item; return 1; }
+    if (d->len >= d->cap) {
+        /* LOUD, never silent. rt_dict_new does not grow, and a dropped pair
+         * here would reproduce exactly the invisible-write defect this block
+         * was written to end. */
+        serial_puts("\r\n[FATAL] rt_dict_set: dictionary capacity exhausted, "
+                    "refusing to drop a key\r\n");
+        return 0;
+    }
+    d->keys[d->len] = key;
+    d->vals[d->len] = item;
+    d->len++;
+    return 1;
+}
+
+/* rt_dict_set -- the riscv64 freestanding definition of an EXISTING runtime
+ * symbol (src/runtime/runtime.h:746, `int8_t rt_dict_set(int64_t, int64_t,
+ * int64_t)`), not a new one.
+ *
+ * THIS IS THE riscv64 IN-GUEST INTERPRETER ROW'S BLOCKER. Measured from the
+ * kept link objects of the pre-fix build: `nm -u mod_*.o` lists rt_dict_set as
+ * REFERENCED by generated guest code, and no boot TU defined it. It did not
+ * surface as a link error because this lane's "Freestanding unresolved
+ * precheck deferred to linker" bridge supplies a silent stub for it — a call
+ * that succeeds and does nothing, which is the worst possible failure mode and
+ * the one this tree has now been bitten by three times.
+ *
+ * Consequence: every insertion into `HirModule.functions` was discarded, the
+ * dict stayed empty, `module.functions.values()` yielded an empty array, the
+ * `f.name == "main"` loop in InterpreterBackendImpl.interpret_hir_module never
+ * executed its body once, and the row failed with "module has no main
+ * function" — with the HIR itself perfectly well-formed. That is why the
+ * symptom pointed at iteration or text compare: both were innocent.
+ *
+ * Returns int8_t 1/0 (success/failure), matching the hosted declaration. */
+int8_t rt_dict_set(int64_t dict, int64_t key, int64_t value)
+{
+    return simpleos_dict_store((RuntimeValue)dict, (RuntimeValue)key, (RuntimeValue)value);
+}
+
+/* rt_dict_get / rt_dict_len mirror the hosted signatures
+ * (runtime.h:745, and `int64_t rt_dict_len(int64_t)` returning a RAW count,
+ * the same basis as this runtime's rt_len). Defined because a dict that can be
+ * written must be readable and measurable by name, not only by subscript. */
+int64_t rt_dict_get(int64_t dict, int64_t key)
+{
+    return (int64_t)simpleos_dict_lookup((RuntimeValue)dict, (RuntimeValue)key);
+}
+
+int64_t rt_dict_len(int64_t dict)
+{
+    RuntimeDict *d = simpleos_dict_from_handle((RuntimeValue)dict);
+    return d ? (int64_t)d->len : 0;
 }
 
 int64_t rt_dict_keys(int64_t dict)
