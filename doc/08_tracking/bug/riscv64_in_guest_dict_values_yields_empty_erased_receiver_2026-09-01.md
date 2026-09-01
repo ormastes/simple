@@ -1,6 +1,6 @@
 # riscv64 in-guest: `hir.functions.values()` yields EMPTY while `.len()` reports non-empty
 
-- Status: OPEN — this is the single remaining blocker for goal row 1
+- Status: OPEN — single remaining blocker for goal row 1. **RESOLVED to reading (b) by measurement: the dict is real and EMPTY; no write ever reaches it.**
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
 - Class: a freestanding-only disagreement between two read routes over one
@@ -49,9 +49,29 @@ therefore consistent with EITHER of:
   (b) `rt_dict_values` WAS called with a perfectly valid `HEAP_DICT` whose
       `len` is 0 — i.e. the dict is genuinely EMPTY.
 
-The measurement does not separate these, and the next session must not assume
-it did. A one-line unconditional marker at the top of `rt_dict_values`
-separates them in a single ~5-minute boot.
+That ambiguity has since been RESOLVED by a second boot carrying unconditional
+markers. Result:
+
+```
+      6 [DIAG] rt_dict_values entered
+      6 [DIAG] rt_dict_values dict is EMPTY
+```
+
+and **zero** `[DIAG] simpleos_dict_store entered` lines.
+
+So reading **(b)** is correct, and it is now established rather than inferred:
+
+- `rt_dict_values` IS called (6 times) and the handle IS a valid `HEAP_DICT`.
+  The `.values()` call is correctly routed. It is NOT misrouted.
+- The dict's `len` is 0 every time — it is genuinely EMPTY.
+- `simpleos_dict_store` — the single funnel through which BOTH `rt_dict_set`
+  and the `rt_index_set` dict arm write — is **never entered even once**.
+
+Therefore: **no insertion into `hir.functions` ever reaches the dict, and it
+does not travel through `rt_dict_set` or `rt_index_set` either.** The write is
+emitted as some third entry point, which is one of the 341 `rt_*` symbols the
+guest objects reference with no definition in any boot TU and which the lane's
+bridge answers with a silent stub.
 
 Three candidate causes were on the table. Two are now EXCLUDED by measurement:
 
@@ -61,9 +81,8 @@ Three candidate causes were on the table. Two are now EXCLUDED by measurement:
 - **The function names are irrelevant.** No per-function line was printed at
   all, so nothing was ever compared. A name-bytes defect (the
   `rt_string_bytes` family) cannot be the cause of an empty iteration.
-- **What remains:** `hir.functions.values()` returns an EMPTY array — either
-  because the call is misrouted, or because the dict really is empty (the
-  write path is still dropping insertions through some route not yet found).
+- **What remains, now positively established:** the dict really is EMPTY, and
+  the write path never reaches it through any route this runtime defines.
 
 ## The contradiction that localises it
 
@@ -108,10 +127,37 @@ commit that landed it overstated the causal claim.
 
 ## Next step
 
-FIRST, separate reading (a) from reading (b) with an unconditional marker at
-the top of `rt_dict_values` (and one in `rt_dict_set` / `simpleos_dict_store`)
-— one boot, ~5 minutes with the fast cycle below. Only then chase either the
-misroute or the remaining write-path hole.
+(a)-vs-(b) is settled — see above. The one remaining question is:
+
+**Which entry point does HIR lowering's insertion into
+`Dict<SymbolId, HirFunction>` actually emit on this lane?** It is provably
+neither `rt_dict_set` nor `rt_index_set` (both funnel through
+`simpleos_dict_store`, which never runs). The referenced-minus-defined symbol
+diff was searched for dict/map/insert/put/store/table-shaped names and turned
+up NO other candidate, which makes a third runtime entry point unlikely.
+
+**That points somewhere more interesting, and the next session should test it
+first: `.len()` is the component that is lying, and the dict was empty all
+along.** The chain is forced by the evidence:
+
+- The dict is measured EMPTY at `.values()` time (6/6 boots, valid HEAP_DICT).
+- No write ever reaches it through any defined route.
+- Yet the `if hir.functions.len() == 0` guard in `interpreter_hello_entry.spl`
+  does NOT fire, so `.len()` reports non-zero **on a dict that is empty**.
+
+If `.len()` is simply wrong here, then nothing was ever dropped at the runtime
+level — **HIR lowering produced a module with no functions in-guest**, the
+`len() == 0` guard that exists precisely to catch that was defeated by a broken
+`.len()`, and `interpret_hir_module` then correctly reported no `main`. The
+runtime dict work in this lane would then be a real but SEPARATE fix, and the
+actual row-1 blocker would be upstream in lowering.
+
+Test to run first (one ~6-minute cycle): print `hir.functions.len()` as a
+repeated-marker count in the guest entry alongside the `values-empty` line, and
+put an unconditional marker in whatever `.len()` resolves to. If `.len()` and
+`.values()` disagree on a dict the runtime says is empty, chase `.len()`; if
+they agree, chase lowering. Do NOT resume patching dict write paths until this
+is answered — two sessions have now been spent on the write side.
 
 `.values()` lowers with `DispatchMode::Dynamic`
 (`src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:1681`), so the emitted
