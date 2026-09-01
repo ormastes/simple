@@ -9,17 +9,20 @@ mod unix {
     use std::collections::HashMap;
     use std::ffi::CString;
     use std::os::fd::RawFd;
-    use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+    use std::io::Read;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     const INVALID: i64 = -1;
-    static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
     static HANDLES: OnceLock<Mutex<HashMap<i64, Entry>>> = OnceLock::new();
+    #[cfg(test)]
+    static READ_TEST_BARRIER: OnceLock<Mutex<Option<std::sync::Arc<std::sync::Barrier>>>> = OnceLock::new();
 
     #[derive(Debug)]
     enum Entry {
         Root(RawFd),
+        Dir(RawFd),
         Read(RawFd),
         Temp { fd: RawFd, root_fd: RawFd, name: CString },
     }
@@ -29,12 +32,21 @@ mod unix {
     }
 
     fn insert(entry: Entry) -> i64 {
-        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        handles()
-            .lock()
-            .expect("cache authority handle lock")
-            .insert(handle, entry);
-        handle
+        let mut guard = handles().lock().expect("cache authority handle lock");
+        loop {
+            let mut bytes = [0u8; 8];
+            if std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(&mut bytes))
+                .is_err()
+            {
+                return INVALID;
+            }
+            let handle = (i64::from_ne_bytes(bytes) & i64::MAX).max(1);
+            if let std::collections::hash_map::Entry::Vacant(slot) = guard.entry(handle) {
+                slot.insert(entry);
+                return handle;
+            }
+        }
     }
 
     unsafe fn input(ptr: *const u8, len: i64) -> Option<CString> {
@@ -55,6 +67,31 @@ mod unix {
 
     fn dup_fd(fd: RawFd) -> RawFd {
         unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn stat_nsec_equal(a: &libc::stat, b: &libc::stat) -> bool {
+        a.st_mtime_nsec == b.st_mtime_nsec && a.st_ctime_nsec == b.st_ctime_nsec
+    }
+
+    #[cfg(target_os = "freebsd")]
+    fn stat_nsec_equal(a: &libc::stat, b: &libc::stat) -> bool {
+        a.st_mtime_nsec == b.st_mtime_nsec && a.st_ctime_nsec == b.st_ctime_nsec
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn stat_nsec_equal(a: &libc::stat, b: &libc::stat) -> bool {
+        a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe fn errno() -> i32 {
+        *libc::__errno_location()
+    }
+
+    #[cfg(any(target_os = "freebsd", target_os = "macos", target_os = "ios"))]
+    unsafe fn errno() -> i32 {
+        *libc::__error()
     }
 
     fn open_beneath(root: RawFd, path: &CString, flags: i32, mode: libc::mode_t) -> RawFd {
@@ -82,7 +119,14 @@ mod unix {
             parent = next;
         }
         let leaf = CString::new(parts[parts.len() - 1]).expect("validated leaf");
-        let fd = unsafe { libc::openat(parent, leaf.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC, mode) };
+        let fd = unsafe {
+            libc::openat(
+                parent,
+                leaf.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                mode as libc::c_uint,
+            )
+        };
         unsafe { libc::close(parent) };
         fd
     }
@@ -138,10 +182,11 @@ mod unix {
     pub unsafe extern "C" fn rt_cache_host_open_read_v1(root: i64, path: *const u8, len: i64) -> i64 {
         let Some(path) = input(path, len) else { return INVALID };
         let guard = handles().lock().expect("cache authority handle lock");
-        let Some(Entry::Root(root_fd)) = guard.get(&root) else {
-            return INVALID;
+        let root_fd = match guard.get(&root) {
+            Some(Entry::Root(fd)) | Some(Entry::Dir(fd)) => *fd,
+            _ => return INVALID,
         };
-        let fd = open_beneath(*root_fd, &path, libc::O_RDONLY, 0);
+        let fd = open_beneath(root_fd, &path, libc::O_RDONLY, 0);
         drop(guard);
         if fd < 0 {
             INVALID
@@ -150,11 +195,53 @@ mod unix {
         }
     }
 
-    /// Returns bytes read, -1 on I/O failure, or -2 if the same-handle
-    /// pre/read/post metadata receipt changed.  The caller must reject -2.
+    /// Derive a fixed child-directory capability without exposing its path.
+    /// Root children are restricted to cache-owned namespaces; descendants are
+    /// single canonical shard components.
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_open_child_v1(parent: i64, name: *const u8, len: i64, create: i64) -> i64 {
+        let Some(name) = input(name, len) else { return INVALID };
+        if !relative_name(&name) || name.as_bytes().contains(&b'/') {
+            return INVALID;
+        }
+        let guard = handles().lock().expect("cache authority handle lock");
+        let parent_fd = match guard.get(&parent) {
+            Some(Entry::Root(fd)) => {
+                if !matches!(name.as_bytes(), b"db" | b"cas" | b"journal" | b"spool" | b"quarantine") {
+                    return INVALID;
+                }
+                *fd
+            }
+            Some(Entry::Dir(fd)) => {
+                if name.as_bytes().len() > 64 || !name.as_bytes().iter().all(|b| b.is_ascii_hexdigit() || *b == b'-') {
+                    return INVALID;
+                }
+                *fd
+            }
+            _ => return INVALID,
+        };
+        if create != 0 && libc::mkdirat(parent_fd, name.as_ptr(), 0o700) != 0 && errno() != libc::EEXIST {
+            return INVALID;
+        }
+        let fd = libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        );
+        drop(guard);
+        if fd < 0 {
+            INVALID
+        } else {
+            insert(Entry::Dir(fd))
+        }
+    }
+
+    /// Reads exactly one complete bounded file. Returns its complete byte
+    /// count, -1 on bounds/I/O failure, or -2 if its same-handle receipt
+    /// changed. Partial/chunked reads are deliberately unsupported.
     #[no_mangle]
     pub unsafe extern "C" fn rt_cache_host_pread_receipt_v1(handle: i64, offset: i64, out: *mut u8, cap: i64) -> i64 {
-        if out.is_null() || offset < 0 || cap < 0 || cap > 64 * 1024 * 1024 {
+        if out.is_null() || offset != 0 || cap < 0 || cap > 64 * 1024 * 1024 {
             return INVALID;
         }
         let guard = handles().lock().expect("cache authority handle lock");
@@ -167,8 +254,42 @@ mod unix {
         if libc::fstat(fd, &mut before) != 0 || (before.st_mode & libc::S_IFMT) != libc::S_IFREG {
             return INVALID;
         }
-        let count = libc::pread(fd, out.cast(), cap as usize, offset as libc::off_t);
-        if count < 0 || libc::fstat(fd, &mut after) != 0 {
+        if before.st_size < 0 || before.st_size > cap {
+            return INVALID;
+        }
+        let expected = before.st_size as usize;
+        let mut count = 0usize;
+        while count < expected {
+            let read_len = (expected - count).min(4096);
+            let read = libc::pread(fd, out.add(count).cast(), read_len, count as libc::off_t);
+            if read <= 0 {
+                return INVALID;
+            }
+            count += read as usize;
+            #[cfg(test)]
+            if count == read_len && count < expected {
+                if let Some(barrier) = READ_TEST_BARRIER
+                    .get_or_init(|| Mutex::new(None))
+                    .lock()
+                    .unwrap()
+                    .clone()
+                {
+                    barrier.wait();
+                    barrier.wait();
+                }
+            }
+        }
+        let mut verified = 0usize;
+        let mut scratch = [0u8; 4096];
+        while verified < expected {
+            let want = (expected - verified).min(scratch.len());
+            let read = libc::pread(fd, scratch.as_mut_ptr().cast(), want, verified as libc::off_t);
+            if read != want as isize || std::slice::from_raw_parts(out.add(verified), want) != &scratch[..want] {
+                return -2;
+            }
+            verified += want;
+        }
+        if libc::fstat(fd, &mut after) != 0 {
             return INVALID;
         }
         if before.st_dev != after.st_dev
@@ -176,20 +297,22 @@ mod unix {
             || before.st_size != after.st_size
             || before.st_mtime != after.st_mtime
             || before.st_ctime != after.st_ctime
+            || !stat_nsec_equal(&before, &after)
         {
             -2
         } else {
-            count as i64
+            expected as i64
         }
     }
 
     #[no_mangle]
     pub unsafe extern "C" fn rt_cache_host_secure_temp_v1(root: i64) -> i64 {
         let guard = handles().lock().expect("cache authority handle lock");
-        let Some(Entry::Root(root_fd)) = guard.get(&root) else {
-            return INVALID;
+        let root_fd = match guard.get(&root) {
+            Some(Entry::Root(fd)) | Some(Entry::Dir(fd)) => *fd,
+            _ => return INVALID,
         };
-        let owned_root = dup_fd(*root_fd);
+        let owned_root = dup_fd(root_fd);
         drop(guard);
         if owned_root < 0 {
             return INVALID;
@@ -210,7 +333,7 @@ mod unix {
                     name,
                 });
             }
-            if *libc::__errno_location() != libc::EEXIST {
+            if errno() != libc::EEXIST {
                 break;
             }
         }
@@ -255,11 +378,7 @@ mod unix {
         #[cfg(not(target_os = "linux"))]
         let rc = { libc::linkat(*root_fd, name.as_ptr(), *root_fd, dest.as_ptr(), 0) };
         if rc != 0 {
-            return if *libc::__errno_location() == libc::EEXIST {
-                0
-            } else {
-                INVALID
-            };
+            return if errno() == libc::EEXIST { 0 } else { INVALID };
         }
         #[cfg(not(target_os = "linux"))]
         libc::unlinkat(*root_fd, name.as_ptr(), 0);
@@ -282,8 +401,9 @@ mod unix {
             return INVALID;
         }
         let guard = handles().lock().expect("cache authority handle lock");
-        let Some(Entry::Root(root_fd)) = guard.get(&root) else {
-            return INVALID;
+        let root_fd = match guard.get(&root) {
+            Some(Entry::Root(fd)) | Some(Entry::Dir(fd)) => *fd,
+            _ => return INVALID,
         };
         let Some(Entry::Read(object_fd)) = guard.get(&object) else {
             return INVALID;
@@ -292,18 +412,14 @@ mod unix {
         let rc = libc::linkat(
             *object_fd,
             empty.as_ptr().cast(),
-            *root_fd,
+            root_fd,
             dest.as_ptr(),
             libc::AT_EMPTY_PATH,
         );
         if rc != 0 {
-            return if *libc::__errno_location() == libc::EEXIST {
-                0
-            } else {
-                INVALID
-            };
+            return if errno() == libc::EEXIST { 0 } else { INVALID };
         }
-        libc::fsync(*root_fd);
+        libc::fsync(root_fd);
         1
     }
 
@@ -318,7 +434,7 @@ mod unix {
     pub unsafe extern "C" fn rt_cache_host_fsync_v1(handle: i64) -> i64 {
         let guard = handles().lock().expect("cache authority handle lock");
         let fd = match guard.get(&handle) {
-            Some(Entry::Root(fd)) | Some(Entry::Read(fd)) | Some(Entry::Temp { fd, .. }) => *fd,
+            Some(Entry::Root(fd)) | Some(Entry::Dir(fd)) | Some(Entry::Read(fd)) | Some(Entry::Temp { fd, .. }) => *fd,
             None => return INVALID,
         };
         if libc::fsync(fd) == 0 {
@@ -334,7 +450,7 @@ mod unix {
             return INVALID;
         };
         match entry {
-            Entry::Root(fd) | Entry::Read(fd) => libc::close(fd) as i64,
+            Entry::Root(fd) | Entry::Dir(fd) | Entry::Read(fd) => libc::close(fd) as i64,
             Entry::Temp { fd, root_fd, name } => {
                 libc::unlinkat(root_fd, name.as_ptr(), 0);
                 libc::close(root_fd);
@@ -381,6 +497,33 @@ mod unix {
         }
 
         #[test]
+        fn child_capabilities_are_fixed_and_descriptor_anchored() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir(dir.path().join("outside")).unwrap();
+            symlink("outside", dir.path().join("spool")).unwrap();
+            let r = root(dir.path());
+            assert_eq!(
+                unsafe { rt_cache_host_open_child_v1(r, b"spool".as_ptr(), 5, 1) },
+                INVALID
+            );
+            assert_eq!(
+                unsafe { rt_cache_host_open_child_v1(r, b"arbitrary".as_ptr(), 9, 1) },
+                INVALID
+            );
+            fs::remove_file(dir.path().join("spool")).unwrap();
+            let cas = unsafe { rt_cache_host_open_child_v1(r, b"cas".as_ptr(), 3, 1) };
+            assert!(cas > 0);
+            let shard = unsafe { rt_cache_host_open_child_v1(cas, b"a9".as_ptr(), 2, 1) };
+            assert!(shard > 0);
+            assert_ne!(cas.wrapping_add(1), shard);
+            unsafe {
+                rt_cache_host_close_v1(shard);
+                rt_cache_host_close_v1(cas);
+                rt_cache_host_close_v1(r);
+            }
+        }
+
+        #[test]
         fn concurrent_publish_is_no_replace() {
             let dir = tempfile::tempdir().unwrap();
             let r = root(dir.path());
@@ -400,6 +543,34 @@ mod unix {
             assert_eq!(results.iter().filter(|v| **v == 1).count(), 1);
             assert_eq!(results.iter().filter(|v| **v == 0).count(), 1);
             unsafe {
+                rt_cache_host_close_v1(r);
+            }
+        }
+
+        #[test]
+        fn same_size_same_second_multi_chunk_mutation_is_rejected() {
+            let dir = tempfile::tempdir().unwrap();
+            let object_path = dir.path().join("object");
+            fs::write(&object_path, vec![b'a'; 8192]).unwrap();
+            let r = root(dir.path());
+            let object = unsafe { rt_cache_host_open_read_v1(r, b"object".as_ptr(), 6) };
+            let barrier = Arc::new(Barrier::new(2));
+            *READ_TEST_BARRIER.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(barrier.clone());
+            let mut out = vec![0u8; 8192];
+            let mutator = thread::spawn(move || {
+                barrier.wait();
+                let file = fs::OpenOptions::new().write(true).open(object_path).unwrap();
+                use std::os::unix::fs::FileExt;
+                file.write_all_at(&vec![b'b'; 4096], 4096).unwrap();
+                file.sync_all().unwrap();
+                barrier.wait();
+            });
+            let result = unsafe { rt_cache_host_pread_receipt_v1(object, 0, out.as_mut_ptr(), out.len() as i64) };
+            mutator.join().unwrap();
+            *READ_TEST_BARRIER.get().unwrap().lock().unwrap() = None;
+            assert_eq!(result, -2);
+            unsafe {
+                rt_cache_host_close_v1(object);
                 rt_cache_host_close_v1(r);
             }
         }
@@ -432,6 +603,7 @@ mod windows_unsupported {
 
     unsupported!(rt_cache_host_open_root_v1(path: *const u8, len: i64));
     unsupported!(rt_cache_host_open_read_v1(root: i64, path: *const u8, len: i64));
+    unsupported!(rt_cache_host_open_child_v1(parent: i64, name: *const u8, len: i64, create: i64));
     unsupported!(rt_cache_host_pread_receipt_v1(handle: i64, offset: i64, out: *mut u8, cap: i64));
     unsupported!(rt_cache_host_secure_temp_v1(root: i64));
     unsupported!(rt_cache_host_write_temp_v1(handle: i64, offset: i64, data: *const u8, len: i64));
