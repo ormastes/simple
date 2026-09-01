@@ -4,7 +4,7 @@ set "EXE=%~dp0release\x86_64-pc-windows-msvc\simple_mcp_server.exe"
 if not "%SIMPLE_MCP_NATIVE%"=="" set "EXE=%SIMPLE_MCP_NATIVE%"
 if exist "%EXE%" (
     "%EXE%" %*
-    exit /b %ERRORLEVEL%
+    goto :done
 )
 if not "%SIMPLE_MCP_NATIVE%"=="" (
     echo error: SIMPLE_MCP_NATIVE not found: %SIMPLE_MCP_NATIVE% 1>&2
@@ -13,7 +13,7 @@ if not "%SIMPLE_MCP_NATIVE%"=="" (
 set "NATIVE_CMD=%~dp0release\x86_64-pc-windows-msvc\simple_mcp_server.cmd"
 if exist "%NATIVE_CMD%" (
     call "%NATIVE_CMD%" %*
-    exit /b %ERRORLEVEL%
+    goto :done
 )
 if "%SIMPLE_MCP_ALLOW_SOURCE_FALLBACK%"=="1" goto :source
 echo error: cached native simple_mcp_server not found 1>&2
@@ -31,4 +31,6 @@ if not exist "%SIMPLE_RUNTIME%" (
     exit /b 127
 )
 "%SIMPLE_RUNTIME%" run "%~dp0..\src\app\mcp\main.spl" %*
+
+:done
 exit /b %ERRORLEVEL%
