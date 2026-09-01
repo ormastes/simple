@@ -6,28 +6,28 @@ use compiler.driver.cache.daemon.cache_daemon_transport
 describe "compiler cache daemon lifecycle":
     it "runs one monotonic launch and reconnect before fallback":
         val machine = cache_connect_state_machine_new(100i64)
-        val first = machine.connect(false, 110i64)
+        val first = machine.connect_unavailable(110i64)
         expect(first.reason).to_equal("launch_then_reconnect")
         expect(machine.launch_count).to_equal(1i64)
-        val retry = machine.connect(false, 350i64)
+        val retry = machine.connect_unavailable(350i64)
         expect(retry.route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
         expect(retry.reconnect_count).to_equal(1i64)
-        expect(machine.connect(true, 351i64).route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+        expect(machine.connect_unavailable(351i64).route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
 
-    it "accepts authenticated readiness only inside the total budget":
-        val ready = cache_connect_state_machine_new(0i64)
-        ready.connect(false, 1i64)
-        expect(ready.connect(true, 250i64).route).to_equal(CACHE_ROUTE_DAEMON)
+    it "starts unsupported-host fallback inside the total budget":
         val late = cache_connect_state_machine_new(0i64)
-        late.connect(false, 1i64)
-        expect(late.connect(true, 251i64).route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+        late.connect_unavailable(1i64)
+        val fallback = late.connect_unavailable(250i64)
+        expect(fallback.route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+        expect(cache_transport_shared_writes_enabled(fallback)).to_equal(false)
+        expect(late.finished).to_equal(true)
 
     it "rejects negative or reversing monotonic time":
         val negative = cache_connect_state_machine_new(-1i64)
-        expect(negative.connect(true, 0i64).reason).to_equal("invalid_monotonic_time")
+        expect(negative.connect_unavailable(0i64).reason).to_equal("invalid_monotonic_time")
         val reverse = cache_connect_state_machine_new(10i64)
-        reverse.connect(false, 20i64)
-        expect(reverse.connect(true, 19i64).reason).to_equal("invalid_monotonic_time")
+        reverse.connect_unavailable(20i64)
+        expect(reverse.connect_unavailable(19i64).reason).to_equal("invalid_monotonic_time")
 
     it "exits no earlier than ten seconds after every inhibitor ends":
         val lifecycle = cache_daemon_lifecycle_new(0i64)
