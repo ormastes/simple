@@ -87,8 +87,11 @@ typedef struct {
  * rv_calloc zeroes what it hands out. */
 extern unsigned char __heap_start[];
 extern unsigned char __heap_end[];
-#define RV_HEAP_BASE (__heap_start)
-#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start))
+/* The HIGH half of the linker-reserved `.heap`. See the matching comment in
+ * baremetal_stubs.c: the two riscv64 runtime TUs each keep a private bump
+ * cursor, so they must own disjoint halves of the region. */
+#define RV_HEAP_BASE (__heap_start + ((size_t)(__heap_end - __heap_start) / 2U))
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 2U)
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));

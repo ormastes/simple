@@ -82,8 +82,13 @@ typedef struct {
  * rv_calloc zeroes what it hands out. */
 extern unsigned char __heap_start[];
 extern unsigned char __heap_end[];
+/* The region is SPLIT IN HALF between the two riscv64 runtime TUs, which each
+ * carry their own private `g_heap_off` bump cursor. Pointing both cursors at
+ * one shared base would let them hand out the same bytes twice; before this
+ * change each TU owned a separate 1 MiB array, and halving preserves exactly
+ * that disjointness at 32x the size. baremetal_stubs.c takes the LOW half. */
 #define RV_HEAP_BASE (__heap_start)
-#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start))
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 2U)
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));
