@@ -956,6 +956,22 @@ pub(super) fn eval_bdd_builtin(
                 }
             }
         }
+        "step" => {
+            // Manual-only scenario marker consumed by spipe-docgen. It is a
+            // pure no-op at run time: it neither records a result nor touches
+            // the example counts. This mirrors the three existing runtime
+            // bodies verbatim — `src/lib/nogc_sync_mut/spec.spl` `step`,
+            // `src/lib/nogc_sync_mut/spec/__init__.spl` `step`, and the
+            // `spipe_inline_helpers()` compile-mode prelude in both
+            // `test_runner/test_runner_execute.spl` and
+            // `test_runner/test_result_wrapper.spl` — all of which are
+            // `if description == "": return`, i.e. no observable effect.
+            // Without this arm the interpreted BDD path raised
+            // "semantic: function `step` not found" for every example that
+            // called it.
+            let _ = extract_desc_str(args, "");
+            Ok(Some(Value::Nil))
+        }
         "planned" => {
             // Future-implementation marker: a spec declared before its feature
             // exists. Bookkeeping mirrors `pending` (never pass, never fail,
