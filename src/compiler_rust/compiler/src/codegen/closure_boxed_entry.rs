@@ -308,27 +308,10 @@ fn unbox_arg(
             coerce(b, f, want)
         }
         TypeId::BOOL => {
-            // `rt_value_unbox_int` is bit-preserving for anything that is not
-            // TAG_INT, and a tagged BOOL is TAG_SPECIAL — so it is a PASSTHROUGH
-            // here, not a decode. The old `unbox_int(v) != 0` therefore answered
-            // TRUE for `true` (11) *and* for `false` (19), since both are
-            // non-zero: every bool that round-tripped a boxed boundary read
-            // back as `true`. `box_result` below emits exactly those tagged
-            // values via `rt_value_bool`, so the round trip was self-defeating.
-            // See doc/08_tracking/bug/riscv64_freestanding_bool_in_collection_always_true_2026-09-01.md
-            //
-            // Decode the TAGGED value directly, with the same falsy set the
-            // LLVM backend uses in `runtime_int_truthy_i1`:
-            //     falsy = (v == 0) | (v == 19 /* tagged false */) | (v == 3 /* nil */)
-            // This is also correct for a RAW 0/1 bool (0 is falsy, 1 is not),
-            // so it is safe whichever representation the producer used.
-            use cranelift_codegen::ir::condcodes::IntCC;
-            let is_zero = b.ins().icmp_imm(IntCC::Equal, tagged, 0);
-            let is_tagged_false = b.ins().icmp_imm(IntCC::Equal, tagged, 19);
-            let is_nil = b.ins().icmp_imm(IntCC::Equal, tagged, 3);
-            let zero_or_false = b.ins().bor(is_zero, is_tagged_false);
-            let falsy = b.ins().bor(zero_or_false, is_nil);
-            let flag = b.ins().icmp_imm(IntCC::Equal, falsy, 0);
+            let raw = call1(b, h.unbox_int, tagged);
+            let flag = b
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, raw, 0);
             coerce(b, flag, want)
         }
         t if is_raw_scalar(t) => {
