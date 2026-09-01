@@ -1,6 +1,6 @@
 # riscv64 in-guest: `hir.functions.values()` yields EMPTY while `.len()` reports non-empty
 
-- Status: OPEN — single remaining blocker for goal row 1. **RESOLVED to reading (b) by measurement: the dict is real and EMPTY; no write ever reaches it.**
+- Status: **RESOLVED 2026-09-01.** Row 1 is GREEN in-guest under real OpenSBI v1.4 `-bios fw_payload`. See ROOT CAUSE below.
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
 - Class: a freestanding-only disagreement between two read routes over one
@@ -178,3 +178,115 @@ called seven times on this lane (inline literal pool).
   `build/os/riscv64_interp/run/probe2-serial.log`
 - Gate verdict of record (both rows, real firmware):
   `FAIL — 2 row(s) checked in-guest under real OpenSBI v1.4 firmware`
+
+
+---
+
+# ROOT CAUSE AND FIX (2026-09-01, third session)
+
+## The answer
+
+`baremetal_stubs.c`, **not** `baremetal_runtime_core.inc.c`, is the translation
+unit whose `rt_index_get` / `rt_index_set` / `rt_len` WIN the link. Both TUs are
+linked into the kernel; the DUPLICATED names resolve to `baremetal_stubs.c`.
+
+`baremetal_stubs.c`'s `rt_index_set` was, in full:
+
+```c
+RuntimeValue rt_index_set(RuntimeValue value, RuntimeValue index, RuntimeValue item)
+{
+    if (!IS_INT(index)) return 0;  /* <- every dict write died here */
+    return rt_array_set(value, (RuntimeValue)DECODE_INT(index), item);
+}
+```
+
+`d[k] = v` lowers to `rt_index_set`. Every write into a dict with a non-int key
+was discarded silently, with no trap and no error. That is every dict in the
+frontend: `ParserModule.functions : Dict<text, ParserFunction>` and
+`HirModule.functions : Dict<SymbolId, HirFunction>`.
+
+The previous session added exactly this dict arm — to the `.inc.c` copy, the one
+that LOSES the link. That is precisely why "it did not move row 1". The tree's
+own comment above `rt_index_get` in `baremetal_stubs.c` already recorded this
+trap ("this TU, not baremetal_runtime_core.inc.c, is the definition that
+actually WINS the link ... Fixing only the .inc.c copy changed nothing
+in-guest") and it was not applied to the sibling function.
+
+## The mandated `.len()`-vs-`.values()` test, and its answer
+
+Run first, as the doc demanded. Three probe boots under real OpenSBI fw_payload:
+
+| measurement | result |
+|---|---|
+| `hir.functions.len()` tick-loop | **0 ticks** |
+| `hir.functions.values()` tick-loop | **0 ticks** |
+| `parsed.function_order` (an ARRAY) tick-loop | **1 tick** |
+| `parsed.functions` (a DICT) tick-loop | **0 ticks** |
+| `rt_dict_values` entered | 7x, `len=0` each |
+| `rt_index_set` entered (`.inc.c` copy, instrumented) | **0** |
+| `simpleos_dict_store` entered | **0** |
+| `rt_dict_new` entered | >=120 |
+
+So `.len()` and `.values()` **AGREE** — the dict really is empty. The doc's
+`.len()`-is-lying fork is **excluded**, and so is its "chase HIR lowering" fork:
+the dict is already empty **at the parser**, one whole phase earlier, while the
+array beside it in the same struct holds its entry. Dicts are created fine; only
+writes vanish.
+
+`nm kernel.elf` then closed it: `rt_index_set` resolved into
+`baremetal_stubs.c`'s address range, and `rt_dict_set` / `simpleos_dict_store`
+were **absent from the linked image entirely** — the latter because its only
+callers lived in the `.inc.c` copies that lose.
+
+## Secondary defect, NOT fixed here (filed separately below)
+
+The `if hir.functions.len() == 0:` guard did not fire even though the tick-loop
+proved `len()` is 0: in the same boot, `while pi < nfn` ran 0 times while both
+`nfn == 0` and `hir.functions.len() == 0` evaluated **false**. A `<` comparison
+and an `== 0` comparison over the same value disagree in the freestanding
+riscv64 guest. Neither `rt_len`, `rt_array_len` nor `rt_dict_len` was entered
+even once across a whole boot, so `.len()` is not routed through any of them.
+Once dict writes land, row 1 no longer exercises this, so it is left as its own
+record rather than expanded into this change. It is a real fail-open: the guard
+that exists to catch an empty module cannot fire.
+
+## Fix
+
+Dict arms added to `rt_index_set`, `rt_index_get` and `rt_len` in
+`examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c`, routed to
+the existing `simpleos_dict_store` / `simpleos_dict_lookup` /
+`simpleos_dict_count` in `baremetal_runtime_core.inc.c` (declared, not
+re-implemented — declaring them is also what stops `--gc-sections` from
+dropping `simpleos_dict_store`, which had no surviving caller).
+
+## Evidence
+
+Serial, real OpenSBI v1.4 `fw_payload`, positively-asserted embed, no `-kernel`,
+no `isa-debug-exit`:
+
+```
+[interp] hir ready, invoking InterpreterBackendImpl.interpret_hir_module
+HELLO_INTERP_SIMPLEOS_RISCV64_OK nonce=probe1788243472
+HELLO_INTERP_SIMPLEOS_RISCV64 second line proves the interpreter kept running
+[interp] interpreter returned Ok
+[interp] interpreter row exited rc=0
+```
+
+## Guard
+
+`scripts/check/check-freestanding-dict-arms-in-every-definition.shs` — per
+DEFINITION, not per tree, because a tree-wide grep is exactly the check that
+would have passed throughout this failure. Verified RED against this fix's
+parent (`e5273bcb2f0`: `FAIL — 6 definition(s) checked, missing a HEAP_DICT arm:
+baremetal_stubs.c:rt_index_get baremetal_stubs.c:rt_index_set
+baremetal_stubs.c:rt_len`) and GREEN after. `--selftest` is fatal, 4 fixtures,
+including a must-FAIL fixture replaying the incident's exact shape (two TUs,
+arm only in the non-winning one) and a decoy fixture proving an unrelated
+`HEAP_DICT` mention elsewhere in the file does not satisfy the check.
+
+## Meta-defect, recorded not fixed
+
+The duplicate-definition arrangement itself is the hazard: two TUs define the
+same runtime entry points, the link silently picks one, and a fix to the other
+looks correct in source review and is inert at runtime. It has now cost two
+sessions on this one function. Deduplicating the boot TUs is a separate change.
