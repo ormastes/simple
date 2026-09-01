@@ -361,6 +361,34 @@ mod unix {
         }
 
         #[test]
+        #[ignore = "production idle timing takes at least ten seconds"]
+        fn production_idle_exit_respects_ten_to_twelve_second_contract() {
+            let dir = tempfile::tempdir().unwrap();
+            let fd = open_root_checked(dir.path());
+            let mut signal = [0; 2];
+            unsafe { assert_eq!(libc::pipe2(signal.as_mut_ptr(), libc::O_CLOEXEC), 0) };
+            let child_fd = fd;
+            let start = Instant::now();
+            let join = std::thread::spawn(move || {
+                serve(child_fd, signal[1], IDLE_MIN_MS, IDLE_MAX_MS)
+            });
+            let mut ready = 0u8;
+            unsafe {
+                assert_eq!(libc::read(signal[0], (&mut ready as *mut u8).cast(), 1), 1)
+            };
+            assert!(try_connect(fd));
+            assert_eq!(join.join().unwrap(), 0);
+            let elapsed = start.elapsed();
+            assert!(elapsed >= Duration::from_millis(IDLE_MIN_MS));
+            assert!(elapsed <= Duration::from_millis(IDLE_MAX_MS + 1_000));
+            assert!(!socket_path(fd).exists());
+            unsafe {
+                libc::close(signal[0]);
+                libc::close(fd);
+            }
+        }
+
+        #[test]
         fn killed_daemon_leaves_no_authority_and_restart_is_equivalent() {
             let dir = tempfile::tempdir().unwrap();
             let fd = open_root_checked(dir.path());
