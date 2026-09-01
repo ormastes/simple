@@ -130,6 +130,24 @@ fn runtime_module_initializer_supported(const_: HirConst) -> bool:
         # + "/timelines" -> `rt_raw_i64_to_string(i64 %undef)`).
         case Binary(_, _, _): true
         case MethodCall(_, _, _, _): true
+        # bug: array_global_2026-07-25 -- `var xs: [T] = []` (or any array
+        # literal) module-level global. Previously fell through to the
+        # type-driven fallback below, whose Int/Float/Bool/Str allowlist has
+        # no Array case, so this returned false and `lower_static` (above,
+        # `elif not runtime_module_initializer_supported(const_): return`)
+        # emitted NO MirStatic at all for it. Every later reassignment
+        # (`XS = new_xs`) then found neither a global static
+        # (`find_global_static` miss) nor a function-local binding
+        # (`find_local` miss, since it is a module global, not a local) and
+        # hit "assignment target has no local binding" at
+        # mir_lowering_stmts.spl:1377 (MCP: dap_bridge.spl DAP_SESSIONS at
+        # lines 226/236/273). `lower_runtime_module_initializers_named`
+        # already lowers the initializer expression generically via
+        # `self.lower_expr(const_.value)` and derives the static's type from
+        # that result, so admitting ArrayLit here needs no new lowering
+        # machinery -- it only starts routing array globals through the same
+        # runtime-init path Call/Binary/MethodCall already use.
+        case ArrayLit(_, _): true
         case _:
             match const_.type_.kind:
                 case Int(_, _) | Float(_) | Bool | Str: true
