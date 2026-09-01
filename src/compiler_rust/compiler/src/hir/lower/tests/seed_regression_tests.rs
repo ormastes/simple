@@ -32,6 +32,31 @@ main()
     assert!(module.functions.iter().any(|function| function.name == "main"));
 }
 
+#[test]
+fn path_typed_string_lowers_to_path_struct_instead_of_text() {
+    let source = r#"class Path:
+    path: text
+
+fn make_path() -> Path:
+    val path = "config/app.toml"_path
+    path
+"#;
+    let module = parse_and_lower(source).expect("_path must lower through the Path constructor");
+    let function = module.functions.iter().find(|f| f.name == "make_path").unwrap();
+    let HirStmt::Let {
+        value: Some(ref expr), ..
+    } = function.body[0]
+    else {
+        panic!("expected let-bound Path construction, got {:?}", function.body[0]);
+    };
+    let HirExprKind::StructInit { fields, .. } = &expr.kind else {
+        panic!("expected Path StructInit, got {:?}", expr.kind);
+    };
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].kind, HirExprKind::String("config/app.toml".to_string()));
+    assert_ne!(expr.ty, TypeId::STRING, "_path suffix must not collapse to text");
+}
+
 // =============================================================================
 // #1: Result.Ok / Option.Some qualified-receiver routing (86e56ca7867)
 // =============================================================================

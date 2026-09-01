@@ -110,7 +110,7 @@ impl Lowerer {
         match expr {
             Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) | Expr::Nil => self.lower_literal(expr),
             Expr::TypedInteger(_, _) | Expr::TypedFloat(_, _) | Expr::TypedString(_, _) => {
-                self.lower_typed_literal(expr)
+                self.lower_typed_literal(expr, ctx)
             }
             Expr::FString { parts, type_meta } => self.lower_fstring(parts, type_meta, ctx),
             Expr::I18nString { name, default_text } => self.lower_i18n_string(name, default_text),

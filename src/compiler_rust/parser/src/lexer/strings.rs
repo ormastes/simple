@@ -131,6 +131,12 @@ impl<'a> super::Lexer<'a> {
                     self.advance(); // First "
                     self.advance(); // Second "
                     self.advance(); // Third "
+                    if let Some(suffix) = self.scan_string_unit_suffix() {
+                        return TokenKind::Error(format!(
+                            "_{} does not support triple-quoted strings",
+                            suffix
+                        ));
+                    }
                     return TokenKind::String(value);
                 } else {
                     // Single " inside the string
@@ -195,6 +201,12 @@ impl<'a> super::Lexer<'a> {
                         if !literal_text.is_empty() {
                             parts.push(FStringToken::Literal(literal_text));
                         }
+                        if let Some(suffix) = self.scan_string_unit_suffix() {
+                            return TokenKind::Error(format!(
+                                "_{} does not support triple-quoted strings",
+                                suffix
+                            ));
+                        }
                         return TokenKind::FString(parts);
                     } else {
                         // Single " inside the string - treat as literal
@@ -212,12 +224,19 @@ impl<'a> super::Lexer<'a> {
                         parts.push(FStringToken::Literal(literal_text.clone()));
                     }
 
-                    // Check for unit suffix (only allowed if no interpolation)
-                    if !has_interpolation {
-                        if let Some(suffix) = self.scan_string_unit_suffix() {
-                            // Simple string with unit suffix: "127.0.0.1"_ip
-                            return TokenKind::TypedString(literal_text, suffix);
+                    // A suffix is grammatically adjacent to the string. It is
+                    // valid only when the token has no interpolation regions;
+                    // consume and diagnose the unsupported form here rather
+                    // than leaving a misleading trailing identifier token.
+                    if let Some(suffix) = self.scan_string_unit_suffix() {
+                        if has_interpolation {
+                            return TokenKind::Error(format!(
+                                "_{} does not support interpolated strings",
+                                suffix
+                            ));
                         }
+                        // Simple string with unit suffix: "127.0.0.1"_ip
+                        return TokenKind::TypedString(literal_text, suffix);
                     }
 
                     return TokenKind::FString(parts);
