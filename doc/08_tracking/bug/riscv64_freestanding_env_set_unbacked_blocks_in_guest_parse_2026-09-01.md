@@ -73,39 +73,67 @@ Two directions, neither yet evaluated — do not pick one without measuring:
    Why the in-guest path takes the non-transient branch has not been
    established.
 
-## Second, separate finding — do not conflate it with the above
+## RESOLVED 2026-09-01 (`aac4ad219da`) — and what it uncovered
 
-The gate's verdict on this run was:
+Both items in this record are fixed.
+
+**The env blocker** is backed by a fixed-capacity guest-local table in
+`baremetal_runtime_core.inc.c` (direction 1 above; direction 2 was not taken —
+it needed an unbounded investigation into why the in-guest parse chooses the
+non-transient arm). A key never set still reports absence, so the property the
+old stub comment protected — "set to empty" stays distinguishable from "not
+set" — is preserved, and no inherited process environment is fabricated. The
+`failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE` panic no longer appears on
+either guest.
+
+**The build-and-run mixup is diagnosed, and it was a gate defect, not a guest
+one.** The marker probe this record asked for:
+
+| payload | `HELLO_INTERP_SIMPLEOS_RISCV64` | `BUILDRUN` |
+|---|---|---|
+| `interp-fw_payload.bin` | 2 | 0 |
+| `buildrun-fw_payload.bin` | **2** | **0** |
+
+The build-and-run firmware embedded the *interpreter* row's Image. Cause:
+OpenSBI embeds its payload with `.incbin "$(FW_PAYLOAD_PATH)"` and does **not**
+list that path as a prerequisite of `fw_payload.o`. Its make is incremental, so
+the second row's build found the object up to date and reused the first row's
+Image. Neither the ELFs nor the Images were at fault — both were correct and
+distinct all along, which is why every build-side check passed.
+
+Fixed in the gate: the firmware objects are deleted before each row's make, and
+a **positive** assertion now requires that row's whole flat Image to appear
+verbatim inside its firmware. A firmware that merely built cleanly is no longer
+accepted as evidence it carries the right payload. After the fix
+`buildrun-serial.log` carries 5628 `[buildrun]` lines and zero `[interp]`
+lines. The gate's 23 selftest fixtures still pass; a check was added, none
+relaxed.
+
+## Current verdict, and the next two defects
 
 ```
-ERROR — nothing was checked: the build-and-run guest never reached its entry — no boot rungs on serial (log: build/os/riscv64_interp/run/buildrun-serial.log)
+FAIL — 2 row(s) checked in-guest under real OpenSBI v1.4 firmware (nonce 1abc472f02598fb1), offender(s):
+interpreter row: the interpreted hello world did not print its own nonce-carrying output;
+build-and-run row: the program was not built and run to a correct result
 ```
 
-That ERROR is **not** the panic. `buildrun-serial.log` contains three
-`[interp]`-prefixed rungs and **zero** `[buildrun]` rungs, and ends with the
-same panic naming `src/os/rv64_interp_hello.spl` — the *interpreter* row's
-program path. `buildrun_sanity_entry.spl` prints only `[buildrun]` prefixes
-(lines 86-128) and drives a different program, so the build-and-run guest
-appears to be executing the interpreter row's code.
+Both rows are evaluated again (recovered from the intermediate ERROR), and both
+now fail on new, deeper, *different* errors. The original empty-token-text
+stall is gone and has not returned.
 
-The two `kernel.Image` files are genuinely distinct
-(`a2709801bdcdf6f7a24bba33bde35f0c` vs `9a043f98f116149350c8c2422b9e9be7`) and
-each `kernel.elf` was verified by the build script to contain its own row
-symbol, so this is not a build-side mixup of the ELFs. The suspects are the
-per-row OpenSBI `fw_payload` embed and the freestanding link's
-`--defsym spl_start=<mangled>__spl_start` entry selection. **Not diagnosed** —
-a byte-probe of the two `fw_payload.bin` files was inconclusive because the
-sampled range is common runtime code present in both. This is exactly hazard 2
-("stale OpenSBI firmware — assert positively that the firmware embeds YOUR
-Image") and needs a positive, nonce-anchored assertion, not a spot check.
-
-## Reproduce
+**Interpreter row** — reaches HIR lowering and is rejected there:
 
 ```
-cd src/compiler_rust && cargo build --release --bin simple   # seed, exit 0
-sh scripts/os/build-simpleos-riscv64-interpreter-kernel.shs  # ~25 min per row
-sh scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs
+[interp] lowering hello-world source through the real frontend
+[interp] FAIL hir lowering error: missing importing module surface for src/os/rv64_interp_hello.spl
+[interp] interpreter row exited rc=nonzero
 ```
 
-The gate's own selftest (23 fixtures) passes unchanged; nothing in it was
-weakened.
+Parsing now completes; the failure has moved a whole phase later. Not
+investigated.
+
+**Build-and-run row** — reboot-loops. Its three boot rungs repeat 5628/3 times,
+so the guest restarts after `[buildrun] lowering source through the real
+frontend` rather than progressing or halting. Not investigated; the repetition
+means a trap-and-reset, so the next step is a `-d int,guest_errors` run to name
+the fault, not more source reading.
