@@ -204,3 +204,81 @@ field faults; it does not say whether HIR lowering wrote it, MIR lowering
 clobbered it through a COW alias, or the clone reads a correct field at a wrong
 width. Those point at different halves of the tree and the probe above
 separates them.
+
+## 2026-09-01, next lane: the bad word DECODES, and it is not a field value
+
+Two of the prior lane's framings are corrected here, both by direct reading of
+the tree rather than by another boot.
+
+### Correction 1 — the row-1/row-2 delta is NOT "MIR lowering ran"
+
+The prior section proposed that the only difference between the green
+interpreter row and the red build-and-run row is that row 2 runs
+`MirLowering.lower_module` first. That is false. The two rows interpret
+**different programs**:
+
+* row 1 (`interpreter_hello_entry.spl:84-86`) is `fn main():` and two `print`s.
+  **One function. No callee. No declared return type. No call.**
+* row 2 (`buildrun_sanity_entry.spl:71-79`) is
+  `fn add(a: i64, b: i64) -> i64` **plus** `fn main()` which CALLS `add`.
+
+`interpret_hir_module` (`70.backend/backend/interpreter.spl:190-196`) reaches
+`call_hir_function` for `main` by iterating `module.functions.values()` and
+binding a **typed local** `val f: HirFunction` — the ANY-erasure cure that file
+documents at length, and the path row 1 proves green. Row 2 additionally
+resolves `add` through the callee-lookup path
+(`ctx.fn_by_name` / `call_function_by_id`'s `ctx.module.functions[method_id]`),
+which is a **dict `[]` read whose value is a struct**. So the bug title is
+right and the discriminator is the CALL, not MIR lowering.
+
+### Correction 2 — `0x3200000001` is a HeapHeader, not a corrupt pointer
+
+The prior lane read the word as `TAG_HEAP | 0x3200000000` and concluded
+"non-null, not a pointer". The tag arithmetic is right but the value is not a
+mangled pointer at all. In the runtime that is ACTUALLY linked into this image,
+`baremetal_runtime_core.inc.c:58-61`:
+
+```c
+typedef struct { uint32_t type; uint32_t size; } HeapHeader;   /* 8 bytes */
+```
+
+Little-endian, that struct read as one 64-bit word is `(size << 32) | type`.
+
+```
+0x00000032_00000001  ->  type = 1, size = 50
+                         #define HEAP_STRING 1U      (same TU, line 38)
+```
+
+**The word at `HirFunction+32` is the header of a 50-byte `RuntimeString`.**
+It is a valid, well-formed heap object header that merely happens to have
+`TAG_HEAP` in its low bits, which is why the emitted clone's tag test accepted
+it and dereferenced `size<<32` as an address. The clone's tag test is correct;
+the DATA is not a field value at all.
+
+### What that means, and the next question
+
+If byte 32 of the object is where a neighbouring string BEGINS, then the object
+`call_hir_function` was handed is not a 248-byte `HirFunction` — the `+32` load
+walks off its end into the next bump allocation. The bump allocator aligns to
+16 (`rv_size_align16`), and the one runtime struct in this TU that is **exactly
+32 bytes** is `RuntimeArray` (`hdr` 8 + `len` 8 + `cap` 8 + `items` 8,
+`baremetal_runtime_core.inc.c:71-76`).
+
+So the leading hypothesis is now: **the value reaching `call_hir_function`'s
+`fn_` parameter is a `RuntimeArray` handle, not a `HirFunction`** — and the
+248-byte by-value COW clone of that parameter reads 248 bytes out of a 32-byte
+object, hitting the next allocation's header at the first heap-tagged slot past
+its end. The three fields BEFORE the fault (`name`, `type_params`, `params` at
++8/+16/+24) cloning "successfully" is consistent with this and is NOT evidence
+the object is a HirFunction: +8/+16/+24 are `RuntimeArray.len`/`cap`/`items`,
+and `len`/`cap` are small raw counts whose low bits are not `TAG_HEAP`, so the
+clone skips them rather than validating them.
+
+**Not claimed:** which call site supplies the wrong value — a dict `[]` read
+returning an internal array (`d->keys`/`d->vals`), a miss returning the wrong
+handle, or an argument-order/ABI mismatch that passes `args: [Value]` where
+`fn_: HirFunction` belongs. All three produce a 32-byte array handle and are
+separated by printing the RAW `hdr.type` of the `fn_` handle on entry to
+`call_hir_function`, which is a strictly cheaper probe than the
+before/after-MIR probe the prior section proposed (that probe tests a
+discriminator now known to be the wrong one).
