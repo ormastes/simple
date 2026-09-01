@@ -89,11 +89,11 @@ static inline void *rv_realloc(void *ptr, size_t size){
 static void *rv_alloc_aligned(size_t size, size_t align){
     if (align == 0) align = 16U;
     size_t offset = g_heap_off;
-    if (offset > (size_t)RV_HEAP_SIZE) return 0;
+    if (offset > (size_t)RV_HEAP_SIZE) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     size_t rem = offset % align;
-    if (rem != 0 && !rv_size_add(offset, align - rem, &offset)) return 0;
+    if (rem != 0 && !rv_size_add(offset, align - rem, &offset)) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     size_t aligned = 0;
-    if (!rv_size_align16(size, &aligned)) return 0;
+    if (!rv_size_align16(size, &aligned)) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     if (offset > (size_t)RV_HEAP_SIZE) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     if (aligned > (size_t)RV_HEAP_SIZE - offset) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     void *p = &(RV_HEAP_BASE)[offset];
