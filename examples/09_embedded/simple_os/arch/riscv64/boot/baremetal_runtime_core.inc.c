@@ -179,6 +179,29 @@ RuntimeValue rt_alloc(RuntimeValue sz)
     return ptr ? (RuntimeValue)(uintptr_t)ptr : 0;
 }
 
+/* Port #45 of the freestanding riscv64 runtime surface.
+ *
+ * Reached only once module-global initializers actually RUN in-guest: a
+ * struct-literal module global lowers to `rt_struct_alloc`. Before
+ * boot_entry.c called `__simple_call_module_inits`, every `__module_init_*`
+ * was garbage-collected out of the link, so this symbol was never referenced
+ * and its absence was invisible.
+ *
+ * Deliberately NOT a port of the hosted implementation
+ * (src/runtime/runtime_memory.c:455), which registers each allocation in an
+ * rwlock-guarded tracking table read back by `rt_struct_receiver_valid`.
+ * Neither that table nor that validator exists in this freestanding runtime
+ * (grep of this boot directory: zero hits for both), so replicating the
+ * bookkeeping would add a structure nothing reads. The load-bearing contract
+ * is the one the hosted version shares with `rt_alloc`: RAW byte count in
+ * (not an encoded RuntimeValue), RAW zeroed pointer out (not encoded), NULL
+ * on a non-positive size or on allocation failure. */
+uint8_t *rt_struct_alloc(int64_t size)
+{
+    if (size <= 0) return (uint8_t *)0;
+    return (uint8_t *)calloc(1, (size_t)size);
+}
+
 RuntimeValue f64_to_bits(RuntimeValue val)
 {
     uint64_t fbits = (uint64_t)val >> 3;
