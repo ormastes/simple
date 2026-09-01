@@ -16,6 +16,7 @@ mod unix {
     const INVALID: i64 = -1;
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
     static HANDLES: OnceLock<Mutex<HashMap<i64, Entry>>> = OnceLock::new();
+    static READER_ROOTS: OnceLock<Mutex<HashMap<(u64, u64), ReaderRootState>>> = OnceLock::new();
     #[cfg(test)]
     static READ_TEST_BARRIER: OnceLock<Mutex<Option<std::sync::Arc<std::sync::Barrier>>>> = OnceLock::new();
 
@@ -28,12 +29,48 @@ mod unix {
         CasShard1(RawFd),
         CasShard2(RawFd),
         Read(RawFd),
+        ReaderPin {
+            root_fd: RawFd,
+            root_key: (u64, u64),
+            epoch: i64,
+            generation: i64,
+            manifest: Vec<u8>,
+            process: Vec<u8>,
+            boot: Vec<u8>,
+            namespace: Vec<u8>,
+            expires: i64,
+        },
         Temp {
             fd: RawFd,
             root_fd: RawFd,
             name: CString,
             cas_leaf: bool,
         },
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ReaderRootState {
+        epoch: i64,
+        generation: i64,
+    }
+
+    fn reader_roots() -> &'static Mutex<HashMap<(u64, u64), ReaderRootState>> {
+        READER_ROOTS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    unsafe fn input_bytes(ptr: *const u8, len: i64, maximum: i64) -> Option<Vec<u8>> {
+        if ptr.is_null() || len <= 0 || len > maximum {
+            return None;
+        }
+        Some(std::slice::from_raw_parts(ptr, len as usize).to_vec())
+    }
+
+    unsafe fn root_key(fd: RawFd) -> Option<(u64, u64)> {
+        let mut stat: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut stat) != 0 {
+            return None;
+        }
+        Some((stat.st_dev as u64, stat.st_ino as u64))
     }
 
     fn handles() -> &'static Mutex<HashMap<i64, Entry>> {
@@ -82,7 +119,7 @@ mod unix {
     fn cas_kind(name: &CString) -> bool {
         matches!(
             name.as_bytes(),
-            b"source_blob" | b"compile_snapshot" | b"public_summary"
+            b"source_blob" | b"compile_snapshot" | b"public_summary" | b"file_ast" | b"semantic_read_set"
         )
     }
 
@@ -361,6 +398,326 @@ mod unix {
         }
     }
 
+    /// Mint an unforgeable process-local read capability.  The first pin fixes
+    /// the root generation; later pins may advance, but never roll it back.
+    /// Odd epochs are GC barriers and cannot mint pins.
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_begin_reader_pin_v1(
+        root: i64,
+        epoch: i64,
+        generation: i64,
+        manifest: *const u8,
+        manifest_len: i64,
+        process: *const u8,
+        process_len: i64,
+        boot: *const u8,
+        boot_len: i64,
+        namespace: *const u8,
+        namespace_len: i64,
+        now: i64,
+        ttl: i64,
+    ) -> i64 {
+        if epoch < 0 || epoch % 2 != 0 || generation < 0 || now < 0 || ttl <= 0 || ttl > 3_600_000 {
+            return INVALID;
+        }
+        let (Some(manifest), Some(process), Some(boot), Some(namespace)) = (
+            input_bytes(manifest, manifest_len, 256),
+            input_bytes(process, process_len, 256),
+            input_bytes(boot, boot_len, 256),
+            input_bytes(namespace, namespace_len, 256),
+        ) else {
+            return INVALID;
+        };
+        let guard = handles().lock().expect("cache authority handle lock");
+        let fd = match guard.get(&root) {
+            Some(Entry::Root(fd)) => *fd,
+            _ => return INVALID,
+        };
+        let Some(key) = root_key(fd) else { return INVALID };
+        let owned = dup_fd(fd);
+        drop(guard);
+        if owned < 0 {
+            return INVALID;
+        }
+        let mut roots = reader_roots().lock().expect("cache reader root lock");
+        let state = roots.entry(key).or_insert(ReaderRootState { epoch, generation });
+        if state.epoch % 2 != 0 || epoch < state.epoch || generation < state.generation {
+            libc::close(owned);
+            return INVALID;
+        }
+        if epoch > state.epoch || generation > state.generation {
+            *state = ReaderRootState { epoch, generation };
+        }
+        drop(roots);
+        let Some(expires) = now.checked_add(ttl) else {
+            libc::close(owned);
+            return INVALID;
+        };
+        insert(Entry::ReaderPin {
+            root_fd: owned,
+            root_key: key,
+            epoch,
+            generation,
+            manifest,
+            process,
+            boot,
+            namespace,
+            expires,
+        })
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_validate_reader_pin_v1(
+        pin: i64,
+        epoch: i64,
+        generation: i64,
+        manifest: *const u8,
+        manifest_len: i64,
+        process: *const u8,
+        process_len: i64,
+        boot: *const u8,
+        boot_len: i64,
+        namespace: *const u8,
+        namespace_len: i64,
+        now: i64,
+    ) -> i64 {
+        let (Some(manifest), Some(process), Some(boot), Some(namespace)) = (
+            input_bytes(manifest, manifest_len, 256),
+            input_bytes(process, process_len, 256),
+            input_bytes(boot, boot_len, 256),
+            input_bytes(namespace, namespace_len, 256),
+        ) else {
+            return INVALID;
+        };
+        let guard = handles().lock().expect("cache authority handle lock");
+        let Some(Entry::ReaderPin {
+            root_key,
+            epoch: pe,
+            generation: pg,
+            manifest: pm,
+            process: pp,
+            boot: pb,
+            namespace: pn,
+            expires,
+            ..
+        }) = guard.get(&pin)
+        else {
+            return INVALID;
+        };
+        let roots = reader_roots().lock().expect("cache reader root lock");
+        let valid = now >= 0
+            && now < *expires
+            && *pe == epoch
+            && *pg == generation
+            && *pm == manifest
+            && *pp == process
+            && *pb == boot
+            && *pn == namespace
+            && roots
+                .get(root_key)
+                .is_some_and(|s| s.epoch == epoch && s.generation == generation && s.epoch % 2 == 0);
+        if valid {
+            1
+        } else {
+            INVALID
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_renew_reader_pin_v1(pin: i64, now: i64, ttl: i64) -> i64 {
+        if now < 0 || ttl <= 0 || ttl > 3_600_000 {
+            return INVALID;
+        }
+        let mut guard = handles().lock().expect("cache authority handle lock");
+        let Some(Entry::ReaderPin {
+            root_key,
+            epoch,
+            generation,
+            expires,
+            ..
+        }) = guard.get_mut(&pin)
+        else {
+            return INVALID;
+        };
+        if now >= *expires {
+            return INVALID;
+        }
+        let roots = reader_roots().lock().expect("cache reader root lock");
+        if !roots
+            .get(root_key)
+            .is_some_and(|s| s.epoch == *epoch && s.generation == *generation && s.epoch % 2 == 0)
+        {
+            return INVALID;
+        }
+        let Some(next) = now.checked_add(ttl) else {
+            return INVALID;
+        };
+        *expires = next;
+        next
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_release_reader_pin_v1(
+        pin: i64,
+        epoch: i64,
+        generation: i64,
+        manifest: *const u8,
+        manifest_len: i64,
+        process: *const u8,
+        process_len: i64,
+        boot: *const u8,
+        boot_len: i64,
+        namespace: *const u8,
+        namespace_len: i64,
+    ) -> i64 {
+        let (Some(manifest), Some(process), Some(boot), Some(namespace)) = (
+            input_bytes(manifest, manifest_len, 256),
+            input_bytes(process, process_len, 256),
+            input_bytes(boot, boot_len, 256),
+            input_bytes(namespace, namespace_len, 256),
+        ) else {
+            return INVALID;
+        };
+        let mut guard = handles().lock().expect("cache authority handle lock");
+        let matches = matches!(guard.get(&pin), Some(Entry::ReaderPin {
+            epoch: pe, generation: pg, manifest: pm, process: pp, boot: pb,
+            namespace: pn, ..
+        }) if *pe == epoch && *pg == generation && *pm == manifest
+            && *pp == process && *pb == boot && *pn == namespace);
+        if !matches {
+            return INVALID;
+        }
+        let Some(Entry::ReaderPin { root_fd, .. }) = guard.remove(&pin) else {
+            return INVALID;
+        };
+        libc::close(root_fd) as i64
+    }
+
+    /// Open the complete CAS hierarchy while holding the root epoch lock.  GC
+    /// can close admission (odd epoch) only before or after this operation;
+    /// an already returned object descriptor remains valid through collection.
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_open_pinned_cas_v1(
+        pin: i64,
+        kind: *const u8,
+        kind_len: i64,
+        digest: *const u8,
+        digest_len: i64,
+        now: i64,
+    ) -> i64 {
+        let (Some(kind), Some(digest)) = (input(kind, kind_len), input(digest, digest_len)) else {
+            return INVALID;
+        };
+        if !cas_kind(&kind) || !lower_hex_component(&digest, 64) {
+            return INVALID;
+        }
+        let guard = handles().lock().expect("cache authority handle lock");
+        let Some(Entry::ReaderPin {
+            root_fd,
+            root_key,
+            epoch,
+            generation,
+            expires,
+            ..
+        }) = guard.get(&pin)
+        else {
+            return INVALID;
+        };
+        if now < 0 || now >= *expires {
+            return INVALID;
+        }
+        let roots = reader_roots().lock().expect("cache reader root lock");
+        if !roots
+            .get(root_key)
+            .is_some_and(|s| s.epoch == *epoch && s.generation == *generation && s.epoch % 2 == 0)
+        {
+            return INVALID;
+        }
+        let cas = CString::new("cas").unwrap();
+        let s1 = CString::new(&digest.as_bytes()[0..2]).unwrap();
+        let s2 = CString::new(&digest.as_bytes()[2..4]).unwrap();
+        let leaf = CString::new(&digest.as_bytes()[4..]).unwrap();
+        let cas_fd = open_dir_component(*root_fd, &cas, 0);
+        if cas_fd < 0 {
+            return INVALID;
+        }
+        let kind_fd = open_dir_component(cas_fd, &kind, 0);
+        libc::close(cas_fd);
+        if kind_fd < 0 {
+            return INVALID;
+        }
+        let s1_fd = open_dir_component(kind_fd, &s1, 0);
+        libc::close(kind_fd);
+        if s1_fd < 0 {
+            return INVALID;
+        }
+        let s2_fd = open_dir_component(s1_fd, &s2, 0);
+        libc::close(s1_fd);
+        if s2_fd < 0 {
+            return INVALID;
+        }
+        let fd = libc::openat(
+            s2_fd,
+            leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        );
+        libc::close(s2_fd);
+        drop(roots);
+        drop(guard);
+        if fd < 0 {
+            INVALID
+        } else {
+            insert(Entry::Read(fd))
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_reader_gc_begin_v1(root: i64, expected_even: i64) -> i64 {
+        if expected_even < 0 || expected_even % 2 != 0 {
+            return INVALID;
+        }
+        let guard = handles().lock().expect("cache authority handle lock");
+        let fd = match guard.get(&root) {
+            Some(Entry::Root(fd)) => *fd,
+            _ => return INVALID,
+        };
+        let Some(key) = root_key(fd) else { return INVALID };
+        drop(guard);
+        let mut roots = reader_roots().lock().expect("cache reader root lock");
+        let Some(state) = roots.get_mut(&key) else {
+            return INVALID;
+        };
+        if state.epoch != expected_even {
+            return INVALID;
+        }
+        state.epoch += 1;
+        state.epoch
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_reader_gc_end_v1(root: i64, expected_odd: i64, generation: i64) -> i64 {
+        if expected_odd < 0 || expected_odd % 2 != 1 || generation < 0 {
+            return INVALID;
+        }
+        let guard = handles().lock().expect("cache authority handle lock");
+        let fd = match guard.get(&root) {
+            Some(Entry::Root(fd)) => *fd,
+            _ => return INVALID,
+        };
+        let Some(key) = root_key(fd) else { return INVALID };
+        drop(guard);
+        let mut roots = reader_roots().lock().expect("cache reader root lock");
+        let Some(state) = roots.get_mut(&key) else {
+            return INVALID;
+        };
+        if state.epoch != expected_odd || generation < state.generation {
+            return INVALID;
+        }
+        state.epoch += 1;
+        state.generation = generation;
+        state.epoch
+    }
+
     /// Reads exactly one complete bounded file. Returns its complete byte
     /// count, -1 on bounds/I/O failure, or -2 if its same-handle receipt
     /// changed. Partial/chunked reads are deliberately unsupported.
@@ -599,6 +956,7 @@ mod unix {
             | Some(Entry::CasShard1(fd))
             | Some(Entry::CasShard2(fd))
             | Some(Entry::Read(fd))
+            | Some(Entry::ReaderPin { root_fd: fd, .. })
             | Some(Entry::Temp { fd, .. }) => *fd,
             None => return INVALID,
         };
@@ -622,6 +980,7 @@ mod unix {
             | Entry::CasShard1(fd)
             | Entry::CasShard2(fd)
             | Entry::Read(fd) => libc::close(fd) as i64,
+            Entry::ReaderPin { root_fd, .. } => libc::close(root_fd) as i64,
             Entry::Temp { fd, root_fd, name, .. } => {
                 libc::unlinkat(root_fd, name.as_ptr(), 0);
                 libc::close(root_fd);
@@ -824,6 +1183,155 @@ mod unix {
                 rt_cache_host_close_v1(r);
             }
         }
+
+        #[test]
+        fn reader_pin_binds_generation_expiry_and_gc_barrier() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir_all(dir.path().join("cas/source_blob/aa/bb")).unwrap();
+            let digest = b"aabb0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
+            assert_eq!(digest.len(), 64);
+            fs::write(
+                dir.path()
+                    .join("cas/source_blob/aa/bb/0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab"),
+                b"verified",
+            )
+            .unwrap();
+            let r = root(dir.path());
+            let pin = unsafe {
+                rt_cache_host_begin_reader_pin_v1(
+                    r,
+                    8,
+                    6,
+                    b"manifest".as_ptr(),
+                    8,
+                    b"process".as_ptr(),
+                    7,
+                    b"boot".as_ptr(),
+                    4,
+                    b"namespace".as_ptr(),
+                    9,
+                    100,
+                    10,
+                )
+            };
+            assert!(pin > 0);
+            assert_eq!(
+                unsafe {
+                    rt_cache_host_validate_reader_pin_v1(
+                        pin,
+                        8,
+                        6,
+                        b"manifest".as_ptr(),
+                        8,
+                        b"process".as_ptr(),
+                        7,
+                        b"boot".as_ptr(),
+                        4,
+                        b"namespace".as_ptr(),
+                        9,
+                        100,
+                    )
+                },
+                1
+            );
+            assert_eq!(
+                unsafe {
+                    rt_cache_host_validate_reader_pin_v1(
+                        pin + 1,
+                        8,
+                        6,
+                        b"manifest".as_ptr(),
+                        8,
+                        b"process".as_ptr(),
+                        7,
+                        b"boot".as_ptr(),
+                        4,
+                        b"namespace".as_ptr(),
+                        9,
+                        100,
+                    )
+                },
+                INVALID
+            );
+            assert_eq!(
+                unsafe {
+                    rt_cache_host_validate_reader_pin_v1(
+                        pin,
+                        8,
+                        7,
+                        b"manifest".as_ptr(),
+                        8,
+                        b"process".as_ptr(),
+                        7,
+                        b"boot".as_ptr(),
+                        4,
+                        b"namespace".as_ptr(),
+                        9,
+                        100,
+                    )
+                },
+                INVALID
+            );
+            assert_eq!(
+                unsafe {
+                    rt_cache_host_validate_reader_pin_v1(
+                        pin,
+                        8,
+                        6,
+                        b"manifest".as_ptr(),
+                        8,
+                        b"process".as_ptr(),
+                        7,
+                        b"boot".as_ptr(),
+                        4,
+                        b"namespace".as_ptr(),
+                        9,
+                        110,
+                    )
+                },
+                INVALID
+            );
+
+            let object =
+                unsafe { rt_cache_host_open_pinned_cas_v1(pin, b"source_blob".as_ptr(), 11, digest.as_ptr(), 64, 105) };
+            assert!(object > 0);
+            assert_eq!(unsafe { rt_cache_host_reader_gc_begin_v1(r, 8) }, 9);
+            assert_eq!(
+                unsafe { rt_cache_host_open_pinned_cas_v1(pin, b"source_blob".as_ptr(), 11, digest.as_ptr(), 64, 105) },
+                INVALID
+            );
+            let mut out = [0u8; 8];
+            assert_eq!(
+                unsafe { rt_cache_host_pread_receipt_v1(object, 0, out.as_mut_ptr(), out.len() as i64) },
+                8
+            );
+            assert_eq!(&out, b"verified");
+            assert_eq!(unsafe { rt_cache_host_reader_gc_end_v1(r, 9, 7) }, 10);
+            assert_eq!(
+                unsafe {
+                    rt_cache_host_validate_reader_pin_v1(
+                        pin,
+                        8,
+                        6,
+                        b"manifest".as_ptr(),
+                        8,
+                        b"process".as_ptr(),
+                        7,
+                        b"boot".as_ptr(),
+                        4,
+                        b"namespace".as_ptr(),
+                        9,
+                        105,
+                    )
+                },
+                INVALID
+            );
+            unsafe {
+                rt_cache_host_close_v1(object);
+                rt_cache_host_close_v1(pin);
+                rt_cache_host_close_v1(r);
+            }
+        }
     }
 }
 
@@ -857,6 +1365,13 @@ mod windows_unsupported {
     unsupported!(rt_cache_host_open_cas_kind_v1(parent: i64, name: *const u8, len: i64, create: i64));
     unsupported!(rt_cache_host_open_cas_shard_v1(parent: i64, name: *const u8, len: i64, level: i64, create: i64));
     unsupported!(rt_cache_host_open_cas_leaf_v1(parent: i64, name: *const u8, len: i64));
+    unsupported!(rt_cache_host_begin_reader_pin_v1(root:i64,epoch:i64,generation:i64,manifest:*const u8,manifest_len:i64,process:*const u8,process_len:i64,boot:*const u8,boot_len:i64,namespace:*const u8,namespace_len:i64,now:i64,ttl:i64));
+    unsupported!(rt_cache_host_validate_reader_pin_v1(pin:i64,epoch:i64,generation:i64,manifest:*const u8,manifest_len:i64,process:*const u8,process_len:i64,boot:*const u8,boot_len:i64,namespace:*const u8,namespace_len:i64,now:i64));
+    unsupported!(rt_cache_host_renew_reader_pin_v1(pin:i64,now:i64,ttl:i64));
+    unsupported!(rt_cache_host_release_reader_pin_v1(pin:i64,epoch:i64,generation:i64,manifest:*const u8,manifest_len:i64,process:*const u8,process_len:i64,boot:*const u8,boot_len:i64,namespace:*const u8,namespace_len:i64));
+    unsupported!(rt_cache_host_open_pinned_cas_v1(pin:i64,kind:*const u8,kind_len:i64,digest:*const u8,digest_len:i64,now:i64));
+    unsupported!(rt_cache_host_reader_gc_begin_v1(root:i64,expected_even:i64));
+    unsupported!(rt_cache_host_reader_gc_end_v1(root:i64,expected_odd:i64,generation:i64));
     unsupported!(rt_cache_host_size_v1(handle: i64, maximum: i64));
     unsupported!(rt_cache_host_pread_receipt_v1(handle: i64, offset: i64, out: *mut u8, cap: i64));
     unsupported!(rt_cache_host_secure_temp_v1(root: i64));

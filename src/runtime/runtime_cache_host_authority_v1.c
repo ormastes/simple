@@ -26,6 +26,13 @@ UNSUPPORTED(rt_cache_host_open_child_v1, (int64_t h, const uint8_t *p, int64_t n
 UNSUPPORTED(rt_cache_host_open_cas_kind_v1, (int64_t h, const uint8_t *p, int64_t n, int64_t c))
 UNSUPPORTED(rt_cache_host_open_cas_shard_v1, (int64_t h, const uint8_t *p, int64_t n, int64_t l, int64_t c))
 UNSUPPORTED(rt_cache_host_open_cas_leaf_v1, (int64_t h, const uint8_t *p, int64_t n))
+UNSUPPORTED(rt_cache_host_begin_reader_pin_v1, (int64_t r,int64_t e,int64_t g,const uint8_t*m,int64_t ml,const uint8_t*p,int64_t pl,const uint8_t*b,int64_t bl,const uint8_t*ns,int64_t nl,int64_t now,int64_t ttl))
+UNSUPPORTED(rt_cache_host_validate_reader_pin_v1, (int64_t h,int64_t e,int64_t g,const uint8_t*m,int64_t ml,const uint8_t*p,int64_t pl,const uint8_t*b,int64_t bl,const uint8_t*ns,int64_t nl,int64_t now))
+UNSUPPORTED(rt_cache_host_renew_reader_pin_v1, (int64_t h,int64_t now,int64_t ttl))
+UNSUPPORTED(rt_cache_host_release_reader_pin_v1, (int64_t h,int64_t e,int64_t g,const uint8_t*m,int64_t ml,const uint8_t*p,int64_t pl,const uint8_t*b,int64_t bl,const uint8_t*ns,int64_t nl))
+UNSUPPORTED(rt_cache_host_open_pinned_cas_v1, (int64_t h,const uint8_t*k,int64_t kl,const uint8_t*d,int64_t dl,int64_t now))
+UNSUPPORTED(rt_cache_host_reader_gc_begin_v1, (int64_t r,int64_t e))
+UNSUPPORTED(rt_cache_host_reader_gc_end_v1, (int64_t r,int64_t e,int64_t g))
 UNSUPPORTED(rt_cache_host_size_v1, (int64_t h, int64_t m))
 UNSUPPORTED(rt_cache_host_pread_receipt_v1, (int64_t h, int64_t o, uint8_t *p, int64_t n))
 UNSUPPORTED(rt_cache_host_secure_temp_v1, (int64_t h))
@@ -79,7 +86,7 @@ static int valid_relative(const char *p) {
     }
 }
 static int lower_hex_n(const char *p,size_t n){if(strlen(p)!=n)return 0;for(size_t i=0;i<n;i++)if(!((p[i]>='0'&&p[i]<='9')||(p[i]>='a'&&p[i]<='f')))return 0;return 1;}
-static int cas_kind_name(const char*p){return !strcmp(p,"source_blob")||!strcmp(p,"compile_snapshot")||!strcmp(p,"public_summary");}
+static int cas_kind_name(const char*p){return !strcmp(p,"source_blob")||!strcmp(p,"compile_snapshot")||!strcmp(p,"public_summary")||!strcmp(p,"file_ast")||!strcmp(p,"semantic_read_set");}
 static int open_dir_child(int fd,const char*name,int create){if(create&&mkdirat(fd,name,0700)&&errno!=EEXIST)return-1;return openat(fd,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);}
 static int open_beneath(int root, const char *path, int flags, mode_t mode) {
     if (!valid_relative(path)) return -1;
@@ -101,6 +108,15 @@ int64_t rt_cache_host_open_child_v1(int64_t h,const uint8_t*p,int64_t n,int64_t 
 int64_t rt_cache_host_open_cas_kind_v1(int64_t h,const uint8_t*p,int64_t n,int64_t create){char name[32769];if(!copy_name(p,n,name)||!cas_kind_name(name))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);int fd=(!c||c->kind!=CAP_CAS_ROOT)?-1:open_dir_child(c->fd,name,(int)create);pthread_mutex_unlock(&caps_lock);return fd<0?-1:add_cap(CAP_CAS_KIND,fd,-1,NULL);}
 int64_t rt_cache_host_open_cas_shard_v1(int64_t h,const uint8_t*p,int64_t n,int64_t level,int64_t create){char name[32769];if(!copy_name(p,n,name)||!lower_hex_n(name,2))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);int good=c&&((level==1&&c->kind==CAP_CAS_KIND)||(level==2&&c->kind==CAP_CAS_SHARD1));int fd=!good?-1:open_dir_child(c->fd,name,(int)create);pthread_mutex_unlock(&caps_lock);return fd<0?-1:add_cap(level==1?CAP_CAS_SHARD1:CAP_CAS_SHARD2,fd,-1,NULL);}
 int64_t rt_cache_host_open_cas_leaf_v1(int64_t h,const uint8_t*p,int64_t n){char name[32769];if(!copy_name(p,n,name)||!lower_hex_n(name,60))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);int fd=(!c||c->kind!=CAP_CAS_SHARD2)?-1:openat(c->fd,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);pthread_mutex_unlock(&caps_lock);return fd<0?-1:add_cap(CAP_READ,fd,-1,NULL);}
+/* Reader admission is fail-closed in the native-C provider until its opaque
+ * generation registry has parity with the Rust runtime. */
+int64_t rt_cache_host_begin_reader_pin_v1(int64_t r,int64_t e,int64_t g,const uint8_t*m,int64_t ml,const uint8_t*p,int64_t pl,const uint8_t*b,int64_t bl,const uint8_t*ns,int64_t nl,int64_t now,int64_t ttl){(void)r;(void)e;(void)g;(void)m;(void)ml;(void)p;(void)pl;(void)b;(void)bl;(void)ns;(void)nl;(void)now;(void)ttl;return-1;}
+int64_t rt_cache_host_validate_reader_pin_v1(int64_t h,int64_t e,int64_t g,const uint8_t*m,int64_t ml,const uint8_t*p,int64_t pl,const uint8_t*b,int64_t bl,const uint8_t*ns,int64_t nl,int64_t now){(void)h;(void)e;(void)g;(void)m;(void)ml;(void)p;(void)pl;(void)b;(void)bl;(void)ns;(void)nl;(void)now;return-1;}
+int64_t rt_cache_host_renew_reader_pin_v1(int64_t h,int64_t now,int64_t ttl){(void)h;(void)now;(void)ttl;return-1;}
+int64_t rt_cache_host_release_reader_pin_v1(int64_t h,int64_t e,int64_t g,const uint8_t*m,int64_t ml,const uint8_t*p,int64_t pl,const uint8_t*b,int64_t bl,const uint8_t*ns,int64_t nl){(void)h;(void)e;(void)g;(void)m;(void)ml;(void)p;(void)pl;(void)b;(void)bl;(void)ns;(void)nl;return-1;}
+int64_t rt_cache_host_open_pinned_cas_v1(int64_t h,const uint8_t*k,int64_t kl,const uint8_t*d,int64_t dl,int64_t now){(void)h;(void)k;(void)kl;(void)d;(void)dl;(void)now;return-1;}
+int64_t rt_cache_host_reader_gc_begin_v1(int64_t r,int64_t e){(void)r;(void)e;return-1;}
+int64_t rt_cache_host_reader_gc_end_v1(int64_t r,int64_t e,int64_t g){(void)r;(void)e;(void)g;return-1;}
 int64_t rt_cache_host_size_v1(int64_t h,int64_t maximum){if(maximum<0||maximum>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);struct stat s;int64_t result=(!c||c->kind!=CAP_READ||fstat(c->fd,&s)||(s.st_mode&S_IFMT)!=S_IFREG||s.st_size<0||s.st_size>maximum)?-1:(int64_t)s.st_size;pthread_mutex_unlock(&caps_lock);return result;}
 int64_t rt_cache_host_pread_receipt_v1(int64_t h,int64_t off,uint8_t*out,int64_t cap){if(!out||off||cap<0||cap>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||c->kind!=CAP_READ){pthread_mutex_unlock(&caps_lock);return-1;}struct stat a,b;if(fstat(c->fd,&a)||(a.st_mode&S_IFMT)!=S_IFREG||a.st_size<0||a.st_size>cap){pthread_mutex_unlock(&caps_lock);return-1;}size_t got=0,want=(size_t)a.st_size;while(got<want){ssize_t n=pread(c->fd,out+got,want-got,(off_t)got);if(n<=0){pthread_mutex_unlock(&caps_lock);return-1;}got+=(size_t)n;}uint8_t verify[4096];size_t checked=0;while(checked<want){size_t n=want-checked<sizeof verify?want-checked:sizeof verify;if(pread(c->fd,verify,n,(off_t)checked)!=(ssize_t)n||memcmp(out+checked,verify,n)){pthread_mutex_unlock(&caps_lock);return-2;}checked+=n;}int bad=fstat(c->fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||a.st_mtim.tv_nsec!=b.st_mtim.tv_nsec||a.st_ctim.tv_nsec!=b.st_ctim.tv_nsec||a.st_mtime!=b.st_mtime||a.st_ctime!=b.st_ctime;pthread_mutex_unlock(&caps_lock);return bad?-2:(int64_t)want;}
 int64_t rt_cache_host_secure_temp_v1(int64_t h){pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_ROOT&&c->kind!=CAP_DIR&&c->kind!=CAP_CAS_SHARD2)){pthread_mutex_unlock(&caps_lock);return-1;}int temp_kind=c->kind==CAP_CAS_SHARD2?CAP_TEMP_CAS:CAP_TEMP;int parent=fcntl(c->fd,F_DUPFD_CLOEXEC,3);pthread_mutex_unlock(&caps_lock);if(parent<0)return-1;for(int i=0;i<128;i++){char name[96];snprintf(name,sizeof name,".simple-cache-tmp-%ld-%lld",(long)getpid(),(long long)random_token());int fd=openat(parent,name,O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)return add_cap((enum cache_cap_kind)temp_kind,fd,parent,name);if(errno!=EEXIST)break;}close(parent);return-1;}

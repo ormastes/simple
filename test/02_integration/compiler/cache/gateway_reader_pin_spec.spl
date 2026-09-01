@@ -1,0 +1,106 @@
+# @req REQ-CSM-001 REQ-CSM-003 REQ-CSM-006
+# @cover src/compiler/80.driver/cache/gateway/cache_gateway_adapter.spl 85%
+# @cover src/compiler/80.driver/cache/cas/verified_cas_store.spl 85%
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write}
+use compiler.common.cache_contract.cache_gateway_v1.*
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_cache_encode_envelope_v1, canonical_cache_kind_source_blob_v1
+}
+use compiler.driver.cache.cas.verified_cas_store.{
+    verified_cas_put_v1, verified_cas_object_path_v1
+}
+use compiler.driver.cache.catalog.cache_catalog_projection.CacheCatalogProjectionV1
+use compiler.driver.cache.gateway.cache_gateway_adapter.CacheGatewayAdapterV1
+use compiler.driver.cache.journal.action_root_journal_v1.ActionRootRecordV1
+use compiler.driver.cache.summary.summary_store_v1.{SummaryStoreV1, VirtualSourceStoreAdapterV1}
+use common.cache_host_authority_v1.{cache_host_open_root_v1,
+    cache_host_reader_gc_begin_v1, cache_host_reader_gc_end_v1,
+    cache_host_close_root_v1}
+
+extern fn rt_getpid() -> i64
+
+fn digest(ch: text) -> text: ch.repeat(64)
+
+fn gateway(root: text, catalog: CacheCatalogProjectionV1,
+           manifest: text) -> CacheGatewayAdapterV1:
+    val summaries = SummaryStoreV1.memory().unwrap()
+    CacheGatewayAdapterV1(catalog: catalog,
+        summaries: VirtualSourceStoreAdapterV1.new(summaries, digest("9")),
+        cache_root: root, process_instance_nonce: digest("1"),
+        boot_identity_digest: digest("2"), reader_admission_epoch: 8,
+        journal_generation: 6, pinned_manifest_digest: manifest,
+        monotonic_now: 100, next_pin: 0)
+
+describe "descriptor-pinned cache gateway":
+    it "serves only a canonical object whose catalog generation and manifest match":
+        step("Publish canonical bytes, pin one even generation, and verify the descriptor-backed hit")
+        val root = "/tmp/simple-cache-gateway-reader-{rt_getpid()}"
+        dir_remove_all(root)
+        expect(dir_create_all(root)).to_equal(true)
+        val envelope = canonical_cache_encode_envelope_v1(
+            canonical_cache_kind_source_blob_v1(), 1, [1, 2, 3])
+        val object = verified_cas_put_v1(root, "source_blob", envelope).unwrap()
+        val manifest = digest("3")
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        catalog.apply(ActionRootRecordV1(sequence: 0, action_digest: digest("a"),
+            object_kind: "source_blob", object_digest: object,
+            manifest_digest: manifest), 6).unwrap()
+        var subject = gateway(root, catalog, manifest)
+        val pin = subject.begin_direct_read(10).unwrap()
+        val hit = subject.lookup_verified_action(digest("a"), pin).unwrap()
+        expect(hit.present).to_equal(true)
+        expect(hit.canonical_bytes).to_equal(envelope)
+        expect(subject.release_direct_read_pin(pin).is_ok()).to_equal(true)
+        dir_remove_all(root)
+
+    it "rejects corruption, forged and expired pins, generation changes, and odd GC admission":
+        step("Exercise every fail-closed reader authority boundary")
+        val root = "/tmp/simple-cache-gateway-reader-hostile-{rt_getpid()}"
+        dir_remove_all(root)
+        expect(dir_create_all(root)).to_equal(true)
+        val envelope = canonical_cache_encode_envelope_v1(
+            canonical_cache_kind_source_blob_v1(), 1, [7, 8, 9])
+        val object = verified_cas_put_v1(root, "source_blob", envelope).unwrap()
+        val manifest = digest("3")
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        catalog.apply(ActionRootRecordV1(sequence: 0, action_digest: digest("a"),
+            object_kind: "source_blob", object_digest: object,
+            manifest_digest: manifest), 6).unwrap()
+        var subject = gateway(root, catalog, manifest)
+        val pin = subject.begin_direct_read(10).unwrap()
+        val forged = DirectReadPinV1(pin_id: "1", process_instance_nonce: pin.process_instance_nonce,
+            boot_identity_digest: pin.boot_identity_digest,
+            reader_admission_epoch: pin.reader_admission_epoch,
+            journal_superblock_generation: pin.journal_superblock_generation,
+            pinned_manifest_digest: pin.pinned_manifest_digest,
+            created_monotonic: pin.created_monotonic,
+            expires_monotonic: pin.expires_monotonic,
+            namespace_entry_digest: pin.namespace_entry_digest)
+        expect(subject.get_verified("source_blob", object,
+            CacheLimitsV1(max_bytes: 1024, max_entries: 1), forged).is_err()).to_equal(true)
+        subject.monotonic_now = 110
+        expect(subject.get_verified("source_blob", object,
+            CacheLimitsV1(max_bytes: 1024, max_entries: 1), pin).is_err()).to_equal(true)
+        subject.monotonic_now = 105
+        subject.journal_generation = 7
+        expect(subject.lookup_verified_action(digest("a"), pin).is_err()).to_equal(true)
+        subject.journal_generation = 6
+        val host_root = cache_host_open_root_v1(root)
+        expect(cache_host_reader_gc_begin_v1(host_root, 8)).to_equal(9)
+        expect(subject.lookup_verified_action(digest("a"), pin).is_err()).to_equal(true)
+        expect(cache_host_reader_gc_end_v1(host_root, 9, 7)).to_equal(10)
+        _ = cache_host_close_root_v1(host_root)
+        expect(file_write(verified_cas_object_path_v1(root, "source_blob", object).unwrap(), "00")).to_equal(true)
+        subject.reader_admission_epoch = 10
+        subject.journal_generation = 7
+        val fresh = subject.begin_direct_read(10).unwrap()
+        expect(subject.get_verified("source_blob", object,
+            CacheLimitsV1(max_bytes: 1024, max_entries: 1), fresh).is_err()).to_equal(true)
+        dir_remove_all(root)
+
+    it "keeps native_object fail closed until a canonical codec tag exists":
+        val root = "/tmp/simple-cache-gateway-native-object-{rt_getpid()}"
+        expect(verified_cas_object_path_v1(root, "native_object", digest("a")).is_err()).to_equal(true)

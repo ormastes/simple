@@ -86,6 +86,8 @@ fn _cas_expected_kind_tag(kind: text) -> i64:
     if kind == "source_blob": return canonical_cache_kind_source_blob_v1()
     if kind == "compile_snapshot": return canonical_cache_kind_compile_snapshot_v1()
     if kind == "public_summary": return canonical_cache_kind_public_summary_v1()
+    if kind == "file_ast": return canonical_cache_kind_file_ast_v1()
+    if kind == "semantic_read_set": return canonical_cache_kind_semantic_read_set_v1()
     -1
 
 pub fn verified_cas_digest_v1(canonical_envelope: [u8]) -> text:
@@ -227,6 +229,52 @@ pub fn verified_cas_get_v1(
     Ok(VerifiedCasLookupV1(present: true, kind: kind,
         digest: digest, canonical_envelope: bytes))
 
+# Generation-pinned read path used by the gateway. Object opening is one host
+# operation under the even-epoch barrier; all bytes are then read twice from
+# that same descriptor and verified as a canonical envelope before admission.
+pub fn verified_cas_get_pinned_v1(pin: CacheReaderPinAuthorityV1, kind: text,
+        digest: text, max_envelope_bytes: i64, now: i64
+    ) -> Result<VerifiedCasLookupV1, CacheErrorV1>:
+    if max_envelope_bytes < 0 or max_envelope_bytes > VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1:
+        return Err(_cas_error(CacheErrorCodeV1.CacheBoundsExceeded,
+            RetryClassV1.Never, "cas-read-bound-invalid"))
+    if not _cas_kind_valid(kind) or _cas_expected_kind_tag(kind) < 0 or not _cas_digest_valid(digest):
+        return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "cas-object-address-invalid"))
+    val object = cache_host_open_pinned_cas_v1(pin, kind, digest, now)
+    if not cache_host_object_valid_v1(object):
+        return Ok(VerifiedCasLookupV1(present: false, kind: kind,
+            digest: digest, canonical_envelope: []))
+    val encoded_size = cache_host_size_v1(object, max_envelope_bytes * 2)
+    if encoded_size < 0:
+        _ = cache_host_close_object_v1(object)
+        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+            RetryClassV1.Never, "cas-object-not-regular-or-oversized"))
+    var encoded_bytes = _cas_zero_bytes(encoded_size)
+    if cache_host_pread_receipt_v1(object, 0, encoded_bytes) != encoded_size:
+        _ = cache_host_close_object_v1(object)
+        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+            RetryClassV1.Never, "cas-object-receipt-changed"))
+    _ = cache_host_close_object_v1(object)
+    val bytes = _cas_hex_decode(bytes_to_string(encoded_bytes), max_envelope_bytes)?
+    val envelope = canonical_cache_decode_envelope_v1(bytes)
+    if not envelope.ok:
+        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+            RetryClassV1.Never, "cas-envelope-invalid:" + envelope.error))
+    val decoded = match envelope.value:
+        case value: value
+        case nil:
+            return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+                RetryClassV1.Never, "cas-envelope-missing"))
+    if decoded.kind != _cas_expected_kind_tag(kind) or decoded.schema != 1:
+        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+            RetryClassV1.Never, "cas-envelope-kind-or-schema-mismatch"))
+    if verified_cas_digest_v1(bytes) != digest:
+        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
+            RetryClassV1.Never, "cas-object-digest-mismatch"))
+    Ok(VerifiedCasLookupV1(present: true, kind: kind,
+        digest: digest, canonical_envelope: bytes))
+
 pub fn verified_cas_put_v1(
     root: text, kind: text, canonical_envelope: [u8]
 ) -> Result<text, CacheErrorV1>:
@@ -261,3 +309,6 @@ pub fn verified_cas_put_v1(
         return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
             RetryClassV1.Never, "cas-publish-readback-mismatch"))
     Ok(digest)
+
+export VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1
+export verified_cas_get_pinned_v1
