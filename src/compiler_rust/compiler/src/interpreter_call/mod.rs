@@ -56,6 +56,14 @@ fn debug_overload_select() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("SIMPLE_DEBUG_OVERLOAD_SELECT").is_some())
 }
 
+/// Cached `SIMPLE_DEBUG_DUPDISPATCH` flag -- level-gated diagnostics for
+/// cross-module duplicate-name dispatch (default off, zero cost when unset).
+fn debug_dupdispatch() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("SIMPLE_DEBUG_DUPDISPATCH").is_some())
+}
+
 fn value_type_matches_name(value: &Value, expected: &str) -> bool {
     let matched = expected == "Any"
         || value.type_name() == expected
@@ -189,6 +197,118 @@ fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
                     })
             })
         })
+}
+
+/// Every registered definition of `name`: the overload set plus the flat-map
+/// entry (which is not always in the overload set).
+fn all_candidates(name: &str, functions: &HashMap<String, Arc<FunctionDef>>) -> Vec<Arc<FunctionDef>> {
+    let mut out = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned()).unwrap_or_default();
+    if let Some(flat) = functions.get(name) {
+        if !out.iter().any(|c| Arc::ptr_eq(c, flat)) {
+            out.push(Arc::clone(flat));
+        }
+    }
+    out
+}
+
+/// The definition of `name` DECLARED BY `owner`, if exactly that one exists.
+fn candidate_declared_by(
+    owner: &str,
+    name: &str,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Option<Arc<FunctionDef>> {
+    all_candidates(name, functions)
+        .into_iter()
+        .find(|candidate| function_module_owner(candidate).is_some_and(|o| *o == *owner))
+}
+
+/// Explicit-import dispatch for a bare call of a MULTIPLY-defined name.
+///
+/// `use m.{f}` records an owner binding (`record_flattened_import_binding` /
+/// `record_import_binding`) for the importing module, but until 2026-08-31 a
+/// CALL of `f` never consulted it when the name resolved at all: the overload
+/// selector (`select_overload`) broke same-score ties by FIRST REGISTRATION
+/// unless the caller's own module declared a candidate, so an import from
+/// module A silently executed module B's same-named body whenever B's module
+/// happened to register first. Measured concrete case:
+/// `llvm_native_link_orchestrator.spl` imported `host_os` from `std.platform`
+/// (env-first, total) and got `std.io_runtime`'s uname-based copy instead,
+/// which returned "" on Windows. See
+/// doc/08_tracking/bug/import_ignored_for_duplicate_name_dispatch_2026-08-31.md.
+///
+/// Selection is by module OWNER, never by bare name -- same rule as the
+/// aliased-import fallback further down `evaluate_call`, resolved through the
+/// SAME two steps (owner-mangled symbol, then owner-matched candidate) so the
+/// two lanes cannot disagree. Deliberate non-goals, each a fall-through to
+/// the historical selection rather than a new behavior:
+///  - the calling module declares `name` itself: the local definition keeps
+///    winning (the existing tie-break already prefers it);
+///  - the binding's owner cannot be matched to any candidate (unresolved
+///    facade chain, unknown owner tags): no guess is made;
+///  - the bound candidate does not accept these arguments
+///    (`overload_score` None): programs that today lean on a different-arity
+///    same-named function from another module keep working.
+fn import_bound_candidate(
+    name: &str,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+    values: &[Value],
+) -> Option<Arc<FunctionDef>> {
+    let current = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone())?;
+    if candidate_declared_by(&current, name, functions).is_some() {
+        return None;
+    }
+    if debug_dupdispatch() {
+        let b = crate::interpreter::owner_bindings(&current);
+        eprintln!("[dupdispatch] probe name={name} current={current} has_table={} entry={:?}",
+            b.is_some(), b.as_ref().and_then(|t| t.get(name).cloned()));
+    }
+    let (mut source_owner, mut source_name) = crate::interpreter::owner_bindings(&current)
+        .and_then(|bindings| bindings.get(name).cloned())?;
+    // Walk re-export facades to the module that actually DECLARES the
+    // function, mirroring the bounded chain walk HIR lowering performs in
+    // `collect_flattened_import_aliases`. At each hop, a candidate declared
+    // by the current owner wins; otherwise follow the owner's own binding for
+    // the symbol, or its recorded glob edge ("*" -- `export use m.*`), whose
+    // per-name expansion cannot see plain functions. A hop that lands back on
+    // the CALLING module is refused: a poisoned facade binding pointing at the
+    // caller's own wrapper is exactly the recursion trap the aliased-import
+    // fallback below documents. Bounded so a cyclic facade graph cannot hang.
+    let mut target: Option<Arc<FunctionDef>> = None;
+    for _ in 0..16 {
+        target = functions
+            .get(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name))
+            .cloned()
+            .or_else(|| candidate_declared_by(&source_owner, &source_name, functions));
+        if target.is_some() {
+            break;
+        }
+        let hop = crate::interpreter::owner_bindings(&source_owner).and_then(|bindings| {
+            bindings.get(&source_name).cloned().filter(|next| {
+                *next.0 != *source_owner || next.1 != source_name
+            }).or_else(|| {
+                bindings.get("*").map(|glob| (Arc::clone(&glob.0), source_name.clone()))
+            })
+        });
+        match hop {
+            Some((next_owner, next_name))
+                if *next_owner != *current
+                    && (*next_owner != *source_owner || next_name != source_name) =>
+            {
+                source_owner = next_owner;
+                source_name = next_name;
+            }
+            _ => break,
+        }
+    }
+    let target = target?;
+    if debug_dupdispatch() {
+        eprintln!(
+            "[dupdispatch] import-bound name={name} current={current} source_owner={source_owner} source_name={source_name} target_owner={:?}",
+            function_module_owner(&target)
+        );
+    }
+    overload_score(&target, values)?;
+    Some(target)
 }
 
 /// True when `func`'s owning module matches the module of the function whose
@@ -583,7 +703,23 @@ pub(crate) fn evaluate_call(
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
+                // An explicit `use m.{name}` in the calling module binds the
+                // call to m's definition; only when no such binding resolves
+                // does the historical score/tie selection below apply.
+                if let Some(func) = import_bound_candidate(name, functions, &evaluated_args) {
+                    return core::exec_function_with_values_and_writeback(
+                        &func,
+                        &evaluated_args,
+                        args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
+                }
                 if let Some(func) = select_overload(&overloads, &evaluated_args) {
+                    if debug_dupdispatch() { eprintln!("[dupdispatch] P4-overload name={name} owner={:?} current={:?}", function_module_owner(&func), CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())); }
                     return core::exec_function_with_values_and_writeback(
                         &func,
                         &evaluated_args,
@@ -614,6 +750,7 @@ pub(crate) fn evaluate_call(
 
         // Priority 5: Check regular functions (user-defined) — most common case
         if let Some(func) = functions.get(name).cloned() {
+            if debug_dupdispatch() { eprintln!("[dupdispatch] P5-flat name={name} owner={:?} current={:?}", function_module_owner(&func), CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())); }
             // AOP join point. `has_advice()` is a thread-local emptiness check,
             // so a program with no `on pc{...}` declaration pays nothing.
             if core::aop_runtime::has_advice() {
@@ -633,6 +770,7 @@ pub(crate) fn evaluate_call(
         // Priority 6: Check env for decorated functions and closures (decorators store
         // the decorated version in env while the original remains in functions)
         if let Some(val) = env.get(name).cloned() {
+            if debug_dupdispatch() { eprintln!("[dupdispatch] P6-env name={name} current={:?}", CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())); }
             if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
                 return Ok(result);
             }

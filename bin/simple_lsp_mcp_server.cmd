@@ -1,5 +1,6 @@
 @echo off
 setlocal
+if not [%2]==[] goto :after_fast_options
 if "%~1"=="--version" (
     echo simple-lsp-mcp-server 0.9.8
     exit /b 0
@@ -20,6 +21,7 @@ if "%~1"=="-h" (
     echo        simple_lsp_mcp_server --version
     exit /b 0
 )
+:after_fast_options
 rem The native simple_lsp_mcp_server.exe fails every tools/call ("Missing tool
 rem name", AOT arg-extraction codegen bug). Default to source mode: 10/11 LSP
 rem tools work; lsp_diagnostics is gated off and returns a message. Opt into

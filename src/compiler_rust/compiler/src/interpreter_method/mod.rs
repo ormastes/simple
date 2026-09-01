@@ -190,6 +190,9 @@ pub(crate) fn evaluate_method_call(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+        eprintln!("[eval-method-call] method={} argc={}", method, args.len());
+    }
     // Support module-style dot calls (lib.func()) by resolving directly to imported functions/classes.
     if let Expr::Identifier(module_name) = receiver.as_ref() {
         if method == "empty" {
@@ -1818,6 +1821,9 @@ pub(crate) fn evaluate_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<Value>), CompileError> {
+    if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+        eprintln!("[eval-method-call-self-update] method={} argc={}", method, args.len());
+    }
     // Builtin text static methods — intercept before evaluate_expr to avoid
     // "variable `text` not found" when the receiver is the builtin type name.
     if let Expr::Identifier(module_name) = receiver.as_ref() {

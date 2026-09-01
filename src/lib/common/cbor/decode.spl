@@ -269,7 +269,10 @@ fn cbor_decode_bytes(bytes: [i64], offset: i64) -> ([i64], i64):
 
     val data_start = offset + header_size
     val data = bytes_slice(bytes, data_start, length)
-    if not cbor_bytes_are_valid(data):
+    # See cbor_item_size's byte/text-string branches: bytes_slice's fail-closed
+    # [] on an invalid byte is indistinguishable from a genuine zero-length
+    # slice, so compare against the requested length first.
+    if data.len() != length or not cbor_bytes_are_valid(data):
         return ([], 0)
     val total_consumed = header_size + length
     (data, total_consumed)
@@ -322,7 +325,7 @@ fn cbor_decode_text(bytes: [i64], offset: i64) -> (text, i64):
 
     val data_start = offset + header_size
     val utf8_bytes = bytes_slice(bytes, data_start, length)
-    if not cbor_bytes_are_valid(utf8_bytes):
+    if utf8_bytes.len() != length or not cbor_bytes_are_valid(utf8_bytes):
         return ("", 0)
     val text_value = cbor_bytes_to_text(utf8_bytes)
     val total_consumed = header_size + length
@@ -494,7 +497,13 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
         if consumed == 0 or offset + consumed + length > bytes.len():
             return 0
         val data = bytes_slice(bytes, offset + consumed, length)
-        if not cbor_bytes_are_valid(data):
+        # bytes_slice fails closed to [] on an invalid byte, which is
+        # indistinguishable from a legitimate zero-length slice — compare
+        # against the requested length first so cbor_bytes_are_valid is never
+        # asked to vacuously "validate" an empty array that really means
+        # "invalid". See
+        # doc/08_tracking/bug/cbor_bytes_slice_invalid_byte_vacuous_valid_guard_2026-09-01.md.
+        if data.len() != length or not cbor_bytes_are_valid(data):
             return 0
         return consumed + length
 
@@ -507,7 +516,7 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
         if consumed == 0 or offset + consumed + length > bytes.len():
             return 0
         val data = bytes_slice(bytes, offset + consumed, length)
-        if not cbor_bytes_are_valid(data):
+        if data.len() != length or not cbor_bytes_are_valid(data):
             return 0
         return consumed + length
 
@@ -586,21 +595,24 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
             if offset + 3 > bytes.len():
                 return 0
             val payload = bytes_slice(bytes, offset + 1, 2)
-            if not cbor_bytes_are_valid(payload):
+            # See byte/text-string branches above: bytes_slice's fail-closed
+            # [] on an invalid byte is indistinguishable from a genuine
+            # zero-length slice, so check the length first.
+            if payload.len() != 2 or not cbor_bytes_are_valid(payload):
                 return 0
             return 3
         if addl == simple_float32():
             if offset + 5 > bytes.len():
                 return 0
             val payload = bytes_slice(bytes, offset + 1, 4)
-            if not cbor_bytes_are_valid(payload):
+            if payload.len() != 4 or not cbor_bytes_are_valid(payload):
                 return 0
             return 5
         if addl == simple_float64():
             if offset + 9 > bytes.len():
                 return 0
             val payload = bytes_slice(bytes, offset + 1, 8)
-            if not cbor_bytes_are_valid(payload):
+            if payload.len() != 8 or not cbor_bytes_are_valid(payload):
                 return 0
             return 9
         if addl == simple_break():

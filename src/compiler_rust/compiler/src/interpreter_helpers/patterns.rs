@@ -522,8 +522,59 @@ fn handle_method_call_with_self_update_inner(
             let (inner_result, inner_update) =
                 handle_method_call_with_self_update(receiver, env, functions, classes, enums, impl_methods)?;
 
-            // If there was an update from the inner method call, we need to use
-            // the updated environment for the outer method call
+            // Make an inner self-mutation visible in the REAL env before
+            // dispatching the outer call: both so the outer call's own
+            // arguments can observe it, and so the write-back path just below
+            // (for the outer call's OWN mutable arguments) lands in the
+            // caller's actual scope rather than a throwaway clone.
+            if let Some((ref obj_name, ref new_self)) = inner_update {
+                env.insert(obj_name.clone(), new_self.clone());
+            }
+
+            // Object receiver whose class defines `method`: dispatch through
+            // the owned-values path, which evaluates the outer call's
+            // arguments in the REAL `env` and writes any mutated
+            // Array/Dict/Object/Tuple identifier argument back into it —
+            // exactly like a plain `x.method(buf)` call does. Without this,
+            // a chained MethodCall receiver (`Type.of(x).store(buf)`) is a
+            // temporary with no caller storage of its own, so the fallback
+            // below (eval args to Values, `call_method_on_value` against a
+            // CLONED env) silently drops any mutation the callee makes to a
+            // non-self reference-typed argument such as `buf`. See
+            // doc/08_tracking/bug/bytebuffer_struct_param_mutation_not_persisted_2026-09-01.md.
+            if let Value::Object { class, fields } = &inner_result {
+                if object_method_exists(classes, impl_methods, class, method) {
+                    let eval_args = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
+                    if let Some((outer_result, updated_inner_self)) = find_and_exec_method_with_self_owned_values(
+                        method,
+                        &eval_args,
+                        args,
+                        class,
+                        Arc::clone(fields),
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )? {
+                        if let Some((ref obj_name, _)) = inner_update {
+                            if let Value::Object { class: updated_class, .. } = &updated_inner_self {
+                                if updated_class == class {
+                                    return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
+                                }
+                            }
+                            return Ok((outer_result, inner_update));
+                        }
+                        return Ok((outer_result, None));
+                    }
+                }
+            }
+
+            // Fallback for non-Object receivers (e.g. a chain ending in a
+            // string/array/dict method): evaluate into Values and call
+            // through the plain (non-write-back) dispatcher. `working_env` is
+            // a clone here on purpose — these receiver kinds have no
+            // reference-typed caller storage to write back into.
             let mut working_env = if let Some((ref obj_name, ref new_self)) = inner_update {
                 let mut temp_env = env.clone();
                 temp_env.insert(obj_name.clone(), new_self.clone());

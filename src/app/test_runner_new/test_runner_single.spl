@@ -462,13 +462,35 @@ fn extract_number_after(s: text, keyword: text) -> i64:
         return -1
     value
 
-fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64):
+fn extract_word_after(s: text, keyword: text) -> text:
+    """The run of uppercase-letter/underscore characters immediately
+    following `keyword` ("" when absent). Mirror of extract_number_after for
+    the `outcome=<WORD>` field (`OK`, `ERROR`, `CRASHED`, `TERMINATED`,
+    `TIMEOUT`, `NOT_RUN`)."""
+    val idx = find_raw(s, keyword)
+    if idx < 0:
+        return ""
+    var pos = idx + keyword.len()
+    val n = s.len()
+    var out = ""
+    while pos < n:
+        val c = s.char_code_at(pos)
+        val is_upper = c >= 65 and c <= 90
+        val is_underscore = c == 95
+        if is_upper or is_underscore:
+            out = out + s.char_at(pos)
+            pos = pos + 1
+        else:
+            break
+    out
+
+fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64, text):
     """Parse the driver's authoritative per-file verdict line.
 
     `report_spec_file_verdict` (src/compiler_rust/driver/src/cli/basic.rs)
     emits exactly one such line per spec FILE, always, on stdout, LAST:
 
-        SPEC FILE VERDICT: <path> declared>=N executed=N passed=N failed=N dropped=N
+        SPEC FILE VERDICT: <path> outcome=OK declared>=N executed=N passed=N failed=N skipped=N dropped=N
 
     Its counts come from the interpreter's own BDD result table, not from
     scraping display text, so it is strictly more reliable than the per-example
@@ -484,11 +506,25 @@ fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64):
     therefore also require `dropped == 0`, or it greenwashes exactly that case.
     Bug: spec_runner_verdict_dropped_gate_reverted.
 
-    Returns (executed, passed, failed, dropped, has_verdict)."""
+    `outcome` is `SpecOutcome::as_str()` on the Rust side: `OK`, `ERROR`,
+    `CRASHED`, `TERMINATED`, `TIMEOUT`, or `NOT_RUN`. Only `OK` means the
+    module itself ran to completion with no error AFTER the BDD table was
+    tallied. `ERROR`/`CRASHED` can carry `failed=0` (every assertion that DID
+    run passed) while still being a genuine failure — e.g. a runtime error in
+    `fn main()` that happens after the file's `describe`/`it` blocks already
+    executed cleanly. Any consumer treating a verdict as POSITIVE evidence
+    that overrides a non-zero child exit code MUST also require
+    `outcome == "OK"`, or it greenwashes exactly that case: a spec whose
+    assertions passed and then crashed/errored/exited was reported as a clean
+    PASS with rc=0.
+    See doc/08_tracking/bug/test_runner_trusts_verdict_over_nonzero_exit_ignoring_outcome_2026-09-01.md.
+
+    Returns (executed, passed, failed, dropped, has_verdict, outcome)."""
     var executed = -1
     var passed = -1
     var failed = -1
     var dropped = -1
+    var outcome = ""
     val lines = output.split("\n")
     for line in lines:
         if line.contains("SPEC FILE VERDICT:"):
@@ -496,18 +532,20 @@ fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64):
             val p = extract_number_after(line, " passed=")
             val f = extract_number_after(line, " failed=")
             val d = extract_number_after(line, " dropped=")
+            val o = extract_word_after(line, " outcome=")
             if e >= 0 and p >= 0 and f >= 0:
                 executed = e
                 passed = p
                 failed = f
                 dropped = d
+                outcome = o
     if executed >= 0:
         # A verdict line with no parseable `dropped=` field is treated as
         # dropped-unknown, and unknown must fail closed: report a nonzero
         # value so neither bypass below can accept it as clean.
         val d_out = if dropped >= 0: dropped else: 1
-        return (executed, passed, failed, d_out, 1)
-    (0, 0, 0, 0, 0)
+        return (executed, passed, failed, d_out, 1, outcome)
+    (0, 0, 0, 0, 0, "")
 
 fn output_was_truncated(output: text) -> bool:
     """True when the bounded-capture reader discarded part of the child output.
@@ -1190,10 +1228,10 @@ fn main() -> i64:
     val (real_passed, real_failed) = count_real_examples(combined)
     val real_executed = real_passed + real_failed
     val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
-    val (verdict_executed, verdict_passed, verdict_failed, verdict_dropped, has_verdict) = parse_spec_file_verdict(combined)
+    val (verdict_executed, verdict_passed, verdict_failed, verdict_dropped, has_verdict, verdict_outcome) = parse_spec_file_verdict(combined)
     val was_truncated = output_was_truncated(combined)
     if env_get("SIMPLE_TEST_RUNNER_DEBUG") == "1":
-        print "test-runner debug: code={code} assert_ran={assert_ran} has_evidence={has_evidence} ev_p={evidence_passed} ev_f={evidence_failed} real_p={real_passed} real_f={real_failed} has_sum={has_summary} sum_p={summary_passed} sum_f={summary_failed} has_v={has_verdict} v_e={verdict_executed} v_p={verdict_passed} v_f={verdict_failed} v_d={verdict_dropped} trunc={was_truncated}"
+        print "test-runner debug: code={code} assert_ran={assert_ran} has_evidence={has_evidence} ev_p={evidence_passed} ev_f={evidence_failed} real_p={real_passed} real_f={real_failed} has_sum={has_summary} sum_p={summary_passed} sum_f={summary_failed} has_v={has_verdict} v_e={verdict_executed} v_p={verdict_passed} v_f={verdict_failed} v_d={verdict_dropped} v_o={verdict_outcome} trunc={was_truncated}"
     var failed = 0
     var passed = 0
     # Non-empty only for the UNVERIFIED classes (TERMINATED / TIMEOUT), which
@@ -1311,13 +1349,14 @@ fn main() -> i64:
         # This is NOT a weakening of the greenwash guards. The child's
         # SPEC FILE VERDICT line is emitted by the driver epilogue, which only
         # runs if the spec process reached the end normally: a spec that
-        # passes its examples and THEN dies abnormally emits no verdict line
-        # at all (proven: `exit(7)` after the block yields has_verdict=0 and
-        # stays RED). So requiring a clean verdict, corroborated by the
-        # independent ✗-glyph tally and by any summary line present, is
-        # POSITIVE evidence that the process completed and nothing failed —
-        # exactly the shape of the truncation fix above. Every genuinely
-        # nonzero exit that is not backed by that evidence still fails closed.
+        # passes its examples and THEN dies abnormally (a raw `exit(N)` call,
+        # which is `std::process::exit` and never returns to the epilogue)
+        # emits no verdict line at all. So requiring a clean verdict,
+        # corroborated by the independent ✗-glyph tally and by any summary
+        # line present, is POSITIVE evidence that the process completed and
+        # nothing failed — exactly the shape of the truncation fix above.
+        # Every genuinely nonzero exit that is not backed by that evidence
+        # still fails closed.
         # `verdict_dropped == 0` is load-bearing and was MISSING when this
         # bypass first landed: without it, a file reporting
         # `declared>=10 executed=1 passed=1 failed=0 dropped=9` plus a nonzero
@@ -1325,7 +1364,24 @@ fn main() -> i64:
         # 24cfc32db98 closed on the truncation bypass above. Same rule, same
         # reason: a verdict is positive evidence of completion only when it
         # accounts for every example the file declared.
-        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and verdict_failed == 0
+        #
+        # `verdict_outcome == "OK"` is ALSO load-bearing and was MISSING
+        # until this fix (bug: test_runner_trusts_verdict_over_nonzero_exit_
+        # ignoring_outcome_2026-09-01). The epilogue runs on `Ok`, `Error`,
+        # AND `Crashed` outcomes alike (all three are "verified": the module
+        # ran far enough to trust the BDD table) — but only `Ok` means
+        # nothing ELSE went wrong. A `fn main()` that runs its assertions
+        # cleanly and THEN hits a runtime error (an unresolved call, a
+        # caught panic, any error that unwinds to a normal `Err` return
+        # rather than a raw `exit()`/process kill) still reaches the
+        # epilogue, still gets a `dropped==0 failed==0` verdict, and the
+        # driver correctly stamps `outcome=ERROR` on that exact line — which
+        # this check used to ignore entirely. Measured: a spec whose `it`
+        # examples all pass and whose `fn main()` then calls an undefined
+        # function reports `SPEC FILE VERDICT: ... outcome=ERROR ... failed=0`
+        # plus child exit 1, and was reported as a clean PASS with rc=0
+        # before this fix.
+        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and verdict_failed == 0 and verdict_outcome == "OK"
         val exit_code_spurious = code != 0 and verdict_clean and real_failed == 0 and (has_summary == 0 or summary_failed == 0)
         if exit_code_spurious:
             print "warning: test-runner: child exit {code} contradicted by a clean SPEC FILE VERDICT; trusting the verdict"

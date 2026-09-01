@@ -18,6 +18,12 @@ extern fn strtoll(ptr: i64, endptr: i64, base: i64) -> i64
 extern fn strtod(ptr: i64, endptr: i64) -> f64
 @unsafe(reason: "raw libc string-length ABI; contract: caller supplies NUL-terminated readable text", capabilities: [ffi, raw_ptr])
 extern fn strlen(ptr: i64) -> i64
+@unsafe(reason: "raw f64 bit-pattern projection ABI", capabilities: [ffi])
+extern fn spl_f64_to_bits(value: f64) -> i64
+@unsafe(reason: "raw bit-pattern f64 reconstruction ABI", capabilities: [ffi])
+extern fn spl_bits_to_f64(bits: i64) -> f64
+@unsafe(reason: "raw transient-tracking runtime note ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64
 @unsafe(reason: "raw descriptor write ABI; contract: negative means failure and short count is valid", capabilities: [ffi, raw_ptr])
 extern fn write(fd: i64, ptr: i64, count: i64) -> i64
 @unsafe(reason: "raw descriptor read ABI; contract: negative means failure and short count is valid", capabilities: [ffi, raw_ptr])
@@ -91,6 +97,11 @@ fn _sffi_core_string_calloc(count: i64, size: i64) -> i64:
 fn _sffi_core_string_realloc(ptr: i64, size: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]):
         realloc(ptr, size)
+
+@always_inline
+fn _sffi_core_string_transient_note(ptr: i64, kind: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_simple_core_transient_note(ptr, kind)
 
 @always_inline
 fn _sffi_core_string_free(ptr: i64):
@@ -281,6 +292,57 @@ fn registered_string_ptr(value: i64) -> i64:
         i = i + 1
     0
 
+fn unregister_string_ptr(ptr: i64):
+    var i = 0
+    while i < string_registry_len:
+        if spl_load_i64(string_registry_items, i * 8) == ptr:
+            val last = string_registry_len - 1
+            if i < last:
+                spl_store_i64(string_registry_items, i * 8, spl_load_i64(string_registry_items, last * 8))
+            string_registry_len = last
+            return
+        i = i + 1
+
+# Transient-string support (2026-08-31, spec: runtime_native.c
+# RT_CORE_STRING_FLAG_TRANSIENT on RtCoreString.reserved). The pure-lane
+# string header keeps its kind magic in the LOW 32 bits of the first word
+# (string_ptr masks with 4294967295), so bit 32 of that word is free and
+# carries the transient flag here. This lane has no shared short cache or
+# literal intern, so C's RT_CORE_STRING_FLAG_SHARED exemption has no
+# pure-lane counterpart (nothing ever sets shared).
+
+fn string_transient_flag(ptr: i64) -> i64:
+    return spl_load_i64(ptr, 0) & 4294967296
+
+# Membership + flag probe for the transient machinery (core_memory.spl):
+# returns the raw header ptr only for a registered, transient-flagged string.
+pub fn string_transient_state(value: i64) -> i64:
+    val ptr = registered_string_ptr(value)
+    if ptr < 1:
+        return 0
+    if string_transient_flag(ptr) == 0:
+        return 0
+    return ptr
+
+# Promotion clears the flag; returns whether it had been set (spec :2171).
+pub fn string_promote_clear(ptr: i64) -> i64:
+    val word = spl_load_i64(ptr, 0)
+    if (word & 4294967296) == 0:
+        return 0
+    spl_store_i64(ptr, 0, word & -4294967297)
+    return 1
+
+# Scope-end reclamation: only a still-registered, still-flagged (unpromoted)
+# string dies; membership is rechecked before freeing (spec :1673, :1679).
+pub fn string_reclaim_transient(ptr: i64) -> i64:
+    if registered_string_ptr(ptr | 1) < 1:
+        return 0
+    if string_transient_flag(ptr) == 0:
+        return 0
+    unregister_string_ptr(ptr)
+    free(ptr)
+    return 1
+
 fn string_ptr(value: i64) -> i64:
     if (value & 7) < 1 or (value & 7) > 1:
         return 0
@@ -324,6 +386,17 @@ fn alloc_string(len: i64) -> i64:
     _sffi_core_string_spl_store_i64(ptr, 0, 1398034993)
     _sffi_core_string_spl_store_i64(ptr, 8, len)
     _sffi_core_string_spl_store_u8(ptr, 16 + len, 0)
+    # Transient-scope tracking (spec: runtime_native.c rt_core_register_string
+    # :1140-:1156): a string born in an active, unpaused scope carries the
+    # transient flag and is reclaimed at scope end unless promoted; a
+    # tracking failure fails the allocation.
+    val noted = _sffi_core_string_transient_note(ptr, 1)
+    if noted < 0:
+        unregister_string_ptr(ptr)
+        _sffi_core_string_free(ptr)
+        return 3
+    if noted > 0:
+        _sffi_core_string_spl_store_i64(ptr, 0, _sffi_core_string_spl_load_i64(ptr, 0) | 4294967296)
     return ptr | 1
 
 pub fn rt_string_new(bytes: i64, len: i64) -> i64:
@@ -832,6 +905,69 @@ fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:
 
 pub fn rt_native_eq(left: i64, right: i64) -> i64:
     rt_native_eq_inner(left, right, 0)
+
+# Decode one rt_native_cmp text operand: a registered heap string yields its
+# (data, len); anything else falls back to the raw-cstr convention this lane
+# already uses in rt_string_len (`value > 65535` -> treat as NUL-terminated
+# char*), mirroring the C spec's rt_interp_cstr (v < 0x10000 -> NULL -> "").
+# Returns the data pointer and leaves the length in native_cmp_text_len.
+var native_cmp_text_len: i64 = 0
+
+fn native_cmp_text_operand(value: i64) -> i64:
+    val ptr = registered_string_ptr(value)
+    if ptr > 0:
+        native_cmp_text_len = spl_load_i64(ptr, 8)
+        return ptr + 16
+    if value > 65535:
+        native_cmp_text_len = strlen(value)
+        return value
+    native_cmp_text_len = 0
+    return 0
+
+# 2026-08-31 pure-Simple port of runtime_native.c rt_native_cmp (:3847):
+# ordering counterpart of rt_native_eq for `<` `<=` `>` `>=` when codegen
+# cannot statically prove either operand's type. Dispatch mirrors the C spec
+# exactly:
+#   - either side a registered heap string -> byte-wise lexicographic compare
+#     (C: strcmp via rt_text_cmp_any; identical ordering for NUL-terminated
+#     data, with the same raw-char* normalization for the other side)
+#   - either side a tagged float -> numeric compare; the non-float side is
+#     converted from its RAW i64 value (C: `(double)left`), NOT >>3-decoded —
+#     decoding here would silently change the ABI for every dynamic caller
+#   - otherwise -> raw signed integer compare, exactly what the inline icmp
+#     arm would have done.
+# Returns a strcmp-style signed result (<0, 0, >0).
+pub fn rt_native_cmp(left: i64, right: i64) -> i64:
+    val left_sptr = registered_string_ptr(left)
+    val right_sptr = registered_string_ptr(right)
+    if left_sptr > 0 or right_sptr > 0:
+        val a = native_cmp_text_operand(left)
+        val a_len = native_cmp_text_len
+        val b = native_cmp_text_operand(right)
+        val b_len = native_cmp_text_len
+        val min_len = if a_len < b_len: a_len else: b_len
+        if min_len > 0:
+            val cmp = memcmp(a, b, min_len)
+            if cmp < 0 or cmp > 0:
+                return cmp
+        if a_len < b_len:
+            return -1
+        if a_len > b_len:
+            return 1
+        return 0
+    if (left & 7) == 2 or (right & 7) == 2:
+        val a = if (left & 7) == 2: spl_bits_to_f64(left & -8) else: left as f64
+        val b = if (right & 7) == 2: spl_bits_to_f64(right & -8) else: right as f64
+        if a < b:
+            return -1
+        if a > b:
+            return 1
+        return 0
+    if left < right:
+        return -1
+    if left > right:
+        return 1
+    return 0
 
 pub fn rt_native_neq(left: i64, right: i64) -> i64:
     val eq = rt_native_eq(left, right)

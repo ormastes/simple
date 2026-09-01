@@ -942,6 +942,82 @@ impl MirLowering:
                                             init_local = self.box_runtime_value(init_local)
                                         case _:
                                             ()
+                        # Bug (any?/any receiver-type erasure, 2026-09-01):
+                        # `val d: Dict<text, i64> = get_obj(...)` where the
+                        # initializer's HIR type is exactly Any or Optional(Any)
+                        # (e.g. a call to `fn get_obj(x: any) -> any?`) used to
+                        # DISCARD the explicit concrete annotation: the
+                        # remember_local_hir_type block below prefers the init
+                        # local's recorded type (Optional(Any)) and effective_type
+                        # picks the init's MIR type (the flat-option Tuple(Bool,
+                        # I64)), so `d.keys()` failed with "unresolved method
+                        # call: keys" and the for-in over it with "collection mir
+                        # type: I64". An explicit concrete annotation is strictly
+                        # more informative than a type-erased Any/Any? -- prefer
+                        # it, ONLY in that exact case (a concrete init type is
+                        # never overridden, and a bare `val d = ...` is
+                        # unchanged). Value representation: an Optional(Any) init
+                        # holds the canonical Option handle (enum id 1), so it is
+                        # unwrapped through rt_unwrap_or_self -- Some(x) -> the
+                        # tagged payload, nil -> the tagged nil sentinel (payload
+                        # 3), any non-Option value -> unchanged. A plain-Any init
+                        # already holds the tagged value itself, so it is only
+                        # retyped, never rewritten.
+                        if let_type.?:
+                            val anyq_declared: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                            if anyq_declared != nil:
+                                # Positive gate: only container annotations
+                                # whose MIR-level runtime representation is a
+                                # single tagged i64 handle (Dict, Array).
+                                # Anything else (Str's fat-pointer tuple,
+                                # structs, scalars, ...) keeps today's
+                                # behavior -- retyping those from here could
+                                # bind a WRONG representation silently.
+                                val anyq_decl_concrete = match anyq_declared.kind:
+                                    case HirTypeKind.Dict(_, _): true
+                                    case HirTypeKind.Array(_, _): true
+                                    case _: false
+                                if anyq_decl_concrete:
+                                    var anyq_init_is_any = false
+                                    var anyq_init_is_opt_any = false
+                                    match self.find_local_hir_type(init_local.id):
+                                        case Some(anyq_init_t):
+                                            # Same guard as local_hir_type_is_str /
+                                            # _is_int (method_calls_literals.spl):
+                                            # on the staged native lane Some can
+                                            # carry a nil payload -- never read
+                                            # .kind until proven non-nil.
+                                            if anyq_init_t != nil:
+                                                match anyq_init_t.kind:
+                                                    case HirTypeKind.Any:
+                                                        anyq_init_is_any = true
+                                                    case HirTypeKind.Optional(anyq_inner):
+                                                        match anyq_inner.kind:
+                                                            case HirTypeKind.Any:
+                                                                anyq_init_is_opt_any = true
+                                                            case _: ()
+                                                    case _: ()
+                                        case nil: ()
+                                    if anyq_init_is_any or anyq_init_is_opt_any:
+                                        if anyq_init_is_opt_any:
+                                            var anyq_b = self.builder
+                                            val anyq_unwrap_op = MirOperand(kind: MirOperandKind.Const(
+                                                MirConstValue.Str("rt_unwrap_or_self"),
+                                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                                            ))
+                                            val anyq_unwrapped = anyq_b.emit_call(anyq_unwrap_op, [mir_operand_copy(init_local)], mir_type)
+                                            self.builder = anyq_b
+                                            if val anyq_uw = anyq_unwrapped:
+                                                init_local = anyq_uw
+                                        self.remember_local_hir_type(init_local.id, anyq_declared, 0, 0)
+                                        match anyq_declared.kind:
+                                            case HirTypeKind.Dict(_, _):
+                                                self.runtime_dict_locals[init_local.id] = true
+                                                self.mark_runtime_value_local(init_local.id)
+                                            case HirTypeKind.Array(_, _):
+                                                self.runtime_array_locals[init_local.id] = true
+                                                self.mark_runtime_value_local(init_local.id)
+                                            case _: ()
                         val annotated_narrow_int = match mir_type.kind:
                             case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: true
                             case _: false
@@ -1178,6 +1254,12 @@ impl MirLowering:
                                 if self.nil_locals.contains(init_local.id):
                                     self.nil_locals[local.id] = true
                                 val found_init_hir_type = self.find_local_hir_type(init_local.id)
+                                if rt_env_get("SIMPLE_ANYQ_PROBE") == "1":
+                                    match found_init_hir_type:
+                                        case Some(iht_probe):
+                                            eprint("[anyq-probe] early-Let remember sym={symbol_value_id} local={local.id} init_hir_type={iht_probe.kind} effective_mir={effective_type.kind}\n")
+                                        case nil:
+                                            eprint("[anyq-probe] early-Let remember sym={symbol_value_id} local={local.id} init_hir_type=nil effective_mir={effective_type.kind}\n")
                                 if found_init_hir_type.?:
                                     val init_hir_type = found_init_hir_type ?? HirType(kind: HirTypeKind.Error, span: span)
                                     self.remember_local_hir_type(local.id, init_hir_type, self.local_hir_type_isolation_state(init_local.id), self.local_hir_type_resource_state(init_local.id))
@@ -2030,6 +2112,9 @@ impl MirLowering:
 
                 # Emit call with no return value
                 self.builder.emit_call(func_operand, [mir_operand_copy(receiver), mir_operand_copy(index_local), mir_operand_copy(boxed_value)], MirType.unit())
+
+            case TupleLit(elements):
+                self.lower_tuple_destructuring_assign(elements, value_local, op)
 
             case _:
                 self.error_fatal("unsupported MIR assignment target: {target.kind}", nil)
@@ -3315,8 +3400,14 @@ impl MirLowering:
             return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span)
 
         # Non-array iterable: no supported lowering (#143). Fail loudly.
-        val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while"
-        self.error(iter_unsupported_msg, Some(body.span))
+        # Diagnostics: `body.span` is frequently (0,0) on this pipeline, which
+        # made every #143 failure location-blind; `source_span` (the for-stmt's
+        # own span, already a parameter) carries the real location. Naming the
+        # collection's MIR type additionally separates "genuinely a dict" from
+        # "i64/unknown = cascade of an upstream lowering failure" per site.
+        val iter_coll_type_text = mir_type_probe_text(self.local_mir_type_of(collection_local))
+        val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while (collection mir type: {iter_coll_type_text})"
+        self.error(iter_unsupported_msg, Some(source_span))
 
         # Belt-and-braces for pipelines that never read MirLowering.errors:
         # emit `rt_panic(msg)` where the loop would have been. A MIR Str
