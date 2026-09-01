@@ -149,27 +149,58 @@ bytes, then clone two words from the field IF its low three bits are
 which is nowhere near the kernel's `0x80…` address space. `stval` is exactly
 that address.
 
-## The lead, stated as a lead
+## The lead, pinned by an ARITHMETIC fingerprint (not a guess)
 
-Byte offset 32 of `HirParam` (`src/compiler/20.hir/hir_definitions.spl:125`,
-8-byte slots: 0 `symbol`, 8 `name`, 16 `type_`, 24 `has_default`, **32
-`default: HirExpr`**, 40 `span`, 48 `is_mutable`) is `default`. The copy is
-`val param = fn_.params[i]` in `call_hir_function`, and it clones `default`
-**unconditionally**, without consulting `has_default` — which is `false` for
-both parameters of `fn add(a: i64, b: i64)`. `default` is a non-optional
-`HirExpr`, so an absent default has to hold *something*, and in-guest that
-something is `0x3200000001`: heap-tagged, non-null, and not a pointer.
+The first draft of this section named `HirParam.default`. That was wrong, and
+the allocation-size fingerprint settles it. Every COW clone in this function
+allocates the exact byte size of the object it copies, so the ordered list of
+`rt_alloc` sizes across `call_hir_function` is a layout fingerprint that can be
+matched against candidate structs statically, with no boot:
 
-That is the same defect shape as the five already fixed on this branch — a
-value that reads as valid instead of failing. Note the shape of the bad word:
-`0x32` (50) in bits 32-39 with `1` in bit 0 reads like two 32-bit halves fused
-into one 64-bit load, i.e. a field-offset/width mismatch rather than random
-memory, which fits this tree's documented "most-fields-wins wrong-struct field
-index" class.
+| site | size | matches |
+|---|---|---|
+| `807116ac  li a0,248` | 248 = 31 slots | `HirFunction` — 31 fields (`hir_definitions.spl`). This is the by-value copy of the `fn_: HirFunction` parameter on entry. |
+| `80711a28  li s9,16`  | 16 = 2 slots  | `HirType` — exactly 2 fields, `kind: HirTypeKind` and `span: Span` (`src/compiler/20.hir/hir_types.spl:541`). |
+| `80711ba8  li a0,40`  | 40 = 5 slots  | (later clone, not on the faulting path) |
 
-**Not yet established, and deliberately not claimed:** whether `default` is
-written garbage by HIR lowering in-guest, or is correct and read at the wrong
-offset/width by the clone. Those point at opposite halves and the next session
-should settle that FIRST, with one batched boot printing the raw words of
-`fn_.params[i]` at offsets 24..40 — raw, never a comparison result, never an
-integer interpolated into text.
+The faulting load reads byte offset **32** of the 248-byte `HirFunction` copy.
+`HirFunction`'s 8-byte slots run 0 `symbol`, 8 `name`, 16 `type_params`,
+24 `params`, **32 `return_type: HirType`** — and the clone that faults
+allocates exactly 16 bytes, exactly `HirType`'s size. Both ends agree.
+
+**So the bad word is `HirFunction.return_type`.** It holds `0x3200000001`:
+`TAG_HEAP`, non-null, and pointing at `0x3200000000`, which is not in the
+kernel's `0x80…` space. The three heap fields BEFORE it (`name`,
+`type_params`, `params`) clone without faulting, so the corruption is specific
+to this field, not general.
+
+That lands in the same struct and the same defect family as one of the five
+fixes already on this branch: `match_result_mir_type` dereferenced a **zeroed
+`HirType`** bound by an if-val extraction from an absent optional. `HirType` is
+non-optional in `HirFunction`, so a function with no declared return type has
+to store *something* there — and in-guest that something reads as a valid heap
+reference instead of failing. Same shape as all five earlier fixes.
+
+## The discriminator the next session should use first
+
+Row 1 also calls `main` through `call_hir_function`, and its `fn main():` also
+declares no return type — yet row 1 is GREEN. The one thing row 2 does that
+row 1 does not is run `MirLowering.lower_module(hir)` **before**
+`interpret_hir_module(hir)`. Under Simple's value semantics that must not be
+observable, but COW is precisely the machinery that is broken in this guest.
+
+So the first question is not "what writes `return_type`" but **"does
+`hir.functions[...].return_type` differ before and after MIR lowering
+in-guest?"** One batched boot answers it: print the raw 64-bit word at
+`return_type` for each function immediately after `phase=hir-ok` and again
+immediately after `phase=mir-ok`. Print via a C helper exported from
+`boot_entry.c` reusing the trap vector's nibble loop — RAW hex, never a
+comparison result, and never an integer interpolated into Simple text
+(`rt_raw_i64_to_string` does not exist in this image and calling it is itself a
+null jump).
+
+**Not claimed:** which side writes the bad word. The fingerprint pins WHICH
+field faults; it does not say whether HIR lowering wrote it, MIR lowering
+clobbered it through a COW alias, or the clone reads a correct field at a wrong
+width. Those point at different halves of the tree and the probe above
+separates them.
