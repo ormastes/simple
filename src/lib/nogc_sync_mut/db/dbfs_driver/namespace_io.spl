@@ -74,6 +74,13 @@ impl DbFsDriver:
             if (flags.bits & 64u32) == 0u32:
                 return Err(FsError.NotFound)
             inode_id = _alloc_inode_id_locked(self.inst_id)
+            # content_generation MUST be 1, not the 0 default. A live namespace
+            # entry with generation 0 is rejected by _valid_entry_shape
+            # (device_commit_owner.spl), so omitting it here made the very next
+            # _dbfs_persist_namespace_locked fail with InvalidArg and NO FILE
+            # COULD EVER BE CREATED on a device-backed DBFS volume. This was the
+            # only DbFsInode construction missing the field -- both root-inode
+            # constructions (dbfs_driver.spl:367,418) already set 1u64.
             _dbfs_inodes.push(DbFsInode(
                 inst_id:  self.inst_id,
                 id:       inode_id,
@@ -82,6 +89,7 @@ impl DbFsDriver:
                 name:     raw,
                 content:  "",
                 content_bytes: [],
+                content_generation: 1u64,
                 parent:   1,
                 size:     0,
                 unlinked: false,
@@ -241,6 +249,7 @@ impl DbFsDriver:
             name:     old.name,
             content:  content,
             content_bytes: dbfs_text_to_bytes(content),
+            content_generation: old.content_generation + 1u64,  # write_handle: content changed
             parent:   old.parent,
             size:     content.len(),
             unlinked: old.unlinked,
@@ -333,6 +342,7 @@ impl DbFsDriver:
             name:     old.name,
             content:  dbfs_bytes_to_text(content, content.len() as i64),
             content_bytes: dbfs_slice_bytes(content, content.len() as i64),
+            content_generation: old.content_generation + 1u64,  # write_bytes_handle: content changed
             parent:   old.parent,
             size:     content.len() as i64,
             unlinked: old.unlinked,
@@ -381,6 +391,7 @@ impl DbFsDriver:
             name:     old.name,
             content:  new_content,
             content_bytes: dbfs_text_to_bytes(new_content),
+            content_generation: old.content_generation + 1u64,  # pwrite_handle: content changed
             parent:   old.parent,
             size:     new_size,
             unlinked: old.unlinked,
@@ -428,6 +439,7 @@ impl DbFsDriver:
             name:     old.name,
             content:  old.content,
             content_bytes: old.content_bytes,
+            content_generation: old.content_generation,  # unlink: metadata only
             parent:   old.parent,
             size:     old.size,
             unlinked: true,
@@ -469,6 +481,7 @@ impl DbFsDriver:
             name:     new_path,
             content:  old.content,
             content_bytes: old.content_bytes,
+            content_generation: old.content_generation,  # rename: metadata only
             parent:   old.parent,
             size:     old.size,
             unlinked: false,
@@ -511,6 +524,7 @@ impl DbFsDriver:
             name:     old.name,
             content:  new_content,
             content_bytes: dbfs_text_to_bytes(new_content),
+            content_generation: old.content_generation + 1u64,  # ftruncate: content changed
             parent:   old.parent,
             size:     new_size,
             unlinked: old.unlinked,
@@ -538,6 +552,7 @@ impl DbFsDriver:
             name:     path,
             content:  "",
             content_bytes: [],
+            content_generation: 1u64,  # mkdir: new inode, first generation
             parent:   1,
             size:     0,
             unlinked: false,
