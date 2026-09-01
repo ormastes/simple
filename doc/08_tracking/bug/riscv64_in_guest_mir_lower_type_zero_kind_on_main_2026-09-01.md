@@ -134,3 +134,39 @@ What survives from round 1, unchanged and still measured:
   discriminants a 0 collision is improbable rather than certain, so this is a
   latent divergence worth aligning, NOT the cause of this bug. Recorded so the
   next reader does not re-derive it, and explicitly de-escalated.
+
+## RESOLVED (2026-09-01, nonce 4d2ef4c711455c53) — and the row's NEXT blocker
+
+Root cause: `MirLowering.match_result_mir_type`
+(`_MirLoweringExpr/switch_operators_calls.spl`) extracted its `HirType?` with
+`if val expected_found = expected:` and dereferenced `expected_found.kind`.
+On riscv64 freestanding that extraction ENTERS its body for an ABSENT optional
+and binds a zeroed object. Localised by two boots: round 1 gave `calls=5`
+(inside `main`'s body, refuting this record's own implicit-return lead) and
+round 2 tagged all 61 external `lower_type` call sites, naming
+`switch_operators_calls:839`. Reached from the value-position `if total == 42:`
+in the interpreted program's `main`.
+
+Fixed by guarding the bound name before the dereference and routing a
+miscompiled extraction to the same `MirType.i64()` the function already returns
+for an absent expected type. Hosted behaviour unchanged (measured). Pinned by
+`scripts/check/check-rv64-match-result-type-guarded.shs` (RED at the fix's
+parent, GREEN at the fix, 8 fatal selftest fixtures, wired in
+`.github/workflows/repo-hygiene.yml`).
+
+MEASURED in-guest after the fix, real OpenSBI v1.4 `-bios fw_payload`:
+
+```
+[buildrun] phase=hir-ok
+[buildrun] phase=mir-ok functions lowered        <-- FIRST TIME EVER
+[buildrun] running the built program
+[buildrun] FAIL run error: function 'add' not found
+```
+
+**The BUILD half of row 2 is now green in-guest.** Real MIR lowering runs over
+real source and produces real functions. The row is still RED, at a new and
+different blocker in the RUN half: the in-guest interpreter cannot resolve the
+callee `add` from `main`'s body. That is a separate defect — row 1
+(`interpreter_hello`) is green but its program never makes a cross-function
+call, so nothing on this lane had exercised callee resolution before. Filed as
+the row's next blocker; it is NOT a regression of this fix.
