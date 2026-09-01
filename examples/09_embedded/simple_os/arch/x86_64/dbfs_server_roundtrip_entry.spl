@@ -75,6 +75,21 @@ use build.os.generated.dbfs_roundtrip_nonce.{dbfs_roundtrip_nonce}
 use os.services.vfs.nvme_boot_runtime_owner.{vfs_boot_probe_pure_simple_nvme_adapter}
 use os.services.vfs.vfs.{Filesystem, VfsManager, vfs_mount}
 use os.services.dbfs.dbfs_filesystem_ops.{}
+# LOAD-BEARING, not tidiness. thread_shim.spl is SimpleOS's critical-section
+# provider: `@export("C") spl_mutex_create/lock/unlock` over a bounded
+# boot-arena word and a real architecture acquire/release CAS (`lock cmpxchg`
+# on x86_64), with the lock word carrying cpu_id+1 so a core that did not
+# acquire cannot release. `--entry-closure` compiles only what the entry
+# reaches, so WITHOUT this import the symbols are satisfied by
+# SIMPLE_ALLOW_FREESTANDING_STUBS instead -- and those stubs are actively
+# deceptive: measured 2026-09-01 on this kernel, stub `spl_mutex_create`
+# returns 8 (a nonzero fake handle) and `spl_mutex_lock` returns 3 (truthy),
+# with zero `lock cmpxchg` in the whole image. DBFS's commit owner admits a
+# provider only after a behavioural handshake whose decisive leg is that a
+# DOUBLE UNLOCK must FAIL, so the stubs are rejected and the mount stays
+# fail-closed; this import is what puts the real provider in the closure.
+use os.kernel.net.thread_shim.{}
+use std.db.dbfs_driver.device_commit_owner.{dbfs_device_serialization_blocker}
 use std.db.dbfs_engine.superblock.{
     dbfs_superblock_set_device, dbfs_superblock_probe_disk, dbfs_superblock_read_from_disk
 }
@@ -145,6 +160,14 @@ fn _start():
     # formatted with the plain dbfs_superblock_format_disk carries 0 here, and
     # open_on_device rejects anything under 4. Always report it.
     serial_println("[dbfsrt] dbfs superblock block_count={sb.block_count}")
+
+    # --- 2b. Critical-section provider admission ---------------------------
+    # Printed BEFORE the open so a refusal is attributable. "ready" here means
+    # the linked provider passed the behavioural handshake in
+    # device_commit_owner.spl (create, lock, unlock, DOUBLE UNLOCK MUST FAIL,
+    # relock, release); a stubbed provider prints the probe-failed blocker.
+    val provider = dbfs_device_serialization_blocker()
+    serial_println("[dbfsrt] critical-section provider=" + provider)
 
     val driver_r = DbFsDriver.open_on_device(dev, DBFSRT_ARENA_BASE_LBA, sb.block_count.to_i64())
     if driver_r.is_err():
