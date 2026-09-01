@@ -153,13 +153,19 @@ fn _domain_digest_v1(domain: text, bytes: [u8]) -> text:
     _append_bytes_v1(framed, bytes)
     sha256_u8_hex(framed)
 
-pub fn canonical_cache_encode_text_v1(value: text) -> [u8]:
+pub struct CanonicalTextEncodeV1:
+    ok: bool
+    bytes: [u8]
+    error: text
+
+pub fn canonical_cache_encode_text_v1(value: text) -> CanonicalTextEncodeV1:
     val bytes = text_to_bytes(value)
     var buffer: [u8] = []
-    if bytes.len() > canonical_cache_max_text_bytes_v1(): return buffer
+    if bytes.len() > canonical_cache_max_text_bytes_v1():
+        return CanonicalTextEncodeV1(ok: false, bytes: buffer, error: "text_bounds_exceeded")
     _push_u64_v1(buffer, bytes.len())
     _append_bytes_v1(buffer, bytes)
-    buffer
+    CanonicalTextEncodeV1(ok: true, bytes: buffer, error: "")
 
 pub fn canonical_cache_encode_sorted_text_map_v1(keys: [text], values: [text]) -> [u8]:
     var buffer: [u8] = []
@@ -186,8 +192,11 @@ pub fn canonical_cache_encode_sorted_text_map_v1(keys: [text], values: [text]) -
         i = i + 1
     _push_u64_v1(buffer, indices.len())
     for index in indices:
-        _append_bytes_v1(buffer, canonical_cache_encode_text_v1(keys[index]))
-        _append_bytes_v1(buffer, canonical_cache_encode_text_v1(values[index]))
+        val key = canonical_cache_encode_text_v1(keys[index])
+        val value = canonical_cache_encode_text_v1(values[index])
+        if not key.ok or not value.ok: return []
+        _append_bytes_v1(buffer, key.bytes)
+        _append_bytes_v1(buffer, value.bytes)
     buffer
 
 fn _append_digest_v1(buffer: [u8], digest: text) -> bool:
@@ -199,7 +208,7 @@ fn _append_digest_v1(buffer: [u8], digest: text) -> bool:
 fn _append_logical_path_v1(buffer: [u8], path: LogicalSourcePathV1) -> bool:
     if not logical_source_path_valid_v1(path): return false
     if not _append_digest_v1(buffer, path.repository_namespace_digest): return false
-    _append_text_v1(buffer, path.module_relative_utf8)
+    if not _append_text_v1(buffer, path.module_relative_utf8): return false
     match path.path_semantics:
         case PathSemanticsV1.CaseSensitiveNfc: _push_u16_v1(buffer, 1)
         case PathSemanticsV1.CaseFoldedNfc: _push_u16_v1(buffer, 2)
@@ -236,17 +245,18 @@ pub fn canonical_source_blob_digest_v1(blob: SourceBlobV1) -> text:
 fn _append_text_sequence_v1(buffer: [u8], values: [text]) -> bool:
     if values.len() > canonical_cache_max_entries_v1(): return false
     _push_u64_v1(buffer, values.len())
-    for value in values: _append_text_v1(buffer, value)
+    for value in values:
+        if not _append_text_v1(buffer, value): return false
     true
 
 fn _append_candidate_v1(buffer: [u8], candidate: ResolutionCandidateV1) -> bool:
     if candidate.order < 0: return false
     _push_u64_v1(buffer, candidate.order)
-    _append_text_v1(buffer, candidate.logical_path)
-    _append_text_v1(buffer, candidate.normalization_key)
+    if not _append_text_v1(buffer, candidate.logical_path): return false
+    if not _append_text_v1(buffer, candidate.normalization_key): return false
     if not _append_digest_v1(buffer, candidate.physical_identity_digest): return false
     if not _append_digest_v1(buffer, candidate.parent_directory_generation_digest): return false
-    _append_text_v1(buffer, candidate.entry_kind)
+    if not _append_text_v1(buffer, candidate.entry_kind): return false
     buffer.push((if candidate.exists: 1 else: 0) as u8)
     buffer.push((if candidate.selected: 1 else: 0) as u8)
     if not _append_digest_v1(buffer, candidate.content_digest): return false
@@ -304,11 +314,11 @@ pub fn canonical_compile_snapshot_payload_v1(snapshot: CompileSnapshotV1) -> [u8
     if not _append_digest_v1(buffer, snapshot.runtime_digest): return []
     _push_u64_v1(buffer, snapshot.provider_manifests.len())
     for provider in snapshot.provider_manifests:
-        _append_text_v1(buffer, provider.name)
+        if not _append_text_v1(buffer, provider.name): return []
         if not _append_digest_v1(buffer, provider.digest): return []
     _push_u64_v1(buffer, snapshot.toolchain_component_digests.len())
     for component in snapshot.toolchain_component_digests:
-        _append_text_v1(buffer, component.name)
+        if not _append_text_v1(buffer, component.name): return []
         if not _append_digest_v1(buffer, component.digest): return []
     buffer
 
@@ -425,20 +435,32 @@ pub fn canonical_semantic_read_set_payload_v1(read_set: SemanticReadSetV1) -> [u
             j = j - 1
         entries[j] = held
         i = i + 1
-    var buffer: [u8] = []
-    _push_u64_v1(buffer, entries.len())
+    var normalized: [SemanticReadEntryV1] = []
     i = 0
     while i < entries.len():
-        if i > 0 and _read_entry_key_v1(entries[i - 1]) == _read_entry_key_v1(entries[i]): return []
-        val entry = entries[i]
+        if i > 0 and _read_entry_key_v1(entries[i - 1]) == _read_entry_key_v1(entries[i]):
+            val previous = entries[i - 1]
+            val current = entries[i]
+            if (previous.provider_manifest_digest != current.provider_manifest_digest or
+                    previous.value_digest != current.value_digest or
+                    _replay_tag_v1(previous.replay_policy) != _replay_tag_v1(current.replay_policy)):
+                return []
+        else:
+            normalized.push(entries[i])
+        i = i + 1
+    var buffer: [u8] = []
+    _push_u64_v1(buffer, normalized.len())
+    i = 0
+    while i < normalized.len():
+        val entry = normalized[i]
         _push_u16_v1(buffer, _effect_tag_v1(entry.effect_kind))
-        _append_text_v1(buffer, entry.logical_name)
-        _append_text_v1(buffer, entry.provider_id)
+        if not _append_text_v1(buffer, entry.logical_name): return []
+        if not _append_text_v1(buffer, entry.provider_id): return []
         if not _append_digest_v1(buffer, entry.provider_manifest_digest): return []
         if not _append_digest_v1(buffer, entry.value_digest): return []
         _push_u16_v1(buffer, _replay_tag_v1(entry.replay_policy))
         i = i + 1
-    _append_text_v1(buffer, read_set.uncacheable_reason)
+    if not _append_text_v1(buffer, read_set.uncacheable_reason): return []
     buffer
 
 pub fn canonical_semantic_read_set_encode_v1(read_set: SemanticReadSetV1) -> [u8]:
@@ -560,8 +582,11 @@ class _CanonicalCursorV1:
             i = i + 1
         values
 
-fn _append_text_v1(buffer: [u8], value: text):
-    _append_bytes_v1(buffer, canonical_cache_encode_text_v1(value))
+fn _append_text_v1(buffer: [u8], value: text) -> bool:
+    val encoded = canonical_cache_encode_text_v1(value)
+    if not encoded.ok: return false
+    _append_bytes_v1(buffer, encoded.bytes)
+    true
 
 fn _summary_entry_less_v1(a: PublicSummaryEntryV1, b: PublicSummaryEntryV1) -> bool:
     a.stable_symbol_id < b.stable_symbol_id or (a.stable_symbol_id == b.stable_symbol_id and a.canonical_bytes < b.canonical_bytes)
@@ -579,15 +604,22 @@ fn _summary_entries_sorted_v1(entries: [PublicSummaryEntryV1]) -> [PublicSummary
         i = i + 1
     sorted
 
-pub fn canonical_summary_entries_valid_v1(entries: [PublicSummaryEntryV1]) -> bool:
+fn _summary_entries_conflict_free_v1(entries: [PublicSummaryEntryV1]) -> bool:
     if entries.len() > canonical_cache_max_entries_v1(): return false
-    val sorted = _summary_entries_sorted_v1(entries)
-    var i = 1
-    while i < sorted.len():
-        if sorted[i - 1].stable_symbol_id == sorted[i].stable_symbol_id and sorted[i - 1].canonical_bytes != sorted[i].canonical_bytes:
-            return false
+    var i = 0
+    while i < entries.len():
+        if (text_to_bytes(entries[i].stable_symbol_id).len() > canonical_cache_max_text_bytes_v1() or
+                text_to_bytes(entries[i].canonical_bytes).len() > canonical_cache_max_text_bytes_v1()): return false
+        var j = i + 1
+        while j < entries.len():
+            if entries[i].stable_symbol_id == entries[j].stable_symbol_id and entries[i].canonical_bytes != entries[j].canonical_bytes:
+                return false
+            j = j + 1
         i = i + 1
     true
+
+pub fn canonical_summary_entries_valid_v1(entries: [PublicSummaryEntryV1]) -> bool:
+    _summary_entries_conflict_free_v1(entries)
 
 fn _encode_summary_entries_v1(buffer: [u8], entries: [PublicSummaryEntryV1]):
     val sorted = _summary_entries_sorted_v1(entries)
@@ -595,6 +627,20 @@ fn _encode_summary_entries_v1(buffer: [u8], entries: [PublicSummaryEntryV1]):
     for entry in sorted:
         _append_text_v1(buffer, entry.stable_symbol_id)
         _append_text_v1(buffer, entry.canonical_bytes)
+
+fn _encode_summary_entries_preserved_v1(buffer: [u8], entries: [PublicSummaryEntryV1]):
+    _push_u64_v1(buffer, entries.len())
+    for entry in entries:
+        _append_text_v1(buffer, entry.stable_symbol_id)
+        _append_text_v1(buffer, entry.canonical_bytes)
+
+pub fn canonical_public_summary_declaration_graph_digest_v1(summary: PublicSummaryV1) -> text:
+    var graph: [u8] = []
+    _push_u16_v1(graph, 1)
+    _encode_summary_entries_preserved_v1(graph, summary.forward_declarations)
+    _push_u16_v1(graph, 2)
+    _encode_summary_entries_v1(graph, summary.declarations)
+    _domain_digest_v1("simple.public-summary.declaration-graph.v1\u0000", graph)
 
 fn _decode_summary_entries_v1(cursor: _CanonicalCursorV1) -> [PublicSummaryEntryV1]:
     var buffer: [PublicSummaryEntryV1] = []
@@ -611,8 +657,23 @@ fn _decode_summary_entries_v1(cursor: _CanonicalCursorV1) -> [PublicSummaryEntry
 
 pub fn canonical_public_summary_payload_v1(summary: PublicSummaryV1) -> [u8]:
     var buffer: [u8] = []
-    val valid = canonical_summary_entries_valid_v1(summary.forward_declarations) and canonical_summary_entries_valid_v1(summary.declarations)
-    if not valid or summary.schema != 1: return buffer
+    val valid = canonical_summary_entries_valid_v1(summary.forward_declarations) and
+        canonical_summary_entries_valid_v1(summary.declarations) and
+        canonical_summary_entries_valid_v1(summary.layouts_abi) and
+        canonical_summary_entries_valid_v1(summary.traits_impls_coherence) and
+        canonical_summary_entries_valid_v1(summary.extensions_reexports) and
+        canonical_summary_entries_valid_v1(summary.aop_selectors) and
+        canonical_summary_entries_valid_v1(summary.macro_signatures) and
+        canonical_summary_entries_valid_v1(summary.body_refs) and
+        canonical_summary_entries_valid_v1(summary.reverse_reference_roots)
+    if not valid or summary.schema != 1 or not logical_source_path_valid_v1(summary.logical_path): return buffer
+    if (_digest_hex_to_raw_v1(summary.snapshot_id).len() != 32 or
+            _digest_hex_to_raw_v1(summary.source_blob_digest).len() != 32 or
+            _digest_hex_to_raw_v1(summary.compiler_owner_digest).len() != 32 or
+            _digest_hex_to_raw_v1(summary.grammar_digest).len() != 32 or
+            _digest_hex_to_raw_v1(summary.virtual_text_digest).len() != 32):
+        return buffer
+    if summary.declaration_graph_digest != canonical_public_summary_declaration_graph_digest_v1(summary): return buffer
     _append_text_v1(buffer, summary.snapshot_id)
     _append_text_v1(buffer, summary.logical_path.repository_namespace_digest)
     _append_text_v1(buffer, summary.logical_path.module_relative_utf8)
@@ -625,7 +686,7 @@ pub fn canonical_public_summary_payload_v1(summary: PublicSummaryV1) -> [u8]:
     _append_text_v1(buffer, summary.grammar_digest)
     # Distinct fixed phases/tags; forward and full declarations never alias.
     _push_u16_v1(buffer, 1)
-    _encode_summary_entries_v1(buffer, summary.forward_declarations)
+    _encode_summary_entries_preserved_v1(buffer, summary.forward_declarations)
     _push_u16_v1(buffer, 2)
     _encode_summary_entries_v1(buffer, summary.declarations)
     _encode_summary_entries_v1(buffer, summary.layouts_abi)
@@ -701,4 +762,6 @@ pub fn canonical_public_summary_decode_v1(bytes: [u8]) -> PublicSummaryDecodeV1:
         traits_impls_coherence: traits, extensions_reexports: extensions, aop_selectors: aop,
         macro_signatures: macros, body_refs: bodies, reverse_reference_roots: reverse_roots,
         declaration_graph_digest: graph_digest, virtual_text_digest: virtual_digest)
+    if canonical_public_summary_payload_v1(summary).len() == 0:
+        return _summary_decode_failure_v1("noncanonical_summary_identity_or_graph")
     PublicSummaryDecodeV1(ok: true, value: summary, error: "")

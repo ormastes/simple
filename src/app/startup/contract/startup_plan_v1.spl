@@ -167,7 +167,12 @@ pub fn startup_plan_from_request(request: StartupRequestV1) -> StartupPlanV1:
 # sealed; an unsealed plan fails `startup_plan_decode` round-trip.
 pub fn startup_plan_sealed(plan: StartupPlanV1) -> StartupPlanV1:
     var sealed = plan
-    val digest = startup_plan_hash(plan)
+    sealed.required_capsules = _sorted_unique_text_values(plan.required_capsules)
+    sealed.forbidden_capsules = _sorted_unique_text_values(plan.forbidden_capsules)
+    sealed.provider_manifest_digests = _sorted_unique_text_values(plan.provider_manifest_digests)
+    sealed.capsule_effect_summary_digests = _sorted_unique_text_values(plan.capsule_effect_summary_digests)
+    if not startup_plan_cache_sets_valid(sealed): return startup_plan_zero()
+    val digest = startup_plan_hash(sealed)
     sealed.plan_digest = digest
     sealed.plan_hash = digest
     sealed
@@ -223,6 +228,41 @@ fn _join_text_values(values: [text]) -> text:
         out = out + values[i]
         i = i + 1
     out
+
+fn _sorted_unique_text_values(values: [text]) -> [text]:
+    var sorted = values.copy()
+    var i = 1
+    while i < sorted.len():
+        val held = sorted[i]
+        var j = i
+        while j > 0 and held < sorted[j - 1]:
+            sorted[j] = sorted[j - 1]
+            j = j - 1
+        sorted[j] = held
+        i = i + 1
+    var unique: [text] = []
+    for value in sorted:
+        if unique.len() == 0 or unique[unique.len() - 1] != value:
+            unique.push(value)
+    unique
+
+fn _text_set_valid(values: [text]) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == "" or values[i].contains(",") or values[i].contains("\n"):
+            return false
+        if i > 0 and values[i - 1] >= values[i]: return false
+        i = i + 1
+    true
+
+pub fn startup_plan_cache_sets_valid(plan: StartupPlanV1) -> bool:
+    if not _text_set_valid(plan.required_capsules) or not _text_set_valid(plan.forbidden_capsules): return false
+    if not _text_set_valid(plan.provider_manifest_digests) or not _text_set_valid(plan.capsule_effect_summary_digests): return false
+    var i = 0
+    while i < plan.required_capsules.len():
+        if plan.forbidden_capsules.contains(plan.required_capsules[i]): return false
+        i = i + 1
+    plan.forbidden_receipt_count == plan.forbidden_capsules.len() and plan.forbidden_loaded_count >= 0
 
 fn _line(key: text, value: text) -> text:
     key + ": " + value + "\n"
@@ -449,6 +489,8 @@ pub fn startup_plan_decode(content: text) -> StartupPlanDecodeV1:
         forbidden_loaded_count: forbidden_loaded,
         plan_digest: values[22],
         plan_hash: values[23])
+    if not startup_plan_cache_sets_valid(plan):
+        return _decode_error(startup_plan_error_malformed(), "noncanonical or conflicting capsule sets")
     val expected = startup_plan_hash(plan)
     if expected != plan.plan_digest or expected != plan.plan_hash:
         return _decode_error(startup_plan_error_hash(),
