@@ -60,6 +60,35 @@ fn _count_sub(haystack: text, needle: text) -> i64:
         rest = rest.substring(index + needle_len)
     count
 
+fn _mask_strings_and_comment(lower: text) -> text:
+    # Blank out double-quoted string CONTENTS (honoring \" escapes) and cut
+    # the line at the first `#` outside any string, so the skip( scan cannot
+    # fire on a mention inside a string literal ("... skip(..) ...") or a
+    # trailing comment (`val n = 1  # never skip() here`) — the same
+    # mention-vs-statement class ORA-001 already fixed for pass_todo/pending
+    # (2026-09-01). Quotes are kept so removal cannot splice new tokens.
+    var out = ""
+    var in_string = false
+    var escaped = false
+    for ch in lower:
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+                out = out + "\""
+        else:
+            if ch == "\"":
+                in_string = true
+                out = out + "\""
+            elif ch == "#":
+                return out
+            else:
+                out = out + ch
+    out
+
 fn _calls_skip(trimmed_lower: text) -> bool:
     # A pending scaffold is a CALL to skip(...) — `test_env_gate_skip(` and
     # other *_skip(name) helpers are real oracles, not skips (2026-08-22).
@@ -86,6 +115,11 @@ fn _is_pending(line: text) -> bool:
     # analyze_sspec_text fixtures with \n-embedded pass_todo still detect.
     val trimmed = line.trim()
     val lower = trimmed.lower()
+    # A comment can only MENTION a marker, never BE one — `# do NOT skip()
+    # it` and `# scaffolds use fail("todo: ...` were both false-flagged as
+    # pending scaffolds before this guard (measured 2026-09-01).
+    if lower.starts_with("#"):
+        return false
     if lower == "pass_todo" or lower == "pass_do_nothing" or lower == "pass_dn":
         return true
     if lower.starts_with("pass_todo(") or lower.starts_with("pass_do_nothing(") or
@@ -97,7 +131,22 @@ fn _is_pending(line: text) -> bool:
     # pending scaffold. skip(/fail("todo: are call forms and stay as-is.
     if lower == "pending" or lower.starts_with("pending("):
         return true
-    lower.contains("fail(\"todo:") or _calls_skip(trimmed)
+    # STATEMENT position, same rule as every marker above. `contains` here
+    # was the one survivor of the 2026-08-21 sweep and contradicted this
+    # function's own opening comment ("must fire only on a pending STATEMENT,
+    # not on any line that mentions the keyword"): a comment, a fixture
+    # string, or a spec that TESTS this detector was flagged as a pending
+    # scaffold. The self-demonstrating case is line 97 of THIS file, whose
+    # comment mentions `fail("todo:` and was therefore matched by the very
+    # predicate it documents. Measured 2026-09-01: that comment is the ONLY
+    # occurrence of the literal in the whole tree, so no real spec relied on
+    # the substring behaviour and `starts_with` cannot regress detection.
+    # The skip( scan runs on a string-masked, comment-cut copy of the line so
+    # `expect(validate_predicate("!execution(* skip(..))"))` and trailing
+    # `# never skip()` comments cannot fire it; genuine `skip("reason", ...)`
+    # and `val gate = skip(...)` still match because the call itself sits
+    # outside any string literal.
+    lower.starts_with("fail(\"todo:") or _calls_skip(_mask_strings_and_comment(lower))
 
 fn _contains_requirement(line: text) -> bool:
     line.contains("REQ-") or line.contains("@req")
