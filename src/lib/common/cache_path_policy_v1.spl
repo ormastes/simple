@@ -47,15 +47,22 @@ fn cache_path_policy_v1(relative: text) -> CachePathPolicyV1Result:
     CachePathPolicyV1Result(accepted: true, logical_relative: canonical.join("/"), error_code: "")
 
 fn user_local_location_v1(os: text, local_app_data: text, xdg_cache_home: text, home: text) -> text:
+    var candidate = ""
     if os == "windows":
         if local_app_data != "":
-            return local_app_data.replace("\\", "/")
-        return home.replace("\\", "/") + "/AppData/Local"
-    if os == "macos":
-        return home + "/Library/Caches"
-    if xdg_cache_home != "":
-        return xdg_cache_home
-    home + "/.cache"
+            candidate = local_app_data.replace("\\", "/")
+        elif home != "":
+            candidate = home.replace("\\", "/") + "/AppData/Local"
+    elif os == "macos":
+        if home != "":
+            candidate = home + "/Library/Caches"
+    elif xdg_cache_home != "":
+        candidate = xdg_cache_home
+    elif home != "":
+        candidate = home + "/.cache"
+    if cache_root_is_absolute_v1(os, candidate):
+        return candidate
+    ""
 
 fn cache_root_is_absolute_v1(os: text, root: text) -> bool:
     if root == "":
@@ -63,8 +70,14 @@ fn cache_root_is_absolute_v1(os: text, root: text) -> bool:
     if os == "windows":
         val normalized = root.replace("\\", "/")
         if normalized.starts_with("//"):
-            return normalized.substring(2, normalized.len()).contains("/")
-        return normalized.len() >= 3 and normalized.substring(1, 2) == ":" and normalized.substring(2, 3) == "/"
+            val unc_tail = normalized.substring(2, normalized.len())
+            val share_separator = unc_tail.index_of("/")
+            return share_separator > 0 and share_separator < unc_tail.len() - 1
+        if normalized.len() < 3:
+            return false
+        val drive = normalized.substring(0, 1).lower()
+        return "abcdefghijklmnopqrstuvwxyz".contains(drive) and
+            normalized.substring(1, 2) == ":" and normalized.substring(2, 3) == "/"
     root.starts_with("/")
 
 fn cache_location_v1(app: text, os: text, override_root: text, local_app_data: text, xdg_cache_home: text, home: text, workspace: text) -> text:
