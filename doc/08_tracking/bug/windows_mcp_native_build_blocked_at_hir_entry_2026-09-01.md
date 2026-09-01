@@ -35,7 +35,13 @@ of any kind. The blocker as reported is not observable at this HEAD with this
 seed. It is most plausibly cleared by the `any?` receiver-erasure and
 `env_get` nil-guard fixes that landed 2026-08-30/09-01 (`628ac26d38d`,
 `040c306da80`), but this run does not prove causation — it proves only absence.
-**Do not re-file it without first reproducing it.**
+**Scope limit — read before citing this.** The build aborts at HIR entry,
+so this absence is proven only for the phases that actually RAN (parse,
+surface build, HIR entry). Everything downstream of the abort — MIR lowering
+included — never executed, and if the enum-len failure fires there, this run
+could not have seen it. Absence up to the abort point is not absence entirely.
+**Do not re-file it without first reproducing it, and do not treat it as
+cleared until a build gets past HIR entry.**
 
 **2. The MCP MIR error count is still unobtainable, and the last figure of 133
 remains unsuperseded.** The build aborts at HIR entry, before MIR lowering
