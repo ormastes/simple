@@ -1,7 +1,6 @@
 """Canonical semantic-cache contract codec golden and rejection vectors."""
 
 use std.spec.*
-use std.spec.step
 use compiler.common.cache_contract.canonical_cache_codec_v1.{canonical_cache_encode_envelope_v1, canonical_cache_decode_envelope_v1, canonical_cache_object_digest_v1, canonical_cache_encode_sorted_text_map_v1, canonical_public_summary_encode_v1, canonical_public_summary_decode_v1, canonical_public_summary_declaration_graph_digest_v1, canonical_cache_encode_text_v1, canonical_semantic_read_set_encode_v1, canonical_semantic_read_set_decode_v1, canonical_compile_snapshot_payload_v1}
 use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1}
 use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, SnapshotSourceEntryV1, ResolutionCandidateV1, ResolutionWitnessV1, NamedDigestV1, CompileSnapshotV1, logical_source_path_valid_v1}
@@ -55,7 +54,6 @@ fn _snapshot_v1(reverse: bool, physical: text) -> CompileSnapshotV1:
 
 describe "Canonical cache envelope V1":
     it "roundtrips one golden payload and produces a stable object digest":
-        step("Encode and verify one canonical envelope")
         val encoded = canonical_cache_encode_envelope_v1(3, 1, [1.to_u8(), 2.to_u8(), 3.to_u8()])
         val decoded = canonical_cache_decode_envelope_v1(encoded)
         expect(decoded.ok).to_equal(true)
@@ -63,7 +61,6 @@ describe "Canonical cache envelope V1":
         expect(canonical_cache_object_digest_v1(encoded).len()).to_equal(64)
 
     it "rejects reserved flags, corruption, truncation, and trailing bytes":
-        step("Reject malformed canonical envelopes")
         val good = canonical_cache_encode_envelope_v1(3, 1, [9.to_u8()])
         var reserved = good.copy()
         reserved[12] = 1.to_u8()
@@ -77,27 +74,33 @@ describe "Canonical cache envelope V1":
         expect(canonical_cache_decode_envelope_v1(trailing).error).to_equal("trailing_bytes")
 
     it "sorts map keys independently of input permutation and rejects duplicates":
-        step("Canonicalize a bounded map")
         val first = canonical_cache_encode_sorted_text_map_v1(["b", "a"], ["2", "1"])
         val second = canonical_cache_encode_sorted_text_map_v1(["a", "b"], ["1", "2"])
         expect(first).to_equal(second)
         expect(canonical_cache_encode_sorted_text_map_v1(["a", "a"], ["1", "1"]).len()).to_equal(0)
 
     it "returns a typed success for empty text instead of ambiguous zero bytes":
-        step("Frame an empty canonical text value")
         val encoded = canonical_cache_encode_text_v1("")
         expect(encoded.ok).to_equal(true)
         expect(encoded.bytes.len()).to_equal(8)
+        expect(encoded.bytes).to_equal([0.to_u8(), 0.to_u8(), 0.to_u8(), 0.to_u8(), 0.to_u8(), 0.to_u8(), 0.to_u8(), 0.to_u8()])
+
+    it "preserves bytes returned through every nested accumulator":
+        val text_value = canonical_cache_encode_text_v1("A")
+        expect(text_value.bytes.len()).to_equal(9)
+        expect(text_value.bytes[8]).to_equal(65.to_u8())
+        val envelope = canonical_cache_encode_envelope_v1(3, 1, text_value.bytes)
+        expect(envelope[0..8]).to_equal([83.to_u8(), 77.to_u8(), 80.to_u8(), 76.to_u8(), 67.to_u8(), 65.to_u8(), 86.to_u8(), 49.to_u8()])
+        expect(canonical_cache_decode_envelope_v1(envelope).ok).to_equal(true)
 
 describe "LogicalSourcePathV1 portability":
     it "uses slash-only semantic paths independent of Windows physical spelling":
-        step("Reject physical Windows spellings from semantic identity")
-        val namespace = "1111111111111111111111111111111111111111111111111111111111111111"
+        val namespace_digest = "1111111111111111111111111111111111111111111111111111111111111111"
         expect(logical_source_path_valid_v1(LogicalSourcePathV1(
-            repository_namespace_digest: namespace, module_relative_utf8: "src/compiler/main.spl",
+            repository_namespace_digest: namespace_digest, module_relative_utf8: "src/compiler/main.spl",
             path_semantics: PathSemanticsV1.CaseFoldedNfc))).to_equal(true)
         expect(logical_source_path_valid_v1(LogicalSourcePathV1(
-            repository_namespace_digest: namespace, module_relative_utf8: "C:\\src\\compiler\\main.spl",
+            repository_namespace_digest: namespace_digest, module_relative_utf8: "C:\\src\\compiler\\main.spl",
             path_semantics: PathSemanticsV1.CaseFoldedNfc))).to_equal(false)
 
 describe "CompileSnapshotV1 canonical identity":
@@ -111,7 +114,6 @@ describe "CompileSnapshotV1 canonical identity":
 
 describe "PublicSummaryV1 canonical codec":
     it "roundtrips the distinct forward-declaration phase":
-        step("Roundtrip a public forward declaration")
         val encoded = canonical_public_summary_encode_v1(_summary_v1())
         val decoded = canonical_public_summary_decode_v1(encoded)
         expect(decoded.ok).to_equal(true)
@@ -123,7 +125,6 @@ describe "PublicSummaryV1 canonical codec":
         expect(summary.declarations[0].canonical_bytes).to_equal("pub extern fn main() -> i64")
 
     it "binds forward ordering and the declaration graph into the digest":
-        step("Invalidate changed declaration phases")
         val base = canonical_public_summary_encode_v1(_summary_v1())
         var changed = _summary_v1()
         changed.forward_declarations = [
@@ -133,14 +134,12 @@ describe "PublicSummaryV1 canonical codec":
         expect(canonical_cache_object_digest_v1(base) == canonical_cache_object_digest_v1(canonical_public_summary_encode_v1(changed))).to_equal(false)
 
     it "rejects a stale declaration graph digest":
-        step("Reject summary dependency-order drift")
         var changed = _summary_v1()
         changed.declaration_graph_digest = "8888888888888888888888888888888888888888888888888888888888888888"
         expect(canonical_public_summary_encode_v1(changed).len()).to_equal(0)
 
 describe "SemanticReadSetV1 canonical codec":
     it "roundtrips one declared provider-bound effect":
-        step("Roundtrip a semantic effect identity")
         val entry = SemanticReadEntryV1(effect_kind: SemanticEffectKindV1.Plugin,
             logical_name: "backend", provider_id: "llvm",
             provider_manifest_digest: "1111111111111111111111111111111111111111111111111111111111111111",
@@ -150,7 +149,6 @@ describe "SemanticReadSetV1 canonical codec":
         expect(canonical_semantic_read_set_decode_v1(encoded).ok).to_equal(true)
 
     it "rejects the same effect identity with divergent manifest or value":
-        step("Reject ambiguous semantic effect inputs")
         val first = SemanticReadEntryV1(effect_kind: SemanticEffectKindV1.Plugin,
             logical_name: "backend", provider_id: "llvm",
             provider_manifest_digest: "1111111111111111111111111111111111111111111111111111111111111111",
@@ -161,7 +159,6 @@ describe "SemanticReadSetV1 canonical codec":
         expect(canonical_semantic_read_set_encode_v1(SemanticReadSetV1(entries: [first, second], uncacheable_reason: "")).len()).to_equal(0)
 
     it "rejects an empty provider manifest digest":
-        step("Require complete provider identity")
         val entry = SemanticReadEntryV1(effect_kind: SemanticEffectKindV1.Plugin,
             logical_name: "backend", provider_id: "llvm", provider_manifest_digest: "",
             value_digest: "2222222222222222222222222222222222222222222222222222222222222222",
@@ -179,7 +176,6 @@ describe "SemanticReadSetV1 canonical codec":
             SemanticReadSetV1(entries: [first, second], uncacheable_reason: "")).len()).to_equal(0)
 
     it "rejects conflicting duplicate symbols within one phase":
-        step("Reject ambiguous declarations")
         var changed = _summary_v1()
         changed.forward_declarations = [
             PublicSummaryEntryV1(stable_symbol_id: "sym.main", canonical_bytes: "a", dependency_symbol_ids: []),
