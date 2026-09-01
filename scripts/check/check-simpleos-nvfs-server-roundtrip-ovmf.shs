@@ -96,7 +96,12 @@ CACHE="$OUT/cache"
 BUILD="$OUT/uefi"
 ESP="$BUILD/esp"
 EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
-GEN="build/os/generated"
+# PRIVATE generated dir, deliberately NOT the shared build/os/generated. Both
+# this lane and the FAT32 lane pass their generated dir to `--source`, so a
+# shared dir means each kernel ingests the other lane's files and a concurrent
+# run of one can rewrite files mid-scan of the other. It also means any stray
+# .spl a human or a diagnostic left there enters the freestanding closure.
+GEN="$OUT/generated"
 NONCE_SPL="$GEN/nvfs_roundtrip_nonce.spl"
 STAGE_SPL="$GEN/nvfs_stage_volume.spl"
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
@@ -332,8 +337,15 @@ rm -f "$IMG"
 # Capture the exit code DIRECTLY into a variable on the next line — never
 # through a pipe. A pipeline's \$? is the last command's status, and that has
 # masked a real failure as a pass in this project.
-SIMPLE_LIB="$ROOT/src" "$SEED" run "$STAGE_SPL" > "$OUT/stage.log" 2>&1
-STAGE_RC=$?
+# `if ...; then/else` rather than a bare call: `set -e` aborts the whole script
+# on a failing bare command, which killed a run of this gate BEFORE it could
+# print any verdict line at all (exit 1, no output) — the exact silent-failure
+# mode the verdict convention exists to prevent.
+if SIMPLE_LIB="$ROOT/src" "$SEED" run "$STAGE_SPL" > "$OUT/stage.log" 2>&1; then
+    STAGE_RC=0
+else
+    STAGE_RC=$?
+fi
 if [ "$STAGE_RC" -ne 0 ] || ! grep -qF 'NVFS_STAGE_OK' "$OUT/stage.log"; then
     STAGE_ERR=$(grep -m1 'NVFS_STAGE_FAIL\|error:' "$OUT/stage.log" 2>/dev/null || true)
     nothing "NVFS volume staging failed (rc=$STAGE_RC): ${STAGE_ERR:-see $OUT/stage.log}"
@@ -342,7 +354,7 @@ fi
 
 # Both anchors, asserted on the FRESH volume before anything boots.
 scan_image "$IMG" "$NONCE" && nothing "fresh image already contains the nonce (impossible; refusing)"
-grep -qa "$NVFSRT_PATH" "$IMG" && nothing "fresh image already carries a $NVFSRT_PATH entry (refusing)"
+grep -qaF "$NVFSRT_PATH" "$IMG" && nothing "fresh image already carries a $NVFSRT_PATH entry (refusing)"
 echo "[nvfsrt] volume=$IMG ($(stat -c%s "$IMG") bytes, ${VOLUME_SECTORS} sectors; nonce and $NVFSRT_PATH both absent)"
 
 # ---- 3. Kernel (RUST SEED; --timeout 1200 deliberate) ----------------------
@@ -358,7 +370,7 @@ if [ "${SKIP_KERNEL:-0}" != "1" ] || [ ! -f "$KERNEL" ]; then
     # is exactly the fabricated evidence this lane exists to rule out.
     SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
     PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
-        "$SEED" native-build --source build/os/generated --source src/os --source src/lib \
+        "$SEED" native-build --source "$GEN" --source src/os --source src/lib \
         --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 \
         --opt-level=aggressive --log off --entry-closure --cache-dir "$CACHE" \
         --timeout 1200 \
