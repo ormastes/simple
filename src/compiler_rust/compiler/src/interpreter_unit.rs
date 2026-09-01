@@ -642,8 +642,7 @@ pub(crate) fn register_unit_family_locals(uf: &simple_parser::ast::UnitFamilyDef
         cell.borrow_mut().insert(uf.name.clone(), conversions);
     });
     BASE_UNIT_DIMENSIONS.with(|cell| {
-        cell.borrow_mut()
-            .insert(uf.name.clone(), Dimension::base(&uf.name));
+        cell.borrow_mut().insert(uf.name.clone(), Dimension::base(&uf.name));
     });
     for variant in &uf.variants {
         if (variant.factor - 1.0).abs() < f64::EPSILON {

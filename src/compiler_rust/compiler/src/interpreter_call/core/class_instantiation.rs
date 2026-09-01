@@ -385,8 +385,7 @@ pub(crate) fn instantiate_class(
     // argument anywhere in the call. Without the skip, `Point(x: 10, y)` bound
     // the trailing positional to field 0 (`x`, overwriting it) and left `y` at
     // its default 0 — see test/feature/usage/struct_shorthand_spec.spl.
-    let named_fields: std::collections::HashSet<&str> =
-        args.iter().filter_map(|a| a.name.as_deref()).collect();
+    let named_fields: std::collections::HashSet<&str> = args.iter().filter_map(|a| a.name.as_deref()).collect();
     let mut positional_idx = 0;
     for arg in args {
         // Struct-spread arguments were consumed in the first pass above.

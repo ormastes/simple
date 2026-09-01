@@ -157,13 +157,7 @@ impl Lowerer {
                 ..
             }) if matches!(
                 *inner,
-                TypeId::I8
-                    | TypeId::I16
-                    | TypeId::I32
-                    | TypeId::I64
-                    | TypeId::U8
-                    | TypeId::U16
-                    | TypeId::U32
+                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
             ) =>
             {
                 Some(*inner)

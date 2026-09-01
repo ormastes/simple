@@ -77,7 +77,11 @@ fn main() -> i64:
     var reg: Any = make()
     return reg.register(2)
 "#;
-    assert_eq!(run(source), 42, "`register` is not in the builtin set and must already work");
+    assert_eq!(
+        run(source),
+        42,
+        "`register` is not in the builtin set and must already work"
+    );
 }
 
 /// Bug #62 regression guard, the other direction: a GENUINELY erased builtin

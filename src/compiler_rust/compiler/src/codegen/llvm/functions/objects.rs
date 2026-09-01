@@ -266,7 +266,10 @@ impl LlvmBackend {
             if word_index >= words_total {
                 continue; // descriptor out of range — fail closed, keep shallow
             }
-            let off = self.context_ref().i32_type().const_int(u64::from(word_index) * 8, false);
+            let off = self
+                .context_ref()
+                .i32_type()
+                .const_int(u64::from(word_index) * 8, false);
             let slot = unsafe { builder.build_gep(i8_type, new_ptr, &[off], "aggcopy_deep_slot") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep deep slot", &e))?;
             let word = builder

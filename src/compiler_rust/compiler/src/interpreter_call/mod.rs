@@ -16,11 +16,11 @@ pub(crate) use bdd::{
     BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ, BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
-    bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named, captured_env_with_live_globals, exec_function,
-    exec_function_with_bound_args, exec_function_with_captured_env, exec_function_with_values,
-    exec_function_with_values_and_self, exec_lambda, execute_function_body, instantiate_class, publish_and_repoint,
-    publish_live_bound_globals, refresh_live_bound_globals, sync_live_bound_globals, sync_owned_captured_globals,
-    ProceedContext, IN_NEW_METHOD,
+    bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named,
+    captured_env_with_live_globals, exec_function, exec_function_with_bound_args, exec_function_with_captured_env,
+    exec_function_with_values, exec_function_with_values_and_self, exec_lambda, execute_function_body,
+    instantiate_class, publish_and_repoint, publish_live_bound_globals, refresh_live_bound_globals,
+    sync_live_bound_globals, sync_owned_captured_globals, ProceedContext, IN_NEW_METHOD,
 };
 pub(crate) use core::bitfield_support::instantiate_bitfield_from_args;
 
@@ -356,7 +356,9 @@ pub(crate) fn call_value_as_callable(
     }
 }
 
-#[allow(clippy::borrowed_box)] // reason: Box<dyn Trait> is the required storage type for this dispatch point
+// NOTE: no #[allow] here. An attribute on a `thread_local!` invocation is
+// applied to the macro call, not the items it expands to, so rustc ignores it
+// and clippy reports `unused attribute `allow``, which is denied in CI.
 thread_local! {
     /// Prelude names already reported by `warn_prelude_shadow_once`, so a
     /// shadowed builtin called in a loop warns once rather than per call.

@@ -1997,10 +1997,7 @@ impl<'a> MirLowerer<'a> {
         // bug #62 is preserved untouched.
         // doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
         let erased_class_receiver_ty: Option<TypeId> = if !wrapper_enum_builtin_collision
-            && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(
-                method,
-                args.len(),
-            )
+            && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len())
             && self.type_registry.and_then(|r| r.get_type_name(receiver.ty)).is_none()
             && receiver_local_ty
                 .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)))
