@@ -263,7 +263,27 @@ impl HirLowering:
         importer_key = importer_key.replace("/", ".")
         if importer_key.starts_with("src."):
             importer_key = importer_key.substring(4)
-        val importer_surface_index = self.surface_index_for_name(importer_key)
+        var importer_surface_index = self.surface_index_for_name(importer_key)
+        if importer_surface_index < 0:
+            # The hand-rolled key above drops `.spl`, `/`->`.` and a leading
+            # `src.`, but NOT the all-digit tier segment. The registry keys its
+            # surfaces with `module_surface_canonical_module_name`
+            # (module_surface_registry.spl:79), whose canonical spelling also
+            # drops tier segments and folds `std.` -> `lib.`;
+            # `hir_pkg_canonical_module_name` (module_lowering.spl:90) is the
+            # in-scope twin of that rule and is already used on `module.name`
+            # at :394 below. Under SIMPLE_BOOTSTRAP `ParserModule.name` is the
+            # raw physical path, so `src/compiler/60.mir_opt/mir_opt/mod.spl`
+            # yields `compiler.60.mir_opt.mir_opt.mod` here while the surface
+            # is registered as `compiler.mir_opt.mir_opt.mod` -> exact miss ->
+            # the file gets NO import surface at all, and every name it imports
+            # is later reported as `unresolved type`/`unresolved name`. In the
+            # Stage 3 log of 2026-09-01 all 78 files whose FIRST HIR error was
+            # `missing importing module surface` carried a numbered path, no
+            # de-numbered-path file hit this error, and those 78 files account
+            # for 4796 of the run's 5024 HIR fatals.
+            importer_surface_index = self.surface_index_for_name(
+                hir_pkg_canonical_module_name(module.name))
         if importer_surface_index < 0:
             self.error("missing importing module surface for {module.name}", Span.empty())
             return
