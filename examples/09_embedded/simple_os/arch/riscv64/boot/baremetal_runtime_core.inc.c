@@ -2307,3 +2307,71 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs)
         default: return 0;
     }
 }
+
+/* ---------------------------------------------------------------------------
+ * Ports of three hosted concurrency-primitive constructors.
+ *
+ * Needed because #209 ("freestanding boot never ran module-global
+ * initializers") made every `__module_init_*` in the entry closure LIVE. Their
+ * module-level globals construct a mutex, an atomic counter and a thread-local
+ * slot, so --gc-sections no longer discards those three references and the
+ * riscv64 component link failed with exactly three undefined symbols:
+ *   rt_mutex_new         (runtime_native.c:3988; src/lib/nogc_sync_mut/concurrent/mutex.spl:11)
+ *   rt_atomic_int_new    (runtime_native.c:676;  src/lib/nogc_sync_mut/atomic.spl:32)
+ *   rt_thread_local_new  (compiler_rust/runtime/src/value/sffi/sync.rs:128;
+ *                         src/lib/nogc_sync_mut/sffi/concurrent.spl:258)
+ * Ports of existing hosted names, not new rt_* symbols.
+ *
+ * ONLY these three are defined, deliberately, for the same reason stated at the
+ * dictionary block above: the load/store/lock/unlock siblings are not pinned
+ * down by any caller in this link, and writing an entry point no caller has
+ * pinned down is how ABI drift gets introduced. If one of them is ever reached
+ * it fails CLOSED at link time with a named undefined symbol rather than
+ * silently returning a wrong value.
+ *
+ * This image is single-hart with no preemption inside these paths, so the
+ * atomic/mutex state is plain memory — the seq_cst machinery the hosted
+ * versions carry has nothing to order against here.
+ * ------------------------------------------------------------------------- */
+
+#define HEAP_MUTEX 12U
+
+typedef struct {
+    HeapHeader hdr;
+    RuntimeValue value;
+    uint32_t locked;
+} RuntimeMutex;
+
+RuntimeValue rt_mutex_new(RuntimeValue initial)
+{
+    RuntimeMutex *m = (RuntimeMutex *)rv_alloc(sizeof(RuntimeMutex));
+    if (!m) return NIL_VALUE;
+    m->hdr.type = HEAP_MUTEX;
+    m->hdr.size = (uint32_t)sizeof(RuntimeMutex);
+    m->value = initial;
+    m->locked = 0;
+    return ENCODE_PTR(m);
+}
+
+/* Hosted returns a RAW pointer as the handle (`(int64_t)(intptr_t)value`), not
+ * a tagged value, and rt_atomic_int_load casts it straight back — so this port
+ * must do the same rather than ENCODE_PTR. */
+typedef struct {
+    int64_t value;
+} RuntimeAtomicInt;
+
+int64_t rt_atomic_int_new(int64_t initial)
+{
+    RuntimeAtomicInt *a = (RuntimeAtomicInt *)rv_alloc(sizeof(RuntimeAtomicInt));
+    if (!a) return 0;
+    a->value = (int64_t)simpleos_raw_or_encoded_int((RuntimeValue)initial);
+    return (int64_t)(intptr_t)a;
+}
+
+/* Hosted hands out a monotonically increasing opaque id from a counter that
+ * starts at 1, so 0 stays available as "no slot". Same contract here. */
+int64_t rt_thread_local_new(void)
+{
+    static int64_t g_thread_local_next = 1;
+    return g_thread_local_next++;
+}
