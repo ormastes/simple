@@ -38,6 +38,14 @@ typedef intptr_t RuntimeValue;
 #define HEAP_STRING 1U
 #define HEAP_ARRAY  2U
 #define HEAP_ENUM   7U
+/* Must match baremetal_runtime_core.inc.c's HEAP_DICT. THIS TU, not that one,
+ * is the definition of rt_index_get / rt_index_set / rt_len that WINS the link
+ * (see the note on rt_index_get below) -- so the dict arms have to be HERE.
+ * Adding them only to the .inc.c copy changed nothing in-guest, which is
+ * exactly what happened once already. The dict helpers themselves are NOT
+ * duplicated, so they resolve to the .inc.c definitions and are declared here
+ * rather than re-implemented. */
+#define HEAP_DICT   11U
 
 typedef struct {
     uint32_t type;
@@ -588,6 +596,15 @@ void rt_mmio_write_u64(uint64_t addr, uint64_t value)
     *(volatile uint64_t *)(uintptr_t)addr = value;
 }
 
+/* Defined in baremetal_runtime_core.inc.c (single definition, not duplicated
+ * here). Declaring them creates the reference that keeps simpleos_dict_store
+ * from being --gc-sections'd out: before this change it had NO surviving
+ * caller, because its only callers were in the .inc.c copies of rt_index_set /
+ * rt_dict_set that LOSE the link. */
+int8_t       simpleos_dict_store(RuntimeValue dict, RuntimeValue key, RuntimeValue item);
+RuntimeValue simpleos_dict_lookup(RuntimeValue dict, RuntimeValue key);
+uint64_t     simpleos_dict_count(RuntimeValue dict);
+
 RuntimeValue rt_len(RuntimeValue value)
 {
     if (!IS_HEAP(value)) return 0;
@@ -595,6 +612,7 @@ RuntimeValue rt_len(RuntimeValue value)
     if (!hdr) return 0;
     if (hdr->type == HEAP_STRING) return (RuntimeValue)((RuntimeString *)hdr)->len;
     if (hdr->type == HEAP_ARRAY) return (RuntimeValue)((RuntimeArray *)hdr)->len;
+    if (hdr->type == HEAP_DICT) return (RuntimeValue)simpleos_dict_count(value);
     return 0;
 }
 
@@ -602,9 +620,15 @@ RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx);
 
 RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
 {
-    if (!IS_INT(index)) return NIL_VALUE;
+    /* Receiver kind is decided BEFORE the key kind. The old opening line
+     * `if (!IS_INT(index)) return NIL_VALUE;` made every dict read with a
+     * non-int key (text, SymbolId) answer nil without ever looking at what it
+     * was reading FROM. */
     if (!IS_HEAP(value)) return NIL_VALUE;
-    HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+    HeapHeader *hdr0 = (HeapHeader *)DECODE_PTR(value);
+    if (hdr0 && hdr0->type == HEAP_DICT) return simpleos_dict_lookup(value, index);
+    if (!IS_INT(index)) return NIL_VALUE;
+    HeapHeader *hdr = hdr0;
     if (!hdr) return NIL_VALUE;
     if (hdr->type == HEAP_ARRAY) return rt_array_get(value, (RuntimeValue)DECODE_INT(index));
     /* A TEXT subscript (`s[i]`) lowers to rt_index_get exactly like an array
@@ -622,6 +646,29 @@ RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
 
 RuntimeValue rt_index_set(RuntimeValue value, RuntimeValue index, RuntimeValue item)
 {
+    /* THE riscv64 in-guest row-1 blocker (2026-09-01). `d[k] = v` lowers to
+     * rt_index_set. This function opened with `if (!IS_INT(index)) return 0;`
+     * and so DISCARDED, silently and without a trap, every write into a dict
+     * with a non-int key -- which is every dict in the frontend:
+     * `ParserModule.functions : Dict<text, ParserFunction>` and
+     * `HirModule.functions : Dict<SymbolId, HirFunction>`.
+     *
+     * Measured in-guest under real OpenSBI fw_payload: the parser's
+     * `function_order` ARRAY held 1 entry while its `functions` DICT held 0,
+     * and `interpret_hir_module` then correctly reported "module has no main
+     * function". simpleos_dict_store was entered ZERO times across the boot.
+     *
+     * The identical arm was added to baremetal_runtime_core.inc.c's copy of
+     * this function first and moved nothing, because THIS TU is the definition
+     * that wins the link -- the same trap the rt_index_get note above records.
+     * Verified here with `nm kernel.elf`: rt_index_set resolves into this
+     * file's address range, and rt_dict_set / simpleos_dict_store were absent
+     * from the linked image entirely. */
+    if (IS_HEAP(value)) {
+        HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+        if (hdr && hdr->type == HEAP_DICT)
+            return (RuntimeValue)simpleos_dict_store(value, index, item);
+    }
     if (!IS_INT(index)) return 0;
     return rt_array_set(value, (RuntimeValue)DECODE_INT(index), item);
 }
