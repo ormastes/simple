@@ -284,6 +284,31 @@ The Simple compiler/CLI, MCP, LSP MCP and SPipe all receive the same injected `V
 
 ## 10. MDSOC startup and delayed loading
 
+### 10.0 Additive capsule-selection implementation slice (2026-09-01)
+
+`src/app/startup/contract/startup_capsule_selection_v1.spl` is the additive
+closure owner layered over the frozen `StartupPlanV1` serialization. It first
+recomputes the plan hash, requires `plan_digest == plan_hash`, validates the
+canonical required/forbidden sets, and rejects any previously loaded forbidden
+capsule. The only unconditional implementation-neutral closure is
+`startup.router` plus `startup.contracts`. Frontend, interpreter and loader
+interfaces are selected by route while their bodies remain delayed. Aspect and
+dynamic-loading capsules are opt-in and otherwise appear in the negative
+closure. Mono/MIR/borrow/optimizer, exactly one named backend, and linker are
+attached only when a native-producing command also carries explicit native
+output intent; neither an installed provider nor an unrelated command may
+widen the closure.
+
+`src/app/startup/contract/compile_time_regression_gate_v1.spl` owns the paired
+decision independently of process launch. Measurement orchestration must use
+one non-empty cache identity, one warmup, and at least seven alternating
+baseline/candidate pairs of the same representative incremental compile. The
+decision uses both median and 20%-trimmed mean pair ratios, requires ratio CV
+at most 5%, passes only when both ratios are at most 1.10, fails only when both
+exceed 1.10, and is otherwise inconclusive. This avoids a full bootstrap per
+sample and prevents noisy or cache-ambiguous evidence from becoming a release
+decision.
+
 The stage-0 router produces a sealed `StartupPlanV1` before loading task capsules:
 
 | Route | Eager/common | Conditionally admitted capsules | Forbidden by closure gate |
