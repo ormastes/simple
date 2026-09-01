@@ -83,3 +83,15 @@ userland, silently.
 - `doc/08_tracking/bug/mcp_native_build_hir_entry_env_get_nil_len_fatal_2026-09-01.md`
 - `.claude/rules/language.md` § Runtime Limitations, "Chained methods on erased receivers"
 - `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:587` ("staged aggregate-receiver accessor hazard")
+
+## Spec status caveat (measured 2026-09-01)
+`test/01_unit/compiler/self_receiver_chain_member_access_spec.spl` carries
+`# @tag:in-development`, but **that tag is not wired at this tree**: a repo-wide
+grep for the literal `in-development` in `src/**.spl` returns exactly two hits,
+both prose — `src/app/tag_query/main.spl:17` and a comment at
+`src/lib/nogc_sync_mut/test_runner/test_runner_types.spl:196`. The
+`in_development` counter field exists and is copied around
+(`test_runner_execute.spl:944`, `test_runner_mcdc_report.spl:249`) but nothing
+sets it from the tag. So the file reds a whole-suite run today (7 examples,
+4 failures). Left red deliberately — the failures ARE this defect. Promote to
+green by fixing the interpreter, not by weakening the assertions.
