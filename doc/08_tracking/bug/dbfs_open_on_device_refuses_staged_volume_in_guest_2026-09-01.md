@@ -8,11 +8,13 @@ Status: OPEN — blocks L5..L10 of the dbfs in-guest round-trip lane
 
 The DBFS filesystem server cannot be brought up in-guest. Under real OVMF
 firmware the guest gets as far as reading a valid DBFS superblock off a real
-NVMe device and then `DbFsDriver.open_on_device` refuses the volume, with no
-usable error detail.
+NVMe device and then `DbFsDriver.open_on_device` refuses the volume.
 
-Three blockers on the path to this point were found and FIXED (see below); this
-record covers the one that remains.
+The refusal is **by design**: DBFS's device commit owner fail-closes on any
+platform without an audited runtime mutex provider, and SimpleOS has none. See
+ROOT CAUSE. Three separate blockers on the path to this point were genuine bugs
+and were FIXED (see "Fixed on the way here"); this record covers the one that
+remains, which is a missing feature rather than a defect.
 
 ## Evidence — serial transcript, OVMF pflash -> GRUB-EFI -> multiboot1
 
@@ -38,35 +40,72 @@ L1..L4 are GREEN: firmware boot, guest entry at this run's nonce, the
 pure-Simple NVMe BlockDevice, and superblock recognition of the volume this run
 staged.
 
-## Localisation
+## ROOT CAUSE (established by measurement, not inference)
 
-`DbFsDriver.open_on_device` (`src/lib/nogc_sync_mut/db/dbfs_driver/dbfs_driver.spl:396`)
-fails somewhere AFTER its argument guard and BEFORE returning Ok. The guard is
-proven passed: it rejects `block_count < 4`, and the guest reads back
-`block_count=65532` with `base_block=4`. That leaves, in order:
+`dbfs_owner_transaction_begin()` returns **false**, so `open_on_device` returns
+`Err(FsError.Unsupported)` at its very first gate.
 
-1. `dbfs_owner_transaction_begin()` -> `Err(FsError.Unsupported)`
-2. `_alloc_inst_id_locked()` -> `Err(FsError.TooLarge)`
-3. `dbfs_device_register_locked(iid, dev)` -> registration refusal
-4. `_dbfs_replay_namespace_locked(iid, base_block, block_count)` -> replay refusal
+Method: i64 stage/diag markers temporarily compiled into the stdlib (the kernel
+compiles stdlib from source every gate run, so no rebuild is needed). Plain
+integers were used deliberately — they are immune to the freestanding
+Result/enum rendering defect described below. Two runs:
 
-(3) and (4) are the prime suspects: both touch the device, and this is the first
-context in which DBFS has ever seen a REAL NVMe BlockDevice rather than the
-host `MemBlockDevice`.
+- `open stage=2` — reached the marker immediately before
+  `dbfs_owner_transaction_begin()`, never reached 3.
+- `lockdiag=0` — every bit of `_owner_lock()`'s precondition mask clear, and
+  `_DBFS_DEVICE_OWNER_MUTEX == 0`.
 
-## Why the error could not be narrowed further — a second defect
+The chain, all in `device_commit_owner.spl`:
+
+```
+dbfs_device_mutex_provider_blocker(platform)   # :20
+    -> "ready" ONLY for linux|macos|windows|freebsd|illumos|solaris
+    -> otherwise DBFS_DEVICE_SERIALIZATION_MISSING
+val _DBFS_DEVICE_OWNER_MUTEX = if blocker == "ready": mutex_raw_create() else: 0   # :57
+fn _owner_lock() = not quarantined and blocker == "ready"
+                   and _DBFS_DEVICE_OWNER_MUTEX > 0 and mutex_raw_lock(...)        # :79
+```
+
+SimpleOS/freestanding is not on the allowed list, so the blocker is
+`SERIALIZATION_MISSING`, the mutex is never created, and the lock can never be
+taken.
+
+## This is DELIBERATE, and must NOT be relaxed
+
+The source says so directly (`device_commit_owner.spl:21-22`):
+
+> These are the audited runtime_thread.c pthread/critical-section targets.
+> **Freestanding, SimpleOS, empty, and unknown providers remain fail-closed.**
+
+DBFS's device commit owner serializes every device binding and every namespace
+commit through one runtime-backed mutex. Without an audited provider it fails
+closed rather than silently corrupting a filesystem under concurrent commits.
+Adding `"simpleos"` to that allow-list would turn this gate green while
+removing a real serialization guarantee — exactly the fabricated evidence this
+lane exists to rule out. **Do not do it.**
+
+## What DBFS-in-guest actually needs
+
+A real SimpleOS/freestanding critical-section provider behind `mutex_raw_create`
+/ `mutex_raw_lock` / `mutex_raw_unlock`, audited the same way the
+`runtime_thread.c` targets were, and then SimpleOS added to the allow-list. That
+is a feature, not a one-line fix, and it is the single remaining blocker: with
+it in place the lane's L5..L10 should follow, since L1..L4 already prove the
+volume, the device, and the superblock are all good.
+
+## Secondary defect — freestanding error rendering
 
 The refusal carries no identity in freestanding:
 
-- `_dbfsrt_fs_err_text(driver_r.unwrap_err())`, a total `match` over every
-  `FsError` variant, rendered as the EMPTY STRING.
-- `"{driver_r}"` on the raw `Result` rendered as `<object>`.
+- `_dbfsrt_fs_err_text(driver_r.unwrap_err())`, a TOTAL `match` over every
+  `FsError` variant, renders as the EMPTY STRING.
+- `"{driver_r}"` on the raw `Result` renders as `<object>`.
 
 A total match cannot legitimately produce "". This matches the documented
 x86_64-freestanding `.unwrap()` defect class (`rt_unwrap_or_trap` returning the
-wrapper rather than the payload), and it is what blocks further diagnosis from
-inside the guest. Fixing error rendering in freestanding is a prerequisite for
-finishing this investigation cheaply.
+wrapper rather than the payload). It is why the i64-marker technique above was
+necessary, and it is worth fixing on its own: it will silently mislead any
+future in-guest driver work.
 
 ## Fixed on the way here (all landed, all measured)
 
@@ -104,7 +143,8 @@ not be cited as a general seed-wide argv break. Re-run the control with
 
 ## Next step
 
-Add serial-visible instrumentation to the four candidate steps above (or fix
-freestanding `FsError` rendering first, which is cheaper and unblocks any future
-in-guest DBFS work), then re-run the gate. The gate is fail-closed and needs no
-change to go green once the driver opens.
+Implement and audit a SimpleOS/freestanding mutex provider (see "What
+DBFS-in-guest actually needs"), then add SimpleOS to the allow-list in the same
+change. The gate is fail-closed and needs no modification to go green once
+`open_on_device` succeeds. Fixing freestanding `FsError` rendering is a cheaper,
+independent win that should probably land first.
