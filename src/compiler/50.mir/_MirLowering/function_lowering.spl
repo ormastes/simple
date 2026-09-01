@@ -62,6 +62,8 @@ var mir_lower_type_probe_state: i64 = -1
 # interpolation (interpolating an i64 emits rt_raw_i64_to_string, which the
 # freestanding riscv64 runtime does not provide -> unresolved -> NULL GOT).
 var mir_probe_lt_calls: i64 = 0
+# ROW2 PROBE (temporary): last tagged lower_type CALL SITE, "file:line".
+var mir_probe_site: text = "<untagged>"
 
 fn _probe_i64_text(n: i64) -> text:
     """Pure-Simple i64 renderer; never uses interpolation of an integer."""
@@ -259,7 +261,7 @@ impl MirLowering:
             elif gpu_kernel_target == "cuda":
                 self.lower_cuda_kernel_param_type(fn_.params[pmi])
             else:
-                self.lower_type(fn_.params[pmi].type_)
+                self.lower_type_at("fn:param", fn_.params[pmi].type_)
             params = params.push(lowered_param)
             pmi = pmi + 1
 
@@ -280,7 +282,7 @@ impl MirLowering:
 
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-start {fn_.name}"
-        val return_type = self.lower_type(fn_.return_type)
+        val return_type = self.lower_type_at("fn:return", fn_.return_type)
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-done {fn_.name}"
         if bootstrap_trace:
@@ -833,6 +835,16 @@ impl MirLowering:
             # lowered (see the reordering in module_lowering.spl), so every
             # function body sees the full set.
 
+    me lower_type_at(site: text, type_: HirType) -> MirType:
+        """ROW2 PROBE (temporary): record the CALL SITE, then lower normally.
+
+        Behaviour-identical to lower_type; it only names which of the 61 tagged
+        call sites handed in the type, which the zeroed object itself cannot
+        say.
+        """
+        mir_probe_site = site
+        self.lower_type(type_)
+
     me lower_type(type_: HirType) -> MirType:
         """Lower HIR type to MIR type."""
         if type_ == nil:
@@ -1176,7 +1188,7 @@ impl MirLowering:
             var p_kindnil = "N"
             if type_.kind == nil:
                 p_kindnil = "Y"
-            self.error_fatal("E-MIR-TYPE-ZeroKind: lower_type received a well-formed HirType whose `kind` field is raw 0 (never written) while lowering '{fn_ctx}' -- fix the PRODUCER that left kind unset, not lower_type [PROBE calls=" + p_calls + " disc=" + p_disc_actual + " discStr=" + p_disc_str + " discInt=" + p_disc_int + " discUnit=" + p_disc_unit + " strHit=" + p_str_hit + " intHit=" + p_int_hit + " kindnil=" + p_kindnil + "]", nil)
+            self.error_fatal("E-MIR-TYPE-ZeroKind: lower_type received a well-formed HirType whose `kind` field is raw 0 (never written) while lowering '{fn_ctx}' -- fix the PRODUCER that left kind unset, not lower_type [PROBE calls=" + p_calls + " disc=" + p_disc_actual + " discStr=" + p_disc_str + " discInt=" + p_disc_int + " discUnit=" + p_disc_unit + " strHit=" + p_str_hit + " intHit=" + p_int_hit + " kindnil=" + p_kindnil + " site=" + mir_probe_site + "]", nil)
             return MirType.i64()
         # Round 2 REVERTED (2026-08-30). This block briefly read five MORE
         # fields off `type_.span` -- including `.file`, a `text` -- to localise
