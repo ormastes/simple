@@ -1,0 +1,328 @@
+#!/bin/sh
+set -eu
+
+# Cert Phase-4 STRESS / ROBUSTNESS gate (DO-178C robustness objective).
+#
+# Exercises the DEPLOYED clean pure-Simple compiler with adversarial-but-
+# structured inputs and asserts it never SIGSEGVs, aborts, or hangs, and that
+# valid inputs produce the exact pinned stdout. Categories:
+#   (a) DEEP nesting   — N-deep parentheses / nested if / nested match
+#   (b) WIDE           — many local vars / many functions / large match
+#   (c) BOUNDED recursion (deep call stack that must terminate)
+#   (d) large literals / long strings
+#   (e) MALFORMED      — must be REJECTED cleanly (nonzero, NOT a crash/hang)
+#
+# Each run is time-boxed (default 30s). Classification per run:
+#   rc==124/137(timeout) -> HANG   (finding, FAIL)
+#   rc>=128 (signal)     -> CRASH  (finding, FAIL)   [SIGSEGV/SIGABRT/stack-overflow]
+# VALID case passes ONLY when rc==0 AND stdout EXACTLY equals the pinned value.
+#   A crashed/empty run can NEVER be scored PASS (guards against false-GREEN).
+# MALFORMED case passes ONLY when it terminated, rc is nonzero AND rc<128
+#   (a clean bounded diagnostic). rc==0 (accepted) or rc>=128 (crash) => FAIL.
+#
+# Confirmed real robustness FINDINGS on the current deployed binary are logged
+# under test/cert/stress/findings/ (repros + README) and re-run live by the
+# FINDINGS section so the defect is demonstrated, not merely asserted. They are
+# documented known defects and do NOT gate the CORE regression result: the CORE
+# envelope (valid pinned + malformed rejected) is GREEN on the clean compiler
+# and RED on any regression. See findings/README.md for the honest boundary.
+#
+# Usage:
+#   sh scripts/check/cert/stress-suite.shs            # run the full gate
+#   sh scripts/check/cert/stress-suite.shs --self-test  # prove the harness works
+#   sh scripts/check/cert/stress-suite.shs --help
+#
+# Exit status:
+#   0  every CORE case passed (valid pinned + malformed cleanly rejected)
+#   1  at least one CORE case crashed / hung / produced wrong output /
+#      accepted a malformed input, OR --self-test failed
+#
+# Env knobs:
+#   SIMPLE_BIN  compiler binary
+#               (default: /home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple)
+#   STRESS_TIMEOUT  per-run wall-clock budget in seconds (default 30)
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+
+SIMPLE_BIN="${SIMPLE_BIN:-/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple}"
+STRESS_TIMEOUT="${STRESS_TIMEOUT:-30}"
+STRESS_DIR="$REPO_ROOT/test/cert/stress"
+GEN_DIR="$STRESS_DIR/gen"
+FIND_DIR="$STRESS_DIR/findings"
+
+usage() { sed -n '3,45p' "$0"; exit 0; }
+
+PASS=0
+FAIL=0
+
+# _run FILE -> writes stdout to $ROUT, returns raw rc (124=timeout/hang).
+ROUT=""
+_run() {
+    ROUT=$(timeout -k 5 "$STRESS_TIMEOUT" "$SIMPLE_BIN" run "$1" 2>/dev/null) && return 0 || return $?
+}
+
+# classify RC -> echoes a token: OK | HANG | CRASH | ERR<rc>
+_classify() {
+    _rc=$1
+    if [ "$_rc" -eq 0 ]; then echo OK
+    elif [ "$_rc" -eq 124 ] || [ "$_rc" -eq 137 ]; then echo HANG
+    elif [ "$_rc" -ge 128 ]; then echo CRASH
+    else echo "ERR$_rc"
+    fi
+}
+
+# valid_case NAME FILE EXPECTED
+valid_case() {
+    _name=$1; _file=$2; _exp=$3
+    set +e
+    _run "$_file"; _rc=$?
+    set -e
+    _cls=$(_classify "$_rc")
+    if [ "$_cls" = OK ] && [ "$ROUT" = "$_exp" ]; then
+        PASS=$((PASS+1)); printf '  PASS  %-28s -> %s\n' "$_name" "$_exp"
+    else
+        FAIL=$((FAIL+1))
+        printf '  FAIL  %-28s [%s rc=%d] got=[%s] want=[%s]\n' \
+            "$_name" "$_cls" "$_rc" "$(printf '%s' "$ROUT" | head -c 40)" "$_exp"
+    fi
+}
+
+# malformed_case NAME FILE  (must be cleanly rejected: nonzero, <128, no hang)
+malformed_case() {
+    _name=$1; _file=$2
+    set +e
+    _run "$_file"; _rc=$?
+    set -e
+    _cls=$(_classify "$_rc")
+    if [ "$_rc" -gt 0 ] && [ "$_rc" -lt 128 ] && [ "$_rc" -ne 124 ]; then
+        PASS=$((PASS+1)); printf '  PASS  %-28s -> rejected (rc=%d)\n' "$_name" "$_rc"
+    else
+        FAIL=$((FAIL+1))
+        if [ "$_rc" -eq 0 ]; then
+            printf '  FAIL  %-28s ACCEPTED a malformed input (rc=0)\n' "$_name"
+        else
+            printf '  FAIL  %-28s [%s rc=%d] malformed input crashed/hung\n' \
+                "$_name" "$_cls" "$_rc"
+        fi
+    fi
+}
+
+# ---- input generation (pure awk/printf; deterministic) --------------------
+
+gen_paren() { # DEPTH FILE
+    awk -v D="$1" 'BEGIN{o="";c="";for(i=0;i<D;i++){o=o"(";c=c")"}
+        print "fn main():"; print "    print(" o "7" c ")"}' > "$2"
+}
+gen_nested_if() { # DEPTH FILE
+    awk -v D="$1" 'BEGIN{print "fn main():"; print "    x = 1"; p="    ";
+        for(i=0;i<D;i++){print p "if x > 0:"; p=p"    "} print p "print(99)"}' > "$2"
+}
+gen_locals() { # N FILE   (sum 0..N-1)
+    awk -v N="$1" 'BEGIN{print "fn main():";
+        for(i=0;i<N;i++)print "    v" i " = " i;
+        s=""; for(i=0;i<N;i++){if(i)s=s"+"; s=s"v"i}
+        print "    print(" s ")"}' > "$2"
+}
+gen_funcs() { # N FILE   (defines N funcs f_i()=i*2; calls a few)
+    awk -v N="$1" 'BEGIN{for(i=0;i<N;i++){print "fn f" i "() -> int:"; print "    return " i "*2"}
+        print "fn main():"; print "    print(f" (N-1) "() + f0() + f150())"}' > "$2"
+}
+gen_bigmatch() { # N FILE   x=157 -> 314
+    awk -v N="$1" 'BEGIN{print "fn main():"; print "    x = 157"; print "    match x:";
+        for(i=0;i<N;i++)print "        " i " => print(" i*2 ")";
+        print "        _ => print(-1)"}' > "$2"
+}
+gen_longstr() { # LEN FILE
+    awk -v L="$1" 'BEGIN{s="";for(i=0;i<L;i++)s=s"a";
+        print "fn main():"; print "    s = \"" s "\""; print "    print(len(s))"}' > "$2"
+}
+gen_unterm_nest() { # DEPTH FILE  (open parens, never closed)
+    awk -v D="$1" 'BEGIN{s="";for(i=0;i<D;i++)s=s"(";
+        print "fn main():"; print "    print(" s}' > "$2"
+}
+gen_manycall_sum() { # N FILE   (defines N funcs f_i()=i; sums ALL of them: 0+1+...+(N-1))
+    awk -v N="$1" 'BEGIN{for(i=0;i<N;i++){print "fn f" i "() -> int:"; print "    return " i}
+        s=""; for(i=0;i<N;i++){if(i)s=s"+"; s=s"f" i "()"}
+        print "fn main():"; print "    print(" s ")"}' > "$2"
+}
+
+gen_all() {
+    mkdir -p "$GEN_DIR"
+    # (a) deep nesting
+    gen_paren 200  "$GEN_DIR/deep_paren_200.spl"
+    gen_paren 500  "$GEN_DIR/deep_paren_500.spl"
+    gen_paren 1000 "$GEN_DIR/deep_paren_1000.spl"
+    gen_nested_if 200 "$GEN_DIR/deep_if_200.spl"
+    cat > "$GEN_DIR/deep_match.spl" <<'EOF'
+fn classify(a: int, b: int, c: int) -> int:
+    match a:
+        0 => match b:
+            0 => 100
+            _ => match c:
+                0 => 200
+                _ => 300
+        _ => 400
+fn main():
+    print(classify(0, 1, 0))
+EOF
+    # (b) wide
+    gen_locals 500  "$GEN_DIR/wide_locals_500.spl"
+    gen_funcs  300  "$GEN_DIR/wide_funcs_300.spl"
+    gen_bigmatch 200 "$GEN_DIR/wide_match_200.spl"
+    gen_manycall_sum 300 "$GEN_DIR/manycall_sum_300.spl"
+    # (c) bounded recursion
+    cat > "$GEN_DIR/rec_1000.spl" <<'EOF'
+fn sum_to(n: int) -> int:
+    if n <= 0:
+        return 0
+    return n + sum_to(n - 1)
+fn main():
+    print(sum_to(1000))
+EOF
+    # (d) large literals / long strings
+    gen_longstr 10000 "$GEN_DIR/long_string_10000.spl"
+    printf 'fn main():\n    print(1000000000000)\n' > "$GEN_DIR/big_int_1e12.spl"
+    printf 'fn main():\n    print(9223372036854775807)\n' > "$GEN_DIR/bigint_i64_max.spl"
+    # (e) malformed (must be rejected cleanly)
+    printf 'fn main():\n    print("oops)\n'   > "$GEN_DIR/mal_unterminated_string.spl"
+    printf 'fn main():\n    print(@@@)\n'      > "$GEN_DIR/mal_invalid_token.spl"
+    printf 'fn main():\nprint(1)\n'            > "$GEN_DIR/mal_bad_indent.spl"
+    gen_unterm_nest 500 "$GEN_DIR/mal_unterminated_nest_500.spl"
+}
+
+# ---- CORE gate -------------------------------------------------------------
+
+run_core() {
+    printf 'STRESS SUITE  bin=%s  timeout=%ss\n\n' "$SIMPLE_BIN" "$STRESS_TIMEOUT"
+    gen_all
+
+    echo "(a) DEEP nesting"
+    valid_case deep_paren_200  "$GEN_DIR/deep_paren_200.spl"  7
+    valid_case deep_paren_500  "$GEN_DIR/deep_paren_500.spl"  7
+    valid_case deep_if_200     "$GEN_DIR/deep_if_200.spl"     99
+    valid_case deep_match      "$GEN_DIR/deep_match.spl"      200
+    # deep_paren_1000 (1000 balanced, otherwise-valid parens) used to be a
+    # valid_case pinned to 7. A parser recursion-depth cap
+    # (MAX_PARSE_RECURSION_DEPTH=512, src/compiler_rust/parser/src/
+    # parser_impl/core.rs, landed independently of this suite -- see
+    # doc/08_tracking/bug/stress_f01_deep_nest_parser_recursion_2026-07-17.md)
+    # now rejects ANY expression nested past 512 levels, valid or not, so a
+    # legitimate 1000-deep nest no longer parses. That is a real, intentional
+    # functional cutoff (crash -> bounded rejection tradeoff), not a
+    # regression to hide: assert the new behavior (clean rejection, same
+    # depth/input as before) instead of silently shrinking the fixture.
+    malformed_case deep_paren_over_cap "$GEN_DIR/deep_paren_1000.spl"
+
+    echo "(b) WIDE"
+    valid_case wide_locals_500 "$GEN_DIR/wide_locals_500.spl" 124750
+    valid_case wide_funcs_300  "$GEN_DIR/wide_funcs_300.spl"  898
+    valid_case wide_match_200  "$GEN_DIR/wide_match_200.spl"  314
+    # 300 chained function-call operands summed in one expression (f0()+...+f299()).
+    # Originally a documented finding (f03): both backends wrong. Root-caused
+    # and re-verified 2026-07-17 -- the default execution path (what this
+    # suite invokes) is now correct; see
+    # doc/08_tracking/bug/stress_f03_manycall_sum_2026-07-17.md for the fix
+    # evidence and the narrower residual (interpreter-mode-only) finding.
+    valid_case manycall_sum_300 "$GEN_DIR/manycall_sum_300.spl" 44850
+
+    echo "(c) BOUNDED recursion"
+    valid_case rec_1000        "$GEN_DIR/rec_1000.spl"        500500
+
+    echo "(d) large literals / long strings"
+    valid_case long_string_10000 "$GEN_DIR/long_string_10000.spl" 10000
+    valid_case big_int_1e12      "$GEN_DIR/big_int_1e12.spl"      1000000000000
+    # i64::MAX literal. Originally a documented finding (f02): compiled/JIT
+    # backend silently printed -1 (RuntimeValue tag-boxing truncates to 61
+    # bits). Root-fixed 2026-07-17, see
+    # doc/08_tracking/bug/stress_f02_i64_boxing_truncation_2026-07-17.md.
+    valid_case bigint_i64_max    "$GEN_DIR/bigint_i64_max.spl"    9223372036854775807
+
+    echo "(e) MALFORMED (must reject cleanly, no crash/hang)"
+    malformed_case mal_unterminated_string "$GEN_DIR/mal_unterminated_string.spl"
+    malformed_case mal_invalid_token       "$GEN_DIR/mal_invalid_token.spl"
+    malformed_case mal_bad_indent          "$GEN_DIR/mal_bad_indent.spl"
+    malformed_case mal_unterminated_nest   "$GEN_DIR/mal_unterminated_nest_500.spl"
+}
+
+# ---- FINDINGS (documented known defects; demonstrated live, non-gating) ----
+
+report_findings() {
+    [ -d "$FIND_DIR" ] || return 0
+    echo
+    echo "KNOWN FINDINGS (documented in $FIND_DIR/README.md; NOT gating the CORE result)"
+    for f in "$FIND_DIR"/f*.spl; do
+        [ -f "$f" ] || continue
+        set +e
+        _run "$f"; _rc=$?
+        set -e
+        _cls=$(_classify "$_rc")
+        printf '  finding  %-32s -> %s rc=%d got=[%s]\n' \
+            "$(basename "$f")" "$_cls" "$_rc" "$(printf '%s' "$ROUT" | head -c 40)"
+    done
+}
+
+# ---- self-test: prove the harness itself is sound --------------------------
+
+self_test() {
+    echo "SELF-TEST: proving the harness scores correctly"
+    _t=$(mktemp -d)
+    trap 'rm -rf "$_t"' EXIT
+    rc=0
+
+    # 1. known-good valid input must be scored PASS
+    printf 'fn main():\n    print(7)\n' > "$_t/good.spl"
+    PASS=0; FAIL=0
+    valid_case good "$_t/good.spl" 7
+    [ "$PASS" -eq 1 ] && [ "$FAIL" -eq 0 ] || { echo "  X known-good not PASS"; rc=1; }
+
+    # 2. known-rejected input must be scored PASS as a clean rejection
+    printf 'fn main():\n    print(@@@)\n' > "$_t/bad.spl"
+    PASS=0; FAIL=0
+    malformed_case bad "$_t/bad.spl"
+    [ "$PASS" -eq 1 ] && [ "$FAIL" -eq 0 ] || { echo "  X known-rejected not PASS"; rc=1; }
+
+    # 3. FALSE-GREEN guard: a crashing input scored as a VALID case must FAIL,
+    #    never pass just because expected output was not observed.
+    awk 'BEGIN{o="";c="";for(i=0;i<6000;i++){o=o"(";c=c")"}
+        print "fn main():"; print "    print(" o "7" c ")"}' > "$_t/crash.spl"
+    PASS=0; FAIL=0
+    valid_case crash "$_t/crash.spl" 7
+    [ "$FAIL" -eq 1 ] && [ "$PASS" -eq 0 ] || { echo "  X crash was NOT caught (false-GREEN!)"; rc=1; }
+
+    # 4. wrong-output guard: correct exit but wrong stdout must FAIL
+    printf 'fn main():\n    print(8)\n' > "$_t/wrong.spl"
+    PASS=0; FAIL=0
+    valid_case wrong "$_t/wrong.spl" 7
+    [ "$FAIL" -eq 1 ] && [ "$PASS" -eq 0 ] || { echo "  X wrong output not caught"; rc=1; }
+
+    # 5. accepted-malformed guard: a program that runs cleanly must FAIL the
+    #    malformed check (it should have been rejected).
+    PASS=0; FAIL=0
+    malformed_case accepted "$_t/good.spl"
+    [ "$FAIL" -eq 1 ] && [ "$PASS" -eq 0 ] || { echo "  X accepted-malformed not caught"; rc=1; }
+
+    if [ "$rc" -eq 0 ]; then echo "SELF-TEST: OK"; else echo "SELF-TEST: FAILED"; fi
+    return "$rc"
+}
+
+# ---- entry -----------------------------------------------------------------
+
+case "${1:-}" in
+    --help|-h) usage ;;
+    --self-test) self_test; exit $? ;;
+    "") : ;;
+    *) echo "unknown arg: $1" >&2; usage ;;
+esac
+
+run_core
+report_findings
+
+echo
+printf 'RESULT  pass=%d fail=%d\n' "$PASS" "$FAIL"
+if [ "$FAIL" -ne 0 ]; then
+    echo "STRESS GATE: FAIL"
+    exit 1
+fi
+echo "STRESS GATE: PASS"
+exit 0

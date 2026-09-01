@@ -1,0 +1,131 @@
+#!/bin/sh
+# check-silent-default-baseline.shs — fail-closed gate for W-MC-DEF-001.
+#
+# Flags NEW silent-default / fail-open sites: an in-domain constant (0, 1, true,
+# "") substituted for a failed LOOKUP or RESOLUTION. Existing sites are recorded
+# in scripts/check/silent_default_baseline.txt so the gate fails only on NEW
+# ones — the pattern established by check-no-phantom-module-imports.shs.
+#
+# WHY A SHELL MIRROR OF THE .spl RULE
+# The authoritative rule is src/compiler/35.semantics/lint/silent_default.spl,
+# run by `bin/simple lint`. But lint costs ~11.7s startup plus a per-declaration
+# cost that is SUPERLINEAR in declaration content (a 2-function hwir file: 210s;
+# an 8-function one: >2400s, killed) — see .claude/rules/commands.md. Gating a
+# push on a full-tree lint is therefore not possible. This script is a fast
+# grep mirror of W-MC-DEF-001 only, over the whole tree in about a second.
+# The two can drift; --selftest pins the mirror against the SAME fixtures the
+# spec asserts (test/01_unit/compiler/lint/silent_default_*_spec.spl), so a
+# divergence surfaces as a fixture disagreement rather than silently.
+#
+# W-MC-DEF-002 and -003 are NOT mirrored here: they are mission-critical-scope
+# only and today's mission-critical tree has zero hits, so a gate on them would
+# be vacuous. They are enforced by `bin/simple lint` alone.
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS — <n> candidate(s) checked, 0 new fail-open (baselined: <k>)   exit 0
+#   FAIL — <n> candidate(s) checked, <m> new: <files>                   exit 1
+#   ERROR — nothing was checked                                         exit 2
+# A run that examined 0 candidates is an ERROR, never a pass.
+#
+# ESCALATION: this guard is advisory-compatible today. Promoting the LINT to a
+# hard error is the one-line `levels["silent_default"] = "deny"` change in
+# src/compiler/90.tools/lint/_LintMain/config_and_model.spl, and must not be
+# done until this script reports a baseline of 0.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BASELINE="$ROOT/scripts/check/silent_default_baseline.txt"
+GREP=/usr/bin/grep
+
+# In-domain default constants only. -1 and other out-of-domain sentinels are
+# deliberately NOT matched: they force the caller to test, which is the fix.
+DEFAULT_RE='\.unwrap_or\( *(0|1|true|"") *\)|\.unwrap_or_default\(\)'
+# Lookup/resolution-shaped receivers: calls that answer "where/which/does it
+# exist". Plain config reads (cfg.get("port").unwrap_or(8080)) are excluded on
+# purpose — those are genuine defaults, and flagging them is how a rule gets
+# switched off wholesale.
+LOOKUP_RE='(index_of|find_index|position|field_of|slot_of|offset_of|id_of|resolve|lookup|[a-z0-9]_index|[a-z0-9]_offset|[a-z0-9]_slot)\('
+
+scan_tree() {
+  # $1 = root dir. Prints "path:line" for each finding, unsuppressed only.
+  find "$1" -name '*.spl' \
+       -not -path '*/vendor/*' -not -path '*/node_modules/*' -print0 2>/dev/null \
+    | xargs -0 $GREP -nHE "$LOOKUP_RE" 2>/dev/null \
+    | $GREP -E "$DEFAULT_RE" \
+    | $GREP -vE 'lint:allow\(silent_default\) *[^ ]' \
+    | $GREP -vE '^[^:]*:[0-9]+: *#' \
+    | sed "s|^$1/||" \
+    | cut -d: -f1,2
+}
+
+# ---------------------------------------------------------------------------
+# selftest — fatal, runs before every scan
+# ---------------------------------------------------------------------------
+selftest() {
+  d=$(mktemp -d)
+  mkdir -p "$d/vendor"
+  # must FAIL (the access.rs defect shape)
+  printf 'fn f():\n    val i = resolve_field_index(n).unwrap_or(0)\n' > "$d/bad.spl"
+  # must PASS: out-of-domain sentinel
+  printf 'fn f():\n    val i = s.index_of("x").unwrap_or(-1)\n' > "$d/sentinel.spl"
+  # must PASS: not a lookup receiver
+  printf 'fn f():\n    val p = cfg.port_setting().unwrap_or(0)\n' > "$d/cfg.spl"
+  # must PASS: reasoned suppression
+  printf 'fn f():\n    val i = resolve(n).unwrap_or(0)  # lint:allow(silent_default) pre-checked\n' > "$d/sup.spl"
+  # must FAIL: bare suppression carries no reason, so it does not suppress
+  printf 'fn f():\n    val i = resolve(n).unwrap_or(0)  # lint:allow(silent_default)\n' > "$d/nosup.spl"
+  # must PASS: vendored code is never scanned
+  printf 'fn f():\n    val i = resolve(n).unwrap_or(0)\n' > "$d/vendor/v.spl"
+
+  out=$(scan_tree "$d")
+  st_fail=0
+  for f in bad.spl nosup.spl; do
+    echo "$out" | $GREP -q "^$f:" || { echo "selftest: expected a finding in $f"; st_fail=1; }
+  done
+  for f in sentinel.spl cfg.spl sup.spl vendor/v.spl; do
+    if echo "$out" | $GREP -q "^$f:"; then
+      echo "selftest: unexpected finding in $f"; st_fail=1
+    fi
+  done
+  # empty tree must yield zero, forcing the caller to ERROR rather than pass
+  e=$(mktemp -d)
+  [ -z "$(scan_tree "$e")" ] || { echo "selftest: empty tree produced findings"; st_fail=1; }
+  rm -rf "$d" "$e"
+  [ "$st_fail" -eq 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+}
+
+selftest
+[ "${1:-}" = "--selftest" ] && { echo "PASS — 7 selftest fixture(s) checked, 0 failures"; exit 0; }
+
+# ---------------------------------------------------------------------------
+# scan
+# ---------------------------------------------------------------------------
+CUR=$(scan_tree "$ROOT/src")
+CANDIDATES=$(find "$ROOT/src" -name '*.spl' -not -path '*/vendor/*' -print0 2>/dev/null \
+  | xargs -0 $GREP -chE "$DEFAULT_RE" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+
+if [ "${CANDIDATES:-0}" -eq 0 ]; then
+  echo "ERROR — nothing was checked"
+  exit 2
+fi
+
+if [ "${1:-}" = "--generate-baseline" ]; then
+  printf '%s\n' "$CUR" | $GREP -v '^$' | sort > "$BASELINE"
+  echo "PASS — baseline regenerated with $(wc -l < "$BASELINE") entr(ies)"
+  exit 0
+fi
+
+[ -f "$BASELINE" ] || : > "$BASELINE"
+BASE_N=$(  $GREP -c . "$BASELINE" 2>/dev/null || echo 0)
+NEW=$(printf '%s\n' "$CUR" | $GREP -v '^$' | sort | comm -23 - "$BASELINE")
+NEW_N=$(printf '%s\n' "$NEW" | $GREP -c . || true)
+
+if [ "${NEW_N:-0}" -gt 0 ]; then
+  printf '%s\n' "$NEW"
+  echo "FAIL — $CANDIDATES candidate(s) checked, $NEW_N new fail-open: $(printf '%s' "$NEW" | tr '\n' ' ')"
+  exit 1
+fi
+
+echo "PASS — $CANDIDATES candidate(s) checked, 0 new fail-open (baselined: $BASE_N)"
+exit 0

@@ -1,0 +1,110 @@
+#!/bin/sh
+# check-codegen-unlowered-mir-fails-build.shs
+#
+# GATE: a MIR instruction kind the LLVM/C backend cannot lower must FAIL THE
+# BUILD with a named, coded diagnostic -- it must NOT produce a linked binary
+# that reports rc=0 / step 6/6 and then panics (or computes garbage) at run
+# time.
+#
+# Incident (2026-08-23,
+# doc/08_tracking/bug/llvm_backend_unlowered_mir_kind_fails_open_2026-08-23.md):
+# an ordinary `Result<i64,text>` + `?` program built rc=0, linked, reported
+# step 6/6, and then died at RUN time with
+#   PANIC: E-BACKEND-LLVM-INST-ResultMatchSemantic
+# because MirToLlvm.emit_unsupported_panic emitted an @rt_panic call into the
+# generated IR instead of raising a compile error. 33 MirInstKind variants
+# reached that helper, so an unknown number of defects could ship silently.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> fixture(s) built, 0 fail-open
+#   FAIL  — ...
+#   ERROR — nothing was checked
+# A run that built 0 fixtures is ERROR, never a pass. A missing compiler is
+# ERROR, never a pass: absence of a compiler is absence of evidence.
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-}
+WORK=${WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/unlowered-mir-XXXXXX")}
+mkdir -p "$WORK" 2>/dev/null
+CHECKED=0
+OFFENDERS=""
+
+verdict_error() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+# ---------------------------------------------------------------- selftest
+# Fatal, runs first, no network / no compiler needed: proves the grep this
+# gate relies on discriminates a fail-OPEN log from a fail-CLOSED one.
+selftest() {
+    open_log="$WORK/st_open.log"; closed_log="$WORK/st_closed.log"
+    printf '[build] link 1/1 step 6/6 done\n' > "$open_log"
+    printf '[mir-to-llvm] E-BACKEND-LLVM-INST-ResultMatchSemantic at=x\nerror: E-BACKEND-LLVM-INST-ResultMatchSemantic: LLVM backend does not lower ResultMatchSemantic\n' > "$closed_log"
+    if grep -q '^error: E-BACKEND-LLVM-INST-' "$open_log"; then
+        echo "selftest FAILED: fail-open log misread as fail-closed"; exit 2
+    fi
+    if ! grep -q '^error: E-BACKEND-LLVM-INST-' "$closed_log"; then
+        echo "selftest FAILED: fail-closed log not recognised"; exit 2
+    fi
+}
+selftest
+
+# ------------------------------------------------------------ locate binary
+if [ -z "$SIMPLE_BIN" ]; then
+    for cand in "$ROOT/bin/simple" \
+                "$ROOT/bin/release/x86_64-unknown-linux-gnu/simple"; do
+        if [ -x "$cand" ] && [ ! -L "$cand" -o -e "$cand" ]; then SIMPLE_BIN="$cand"; break; fi
+    done
+fi
+[ -n "$SIMPLE_BIN" ] && [ -x "$SIMPLE_BIN" ] || verdict_error "no runnable simple compiler; set SIMPLE_BIN"
+
+# --------------------------------------------------------------- fixture(s)
+SRC="$WORK/src"
+mkdir -p "$SRC/unlowered"
+cat > "$SRC/unlowered/main.spl" <<'SPL'
+fn half(n: i64) -> Result<i64, text>:
+    if n % 2 == 0: Ok(n / 2)
+    else: Err("odd")
+fn run(n: i64) -> Result<i64, text>:
+    val h = half(n)?
+    Ok(h + 1)
+fn main() -> void:
+    match run(8):
+        case Ok(v): print(v.to_text())
+        case Err(e): print(e)
+SPL
+
+LOG="$WORK/build.log"
+OUT="$WORK/out_unlowered"
+SIMPLE_TIMEOUT_SECONDS=0 TMPDIR="$WORK" SIMPLE_CACHE_SCOPE=unlowered_mir_gate \
+    timeout "${BUILD_TIMEOUT:-2400}" "$SIMPLE_BIN" native-build \
+    --source "$SRC" --entry-closure --entry "$SRC/unlowered/main.spl" \
+    --threads "${THREADS:-4}" -o "$OUT" > "$LOG" 2>&1
+RC=$?
+CHECKED=$((CHECKED + 1))
+
+if [ "$RC" -eq 124 ]; then verdict_error "build timed out; no evidence either way"; fi
+
+if [ "$RC" -eq 0 ]; then
+    # rc=0 is only acceptable if the backend really lowered the construct --
+    # i.e. the produced binary RUNS and prints the right answer. rc=0 plus a
+    # runtime panic is precisely the fail-open being gated.
+    RUNOUT=$("$OUT" 2>&1)
+    RUNRC=$?
+    if [ "$RUNRC" -ne 0 ] || echo "$RUNOUT" | grep -q 'E-BACKEND-LLVM-INST-'; then
+        OFFENDERS="build reported rc=0 but the binary failed at run time (rc=$RUNRC): $(echo "$RUNOUT" | head -1)"
+    elif [ "$RUNOUT" != "5" ]; then
+        OFFENDERS="build reported rc=0 but the binary printed '$RUNOUT', expected '5'"
+    fi
+else
+    if ! grep -q '^error: E-BACKEND-LLVM-INST-' "$LOG"; then
+        OFFENDERS="build failed (rc=$RC) but emitted no named E-BACKEND-LLVM-INST-* diagnostic; log $LOG"
+    fi
+fi
+
+[ "$CHECKED" -gt 0 ] || verdict_error "0 fixtures built"
+if [ -n "$OFFENDERS" ]; then
+    echo "FAIL — $CHECKED fixture(s) built, fail-open detected: $OFFENDERS"
+    exit 1
+fi
+echo "PASS — $CHECKED fixture(s) built, 0 fail-open"
+exit 0

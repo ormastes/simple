@@ -1,0 +1,803 @@
+#!/bin/sh
+# Build and verify the only native driver admitted by the macOS GPU 2D live
+# evidence lanes.  The manifest is intentionally line-oriented but is never
+# sourced: all values are read as data and every binding is re-derived here.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+cd "$ROOT_DIR"
+BOOTSTRAP_STAGE3_FACADE_PATH=\
+"$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+BUILD_ROOT="$ROOT_DIR/build/macos_gpu_2d_live_native"
+COMPILER_IDENTITY="canonical-pure-simple-stage3-with-bound-backfill-v1"
+MANIFEST_SCHEMA="macos-gpu-2d-live-native-manifest-v4"
+SOURCE_INPUT_ROOT_LIB="src/lib"
+SOURCE_INPUT_ROOT_RENDERING="test/02_integration/rendering"
+BUILD_WATCHDOG_TIMEOUT_SECS="${GPU_2D_NATIVE_BUILD_TIMEOUT_SECS:-240}"
+BUILD_WATCHDOG_TERM_GRACE_SECS="${GPU_2D_NATIVE_BUILD_TERM_GRACE_SECS:-10}"
+
+fail() {
+    echo "macOS GPU 2D native build: FAIL ($1)" >&2
+    exit 1
+}
+
+[ -z "${GPU_2D_LIVE_WINIT_LIB:-}" ] ||
+    fail "arbitrary-winit-provider-supplied"
+[ -z "${GPU_2D_LIVE_RUNTIME_DYLIB:-}" ] ||
+    fail "arbitrary-runtime-provider-supplied"
+[ -z "${GPU_2D_LIVE_RUNTIME_C_DYLIB:-}" ] ||
+    fail "arbitrary-runtime-c-provider-supplied"
+
+sha256_file() {
+    [ -f "$1" ] || fail "hashed-file-missing"
+    shasum -a 256 "$1" | awk '{print $1}'
+}
+
+canonical_file() {
+    [ -f "$1" ] || fail "canonical-file-missing"
+    [ ! -L "$1" ] || fail "symlinked-file-not-trusted"
+    dir="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)"
+    printf '%s/%s\n' "$dir" "$(basename -- "$1")"
+}
+
+digest_args() {
+    for argument in "$@"; do
+        # Length-prefixing makes the digest independent of argument boundaries.
+        printf '%s:%s\n' "${#argument}" "$argument"
+    done | shasum -a 256 | awk '{print $1}'
+}
+
+positive_integer() {
+    case "${1:-}" in
+        ""|0|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+source_inputs_snapshot_once() {
+    snapshot_path="$1"
+    snapshot_root="$2"
+    shift 2
+    snapshot_tmp="$snapshot_path.tmp.$$"
+    snapshot_paths_tmp="$snapshot_path.paths.tmp.$$"
+    snapshot_paths_unsorted_tmp="$snapshot_path.paths-unsorted.tmp.$$"
+    snapshot_hashes_tmp="$snapshot_path.hashes.tmp.$$"
+    rm -f "$snapshot_tmp" "$snapshot_paths_tmp" \
+        "$snapshot_paths_unsorted_tmp" "$snapshot_hashes_tmp"
+    (
+        cd "$snapshot_root"
+        for source_root in "$@"; do
+            [ -d "$source_root" ] || fail "source-input-root-missing"
+            LC_ALL=C find "$source_root" \
+                \( -type f -o -type l \) -print
+        done
+    ) >"$snapshot_paths_unsorted_tmp"
+    LC_ALL=C sort -u "$snapshot_paths_unsorted_tmp" >"$snapshot_paths_tmp"
+    rm -f "$snapshot_paths_unsorted_tmp"
+    [ -s "$snapshot_paths_tmp" ] || fail "source-input-snapshot-empty"
+    (
+        cd "$snapshot_root"
+        # Batch hashing preserves the sorted path order while avoiding one
+        # shasum process per source file (thousands on a full src/lib tree).
+        while IFS= read -r snapshot_source_path; do
+            if [ -L "$snapshot_source_path" ]; then
+                snapshot_link_target="$(readlink "$snapshot_source_path")" ||
+                    exit 1
+                snapshot_link_sha="$(
+                    printf '%s' "$snapshot_link_target" |
+                        shasum -a 256 | awk '{print $1}'
+                )" || exit 1
+                printf 'link:%s:%s:%s:%s\n' \
+                    "${#snapshot_source_path}" "$snapshot_source_path" \
+                    "${#snapshot_link_target}" "$snapshot_link_sha"
+            else
+                snapshot_file_sha="$(sha256_file "$snapshot_source_path")" ||
+                    exit 1
+                snapshot_executable=0
+                [ ! -x "$snapshot_source_path" ] ||
+                    snapshot_executable=1
+                printf 'file:%s:%s:%s:%s\n' \
+                    "${#snapshot_source_path}" "$snapshot_source_path" \
+                    "$snapshot_executable" "$snapshot_file_sha"
+            fi
+        done <"$snapshot_paths_tmp"
+    ) >"$snapshot_tmp" || fail "source-input-snapshot-hash-failed"
+    [ "$(wc -l <"$snapshot_paths_tmp" | tr -d ' ')" = \
+        "$(wc -l <"$snapshot_tmp" | tr -d ' ')" ] ||
+        fail "source-input-snapshot-count-mismatch"
+    rm -f "$snapshot_paths_tmp" "$snapshot_hashes_tmp"
+    [ -s "$snapshot_tmp" ] || fail "source-input-snapshot-empty"
+    mv "$snapshot_tmp" "$snapshot_path"
+}
+
+source_inputs_snapshot() {
+    snapshot_path="$1"
+    shift
+    snapshot_first="$snapshot_path.first.$$"
+    snapshot_second="$snapshot_path.second.$$"
+    source_inputs_snapshot_once "$snapshot_first" "$@"
+    snapshot_first_sha="$(sha256_file "$snapshot_first")"
+    source_inputs_snapshot_once "$snapshot_second" "$@"
+    snapshot_second_sha="$(sha256_file "$snapshot_second")"
+    [ "$snapshot_first_sha" = "$snapshot_second_sha" ] &&
+        cmp -s "$snapshot_first" "$snapshot_second" ||
+        fail "source-input-snapshot-raced"
+    mv "$snapshot_second" "$snapshot_path"
+    rm -f "$snapshot_first"
+    SOURCE_INPUT_FILE_COUNT="$(wc -l <"$snapshot_path" | tr -d ' ')"
+    SOURCE_INPUT_FINGERPRINT="$(sha256_file "$snapshot_path")"
+}
+
+run_with_wall_clock_watchdog() {
+    watchdog_log="$1"
+    watchdog_timeout="$2"
+    watchdog_grace="$3"
+    shift 3
+    positive_integer "$watchdog_timeout" || fail "native-build-watchdog-timeout-invalid"
+    positive_integer "$watchdog_grace" || fail "native-build-watchdog-grace-invalid"
+
+    : >"$watchdog_log"
+    # A monitored background job is its own process-group leader on macOS.
+    # Keep the whole compiler tree in that group so timeout cleanup cannot
+    # orphan native compiler/linker descendants when the leader is signalled.
+    set -m
+    "$@" >"$watchdog_log" 2>&1 &
+    watchdog_target_pid=$!
+    set +m
+    WATCHDOG_PROCESS_GROUP_ID="$watchdog_target_pid"
+    watchdog_started_at="$(date +%s)"
+    watchdog_deadline=$((watchdog_started_at + watchdog_timeout))
+    WATCHDOG_TIMED_OUT=0
+    WATCHDOG_TERM_SENT=0
+    WATCHDOG_KILL_SENT=0
+
+    while kill -0 "-$WATCHDOG_PROCESS_GROUP_ID" 2>/dev/null; do
+        watchdog_now="$(date +%s)"
+        if [ "$watchdog_now" -ge "$watchdog_deadline" ]; then
+            WATCHDOG_TIMED_OUT=1
+            WATCHDOG_TERM_SENT=1
+            kill -TERM "-$WATCHDOG_PROCESS_GROUP_ID" 2>/dev/null || true
+            watchdog_grace_deadline=$((watchdog_now + watchdog_grace))
+            while kill -0 "-$WATCHDOG_PROCESS_GROUP_ID" 2>/dev/null; do
+                watchdog_now="$(date +%s)"
+                [ "$watchdog_now" -lt "$watchdog_grace_deadline" ] || break
+                sleep 1
+            done
+            if kill -0 "-$WATCHDOG_PROCESS_GROUP_ID" 2>/dev/null; then
+                WATCHDOG_KILL_SENT=1
+                kill -KILL "-$WATCHDOG_PROCESS_GROUP_ID" 2>/dev/null || true
+            fi
+            break
+        fi
+        sleep 1
+    done
+
+    set +e
+    wait "$watchdog_target_pid" 2>>"$watchdog_log"
+    WATCHDOG_WAIT_STATUS=$?
+    set -e
+    if [ "$WATCHDOG_TIMED_OUT" = 1 ]; then
+        return 124
+    fi
+    return "$WATCHDOG_WAIT_STATUS"
+}
+
+manifest_value() {
+    key="$1"
+    manifest="$2"
+    count="$(grep -c "^${key}=" "$manifest" || true)"
+    [ "$count" = 1 ] || fail "manifest-${key}-not-singular"
+    sed -n "s/^${key}=//p" "$manifest"
+}
+
+require_value() {
+    value="$(manifest_value "$1" "$2")"
+    [ -n "$value" ] || fail "manifest-$1-missing"
+    printf '%s\n' "$value"
+}
+
+resolve_compiler() {
+    host_platform="$(bootstrap_stage3_host_platform)" ||
+        fail "unsupported-host-platform"
+    case "$host_platform" in
+        aarch64-apple-darwin|x86_64-apple-darwin) ;;
+        *) fail "host-is-not-macos" ;;
+    esac
+    candidate="$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/$host_platform/simple"
+    manifest="$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/$host_platform/provenance.env"
+    [ -x "$candidate" ] && [ ! -L "$candidate" ] ||
+        fail "canonical-stage3-compiler-missing"
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] ||
+        fail "canonical-stage3-provenance-missing"
+    canonical_candidate="$(canonical_file "$candidate")"
+    canonical_manifest="$(canonical_file "$manifest")"
+    candidate_sha_before_verify="$(sha256_file "$canonical_candidate")"
+    manifest_sha_before_verify="$(sha256_file "$canonical_manifest")"
+    bootstrap_stage3_verify_manifest \
+        "$canonical_manifest" "$ROOT_DIR" "$canonical_candidate" >/dev/null ||
+        fail "canonical-stage3-provenance-invalid"
+    candidate_sha_after_verify="$(sha256_file "$canonical_candidate")"
+    manifest_sha_after_verify="$(sha256_file "$canonical_manifest")"
+    [ "$candidate_sha_before_verify" = "$candidate_sha_after_verify" ] ||
+        fail "canonical-stage3-compiler-changed-during-verification"
+    [ "$manifest_sha_before_verify" = "$manifest_sha_after_verify" ] ||
+        fail "canonical-stage3-provenance-changed-during-verification"
+    COMPILER_PROVENANCE_MANIFEST_PATH="$canonical_manifest"
+    COMPILER_PATH="$canonical_candidate"
+    COMPILER_VERIFIED_SHA256="$candidate_sha_after_verify"
+    COMPILER_PROVENANCE_VERIFIED_SHA256="$manifest_sha_after_verify"
+}
+
+freeze_verified_compiler() {
+    compiler_origin="$COMPILER_PATH"
+    provenance_origin="$COMPILER_PROVENANCE_MANIFEST_PATH"
+    compiler_origin_sha_before="$(sha256_file "$compiler_origin")"
+    provenance_origin_sha_before="$(sha256_file "$provenance_origin")"
+    [ "$compiler_origin_sha_before" = "$COMPILER_VERIFIED_SHA256" ] ||
+        fail "compiler-changed-after-provenance-verification"
+    [ "$provenance_origin_sha_before" = \
+        "$COMPILER_PROVENANCE_VERIFIED_SHA256" ] ||
+        fail "provenance-changed-after-verification"
+    mkdir -p "$BUILD_ROOT/$BACKEND"
+    [ ! -L "$BUILD_ROOT/$BACKEND" ] ||
+        fail "compiler-private-snapshot-parent-symlinked"
+    compiler_snapshot_parent="$(
+        CDPATH= cd -- "$BUILD_ROOT/$BACKEND" && pwd -P
+    )" || fail "compiler-private-snapshot-parent-invalid"
+    [ "$compiler_snapshot_parent" = "$BUILD_ROOT/$BACKEND" ] ||
+        fail "compiler-private-snapshot-parent-not-canonical"
+    compiler_snapshot_dir="$(
+        mktemp -d "$BUILD_ROOT/$BACKEND/compiler-admission.XXXXXX"
+    )" || fail "compiler-private-snapshot-create-failed"
+    [ ! -L "$compiler_snapshot_dir" ] ||
+        fail "compiler-private-snapshot-dir-symlinked"
+    compiler_snapshot="$compiler_snapshot_dir/simple"
+    provenance_snapshot="$compiler_snapshot_dir/provenance.env"
+    cp -p "$compiler_origin" "$compiler_snapshot" ||
+        fail "compiler-private-snapshot-copy-failed"
+    cp -p "$provenance_origin" "$provenance_snapshot" ||
+        fail "provenance-private-snapshot-copy-failed"
+    [ -x "$compiler_snapshot" ] && [ ! -L "$compiler_snapshot" ] ||
+        fail "compiler-private-snapshot-invalid"
+    [ -f "$provenance_snapshot" ] && [ ! -L "$provenance_snapshot" ] ||
+        fail "provenance-private-snapshot-invalid"
+    compiler_origin_sha_after="$(sha256_file "$compiler_origin")"
+    provenance_origin_sha_after="$(sha256_file "$provenance_origin")"
+    [ "$compiler_origin_sha_before" = "$compiler_origin_sha_after" ] &&
+        [ "$compiler_origin_sha_before" = \
+            "$(sha256_file "$compiler_snapshot")" ] ||
+        fail "compiler-changed-during-private-snapshot"
+    [ "$provenance_origin_sha_before" = "$provenance_origin_sha_after" ] &&
+        [ "$provenance_origin_sha_before" = \
+            "$(sha256_file "$provenance_snapshot")" ] ||
+        fail "provenance-changed-during-private-snapshot"
+    chmod 500 "$compiler_snapshot_dir" "$compiler_snapshot" ||
+        fail "compiler-private-snapshot-permission-failed"
+    chmod 400 "$provenance_snapshot" ||
+        fail "provenance-private-snapshot-permission-failed"
+    COMPILER_ORIGIN_PATH="$compiler_origin"
+    COMPILER_ORIGIN_SHA256="$compiler_origin_sha_before"
+    COMPILER_PROVENANCE_ORIGIN_PATH="$provenance_origin"
+    COMPILER_PROVENANCE_ORIGIN_SHA256="$provenance_origin_sha_before"
+    COMPILER_PATH="$(canonical_file "$compiler_snapshot")"
+    COMPILER_PROVENANCE_MANIFEST_PATH="$(canonical_file "$provenance_snapshot")"
+    COMPILER_ADMITTED_SHA256="$(sha256_file "$COMPILER_PATH")"
+    COMPILER_PROVENANCE_ADMITTED_SHA256="$(
+        sha256_file "$COMPILER_PROVENANCE_MANIFEST_PATH"
+    )"
+}
+
+assert_frozen_compiler() {
+    [ -x "$COMPILER_PATH" ] && [ ! -L "$COMPILER_PATH" ] ||
+        fail "admitted-compiler-missing"
+    [ "$(canonical_file "$COMPILER_PATH")" = "$COMPILER_PATH" ] ||
+        fail "admitted-compiler-path-not-canonical"
+    [ "$(sha256_file "$COMPILER_PATH")" = "$COMPILER_ADMITTED_SHA256" ] ||
+        fail "admitted-compiler-mutated"
+    [ "$(sha256_file "$COMPILER_PROVENANCE_MANIFEST_PATH")" = \
+        "$COMPILER_PROVENANCE_ADMITTED_SHA256" ] ||
+        fail "admitted-provenance-mutated"
+}
+
+configure_backend() {
+    BACKEND="$1"
+    case "$BACKEND" in
+        vulkan|metal) ;;
+        *) fail "invalid-backend" ;;
+    esac
+    ENTRY="$ROOT_DIR/test/02_integration/rendering/macos_${BACKEND}_2d_live_harness.spl"
+    SHARED_HARNESS="$ROOT_DIR/test/02_integration/rendering/macos_gpu_2d_live_harness.spl"
+    FIXTURE_SOURCE="$ROOT_DIR/test/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture.spl"
+    BACKEND_SOURCE="$ROOT_DIR/src/lib/gc_async_mut/gpu/engine2d/backend_${BACKEND}.spl"
+    OUTPUT_PATH="$BUILD_ROOT/$BACKEND/macos_${BACKEND}_2d_live_native"
+    MANIFEST_PATH="$BUILD_ROOT/$BACKEND/trusted-build.env"
+    BUILD_LOG_PATH="$BUILD_ROOT/$BACKEND/native-build.log"
+    SOURCE_INPUTS_BEFORE_PATH="$BUILD_ROOT/$BACKEND/source-inputs-before.txt"
+    SOURCE_INPUTS_AFTER_PATH="$BUILD_ROOT/$BACKEND/source-inputs-after.txt"
+    BUILD_TRANSCRIPT_PATH="$BUILD_ROOT/$BACKEND/native-build.transcript"
+    BUILD_HOME="$BUILD_ROOT/$BACKEND/build-home"
+    BUILD_TMP="$BUILD_ROOT/$BACKEND/build-tmp"
+    BUILD_CACHE="$BUILD_ROOT/$BACKEND/native-cache"
+    WINIT_PROVIDER="$ROOT_DIR/build/sffi/libspl_winit.dylib"
+    SIMPLE_RUNTIME_PROVIDER="$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib"
+    SIMPLE_RUNTIME_C_PROVIDER="$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.dylib"
+    BUILD_ARGS_SHA256="$(digest_args native-build --backend cranelift --threads 4 --cache-dir "$BUILD_CACHE" --runtime-bundle core-c-bootstrap --source src/lib --source test/02_integration/rendering --entry-closure --entry "test/02_integration/rendering/macos_${BACKEND}_2d_live_harness.spl" --strip --verbose --output "build/macos_gpu_2d_live_native/${BACKEND}/macos_${BACKEND}_2d_live_native")"
+}
+
+build_environment_sha256() {
+    digest_args \
+        "HOME=$BUILD_HOME" "PATH=$PATH" "TMPDIR=$BUILD_TMP" \
+        LC_ALL=C LANG=C \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        "SIMPLE_LIB=$ROOT_DIR/src" \
+        SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 \
+        "SIMPLE_LINK_OBJECTS=$WINIT_PROVIDER_PATH:$SIMPLE_RUNTIME_PROVIDER_PATH:$SIMPLE_RUNTIME_C_PROVIDER_PATH"
+}
+
+write_manifest() {
+    manifest_tmp="$MANIFEST_PATH.tmp.$$"
+    umask 077
+    {
+        echo "schema=$MANIFEST_SCHEMA"
+        echo "status=pass"
+        echo "built_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "backend=$BACKEND"
+        echo "entry_path=$ENTRY"
+        echo "entry_sha256=$(sha256_file "$ENTRY")"
+        echo "shared_harness_path=$SHARED_HARNESS"
+        echo "shared_harness_sha256=$(sha256_file "$SHARED_HARNESS")"
+        echo "fixture_path=$FIXTURE_SOURCE"
+        echo "fixture_sha256=$(sha256_file "$FIXTURE_SOURCE")"
+        echo "backend_source_path=$BACKEND_SOURCE"
+        echo "backend_source_sha256=$(sha256_file "$BACKEND_SOURCE")"
+        echo "source_input_file_count=$SOURCE_INPUT_FILE_COUNT"
+        echo "source_input_fingerprint=$SOURCE_INPUT_FINGERPRINT"
+        echo "repo_revision=$(git rev-parse HEAD)"
+        echo "repo_fingerprint=$(git rev-parse HEAD | shasum -a 256 | awk '{print $1}')"
+        echo "shared_scene_fingerprint=$(cat "$SHARED_HARNESS" "$FIXTURE_SOURCE" | shasum -a 256 | awk '{print $1}')"
+        echo "build_compiler_abs_path=$COMPILER_PATH"
+        echo "build_compiler_sha256=$(sha256_file "$COMPILER_PATH")"
+        echo "build_compiler_origin_path=$COMPILER_ORIGIN_PATH"
+        echo "build_compiler_origin_sha256=$COMPILER_ORIGIN_SHA256"
+        echo "build_compiler_identity=$COMPILER_IDENTITY"
+        echo "build_compiler_source_kind=canonical-pure-simple-bootstrap-stage3"
+        echo "build_compiler_native_build_backfill_status=bound-bootstrap-native-all"
+        echo "build_compiler_provenance_manifest_path=$COMPILER_PROVENANCE_MANIFEST_PATH"
+        echo "build_compiler_provenance_manifest_sha256=$(sha256_file "$COMPILER_PROVENANCE_MANIFEST_PATH")"
+        echo "build_compiler_provenance_origin_path=$COMPILER_PROVENANCE_ORIGIN_PATH"
+        echo "build_compiler_provenance_origin_sha256=$COMPILER_PROVENANCE_ORIGIN_SHA256"
+        echo "build_environment_sha256=$(build_environment_sha256)"
+        echo "build_transcript_path=$BUILD_TRANSCRIPT_PATH"
+        echo "build_transcript_sha256=$(sha256_file "$BUILD_TRANSCRIPT_PATH")"
+        echo "build_args_sha256=$BUILD_ARGS_SHA256"
+        echo "winit_provider_path=$WINIT_PROVIDER_PATH"
+        echo "winit_provider_sha256=$(sha256_file "$WINIT_PROVIDER_PATH")"
+        echo "simple_runtime_provider_path=$SIMPLE_RUNTIME_PROVIDER_PATH"
+        echo "simple_runtime_provider_sha256=$(sha256_file "$SIMPLE_RUNTIME_PROVIDER_PATH")"
+        echo "simple_runtime_c_provider_path=$SIMPLE_RUNTIME_C_PROVIDER_PATH"
+        echo "simple_runtime_c_provider_sha256=$(sha256_file "$SIMPLE_RUNTIME_C_PROVIDER_PATH")"
+        echo "output_path=$OUTPUT_PATH"
+        echo "output_sha256=$(sha256_file "$OUTPUT_PATH")"
+        echo "output_status=pass"
+    } >"$manifest_tmp"
+    mv "$manifest_tmp" "$MANIFEST_PATH"
+}
+
+verify_manifest() {
+    manifest="$1"
+    [ -f "$manifest" ] || fail "trusted-build-manifest-missing"
+    [ ! -L "$manifest" ] || fail "trusted-build-manifest-symlinked"
+
+    for key in schema status built_at_utc backend entry_path entry_sha256 shared_harness_path \
+        shared_harness_sha256 fixture_path fixture_sha256 backend_source_path \
+        backend_source_sha256 source_input_file_count source_input_fingerprint \
+        repo_revision repo_fingerprint shared_scene_fingerprint \
+        build_compiler_abs_path build_compiler_sha256 build_compiler_origin_path \
+        build_compiler_origin_sha256 build_compiler_identity build_compiler_source_kind \
+        build_compiler_native_build_backfill_status \
+        build_compiler_provenance_manifest_path build_compiler_provenance_manifest_sha256 \
+        build_compiler_provenance_origin_path build_compiler_provenance_origin_sha256 \
+        build_environment_sha256 build_transcript_path \
+        build_transcript_sha256 \
+        build_args_sha256 winit_provider_path winit_provider_sha256 \
+        simple_runtime_provider_path simple_runtime_provider_sha256 \
+        simple_runtime_c_provider_path simple_runtime_c_provider_sha256 output_path \
+        output_sha256 output_status; do
+        require_value "$key" "$manifest" >/dev/null
+    done
+
+    [ "$(manifest_value schema "$manifest")" = "$MANIFEST_SCHEMA" ] || fail "manifest-schema-mismatch"
+    [ "$(manifest_value status "$manifest")" = pass ] || fail "manifest-status-not-pass"
+    case "$(manifest_value built_at_utc "$manifest")" in
+        ????-??-??T??:??:??Z) ;;
+        *) fail "manifest-built-at-invalid" ;;
+    esac
+    [ "$(manifest_value backend "$manifest")" = "$BACKEND" ] || fail "manifest-backend-mismatch"
+    [ "$(manifest_value entry_path "$manifest")" = "$ENTRY" ] || fail "manifest-entry-path-mismatch"
+    [ "$(manifest_value entry_sha256 "$manifest")" = "$(sha256_file "$ENTRY")" ] || fail "manifest-entry-sha256-mismatch"
+    [ "$(manifest_value shared_harness_path "$manifest")" = "$SHARED_HARNESS" ] || fail "manifest-shared-harness-path-mismatch"
+    [ "$(manifest_value shared_harness_sha256 "$manifest")" = "$(sha256_file "$SHARED_HARNESS")" ] || fail "manifest-shared-harness-sha256-mismatch"
+    [ "$(manifest_value fixture_path "$manifest")" = "$FIXTURE_SOURCE" ] || fail "manifest-fixture-path-mismatch"
+    [ "$(manifest_value fixture_sha256 "$manifest")" = "$(sha256_file "$FIXTURE_SOURCE")" ] || fail "manifest-fixture-sha256-mismatch"
+    [ "$(manifest_value backend_source_path "$manifest")" = "$BACKEND_SOURCE" ] || fail "manifest-backend-source-path-mismatch"
+    [ "$(manifest_value backend_source_sha256 "$manifest")" = "$(sha256_file "$BACKEND_SOURCE")" ] || fail "manifest-backend-source-sha256-mismatch"
+    verify_snapshot="$BUILD_ROOT/$BACKEND/source-inputs-verify.$$"
+    source_inputs_snapshot "$verify_snapshot" "$ROOT_DIR" \
+        "$SOURCE_INPUT_ROOT_LIB" "$SOURCE_INPUT_ROOT_RENDERING"
+    verify_source_input_file_count="$SOURCE_INPUT_FILE_COUNT"
+    verify_source_input_fingerprint="$SOURCE_INPUT_FINGERPRINT"
+    rm -f "$verify_snapshot"
+    [ "$(manifest_value source_input_file_count "$manifest")" = "$verify_source_input_file_count" ] || fail "manifest-source-input-file-count-mismatch"
+    [ "$(manifest_value source_input_fingerprint "$manifest")" = "$verify_source_input_fingerprint" ] || fail "manifest-source-input-fingerprint-mismatch"
+    [ "$(manifest_value repo_revision "$manifest")" = "$(git rev-parse HEAD)" ] || fail "manifest-repo-revision-mismatch"
+    [ "$(manifest_value repo_fingerprint "$manifest")" = "$(git rev-parse HEAD | shasum -a 256 | awk '{print $1}')" ] || fail "manifest-repo-fingerprint-mismatch"
+    expected_scene="$(cat "$SHARED_HARNESS" "$FIXTURE_SOURCE" | shasum -a 256 | awk '{print $1}')"
+    [ "$(manifest_value shared_scene_fingerprint "$manifest")" = "$expected_scene" ] || fail "manifest-shared-scene-fingerprint-mismatch"
+
+    compiler_path="$(manifest_value build_compiler_abs_path "$manifest")"
+    case "$compiler_path" in
+        "$BUILD_ROOT/$BACKEND"/compiler-admission.*/simple) ;;
+        *) fail "manifest-compiler-path-not-private-admission" ;;
+    esac
+    [ "$(canonical_file "$compiler_path")" = "$compiler_path" ] ||
+        fail "manifest-compiler-path-not-canonical"
+    [ "$(manifest_value build_compiler_sha256 "$manifest")" = "$(sha256_file "$compiler_path")" ] || fail "manifest-build-compiler-sha256-mismatch"
+    expected_origin_platform="$(bootstrap_stage3_host_platform)" ||
+        fail "manifest-compiler-origin-platform-unsupported"
+    expected_compiler_origin="$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/$expected_origin_platform/simple"
+    [ "$(manifest_value build_compiler_origin_path "$manifest")" = \
+        "$expected_compiler_origin" ] ||
+        fail "manifest-compiler-origin-path-mismatch"
+    [ "$(manifest_value build_compiler_origin_sha256 "$manifest")" = \
+        "$(manifest_value build_compiler_sha256 "$manifest")" ] ||
+        fail "manifest-compiler-origin-sha256-mismatch"
+    [ "$(manifest_value build_compiler_identity "$manifest")" = "$COMPILER_IDENTITY" ] || fail "manifest-build-compiler-identity-mismatch"
+    compiler_provenance_manifest="$(
+        manifest_value build_compiler_provenance_manifest_path "$manifest"
+    )"
+    [ "$compiler_provenance_manifest" = \
+        "$(dirname -- "$compiler_path")/provenance.env" ] ||
+        fail "manifest-compiler-provenance-not-private-admission"
+    [ "$(canonical_file "$compiler_provenance_manifest")" = \
+        "$compiler_provenance_manifest" ] ||
+        fail "manifest-compiler-provenance-not-canonical"
+    [ "$(manifest_value build_compiler_provenance_manifest_path "$manifest")" = \
+        "$compiler_provenance_manifest" ] ||
+        fail "manifest-compiler-provenance-path-mismatch"
+    [ "$(manifest_value build_compiler_provenance_manifest_sha256 "$manifest")" = \
+        "$(sha256_file "$compiler_provenance_manifest")" ] ||
+        fail "manifest-compiler-provenance-sha256-mismatch"
+    expected_provenance_origin="$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/$expected_origin_platform/provenance.env"
+    [ "$(manifest_value build_compiler_provenance_origin_path "$manifest")" = \
+        "$expected_provenance_origin" ] ||
+        fail "manifest-compiler-provenance-origin-path-mismatch"
+    [ "$(manifest_value build_compiler_provenance_origin_sha256 "$manifest")" = \
+        "$(manifest_value build_compiler_provenance_manifest_sha256 "$manifest")" ] ||
+        fail "manifest-compiler-provenance-origin-sha256-mismatch"
+    compiler_origin_path="$(manifest_value build_compiler_origin_path "$manifest")"
+    compiler_origin_manifest="$(
+        manifest_value build_compiler_provenance_origin_path "$manifest"
+    )"
+    compiler_origin_sha_before="$(sha256_file "$compiler_origin_path")"
+    compiler_origin_manifest_sha_before="$(
+        sha256_file "$compiler_origin_manifest"
+    )"
+    bootstrap_stage3_verify_manifest "$compiler_origin_manifest" \
+        "$ROOT_DIR" "$compiler_origin_path" >/dev/null ||
+        fail "manifest-canonical-stage3-provenance-invalid"
+    compiler_origin_sha_after="$(sha256_file "$compiler_origin_path")"
+    compiler_origin_manifest_sha_after="$(
+        sha256_file "$compiler_origin_manifest"
+    )"
+    [ "$compiler_origin_sha_before" = "$compiler_origin_sha_after" ] &&
+        [ "$compiler_origin_sha_after" = \
+            "$(manifest_value build_compiler_origin_sha256 "$manifest")" ] &&
+        [ "$compiler_origin_sha_after" = \
+            "$(manifest_value build_compiler_sha256 "$manifest")" ] ||
+        fail "manifest-compiler-origin-reverification-mismatch"
+    [ "$compiler_origin_manifest_sha_before" = \
+        "$compiler_origin_manifest_sha_after" ] &&
+        [ "$compiler_origin_manifest_sha_after" = \
+            "$(manifest_value build_compiler_provenance_origin_sha256 \
+                "$manifest")" ] &&
+        [ "$compiler_origin_manifest_sha_after" = \
+            "$(manifest_value build_compiler_provenance_manifest_sha256 \
+                "$manifest")" ] ||
+        fail "manifest-provenance-origin-reverification-mismatch"
+    [ "$(manifest_value build_compiler_native_build_backfill_status "$manifest")" = \
+        bound-bootstrap-native-all ] ||
+        fail "manifest-build-compiler-native-build-backfill-status-mismatch"
+    [ "$(manifest_value build_args_sha256 "$manifest")" = "$BUILD_ARGS_SHA256" ] || fail "manifest-build-args-sha256-mismatch"
+
+    WINIT_PROVIDER_PATH="$(canonical_file "$WINIT_PROVIDER")"
+    SIMPLE_RUNTIME_PROVIDER_PATH="$(canonical_file "$SIMPLE_RUNTIME_PROVIDER")"
+    SIMPLE_RUNTIME_C_PROVIDER_PATH="$(canonical_file "$SIMPLE_RUNTIME_C_PROVIDER")"
+    [ "$(manifest_value winit_provider_path "$manifest")" = "$WINIT_PROVIDER_PATH" ] || fail "manifest-winit-provider-path-mismatch"
+    [ "$(manifest_value winit_provider_sha256 "$manifest")" = "$(sha256_file "$WINIT_PROVIDER_PATH")" ] || fail "manifest-winit-provider-sha256-mismatch"
+    [ "$(manifest_value simple_runtime_provider_path "$manifest")" = "$SIMPLE_RUNTIME_PROVIDER_PATH" ] || fail "manifest-runtime-provider-path-mismatch"
+    [ "$(manifest_value simple_runtime_provider_sha256 "$manifest")" = "$(sha256_file "$SIMPLE_RUNTIME_PROVIDER_PATH")" ] || fail "manifest-runtime-provider-sha256-mismatch"
+    [ "$(manifest_value simple_runtime_c_provider_path "$manifest")" = "$SIMPLE_RUNTIME_C_PROVIDER_PATH" ] || fail "manifest-runtime-c-provider-path-mismatch"
+    [ "$(manifest_value simple_runtime_c_provider_sha256 "$manifest")" = "$(sha256_file "$SIMPLE_RUNTIME_C_PROVIDER_PATH")" ] || fail "manifest-runtime-c-provider-sha256-mismatch"
+    [ "$(manifest_value build_compiler_source_kind "$manifest")" = \
+        canonical-pure-simple-bootstrap-stage3 ] ||
+        fail "manifest-build-compiler-source-kind-mismatch"
+    [ "$(manifest_value build_environment_sha256 "$manifest")" = "$(build_environment_sha256)" ] || fail "manifest-build-environment-sha256-mismatch"
+    [ "$(manifest_value build_transcript_path "$manifest")" = \
+        "$BUILD_TRANSCRIPT_PATH" ] ||
+        fail "manifest-build-transcript-path-mismatch"
+    [ "$(manifest_value build_transcript_sha256 "$manifest")" = \
+        "$(sha256_file "$BUILD_TRANSCRIPT_PATH")" ] ||
+        fail "manifest-build-transcript-sha256-mismatch"
+    bootstrap_stage3_verify_command_transcript "$BUILD_TRANSCRIPT_PATH" \
+        "$ROOT_DIR" SIMPLE_NO_STUB_FALLBACK=1 \
+        "SIMPLE_LIB=$ROOT_DIR/src" SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 \
+        "SIMPLE_LINK_OBJECTS=$WINIT_PROVIDER_PATH:$SIMPLE_RUNTIME_PROVIDER_PATH:$SIMPLE_RUNTIME_C_PROVIDER_PATH" \
+        -- "$compiler_path" native-build --backend cranelift --threads 4 \
+        --cache-dir "$BUILD_CACHE" --runtime-bundle core-c-bootstrap \
+        --source src/lib --source test/02_integration/rendering \
+        --entry-closure --entry \
+        "test/02_integration/rendering/macos_${BACKEND}_2d_live_harness.spl" \
+        --strip --verbose --output \
+        "build/macos_gpu_2d_live_native/${BACKEND}/macos_${BACKEND}_2d_live_native" ||
+        fail "manifest-build-transcript-invalid"
+    [ "$(manifest_value output_path "$manifest")" = "$OUTPUT_PATH" ] || fail "manifest-output-path-mismatch"
+    [ "$(manifest_value output_status "$manifest")" = pass ] || fail "manifest-output-status-not-pass"
+    [ -x "$OUTPUT_PATH" ] && [ ! -L "$OUTPUT_PATH" ] || fail "manifest-output-missing"
+    [ "$(manifest_value output_sha256 "$manifest")" = "$(sha256_file "$OUTPUT_PATH")" ] || fail "manifest-output-sha256-mismatch"
+    printf 'trusted_build_manifest_status=pass\ntrusted_build_manifest_output_path=%s\n' "$OUTPUT_PATH"
+}
+
+usage() {
+    echo "usage: sh scripts/check/build-macos-gpu-2d-live-native.shs --build <vulkan|metal> | --verify <vulkan|metal> <manifest-snapshot> [canonical-origin] | --self-test-contract" >&2
+    exit 2
+}
+
+if [ "${1:-}" = "--self-test-contract" ]; then
+    [ "$#" = 1 ] || usage
+    self_test_root="$(mktemp -d "${TMPDIR:-/tmp}/macos-gpu-2d-native-contract.XXXXXX")"
+    self_test_root="$(CDPATH= cd -- "$self_test_root" && pwd -P)"
+    trap 'rm -rf "$self_test_root"' EXIT HUP INT TERM
+    bootstrap_stage3_provenance_self_test \
+        "$self_test_root/stage3-provenance" ||
+        fail "self-test-stage3-provenance-contract-failed"
+
+    self_test_compiler_origin="$self_test_root/compiler-origin"
+    self_test_provenance_origin="$self_test_root/provenance-origin.env"
+    printf '#!/bin/sh\nexit 0\n' >"$self_test_compiler_origin"
+    chmod 700 "$self_test_compiler_origin"
+    printf 'schema=synthetic-provenance\n' >"$self_test_provenance_origin"
+    BUILD_ROOT="$self_test_root/private-build"
+    BACKEND=vulkan
+    COMPILER_PATH="$self_test_compiler_origin"
+    COMPILER_PROVENANCE_MANIFEST_PATH="$self_test_provenance_origin"
+    COMPILER_VERIFIED_SHA256="$(sha256_file "$self_test_compiler_origin")"
+    COMPILER_PROVENANCE_VERIFIED_SHA256="$(
+        sha256_file "$self_test_provenance_origin"
+    )"
+    cp -p "$self_test_compiler_origin" \
+        "$self_test_compiler_origin.saved"
+    printf '# origin tamper\n' >>"$self_test_compiler_origin"
+    if (freeze_verified_compiler >/dev/null 2>&1); then
+        fail "self-test-compiler-origin-tamper-not-detected"
+    fi
+    mv "$self_test_compiler_origin.saved" "$self_test_compiler_origin"
+    COMPILER_VERIFIED_SHA256="$(sha256_file "$self_test_compiler_origin")"
+    cp -p "$self_test_provenance_origin" \
+        "$self_test_provenance_origin.saved"
+    printf 'origin_tamper=true\n' >>"$self_test_provenance_origin"
+    if (freeze_verified_compiler >/dev/null 2>&1); then
+        fail "self-test-provenance-origin-tamper-not-detected"
+    fi
+    mv "$self_test_provenance_origin.saved" "$self_test_provenance_origin"
+    COMPILER_PROVENANCE_VERIFIED_SHA256="$(
+        sha256_file "$self_test_provenance_origin"
+    )"
+    freeze_verified_compiler
+    assert_frozen_compiler
+    case "$COMPILER_PATH:$COMPILER_PROVENANCE_MANIFEST_PATH" in
+        "$BUILD_ROOT/$BACKEND"/compiler-admission.*/simple:"$BUILD_ROOT/$BACKEND"/compiler-admission.*/provenance.env) ;;
+        *) fail "self-test-private-freeze-path-invalid" ;;
+    esac
+    chmod 700 "$(dirname -- "$COMPILER_PATH")" "$COMPILER_PATH"
+    printf 'tampered\n' >>"$COMPILER_PATH"
+    if (assert_frozen_compiler >/dev/null 2>&1); then
+        fail "self-test-private-compiler-tamper-not-detected"
+    fi
+    cp -p "$self_test_compiler_origin" "$COMPILER_PATH"
+    chmod 500 "$COMPILER_PATH"
+    assert_frozen_compiler
+    chmod 600 "$COMPILER_PROVENANCE_MANIFEST_PATH"
+    printf 'tampered=true\n' >>"$COMPILER_PROVENANCE_MANIFEST_PATH"
+    if (assert_frozen_compiler >/dev/null 2>&1); then
+        fail "self-test-private-provenance-tamper-not-detected"
+    fi
+
+    configure_backend vulkan
+    WINIT_PROVIDER_PATH="$self_test_root/winit-provider"
+    SIMPLE_RUNTIME_PROVIDER_PATH="$self_test_root/runtime-provider"
+    SIMPLE_RUNTIME_C_PROVIDER_PATH="$self_test_root/runtime-c-provider"
+    self_test_expected_build_args_sha256="$(
+        digest_args native-build --backend cranelift --threads 4 \
+            --cache-dir "$BUILD_CACHE" --runtime-bundle core-c-bootstrap \
+            --source src/lib --source test/02_integration/rendering \
+            --entry-closure --entry \
+            test/02_integration/rendering/macos_vulkan_2d_live_harness.spl \
+            --strip --verbose --output \
+            build/macos_gpu_2d_live_native/vulkan/macos_vulkan_2d_live_native
+    )"
+    [ "$BUILD_ARGS_SHA256" = "$self_test_expected_build_args_sha256" ] ||
+        fail "self-test-build-args-do-not-match-invocation"
+    self_test_expected_environment_sha256="$(
+        digest_args \
+            "HOME=$BUILD_HOME" "PATH=$PATH" "TMPDIR=$BUILD_TMP" \
+            LC_ALL=C LANG=C SIMPLE_NO_STUB_FALLBACK=1 \
+            "SIMPLE_LIB=$ROOT_DIR/src" \
+            SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 \
+            "SIMPLE_LINK_OBJECTS=$WINIT_PROVIDER_PATH:$SIMPLE_RUNTIME_PROVIDER_PATH:$SIMPLE_RUNTIME_C_PROVIDER_PATH"
+    )"
+    [ "$(build_environment_sha256)" = \
+        "$self_test_expected_environment_sha256" ] ||
+        fail "self-test-build-environment-does-not-match-transcript"
+    [ "$(build_environment_sha256)" != "$(
+        digest_args \
+            "HOME=$BUILD_HOME" "PATH=$PATH" "TMPDIR=$BUILD_TMP" \
+            LC_ALL=C LANG=C SIMPLE_NO_STUB_FALLBACK=1 \
+            "SIMPLE_LIB=$ROOT_DIR/src" \
+            SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 \
+            "NATIVE_CACHE=$BUILD_CACHE" \
+            "SIMPLE_LINK_OBJECTS=$WINIT_PROVIDER_PATH:$SIMPLE_RUNTIME_PROVIDER_PATH:$SIMPLE_RUNTIME_C_PROVIDER_PATH"
+    )" ] || fail "self-test-untranscribed-native-cache-claimed"
+
+    mkdir -p "$self_test_root/src/lib" "$self_test_root/test/02_integration/rendering"
+    printf 'first\n' >"$self_test_root/src/lib/first.spl"
+    printf 'second\n' >"$self_test_root/test/02_integration/rendering/second.spl"
+    ln -s first.spl "$self_test_root/src/lib/current.spl"
+    source_inputs_snapshot "$self_test_root/before.txt" "$self_test_root" \
+        "$SOURCE_INPUT_ROOT_LIB" "$SOURCE_INPUT_ROOT_RENDERING"
+    self_test_before_count="$SOURCE_INPUT_FILE_COUNT"
+    self_test_before_fingerprint="$SOURCE_INPUT_FINGERPRINT"
+    printf 'changed\n' >>"$self_test_root/src/lib/first.spl"
+    source_inputs_snapshot "$self_test_root/after.txt" "$self_test_root" \
+        "$SOURCE_INPUT_ROOT_LIB" "$SOURCE_INPUT_ROOT_RENDERING"
+    [ "$SOURCE_INPUT_FILE_COUNT" = "$self_test_before_count" ] ||
+        fail "self-test-source-count-not-stable"
+    [ "$SOURCE_INPUT_FINGERPRINT" != "$self_test_before_fingerprint" ] ||
+        fail "self-test-source-change-not-detected"
+    self_test_file_change_fingerprint="$SOURCE_INPUT_FINGERPRINT"
+    ln -snf ../../test/02_integration/rendering/second.spl \
+        "$self_test_root/src/lib/current.spl"
+    source_inputs_snapshot "$self_test_root/link-after.txt" "$self_test_root" \
+        "$SOURCE_INPUT_ROOT_LIB" "$SOURCE_INPUT_ROOT_RENDERING"
+    [ "$SOURCE_INPUT_FINGERPRINT" != \
+        "$self_test_file_change_fingerprint" ] ||
+        fail "self-test-symlink-target-change-not-detected"
+    self_test_watchdog_status=0
+    run_with_wall_clock_watchdog "$self_test_root/watchdog.log" 1 1 \
+        sh -c 'trap "" TERM; while :; do :; done' ||
+        self_test_watchdog_status=$?
+    [ "$self_test_watchdog_status" = 124 ] ||
+        fail "self-test-watchdog-status-mismatch"
+    [ "$WATCHDOG_TIMED_OUT" = 1 ] && [ "$WATCHDOG_TERM_SENT" = 1 ] &&
+        [ "$WATCHDOG_KILL_SENT" = 1 ] ||
+        fail "self-test-watchdog-escalation-missing"
+    [ -f "$self_test_root/watchdog.log" ] ||
+        fail "self-test-watchdog-log-missing"
+    self_test_watchdog_child_pid_path="$self_test_root/watchdog-child.pid"
+    self_test_tree_status=0
+    run_with_wall_clock_watchdog "$self_test_root/watchdog-tree.log" 1 1 \
+        sh -c 'trap "" TERM
+            sh -c '"'"'trap "" TERM
+                printf "%s\n" "$$" >"$1"
+                while :; do sleep 1; done'"'"' sh "$1" &
+            while :; do sleep 1; done' \
+        sh "$self_test_watchdog_child_pid_path" ||
+        self_test_tree_status=$?
+    [ "$self_test_tree_status" = 124 ] ||
+        fail "self-test-watchdog-tree-status-mismatch"
+    [ -s "$self_test_watchdog_child_pid_path" ] ||
+        fail "self-test-watchdog-child-pid-missing"
+    self_test_watchdog_child_pid="$(
+        sed -n '1p' "$self_test_watchdog_child_pid_path"
+    )"
+    positive_integer "$self_test_watchdog_child_pid" ||
+        fail "self-test-watchdog-child-pid-invalid"
+    self_test_watchdog_reap_attempt=0
+    while kill -0 "$self_test_watchdog_child_pid" 2>/dev/null; do
+        self_test_watchdog_reap_attempt=$(
+            (self_test_watchdog_reap_attempt + 1)
+        )
+        [ "$self_test_watchdog_reap_attempt" -lt 50 ] ||
+            fail "self-test-watchdog-child-survived"
+        sleep 0.1
+    done
+    kill -0 "-$WATCHDOG_PROCESS_GROUP_ID" 2>/dev/null &&
+        fail "self-test-watchdog-process-group-survived"
+    self_test_exit_status=0
+    run_with_wall_clock_watchdog "$self_test_root/exit-status.log" 5 1 \
+        sh -c 'printf "synthetic-status\n"; exit 7' ||
+        self_test_exit_status=$?
+    [ "$self_test_exit_status" = 7 ] && [ "$WATCHDOG_TIMED_OUT" = 0 ] ||
+        fail "self-test-watchdog-exit-status-mismatch"
+    grep -Fq "synthetic-status" "$self_test_root/exit-status.log" ||
+        fail "self-test-watchdog-log-not-retained"
+    echo "macOS GPU 2D native build contract self-test: PASS"
+    exit 0
+fi
+
+[ "$#" -ge 2 ] || usage
+mode="$1"
+configure_backend "$2"
+
+case "$mode" in
+    --build)
+        [ "$#" = 2 ] || usage
+        [ "$(uname -s)" = Darwin ] || fail "requires-macos"
+        [ -f "$ENTRY" ] && [ -f "$SHARED_HARNESS" ] && [ -f "$FIXTURE_SOURCE" ] && [ -f "$BACKEND_SOURCE" ] || fail "build-input-missing"
+        resolve_compiler
+        freeze_verified_compiler
+        WINIT_PROVIDER_PATH="$(canonical_file "$WINIT_PROVIDER")"
+        SIMPLE_RUNTIME_PROVIDER_PATH="$(canonical_file "$SIMPLE_RUNTIME_PROVIDER")"
+        SIMPLE_RUNTIME_C_PROVIDER_PATH="$(canonical_file "$SIMPLE_RUNTIME_C_PROVIDER")"
+        mkdir -p "$(dirname -- "$OUTPUT_PATH")"
+        rm -rf "$BUILD_HOME" "$BUILD_TMP" "$BUILD_CACHE"
+        mkdir -p "$BUILD_HOME" "$BUILD_TMP" "$BUILD_CACHE"
+        rm -f "$OUTPUT_PATH" "$MANIFEST_PATH"
+        source_inputs_snapshot "$SOURCE_INPUTS_BEFORE_PATH" "$ROOT_DIR" \
+            "$SOURCE_INPUT_ROOT_LIB" "$SOURCE_INPUT_ROOT_RENDERING"
+        source_input_count_before="$SOURCE_INPUT_FILE_COUNT"
+        source_input_fingerprint_before="$SOURCE_INPUT_FINGERPRINT"
+        assert_frozen_compiler
+        build_status=0
+        run_with_wall_clock_watchdog "$BUILD_LOG_PATH.watchdog" \
+            "$BUILD_WATCHDOG_TIMEOUT_SECS" "$BUILD_WATCHDOG_TERM_GRACE_SECS" \
+            bootstrap_stage3_run_transcribed "$BUILD_TRANSCRIPT_PATH" \
+                "$ROOT_DIR" "$BUILD_LOG_PATH" "$BUILD_HOME" "$BUILD_TMP" \
+                "$PATH" SIMPLE_NO_STUB_FALLBACK=1 \
+                SIMPLE_LIB="$ROOT_DIR/src" \
+                SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 \
+                SIMPLE_LINK_OBJECTS="$WINIT_PROVIDER_PATH:$SIMPLE_RUNTIME_PROVIDER_PATH:$SIMPLE_RUNTIME_C_PROVIDER_PATH" \
+                -- \
+                "$COMPILER_PATH" native-build \
+                --backend cranelift --threads 4 \
+                --cache-dir "$BUILD_CACHE" \
+                --runtime-bundle core-c-bootstrap \
+                --source src/lib --source test/02_integration/rendering \
+                --entry-closure --entry "test/02_integration/rendering/macos_${BACKEND}_2d_live_harness.spl" \
+                --strip --verbose \
+                --output "build/macos_gpu_2d_live_native/${BACKEND}/macos_${BACKEND}_2d_live_native" ||
+            build_status=$?
+        assert_frozen_compiler
+        source_inputs_snapshot "$SOURCE_INPUTS_AFTER_PATH" "$ROOT_DIR" \
+            "$SOURCE_INPUT_ROOT_LIB" "$SOURCE_INPUT_ROOT_RENDERING"
+        [ "$SOURCE_INPUT_FILE_COUNT" = "$source_input_count_before" ] &&
+            [ "$SOURCE_INPUT_FINGERPRINT" = "$source_input_fingerprint_before" ] ||
+            fail "source-inputs-changed-during-build"
+        if [ "$WATCHDOG_TIMED_OUT" = 1 ]; then
+            echo "native build log retained at $BUILD_LOG_PATH" >&2
+            fail "native-build-wall-clock-timeout"
+        fi
+        if [ "$build_status" != 0 ]; then
+            echo "native build log retained at $BUILD_LOG_PATH" >&2
+            fail "native-build-failed-status-$build_status"
+        fi
+        [ -x "$OUTPUT_PATH" ] || fail "native-build-output-missing"
+        assert_frozen_compiler
+        write_manifest
+        verify_manifest "$MANIFEST_PATH"
+        ;;
+    --verify)
+        [ "$#" = 3 ] || [ "$#" = 4 ] || usage
+        manifest_origin="${4:-$3}"
+        [ "$manifest_origin" = "$MANIFEST_PATH" ] ||
+            fail "manifest-origin-path-not-canonical"
+        [ -f "$manifest_origin" ] && [ ! -L "$manifest_origin" ] ||
+            fail "manifest-origin-invalid"
+        [ "$(sha256_file "$3")" = "$(sha256_file "$manifest_origin")" ] ||
+            fail "manifest-snapshot-origin-sha256-mismatch"
+        verify_manifest "$3"
+        ;;
+    *) usage ;;
+esac

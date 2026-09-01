@@ -1,0 +1,115 @@
+#!/bin/sh
+set -eu
+
+fail() { echo "x86-64-real-fs-exec-wiring: $*" >&2; exit 1; }
+[ "${1:-}" = "--self-test" ] || fail "usage: $0 --self-test"
+
+entry=examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl
+runtime=examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+bridge=src/os/kernel/arch/x86_64/user_entry.spl
+validation=src/os/kernel/arch/x86_64/user_entry_validation.spl
+launcher=src/os/kernel/loader/x86_64_fs_exec_spawn.spl
+authenticated_owner=src/os/kernel/loader/fs_exec_spawn.spl
+authenticated_media=src/os/kernel/loader/x86_64_authenticated_media_fixture.spl
+user_as=src/os/kernel/memory/user_address_space.spl
+vmm_as=src/os/kernel/memory/vmm_address_space.spl
+matrix=src/os/qemu_systest_contract.spl
+ovmf_launcher=scripts/os/run_x86_64_fs_exec_ovmf.shs
+
+require() {
+    needle=$1
+    file=$2
+    grep -Fq "$needle" "$file" || fail "missing '$needle' in $file"
+}
+
+require 'rt_qemu_nonce_echo()' "$entry"
+require 'rt_x86_64_fs_ls_sys_apps()' "$entry"
+require 'x86_64_authenticated_media_execute_v1(Scheduler.new(), g_mount_table)' "$entry"
+if grep -Fq 'x86_64_fs_exec_spawn_scheduler_owned("/FSEXEC.ELF"' "$entry"; then
+    fail 'canonical entry bypasses authenticated media admission'
+fi
+require 'FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=x86_64' "$entry"
+require 'FS_PROGRAM_END rc=37 reaped=true' "$entry"
+if grep -Fq 'SIMPLEOS_X86_64_SMF_FS_PASS' "$entry"; then
+    fail 'synthetic package PASS remains in canonical entry'
+fi
+
+require 'rt_x86_exec_token_install(validation.pid, validation.generation, validation.cr3)' "$bridge"
+require 'rt_x86_exec_token_take_result(validation.pid, validation.generation, validation.cr3)' "$bridge"
+require 'arch_x86_64_enter_user_scalars(validation.entry, validation.initial_rsp, validation.cr3)' "$bridge"
+require 'if validation.entry == 0u64 or validation.initial_rsp == 0u64:' "$bridge"
+if grep -Fq 'validation.context.unwrap()' "$bridge"; then
+    fail 'live bridge must not unpack nested TaskContext across freestanding ABI'
+fi
+require 'generation: u64' "$validation"
+require 'generation: task.isolation.capability_generation' "$validation"
+require 'entry: task.entry_point' "$validation"
+require 'initial_rsp: task.user_stack' "$validation"
+# Path-only compatibility calls no longer create a scheduler child. The
+# authenticated facade consumes a loader-issued token before it owns the exact
+# child handoff/exit/collection lifecycle.
+require 'fs_exec_spawn_as(0, path, argv, envp)' "$launcher"
+# The retained v1 wrapper is source compatibility only. Production adoption
+# must enter the launch-aware path so validated argv/envp reach the image.
+require 'fs_exec_adopt_authenticated_v1(' "$authenticated_owner"
+require 'fs_exec_adopt_authenticated_with_launch_v1(' "$authenticated_owner"
+require 'fs_exec_adopt_authenticated_with_launch_v1(' "$launcher"
+require 'token: ExecutableAuthorityTokenV1' "$authenticated_owner"
+require 'consumer: ExecutableLoadConsumerV1' "$authenticated_owner"
+require 'owner.adopt_authenticated_executable_pid_with_launch_v1(' "$authenticated_owner"
+require 'owner.open_for_execute(executable_path, ExecuteTrust.Trusted)' "$authenticated_media"
+require 'executable_loader_admit_authenticated_open_binding_v1(' "$authenticated_media"
+require 'admitted.unwrap().authority_token' "$authenticated_media"
+require 'executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos")' "$authenticated_media"
+require 'x86_64_fs_exec_spawn_authenticated_v1(' "$authenticated_media"
+require 'val prepared = fs_exec_adopt_authenticated_with_launch_v1(' "$launcher"
+require 'owner.exit_task_by_id(child, exit_code.to_i32())' "$launcher"
+require 'owner.wait_for_collect(TaskId(id: 0u64), child, false)' "$launcher"
+require 'if not vmm_clone_kernel_low_private(space.phys_root):' "$user_as"
+require 'return AddressSpace(phys_root: 0, id: 0)' "$user_as"
+require 'vmm_map_user_low_page(space, virt, phys, flags)' "$user_as"
+require 'if _pte_is_present(existing) and (existing & PTE_USER) != 0:' "$vmm_as"
+require 'private 4K user mappings without corrupting the kernel' "$vmm_as"
+require '_x86_current_cr3() == _x86_exec_token_cr3' "$runtime"
+require 'task != _x86_exec_token_task' "$runtime"
+require 'generation != _x86_exec_token_generation' "$runtime"
+require 'int64_t rt_qemu_nonce_echo(void)' "$runtime"
+require 'int64_t rt_x86_64_fs_ls_sys_apps(void)' "$runtime"
+require 'SIMPLEOS_FS_EXEC_OK arch=x86_64 nonce=' "$matrix"
+require 'scripts/os/run_x86_64_fs_exec_ovmf.shs' "$matrix"
+require 'grub-mkstandalone --format=x86_64-efi' "$ovmf_launcher"
+require 'multiboot (memdisk)/boot/kernel.elf' "$ovmf_launcher"
+require '"boot/kernel.elf=$kernel"' "$ovmf_launcher"
+require 'memory=${SIMPLEOS_X86_64_MEMORY:-2048M}' "$ovmf_launcher"
+require 'if=pflash,format=raw,readonly=on' "$ovmf_launcher"
+if grep -Fq 'loader,file=build/os/simpleos_x86_64_fs_exec.elf' "$matrix"; then
+    echo 'x86_64-real-fs-exec-wiring: generic QEMU loader is not a Multiboot launcher' >&2
+    exit 1
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cp "$bridge" "$tmp/bridge.spl"
+sed -i 's/validation\.cr3/0u64/g' "$tmp/bridge.spl"
+if grep -Fq 'rt_x86_exec_token_install(validation.pid, validation.generation, validation.cr3)' "$tmp/bridge.spl"; then
+    fail 'CR3-substitution sabotage was not applied'
+fi
+
+cp "$user_as" "$tmp/user_address_space.spl"
+sed -i 's/if not vmm_clone_kernel_low_private(space\.phys_root):/if false:/' "$tmp/user_address_space.spl"
+if grep -Fq 'if not vmm_clone_kernel_low_private(space.phys_root):' "$tmp/user_address_space.spl"; then
+    fail 'low-identity-clone sabotage was not applied'
+fi
+
+# Self-test fixture: rewriting the canonical owner handoff to the retained v1
+# wrapper must remove the exact launch-aware production call required above.
+cp "$authenticated_owner" "$tmp/fs_exec_spawn.spl"
+sed -i 's/owner\.adopt_authenticated_executable_pid_with_launch_v1(/owner.adopt_authenticated_executable_pid_v1(/' "$tmp/fs_exec_spawn.spl"
+if grep -Fq 'owner.adopt_authenticated_executable_pid_with_launch_v1(' "$tmp/fs_exec_spawn.spl"; then
+    fail 'launch-aware scheduler handoff sabotage was not applied'
+fi
+if ! grep -Fq 'owner.adopt_authenticated_executable_pid_v1(' "$tmp/fs_exec_spawn.spl"; then
+    fail 'compatibility-wrapper sabotage fixture is malformed'
+fi
+
+echo 'PASS x86_64 real filesystem execution wiring contract'

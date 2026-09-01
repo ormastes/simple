@@ -1,0 +1,129 @@
+#!/bin/sh
+# check-spec-lane.shs — run one SSpec file and report its verdict in guard grammar.
+#
+# Shared by the rules.sdl scenario gates so each lane is a one-line entry instead of a
+# near-identical wrapper script. Reading a spec run correctly is the whole job here,
+# and every rule below exists because getting it wrong produced a confidently wrong
+# answer in this repo before:
+#
+#   * Score the per-FILE `SPEC FILE VERDICT:` line, never `tail -1`. The
+#     `N examples, M failures` line prints once per top-level describe, so stdout can
+#     end on a green count from the last group while the file failed.
+#   * Strip ANSI first. The verdict lines are colour-wrapped, so `^[0-9]` anchors match
+#     nothing and naive digit-scooping reads `[32m` as digits.
+#   * Never pass an absolute spec path to `bin/simple test` -- it runs NOTHING and
+#     exits 0. Paths are forced repo-relative below.
+#   * Exit status is corroboration only. 255/143 are timeout/CPU-guard kills, not
+#     results, and an unresolved `use` is only a warning, so a dead spec exits 0.
+#
+# Verdict is the LAST LINE of stdout:
+#   PASS — <spec>: <n> examples executed, 0 failed     exit 0
+#   FAIL — ...                                         exit 1
+#   ERROR — nothing was checked                        exit 2
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SPEC=""
+TIMEOUT_SECS="${SPEC_LANE_TIMEOUT:-900}"
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        --timeout) TIMEOUT_SECS=$2; shift 2 ;;
+        -h|--help) echo "usage: $0 <repo-relative-spec.spl> [--timeout N] [--selftest]" >&2; exit 2 ;;
+        *) [ -z "$SPEC" ] && SPEC=$1 || { echo "unexpected argument: $1" >&2; exit 2; }; shift ;;
+    esac
+done
+
+strip_ansi() { sed -e 's/\x1b\[[0-9;]*m//g'; }
+
+# Reads the authoritative per-file verdict out of a captured run log.
+# Emits "<executed> <failed> <dropped>" or nothing when no verdict line exists.
+read_verdict() {
+    strip_ansi < "$1" | awk '
+        /SPEC FILE VERDICT:/ {
+            ex=0; fa=0; dr=0
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^executed=/) { sub(/^executed=/, "", $i); ex = $i }
+                if ($i ~ /^failed=/)   { sub(/^failed=/,   "", $i); fa = $i }
+                if ($i ~ /^dropped=/)  { sub(/^dropped=/,  "", $i); dr = $i }
+            }
+            print ex, fa, dr
+            found = 1
+        }
+        END { if (!found) exit 1 }
+    '
+}
+
+selftest() {
+    st=$(mktemp -d) || return 1
+    rc=0
+
+    # arm 1: a clean verdict parses
+    printf 'noise\nSPEC FILE VERDICT: a.spl declared>=3 executed=3 passed=3 failed=0 dropped=0\n' > "$st/ok.log"
+    got=$(read_verdict "$st/ok.log")
+    [ "$got" = "3 0 0" ] || { echo "selftest arm1: parsed '$got', want '3 0 0'" >&2; rc=1; }
+
+    # arm 2: ANSI-wrapped verdict must still parse (colour is the default)
+    printf '\033[32mSPEC FILE VERDICT: a.spl declared>=2 executed=2 passed=1 failed=1 dropped=0\033[0m\n' > "$st/ansi.log"
+    got=$(read_verdict "$st/ansi.log")
+    [ "$got" = "2 1 0" ] || { echo "selftest arm2: parsed '$got', want '2 1 0'" >&2; rc=1; }
+
+    # arm 3: a trailing GREEN per-describe line must not mask a failed file
+    printf 'SPEC FILE VERDICT: a.spl declared>=9 executed=9 passed=8 failed=1 dropped=0\n3 examples, 0 failures\n' > "$st/tail_green.log"
+    got=$(read_verdict "$st/tail_green.log")
+    [ "$got" = "9 1 0" ] || { echo "selftest arm3: tail-green masked failure, parsed '$got'" >&2; rc=1; }
+
+    # arm 4: no verdict line at all must NOT look like success
+    printf 'some output with no verdict\n' > "$st/none.log"
+    if read_verdict "$st/none.log" >/dev/null 2>&1; then
+        echo "selftest arm4: missing verdict wrongly accepted" >&2; rc=1
+    fi
+
+    rm -rf "$st"
+    return $rc
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed; the guard itself is broken)"
+    exit 2
+fi
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — 4 selftest arms checked, guard calibrated"; exit 0; }
+
+[ -n "$SPEC" ] || { echo "ERROR — nothing was checked (no spec path given)"; exit 2; }
+case "$SPEC" in
+    /*) echo "ERROR — nothing was checked (absolute spec path runs nothing and exits 0: $SPEC)"; exit 2 ;;
+esac
+[ -f "$REPO_ROOT/$SPEC" ] || { echo "ERROR — nothing was checked (spec not found: $SPEC)"; exit 2; }
+
+log=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -f "$log"' EXIT
+
+( cd "$REPO_ROOT" && SIMPLE_TIMEOUT_SECONDS="$TIMEOUT_SECS" \
+    timeout "$TIMEOUT_SECS" bin/simple test "$SPEC" ) > "$log" 2>&1
+run_rc=$?
+
+if [ "$run_rc" -eq 124 ]; then
+    echo "ERROR — nothing was checked (spec run timed out after ${TIMEOUT_SECS}s: $SPEC)"
+    exit 2
+fi
+
+verdict=$(read_verdict "$log" 2>/dev/null) || {
+    echo "ERROR — nothing was checked (no SPEC FILE VERDICT line; run rc=$run_rc: $SPEC)"
+    exit 2
+}
+executed=$(echo "$verdict" | awk '{print $1}')
+failed=$(echo   "$verdict" | awk '{print $2}')
+dropped=$(echo  "$verdict" | awk '{print $3}')
+
+if [ "$executed" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 examples executed: $SPEC)"
+    exit 2
+fi
+if [ "$failed" -ne 0 ] || [ "$dropped" -ne 0 ]; then
+    echo "FAIL — $SPEC: $failed failed, $dropped dropped of $executed executed"
+    exit 1
+fi
+echo "PASS — $SPEC: $executed examples executed, 0 failed"
+exit 0

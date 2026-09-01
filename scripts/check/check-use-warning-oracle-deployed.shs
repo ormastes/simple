@@ -1,0 +1,171 @@
+#!/bin/sh
+# Refuse a deployed `bin/simple` whose `[use-warning]` oracle is missing or noisy.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS CHECK EXISTS
+# ---------------------------------------------------------------------------
+# The `[use-warning]` oracle reports braced `use m.{A, B}` names that module `m`
+# does not actually provide. It is the only automated instrument this repo has
+# for the "imported symbol declared nowhere" family — 766 distinct undeclared
+# names across 380 files, per
+# doc/08_tracking/bug/undeclared_imported_symbols_census.md.
+#
+# It landed in 98e468602fd (2026-08-04) and then FIRED NOWHERE, because it never
+# reached the deployed binary:
+#
+#     strings -a bin/release/x86_64-unknown-linux-gnu/simple | grep -c use-warning
+#     0
+#
+# The source was correct the whole time. That is the entire point of this file:
+# **a check on source presence would not have caught this.** `git grep
+# use-warning` was green on the day the oracle was reporting nothing at all. The
+# defect lives in the gap between the source tree and the artifact that runs, so
+# the check has to interrogate the ARTIFACT, and it has to do it by running the
+# artifact rather than by reading strings out of it — a string survives in the
+# binary even when the call site that would print it has become unreachable.
+#
+# So this is a POSITIVE CAPABILITY PROBE: compile a fixture that is known to
+# contain exactly one genuinely-absent imported name, and require the deployed
+# binary to say so out loud.
+#
+# ---------------------------------------------------------------------------
+# WHAT IS ASSERTED (all three must hold)
+# ---------------------------------------------------------------------------
+#   A. POSITIVE  — importing `uw_probe_zzz_absent`, which `src/lib/common/use_warning_probe.spl` does not
+#                  declare in any form, MUST produce a `[use-warning]` naming it.
+#                  Fails if the oracle is absent from the binary, compiled out,
+#                  or wired to a dead call site.
+#   B. FP GUARD  — importing `uw_probe_extern_provided`, declared as `extern fn`, must NOT
+#                  warn. `collect_provided_names` originally ignored
+#                  `Node::Extern`/`Node::ExternClass`, so every module exposing a
+#                  symbol via `extern fn` was wrongly reported as not exposing it
+#                  (census §6b, the `rt_font_glyph_advance` false positive at
+#                  src/lib/nogc_sync_mut/text_layout/font_rasterizer.spl:107).
+#                  A noisy oracle gets ignored on day one — which is how the
+#                  previous one died — so the noise is gated, not just the signal.
+#   C. CONTROL   — importing `uw_probe_plain_provided`, an ordinary `fn`, must NOT warn.
+#                  Without this, an oracle that warned on EVERY name would pass A.
+#
+# A + C together mean this cannot pass vacuously: it demands one specific line be
+# present and two specific lines be absent, from the same single run.
+#
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED CONTRACT
+# ---------------------------------------------------------------------------
+# Verdict is always the LAST line of stdout, matching the other scripts/check
+# guards:
+#
+#   PASS  — exit 0. States what was actually observed; counts are always > 0.
+#   FAIL  — exit 1. The oracle regressed. Do not ship this binary.
+#   ERROR — exit 2. Nothing was checked (no binary, no `timeout`, fixture did not
+#           run). NEVER reported as a pass. An exit status alone is a fail-open
+#           oracle here: an unresolved `use` is only a WARN and still exits 0, so
+#           this script scores stderr CONTENT and ignores the child's exit code.
+#
+# Usage:  sh scripts/check/check-use-warning-oracle-deployed.shs [path-to-simple]
+
+set -u
+
+VERDICT_PASS=0
+
+fail()  { printf 'FAIL — %s\n' "$1"; exit 1; }
+oops()  { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+# --- locate the repo and the DEPLOYED binary --------------------------------
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || oops "cannot resolve script dir"
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd) || oops "cannot resolve repo root"
+
+if [ "$#" -ge 1 ] && [ -n "$1" ]; then
+    BIN=$1
+else
+    BIN=$repo_root/bin/simple
+fi
+
+[ -e "$BIN" ] || oops "deployed binary not found: $BIN"
+[ -x "$BIN" ] || oops "deployed binary is not executable: $BIN"
+
+command -v timeout >/dev/null 2>&1 || oops "\`timeout\` is required to bound the probe"
+
+# --- fixture ----------------------------------------------------------------
+# Both fixture halves are COMMITTED, not generated into a temp dir. That is
+# forced, not stylistic: the oracle only runs on library-path module resolution,
+# so a provider written to /tmp resolves through the relative-file path instead,
+# never reaches `collect_provided_names`, and the probe measures nothing while
+# looking perfectly healthy. The provider therefore has to live under a real
+# module root. Verified directly: the same fixture text warns from
+# src/lib/common and is silent from a temp dir, on the same binary.
+IMPORTER=$repo_root/scripts/check/fixtures/use_warning_probe_importer.spl
+PROVIDER=$repo_root/src/lib/common/use_warning_probe.spl
+
+[ -f "$IMPORTER" ] || oops "fixture importer missing: $IMPORTER"
+[ -f "$PROVIDER" ] || oops "fixture provider missing: $PROVIDER"
+
+work_pre=$(mktemp -d) || oops "cannot create temp dir"
+trap 'rm -rf "$work_pre" "${work:-}"' EXIT INT TERM
+
+# Comments in the provider legitimately NAME all three probe symbols to explain
+# the contract, so every fixture-integrity grep below scores code lines only.
+provider_code=$work_pre/provider_code.txt
+grep -v '^[[:space:]]*#' "$PROVIDER" > "$provider_code" 2>/dev/null
+
+# The provider must NOT declare the name the positive assertion depends on.
+if grep -q 'uw_probe_zzz_absent' "$provider_code" 2>/dev/null; then
+    oops "fixture provider $PROVIDER declares uw_probe_zzz_absent — the positive assertion can no longer distinguish a live oracle from a dead one. Remove that declaration."
+fi
+# ...and it must still declare the two names the silence assertions depend on.
+grep -q "extern fn uw_probe_extern_provided" "$provider_code" 2>/dev/null \
+    || oops "fixture provider $PROVIDER no longer declares \`extern fn uw_probe_extern_provided\` — the false-positive guard would pass vacuously."
+grep -q "fn uw_probe_plain_provided" "$provider_code" 2>/dev/null \
+    || oops "fixture provider $PROVIDER no longer declares \`fn uw_probe_plain_provided\` — the control assertion would pass vacuously."
+
+work=$(mktemp -d) || oops "cannot create temp dir"
+
+# --- run --------------------------------------------------------------------
+# SIMPLE_NO_DEPRECATED_WARNINGS disables the oracle outright
+# (module_loader.rs:use_list_warnings_enabled). If the ambient environment has it
+# set, this probe would measure the knob rather than the binary, so clear it.
+( cd "$repo_root" && env -u SIMPLE_NO_DEPRECATED_WARNINGS \
+    timeout 300 "$BIN" run "$IMPORTER" > "$work/out.txt" 2> "$work/err.txt" )
+
+# Deliberately NOT scoring $? — see the fail-open note above.
+
+[ -f "$work/out.txt" ] || oops "probe produced no stdout file"
+[ -f "$work/err.txt" ] || oops "probe produced no stderr file"
+
+# Fail closed on a probe that never actually executed: exit 255/143 with empty
+# output is a timeout or a kill, not a clean run, and must not read as a pass.
+if ! grep -q 'use-warning-probe-ran' "$work/out.txt" 2>/dev/null; then
+    oops "fixture never executed (timeout, kill, or compile failure); stderr head: $(head -c 300 "$work/err.txt" 2>/dev/null | tr '\n' ' ')"
+fi
+
+warn_lines=$work/warns.txt
+grep -F '[use-warning]' "$work/err.txt" > "$warn_lines" 2>/dev/null
+n_warn=$(wc -l < "$warn_lines" | tr -d ' ')
+
+# --- A: POSITIVE ------------------------------------------------------------
+n_absent=$(grep -c "uw_probe_zzz_absent" "$warn_lines" 2>/dev/null || true)
+[ -n "$n_absent" ] || n_absent=0
+if [ "$n_absent" -lt 1 ]; then
+    fail "the [use-warning] oracle is NOT live in $BIN — 'uw_probe_zzz_absent' is declared nowhere in src/lib/common/use_warning_probe.spl and drew no warning ($n_warn use-warning line(s) total). The oracle exists in src/compiler_rust/compiler/src/interpreter_module/module_loader.rs but is not reaching the deployed artifact; rebuild the seed and redeploy (cp to .new then mv — a direct cp onto a running binary hits 'Text file busy')."
+fi
+VERDICT_PASS=$((VERDICT_PASS + 1))
+
+# --- B: FALSE-POSITIVE GUARD (extern fn) ------------------------------------
+n_extern=$(grep -c "uw_probe_extern_provided" "$warn_lines" 2>/dev/null || true)
+[ -n "$n_extern" ] || n_extern=0
+if [ "$n_extern" -gt 0 ]; then
+    fail "extern-fn false positive REGRESSED — 'uw_probe_extern_provided' is declared \`extern fn\` in src/lib/common/use_warning_probe.spl but the oracle reported it as not provided ($n_extern line(s)). collect_provided_names must include Node::Extern and Node::ExternClass (module_loader.rs). See census §6b."
+fi
+VERDICT_PASS=$((VERDICT_PASS + 1))
+
+# --- C: CONTROL (ordinary fn) -----------------------------------------------
+n_plain=$(grep -c "uw_probe_plain_provided" "$warn_lines" 2>/dev/null || true)
+[ -n "$n_plain" ] || n_plain=0
+if [ "$n_plain" -gt 0 ]; then
+    fail "oracle is over-warning — 'uw_probe_plain_provided' is an ordinary \`fn\` in src/lib/common/use_warning_probe.spl but was reported as not provided ($n_plain line(s)). A checker that warns on every name would satisfy the positive assertion while being useless."
+fi
+VERDICT_PASS=$((VERDICT_PASS + 1))
+
+printf 'PASS — %s assertions checked against %s: 1 true-absent name warned (%s use-warning line(s)), extern-fn surface silent, ordinary-fn surface silent\n' \
+    "$VERDICT_PASS" "$BIN" "$n_warn"
+exit 0

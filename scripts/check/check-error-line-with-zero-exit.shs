@@ -1,0 +1,308 @@
+#!/bin/sh
+# Fail-closed gate: a build that PRINTED an `error:`-prefixed line must not exit 0.
+#
+# WHY THIS EXISTS
+# ---------------
+# doc/08_tracking/bug/stale_runtime_archive_refusal_downgrades_lane_silently_2026-08-17.md
+# records a real green-over-broken landing: the Rust seed printed
+#
+#     error: ... refusing to link a stale archive ...
+#
+# and then CONTINUED -- it silently downgraded the runtime lane, ignored an
+# unresolved symbol, and exited 0 with a binary that segfaults on first run.
+# Three independently-defensible fail-open links combined into a green exit over
+# a broken artifact. Fixing those three links at the source is a wide-blast-radius
+# policy change (threading a Result through `resolve_runtime_lane`, and flipping
+# `-Wl,--unresolved-symbols=ignore-all` off by default, which
+# `.claude/rules/bootstrap.md` shows is load-bearing for the freestanding lanes).
+# This gate is the cheap, general, source-independent half: it does not care WHY
+# the build fell through, only that it announced an error and still claimed
+# success. Any future fail-open link of the same shape is caught by the same
+# check, with no change to this file.
+#
+# SCOPE (stated deliberately, per the lane brief)
+# ----------------------------------------------
+# This gate audits ONE build invocation, or one already-captured build log, for
+# the single invariant above. It is aimed at the NATIVE-BUILD / LINK path, where
+# the defect actually occurred -- `simple native-build`, `simple compile
+# --native`, and the link steps under them -- but nothing in it is
+# native-build-specific, so it wraps any build-shaped command.
+#
+# It is deliberately NOT a scan of the whole tree and NOT wired into the
+# pre-push hook (see the recommendation at the bottom of this comment).
+#
+# NOT IN SCOPE: whether the error message is correct, whether the artifact
+# actually works, or whether a build that exits nonzero exited with the RIGHT
+# nonzero code. A build that prints `error:` and exits nonzero is already
+# fail-closed and PASSES here -- this gate hunts exactly one shape.
+#
+# USAGE
+# -----
+#   scripts/check/check-error-line-with-zero-exit.shs --selftest
+#   scripts/check/check-error-line-with-zero-exit.shs -- <build command...>
+#   scripts/check/check-error-line-with-zero-exit.shs --log FILE --rc N
+#
+# The `--log/--rc` form audits a build someone else already ran (e.g. a CI log
+# plus its recorded status), so this gate never has to re-run a multi-hour
+# native-build itself.
+#
+# VERDICT (always the LAST line of stdout)
+#   PASS  — <n> build(s) checked, ...          exit 0   (n is always > 0)
+#   FAIL  — ...                                exit 1
+#   ERROR — nothing was checked                exit 2
+#
+# A run that checked ZERO builds is ERROR, never a pass. Non-vacuity is absolute.
+#
+# WHY THE DETECTOR IS LINE-ANCHORED
+# ---------------------------------
+# It matches only an `error:` that OPENS a line (leading whitespace allowed, and
+# an optional `<tool>:`/`<file>:<line>:<col>:` prefix is NOT accepted -- see
+# below). It must not fire on:
+#   - `warning: 3 errors were suppressed`      (a warning that mentions errors)
+#   - `note: the previous error: is stale`     (`error:` mid-sentence)
+#   - `checking for error: handling support`   (prose)
+# Those are ordinary build chatter and a gate that reddens on them gets disabled,
+# which is worse than no gate. Both directions are fixtured in --selftest.
+#
+# NEVER READ rc THROUGH A PIPE: a pipeline's `$?` is the LAST stage's status and
+# has produced false greens in this repo before. Every status below is captured
+# on its own line, directly after the invocation.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+
+# --- The detector. Single definition, used by both the selftest and the scan,
+#     so a mutation to it cannot be true for one and false for the other.
+#     Returns 0 (true) when FILE contains at least one line-leading `error:`.
+has_error_line() {
+    grep -Eq '^[[:space:]]*error:' "$1" 2>/dev/null
+}
+
+# --- Reporter: surface the offending lines. Build logs here run to ~1200 lines
+#     with the real content at the tail (measured in
+#     check-native-extern-fabrication.shs), so print the MATCHES, not a head.
+report_error_lines() {
+    _log="$1"
+    _n="$(grep -Ec '^[[:space:]]*error:' "$_log" 2>/dev/null || true)"
+    echo "  $_n error-prefixed line(s) in $_log:"
+    grep -En '^[[:space:]]*error:' "$_log" 2>/dev/null | head -n 25 | sed 's/^/  | /'
+}
+
+# --- Audit one (log, rc) pair. Echoes a one-line disposition; returns 1 on FAIL.
+audit_build() {
+    _log="$1"
+    _rc="$2"
+    _label="${3:-build}"
+    if has_error_line "$_log"; then
+        if [ "$_rc" -eq 0 ]; then
+            echo "FAIL — [$_label] printed an 'error:' line yet exited 0 (fail-open build)"
+            report_error_lines "$_log"
+            echo "  A build that announces an error must not claim success. See"
+            echo "  doc/08_tracking/bug/stale_runtime_archive_refusal_downgrades_lane_silently_2026-08-17.md"
+            return 1
+        fi
+        echo "  [$_label] printed 'error:' and exited $_rc — already fail-closed, OK"
+        return 0
+    fi
+    if [ "$_rc" -eq 0 ]; then
+        echo "  [$_label] no 'error:' line, exit 0 — clean"
+    else
+        echo "  [$_label] no 'error:' line, exit $_rc — failed without an error: line (not this gate's shape)"
+    fi
+    return 0
+}
+
+# --- Selftest (FATAL, runs before any scan).
+#     Fixtures are FAKE BUILD SCRIPTS that print and exit -- deliberately not
+#     real native-build invocations: the pure-Simple native-build worker leaks
+#     ~22 MB/s here and is being SIGTERMed by earlyoom, so a real build would
+#     make this gate untestable. Fixtures are both sufficient and correct: the
+#     invariant is about (stdout, exit status), nothing else.
+if [ "${1:-}" = "--selftest" ]; then
+    st_dir="$(mktemp -d)"
+    trap 'rm -rf "$st_dir"' EXIT HUP INT TERM
+    st_fail=0
+    st_checked=0
+
+    st_assert_fail() {  # name, log, rc  -> audit MUST fail
+        st_checked=$((st_checked + 1))
+        _out=0
+        audit_build "$2" "$3" "$1" >/dev/null 2>&1 || _out=$?
+        if [ "$_out" -eq 0 ]; then
+            echo "SELFTEST FAIL — $1: expected FAIL, got PASS"
+            st_fail=1
+        fi
+    }
+    st_assert_pass() {  # name, log, rc  -> audit MUST pass
+        st_checked=$((st_checked + 1))
+        _out=0
+        audit_build "$2" "$3" "$1" >/dev/null 2>&1 || _out=$?
+        if [ "$_out" -ne 0 ]; then
+            echo "SELFTEST FAIL — $1: expected PASS, got FAIL"
+            st_fail=1
+        fi
+    }
+
+    # --- Direction 1: the defect itself. error: printed, exit 0 -> must FAIL.
+    #     Fixture text is the literal shape from the 2026-08-17 incident.
+    f_defect="$st_dir/defect.log"
+    {
+        echo "info: building runtime lane"
+        echo "error: refusing to link a stale archive libsimple_runtime.a"
+        echo "info: continuing with downgraded runtime lane"
+    } >"$f_defect"
+    st_assert_fail "incident-replay" "$f_defect" 0
+
+    # Same, but the error is at the TAIL of a long noisy log (the measured shape).
+    f_tail="$st_dir/tail.log"
+    i=0
+    while [ "$i" -lt 400 ]; do
+        echo "warning: seed/lint noise line $i" >>"$f_tail"
+        i=$((i + 1))
+    done
+    echo "error: linker reported an unresolved symbol; ignoring" >>"$f_tail"
+    st_assert_fail "error-at-tail-exit-0" "$f_tail" 0
+
+    # Indented error: (some emitters indent under a group header) still counts.
+    f_indent="$st_dir/indent.log"
+    printf 'building\n    error: cannot find -lsimple_runtime\n' >"$f_indent"
+    st_assert_fail "indented-error-exit-0" "$f_indent" 0
+
+    # --- Direction 2: already fail-closed. error: printed, exit nonzero -> PASS.
+    f_closed="$st_dir/closed.log"
+    printf 'building\nerror: refusing to link a stale archive\n' >"$f_closed"
+    st_assert_pass "error-with-nonzero-exit" "$f_closed" 1
+
+    # --- Direction 3: a genuinely clean build -> PASS.
+    f_clean="$st_dir/clean.log"
+    printf 'info: building\ninfo: link ok\ninfo: wrote out/simple\n' >"$f_clean"
+    st_assert_pass "clean-build" "$f_clean" 0
+
+    # --- Direction 4: FALSE-POSITIVE guards. None of these may trip the gate.
+    f_fp1="$st_dir/fp-warning-mentions-errors.log"
+    printf 'warning: 3 errors were suppressed by --keep-going\n' >"$f_fp1"
+    st_assert_pass "fp/warning-mentions-errors" "$f_fp1" 0
+
+    f_fp2="$st_dir/fp-midsentence.log"
+    printf 'note: the previous error: message is stale, ignore it\n' >"$f_fp2"
+    st_assert_pass "fp/error-colon-midsentence" "$f_fp2" 0
+
+    f_fp3="$st_dir/fp-prose.log"
+    printf 'checking for error: handling support... yes\n' >"$f_fp3"
+    st_assert_pass "fp/prose-mentioning-error-colon" "$f_fp3" 0
+
+    f_fp4="$st_dir/fp-errors-word.log"
+    printf 'info: 0 errors, 4 warnings\ninfo: errors: none\n' >"$f_fp4"
+    st_assert_pass "fp/errors-plural-and-errors-colon" "$f_fp4" 0
+
+    # --- Direction 5: rc must be read from the COMMAND, never from a pipeline.
+    #     A real fake-build invocation, run exactly the way the scan runs it.
+    f_cmd="$st_dir/cmd.sh"
+    printf '#!/bin/sh\necho "error: refusing to link a stale archive"\nexit 0\n' >"$f_cmd"
+    chmod +x "$f_cmd"
+    f_cmdlog="$st_dir/cmd.log"
+    cmd_rc=0
+    "$f_cmd" >"$f_cmdlog" 2>&1 || cmd_rc=$?
+    st_checked=$((st_checked + 1))
+    if [ "$cmd_rc" -ne 0 ]; then
+        echo "SELFTEST FAIL — live-invocation fixture: rc capture broken (got $cmd_rc, want 0)"
+        st_fail=1
+    fi
+    st_assert_fail "live-invocation-error-exit-0" "$f_cmdlog" "$cmd_rc"
+
+    # A clean live invocation must pass, so the above is not vacuous.
+    f_cmd2="$st_dir/cmd2.sh"
+    printf '#!/bin/sh\necho "info: link ok"\nexit 0\n' >"$f_cmd2"
+    chmod +x "$f_cmd2"
+    f_cmdlog2="$st_dir/cmd2.log"
+    cmd2_rc=0
+    "$f_cmd2" >"$f_cmdlog2" 2>&1 || cmd2_rc=$?
+    st_assert_pass "live-invocation-clean" "$f_cmdlog2" "$cmd2_rc"
+
+    # --- Direction 6: stderr must be captured too. A build that writes `error:`
+    #     to stderr and exits 0 is the SAME defect; if the scan only captured
+    #     stdout it would be silently fail-open.
+    f_cmd3="$st_dir/cmd3.sh"
+    printf '#!/bin/sh\necho "error: stale archive (on stderr)" >&2\nexit 0\n' >"$f_cmd3"
+    chmod +x "$f_cmd3"
+    f_cmdlog3="$st_dir/cmd3.log"
+    cmd3_rc=0
+    "$f_cmd3" >"$f_cmdlog3" 2>&1 || cmd3_rc=$?
+    st_assert_fail "live-invocation-error-on-stderr" "$f_cmdlog3" "$cmd3_rc"
+
+    # --- Direction 7: the reporter must actually name the offending line, or a
+    #     FAIL is undiagnosable.
+    st_checked=$((st_checked + 1))
+    rep_out="$(report_error_lines "$f_defect")"
+    case "$rep_out" in
+        *"refusing to link a stale archive"*) ;;
+        *) echo "SELFTEST FAIL — reporter: offending line never reached stdout"; st_fail=1 ;;
+    esac
+
+    if [ "$st_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    if [ "$st_fail" -ne 0 ]; then
+        echo "FAIL — selftest: $st_checked fixture assertion(s) run, at least one failed"
+        exit 1
+    fi
+    echo "PASS — selftest: $st_checked fixture assertion(s) checked, 0 failed"
+    exit 0
+fi
+
+# --- Argument handling.
+LOG_FILE=""
+LOG_RC=""
+CMD_GIVEN=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --log) LOG_FILE="${2:-}"; shift 2 ;;
+        --rc)  LOG_RC="${2:-}"; shift 2 ;;
+        --) shift; CMD_GIVEN=1; break ;;
+        -h|--help)
+            sed -n '1,60p' "$0"
+            exit 0 ;;
+        *)
+            echo "unknown argument: $1" >&2
+            echo "ERROR — nothing was checked"
+            exit 2 ;;
+    esac
+done
+
+checked=0
+fail=0
+
+if [ -n "$LOG_FILE" ] || [ -n "$LOG_RC" ]; then
+    if [ -z "$LOG_FILE" ] || [ -z "$LOG_RC" ] || [ ! -f "$LOG_FILE" ]; then
+        echo "--log and --rc must BOTH be given and the log must exist" >&2
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    audit_build "$LOG_FILE" "$LOG_RC" "$LOG_FILE" || fail=1
+    checked=$((checked + 1))
+elif [ "$CMD_GIVEN" -eq 1 ] && [ "$#" -gt 0 ]; then
+    run_log="$(mktemp "${TMPDIR:-/tmp}/check-error-line-with-zero-exit.XXXXXX")"
+    trap 'rm -f "$run_log"' EXIT HUP INT TERM
+    cd "$ROOT_DIR"
+    # rc captured on its OWN line, directly after the invocation. Never a pipe.
+    run_rc=0
+    "$@" >"$run_log" 2>&1 || run_rc=$?
+    audit_build "$run_log" "$run_rc" "$1" || fail=1
+    checked=$((checked + 1))
+else
+    echo "no build command and no --log/--rc pair was given" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$fail" -ne 0 ]; then
+    echo "FAIL — $checked build(s) checked, at least one printed 'error:' and exited 0"
+    exit 1
+fi
+echo "PASS — $checked build(s) checked, 0 printed an 'error:' line while exiting 0"
+exit 0

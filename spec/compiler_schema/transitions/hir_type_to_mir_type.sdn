@@ -1,0 +1,240 @@
+# Transition table: HirTypeKind -> MirTypeKind
+#
+# Boundary: `MirLowering.lower_type`, src/compiler/50.mir/_MirLowering/function_lowering.spl
+# Producer universe: `enum HirTypeKind`, src/compiler/20.hir/hir_types.spl:431 (27 variants).
+#
+# This table records what the lowering ACTUALLY does today, not what it should
+# do. The `case _:` wildcard arm is GONE (agent C5, 2026-08-21): every
+# HirTypeKind variant now has an explicit arm. Variants that MIR genuinely
+# cannot represent (TypeParam, Projection, and the pre-existing Infer) keep
+# `state: unsupported`, but each now raises its own named diagnostic
+# (E-MIR-TYPE-<Variant>) with the source span instead of a shared fatal
+# wildcard. They are NOT recorded as implemented and they are NOT omitted: an
+# omission would show up as Missing and fail the build, which is the point.
+#
+# Recorded state verified by source inspection 2026-08-21.
+
+table: hir_type_to_mir_type
+producer: HirTypeKind
+consumer: MirTypeKind
+source: src/compiler/50.mir/_MirLowering/function_lowering.spl
+
+universe:
+  - Int
+  - Float
+  - Bool
+  - Char
+  - Str
+  - Unit
+  - Tuple
+  - Array
+  - Slice
+  - Dict
+  - Ref
+  - Ptr
+  - Optional
+  - Result
+  - Named
+  - TypeParam
+  - Union
+  - DynTrait
+  - Function
+  - Projection
+  - Isolated
+  - Infer
+  - Error
+  - Never
+  - Any
+  - Tensor
+  - Layer
+
+transition:
+  from: HirTypeKind.Int
+  to: MirTypeKind.I8|I16|I32|I64|U8|U16|U32|U64
+  state: implemented
+  reason: "width- and signedness-dispatched integer arm"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Float
+  to: MirTypeKind.F32|F64
+  state: implemented
+  reason: "width-dispatched float arm; non-32 widths fall to F64"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Bool
+  to: MirTypeKind.Bool
+  state: implemented
+  reason: "direct arm"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Char
+  to: MirTypeKind.Char
+  state: implemented
+  reason: "direct arm"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Str
+  to: MirTypeKind.Str
+  state: implemented
+  reason: "direct arm"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Unit
+  to: MirTypeKind.Unit
+  state: implemented
+  reason: "direct arm"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Tuple
+  to: MirTypeKind.Tuple
+  state: implemented
+  reason: "elementwise recursive lowering"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Array
+  to: MirTypeKind.Array
+  state: implemented
+  reason: "recursive element lowering; a nil size becomes 0"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Slice
+  to: "MirTypeKind.Slice"
+  state: implemented
+  reason: "recursive element lowering into MirTypeKind.Slice"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Dict
+  to: MirTypeKind.Dict
+  state: implemented
+  reason: "recursive key/value lowering"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Ref
+  to: MirTypeKind.Ref
+  state: implemented
+  reason: "recursive inner lowering, mutability carried"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Ptr
+  to: MirTypeKind.Ptr
+  state: implemented
+  reason: "recursive inner lowering via MirType.ptr"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Optional
+  to: MirTypeKind.Tuple
+  state: implemented
+  reason: "expanded to (Bool has_value, T) rather than a distinct MIR kind"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Result
+  to: MirTypeKind.Result
+  state: implemented
+  reason: "recursive ok/err lowering via MirType.result"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Named
+  to: MirTypeKind.Struct|Bool|I64|F64
+  state: implemented
+  reason: "custom-primitive underlying tag can collapse to a scalar, else Struct"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.TypeParam
+  to: ""
+  state: unsupported
+  reason: "explicit arm raising E-MIR-TYPE-TypeParam with the source span; generics must be monomorphized before MIR"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Union
+  to: MirTypeKind.Union
+  state: implemented
+  reason: "tagged union, all member types lowered for backend layout"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.DynTrait
+  to: "MirTypeKind.Tuple"
+  state: normalized
+  reason: "trait object is a fat pointer (data ptr, vtable ptr); MIR has no dyn-trait type"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Function
+  to: "MirTypeKind.FuncPtr"
+  state: implemented
+  reason: "params/return lowered into a MirSignature code pointer; effects have no MIR representation"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Projection
+  to: ""
+  state: unsupported
+  reason: "explicit arm raising E-MIR-TYPE-Projection with the source span; trait selection must resolve it before MIR"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Isolated
+  to: MirTypeKind.*
+  state: normalized
+  reason: "iso T erases to T's representation; isolation is tracked at the HIR-type layer"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Infer
+  to: ""
+  state: unsupported
+  reason: "explicit arm exists but is itself a fatal diagnostic (infer-arm); an unresolved inference variable reaching MIR is a type-checker defect, not a lowering the backend can perform"
+  issue: doc/08_tracking/bug/mir_lowering_missing_hirtypekind_arms_wildcard_fatal_2026-08-05.md
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Error
+  to: MirTypeKind.I64
+  state: implemented
+  reason: "fail-soft: degrades to the tagged any/i64 slot so a recovered unresolved type does not abort the compile"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Never
+  to: MirTypeKind.Never
+  state: implemented
+  reason: "direct arm"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Any
+  to: "MirTypeKind.I64"
+  state: normalized
+  profile_dependent: true
+  reason: "Normalized(I64) - non-critical only, and recorded as a non-fatal E-MIR-TYPE-Any warning rather than silently; Unsupported(E-MIR-TYPE-Any, fatal) under critical per hardening plan §8/§9.5"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Tensor
+  to: "MirTypeKind.Opaque"
+  state: normalized
+  reason: "Opaque("tensor") runtime handle; dims/device checked in HIR only"
+  test: hir_type_to_mir_type_coverage_spec
+
+transition:
+  from: HirTypeKind.Layer
+  to: "MirTypeKind.Opaque"
+  state: normalized
+  reason: "Opaque("layer") runtime handle; shapes checked in HIR only"
+  test: hir_type_to_mir_type_coverage_spec

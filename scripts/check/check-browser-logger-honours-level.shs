@@ -1,0 +1,153 @@
+#!/bin/sh
+# check-browser-logger-honours-level.shs
+#
+# Fences src/lib/gc_async_mut/gpu/browser_engine/shared/logging.spl (OPEN 4 of
+# doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md).
+#
+# This is the INVERSE of the rest of that family. The others suppressed errors by
+# default; this one suppressed nothing at all:
+#
+#   fn should_log(msg_level: BrowserLogLevel) -> bool:
+#       val _level = msg_level      # bound, then ignored
+#       true                        # everything passes
+#
+# and, compounding it, `Logger.new(name, level)` accepted a level and threw it
+# away, because the class had no field to hold it. The filter was inert at both
+# ends. Reproduction: a Logger built with threshold Error printed all five levels
+# (TRACE, DEBUG, INFO, WARN, ERROR) in both lanes.
+#
+# The assertion that matters here is the NEGATIVE one -- that sub-threshold
+# messages emit ZERO lines. A positive-only check ("does error() print?") passed
+# on the broken code, since the broken code printed everything.
+#
+# Sides:
+#   negative control -- with threshold Error, each of TRACE/DEBUG/INFO/WARN must
+#                       emit EXACTLY ZERO lines. This is the defect.
+#   positive         -- with threshold Error, error() must still emit its
+#                       LABELLED "[ERROR] [scope] msg" line. Guards against a
+#                       "fix" that over-corrects into suppressing everything.
+#   boundary         -- with threshold Info, INFO and above pass (3 levels) and
+#                       TRACE/DEBUG do not (2 levels). Catches an off-by-one in
+#                       the rank comparison, which a single-threshold test misses
+#                       (e.g. `>` instead of `>=` still passes at Error alone if
+#                       only ERROR is checked).
+#   permissive end   -- with threshold Trace, all five levels pass, proving the
+#                       gate was made to honour the level rather than hardcoded
+#                       to a new fixed threshold.
+#
+# Verdict line is the last line of stdout:
+#   PASS -- <n> assertion(s) checked ...   exit 0
+#   FAIL -- ...                            exit 1
+#   ERROR -- nothing was checked           exit 2
+#
+# Usage: sh scripts/check/check-browser-logger-honours-level.shs
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR -- nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="./bin/simple"
+if [ ! -e "$SIMPLE_BIN" ]; then
+    echo "ERROR -- nothing was checked (no $SIMPLE_BIN in $REPO_ROOT)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+FIXTURE="$WORK/browser_logger_probe.spl"
+cat > "$FIXTURE" <<'SPL'
+# Fixture for check-browser-logger-honours-level.shs.
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
+
+fn emit_all(lg: Logger, tag: text):
+    lg.trace("BLOG_{tag}_TRACE")
+    lg.debug("BLOG_{tag}_DEBUG")
+    lg.info("BLOG_{tag}_INFO")
+    lg.warn("BLOG_{tag}_WARN")
+    lg.error("BLOG_{tag}_ERROR")
+
+fn main():
+    emit_all(Logger.new("errscope", BrowserLogLevel.Error), "ERR")
+    emit_all(Logger.new("infoscope", BrowserLogLevel.Info), "INF")
+    emit_all(Logger.new("tracescope", BrowserLogLevel.Trace), "TRC")
+SPL
+
+FAILURES=0
+ASSERTIONS=0
+
+fail() {
+    echo "  FAIL: $1"
+    FAILURES=$((FAILURES + 1))
+}
+
+for MODE in interpreter jit; do
+    echo "== lane: $MODE =="
+
+    SIMPLE_EXECUTION_MODE="$MODE" timeout 300 "$SIMPLE_BIN" run "$FIXTURE" \
+        > "$WORK/out.$MODE" 2>"$WORK/err.$MODE"
+    RC=$?
+    if [ $RC -ne 0 ]; then
+        fail "$MODE: fixture exited $RC (expected 0)"
+        ASSERTIONS=$((ASSERTIONS + 1))
+        continue
+    fi
+    O="$WORK/out.$MODE"
+
+    # --- NEGATIVE CONTROL: threshold Error suppresses the four below it -----
+    # This is the defect. Each is asserted individually so a failure names the
+    # level that leaked.
+    for L in TRACE DEBUG INFO WARN; do
+        ASSERTIONS=$((ASSERTIONS + 1))
+        N=$(grep -c "BLOG_ERR_$L" "$O")
+        if [ "$N" -ne 0 ]; then
+            fail "$MODE: negative control -- a Logger with threshold Error still emitted $L ($N line(s)); should_log is not honouring its level argument"
+        fi
+    done
+
+    # --- POSITIVE: the level at the threshold still gets through, labelled --
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! grep -q '\[ERROR\] \[errscope\] BLOG_ERR_ERROR' "$O"; then
+        fail "$MODE: a Logger with threshold Error emitted no labelled '[ERROR] [errscope] ...' line -- the gate over-corrected into suppressing everything"
+    fi
+
+    # --- BOUNDARY: threshold Info -> exactly INFO, WARN, ERROR -------------
+    # Catches an off-by-one (`>` vs `>=`) that a single-threshold test misses.
+    for L in TRACE DEBUG; do
+        ASSERTIONS=$((ASSERTIONS + 1))
+        if [ "$(grep -c "BLOG_INF_$L" "$O")" -ne 0 ]; then
+            fail "$MODE: threshold Info still emitted $L"
+        fi
+    done
+    for L in INFO WARN ERROR; do
+        ASSERTIONS=$((ASSERTIONS + 1))
+        if [ "$(grep -c "BLOG_INF_$L" "$O")" -ne 1 ]; then
+            fail "$MODE: threshold Info did not emit $L exactly once -- off-by-one in the rank comparison"
+        fi
+    done
+
+    # --- PERMISSIVE END: threshold Trace lets all five through -------------
+    # Proves the gate honours the configured level rather than being hardcoded
+    # to some new fixed threshold.
+    N_TRC=$(grep -c 'BLOG_TRC_' "$O")
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if [ "$N_TRC" -ne 5 ]; then
+        fail "$MODE: threshold Trace emitted $N_TRC of 5 levels -- the gate looks hardcoded rather than level-driven"
+    fi
+
+    echo "  threshold Error: $(grep -c 'BLOG_ERR_' "$O")/5 (expect 1); Info: $(grep -c 'BLOG_INF_' "$O")/5 (expect 3); Trace: $N_TRC/5 (expect 5)"
+done
+
+if [ "$ASSERTIONS" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+
+if [ "$FAILURES" -ne 0 ]; then
+    echo "FAIL -- $FAILURES of $ASSERTIONS assertion(s) failed across 2 execution lanes"
+    exit 1
+fi
+
+echo "PASS -- $ASSERTIONS assertion(s) checked across 2 execution lanes (interpreter, jit), including the sub-threshold negative control, the Info boundary, and the permissive Trace end"
+exit 0

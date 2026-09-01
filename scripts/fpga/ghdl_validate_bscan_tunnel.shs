@@ -1,0 +1,47 @@
+#!/bin/sh
+# ghdl_validate_bscan_tunnel.shs — Lane B: GHDL analyze + elaborate + run of the
+# BSCANE2 tunnel transport (bscane2_stub -> bscane2_tap_bridge -> jtag_debug_chain).
+#
+# Proves the integrated BSCANE2 debug path is GHDL-08 analyzable/elaboratable
+# WITH the BSCANE2 primitive replaced by its sim stub, and that the FPGA-side
+# tunnel de-frame is self-consistent (IDCODE round-trips through the tunnel).
+#
+# NOTE (evidence honesty): bit-exact OpenOCD `riscv use_bscan_tunnel` interop is a
+# separate BOARD (Phase 3) verification item — see bscane2_tap_bridge.vhd header
+# and doc/08_tracking/bug. This script is the FPGA-side self-consistency gate.
+set -e
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+DEBUG_DIR="$REPO_ROOT/src/lib/hardware/debug"
+CORE="$REPO_ROOT/examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd"
+RUN_DIR="${BSCAN_RUN_DIR:-$REPO_ROOT/build/ghdl/bscan}"
+STD=08
+
+command -v ghdl >/dev/null 2>&1 || { echo "FAIL: ghdl not found in PATH"; exit 1; }
+
+rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"; cd "$RUN_DIR"
+printf '02A00513\n00700093\n' > rv32_payload.mem
+printf '00000000\n' > rv32_fat32.mem
+
+for u in jtag_tap dmi_bus debug_registers riscv_dtm riscv_debug_module sba_test_mem; do
+  ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/$u.vhd"
+done
+ghdl -a --std=$STD --workdir=. "$CORE"
+ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/hart_core_glue.vhd"
+ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/jtag_debug_chain.vhd"
+ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/bscane2_stub.vhd"
+ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/bscane2_tap_bridge.vhd"
+ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/tb_bscane2_bridge.vhd"
+ghdl -e --std=$STD --workdir=. tb_bscane2_bridge
+
+LOG="$RUN_DIR/tb_bscane2_bridge.log"
+ghdl -r --std=$STD --workdir=. tb_bscane2_bridge --stop-time=20ms > "$LOG" 2>&1 || true
+cat "$LOG"
+
+if grep -q "BSCANE2 TUNNEL SELF-CONSISTENT PASS" "$LOG" && ! grep -qi ":error:" "$LOG"; then
+  echo "ghdl_validate_bscan_tunnel: PASS"
+  exit 0
+else
+  echo "ghdl_validate_bscan_tunnel: FAIL (see $LOG)"
+  exit 1
+fi

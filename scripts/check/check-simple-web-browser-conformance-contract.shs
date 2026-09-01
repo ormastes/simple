@@ -1,0 +1,171 @@
+#!/bin/sh
+set -eu
+
+# Pin/ledger contract gate for the Simple web browser conformance suite.
+#
+# WHAT THIS GATE DOES AND DOES NOT ASSERT
+# ---------------------------------------
+# It verifies that the PINNED MANIFEST is honest: every declared case row is
+# complete, its retained upstream source still hashes to the recorded sha256,
+# the evidence spec binds the same id/url/revision/hash, and no row claims a
+# conformance PASS. The conformance suite itself is NOT RUN here -- running it
+# needs a real browser runtime.
+#
+# So `executed_case_count=0` is the ASSERTED-CORRECT state, not a vacuity.
+# The bug this header now guards against is different: `executed` used to be a
+# hardcoded `0` that no code path ever assigned, i.e. the gate PRINTED A NUMBER
+# IT NEVER MEASURED, next to a bare `contract=pass` that read as "conformance
+# passed". It is now counted from each row's execution_status, and the verdict
+# line says in words which of the two things passed.
+#
+# OUTPUT CONTRACT
+#   PASS  — <n> pinned case(s) checked, <k> executed   (n is ALWAYS > 0)
+#   FAIL  — contract violated, exit 1
+#   ERROR — nothing was checked, exit 2
+#
+# VACUITY FLOOR: >= 1 pinned case. The floor is 1, not a large number, because
+# the manifest legitimately pins a single case today; it exists so that a
+# manifest that lost all its rows cannot report a pass. Raise it as cases are
+# pinned; never lower it to make a run pass.
+MIN_PINNED_CASES=1
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+MANIFEST="$ROOT_DIR/test/fixtures/browser/conformance/pinned_manifest.env"
+TEST_MODE="${SIMPLE_WEB_CONFORMANCE_CONTRACT_TEST_MODE:-0}"
+if [ "$TEST_MODE" = 1 ]; then
+    MANIFEST="${SIMPLE_WEB_CONFORMANCE_TEST_MANIFEST:-$MANIFEST}"
+fi
+LEDGER="$ROOT_DIR/test/fixtures/browser/conformance/unsupported_ledger.env"
+RECEIPT_SCHEMA="$ROOT_DIR/test/fixtures/browser/conformance/receipt_schema.env"
+
+fail() {
+    echo "simple_web_browser_conformance_contract=fail"
+    echo "reason=$1"
+    echo "check-simple-web-browser-conformance-contract: FAIL — ${accounted:-0} pinned case(s) checked, $1" >&2
+    exit 1
+}
+
+# ERROR is reserved for "the gate could not check anything", which must never be
+# reported as a pass. Distinct exit code so a caller can tell it from FAIL.
+vacuous() {
+    echo "check-simple-web-browser-conformance-contract: ERROR — nothing was checked: $1" >&2
+    exit 2
+}
+
+field() {
+    sed -n "s/^$2=//p" "$1"
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | sed 's/ .*//'
+    else
+        shasum -a 256 "$1" | sed 's/ .*//'
+    fi
+}
+
+valid_sha256() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+valid_revision() {
+    [ "${#1}" -eq 40 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+for artifact in "$MANIFEST" "$LEDGER" "$RECEIPT_SCHEMA"; do
+    [ -s "$artifact" ] || fail "missing-artifact:$artifact"
+done
+
+[ "$(field "$MANIFEST" schema)" = simple-web-browser-conformance-manifest-v1 ] ||
+    fail invalid-manifest-schema
+[ "$(field "$MANIFEST" status)" = not-run ] || fail manifest-must-not-claim-pass
+case_count="$(field "$MANIFEST" claimed_case_count)"
+case "$case_count" in ""|*[!0-9]*) fail invalid-claimed-case-count ;; esac
+[ "$case_count" -ge "$MIN_PINNED_CASES" ] ||
+    vacuous "manifest declares $case_count pinned case(s), expected >= $MIN_PINNED_CASES"
+for key in wpt_revision test262_revision; do
+    revision="$(field "$MANIFEST" "$key")"
+    valid_revision "$revision" || fail "invalid-pin:$key"
+done
+
+accounted=0
+executed=0
+index=1
+while [ "$index" -le "$case_count" ]; do
+    prefix="$(printf 'case_%03d_' "$index")"
+    id="$(field "$MANIFEST" "${prefix}id")"
+    status="$(field "$MANIFEST" "${prefix}status")"
+    suite="$(field "$MANIFEST" "${prefix}suite")"
+    upstream_url="$(field "$MANIFEST" "${prefix}upstream_url")"
+    upstream_revision="$(field "$MANIFEST" "${prefix}upstream_revision")"
+    retrieved_utc="$(field "$MANIFEST" "${prefix}retrieved_utc")"
+    retained_source_path="$(field "$MANIFEST" "${prefix}retained_source_path")"
+    retained_source_sha256="$(field "$MANIFEST" "${prefix}retained_source_sha256")"
+    evidence_spec_path="$(field "$MANIFEST" "${prefix}evidence_spec_path")"
+    execution_status="$(field "$MANIFEST" "${prefix}execution_status")"
+
+    for value in "$id" "$status" "$suite" "$upstream_url" \
+        "$upstream_revision" "$retrieved_utc" "$retained_source_path" \
+        "$retained_source_sha256" "$evidence_spec_path" "$execution_status"; do
+        [ -n "$value" ] || fail "incomplete-case-row:$index"
+    done
+    valid_revision "$upstream_revision" || fail "invalid-case-revision:$index"
+    [ "$upstream_revision" = "$(field "$MANIFEST" wpt_revision)" ] ||
+        fail "case-pin-mismatch:$index"
+    case "$retrieved_utc" in ????-??-??) ;; *) fail "invalid-case-date:$index" ;; esac
+    valid_sha256 "$retained_source_sha256" || fail "invalid-case-source-hash:$index"
+    retained_source="$ROOT_DIR/$retained_source_path"
+    evidence_spec="$ROOT_DIR/$evidence_spec_path"
+    [ -s "$retained_source" ] && [ -s "$evidence_spec" ] ||
+        fail "missing-case-evidence:$index"
+    [ "$(sha256_file "$retained_source")" = "$retained_source_sha256" ] ||
+        fail "stale-case-source-hash:$index"
+    for binding in "$id" "$upstream_url" "$upstream_revision" \
+        "$retained_source_path" "$retained_source_sha256"; do
+        grep -Fq "$binding" "$evidence_spec" ||
+            fail "case-evidence-binding-missing:$index"
+    done
+
+    case "$status:$execution_status" in
+        red-not-run:not-run) ;;
+        pass:pass) fail "conformance-pass-unpromotable:$index" ;;
+        *) fail "invalid-case-status:$index" ;;
+    esac
+    accounted=$((accounted + 1))
+    # MEASURED, not assumed. `executed` was previously a literal 0 that nothing
+    # ever assigned, so the reported count could not have detected a row that
+    # did claim execution.
+    [ "$execution_status" = not-run ] || executed=$((executed + 1))
+    index=$((index + 1))
+done
+
+# Every declared row must have been walked. Guards against a loop that exits
+# early leaving a truthful-looking partial count.
+[ "$accounted" -eq "$case_count" ] ||
+    vacuous "walked $accounted of $case_count declared case row(s)"
+[ "$accounted" -ge "$MIN_PINNED_CASES" ] ||
+    vacuous "0 case row(s) walked"
+
+[ "$(field "$LEDGER" schema)" = simple-web-browser-conformance-unsupported-v1 ] ||
+    fail invalid-ledger-schema
+[ "$(field "$LEDGER" status)" = blocked ] || fail ledger-must-remain-visible
+[ "$(field "$LEDGER" entry_count)" = 6 ] || fail ledger-count-mismatch
+[ "$(field "$RECEIPT_SCHEMA" schema)" = simple-web-browser-conformance-receipt-schema-v1 ] ||
+    fail invalid-receipt-schema
+[ "$(field "$RECEIPT_SCHEMA" status)" = contract-only ] ||
+    fail receipt-schema-must-not-claim-run
+
+echo "simple_web_browser_conformance_accounted_case_count=$accounted"
+echo "simple_web_browser_conformance_executed_case_count=$executed"
+echo "simple_web_browser_conformance_status=$(field "$MANIFEST" status)"
+[ "$TEST_MODE" = 0 ] || fail test-mode-cannot-pass
+# A row that claims execution while the suite has never been run is a promoted
+# result with no evidence behind it. The per-row status check above already
+# rejects `pass:pass`; this is the aggregate backstop.
+[ "$executed" -eq 0 ] || fail "executed-cases-claimed-without-a-run:$executed"
+echo "simple_web_browser_conformance_contract=pass"
+echo "check-simple-web-browser-conformance-contract: PASS — $accounted pinned case(s) checked," \
+     "$executed executed (the conformance suite is NOT run by this gate; it verifies" \
+     "the pin/ledger contract only, and 0 executed is the required state)"

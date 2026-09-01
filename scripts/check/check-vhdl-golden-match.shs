@@ -1,0 +1,399 @@
+#!/bin/sh
+# check-vhdl-golden-match.shs — vhdl_gen backend output vs pinned golden VHDL.
+#
+# Two layers, both fail-closed:
+#
+#   1. Golden drift: every file listed in the golden manifest
+#      (doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt) must
+#      still hash to its pinned sha256. The goldens are the silicon-tested
+#      baseline — if one changed, that is a deliberate event that must be
+#      accompanied by a manifest regeneration, not silently absorbed here.
+#
+#   2. Generated match: for each backend-generated core present in
+#      build/os/rtl/ (rv32/rv64 base cores plus the _flat and _axi sibling
+#      variants — 6 files), the file must
+#      be BYTE-IDENTICAL to the same-named golden under
+#      examples/09_embedded/fpga_riscv/rtl/. Generation is the DEFAULT
+#      expectation: all 30 pinned RTL files are emitted by the generator, so a
+#      missing generated file FAILS the gate. Pass --allow-missing to opt out
+#      and have it reported as "not-generated" instead.
+#
+# Usage: check-vhdl-golden-match.shs [--allow-missing] [--selftest]
+#   (default)             every pinned RTL file MUST be generated; a missing
+#                         build/os/rtl/<file>.vhd counts as fail
+#   --allow-missing       opt out: treat a missing generated file as
+#                         not-generated instead of fail
+#   --require-generated   accepted no-op (this is now the default)
+#   --selftest            deliberate-red calibration: prove that a 1-byte
+#                         mutation of a golden is caught (and that an exact
+#                         copy passes), then clean up. Exits 0 only if the
+#                         gate demonstrably fails on the mutant.
+#
+# Env: VHDL_GEN_DIR overrides the generated-output dir (default build/os/rtl).
+#      Used by --selftest to point the gate at a scratch dir.
+#
+# Summary keys (always printed):
+#   vhdl_golden_match_manifest=ok|drift
+#   vhdl_golden_match_rv32=pass|fail|not-generated
+#   vhdl_golden_match_rv64=pass|fail|not-generated
+#   vhdl_golden_match_rv32_flat=pass|fail|not-generated
+#   vhdl_golden_match_rv64_flat=pass|fail|not-generated
+#   vhdl_golden_match_rv32_axi=pass|fail|not-generated
+#   vhdl_golden_match_rv64_axi=pass|fail|not-generated
+#   vhdl_golden_match_rest_total=24      (the non-exec-core RTL files)
+#   vhdl_golden_match_rest_pass=<n>
+#   vhdl_golden_match_rest_fail=<n>
+#   vhdl_golden_match_rest_missing=<n>
+#   vhdl_golden_match_ok=true|false
+#
+# Exit 0 = all good, 1 = any fail (drift, byte mismatch, or missing under
+# --require-generated), 2 = environment problem (missing manifest/golden).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+MANIFEST="$ROOT/doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt"
+GOLDEN_DIR="$ROOT/examples/09_embedded/fpga_riscv/rtl"
+GEN_DIR="${VHDL_GEN_DIR:-$ROOT/build/os/rtl}"
+# Out-of-tree goldens are staged in a SEPARATE dir so they never enter the
+# silicon-lane scan that check-riscv-rtl-truth.shs performs on build/os/rtl.
+GEN_EXT_DIR="${VHDL_GEN_EXT_DIR:-${GEN_DIR}_external}"
+CORES="rv32_exec_core.vhd rv64_exec_core.vhd rv32_exec_core_flat.vhd rv64_exec_core_flat.vhd rv32_exec_core_axi.vhd rv64_exec_core_axi.vhd"
+
+# The remaining 24 pinned RTL files, also emitted by src/lib/hardware/vhdl_gen/.
+# Kept as a separate list from CORES so the six per-core keys above stay stable
+# for lanes that already cite them; these are reported in aggregate below.
+RTL_REST="rv32_axi4_mem_adapter.vhd rv64_axi4_mem_adapter.vhd rv32_ctrl_obs_slave.vhd rv32_bram_soc.vhd \
+soc_top_rv32.vhd soc_top_rv64.vhd soc_top_rv32_k26_ddr.vhd soc_top_rv64_k26_ddr.vhd \
+soc_top_rv32_sim.vhd soc_top_rv64_sim.vhd soc_top_rv32_tiny_bram.vhd \
+tb_rv32_k26_ddr_boot.vhd tb_rv64_k26_ddr_boot.vhd \
+tb_rv32_simpleos_boot_axi.vhd tb_rv64_simpleos_boot_axi.vhd \
+tb_rv32_simpleos_boot.vhd tb_rv64_simpleos_boot.vhd \
+tb_rv32_wb_soc_smoke.vhd tb_rv64_wb_soc_smoke.vhd \
+tb_rv32_nvme_fw_smoke.vhd tb_rv32_simpleos_boot_tiny.vhd tb_rv32_tiny_bram_soc.vhd tb_rv64_soak.vhd \
+tb_rv32_nvme_bram_soc.vhd"
+
+# Generated RTL whose golden lives OUTSIDE $GOLDEN_DIR, so it needs an explicit
+# basename:golden-path mapping (paths are repo-relative).
+RTL_EXTERNAL="tb_rv32_payload.vhd:examples/09_embedded/fpga_riscv/payload/tb_rv32_payload.vhd \
+tb_gate.vhd:test/riscv_isa_gate/tb_gate.vhd \
+tb_rv32_product_sv32_pmp.vhd:test/01_unit/lib/hardware/fpga_linux/rv32_product_sv32_pmp_ghdl/tb_rv32_product_sv32_pmp.vhd \
+tb_rv64_product_sv39_pmp.vhd:test/01_unit/lib/hardware/fpga_linux/rv64_product_sv39_pmp_ghdl/tb_rv64_product_sv39_pmp.vhd \
+tb_rv64_product_wb_axi.vhd:test/01_unit/lib/hardware/fpga_linux/rv64_product_wb_axi_ghdl/tb_rv64_product_wb_axi.vhd"
+
+# Generation is the DEFAULT expectation: all 30 pinned RTL files are emitted by
+# src/lib/hardware/vhdl_gen/, so a missing build/os/rtl/<file>.vhd is a failure
+# unless the caller explicitly opts out with --allow-missing. --require-generated
+# is kept as an accepted no-op so existing lanes and evidence docs that pass it
+# keep working and keep meaning the same thing.
+REQUIRE_GENERATED=1
+SELFTEST=0
+for arg in "$@"; do
+    case "$arg" in
+        --require-generated) REQUIRE_GENERATED=1 ;;
+        --allow-missing) REQUIRE_GENERATED=0 ;;
+        --selftest) SELFTEST=1 ;;
+        *)
+            echo "check-vhdl-golden-match: unknown argument: $arg" >&2
+            echo "usage: check-vhdl-golden-match.shs [--allow-missing] [--selftest]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+sha256_of() {
+    # Portable sha256: prefer sha256sum, fall back to shasum -a 256.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "check-vhdl-golden-match: no sha256sum/shasum available" >&2
+        exit 2
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# --selftest: deliberate-red calibration of the byte-diff branch.
+# Copies the rv32 golden into a scratch dir, first verifies an exact copy
+# PASSES, then flips one byte and verifies the gate FAILS. Cleans up either
+# way. This proves the gate can actually go red — a gate that cannot fail is
+# not a gate.
+# ---------------------------------------------------------------------------
+if [ "$SELFTEST" = "1" ]; then
+    golden="$GOLDEN_DIR/rv32_exec_core.vhd"
+    if [ ! -f "$golden" ]; then
+        echo "selftest: golden missing: $golden" >&2
+        exit 2
+    fi
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/vhdl-golden-selftest.XXXXXX") || exit 2
+    trap 'rm -rf "$tmp"' EXIT INT TERM
+
+    # Phase 1 (green control): exact copy must classify rv32=pass.
+    cp "$golden" "$tmp/rv32_exec_core.vhd"
+    out=$(VHDL_GEN_DIR="$tmp" "$0" --allow-missing 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ] || ! printf '%s\n' "$out" | grep -q '^vhdl_golden_match_rv32=pass$'; then
+        echo "selftest: FAIL — exact golden copy did not classify pass (rc=$rc)" >&2
+        printf '%s\n' "$out" | sed 's/^/selftest|/' >&2
+        exit 1
+    fi
+    echo "selftest: green control ok (exact copy -> rv32=pass, rc=0)"
+
+    # Phase 2 (deliberate red): flip one byte, gate MUST fail.
+    printf 'X' | dd of="$tmp/rv32_exec_core.vhd" bs=1 seek=100 conv=notrunc 2>/dev/null
+    if cmp -s "$golden" "$tmp/rv32_exec_core.vhd"; then
+        echo "selftest: FAIL — mutation did not change the file" >&2
+        exit 1
+    fi
+    out=$(VHDL_GEN_DIR="$tmp" "$0" --allow-missing 2>&1)
+    rc=$?
+    if [ $rc -eq 0 ] || ! printf '%s\n' "$out" | grep -q '^vhdl_golden_match_rv32=fail$'; then
+        echo "selftest: FAIL — 1-byte mutant was NOT caught (rc=$rc); gate cannot go red" >&2
+        printf '%s\n' "$out" | sed 's/^/selftest|/' >&2
+        exit 1
+    fi
+    echo "selftest: deliberate-red ok (1-byte mutant -> rv32=fail, rc=$rc)"
+
+    # Phase 3 (variant red): same calibration for a flat/axi variant core —
+    # exact copy of the rv32 flat golden passes, a 1-byte mutant must fail.
+    rm -f "$tmp/rv32_exec_core.vhd"
+    vgolden="$GOLDEN_DIR/rv32_exec_core_flat.vhd"
+    if [ ! -f "$vgolden" ]; then
+        echo "selftest: golden missing: $vgolden" >&2
+        exit 2
+    fi
+    cp "$vgolden" "$tmp/rv32_exec_core_flat.vhd"
+    out=$(VHDL_GEN_DIR="$tmp" "$0" --allow-missing 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ] || ! printf '%s\n' "$out" | grep -q '^vhdl_golden_match_rv32_flat=pass$'; then
+        echo "selftest: FAIL — exact flat golden copy did not classify pass (rc=$rc)" >&2
+        printf '%s\n' "$out" | sed 's/^/selftest|/' >&2
+        exit 1
+    fi
+    printf 'X' | dd of="$tmp/rv32_exec_core_flat.vhd" bs=1 seek=100 conv=notrunc 2>/dev/null
+    if cmp -s "$vgolden" "$tmp/rv32_exec_core_flat.vhd"; then
+        echo "selftest: FAIL — flat mutation did not change the file" >&2
+        exit 1
+    fi
+    out=$(VHDL_GEN_DIR="$tmp" "$0" --allow-missing 2>&1)
+    rc=$?
+    if [ $rc -eq 0 ] || ! printf '%s\n' "$out" | grep -q '^vhdl_golden_match_rv32_flat=fail$'; then
+        echo "selftest: FAIL — 1-byte flat mutant was NOT caught (rc=$rc); gate cannot go red" >&2
+        printf '%s\n' "$out" | sed 's/^/selftest|/' >&2
+        exit 1
+    fi
+    echo "selftest: deliberate-red ok (1-byte mutant -> rv32_flat=fail, rc=$rc)"
+    echo "vhdl_golden_match_selftest=ok"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Layer 1: golden manifest drift check.
+# ---------------------------------------------------------------------------
+if [ ! -f "$MANIFEST" ]; then
+    echo "check-vhdl-golden-match: manifest missing: $MANIFEST" >&2
+    exit 2
+fi
+
+manifest_status="ok"
+drift_count=0
+checked=0
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+        ''|\#*) continue ;;
+    esac
+    want=$(printf '%s\n' "$line" | awk '{print $1}')
+    path=$(printf '%s\n' "$line" | awk '{print $2}')
+    [ -n "$want" ] && [ -n "$path" ] || continue
+    checked=$((checked + 1))
+    if [ ! -f "$ROOT/$path" ]; then
+        echo "GOLDEN DRIFT: $path — file missing (pinned $want)"
+        manifest_status="drift"
+        drift_count=$((drift_count + 1))
+        continue
+    fi
+    got=$(sha256_of "$ROOT/$path")
+    if [ "$got" != "$want" ]; then
+        echo "GOLDEN DRIFT: $path"
+        echo "  pinned:  $want"
+        echo "  current: $got"
+        manifest_status="drift"
+        drift_count=$((drift_count + 1))
+    fi
+done < "$MANIFEST"
+
+if [ "$checked" -eq 0 ]; then
+    echo "check-vhdl-golden-match: manifest has no hash entries: $MANIFEST" >&2
+    exit 2
+fi
+
+if [ "$manifest_status" = "drift" ]; then
+    echo "check-vhdl-golden-match: $drift_count golden file(s) no longer match the pinned manifest." >&2
+    echo "  Goldens are the silicon-tested baseline. If the change is deliberate," >&2
+    echo "  regenerate $MANIFEST" >&2
+    echo "  in the same change and say so in the commit message. Do NOT edit hashes ad hoc." >&2
+fi
+
+# ---------------------------------------------------------------------------
+# Layer 2: generated cores vs goldens (byte-identical).
+# ---------------------------------------------------------------------------
+overall_fail=0
+[ "$manifest_status" = "drift" ] && overall_fail=1
+
+core_status_rv32="not-generated"
+core_status_rv64="not-generated"
+core_status_rv32_flat="not-generated"
+core_status_rv64_flat="not-generated"
+core_status_rv32_axi="not-generated"
+core_status_rv64_axi="not-generated"
+
+for core in $CORES; do
+    gen="$GEN_DIR/$core"
+    golden="$GOLDEN_DIR/$core"
+    status="not-generated"
+    if [ ! -f "$golden" ]; then
+        echo "check-vhdl-golden-match: golden missing: $golden" >&2
+        exit 2
+    fi
+    if [ -f "$gen" ]; then
+        if cmp -s "$golden" "$gen"; then
+            status="pass"
+        else
+            status="fail"
+            overall_fail=1
+            echo "MISMATCH: $gen differs from golden $golden"
+            # First differing byte/line for triage (short, bounded output).
+            cmp "$golden" "$gen" 2>&1 | head -1 | sed 's/^/  /'
+        fi
+    else
+        if [ "$REQUIRE_GENERATED" = "1" ]; then
+            status="fail"
+            overall_fail=1
+            echo "MISSING: $gen not generated (run scripts/fpga/generate_exec_core_vhdl.shs; --allow-missing to opt out)"
+        fi
+    fi
+    case "$core" in
+        rv32_exec_core.vhd) core_status_rv32="$status" ;;
+        rv64_exec_core.vhd) core_status_rv64="$status" ;;
+        rv32_exec_core_flat.vhd) core_status_rv32_flat="$status" ;;
+        rv64_exec_core_flat.vhd) core_status_rv64_flat="$status" ;;
+        rv32_exec_core_axi.vhd) core_status_rv32_axi="$status" ;;
+        rv64_exec_core_axi.vhd) core_status_rv64_axi="$status" ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Layer 3: the remaining 24 generated RTL files vs goldens (byte-identical).
+# Same fail-closed rules as Layer 2; reported in aggregate.
+# ---------------------------------------------------------------------------
+rest_pass=0
+rest_fail=0
+rest_missing=0
+
+for rtl in $RTL_REST; do
+    gen="$GEN_DIR/$rtl"
+    golden="$GOLDEN_DIR/$rtl"
+    if [ ! -f "$golden" ]; then
+        echo "check-vhdl-golden-match: golden missing: $golden" >&2
+        exit 2
+    fi
+    if [ -f "$gen" ]; then
+        if cmp -s "$golden" "$gen"; then
+            rest_pass=$((rest_pass + 1))
+        else
+            rest_fail=$((rest_fail + 1))
+            overall_fail=1
+            echo "MISMATCH: $gen differs from golden $golden"
+            cmp "$golden" "$gen" 2>&1 | head -1 | sed 's/^/  /'
+        fi
+    else
+        rest_missing=$((rest_missing + 1))
+        if [ "$REQUIRE_GENERATED" = "1" ]; then
+            overall_fail=1
+            echo "MISSING: $gen not generated (run scripts/fpga/generate_exec_core_vhdl.shs; --allow-missing to opt out)"
+        fi
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Layer 3b: generated RTL whose golden lives outside $GOLDEN_DIR.
+# ---------------------------------------------------------------------------
+ext_pass=0
+ext_fail=0
+ext_missing=0
+
+for pair in $RTL_EXTERNAL; do
+    ename=${pair%%:*}
+    epath=${pair#*:}
+    gen="$GEN_EXT_DIR/$ename"
+    golden="$ROOT/$epath"
+    if [ ! -f "$golden" ]; then
+        echo "check-vhdl-golden-match: golden missing: $golden" >&2
+        exit 2
+    fi
+    if [ -f "$gen" ]; then
+        if cmp -s "$golden" "$gen"; then
+            ext_pass=$((ext_pass + 1))
+        else
+            ext_fail=$((ext_fail + 1))
+            overall_fail=1
+            echo "MISMATCH: $gen differs from golden $golden"
+            cmp "$golden" "$gen" 2>&1 | head -1 | sed 's/^/  /'
+        fi
+    else
+        ext_missing=$((ext_missing + 1))
+        if [ "$REQUIRE_GENERATED" = "1" ]; then
+            overall_fail=1
+            echo "MISSING: $gen not generated (run scripts/fpga/generate_exec_core_vhdl.shs; --allow-missing to opt out)"
+        fi
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Layer 4: coverage audit. Every .vhd in the golden dir MUST appear in CORES or
+# RTL_REST. Without this, a new (or restored) golden is simply invisible to the
+# gate: on 2026-07-27 tb_rv32_nvme_bram_soc.vhd was live at origin, unpinned and
+# ungenerated, and a stray local deletion of it went unnoticed for exactly that
+# reason. A hash check cannot catch a file it was never told about.
+# ---------------------------------------------------------------------------
+uncovered=0
+for gpath in "$GOLDEN_DIR"/*.vhd; do
+    [ -e "$gpath" ] || continue
+    gname=$(basename "$gpath")
+    case " $CORES $RTL_REST " in
+        *" $gname "*) ;;
+        *)
+            echo "UNCOVERED GOLDEN: $gname is in $GOLDEN_DIR but in neither CORES nor RTL_REST"
+            echo "  Add it to this gate AND to the generator, or the gate is blind to it."
+            uncovered=$((uncovered + 1))
+            overall_fail=1
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Summary (stable keys, one per line).
+# ---------------------------------------------------------------------------
+echo "vhdl_golden_match_external_total=5"
+echo "vhdl_golden_match_external_pass=$ext_pass"
+echo "vhdl_golden_match_external_fail=$ext_fail"
+echo "vhdl_golden_match_external_missing=$ext_missing"
+echo "vhdl_golden_match_uncovered=$uncovered"
+echo "vhdl_golden_match_manifest=$manifest_status"
+echo "vhdl_golden_match_rv32=$core_status_rv32"
+echo "vhdl_golden_match_rv64=$core_status_rv64"
+echo "vhdl_golden_match_rv32_flat=$core_status_rv32_flat"
+echo "vhdl_golden_match_rv64_flat=$core_status_rv64_flat"
+echo "vhdl_golden_match_rv32_axi=$core_status_rv32_axi"
+echo "vhdl_golden_match_rv64_axi=$core_status_rv64_axi"
+echo "vhdl_golden_match_rest_total=24"
+echo "vhdl_golden_match_rest_pass=$rest_pass"
+echo "vhdl_golden_match_rest_fail=$rest_fail"
+echo "vhdl_golden_match_rest_missing=$rest_missing"
+if [ "$overall_fail" = "1" ]; then
+    echo "vhdl_golden_match_ok=false"
+    exit 1
+fi
+echo "vhdl_golden_match_ok=true"
+exit 0

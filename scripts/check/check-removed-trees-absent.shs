@@ -1,0 +1,169 @@
+#!/bin/sh
+# check-removed-trees-absent.shs — a tree declared REMOVED must not still be on disk.
+#
+# Why this guard exists
+# ---------------------
+# `src/app/__init__.spl:33` said "`app.interpreter` - REMOVED" from 2026-02.
+# The 99-file, 25,232-line tree stayed on disk until 2026-08-17 — five months of
+# every reader, every grep, every code count and every LLM context being told a
+# lie by the tree itself. Nothing detected it, because no check compares a
+# removal DECLARATION against the filesystem. Docs said gone; `ls` said present.
+# Tracked in doc/08_tracking/bug/app_interpreter_tree_declared_removed_but_still_on_disk_2026-08-10.md.
+#
+# Mechanism
+# ---------
+# Scan every `src/**/__init__.spl` for a removal declaration in the comment form
+# the repo actually uses:
+#
+#     # - `app.interpreter` - REMOVED. Use `core.interpreter` instead
+#
+# For each declared dotted module path `a.b.c`, require that `src/a/b/c` does not
+# exist as a directory containing tracked files. A declaration whose directory is
+# gone is the healthy state and counts toward the checked total.
+#
+# This is deliberately a TREE check (`--root DIR`, default the working tree), not
+# a BASE..NEW range check: "declared removed but present" is a property of a tree,
+# and a commit that only edits the __init__.spl can introduce the contradiction
+# without touching the tree it names, so a changed-files-only scan would be
+# fail-open.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> declaration(s) checked, 0 still on disk      exit 0
+#   FAIL  — <n> declaration(s) checked, <k> still on disk    exit 1
+#   ERROR — nothing was checked                              exit 2
+# A run that examined 0 declarations is an ERROR, never a pass. `--selftest` runs
+# before every scan and is fatal.
+
+set -u
+
+ROOT="."
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="$2"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+# Extract dotted module paths declared REMOVED/DELETED from one file.
+# Matches: # - `a.b.c` - REMOVED ...   and   # - `a.b.c` - DELETED ...
+extract_decls() {
+    sed -n "s/^[[:space:]]*#.*\`\([A-Za-z_][A-Za-z0-9_.]*\)\`[[:space:]]*-[[:space:]]*\(REMOVED\|DELETED\)\b.*/\1/p" "$1"
+}
+
+# Scan a root. Prints one "decl<TAB>path" line per still-present tree; sets counters
+# via a temp file because a pipeline subshell cannot export them back.
+scan_root() {
+    _root="$1"; _offenders="$2"; _count_file="$3"
+    : > "$_offenders"
+    _n=0
+    for init in $(find "$_root/src" -name '__init__.spl' -type f 2>/dev/null); do
+        for decl in $(extract_decls "$init"); do
+            _n=$((_n + 1))
+            # a.b.c -> src/a/b/c
+            rel="src/$(echo "$decl" | tr '.' '/')"
+            if [ -d "$_root/$rel" ]; then
+                # A directory holding only ignored build residue is not a live
+                # tree; require at least one regular file to call it present.
+                if [ -n "$(find "$_root/$rel" -type f -print -quit 2>/dev/null)" ]; then
+                    printf '%s\t%s\n' "$decl" "$rel" >> "$_offenders"
+                fi
+            fi
+        done
+    done
+    echo "$_n" > "$_count_file"
+}
+
+# ---------------------------------------------------------------- selftest ----
+selftest() {
+    tmp=$(mktemp -d) || return 1
+    fail=0
+
+    # Fixture 1: declared removed AND still on disk -> must be detected.
+    mkdir -p "$tmp/f1/src/app/interpreter"
+    printf '# - `app.interpreter` - REMOVED. Use `core.interpreter` instead\n' > "$tmp/f1/src/app/__init__.spl"
+    printf 'fn x():\n    1\n' > "$tmp/f1/src/app/interpreter/main.spl"
+    scan_root "$tmp/f1" "$tmp/o1" "$tmp/c1"
+    [ -s "$tmp/o1" ] || { echo "selftest: fixture 1 (present tree) not detected" >&2; fail=1; }
+    [ "$(cat "$tmp/c1")" = "1" ] || { echo "selftest: fixture 1 wrong decl count" >&2; fail=1; }
+
+    # Fixture 2: declared removed and genuinely gone -> must be clean, count 1.
+    mkdir -p "$tmp/f2/src/app"
+    printf '# - `app.interpreter` - REMOVED. Use `core.interpreter` instead\n' > "$tmp/f2/src/app/__init__.spl"
+    scan_root "$tmp/f2" "$tmp/o2" "$tmp/c2"
+    [ -s "$tmp/o2" ] && { echo "selftest: fixture 2 (absent tree) false-positived" >&2; fail=1; }
+    [ "$(cat "$tmp/c2")" = "1" ] || { echo "selftest: fixture 2 wrong decl count" >&2; fail=1; }
+
+    # Fixture 3: DELETED spelling is recognised too.
+    mkdir -p "$tmp/f3/src/app/legacy"
+    printf '# - `app.legacy` - DELETED 2026-02-10, superseded\n' > "$tmp/f3/src/app/__init__.spl"
+    printf 'fn y():\n    2\n' > "$tmp/f3/src/app/legacy/mod.spl"
+    scan_root "$tmp/f3" "$tmp/o3" "$tmp/c3"
+    [ -s "$tmp/o3" ] || { echo "selftest: fixture 3 (DELETED spelling) not detected" >&2; fail=1; }
+
+    # Fixture 4: prose that merely mentions the word must NOT be a declaration.
+    mkdir -p "$tmp/f4/src/app/live"
+    printf '# The `app.live` module is not REMOVED; see notes below.\n' > "$tmp/f4/src/app/__init__.spl"
+    printf 'fn z():\n    3\n' > "$tmp/f4/src/app/live/mod.spl"
+    scan_root "$tmp/f4" "$tmp/o4" "$tmp/c4"
+    [ "$(cat "$tmp/c4")" = "0" ] || { echo "selftest: fixture 4 (prose) parsed as a declaration" >&2; fail=1; }
+
+    # Fixture 5: a directory holding only build residue is not a live tree.
+    mkdir -p "$tmp/f5/src/app/interpreter/.simple/logs"
+    printf '# - `app.interpreter` - REMOVED\n' > "$tmp/f5/src/app/__init__.spl"
+    scan_root "$tmp/f5" "$tmp/o5" "$tmp/c5"
+    # Empty dirs only -> no regular file -> clean.
+    [ -s "$tmp/o5" ] && { echo "selftest: fixture 5 (empty residue dirs) false-positived" >&2; fail=1; }
+
+    # Fixture 6: a tree with NO declarations must yield 0, forcing caller to ERROR.
+    mkdir -p "$tmp/f6/src/app"
+    printf '# nothing declared here\n' > "$tmp/f6/src/app/__init__.spl"
+    scan_root "$tmp/f6" "$tmp/o6" "$tmp/c6"
+    [ "$(cat "$tmp/c6")" = "0" ] || { echo "selftest: fixture 6 (no declarations) non-zero count" >&2; fail=1; }
+
+    rm -rf "$tmp"
+    return $fail
+}
+
+if ! selftest; then
+    echo "selftest FAILED — guard is not trustworthy, not scanning" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "$SELFTEST_ONLY" = "1" ]; then
+    echo "PASS — 6 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+if [ ! -d "$ROOT/src" ]; then
+    echo "no src/ under root '$ROOT'" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+OFF=$(mktemp) || { echo "ERROR — nothing was checked"; exit 2; }
+CNT=$(mktemp) || { rm -f "$OFF"; echo "ERROR — nothing was checked"; exit 2; }
+scan_root "$ROOT" "$OFF" "$CNT"
+N=$(cat "$CNT")
+
+if [ "$N" -eq 0 ]; then
+    rm -f "$OFF" "$CNT"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ -s "$OFF" ]; then
+    K=$(wc -l < "$OFF" | tr -d ' ')
+    NAMES=$(cut -f2 "$OFF" | tr '\n' ' ')
+    echo "Declared removed but still on disk:"
+    cat "$OFF"
+    rm -f "$OFF" "$CNT"
+    echo "FAIL — $N declaration(s) checked, $K still on disk: $NAMES"
+    exit 1
+fi
+
+rm -f "$OFF" "$CNT"
+echo "PASS — $N declaration(s) checked, 0 still on disk"
+exit 0

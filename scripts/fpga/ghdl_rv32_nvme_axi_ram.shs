@@ -1,0 +1,54 @@
+#!/bin/sh
+# Run the RV32 NVMe firmware against RAM-backed NAND state through full AXI4.
+set -e
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+FW_ELF="${FW_ELF:-$ROOT_DIR/build/nvme_fw_rv32.elf}"
+NM="${NM:-riscv64-unknown-elf-nm}"
+WORK_DIR="$ROOT_DIR/build/ghdl/rv32_nvme_axi_ram"
+GARBAGE_FILL="${GARBAGE_FILL:-1}"
+EVIDENCE_DIR="$ROOT_DIR/build/ghdl/rv32_k26_ddr_boot"
+[ "$GARBAGE_FILL" = "1" ] && EVIDENCE_DIR="${EVIDENCE_DIR}_garbage"
+
+[ -f "$FW_ELF" ] || { echo "ERROR: firmware ELF missing: $FW_ELF"; exit 1; }
+command -v "$NM" >/dev/null 2>&1 || { echo "ERROR: $NM not found"; exit 1; }
+mkdir -p "$WORK_DIR"
+: > "$WORK_DIR/empty.img"
+
+start_hex="$($NM -n "$FW_ELF" | awk '$3 == "_nandram_start" { print $1; exit }')"
+end_hex="$($NM -n "$FW_ELF" | awk '$3 == "_nandram_end" { print $1; exit }')"
+[ -n "$start_hex" ] && [ -n "$end_hex" ] || {
+  echo "ERROR: firmware is missing _nandram_start/_nandram_end"; exit 1;
+}
+
+trace_base="$((0x$start_hex - 0x80000000 + 0x10000000))"
+trace_bytes="$((0x$end_hex - 0x$start_hex))"
+[ "$trace_bytes" -eq 256 ] || {
+  echo "ERROR: firmware .nandram size is $trace_bytes bytes, expected 256"; exit 1;
+}
+
+KERNEL_ELF="$FW_ELF" \
+FAT32_IMG="$WORK_DIR/empty.img" \
+RAMDISK_BYTES=0 \
+STOP_TIME="${STOP_TIME:-120ms}" \
+GARBAGE_FILL="$GARBAGE_FILL" \
+WORK_DIR="$EVIDENCE_DIR" \
+EXPECTED_MARKER="ALL RV32 NVME FW CHECKS PASS" \
+TRACE_BASE="$trace_base" \
+TRACE_BYTES="$trace_bytes" \
+REQUIRE_TRACE=1 \
+RESULT_LABEL="RV32 NVMe NAND recovery/prevention passed through AXI4 RAM" \
+  sh "$ROOT_DIR/scripts/fpga/ghdl_rv32_k26_ddr_boot.shs"
+
+SIM_LOG="$EVIDENCE_DIR/sim.log"
+for marker in \
+  "NAND PREVENT PASS" \
+  "NAND EVIDENCE D1 U1 F5 C3 T1 M1 Q3 X2 S1 PASS" \
+  "NAND RECOVERY PASS" \
+  "ALL RV32 NVME FW CHECKS PASS"; do
+  grep -Fq "$marker" "$SIM_LOG" || {
+    echo "ERROR: missing AXI RAM evidence marker: $marker"; exit 1;
+  }
+done
+
+printf 'RV32_NVME_AXI_RAM_PASS trace=0x%08X bytes=%s\n' "$trace_base" "$trace_bytes"

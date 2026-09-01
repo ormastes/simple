@@ -1,0 +1,252 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_dashboard_live}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_dashboard_live_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+DASHBOARD_BUILD_DIR="$BUILD_DIR/dashboard"
+DASHBOARD_REPORT="$BUILD_DIR/dashboard_report.md"
+DASHBOARD_ENV="$DASHBOARD_BUILD_DIR/evidence.env"
+LIVE_HTTP_ENV="${LLM_DASHBOARD_LIVE_HTTP_EVIDENCE_ENV:-build/llm_dashboard_live_http/evidence.env}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$DASHBOARD_REPORT"
+
+status="pass"
+reason="dashboard_live_routes_verified"
+failures=""
+required_gates="dashboard_evidence,route_spec_html,route_spec_auth,route_spec_api,route_spec_side_effect,route_spec_owner,agent_spec_auth,agent_spec_render,agent_spec_prefix,server_route,server_agents_route,server_agents_render,server_boundary,server_execution,guide_live,guide_api,guide_agents,runtime_plan,live_http_authenticated_request"
+
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+record_failure() {
+    if [ -z "$failures" ]; then
+        failures="$1"
+    else
+        failures="$failures,$1"
+    fi
+    status="fail"
+}
+
+require_contains() {
+    name="$1"
+    path="$2"
+    pattern="$3"
+    if [ ! -f "$path" ]; then
+        record_failure "$name:missing_file"
+        return
+    fi
+    if ! grep -F "$pattern" "$path" >/dev/null 2>&1; then
+        record_failure "$name:missing_pattern"
+    fi
+}
+
+if BUILD_DIR="$DASHBOARD_BUILD_DIR" REPORT_PATH="$DASHBOARD_REPORT" sh scripts/check/check-llm-dashboard-evidence.shs >"$BUILD_DIR/dashboard.log" 2>&1; then
+    dashboard_status="pass"
+else
+    dashboard_status="fail"
+    record_failure "dashboard_evidence"
+fi
+
+require_contains route_spec_html test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "embeds the vLLM control panel in authenticated dashboard HTML"
+require_contains route_spec_auth test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "rejects unauthenticated vLLM control API requests"
+require_contains route_spec_api test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "serves authenticated preflight control JSONL"
+require_contains route_spec_side_effect test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "routes missing-resource start through runtime execution JSONL without spawning"
+require_contains route_spec_owner test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "keeps preflight on the collector and side-effect actions on runtime-owner execution JSONL"
+require_contains agent_spec_auth test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl "redirects unauthenticated /agents requests to /login"
+require_contains agent_spec_render test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl "renders authenticated /agents as an absence-safe dashboard"
+require_contains agent_spec_prefix test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl "does not hijack non-agents prefixes"
+require_contains server_route src/app/web_dashboard/server.spl "if path.starts_with(\"/api/vllm/control\")"
+require_contains server_agents_route src/app/web_dashboard/server.spl "if _is_agents_path(clean_path)"
+require_contains server_agents_render src/app/web_dashboard/server.spl "return http_response(200, \"text/html\", self.render_agents_html())"
+require_contains server_boundary src/app/web_dashboard/server.spl "llm_runtime_dashboard_live_boundary_jsonl"
+require_contains server_execution src/app/web_dashboard/server.spl "llm_runtime_execute_dashboard_control_jsonl"
+require_contains guide_live doc/07_guide/app/dashboard.md "The authenticated web dashboard shell is the operator view"
+require_contains guide_api doc/07_guide/app/dashboard.md "/api/vllm/control"
+require_contains guide_agents doc/07_guide/app/dashboard.md "/agents"
+require_contains runtime_plan doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md "Wire side-effect dashboard actions through runtime-owner execution JSONL"
+
+SURFACE_MANIFEST="$BUILD_DIR/dashboard_live_surface_manifest.tsv"
+{
+    for path in \
+        scripts/check/check-llm-dashboard-live-evidence.shs \
+        scripts/check/check-llm-dashboard-live-http-evidence.shs \
+        scripts/check/check-llm-dashboard-evidence.shs \
+        test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl \
+        test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl \
+        src/app/web_dashboard/server.spl \
+        doc/07_guide/app/dashboard.md \
+        doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md \
+        doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
+dashboard_env_size="$(artifact_size "$DASHBOARD_ENV")"
+dashboard_env_sha256="$(artifact_sha256 "$DASHBOARD_ENV")"
+dashboard_log_size="$(artifact_size "$BUILD_DIR/dashboard.log")"
+dashboard_log_sha256="$(artifact_sha256 "$BUILD_DIR/dashboard.log")"
+
+live_http_status="missing"
+live_http_reason="missing_live_http_evidence"
+live_http_base_url_status="not_collected"
+live_http_base_url_scheme_status="not_collected"
+live_http_auth_config_status="not_collected"
+live_http_auth_source="not_collected"
+live_http_timeout_seconds="not_collected"
+live_http_dashboard_status="not_collected"
+live_http_control_status="not_collected"
+live_http_surface_manifest_count="not_collected"
+live_http_surface_manifest_size="not_collected"
+live_http_surface_manifest_sha256="not_collected"
+live_http_pass_integrity_status="missing"
+live_http_pass_integrity_reason="missing_live_http_evidence"
+if [ -f "$LIVE_HTTP_ENV" ]; then
+    live_http_status="$(sed -n 's/^llm_dashboard_live_http_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_reason="$(sed -n 's/^llm_dashboard_live_http_reason=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_base_url_status="$(sed -n 's/^llm_dashboard_live_http_base_url_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_base_url_scheme_status="$(sed -n 's/^llm_dashboard_live_http_base_url_scheme_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_auth_config_status="$(sed -n 's/^llm_dashboard_live_http_auth_config_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_auth_source="$(sed -n 's/^llm_dashboard_live_http_auth_source=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_timeout_seconds="$(sed -n 's/^llm_dashboard_live_http_timeout_seconds=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_dashboard_status="$(sed -n 's/^llm_dashboard_live_http_dashboard_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_control_status="$(sed -n 's/^llm_dashboard_live_http_control_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_surface_manifest_count="$(sed -n 's/^llm_dashboard_live_http_surface_manifest_count=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_surface_manifest_size="$(sed -n 's/^llm_dashboard_live_http_surface_manifest_size=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_surface_manifest_sha256="$(sed -n 's/^llm_dashboard_live_http_surface_manifest_sha256=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_pass_integrity_status="$(sed -n 's/^llm_dashboard_live_http_pass_integrity_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_pass_integrity_reason="$(sed -n 's/^llm_dashboard_live_http_pass_integrity_reason=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+fi
+if [ "$live_http_status" != "pass" ]; then
+    record_failure "live_http_authenticated_request:${live_http_reason:-not_passed}"
+elif [ "$live_http_pass_integrity_status" != "pass" ]; then
+    record_failure "live_http_pass_integrity:${live_http_pass_integrity_reason:-missing}"
+fi
+
+if [ "$status" != "pass" ]; then
+    reason="dashboard_live_http_or_route_gap"
+fi
+blocked_gates="$failures"
+next_action="strict live dashboard evidence is ready"
+if [ -z "$blocked_gates" ]; then
+    blocked_gates="none"
+    primary_blocked_gate="none"
+else
+    primary_blocked_gate="$(printf '%s\n' "$blocked_gates" | cut -d ',' -f 1 | cut -d ':' -f 1)"
+    next_action="resolve live dashboard evidence failures: $blocked_gates"
+fi
+
+{
+    printf '%s\n' "llm_dashboard_live_status=$status"
+    printf '%s\n' "llm_dashboard_live_reason=$reason"
+    printf '%s\n' "llm_dashboard_live_scope=authenticated_dashboard_route_execution"
+    printf '%s\n' "llm_dashboard_live_required_gates=$required_gates"
+    printf '%s\n' "llm_dashboard_live_blocked_gates=$blocked_gates"
+    printf '%s\n' "llm_dashboard_live_primary_blocked_gate=$primary_blocked_gate"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_status=$dashboard_status"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_env=$DASHBOARD_ENV"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_env_size=$dashboard_env_size"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_env_sha256=$dashboard_env_sha256"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_log_size=$dashboard_log_size"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_log_sha256=$dashboard_log_sha256"
+    printf '%s\n' "llm_dashboard_live_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "llm_dashboard_live_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "llm_dashboard_live_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "llm_dashboard_live_surface_manifest_sha256=$surface_manifest_sha256"
+    printf '%s\n' "llm_dashboard_live_http_evidence_env=$LIVE_HTTP_ENV"
+    printf '%s\n' "llm_dashboard_live_http_status=${live_http_status:-missing}"
+    printf '%s\n' "llm_dashboard_live_http_reason=${live_http_reason:-missing_live_http_evidence}"
+    printf '%s\n' "llm_dashboard_live_http_base_url_status=${live_http_base_url_status:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_base_url_scheme_status=${live_http_base_url_scheme_status:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_auth_config_status=${live_http_auth_config_status:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_auth_source=${live_http_auth_source:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_timeout_seconds=${live_http_timeout_seconds:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_dashboard_status=${live_http_dashboard_status:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_control_status=${live_http_control_status:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_surface_manifest_count=${live_http_surface_manifest_count:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_surface_manifest_size=${live_http_surface_manifest_size:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_surface_manifest_sha256=${live_http_surface_manifest_sha256:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_pass_integrity_status=${live_http_pass_integrity_status:-missing}"
+    printf '%s\n' "llm_dashboard_live_http_pass_integrity_reason=${live_http_pass_integrity_reason:-missing_live_http_evidence}"
+    printf '%s\n' "llm_dashboard_live_failures=$failures"
+    printf '%s\n' "llm_dashboard_live_next_action=$next_action"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Dashboard Live Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- scope: \`authenticated_dashboard_route_execution\`"
+    printf '%s\n' "- required_gates: \`$required_gates\`"
+    printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
+    printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
+    printf '%s\n' "- dashboard_evidence_status: \`$dashboard_status\`"
+    printf '%s\n' "- dashboard_evidence_env: \`$DASHBOARD_ENV\`"
+    printf '%s\n' "- dashboard_evidence_env_size: \`$dashboard_env_size\`"
+    printf '%s\n' "- dashboard_evidence_env_sha256: \`$dashboard_env_sha256\`"
+    printf '%s\n' "- dashboard_evidence_log_size: \`$dashboard_log_size\`"
+    printf '%s\n' "- dashboard_evidence_log_sha256: \`$dashboard_log_sha256\`"
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
+    printf '%s\n' "- live_http_env: \`$LIVE_HTTP_ENV\`"
+    printf '%s\n' "- live_http_status: \`${live_http_status:-missing}\`"
+    printf '%s\n' "- live_http_reason: \`${live_http_reason:-missing_live_http_evidence}\`"
+    printf '%s\n' "- live_http_base_url_status: \`${live_http_base_url_status:-not_collected}\`"
+    printf '%s\n' "- live_http_base_url_scheme_status: \`${live_http_base_url_scheme_status:-not_collected}\`"
+    printf '%s\n' "- live_http_auth_config_status: \`${live_http_auth_config_status:-not_collected}\`"
+    printf '%s\n' "- live_http_auth_source: \`${live_http_auth_source:-not_collected}\`"
+    printf '%s\n' "- live_http_timeout_seconds: \`${live_http_timeout_seconds:-not_collected}\`"
+    printf '%s\n' "- live_http_dashboard_status: \`${live_http_dashboard_status:-not_collected}\`"
+    printf '%s\n' "- live_http_control_status: \`${live_http_control_status:-not_collected}\`"
+    printf '%s\n' "- live_http_surface_manifest_count: \`${live_http_surface_manifest_count:-not_collected}\`"
+    printf '%s\n' "- live_http_surface_manifest_size: \`${live_http_surface_manifest_size:-not_collected}\`"
+    printf '%s\n' "- live_http_surface_manifest_sha256: \`${live_http_surface_manifest_sha256:-not_collected}\`"
+    printf '%s\n' "- live_http_pass_integrity_status: \`${live_http_pass_integrity_status:-missing}\`"
+    printf '%s\n' "- live_http_pass_integrity_reason: \`${live_http_pass_integrity_reason:-missing_live_http_evidence}\`"
+    if [ -n "$failures" ]; then
+        printf '%s\n' "- failures: \`$failures\`"
+    else
+        printf '%s\n' "- failures: \`none\`"
+    fi
+    printf '%s\n' "- next_action: \`$next_action\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This evidence proves authenticated dashboard route contracts through checked-in specs and source surfaces, then requires separate live HTTP evidence from `LLM_DASHBOARD_LIVE_HTTP_EVIDENCE_ENV` with `llm_dashboard_live_http_status=pass` and `llm_dashboard_live_http_pass_integrity_status=pass`. Produce that env with `scripts/check/check-llm-dashboard-live-http-evidence.shs` on a configured running dashboard host. Without that env, strict dashboard completion stays failed instead of treating route-contract checks as live operator-dashboard proof. It does not claim live vLLM serving; that remains the vLLM host strict lane.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-dashboard-live-evidence"
+else
+    echo "STATUS: FAIL llm-dashboard-live-evidence failures=$failures"
+    exit 1
+fi

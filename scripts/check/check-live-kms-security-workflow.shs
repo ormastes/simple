@@ -1,0 +1,87 @@
+#!/bin/sh
+# Validate the live KMS workflow invariants without requiring cloud credentials.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+WORKFLOW="$ROOT_DIR/.github/workflows/live-kms-security.yml"
+
+fail() {
+    echo "VIOLATION: live KMS workflow: $1"
+    exit 1
+}
+
+contains() {
+    needle="$1"
+    if ! grep -Fq -- "$needle" "$WORKFLOW"; then
+        fail "missing '$needle'"
+    fi
+}
+
+if [ ! -f "$WORKFLOW" ]; then
+    fail "missing $WORKFLOW"
+fi
+
+if command -v actionlint >/dev/null 2>&1; then
+    actionlint "$WORKFLOW"
+fi
+
+contains "workflow_dispatch:"
+contains "auth:"
+contains "type: choice"
+contains "permissions:"
+contains "contents: read"
+contains "id-token: write"
+contains "concurrency:"
+
+if grep -Eq '^[[:space:]]*(push|pull_request|schedule):' "$WORKFLOW"; then
+    fail "live credential workflow must stay manual-only"
+fi
+
+for provider in aws gcp azure hsm; do
+    case "$provider" in
+        aws) provider_name="AWS" ;;
+        gcp) provider_name="GCP" ;;
+        azure) provider_name="Azure" ;;
+        hsm) provider_name="HSM" ;;
+    esac
+    contains "$provider-live-kms:"
+    contains "environment: live-kms-$provider"
+    contains "SIMPLE_LIVE_KMS_PROVIDER: $provider"
+    contains "Require $provider_name live KMS credentials"
+done
+
+contains "SIMPLE_LIB=src"
+contains "test/02_integration/lib/security/live_kms_transport_spec.spl"
+contains "::error::\$name is required"
+contains "exit \"\$missing\""
+
+contains "SIMPLE_LIVE_KMS_AWS_ENDPOINT"
+contains "SIMPLE_LIVE_KMS_AWS_KEY_ID"
+contains "SIMPLE_LIVE_KMS_AWS_AUTHORIZATION"
+contains "SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN"
+contains "SIMPLE_LIVE_KMS_AWS_REGION"
+contains "SIMPLE_LIVE_KMS_AWS_AMZ_DATETIME"
+contains "SIMPLE_LIVE_KMS_AUTH: \${{ inputs.auth }}"
+contains "SIMPLE_LIVE_KMS_GCP_ENDPOINT"
+contains "SIMPLE_LIVE_KMS_GCP_KEY_VERSION"
+contains "SIMPLE_LIVE_KMS_GCP_BEARER"
+contains "SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER"
+contains "SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT"
+contains "SIMPLE_LIVE_KMS_AZURE_VAULT"
+contains "SIMPLE_LIVE_KMS_AZURE_KEY"
+contains "SIMPLE_LIVE_KMS_AZURE_BEARER"
+contains "SIMPLE_LIVE_KMS_AZURE_CLIENT_ID"
+contains "SIMPLE_LIVE_KMS_AZURE_TENANT_ID"
+contains "SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID"
+contains "SIMPLE_LIVE_KMS_HSM_ENDPOINT"
+contains "SIMPLE_LIVE_KMS_HSM_SLOT"
+contains "SIMPLE_LIVE_KMS_HSM_KEY"
+contains "SIMPLE_LIVE_KMS_HSM_AUTHORIZATION"
+contains "aws-actions/configure-aws-credentials@v4"
+contains "google-github-actions/auth@v2"
+contains "azure/login@v2"
+contains "AWS_SESSION_TOKEN"
+contains "Export GCP OIDC bearer"
+contains "Export Azure OIDC bearer"
+
+echo "PASSED: live KMS workflow invariants"

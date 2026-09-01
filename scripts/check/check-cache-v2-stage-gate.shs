@@ -1,0 +1,150 @@
+#!/bin/sh
+# Per-stage harden gate for the Semantic Incremental Build v2 campaign.
+#
+# WHY THIS EXISTS
+# ---------------
+# The campaign lands in stages (C0..C11), each from its own worktree, while
+# other agents are concurrently bootstrapping off `main`. A stage that pushes a
+# tree which does not bootstrap does not merely break itself — it breaks every
+# sibling agent that fetches main next, and they will spend a session chasing a
+# failure that is not theirs. So: harden BEFORE the push, never after.
+#
+# This script composes gates that already exist rather than reimplementing them:
+#
+#   scripts/check/check-no-conflict-tree-push.shs     jj conflict tree
+#   scripts/check/check-no-conflict-markers-push.shs  marker text in content
+#   scripts/check/check-tree-size-push.shs            structurally wrong tree
+#   scripts/check/check-bootstrap-essential-tools-smoke.shs   bootstrap survives
+#
+# The first three are the standing pre-push guards (.claude/rules/vcs.md). The
+# fourth is what makes this a STAGE gate rather than a repo-integrity gate: a
+# tree can be perfectly well-formed and still fail to bootstrap, and bootstrap
+# failure is precisely the damage this campaign can inflict on siblings.
+#
+# FAIL-CLOSED CONTRACT
+# --------------------
+# Same contract as its siblings, for the same reason: until 2026-08-01 the
+# pre-push guards FAILED OPEN when run from a directory that is not a git repo
+# (the `git archive` worktrees under /dev/shm that agents build in), printing a
+# pass verdict having checked nothing. This script refuses to run from a
+# non-repo and refuses to interpret an empty commit range as success.
+#
+# Verdict is ALWAYS the last line of stdout:
+#
+#   PASS  — <n> gate(s) passed, <m> commit(s) checked   exit 0   safe to push
+#   FAIL  — <what failed>                               exit 1   do not push
+#   ERROR — nothing was checked                         exit 2   do not push
+#
+# There is no flag, env var, or argument that skips a gate. A stage that cannot
+# pass is a stage that is not ready to push.
+#
+# USAGE
+#   sh scripts/check/check-cache-v2-stage-gate.shs [range]
+#
+# `range` defaults to main@origin..@- — exactly what `jj git push --bookmark
+# main` sends. A bare revision (no `..`) is rejected rather than reinterpreted.
+
+set -u
+
+GATES_RUN=0
+FAILED_GATE=""
+
+fail() {
+    printf '%s\n' "FAIL — $1"
+    exit 1
+}
+
+bail() {
+    printf '%s\n' "ERROR — nothing was checked: $1"
+    exit 2
+}
+
+# --- cwd must be a real repo root ------------------------------------------
+# `git -C` does NOT override an inherited GIT_DIR, so check the resolved
+# toplevel rather than trusting the path we were handed.
+TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null) \
+    || bail "cwd is not a git repository (run from the repo root of a real clone)"
+
+if [ ! -d "$TOPLEVEL/scripts/check" ]; then
+    bail "resolved toplevel '$TOPLEVEL' has no scripts/check — wrong repo"
+fi
+
+cd "$TOPLEVEL" || bail "cannot cd to toplevel '$TOPLEVEL'"
+
+# --- range ------------------------------------------------------------------
+RANGE="${1:-}"
+if [ -n "$RANGE" ]; then
+    case "$RANGE" in
+        *..*) : ;;
+        *) bail "'$RANGE' is a bare revision, not a range; refusing to guess" ;;
+    esac
+fi
+
+# --- 1..3: the standing pre-push guards -------------------------------------
+# Delegate verbatim. Their verdict is authoritative; we only aggregate.
+for guard in check-no-conflict-tree-push \
+             check-no-conflict-markers-push \
+             check-tree-size-push
+do
+    script="scripts/check/$guard.shs"
+    [ -f "$script" ] || bail "missing prerequisite guard $script"
+
+    if [ -n "$RANGE" ]; then
+        out=$(sh "$script" "$RANGE" 2>&1); rc=$?
+    else
+        out=$(sh "$script" 2>&1); rc=$?
+    fi
+
+    verdict=$(printf '%s\n' "$out" | tail -n 1)
+
+    case "$rc" in
+        0) GATES_RUN=$((GATES_RUN + 1)) ;;
+        2) bail "$guard could not check anything: $verdict" ;;
+        *) FAILED_GATE="$guard"; fail "$guard: $verdict" ;;
+    esac
+done
+
+# --- 4: bootstrap smoke -----------------------------------------------------
+# The gate that distinguishes this from a plain repo-integrity check. A stage
+# may be structurally clean and still leave main unbootstrappable for siblings.
+SMOKE="scripts/check/check-bootstrap-essential-tools-smoke.shs"
+if [ -f "$SMOKE" ]; then
+    out=$(sh "$SMOKE" 2>&1); rc=$?
+    verdict=$(printf '%s\n' "$out" | tail -n 1)
+    if [ "$rc" -ne 0 ]; then
+        # Distinguish "this stage broke bootstrap" from "this machine cannot
+        # evaluate bootstrap at all". Conflating them makes the gate
+        # permanently red for an environment reason no stage can fix — which
+        # is how a gate gets ignored into uselessness.
+        #
+        # error=rust_seed_binary means no self-hosted binary is deployed
+        # (bin/simple resolves to the Rust seed). That is an environment
+        # blocker, not a verdict on the staged commit. It still blocks the
+        # push — bootstrap genuinely cannot be proven — but is reported as
+        # ERROR ("nothing was checked"), never as FAIL.
+        # See doc/08_tracking/bug/no_self_hosted_binary_deployed_blocks_bootstrap_gate_2026-08-09.md
+        case "$out" in
+            *rust_seed_binary*)
+                bail "bootstrap smoke cannot run: no self-hosted binary deployed (bin/simple is the Rust seed). ENVIRONMENT blocker, not a defect in the staged commit. Deploy via 'bin/simple build bootstrap', then re-run. Verdict: $verdict"
+                ;;
+            *)
+                fail "bootstrap smoke failed — pushing this would break sibling agents: $verdict"
+                ;;
+        esac
+    fi
+    GATES_RUN=$((GATES_RUN + 1))
+else
+    # Absence is not success. Say so loudly rather than silently passing 3/4.
+    bail "missing $SMOKE — cannot prove this stage bootstraps, refusing to pass"
+fi
+
+# --- verdict ----------------------------------------------------------------
+if [ "$GATES_RUN" -lt 4 ]; then
+    bail "only $GATES_RUN of 4 gates ran"
+fi
+
+RANGE_LABEL="${RANGE:-main@origin..@-}"
+COMMITS=$(git rev-list --count "$(printf '%s' "$RANGE_LABEL" | sed 's/main@origin/refs\/remotes\/origin\/main/; s/@-/HEAD/')" 2>/dev/null || echo "?")
+
+printf '%s\n' "PASS — $GATES_RUN gates passed, $COMMITS commit(s) checked in $RANGE_LABEL"
+exit 0

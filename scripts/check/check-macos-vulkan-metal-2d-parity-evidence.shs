@@ -1,0 +1,749 @@
+#!/bin/sh
+# Fail-closed aggregate for existing macOS Vulkan and Metal 2D live evidence.
+# This checker never launches a renderer; it compares two completed lane records.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+VULKAN_ENV="${1:-}"
+METAL_ENV="${2:-}"
+OUTPUT="${3:-${MACOS_VULKAN_METAL_2D_PARITY_OUTPUT:-build/tmp/macos_vulkan_metal_2d_parity/evidence.env}}"
+PREFIX="macos_vulkan_metal_2d_parity"
+
+mismatch_count=unavailable
+max_channel_delta=unavailable
+pixel_sha256_equal=false
+metadata_equal=false
+font_identity_equal=false
+event_sequence_equal=false
+non_background_bounds_equal=false
+repo_revision_equal=false
+shared_scene_fingerprint_equal=false
+draw_ir_equal=false
+draw_ir_readback_checksum_equal=false
+semantic_equal=false
+font_metrics_equal=false
+provider_sha256_equal=false
+vulkan_source_revision=unavailable
+metal_source_revision=unavailable
+vulkan_repo_revision=unavailable
+metal_repo_revision=unavailable
+vulkan_shared_scene_fingerprint=unavailable
+metal_shared_scene_fingerprint=unavailable
+
+write_result() {
+    result_status="$1"
+    result_reason="$2"
+    mkdir -p "$(dirname -- "$OUTPUT")"
+    {
+        echo "${PREFIX}_status=$result_status"
+        echo "${PREFIX}_reason=$result_reason"
+        echo "${PREFIX}_vulkan_evidence=$VULKAN_ENV"
+        echo "${PREFIX}_metal_evidence=$METAL_ENV"
+        echo "${PREFIX}_metadata_equal=$metadata_equal"
+        echo "${PREFIX}_font_identity_equal=$font_identity_equal"
+        echo "${PREFIX}_event_sequence_equal=$event_sequence_equal"
+        echo "${PREFIX}_non_background_bounds_equal=$non_background_bounds_equal"
+        echo "${PREFIX}_vulkan_source_revision=$vulkan_source_revision"
+        echo "${PREFIX}_metal_source_revision=$metal_source_revision"
+        echo "${PREFIX}_vulkan_repo_revision=$vulkan_repo_revision"
+        echo "${PREFIX}_metal_repo_revision=$metal_repo_revision"
+        echo "${PREFIX}_repo_revision_equal=$repo_revision_equal"
+        echo "${PREFIX}_vulkan_shared_scene_fingerprint=$vulkan_shared_scene_fingerprint"
+        echo "${PREFIX}_metal_shared_scene_fingerprint=$metal_shared_scene_fingerprint"
+        echo "${PREFIX}_shared_scene_fingerprint_equal=$shared_scene_fingerprint_equal"
+        echo "${PREFIX}_draw_ir_equal=$draw_ir_equal"
+        echo "${PREFIX}_draw_ir_composition_id_vulkan=${vulkan_draw_ir_composition_id:-unavailable}"
+        echo "${PREFIX}_draw_ir_composition_id_metal=${metal_draw_ir_composition_id:-unavailable}"
+        echo "${PREFIX}_draw_ir_scene_key_vulkan=${vulkan_draw_ir_scene_key:-unavailable}"
+        echo "${PREFIX}_draw_ir_scene_key_metal=${metal_draw_ir_scene_key:-unavailable}"
+        echo "${PREFIX}_draw_ir_rendered_commands_vulkan=${vulkan_draw_ir_rendered_commands:-unavailable}"
+        echo "${PREFIX}_draw_ir_rendered_commands_metal=${metal_draw_ir_rendered_commands:-unavailable}"
+        echo "${PREFIX}_draw_ir_skipped_commands_vulkan=${vulkan_draw_ir_skipped_commands:-unavailable}"
+        echo "${PREFIX}_draw_ir_skipped_commands_metal=${metal_draw_ir_skipped_commands:-unavailable}"
+        echo "${PREFIX}_draw_ir_readback_checksum_vulkan=${vulkan_draw_ir_readback_checksum:-unavailable}"
+        echo "${PREFIX}_draw_ir_readback_checksum_metal=${metal_draw_ir_readback_checksum:-unavailable}"
+        echo "${PREFIX}_draw_ir_readback_checksum_equal=$draw_ir_readback_checksum_equal"
+        echo "${PREFIX}_semantic_equal=$semantic_equal"
+        echo "${PREFIX}_semantic_event_vulkan=${vulkan_semantic_event:-unavailable}"
+        echo "${PREFIX}_semantic_event_metal=${metal_semantic_event:-unavailable}"
+        echo "${PREFIX}_semantic_before_focus_vulkan=${vulkan_semantic_before_focus:-unavailable}"
+        echo "${PREFIX}_semantic_before_focus_metal=${metal_semantic_before_focus:-unavailable}"
+        echo "${PREFIX}_semantic_after_focus_vulkan=${vulkan_semantic_after_focus:-unavailable}"
+        echo "${PREFIX}_semantic_after_focus_metal=${metal_semantic_after_focus:-unavailable}"
+        echo "${PREFIX}_semantic_before_accent_vulkan=${vulkan_semantic_before_accent:-unavailable}"
+        echo "${PREFIX}_semantic_before_accent_metal=${metal_semantic_before_accent:-unavailable}"
+        echo "${PREFIX}_semantic_after_accent_vulkan=${vulkan_semantic_after_accent:-unavailable}"
+        echo "${PREFIX}_semantic_after_accent_metal=${metal_semantic_after_accent:-unavailable}"
+        echo "${PREFIX}_semantic_changed_vulkan=${vulkan_semantic_changed:-unavailable}"
+        echo "${PREFIX}_semantic_changed_metal=${metal_semantic_changed:-unavailable}"
+        echo "${PREFIX}_semantic_native_focus_reduced_vulkan=${vulkan_semantic_native_focus_reduced:-unavailable}"
+        echo "${PREFIX}_semantic_native_focus_reduced_metal=${metal_semantic_native_focus_reduced:-unavailable}"
+        echo "${PREFIX}_semantic_raw_winit_reduced_vulkan=${vulkan_semantic_raw_winit_reduced:-unavailable}"
+        echo "${PREFIX}_semantic_raw_winit_reduced_metal=${metal_semantic_raw_winit_reduced:-unavailable}"
+        echo "${PREFIX}_semantic_pointer_key_delivery_vulkan=${vulkan_semantic_pointer_key_delivery:-unavailable}"
+        echo "${PREFIX}_semantic_pointer_key_delivery_metal=${metal_semantic_pointer_key_delivery:-unavailable}"
+        echo "${PREFIX}_semantic_correlation_vulkan=${vulkan_semantic_correlation:-unavailable}"
+        echo "${PREFIX}_semantic_correlation_metal=${metal_semantic_correlation:-unavailable}"
+        echo "${PREFIX}_font_metrics_equal=$font_metrics_equal"
+        echo "${PREFIX}_font_point_size_vulkan=${vulkan_font_point_size:-unavailable}"
+        echo "${PREFIX}_font_point_size_metal=${metal_font_point_size:-unavailable}"
+        echo "${PREFIX}_font_dpi_vulkan=${vulkan_font_dpi:-unavailable}"
+        echo "${PREFIX}_font_dpi_metal=${metal_font_dpi:-unavailable}"
+        echo "${PREFIX}_font_pixel_size_vulkan=${vulkan_font_pixel_size:-unavailable}"
+        echo "${PREFIX}_font_pixel_size_metal=${metal_font_pixel_size:-unavailable}"
+        echo "${PREFIX}_provider_sha256_equal=$provider_sha256_equal"
+        echo "${PREFIX}_winit_provider_sha256_vulkan=${vulkan_winit_provider_sha256:-unavailable}"
+        echo "${PREFIX}_winit_provider_sha256_metal=${metal_winit_provider_sha256:-unavailable}"
+        echo "${PREFIX}_simple_runtime_provider_sha256_vulkan=${vulkan_simple_runtime_provider_sha256:-unavailable}"
+        echo "${PREFIX}_simple_runtime_provider_sha256_metal=${metal_simple_runtime_provider_sha256:-unavailable}"
+        echo "${PREFIX}_simple_runtime_c_provider_sha256_vulkan=${vulkan_simple_runtime_c_provider_sha256:-unavailable}"
+        echo "${PREFIX}_simple_runtime_c_provider_sha256_metal=${metal_simple_runtime_c_provider_sha256:-unavailable}"
+        echo "${PREFIX}_pixel_sha256_equal=$pixel_sha256_equal"
+        echo "${PREFIX}_mismatch_count=$mismatch_count"
+        echo "${PREFIX}_max_channel_delta=$max_channel_delta"
+        echo "${PREFIX}_accepted_tolerance=0"
+    } >"$OUTPUT"
+}
+
+fail() {
+    write_result fail "$1"
+    echo "macOS Vulkan/Metal 2D parity evidence: FAIL ($1)" >&2
+    echo "evidence=$OUTPUT" >&2
+    exit 1
+}
+
+field() {
+    key="$1"
+    env_path="$2"
+    awk -v key="$key" '
+        index($0, key "=") == 1 {
+            count += 1
+            value = substr($0, length(key) + 2)
+        }
+        END {
+            if (count != 1 || value == "") exit 1
+            print value
+        }
+    ' "$env_path"
+}
+
+valid_positive_integer() {
+    case "$1" in
+        ''|*[!0-9]*|0) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+valid_sha256() {
+    case "$1" in
+        *[!0-9a-f]*|'') return 1 ;;
+    esac
+    [ "${#1}" -eq 64 ]
+}
+
+valid_repo_revision() {
+    case "$1" in
+        *[!0-9a-f]*|'') return 1 ;;
+    esac
+    case "${#1}" in
+        40|64) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+file_mtime() {
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+}
+
+payload_sha256() {
+    ppm_path="$1"
+    header_bytes="$2"
+    dd if="$ppm_path" bs=1 skip="$header_bytes" 2>/dev/null |
+        shasum -a 256 |
+        awk '{print $1}'
+}
+
+normalize_absolute_path() {
+    awk -v path="$1" '
+        BEGIN {
+            count = split(path, parts, "/")
+            depth = 0
+            for (i = 1; i <= count; i += 1) {
+                if (parts[i] == "" || parts[i] == ".") continue
+                if (parts[i] == "..") {
+                    if (depth > 0) depth -= 1
+                    continue
+                }
+                depth += 1
+                stack[depth] = parts[i]
+            }
+            printf "/"
+            for (i = 1; i <= depth; i += 1) {
+                if (i > 1) printf "/"
+                printf "%s", stack[i]
+            }
+            printf "\n"
+        }
+    '
+}
+
+canonical_existing_path() {
+    realpath "$1" 2>/dev/null
+}
+
+canonical_output_path() {
+    candidate="$1"
+    if [ -e "$candidate" ]; then
+        canonical_existing_path "$candidate"
+        return
+    fi
+    if [ -L "$candidate" ]; then
+        return 1
+    fi
+    case "$candidate" in
+        /*) absolute_candidate="$candidate" ;;
+        *) absolute_candidate="$ROOT_DIR/$candidate" ;;
+    esac
+    probe="$(dirname -- "$absolute_candidate")"
+    suffix="$(basename -- "$absolute_candidate")"
+    while [ ! -d "$probe" ]; do
+        parent="$(dirname -- "$probe")"
+        [ "$parent" != "$probe" ] || return 1
+        suffix="$(basename -- "$probe")/$suffix"
+        probe="$parent"
+    done
+    physical_parent="$(CDPATH= cd -- "$probe" && pwd -P)" || return 1
+    normalize_absolute_path "$physical_parent/$suffix"
+}
+
+same_existing_file() {
+    [ -e "$1" ] && [ -e "$2" ] && [ "$1" -ef "$2" ]
+}
+
+reject_without_result() {
+    echo "macOS Vulkan/Metal 2D parity evidence: FAIL ($1)" >&2
+    exit 1
+}
+
+validate_lane() {
+    lane="$1"; shift
+    env_path="$1"; shift
+    backend="$1"; shift
+    target="$1"; shift
+    width="$1"; shift
+    height="$1"; shift
+    dpi="$1"; shift
+    event_count="$1"; shift
+    pixel_sha256="$1"; shift
+    non_background_bounds="$1"; shift
+    event_sequence="$1"; shift
+    capture_path="$1"; shift
+    source_revision="$1"; shift
+    repo_revision="$1"; shift
+    shared_scene_fingerprint="$1"; shift
+    font_identity="$1"; shift
+    expected_font_identity="$1"; shift
+    draw_ir_composition_id="$1"; shift
+    draw_ir_scene_key="$1"; shift
+    draw_ir_rendered_commands="$1"; shift
+    draw_ir_skipped_commands="$1"; shift
+    draw_ir_readback_checksum="$1"; shift
+    semantic_event="$1"; shift
+    semantic_before_focus="$1"; shift
+    semantic_after_focus="$1"; shift
+    semantic_before_accent="$1"; shift
+    semantic_after_accent="$1"; shift
+    semantic_changed="$1"; shift
+    semantic_native_focus_reduced="$1"; shift
+    semantic_raw_winit_reduced="$1"; shift
+    semantic_pointer_key_delivery="$1"; shift
+    semantic_correlation="$1"; shift
+    font_point_size="$1"; shift
+    font_dpi="$1"; shift
+    font_pixel_size="$1"; shift
+    winit_provider_sha256="$1"; shift
+    simple_runtime_provider_sha256="$1"; shift
+    simple_runtime_c_provider_sha256="$1"
+
+    [ "$backend" = "$lane" ] || fail "${lane}-backend-invalid"
+    [ "$target" = macos-host ] || fail "${lane}-target-invalid"
+    for value in "$width" "$height" "$dpi" "$event_count"; do
+        valid_positive_integer "$value" || fail "${lane}-numeric-metadata-invalid"
+    done
+    [ "$dpi" = 300 ] || fail "${lane}-dpi-not-300"
+    [ "$event_count" = 6 ] || fail "${lane}-event-count-invalid"
+    valid_sha256 "$pixel_sha256" || fail "${lane}-pixel-sha256-invalid"
+    valid_sha256 "$source_revision" || fail "${lane}-source-revision-invalid"
+    valid_repo_revision "$repo_revision" ||
+        fail "${lane}-repo-revision-invalid"
+    valid_sha256 "$shared_scene_fingerprint" ||
+        fail "${lane}-shared-scene-fingerprint-invalid"
+    [ "$event_sequence" = \
+        "focus,pointer_move,pointer_down,pointer_up,key_down,key_up" ] ||
+        fail "${lane}-event-sequence-invalid"
+    [ "$font_identity" = "$expected_font_identity" ] ||
+        fail "${lane}-font-identity-invalid"
+    [ "$draw_ir_composition_id" = "macos-gpu-2d-frozen-composition-v1" ] ||
+        fail "${lane}-draw-ir-composition-id-invalid"
+    [ "$draw_ir_scene_key" = "macos-gpu-2d-frozen-scene-v1" ] ||
+        fail "${lane}-draw-ir-scene-key-invalid"
+    [ "$draw_ir_rendered_commands" = 5 ] ||
+        fail "${lane}-draw-ir-rendered-commands-invalid"
+    [ "$draw_ir_skipped_commands" = 0 ] ||
+        fail "${lane}-draw-ir-skipped-commands-invalid"
+    valid_positive_integer "$draw_ir_readback_checksum" ||
+        fail "${lane}-draw-ir-readback-checksum-invalid"
+    [ "$semantic_event" = "focus" ] ||
+        fail "${lane}-semantic-event-invalid"
+    [ "$semantic_before_focus" = "macos-gpu-2d-root" ] ||
+        fail "${lane}-semantic-before-focus-invalid"
+    [ "$semantic_after_focus" = "macos-gpu-2d-action" ] ||
+        fail "${lane}-semantic-after-focus-invalid"
+    valid_positive_integer "$semantic_before_accent" ||
+        fail "${lane}-semantic-before-accent-invalid"
+    valid_positive_integer "$semantic_after_accent" ||
+        fail "${lane}-semantic-after-accent-invalid"
+    [ "$semantic_before_accent" != "$semantic_after_accent" ] ||
+        fail "${lane}-semantic-accent-unchanged"
+    [ "$semantic_changed" = true ] ||
+        fail "${lane}-semantic-changed-invalid"
+    [ "$semantic_native_focus_reduced" = true ] ||
+        fail "${lane}-semantic-native-focus-reduced-invalid"
+    [ "$semantic_raw_winit_reduced" = true ] ||
+        fail "${lane}-semantic-raw-winit-reduced-invalid"
+    [ "$semantic_pointer_key_delivery" = observed ] ||
+        fail "${lane}-semantic-pointer-key-delivery-invalid"
+    [ "$semantic_correlation" = \
+        "native-focus-reduced;pointer-key-delivery-observed" ] ||
+        fail "${lane}-semantic-correlation-invalid"
+    [ "$font_point_size" = 24 ] ||
+        fail "${lane}-font-point-size-invalid"
+    [ "$font_dpi" = 300 ] ||
+        fail "${lane}-font-dpi-invalid"
+    [ "$font_pixel_size" = 100 ] ||
+        fail "${lane}-font-pixel-size-invalid"
+    valid_sha256 "$winit_provider_sha256" ||
+        fail "${lane}-winit-provider-sha256-invalid"
+    valid_sha256 "$simple_runtime_provider_sha256" ||
+        fail "${lane}-simple-runtime-provider-sha256-invalid"
+    valid_sha256 "$simple_runtime_c_provider_sha256" ||
+        fail "${lane}-simple-runtime-c-provider-sha256-invalid"
+
+    [ -s "$capture_path" ] || fail "${lane}-capture-missing"
+    header="P6
+${width} ${height}
+255
+"
+    header_bytes="${#header}"
+    expected_bytes=$((header_bytes + width * height * 3))
+    actual_bytes="$(wc -c <"$capture_path" | tr -d ' ')"
+    [ "$actual_bytes" -eq "$expected_bytes" ] ||
+        fail "${lane}-capture-size-invalid"
+    actual_header="$(dd if="$capture_path" bs=1 count="$header_bytes" 2>/dev/null)"
+    [ "$actual_header" = "${header%?}" ] || fail "${lane}-capture-header-invalid"
+    actual_pixel_sha256="$(payload_sha256 "$capture_path" "$header_bytes")"
+    [ "$actual_pixel_sha256" = "$pixel_sha256" ] ||
+        fail "${lane}-capture-sha256-stale"
+    evidence_mtime="$(file_mtime "$env_path")" ||
+        fail "${lane}-evidence-mtime-unavailable"
+    capture_mtime="$(file_mtime "$capture_path")" ||
+        fail "${lane}-capture-mtime-unavailable"
+    [ "$evidence_mtime" -ge "$capture_mtime" ] ||
+        fail "${lane}-capture-newer-than-evidence"
+}
+
+[ -n "$VULKAN_ENV" ] && [ -n "$METAL_ENV" ] ||
+    reject_without_result "usage-two-evidence-env-paths-required"
+
+VULKAN_CANONICAL="$(canonical_output_path "$VULKAN_ENV")" ||
+    reject_without_result "vulkan-evidence-path-unresolvable"
+METAL_CANONICAL="$(canonical_output_path "$METAL_ENV")" ||
+    reject_without_result "metal-evidence-path-unresolvable"
+OUTPUT_CANONICAL="$(canonical_output_path "$OUTPUT")" ||
+    reject_without_result "output-path-unresolvable"
+if [ "$VULKAN_CANONICAL" = "$METAL_CANONICAL" ] ||
+        same_existing_file "$VULKAN_CANONICAL" "$METAL_CANONICAL"; then
+    reject_without_result "vulkan-metal-evidence-alias"
+fi
+if [ "$OUTPUT_CANONICAL" = "$VULKAN_CANONICAL" ] ||
+        same_existing_file "$OUTPUT_CANONICAL" "$VULKAN_CANONICAL"; then
+    reject_without_result "output-aliases-vulkan-evidence"
+fi
+if [ "$OUTPUT_CANONICAL" = "$METAL_CANONICAL" ] ||
+        same_existing_file "$OUTPUT_CANONICAL" "$METAL_CANONICAL"; then
+    reject_without_result "output-aliases-metal-evidence"
+fi
+VULKAN_ENV="$VULKAN_CANONICAL"
+METAL_ENV="$METAL_CANONICAL"
+OUTPUT="$OUTPUT_CANONICAL"
+[ -s "$VULKAN_ENV" ] || fail "vulkan-evidence-missing"
+[ -s "$METAL_ENV" ] || fail "metal-evidence-missing"
+
+vulkan_status="$(field macos_vulkan_2d_live_status "$VULKAN_ENV")" ||
+    fail "vulkan-status-missing-or-duplicate"
+metal_status="$(field macos_metal_2d_live_status "$METAL_ENV")" ||
+    fail "metal-status-missing-or-duplicate"
+[ "$vulkan_status" = pass ] || fail "vulkan-lane-not-pass"
+[ "$metal_status" = pass ] || fail "metal-lane-not-pass"
+
+vulkan_backend="$(field backend "$VULKAN_ENV")" ||
+    fail "vulkan-backend-missing-or-duplicate"
+vulkan_target="$(field target "$VULKAN_ENV")" ||
+    fail "vulkan-target-missing-or-duplicate"
+vulkan_width="$(field width "$VULKAN_ENV")" ||
+    fail "vulkan-width-missing-or-duplicate"
+vulkan_height="$(field height "$VULKAN_ENV")" ||
+    fail "vulkan-height-missing-or-duplicate"
+vulkan_dpi="$(field dpi "$VULKAN_ENV")" ||
+    fail "vulkan-dpi-missing-or-duplicate"
+vulkan_event_count="$(field event_count "$VULKAN_ENV")" ||
+    fail "vulkan-event-count-missing-or-duplicate"
+vulkan_pixel_sha256="$(field pixel_sha256 "$VULKAN_ENV")" ||
+    fail "vulkan-pixel-sha256-missing-or-duplicate"
+vulkan_non_background_bounds="$(field non_background_bounds "$VULKAN_ENV")" ||
+    fail "vulkan-non-background-bounds-missing-or-duplicate"
+vulkan_event_sequence="$(field event_sequence "$VULKAN_ENV")" ||
+    fail "vulkan-event-sequence-missing-or-duplicate"
+vulkan_capture_path="$(field capture_path "$VULKAN_ENV")" ||
+    fail "vulkan-capture-path-missing-or-duplicate"
+vulkan_source_revision="$(field source_revision "$VULKAN_ENV")" ||
+    fail "vulkan-source-revision-missing-or-duplicate"
+vulkan_repo_revision="$(field repo_revision "$VULKAN_ENV")" ||
+    fail "vulkan-repo-revision-missing-or-duplicate"
+vulkan_shared_scene_fingerprint="$(
+    field shared_scene_fingerprint "$VULKAN_ENV"
+)" || fail "vulkan-shared-scene-fingerprint-missing-or-duplicate"
+vulkan_font_identity="$(
+    field macos_vulkan_2d_live_font_identity "$VULKAN_ENV"
+)" || fail "vulkan-font-identity-missing-or-duplicate"
+vulkan_expected_font_identity="$(
+    field macos_vulkan_2d_live_font_expected_identity "$VULKAN_ENV"
+)" || fail "vulkan-font-expected-identity-missing-or-duplicate"
+vulkan_draw_ir_composition_id="$(field draw_ir_composition_id "$VULKAN_ENV")" ||
+    fail "vulkan-draw-ir-composition-id-missing-or-duplicate"
+vulkan_draw_ir_scene_key="$(field draw_ir_scene_key "$VULKAN_ENV")" ||
+    fail "vulkan-draw-ir-scene-key-missing-or-duplicate"
+vulkan_draw_ir_rendered_commands="$(
+    field draw_ir_rendered_commands "$VULKAN_ENV"
+)" || fail "vulkan-draw-ir-rendered-commands-missing-or-duplicate"
+vulkan_draw_ir_skipped_commands="$(
+    field draw_ir_skipped_commands "$VULKAN_ENV"
+)" || fail "vulkan-draw-ir-skipped-commands-missing-or-duplicate"
+vulkan_draw_ir_readback_checksum="$(
+    field draw_ir_readback_checksum "$VULKAN_ENV"
+)" || fail "vulkan-draw-ir-readback-checksum-missing-or-duplicate"
+vulkan_semantic_event="$(field semantic_event "$VULKAN_ENV")" ||
+    fail "vulkan-semantic-event-missing-or-duplicate"
+vulkan_semantic_before_focus="$(field semantic_before_focus "$VULKAN_ENV")" ||
+    fail "vulkan-semantic-before-focus-missing-or-duplicate"
+vulkan_semantic_after_focus="$(field semantic_after_focus "$VULKAN_ENV")" ||
+    fail "vulkan-semantic-after-focus-missing-or-duplicate"
+vulkan_semantic_before_accent="$(field semantic_before_accent "$VULKAN_ENV")" ||
+    fail "vulkan-semantic-before-accent-missing-or-duplicate"
+vulkan_semantic_after_accent="$(field semantic_after_accent "$VULKAN_ENV")" ||
+    fail "vulkan-semantic-after-accent-missing-or-duplicate"
+vulkan_semantic_changed="$(field semantic_changed "$VULKAN_ENV")" ||
+    fail "vulkan-semantic-changed-missing-or-duplicate"
+vulkan_semantic_native_focus_reduced="$(
+    field semantic_native_focus_reduced "$VULKAN_ENV"
+)" || fail "vulkan-semantic-native-focus-reduced-missing-or-duplicate"
+vulkan_semantic_raw_winit_reduced="$(
+    field semantic_raw_winit_reduced "$VULKAN_ENV"
+)" || fail "vulkan-semantic-raw-winit-reduced-missing-or-duplicate"
+vulkan_semantic_pointer_key_delivery="$(
+    field semantic_pointer_key_delivery "$VULKAN_ENV"
+)" || fail "vulkan-semantic-pointer-key-delivery-missing-or-duplicate"
+vulkan_semantic_correlation="$(field semantic_correlation "$VULKAN_ENV")" ||
+    fail "vulkan-semantic-correlation-missing-or-duplicate"
+vulkan_font_point_size="$(field font_point_size "$VULKAN_ENV")" ||
+    fail "vulkan-font-point-size-missing-or-duplicate"
+vulkan_font_dpi="$(field font_dpi "$VULKAN_ENV")" ||
+    fail "vulkan-font-dpi-missing-or-duplicate"
+vulkan_font_pixel_size="$(field font_pixel_size "$VULKAN_ENV")" ||
+    fail "vulkan-font-pixel-size-missing-or-duplicate"
+vulkan_winit_provider_sha256="$(field winit_provider_sha256 "$VULKAN_ENV")" ||
+    fail "vulkan-winit-provider-sha256-missing-or-duplicate"
+vulkan_simple_runtime_provider_sha256="$(
+    field simple_runtime_provider_sha256 "$VULKAN_ENV"
+)" || fail "vulkan-simple-runtime-provider-sha256-missing-or-duplicate"
+vulkan_simple_runtime_c_provider_sha256="$(
+    field simple_runtime_c_provider_sha256 "$VULKAN_ENV"
+)" || fail "vulkan-simple-runtime-c-provider-sha256-missing-or-duplicate"
+
+metal_backend="$(field backend "$METAL_ENV")" ||
+    fail "metal-backend-missing-or-duplicate"
+metal_target="$(field target "$METAL_ENV")" ||
+    fail "metal-target-missing-or-duplicate"
+metal_width="$(field width "$METAL_ENV")" ||
+    fail "metal-width-missing-or-duplicate"
+metal_height="$(field height "$METAL_ENV")" ||
+    fail "metal-height-missing-or-duplicate"
+metal_dpi="$(field dpi "$METAL_ENV")" ||
+    fail "metal-dpi-missing-or-duplicate"
+metal_event_count="$(field event_count "$METAL_ENV")" ||
+    fail "metal-event-count-missing-or-duplicate"
+metal_pixel_sha256="$(field pixel_sha256 "$METAL_ENV")" ||
+    fail "metal-pixel-sha256-missing-or-duplicate"
+metal_non_background_bounds="$(field non_background_bounds "$METAL_ENV")" ||
+    fail "metal-non-background-bounds-missing-or-duplicate"
+metal_event_sequence="$(field event_sequence "$METAL_ENV")" ||
+    fail "metal-event-sequence-missing-or-duplicate"
+metal_capture_path="$(field capture_path "$METAL_ENV")" ||
+    fail "metal-capture-path-missing-or-duplicate"
+metal_source_revision="$(field source_revision "$METAL_ENV")" ||
+    fail "metal-source-revision-missing-or-duplicate"
+metal_repo_revision="$(field repo_revision "$METAL_ENV")" ||
+    fail "metal-repo-revision-missing-or-duplicate"
+metal_shared_scene_fingerprint="$(
+    field shared_scene_fingerprint "$METAL_ENV"
+)" || fail "metal-shared-scene-fingerprint-missing-or-duplicate"
+metal_font_identity="$(
+    field macos_metal_2d_live_font_identity "$METAL_ENV"
+)" || fail "metal-font-identity-missing-or-duplicate"
+metal_expected_font_identity="$(
+    field macos_metal_2d_live_font_expected_identity "$METAL_ENV"
+)" || fail "metal-font-expected-identity-missing-or-duplicate"
+metal_draw_ir_composition_id="$(field draw_ir_composition_id "$METAL_ENV")" ||
+    fail "metal-draw-ir-composition-id-missing-or-duplicate"
+metal_draw_ir_scene_key="$(field draw_ir_scene_key "$METAL_ENV")" ||
+    fail "metal-draw-ir-scene-key-missing-or-duplicate"
+metal_draw_ir_rendered_commands="$(
+    field draw_ir_rendered_commands "$METAL_ENV"
+)" || fail "metal-draw-ir-rendered-commands-missing-or-duplicate"
+metal_draw_ir_skipped_commands="$(
+    field draw_ir_skipped_commands "$METAL_ENV"
+)" || fail "metal-draw-ir-skipped-commands-missing-or-duplicate"
+metal_draw_ir_readback_checksum="$(
+    field draw_ir_readback_checksum "$METAL_ENV"
+)" || fail "metal-draw-ir-readback-checksum-missing-or-duplicate"
+metal_semantic_event="$(field semantic_event "$METAL_ENV")" ||
+    fail "metal-semantic-event-missing-or-duplicate"
+metal_semantic_before_focus="$(field semantic_before_focus "$METAL_ENV")" ||
+    fail "metal-semantic-before-focus-missing-or-duplicate"
+metal_semantic_after_focus="$(field semantic_after_focus "$METAL_ENV")" ||
+    fail "metal-semantic-after-focus-missing-or-duplicate"
+metal_semantic_before_accent="$(field semantic_before_accent "$METAL_ENV")" ||
+    fail "metal-semantic-before-accent-missing-or-duplicate"
+metal_semantic_after_accent="$(field semantic_after_accent "$METAL_ENV")" ||
+    fail "metal-semantic-after-accent-missing-or-duplicate"
+metal_semantic_changed="$(field semantic_changed "$METAL_ENV")" ||
+    fail "metal-semantic-changed-missing-or-duplicate"
+metal_semantic_native_focus_reduced="$(
+    field semantic_native_focus_reduced "$METAL_ENV"
+)" || fail "metal-semantic-native-focus-reduced-missing-or-duplicate"
+metal_semantic_raw_winit_reduced="$(
+    field semantic_raw_winit_reduced "$METAL_ENV"
+)" || fail "metal-semantic-raw-winit-reduced-missing-or-duplicate"
+metal_semantic_pointer_key_delivery="$(
+    field semantic_pointer_key_delivery "$METAL_ENV"
+)" || fail "metal-semantic-pointer-key-delivery-missing-or-duplicate"
+metal_semantic_correlation="$(field semantic_correlation "$METAL_ENV")" ||
+    fail "metal-semantic-correlation-missing-or-duplicate"
+metal_font_point_size="$(field font_point_size "$METAL_ENV")" ||
+    fail "metal-font-point-size-missing-or-duplicate"
+metal_font_dpi="$(field font_dpi "$METAL_ENV")" ||
+    fail "metal-font-dpi-missing-or-duplicate"
+metal_font_pixel_size="$(field font_pixel_size "$METAL_ENV")" ||
+    fail "metal-font-pixel-size-missing-or-duplicate"
+metal_winit_provider_sha256="$(field winit_provider_sha256 "$METAL_ENV")" ||
+    fail "metal-winit-provider-sha256-missing-or-duplicate"
+metal_simple_runtime_provider_sha256="$(
+    field simple_runtime_provider_sha256 "$METAL_ENV"
+)" || fail "metal-simple-runtime-provider-sha256-missing-or-duplicate"
+metal_simple_runtime_c_provider_sha256="$(
+    field simple_runtime_c_provider_sha256 "$METAL_ENV"
+)" || fail "metal-simple-runtime-c-provider-sha256-missing-or-duplicate"
+
+validate_lane vulkan "$VULKAN_ENV" "$vulkan_backend" "$vulkan_target" \
+    "$vulkan_width" "$vulkan_height" "$vulkan_dpi" "$vulkan_event_count" \
+    "$vulkan_pixel_sha256" "$vulkan_non_background_bounds" \
+    "$vulkan_event_sequence" "$vulkan_capture_path" "$vulkan_source_revision" \
+    "$vulkan_repo_revision" "$vulkan_shared_scene_fingerprint" \
+    "$vulkan_font_identity" "$vulkan_expected_font_identity" \
+    "$vulkan_draw_ir_composition_id" "$vulkan_draw_ir_scene_key" \
+    "$vulkan_draw_ir_rendered_commands" "$vulkan_draw_ir_skipped_commands" \
+    "$vulkan_draw_ir_readback_checksum" "$vulkan_semantic_event" \
+    "$vulkan_semantic_before_focus" "$vulkan_semantic_after_focus" \
+    "$vulkan_semantic_before_accent" "$vulkan_semantic_after_accent" \
+    "$vulkan_semantic_changed" "$vulkan_semantic_native_focus_reduced" \
+    "$vulkan_semantic_raw_winit_reduced" \
+    "$vulkan_semantic_pointer_key_delivery" \
+    "$vulkan_semantic_correlation" "$vulkan_font_point_size" \
+    "$vulkan_font_dpi" "$vulkan_font_pixel_size" \
+    "$vulkan_winit_provider_sha256" \
+    "$vulkan_simple_runtime_provider_sha256" \
+    "$vulkan_simple_runtime_c_provider_sha256"
+validate_lane metal "$METAL_ENV" "$metal_backend" "$metal_target" \
+    "$metal_width" "$metal_height" "$metal_dpi" "$metal_event_count" \
+    "$metal_pixel_sha256" "$metal_non_background_bounds" \
+    "$metal_event_sequence" "$metal_capture_path" "$metal_source_revision" \
+    "$metal_repo_revision" "$metal_shared_scene_fingerprint" \
+    "$metal_font_identity" "$metal_expected_font_identity" \
+    "$metal_draw_ir_composition_id" "$metal_draw_ir_scene_key" \
+    "$metal_draw_ir_rendered_commands" "$metal_draw_ir_skipped_commands" \
+    "$metal_draw_ir_readback_checksum" "$metal_semantic_event" \
+    "$metal_semantic_before_focus" "$metal_semantic_after_focus" \
+    "$metal_semantic_before_accent" "$metal_semantic_after_accent" \
+    "$metal_semantic_changed" "$metal_semantic_native_focus_reduced" \
+    "$metal_semantic_raw_winit_reduced" \
+    "$metal_semantic_pointer_key_delivery" \
+    "$metal_semantic_correlation" "$metal_font_point_size" \
+    "$metal_font_dpi" "$metal_font_pixel_size" \
+    "$metal_winit_provider_sha256" \
+    "$metal_simple_runtime_provider_sha256" \
+    "$metal_simple_runtime_c_provider_sha256"
+
+[ "$vulkan_width" = "$metal_width" ] &&
+    [ "$vulkan_height" = "$metal_height" ] &&
+    [ "$vulkan_dpi" = "$metal_dpi" ] &&
+    [ "$vulkan_event_count" = "$metal_event_count" ] &&
+    metadata_equal=true
+
+[ "$vulkan_font_identity" = "$metal_font_identity" ] &&
+    font_identity_equal=true
+
+[ "$vulkan_event_sequence" = "$metal_event_sequence" ] &&
+    event_sequence_equal=true
+
+[ "$vulkan_non_background_bounds" = "$metal_non_background_bounds" ] &&
+    non_background_bounds_equal=true
+
+[ "$vulkan_repo_revision" = "$metal_repo_revision" ] &&
+    repo_revision_equal=true
+
+[ "$vulkan_shared_scene_fingerprint" = "$metal_shared_scene_fingerprint" ] &&
+    shared_scene_fingerprint_equal=true
+
+[ "$vulkan_draw_ir_readback_checksum" = "$metal_draw_ir_readback_checksum" ] &&
+    draw_ir_readback_checksum_equal=true
+[ "$vulkan_draw_ir_composition_id" = "$metal_draw_ir_composition_id" ] &&
+    [ "$vulkan_draw_ir_scene_key" = "$metal_draw_ir_scene_key" ] &&
+    [ "$vulkan_draw_ir_rendered_commands" = \
+        "$metal_draw_ir_rendered_commands" ] &&
+    [ "$vulkan_draw_ir_skipped_commands" = \
+        "$metal_draw_ir_skipped_commands" ] &&
+    [ "$draw_ir_readback_checksum_equal" = true ] &&
+    draw_ir_equal=true
+
+[ "$vulkan_semantic_event" = "$metal_semantic_event" ] &&
+    [ "$vulkan_semantic_before_focus" = "$metal_semantic_before_focus" ] &&
+    [ "$vulkan_semantic_after_focus" = "$metal_semantic_after_focus" ] &&
+    [ "$vulkan_semantic_before_accent" = "$metal_semantic_before_accent" ] &&
+    [ "$vulkan_semantic_after_accent" = "$metal_semantic_after_accent" ] &&
+    [ "$vulkan_semantic_changed" = "$metal_semantic_changed" ] &&
+    [ "$vulkan_semantic_native_focus_reduced" = \
+        "$metal_semantic_native_focus_reduced" ] &&
+    [ "$vulkan_semantic_raw_winit_reduced" = \
+        "$metal_semantic_raw_winit_reduced" ] &&
+    [ "$vulkan_semantic_pointer_key_delivery" = \
+        "$metal_semantic_pointer_key_delivery" ] &&
+    [ "$vulkan_semantic_correlation" = "$metal_semantic_correlation" ] &&
+    semantic_equal=true
+
+[ "$vulkan_font_point_size" = "$metal_font_point_size" ] &&
+    [ "$vulkan_font_dpi" = "$metal_font_dpi" ] &&
+    [ "$vulkan_font_pixel_size" = "$metal_font_pixel_size" ] &&
+    font_metrics_equal=true
+
+[ "$vulkan_winit_provider_sha256" = "$metal_winit_provider_sha256" ] &&
+    [ "$vulkan_simple_runtime_provider_sha256" = \
+        "$metal_simple_runtime_provider_sha256" ] &&
+    [ "$vulkan_simple_runtime_c_provider_sha256" = \
+        "$metal_simple_runtime_c_provider_sha256" ] &&
+    provider_sha256_equal=true
+
+pixel_stats="$(
+    LC_ALL=C cmp -l "$vulkan_capture_path" "$metal_capture_path" |
+        awk -v header_bytes="${#header}" '
+            function octal(value, result, i, digit) {
+                result = 0
+                for (i = 1; i <= length(value); i += 1) {
+                    digit = substr(value, i, 1) + 0
+                    result = result * 8 + digit
+                }
+                return result
+            }
+            $1 > header_bytes {
+                delta = octal($2) - octal($3)
+                if (delta < 0) delta = -delta
+                mismatches += 1
+                if (delta > maximum) maximum = delta
+            }
+            END { print mismatches + 0, maximum + 0 }
+        '
+)"
+mismatch_count="${pixel_stats%% *}"
+max_channel_delta="${pixel_stats#* }"
+
+[ "$vulkan_pixel_sha256" = "$metal_pixel_sha256" ] &&
+    pixel_sha256_equal=true
+
+[ "$metadata_equal" = true ] || fail "metadata-mismatch"
+[ "$font_identity_equal" = true ] || fail "font-identity-mismatch"
+[ "$event_sequence_equal" = true ] || fail "event-sequence-mismatch"
+[ "$non_background_bounds_equal" = true ] ||
+    fail "non-background-bounds-mismatch"
+[ "$repo_revision_equal" = true ] || fail "repo-revision-mismatch"
+[ "$shared_scene_fingerprint_equal" = true ] ||
+    fail "shared-scene-fingerprint-mismatch"
+[ "$vulkan_draw_ir_composition_id" = "$metal_draw_ir_composition_id" ] ||
+    fail "draw-ir-composition-id-mismatch"
+[ "$vulkan_draw_ir_scene_key" = "$metal_draw_ir_scene_key" ] ||
+    fail "draw-ir-scene-key-mismatch"
+[ "$vulkan_draw_ir_rendered_commands" = "$metal_draw_ir_rendered_commands" ] ||
+    fail "draw-ir-rendered-commands-mismatch"
+[ "$vulkan_draw_ir_skipped_commands" = "$metal_draw_ir_skipped_commands" ] ||
+    fail "draw-ir-skipped-commands-mismatch"
+[ "$draw_ir_readback_checksum_equal" = true ] ||
+    fail "draw-ir-readback-checksum-mismatch"
+[ "$draw_ir_equal" = true ] || fail "draw-ir-mismatch"
+[ "$vulkan_semantic_event" = "$metal_semantic_event" ] ||
+    fail "semantic-event-mismatch"
+[ "$vulkan_semantic_before_focus" = "$metal_semantic_before_focus" ] ||
+    fail "semantic-before-focus-mismatch"
+[ "$vulkan_semantic_after_focus" = "$metal_semantic_after_focus" ] ||
+    fail "semantic-after-focus-mismatch"
+[ "$vulkan_semantic_before_accent" = "$metal_semantic_before_accent" ] ||
+    fail "semantic-before-accent-mismatch"
+[ "$vulkan_semantic_after_accent" = "$metal_semantic_after_accent" ] ||
+    fail "semantic-after-accent-mismatch"
+[ "$vulkan_semantic_changed" = "$metal_semantic_changed" ] ||
+    fail "semantic-changed-mismatch"
+[ "$vulkan_semantic_native_focus_reduced" = \
+    "$metal_semantic_native_focus_reduced" ] ||
+    fail "semantic-native-focus-reduced-mismatch"
+[ "$vulkan_semantic_raw_winit_reduced" = \
+    "$metal_semantic_raw_winit_reduced" ] ||
+    fail "semantic-raw-winit-reduced-mismatch"
+[ "$vulkan_semantic_pointer_key_delivery" = \
+    "$metal_semantic_pointer_key_delivery" ] ||
+    fail "semantic-pointer-key-delivery-mismatch"
+[ "$vulkan_semantic_correlation" = "$metal_semantic_correlation" ] ||
+    fail "semantic-correlation-mismatch"
+[ "$semantic_equal" = true ] || fail "semantic-mismatch"
+[ "$vulkan_font_point_size" = "$metal_font_point_size" ] ||
+    fail "font-point-size-mismatch"
+[ "$vulkan_font_dpi" = "$metal_font_dpi" ] ||
+    fail "font-dpi-mismatch"
+[ "$vulkan_font_pixel_size" = "$metal_font_pixel_size" ] ||
+    fail "font-pixel-size-mismatch"
+[ "$font_metrics_equal" = true ] || fail "font-metrics-mismatch"
+[ "$vulkan_winit_provider_sha256" = "$metal_winit_provider_sha256" ] ||
+    fail "winit-provider-sha256-mismatch"
+[ "$vulkan_simple_runtime_provider_sha256" = \
+    "$metal_simple_runtime_provider_sha256" ] ||
+    fail "simple-runtime-provider-sha256-mismatch"
+[ "$vulkan_simple_runtime_c_provider_sha256" = \
+    "$metal_simple_runtime_c_provider_sha256" ] ||
+    fail "simple-runtime-c-provider-sha256-mismatch"
+[ "$provider_sha256_equal" = true ] || fail "provider-sha256-mismatch"
+[ "$mismatch_count" = 0 ] &&
+    [ "$max_channel_delta" = 0 ] &&
+    [ "$pixel_sha256_equal" = true ] ||
+    fail "pixel-payload-mismatch"
+
+write_result pass pass
+echo "macOS Vulkan/Metal 2D parity evidence: PASS"
+echo "evidence=$OUTPUT"

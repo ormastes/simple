@@ -1,0 +1,315 @@
+#!/bin/sh
+# Scoped-delta escape for check-engine-claiming-specs-use-probe.shs.
+#
+# A FAIL of the engine-claiming-spec ratchet is acceptable for landing IFF the
+# outgoing range introduces ZERO new offenders — i.e. the guard's offender state
+# at NEW is byte-identical to its offender state at BASE (the origin tip the push
+# replaces). This helper proves exactly that, mechanically:
+#
+#   sh scripts/check/check-engine-claiming-specs-use-probe-delta.shs <BASE> <NEW>
+#
+# It runs the guard in --ref (committed-content) mode for BOTH sides — never the
+# working copy — captures each side's unbaselined-offender list via
+# ENGINE_CLAIMING_SPECS_OUT, and diffs them byte-for-byte.
+#
+# WHY (2026-08-17): the ratchet was wired into the pre-push hook as a FULL
+# WORKING-TREE scan, so it gated a push on content a push cannot contain. Of 56
+# reported offenders on this host, 52 were already committed at origin/main
+# (other lanes' pre-existing debt) and 4 were UNTRACKED scratch files belonging
+# to one of ~16 concurrent agent sessions sharing a single working copy. One
+# lane's temporary file blocked every lane's push. Committed-content evaluation
+# is the repo's own doctrine (.claude/rules/vcs.md, on
+# check-test-tree-divergence.shs), and this helper is the direct analogue of
+# check-test-tree-divergence-delta.shs.
+#
+# Verdict (always the LAST line of stdout):
+#   PASS — <n> pre-existing offender(s), 0 introduced by this range   exit 0
+#   FAIL — <n> newly introduced: <names>                              exit 1
+#   ERROR — nothing was checked                                       exit 2
+#
+# A range in which the guard compared 0 spec files is an ERROR, never a PASS.
+#
+# This is NOT a licence to skip the ratchet, and NOT a substitute for the
+# baseline: a PASS here still requires the lander to record the pre-existing
+# offender list (the base .offenders file whose path this prints) in the commit
+# message or a doc/08_tracking/bug/ record. Any range that ADDS an offender stays
+# hard-blocked. Baselining an offender to silence it remains the thing this guard
+# exists to prevent — a shrink is always fine, a growth never is.
+
+set -u
+
+SELF=check-engine-claiming-specs-use-probe-delta
+
+die() {
+    status="$1"; shift
+    echo "$SELF: ERROR: $*" >&2
+    echo "$SELF: ERROR — nothing was checked"
+    exit "$status"
+}
+
+SELFTEST=0
+POS1=""
+POS2=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST=1 ;;
+        -*) die 2 "unknown argument: $1" ;;
+        *) if [ -z "$POS1" ]; then POS1="$1"; elif [ -z "$POS2" ]; then POS2="$1"; else die 2 "too many arguments"; fi ;;
+    esac
+    shift
+done
+
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null)
+[ -n "$toplevel" ] || die 2 "not inside a git repository (cwd=$(pwd))"
+
+# Resolved from THIS script's own directory, not from the repo toplevel: the
+# selftest runs this helper from inside throwaway fixture repos, which have no
+# scripts/check/ of their own. The guard is always this script's sibling.
+GUARD_SRC="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/check-engine-claiming-specs-use-probe.shs"
+[ -f "$GUARD_SRC" ] || die 2 "guard script missing: $GUARD_SRC"
+
+# ---------------------------------------------------------------- selftest ---
+# Fixtures build throwaway git repos with real commits. Every one asserts a
+# DIRECTION this helper must get right; a helper never observed failing is not a
+# gate. Runs before every real comparison and is FATAL.
+selftest() {
+    st_tmp=$(mktemp -d) || return 1
+    st_rc=0
+    st_fail() { echo "  selftest FAIL: $1"; st_rc=1; }
+
+    # An offending spec (JIT claim in an `it` title, no probe, no ack marker)
+    off='describe "g":\n    it "runs natively":\n        expect(1).to_equal(1)\n'
+    clean='describe "g":\n    it "sorts text":\n        expect(1).to_equal(1)\n'
+
+    mk_repo() { # mk_repo DIR — empty repo with a clean spec and an empty baseline
+        mkdir -p "$1/test/x" "$1/scripts/check"
+        printf "$clean" > "$1/test/x/clean_spec.spl"
+        : > "$1/scripts/check/engine_claiming_specs_baseline.txt"
+        ( cd "$1" && git init -q . && git config user.email t@t && git config user.name t \
+          && git add -A && git commit -qm base ) >/dev/null 2>&1
+    }
+    commit_all() { ( cd "$1" && git add -A && git commit -qm "$2" ) >/dev/null 2>&1; }
+    run_delta() { # run_delta DIR BASE NEW -> writes $st_tmp/out, sets st_drc
+        ( cd "$1" && ENGINE_CLAIMING_DELTA_NESTED=1 \
+            ENGINE_CLAIMING_DELTA_OUT="$st_tmp/pre.txt" \
+            sh "$SELF_ABS" "$2" "$3" >"$st_tmp/out" 2>&1 )
+        st_drc=$?
+    }
+
+    # A. an offender present in BASE and still in NEW => PASS (0 introduced)
+    r="$st_tmp/a"; mk_repo "$r" || { st_fail "could not build repo A"; rm -rf "$st_tmp"; return 1; }
+    printf "$off" > "$r/test/x/off_spec.spl"; commit_all "$r" withoffender
+    base=$( cd "$r" && git rev-parse HEAD )
+    printf "$clean" > "$r/test/x/another_spec.spl"; commit_all "$r" unrelated
+    new=$( cd "$r" && git rev-parse HEAD )
+    run_delta "$r" "$base" "$new"
+    [ "$st_drc" -eq 0 ] || st_fail "pre-existing offender in BASE and NEW did not PASS (got $st_drc): $(tail -1 "$st_tmp/out")"
+    tail -1 "$st_tmp/out" | $GREP -q '^'"$SELF"': PASS — 1 pre-existing offender(s), 0 introduced' \
+        || st_fail "pre-existing PASS verdict wording/count wrong: $(tail -1 "$st_tmp/out")"
+    [ -f "$st_tmp/pre.txt" ] || st_fail "pre-existing offender list was not saved"
+    $GREP -qxF "test/x/off_spec.spl" "$st_tmp/pre.txt" 2>/dev/null \
+        || st_fail "saved pre-existing list does not name the offender"
+
+    # B. an offender absent in BASE and present in NEW => FAIL naming it
+    r="$st_tmp/b"; mk_repo "$r" || { st_fail "could not build repo B"; rm -rf "$st_tmp"; return 1; }
+    base=$( cd "$r" && git rev-parse HEAD )
+    printf "$off" > "$r/test/x/new_off_spec.spl"; commit_all "$r" introduced
+    new=$( cd "$r" && git rev-parse HEAD )
+    run_delta "$r" "$base" "$new"
+    [ "$st_drc" -eq 1 ] || st_fail "newly introduced offender did not FAIL exit 1 (got $st_drc): $(tail -1 "$st_tmp/out")"
+    tail -1 "$st_tmp/out" | $GREP -q 'FAIL — 1 newly introduced:.*test/x/new_off_spec.spl' \
+        || st_fail "FAIL verdict did not name the introduced offender: $(tail -1 "$st_tmp/out")"
+
+    # C. a range that REMOVES an offender => PASS (a shrink is always fine)
+    r="$st_tmp/c"; mk_repo "$r" || { st_fail "could not build repo C"; rm -rf "$st_tmp"; return 1; }
+    printf "$off" > "$r/test/x/off_spec.spl"
+    printf "$off" > "$r/test/x/off2_spec.spl"
+    commit_all "$r" two
+    base=$( cd "$r" && git rev-parse HEAD )
+    rm -f "$r/test/x/off2_spec.spl"; commit_all "$r" removedone
+    new=$( cd "$r" && git rev-parse HEAD )
+    run_delta "$r" "$base" "$new"
+    [ "$st_drc" -eq 0 ] || st_fail "a range that REMOVES an offender did not PASS (got $st_drc): $(tail -1 "$st_tmp/out")"
+
+    # C2. removing the LAST offender flips the guard green at NEW => PASS
+    r="$st_tmp/c2"; mk_repo "$r" || { st_fail "could not build repo C2"; rm -rf "$st_tmp"; return 1; }
+    printf "$off" > "$r/test/x/off_spec.spl"; commit_all "$r" one
+    base=$( cd "$r" && git rev-parse HEAD )
+    rm -f "$r/test/x/off_spec.spl"; commit_all "$r" removedall
+    new=$( cd "$r" && git rev-parse HEAD )
+    run_delta "$r" "$base" "$new"
+    [ "$st_drc" -eq 0 ] || st_fail "removing the last offender did not PASS (got $st_drc): $(tail -1 "$st_tmp/out")"
+
+    # D. a range in which the guard compares 0 specs => ERROR exit 2, not PASS
+    r="$st_tmp/d"; mkdir -p "$r/scripts/check"
+    printf 'x\n' > "$r/README"
+    : > "$r/scripts/check/engine_claiming_specs_baseline.txt"
+    ( cd "$r" && git init -q . && git config user.email t@t && git config user.name t \
+      && git add -A && git commit -qm empty ) >/dev/null 2>&1 || st_fail "could not build repo D"
+    base=$( cd "$r" && git rev-parse HEAD )
+    printf 'y\n' >> "$r/README"; commit_all "$r" more
+    new=$( cd "$r" && git rev-parse HEAD )
+    run_delta "$r" "$base" "$new"
+    [ "$st_drc" -eq 2 ] || st_fail "a 0-spec range did not ERROR exit 2 (got $st_drc): $(tail -1 "$st_tmp/out")"
+    tail -1 "$st_tmp/out" | $GREP -q 'ERROR — nothing was checked' \
+        || st_fail "0-spec range did not emit the ERROR verdict line: $(tail -1 "$st_tmp/out")"
+
+    # E. an UNTRACKED offender on disk only must not affect the verdict — the
+    #    incident this whole change exists to fix, pinned end-to-end here.
+    r="$st_tmp/e"; mk_repo "$r" || { st_fail "could not build repo E"; rm -rf "$st_tmp"; return 1; }
+    base=$( cd "$r" && git rev-parse HEAD )
+    printf "$clean" > "$r/test/x/unrelated_spec.spl"; commit_all "$r" unrelated
+    new=$( cd "$r" && git rev-parse HEAD )
+    printf "$off" > "$r/test/x/scratch_untracked_spec.spl"   # never committed
+    run_delta "$r" "$base" "$new"
+    [ "$st_drc" -eq 0 ] || st_fail "an UNTRACKED on-disk offender changed the verdict (got $st_drc): $(tail -1 "$st_tmp/out")"
+
+    # F. a bad rev is an ERROR, not a pass
+    run_delta "$st_tmp/a" no/such/rev HEAD
+    [ "$st_drc" -eq 2 ] || st_fail "an unresolvable BASE did not ERROR exit 2 (got $st_drc)"
+
+    rm -rf "$st_tmp"
+    return $st_rc
+}
+
+GREP=/usr/bin/grep
+[ -x "$GREP" ] || GREP=grep
+case "$0" in
+    /*) SELF_ABS="$0" ;;
+    *)  SELF_ABS="$(pwd)/$0" ;;
+esac
+
+if [ "$SELFTEST" -eq 1 ]; then
+    if selftest; then
+        echo "$SELF: PASS — 7 selftest fixtures checked"
+        exit 0
+    fi
+    echo "$SELF: FAIL — selftest fixtures failed"
+    exit 1
+fi
+
+[ -n "$POS1" ] && [ -n "$POS2" ] || die 2 "usage: $SELF <BASE> <NEW> (both commit-ish)"
+BASE_REF="$POS1"
+NEW_REF="$POS2"
+
+# The selftest gates every real comparison and is FATAL. Its fixtures re-invoke
+# this script, which would re-enter the selftest forever; ENGINE_CLAIMING_DELTA_NESTED
+# marks those child runs. It is set ONLY by the selftest, never by a caller.
+if [ "${ENGINE_CLAIMING_DELTA_NESTED:-0}" != 1 ] && ! selftest >/dev/null 2>&1; then
+    echo "$SELF: selftest failed — refusing to report a delta verdict" >&2
+    echo "$SELF: ERROR — nothing was checked"
+    exit 2
+fi
+
+cd "$toplevel" || die 2 "cannot cd to repo root $toplevel"
+
+git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null \
+    || die 2 "BASE '$BASE_REF' does not resolve to a commit"
+git rev-parse --verify --quiet "${NEW_REF}^{commit}" >/dev/null \
+    || die 2 "NEW '$NEW_REF' does not resolve to a commit"
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/engine_claiming_specs_delta.XXXXXX") || die 2 "mktemp failed"
+trap 'rm -rf "$work"' EXIT INT TERM
+
+# Pin the guard SCRIPT once for both runs: it lives in the shared working copy
+# that concurrent sessions mutate, and two runs of DIFFERENT guard versions would
+# read a byte-identical offender state as a delta. TOCTOU. The BASELINE needs no
+# pinning — in --ref mode the guard reads it from the ref, and committed content
+# cannot be mutated by a concurrent session.
+cp "$GUARD_SRC" "$work/guard.shs" || die 2 "cannot snapshot guard script"
+GUARD="$work/guard.shs"
+
+# The two --ref runs below set ENGINE_PROBE_GUARD_NESTED=1 so the guard does not
+# re-run its own (fatal) selftest twice. Run it ONCE here instead, explicitly, so
+# the guard's selftest still gates every push — skipping it entirely would trade
+# one fail-open for another.
+if [ "${ENGINE_CLAIMING_DELTA_NESTED:-0}" != 1 ]; then
+    sh "$GUARD" --selftest > "$work/guard.selftest" 2>&1
+    grc=$?
+    [ "$grc" -eq 0 ] || die 2 "the underlying guard's own selftest FAILED (exit $grc): $(tail -1 "$work/guard.selftest")"
+fi
+
+# run_side <name> <ref> — runs the guard in committed-content mode.
+# Sets <name>_rc; writes $work/<name>.{out,err,offenders,verdict,scanned}
+run_side() {
+    name="$1"; sref="$2"
+    ENGINE_PROBE_GUARD_NESTED=1 ENGINE_CLAIMING_SPECS_OUT="$work/$name.offenders" \
+        sh "$GUARD" --ref "$sref" > "$work/$name.out" 2> "$work/$name.err"
+    rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] \
+        || die 2 "guard errored (exit $rc) at $name=$sref — cannot determine offender list; last line: $(tail -1 "$work/$name.out" 2>/dev/null)"
+    verdict=$(tail -1 "$work/$name.out")
+    case "$verdict" in
+        "PASS — "*|"FAIL — "*) ;;
+        *) die 2 "no recognizable verdict line from guard at $name=$sref (got: $verdict)" ;;
+    esac
+    # Non-vacuity: a run that scanned 0 specs cannot be a pass. The guard already
+    # exits 2 in that case, but parse the count and re-assert it here so a future
+    # guard change cannot make this helper vacuously green.
+    # Two verdict shapes: FAIL carries "(<n> scanned, ...)", PASS carries
+    # "<n> spec files scanned, ...". Parse both; a shape neither matches is a
+    # format drift and must ERROR rather than be assumed non-vacuous.
+    nsc=$(printf '%s' "$verdict" | sed -n 's/.*(\([0-9]*\) scanned.*/\1/p')
+    [ -n "$nsc" ] || nsc=$(printf '%s' "$verdict" | sed -n 's/^PASS — \([0-9]*\) spec files scanned.*/\1/p')
+    [ -n "$nsc" ] || die 2 "could not parse the scanned count from the $name verdict: $verdict"
+    [ "$nsc" -gt 0 ] || die 2 "guard scanned 0 spec files at $name=$sref"
+    printf '%s\n' "$nsc" > "$work/$name.scanned"
+    [ -f "$work/$name.offenders" ] || die 2 "guard did not write an offender list for $name=$sref"
+    printf '%s\n' "$verdict" > "$work/$name.verdict"
+    eval "${name}_rc=$rc"
+}
+
+run_side base "$BASE_REF"
+run_side new  "$NEW_REF"
+
+# Guard green at NEW: nothing to escape — the range is clean regardless of BASE.
+if [ "$new_rc" -eq 0 ]; then
+    echo "$SELF: guard is PASS at NEW ($NEW_REF); no escape needed"
+    echo "$SELF: new verdict: $(cat "$work/new.verdict")"
+    echo "$SELF: PASS — 0 pre-existing offender(s), 0 introduced by this range"
+    exit 0
+fi
+
+# Guard red at NEW but green at BASE: this range introduced the red. Hard block.
+if [ "$base_rc" -eq 0 ]; then
+    comm -13 "$work/base.offenders" "$work/new.offenders" > "$work/introduced.txt"
+    n_intro=$(wc -l < "$work/introduced.txt" | tr -d ' ')
+    names=$(tr '\n' ' ' < "$work/introduced.txt")
+    [ "$n_intro" -gt 0 ] || { n_intro="?"; names="(offender-count change with no named entry — new verdict: $(cat "$work/new.verdict"))"; }
+    echo "$SELF: guard is PASS at BASE but FAIL at NEW — this range introduced the red" >&2
+    sed 's/^/  + /' "$work/introduced.txt" >&2
+    echo "$SELF: FAIL — $n_intro newly introduced: $names"
+    exit 1
+fi
+
+# Both sides red: acceptable ONLY if the offender list is byte-identical.
+if ! cmp -s "$work/base.offenders" "$work/new.offenders"; then
+    comm -13 "$work/base.offenders" "$work/new.offenders" > "$work/introduced.txt"
+    n_intro=$(wc -l < "$work/introduced.txt" | tr -d ' ')
+    if [ "$n_intro" -gt 0 ]; then
+        names=$(tr '\n' ' ' < "$work/introduced.txt")
+        echo "$SELF: offender list changed between BASE and NEW:" >&2
+        sed 's/^/  + /' "$work/introduced.txt" >&2
+        echo "$SELF: FAIL — $n_intro newly introduced: $names"
+        exit 1
+    fi
+    # Only removals. A shrink is always fine for a ratchet: the range retired
+    # debt and introduced none. Fall through to PASS, counting the SURVIVING
+    # offenders (the state the lander must still record).
+    comm -23 "$work/base.offenders" "$work/new.offenders" > "$work/retired.txt"
+    echo "$SELF: offender list SHRANK — $(wc -l < "$work/retired.txt" | tr -d ' ') retired, 0 introduced:" >&2
+    sed 's/^/  - /' "$work/retired.txt" >&2
+    cp "$work/new.offenders" "$work/base.offenders"
+fi
+
+n_pre=$(wc -l < "$work/base.offenders" | tr -d ' ')
+[ "$n_pre" -gt 0 ] || die 2 "guard FAILs at both refs but the offender list is empty — verdict/output format drift? ($(cat "$work/base.verdict"))"
+
+keep="${ENGINE_CLAIMING_DELTA_OUT:-${TMPDIR:-/tmp}/engine_claiming_specs_preexisting.txt}"
+cp "$work/base.offenders" "$keep" 2>/dev/null || keep="(failed to write $keep)"
+echo "$SELF: pre-existing red is identical at BASE and NEW; this range introduces nothing"
+echo "$SELF: pre-existing offender list saved to $keep — RECORD IT (commit message or tracking bug) before landing"
+echo "$SELF: base verdict: $(cat "$work/base.verdict")"
+echo "$SELF: new  verdict: $(cat "$work/new.verdict")"
+echo "$SELF: PASS — $n_pre pre-existing offender(s), 0 introduced by this range"
+exit 0

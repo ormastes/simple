@@ -1,0 +1,265 @@
+#!/bin/sh
+# check-engine-receipt-discriminates.shs
+#
+# Asserts that a Simple `run` emits a NON-FORGEABLE ENGINE RECEIPT naming the
+# engine that ACTUALLY executed, and that the receipt DISCRIMINATES: a program
+# the JIT compiles cleanly must report the JIT, and a program containing a
+# known-demoting construct must report the interpreter WITH a named reason.
+#
+# Why this guard exists
+# ---------------------
+# doc/01_research/compiler/dual_impl_test_sharing_assessment_2026-08-23.md ran one
+# spec under both `run` engines and got byte-identical `39 examples, 0 failures`,
+# then had to label the result unusable: one unsupported operation silently
+# demotes a whole program to the tree-walk interpreter, and no engine receipt was
+# printed anywhere. `SIMPLE_NO_JIT=1` is a decoy with no reader in
+# src/compiler_rust at all. So every claim of the form "this behaves the same on
+# both engines" was unfalsifiable. This guard is the falsifier.
+#
+# It is fail-closed in the way that matters here: a receipt that says the SAME
+# thing for both halves of the pair is a FAIL, not a pass. A guard that only
+# checked "a receipt was printed" would go green on a receipt hardcoded to "jit",
+# which is exactly the failure mode being fixed.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> assertion(s) checked, receipt discriminates   exit 0
+#   FAIL  — ...                                               exit 1
+#   ERROR — nothing was checked (<reason>)                    exit 2
+# A run that made 0 assertions is ERROR, never a pass. A missing binary is
+# ERROR, never a pass: absence of evidence is not evidence.
+#
+# Usage:
+#   sh scripts/check/check-engine-receipt-discriminates.shs [--binary PATH]
+#   sh scripts/check/check-engine-receipt-discriminates.shs --selftest
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BINARY=""
+SELFTEST_ONLY=0
+CHECKED=0
+FAILURES=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) BINARY="$2"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+fail() { FAILURES="${FAILURES}
+  - $1"; }
+
+# ---------------------------------------------------------------------------
+# Selftest. Runs before every scan and is fatal, so a scanner that cannot tell
+# a good receipt from a bad one can never emit a PASS.
+#
+# The subject under test is `classify_receipt`, the same function the real scan
+# uses. Fixtures are receipt LINES rather than binaries, because what the guard
+# actually reasons about is the line.
+# ---------------------------------------------------------------------------
+
+# Echo the engine named by a receipt line, or the empty string.
+receipt_engine() {
+    printf '%s\n' "$1" | sed -n 's/.*\[engine-receipt\] engine=\([^ ]*\).*/\1/p' | head -1
+}
+
+# Echo yes/no from a receipt line's demoted= field, or the empty string.
+receipt_demoted() {
+    printf '%s\n' "$1" | sed -n 's/.*\[engine-receipt\] .*demoted=\([^ ]*\).*/\1/p' | head -1
+}
+
+# Echo the reason field, or the empty string.
+receipt_reason() {
+    printf '%s\n' "$1" | sed -n 's/.*\[engine-receipt\] .*reason=\(.*\) file=.*/\1/p' | head -1
+}
+
+selftest() {
+    st_fail=""
+    st_checked=0
+
+    st_assert() {
+        st_checked=$((st_checked + 1))
+        if [ "$2" != "$3" ]; then
+            st_fail="${st_fail} [$1: expected '$3', got '$2']"
+        fi
+    }
+
+    good_jit='[engine-receipt] engine=cranelift-jit requested=jit demoted=no reason=- file=/tmp/a.spl'
+    good_demoted='[engine-receipt] engine=interpreter requested=jit demoted=yes reason=jit-compile-error: unresolved external symbol file=/tmp/b.spl'
+
+    # 1-3: a clean JIT receipt parses into all three fields.
+    st_assert "clean-engine"  "$(receipt_engine "$good_jit")"   "cranelift-jit"
+    st_assert "clean-demoted" "$(receipt_demoted "$good_jit")"  "no"
+    st_assert "clean-reason"  "$(receipt_reason "$good_jit")"   "-"
+
+    # 4-6: a demoted receipt names the interpreter AND carries a real reason.
+    st_assert "demoted-engine"  "$(receipt_engine "$good_demoted")"  "interpreter"
+    st_assert "demoted-flag"    "$(receipt_demoted "$good_demoted")" "yes"
+    st_assert "demoted-reason"  "$(receipt_reason "$good_demoted")" \
+        "jit-compile-error: unresolved external symbol"
+
+    # 7: NO receipt at all must parse to the empty string, not to a default.
+    #    This is the pre-fix state, and it must be distinguishable from a pass.
+    st_assert "absent-engine" "$(receipt_engine 'total=45')" ""
+
+    # 8: a receipt whose reason field claims a demotion but names no reason is
+    #    NOT acceptable; `reason=-` with `demoted=yes` is self-contradictory and
+    #    the scan below rejects it. Pinned here so that rule cannot be dropped.
+    contradictory='[engine-receipt] engine=interpreter requested=jit demoted=yes reason=- file=/tmp/c.spl'
+    st_assert "contradictory-reason" "$(receipt_reason "$contradictory")" "-"
+
+    if [ -n "$st_fail" ]; then
+        echo "selftest FAILED:$st_fail"
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    if [ "$st_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked (selftest made 0 assertions)"
+        exit 2
+    fi
+    echo "selftest: $st_checked assertion(s) passed"
+}
+
+selftest
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — selftest only, 8 assertion(s) checked, receipt parser discriminates"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Real scan.
+# ---------------------------------------------------------------------------
+
+if [ -z "$BINARY" ]; then
+    BINARY="$ROOT/bin/simple"
+fi
+
+if [ ! -x "$BINARY" ]; then
+    echo "ERROR — nothing was checked (no executable simple binary at $BINARY)"
+    exit 2
+fi
+
+CLEAN_FIXTURE="$ROOT/test/fixtures/engine_receipt/jit_clean.spl"
+DEMOTE_FIXTURE="$ROOT/test/fixtures/engine_receipt/demote_graphics_text.spl"
+
+for f in "$CLEAN_FIXTURE" "$DEMOTE_FIXTURE"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR — nothing was checked (missing fixture $f)"
+        exit 2
+    fi
+done
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+run_fixture() {
+    # $1 = fixture path, $2 = output file. Exit status is read DIRECTLY into a
+    # variable on the line after the invocation, never through a pipe: a
+    # pipeline's $? is the LAST command's status and has produced false greens
+    # in this repo before.
+    #
+    # SIMPLE_EXECUTION_MODE is deliberately NOT set. The seed's default lane is
+    # already the JIT, and setting the variable makes
+    # `interpreter_preference_reason` return None -- i.e. it disables the very
+    # whole-module gates this pair is built to expose. Asserting on the default
+    # lane is also the honest test: it is the lane almost every run actually
+    # takes.
+    SIMPLE_ENGINE_RECEIPT=1 SIMPLE_TIMEOUT_SECONDS=0 \
+        "$BINARY" run "$1" > "$2" 2>&1
+    return $?
+}
+
+run_fixture "$CLEAN_FIXTURE" "$WORK/clean.out"
+run_fixture "$DEMOTE_FIXTURE" "$WORK/demote.out"
+
+CLEAN_LINE=$(grep -m1 '\[engine-receipt\]' "$WORK/clean.out" 2>/dev/null)
+DEMOTE_LINE=$(grep -m1 '\[engine-receipt\]' "$WORK/demote.out" 2>/dev/null)
+
+# Assertion 1: a receipt exists at all. This is the assertion that FAILS
+# pre-fix -- no engine receipt was printed anywhere in the tree.
+CHECKED=$((CHECKED + 1))
+[ -n "$CLEAN_LINE" ] || fail "no [engine-receipt] line for $CLEAN_FIXTURE (pre-fix state: no receipt is emitted anywhere)"
+CHECKED=$((CHECKED + 1))
+[ -n "$DEMOTE_LINE" ] || fail "no [engine-receipt] line for $DEMOTE_FIXTURE"
+
+if [ -n "$CLEAN_LINE" ] && [ -n "$DEMOTE_LINE" ]; then
+    CLEAN_ENGINE=$(receipt_engine "$CLEAN_LINE")
+    CLEAN_DEMOTED=$(receipt_demoted "$CLEAN_LINE")
+    DEMOTE_ENGINE=$(receipt_engine "$DEMOTE_LINE")
+    DEMOTE_DEMOTED=$(receipt_demoted "$DEMOTE_LINE")
+    DEMOTE_REASON=$(receipt_reason "$DEMOTE_LINE")
+
+    # Assertion 3: the clean fixture reports a COMPILED engine, not the
+    # interpreter. If this fails the JIT is not running what it claims to run.
+    CHECKED=$((CHECKED + 1))
+    case "$CLEAN_ENGINE" in
+        cranelift-jit|llvm-jit|native) : ;;
+        *) fail "clean fixture reported engine='$CLEAN_ENGINE', expected a compiled engine" ;;
+    esac
+
+    # Assertion 4: the clean fixture reports NO demotion.
+    CHECKED=$((CHECKED + 1))
+    [ "$CLEAN_DEMOTED" = "no" ] || fail "clean fixture reported demoted='$CLEAN_DEMOTED', expected 'no'"
+
+    # Assertion 5: the demoting fixture reports the INTERPRETER -- what RAN,
+    # not the jit it was asked for.
+    CHECKED=$((CHECKED + 1))
+    [ "$DEMOTE_ENGINE" = "interpreter" ] || fail "demoting fixture reported engine='$DEMOTE_ENGINE', expected 'interpreter'"
+
+    # Assertion 6: it reports the demotion.
+    CHECKED=$((CHECKED + 1))
+    [ "$DEMOTE_DEMOTED" = "yes" ] || fail "demoting fixture reported demoted='$DEMOTE_DEMOTED', expected 'yes'"
+
+    # Assertion 7: with a REASON. `demoted=yes reason=-` is self-contradictory
+    # and is rejected: a demotion with no reason is barely better than silence.
+    CHECKED=$((CHECKED + 1))
+    if [ -z "$DEMOTE_REASON" ] || [ "$DEMOTE_REASON" = "-" ]; then
+        fail "demoting fixture reported demoted=yes with no reason"
+    fi
+
+    # Assertion 8 -- THE POINT OF THE GUARD. The two receipts must DIFFER.
+    # A receipt that says "jit" for both halves of the pair is worthless.
+    CHECKED=$((CHECKED + 1))
+    [ "$CLEAN_ENGINE" != "$DEMOTE_ENGINE" ] || fail "receipt does NOT discriminate: both fixtures reported engine='$CLEAN_ENGINE'"
+
+    # Assertion 9: the demotion is announced on stderr even without asking for
+    # a receipt, whenever a compiled lane was explicitly requested. This is the
+    # non-suppressibility requirement: a demotion that happens must be visible.
+    CHECKED=$((CHECKED + 1))
+    SIMPLE_TIMEOUT_SECONDS=0 \
+        "$BINARY" run "$DEMOTE_FIXTURE" > "$WORK/demote_noreceipt.out" 2>&1
+    if ! grep -q '\[engine-demotion\]' "$WORK/demote_noreceipt.out"; then
+        fail "demotion was NOT announced without SIMPLE_ENGINE_RECEIPT (a demotion that happens must be visible; there is deliberately no knob that hides it)"
+    fi
+
+    # Assertion 10: and it is NOT suppressible. Re-run with every plausible
+    # silencing knob set at once; the announcement must survive all of them. A
+    # signal with an off switch is the defect, not the fix.
+    CHECKED=$((CHECKED + 1))
+    SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_ENGINE_RECEIPT=0 SIMPLE_JIT_COVERAGE=0 \
+        SIMPLE_NO_JIT=1 SIMPLE_QUIET=1 \
+        "$BINARY" run "$DEMOTE_FIXTURE" > "$WORK/demote_silenced.out" 2>&1
+    if ! grep -q '\[engine-demotion\]' "$WORK/demote_silenced.out"; then
+        fail "demotion announcement was suppressed by an env knob; it must not be suppressible"
+    fi
+fi
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no assertions ran)"
+    exit 2
+fi
+
+if [ -n "$FAILURES" ]; then
+    echo "clean receipt:   ${CLEAN_LINE:-<none>}"
+    echo "demoted receipt: ${DEMOTE_LINE:-<none>}"
+    echo "FAIL — $CHECKED assertion(s) checked, offender(s):$FAILURES"
+    exit 1
+fi
+
+echo "clean receipt:   $CLEAN_LINE"
+echo "demoted receipt: $DEMOTE_LINE"
+echo "PASS — $CHECKED assertion(s) checked, receipt discriminates (clean=$CLEAN_ENGINE, demoted=$DEMOTE_ENGINE)"
+exit 0

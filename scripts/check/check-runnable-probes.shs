@@ -1,0 +1,438 @@
+#!/bin/sh
+# Runnable-probe gate: execute every runnable regression PROBE and fail loudly.
+#
+# WHY THIS EXISTS
+# ---------------
+# A `*_spec.spl` cannot execute under the Cranelift JIT. `describe` / `it` /
+# `expect` are Rust INTERPRETER intrinsics with thread-local state
+# (src/compiler_rust/compiler/src/interpreter_call/bdd.rs), and a module with no
+# `fn main` de-JITs regardless (src/compiler_rust/driver/src/exec_core.rs). So a
+# spec that pins engine-dependent behaviour is GREEN BY CONSTRUCTION against a
+# JIT-only defect -- it cannot observe it at all. See
+# doc/07_guide/infra/testing/spec_engine_reach.md.
+#
+# The repo's answer is the RUNNABLE PROBE: a plain program with `fn main` that
+# self-scores and prints a verdict line, run once per engine. Three exist today
+# (text ordering under the JIT; UTF-8 index space; for-loop-over-text char
+# iteration), and each was written precisely because the sspec path had already
+# passed on a binary whose JIT was provably wrong.
+#
+# On 2026-08-02 an audit found NO hook and NO workflow executed any probe by
+# name. The convention's whole value is that it reaches an engine specs cannot,
+# and nothing was pulling that trigger. This script is that trigger.
+#
+# OUTPUT CONTRACT
+# ---------------
+#   PASS  -- <n> probe(s) x <m> engine(s), all verdicts PASS   (n is ALWAYS > 0)
+#   FAIL  -- one or more probe/engine verdicts wrong, exit 1
+#   ERROR -- nothing was checked, exit 2
+#
+# FAIL CLOSED. Every one of these is an ERROR, never a silent pass:
+#   * no Simple binary resolved or not executable
+#   * zero probes discovered
+#   * the discovered probe list is empty after filtering
+#   * fewer probes than MIN_PROBES (the enumerator broke)
+#   * an unknown engine name (SIMPLE_EXECUTION_MODE silently selects the JIT on
+#     an unrecognised value, which makes an A/B comparison look like agreement)
+# Never read this script's status from a pipeline: $? is the LAST command's.
+#
+# NO SUPPRESSION BASELINE. A failing probe is a live defect that has been
+# invisible. It gets reported, not baselined. There is deliberately no opt-out
+# file here -- adding one would recreate exactly the blindness this gate closes.
+
+set -u
+
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+
+# Engines to score. `interpret` is NOT optional: two engines agreeing is the
+# evidence, one engine passing is not. `SIMPLE_EXECUTION_MODE` takes
+# `interpret`, not `interp`.
+ENGINES="interpret jit"
+KNOWN_ENGINES="interpret interpreter jit native llvm"
+
+# A floor, not a target. Three probes exist as of 2026-08-02 (text ordering,
+# utf8 index space, for-in-text). Anything below this means the enumerator
+# broke, not that the tree got clean. Raise it as probes are added; NEVER lower
+# it to make a run pass.
+MIN_PROBES=3
+
+# Per-probe wall clock. A probe that hangs is a failure, not a skip.
+PROBE_TIMEOUT=300
+
+usage() {
+    cat <<'EOF'
+Usage: sh scripts/check/check-runnable-probes.shs [options]
+
+Executes every runnable regression probe under every scored engine and fails
+on any wrong verdict. Fails CLOSED: no binary, zero probes, or a short probe
+list is an ERROR (exit 2), never a pass.
+
+Discovery predicate (union of two documented conventions, under test/):
+  1. basename matches *_jit_probe.spl
+  2. a non-*_spec.spl .spl file containing the literal marker PROBE VERDICT
+
+Options:
+  --list        Print the discovered probe list and exit 0.
+  --self-test   Drive the scorer and the fail-closed paths over synthetic
+                fixtures. Needs no Simple binary, so it can gate in CI.
+  -h, --help    Show this help.
+
+Binary resolution order: SIMPLE_BINARY, SIMPLE_BIN, then <root>/bin/simple.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# discover_probes <root> <outfile>
+#
+# Parameterised on <root> so the selftest drives the identical code path over
+# synthetic fixtures. `find -print` into `while IFS= read -r` -- never
+# `for f in $list`, which word-splits on spaces and silently drops files.
+# ---------------------------------------------------------------------------
+discover_probes() {
+    _root=$1
+    _out=$2
+    : > "$_out"
+    [ -d "$_root/test" ] || return 0
+
+    _tmp="$_out.raw"
+    : > "$_tmp"
+
+    # (1) The named convention.
+    find "$_root/test" -type f -name '*_jit_probe.spl' -print >> "$_tmp"
+
+    # (2) The verdict-marker convention: any runnable (non-spec) .spl that
+    #     self-scores with a PROBE VERDICT line. This is what makes the gate
+    #     grow automatically instead of needing a hand-maintained list -- the
+    #     hand-maintained-list failure mode is the one that orphaned 366 of 413
+    #     guards (doc/08_tracking/bug/check_script_wiring_orphans_2026-08-01.md).
+    find "$_root/test" -type f -name '*.spl' \
+        ! -name '*_spec.spl' \
+        ! -path '*/.spipe*' -print |
+    while IFS= read -r _f; do
+        $GREP -q -F 'PROBE VERDICT' "$_f" 2>/dev/null && echo "$_f"
+    done >> "$_tmp"
+
+    sort -u "$_tmp" > "$_out"
+    rm -f "$_tmp"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# score_verdict <stdout-file> <exit-code>  ->  echoes PASS | FAIL | UNSCOREABLE
+#
+# Scores the VERDICT LINE, never the exit code. A codegen panic and a clean
+# wrong answer both exit non-zero, and some failure shapes exit 0 -- so exit
+# code is not evidence in either direction. The exit code is used for one thing
+# only: a timeout/signal kill is never a pass.
+#
+# Two verdict shapes are recognised, both already in the tree:
+#   * "PROBE VERDICT: PASS" / "PROBE VERDICT: FAIL ..."  (self-scoring probes)
+#   * a bare "ok" line, with any "fail:" line losing     (older probe shape)
+# Anything else is UNSCOREABLE, which counts as a FAILURE. A probe whose output
+# the scorer cannot read is a probe that is asserting nothing.
+# ---------------------------------------------------------------------------
+score_verdict() {
+    _out=$1
+    _rc=$2
+
+    # 124 is GNU timeout's kill code; >128 is a signal. Neither can be a pass
+    # no matter what was printed before the process died.
+    if [ "$_rc" -eq 124 ] || [ "$_rc" -gt 128 ]; then
+        echo "FAIL"
+        return 0
+    fi
+
+    if $GREP -q -F 'PROBE VERDICT: PASS' "$_out" 2>/dev/null; then
+        echo "PASS"
+        return 0
+    fi
+    if $GREP -q -F 'PROBE VERDICT:' "$_out" 2>/dev/null; then
+        echo "FAIL"
+        return 0
+    fi
+    if $GREP -q '^fail:' "$_out" 2>/dev/null; then
+        echo "FAIL"
+        return 0
+    fi
+    if $GREP -q -x 'ok' "$_out" 2>/dev/null; then
+        echo "PASS"
+        return 0
+    fi
+    echo "UNSCOREABLE"
+    return 0
+}
+
+resolve_binary() {
+    if [ -n "${SIMPLE_BINARY:-}" ]; then
+        echo "$SIMPLE_BINARY"
+        return 0
+    fi
+    if [ -n "${SIMPLE_BIN:-}" ]; then
+        echo "$SIMPLE_BIN"
+        return 0
+    fi
+    echo "$ROOT_DIR/bin/simple"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST. Every fixture below is the ONLY one that turns its verdict, so
+# neutering any branch of score_verdict or discover_probes turns this red. A
+# sabotage matrix is only as good as its fixture coverage.
+# ---------------------------------------------------------------------------
+selftest() {
+    _t=$(mktemp -d) || return 1
+    _fail=0
+
+    _assert() { # <desc> <expected> <actual>
+        if [ "$2" != "$3" ]; then
+            echo "SELFTEST FAILED: $1 (expected '$2', got '$3')"
+            _fail=1
+        fi
+    }
+
+    # --- score_verdict -----------------------------------------------------
+    printf 'noise\nPROBE VERDICT: PASS\n' > "$_t/v_pass"
+    _assert "explicit PASS verdict"        PASS        "$(score_verdict "$_t/v_pass" 0)"
+
+    printf 'PROBE VERDICT: FAIL (3 checks wrong)\n' > "$_t/v_fail"
+    _assert "explicit FAIL verdict"        FAIL        "$(score_verdict "$_t/v_fail" 0)"
+
+    printf 'ok\n' > "$_t/v_ok"
+    _assert "bare ok verdict"              PASS        "$(score_verdict "$_t/v_ok" 0)"
+
+    printf 'fail:sum expected=1 actual=2\n' > "$_t/v_failcolon"
+    _assert "fail: line verdict"           FAIL        "$(score_verdict "$_t/v_failcolon" 0)"
+
+    : > "$_t/v_empty"
+    _assert "silent probe is unscoreable"  UNSCOREABLE "$(score_verdict "$_t/v_empty" 0)"
+
+    # Exit code is NOT the oracle, proved in both directions.
+    _assert "rc0 with no verdict is not a pass" \
+                                           UNSCOREABLE "$(score_verdict "$_t/v_empty" 0)"
+    _assert "rc1 with PASS verdict is a pass" \
+                                           PASS        "$(score_verdict "$_t/v_pass" 1)"
+    # ...except that a killed process can never be a pass.
+    _assert "timeout kill overrides PASS"  FAIL        "$(score_verdict "$_t/v_pass" 124)"
+    _assert "signal kill overrides PASS"   FAIL        "$(score_verdict "$_t/v_pass" 139)"
+
+    # --- discover_probes ---------------------------------------------------
+    mkdir -p "$_t/root/test/sub" "$_t/root/test/.spipe_gen"
+    # Deliberately carries NO verdict marker, so ONLY the *_jit_probe.spl glob
+    # can collect it. An early draft gave this fixture a marker too, which made
+    # the two discovery branches indistinguishable: deleting the glob left the
+    # selftest green. Each fixture must be the only one turning its verdict.
+    echo 'fn main(): print("ok")' \
+        > "$_t/root/test/sub/alpha_jit_probe.spl"
+    echo 'fn main(): print("PROBE VERDICT: PASS")' \
+        > "$_t/root/test/sub/marker_only.spl"
+    echo 'describe "x": it "y": expect(1).to_equal(1)' \
+        > "$_t/root/test/sub/plain_spec.spl"
+    # A spec that merely NAMES the marker must not be collected as a probe.
+    echo 'val _PASS = "PROBE VERDICT: PASS"' \
+        > "$_t/root/test/sub/wrapper_spec.spl"
+    echo 'fn main(): print("PROBE VERDICT: PASS")' \
+        > "$_t/root/test/.spipe_gen/generated.spl"
+
+    discover_probes "$_t/root" "$_t/found"
+    _n=$(wc -l < "$_t/found" | tr -d ' ')
+    _assert "discovers exactly the two probe shapes" 2 "$_n"
+    _has() { $GREP -q -F "$1" "$_t/found" && echo yes || echo no; }
+    _assert "collects *_jit_probe.spl"        yes "$(_has alpha_jit_probe.spl)"
+    _assert "collects PROBE VERDICT marker"   yes "$(_has marker_only.spl)"
+    _assert "ignores a plain _spec.spl"       no  "$(_has plain_spec.spl)"
+    _assert "ignores a marker-quoting _spec"  no  "$(_has wrapper_spec.spl)"
+    _assert "ignores .spipe generated files"  no  "$(_has generated.spl)"
+
+    # --- fail-closed paths (run the real script, check the real exit code) --
+    #
+    # The fixture root holds 2 probes and the real floor is higher, so every
+    # sub-run below that is NOT about the floor pins MIN_PROBES_OVERRIDE=1.
+    # Without that pin the floor check -- which runs first -- would exit 2 and
+    # each assertion would pass for the wrong reason, leaving the branch it
+    # claims to cover unexercised.
+    mkdir -p "$_t/empty/test"
+    _rc=0
+    SIMPLE_BINARY="/bin/sh" MIN_PROBES_OVERRIDE=1 \
+        sh "$0" --internal-run-root "$_t/empty" >"$_t/zero.log" 2>&1 || _rc=$?
+    _assert "zero probes discovered is ERROR exit 2" 2 "$_rc"
+    _assert "zero-probe run says ERROR" yes \
+        "$($GREP -q '^ERROR' "$_t/zero.log" && echo yes || echo no)"
+    _assert "zero-probe message names the enumerator" yes \
+        "$($GREP -q 'zero runnable probes' "$_t/zero.log" && echo yes || echo no)"
+
+    _rc=0
+    SIMPLE_BINARY="$_t/does-not-exist" MIN_PROBES_OVERRIDE=1 \
+        sh "$0" --internal-run-root "$_t/root" >"$_t/nobin.log" 2>&1 || _rc=$?
+    _assert "missing binary is ERROR exit 2" 2 "$_rc"
+    _assert "missing-binary run says ERROR" yes \
+        "$($GREP -q '^ERROR' "$_t/nobin.log" && echo yes || echo no)"
+    _assert "missing-binary message names the binary" yes \
+        "$($GREP -q 'no executable Simple binary' "$_t/nobin.log" && echo yes || echo no)"
+
+    _rc=0
+    SIMPLE_BINARY="/bin/sh" MIN_PROBES_OVERRIDE=99 \
+        sh "$0" --internal-run-root "$_t/root" >"$_t/short.log" 2>&1 || _rc=$?
+    _assert "short probe list is ERROR exit 2" 2 "$_rc"
+    _assert "short-list message names the floor" yes \
+        "$($GREP -q 'floor is 99' "$_t/short.log" && echo yes || echo no)"
+
+    _rc=0
+    SIMPLE_BINARY="/bin/sh" MIN_PROBES_OVERRIDE=1 ENGINES_OVERRIDE="jitt" \
+        sh "$0" --internal-run-root "$_t/root" >"$_t/eng.log" 2>&1 || _rc=$?
+    _assert "unknown engine name is ERROR exit 2" 2 "$_rc"
+    _assert "unknown-engine message names the engine" yes \
+        "$($GREP -q "unknown engine 'jitt'" "$_t/eng.log" && echo yes || echo no)"
+
+    rm -rf "$_t"
+    if [ "$_fail" -ne 0 ]; then
+        echo "check-runnable-probes: SELFTEST FAILED -- the probe gate is broken."
+        echo "Fix the scorer or the enumerator. Do NOT delete these fixtures."
+        return 1
+    fi
+    echo "check-runnable-probes: selftest 25/25 fixtures correct"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+MODE=run
+RUN_ROOT="$ROOT_DIR"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --list) MODE=list ;;
+        --self-test|--selftest) MODE=selftest ;;
+        --internal-run-root) shift; RUN_ROOT="${1:-}" ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "check-runnable-probes: unknown option: $1" >&2; usage; exit 2 ;;
+    esac
+    shift
+done
+
+[ -n "${MIN_PROBES_OVERRIDE:-}" ] && MIN_PROBES="$MIN_PROBES_OVERRIDE"
+[ -n "${ENGINES_OVERRIDE:-}" ] && ENGINES="$ENGINES_OVERRIDE"
+
+if [ "$MODE" = selftest ]; then
+    selftest
+    exit $?
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR -- cannot create temp dir"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+discover_probes "$RUN_ROOT" "$WORK/probes"
+PROBE_COUNT=$(wc -l < "$WORK/probes" | tr -d ' ')
+
+if [ "$MODE" = list ]; then
+    cat "$WORK/probes"
+    echo "check-runnable-probes: $PROBE_COUNT probe(s)"
+    exit 0
+fi
+
+# --- fail-closed preconditions ---------------------------------------------
+if [ ! -s "$WORK/probes" ] || [ "$PROBE_COUNT" -eq 0 ]; then
+    echo "ERROR -- nothing was checked: zero runnable probes discovered under"
+    echo "         $RUN_ROOT/test"
+    echo "         The enumerator broke, or the convention was renamed. This is"
+    echo "         NOT a pass: the probes are the only regression cover for"
+    echo "         defect classes an sspec describe block cannot observe."
+    exit 2
+fi
+
+if [ "$PROBE_COUNT" -lt "$MIN_PROBES" ]; then
+    echo "ERROR -- nothing was checked: found $PROBE_COUNT probe(s), floor is $MIN_PROBES."
+    echo "         A count below the floor means the enumerator broke. Raise the"
+    echo "         floor when probes are added; never lower it to pass."
+    exit 2
+fi
+
+for eng in $ENGINES; do
+    _ok=0
+    for known in $KNOWN_ENGINES; do
+        [ "$eng" = "$known" ] && _ok=1
+    done
+    if [ "$_ok" -ne 1 ]; then
+        echo "ERROR -- nothing was checked: unknown engine '$eng'."
+        echo "         SIMPLE_EXECUTION_MODE silently selects the JIT on an"
+        echo "         unrecognised value, which makes an A/B look like agreement."
+        echo "         Known: $KNOWN_ENGINES"
+        exit 2
+    fi
+done
+
+BIN=$(resolve_binary)
+if [ ! -x "$BIN" ]; then
+    echo "ERROR -- nothing was checked: no executable Simple binary at '$BIN'."
+    echo "         Set SIMPLE_BINARY, or build and deploy bin/simple. A missing"
+    echo "         binary is an ERROR, not a skip."
+    exit 2
+fi
+
+echo "check-runnable-probes: binary $BIN"
+echo "check-runnable-probes: $PROBE_COUNT probe(s), engines: $ENGINES"
+echo ""
+
+FAILURES=0
+RUNS=0
+: > "$WORK/failures"
+
+while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    rel=$(printf '%s\n' "$probe" | sed "s#^$RUN_ROOT/##")
+    for eng in $ENGINES; do
+        RUNS=$((RUNS + 1))
+        rc=0
+        if command -v timeout >/dev/null 2>&1; then
+            SIMPLE_EXECUTION_MODE="$eng" timeout "$PROBE_TIMEOUT" \
+                "$BIN" run "$probe" >"$WORK/out" 2>"$WORK/err" || rc=$?
+        else
+            SIMPLE_EXECUTION_MODE="$eng" \
+                "$BIN" run "$probe" >"$WORK/out" 2>"$WORK/err" || rc=$?
+        fi
+        verdict=$(score_verdict "$WORK/out" "$rc")
+        case "$verdict" in
+            PASS)
+                echo "  PASS  [$eng] $rel"
+                ;;
+            *)
+                echo "  $verdict  [$eng] $rel  (exit $rc)"
+                FAILURES=$((FAILURES + 1))
+                {
+                    echo "--- $verdict [$eng] $rel (exit $rc)"
+                    echo "    stdout:"
+                    sed 's/^/      /' "$WORK/out" | head -40
+                    echo "    stderr:"
+                    sed 's/^/      /' "$WORK/err" | head -20
+                } >> "$WORK/failures"
+                ;;
+        esac
+    done
+done < "$WORK/probes"
+
+echo ""
+# Defence in depth, deliberately unreachable: the zero-probe guard above already
+# exits 2. It has NO unique selftest fixture and neutering it stays green -- that
+# is stated here rather than papered over with a fixture that proves nothing.
+if [ "$RUNS" -eq 0 ]; then
+    echo "ERROR -- nothing was checked: zero probe runs executed."
+    exit 2
+fi
+
+if [ "$FAILURES" -gt 0 ]; then
+    echo "FAIL -- $FAILURES of $RUNS probe run(s) did not report PASS."
+    echo ""
+    cat "$WORK/failures"
+    echo ""
+    echo "A failing probe is a LIVE DEFECT that specs cannot see. Do not silence"
+    echo "it and do not add a suppression baseline -- fix the defect, or file it"
+    echo "with the mechanism proved and leave this gate red."
+    exit 1
+fi
+
+echo "PASS -- $PROBE_COUNT probe(s) x $(echo "$ENGINES" | wc -w | tr -d ' ') engine(s), $RUNS run(s), all verdicts PASS"
+exit 0

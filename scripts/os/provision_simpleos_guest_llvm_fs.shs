@@ -1,0 +1,75 @@
+#!/bin/sh
+# Provision real guest-native LLVM/Clang/LLD binaries into the canonical FAT32
+# image.  This is construction evidence only; QEMU execution is a separate gate.
+set -eu
+
+fail() { echo "guest-llvm-provision: $*" >&2; exit 1; }
+sha() { sha256sum "$1" | awk '{print $1}'; }
+field() {
+    key=$1 file=$2
+    count=$(awk -F= -v k="$key" '$1 == k {n++} END {print n+0}' "$file")
+    [ "$count" -eq 1 ] || fail "receipt field-count $key=$count"
+    awk -F= -v k="$key" '$1 == k {print substr($0,index($0,"=")+1)}' "$file"
+}
+elf_admit() {
+    path=$1 machine=$2 role=$3
+    [ -f "$path" ] && [ ! -L "$path" ] && [ -s "$path" ] || fail "$role missing or unsafe: $path"
+    [ "$(od -An -tx1 -N4 "$path" | tr -d ' \n')" = 7f454c46 ] || fail "$role is not ELF"
+    actual=$(od -An -tu2 -j18 -N2 "$path" | tr -d ' ')
+    [ "$actual" = "$machine" ] || fail "$role machine=$actual expected=$machine"
+    readelf -h "$path" | grep -Eq 'Type:[[:space:]]+EXEC' || fail "$role is not ET_EXEC"
+    if readelf -l "$path" | grep -q 'INTERP'; then fail "$role has a host dynamic interpreter"; fi
+}
+
+[ "$#" -eq 9 ] || fail "usage: $0 <arm64|riscv64> KERNEL CLANG LLD LLVM_AR SYSROOT BUILD_RECEIPT OUTPUT_IMAGE OUTPUT_RECEIPT"
+arch=$1 kernel=$2 clang=$3 lld=$4 llvm_ar=$5 sysroot=$6 build_receipt=$7 output=$8 receipt=$9
+case "$arch" in
+    arm64) machine=183; target=aarch64-unknown-simpleos ;;
+    riscv64) machine=243; target=riscv64gc-unknown-simpleos ;;
+    *) fail "unsupported architecture: $arch" ;;
+esac
+for command_name in sha256sum awk readelf od grep; do command -v "$command_name" >/dev/null 2>&1 || fail "missing tool: $command_name"; done
+[ -f "$kernel" ] && [ ! -L "$kernel" ] && [ -s "$kernel" ] || fail "kernel missing or unsafe"
+[ -f "$build_receipt" ] && [ ! -L "$build_receipt" ] || fail "build receipt missing or unsafe"
+[ "$(field status "$build_receipt")" = pass ] || fail "build receipt is not passing"
+[ "$(field target "$build_receipt")" = "$target" ] || fail "build receipt target mismatch"
+[ "$(field guest_native "$build_receipt")" = true ] || fail "build receipt is not guest-native"
+builder=$(field builder "$build_receipt")
+case "$builder" in ""|*compiler_rust*|*target/bootstrap*|*simple_seed*) fail "bootstrap/empty builder is not admitted" ;; esac
+elf_admit "$clang" "$machine" clang
+elf_admit "$lld" "$machine" ld.lld
+elf_admit "$llvm_ar" "$machine" llvm-ar
+[ "$(field clang_sha256 "$build_receipt")" = "$(sha "$clang")" ] || fail "clang digest mismatch"
+[ "$(field lld_sha256 "$build_receipt")" = "$(sha "$lld")" ] || fail "lld digest mismatch"
+[ "$(field llvm_ar_sha256 "$build_receipt")" = "$(sha "$llvm_ar")" ] || fail "llvm-ar digest mismatch"
+for item in lib/crt0.o lib/libsimpleos_c.a lib/libsimpleos_runtime.a share/simpleos/simpleos.ld; do
+    [ -f "$sysroot/$item" ] && [ -s "$sysroot/$item" ] || fail "sysroot input missing: $item"
+done
+mkdir -p "$(dirname "$output")" "$(dirname "$receipt")"
+tmp_output="${output}.tmp.$$"
+trap 'rm -f "$tmp_output"' EXIT HUP INT TERM
+env SIMPLEOS_CLANG_BINARY="$clang" SIMPLEOS_LLD_BINARY="$lld" SIMPLEOS_LLVM_AR_BINARY="$llvm_ar" \
+    SIMPLEOS_CRT0_OBJECT="$sysroot/lib/crt0.o" \
+    SIMPLEOS_RUNTIME_ARCHIVE="$sysroot/lib/libsimpleos_runtime.a" \
+    SIMPLEOS_LIBC_ARCHIVE="$sysroot/lib/libsimpleos_c.a" \
+    SIMPLEOS_LINKER_SCRIPT="$sysroot/share/simpleos/simpleos.ld" \
+    sh scripts/os/make_os_disk.shs 256 "$tmp_output" "$kernel" "$arch" fs-exec
+[ -s "$tmp_output" ] || fail "media builder produced no image"
+mv "$tmp_output" "$output"
+{
+    echo schema=simpleos-guest-llvm-fs-provision-v1
+    echo status=pass
+    echo target="$target"
+    echo filesystem=fat32
+    echo image_path="$output"
+    echo image_sha256="$(sha "$output")"
+    echo kernel_sha256="$(sha "$kernel")"
+    echo clang_sha256="$(sha "$clang")"
+    echo lld_sha256="$(sha "$lld")"
+    echo llvm_ar_sha256="$(sha "$llvm_ar")"
+    echo execution_claim=false
+    echo live_gate=scripts/check/check-simpleos-guest-llvm-fs-hello-qemu.shs
+} >"${receipt}.tmp.$$"
+mv "${receipt}.tmp.$$" "$receipt"
+trap - EXIT HUP INT TERM
+echo "guest_llvm_provision_status=pass target=$target image=$output receipt=$receipt execution_claim=false"

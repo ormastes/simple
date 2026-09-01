@@ -1,0 +1,43 @@
+# chained_store_writeback_spec.spl — exact reproduction of the chained-receiver
+# mutable-argument write-back defect.
+#
+# `U16le.of(v).store(b)` (chained MethodCall receiver) must mutate the caller's
+# `b` exactly like the decomposed form `val u = U16le.of(v); u.store(b)`.
+# Regression spec for:
+# doc/08_tracking/bug/bytebuffer_struct_param_mutation_not_persisted_2026-09-01.md
+# Interpreter dispatch: interpreter_helpers/patterns.rs
+# handle_method_call_with_self_update_inner (chained-MethodCall branch) ->
+# find_and_exec_method_with_self_owned_values ->
+# exec_function_with_self_return_values (identifier-arg write-back loop).
+use std.spec
+use lib.common.bytes.span.{ByteSpan, ByteBuffer}
+use lib.common.bytes.ints.{U16le, U16be}
+
+describe "chained-receiver store write-back":
+    it "U16le.of(v).store(b) persists bytes to the caller's buffer":
+        var b = ByteBuffer.new()
+        U16le.of(0xBEEF).store(b)
+        val s = b.freeze()
+        expect(s.len()).to_equal(2)
+        expect(s.get(0).to_i64()).to_equal(0xEF)
+        expect(s.get(1).to_i64()).to_equal(0xBE)
+
+    it "U16be.of(v).store(b) persists bytes to the caller's buffer":
+        var b = ByteBuffer.new()
+        U16be.of(0xBEEF).store(b)
+        val s = b.freeze()
+        expect(s.len()).to_equal(2)
+        expect(s.get(0).to_i64()).to_equal(0xBE)
+        expect(s.get(1).to_i64()).to_equal(0xEF)
+
+    it "chained and decomposed forms produce identical buffers":
+        var chained = ByteBuffer.new()
+        U16le.of(0x1234).store(chained)
+        var decomposed = ByteBuffer.new()
+        val u = U16le.of(0x1234)
+        u.store(decomposed)
+        val cs = chained.freeze()
+        val ds = decomposed.freeze()
+        expect(cs.len()).to_equal(ds.len())
+        expect(cs.get(0).to_i64()).to_equal(ds.get(0).to_i64())
+        expect(cs.get(1).to_i64()).to_equal(ds.get(1).to_i64())

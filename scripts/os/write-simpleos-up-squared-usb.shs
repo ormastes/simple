@@ -1,0 +1,134 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+IMAGE="$ROOT_DIR/build/os/up-squared-apollo-lake/usb/board-usb.img"
+BY_ID=""
+EXPECTED_SERIAL=""
+CONFIRMATION=""
+WRITE_MEDIA=0
+RECEIPT=""
+
+fail() { echo "up2_media_status=fail"; echo "up2_media_reason=$1"; exit 1; }
+blocked() { echo "up2_media_status=blocked"; echo "up2_media_reason=$1"; exit 2; }
+
+while test "$#" -gt 0; do
+    case "$1" in
+        --image) test "$#" -ge 2 || fail missing-image-value; IMAGE=$2; shift 2 ;;
+        --device-by-id) test "$#" -ge 2 || fail missing-device-value; BY_ID=$2; shift 2 ;;
+        --expected-serial) test "$#" -ge 2 || fail missing-serial-value; EXPECTED_SERIAL=$2; shift 2 ;;
+        --confirmation) test "$#" -ge 2 || fail missing-confirmation-value; CONFIRMATION=$2; shift 2 ;;
+        --receipt) test "$#" -ge 2 || fail missing-receipt-value; RECEIPT=$2; shift 2 ;;
+        --write-media) WRITE_MEDIA=1; shift ;;
+        *) fail unknown-argument ;;
+    esac
+done
+
+test -s "$IMAGE" || blocked image-missing
+case "$BY_ID" in /dev/disk/by-id/*) ;; *) blocked stable-by-id-required ;; esac
+test -L "$BY_ID" || blocked stable-by-id-missing
+REAL_DEVICE="$(readlink -f "$BY_ID")"
+test -b "$REAL_DEVICE" || blocked target-not-block-device
+case "$REAL_DEVICE" in /dev/*) ;; *) fail target-outside-dev ;; esac
+
+TYPE="$(lsblk -dnro TYPE "$REAL_DEVICE" 2>/dev/null || true)"
+test "$TYPE" = disk || fail whole-disk-required
+KNAME="$(lsblk -dnro KNAME "$REAL_DEVICE" 2>/dev/null || true)"
+test -n "$KNAME" || fail target-kname-missing
+SYS_BLOCK="/sys/class/block/$KNAME"
+test -d "$SYS_BLOCK" || fail target-sysfs-missing
+REMOVABLE="$(cat "$SYS_BLOCK/removable" 2>/dev/null || echo 0)"
+test "$REMOVABLE" = 1 || fail target-not-removable
+
+PROPS="$(udevadm info --query=property --name="$REAL_DEVICE" 2>/dev/null || true)"
+TRANSPORT="$(printf '%s\n' "$PROPS" | awk -F= '$1=="ID_BUS" {print $2; exit}')"
+SERIAL="$(printf '%s\n' "$PROPS" | awk -F= '$1=="ID_SERIAL_SHORT" {print $2; exit}')"
+MODEL="$(printf '%s\n' "$PROPS" | awk -F= '$1=="ID_MODEL" {print $2; exit}')"
+test "$TRANSPORT" = usb || fail target-not-usb
+test -n "$SERIAL" || fail target-serial-missing
+test -n "$EXPECTED_SERIAL" || blocked expected-serial-required
+test "$SERIAL" = "$EXPECTED_SERIAL" || fail target-serial-mismatch
+
+MOUNTS="$(lsblk -nrpo MOUNTPOINT "$REAL_DEVICE" 2>/dev/null | awk 'NF {print; exit}')"
+test -z "$MOUNTS" || fail target-mounted
+test -d "$SYS_BLOCK/holders" || fail target-holders-sysfs-missing
+test -z "$(find "$SYS_BLOCK/holders" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || fail target-held
+
+ROOT_SOURCE="$(findmnt -nro SOURCE / 2>/dev/null || true)"
+ROOT_PARENT=""
+if test -n "$ROOT_SOURCE" -a -b "$ROOT_SOURCE"; then
+    ROOT_PARENT="$(lsblk -dnro PKNAME "$ROOT_SOURCE" 2>/dev/null || true)"
+fi
+test "$REAL_DEVICE" != "$ROOT_SOURCE" || fail target-is-root
+test -z "$ROOT_PARENT" -o "$KNAME" != "$ROOT_PARENT" || fail target-backs-root
+if swapon --noheadings --raw --output NAME 2>/dev/null | while IFS= read -r swap_dev; do
+    test -z "$swap_dev" && continue
+    swap_parent="$(lsblk -dnro PKNAME "$swap_dev" 2>/dev/null || true)"
+    test "$swap_dev" != "$REAL_DEVICE" -a "$swap_parent" != "$KNAME" || exit 1
+done; then :; else fail target-backs-swap; fi
+
+IMAGE_BYTES="$(wc -c < "$IMAGE" | tr -d ' ')"
+DEVICE_BYTES="$(blockdev --getsize64 "$REAL_DEVICE" 2>/dev/null || true)"
+case "$IMAGE_BYTES:$DEVICE_BYTES" in *[!0-9:]*) fail capacity-invalid ;; esac
+test "$DEVICE_BYTES" -ge "$IMAGE_BYTES" || fail target-too-small
+IMAGE_SHA256="$(sha256sum "$IMAGE" | awk '{print $1}')"
+IDENTITY="$(basename "$BY_ID")|$SERIAL|$DEVICE_BYTES|$IMAGE_SHA256"
+CHALLENGE="$(printf '%s' "$IDENTITY" | sha256sum | awk '{print $1}')"
+
+echo "up2_media_admission=pass"
+echo "device_by_id=$BY_ID"
+echo "device=$REAL_DEVICE"
+echo "transport=$TRANSPORT"
+echo "model=$MODEL"
+echo "serial=$SERIAL"
+echo "capacity_bytes=$DEVICE_BYTES"
+echo "image=$IMAGE"
+echo "image_bytes=$IMAGE_BYTES"
+echo "image_sha256=$IMAGE_SHA256"
+echo "write_confirmation=$CHALLENGE"
+echo "persistent_target=selected-removable-usb-only"
+
+test "$WRITE_MEDIA" -eq 1 || { echo "up2_media_status=admitted-read-only"; exit 0; }
+test "$(id -u)" -eq 0 || blocked write-requires-root
+test "$CONFIRMATION" = "$CHALLENGE" || fail write-confirmation-mismatch
+
+# Re-resolve all stable identity inputs immediately before the first write.
+test "$(readlink -f "$BY_ID")" = "$REAL_DEVICE" || fail target-identity-changed
+NOW_SERIAL="$(udevadm info --query=property --name="$REAL_DEVICE" | awk -F= '$1=="ID_SERIAL_SHORT" {print $2; exit}')"
+NOW_BYTES="$(blockdev --getsize64 "$REAL_DEVICE")"
+test "$NOW_SERIAL" = "$SERIAL" -a "$NOW_BYTES" = "$DEVICE_BYTES" || fail target-identity-changed
+
+dd if="$IMAGE" of="$REAL_DEVICE" bs=4M conv=fsync status=progress
+blockdev --flushbufs "$REAL_DEVICE"
+READBACK_SHA256="$(dd if="$REAL_DEVICE" bs=4M iflag=count_bytes count="$IMAGE_BYTES" status=none | sha256sum | awk '{print $1}')"
+test "$READBACK_SHA256" = "$IMAGE_SHA256" || fail media-readback-mismatch
+test "$(readlink -f "$BY_ID")" = "$REAL_DEVICE" || fail target-identity-changed-after-write
+
+test -n "$RECEIPT" || RECEIPT="$ROOT_DIR/build/test-artifacts/03_system/os/x86_64/up_squared_apl_simpleos/media-$(date -u +%Y%m%dT%H%M%SZ).receipt"
+mkdir -p "$(dirname "$RECEIPT")"
+TMP="$RECEIPT.tmp.$$"
+trap 'rm -f "$TMP"' EXIT HUP INT TERM
+{
+    echo schema=up2-removable-media-v1
+    echo status=pass
+    echo device_by_id="$BY_ID"
+    echo device="$REAL_DEVICE"
+    echo transport="$TRANSPORT"
+    echo model="$MODEL"
+    echo serial="$SERIAL"
+    echo capacity_bytes="$DEVICE_BYTES"
+    echo image="$IMAGE"
+    echo image_bytes="$IMAGE_BYTES"
+    echo image_sha256="$IMAGE_SHA256"
+    echo readback_sha256="$READBACK_SHA256"
+    echo bytes_written="$IMAGE_BYTES"
+    echo bytes_readback="$IMAGE_BYTES"
+    echo persistent_target=selected-removable-usb-only
+    echo written_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$TMP"
+mv "$TMP" "$RECEIPT"
+chmod 0444 "$RECEIPT"
+trap - EXIT HUP INT TERM
+echo "media_readback_hash_match=1"
+echo "media_receipt=$RECEIPT"
+echo "up2_media_status=pass"

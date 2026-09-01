@@ -1,0 +1,165 @@
+#!/bin/sh
+# soak_rv64_hard_job.shs  (RV64 hard-job soak — NEW additive soak, not in CI)
+#
+# Sustained hard-job soak of the rv64 exec core (soc_top_64, the .spl RTL model
+# — NOT GHDL). Runs an Adler-32 reduction over the deterministic byte sequence
+# (i & 0xFF) for COUNT iterations, driving the core's M-extension divider (two
+# `remu` per iteration) for minutes of wall-clock. Emits periodic 'P' progress
+# markers (liveliness / no-stall proof) and a final Adler-32 golden over UART.
+# The gate asserts: sustained wall time >= MIN_WALL seconds, the core golden
+# matches the host reference, progress markers were seen (no early livelock),
+# and the core did not trap or hang. Mirrors scripts/fpga/soak_rv32_hard_job.shs.
+#
+# The probe (soak_rv64_probe.spl) runs under SIMPLE_EXECUTION_MODE=interpreter
+# (the JIT has known bugs; interp is the correct oracle).
+#
+# ADAPTIVE SIZING: the soc_top_64 interpreter runs only ~270-620 datapath
+# ticks/s and that rate swings 2-4x with load on a shared host, so a fixed COUNT
+# cannot reliably land in a bounded wall-clock window.  Unless RV64_SOAK_COUNT is
+# set explicitly, the script first runs a short CALIBRATION soak to measure the
+# CURRENT host tick-rate, then sizes the real COUNT so the real run lands near
+# TARGET_WALL (default 2x MIN_WALL) — comfortably above the MIN_WALL floor and
+# below TIMEOUT regardless of how loaded the host is.
+#
+# Tunables (env):
+#   RV64_SOAK_COUNT     force a fixed iteration count (skips calibration). Use
+#                       for the 10-minute run, e.g. RV64_SOAK_MIN_WALL=600
+#                       RV64_SOAK_TIMEOUT=1500 RV64_SOAK_COUNT=<scaled> (or just
+#                       set MIN_WALL=600 and let calibration size it — then also
+#                       raise TIMEOUT to ~1500).
+#   RV64_SOAK_MIN_WALL  wall-clock floor in seconds (default 60; set 600 for the
+#                       10-minute run).
+#   RV64_SOAK_TARGET_WALL  calibration target wall in seconds (default 2*MIN_WALL).
+#   RV64_SOAK_CAL_COUNT    calibration iteration count (default 1500).
+#   RV64_SOAK_INTERVAL  progress-marker interval (default COUNT/20).
+#   RV64_SOAK_TIMEOUT   hard timeout for the real probe process (default 300; for
+#                       MIN_WALL=600 raise to ~1500).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+PAY="$ROOT_DIR/examples/09_embedded/fpga_riscv/payload"
+PROBE="test/01_unit/lib/hardware/soc_rtl/soak_rv64_probe.spl"
+WORK="$ROOT_DIR/build/fpga/soak_rv64"
+GCC="${RV64_GCC:-riscv64-unknown-elf-gcc}"
+OBJCOPY="${RV64_OBJCOPY:-riscv64-unknown-elf-objcopy}"
+MIN_WALL="${RV64_SOAK_MIN_WALL:-60}"
+TIMEOUT="${RV64_SOAK_TIMEOUT:-300}"
+TARGET_WALL="${RV64_SOAK_TARGET_WALL:-$((MIN_WALL * 2))}"
+CAL_COUNT="${RV64_SOAK_CAL_COUNT:-1500}"
+CAL_TIMEOUT="${RV64_SOAK_CAL_TIMEOUT:-240}"
+SIMPLE="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
+
+fail() { echo "FAIL: $1"; echo "SOAK_RV64_HARD_JOB: FAIL"; exit 1; }
+
+command -v "$GCC" >/dev/null 2>&1 || fail "$GCC not found"
+command -v "$OBJCOPY" >/dev/null 2>&1 || fail "$OBJCOPY not found"
+[ -x "$SIMPLE" ] || fail "bin/simple not found/executable at $SIMPLE"
+
+rm -rf "$WORK"; mkdir -p "$WORK"
+
+# Host Adler-32 golden for a given count (exact in awk: intermediates < 2^53).
+golden_for() {
+    awk -v k="$1" 'BEGIN{
+        a=1; b=0;
+        for(i=0;i<k;i++){ a=(a+(i%256))%65521; b=(b+a)%65521; }
+        printf "%08X", (b*65536+a)%4294967296;
+    }'
+}
+
+# Assemble the soak payload for a count into WORK/soak_<tag>.bin.
+build_payload() {
+    bp_cnt="$1"; bp_tag="$2"
+    bp_int=$((bp_cnt / 20)); [ "$bp_int" -ge 1 ] || bp_int=1
+    sed -e "s/@COUNT@/$bp_cnt/g" -e "s/@INTERVAL@/$bp_int/g" \
+        "$PAY/soak_rv64.s" > "$WORK/soak_$bp_tag.s"
+    "$GCC" -march=rv64im -mabi=lp64 -nostdlib -nostartfiles \
+        -Wl,-Ttext=0x80000000 -o "$WORK/soak_$bp_tag.elf" "$WORK/soak_$bp_tag.s" \
+        || fail "assemble soak payload ($bp_tag)"
+    "$OBJCOPY" -O binary "$WORK/soak_$bp_tag.elf" "$WORK/soak_$bp_tag.bin" \
+        || fail "objcopy ($bp_tag)"
+    [ -s "$WORK/soak_$bp_tag.bin" ] || fail "empty soak_$bp_tag.bin"
+}
+
+# Run the probe for a prebuilt payload. Sets: RC, WALL, GOLD_USED; log at
+# WORK/<tag>.log.
+run_probe() {
+    rp_cnt="$1"; rp_tag="$2"; rp_to="$3"
+    GOLD_USED="$(golden_for "$rp_cnt")"
+    rp_maxt="$(awk -v c="$rp_cnt" 'BEGIN{ printf "%d", c*12 + 500000 }')"
+    rp_t0="$(date +%s)"
+    set +e
+    env SIMPLE_EXECUTION_MODE=interpreter \
+        RV64_SOAK_BIN="$WORK/soak_$rp_tag.bin" \
+        RV64_SOAK_GOLDEN="$GOLD_USED" \
+        RV64_SOAK_MAX_TICKS="$rp_maxt" \
+        timeout "$rp_to" "$SIMPLE" run "$PROBE" >"$WORK/$rp_tag.log" 2>&1
+    RC=$?
+    set -e
+    WALL=$(( $(date +%s) - rp_t0 ))
+}
+
+echo "=== RV64 hard-job soak (soc_top_64 .spl model) ==="
+
+# ---------------------------------------------------------------------------
+# Phase 0: calibration (unless a fixed COUNT was requested) — measure the
+# current host tick-rate and size the real run to TARGET_WALL.
+# ---------------------------------------------------------------------------
+if [ -n "${RV64_SOAK_COUNT:-}" ]; then
+    COUNT="$RV64_SOAK_COUNT"
+    echo "fixed COUNT requested: $COUNT (calibration skipped)"
+else
+    echo "--- calibration (measuring current host tick-rate) ---"
+    build_payload "$CAL_COUNT" cal
+    run_probe "$CAL_COUNT" cal "$CAL_TIMEOUT"
+    [ "$RC" -ne 124 ] || fail "calibration timed out after ${CAL_TIMEOUT}s (host extremely slow — raise RV64_SOAK_CAL_TIMEOUT)"
+    grep -q "SOAK_RV64: ALL PASS" "$WORK/cal.log" || { cat "$WORK/cal.log"; fail "calibration run did not PASS (rc=$RC)"; }
+    CAL_WALL="$WALL"; [ "$CAL_WALL" -ge 1 ] || CAL_WALL=1
+    CAL_TPS="$(sed -n 's/^TICKS_PER_SEC=\([0-9][0-9]*\)$/\1/p' "$WORK/cal.log" | head -1)"
+    # Scale iterations directly by wall time (independent of ticks/iter):
+    #   COUNT = CAL_COUNT * TARGET_WALL / CAL_WALL
+    COUNT=$(( CAL_COUNT * TARGET_WALL / CAL_WALL ))
+    [ "$COUNT" -ge "$CAL_COUNT" ] || COUNT="$CAL_COUNT"
+    echo "calibration: cal_count=$CAL_COUNT cal_wall=${CAL_WALL}s tps=${CAL_TPS:-?} -> real COUNT=$COUNT (target_wall=${TARGET_WALL}s)"
+fi
+
+INTERVAL="${RV64_SOAK_INTERVAL:-$((COUNT / 20))}"
+[ "$INTERVAL" -ge 1 ] || INTERVAL=1
+
+# ---------------------------------------------------------------------------
+# Phase 1: the real soak.
+# ---------------------------------------------------------------------------
+echo "iterations = $COUNT   progress_interval = $INTERVAL   min_wall = ${MIN_WALL}s   timeout = ${TIMEOUT}s"
+build_payload "$COUNT" real
+echo "host_golden = $(golden_for "$COUNT")"
+echo "payload bytes = $(wc -c < "$WORK/soak_real.bin")"
+echo "=== running soak (this takes minutes) ==="
+run_probe "$COUNT" real "$TIMEOUT"
+
+grep -vE '^(WARNING: this Rust-built|Build and use the pure-Simple)' "$WORK/real.log" || true
+
+# --- Verify -------------------------------------------------------------------
+[ "$RC" -ne 124 ] || fail "probe timed out after ${TIMEOUT}s (livelock/hang or COUNT too large)"
+grep -q "SOAK_RV64: ALL PASS" "$WORK/real.log" || fail "probe did not report ALL PASS (rc=$RC)"
+
+CORE_GOLD="$(sed -n 's/^CORE_GOLDEN=\([0-9A-F]\{8\}\)$/\1/p' "$WORK/real.log" | head -1)"
+CTICKS="$(sed -n 's/^CORE_TICKS=\([0-9][0-9]*\)$/\1/p' "$WORK/real.log" | head -1)"
+PMARK="$(sed -n 's/^PROGRESS_MARKERS=\([0-9][0-9]*\)$/\1/p' "$WORK/real.log" | head -1)"
+TPS="$(sed -n 's/^TICKS_PER_SEC=\([0-9][0-9]*\)$/\1/p' "$WORK/real.log" | head -1)"
+
+[ -n "$CORE_GOLD" ] || fail "no CORE_GOLDEN in probe output"
+[ -n "$CTICKS" ] || fail "no CORE_TICKS in probe output"
+[ "$CORE_GOLD" = "$GOLD_USED" ] || fail "golden mismatch core=$CORE_GOLD host=$GOLD_USED"
+[ "${PMARK:-0}" -ge 1 ] || fail "no progress markers (livelock)"
+grep -q "^TRAPPED=0$" "$WORK/real.log" || fail "core trapped during soak (see real.log)"
+[ "$WALL" -ge "$MIN_WALL" ] || fail "wall ${WALL}s < required ${MIN_WALL}s (host sped up mid-run; rerun)"
+
+echo "--- metrics ---"
+echo "iterations       = $COUNT"
+echo "progress_markers = $PMARK"
+echo "core_ticks       = $CTICKS"
+echo "ticks_per_sec    = ${TPS:-n/a}"
+echo "wall_seconds     = $WALL"
+echo "golden           = $CORE_GOLD (core) == $GOLD_USED (host)"
+echo "SOAK_RV64_HARD_JOB: PASS"

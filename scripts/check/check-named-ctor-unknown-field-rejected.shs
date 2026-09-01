@@ -1,0 +1,223 @@
+#!/bin/sh
+# Guard: a named-constructor argument whose name matches NO declared field must
+# be a COMPILE ERROR, and a correctly-spelled sibling field must never be
+# silently corrupted.
+#
+# Bug: doc/08_tracking/bug/jit_named_ctor_accepts_unknown_field_name_2026-08-08.md
+# Fix: seed HIR lowering, `lower_struct_init_fields`
+#      (src/compiler_rust/compiler/src/hir/lower/expr/collections.rs)
+#
+# WHY THIS IS A SHELL SCRIPT AND NOT A `*_spec.spl`
+# -------------------------------------------------
+# The spec DSL cannot reach this defect. `bin/simple test` runs the INTERPRETER,
+# and the interpreter already rejected unknown field names correctly before the
+# fix (interpreter_call/core/class_instantiation.rs, "class `X` has no field
+# named `Y`"). A spec therefore goes red on a broken compiler for the WRONG
+# reason -- it never exercises the JIT lowering that carried the bug -- and
+# proves nothing about the fix. Only a plain `.spl` program run through
+# `bin/simple run` (= the JIT) reaches it. That is a structural property of the
+# harness, not a fixable assertion, hence a check script.
+#
+# WHAT WAS BROKEN
+# ---------------
+# `lower_struct_init_fields` built a name->expr map from the call's named
+# arguments, then walked the struct's DECLARED field list taking the named arg
+# for each field it knew. An argument whose name matched no declared field was
+# inserted into that map, NEVER consumed, and NEVER validated. The declared slot
+# the author meant to fill therefore stayed unfilled and fell through to the
+# `HirExprKind::Nil` placeholder -- which MIR lowers to `ConstInt { value: 3 }`,
+# the runtime NIL tag (TAG_SPECIAL=0b011 | SPECIAL_NIL=0, see
+# mir/lower/lowering_expr_literal.rs `lower_nil_expr`). Read back through an
+# i64-typed field that tag surfaces UNTAGGED as the literal integer 3.
+#
+# So ONE mistyped field name silently corrupted a DIFFERENT, correctly-spelled
+# field with a leaked discriminant, with no diagnostic on any line:
+#
+#     class Font { id: i64, size: i64 }
+#     Font(bogus: 111, size: 8)   -> id=3   size=8
+#     Font(bogus: 222, size: 9)   -> id=3   size=9
+#     Font(id: 5,      bogus: 999)-> id=5   size=3
+#
+# The constant is 3 in EVERY case regardless of the arguments' values, which is
+# what identifies it as a leaked tag rather than a misplaced value. A three-field
+# class makes that unambiguous -- `T3(b: 7, zzz: 99)` printed `a=3 b=7 c=3`, two
+# INDEPENDENT slots holding the same constant, which no "value landed in the
+# neighbouring slot" explanation can produce.
+#
+# WHAT IS ASSERTED
+# ----------------
+#   RED-1  unknown name in a 2-field class  -> compile error naming the field,
+#          non-zero exit, and NO program output
+#   RED-2  unknown name in 3-field class    -> same (the two-slot tag witness)
+#   TAG    the string " 3" must never appear as a field value in any output --
+#          i.e. the corrupt-value symptom is gone, not merely relabelled
+#   GREEN  correctly-spelled construction still works in all three argument
+#          shapes (declared order, reversed order, plain positional) and the
+#          values are exact -- so the fix rejects typos WITHOUT breaking the
+#          house-style named-constructor form
+#
+# Checked under the default engine and with SIMPLE_EXECUTION_MODE=jit, because
+# the defect was JIT-only; asserting on the default engine alone would fail open
+# if the default ever moved to the interpreter.
+#
+# SCOPE (deliberate, see the bug doc's "remaining gap")
+# ----------------------------------------------------
+# The rejection fires for a struct/class DECLARED IN THE SAME FILE as the
+# construction site. ~1,522 bare type names are duplicated across
+# src/{compiler,lib,app} and the HIR type registry is bare-keyed
+# last-registration-wins, so for an IMPORTED name the resolved layout may not be
+# the one the author meant -- rejecting there reports the separate bare-name
+# collision defect (b9e23914a0e family) rather than a typo. Measured: rejecting
+# on the resolved list alone fired on 21 of 400 repo files, every inspected one a
+# collision, not a typo. This guard therefore pins the same-file case only.
+
+set -e
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT"
+
+SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — compiler under test not executable: $SIMPLE_BIN"
+    exit 2
+fi
+SIMPLE_RUST_SEED_WARNING=0
+export SIMPLE_RUST_SEED_WARNING
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/named-ctor-guard.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+fail() {
+    echo "FAIL — $1"
+    exit 1
+}
+
+# ---------------------------------------------------------------- fixtures ---
+cat > "$WORK/red1.spl" <<'SPL'
+class Font:
+    id: i64
+    size: i64
+
+fn main():
+    val a = Font(bogus: 111, size: 8)
+    print "MARKER id={a.id} size={a.size}"
+main()
+SPL
+
+cat > "$WORK/red2.spl" <<'SPL'
+class T3:
+    a: i64
+    b: i64
+    c: i64
+
+fn main():
+    val x = T3(b: 7, zzz: 99)
+    print "MARKER a={x.a} b={x.b} c={x.c}"
+main()
+SPL
+
+cat > "$WORK/red3.spl" <<'SPL'
+class Font:
+    id: i64
+    size: i64
+
+fn main():
+    val c = Font(id: 5, bogus: 999)
+    print "MARKER id={c.id} size={c.size}"
+main()
+SPL
+
+cat > "$WORK/green.spl" <<'SPL'
+class Font:
+    id: i64
+    size: i64
+
+fn main():
+    val a = Font(id: 5, size: 8)
+    val b = Font(size: 9, id: 6)
+    val c = Font(7, 10)
+    print "OK {a.id},{a.size} {b.id},{b.size} {c.id},{c.size}"
+main()
+SPL
+
+CHECKS=0
+
+# The unknown field name each fixture must be blamed for.
+red_field_for() {
+    case "$1" in
+        red1) echo bogus ;;
+        red2) echo zzz ;;
+        red3) echo bogus ;;
+    esac
+}
+
+run_red() {
+    fixture=$1
+    engine_label=$2
+    shift 2
+
+    out=$(env "$@" "$SIMPLE_BIN" run "$WORK/$fixture.spl" 2>&1) && rc=0 || rc=$?
+
+    [ "$rc" -eq 0 ] && fail "$fixture [$engine_label]: exit 0 — an unknown field name was ACCEPTED (must be a compile error).
+Output was:
+$out"
+
+    field=$(red_field_for "$fixture")
+    echo "$out" | grep -q "no field named .$field." \
+        || fail "$fixture [$engine_label]: exited $rc but never named the offending field \`$field\`.
+A non-zero exit from some unrelated failure is not proof this defect is fixed.
+Output was:
+$out"
+
+    # The program body must not have run: reaching the print means the corrupt
+    # object was constructed and only incidentally reported afterwards.
+    echo "$out" | grep -q 'MARKER' \
+        && fail "$fixture [$engine_label]: the constructed object REACHED the program body (MARKER printed).
+The construction must be rejected at compile time, not diagnosed after the fact.
+Output was:
+$out"
+
+    # The precise corruption signature: a field rendering as the NIL tag 3.
+    echo "$out" | grep -Eq '(id|size|a|b|c)=3' \
+        && fail "$fixture [$engine_label]: a field still rendered as the leaked NIL tag 3.
+Output was:
+$out"
+
+    CHECKS=$((CHECKS + 1))
+}
+
+run_green() {
+    engine_label=$1
+    shift
+
+    out=$(env "$@" "$SIMPLE_BIN" run "$WORK/green.spl" 2>&1) && rc=0 || rc=$?
+
+    [ "$rc" -eq 0 ] || fail "green [$engine_label]: correctly-spelled named construction was REJECTED (exit $rc).
+The fix must not break the house-style named-constructor form.
+Output was:
+$out"
+
+    echo "$out" | grep -q 'OK 5,8 6,9 7,10' \
+        || fail "green [$engine_label]: wrong field values.
+Expected 'OK 5,8 6,9 7,10' (declared order, reversed order, positional).
+Output was:
+$out"
+
+    CHECKS=$((CHECKS + 1))
+}
+
+# ----------------------------------------------------------------- default ---
+run_red red1 default
+run_red red2 default
+run_red red3 default
+run_green default
+
+# --------------------------------------------------------------------- jit ---
+# The defect was JIT-only. Force the engine so a future change of default
+# cannot silently retire this coverage.
+run_red red1 jit SIMPLE_EXECUTION_MODE=jit
+run_red red2 jit SIMPLE_EXECUTION_MODE=jit
+run_red red3 jit SIMPLE_EXECUTION_MODE=jit
+run_green jit SIMPLE_EXECUTION_MODE=jit
+
+echo "PASS — $CHECKS checks: unknown named-constructor field rejected at compile time (default + jit), no NIL-tag corruption, correct construction unaffected"

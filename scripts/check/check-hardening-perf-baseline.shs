@@ -1,0 +1,223 @@
+#!/bin/sh
+# check-hardening-perf-baseline.shs — A7 whole-process wall + max-RSS baseline
+# for the compiler-hardening lanes (critical_hardening_plan_2026-08-21 §A7,
+# design §18/§19).
+#
+# Complements check-hardening-perf-budget.shs (in-process ns/op micro-benches):
+# this one times the WHOLE `simple` process with `/usr/bin/time -v`, so it sees
+# startup, parse/lower/codegen, and peak memory — the axes the Any-removal,
+# mono, closed-match and transition-table lanes can regress without any ns/op
+# number moving.
+#
+# Benches (fixed set; fixtures under test/05_perf/compiler_hardening/wall_*.spl):
+#   compile_hello     `simple compile` of a 5-line hello world
+#   run_hello         `simple run`     of the same file (startup floor)
+#   run_enum_match    `simple run`     ~225-line closed enum, 40 variants x 3 match sites
+#   run_generic       `simple run`     generic fns at 3 instantiation types
+#   run_anybox        `simple run`     Any box/unbox loop
+# Each is sampled SAMPLES times (default 3) under `nice -n 10`; the MEDIAN wall
+# (seconds) and MEDIAN max RSS (kB) are compared to the baseline. Median, not
+# min: the box is shared and a single sample has shown >2x spread.
+#
+# Baseline: doc/10_metrics/hardening/perf_baseline.sdn — records binary
+# identity (path, size, mtime) and load average at record time. A baseline
+# recorded on a different binary is still compared (that is the point), but the
+# header tells the reader which binary the numbers came from.
+#
+# Budget: FAIL when median wall > recorded * (1 + TOLERANCE_PCT/100) or median
+# RSS exceeds the same factor. Default tolerance 100% (2x): generous by design —
+# a flaky perf gate gets disabled, which protects nothing. An absolute floor
+# (WALL_FLOOR_S, default 0.25s) is added to the wall budget so a 0.07s bench
+# cannot fail on scheduler noise alone.
+#
+# Verdict convention (LAST line of stdout is authoritative):
+#   PASS  — <n> bench(es) checked, 0 over budget (+<X>% tolerance)   exit 0
+#   FAIL  — <n> bench(es) checked, <k> over budget: <names>          exit 1
+#   ERROR — nothing was checked (<reason>)                            exit 2
+# A run that measured 0 benches is ERROR, never a pass. --selftest runs first
+# and is fatal. --record rewrites the baseline (reviewed updates only — never
+# "fix" a FAIL with it without reading the diff).
+#
+# The timed command's exit status is read directly into a variable on the line
+# after the invocation, never through a pipe (a pipeline's $? is the last
+# stage's status; that trap has produced false greens in this repo).
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BENCH_DIR="${A7_WALL_BENCH_DIR:-$ROOT/test/05_perf/compiler_hardening}"
+BASELINE="${A7_WALL_BASELINE:-$ROOT/doc/10_metrics/hardening/perf_baseline.sdn}"
+SIMPLE="${A7_SIMPLE:-$ROOT/bin/release/x86_64-unknown-linux-gnu/simple}"
+SAMPLES="${A7_SAMPLES:-3}"
+TOLERANCE_PCT="${A7_TOLERANCE_PCT:-100}"
+WALL_FLOOR_S="${A7_WALL_FLOOR_S:-0.25}"
+TIME_BIN=/usr/bin/time
+MODE=check
+RUN_SELFTEST=1
+
+for arg in "$@"; do
+    case "$arg" in
+        --record) MODE=record ;;
+        --selftest) MODE=selftest ;;
+        --no-selftest) RUN_SELFTEST=0 ;;
+        --tolerance=*) TOLERANCE_PCT=${arg#--tolerance=} ;;
+        --samples=*) SAMPLES=${arg#--samples=} ;;
+        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+error_out() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+# name | command template (FILE and OUT substituted)
+BENCH_TABLE='compile_hello|wall_hello.spl|compile -o OUT FILE
+run_hello|wall_hello.spl|run FILE
+run_enum_match|wall_enum_match.spl|run FILE
+run_generic|wall_generic.spl|run FILE
+run_anybox|wall_anybox.spl|run FILE'
+
+# median of a whitespace-separated numeric list (awk, works for floats)
+median() {
+    printf '%s\n' "$@" | sort -g | awk '{a[NR]=$1} END{ if(NR==0){print "nan";exit} if(NR%2){print a[(NR+1)/2]} else {printf "%.3f\n",(a[NR/2]+a[NR/2+1])/2} }'
+}
+
+# compare_one name rec_wall got_wall rec_rss got_rss -> prints "ok" or "over(<why>)"
+compare_one() {
+    awk -v rw="$2" -v gw="$3" -v rr="$4" -v gr="$5" -v tol="$TOLERANCE_PCT" -v floor="$WALL_FLOOR_S" 'BEGIN{
+        f = 1 + tol/100.0
+        wb = rw * f; if (wb < rw + floor) wb = rw + floor
+        rb = rr * f
+        why = ""
+        if (gw > wb) why = why sprintf("wall %.3fs > %.3fs;", gw, wb)
+        if (gr > rb) why = why sprintf("rss %dkB > %dkB;", gr, rb)
+        if (why == "") print "ok"; else print "over(" why ")"
+    }'
+}
+
+# time_one <outfile-for-time> cmd... ; echoes "<wall_s> <rss_kb>" ; rc of cmd in <outfile>.rc
+time_one() {
+    _tf=$1; shift
+    nice -n 10 "$TIME_BIN" -v -o "$_tf" "$@" >/dev/null 2>&1
+    echo $? > "$_tf.rc"
+    _w=$(awk -F': ' '/Elapsed \(wall clock\)/{split($2,p,":"); if (length(p)==3) print p[1]*3600+p[2]*60+p[3]; else print p[1]*60+p[2]}' "$_tf")
+    _r=$(awk -F': ' '/Maximum resident set size/{print $2}' "$_tf")
+    echo "$_w $_r"
+}
+
+# ------------------------------------------------------------------ selftest
+selftest() {
+    _n=0
+    chk() { _n=$((_n+1)); _got=$(compare_one "$1" "$2" "$3" "$4" "$5")
+        case "$_got" in $6) ;; *) echo "selftest fixture $_n FAILED: $1 rec=$2/$4 got=$3/$5 -> $_got (want $6)" >&2; return 1 ;; esac; }
+    chk a 1.0 1.0 1000 1000 ok || return 1            # identical
+    chk b 1.0 1.9 1000 1000 ok || return 1            # within 2x
+    chk c 1.0 2.3 1000 1000 'over(wall*' || return 1  # wall over
+    chk d 1.0 1.0 1000 2100 'over(rss*' || return 1   # rss over
+    chk e 0.05 0.28 1000 1000 ok || return 1          # floor saves tiny bench
+    chk f 0.05 0.40 1000 1000 'over(wall*' || return 1 # ... but not by much
+    # median helper: even and odd counts
+    _n=$((_n+1)); [ "$(median 3 1 2)" = "2" ] || { echo "selftest fixture $_n FAILED: median odd" >&2; return 1; }
+    _n=$((_n+1)); [ "$(median 1 4 2 3)" = "2.500" ] || { echo "selftest fixture $_n FAILED: median even" >&2; return 1; }
+    # empty bench dir must ERROR (exit 2), never PASS — real scan path, recursive
+    _n=$((_n+1)); _empty=$(mktemp -d)
+    A7_WALL_BENCH_DIR="$_empty" sh "$0" --no-selftest >"$_empty/out" 2>/dev/null
+    _rc=$?
+    if [ "$_rc" -ne 2 ] || ! grep -q '^ERROR — nothing was checked' "$_empty/out"; then
+        echo "selftest fixture $_n FAILED: empty bench dir rc=$_rc out=$(cat "$_empty/out")" >&2; rm -rf "$_empty"; return 1; fi
+    rm -rf "$_empty"
+    # missing baseline must ERROR
+    _n=$((_n+1)); _nb=$(mktemp -d)
+    A7_WALL_BASELINE="$_nb/none.sdn" sh "$0" --no-selftest >"$_nb/out" 2>/dev/null
+    _rc=$?
+    if [ "$_rc" -ne 2 ]; then echo "selftest fixture $_n FAILED: missing baseline rc=$_rc" >&2; rm -rf "$_nb"; return 1; fi
+    rm -rf "$_nb"
+    echo "selftest: $_n fixtures passed"
+}
+
+if [ "$MODE" = selftest ]; then selftest || { echo "SELFTEST FAILED" >&2; exit 2; }; exit 0; fi
+if [ "$RUN_SELFTEST" -eq 1 ]; then selftest >/dev/null || { echo "SELFTEST FAILED" >&2; error_out "selftest failed"; }; fi
+
+# ------------------------------------------------------------------ preflight
+[ -x "$TIME_BIN" ] || error_out "$TIME_BIN not available"
+[ -x "$SIMPLE" ] || error_out "no deployed binary at $SIMPLE"
+[ -d "$BENCH_DIR" ] || error_out "bench dir $BENCH_DIR missing"
+[ "$MODE" = record ] || [ -f "$BASELINE" ] || error_out "baseline $BASELINE missing; run --record"
+
+REAL_BIN=$(readlink -f "$SIMPLE")
+BIN_ID="$REAL_BIN $(stat -c '%s %y' "$REAL_BIN")"
+LOAD_START=$(cut -d' ' -f1-3 /proc/loadavg)
+
+# ------------------------------------------------------------------ measure
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+RESULTS="$WORK/results"   # name wall rss
+: > "$RESULTS"
+printf '%s\n' "$BENCH_TABLE" | while IFS='|' read -r name fixture tmpl; do
+    f="$BENCH_DIR/$fixture"
+    [ -f "$f" ] || continue
+    walls=""; rsses=""; i=0; bad=0
+    while [ $i -lt "$SAMPLES" ]; do
+        out="$WORK/$name.$i.out"
+        set -- $(printf '%s' "$tmpl" | sed "s#FILE#$f#; s#OUT#$out#")
+        wr=$(time_one "$WORK/t" "$SIMPLE" "$@")
+        [ "$(cat "$WORK/t.rc")" = 0 ] || bad=1
+        walls="$walls ${wr%% *}"; rsses="$rsses ${wr##* }"
+        i=$((i+1))
+    done
+    if [ $bad -ne 0 ]; then echo "$name FAILED_RUN -" >> "$RESULTS"; continue; fi
+    echo "$name $(median $walls) $(median $rsses)" >> "$RESULTS"
+done
+LOAD_END=$(cut -d' ' -f1-3 /proc/loadavg)
+
+N=$(wc -l < "$RESULTS" | tr -d ' ')
+[ "$N" -gt 0 ] || error_out "0 benches measured in $BENCH_DIR"
+
+# ------------------------------------------------------------------ record
+if [ "$MODE" = record ]; then
+    mkdir -p "$(dirname "$BASELINE")"
+    {
+        echo "# A7 hardening perf baseline (whole-process wall + max RSS). Generated by"
+        echo "# scripts/check/check-hardening-perf-baseline.shs --record — reviewed updates only."
+        echo "recorded: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "binary: $BIN_ID"
+        echo "loadavg_start: $LOAD_START"
+        echo "loadavg_end: $LOAD_END"
+        echo "samples: $SAMPLES"
+        echo "host: $(uname -n) $(nproc) cpus"
+        echo "benches:"
+        awk '$2!="FAILED_RUN"{printf "  - name: %s\n    wall_s: %s\n    rss_kb: %s\n",$1,$2,$3}' "$RESULTS"
+    } > "$BASELINE"
+    cat "$RESULTS"
+    echo "PASS — $N bench(es) recorded to $BASELINE (binary: $BIN_ID; load $LOAD_START -> $LOAD_END)"
+    exit 0
+fi
+
+# ------------------------------------------------------------------ compare
+echo "binary: $BIN_ID"
+echo "load: $LOAD_START -> $LOAD_END (samples=$SAMPLES)"
+echo "baseline: $(grep '^binary:' "$BASELINE" | cut -c9-) / $(grep '^recorded:' "$BASELINE" | cut -c11-)"
+printf '%-16s %10s %10s %12s %12s  %s\n' bench wall_s base_s rss_kb base_kb verdict
+OVER=0; OVER_NAMES=""; CHECKED=0
+while read -r name wall rss; do
+    if [ "$wall" = FAILED_RUN ]; then
+        OVER=$((OVER+1)); OVER_NAMES="$OVER_NAMES $name(run-failed)"
+        printf '%-16s %10s %10s %12s %12s  %s\n' "$name" - - - - "FAILED_RUN"; CHECKED=$((CHECKED+1)); continue
+    fi
+    bw=$(awk -v n="$name" '$1=="-"&&$2=="name:"&&$3==n{getline; print $2; exit}' "$BASELINE")
+    br=$(awk -v n="$name" '$1=="-"&&$2=="name:"&&$3==n{getline; getline; print $2; exit}' "$BASELINE")
+    if [ -z "$bw" ] || [ -z "$br" ]; then
+        printf '%-16s %10s %10s %12s %12s  %s\n' "$name" "$wall" - "$rss" - "NO_BASELINE (run --record)"
+        OVER=$((OVER+1)); OVER_NAMES="$OVER_NAMES $name(no-baseline)"; CHECKED=$((CHECKED+1)); continue
+    fi
+    v=$(compare_one "$name" "$bw" "$wall" "$br" "$rss")
+    case "$v" in ok) ;; *) OVER=$((OVER+1)); OVER_NAMES="$OVER_NAMES $name$v" ;; esac
+    printf '%-16s %10s %10s %12s %12s  %s\n' "$name" "$wall" "$bw" "$rss" "$br" "$v"
+    CHECKED=$((CHECKED+1))
+done < "$RESULTS"
+
+[ "$CHECKED" -gt 0 ] || error_out "0 benches compared"
+if [ "$OVER" -eq 0 ]; then
+    echo "PASS — $CHECKED bench(es) checked, 0 over budget (+${TOLERANCE_PCT}% tolerance)"
+    exit 0
+fi
+echo "FAIL — $CHECKED bench(es) checked, $OVER over budget (+${TOLERANCE_PCT}% tolerance):$OVER_NAMES"
+exit 1

@@ -1,0 +1,197 @@
+#!/bin/sh
+# Guard against `@extern fn` declarations whose symbol is never registered.
+#
+# WHY THIS EXISTS
+# ---------------
+# An unregistered extern does NOT fail to link. Depending on lane it returns a
+# silent nil/0, or NULL-jumps. Proven 2026-08-01 against
+# bin/release/x86_64-unknown-linux-gnu/simple_seed:
+#
+#   @extern fn _bogus(a: i64) -> i64  ; _bogus(7)   -> SIGILL, core dumped (132)
+#   extern fn rt_bogus(a: i64) -> i64 ; rt_bogus(7) -> logs "unknown extern
+#                                       function", then returns 0 and exits 0
+#
+# Neither is a link error. This has shipped real wrong answers: b9ae3d91c07
+# (game2d _f64_to_i32/_i32_to_f64/_i32_to_u32 feeding nil into pixel
+# coordinates) and the _cos/_sin siblings it left behind in transform.spl.
+#
+# RELATION TO check-seed-extern-registry.shs
+# ------------------------------------------
+# That script ratchets `extern fn rt_*` in src/compiler + src/app only. It is
+# blind to this defect on three independent counts, all closed here:
+#   1. its regex needs a literal `extern fn` -> `@extern fn` never matches
+#   2. its regex needs an `rt_` prefix       -> `_cos`, `_sin` never match
+#   3. its scope is src/compiler + src/app   -> src/lib, src/os never scanned
+# This script is additive; it does not replace or weaken that ratchet.
+#
+# BOTH DECLARATION FORMS ARE IN SCOPE (fixed 2026-08-01)
+# ------------------------------------------------------
+# The first revision of this script matched only lines containing `@extern`,
+# which made it blind to the bare `extern fn sym(...)` form -- the *majority*
+# form in this tree (~9,550 declaration lines / ~3,800 distinct symbols, versus
+# ~172 `@extern` lines). That blind spot swallowed this script's own motivating
+# case: `rt_smf_reader_open`, declared `extern fn` at
+# src/compiler/70.backend/linker/smf_reader.spl:31, has no implementation
+# anywhere in src/runtime or src/compiler_rust, so the single-file SMF reader
+# bridge returns a silent nil -- and the guard reported "all clean".
+#
+# The irony is load-bearing: the header above proves the silent-nil behaviour
+# using `extern fn rt_bogus`, the very form the extractor could not see. A guard
+# that misses its motivating case is worse than no guard, because it converts an
+# open question into a false all-clear. Both forms reach the identical
+# unregistered fall-through, so both are scanned.
+#
+# THE SANCTIONED EXEMPTION
+# ------------------------
+# Some externs are legitimately unresolved on the host: freestanding/baremetal
+# intrinsics that only exist on a bare target. Those are ALREADY explicitly
+# annotated in source with the `bare` ABI tag:
+#
+#     @extern("bare", "mem_read_u8") fn mem_read_u8(addr: u64) -> u8
+#
+# `bare` is the opt-in, and it is the ONLY exemption. There is deliberately no
+# env-var escape hatch, no allowlist file, and no stub-emitting mode --
+# fabricating a weak nil-returning stub converts a silent nil into a silent nil
+# with paperwork, which is the very defect this guard exists to catch.
+#
+# MODE
+# ----
+# Default is REPORT (exit 0): the repo carries a known backlog (see the bug doc)
+# that must be retired family by family. `--strict` makes any non-`bare`
+# unregistered extern a hard error; that is the intended end state.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "${root}"
+
+STRICT=0
+[ "${1:-}" = "--strict" ] && STRICT=1
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+decls="$work/decls.tsv"; cand="$work/cand.txt"; reg="$work/reg.txt"
+
+# ---------------------------------------------------------------------------
+# 1. Declared extern symbols (owned scope; vendored runtime excluded).
+#
+# Four surface forms, all of which reach the same silent fall-through:
+#     @extern("abi", "sym") fn f(...)     abi = runtime | bare
+#     @extern("sym") fn f(...)
+#     @extern fn sym(...)                 bare decorator: symbol = fn name
+#     [pub] extern fn sym(...)            bare keyword form: symbol = fn name
+# The last form carries no ABI tag, so it can never be `bare`-exempt; it is
+# always held to the registration requirement.
+# Emits: abi<TAB>symbol<TAB>file:line
+# ---------------------------------------------------------------------------
+grep -rnE --include='*.spl' --exclude-dir=vendor \
+     '@extern|^[[:space:]]*(pub[[:space:]]+)?extern[[:space:]]+fn[[:space:]]' src test 2>/dev/null \
+| perl -ne '
+    chomp;
+    next unless /^([^:]+):(\d+):(.*)$/;
+    my ($f,$l,$t)=($1,$2,$3);
+    next if $t =~ /^\s*#/;                 # skip comments
+    my ($abi,$sym)=("host","");
+    if    ($t =~ /\@extern\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)/) { $abi=$1; $sym=$2; }
+    elsif ($t =~ /\@extern\(\s*"([^"]+)"\s*\)/)                 { $sym=$1; }
+    elsif ($t =~ /\@extern\s+fn\s+([A-Za-z_]\w*)/)              { $sym=$1; }
+    elsif ($t =~ /^\s*(?:pub\s+)?extern\s+fn\s+([A-Za-z_]\w*)/) { $sym=$1; }
+    print "$abi\t$sym\t$f:$l\n" if $sym ne "";
+' | sort -u > "$decls"
+
+cut -f2 "$decls" | sort -u > "$cand"
+
+# VACUITY GUARD. A parser regression that silently matches nothing would make
+# this script report "all clean" forever -- the exact failure mode it exists to
+# prevent. The repo has ~9,700 extern declaration sites across both forms;
+# anything near zero means the extractor broke, not that the tree got clean.
+#
+# The bound is deliberately set just under the bare-form population alone: the
+# original 100 was low enough that dropping the entire bare-keyword form (~97%
+# of declarations) still sailed past it. That is exactly how rt_smf_reader_open
+# stayed invisible. Raise this bound as the tree grows; never lower it.
+decl_n=$(wc -l < "$decls" | tr -d ' ')
+if [ "$decl_n" -lt 5000 ]; then
+  echo "extern_registration_ok=false"
+  echo "VACUITY GUARD TRIPPED: only $decl_n extern declarations found (expected ~9700)."
+  echo "The declaration extractor is broken -- most likely one of the two surface"
+  echo "forms stopped matching. Fix it -- do not lower this bound."
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Registered symbols.
+#
+# Evidence that a symbol actually resolves:
+#   - C/H/Rust (comments stripped): a definition or call `sym(`, or a
+#     registration-table string "sym"
+#   - .spl: a quoted registration-table entry "sym"
+#
+# Deliberately NOT counted:
+#   - mentions inside comments. `_sin` and `_cos` appear only in two Rust
+#     comments, and an earlier revision of this script scored them "registered"
+#     on that basis -- missing the very bug that motivated it.
+#   - a same-named `fn` in some other .spl module. Simple resolution is
+#     module-scoped, so `fn _cos` in engine3d/types3d.spl does not resolve
+#     game2d/transform.spl's `@extern fn _cos`.
+# ---------------------------------------------------------------------------
+{
+  grep -rhFf "$cand" --include='*.c' --include='*.h' --include='*.rs' \
+       --exclude-dir=vendor --exclude-dir=target src 2>/dev/null \
+    | sed -e 's://.*::' | grep -v '^[[:space:]]*[*/]' \
+    | grep -oE '[A-Za-z_][A-Za-z0-9_]*\(|"[A-Za-z_][A-Za-z0-9_]*"' | tr -d '"('
+  grep -rhFf "$cand" --include='*.spl' --exclude-dir=vendor src test 2>/dev/null \
+    | grep -v '@extern' \
+    | grep -oE '"[A-Za-z_][A-Za-z0-9_]*"' | tr -d '"'
+} | sort -u | grep -xFf "$cand" > "$reg" || :
+
+# SELF-TEST. Fixed controls keep the registration detector honest: a symbol that
+# is definitely registered must be found, and the scan must not be empty.
+if ! grep -qx 'rt_file_read_text' "$reg"; then
+  echo "extern_registration_ok=false"
+  echo "SELF-TEST FAILED: rt_file_read_text is registered in the runtime but the"
+  echo "detector did not find it. The registration scan is broken."
+  exit 1
+fi
+
+# PER-FORM CONTROL. rt_file_read_text above is declared in BOTH surface forms,
+# so it stays green even if the bare-keyword extractor dies -- it cannot detect
+# the regression this script was fixed for. rt_array_len is declared ONLY as
+# `extern fn` and is heavily registered in the Rust runtime, so it reaches $reg
+# only via the bare-form path. If this trips, the bare-form extractor is broken
+# and the guard has silently reverted to its @extern-only blind spot.
+if ! grep -qx 'rt_array_len' "$cand"; then
+  echo "extern_registration_ok=false"
+  echo "SELF-TEST FAILED: rt_array_len is declared as a bare 'extern fn' but the"
+  echo "declaration extractor did not collect it. The bare-form scan is broken --"
+  echo "this is the exact blind spot that hid rt_smf_reader_open. Fix the"
+  echo "extractor; do not delete this control."
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Diff.
+# ---------------------------------------------------------------------------
+awk -F'\t' 'NR==FNR{r[$0];next} !($2 in r)' "$reg" "$decls" > "$work/unreg.tsv"
+bare_n=$(awk -F'\t' '$1=="bare"' "$work/unreg.tsv" | wc -l | tr -d ' ')
+awk -F'\t' '$1!="bare"' "$work/unreg.tsv" | sort -t"$(printf '\t')" -k2,2 > "$work/bad.tsv"
+bad_n=$(wc -l < "$work/bad.tsv" | tr -d ' ')
+
+echo "== unregistered extern symbols (non-bare ABI) =="
+while IFS="$(printf '\t')" read -r abi sym loc; do
+  [ -n "${sym:-}" ] && echo "unregistered_extern=$sym ($loc)"
+done < "$work/bad.tsv"
+
+echo "extern_decl_total=$decl_n"
+echo "extern_registered=$(wc -l < "$reg" | tr -d ' ')"
+echo "extern_bare_exempt=$bare_n"
+echo "extern_unregistered=$bad_n"
+
+if [ "$bad_n" -gt 0 ] && [ "$STRICT" -eq 1 ]; then
+  echo "extern_registration_ok=false"
+  echo "An @extern symbol with no registration does not fail to link: it returns"
+  echo "a silent nil/0 or NULL-jumps. Register the symbol in the runtime, or"
+  echo "implement the function in pure Simple in the SAME module. Do NOT add a"
+  echo "weak/nil stub and do NOT add it to a fabricated-stub baseline."
+  exit 1
+fi
+echo "extern_registration_ok=true"
+exit 0

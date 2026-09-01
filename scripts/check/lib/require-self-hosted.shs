@@ -1,0 +1,134 @@
+#!/bin/sh
+# require-self-hosted.shs — shared fail-closed identity guard for scripts/check/.
+#
+# WHY THIS EXISTS (2026-07-28)
+#   An audit of scripts/check/ found ~70 scripts that assert properties of the
+#   *self-hosted / pure-Simple* compiler while resolving their target as
+#       SIMPLE="${SIMPLE_BIN:-bin/simple}"
+#   and never verifying what they got. `bin/simple` currently resolves to the
+#   Rust bootstrap SEED, so those scripts measured the seed and printed PASS.
+#   A check that cannot fail is worse than no check.
+#   Inventory: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
+#   Worked reference implementation: scripts/check/check-f64-call-abi.shs
+#
+# HOW TO USE (source it; do not exec it)
+#
+#   . "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
+#   require_self_hosted "${SIMPLE_BIN:-bin/simple}"
+#   # -> on success sets:
+#   #      SELF_HOSTED_BIN      the runnable path (as resolved, PATH-searched)
+#   #      SELF_HOSTED_REAL     readlink -f of the above (the real file)
+#   #      SELF_HOSTED_VERSION  captured `--version` output (2>&1)
+#   # -> on any "cannot establish a verified self-hosted target": exit 2
+#   "$SELF_HOSTED_BIN" run prog.spl
+#
+# EXIT CONTRACT (identical to check-f64-call-abi.shs — keep it that way)
+#   0  the property under test was actually measured on a verified target
+#   1  a real regression: the property was measured and it is wrong
+#   2  UNTESTABLE: target missing / unreadable / no --version / is the Rust
+#      seed / a required tool is absent. NOT a pass. Never exit 0 for this.
+#
+# HARD RULE: "could not test this right now" must exit non-zero. If you find
+# yourself wanting `|| true` or `exit 0` on a skip path, you are re-introducing
+# the exact defect this file exists to remove.
+
+# check_untestable MSG... — exit 2. Use for every "could not measure" path.
+check_untestable() {
+    echo "SKIPPED (cannot test): $*" >&2
+    echo "  This is NOT a pass. The property under test was never exercised." >&2
+    echo "  Deploy a pure-Simple self-hosted binary (bin/simple build bootstrap)" >&2
+    echo "  or set SIMPLE_BIN=/path/to/self-hosted/simple, then re-run." >&2
+    exit 2
+}
+
+# check_fail MSG... — exit 1. Use only when the property WAS measured and is wrong.
+check_fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# resolve_binary TARGET — echo the runnable path for TARGET, or return 1.
+# Accepts an executable file path or a name on PATH.
+resolve_binary() {
+    _rb_t="$1"
+    if [ -f "$_rb_t" ] && [ -x "$_rb_t" ]; then
+        printf '%s\n' "$_rb_t"
+        return 0
+    fi
+    _rb_p="$(command -v -- "$_rb_t" 2>/dev/null)" || return 1
+    [ -n "$_rb_p" ] || return 1
+    printf '%s\n' "$_rb_p"
+    return 0
+}
+
+# real_path PATH — echo readlink -f, falling back to the input.
+real_path() {
+    readlink -f -- "$1" 2>/dev/null || printf '%s\n' "$1"
+}
+
+# binary_is_seed PATH — 0 = it IS the Rust bootstrap seed,
+#                       1 = it is NOT the seed,
+#                       2 = identity could not be established.
+# The seed self-identifies on stderr; see
+# src/compiler_rust/driver/src/seed_warning.rs. Capture with 2>&1 or the
+# banner is invisible.
+binary_is_seed() {
+    _bis_v="$("$1" --version 2>&1)" || return 2
+    [ -n "$_bis_v" ] || return 2
+    case "$_bis_v" in
+        *"bootstrap seed only"*|*"Rust-built Simple binary"*|*"Rust-built"*) return 0 ;;
+    esac
+    return 1
+}
+
+# require_self_hosted TARGET [LABEL] — the main entry point.
+# Resolves TARGET, prints the real path as evidence, rejects the seed, and
+# exits 2 on anything that would leave the check unverified.
+require_self_hosted() {
+    _rsh_t="${1:?require_self_hosted: target argument is required}"
+    _rsh_label="${2:-target}"
+
+    _rsh_bin="$(resolve_binary "$_rsh_t")" ||
+        check_untestable "$_rsh_label '$_rsh_t' is not an executable file and is not on PATH"
+
+    _rsh_real="$(real_path "$_rsh_bin")"
+    echo "$_rsh_label:  $_rsh_t  ->  $_rsh_real"
+
+    SELF_HOSTED_VERSION="$("$_rsh_bin" --version 2>&1)" ||
+        check_untestable "'$_rsh_real --version' exited non-zero; cannot establish identity"
+    [ -n "$SELF_HOSTED_VERSION" ] ||
+        check_untestable "'$_rsh_real --version' produced no output; cannot establish identity"
+
+    case "$SELF_HOSTED_VERSION" in
+        *"bootstrap seed only"*|*"Rust-built Simple binary"*|*"Rust-built"*)
+            echo "identity:  Rust bootstrap SEED (banner present)" >&2
+            check_untestable "$_rsh_label is the Rust bootstrap seed, not the self-hosted compiler.
+  Measuring the seed here would assert a self-hosted property against a binary
+  that is green by construction, proving nothing about the compiler this check
+  exists to guard."
+            ;;
+    esac
+
+    echo "identity:  self-hosted (no seed banner)  OK"
+    SELF_HOSTED_BIN="$_rsh_bin"
+    SELF_HOSTED_REAL="$_rsh_real"
+}
+
+# require_distinct_binaries A B — exit 2 unless A and B are different real
+# files. For any check whose whole premise is comparing two implementations:
+# one binary on both sides is a comparison that structurally cannot fail.
+require_distinct_binaries() {
+    _rdb_a="$(real_path "$1")"
+    _rdb_b="$(real_path "$2")"
+    if [ "$_rdb_a" = "$_rdb_b" ]; then
+        check_untestable "both sides of this comparison resolve to the SAME file:
+  $_rdb_a
+  A comparison of a binary against itself cannot fail and proves nothing."
+    fi
+}
+
+# require_tool NAME [PURPOSE] — exit 2 if NAME is not on PATH.
+require_tool() {
+    command -v -- "$1" >/dev/null 2>&1 ||
+        check_untestable "required tool '$1' is not available${2:+ ($2)}"
+}

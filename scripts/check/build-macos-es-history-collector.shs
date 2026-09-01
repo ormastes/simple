@@ -1,0 +1,819 @@
+#!/bin/sh
+# Two-phase, snapshot-only build/admission wrapper for the EndpointSecurity
+# execution-history collector. The outer invocation performs no build or
+# admission work: it snapshots and authenticates this builder and the tracked
+# policy, then re-execs the immutable private builder copy.
+set -eu
+umask 077
+
+POLICY_REL="config/security/macos_gui_es_collector_policy.env"
+BUILDER_REL="scripts/check/build-macos-es-history-collector.shs"
+
+fail() {
+    echo "macOS ES collector: FAIL ($1)" >&2
+    exit "${2:-1}"
+}
+
+sha256_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
+}
+
+value_of() {
+    key=$1
+    file=$2
+    count="$(/usr/bin/grep -c "^${key}=" "$file" 2>/dev/null || true)"
+    [ "$count" = 1 ] || return 1
+    /usr/bin/sed -n "s/^${key}=//p" "$file"
+}
+
+tracked_object_copy() {
+    tracked_root=$1
+    tracked_head=$2
+    tracked_relative=$3
+    tracked_output=$4
+    /usr/bin/git -C "$tracked_root" show \
+        "$tracked_head:$tracked_relative" >"$tracked_output"
+}
+
+bootstrap_outer() {
+    [ "$(/usr/bin/id -u)" != 0 ] ||
+        fail "root-execution-defeats-system-path-immutability" 125
+    outer_root="$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")/../.." &&
+        pwd -P)"
+    [ "$(/usr/bin/git -C "$outer_root" rev-parse --show-toplevel)" = \
+        "$outer_root" ] || fail "repository-root" 125
+    outer_head="$(/usr/bin/git -C "$outer_root" rev-parse HEAD)"
+    outer_private="$(/usr/bin/mktemp -d \
+        "${TMPDIR:-/tmp}/simple-macos-es-builder.XXXXXX")"
+    /bin/chmod 700 "$outer_private"
+    outer_cleanup() {
+        [ -d "$outer_private" ] || return 0
+        /usr/bin/chflags -R nouchg "$outer_private" 2>/dev/null || true
+        /bin/rm -rf "$outer_private"
+    }
+    trap outer_cleanup EXIT HUP INT TERM
+    outer_builder="$outer_private/builder"
+    outer_policy="$outer_private/policy.env"
+    outer_head_builder="$outer_private/head-builder"
+    outer_head_policy="$outer_private/head-policy"
+    [ -f "$outer_root/$BUILDER_REL" ] &&
+        [ ! -L "$outer_root/$BUILDER_REL" ] &&
+        [ -f "$outer_root/$POLICY_REL" ] &&
+        [ ! -L "$outer_root/$POLICY_REL" ] || fail "bootstrap-input-shape" 125
+    /bin/cp "$outer_root/$BUILDER_REL" "$outer_builder"
+    /bin/cp "$outer_root/$POLICY_REL" "$outer_policy"
+    tracked_object_copy "$outer_root" "$outer_head" "$BUILDER_REL" \
+        "$outer_head_builder" || fail "tracked-builder-read" 125
+    tracked_object_copy "$outer_root" "$outer_head" "$POLICY_REL" \
+        "$outer_head_policy" || fail "tracked-policy-read" 125
+    outer_builder_sha="$(sha256_file "$outer_builder")"
+    [ "$outer_builder_sha" = "$(sha256_file "$outer_head_builder")" ] &&
+        [ "$outer_builder_sha" = "$(value_of \
+            collector_build_script_sha256 "$outer_policy")" ] ||
+        fail "bootstrap-builder-binding" 125
+    [ "$(sha256_file "$outer_policy")" = \
+        "$(sha256_file "$outer_head_policy")" ] ||
+        fail "bootstrap-policy-binding" 125
+    /bin/rm "$outer_head_builder" "$outer_head_policy"
+    /bin/chmod 500 "$outer_builder"
+    /bin/chmod 400 "$outer_policy"
+    /usr/bin/chflags uchg "$outer_builder" "$outer_policy"
+    export MACOS_ES_INTERNAL_REEXEC=1
+    export MACOS_ES_INTERNAL_ROOT="$outer_root"
+    export MACOS_ES_INTERNAL_HEAD="$outer_head"
+    export MACOS_ES_INTERNAL_PRIVATE="$outer_private"
+    export MACOS_ES_INTERNAL_BUILDER="$outer_builder"
+    export MACOS_ES_INTERNAL_POLICY="$outer_policy"
+    trap - EXIT HUP INT TERM
+    exec "$outer_builder" "$@"
+}
+
+if [ "${MACOS_ES_INTERNAL_REEXEC:-0}" != 1 ]; then
+    for internal_name in MACOS_ES_INTERNAL_ROOT MACOS_ES_INTERNAL_HEAD \
+        MACOS_ES_INTERNAL_PRIVATE MACOS_ES_INTERNAL_BUILDER \
+        MACOS_ES_INTERNAL_POLICY; do
+        eval "internal_value=\${$internal_name-}"
+        [ -z "$internal_value" ] ||
+            fail "caller-supplied-internal-state" 125
+    done
+    bootstrap_outer "$@"
+fi
+
+ROOT_DIR="${MACOS_ES_INTERNAL_ROOT:?}"
+TRACKED_HEAD="${MACOS_ES_INTERNAL_HEAD:?}"
+PRIVATE_DIR="${MACOS_ES_INTERNAL_PRIVATE:?}"
+BUILDER_SNAPSHOT="${MACOS_ES_INTERNAL_BUILDER:?}"
+POLICY_SNAPSHOT="${MACOS_ES_INTERNAL_POLICY:?}"
+POLICY="$POLICY_SNAPSHOT"
+KEEP_PRIVATE=0
+
+cleanup_private() {
+    [ "$KEEP_PRIVATE" = 0 ] || return 0
+    case "$PRIVATE_DIR" in
+        "${TMPDIR:-/tmp}"/simple-macos-es-builder.*|\
+        /private/tmp/simple-macos-es-builder.*|\
+        /tmp/simple-macos-es-builder.*) ;;
+        *) return 0 ;;
+    esac
+    [ -d "$PRIVATE_DIR" ] || return 0
+    /usr/bin/chflags -R nouchg "$PRIVATE_DIR" 2>/dev/null || true
+    /bin/rm -rf "$PRIVATE_DIR"
+}
+trap cleanup_private EXIT HUP INT TERM
+
+file_mode() {
+    /usr/bin/stat -f %Lp "$1" 2>/dev/null
+}
+
+file_uid() {
+    /usr/bin/stat -f %u "$1" 2>/dev/null
+}
+
+file_flags() {
+    /usr/bin/stat -f %f "$1" 2>/dev/null
+}
+
+private_directory_valid() {
+    [ -d "$1" ] && [ ! -L "$1" ] &&
+        [ "$(file_uid "$1")" = "$(/usr/bin/id -u)" ] &&
+        [ "$(file_mode "$1")" = 700 ]
+}
+
+private_snapshot_valid() {
+    snapshot_path=$1
+    snapshot_mode=$2
+    [ -f "$snapshot_path" ] && [ ! -L "$snapshot_path" ] &&
+        [ "$(file_uid "$snapshot_path")" = "$(/usr/bin/id -u)" ] &&
+        [ "$(file_mode "$snapshot_path")" = "$snapshot_mode" ] &&
+        [ $(( $(file_flags "$snapshot_path") & 2 )) -eq 2 ]
+}
+
+validate_internal_bootstrap() {
+    [ "$(/usr/bin/id -u)" != 0 ] ||
+        fail "root-execution-defeats-system-path-immutability" 125
+    [ "$(/usr/bin/git -C "$ROOT_DIR" rev-parse --show-toplevel)" = \
+        "$ROOT_DIR" ] || fail "internal-root" 125
+    [ "$(/usr/bin/git -C "$ROOT_DIR" rev-parse HEAD)" = "$TRACKED_HEAD" ] ||
+        fail "head-changed-during-bootstrap" 125
+    private_directory_valid "$PRIVATE_DIR" ||
+        fail "private-directory" 125
+    [ "$BUILDER_SNAPSHOT" = "$PRIVATE_DIR/builder" ] &&
+        [ "$POLICY_SNAPSHOT" = "$PRIVATE_DIR/policy.env" ] &&
+        [ "$0" = "$BUILDER_SNAPSHOT" ] ||
+        fail "internal-path-injection" 125
+    private_snapshot_valid "$BUILDER_SNAPSHOT" 500 &&
+        private_snapshot_valid "$POLICY_SNAPSHOT" 400 ||
+        fail "bootstrap-snapshot-mutability" 125
+    verify_head_builder="$PRIVATE_DIR/verify-head-builder"
+    verify_head_policy="$PRIVATE_DIR/verify-head-policy"
+    tracked_object_copy "$ROOT_DIR" "$TRACKED_HEAD" "$BUILDER_REL" \
+        "$verify_head_builder" || fail "tracked-builder-reread" 125
+    tracked_object_copy "$ROOT_DIR" "$TRACKED_HEAD" "$POLICY_REL" \
+        "$verify_head_policy" || fail "tracked-policy-reread" 125
+    [ "$(sha256_file "$BUILDER_SNAPSHOT")" = \
+        "$(sha256_file "$verify_head_builder")" ] &&
+        [ "$(sha256_file "$BUILDER_SNAPSHOT")" = "$(value_of \
+            collector_build_script_sha256 "$POLICY_SNAPSHOT")" ] &&
+        [ "$(sha256_file "$POLICY_SNAPSHOT")" = \
+            "$(sha256_file "$verify_head_policy")" ] ||
+        fail "internal-bootstrap-binding" 125
+    /bin/rm "$verify_head_builder" "$verify_head_policy"
+}
+validate_internal_bootstrap
+
+hash_args() {
+    for argument in "$@"; do
+        printf '%s:%s\n' "${#argument}" "$argument"
+    done | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
+}
+
+is_sha256() {
+    case "${1:-}" in
+        ""|*[!0-9a-f]*) return 1 ;;
+        *) [ "${#1}" = 64 ] ;;
+    esac
+}
+
+canonical_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    canonical_parent="$(CDPATH= cd -- "$(/usr/bin/dirname -- "$1")" &&
+        pwd -P)" || return 1
+    printf '%s/%s\n' "$canonical_parent" "$(/usr/bin/basename -- "$1")"
+}
+
+canonical_directory() {
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    (CDPATH= cd -- "$1" && pwd -P)
+}
+
+freeze_snapshot() {
+    freeze_path=$1
+    freeze_mode=$2
+    /bin/chmod "$freeze_mode" "$freeze_path"
+    /usr/bin/chflags uchg "$freeze_path"
+    private_snapshot_valid "$freeze_path" "$freeze_mode"
+}
+
+snapshot_tracked_input() {
+    snapshot_relative=$1
+    snapshot_destination=$2
+    snapshot_mode=$3
+    snapshot_expected_sha=$4
+    snapshot_original="$ROOT_DIR/$snapshot_relative"
+    snapshot_head="$PRIVATE_DIR/head-$(
+        printf '%s' "$snapshot_relative" |
+            /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
+    )"
+    [ "$(canonical_file "$snapshot_original")" = "$snapshot_original" ] ||
+        fail "tracked-input-shape" 125
+    /bin/cp "$snapshot_original" "$snapshot_destination"
+    tracked_object_copy "$ROOT_DIR" "$TRACKED_HEAD" "$snapshot_relative" \
+        "$snapshot_head" || fail "tracked-input-read" 125
+    snapshot_sha="$(sha256_file "$snapshot_destination")"
+    [ "$snapshot_sha" = "$(sha256_file "$snapshot_head")" ] &&
+        [ "$snapshot_sha" = "$snapshot_expected_sha" ] ||
+        fail "tracked-input-snapshot-binding" 125
+    /bin/rm "$snapshot_head"
+    freeze_snapshot "$snapshot_destination" "$snapshot_mode" ||
+        fail "tracked-input-snapshot-freeze" 125
+}
+
+snapshot_artifact() {
+    artifact_original=$1
+    artifact_destination=$2
+    artifact_mode=$3
+    [ "$(canonical_file "$artifact_original")" = "$artifact_original" ] ||
+        fail "artifact-input-shape" 125
+    /bin/cp "$artifact_original" "$artifact_destination"
+    freeze_snapshot "$artifact_destination" "$artifact_mode" ||
+        fail "artifact-snapshot-freeze" 125
+}
+
+candidate_policy_digest() {
+    digest_policy=$1
+    for digest_key in \
+        schema required_events required_entitlement signing_identifier \
+        signing_identity team_identifier collector_source_path \
+        collector_source_sha256 collector_build_script_path \
+        collector_build_script_sha256 collector_entitlements_path \
+        collector_entitlements_sha256 collector_build_manifest_path \
+        collector_output_path compiler_path compiler_sha256 \
+        compiler_version_sha256 sdk_path sdk_version sdk_canonical_name \
+        sdk_settings_sha256 target_triple build_argv_sha256 \
+        build_environment_sha256 codesign_path codesign_sha256 \
+        codesign_version_sha256 codesign_argv_sha256 \
+        codesign_environment_sha256; do
+        digest_value="$(value_of "$digest_key" "$digest_policy")" || return 1
+        printf '%s:%s:%s\n' "${#digest_key}" "$digest_key" "$digest_value"
+    done | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
+}
+
+policy_phase_valid() {
+    phase_policy=$1
+    phase_expected=$2
+    [ "$(value_of schema "$phase_policy")" = \
+        simple-macos-es-collector-policy-v3 ] || return 1
+    [ "$(value_of status "$phase_policy")" = "$phase_expected" ] || return 1
+    [ "$(value_of required_events "$phase_policy")" = exec,fork,exit ] ||
+        return 1
+    [ "$(value_of required_entitlement "$phase_policy")" = \
+        com.apple.developer.endpoint-security.client ] || return 1
+    [ "$(value_of signing_identifier "$phase_policy")" = \
+        org.simplelang.gui-es-history ] || return 1
+    phase_team="$(value_of team_identifier "$phase_policy")" || return 1
+    phase_identity="$(value_of signing_identity "$phase_policy")" || return 1
+    case "$phase_team" in ""|*[!A-Z0-9]*) return 1 ;; esac
+    [ "${#phase_team}" = 10 ] || return 1
+    [ -n "$phase_identity" ] && [ "$phase_identity" != unassigned ] || return 1
+    for phase_hash_key in \
+        collector_source_sha256 collector_build_script_sha256 \
+        collector_entitlements_sha256 compiler_sha256 \
+        compiler_version_sha256 sdk_settings_sha256 build_argv_sha256 \
+        build_environment_sha256 codesign_sha256 codesign_version_sha256 \
+        codesign_argv_sha256 codesign_environment_sha256; do
+        is_sha256 "$(value_of "$phase_hash_key" "$phase_policy")" || return 1
+    done
+    for phase_value_key in compiler_path sdk_path sdk_version \
+        sdk_canonical_name target_triple codesign_path; do
+        phase_value="$(value_of "$phase_value_key" "$phase_policy")" || return 1
+        [ -n "$phase_value" ] && [ "$phase_value" != unassigned ] || return 1
+    done
+    case "$phase_expected" in
+        prepared)
+            [ "$(value_of collector_build_manifest_sha256 "$phase_policy")" = \
+                unavailable ] &&
+                [ "$(value_of collector_output_sha256 "$phase_policy")" = \
+                    unavailable ]
+            ;;
+        admitted)
+            is_sha256 "$(value_of collector_build_manifest_sha256 \
+                "$phase_policy")" &&
+                is_sha256 "$(value_of collector_output_sha256 "$phase_policy")"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+configure_policy_paths() {
+    SOURCE_REL="$(value_of collector_source_path "$POLICY")"
+    ENTITLEMENTS_REL="$(value_of collector_entitlements_path "$POLICY")"
+    [ "$SOURCE_REL" = tools/native/macos/simple_es_history_collector.swift ] &&
+        [ "$(value_of collector_build_script_path "$POLICY")" = \
+            "$BUILDER_REL" ] &&
+        [ "$ENTITLEMENTS_REL" = \
+            config/security/macos_gui_es_collector.entitlements.xml ] ||
+        fail "policy-input-path" 125
+    [ "$(value_of collector_build_manifest_path "$POLICY")" = \
+        build/sffi/simple_es_history_collector.provenance.env ] &&
+        [ "$(value_of collector_output_path "$POLICY")" = \
+            build/sffi/simple_es_history_collector ] ||
+        fail "policy-output-path" 125
+    SOURCE_LABEL="$ROOT_DIR/$SOURCE_REL"
+    BUILDER_LABEL="$ROOT_DIR/$BUILDER_REL"
+    ENTITLEMENTS_LABEL="$ROOT_DIR/$ENTITLEMENTS_REL"
+    POLICY_LABEL="$ROOT_DIR/$POLICY_REL"
+    OUTPUT_LABEL="$ROOT_DIR/$(value_of collector_output_path "$POLICY")"
+    MANIFEST_LABEL="$ROOT_DIR/$(value_of collector_build_manifest_path "$POLICY")"
+    SOURCE_INPUT="$PRIVATE_DIR/source.swift"
+    ENTITLEMENTS_INPUT="$PRIVATE_DIR/entitlements.xml"
+    COMPILER_PATH="$(value_of compiler_path "$POLICY")"
+    SDK_PATH="$(value_of sdk_path "$POLICY")"
+    SDK_SETTINGS="$SDK_PATH/SDKSettings.json"
+    TARGET_TRIPLE="$(value_of target_triple "$POLICY")"
+    CODESIGN_PATH="$(value_of codesign_path "$POLICY")"
+    PRIVATE_HOME="$PRIVATE_DIR/home"
+    PRIVATE_TMP="$PRIVATE_DIR/tmp"
+}
+configure_policy_paths
+
+prepare_tracked_inputs() {
+    snapshot_tracked_input "$SOURCE_REL" "$SOURCE_INPUT" 400 \
+        "$(value_of collector_source_sha256 "$POLICY")"
+    snapshot_tracked_input "$ENTITLEMENTS_REL" "$ENTITLEMENTS_INPUT" 400 \
+        "$(value_of collector_entitlements_sha256 "$POLICY")"
+    [ "$(sha256_file "$BUILDER_SNAPSHOT")" = \
+        "$(value_of collector_build_script_sha256 "$POLICY")" ] ||
+        fail "builder-snapshot-policy-binding" 125
+}
+
+permission_not_group_other_writable() {
+    permission_mode=$1
+    permission_group="$(printf '%s' "$permission_mode" |
+        /usr/bin/sed 's/.*\(.\).$/\1/')"
+    permission_other="$(printf '%s' "$permission_mode" |
+        /usr/bin/sed 's/.*\(.\)$/\1/')"
+    case "$permission_group$permission_other" in
+        [2367]?|?[2367]) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+system_path_chain_secure() {
+    secure_path=$1
+    if [ -d "$secure_path" ]; then
+        [ "$(canonical_directory "$secure_path")" = "$secure_path" ] || return 1
+    else
+        [ "$(canonical_file "$secure_path")" = "$secure_path" ] || return 1
+    fi
+    secure_current=$secure_path
+    while :; do
+        [ "$(file_uid "$secure_current")" = 0 ] &&
+            permission_not_group_other_writable \
+                "$(file_mode "$secure_current")" || return 1
+        [ "$secure_current" = / ] && break
+        secure_current="$(/usr/bin/dirname -- "$secure_current")"
+    done
+}
+
+apple_signed_tool() {
+    /usr/bin/codesign --verify --strict \
+        -R '=anchor apple' "$1" >/dev/null 2>&1
+}
+
+build_argv_sha256() {
+    hash_args -parse-as-library -O -whole-module-optimization \
+        -sdk "$SDK_PATH" -target "$TARGET_TRIPLE" \
+        -lEndpointSecurity -lbsm -framework Security \
+        @private-source-snapshot@ -o @private-output-snapshot@
+}
+
+build_environment_sha256() {
+    hash_args HOME=@private-home@ TMPDIR=@private-tmp@ \
+        PATH=/usr/bin:/bin LANG=C LC_ALL=C "SDKROOT=$SDK_PATH" \
+        SOURCE_DATE_EPOCH=0 SWIFT_DETERMINISTIC_HASHING=1 ZERO_AR_DATE=1
+}
+
+codesign_argv_sha256() {
+    hash_args --force --timestamp=none --options runtime \
+        --sign "$(value_of signing_identity "$POLICY")" \
+        --entitlements @private-entitlements-snapshot@ \
+        @private-output-snapshot@
+}
+
+codesign_environment_sha256() {
+    hash_args HOME=@private-home@ TMPDIR=@private-tmp@ \
+        PATH=/usr/bin:/bin LANG=C LC_ALL=C
+}
+
+verify_toolchain_pins() {
+    [ "$(/usr/bin/id -u)" != 0 ] ||
+        fail "root-execution-defeats-system-path-immutability" 125
+    system_path_chain_secure "$COMPILER_PATH" &&
+        system_path_chain_secure "$CODESIGN_PATH" &&
+        system_path_chain_secure "$SDK_PATH" &&
+        system_path_chain_secure "$SDK_SETTINGS" &&
+        system_path_chain_secure /usr/bin/plutil ||
+        fail "toolchain-system-path-mutability" 125
+    apple_signed_tool "$COMPILER_PATH" &&
+        apple_signed_tool "$CODESIGN_PATH" &&
+        apple_signed_tool /usr/bin/plutil ||
+        fail "toolchain-apple-signature" 125
+    [ "$(sha256_file "$COMPILER_PATH")" = \
+        "$(value_of compiler_sha256 "$POLICY")" ] ||
+        fail "compiler-hash" 125
+    compiler_version_sha="$(
+        "$COMPILER_PATH" --version |
+            /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
+    )"
+    [ "$compiler_version_sha" = \
+        "$(value_of compiler_version_sha256 "$POLICY")" ] ||
+        fail "compiler-version" 125
+    [ "$(sha256_file "$SDK_SETTINGS")" = \
+        "$(value_of sdk_settings_sha256 "$POLICY")" ] ||
+        fail "sdk-settings-hash" 125
+    [ "$(/usr/bin/plutil -extract Version raw -o - "$SDK_SETTINGS")" = \
+        "$(value_of sdk_version "$POLICY")" ] &&
+        [ "$(/usr/bin/plutil -extract CanonicalName raw -o - \
+            "$SDK_SETTINGS")" = "$(value_of sdk_canonical_name "$POLICY")" ] ||
+        fail "sdk-identity" 125
+    [ "$TARGET_TRIPLE" = "$(uname -m)-apple-macos13.0" ] ||
+        fail "target-triple" 125
+    [ "$(sha256_file "$CODESIGN_PATH")" = \
+        "$(value_of codesign_sha256 "$POLICY")" ] ||
+        fail "codesign-hash" 125
+    codesign_version_sha="$(
+        "$CODESIGN_PATH" --version |
+            /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
+    )"
+    [ "$codesign_version_sha" = \
+        "$(value_of codesign_version_sha256 "$POLICY")" ] ||
+        fail "codesign-version" 125
+    [ "$(build_argv_sha256)" = \
+        "$(value_of build_argv_sha256 "$POLICY")" ] &&
+        [ "$(build_environment_sha256)" = \
+            "$(value_of build_environment_sha256 "$POLICY")" ] &&
+        [ "$(codesign_argv_sha256)" = \
+            "$(value_of codesign_argv_sha256 "$POLICY")" ] &&
+        [ "$(codesign_environment_sha256)" = \
+            "$(value_of codesign_environment_sha256 "$POLICY")" ] ||
+        fail "command-policy-binding" 125
+}
+
+verify_candidate_bindings() {
+    binding_policy=$1
+    binding_manifest=$2
+    binding_output=$3
+    private_snapshot_valid "$binding_manifest" 400 &&
+        private_snapshot_valid "$binding_output" 500 || return 1
+    [ "$(value_of schema "$binding_manifest")" = \
+        simple-macos-es-collector-provenance-v3 ] &&
+        [ "$(value_of status "$binding_manifest")" = candidate ] &&
+        [ "$(value_of candidate_policy_path "$binding_manifest")" = \
+            "$POLICY_LABEL" ] &&
+        [ "$(value_of candidate_policy_digest "$binding_manifest")" = \
+            "$(candidate_policy_digest "$binding_policy")" ] &&
+        [ "$(value_of source_path "$binding_manifest")" = "$SOURCE_LABEL" ] &&
+        [ "$(value_of build_script_path "$binding_manifest")" = \
+            "$BUILDER_LABEL" ] &&
+        [ "$(value_of entitlements_path "$binding_manifest")" = \
+            "$ENTITLEMENTS_LABEL" ] &&
+        [ "$(value_of output_path "$binding_manifest")" = "$OUTPUT_LABEL" ] &&
+        [ "$(value_of output_sha256 "$binding_manifest")" = \
+            "$(sha256_file "$binding_output")" ] || return 1
+    for binding_key in source_sha256 build_script_sha256 \
+        entitlements_sha256 signing_identifier team_identifier \
+        required_entitlement compiler_path compiler_sha256 \
+        compiler_version_sha256 sdk_path sdk_version sdk_canonical_name \
+        sdk_settings_sha256 target_triple build_argv_sha256 \
+        build_environment_sha256 codesign_path codesign_sha256 \
+        codesign_version_sha256 codesign_argv_sha256 \
+        codesign_environment_sha256; do
+        case "$binding_key" in
+            source_sha256) policy_key=collector_source_sha256 ;;
+            build_script_sha256) policy_key=collector_build_script_sha256 ;;
+            entitlements_sha256) policy_key=collector_entitlements_sha256 ;;
+            *) policy_key=$binding_key ;;
+        esac
+        [ "$(value_of "$binding_key" "$binding_manifest")" = \
+            "$(value_of "$policy_key" "$binding_policy")" ] || return 1
+    done
+    for proof_key in toolchain_non_root_status \
+        compiler_system_immutability_status compiler_apple_signature_status \
+        codesign_system_immutability_status codesign_apple_signature_status \
+        sdk_system_immutability_status sdk_settings_immutability_status \
+        snapshot_inputs_status; do
+        [ "$(value_of "$proof_key" "$binding_manifest")" = pass ] || return 1
+    done
+    [ "$(value_of command_path_binding "$binding_manifest")" = \
+        private-snapshot-placeholders-v1 ] || return 1
+}
+
+verify_signature() {
+    signed_output=$1
+    "$CODESIGN_PATH" --verify --strict --verbose=4 "$signed_output" \
+        >/dev/null 2>&1 || fail "signature" 125
+    signature="$("$CODESIGN_PATH" -d --verbose=4 "$signed_output" 2>&1)" ||
+        fail "signature-read" 125
+    printf '%s\n' "$signature" |
+        /usr/bin/grep -Fx \
+            "Identifier=$(value_of signing_identifier "$POLICY")" \
+            >/dev/null || fail "identifier" 125
+    printf '%s\n' "$signature" |
+        /usr/bin/grep -Fx \
+            "TeamIdentifier=$(value_of team_identifier "$POLICY")" \
+            >/dev/null || fail "team" 125
+    entitlements="$("$CODESIGN_PATH" -d --entitlements :- \
+        "$signed_output" 2>/dev/null)" || fail "entitlements-read" 125
+    printf '%s\n' "$entitlements" |
+        /usr/bin/grep -A1 \
+            '<key>com.apple.developer.endpoint-security.client</key>' |
+        /usr/bin/grep -F '<true/>' >/dev/null || fail "entitlement" 125
+}
+
+write_manifest_snapshot() {
+    manifest_snapshot=$1
+    output_snapshot=$2
+    {
+        echo schema=simple-macos-es-collector-provenance-v3
+        echo status=candidate
+        echo candidate_policy_path="$POLICY_LABEL"
+        echo candidate_policy_digest="$(candidate_policy_digest "$POLICY")"
+        echo source_path="$SOURCE_LABEL"
+        echo source_sha256="$(sha256_file "$SOURCE_INPUT")"
+        echo build_script_path="$BUILDER_LABEL"
+        echo build_script_sha256="$(sha256_file "$BUILDER_SNAPSHOT")"
+        echo entitlements_path="$ENTITLEMENTS_LABEL"
+        echo entitlements_sha256="$(sha256_file "$ENTITLEMENTS_INPUT")"
+        echo signing_identifier="$(value_of signing_identifier "$POLICY")"
+        echo team_identifier="$(value_of team_identifier "$POLICY")"
+        echo required_entitlement=com.apple.developer.endpoint-security.client
+        echo compiler_path="$COMPILER_PATH"
+        echo compiler_sha256="$(sha256_file "$COMPILER_PATH")"
+        echo compiler_version_sha256="$(value_of compiler_version_sha256 "$POLICY")"
+        echo sdk_path="$SDK_PATH"
+        echo sdk_version="$(value_of sdk_version "$POLICY")"
+        echo sdk_canonical_name="$(value_of sdk_canonical_name "$POLICY")"
+        echo sdk_settings_sha256="$(value_of sdk_settings_sha256 "$POLICY")"
+        echo target_triple="$TARGET_TRIPLE"
+        echo build_argv_sha256="$(build_argv_sha256)"
+        echo build_environment_sha256="$(build_environment_sha256)"
+        echo codesign_path="$CODESIGN_PATH"
+        echo codesign_sha256="$(sha256_file "$CODESIGN_PATH")"
+        echo codesign_version_sha256="$(value_of codesign_version_sha256 "$POLICY")"
+        echo codesign_argv_sha256="$(codesign_argv_sha256)"
+        echo codesign_environment_sha256="$(codesign_environment_sha256)"
+        echo toolchain_non_root_status=pass
+        echo compiler_system_immutability_status=pass
+        echo compiler_apple_signature_status=pass
+        echo codesign_system_immutability_status=pass
+        echo codesign_apple_signature_status=pass
+        echo sdk_system_immutability_status=pass
+        echo sdk_settings_immutability_status=pass
+        echo snapshot_inputs_status=pass
+        echo command_path_binding=private-snapshot-placeholders-v1
+        echo output_path="$OUTPUT_LABEL"
+        echo output_sha256="$(sha256_file "$output_snapshot")"
+    } >"$manifest_snapshot"
+    freeze_snapshot "$manifest_snapshot" 400 ||
+        fail "manifest-snapshot-freeze" 125
+}
+
+publish_snapshot() {
+    publish_source=$1
+    publish_destination=$2
+    publish_mode=$3
+    publish_parent="$(
+        CDPATH= cd -- "$(/usr/bin/dirname -- "$publish_destination")" && pwd -P
+    )" || fail "publish-parent" 125
+    [ "$publish_parent/$(
+        /usr/bin/basename -- "$publish_destination"
+    )" = "$publish_destination" ] || fail "publish-parent-canonical" 125
+    publish_temporary="$publish_destination.tmp.$$"
+    [ ! -e "$publish_temporary" ] || fail "publish-temporary-exists" 125
+    /bin/cp "$publish_source" "$publish_temporary"
+    /usr/bin/chflags nouchg "$publish_temporary" 2>/dev/null || true
+    /bin/chmod "$publish_mode" "$publish_temporary"
+    /bin/mv "$publish_temporary" "$publish_destination"
+}
+
+snapshot_admitted_artifacts() {
+    ADMITTED_OUTPUT="$PRIVATE_DIR/admitted-collector"
+    ADMITTED_MANIFEST="$PRIVATE_DIR/admitted-manifest.env"
+    snapshot_artifact "$OUTPUT_LABEL" "$ADMITTED_OUTPUT" 500
+    snapshot_artifact "$MANIFEST_LABEL" "$ADMITTED_MANIFEST" 400
+    [ "$(value_of collector_output_sha256 "$POLICY")" = \
+        "$(sha256_file "$ADMITTED_OUTPUT")" ] &&
+        [ "$(value_of collector_build_manifest_sha256 "$POLICY")" = \
+            "$(sha256_file "$ADMITTED_MANIFEST")" ] ||
+        fail "admitted-artifact-pins" 125
+    verify_candidate_bindings "$POLICY" "$ADMITTED_MANIFEST" \
+        "$ADMITTED_OUTPUT" || fail "admitted-candidate-binding" 125
+    verify_signature "$ADMITTED_OUTPUT"
+}
+
+self_test_write_phase_policy() {
+    source_policy=$1
+    output_policy=$2
+    requested_status=$3
+    artifact_sha=${4:-unavailable}
+    while IFS= read -r line; do
+        key=${line%%=*}
+        case "$key" in
+            status) echo "status=$requested_status" ;;
+            signing_identity) echo signing_identity=Developer-ID-Test ;;
+            team_identifier) echo team_identifier=ABCDEFGHIJ ;;
+            compiler_path) echo compiler_path=/toolchain/swiftc ;;
+            compiler_sha256|compiler_version_sha256|sdk_settings_sha256|\
+            build_argv_sha256|build_environment_sha256|codesign_sha256|\
+            codesign_version_sha256|codesign_argv_sha256|\
+            codesign_environment_sha256) echo "$key=$(printf %064d 1)" ;;
+            sdk_path) echo sdk_path=/SDKs/MacOSX.sdk ;;
+            sdk_version) echo sdk_version=26.2 ;;
+            sdk_canonical_name) echo sdk_canonical_name=macosx26.2 ;;
+            target_triple) echo target_triple=arm64-apple-macos13.0 ;;
+            codesign_path) echo codesign_path=/usr/bin/codesign ;;
+            collector_build_manifest_sha256|collector_output_sha256)
+                echo "$key=$artifact_sha"
+                ;;
+            *) echo "$line" ;;
+        esac
+    done <"$source_policy" >"$output_policy"
+}
+
+run_self_test() {
+    self_root="$(/usr/bin/mktemp -d \
+        "${TMPDIR:-/tmp}/macos-es-snapshot-self-test.XXXXXX")"
+    /bin/chmod 700 "$self_root"
+    prepared="$self_root/prepared.env"
+    admitted="$self_root/admitted.env"
+    original="$self_root/original-output"
+    output="$self_root/admitted-collector"
+    manifest="$self_root/admitted-manifest.env"
+    printf 'original-admitted-bytes\n' >"$original"
+    /bin/cp "$original" "$output"
+    freeze_snapshot "$output" 500
+    output_backup="$self_root/output.backup"
+    /bin/cp "$output" "$output_backup"
+    self_test_write_phase_policy "$POLICY" "$prepared" prepared
+    policy_phase_valid "$prepared" prepared
+    ! policy_phase_valid "$prepared" admitted
+    {
+        echo schema=simple-macos-es-collector-provenance-v3
+        echo status=candidate
+        echo candidate_policy_path="$POLICY_LABEL"
+        echo candidate_policy_digest="$(candidate_policy_digest "$prepared")"
+        echo source_path="$SOURCE_LABEL"
+        echo build_script_path="$BUILDER_LABEL"
+        echo entitlements_path="$ENTITLEMENTS_LABEL"
+        echo output_path="$OUTPUT_LABEL"
+        echo output_sha256="$(sha256_file "$output")"
+        for self_key in source_sha256 build_script_sha256 \
+            entitlements_sha256 signing_identifier team_identifier \
+            required_entitlement compiler_path compiler_sha256 \
+            compiler_version_sha256 sdk_path sdk_version sdk_canonical_name \
+            sdk_settings_sha256 target_triple build_argv_sha256 \
+            build_environment_sha256 codesign_path codesign_sha256 \
+            codesign_version_sha256 codesign_argv_sha256 \
+            codesign_environment_sha256; do
+            case "$self_key" in
+                source_sha256) policy_key=collector_source_sha256 ;;
+                build_script_sha256) policy_key=collector_build_script_sha256 ;;
+                entitlements_sha256) policy_key=collector_entitlements_sha256 ;;
+                *) policy_key=$self_key ;;
+            esac
+            echo "$self_key=$(value_of "$policy_key" "$prepared")"
+        done
+        for proof_key in toolchain_non_root_status \
+            compiler_system_immutability_status \
+            compiler_apple_signature_status \
+            codesign_system_immutability_status \
+            codesign_apple_signature_status sdk_system_immutability_status \
+            sdk_settings_immutability_status snapshot_inputs_status; do
+            echo "$proof_key=pass"
+        done
+        echo command_path_binding=private-snapshot-placeholders-v1
+    } >"$manifest"
+    freeze_snapshot "$manifest" 400
+    manifest_backup="$self_root/manifest.backup"
+    /bin/cp "$manifest" "$manifest_backup"
+    verify_candidate_bindings "$prepared" "$manifest" "$output"
+    manifest_sha="$(sha256_file "$manifest")"
+    output_sha="$(sha256_file "$output")"
+    self_test_write_phase_policy "$prepared" "$admitted" admitted "$manifest_sha"
+    /usr/bin/sed \
+        "s/^collector_output_sha256=.*/collector_output_sha256=$output_sha/" \
+        "$admitted" >"$admitted.tmp"
+    /bin/mv "$admitted.tmp" "$admitted"
+    policy_phase_valid "$admitted" admitted
+    verify_candidate_bindings "$admitted" "$manifest" "$output"
+
+    # Replacing the original after snapshot cannot change admitted bytes.
+    printf 'replacement-original-bytes\n' >"$original"
+    [ "$(sha256_file "$output")" = "$output_sha" ]
+    verify_candidate_bindings "$admitted" "$manifest" "$output"
+
+    # Mutating the private artifact, manifest, or policy is rejected.
+    /usr/bin/chflags nouchg "$output"
+    /bin/chmod 700 "$output"
+    printf 'tampered-snapshot\n' >"$output"
+    freeze_snapshot "$output" 500
+    ! verify_candidate_bindings "$admitted" "$manifest" "$output"
+    /usr/bin/chflags nouchg "$output"
+    /bin/chmod 700 "$output"
+    /bin/cp "$output_backup" "$output"
+    freeze_snapshot "$output" 500
+    verify_candidate_bindings "$admitted" "$manifest" "$output"
+    /usr/bin/chflags nouchg "$manifest"
+    /bin/chmod 600 "$manifest"
+    /usr/bin/sed 's/^source_sha256=.*/source_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' \
+        "$manifest" >"$manifest.tmp"
+    /bin/mv "$manifest.tmp" "$manifest"
+    freeze_snapshot "$manifest" 400
+    ! verify_candidate_bindings "$admitted" "$manifest" "$output"
+    /usr/bin/chflags nouchg "$manifest"
+    /bin/chmod 600 "$manifest"
+    /bin/cp "$manifest_backup" "$manifest"
+    freeze_snapshot "$manifest" 400
+    verify_candidate_bindings "$admitted" "$manifest" "$output"
+    /usr/bin/sed 's/^compiler_sha256=.*/compiler_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/' \
+        "$admitted" >"$admitted.mismatch"
+    ! verify_candidate_bindings "$admitted.mismatch" "$manifest" "$output"
+    /usr/bin/chflags -R nouchg "$self_root" 2>/dev/null || true
+    /bin/rm -rf "$self_root"
+    echo "macOS ES collector snapshot/admission self-test: PASS"
+}
+
+case "${1:-}" in
+    --build-candidate)
+        [ "$#" = 1 ] || fail "usage" 2
+        policy_phase_valid "$POLICY" prepared ||
+            fail "policy-not-prepared" 125
+        prepare_tracked_inputs
+        verify_toolchain_pins
+        /bin/mkdir -p "$ROOT_DIR/build/sffi" "$PRIVATE_HOME" "$PRIVATE_TMP"
+        candidate_output="$PRIVATE_DIR/candidate-output"
+        candidate_manifest="$PRIVATE_DIR/candidate-manifest.env"
+        env -i "HOME=$PRIVATE_HOME" "TMPDIR=$PRIVATE_TMP" \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C "SDKROOT=$SDK_PATH" \
+            SOURCE_DATE_EPOCH=0 SWIFT_DETERMINISTIC_HASHING=1 \
+            ZERO_AR_DATE=1 "$COMPILER_PATH" \
+            -parse-as-library -O -whole-module-optimization \
+            -sdk "$SDK_PATH" -target "$TARGET_TRIPLE" \
+            -lEndpointSecurity -lbsm -framework Security \
+            "$SOURCE_INPUT" -o "$candidate_output" || fail "swift-build"
+        env -i "HOME=$PRIVATE_HOME" "TMPDIR=$PRIVATE_TMP" \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            "$CODESIGN_PATH" --force --timestamp=none --options runtime \
+            --sign "$(value_of signing_identity "$POLICY")" \
+            --entitlements "$ENTITLEMENTS_INPUT" "$candidate_output" ||
+            fail "codesign"
+        freeze_snapshot "$candidate_output" 500 ||
+            fail "candidate-output-freeze" 125
+        write_manifest_snapshot "$candidate_manifest" "$candidate_output"
+        verify_candidate_bindings "$POLICY" "$candidate_manifest" \
+            "$candidate_output" || fail "candidate-binding"
+        verify_signature "$candidate_output"
+        publish_snapshot "$candidate_output" "$OUTPUT_LABEL" 500
+        publish_snapshot "$candidate_manifest" "$MANIFEST_LABEL" 400
+        echo "macOS ES collector: candidate built; reviewed admitted pins are still required"
+        ;;
+    --verify)
+        [ "$#" = 1 ] || fail "usage" 2
+        policy_phase_valid "$POLICY" admitted ||
+            fail "policy-not-admitted" 125
+        prepare_tracked_inputs
+        verify_toolchain_pins
+        snapshot_admitted_artifacts
+        ;;
+    --exec-verified)
+        [ "${2:-}" = -- ] && [ "$#" -ge 3 ] || fail "usage" 2
+        policy_phase_valid "$POLICY" admitted ||
+            fail "policy-not-admitted" 125
+        prepare_tracked_inputs
+        verify_toolchain_pins
+        snapshot_admitted_artifacts
+        shift 2
+        KEEP_PRIVATE=1
+        trap - EXIT HUP INT TERM
+        exec "$ADMITTED_OUTPUT" "$@"
+        ;;
+    --self-test)
+        [ "$#" = 1 ] || fail "usage" 2
+        run_self_test
+        ;;
+    *)
+        echo "usage: sh scripts/check/build-macos-es-history-collector.shs --build-candidate|--verify|--exec-verified -- <collector-args...>|--self-test" >&2
+        exit 2
+        ;;
+esac

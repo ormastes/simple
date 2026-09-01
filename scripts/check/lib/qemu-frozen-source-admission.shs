@@ -1,0 +1,158 @@
+#!/bin/sh
+
+# Shared source-admission boundary for QEMU evidence producers. It deliberately
+# accepts only a linked Git worktree with clean, tracked source roots. A build
+# from a mutable checkout may be useful for diagnosis, but cannot publish an
+# acceptance artifact.
+
+qemu_admission_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+qemu_admission_require_linked_worktree() {
+    QEMU_ADMISSION_ROOT="$(git rev-parse --show-toplevel)" || return 1
+    [ "$(pwd -P)" = "$QEMU_ADMISSION_ROOT" ] || return 1
+    # A linked worktree has a .git indirection file; reject a mutable primary
+    # checkout so acceptance builds always start from an isolated snapshot.
+    [ -f "$QEMU_ADMISSION_ROOT/.git" ] || return 1
+    grep -Eq '^gitdir: ' "$QEMU_ADMISSION_ROOT/.git" || return 1
+}
+
+qemu_admission_source_snapshot() {
+    QEMU_ADMISSION_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/simpleos-qemu-source.XXXXXX")" || return 1
+    : >"$QEMU_ADMISSION_SNAPSHOT" || return 1
+    for qemu_admission_root in "$@"
+    do
+        if [ -d "$qemu_admission_root" ]; then
+            find "$qemu_admission_root" \( -type f -o -type l \) -print0 \
+                >>"$QEMU_ADMISSION_SNAPSHOT" || {
+                rm -f "$QEMU_ADMISSION_SNAPSHOT"
+                return 1
+            }
+        elif [ -f "$qemu_admission_root" ] || [ -L "$qemu_admission_root" ]; then
+            printf '%s\0' "$qemu_admission_root" >>"$QEMU_ADMISSION_SNAPSHOT" || {
+                rm -f "$QEMU_ADMISSION_SNAPSHOT"
+                return 1
+            }
+        else
+            rm -f "$QEMU_ADMISSION_SNAPSHOT"
+            return 1
+        fi
+    done
+    QEMU_ADMISSION_SNAPSHOT_OUTPUT="$(python3 - "$QEMU_ADMISSION_SNAPSHOT" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+raw = open(sys.argv[1], "rb").read().split(b"\0")
+if not raw or raw[-1] != b"":
+    raise SystemExit(1)
+paths = sorted(set(raw[:-1]))
+if not paths or any(path == b"" for path in paths):
+    raise SystemExit(1)
+digest = hashlib.sha256()
+for path in paths:
+    mode = os.lstat(path).st_mode
+    if stat.S_ISLNK(mode):
+        kind = b"L"
+        payload = os.readlink(path)
+        if isinstance(payload, str):
+            payload = os.fsencode(payload)
+        size = len(payload)
+        content_hash = hashlib.sha256(payload).hexdigest().encode("ascii")
+    elif stat.S_ISREG(mode):
+        kind = b"F"
+        size = os.lstat(path).st_size
+        file_digest = hashlib.sha256()
+        with open(path, "rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                file_digest.update(chunk)
+        content_hash = file_digest.hexdigest().encode("ascii")
+    else:
+        raise SystemExit(1)
+    digest.update(kind + b"\0" + path + b"\0" + str(size).encode("ascii") + b"\0" + content_hash + b"\0")
+print(digest.hexdigest())
+print(len(paths))
+PY
+    )" || {
+        rm -f "$QEMU_ADMISSION_SNAPSHOT"
+        return 1
+    }
+    QEMU_ADMISSION_SOURCE_FINGERPRINT="$(printf '%s\n' "$QEMU_ADMISSION_SNAPSHOT_OUTPUT" | sed -n '1p')"
+    QEMU_ADMISSION_SOURCE_FILE_COUNT="$(printf '%s\n' "$QEMU_ADMISSION_SNAPSHOT_OUTPUT" | sed -n '2p')"
+    rm -f "$QEMU_ADMISSION_SNAPSHOT"
+    [ "${#QEMU_ADMISSION_SOURCE_FINGERPRINT}" -eq 64 ]
+}
+
+qemu_admission_begin() {
+    QEMU_ADMISSION_ARCH="$1"
+    QEMU_ADMISSION_ENTRY="$2"
+    QEMU_ADMISSION_COMPILER="$3"
+    QEMU_ADMISSION_COMMAND="$4"
+    shift 4
+    qemu_admission_require_linked_worktree || return 1
+    [ -f "$QEMU_ADMISSION_ENTRY" ] && [ ! -L "$QEMU_ADMISSION_ENTRY" ] || return 1
+    [ -x "$QEMU_ADMISSION_COMPILER" ] && [ -f "$QEMU_ADMISSION_COMPILER" ] && [ ! -L "$QEMU_ADMISSION_COMPILER" ] || return 1
+    QEMU_ADMISSION_SOURCE_ROOTS=""
+    for qemu_admission_root in "$@"
+    do
+        if [ -n "$QEMU_ADMISSION_SOURCE_ROOTS" ]; then
+            QEMU_ADMISSION_SOURCE_ROOTS="${QEMU_ADMISSION_SOURCE_ROOTS}|"
+        fi
+        QEMU_ADMISSION_SOURCE_ROOTS="${QEMU_ADMISSION_SOURCE_ROOTS}${qemu_admission_root}"
+    done
+    QEMU_ADMISSION_DIRTY_POLICY=scoped-tracked-and-untracked-clean
+    QEMU_ADMISSION_DIRTY="$(git status --porcelain --untracked-files=all -- "$@")" || return 1
+    [ -z "$QEMU_ADMISSION_DIRTY" ] || return 1
+    QEMU_ADMISSION_REVISION="$(git rev-parse --verify HEAD)" || return 1
+    QEMU_ADMISSION_ENTRY_SHA256="$(qemu_admission_sha256 "$QEMU_ADMISSION_ENTRY")" || return 1
+    QEMU_ADMISSION_COMPILER_SHA256="$(qemu_admission_sha256 "$QEMU_ADMISSION_COMPILER")" || return 1
+    qemu_admission_source_snapshot "$@"
+}
+
+qemu_admission_publish() {
+    QEMU_ADMISSION_OUTPUT="$1"
+    QEMU_ADMISSION_MANIFEST="$2"
+    shift 2
+    QEMU_ADMISSION_PRE_REVISION="$QEMU_ADMISSION_REVISION"
+    QEMU_ADMISSION_PRE_FINGERPRINT="$QEMU_ADMISSION_SOURCE_FINGERPRINT"
+    QEMU_ADMISSION_PRE_ENTRY_SHA256="$QEMU_ADMISSION_ENTRY_SHA256"
+    QEMU_ADMISSION_PRE_COMPILER_SHA256="$QEMU_ADMISSION_COMPILER_SHA256"
+    qemu_admission_begin "$QEMU_ADMISSION_ARCH" "$QEMU_ADMISSION_ENTRY" "$QEMU_ADMISSION_COMPILER" "$QEMU_ADMISSION_COMMAND" "$@" || return 1
+    [ "$QEMU_ADMISSION_REVISION" = "$QEMU_ADMISSION_PRE_REVISION" ] || return 1
+    [ "$QEMU_ADMISSION_SOURCE_FINGERPRINT" = "$QEMU_ADMISSION_PRE_FINGERPRINT" ] || return 1
+    [ "$QEMU_ADMISSION_ENTRY_SHA256" = "$QEMU_ADMISSION_PRE_ENTRY_SHA256" ] || return 1
+    [ "$QEMU_ADMISSION_COMPILER_SHA256" = "$QEMU_ADMISSION_PRE_COMPILER_SHA256" ] || return 1
+    [ -f "$QEMU_ADMISSION_OUTPUT" ] && [ -s "$QEMU_ADMISSION_OUTPUT" ] && [ ! -L "$QEMU_ADMISSION_OUTPUT" ] || return 1
+    QEMU_ADMISSION_OUTPUT_SHA256="$(qemu_admission_sha256 "$QEMU_ADMISSION_OUTPUT")" || return 1
+    QEMU_ADMISSION_TMP="${QEMU_ADMISSION_MANIFEST}.tmp.$$"
+    {
+        echo "schema=qemu-frozen-source-admission-v1"
+        echo "arch=$QEMU_ADMISSION_ARCH"
+        echo "repo_root=$QEMU_ADMISSION_ROOT"
+        echo "repo_revision=$QEMU_ADMISSION_REVISION"
+        echo "dirty_state_policy=$QEMU_ADMISSION_DIRTY_POLICY"
+        echo "frozen_worktree=linked-clean"
+        echo "entry_path=$QEMU_ADMISSION_ENTRY"
+        echo "entry_sha256=$QEMU_ADMISSION_ENTRY_SHA256"
+        echo "source_roots=$QEMU_ADMISSION_SOURCE_ROOTS"
+        echo "source_fingerprint=$QEMU_ADMISSION_SOURCE_FINGERPRINT"
+        echo "source_file_count=$QEMU_ADMISSION_SOURCE_FILE_COUNT"
+        echo "compiler_path=$QEMU_ADMISSION_COMPILER"
+        echo "compiler_sha256=$QEMU_ADMISSION_COMPILER_SHA256"
+        echo "build_command=$QEMU_ADMISSION_COMMAND"
+        echo "output_path=$QEMU_ADMISSION_OUTPUT"
+        echo "output_sha256=$QEMU_ADMISSION_OUTPUT_SHA256"
+    } >"$QEMU_ADMISSION_TMP" || return 1
+    mv "$QEMU_ADMISSION_TMP" "$QEMU_ADMISSION_MANIFEST"
+}

@@ -1,0 +1,113 @@
+#!/bin/sh
+# reseal-sdn-crc32.shs
+#
+# Recomputes the `#sdn-crc32:` header of an SDN file after a hand edit.
+#
+# Why this exists: `src/lib/nogc_sync_mut/database/core.spl:462-478` verifies the
+# header fail-CLOSED -- a body whose crc32 does not match the header makes the
+# whole file load as nil, silently. Editing `doc/08_tracking/bug/bug_db.sdn` by
+# hand without resealing therefore does not corrupt the file visibly; it makes
+# the entire bug database disappear.
+#
+# The checksum is CRC-32/ISO-HDLC over the body (everything after the header
+# line), which is exactly what gzip stores in its trailer -- that is how it is
+# computed here, with no second implementation to drift.
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS — <file> resealed, crc32 <n>            exit 0
+#   PASS — <file> already sealed, crc32 <n>      exit 0
+#   ERROR — nothing was checked                  exit 2
+#
+# Usage:
+#   sh scripts/check/reseal-sdn-crc32.shs [--selftest] <file.sdn>
+
+set -u
+
+crc32_of_body() { # file -> crc32 of everything after line 1
+    tail -n +2 "$1" | gzip -c -n | tail -c 8 | od -An -tu4 | awk '{print $1; exit}'
+}
+
+reseal() { # file -> prints "resealed <crc>" or "already <crc>"
+    _f="$1"
+    _crc=$(crc32_of_body "$_f")
+    [ -n "$_crc" ] || return 1
+    _hdr=$(head -1 "$_f")
+    if [ "$_hdr" = "#sdn-crc32:$_crc" ]; then
+        echo "already $_crc"
+        return 0
+    fi
+    case "$_hdr" in
+        '#sdn-crc32:'*) ;;
+        *) echo "not-sdn"; return 1 ;;
+    esac
+    _tmp="$_f.reseal.$$"
+    { echo "#sdn-crc32:$_crc"; tail -n +2 "$_f"; } > "$_tmp" || return 1
+    mv "$_tmp" "$_f" || return 1
+    echo "resealed $_crc"
+}
+
+selftest() {
+    _t=$(mktemp -d) || return 1
+    _fails=0
+
+    # 1 a wrong header is corrected, and the corrected file verifies
+    printf '#sdn-crc32:0\nbugs |id, status, valid|\n    a, open, true\n' > "$_t/f1.sdn"
+    _r=$(reseal "$_t/f1.sdn")
+    case "$_r" in resealed\ *) ;; *) echo "selftest FAIL: wrong-header not resealed ($_r)"; _fails=$((_fails+1)) ;; esac
+    _r2=$(reseal "$_t/f1.sdn")
+    case "$_r2" in already\ *) ;; *) echo "selftest FAIL: resealed file not idempotent ($_r2)"; _fails=$((_fails+1)) ;; esac
+
+    # 2 the body is preserved byte-for-byte
+    printf 'bugs |id, status, valid|\n    a, open, true\n' > "$_t/want"
+    tail -n +2 "$_t/f1.sdn" > "$_t/got"
+    if ! cmp -s "$_t/want" "$_t/got"; then
+        echo "selftest FAIL: body was modified by reseal"; _fails=$((_fails+1))
+    fi
+
+    # 3 a non-SDN file is refused, not silently rewritten
+    printf 'hello\n' > "$_t/f3.txt"
+    _r=$(reseal "$_t/f3.txt")
+    if [ "$_r" != "not-sdn" ]; then
+        echo "selftest FAIL: non-sdn file accepted ($_r)"; _fails=$((_fails+1))
+    fi
+
+    # 4 the computed value matches the known-good real bug_db.sdn header
+    _real="$(git rev-parse --show-toplevel 2>/dev/null)/doc/08_tracking/bug/bug_db.sdn"
+    if [ -f "$_real" ]; then
+        _c=$(crc32_of_body "$_real")
+        _h=$(head -1 "$_real")
+        if [ "$_h" != "#sdn-crc32:$_c" ]; then
+            echo "selftest NOTE: live bug_db.sdn header $_h vs computed $_c (unsealed working copy)"
+        fi
+    fi
+
+    rm -rf "$_t"
+    [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
+    echo "selftest: 4 fixtures passed"
+}
+
+SELFTEST_ONLY=0
+FILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) FILE="$1"; shift ;;
+    esac
+done
+
+selftest || { echo "ERROR — nothing was checked"; exit 2; }
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 4 fixture(s) checked, selftest only"
+    exit 0
+fi
+if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+RES=$(reseal "$FILE") || { echo "ERROR — nothing was checked"; exit 2; }
+case "$RES" in
+    resealed\ *) echo "PASS — $FILE resealed, crc32 ${RES#resealed }" ;;
+    already\ *)  echo "PASS — $FILE already sealed, crc32 ${RES#already }" ;;
+    *)           echo "ERROR — nothing was checked"; exit 2 ;;
+esac
+exit 0

@@ -1,0 +1,26 @@
+#!/bin/sh
+# Ratchet the owned C++ SFFI boundary inventory without treating source as proof.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+baseline=${1:-$root/scripts/audit/baselines/sffi-cpp-boundary-v1.tsv}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+sh "$root/scripts/audit/sffi-cpp-boundary-census.shs" "$work/rows.tsv" >"$work/summary.tsv"
+metric() { awk -F '\t' -v key="$1" '$1 == key { print $2 }' "$2"; }
+
+definitions=$(metric cpp_sffi_definitions "$work/summary.tsv")
+missing=$(metric cpp_sffi_missing_exception_barrier "$work/summary.tsv")
+minimum=$(metric min_cpp_sffi_definitions "$baseline")
+maximum=$(metric max_cpp_sffi_missing_exception_barrier "$baseline")
+
+test -n "$definitions" && test -n "$missing" && test -n "$minimum" && test -n "$maximum" || {
+    echo 'C++ SFFI boundary contract: malformed census or baseline' >&2
+    exit 2
+}
+if [ "$definitions" -lt "$minimum" ] || [ "$missing" -gt "$maximum" ]; then
+    echo "C++ SFFI boundary contract: FAIL definitions=$definitions/$minimum missing_barrier=$missing/$maximum" >&2
+    exit 1
+fi
+echo "C++ SFFI boundary contract: PASS definitions=$definitions missing_barrier=$missing"

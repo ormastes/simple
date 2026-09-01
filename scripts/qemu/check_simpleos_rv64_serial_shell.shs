@@ -1,0 +1,65 @@
+#!/bin/sh
+# SimpleOS RV64 serial-shell end-to-end: boot -> login -> ls -> launch.
+#
+# Unlike check_simpleos_riscv_telnet_serial.shs (one-way, `-serial file:`,
+# boot-marker only), this drives the INTERACTIVE serial_shell_main path with
+# bidirectional serial (`-serial stdio`): it logs in, runs `ls`, and launches an
+# on-FS tool, then gates on the login prompt + shell prompt appearing.
+#
+# Pacing: commands are fed on a schedule so the guest has booted to the login
+# prompt before credentials arrive (UART RX is not buffered before the shell
+# loop starts reading). Tune BOOT_DELAY / CMD_DELAY for a slower/faster host.
+#
+#   qemu-system-riscv64 -kernel build/os/simpleos_riscv64.elf -serial stdio
+#        ^ stdin piped commands (login/ls/launch)   ^ stdout captured
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+ELF="${ELF:-build/os/simpleos_riscv64.elf}"
+BOOT_DELAY="${BOOT_DELAY:-6}"
+CMD_DELAY="${CMD_DELAY:-1}"
+LAUNCH_PATH="${LAUNCH_PATH:-/sys/apps/clang}"
+LOGIN="${LOGIN:-root}"
+PASSWORD="${PASSWORD:-simpleos}"
+OUT="${OUT:-build/simpleos_rv64_serial_shell_$(date +%Y%m%d_%H%M%S)}"
+
+mkdir -p "$OUT"
+command -v qemu-system-riscv64 >/dev/null 2>&1 || { echo "FAIL qemu_missing"; exit 1; }
+[ -f "$ELF" ] || { echo "FAIL elf_missing path=$ELF"; exit 1; }
+
+# Feed the command sequence into QEMU stdin on a schedule.
+feed_input() {
+    sleep "$BOOT_DELAY"
+    printf '%s\r' "$LOGIN";    sleep "$CMD_DELAY"
+    printf '%s\r' "$PASSWORD"; sleep "$CMD_DELAY"
+    printf 'ls\r';             sleep "$CMD_DELAY"
+    printf 'info\r';           sleep "$CMD_DELAY"
+    printf 'launch %s --version\r' "$LAUNCH_PATH"; sleep 4
+}
+
+feed_input | timeout 40 qemu-system-riscv64 \
+    -machine virt -cpu rv64 -m 256M \
+    -nographic -monitor none -no-reboot \
+    -kernel "$ELF" \
+    -serial stdio \
+    >"$OUT/serial.log" 2>&1 || true
+
+echo "INFO out_dir=$OUT"
+echo "=== serial.log (last 40 lines, printable) ==="
+tr -cd '\11\12\15\40-\176' <"$OUT/serial.log" | sed -n '1,40p' | tail -40
+echo "=== serial.log bytes ==="
+wc -c <"$OUT/serial.log" | tr -d ' '
+
+ok=1
+grep -q 'login:' "$OUT/serial.log" || { echo "GATE_FAIL no_login_prompt"; ok=0; }
+grep -Eq 'simpleos-rv64>|SimpleOS RV64' "$OUT/serial.log" || { echo "GATE_FAIL no_shell_banner_or_prompt"; ok=0; }
+grep -q 'launch' "$OUT/serial.log" || { echo "GATE_FAIL launch_not_echoed"; ok=0; }
+
+if [ "$ok" = 1 ]; then
+    echo "PASS simpleos_rv64_serial_shell_login_ls_launch_reachable"
+else
+    echo "FAIL simpleos_rv64_serial_shell"
+fi
+echo "INFO full_log=$OUT/serial.log"

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Build and run the pinned decoder-only Sail Zca classification extractor.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+checkout=${SAIL_RISCV_CHECKOUT:-"$root/build/oracles/sail-riscv-a33475a"}
+sail=${SAIL_EXECUTABLE:-sail}
+output=${1:-"$root/test/fixtures/hardware/riscv_gen2/zca_sail_oracle"}
+revision=a33475aeb80090127433b5a8b30e717edaa19e71
+zca="$checkout/model/extensions/C/zca_insts.sail"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+[ -x "$sail" ] || command -v "$sail" >/dev/null 2>&1 || fail "Sail executable is unavailable: $sail"
+[ -d "$checkout/.git" ] || fail "missing pinned Sail checkout"
+[ "$(git -C "$checkout" rev-parse HEAD)" = "$revision" ] || fail "Sail checkout revision mismatch"
+[ "$(sha256sum "$zca" | awk '{print $1}')" = "b6dee98f5fa917dfcf37452f3f475eefd59215f949c21dda541c54f14a5de039" ] || fail "Zca source hash mismatch"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-zca-sail-classifier.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$output"
+
+for xlen in 32 64; do
+    prelude="$root/scripts/tool/riscv-gen2-zca-sail-classifier-prelude-rv${xlen}.sail"
+    combined="$tmp/zca-classifier-rv${xlen}.sail"
+    cat "$prelude" "$zca" "$root/scripts/tool/riscv-gen2-zca-sail-classifier-postlude.sail" > "$combined"
+    "$sail" -c -o "$tmp/zca-classifier-rv${xlen}" "$combined"
+    "$tmp/zca-classifier-rv${xlen}" > "$output/rv${xlen}-zca.tsv"
+done
+
+echo "generated classification-only RV32/RV64 tables; run check-riscv-gen2-zca-oracle.shs"

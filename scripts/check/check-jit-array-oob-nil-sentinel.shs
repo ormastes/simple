@@ -1,0 +1,107 @@
+#!/bin/sh
+# Regression canary for the JIT array out-of-bounds-read raw-sentinel leak.
+#
+# WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk
+# interpreter, so a spec never exercises the Cranelift JIT lane (the default
+# execution engine for `bin/simple run`). This bug ONLY reproduces on the
+# JIT lane -- only a script that drives `bin/simple run` under both the
+# default engine and `SIMPLE_EXECUTION_MODE=interpret` can fence it.
+# Bug: doc/08_tracking/bug/jit_array_oob_read_leaks_raw_rt_nil_sentinel_2026-08-07.md
+#
+# Root cause (Rust seed, out of `.spl`-fix scope):
+#   src/compiler_rust/runtime/src/value/collections.rs:595-611 (rt_array_get
+#   returns the bare RT_NIL sentinel word `3` on OOB, indistinguishable from
+#   a genuine value 3) and
+#   src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs:507-523
+#   (the array index/.get() MIR arm calls rt_array_get with ZERO
+#   bounds-check emission and ZERO nil-sentinel guard on the result).
+#
+# Discriminator: the fixture ALSO reads a genuine in-bounds element whose
+# value happens to be the sentinel's numeric value (3), at ys[2]/ys.get(2).
+# Both engines must print "3" for that (a real 3 is not the bug) while
+# diverging only on the actual OOB reads -- this is what proves "leaked
+# sentinel" from "a real 3", not just eyeballing one wrong number.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+FIXTURE="test/fixtures/jit_array_oob_nil_sentinel/main.spl"
+
+test -x "$SIMPLE_BINARY"
+test -f "$FIXTURE"
+
+WORK_DIR="${WORK_DIR:-/tmp/check-jit-array-oob-nil-sentinel.$$}"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+interp_log="$WORK_DIR/interpret.log"
+jit_log="$WORK_DIR/jit.log"
+
+interp_rc=0
+timeout 30 env SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BINARY" run "$FIXTURE" >"$interp_log" 2>&1 || interp_rc=$?
+
+jit_rc=0
+timeout 30 "$SIMPLE_BINARY" run "$FIXTURE" >"$jit_log" 2>&1 || jit_rc=$?
+
+fail=0
+
+# --- Interpreter lane: this is the REFERENCE / correct-behaviour lane. ---
+interp_miss="$(sed -n 's/^miss=//p' "$interp_log" | head -1)"
+interp_inb_get="$(sed -n 's/^inbounds_get=//p' "$interp_log" | head -1)"
+interp_inb_idx="$(sed -n 's/^inbounds_idx=//p' "$interp_log" | head -1)"
+
+if [ "$interp_miss" != "nil" ]; then
+    echo "FAIL — interpreter lane regressed: xs.get(9) miss should format as 'nil', got '$interp_miss'"
+    fail=1
+fi
+if [ "$interp_inb_get" != "3" ] || [ "$interp_inb_idx" != "3" ]; then
+    echo "FAIL — interpreter lane control regressed: in-bounds ys[2]/ys.get(2) should both be '3'"
+    echo "       got inbounds_get='$interp_inb_get' inbounds_idx='$interp_inb_idx'"
+    fail=1
+fi
+if [ "$interp_rc" -eq 0 ]; then
+    echo "FAIL — interpreter lane regressed: bare xs[9] OOB index should panic (nonzero rc), got rc=0"
+    fail=1
+elif ! /usr/bin/grep -qi 'array index out of bounds' "$interp_log"; then
+    echo "FAIL — interpreter lane regressed: OOB panic message text missing/changed"
+    echo "       log tail:"; tail -5 "$interp_log"
+    fail=1
+fi
+
+if [ "$fail" -eq 1 ]; then
+    echo "FAIL — interpreter reference lane did not behave as expected; cannot trust the JIT comparison below."
+    exit 1
+fi
+echo "PASS — interpreter reference lane correct: miss=nil, in-bounds control=3/3, bare OOB panics"
+
+# --- JIT lane: this is the KNOWN-OPEN defect. Record it; do not assert the wrong value as right. ---
+jit_miss="$(sed -n 's/^miss=//p' "$jit_log" | head -1)"
+jit_inb_get="$(sed -n 's/^inbounds_get=//p' "$jit_log" | head -1)"
+jit_inb_idx="$(sed -n 's/^inbounds_idx=//p' "$jit_log" | head -1)"
+jit_val="$(sed -n 's/^val=//p' "$jit_log" | head -1)"
+
+# The in-bounds control MUST agree between engines regardless of the bug's
+# status -- if this regresses, something ELSE broke (not this bug).
+if [ "$jit_inb_get" != "3" ] || [ "$jit_inb_idx" != "3" ]; then
+    echo "FAIL — JIT in-bounds control regressed (unrelated to this bug): expected 3/3, got '$jit_inb_get'/'$jit_inb_idx'"
+    exit 1
+fi
+
+if [ "$jit_miss" = "nil" ] && [ "$jit_rc" -ne 0 ] && /usr/bin/grep -qi 'array index out of bounds' "$jit_log"; then
+    echo "FAIL (promote-me) — the JIT lane now matches the interpreter's correct behaviour"
+    echo "       (miss=nil, bare OOB panics with rc=$jit_rc). The JIT array-OOB raw-sentinel-leak"
+    echo "       defect in doc/08_tracking/bug/jit_array_oob_read_leaks_raw_rt_nil_sentinel_2026-08-07.md"
+    echo "       appears FIXED. Rewrite this branch to a hard assertion of the correct behaviour."
+    exit 1
+fi
+
+echo "KNOWN-OPEN — JIT array-OOB raw-sentinel leak still present:"
+echo "             xs.get(9) miss printed '$jit_miss' (expected: nil)"
+echo "             bare xs[9] printed val='$jit_val' with rc=$jit_rc, no panic (expected: panic, rc!=0,"
+echo "             message containing 'array index out of bounds')"
+echo "             In-bounds control (real value 3) correctly prints 3/3 on both engines, confirming"
+echo "             this IS the leaked-sentinel defect and not a general formatting issue."
+
+exit 0

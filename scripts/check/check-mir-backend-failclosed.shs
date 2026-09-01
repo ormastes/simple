@@ -1,0 +1,123 @@
+#!/bin/sh
+# check-mir-backend-failclosed.shs
+#
+# GATE: the five text/JIT MIR backends must ASSERT on a construct they cannot
+# lower -- never emit nothing (or an inert comment) while the build reports
+# success.
+#
+# POLICY (2026-08-23, user): "add assert or todo; disable what is not completed
+# optional." An incomplete path fails loudly or is explicitly disabled with a
+# TODO. Silent fail-open is the forbidden state.
+#
+# Incident: doc/09_report/mir_construct_coverage_matrix_2026-08-23.md measured
+# 25 MirInstKind constructs dropped by ALL FIVE of these backends -- including
+# `Drop` (the WP-E affine resource release simply never happened),
+# TransferIn/TransferOut, FreezeRegion, AcquireSnapshot and CommitUpdates.
+# Two sites emitted literally nothing (`case _: ()` and an empty
+# `translate_unsupported` body); three left an inert artifact (an unnamed
+# warning line, a `;;` WAT comment, a `//` C comment). All five let the build
+# succeed with the instruction missing from the output.
+#
+# Sibling: check-codegen-unlowered-mir-fails-build.shs covers the LLVM and C
+# backends, which were made loud first. This guard covers the five that were
+# not, using the same `E-BACKEND-<NAME>-INST-<Variant>` diagnostic shape.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> site(s) checked, 0 fail-open
+#   FAIL  — ...
+#   ERROR — nothing was checked (<reason>)
+# A run that checked 0 sites is ERROR, never a pass.
+
+set -u
+ROOT=${MIR_FC_ROOT:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd || pwd)}
+
+# site: <label>|<path>|<error-code-prefix>
+sites() {
+  cat <<'EOT'
+cranelift|src/compiler/70.backend/backend/cranelift_codegen_adapter.spl|E-BACKEND-CRANELIFT-INST
+mir_text_base_trait|src/compiler/70.backend/backend/common/mir_text_codegen.spl|E-BACKEND-MIRTEXT-INST
+llvm_lib|src/compiler/70.backend/backend/llvm_lib_translate_expr.spl|E-BACKEND-LLVMLIB-INST
+wasm_wat|src/compiler/70.backend/backend/wasm/wat_codegen.spl|E-BACKEND-WASM-INST
+opencl|src/compiler/70.backend/backend/opencl_backend.spl|E-BACKEND-OPENCL-INST
+EOT
+}
+
+# A site is fail-closed when it (a) names the construct via the shared
+# variant-name table, (b) carries its own E-BACKEND-<NAME>-INST code, and
+# (c) reaches a panic. Checked as CONTENT, so deleting any one of the three
+# flips the verdict.
+check_site() { # $1=file $2=code ; echo "ok" or a reason
+  f="$1"; code="$2"
+  [ -f "$f" ] || { echo "missing file"; return; }
+  grep -q 'mir_instkind_variant_name' "$f" || { echo "does not name the construct (no mir_instkind_variant_name)"; return; }
+  grep -q "$code" "$f" || { echo "no $code diagnostic"; return; }
+  grep -q 'panic(' "$f" || { echo "never panics (fail-open)"; return; }
+  echo ok
+}
+
+selftest() {
+  d=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+  fails=0
+  # good fixture
+  cat > "$d/good.spl" <<'G'
+            case _:
+                val n = mir_instkind_variant_name(inst.kind)
+                eprint("[x] E-BACKEND-X-INST-{n}")
+                panic("compile error: E-BACKEND-X-INST-{n}")
+G
+  [ "$(check_site "$d/good.spl" E-BACKEND-X-INST)" = "ok" ] || { echo "SELFTEST FAIL good"; fails=$((fails+1)); }
+  # neuter 1: drop the panic -> must FAIL
+  sed '/panic(/d' "$d/good.spl" > "$d/nopanic.spl"
+  [ "$(check_site "$d/nopanic.spl" E-BACKEND-X-INST)" = "ok" ] && { echo "SELFTEST FAIL nopanic not detected"; fails=$((fails+1)); }
+  # neuter 2: drop the name lookup -> must FAIL
+  sed '/mir_instkind_variant_name/d' "$d/good.spl" > "$d/noname.spl"
+  [ "$(check_site "$d/noname.spl" E-BACKEND-X-INST)" = "ok" ] && { echo "SELFTEST FAIL noname not detected"; fails=$((fails+1)); }
+  # neuter 3: the original silent shape -> must FAIL
+  printf '            case _:\n                ()\n' > "$d/silent.spl"
+  [ "$(check_site "$d/silent.spl" E-BACKEND-X-INST)" = "ok" ] && { echo "SELFTEST FAIL silent not detected"; fails=$((fails+1)); }
+  # missing file -> must FAIL
+  [ "$(check_site "$d/nope.spl" E-BACKEND-X-INST)" = "ok" ] && { echo "SELFTEST FAIL missing not detected"; fails=$((fails+1)); }
+  rm -rf "$d"
+  [ "$fails" -eq 0 ] || { echo "ERROR — nothing was checked (selftest failed: $fails fixture(s))"; exit 2; }
+}
+
+selftest
+[ "${1:-}" = "--selftest" ] && { echo "PASS — 5 selftest fixture(s) checked, 0 fail-open"; exit 0; }
+
+cd "$ROOT" 2>/dev/null || { echo "ERROR — nothing was checked (cannot cd to $ROOT)"; exit 2; }
+
+# The shared name table must exist and cover every MirInstKind variant.
+TBL=src/compiler/70.backend/backend/common/mir_inst_variant_name.spl
+UNIV=scripts/check/mir_instkind_universe.txt
+[ -f "$TBL" ]  || { echo "ERROR — nothing was checked (missing $TBL)"; exit 2; }
+[ -f "$UNIV" ] || { echo "ERROR — nothing was checked (missing $UNIV)"; exit 2; }
+MISSING=""
+NV=0
+while read -r v; do
+  case "$v" in ''|\#*) continue;; esac
+  NV=$((NV+1))
+  grep -q "case ${v}[(:]" "$TBL" || MISSING="$MISSING $v"
+done < "$UNIV"
+[ "$NV" -gt 0 ] || { echo "ERROR — nothing was checked (empty universe)"; exit 2; }
+
+CHECKED=0
+BAD=""
+while IFS='|' read -r label path code; do
+  [ -n "$label" ] || continue
+  CHECKED=$((CHECKED+1))
+  r=$(check_site "$path" "$code")
+  [ "$r" = "ok" ] || BAD="$BAD $label($r);"
+done <<EOT
+$(sites)
+EOT
+
+[ "$CHECKED" -gt 0 ] || { echo "ERROR — nothing was checked (no sites enumerated)"; exit 2; }
+
+if [ -n "$MISSING" ] || [ -n "$BAD" ]; then
+  [ -n "$MISSING" ] && echo "variant(s) with no arm in the shared name table:$MISSING"
+  [ -n "$BAD" ] && echo "fail-open site(s):$BAD"
+  echo "FAIL — $CHECKED site(s) and $NV variant(s) checked, $(echo "$BAD" | tr ';' '\n' | grep -c .) fail-open"
+  exit 1
+fi
+echo "PASS — $CHECKED site(s) and $NV variant(s) checked, 0 fail-open"
+exit 0

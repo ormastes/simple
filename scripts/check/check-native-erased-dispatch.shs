@@ -1,0 +1,163 @@
+#!/bin/sh
+# check-native-erased-dispatch.shs -- native/AOT erased-receiver method dispatch.
+#
+# ENGINE: native/AOT ONLY. Every case is built with `native-build` and the
+# resulting BINARY is executed. The tree-walk interpreter (`simple test`) and
+# the Cranelift JIT (`simple run`) are deliberately never invoked: a pass on
+# either proves nothing about the backend under test. The `2^60` engine control
+# is NOT used -- it is unsound and reports backwards on a good binary.
+#
+# VALUE, not exit code: each positive case asserts an exact expected line in
+# the binary's stdout. A build that "succeeds" while emitting a functionless
+# artifact fails here.
+#
+# EXIT CODES: rc is read on the line AFTER the command, never through a pipe.
+# rc 137/143/144 with no result line is UNVERIFIED (verdict ERROR, exit 2) --
+# never a pass and never a fail. rc 139 is a real segfault verdict (FAIL).
+#
+# Verdict is the LAST line of stdout:
+#   PASS  -- <n> case(s) checked, all correct        exit 0
+#   FAIL  -- ...                                     exit 1
+#   ERROR -- nothing was checked / UNVERIFIED        exit 2
+#
+# HOST COST WARNING: one native-build of a 20-line fixture was measured at
+# ~19 GB RSS on 2026-08-18 and was reaped by earlyoom. Cases run STRICTLY
+# SEQUENTIALLY and MemAvailable is re-checked before each one.
+#
+# See doc/08_tracking/bug/native_erased_by_name_method_dispatch_absent_2026-08-18.md
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+FX="$ROOT/scripts/check/fixtures/native_erased_dispatch"
+SIMPLE="${SIMPLE_BIN:-$ROOT/bin/simple}"
+WORK="${TMPDIR:-/tmp}/native_erased_dispatch.$$"
+MIN_AVAIL_GB="${MIN_AVAIL_GB:-40}"
+mkdir -p "$WORK"
+
+CHECKED=0
+FAILED=""
+UNVERIFIED=""
+
+mem_avail_gb() {
+    awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo 2>/dev/null || echo 999
+}
+
+# build_case <fixture> -> sets BUILD_RC, BIN
+build_case() {
+    _fx="$1"
+    _bin="$WORK/$(basename "$_fx" .spl).bin"
+    _log="$WORK/$(basename "$_fx" .spl).build.log"
+    _avail=$(mem_avail_gb)
+    if [ "$_avail" -lt "$MIN_AVAIL_GB" ]; then
+        BUILD_RC=-1
+        return
+    fi
+    nice -n 19 "$SIMPLE" native-build "$_fx" -o "$_bin" >"$_log" 2>&1
+    BUILD_RC=$?
+    BIN="$_bin"
+    BUILD_LOG="$_log"
+}
+
+# positive <fixture> <expected-line> [<expected-line> ...]
+positive() {
+    _fx="$FX/$1"; shift
+    build_case "$_fx"
+    if [ "$BUILD_RC" = "-1" ]; then
+        UNVERIFIED="$UNVERIFIED $(basename "$_fx") (low-memory: <${MIN_AVAIL_GB}G available)"
+        return
+    fi
+    if [ "$BUILD_RC" = "137" ] || [ "$BUILD_RC" = "143" ] || [ "$BUILD_RC" = "144" ]; then
+        UNVERIFIED="$UNVERIFIED $(basename "$_fx") (build rc=$BUILD_RC, reaped)"
+        return
+    fi
+    CHECKED=$((CHECKED + 1))
+    if [ "$BUILD_RC" != "0" ] || [ ! -x "$BIN" ]; then
+        FAILED="$FAILED $(basename "$_fx"):build-rc=$BUILD_RC"
+        return
+    fi
+    _out="$WORK/$(basename "$_fx" .spl).out"
+    nice -n 19 "$BIN" >"$_out" 2>&1
+    _rc=$?
+    if [ "$_rc" = "137" ] || [ "$_rc" = "143" ] || [ "$_rc" = "144" ]; then
+        CHECKED=$((CHECKED - 1))
+        UNVERIFIED="$UNVERIFIED $(basename "$_fx") (run rc=$_rc, reaped)"
+        return
+    fi
+    if [ "$_rc" = "139" ]; then
+        FAILED="$FAILED $(basename "$_fx"):SEGFAULT"
+        return
+    fi
+    for _want in "$@"; do
+        if ! grep -qxF "$_want" "$_out"; then
+            FAILED="$FAILED $(basename "$_fx"):missing-line[$_want]"
+            return
+        fi
+    done
+}
+
+# fail_closed <fixture> -- must NOT produce a working binary that prints a value.
+fail_closed() {
+    _fx="$FX/$1"
+    build_case "$_fx"
+    if [ "$BUILD_RC" = "-1" ]; then
+        UNVERIFIED="$UNVERIFIED $(basename "$_fx") (low-memory: <${MIN_AVAIL_GB}G available)"
+        return
+    fi
+    if [ "$BUILD_RC" = "137" ] || [ "$BUILD_RC" = "143" ] || [ "$BUILD_RC" = "144" ]; then
+        UNVERIFIED="$UNVERIFIED $(basename "$_fx") (build rc=$BUILD_RC, reaped)"
+        return
+    fi
+    CHECKED=$((CHECKED + 1))
+    if [ "$BUILD_RC" != "0" ]; then
+        # Loud build-time refusal: the required behaviour.
+        if ! grep -q "unresolved method call" "$BUILD_LOG"; then
+            FAILED="$FAILED $(basename "$_fx"):failed-but-not-loud"
+        fi
+        return
+    fi
+    # It built. Then it must rt_panic rather than print a value.
+    _out="$WORK/$(basename "$_fx" .spl).out"
+    nice -n 19 "$BIN" >"$_out" 2>&1
+    _rc=$?
+    if [ "$_rc" = "137" ] || [ "$_rc" = "143" ] || [ "$_rc" = "144" ]; then
+        CHECKED=$((CHECKED - 1))
+        UNVERIFIED="$UNVERIFIED $(basename "$_fx") (run rc=$_rc, reaped)"
+        return
+    fi
+    if [ "$_rc" = "0" ]; then
+        FAILED="$FAILED $(basename "$_fx"):SILENT-SUCCESS(fail-open)"
+        return
+    fi
+    if ! grep -q "unresolved method call" "$_out"; then
+        FAILED="$FAILED $(basename "$_fx"):died-without-naming-the-method"
+    fi
+}
+
+if [ ! -d "$FX" ]; then
+    echo "ERROR -- nothing was checked (fixture dir missing: $FX)"
+    exit 2
+fi
+
+positive any_local_noarg.spl                  "A=7"
+positive any_local_args.spl                   "B=21"
+positive any_local_same_name_two_classes.spl  "C=7" "D=42"
+positive any_local_unique_name.spl            "E=101"
+fail_closed any_param_two_classes.spl
+fail_closed any_local_missing_method.spl
+
+rm -rf "$WORK"
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR -- nothing was checked (unverified:$UNVERIFIED)"
+    exit 2
+fi
+if [ -n "$UNVERIFIED" ]; then
+    echo "ERROR -- nothing was checked conclusively; UNVERIFIED case(s):$UNVERIFIED"
+    exit 2
+fi
+if [ -n "$FAILED" ]; then
+    echo "FAIL -- $CHECKED case(s) checked, defect(s):$FAILED"
+    exit 1
+fi
+echo "PASS -- $CHECKED case(s) checked, all correct (engine: native/AOT)"
+exit 0

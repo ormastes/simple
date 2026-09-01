@@ -1,0 +1,142 @@
+#!/bin/sh
+# check-interp-field-array-push-linear.shs
+#
+# Fail-closed cost gate: accumulating into an OBJECT FIELD array in the AST
+# interpreter (`self.data = self.data.push(i)` / `self.data.push(i)`) must scale
+# LINEARLY, like the identifier-receiver form already does.
+#
+# Why this exists
+# ---------------
+# doc/08_tracking/bug/interpreter_gc_root_scan_blowup_large_array_2026-07-25.md
+# filed a "font load goes 8s -> 2min when an unrelated Engine2D is alive" blowup
+# and hypothesised a GC root scan. There is no GC root scan in this interpreter.
+# The real defect: `interpreter/expr/calls.rs` handled `obj.field.m()` by copying
+# the field value into a `__nested_field_*__` temp binding. That second strong
+# ref made the array Arc ALIASED, so `Arc::make_mut` in
+# `interpreter_helpers/patterns.rs` cloned the entire backing Vec on EVERY
+# mutator call — O(N^2) accumulation into any object field. The identifier form
+# (`arr.push(x)`) was already O(N) because its binding is uniquely owned.
+#
+# Measured on the seed before the fix (SIMPLE_EXECUTION_MODE=interpret):
+#   n= 5000 0.46s   n=10000 0.55s   n=20000 2.07s   n=40000 8.02s   (4x per 2x)
+# After:
+#   n= 5000 0.06s   n=10000 0.07s   n=20000 0.09s   n=40000 0.12s   (flat)
+#
+# Verdict is the LAST line of stdout, same convention as the other guards:
+#   PASS  — <n> measurement(s) taken, field-array accumulation scales linearly ...
+#   FAIL  — ... (exit 1)
+#   ERROR — nothing was checked (exit 2)
+#
+# --selftest runs first and is fatal.
+
+set -u
+
+BIN="${SIMPLE_BIN:-bin/simple}"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# Ratio ceiling. A perfectly quadratic path doubles N -> 4x cost; a linear one
+# stays near 1x plus fixed startup. 2.5 leaves generous headroom for a loaded
+# shared box while still being far below the 4x a quadratic path cannot avoid.
+MAX_RATIO_X100=250
+
+emit_probe() {
+    # $1 = output path, $2 = element count
+    cat > "$1" <<EOF
+class Acc:
+    var data: Array<i64>
+    fn fill(n: i64):
+        self.data = []
+        var i = 0
+        while i < n:
+            self.data = self.data.push(i)
+            i = i + 1
+
+fn main():
+    var b = Acc()
+    b.fill($2)
+    print("len \${b.data.len()}")
+EOF
+}
+
+# Milliseconds of wall time for one run. Prints -1 on a failed run.
+time_run() {
+    _probe="$1"
+    _start=$(date +%s%N)
+    SIMPLE_EXECUTION_MODE=interpret SIMPLE_RUST_SEED_WARNING=1 \
+        "$BIN" run "$_probe" >/dev/null 2>&1
+    _rc=$?
+    _end=$(date +%s%N)
+    if [ "$_rc" -ne 0 ]; then
+        echo "-1"
+        return
+    fi
+    echo $(( (_end - _start) / 1000000 ))
+}
+
+selftest() {
+    # The gate must reject a synthetic quadratic curve and accept a linear one.
+    # Ratio arithmetic is the whole decision, so it is what gets proved here.
+    _fail=0
+
+    # quadratic: 100ms -> 400ms is 4.00x, must exceed the ceiling
+    _r=$(( 400 * 100 / 100 ))
+    [ "$_r" -le "$MAX_RATIO_X100" ] && { echo "selftest: quadratic curve not rejected"; _fail=1; }
+
+    # linear: 100ms -> 130ms is 1.30x, must be accepted
+    _r=$(( 130 * 100 / 100 ))
+    [ "$_r" -gt "$MAX_RATIO_X100" ] && { echo "selftest: linear curve not accepted"; _fail=1; }
+
+    # borderline: exactly at the ceiling is accepted, one above is not
+    _r=250
+    [ "$_r" -gt "$MAX_RATIO_X100" ] && { echo "selftest: ceiling boundary rejected"; _fail=1; }
+    _r=251
+    [ "$_r" -le "$MAX_RATIO_X100" ] && { echo "selftest: above-ceiling not rejected"; _fail=1; }
+
+    # a failed run must never be readable as a fast (passing) measurement
+    [ "$(time_run /nonexistent-probe-path.spl)" != "-1" ] && \
+        { echo "selftest: failed run did not report -1"; _fail=1; }
+
+    if [ "$_fail" -ne 0 ]; then
+        echo "FAIL — selftest failed; gate arithmetic is not trustworthy"
+        exit 1
+    fi
+}
+
+selftest
+
+if [ ! -x "$BIN" ] && ! command -v "$BIN" >/dev/null 2>&1; then
+    echo "ERROR — nothing was checked (no runnable binary at '$BIN')"
+    exit 2
+fi
+
+emit_probe "$WORK/small.spl" 10000
+emit_probe "$WORK/large.spl" 20000
+
+# Warm the binary/page cache so the first measurement is not penalised.
+time_run "$WORK/small.spl" >/dev/null
+
+SMALL_MS=$(time_run "$WORK/small.spl")
+LARGE_MS=$(time_run "$WORK/large.spl")
+MEASUREMENTS=0
+[ "$SMALL_MS" -ge 0 ] 2>/dev/null && MEASUREMENTS=$((MEASUREMENTS + 1))
+[ "$LARGE_MS" -ge 0 ] 2>/dev/null && MEASUREMENTS=$((MEASUREMENTS + 1))
+
+if [ "$MEASUREMENTS" -lt 2 ]; then
+    echo "ERROR — nothing was checked (probe run failed: small=${SMALL_MS}ms large=${LARGE_MS}ms)"
+    exit 2
+fi
+
+# Guard against a degenerate denominator: a sub-10ms small run makes the ratio
+# meaningless, so floor it rather than dividing by noise.
+[ "$SMALL_MS" -lt 10 ] && SMALL_MS=10
+
+RATIO_X100=$(( LARGE_MS * 100 / SMALL_MS ))
+
+if [ "$RATIO_X100" -gt "$MAX_RATIO_X100" ]; then
+    echo "FAIL — 2 measurement(s) taken, doubling N cost ${RATIO_X100}x100 (10000=${SMALL_MS}ms, 20000=${LARGE_MS}ms), ceiling ${MAX_RATIO_X100}x100: field-array accumulation is superlinear"
+    exit 1
+fi
+
+echo "PASS — 2 measurement(s) taken, field-array accumulation scales linearly (10000=${SMALL_MS}ms, 20000=${LARGE_MS}ms, ratio ${RATIO_X100}x100 <= ${MAX_RATIO_X100}x100)"
+exit 0

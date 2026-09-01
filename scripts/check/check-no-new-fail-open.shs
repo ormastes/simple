@@ -1,0 +1,374 @@
+#!/bin/sh
+# check-no-new-fail-open.shs
+#
+# STATIC FAIL-OPEN AUDIT across BOTH trees — the Rust seed/compiler
+# (`src/compiler_rust/**`) and pure Simple (`src/compiler/**`, `src/lib/**`),
+# plus the shell lanes under `scripts/**`.
+#
+# THE DEFECT CLASS: code that cannot determine an answer, GUESSES one, and
+# continues with NO diagnostic. The result is wrong but plausible, so it reads
+# as success. Real instances from 2026-08-16/17, all found by hand:
+#
+#   * hir/lower/expr/access.rs:288 — `.unwrap_or(0)` on the
+#     `CannotInferFieldType` recovery path. A struct returned BY VALUE lost its
+#     receiver type, so EVERY field read returned field 0's value:
+#     `W3(first: 9, length: n, tag: 77)` printed `first=9 length=9 tag=9`.
+#     Blocked the bootstrap six times. Note the surviving `.ok()` on
+#     `get_field_info` at that site — the Err is still discarded.
+#   * unresolved `use` imports were WARNINGS, and the JIT fallback SWALLOWED
+#     the E1034 and silently de-JIT'd, hiding a missing P-256 implementation
+#     behind a public API. (`1478ca64460`)
+#   * `TestRunResult::success()` was `total_failed == 0` — zero tests executed
+#     satisfied it.
+#   * `SIMPLE_TIMEOUT_SECONDS` was parsed and DISCARDED.
+#   * `kill_simple_monitor.shs` decided kills from a LIFETIME-AVERAGE `pcpu`.
+#   * two push guards failed OPEN on cwd, printing "nothing to push" and
+#     exiting 0 without checking anything.
+#
+# WHAT THIS GATE IS, AND IS NOT
+#
+# It is a SHAPE detector, not a correctness prover. Most hits are benign: a
+# default of 0 is often exactly right. Failing on the absolute count would be
+# useless noise, so — exactly like `check-no-phantom-module-imports.shs` — the
+# existing population is BASELINED and only NEW shapes fail. Raw pre-baseline
+# counts are recorded in the baseline file's header so nobody has to re-derive
+# them to know how big the debt is.
+#
+# The baseline key is `<path>|<pattern_id>|<count>`, deliberately WITHOUT line
+# numbers: a line-keyed baseline goes stale on every unrelated edit above the
+# offender, and a guard that is always stale gets ignored, which is its own
+# fail-open. A file's count rising above baseline, or a new (file, pattern)
+# pair appearing, is the failure condition.
+#
+# A sibling lane owns the pure-Simple LINT rule for mission-critical scope.
+# This gate stays out of the lint-rule registry and out of
+# `src/lib/**/mission_critical/**` policy.
+#
+# USAGE
+#   sh scripts/check/check-no-new-fail-open.shs
+#   sh scripts/check/check-no-new-fail-open.shs --selftest
+#   sh scripts/check/check-no-new-fail-open.shs --generate-baseline
+#
+# VERDICT is the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> site(s) checked, 0 new fail-open (baselined: <b>)   exit 0
+#   FAIL  — <n> site(s) checked, <k> new fail-open: <list>          exit 1
+#   ERROR — nothing was checked                                     exit 2
+set -u
+
+ROOT="."
+BASELINE="scripts/check/fail_open_baseline.txt"
+MODE="scan"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE="selftest"; shift ;;
+        --generate-baseline) MODE="generate"; shift ;;
+        --root) ROOT="${2:-.}"; shift 2 ;;
+        --baseline) BASELINE="${2:-$BASELINE}"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+cd "$ROOT" 2>/dev/null || { echo "ERROR — nothing was checked"; exit 2; }
+
+WORK=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# scan_tree <srcroot> <out>
+#
+# Emit one `<path>|<pattern_id>|<count>` line per (file, pattern) with a
+# non-zero count. Patterns are grouped by tree because the languages express
+# the same defect differently.
+#
+# RUST scope is narrowed to the LOWERING/CODEGEN layers (hir, mir, codegen,
+# interpreter, type). That is a deliberate calibration, not laziness: a guessed
+# constant there becomes a wrong FIELD INDEX, SLOT, WIDTH or OFFSET — silently
+# wrong data — whereas the same shape in CLI argument handling is usually a
+# real default. The tree-wide raw counts are recorded in the baseline header so
+# the narrowing is visible rather than hidden.
+# ---------------------------------------------------------------------------
+#
+# Counting is done with BATCHED `grep -c` over a file list rather than one
+# grep per file: the per-file loop took long enough on 9,472 `.spl` files that
+# nobody would run the gate, and a guard nobody runs is its own fail-open.
+#
+# `grep -c` over multiple files prints `path:count` including zeros, so the
+# awk filter below keeps only non-zero rows. A path containing `:` would
+# corrupt that; none exist in this tree and `emit_counts` states the
+# assumption rather than silently relying on it.
+count_pattern() {
+    # count_pattern <file-list> <pattern_id> <ere> <out>
+    _list="$1"; _pid="$2"; _re="$3"; _o="$4"
+    [ -s "$_list" ] || return 0
+    # `/dev/null` is passed as a permanent extra operand so grep ALWAYS has at
+    # least two files and therefore always prefixes its output with the path.
+    # Without it, a batch containing exactly one file prints a bare count, the
+    # path is lost, and every row silently drops — a fail-open in the fail-open
+    # detector. Selftest fixture 7 exists because that is exactly what happened.
+    xargs -a "$_list" -r grep -cE -- "$_re" /dev/null 2>/dev/null \
+        | awk -F: -v OFS=: -v p="$_pid" 'NF>=2 && $NF+0>0 && $1!="/dev/null" {
+              c=$NF; $NF=""; sub(/:$/,"",$0); print $0 "|" p "|" c
+          }' >> "$_o"
+    return 0
+}
+
+scan_tree() {
+    _out="$1"
+    : > "$_out"
+
+    # --- Rust: fail-open in lowering/codegen ------------------------------
+    if [ -d src/compiler_rust ]; then
+        find src/compiler_rust -name '*.rs' \
+            -not -path '*/vendor/*' -not -path '*/target/*' -not -path '*/tests/*' \
+            2>/dev/null | grep -E 'src/(hir|mir|codegen|interpreter|type)' | sort > "$WORK/rs.files"
+        # rust_unwrap_or_const: the access.rs shape — a lookup that could not
+        # answer, answered anyway with a plausible number.
+        count_pattern "$WORK/rs.files" rust_unwrap_or_const \
+            '\.unwrap_or\((-?[0-9]+|-?[0-9]+\.[0-9]+)\)' "$_out"
+        # rust_unwrap_or_default: same, spelled without the constant.
+        count_pattern "$WORK/rs.files" rust_unwrap_or_default \
+            '\.unwrap_or_default\(\)' "$_out"
+        # rust_ok_discards_err: `.ok()` throws the diagnostic away. This is the
+        # shape still live at the access.rs site after its partial fix.
+        count_pattern "$WORK/rs.files" rust_ok_discards_err \
+            '\.ok\(\)' "$_out"
+        # rust_unwrap_or_else_const: a closure that ignores the error value.
+        count_pattern "$WORK/rs.files" rust_unwrap_or_else_const \
+            'unwrap_or_else\(\|_\|' "$_out"
+        # rust_err_arm_ignored: a match arm that binds nothing from Err.
+        count_pattern "$WORK/rs.files" rust_err_arm_ignored \
+            'Err\(_\)[[:space:]]*=>' "$_out"
+    fi
+
+    # --- Pure Simple ------------------------------------------------------
+    # `src/lib/**/mission_critical/**` is EXCLUDED by agreement: a sibling lane
+    # owns the lint rule that governs that scope, and two gates disagreeing
+    # about the same policy is worse than one.
+    : > "$WORK/sp.files"
+    for _sr in src/compiler src/lib; do
+        [ -d "$_sr" ] || continue
+        find "$_sr" -name '*.spl' -not -path '*/mission_critical/*' 2>/dev/null >> "$WORK/sp.files"
+    done
+    sort -o "$WORK/sp.files" "$WORK/sp.files"
+    # simple_coalesce_const: `?? 0` on a lookup — the Simple spelling of
+    # `.unwrap_or(0)`.
+    count_pattern "$WORK/sp.files" simple_coalesce_const \
+        '\?\?[[:space:]]*(-?[0-9]+(\.[0-9]+)?)([^0-9.]|$)' "$_out"
+    # simple_coalesce_empty: `?? ""` / `?? false` / `?? true`.
+    count_pattern "$WORK/sp.files" simple_coalesce_empty \
+        '\?\?[[:space:]]*(""|false|true)' "$_out"
+    # simple_unwrap_or: explicit helper form.
+    count_pattern "$WORK/sp.files" simple_unwrap_or \
+        '(unwrap_or|value_or|get_or)[a-z_]*\(' "$_out"
+
+    # --- Shell lanes ------------------------------------------------------
+    # A guard's own script laundering a failure is the most dangerous instance
+    # of this class: it makes every OTHER check unreliable.
+    if [ -d scripts ]; then
+        find scripts \( -name '*.shs' -o -name '*.sh' \) 2>/dev/null | sort > "$WORK/sh.files"
+        count_pattern "$WORK/sh.files" shell_or_true \
+            '\|\|[[:space:]]*(true|:)[[:space:]]*$' "$_out"
+        count_pattern "$WORK/sh.files" shell_or_echo_const \
+            '\|\|[[:space:]]*echo[[:space:]]+["0-9]' "$_out"
+    fi
+
+    sort -o "$_out" "$_out"
+}
+
+# ---------------------------------------------------------------------------
+# diff_against_baseline <current> <baseline> -> prints "<sites>|<baselined>|<new>|<names>"
+#
+# NEW means: a (file, pattern) pair absent from the baseline, or present with a
+# HIGHER count than the baseline records. A count that DROPS is progress and is
+# never a failure — unlike the test-tree guard there is no "stale baseline"
+# failure mode here, because shrinking debt must never be discouraged.
+# ---------------------------------------------------------------------------
+diff_against_baseline() {
+    _cur="$1"; _base="$2"
+    grep -v '^#' "$_base" 2>/dev/null | grep -v '^[[:space:]]*$' | sort > "$WORK/base.clean"
+
+    _sites=$(awk -F'|' '{s+=$3}END{print s+0}' "$_cur")
+    _basecount=$(awk -F'|' '{s+=$3}END{print s+0}' "$WORK/base.clean")
+
+    _new=0; _names=""
+    while IFS='|' read -r _f _p _c; do
+        [ -z "$_f" ] && continue
+        _b=$(awk -F'|' -v f="$_f" -v p="$_p" '$1==f&&$2==p{print $3; exit}' "$WORK/base.clean")
+        [ -z "$_b" ] && _b=0
+        if [ "$_c" -gt "$_b" ]; then
+            _new=$((_new + _c - _b))
+            _names="$_names $_f:$_p(+$((_c - _b)))"
+        fi
+    done < "$_cur"
+
+    echo "$_sites|$_basecount|$_new|$_names"
+}
+
+# ---------------------------------------------------------------------------
+# --selftest — fatal, runs before every real scan.
+# ---------------------------------------------------------------------------
+if [ "$MODE" = "selftest" ]; then
+    FAIL=0
+    T="$WORK/st"; mkdir -p "$T"
+
+    # Fixture 1 (must FAIL): replays the REAL access.rs:288 defect — a field
+    # index resolution answered with `.unwrap_or(0)`. Baseline knows nothing
+    # about the file, so this must be reported as NEW and NAMED.
+    printf 'a.rs|rust_unwrap_or_const|1\n' > "$T/cur"
+    : > "$T/base"
+    R=$(diff_against_baseline "$T/cur" "$T/base")
+    if [ "$(echo "$R" | cut -d'|' -f3)" -ne 1 ]; then
+        echo "selftest fixture 1 FAILED: new unwrap_or(0) not detected ($R)"; FAIL=1
+    fi
+    case "$(echo "$R" | cut -d'|' -f4)" in
+        *a.rs*rust_unwrap_or_const*) ;;
+        *) echo "selftest fixture 1 FAILED: verdict did not name the offender ($R)"; FAIL=1 ;;
+    esac
+
+    # Fixture 2 (must PASS): the identical site, baselined. Proves fixture 1's
+    # failure came from novelty, not from the detector flagging everything.
+    printf 'a.rs|rust_unwrap_or_const|1\n' > "$T/base"
+    R=$(diff_against_baseline "$T/cur" "$T/base")
+    if [ "$(echo "$R" | cut -d'|' -f3)" -ne 0 ]; then
+        echo "selftest fixture 2 FAILED: baselined site reported as new ($R)"; FAIL=1
+    fi
+
+    # Fixture 3 (must FAIL): a file that ALREADY had one baselined hit grows a
+    # second. Presence-only baselining would pass this, which is how a known-bad
+    # file becomes a place to hide new instances.
+    printf 'a.rs|rust_unwrap_or_const|2\n' > "$T/cur"
+    printf 'a.rs|rust_unwrap_or_const|1\n' > "$T/base"
+    R=$(diff_against_baseline "$T/cur" "$T/base")
+    if [ "$(echo "$R" | cut -d'|' -f3)" -ne 1 ]; then
+        echo "selftest fixture 3 FAILED: count growth in a baselined file not detected ($R)"; FAIL=1
+    fi
+
+    # Fixture 4 (must PASS): count DROPS. Removing fail-open code must never be
+    # a failure.
+    printf 'a.rs|rust_unwrap_or_const|1\n' > "$T/cur"
+    printf 'a.rs|rust_unwrap_or_const|5\n' > "$T/base"
+    R=$(diff_against_baseline "$T/cur" "$T/base")
+    if [ "$(echo "$R" | cut -d'|' -f3)" -ne 0 ]; then
+        echo "selftest fixture 4 FAILED: shrinking debt reported as new ($R)"; FAIL=1
+    fi
+
+    # Fixture 5 (must yield 0 sites): an empty scan must report zero so the
+    # caller is FORCED into ERROR. A guard that passes having checked nothing is
+    # itself an instance of this defect class.
+    : > "$T/cur"; : > "$T/base"
+    R=$(diff_against_baseline "$T/cur" "$T/base")
+    if [ "$(echo "$R" | cut -d'|' -f1)" -ne 0 ]; then
+        echo "selftest fixture 5 FAILED: empty scan did not report 0 sites ($R)"; FAIL=1
+    fi
+
+    # Fixture 6 (must FAIL): the shell-launderer shape — a guard script that
+    # swallows its own failure with `|| true`. Replays the pre-push guards that
+    # exited 0 without checking anything.
+    printf 'scripts/check/g.shs|shell_or_true|1\n' > "$T/cur"
+    : > "$T/base"
+    R=$(diff_against_baseline "$T/cur" "$T/base")
+    if [ "$(echo "$R" | cut -d'|' -f3)" -ne 1 ]; then
+        echo "selftest fixture 6 FAILED: new '|| true' laundering not detected ($R)"; FAIL=1
+    fi
+
+    # Fixture 7 (must detect on REAL source): the detector regexes themselves
+    # must match real code, not just synthetic baseline rows. A detector that
+    # matches nothing would make every scan vacuously clean.
+    mkdir -p "$T/tree/src/compiler_rust/compiler/src/hir"
+    printf 'fn f() { let i = lookup().unwrap_or(0); let j = g().ok(); }\n' \
+        > "$T/tree/src/compiler_rust/compiler/src/hir/probe.rs"
+    ( cd "$T/tree" && ROOT=. ; ) 2>/dev/null
+    OLDPWD_SAVE=$(pwd)
+    cd "$T/tree" || { echo "selftest fixture 7 FAILED: cannot enter fixture tree"; FAIL=1; }
+    scan_tree "$T/f7.out"
+    cd "$OLDPWD_SAVE" || true
+    if ! grep -q 'rust_unwrap_or_const' "$T/f7.out" 2>/dev/null; then
+        echo "selftest fixture 7 FAILED: detector did not match a real unwrap_or(0) in source"; FAIL=1
+    fi
+    if ! grep -q 'rust_ok_discards_err' "$T/f7.out" 2>/dev/null; then
+        echo "selftest fixture 7 FAILED: detector did not match a real .ok() in source"; FAIL=1
+    fi
+
+    if [ "$FAIL" -ne 0 ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    echo "PASS — 7 selftest fixture(s) checked, 0 failed"
+    exit 0
+fi
+
+# Selftest is fatal before every real scan: a gate nobody proved can FAIL is
+# not evidence.
+SELFOUT=$(sh "$0" --selftest 2>&1)
+SELFRC=$?
+if [ "$SELFRC" -ne 0 ]; then
+    echo "$SELFOUT"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+scan_tree "$WORK/current"
+
+if [ "$MODE" = "generate" ]; then
+    {
+        echo "# fail_open_baseline.txt — generated by scripts/check/check-no-new-fail-open.shs"
+        echo "# Format: <path>|<pattern_id>|<count>. Line numbers are deliberately absent."
+        echo "#"
+        echo "# This is DEBT, not approval. Every line is a place where code that could"
+        echo "# not determine an answer may be guessing one silently. Shrinking a count"
+        echo "# is always allowed and never fails the gate."
+        echo "# Generated: $(date -u +%Y-%m-%d)"
+        echo "#"
+        echo "# RAW TREE-WIDE COUNTS BEFORE ANY NARROWING OR BASELINING (recorded so the"
+        echo "# scoping decisions above are auditable rather than hidden):"
+        echo "#   src/compiler_rust/** (1723 .rs files, vendor excluded), tree-wide:"
+        echo "#     unwrap_or(<int const>)   597"
+        echo "#     unwrap_or(<other const>) 356"
+        echo "#     unwrap_or_default()      343"
+        echo "#     unwrap_or_else(|_| ...)  105"
+        echo "#     .ok()                    749"
+        echo "#     let _ = <fallible>       935"
+        echo "#     Err(_) =>                618"
+        echo "#   src/compiler/** + src/lib/** (9472 .spl files):"
+        echo "#     ?? <numeric const>      1142"
+        echo "#     ?? \"\"/false/true        1171"
+        echo "#     unwrap_or(                104"
+        echo "#     or_else(                   10"
+        echo "#     value_or/get_or           107"
+        echo "#   scripts/**:"
+        echo "#     || true                  1547"
+        echo "#     || echo <const>           128"
+        echo "#     || :                       53"
+        echo "#"
+        cat "$WORK/current"
+    } > "$BASELINE"
+    N=$(awk -F'|' '{s+=$3}END{print s+0}' "$WORK/current")
+    echo "wrote $BASELINE"
+    echo "PASS — $N site(s) checked, baseline regenerated"
+    exit 0
+fi
+
+[ -f "$BASELINE" ] || { echo "baseline not found: $BASELINE (run --generate-baseline)"; echo "ERROR — nothing was checked"; exit 2; }
+
+RESULT=$(diff_against_baseline "$WORK/current" "$BASELINE")
+SITES=$(echo "$RESULT" | cut -d'|' -f1)
+BASED=$(echo "$RESULT" | cut -d'|' -f2)
+NEW=$(echo "$RESULT" | cut -d'|' -f3)
+NAMES=$(echo "$RESULT" | cut -d'|' -f4)
+
+# Non-vacuity is absolute: a scan that examined zero sites is ERROR, never a
+# pass. This gate is a member of the class it defends against.
+if [ "${SITES:-0}" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "${NEW:-0}" -gt 0 ]; then
+    echo "NEW fail-open shapes (not in baseline):"
+    for n in $NAMES; do echo "  $n"; done
+    echo "FAIL — $SITES site(s) checked, $NEW new fail-open:$NAMES"
+    exit 1
+fi
+echo "PASS — $SITES site(s) checked, 0 new fail-open (baselined: $BASED)"
+exit 0

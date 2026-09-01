@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# The setup wrapper requires NVIDIA_CUDA_BASE to be an immutable @sha256 image.
+ARG NVIDIA_CUDA_BASE
+FROM ${NVIDIA_CUDA_BASE}
+
+ARG UBUNTU_SNAPSHOT=20260814T000000Z
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Use an immutable archive view. vulkan-tools supplies the loader diagnostic;
+# the NVIDIA ICD is injected by NVIDIA Container Toolkit at run time. Installing
+# mesa-vulkan-drivers here would create a false NVIDIA/Vulkan admission path.
+RUN printf '%s\n' \
+      'Types: deb' \
+      "URIs: https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}" \
+      'Suites: noble noble-updates noble-security' \
+      'Components: main universe restricted multiverse' \
+      'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+      > /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates time vulkan-tools \
+    && ! dpkg-query -W -f='${Status}\n' mesa-vulkan-drivers 2>/dev/null | grep -Fq 'install ok installed' \
+    && command -v /usr/bin/time >/dev/null \
+    && command -v vulkaninfo >/dev/null \
+    && rm -rf /var/lib/apt/lists/*
+
+LABEL org.simple-lang.campaign="render-perf-8k80-nvidia-v1" \
+      org.simple-lang.driver-model="nvidia-container-toolkit-injection" \
+      org.simple-lang.mesa-icd="forbidden"
+
+ENTRYPOINT ["/bin/sh"]

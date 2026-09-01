@@ -1,0 +1,72 @@
+# chained_receiver_mut_arg_writeback_spec.spl — generalization of the
+# chained-MethodCall-receiver mutable-argument write-back defect beyond the
+# ByteBuffer/U16le shape that first exposed it. Probes deeper chains, multiple
+# mutable arguments on one chained call, and mutation of a value returned by
+# a chained call.
+# Regression spec for:
+# doc/08_tracking/bug/bytebuffer_struct_param_mutation_not_persisted_2026-09-01.md
+use std.spec
+
+class Sink:
+    items: [i64]
+
+    static fn new() -> Sink:
+        Sink(items: [])
+
+    me fn add(v: i64):
+        self.items.push(v)
+
+    fn size() -> i64:
+        self.items.len()
+
+struct Emitter:
+    base: i64
+
+    static fn of(v: i64) -> Emitter:
+        Emitter(base: v)
+
+    fn wide(extra: i64) -> Emitter:
+        Emitter(base: self.base + extra)
+
+    fn emit(out: Sink):
+        out.add(self.base)
+        out.add(self.base + 1)
+
+    fn emit_two(a: Sink, b: Sink):
+        a.add(self.base)
+        b.add(self.base * 2)
+
+describe "chained receiver mutable-arg write-back (generalized)":
+    it "two-level chain mutates the caller's argument":
+        var s = Sink.new()
+        Emitter.of(10).emit(s)
+        expect(s.size()).to_equal(2)
+
+    it "three-level chain mutates the caller's argument":
+        var s = Sink.new()
+        Emitter.of(10).wide(5).emit(s)
+        expect(s.size()).to_equal(2)
+        expect(s.items[0]).to_equal(15)
+
+    it "chained call writes back multiple mutable arguments":
+        var a = Sink.new()
+        var b = Sink.new()
+        Emitter.of(7).emit_two(a, b)
+        expect(a.size()).to_equal(1)
+        expect(a.items[0]).to_equal(7)
+        expect(b.size()).to_equal(1)
+        expect(b.items[0]).to_equal(14)
+
+    it "value returned by a chained call can itself be mutated afterwards":
+        var s = Sink.new()
+        val e = Emitter.of(1).wide(2)
+        e.emit(s)
+        expect(s.size()).to_equal(2)
+        expect(s.items[0]).to_equal(3)
+
+    it "chained write-back does not alias unrelated caller variables":
+        var target = Sink.new()
+        var untouched = Sink.new()
+        Emitter.of(3).emit(target)
+        expect(target.size()).to_equal(2)
+        expect(untouched.size()).to_equal(0)

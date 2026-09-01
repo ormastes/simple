@@ -1,0 +1,182 @@
+#!/bin/sh
+# Guard: `array.remove(index)` must REMOVE the element at `index` from the
+# receiver IN PLACE and RETURN THAT ELEMENT — on every engine.
+#
+# Bug: doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+#
+# THE CONTRACT AND WHY IT WAS CHOSEN
+# ----------------------------------
+# There is no prose spec for array `.remove(index)` anywhere in doc/. The
+# contract was settled from the tree's own primary sources, all of which say
+# "return the removed thing, mutate in place":
+#
+#   * sibling `pop()` — runtime `rt_array_pop` (runtime/src/value/collections.rs)
+#     mutates in place and returns the ELEMENT; `method_registry/builtins.rs`
+#     declares it `is_mutating: true`, "removes and returns the last element";
+#     HIR types `[T].pop()` as `T`.
+#   * sibling `Dict.remove(key)` — runtime `rt_dict_remove`
+#     (runtime/src/value/dict.rs) removes the entry and returns the VALUE; HIR
+#     types it as the dict's value type.
+#   * `method_registry/builtins.rs` already declared array `remove` as mutating.
+#   * the only spec that pins builtin array remove,
+#     test/03_system/feature/usage/mutable_by_default_spec.spl, asserts exactly
+#     `removed == 2` and `arr.len() == 2` — element plus in-place shrink.
+#
+# The rejected alternative was "return the mutated array" (what the AST
+# interpreter did). It had no runtime implementation behind it, no HIR type, no
+# spec, and it contradicts both siblings — so it was a defect, not a design.
+#
+# WHY THIS IS A SHELL SCRIPT AND NOT A `*_spec.spl`
+# -------------------------------------------------
+# `bin/simple test` runs the AST interpreter only. On the interpreter the defect
+# was a wrong RETURN VALUE; on the JIT it was strictly worse and completely
+# invisible to the suite — `arr.remove(i)` compiled to `rt_dict_remove`, which
+# type-checks its receiver as a Dict, so on an Array it returned nil and mutated
+# NOTHING. `rt_array_remove` was declared in the method registry but did not
+# exist in the runtime at all. No spec can reach that lane. See
+# doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md.
+#
+# WHAT IS ASSERTED, per engine
+# ----------------------------
+#   1. the RETURN VALUE is the removed element (not the array, not nil)
+#   2. the receiver SHRANK — `len()` went 3 -> 2 (catches the JIT no-op, which
+#      left len at 3)
+#   3. the receiver's CONTENTS are right — the correct element was dropped, not
+#      merely some element (an off-by-one that pops the tail would satisfy 1+2
+#      for a middle index otherwise)
+#   4. first-index and last-index removal also return their element (the two
+#      other examples the spec pins)
+#   5. an OUT-OF-RANGE index does not mutate and does not crash
+#
+# BINARY UNDER TEST — `SIMPLE_BIN` (default `bin/simple`). Expected RED against
+# the stale deployed binary and GREEN against a freshly built seed until the
+# next redeploy; see the bug doc. Do not "fix" a red run by relaxing an
+# assertion.
+#
+# FAIL-CLOSED CONTRACT — verdict line is always the LAST line of stdout:
+#   PASS — <n> engine setting(s) checked: ...   exit 0   (n is always > 0)
+#   FAIL — ...                                  exit 1
+#   ERROR — nothing was checked: ...            exit 2
+
+set -u
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_RUST_SEED_WARNING=0
+export SIMPLE_RUST_SEED_WARNING
+
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+oops() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+[ -x "$SIMPLE_BIN" ] || command -v "$SIMPLE_BIN" >/dev/null 2>&1 \
+  || oops "compiler not executable at '$SIMPLE_BIN' (set SIMPLE_BIN to override)"
+
+work="$(mktemp -d)" || oops "mktemp failed"
+trap 'rm -rf "$work"' EXIT INT TERM
+
+probe="$work/array_remove_probe.spl"
+cat > "$probe" <<'PROBE_EOF'
+class Q:
+    items: [i64]
+    me take() -> i64:
+        return self.items.remove(0)
+
+fn main():
+    # Middle index.
+    var a = [10, 20, 30]
+    val mid = a.remove(1)
+    print "mid={mid}"
+    print "mid_len={a.len()}"
+    print "mid_0={a[0]}"
+    print "mid_1={a[1]}"
+
+    # First index.
+    var b = [10, 20, 30]
+    val head = b.remove(0)
+    print "head={head}"
+    print "head_len={b.len()}"
+    print "head_0={b[0]}"
+
+    # Last index.
+    var c = [10, 20, 30]
+    val tail = c.remove(2)
+    print "tail={tail}"
+    print "tail_len={c.len()}"
+    print "tail_1={c[1]}"
+
+    # Out of range: must not mutate and must not crash. The marker after it is
+    # the liveness witness.
+    var d = [10, 20, 30]
+    val oob = d.remove(9)
+    print "oob_len={d.len()}"
+
+    # TYPED field receiver, returned through a declared `-> i64`. This is a
+    # DIFFERENT code path from the local-variable cases above and it caught a
+    # real defect the locals missed: with array `remove` absent from the HIR
+    # method-return-type table, the result stayed TAGGED and `q.take()` returned
+    # 56 (== 7 << 3) instead of 7. Any value that is the expected one times 8 is
+    # an unstripped tag, not an arithmetic error.
+    var q = Q(items: [7, 8, 9])
+    print "field_got={q.take()}"
+    print "field_len={q.items.len()}"
+    print "field_first={q.items[0]}"
+    print "REACHED_END"
+main()
+PROBE_EOF
+[ -s "$probe" ] || oops "probe file was not written"
+
+expect_line() {
+  _mode="$1"; _pat="$2"; _what="$3"; _file="$4"
+  /usr/bin/grep -aq "^$_pat\$" "$_file" \
+    || fail "engine '$_mode': $_what — expected line '$_pat', got: $(tr '\n' '|' < "$_file")"
+}
+
+checked=0
+engines=""
+
+for mode in interpreter jit; do
+  out="$work/out.$mode"
+  SIMPLE_EXECUTION_MODE="$mode" "$SIMPLE_BIN" run "$probe" > "$out" 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || oops "engine '$mode': probe exited $rc: $(tr '\n' '|' < "$out")"
+  [ -s "$out" ]   || oops "engine '$mode': probe produced no output"
+
+  # Vacuity sentinel: the probe must have run to the end, or every assertion
+  # below could pass on a truncated run.
+  /usr/bin/grep -aq '^REACHED_END$' "$out" \
+    || oops "engine '$mode': probe did not reach the end — assertions would be vacuous: $(tr '\n' '|' < "$out")"
+
+  # 1 + 3. Middle removal: returns the ELEMENT, and the RIGHT one is gone.
+  #        The pre-fix interpreter printed `mid=[10, 30]`; the pre-fix JIT
+  #        printed `mid=nil` with `mid_len=3`.
+  expect_line "$mode" 'mid=20'   'array.remove(index) did not return the removed element' "$out"
+  expect_line "$mode" 'mid_len=2' 'array.remove(index) did not shrink the receiver in place' "$out"
+  expect_line "$mode" 'mid_0=10' 'array.remove(index) removed the wrong element' "$out"
+  expect_line "$mode" 'mid_1=30' 'array.remove(index) removed the wrong element' "$out"
+
+  # 4. First and last index.
+  expect_line "$mode" 'head=10'   'remove(0) did not return the first element' "$out"
+  expect_line "$mode" 'head_len=2' 'remove(0) did not shrink the receiver' "$out"
+  expect_line "$mode" 'head_0=20' 'remove(0) removed the wrong element' "$out"
+  expect_line "$mode" 'tail=30'   'remove(last) did not return the last element' "$out"
+  expect_line "$mode" 'tail_len=2' 'remove(last) did not shrink the receiver' "$out"
+  expect_line "$mode" 'tail_1=20' 'remove(last) removed the wrong element' "$out"
+
+  # 5. Out-of-range is a no-op, not a mutation and not a crash.
+  expect_line "$mode" 'oob_len=3' 'an out-of-range remove(index) mutated the receiver' "$out"
+
+  # 6. Typed field receiver through a declared `-> i64` return. `field_got=56`
+  #    (7 << 3) was the measured pre-fix value: the element came back still
+  #    TAGGED because array `remove` was missing from the HIR return-type table.
+  #    The local-variable cases above all passed while this one failed, so this
+  #    assertion is not redundant with them.
+  expect_line "$mode" 'field_got=7'   'remove() through a typed field returned a TAGGED value (expected*8 => unstripped tag) or the wrong element' "$out"
+  expect_line "$mode" 'field_len=2'   'remove() on a field array did not shrink it — the mutation write-back was dropped' "$out"
+  expect_line "$mode" 'field_first=8' 'remove() on a field array removed the wrong element' "$out"
+
+  checked=$((checked + 1))
+  engines="${engines:+$engines,}$mode"
+done
+
+[ "$checked" -gt 0 ] || oops "no engine was exercised"
+printf 'PASS — %d engine setting(s) checked: %s — array.remove(index) returns the removed element and shrinks the receiver in place\n' "$checked" "$engines"
+exit 0

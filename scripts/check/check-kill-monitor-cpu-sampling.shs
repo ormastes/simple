@@ -1,0 +1,194 @@
+#!/bin/sh
+# check-kill-monitor-cpu-sampling.shs — guard the kill-monitor CPU-spin decision.
+#
+# Incident 2026-08-17: scripts/resource/kill_simple_monitor.shs SIGTERMed
+# legitimate spec runs. Two independent defects:
+#
+#   1. The kill decision read `ps -o pcpu`, which is a LIFETIME AVERAGE of the
+#      process. A spec pegs ~100% while compiling and decays toward ~70% once it
+#      is I/O bound, so its average sweeps DOWNWARD through the fixed
+#      CPU_THRESHOLD=95 over its lifetime. Whether it was above or below at the
+#      instant the monitor polled was pure timing: byte-identical commands were
+#      measured at 75.1% (survived), 97.2% (KILLED) and 69.2% (survived).
+#   2. MIN_AGE_SECS defaulted to 60, BELOW the ~115s runtime of an ordinary unit
+#      spec, so the default configuration killed valid runs.
+#
+# Both are result-corrupting: the victim dies on SIGTERM mid-output and the
+# truncated stream reads like a real (partial) failure rather than an
+# infrastructure kill.
+#
+# This guard asserts the FIXED shape, and its --selftest demonstrates on live
+# processes that instantaneous sampling separates a real spinner from a
+# mostly-idle process while `ps` pcpu does not.
+#
+# Verdict convention (last line of stdout is authoritative):
+#   PASS  — <n> invariant(s) checked, ...      exit 0
+#   FAIL  — ...                                exit 1
+#   ERROR — nothing was checked                exit 2
+#
+# Non-vacuity is absolute: a run that checked 0 invariants is ERROR, never PASS.
+
+set -u
+
+MONITOR="${MONITOR_PATH:-scripts/resource/kill_simple_monitor.shs}"
+CHECKED=0
+FAILURES=""
+
+fail() { FAILURES="${FAILURES}${FAILURES:+; }$1"; }
+note() { CHECKED=$(( CHECKED + 1 )); }
+
+# ---------------------------------------------------------------- selftest ---
+# Proves the MECHANISM on live processes, not just the source text: a busy-spin
+# process must measure hot instantaneously, and a sleeping process must not.
+selftest_sample() {
+    # $1 = pid, $2 = interval secs. Echoes instantaneous cpu pct.
+    _pid="$1"; _iv="$2"
+    _tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    _a=$(selftest_ticks "$_pid") || return 1
+    sleep "$_iv"
+    _b=$(selftest_ticks "$_pid") || return 1
+    echo $(( (_b - _a) * 100 / (_tck * _iv) ))
+}
+
+selftest_ticks() {
+    _s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    [ -n "$_s" ] || return 1
+    _r=${_s##*') '}
+    set -f
+    # shellcheck disable=SC2086
+    set -- $_r
+    set +f
+    [ "$#" -ge 20 ] || return 1
+    echo $(( ${12} + ${13} ))
+}
+
+run_selftest() {
+    _sf_fail=""
+
+    # Fixture 1: a genuine CPU spinner must measure hot (>=95%).
+    sh -c 'while :; do :; done' &
+    _spin=$!
+    sleep 1
+    _hot=$(selftest_sample "$_spin" 2)
+    kill -9 "$_spin" 2>/dev/null || true
+    wait "$_spin" 2>/dev/null || true
+    # Deliberately NOT asserting ~100%: on a contended host a genuine spinner
+    # measures well below that (81% observed here while other lanes ran). The
+    # invariant that matters is that it registers as substantially busy.
+    if [ -z "$_hot" ] || [ "$_hot" -lt 40 ] 2>/dev/null; then
+        _sf_fail="${_sf_fail}${_sf_fail:+; }spinner measured ${_hot:-<none>}% instantaneously, expected >=40"
+    fi
+
+    # Fixture 2: a sleeping process must measure cold (<95%), even though it may
+    # have burned CPU earlier in its life. This is exactly the case ps pcpu
+    # smears: burn ~2s of CPU, then sleep, then sample.
+    sh -c 'e=$(( $(date +%s) + 2 )); while [ $(date +%s) -lt $e ]; do :; done; sleep 20' &
+    _mixed=$!
+    # Wait out the burn phase so we sample during the idle phase.
+    sleep 4
+    _cold=$(selftest_sample "$_mixed" 2)
+    _pscpu=$(ps -o pcpu= -p "$_mixed" 2>/dev/null | tr -d ' ')
+    kill -9 "$_mixed" 2>/dev/null || true
+    wait "$_mixed" 2>/dev/null || true
+    if [ -z "$_cold" ] || [ "$_cold" -ge 50 ] 2>/dev/null; then
+        _sf_fail="${_sf_fail}${_sf_fail:+; }idle-phase process measured ${_cold:-<none>}% instantaneously, expected <50"
+    fi
+
+    # Fixture 3: a pid that does not exist yields no sample (fail-closed: the
+    # monitor must not read "no evidence" as "hot").
+    if selftest_ticks 999999 >/dev/null 2>&1; then
+        _sf_fail="${_sf_fail}${_sf_fail:+; }nonexistent pid produced a sample"
+    fi
+
+    # Fixture 4: the DISCRIMINATION invariant — the whole point of the fix is
+    # that a spinner and a post-burn idle process land far apart. A sampler that
+    # smeared them together (as ps pcpu does) would fail here.
+    if [ -n "$_hot" ] && [ -n "$_cold" ]; then
+        if [ $(( _hot - _cold )) -lt 30 ] 2>/dev/null; then
+            _sf_fail="${_sf_fail}${_sf_fail:+; }spinner (${_hot}%) and idle-phase (${_cold}%) not separated by >=30 points"
+        fi
+    fi
+
+    if [ -n "$_sf_fail" ]; then
+        echo "selftest FAILED: $_sf_fail" >&2
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "selftest: 4 fixture(s) passed (spinner=${_hot}% idle-phase=${_cold}% ps-pcpu-on-idle=${_pscpu:-n/a})"
+}
+
+run_selftest
+
+# ------------------------------------------------------------- invariants ---
+if [ ! -f "$MONITOR" ]; then
+    echo "ERROR — nothing was checked (monitor not found at $MONITOR)"
+    exit 2
+fi
+
+# 1. The CPU kill decision must not be driven by ps pcpu.
+note
+if grep -q 'cpu_int=$(printf' "$MONITOR"; then
+    fail "CPU decision still derives cpu_int from ps pcpu (lifetime average)"
+fi
+
+# 2. instant_cpu_pct must exist and be what the decision calls.
+note
+if ! grep -q '^instant_cpu_pct()' "$MONITOR"; then
+    fail "instant_cpu_pct() is not defined"
+fi
+note
+if ! grep -q 'cpu_int=$(instant_cpu_pct' "$MONITOR"; then
+    fail "kill decision does not call instant_cpu_pct"
+fi
+
+# 3. An empty sample must skip, never kill.
+note
+if ! grep -q 'if \[ -z "$cpu_int" \]; then' "$MONITOR"; then
+    fail "missing fail-closed skip when no CPU sample is available"
+fi
+
+# 4. MIN_AGE_SECS default must exceed realistic spec runtime (~115s measured).
+note
+_min=$(sed -n 's/^MIN_AGE_SECS="\${KILL_SIMPLE_MIN_AGE_SECS:-\([0-9]*\)}".*/\1/p' "$MONITOR")
+case "$_min" in
+    ''|*[!0-9]*) fail "could not read MIN_AGE_SECS default from $MONITOR" ;;
+    *) [ "$_min" -ge 600 ] 2>/dev/null || fail "MIN_AGE_SECS default is ${_min}s, must be >=600s (an ordinary unit spec runs ~115s)" ;;
+esac
+
+# 5. Consecutive-sample requirement, so one hot poll cannot fire the guard.
+note
+if ! grep -q 'SPIN_SAMPLES' "$MONITOR"; then
+    fail "no consecutive-hot-sample requirement (SPIN_SAMPLES)"
+fi
+
+# 6. Single-instance lock, so two worktrees cannot both police the uid.
+note
+if ! grep -q 'acquire_lock' "$MONITOR"; then
+    fail "no single-instance lock; concurrent monitors give contradictory verdicts"
+fi
+
+# 7. The RSS runaway guards must still be present — the fix must not have
+#    disarmed real protection.
+note
+if ! grep -q 'MEM_THRESHOLD_MB' "$MONITOR" || ! grep -q 'GENERIC_MEM_THRESHOLD_MB' "$MONITOR"; then
+    fail "RSS runaway guards were removed; the monitor must stay protective"
+fi
+
+# 8. The monitor must still be able to kill something.
+note
+if ! grep -q 'kill_hard "$pid"' "$MONITOR"; then
+    fail "no kill path remains; the monitor would be inert"
+fi
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ -n "$FAILURES" ]; then
+    echo "FAIL — $CHECKED invariant(s) checked in $MONITOR: $FAILURES"
+    exit 1
+fi
+
+echo "PASS — $CHECKED invariant(s) checked, kill-monitor uses instantaneous CPU sampling (MIN_AGE_SECS=${_min}s)"
+exit 0

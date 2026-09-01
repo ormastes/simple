@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Load a RISC-V image into PS DDR, then configure the K26 PL.
+# Usage: bash scripts/fpga/load_elf_k26.shs <bitstream.bit> <asset-dir|image.elf|image.bin>
+#
+# Prerequisites:
+#   - K26 connected via USB (JTAG + UART)
+#   - Vivado 2025.2 installed
+#   - FTDI driver bound to JTAG interface
+
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
+set -euo pipefail
+
+VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
+RISCV_ARCH="${RISCV_ARCH:-rv64}"
+case "$RISCV_ARCH" in
+  rv32)
+    default_bitstream="build/fpga/k26_rv32/k26_rv32_product.bit"
+    default_input="build/os/rv32_soc"
+    default_load_log="build/fpga/rv32/load_elf_rv32.log"
+    kernel_load_addr=0x40400000
+    kernel_max_bytes=130023424
+    tool_prefix="riscv32"
+    build_script="scripts/fpga/build_k26_rv32.shs"
+    ;;
+  rv64)
+    default_bitstream="build/fpga/k26/k26_rv64_product.bit"
+    default_input="build/os/rv64_soc"
+    default_load_log="build/fpga/k26/load_elf_k26.log"
+    kernel_load_addr=0x40200000
+    kernel_max_bytes=132120576
+    tool_prefix="riscv64"
+    build_script="scripts/fpga/build_k26_rv64.shs"
+    ;;
+  *) echo "ERROR: RISCV_ARCH must be rv32 or rv64" >&2; exit 2 ;;
+esac
+BITSTREAM="${1:-$default_bitstream}"
+INPUT="${2:-$default_input}"
+K26_DDR_LOAD_ADDR="0x40000000"
+UART_DEV="${UART_DEV:-}"
+UART_BAUD="${UART_BAUD:-115200}"
+
+if [ ! -f "$VIVADO_SETTINGS" ]; then
+    echo "ERROR: Vivado not found at $VIVADO_SETTINGS"
+    exit 1
+fi
+
+if [ ! -f "$BITSTREAM" ]; then
+    echo "ERROR: Bitstream not found: $BITSTREAM"
+    echo "Run: sh $build_script"
+    exit 1
+fi
+
+if [ ! -e "$INPUT" ]; then
+    echo "ERROR: image/assets not found: $INPUT"
+    echo "Build Linux assets: sh scripts/os/build_${RISCV_ARCH}_linux_assets.shs --all"
+    exit 1
+fi
+if [ "${K26_PS_DDR_RESERVED:-0}" != "1" ]; then
+    echo "ERROR: refuse DDR download without K26_PS_DDR_RESERVED=1" >&2
+    echo "Boot only FSBL/PMU/U-Boot, reserve 0x40000000..0x4fffffff, and stop PS DMA first." >&2
+    exit 1
+fi
+
+# shellcheck disable=SC1090
+. "$VIVADO_SETTINGS"
+
+echo "=== K26 SimpleOS FPGA Load ==="
+echo "Bitstream: $BITSTREAM"
+echo "Input:     $INPUT"
+echo "UART:      ${UART_DEV:-external PMOD adapter required} @ ${UART_BAUD}"
+echo "PS DDR:    $K26_DDR_LOAD_ADDR"
+
+TEMP_BIN=""
+XSDB_SCRIPT=""
+trap 'rm -f "${XSDB_SCRIPT:-}" "${TEMP_BIN:-}"' EXIT
+XSDB_ARGS=("$BITSTREAM")
+
+add_payload() {
+    local file="$1" addr="$2" max_bytes="$3"
+    local bytes
+    [ -f "$file" ] || { echo "ERROR: missing payload: $file" >&2; exit 1; }
+    bytes=$(wc -c <"$file")
+    if [ "$bytes" -le 0 ] || [ "$bytes" -gt "$max_bytes" ]; then
+        echo "ERROR: $file size $bytes exceeds its DDR slot $max_bytes" >&2
+        exit 1
+    fi
+    XSDB_ARGS+=("$file" "$addr")
+}
+
+if [ -d "$INPUT" ]; then
+    add_payload "$INPUT/fw_jump.bin"       0x40000000 2097152
+    add_payload "$INPUT/Image"             "$kernel_load_addr" "$kernel_max_bytes"
+    add_payload "$INPUT/soc_virt.dtb"      0x48000000 2097152
+    add_payload "$INPUT/initramfs.cpio.gz" 0x48200000 132120576
+else
+    PAYLOAD_BIN="$INPUT"
+    case "$INPUT" in
+      *.elf)
+        if command -v "${tool_prefix}-linux-gnu-readelf" >/dev/null 2>&1; then
+            READELF="${tool_prefix}-linux-gnu-readelf"
+        elif command -v readelf >/dev/null 2>&1; then
+            READELF=readelf
+        else
+            echo "ERROR: no readelf found" >&2
+            exit 1
+        fi
+        LOWEST_LOAD=$("$READELF" -lW "$INPUT" | awk '$1 == "LOAD" { print $3; exit }')
+        case "$LOWEST_LOAD" in
+            0x0000000080000000|0x80000000) ;;
+            *) echo "ERROR: ELF lowest LOAD is $LOWEST_LOAD, expected 0x80000000" >&2; exit 1 ;;
+        esac
+        TEMP_BIN=$(mktemp /tmp/k26_riscv_payload.XXXXXX.bin)
+        if command -v "${tool_prefix}-linux-gnu-objcopy" >/dev/null 2>&1; then
+            "${tool_prefix}-linux-gnu-objcopy" -O binary "$INPUT" "$TEMP_BIN"
+        elif command -v riscv64-unknown-elf-objcopy >/dev/null 2>&1; then
+            riscv64-unknown-elf-objcopy -O binary "$INPUT" "$TEMP_BIN"
+        else
+            echo "ERROR: no RISC-V objcopy found" >&2
+            exit 1
+        fi
+        PAYLOAD_BIN="$TEMP_BIN"
+        ;;
+    esac
+    add_payload "$PAYLOAD_BIN" "$K26_DDR_LOAD_ADDR" 268435456
+fi
+
+# Generate XSDB script
+XSDB_SCRIPT=$(mktemp /tmp/k26_load_XXXXXX.tcl)
+cat > "$XSDB_SCRIPT" << 'XSDB_EOF'
+# Connect to target
+connect
+after 1000
+
+# Normal QSPI/FSBL/PMU boot must initialize PS DDR first. Stop all A53 harts so
+# they cannot race the PL core, and use A53 #0 only as a debug-memory writer.
+puts "Loading RISC-V image into initialized PS DDR..."
+for {set hart 0} {$hart < 4} {incr hart} {
+    set target_filter [format {name =~ "*Cortex-A53*#%d*"} $hart]
+    targets -set -nocase -filter $target_filter
+    stop
+}
+targets -set -nocase -filter {name =~ "*Cortex-A53*#0*"}
+for {set i 1} {$i < [llength $argv]} {incr i 2} {
+    set image [lindex $argv $i]
+    set address [lindex $argv [expr {$i + 1}]]
+    puts "DDR_LOAD image=$image address=$address"
+    dow -data $image $address
+    puts "DDR_FIRST_WORD address=$address value=[mrd -value $address]"
+}
+
+# Configure PL only after the image is resident.  The PL reset/clock comes from
+# the already-booted PS, so the RISC-V core starts immediately after fpga.
+puts "Programming PL..."
+targets -set -nocase -filter {name =~ "*PL*"}
+fpga [lindex $argv 0]
+after 3000
+puts "RISC-V core started from translated DDR — check UART console"
+disconnect
+XSDB_EOF
+
+LOAD_LOG="${LOAD_LOG:-$default_load_log}"
+mkdir -p "$(dirname "$LOAD_LOG")"
+set +e
+xsdb "$XSDB_SCRIPT" "${XSDB_ARGS[@]}" >"$LOAD_LOG" 2>&1
+xsdb_rc=$?
+set -e
+tail -80 "$LOAD_LOG"
+if [ "$xsdb_rc" -ne 0 ]; then
+    echo "ERROR: XSDB load failed (exit $xsdb_rc); see $LOAD_LOG"
+    exit "$xsdb_rc"
+fi
+
+echo ""
+if [ -n "$UART_DEV" ]; then
+    echo "Monitor UART: screen $UART_DEV $UART_BAUD"
+    echo "  or: picocom -b $UART_BAUD $UART_DEV"
+else
+    echo "UART capture remains blocked: attach a 3.3V adapter to PMOD H12/E10 and set UART_DEV."
+fi

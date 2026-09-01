@@ -1,0 +1,88 @@
+#!/bin/sh
+# LLVM/clang toolchain selection for this repo. SOURCE this file, do not run it:
+#
+#   . scripts/setup/llvm-toolchain-env.shs
+#
+# Pins the repo's C compiler, C++ compiler and linker to LLVM 23 when it is
+# available, falling back to the previously-pinned LLVM 20 and then to whatever
+# bare `clang`/`cc` the host provides. Everything downstream keys off `CC`:
+#
+#   * scripts/check/check-c-runtime-compiles-push.shs   -- detect_cc() reads $CC first
+#   * the Rust seed's native-build link driver           -- src/compiler_rust/common/src/
+#                                                           platform/cc_detect.rs reads $CC/$CXX
+#                                                           before any probing
+#   * any CMake/Make under src/runtime/                  -- standard CC/CXX
+#
+# LLVM 23 is deployed here WITHOUT root as an extracted apt.llvm.org tree (the
+# host has no passwordless sudo). SIMPLE_LLVM_ROOT points at that tree; a normal
+# root install of the clang-23 packages puts the same binaries on PATH and this
+# script finds them there too. Override the whole decision with
+# SIMPLE_LLVM_VERSION=20 (or any installed major) before sourcing.
+#
+# See doc/07_guide/infra/toolchain/llvm_23_deploy_2026-08-21.md.
+
+# Local (non-root) LLVM 23 prefix, if it was deployed that way.
+: "${SIMPLE_LLVM_ROOT:=/mnt/data/toolchains/llvm-23-root}"
+if [ -x "${SIMPLE_LLVM_ROOT}/usr/bin/clang-23" ]; then
+  # Two directories, both needed:
+  #   usr/bin              -- version-suffixed names (clang-23, ld.lld-23, ...)
+  #   usr/lib/llvm-23/bin  -- UNSUFFIXED names (clang, ld.lld, llvm-config)
+  # The unsuffixed dir is load-bearing, not cosmetic. The seed's native link
+  # step picks its linker by probing PATH for a bare `ld.lld`
+  # (src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:1972,
+  # `use_direct_lld`) and never consults $CC/$LD for that decision. Without
+  # this dir on PATH the C compiler is 23 while the actual link still runs the
+  # host's bare ld.lld (18 here), which is exactly the split this pin exists to
+  # remove. Ordering it ahead of /usr/bin is the no-root equivalent of
+  # update-alternatives, and is scoped to shells that source this file rather
+  # than changing the whole machine.
+  for _d in "${SIMPLE_LLVM_ROOT}/usr/lib/llvm-23/bin" "${SIMPLE_LLVM_ROOT}/usr/bin"; do
+    case ":${PATH}:" in
+      *":${_d}:"*) : ;;
+      *) PATH="${_d}:${PATH}"; export PATH ;;
+    esac
+  done
+  unset _d
+fi
+
+# Preference order: explicit request, then 23, then the old 20 pin, then bare.
+_simple_llvm_pick=""
+for _v in ${SIMPLE_LLVM_VERSION:-} 23 20; do
+  [ -n "${_v}" ] || continue
+  if command -v "clang-${_v}" >/dev/null 2>&1; then
+    _simple_llvm_pick="${_v}"
+    break
+  fi
+done
+
+if [ -n "${_simple_llvm_pick}" ]; then
+  CC="clang-${_simple_llvm_pick}"
+  CXX="clang++-${_simple_llvm_pick}"
+  export CC CXX
+  if command -v "ld.lld-${_simple_llvm_pick}" >/dev/null 2>&1; then
+    LD="ld.lld-${_simple_llvm_pick}"
+    SIMPLE_LLD="ld.lld-${_simple_llvm_pick}"
+    export LD SIMPLE_LLD
+  fi
+  if command -v "llvm-config-${_simple_llvm_pick}" >/dev/null 2>&1; then
+    LLVM_CONFIG="llvm-config-${_simple_llvm_pick}"
+    export LLVM_CONFIG
+    # llvm-sys reads LLVM_SYS_<major><minor>_PREFIX. Export the one matching the
+    # picked major so an llvm-sys bump does not also need an env change.
+    _simple_llvm_prefix="$("${LLVM_CONFIG}" --prefix 2>/dev/null || true)"
+    if [ -n "${_simple_llvm_prefix}" ]; then
+      case "${_simple_llvm_pick}" in
+        23) LLVM_SYS_231_PREFIX="${_simple_llvm_prefix}"; export LLVM_SYS_231_PREFIX ;;
+        22) LLVM_SYS_221_PREFIX="${_simple_llvm_prefix}"; export LLVM_SYS_221_PREFIX ;;
+        20) LLVM_SYS_201_PREFIX="${_simple_llvm_prefix}"; export LLVM_SYS_201_PREFIX ;;
+        18) LLVM_SYS_180_PREFIX="${_simple_llvm_prefix}"; export LLVM_SYS_180_PREFIX ;;
+      esac
+    fi
+    unset _simple_llvm_prefix
+  fi
+  SIMPLE_LLVM_MAJOR="${_simple_llvm_pick}"
+  export SIMPLE_LLVM_MAJOR
+else
+  echo "llvm-toolchain-env: no versioned clang found; leaving CC/CXX unset" >&2
+fi
+unset _simple_llvm_pick _v

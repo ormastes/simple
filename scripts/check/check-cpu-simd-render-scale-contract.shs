@@ -1,0 +1,477 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+OUT_DIR="${OUT_DIR:-$ROOT/build/check/cpu-simd-render-scale}"
+TIMEOUT_SECS="${CPU_SIMD_RENDER_SCALE_TIMEOUT_SECS:-900}"
+WIDTH_4K="${CPU_SIMD_RENDER_SCALE_4K_WIDTH:-3840}"
+HEIGHT_4K="${CPU_SIMD_RENDER_SCALE_4K_HEIGHT:-2160}"
+WIDTH_8K="${CPU_SIMD_RENDER_SCALE_8K_WIDTH:-7680}"
+HEIGHT_8K="${CPU_SIMD_RENDER_SCALE_8K_HEIGHT:-4320}"
+DPI="${CPU_SIMD_RENDER_SCALE_DPI:-300}"
+SAMPLE_COUNT="${CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT:-1}"
+EXEC_MODE="${CPU_SIMD_RENDER_SCALE_MODE:-native}"
+RUN_ORDER="${CPU_SIMD_RENDER_SCALE_RUN_ORDER:-cpu_simd_first}"
+REQUIRE_ENGINE2D_BINARY="${CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY:-0}"
+REQUIRE_RUNTIME_FRESH="${CPU_SIMD_RENDER_SCALE_REQUIRE_RUNTIME_FRESH:-0}"
+REQUIRE_NATIVE_PROBE="${CPU_SIMD_RENDER_SCALE_REQUIRE_NATIVE_PROBE:-0}"
+NATIVE_PROBE_BIN="${CPU_SIMD_RENDER_SCALE_NATIVE_PROBE_BIN:-}"
+PROBE_ONLY="${CPU_SIMD_RENDER_SCALE_PROBE_ONLY:-0}"
+REQUIRE_ARCH_MATRIX="${CPU_SIMD_RENDER_SCALE_REQUIRE_ARCH_MATRIX:-0}"
+ARCH_MATRIX_ENV="${CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ENV:-}"
+ARCH_MATRIX_ONLY="${CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ONLY:-0}"
+
+mkdir -p "$OUT_DIR"
+
+run_with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+run_export() {
+    label="$1"
+    width="$2"
+    height="$3"
+    backend="${4:-cpu_simd}"
+    fixture_label="${5:-$label}"
+    entry="$OUT_DIR/$label.entry.spl"
+    time_file="$OUT_DIR/$label.time"
+    dpi_source="default"
+    if [ "$DPI" != "300" ]; then
+        dpi_source="override"
+    fi
+    rm -f "$OUT_DIR/$label.sdn" "$OUT_DIR/$label.err" "$time_file" "$entry"
+    cat >"$entry" <<EOF
+use app.wm_compare.backend_measurement_software_export.{software_only_render_loop_export_values}
+
+fn main() -> i64:
+    print(software_only_render_loop_export_values("$backend", $width, $height, $DPI, "$dpi_source", 1, $SAMPLE_COUNT, "cpu-simd-${fixture_label}", "simple-web", "scale-${fixture_label}", "local", 1, 1, 1))
+    0
+EOF
+    [ -x /usr/bin/time ] || return 96
+    run_rc=0
+    if command -v timeout >/dev/null 2>&1; then
+        SIMPLE_LIB="$ROOT/src" /usr/bin/time -f 'max_rss_kb=%M' -o "$time_file" \
+            timeout "$TIMEOUT_SECS" "$SIMPLE_BIN" run "$entry" --mode="$EXEC_MODE" \
+            >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err" || run_rc=$?
+    else
+        SIMPLE_LIB="$ROOT/src" /usr/bin/time -f 'max_rss_kb=%M' -o "$time_file" \
+            "$SIMPLE_BIN" run "$entry" --mode="$EXEC_MODE" \
+            >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err" || run_rc=$?
+    fi
+    [ "$run_rc" -eq 0 ] || return "$run_rc"
+    measured_rss="$(sed -n 's/^max_rss_kb=//p' "$time_file")"
+    case "$measured_rss" in
+        ''|*[!0-9]*|0) return 95 ;;
+    esac
+    sed "0,/max_rss_kb: 1 /s//max_rss_kb: $measured_rss /" "$OUT_DIR/$label.sdn" >"$OUT_DIR/$label.sdn.tmp"
+    mv "$OUT_DIR/$label.sdn.tmp" "$OUT_DIR/$label.sdn"
+    grep -q "max_rss_kb: $measured_rss " "$OUT_DIR/$label.sdn" || return 94
+    if grep -q "falling back to interpreter" "$OUT_DIR/$label.err" 2>/dev/null; then
+        return 97
+    fi
+}
+
+field_value() {
+    key="$1"
+    file="$2"
+    grep "^${key}=" "$file" | tail -1 | cut -d= -f2-
+}
+
+sdn_text_value() {
+    key="$1"
+    file="$2"
+    grep -o "${key}: \"[^\"]*\"" "$file" | head -1 | sed "s/^${key}: \"//; s/\"$//"
+}
+
+sdn_bool_value() {
+    key="$1"
+    file="$2"
+    grep -o "${key}: \\(true\\|false\\)" "$file" | head -1 | sed "s/^${key}: //"
+}
+
+sdn_i64_value() {
+    key="$1"
+    file="$2"
+    grep -o "${key}: [0-9][0-9]*" "$file" | head -1 | sed "s/^${key}: //"
+}
+
+fail() {
+    echo "cpu_simd_render_scale_contract_status=fail"
+    echo "cpu_simd_render_scale_contract_reason=$1"
+    exit 1
+}
+
+binary_has_engine2d_simd_externs() {
+    [ -x "$1" ] || return 1
+    command -v nm >/dev/null 2>&1 || return 1
+    _symbols="$(nm -P -g "$1" 2>/dev/null || true)"
+    for _symbol in \
+        rt_engine2d_simd_fill_row_u32 \
+        rt_engine2d_simd_fill_rows_u32 \
+        rt_engine2d_simd_fill_span_u32 \
+        rt_engine2d_simd_copy_row_u32 \
+        rt_engine2d_simd_copy_span_u32 \
+        rt_engine2d_simd_blend_row_u32
+    do
+        printf '%s\n' "$_symbols" | awk -v symbol="$_symbol" '$1 == symbol && $2 == "T" { found = 1 } END { exit !found }' || return 1
+        if [ "$(uname -s)" = Darwin ] \
+            && nm -m "$1" 2>/dev/null | grep " $_symbol$" | grep -q 'weak external'; then
+            return 1
+        fi
+    done
+}
+
+engine2d_binary_link_status() {
+    if binary_has_engine2d_simd_externs "$SIMPLE_BIN"; then
+        echo pass
+    else
+        echo missing
+    fi
+}
+
+file_mtime() {
+    if stat -c %Y "$1" >/dev/null 2>&1; then
+        stat -c %Y "$1"
+    else
+        echo 0
+    fi
+}
+
+runtime_source_fresh_status() {
+    bin_mtime="$(file_mtime "$SIMPLE_BIN")"
+    for source in \
+        "$ROOT/src/runtime/runtime_native.c" \
+        "$ROOT/src/runtime/runtime_simd_dispatch.c" \
+        "$ROOT/src/runtime/simple_core/core_array_ops.spl" \
+        "$ROOT/src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl" \
+        "$ROOT/src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl" \
+        "$ROOT/src/lib/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl"
+    do
+        if [ "$bin_mtime" -lt "$(file_mtime "$source")" ]; then
+            echo stale
+            return
+        fi
+    done
+    echo fresh
+}
+
+native_probe_status() {
+    rm -f "$OUT_DIR/native_probe.err"
+    if [ "$NATIVE_PROBE_BIN" = "" ]; then
+        echo not_configured
+        return
+    fi
+    if [ ! -x "$NATIVE_PROBE_BIN" ]; then
+        echo missing
+        return
+    fi
+    if run_with_timeout "$NATIVE_PROBE_BIN" >/dev/null 2>"$OUT_DIR/native_probe.err"; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+arch_matrix_value() {
+    key="$1"
+    if [ "$ARCH_MATRIX_ENV" = "" ] || [ ! -f "$ARCH_MATRIX_ENV" ]; then
+        echo ""
+        return
+    fi
+    grep "^${key}=" "$ARCH_MATRIX_ENV" | tail -1 | cut -d= -f2-
+}
+
+arch_matrix_status() {
+    if [ "$ARCH_MATRIX_ENV" = "" ]; then
+        echo not_configured
+    elif [ ! -f "$ARCH_MATRIX_ENV" ]; then
+        echo missing
+    else
+        arch_matrix_value cpu_simd_engine2d_arch_matrix_status
+    fi
+}
+
+if [ "$PROBE_ONLY" = "1" ]; then
+    NATIVE_PROBE_STATUS="$(native_probe_status)"
+    if [ "$REQUIRE_NATIVE_PROBE" = "1" ] && [ "$NATIVE_PROBE_STATUS" != "pass" ]; then
+        fail "native_probe_${NATIVE_PROBE_STATUS}"
+    fi
+    echo "cpu_simd_render_scale_contract_status=pass"
+    echo "cpu_simd_render_scale_native_probe_status=$NATIVE_PROBE_STATUS"
+    echo "cpu_simd_render_scale_native_probe_required=$REQUIRE_NATIVE_PROBE"
+    echo "cpu_simd_render_scale_native_probe_bin=$NATIVE_PROBE_BIN"
+    echo "cpu_simd_render_scale_native_probe_contract=cpu_simd_trace_sdn_length_witness"
+    echo "cpu_simd_render_scale_probe_only=1"
+    exit 0
+fi
+
+require_value() {
+    require_label="$1"
+    require_expected="$2"
+    require_actual="$3"
+    if [ "$require_actual" != "$require_expected" ]; then
+        fail "${require_label}_expected_${require_expected}_got_${require_actual}"
+    fi
+}
+
+require_positive() {
+    positive_label="$1"
+    positive_actual="$2"
+    case "$positive_actual" in
+        ''|*[!0-9]*) fail "${positive_label}_not_numeric_${positive_actual}" ;;
+    esac
+    if [ "$positive_actual" -le 0 ]; then
+        fail "${positive_label}_not_positive_${positive_actual}"
+    fi
+}
+
+require_arch_matrix_pass() {
+    require_value "arch_matrix_status" "pass" "$(arch_matrix_status)"
+    require_value "arch_matrix_x86_64_target_binary" "pass" "$(arch_matrix_value cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status)"
+    require_value "arch_matrix_aarch64_target_binary" "pass" "$(arch_matrix_value cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status)"
+    require_value "arch_matrix_riscv64_target_binary" "pass" "$(arch_matrix_value cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status)"
+}
+
+emit_arch_matrix_fields() {
+    echo "cpu_simd_render_scale_arch_matrix_status=$(arch_matrix_status)"
+    echo "cpu_simd_render_scale_arch_matrix_required=$REQUIRE_ARCH_MATRIX"
+    echo "cpu_simd_render_scale_arch_matrix_env=$ARCH_MATRIX_ENV"
+    echo "cpu_simd_render_scale_arch_matrix_x86_64_target_binary_status=$(arch_matrix_value cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status)"
+    echo "cpu_simd_render_scale_arch_matrix_aarch64_target_binary_status=$(arch_matrix_value cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status)"
+    echo "cpu_simd_render_scale_arch_matrix_riscv64_target_binary_status=$(arch_matrix_value cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status)"
+}
+
+if [ "$ARCH_MATRIX_ONLY" = "1" ]; then
+    if [ "$REQUIRE_ARCH_MATRIX" = "1" ]; then
+        require_arch_matrix_pass
+    fi
+    echo "cpu_simd_render_scale_contract_status=pass"
+    emit_arch_matrix_fields
+    echo "cpu_simd_render_scale_arch_matrix_only=1"
+    exit 0
+fi
+
+ratio_permille() {
+    numerator="$1"
+    denominator="$2"
+    case "$numerator:$denominator" in
+        *[!0-9:]*|:*|*:) echo 0; return ;;
+    esac
+    if [ "$denominator" -le 0 ]; then
+        echo 0
+        return
+    fi
+    echo $((numerator * 1000 / denominator))
+}
+
+us_to_ms() {
+    awk -v us="$1" 'BEGIN { printf "%.3f", us / 1000.0 }'
+}
+
+ratio_decimal() {
+    awk -v numerator="$1" -v denominator="$2" 'BEGIN { if (denominator > 0) printf "%.3f", numerator / denominator; else print "0.000" }'
+}
+
+target_met() {
+    awk -v simple="$1" -v baseline="$2" 'BEGIN { print (simple <= baseline) ? "yes" : "no" }'
+}
+
+expected_default_checksum() {
+    label="$1"
+    width="$2"
+    height="$3"
+    if [ "$DPI" != "300" ]; then
+        echo ""
+        return
+    fi
+    if [ "$label" = "4k" ] && [ "$width" = "3840" ] && [ "$height" = "2160" ]; then
+        echo "${CPU_SIMD_RENDER_SCALE_4K_EXPECTED_CHECKSUM:-sum32:35493787911101004}"
+        return
+    fi
+    if [ "$label" = "8k" ] && [ "$width" = "7680" ] && [ "$height" = "4320" ]; then
+        echo "${CPU_SIMD_RENDER_SCALE_8K_EXPECTED_CHECKSUM:-sum32:141975144273648204}"
+        return
+    fi
+    echo ""
+}
+
+check_export() {
+    label="$1"
+    width="$2"
+    height="$3"
+    file="$OUT_DIR/$label.sdn"
+    pixels=$((width * height))
+
+    require_value "${label}_dpi" "$DPI" "$(field_value gui_perf_benchmark_dpi "$file")"
+    require_value "${label}_dpi_default" "300" "$(field_value gui_perf_benchmark_dpi_default "$file")"
+    if [ "$DPI" = "300" ]; then
+        require_value "${label}_dpi_source" "default" "$(field_value gui_perf_benchmark_dpi_source "$file")"
+    else
+        require_value "${label}_dpi_source" "override" "$(field_value gui_perf_benchmark_dpi_source "$file")"
+    fi
+    require_value "${label}_density" "retina" "$(field_value gui_perf_benchmark_density_profile "$file")"
+    require_value "${label}_logical_pixels" "${width}x${height}" "$(field_value gui_perf_benchmark_logical_pixels "$file")"
+    require_value "${label}_physical_pixels" "${width}x${height}" "$(field_value gui_perf_benchmark_physical_pixels "$file")"
+    require_value "${label}_screen_size_reduced" "false" "$(field_value gui_perf_benchmark_screen_size_reduced "$file")"
+    require_value "${label}_native_simd_executed" "true" "$(sdn_bool_value native_simd_executed "$file")"
+    require_value "${label}_native_simd_field" "true" "$(field_value gui_perf_benchmark_native_simd_executed "$file")"
+    require_value "${label}_simd_provider_hits" "$(sdn_i64_value simd_provider_hits "$file")" "$(field_value gui_perf_benchmark_simd_provider_hits "$file")"
+    require_value "${label}_native_simd_hits" "$(sdn_i64_value native_simd_hits "$file")" "$(field_value gui_perf_benchmark_native_simd_hits "$file")"
+    require_positive "${label}_simd_provider_hits" "$(sdn_i64_value simd_provider_hits "$file")"
+    require_positive "${label}_native_simd_hits" "$(sdn_i64_value native_simd_hits "$file")"
+    require_value "${label}_requested" "cpu_simd" "$(sdn_text_value requested "$file")"
+    require_value "${label}_selected" "cpu_simd" "$(sdn_text_value selected "$file")"
+    require_value "${label}_backend_family" "cpu_simd" "$(sdn_text_value backend_family "$file")"
+    require_value "${label}_status" "Initialized" "$(sdn_text_value status "$file")"
+    require_value "${label}_readback_scope" "software-render-loop" "$(sdn_text_value render_readback_scope "$file")"
+    require_value "${label}_runtime_target" "cpu_simd" "$(sdn_text_value runtime_compute_target "$file")"
+    require_value "${label}_runtime_path" "simple_web_layout_engine2d_cpu_simd" "$(sdn_text_value runtime_execution_path "$file")"
+    require_value "${label}_runtime_status" "cpu-simd-render-loop-ready" "$(sdn_text_value runtime_status "$file")"
+    require_value "${label}_scalar_baseline_compared" "true" "$(sdn_bool_value scalar_baseline_compared "$file")"
+    require_value "${label}_fallback" "false" "$(sdn_bool_value fallback_used "$file")"
+    require_value "${label}_fallback_reason" "" "$(sdn_text_value fallback_reason "$file")"
+    require_value "${label}_unavailable_reason" "" "$(sdn_text_value unavailable_reason "$file")"
+    require_value "${label}_pixel_proof" "nonzero_pixels:$pixels" "$(sdn_text_value pixel_proof "$file")"
+    case "$(sdn_text_value checksum "$file")" in
+        sum32:*) ;;
+        *) fail "${label}_missing_checksum" ;;
+    esac
+    expected_checksum="$(expected_default_checksum "$label" "$width" "$height")"
+    if [ "$expected_checksum" != "" ]; then
+        require_value "${label}_retained_checksum" "$expected_checksum" "$(sdn_text_value checksum "$file")"
+    fi
+    require_positive "${label}_cold_start_us" "$(sdn_i64_value cold_start_us "$file")"
+    require_positive "${label}_warm_start_us" "$(sdn_i64_value warm_start_us "$file")"
+    require_positive "${label}_p50_frame_us" "$(sdn_i64_value p50_frame_us "$file")"
+    require_positive "${label}_p95_frame_us" "$(sdn_i64_value p95_frame_us "$file")"
+    require_positive "${label}_p95_input_to_paint_us" "$(sdn_i64_value p95_input_to_paint_us "$file")"
+    require_positive "${label}_max_rss_kb" "$(sdn_i64_value max_rss_kb "$file")"
+    require_positive "${label}_binary_size_bytes" "$(sdn_i64_value binary_size_bytes "$file")"
+    require_positive "${label}_baseline_binary_size_bytes" "$(sdn_i64_value baseline_binary_size_bytes "$file")"
+    require_positive "${label}_package_size_bytes" "$(sdn_i64_value package_size_bytes "$file")"
+    require_positive "${label}_artifact_submit_us" "$(sdn_i64_value artifact_submit_us "$file")"
+}
+
+check_software_export() {
+    label="$1"
+    width="$2"
+    height="$3"
+    file="$OUT_DIR/${label}_software.sdn"
+    pixels=$((width * height))
+
+    require_value "${label}_software_dpi" "$DPI" "$(field_value gui_perf_benchmark_dpi "$file")"
+    require_value "${label}_software_backend_family" "software" "$(sdn_text_value backend_family "$file")"
+    require_value "${label}_software_requested" "software" "$(sdn_text_value requested "$file")"
+    require_value "${label}_software_selected" "software" "$(sdn_text_value selected "$file")"
+    require_value "${label}_software_runtime_target" "cpu_scalar" "$(sdn_text_value runtime_compute_target "$file")"
+    require_value "${label}_software_runtime_path" "simple_web_layout_software" "$(sdn_text_value runtime_execution_path "$file")"
+    require_value "${label}_software_simd_provider_hits" "0" "$(sdn_i64_value simd_provider_hits "$file")"
+    require_value "${label}_software_native_simd_hits" "0" "$(sdn_i64_value native_simd_hits "$file")"
+    require_value "${label}_software_native_simd_executed" "false" "$(sdn_bool_value native_simd_executed "$file")"
+    require_value "${label}_software_fallback" "false" "$(sdn_bool_value fallback_used "$file")"
+    require_value "${label}_software_pixel_proof" "nonzero_pixels:$pixels" "$(sdn_text_value pixel_proof "$file")"
+    require_value "${label}_software_checksum_parity" "$(sdn_text_value checksum "$OUT_DIR/$label.sdn")" "$(sdn_text_value checksum "$file")"
+}
+
+case "$RUN_ORDER" in
+    cpu_simd_first)
+        if run_export 4k "$WIDTH_4K" "$HEIGHT_4K"; then :; else rc="$?"; fail "4k_run_failed_exit_$rc"; fi
+        if run_export 8k "$WIDTH_8K" "$HEIGHT_8K"; then :; else rc="$?"; fail "8k_run_failed_exit_$rc"; fi
+        if run_export 4k_software "$WIDTH_4K" "$HEIGHT_4K" software 4k; then :; else rc="$?"; fail "4k_software_run_failed_exit_$rc"; fi
+        if run_export 8k_software "$WIDTH_8K" "$HEIGHT_8K" software 8k; then :; else rc="$?"; fail "8k_software_run_failed_exit_$rc"; fi
+        ;;
+    software_first)
+        if run_export 4k_software "$WIDTH_4K" "$HEIGHT_4K" software 4k; then :; else rc="$?"; fail "4k_software_run_failed_exit_$rc"; fi
+        if run_export 8k_software "$WIDTH_8K" "$HEIGHT_8K" software 8k; then :; else rc="$?"; fail "8k_software_run_failed_exit_$rc"; fi
+        if run_export 4k "$WIDTH_4K" "$HEIGHT_4K"; then :; else rc="$?"; fail "4k_run_failed_exit_$rc"; fi
+        if run_export 8k "$WIDTH_8K" "$HEIGHT_8K"; then :; else rc="$?"; fail "8k_run_failed_exit_$rc"; fi
+        ;;
+    *)
+        fail "unsupported_run_order_$RUN_ORDER"
+        ;;
+esac
+check_export 4k "$WIDTH_4K" "$HEIGHT_4K"
+check_export 8k "$WIDTH_8K" "$HEIGHT_8K"
+check_software_export 4k "$WIDTH_4K" "$HEIGHT_4K"
+check_software_export 8k "$WIDTH_8K" "$HEIGHT_8K"
+
+ENGINE2D_BINARY_LINK_STATUS="$(engine2d_binary_link_status)"
+if [ "$REQUIRE_ENGINE2D_BINARY" = "1" ] && [ "$ENGINE2D_BINARY_LINK_STATUS" != "pass" ]; then
+    fail "engine2d_simd_externs_not_linked_in_simple_bin"
+fi
+RUNTIME_SOURCE_FRESH_STATUS="$(runtime_source_fresh_status)"
+if [ "$REQUIRE_RUNTIME_FRESH" = "1" ] && [ "$RUNTIME_SOURCE_FRESH_STATUS" != "fresh" ]; then
+    fail "runtime_sources_newer_than_simple_bin"
+fi
+NATIVE_PROBE_STATUS="$(native_probe_status)"
+if [ "$REQUIRE_NATIVE_PROBE" = "1" ] && [ "$NATIVE_PROBE_STATUS" != "pass" ]; then
+    fail "native_probe_${NATIVE_PROBE_STATUS}"
+fi
+ARCH_MATRIX_STATUS="$(arch_matrix_status)"
+if [ "$REQUIRE_ARCH_MATRIX" = "1" ] && [ "$ARCH_MATRIX_STATUS" != "pass" ]; then
+    fail "arch_matrix_${ARCH_MATRIX_STATUS}"
+fi
+if [ "$REQUIRE_ARCH_MATRIX" = "1" ]; then
+    require_arch_matrix_pass
+fi
+
+echo "cpu_simd_render_scale_contract_status=pass"
+echo "gui_perf_benchmark_backend=simple_web_cpu_simd"
+echo "cpu_simd_render_scale_contract_mode=$EXEC_MODE"
+echo "cpu_simd_render_scale_engine2d_binary_link_status=$ENGINE2D_BINARY_LINK_STATUS"
+echo "cpu_simd_render_scale_engine2d_binary_link_required=$REQUIRE_ENGINE2D_BINARY"
+echo "cpu_simd_render_scale_engine2d_binary_link_simple_bin=$SIMPLE_BIN"
+echo "cpu_simd_render_scale_runtime_source_fresh_status=$RUNTIME_SOURCE_FRESH_STATUS"
+echo "cpu_simd_render_scale_runtime_source_fresh_required=$REQUIRE_RUNTIME_FRESH"
+echo "cpu_simd_render_scale_runtime_native_mtime=$(file_mtime "$ROOT/src/runtime/runtime_native.c")"
+echo "cpu_simd_render_scale_runtime_simple_core_array_ops_mtime=$(file_mtime "$ROOT/src/runtime/simple_core/core_array_ops.spl")"
+echo "cpu_simd_render_scale_simple_bin_mtime=$(file_mtime "$SIMPLE_BIN")"
+echo "cpu_simd_render_scale_native_probe_status=$NATIVE_PROBE_STATUS"
+echo "cpu_simd_render_scale_native_probe_required=$REQUIRE_NATIVE_PROBE"
+echo "cpu_simd_render_scale_native_probe_bin=$NATIVE_PROBE_BIN"
+echo "cpu_simd_render_scale_native_probe_contract=cpu_simd_trace_sdn_length_witness"
+emit_arch_matrix_fields
+echo "cpu_simd_render_scale_contract_dpi=$DPI"
+echo "cpu_simd_render_scale_contract_dpi_source=$(field_value gui_perf_benchmark_dpi_source "$OUT_DIR/4k.sdn")"
+echo "cpu_simd_render_scale_contract_sample_count=$SAMPLE_COUNT"
+echo "cpu_simd_render_scale_contract_run_order=$RUN_ORDER"
+echo "cpu_simd_render_scale_4k_pixels=${WIDTH_4K}x${HEIGHT_4K}"
+echo "cpu_simd_render_scale_4k_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/4k.sdn")"
+echo "cpu_simd_render_scale_4k_p95_frame_us=$(sdn_i64_value p95_frame_us "$OUT_DIR/4k.sdn")"
+echo "cpu_simd_render_scale_4k_software_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/4k_software.sdn")"
+echo "cpu_simd_render_scale_4k_software_p95_frame_us=$(sdn_i64_value p95_frame_us "$OUT_DIR/4k_software.sdn")"
+echo "cpu_simd_render_scale_4k_vs_software_p50_ratio_permille=$(ratio_permille "$(sdn_i64_value p50_frame_us "$OUT_DIR/4k_software.sdn")" "$(sdn_i64_value p50_frame_us "$OUT_DIR/4k.sdn")")"
+echo "cpu_simd_render_scale_4k_checksum=$(sdn_text_value checksum "$OUT_DIR/4k.sdn")"
+echo "cpu_simd_render_scale_4k_software_checksum=$(sdn_text_value checksum "$OUT_DIR/4k_software.sdn")"
+echo "cpu_simd_render_scale_4k_software_checksum_parity=true"
+echo "cpu_simd_render_scale_8k_pixels=${WIDTH_8K}x${HEIGHT_8K}"
+echo "cpu_simd_render_scale_8k_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/8k.sdn")"
+echo "cpu_simd_render_scale_8k_p95_frame_us=$(sdn_i64_value p95_frame_us "$OUT_DIR/8k.sdn")"
+echo "cpu_simd_render_scale_8k_software_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/8k_software.sdn")"
+echo "cpu_simd_render_scale_8k_software_p95_frame_us=$(sdn_i64_value p95_frame_us "$OUT_DIR/8k_software.sdn")"
+echo "cpu_simd_render_scale_8k_vs_software_p50_ratio_permille=$(ratio_permille "$(sdn_i64_value p50_frame_us "$OUT_DIR/8k_software.sdn")" "$(sdn_i64_value p50_frame_us "$OUT_DIR/8k.sdn")")"
+echo "cpu_simd_render_scale_8k_checksum=$(sdn_text_value checksum "$OUT_DIR/8k.sdn")"
+echo "cpu_simd_render_scale_8k_software_checksum=$(sdn_text_value checksum "$OUT_DIR/8k_software.sdn")"
+echo "cpu_simd_render_scale_8k_software_checksum_parity=true"
+simple_8k_us="$(sdn_i64_value p50_frame_us "$OUT_DIR/8k.sdn")"
+software_8k_us="$(sdn_i64_value p50_frame_us "$OUT_DIR/8k_software.sdn")"
+simple_8k_ms="$(us_to_ms "$simple_8k_us")"
+software_8k_ms="$(us_to_ms "$software_8k_us")"
+echo "gui_perf_cpu_base_compare_status=measured"
+echo "gui_perf_cpu_base_compare_source=cpu_simd_scale_contract"
+echo "gui_perf_cpu_base_compare_schedule_order=$RUN_ORDER"
+echo "gui_perf_cpu_base_compare_pixels=${WIDTH_8K}x${HEIGHT_8K}"
+echo "gui_perf_cpu_base_compare_simple_backend=simple_web_cpu_simd"
+echo "gui_perf_cpu_base_compare_simple_p50_ms=$simple_8k_ms"
+echo "gui_perf_cpu_base_compare_baseline_backend=simple_web_software"
+echo "gui_perf_cpu_base_compare_baseline_metric=p50_frame_ms"
+echo "gui_perf_cpu_base_compare_baseline_ms=$software_8k_ms"
+echo "gui_perf_cpu_base_compare_baseline_over_simple_ratio=$(ratio_decimal "$software_8k_ms" "$simple_8k_ms")"
+echo "gui_perf_cpu_base_compare_target_met=$(target_met "$simple_8k_ms" "$software_8k_ms")"
+echo "gui_perf_cpu_base_compare_simd_provider_hits=$(field_value gui_perf_benchmark_simd_provider_hits "$OUT_DIR/8k.sdn")"
+echo "gui_perf_cpu_base_compare_native_simd_executed=$(field_value gui_perf_benchmark_native_simd_executed "$OUT_DIR/8k.sdn")"

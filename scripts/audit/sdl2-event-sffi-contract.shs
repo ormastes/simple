@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+binding="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+provider="$root/src/runtime/runtime_sdl2.c"
+failed=0
+
+event_declarations=$(sed -n '/^# --- Event Polling ---/,/^# --- Keyboard State/p' "$binding")
+if [ "$(printf '%s\n' "$event_declarations" | grep -c '^extern fn rt_sdl2_' || true)" -ne 11 ] ||
+   [ "$(printf '%s\n' "$event_declarations" | grep -c '^@unsafe(reason: "raw SDL2 provider ABI;' || true)" -ne 11 ]; then
+    echo "all SDL2 event externs must retain exact FFI contracts" >&2
+    failed=1
+fi
+window_declarations=$(sed -n '/^# --- Window Events ---/,/^# --- Window Properties ---/p' "$binding")
+if [ "$(printf '%s\n' "$window_declarations" | grep -c '^extern fn rt_sdl2_event_window_' || true)" -ne 3 ] ||
+   [ "$(printf '%s\n' "$window_declarations" | grep -c '^@unsafe(reason: "raw SDL2 provider ABI;' || true)" -ne 3 ]; then
+    echo "all SDL2 window-event externs must retain exact cached-event contracts" >&2
+    failed=1
+fi
+
+for wrapper in event_parse_type event_window_resized event_window_moved \
+    event_window_focused event_keyboard_input event_received_character \
+    event_mouse_button event_mouse_moved event_mouse_wheel; do
+    if grep -B1 "^fn $wrapper" "$binding" | grep -q '^@unsafe'; then
+        echo "$wrapper must confine FFI authority to lexical call scopes" >&2
+        failed=1
+    fi
+done
+detail_wrappers=$(sed -n '/^fn event_parse_type/,/^# --- Keyboard Events ---/p' "$binding")
+if [ "$(printf '%s\n' "$detail_wrappers" | grep -c 'unsafe(capabilities: \[ffi\]):' || true)" -ne 9 ]; then
+    echo "SDL2 event detail wrappers must retain nine minimal FFI scopes" >&2
+    failed=1
+fi
+
+event_text=$(sed -n '/^const char\* rt_sdl2_event_text/,/^}/p' "$provider")
+if ! printf '%s\n' "$event_text" | grep -q 'g_last_event.text.text' ||
+   printf '%s\n' "$event_text" | grep -Eq 'malloc|calloc|realloc|strdup'; then
+    echo "SDL2 event text must remain a zero-allocation borrowed view" >&2
+    failed=1
+fi
+detail_provider=$(sed -n '/^int64_t rt_sdl2_event_key_code/,/Keyboard State (polled/p' "$provider")
+if printf '%s\n' "$detail_provider" | grep -Eq 'SDL_(Poll|Wait)Event|malloc|calloc|realloc|pthread_|mutex'; then
+    echo "SDL2 cached event detail access must remain O(1) and allocation-free" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "SDL2 event SFFI contract audit: PASS"

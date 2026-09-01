@@ -1,0 +1,124 @@
+#!/bin/sh
+# DUP001 gate: flag `enum NAME` declarations that collide (same top-level
+# type name) with a `struct NAME` / `class NAME` declaration in a *different*
+# module. This is the exact defect mechanism behind 4 confirmed production
+# bugs in a 2-day span: vtable NAME-keying (8932fcb3a14), Wall-2
+# StmtKind.Expr-vs-struct-Expr (b1a58671), the compiler-internal SdnValue
+# collision (see doc/08_tracking/bug/duplicate_type_name_collision_audit_2026-07-17.md),
+# and RunnerTestDb (d051505b0c0). Root cause: the seed interpreter's
+# classes/enums registries are FLAT and GLOBAL, so an enum and a struct/class
+# sharing a name silently collide at runtime (class construction wins over
+# enum-variant construction, or vice versa) with zero compile-time signal.
+#
+# This check lives here, not in the pure-Simple lint (src/compiler/90.tools/lint),
+# because that linter's `Linter.lint_file(path)` runs ONE FILE PER PROCESS
+# INVOCATION with no cross-file state (see entry_and_fixes.spl main()) --
+# there is no whole-tree pass to hook a cross-module check into without
+# framework surgery. This standalone script is the documented fallback.
+#
+# Heuristic + textual, not type-checked (same model as
+# src/compiler/90.tools/lint/_LintMain/os_freestanding_lints.spl): it does not
+# know whether either declaration is dead/unreachable code, so a name that
+# collides only inside orphaned files (e.g. undocumented historical
+# `*_phaseNx.spl` snapshots) still gets reported. Read the hit before
+# dismissing it. WARN severity: report-only by default (exit 0); pass
+# --strict to fail the build on any hit.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+STRICT=0
+SCAN_DIRS="src/lib src/compiler src/app src/os"
+
+usage() {
+    cat <<'EOF'
+Usage: sh scripts/check/check-type-name-collisions.shs [options]
+
+Scans src/lib, src/compiler, src/app, src/os for a top-level `enum NAME`
+declared in one module colliding with a `struct NAME` / `class NAME` of the
+same NAME declared in a different module (DUP001).
+
+Options:
+  --strict    Exit 1 if any collision is found (default: report-only, exit 0)
+  -h, --help  Show this help
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --strict) STRICT=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "check-type-name-collisions: unknown option: $arg" >&2; usage; exit 2 ;;
+    esac
+done
+
+COUNT_FILE="$(mktemp)"
+trap 'rm -f "$COUNT_FILE"' EXIT
+echo 0 > "$COUNT_FILE"
+
+# Column format: kind<TAB>name<TAB>path
+# `^(pub )?(enum|struct|class) NAME` — no leading whitespace, so only
+# top-level declarations count (nested/indented bodies never match).
+# Single AWK pass: group file lists per name while streaming (avoids an
+# O(unique_names) shell loop re-scanning the whole decl list per name, which
+# is unusably slow at this repo's scale of ~11k distinct top-level names).
+git grep -nE '^(pub )?(enum|struct|class) [A-Za-z_][A-Za-z0-9_]*' -- $SCAN_DIRS 2>/dev/null | \
+    awk -F: -v count_file="$COUNT_FILE" '
+        {
+            file = $1
+            rest = $0
+            sub(/^[^:]*:[0-9]+:/, "", rest)
+            line = rest
+            sub(/^pub /, "", line)
+            if (line ~ /^enum /)        { kind = "enum" }
+            else if (line ~ /^struct /) { kind = "struct" }
+            else if (line ~ /^class /)  { kind = "class" }
+            else { next }
+            name = line
+            sub(/^(enum|struct|class) /, "", name)
+            sub(/[^A-Za-z0-9_].*$/, "", name)
+            if (name == "") next
+
+            # Dedup (kind,name,file) triples cheaply (a name can be declared
+            # twice in one file only via a real duplicate; harmless either way).
+            key = kind SUBSEP name SUBSEP file
+            if (seen[key]++) next
+
+            if (kind == "enum") {
+                if (!(name in enum_seen)) { enum_names[++enum_n] = name }
+                enum_seen[name] = 1
+                enum_files[name] = enum_files[name] file "\n"
+            } else {
+                sc_files[name] = sc_files[name] file "\n"
+            }
+        }
+        END {
+            hits = 0
+            for (i = 1; i <= enum_n; i++) {
+                name = enum_names[i]
+                if (!(name in sc_files)) continue
+                hits++
+                print "DUP001: \x27" name "\x27 declared as BOTH enum and struct/class in different modules"
+                n = split(enum_files[name], ef, "\n")
+                for (j = 1; j <= n; j++) if (ef[j] != "") print "  enum:         " ef[j]
+                n = split(sc_files[name], sf, "\n")
+                for (j = 1; j <= n; j++) if (sf[j] != "") print "  struct/class: " sf[j]
+                print ""
+            }
+            print hits > count_file
+        }
+    '
+
+HITS=$(cat "$COUNT_FILE")
+
+if [ "$HITS" -eq 0 ]; then
+    echo "check-type-name-collisions: no enum-vs-struct/class name collisions found"
+    exit 0
+fi
+
+echo "check-type-name-collisions: $HITS colliding name(s) found (DUP001, warn severity)"
+if [ "$STRICT" -eq 1 ]; then
+    exit 1
+fi
+exit 0

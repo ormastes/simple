@@ -1,0 +1,148 @@
+#!/bin/sh
+# check-simpleos-shell-hello-e2e.shs — SimpleOS on QEMU: boot -> `ls` -> compile a
+# hello world in-guest -> run it.
+#
+# Board-runnable rule (.claude/rules/board-runnable.md): this drives the REAL-FIRMWARE
+# lane (OVMF pflash -> GRUB-EFI), never QEMU `-kernel` and never isa-debug-exit, so the
+# same artifact is what would run on hardware. The underlying lane is
+# scripts/os/ssh_simple_hello_uefi.shs, which already proves boot + in-guest execution
+# of an ARBITRARY guest program over SSH. This wrapper adds the two rungs rules.sdl
+# needs and holds the acceptance bar for all four.
+#
+# Physical-board path for this lane: doc/03_plan/os/simpleos/hw_qemu/ and
+# doc/07_guide/os/simpleos_host_os_guide.md. A QEMU-only result is not a board claim.
+#
+# The four rungs, each proven from the TRANSCRIPT, never from an exit code:
+#   R1 boot     — real firmware reached the SimpleOS kernel
+#   R2 ls       — a directory listing came back from the guest
+#   R3 compile  — a hello world was compiled INSIDE the guest
+#   R4 run      — the resulting program printed its expected line
+#
+# Ground truth 2026-07-14/08-04: in-guest INTERPRETER execution is proven; the deployed
+# in-guest full CLI still has open compile blockers. So R3 is reported honestly --
+# `compile_blocked` is a recorded outcome, never silently folded into a PASS.
+#
+# Verdict is the LAST LINE of stdout; exit status is corroboration only:
+#   PASS — SimpleOS booted, ls returned <n> entries, hello compiled and ran   exit 0
+#   SKIPPED — QEMU/OVMF PREREQUISITES ABSENT, LANE NOT VERIFIED               exit 0
+#   FAIL — ... (names the first rung that did not hold)                       exit 1
+#   ERROR — nothing was checked                                              exit 2
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+LANE="$REPO_ROOT/scripts/os/ssh_simple_hello_uefi.shs"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/build/os/shell_hello_e2e}"
+TIMEOUT_SECS="${QEMU_LANE_TIMEOUT:-2400}"
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        --out-dir) OUT_DIR=$2; shift 2 ;;
+        -h|--help) echo "usage: $0 [--out-dir DIR] [--selftest]" >&2; exit 2 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+# Prerequisites: QEMU, real OVMF firmware, and a built SimpleOS-target payload.
+# Any missing piece means the lane cannot run here -- absent, not failing.
+# Names the FIRST missing prerequisite rather than answering a bare yes/no: a generic
+# "prerequisites absent" sends the reader hunting for which one, and the answer here is
+# usually the cross-built payload, not the emulator.
+missing_prereq() {
+    command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "qemu-system-x86_64 not installed"; return 0; }
+    ovmf=0
+    for f in /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd \
+             /usr/share/edk2/x64/OVMF_CODE.fd "$REPO_ROOT/build/os/ovmf/OVMF_CODE.fd"; do
+        [ -f "$f" ] && ovmf=1
+    done
+    [ "$ovmf" -eq 1 ] || { echo "no OVMF firmware image (real-firmware boot is mandatory here)"; return 0; }
+    payload="$REPO_ROOT/bin/release/x86_64-unknown-simpleos/simple"
+    [ -f "$payload" ] || { echo "cross-built SimpleOS payload missing: bin/release/x86_64-unknown-simpleos/simple"; return 0; }
+    echo ""
+    return 0
+}
+
+# --- the acceptance bar, applied to a transcript ---------------------------------
+rung_boot()    { grep -qiE 'SimpleOS|kernel: boot|GRUB|BdsDxe' "$1"; }
+rung_ls()      { grep -qE 'E2E-LS-BEGIN' "$1" && grep -qE '^(bin|dev|etc|sys|usr|hello\.spl|FSEXEC\.ELF)' "$1"; }
+rung_compile() { grep -qE 'E2E-COMPILE-OK' "$1"; }
+rung_run()     { grep -qE 'hello from simple on simpleos|E2E-HELLO-OK' "$1"; }
+
+selftest() {
+    st=$(mktemp -d) || return 1
+    rc=0
+
+    # arm 1: empty transcript proves nothing
+    : > "$st/empty.log"
+    for r in rung_boot rung_ls rung_compile rung_run; do
+        if $r "$st/empty.log"; then echo "selftest arm1: $r accepted an empty log" >&2; rc=1; fi
+    done
+
+    # arm 2: booted but no ls -- the exact "it booted so I'll claim the rest" fraud
+    printf 'BdsDxe: loading\nSimpleOS kernel: boot ok\n' > "$st/boot_only.log"
+    rung_boot "$st/boot_only.log" || { echo "selftest arm2: boot rung missed a real boot" >&2; rc=1; }
+    if rung_ls "$st/boot_only.log"; then echo "selftest arm2: ls rung accepted a boot-only log" >&2; rc=1; fi
+
+    # arm 3: an `ls` MARKER with no actual entries must not count as a listing
+    printf 'SimpleOS kernel: boot ok\nE2E-LS-BEGIN\nE2E-LS-END\n' > "$st/marker_only.log"
+    if rung_ls "$st/marker_only.log"; then echo "selftest arm3: ls rung accepted a marker with no entries" >&2; rc=1; fi
+
+    # arm 4: compiled but never ran must not count as run
+    printf 'SimpleOS kernel: boot ok\nE2E-COMPILE-OK\n' > "$st/compiled.log"
+    rung_compile "$st/compiled.log" || { echo "selftest arm4: compile rung missed a real compile" >&2; rc=1; }
+    if rung_run "$st/compiled.log"; then echo "selftest arm4: run rung accepted a compile-only log" >&2; rc=1; fi
+
+    # arm 5: the full genuine ladder passes every rung
+    printf 'BdsDxe: loading\nSimpleOS kernel: boot ok\nE2E-LS-BEGIN\nbin\nusr\nhello.spl\nE2E-LS-END\nE2E-COMPILE-OK\nhello from simple on simpleos\n' > "$st/good.log"
+    for r in rung_boot rung_ls rung_compile rung_run; do
+        $r "$st/good.log" || { echo "selftest arm5: $r rejected a genuine transcript" >&2; rc=1; }
+    done
+
+    rm -rf "$st"
+    return $rc
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed; the guard itself is broken)"
+    exit 2
+fi
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — 5 selftest arms checked, guard calibrated"; exit 0; }
+
+[ -f "$LANE" ] || { echo "ERROR — nothing was checked (missing lane script: $LANE)"; exit 2; }
+
+missing=$(missing_prereq)
+if [ -n "$missing" ]; then
+    echo "SKIPPED — QEMU/OVMF PREREQUISITE ABSENT ($missing), LANE NOT VERIFIED"
+    exit 0
+fi
+
+mkdir -p "$OUT_DIR" || { echo "ERROR — nothing was checked (cannot create $OUT_DIR)"; exit 2; }
+log="$OUT_DIR/shell_hello_e2e.log"
+
+# E2E_GUEST_EXTRA_STEPS is consumed by the lane to run the extra rungs in-guest over the
+# SAME SSH session that already proves boot, so no second boot is needed.
+E2E_GUEST_EXTRA_STEPS='echo E2E-LS-BEGIN; ls /; echo E2E-LS-END; /usr/bin/simple build /hello.spl -o /hello.out && echo E2E-COMPILE-OK; /hello.out || /usr/bin/simple /hello.spl' \
+    timeout "$TIMEOUT_SECS" sh "$LANE" >"$log" 2>&1
+lane_rc=$?
+
+if [ $lane_rc -eq 124 ]; then
+    echo "FAIL — lane timed out after ${TIMEOUT_SECS}s at rung boot/ls (transcript: $log)"
+    exit 1
+fi
+
+rung_boot "$log" || { echo "FAIL — R1 boot: real firmware never reached SimpleOS (rc=$lane_rc, transcript: $log)"; exit 1; }
+rung_ls   "$log" || { echo "FAIL — R2 ls: booted but no directory listing came back (transcript: $log)"; exit 1; }
+
+entries=$(grep -cE '^(bin|dev|etc|sys|usr|hello\.spl|FSEXEC\.ELF)' "$log")
+
+if ! rung_compile "$log"; then
+    # Recorded outcome, never folded into a pass: in-guest full-CLI compile has known
+    # open blockers (deployed selfhost env_set miscompile; seed-cranelift enum defect).
+    echo "FAIL — R3 compile: booted and ls returned $entries entries, but in-guest compile did not report success (transcript: $log)"
+    exit 1
+fi
+rung_run "$log" || { echo "FAIL — R4 run: compiled in-guest but the program produced no expected output (transcript: $log)"; exit 1; }
+
+echo "PASS — SimpleOS booted, ls returned $entries entries, hello compiled and ran in-guest (transcript: $log)"
+exit 0

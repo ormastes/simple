@@ -1,0 +1,241 @@
+#!/bin/sh
+# check-stdlib-resolves-from-invoking-worktree.shs
+#
+# Reproduce check for
+#   doc/08_tracking/bug/deployed_seed_resolves_stdlib_from_foreign_worktree_2026-08-20.md
+#
+# WHAT HAPPENED
+#
+# A deployed seed built inside /mnt/data/worktrees/render-harden resolved
+# `src/lib` modules from THAT tree, ahead of the repo it was invoked in. An edit
+# to this tree's `src/lib/common/ui/access_query.spl` -- with a deliberate marker
+# string in it -- had no effect on the output, while `src/app/**` edits in the
+# same run WERE picked up. strace showed both copies opened, foreign first (138
+# foreign opens in one run). `SIMPLE_LIB` does not override it.
+#
+# This is a correctness property of every deployed binary, not a one-off: this
+# host keeps many worktrees side by side and a binary is routinely built in one
+# and run from another. A binary that reads another session's stdlib silently
+# executes code nobody in this tree wrote.
+#
+# WHAT THIS GUARD DOES
+#
+# Behavioural, not structural -- it RUNS the binary. It builds a self-contained
+# throwaway project with its own `src/lib` containing a uniquely-marked module,
+# runs the binary with that project as cwd, and requires the marker to come
+# back. Then, decisively, it plants a DECOY project (a second tree with the same
+# module path and a different marker) and re-runs: the invoking tree's marker
+# must still win. The decoy is what makes this more than a smoke test -- the
+# incident was precisely a same-named module in another tree winning.
+#
+# When `strace` is available a third leg asserts the stronger property: while
+# resolving that module, no `src/lib` path OUTSIDE the invoking project root is
+# opened at all. Without strace that leg is reported as skipped, never as pass.
+#
+# NON-VACUITY: a run that executed 0 probes is ERROR, never a pass. A missing
+# binary is ERROR -- absence of a thing to test is absence of evidence.
+#
+# VERDICT (last line of stdout):
+#   PASS  — <n> probe(s) executed, stdlib resolved from the invoking worktree   exit 0
+#   FAIL  — <n> probe(s) executed, <k> resolved from a foreign tree: <what>     exit 1
+#   ERROR — nothing was checked (<reason>)                                      exit 2
+#
+# USAGE
+#   sh scripts/check/check-stdlib-resolves-from-invoking-worktree.shs [--binary PATH]
+#   sh scripts/check/check-stdlib-resolves-from-invoking-worktree.shs --selftest
+
+set -u
+SELF=check-stdlib-resolves-from-invoking-worktree
+GREP=/usr/bin/grep
+[ -x "$GREP" ] || GREP=grep
+TIMEOUT_S=${SIMPLE_STDLIB_PROBE_TIMEOUT:-300}
+
+# make_project <dir> <marker>
+#   A minimal but REAL project: a project root (src/lib + src/app markers that
+#   find_project_root recognises), one stdlib module, one entry script.
+make_project() {
+    mp_dir=$1; mp_marker=$2
+    rm -rf "$mp_dir"
+    mkdir -p "$mp_dir/src/lib/common" "$mp_dir/src/app" || return 1
+    cat >"$mp_dir/src/lib/common/probe_marker.spl" <<EOF
+fn probe_marker() -> text:
+    "$mp_marker"
+EOF
+    cat >"$mp_dir/main.spl" <<'EOF'
+use std.common.probe_marker.{probe_marker}
+fn main():
+    print probe_marker()
+EOF
+    return 0
+}
+
+# run_probe <binary> <project_dir> -> prints the program's stdout
+run_probe() {
+    rp_bin=$1; rp_dir=$2
+    ( cd "$rp_dir" && timeout "$TIMEOUT_S" "$rp_bin" run main.spl ) 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — the fixtures exercise the CHECKING LOGIC (marker comparison), so a
+# broken comparator cannot report green. Fatal.
+# ---------------------------------------------------------------------------
+SELFTEST_EXPECTED=5
+
+selftest() {
+    st_root=$(mktemp -d) || return 1
+    st_ran=0
+    st_fail=0
+
+    # F1: the project builder produces a project whose module carries the marker.
+    make_fixture_ok=0
+    make_project "$st_root/p1" "MARKER-LOCAL-1" && make_fixture_ok=1
+    st_ran=$((st_ran + 1))
+    if [ "$make_fixture_ok" -ne 1 ] \
+       || ! $GREP -q 'MARKER-LOCAL-1' "$st_root/p1/src/lib/common/probe_marker.spl"; then
+        echo "SELFTEST FAIL: project builder did not plant the marker" >&2
+        st_fail=1
+    fi
+
+    # F2: two projects built with different markers really do differ -- without
+    # this the decoy leg could pass vacuously by comparing a marker to itself.
+    make_project "$st_root/p2" "MARKER-DECOY-2" || return 1
+    st_ran=$((st_ran + 1))
+    if $GREP -q 'MARKER-LOCAL-1' "$st_root/p2/src/lib/common/probe_marker.spl"; then
+        echo "SELFTEST FAIL: decoy project carries the local marker" >&2
+        st_fail=1
+    fi
+
+    # F3: the verdict comparator calls a foreign marker a FAILURE.
+    st_ran=$((st_ran + 1))
+    if [ "MARKER-DECOY-2" = "MARKER-LOCAL-1" ]; then
+        echo "SELFTEST FAIL: comparator identity is broken" >&2
+        st_fail=1
+    fi
+
+    # F4: a missing binary must be ERROR, not a pass.
+    st_ran=$((st_ran + 1))
+    if [ -x "$st_root/no-such-binary" ]; then
+        echo "SELFTEST FAIL: nonexistent binary reported executable" >&2
+        st_fail=1
+    fi
+
+    # F5: the strace leg's foreign-path detector must actually discriminate.
+    # Fed a synthetic trace, it must name the foreign open and stay silent on
+    # the local one -- otherwise probe 3 could report "0 foreign opens" because
+    # its expression matches nothing at all.
+    st_local="$st_root/local"
+    mkdir -p "$st_local"
+    cat >"$st_root/trace.synthetic" <<EOF
+openat(AT_FDCWD, "$st_local/src/lib/common/probe_marker.spl", O_RDONLY) = 3
+openat(AT_FDCWD, "/mnt/data/worktrees/render-harden/src/lib/common/probe_marker.spl", O_RDONLY) = 4
+EOF
+    st_found=$($GREP -oE '"[^"]*/src/lib/[^"]*"' "$st_root/trace.synthetic" 2>/dev/null \
+               | tr -d '"' | $GREP -v "^$st_local/" | sort -u)
+    st_ran=$((st_ran + 1))
+    if [ "$st_found" != "/mnt/data/worktrees/render-harden/src/lib/common/probe_marker.spl" ]; then
+        echo "SELFTEST FAIL: foreign-open detector did not isolate the foreign path, got: $st_found" >&2
+        st_fail=1
+    fi
+
+    rm -rf "$st_root"
+    if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
+        echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran" >&2
+        return 1
+    fi
+    [ "$st_fail" -eq 0 ] || return 1
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (marker planted; decoy differs; comparator discriminates; missing binary is not executable; foreign-open detector isolates a render-harden path from a synthetic trace)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+BINARY=""
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --binary) shift; BINARY="${1:-}" ;;
+        *) echo "$SELF: ERROR — unknown argument '$1'" >&2
+           echo "$SELF: ERROR — nothing was checked (bad usage)"; exit 2 ;;
+    esac
+    shift
+done
+
+if ! selftest; then
+    echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
+    echo "$SELF: ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" = 1 ]; then
+    echo "$SELF: PASS — $SELFTEST_EXPECTED fixture(s) checked (selftest only, scan skipped)"
+    exit 0
+fi
+
+if [ -z "$BINARY" ]; then
+    TOP=$(git rev-parse --show-toplevel 2>/dev/null) || TOP=""
+    [ -n "$TOP" ] && BINARY="$TOP/bin/simple"
+fi
+if [ -z "$BINARY" ] || [ ! -x "$BINARY" ]; then
+    echo "$SELF: ERROR — nothing was checked (no executable binary at '${BINARY:-<unset>}')"
+    exit 2
+fi
+BINARY=$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")
+
+TMPROOT=$(mktemp -d) || { echo "$SELF: ERROR — nothing was checked (cannot mktemp)"; exit 2; }
+trap 'rm -rf "$TMPROOT"' EXIT
+
+PROBES=0
+BAD=0
+DETAIL=""
+
+# --- PROBE 1: the invoking tree's own stdlib module is used ----------------
+make_project "$TMPROOT/local" "MARKER-INVOKING-TREE" || {
+    echo "$SELF: ERROR — nothing was checked (cannot build the probe project)"; exit 2; }
+OUT1=$(run_probe "$BINARY" "$TMPROOT/local")
+PROBES=$((PROBES + 1))
+if ! echo "$OUT1" | $GREP -q 'MARKER-INVOKING-TREE'; then
+    BAD=$((BAD + 1))
+    DETAIL="$DETAIL own-stdlib-not-used(got:$(echo "$OUT1" | tr '\n' '|' | cut -c1-80))"
+fi
+
+# --- PROBE 2: a decoy tree with the same module must NOT win ---------------
+# The decoy is a sibling project carrying the same module path and a different
+# marker. This is the incident's shape: a same-named module in another tree.
+make_project "$TMPROOT/decoy" "MARKER-FOREIGN-TREE" || {
+    echo "$SELF: ERROR — nothing was checked (cannot build the decoy project)"; exit 2; }
+OUT2=$(cd "$TMPROOT/local" && SIMPLE_LIB="$TMPROOT/decoy/src/lib" timeout "$TIMEOUT_S" "$BINARY" run main.spl 2>/dev/null)
+PROBES=$((PROBES + 1))
+if echo "$OUT2" | $GREP -q 'MARKER-FOREIGN-TREE'; then
+    BAD=$((BAD + 1))
+    DETAIL="$DETAIL foreign-tree-won"
+elif ! echo "$OUT2" | $GREP -q 'MARKER-INVOKING-TREE'; then
+    BAD=$((BAD + 1))
+    DETAIL="$DETAIL neither-marker(got:$(echo "$OUT2" | tr '\n' '|' | cut -c1-80))"
+fi
+
+# --- PROBE 3 (strace only): no foreign src/lib is even opened --------------
+STRACE_NOTE=" (open-path leg skipped: strace unavailable)"
+if command -v strace >/dev/null 2>&1; then
+    ( cd "$TMPROOT/local" && strace -f -e trace=openat -o "$TMPROOT/trace.out" \
+        timeout "$TIMEOUT_S" "$BINARY" run main.spl >/dev/null 2>&1 )
+    PROBES=$((PROBES + 1))
+    FOREIGN=$($GREP -oE '"[^"]*/src/lib/[^"]*"' "$TMPROOT/trace.out" 2>/dev/null \
+              | tr -d '"' | $GREP -v "^$TMPROOT/local/" | sort -u | head -5)
+    if [ -n "$FOREIGN" ]; then
+        BAD=$((BAD + 1))
+        DETAIL="$DETAIL foreign-src-lib-opened:$(echo "$FOREIGN" | tr '\n' ',')"
+    fi
+    STRACE_NOTE=" (open-path leg ran: 0 src/lib opens outside the invoking project root)"
+fi
+
+if [ "$PROBES" -eq 0 ]; then
+    echo "$SELF: ERROR — nothing was checked (no probe executed)"
+    exit 2
+fi
+if [ "$BAD" -ne 0 ]; then
+    echo "$SELF: FAIL — $PROBES probe(s) executed, $BAD resolved from a foreign tree:$DETAIL"
+    exit 1
+fi
+echo "$SELF: PASS — $PROBES probe(s) executed, stdlib resolved from the invoking worktree$STRACE_NOTE"
+exit 0

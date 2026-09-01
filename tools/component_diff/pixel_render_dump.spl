@@ -1,0 +1,38 @@
+# Render an HTML fixture through the Simple browser engine to a PPM file,
+# for pixel-level comparison against a Chrome screenshot of the same fixture.
+# Usage: simple tools/component_diff/pixel_render_dump.spl <fixture.html> <out.ppm> [w] [h]
+use std.io_runtime.{get_args, read_file}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
+use common.image.ppm_decode.{encode_ppm_p6}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+
+fn main() -> i64:
+    var args = get_args()
+    # get_args() may include the script path as args[0]; skip it if so.
+    if args.len() > 0 and args[0].ends_with(".spl"):
+        args = args.slice(1, args.len())
+    if args.len() < 2:
+        print "usage: pixel_render_dump <fixture.html> <out.ppm> [w] [h]"
+        return 1
+    val html = read_file(args[0]) ?? ""
+    if html == "":
+        print "error: cannot read {args[0]}"
+        return 1
+    var w = 400
+    var h = 300
+    if args.len() >= 4:
+        w = args[2].to_int() ?? 400
+        h = args[3].to_int() ?? 300
+    # Interpreter-hosted renders are ~30x slower than native; the default 7s
+    # style budget truncates styling mid-page (mixed font sizes). Use a large
+    # explicit budget — this tool is for offline pixel comparison, not latency.
+    val px = simple_web_layout_render_html_software_pixels(html, w, h, 600000)
+    if px.len() != w * h:
+        print "error: pixel buffer {px.len()} != {w}x{h}"
+        return 1
+    val bytes = encode_ppm_p6(w.to_u32(), h.to_u32(), px)
+    if not file_write_bytes(args[1], bytes):
+        print "error: write failed {args[1]}"
+        return 1
+    print "OK {args[1]} {w}x{h}"
+    0

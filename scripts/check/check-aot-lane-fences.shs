@@ -1,0 +1,266 @@
+#!/bin/sh
+# check-aot-lane-fences.shs — run every AOT-lane regression fence, fail closed.
+#
+# WHY THIS EXISTS
+# ---------------
+# `bin/simple test` hard-defaults to the tree-walk interpreter and
+# TestExecutionMode has no AOT/native variant, so NO SPEC CAN EVER OBSERVE the
+# `native-build` lane. AOT defects therefore hide behind a fully green spec
+# corpus. The only working fence for that lane is a script that drives the real
+# native-build binary — which is what each script listed below does.
+#
+# But on 2026-08-08 an audit found that none of those nine scripts was
+# referenced by any workflow, hook, or aggregate gate. Nine fences that nothing
+# runs are ADVERTISED COVERAGE THAT DOES NOT EXIST — arguably worse than no
+# fence, because their presence in the tree reads as protection. This aggregator
+# is the missing caller.
+#
+# EXIT CODES (matching the repo's pre-push guard convention)
+#   0  PASS  — every fence ran and passed. The verdict line states how many.
+#   1  FAIL  — at least one fence reported a real regression.
+#   2  ERROR — nothing (or not everything) was actually measured. NOT a pass.
+#
+# An exit 2 is deliberately distinct from exit 1: "the gate could not run" and
+# "the gate ran and found a defect" demand different responses, and collapsing
+# them is how a vacuous run gets mistaken for a green one.
+#
+# Individual fences use exit 2 for the same meaning (missing llvm-as, absent
+# strace, an unparseable cache receipt, a native-build timeout). Those propagate
+# here as ERROR, never as PASS.
+#
+# Usage:
+#   sh scripts/check/check-aot-lane-fences.shs            # run all
+#   sh scripts/check/check-aot-lane-fences.shs --list     # print the roster
+#
+# Env:
+#   AOT_FENCE_ONLY="name1 name2"   run only these (basename, no .shs)
+set -u
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+# The roster. Adding an AOT fence WITHOUT adding it here leaves it unrun, which
+# is the exact failure this script was written to end.
+#
+# THE ROSTER IS NOW ITSELF UNDER ORACLE. Until 2026-08-10 this list was
+# hand-maintained with nothing checking it against the tree, and it had drifted
+# by SEVENTEEN fences -- see `--roster` below and aot_fence_roster_optout.txt.
+# `--roster` derives the fence set from disk and FAILS on any fence that is
+# neither listed here nor given a written reason in the opt-out file. It runs
+# automatically before the fences on every invocation; a roster that cannot be
+# verified is an ERROR, never a pass.
+FENCES="
+check-native-tuple-to-text
+check-native-enum-match-payload
+check-native-extern-fabrication
+check-native-object-cache-granularity
+check-native-option-eq-representation
+check-native-option-bool-eq-vs-literal
+check-native-utf8-slice
+check-rt-io-file-native-jit-stub
+check-native-option-bool-llvm-verify
+check-u32-array-not-packed
+check-tuple-index-out-of-range
+check-native-trailing-default-param
+check-native-option-unwrap-receiver
+check-jit-unresolved-symbol-guard
+check-aot-smoke
+check-native-print-stdout-oracle
+check-native-immutable-fn-receiver
+check-native-consecutive-zero-arg-receiver
+check-native-field-text-receiver
+check-native-capturing-lambda-values
+check-native-concat-string-array-forward
+check-native-crossmodule-result-u8
+check-native-inprocess-positional-nonvacuous
+check-native-option-try-target-fail
+check-native-sspec-expect-helper
+check-jit-array-oob-nil-sentinel
+check-jit-closure-blockers
+check-jit-nested-extern-arg-marshal
+"
+
+OPTOUT="scripts/check/aot_fence_roster_optout.txt"
+
+if [ "${1:-}" = "--list" ]; then
+    for f in $FENCES; do echo "$f"; done
+    exit 0
+fi
+
+# ------------------------------------------------------------------ roster
+# ORACLE FOR THE AGGREGATOR ITSELF.
+#
+# The subject of this script is not any program's stdout -- it is "did every AOT
+# fence in the tree actually run". A stdout oracle is the wrong instrument here;
+# the right one is set equality between the fences ON DISK and the fences this
+# roster names. Without it the verdict "PASS -- 14 fence(s) checked" is true and
+# useless: it counts what the list says, never what the tree holds.
+#
+# Emits nothing on success beyond its own tally; prints every offender on
+# failure. `$1` is a directory to scan (the selftest passes a fixture dir).
+roster_check() {
+    scan_dir="$1"
+    rc_missing=""
+    rc_seen=0
+
+    [ -f "$OPTOUT" ] || { echo "ERROR — roster opt-out file $OPTOUT is missing"; return 2; }
+
+    for path in "$scan_dir"/check-native-*.shs "$scan_dir"/check-aot-*.shs \
+                "$scan_dir"/check-jit-*.shs; do
+        [ -f "$path" ] || continue
+        base=$(basename "$path" .shs)
+        rc_seen=$((rc_seen + 1))
+
+        case "
+$FENCES" in
+            *"
+$base
+"*) continue ;;
+        esac
+
+        # Opt-out requires a REASON: basename followed by whitespace then text.
+        if grep -qE "^${base}[[:space:]]+[^[:space:]]" "$OPTOUT" 2>/dev/null; then
+            continue
+        fi
+        if grep -qE "^${base}[[:space:]]*$" "$OPTOUT" 2>/dev/null; then
+            echo "  $base — listed in $OPTOUT with NO REASON (a bare basename is not an opt-out)"
+            rc_missing="$rc_missing $base"
+            continue
+        fi
+        echo "  $base — on disk, not in the roster, not opted out"
+        rc_missing="$rc_missing $base"
+    done
+
+    if [ "$rc_seen" -eq 0 ]; then
+        echo "ERROR — roster oracle scanned 0 fence scripts under $scan_dir"
+        return 2
+    fi
+    ROSTER_SEEN=$rc_seen
+    ROSTER_MISSING="$rc_missing"
+    [ -z "$rc_missing" ] || return 1
+    return 0
+}
+
+# NEGATIVE CONTROL. Plants a fence file that is deliberately absent from the
+# roster and from the opt-out, and requires roster_check to FAIL on it; then
+# removes it and requires the same scan to PASS. If the planted defect is not
+# detected, the completeness oracle is not running and every roster verdict
+# below it is vacuous -- that is an ERROR, not a pass.
+roster_selftest() {
+    st_dir="${TMPDIR:-/tmp}/aot-fence-roster-selftest.$$"
+    rm -rf "$st_dir"
+    mkdir -p "$st_dir" || { echo "ERROR — nothing was checked (cannot create $st_dir)"; return 2; }
+
+    # A control fence that IS in the roster, so the clean scan is non-empty.
+    : > "$st_dir/check-native-tuple-to-text.shs"
+
+    # RED half: plant the unrostered fence.
+    : > "$st_dir/check-native-selftest-planted-unrostered-fence.shs"
+    if roster_check "$st_dir" >/dev/null 2>&1; then
+        rm -rf "$st_dir"
+        echo "ERROR — SELFTEST FAILED: the roster oracle ACCEPTED a planted"
+        echo "        unrostered fence. The completeness check is not running,"
+        echo "        so a green roster verdict would prove nothing."
+        return 2
+    fi
+
+    # GREEN half: remove it, the same scan must now pass.
+    rm -f "$st_dir/check-native-selftest-planted-unrostered-fence.shs"
+    if ! roster_check "$st_dir" >/dev/null 2>&1; then
+        rm -rf "$st_dir"
+        echo "ERROR — SELFTEST FAILED: the roster oracle rejected a clean fixture"
+        echo "        directory, so it cannot distinguish drift from no drift."
+        return 2
+    fi
+
+    rm -rf "$st_dir"
+    return 0
+}
+
+ROSTER_SEEN=0
+ROSTER_MISSING=""
+
+roster_selftest || exit 2
+
+if [ "${1:-}" = "--roster" ]; then
+    echo "=== roster completeness (selftest: 2 fixtures, passed) ==="
+    if roster_check scripts/check; then
+        echo "PASS — $ROSTER_SEEN fence script(s) checked, roster matches the tree"
+        exit 0
+    fi
+    rc=$?
+    [ "$rc" -eq 2 ] && { echo "ERROR — nothing was checked (roster scan could not run)"; exit 2; }
+    echo "FAIL — roster drift: fence(s) on disk that this aggregator never runs:$ROSTER_MISSING"
+    exit 1
+fi
+
+echo "=== roster completeness (selftest: 2 fixtures, passed) ==="
+if ! roster_check scripts/check; then
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+        echo "ERROR — nothing was checked (roster scan could not run)"
+        exit 2
+    fi
+    echo "FAIL — roster drift: fence(s) on disk that this aggregator never runs:$ROSTER_MISSING"
+    echo "       Add each to FENCES, or give it a written reason in $OPTOUT."
+    exit 1
+fi
+echo "ok — roster matches the tree ($ROSTER_SEEN fence script(s) on disk accounted for)"
+
+only="${AOT_FENCE_ONLY:-}"
+ran=0
+failed=0
+errored=0
+fail_names=""
+error_names=""
+
+for f in $FENCES; do
+    if [ -n "$only" ]; then
+        case " $only " in
+            *" $f "*) ;;
+            *) continue ;;
+        esac
+    fi
+    script="scripts/check/$f.shs"
+    if [ ! -f "$script" ]; then
+        echo "ERROR — fence '$f' listed in roster but $script does not exist"
+        errored=$((errored + 1))
+        error_names="$error_names $f"
+        continue
+    fi
+    echo "=== running $f ==="
+    if sh "$script"; then
+        ran=$((ran + 1))
+    else
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+            echo "--- $f: ERROR (exit 2) ---"
+            errored=$((errored + 1))
+            error_names="$error_names $f"
+        else
+            echo "--- $f: FAIL (exit $rc) ---"
+            failed=$((failed + 1))
+            fail_names="$fail_names $f"
+        fi
+    fi
+done
+
+total=$((ran + failed + errored))
+
+if [ "$total" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 fences ran; check AOT_FENCE_ONLY / roster)"
+    exit 2
+fi
+
+if [ "$errored" -gt 0 ]; then
+    echo "ERROR — $errored fence(s) could not run:$error_names"
+    exit 2
+fi
+
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $failed of $total fence(s) regressed:$fail_names"
+    exit 1
+fi
+
+echo "PASS — $ran fence(s) checked, all green; roster verified complete against $ROSTER_SEEN fence script(s) on disk"

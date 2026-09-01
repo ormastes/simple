@@ -1,0 +1,90 @@
+#!/bin/sh
+# Refuse to trust a UTF-8 slice-boundary measurement taken through a binary
+# that does not contain the instrument.
+#
+# `src/compiler_rust/runtime/src/text_slice_audit.rs` counts mid-codepoint
+# text slices when `SIMPLE_UTF8_SLICE_AUDIT` is set. It is designed to be
+# self-proving: when the gate is on it emits exactly ONE synthetic
+# `site=self_test` violation per process, precisely so that a reported zero
+# from an instrument that never ran can be told apart from a real zero.
+#
+# On 2026-08-02 the shipped binary emitted NOTHING with the gate on. Measured,
+# not inferred:
+#
+#   * `SIMPLE_UTF8_SLICE_AUDIT=1` and `=2` each produced 0 audit lines --
+#     the self_test line included, so the instrument's own liveness control
+#     never fired;
+#   * the strings `SIMPLE_UTF8_SLICE_AUDIT`, `interp_bracket`, `interp_method`,
+#     `rt_slice_rust` and `self_test` all occur 0 times in
+#     `bin/release/x86_64-unknown-linux-gnu/simple`, while the control string
+#     `SIMPLE_EXECUTION_MODE` occurs 3 times -- so the absence is real and not
+#     an artifact of how the binary is searched.
+#
+# The cause is NOT that the module is compiled out and NOT that it is unwired.
+# `runtime/src/lib.rs` declares `pub mod text_slice_audit;` unconditionally,
+# with no `cfg` gate, and three call sites reference it unconditionally
+# (`interpreter/expr/collections.rs`, `interpreter_method/string.rs`,
+# `runtime/src/value/collections.rs`). The module landed in 2ca6b4da3a9 on
+# 2026-08-01 and is an ancestor of main. It was LOST IN DEPLOYMENT: the binary
+# under `bin/release/` was never rebuilt from a tree containing it.
+#
+# THE FIX is a runtime rebuild + redeploy of the seed binary, which this script
+# deliberately does not perform -- rebuilding is a separate lane. Until that
+# happens this guard makes the gap LOUD instead of letting the audit report a
+# vacuous clean.
+#
+# usage: sh scripts/check/check-utf8-slice-audit-live.shs [path-to-simple]
+# exit 0 = the instrument is live in that binary; exit 1 = inert (or missing).
+
+set -u
+
+BIN="${1:-}"
+if [ -z "$BIN" ]; then
+    for cand in \
+        bin/release/x86_64-unknown-linux-gnu/simple \
+        bin/release/linux-x86_64/simple \
+        bin/simple
+    do
+        if [ -x "$cand" ]; then BIN="$cand"; break; fi
+    done
+fi
+
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+    echo "check-utf8-slice-audit-live: ERROR — no simple binary found to check (looked under bin/release/); nothing was checked, which is a FAILURE, not a pass"
+    exit 1
+fi
+
+fail=0
+
+# 1. Static: the gate string must be present at all.
+count=$(strings -a "$BIN" 2>/dev/null | grep -c 'SIMPLE_UTF8_SLICE_AUDIT')
+control=$(strings -a "$BIN" 2>/dev/null | grep -c 'SIMPLE_EXECUTION_MODE')
+if [ "$control" -eq 0 ]; then
+    echo "check-utf8-slice-audit-live: ERROR — control string SIMPLE_EXECUTION_MODE absent too; the search method itself is broken, so this run proves nothing"
+    exit 1
+fi
+if [ "$count" -eq 0 ]; then
+    echo "check-utf8-slice-audit-live: FAIL — SIMPLE_UTF8_SLICE_AUDIT occurs 0 times in $BIN (control SIMPLE_EXECUTION_MODE occurs $control), so the instrument is not in the shipped tool"
+    fail=1
+fi
+
+# 2. Dynamic: with the gate on, the module's own liveness self-test must emit
+#    exactly one synthetic violation. This is the check that cannot be faked.
+probe_dir=$(mktemp -d)
+probe="$probe_dir/utf8_slice_audit_liveness.spl"
+printf 'fn main():\n    val s = "caf\\u{e9}x"\n    print s.slice(0, 4)\n' > "$probe"
+lines=$(SIMPLE_UTF8_SLICE_AUDIT=1 "$BIN" run "$probe" 2>&1 | grep -c '^SIMPLE_UTF8_SLICE_AUDIT ')
+rm -rf "$probe_dir"
+
+if [ "$lines" -eq 0 ]; then
+    echo "check-utf8-slice-audit-live: FAIL — with SIMPLE_UTF8_SLICE_AUDIT=1, $BIN emitted 0 audit lines; the module's own self_test violation did not fire, so ANY zero-violation figure taken through this binary is vacuous"
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo "check-utf8-slice-audit-live: rebuild the Rust runtime and redeploy $BIN, then re-run. Do NOT report slice-audit counts measured through the current binary."
+    exit 1
+fi
+
+echo "check-utf8-slice-audit-live: PASS — gate string present ($count occurrence(s)) and the self_test liveness violation fired ($lines audit line(s)) in $BIN"
+exit 0

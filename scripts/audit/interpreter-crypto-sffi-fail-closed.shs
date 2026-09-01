@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+bridge="$root/src/compiler_rust/compiler/src/interpreter_extern/crypto.rs"
+failed=0
+
+if grep -n -E 'try_array_bytes\(\)\.unwrap_or_default\(\)|_ => Vec::new\(\)|_ => return Ok\(Value::(Nil|Int\(0\))' "$bridge"; then
+    echo "interpreter crypto SFFI contains a fabricated input/result fallback" >&2
+    failed=1
+fi
+
+for file in \
+    "$root/src/app/ui.web/ws_handler.spl" \
+    "$root/src/compiler_rust/lib/std/src/infra/hash.spl"
+do
+    if ! awk '
+        /^[[:space:]]*extern fn rt_sha1_/ {
+            if (previous !~ /@unsafe\(/ || previous !~ /capabilities:[[:space:]]*\[[^]]*ffi/) {
+                printf "%s:%d:%s\n", FILENAME, FNR, $0
+                failed = 1
+            }
+        }
+        { previous = $0 }
+        END { exit failed }
+    ' "$file"; then
+        echo "raw SHA-1 declarations must carry explicit ffi unsafe metadata" >&2
+        failed=1
+    fi
+done
+
+if grep -n 'ui_web_ws_sha1_free(handle)' "$root/src/app/ui.web/ws_handler.spl"; then
+    echo "WebSocket SHA-1 finish already consumes its state; do not free twice" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "interpreter crypto SFFI fail-closed audit: PASS"

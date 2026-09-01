@@ -1,0 +1,181 @@
+#!/bin/sh
+# check-symbol-define-visibility-arg.shs
+#
+# SymbolTable.define() takes `visibility: Visibility` in argument slot 5
+# (src/compiler/20.hir/hir_types.spl). The signature used to take
+# `is_public: bool` there, and 25 call sites were never migrated: they kept
+# passing the literal `false`. A bool is not nil, so every nil-guard in the
+# HIR codec passed, and the value then matched none of the six `Visibility`
+# variants — `hc_enc_visibility`'s unreachable fallthrough fired and aborted
+# the build with
+#
+#   error: hir codec: no `Visibility` arm for tag -1
+#
+# That killed `compile --format=smf` on a three-line hello world and with it
+# the whole Stage-3 bootstrap. See the §27 row dated 2026-08-24.
+#
+# This guard fails on any `.define(...)` call with exactly seven arguments
+# whose fifth argument is the literal `true` or `false`. Multi-line calls are
+# joined before parsing. It is a hard zero-bar, not a ratchet: there is no
+# legitimate reason to pass a bool where a Visibility is required.
+#
+# Verdict line is always the LAST line of stdout:
+#   PASS — <n> call site(s) checked, 0 with a bool in the visibility slot   (exit 0)
+#   FAIL — <n> call site(s) checked, <k> with a bool ...: <locations>       (exit 1)
+#   ERROR — nothing was checked (<reason>)                                  (exit 2)
+# A run that examined 0 call sites is an ERROR, never a pass.
+set -u
+
+ROOT=""
+SELFTEST_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --root=*) ROOT=${arg#--root=} ;;
+        *) echo "usage: $0 [--root=DIR] [--selftest]" >&2; exit 2 ;;
+    esac
+done
+
+# scan_tree DIR -> prints "path:line" per offender on stdout, and the number of
+# `.define(` call sites examined on the last line prefixed with "CHECKED ".
+scan_tree() {
+    find "$1" -name '*.spl' -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+        printf '%s\n' "$f"
+    done | {
+        files=$(cat)
+        [ -n "$files" ] || { echo "CHECKED 0"; return; }
+        printf '%s\n' "$files" | xargs awk '
+        function flush(  d,i,c,n,args,cur,a) {
+            if (buf == "") return
+            # split the argument list of the FIRST .define( in buf
+            p = index(buf, ".define(")
+            if (p == 0) { buf = ""; return }
+            s = p + 8
+            d = 1; n = 0; cur = ""
+            for (i = s; i <= length(buf); i++) {
+                c = substr(buf, i, 1)
+                if (c == "(" || c == "[" || c == "{") d++
+                else if (c == ")" || c == "]" || c == "}") { d--; if (d == 0) break }
+                if (d == 1 && c == ",") { args[++n] = cur; cur = ""; continue }
+                cur = cur c
+            }
+            args[++n] = cur
+            if (d != 0) { buf = ""; return }   # unbalanced: not a complete call
+            checked++
+            if (n == 7) {
+                a = args[5]
+                gsub(/^[ \t]+|[ \t]+$/, "", a)
+                if (a == "true" || a == "false")
+                    printf "%s:%d\n", startfile, startline
+            }
+            buf = ""
+        }
+        {
+            line = $0
+            sub(/[ \t]*#.*$/, "", line)
+            if (buf == "") {
+                if (index(line, ".define(") == 0) next
+                buf = line; startfile = FILENAME; startline = FNR
+            } else {
+                buf = buf " " line
+            }
+            # balanced?
+            d = 0
+            p = index(buf, ".define(")
+            for (i = p + 8; i <= length(buf); i++) {
+                c = substr(buf, i, 1)
+                if (c == "(" || c == "[" || c == "{") d++
+                else if (c == ")" || c == "]" || c == "}") { d--; if (d == -1) break }
+            }
+            if (d <= -1 || index(substr(buf, p + 8), ")") > 0) {
+                # try to flush; flush() itself re-validates balance
+                saved = buf
+                flush()
+                if (buf != "") buf = saved
+            }
+            if (length(buf) > 20000) buf = ""
+        }
+        END { printf "CHECKED %d\n", checked }
+        '
+    }
+}
+
+run_scan() {
+    out=$(scan_tree "$1")
+    # xargs may split the file list across several awk invocations; sum them.
+    checked=$(printf '%s\n' "$out" | sed -n 's/^CHECKED \([0-9]*\)$/\1/p' | awk '{s+=$1} END {print s+0}')
+    offenders=$(printf '%s\n' "$out" | grep -v '^CHECKED ' || true)
+    [ -n "${checked:-}" ] || checked=0
+}
+
+selftest() {
+    tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    rc=0
+
+    mkdir -p "$tmp/good"
+    cat > "$tmp/good/a.spl" <<'EOF'
+fn f():
+    val s = self.symbols.define(name, SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
+EOF
+    run_scan "$tmp/good"
+    if [ "$checked" -ne 1 ] || [ -n "$offenders" ]; then
+        echo "selftest FAIL: clean fixture (checked=$checked offenders=$offenders)"; rc=1
+    fi
+
+    mkdir -p "$tmp/bad"
+    cat > "$tmp/bad/b.spl" <<'EOF'
+fn f():
+    val s = self.symbols.define(name, SymbolKind.Variable, nil, span, false, true, nil)
+EOF
+    run_scan "$tmp/bad"
+    if [ "$checked" -ne 1 ] || [ -z "$offenders" ]; then
+        echo "selftest FAIL: incident fixture not flagged (checked=$checked)"; rc=1
+    fi
+
+    # a different .define() (Env.define, 2 args) must not be flagged
+    mkdir -p "$tmp/other"
+    cat > "$tmp/other/c.spl" <<'EOF'
+fn f():
+    ctx.env.define(name, value)
+EOF
+    run_scan "$tmp/other"
+    if [ "$checked" -ne 1 ] || [ -n "$offenders" ]; then
+        echo "selftest FAIL: 2-arg define wrongly flagged (offenders=$offenders)"; rc=1
+    fi
+
+    mkdir -p "$tmp/empty"
+    run_scan "$tmp/empty"
+    if [ "$checked" -ne 0 ]; then
+        echo "selftest FAIL: empty tree reported checked=$checked"; rc=1
+    fi
+
+    rm -rf "$tmp"
+    return $rc
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — selftest only, 4 fixture(s) checked"; exit 0; }
+
+if [ -z "$ROOT" ]; then
+    here=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+    ROOT="$here/src"
+fi
+[ -d "$ROOT" ] || { echo "ERROR — nothing was checked (no such directory: $ROOT)"; exit 2; }
+
+run_scan "$ROOT"
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 .define( call sites found under $ROOT)"
+    exit 2
+fi
+if [ -n "$offenders" ]; then
+    printf '%s\n' "$offenders"
+    k=$(printf '%s\n' "$offenders" | wc -l | tr -d ' ')
+    names=$(printf '%s\n' "$offenders" | tr '\n' ' ')
+    echo "FAIL — $checked call site(s) checked, $k with a bool in the visibility slot: $names"
+    exit 1
+fi
+echo "PASS — $checked call site(s) checked, 0 with a bool in the visibility slot"
+exit 0

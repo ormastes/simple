@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+# Canonical, offline-only admission for the FreeBSD QEMU base image. The image
+# is shared outside a checkout; mutable overlays never become media evidence.
+FREEBSD_VERSION="14.4"
+FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
+STORAGE_ROOT="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}"
+MEDIA_DIR="${SIMPLE_FREEBSD_MEDIA_DIR:-${STORAGE_ROOT}/qemu/images/freebsd}"
+MEDIA_PATH="${SIMPLE_FREEBSD_MEDIA_PATH:-${MEDIA_DIR}/${FREEBSD_IMAGE_NAME}}"
+
+usage() { printf 'Usage: %s --check [--path QCOW2]\n' "$0" >&2; exit 2; }
+[ "$#" -ge 1 ] && [ "$1" = "--check" ] || usage
+shift
+if [ "$#" -gt 0 ]; then
+    [ "$#" -eq 2 ] && [ "$1" = "--path" ] || usage
+    MEDIA_PATH="$2"
+fi
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then sha256 -q "$1"
+    else return 1
+    fi
+}
+
+expected_sha="${SIMPLE_FREEBSD_MEDIA_SHA256:-}"
+if [ -z "$expected_sha" ] && [ -r "${MEDIA_PATH}.sha256" ]; then
+    expected_sha="$(awk 'NF { print $1; exit }' "${MEDIA_PATH}.sha256")"
+fi
+reason="none"
+actual_sha=""
+if [ ! -f "$MEDIA_PATH" ]; then reason="image_missing"
+elif [ -z "$expected_sha" ]; then reason="trusted_sha_missing"
+elif ! printf '%s\n' "$expected_sha" | grep -Eq '^[0-9a-fA-F]{64}$'; then reason="trusted_sha_invalid"
+elif ! actual_sha="$(hash_file "$MEDIA_PATH")"; then reason="sha_tool_missing"
+elif [ "$actual_sha" != "$expected_sha" ]; then reason="sha_mismatch"
+fi
+if [ "$reason" = "none" ]; then status=pass; else status=fail; fi
+printf 'freebsd_media_status=%s\n' "$status"
+printf 'freebsd_media_path=%s\n' "$MEDIA_PATH"
+printf 'freebsd_media_expected_sha256=%s\n' "$expected_sha"
+printf 'freebsd_media_actual_sha256=%s\n' "$actual_sha"
+printf 'freebsd_media_reason=%s\n' "$reason"
+[ "$reason" = "none" ]

@@ -1,0 +1,353 @@
+#!/bin/sh
+# One-command external-host wrapper for the remaining original
+# RenderDoc+Chrome HTML/CSS capture gate.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/html-external-host-capture}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_external_host_capture_$(date -u +%F).md}"
+RUN_CAPTURE="${RDOC_EXTERNAL_RUN_CAPTURE:-0}"
+CAPTURE_OUT="$BUILD_DIR/capture"
+SETUP_OUT="$BUILD_DIR/setup.out"
+SETUP_ENV="$BUILD_DIR/setup/evidence.env"
+GATE_OUT="$BUILD_DIR/gate.out"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+file_exists_status() {
+    path="$1"
+    if [ -z "$path" ]; then
+        echo "missing"
+    elif [ -L "$path" ]; then
+        echo "symlink"
+    elif [ -s "$path" ]; then
+        echo "pass"
+    else
+        echo "missing"
+    fi
+}
+
+write_gpu_exit_gate_env() {
+    log_path="$1"
+    out_path="$2"
+
+    if [ "$log_path" = "" ] || [ ! -s "$log_path" ]; then
+        {
+            echo "rdoc_external_host_gpu_process_exit_status=not-recorded"
+            echo "rdoc_external_host_gpu_process_exit_count=0"
+            echo "rdoc_external_host_gpu_process_exit_codes="
+            echo "rdoc_external_host_gpu_process_exit_reason="
+        } >"$out_path"
+        return 0
+    fi
+
+    exit_lines="$(grep -E 'GPU process exited unexpectedly: exit_code=' "$log_path" 2>/dev/null || true)"
+    if [ "$exit_lines" = "" ]; then
+        {
+            echo "rdoc_external_host_gpu_process_exit_status=pass"
+            echo "rdoc_external_host_gpu_process_exit_count=0"
+            echo "rdoc_external_host_gpu_process_exit_codes="
+            echo "rdoc_external_host_gpu_process_exit_reason=pass"
+        } >"$out_path"
+        return 0
+    fi
+
+    exit_count="$(printf '%s\n' "$exit_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+    exit_codes="$(printf '%s\n' "$exit_lines" | sed -n 's/.*exit_code=\([0-9][0-9]*\).*/\1/p' | sort -u | paste -sd, -)"
+    {
+        echo "rdoc_external_host_gpu_process_exit_status=fail"
+        echo "rdoc_external_host_gpu_process_exit_count=$exit_count"
+        echo "rdoc_external_host_gpu_process_exit_codes=$exit_codes"
+        echo "rdoc_external_host_gpu_process_exit_reason=gpu-process-exited-unexpectedly"
+    } >"$out_path"
+}
+
+setup_status="unavailable"
+setup_reason="not-run"
+capture_status="not-run"
+capture_reason="not-run"
+capture_env="${RDOC_HTML_EVIDENCE_ENV:-$CAPTURE_OUT/html/evidence.env}"
+capture_file=""
+capture_magic=""
+capture_file_status="missing"
+capture_file_magic=""
+capture_html_path=""
+capture_log=""
+gpu_exit_env="$BUILD_DIR/gpu-process-exit.env"
+gpu_process_exit_status=""
+gpu_process_exit_count=""
+gpu_process_exit_codes=""
+gpu_process_exit_reason=""
+gate_status="not-run"
+gate_reason="not-run"
+gate_scene=""
+gate_html_path=""
+gate_capture_file_magic=""
+gate_requested_api=""
+gate_requested_angle=""
+gate_requested_features=""
+gate_launch_flags=""
+overall_status="unavailable"
+overall_reason="capture-not-requested"
+
+if GUI_WEB_2D_VULKAN_BUILD_DIR="$BUILD_DIR/setup" sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check >"$SETUP_OUT" 2>&1; then
+    setup_status="$(value_of gui_web_2d_vulkan_renderdoc_status "$SETUP_ENV")"
+    setup_reason="$(value_of gui_web_2d_vulkan_renderdoc_reason "$SETUP_ENV")"
+    if [ "$setup_status" = "present" ] || [ "$setup_status" = "pass" ]; then
+        setup_status="ready"
+        setup_reason="ready"
+    elif [ "$setup_status" = "" ]; then
+        setup_status="unavailable"
+        setup_reason="missing-renderdoc-status"
+    fi
+else
+    setup_status="$(value_of gui_web_2d_vulkan_renderdoc_status "$SETUP_ENV")"
+    setup_reason="$(value_of gui_web_2d_vulkan_renderdoc_reason "$SETUP_ENV")"
+    if [ "$setup_status" = "" ]; then
+        setup_status="unavailable"
+    fi
+    if [ "$setup_reason" = "" ]; then
+        setup_reason="setup-check-failed"
+    fi
+fi
+
+if [ "$RUN_CAPTURE" = "1" ]; then
+    if [ "$setup_status" = "ready" ]; then
+        if RDOC_OUTPUT_DIR="$CAPTURE_OUT" scripts/tool/renderdoc-evidence.shs capture-html >"$BUILD_DIR/capture-html.out" 2>&1; then
+            capture_status="$(awk -F= '/^rdoc_capture_status=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+            capture_reason="$(awk -F= '/^rdoc_capture_reason=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+            if [ "$capture_status" = "" ]; then
+                capture_status="unknown"
+                capture_reason="missing-capture-evidence"
+            fi
+        else
+            capture_status="$(awk -F= '/^rdoc_capture_status=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+            capture_reason="$(awk -F= '/^rdoc_capture_reason=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+            if [ "$capture_status" = "" ]; then
+                capture_status="fail"
+                capture_reason="capture-command-failed"
+            fi
+        fi
+    else
+        capture_status="unavailable"
+        capture_reason="$setup_reason"
+    fi
+fi
+
+if [ -f "$capture_env" ]; then
+    capture_status_from_env="$(awk -F= '/^rdoc_capture_status=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    capture_reason_from_env="$(awk -F= '/^rdoc_capture_reason=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    if [ "$capture_status_from_env" != "" ]; then
+        capture_status="$capture_status_from_env"
+        capture_reason="$capture_reason_from_env"
+    fi
+    capture_file="$(awk -F= '/^rdoc_capture_file=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    capture_magic="$(awk -F= '/^rdoc_capture_magic=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    capture_html_path="$(awk -F= '/^rdoc_html_path=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    capture_log="$(awk -F= '/^rdoc_log=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+fi
+capture_file_status="$(file_exists_status "$capture_file")"
+if [ "$capture_file_status" = "pass" ]; then
+    capture_file_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
+fi
+write_gpu_exit_gate_env "$capture_log" "$gpu_exit_env"
+gpu_process_exit_status="$(value_of rdoc_external_host_gpu_process_exit_status "$gpu_exit_env")"
+gpu_process_exit_count="$(value_of rdoc_external_host_gpu_process_exit_count "$gpu_exit_env")"
+gpu_process_exit_codes="$(value_of rdoc_external_host_gpu_process_exit_codes "$gpu_exit_env")"
+gpu_process_exit_reason="$(value_of rdoc_external_host_gpu_process_exit_reason "$gpu_exit_env")"
+
+if [ -f "$capture_env" ] && [ "$capture_status" != "" ] && [ "$capture_status" != "pass" ]; then
+    gate_status="fail"
+    gate_reason="${capture_reason:-capture-not-pass}"
+    if [ "$gpu_process_exit_status" = "fail" ]; then
+        gate_reason="chromium-gpu-process-crashed-under-renderdoc"
+    fi
+    gate_scene="$(awk -F= '/^rdoc_scene=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    gate_html_path="$capture_html_path"
+    gate_capture_file_magic="$capture_file_magic"
+    gate_requested_api="$(value_of rdoc_chromium_requested_api "$capture_env")"
+    gate_requested_angle="$(value_of rdoc_chromium_requested_angle "$capture_env")"
+    gate_requested_features="$(value_of rdoc_chromium_requested_features "$capture_env")"
+    gate_launch_flags="$(value_of rdoc_chromium_launch_flags "$capture_env")"
+elif [ -f "$capture_env" ] && [ "$capture_file_status" = "symlink" ]; then
+    gate_status="fail"
+    gate_reason="rdc-file-symlink"
+    gate_scene="$(awk -F= '/^rdoc_scene=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    gate_html_path="$capture_html_path"
+    gate_capture_file_magic="$capture_file_magic"
+    gate_requested_api="$(value_of rdoc_chromium_requested_api "$capture_env")"
+    gate_requested_angle="$(value_of rdoc_chromium_requested_angle "$capture_env")"
+    gate_requested_features="$(value_of rdoc_chromium_requested_features "$capture_env")"
+    gate_launch_flags="$(value_of rdoc_chromium_launch_flags "$capture_env")"
+elif [ -f "$capture_env" ] && [ "$capture_status" = "pass" ] &&
+     [ "$capture_file_status" = "pass" ] && [ "$capture_file_magic" = "RDOC" ]; then
+    gate_scene="$(awk -F= '/^rdoc_scene=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    gate_html_path="$capture_html_path"
+    gate_capture_file_magic="$capture_file_magic"
+    gate_requested_api="$(value_of rdoc_chromium_requested_api "$capture_env")"
+    gate_requested_angle="$(value_of rdoc_chromium_requested_angle "$capture_env")"
+    gate_requested_features="$(value_of rdoc_chromium_requested_features "$capture_env")"
+    gate_launch_flags="$(value_of rdoc_chromium_launch_flags "$capture_env")"
+    case " $gate_launch_flags " in
+        *" --enable-features=Vulkan "*|*" --enable-features=Vulkan,"*|*" --enable-features="*",Vulkan "*|*" --enable-features="*",Vulkan,"*)
+            gate_has_vulkan_feature_flag="1"
+            ;;
+        *)
+            gate_has_vulkan_feature_flag="0"
+            ;;
+    esac
+    case " $gate_launch_flags " in
+        *" --use-angle=vulkan "*)
+            gate_has_vulkan_angle_flag="1"
+            ;;
+        *)
+            gate_has_vulkan_angle_flag="0"
+            ;;
+    esac
+    if [ "$gate_scene" = "html-css-chrome" ] &&
+       [ "$gate_requested_api" = "vulkan" ] &&
+       [ "$gate_requested_angle" = "vulkan" ] &&
+       printf '%s\n' "$gate_requested_features" | grep -q 'Vulkan' &&
+       [ "$gate_has_vulkan_feature_flag" = "1" ] &&
+       [ "$gate_has_vulkan_angle_flag" = "1" ]; then
+        gate_status="pass"
+        gate_reason="pass"
+    else
+        gate_status="fail"
+        gate_reason="capture-metadata-mismatch"
+    fi
+elif [ -f "$capture_env" ]; then
+    if RDOC_HTML_EVIDENCE_ENV="$capture_env" \
+        BUILD_DIR="$BUILD_DIR/gate" \
+        REPORT_PATH="$BUILD_DIR/gate/report.md" \
+        sh scripts/check/check-renderdoc-html-external-host-gate.shs >"$GATE_OUT" 2>&1; then
+        gate_status="pass"
+        gate_reason="pass"
+        gate_scene="$(awk -F= '/^rdoc_html_external_gate_scene=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        gate_html_path="$(awk -F= '/^rdoc_html_external_gate_html_path=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        gate_capture_file_magic="$(awk -F= '/^rdoc_html_external_gate_capture_file_magic=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        gate_requested_api="$(value_of rdoc_html_external_gate_requested_api "$BUILD_DIR/gate/evidence.env")"
+        gate_requested_angle="$(value_of rdoc_html_external_gate_requested_angle "$BUILD_DIR/gate/evidence.env")"
+        gate_requested_features="$(value_of rdoc_html_external_gate_requested_features "$BUILD_DIR/gate/evidence.env")"
+        gate_launch_flags="$(value_of rdoc_html_external_gate_launch_flags "$BUILD_DIR/gate/evidence.env")"
+    else
+        gate_status="$(awk -F= '/^rdoc_html_external_gate_status=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        gate_reason="$(awk -F= '/^rdoc_html_external_gate_reason=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        gate_scene="$(awk -F= '/^rdoc_html_external_gate_scene=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        gate_html_path="$(awk -F= '/^rdoc_html_external_gate_html_path=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        gate_capture_file_magic="$(awk -F= '/^rdoc_html_external_gate_capture_file_magic=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        gate_requested_api="$(value_of rdoc_html_external_gate_requested_api "$BUILD_DIR/gate/evidence.env")"
+        gate_requested_angle="$(value_of rdoc_html_external_gate_requested_angle "$BUILD_DIR/gate/evidence.env")"
+        gate_requested_features="$(value_of rdoc_html_external_gate_requested_features "$BUILD_DIR/gate/evidence.env")"
+        gate_launch_flags="$(value_of rdoc_html_external_gate_launch_flags "$BUILD_DIR/gate/evidence.env")"
+        if [ "$gate_status" = "" ]; then
+            gate_status="fail"
+            gate_reason="gate-command-failed"
+        fi
+    fi
+fi
+
+if [ "$gate_status" = "pass" ]; then
+    overall_status="pass"
+    overall_reason="pass"
+elif [ "$RUN_CAPTURE" != "1" ]; then
+    overall_status="unavailable"
+    overall_reason="capture-not-requested"
+elif [ "$setup_status" != "ready" ]; then
+    overall_status="unavailable"
+    overall_reason="$setup_reason"
+else
+    overall_status="fail"
+    overall_reason="${gate_reason:-${capture_reason:-capture-not-pass}}"
+fi
+
+{
+    echo "rdoc_external_host_capture_status=$overall_status"
+    echo "rdoc_external_host_capture_reason=$overall_reason"
+    echo "rdoc_external_host_setup_status=$setup_status"
+    echo "rdoc_external_host_setup_reason=$setup_reason"
+    echo "rdoc_external_host_run_capture=$RUN_CAPTURE"
+    echo "rdoc_external_host_capture_env=$capture_env"
+    echo "rdoc_external_host_capture_status_raw=$capture_status"
+    echo "rdoc_external_host_capture_reason_raw=$capture_reason"
+    echo "rdoc_external_host_capture_file=$capture_file"
+    echo "rdoc_external_host_capture_file_status=$capture_file_status"
+    echo "rdoc_external_host_capture_magic=$capture_magic"
+    echo "rdoc_external_host_capture_file_magic=$capture_file_magic"
+    echo "rdoc_external_host_capture_html_path=$capture_html_path"
+    echo "rdoc_external_host_capture_log=$capture_log"
+    echo "rdoc_external_host_gpu_process_exit_status=$gpu_process_exit_status"
+    echo "rdoc_external_host_gpu_process_exit_count=$gpu_process_exit_count"
+    echo "rdoc_external_host_gpu_process_exit_codes=$gpu_process_exit_codes"
+    echo "rdoc_external_host_gpu_process_exit_reason=$gpu_process_exit_reason"
+    echo "rdoc_external_host_gate_status=$gate_status"
+    echo "rdoc_external_host_gate_reason=$gate_reason"
+    echo "rdoc_external_host_gate_scene=$gate_scene"
+    echo "rdoc_external_host_gate_html_path=$gate_html_path"
+    echo "rdoc_external_host_gate_capture_file_status=$capture_file_status"
+    echo "rdoc_external_host_gate_capture_file_magic=$gate_capture_file_magic"
+    echo "rdoc_external_host_gate_requested_api=$gate_requested_api"
+    echo "rdoc_external_host_gate_requested_angle=$gate_requested_angle"
+    echo "rdoc_external_host_gate_requested_features=$gate_requested_features"
+    echo "rdoc_external_host_gate_launch_flags=$gate_launch_flags"
+    echo "rdoc_external_host_required_backend=original"
+    echo "rdoc_external_host_required_scene=html-css-chrome"
+    echo "rdoc_external_host_required_status=pass"
+    echo "rdoc_external_host_required_magic=RDOC"
+    echo "rdoc_external_host_required_api=vulkan"
+    echo "rdoc_external_host_required_angle=vulkan"
+    echo "rdoc_external_host_required_features=Vulkan"
+    echo "rdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html"
+    echo "rdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan"
+    echo "rdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan"
+} >"$OUT_ENV"
+
+{
+    echo "# RenderDoc External Host Capture"
+    echo
+    echo "- status: $overall_status"
+    echo "- reason: $overall_reason"
+    echo "- setup status: $setup_status"
+    echo "- setup reason: $setup_reason"
+    echo "- run capture: $RUN_CAPTURE"
+    echo "- capture env: $capture_env"
+    echo "- capture status: $capture_status"
+    echo "- capture reason: $capture_reason"
+    echo "- capture file: $capture_file"
+    echo "- capture magic: $capture_magic"
+    echo "- capture file magic: $capture_file_magic"
+    echo "- capture HTML fixture: $capture_html_path"
+    echo "- capture log: $capture_log"
+    echo "- GPU process exits: $gpu_process_exit_status count=$gpu_process_exit_count codes=$gpu_process_exit_codes"
+    echo "- gate status: $gate_status"
+    echo "- gate reason: $gate_reason"
+    echo "- gate scene: $gate_scene"
+    echo "- gate HTML fixture: $gate_html_path"
+    echo "- gate capture file magic: $gate_capture_file_magic"
+    echo "- gate requested API: $gate_requested_api"
+    echo "- gate requested ANGLE: $gate_requested_angle"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$overall_status" = "pass" ]; then
+    exit 0
+fi
+
+if [ "$RUN_CAPTURE" = "1" ]; then
+    exit 1
+fi
+
+exit 0

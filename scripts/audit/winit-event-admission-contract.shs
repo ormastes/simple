@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+provider="$root/src/runtime/spl_winit/src/lib.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/winit_sffi_window.rs"
+wrapper="$root/src/lib/nogc_sync_mut/io/window_winit.spl"
+
+for symbol in rt_winit_event_loop_poll_events rt_winit_event_loop_wait_events; do
+    if ! grep -B1 -F "extern fn $symbol" "$wrapper" | grep -Fq 'negative sentinel'; then
+        echo "FAIL: $symbol lacks disjoint provider-failure metadata" >&2
+        exit 1
+    fi
+    if ! grep -Fq "fn $symbol(" "$provider"; then
+        echo "FAIL: native provider does not export declared symbol $symbol" >&2
+        exit 1
+    fi
+done
+
+if ! grep -Fq 'fn winit_poll_close_requested(lp: WinitLoop) -> bool?' "$wrapper" ||
+   ! grep -A3 'struct WinitInput:' "$wrapper" | grep -Fq 'is_valid: bool'; then
+    echo 'FAIL: event admission failure is not represented in the safe API' >&2
+    exit 1
+fi
+
+for name in winit_poll_close_requested winit_poll_input_into winit_wait_input_into; do
+    body=$(sed -n "/^fn $name(/,/^fn /p" "$wrapper")
+    if ! printf '%s\n' "$body" | grep -Fq 'unsafe(capabilities: [ffi]):'; then
+        echo "FAIL: $name lacks lexical polling scope" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$body" | grep -Eq 'while ev > 0|if ev < 0'; then
+        echo "FAIL: $name can interpret negative failure as an event" >&2
+        exit 1
+    fi
+done
+
+poll_body=$(sed -n '/fn rt_winit_event_loop_poll_events/,/^}/p' "$provider")
+wait_body=$(sed -n '/fn rt_winit_event_loop_wait_events/,/^}/p' "$provider")
+for body in "$poll_body" "$wait_body"; do
+    if [ "$(printf '%s\n' "$body" | grep -c 'pump_once' || true)" -ne 1 ]; then
+        echo 'FAIL: event admission must retain exactly one native event pump' >&2
+        exit 1
+    fi
+    if printf '%s\n' "$body" | grep -Eq 'loop \{|while |thread::sleep|Vec::|HashMap::'; then
+        echo 'FAIL: event admission gained polling loops, sleeps, or allocation' >&2
+        exit 1
+    fi
+done
+
+if ! grep -A18 '"rt_winit_event_loop_poll_events"' "$interpreter" | grep -Fq 'Ok(int_value(-1))' ||
+   ! grep -A25 '"rt_winit_event_loop_wait_events"' "$interpreter" | grep -Fq 'Ok(int_value(-1))'; then
+    echo 'FAIL: interpreter still fabricates no-event for invalid/disconnected loops' >&2
+    exit 1
+fi
+
+echo 'PASS: Winit event admission distinguishes failure with one pump and no new memory work'

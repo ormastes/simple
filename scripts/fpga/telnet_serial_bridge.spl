@@ -1,0 +1,63 @@
+# Telnet-over-Serial Bridge runner
+#
+# Exposes a serial console (FPGA PL UART / SimpleOS RISC-V console) as a
+# telnet server for system tests. The serial side is file-based (see
+# std.nogc_sync_mut.io.telnet_serial_bridge): an external `stty + dd` reader
+# appends device bytes to RX_PATH while the bridge appends client bytes to
+# TX_PATH (usually the device node itself).
+#
+# Run detached, in its own process group, with interpreter mode pinned:
+#
+#   stty -F /dev/ttyUSB4 115200 cs8 -cstopb -parenb raw -echo
+#   setsid timeout 120 dd if=/dev/ttyUSB4 of=build/rx.bin oflag=append conv=notrunc &
+#   setsid timeout 120 env SIMPLE_EXECUTION_MODE=interpreter \
+#       bin/simple run scripts/fpga/telnet_serial_bridge.spl \
+#       build/rx.bin /dev/ttyUSB4 127.0.0.1:2326 1 5000 &
+#
+# Args: RX_PATH TX_PATH BIND_ADDR [MAX_SESSIONS] [IDLE_LIMIT_MS]
+#   MAX_SESSIONS  0 = serve forever (default 1)
+#   IDLE_LIMIT_MS 0 = no idle limit (default 0)
+#
+# Markers on stdout: BRIDGE_LISTENING / BRIDGE_SESSION_DONE / BRIDGE_DONE /
+# BRIDGE_ERROR=... / BRIDGE_EXIT rc=N
+
+use std.nogc_sync_mut.io.telnet_serial_bridge.{BridgeConfig, bridge_serve}
+
+extern fn rt_cli_get_args() -> [text]
+
+fn script_user_args(marker: text) -> [text]:
+    """Args after the script path — argv layout differs between
+    `bin/simple run script args...` and `simple_seed run script args...`."""
+    val raw = rt_cli_get_args()
+    var out: [text] = []
+    var seen_script = false
+    for a in raw:
+        if seen_script:
+            out.push(a)
+        else:
+            if a.contains(marker):
+                seen_script = true
+    out
+
+# NOTE: no explicit main() call — the interpreter auto-invokes fn main, and an
+# explicit module-level call makes it run twice (double TCP bind).
+fn main():
+    val args = script_user_args("telnet_serial_bridge.spl")
+    if args.len() < 3:
+        print("usage: telnet_serial_bridge.spl RX_PATH TX_PATH BIND_ADDR [MAX_SESSIONS] [IDLE_LIMIT_MS]")
+        return
+
+    val rx_path = args[0]
+    val tx_path = args[1]
+    val bind_addr = args[2]
+
+    var max_sessions = 1
+    if args.len() > 3:
+        max_sessions = args[3].to_int()
+    var idle_limit_ms = 0
+    if args.len() > 4:
+        idle_limit_ms = args[4].to_int()
+
+    val cfg = BridgeConfig(rx_path: rx_path, tx_path: tx_path, bind_addr: bind_addr, max_sessions: max_sessions, idle_limit_ms: idle_limit_ms)
+    val rc = bridge_serve(cfg)
+    print("BRIDGE_EXIT rc={rc}")

@@ -1,0 +1,292 @@
+# Build the kernel (same flow as os.qemu_runner.build_os for the
+# wm-simple-web check target) unless a fresh artifact already exists.
+kernel_stale=false
+if [ -n "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
+    explicit_kernel_status="$(elf_file_status "$KERNEL_OUTPUT")"
+    if [ "$explicit_kernel_status" != pass ]; then
+        KERNEL_BUILD_STATUS="external-elf-$explicit_kernel_status"
+        emit_failure "explicit-wm-kernel-artifact-invalid"
+        exit 1
+    fi
+    KERNEL_ADMISSION=""
+    KERNEL_BUILD_STATUS=external-elf-validated
+elif [ ! -f "$KERNEL_OUTPUT" ]; then
+    kernel_stale=true
+elif ! is_sha256 "$KERNEL_SOURCE_REVISION" || \
+     [ ! -f "$KERNEL_ADMISSION" ] || \
+     ! grep -Fxq "wrapper_sha256=$WRAPPER_SHA256" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "wrapper_bundle_sha256=$WRAPPER_BUNDLE_SHA256" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "simple_bin_sha256=$SIMPLE_BIN_SHA256" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "profile=cranelift|x86-64-v1|none|dynload" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "schema=simpleos-wm-kernel-admission-v3" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "source_input_files=$KERNEL_INPUT_COUNT" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "source_revision_sha256=$KERNEL_SOURCE_REVISION" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "kernel_sha256=$(file_sha256 "$KERNEL_OUTPUT")" "$KERNEL_ADMISSION"; then
+    kernel_stale=true
+fi
+if [ "$kernel_stale" = true ]; then
+    TIMEOUT_BIN=""
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_BIN=timeout
+    elif command -v gtimeout >/dev/null 2>&1; then
+        TIMEOUT_BIN=gtimeout
+    else
+        emit_failure "native-build-watchdog-not-found"
+        exit 1
+    fi
+    mkdir -p build/os/generated/generated
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+    sample_kernel_source_revision
+    if ! is_sha256 "$KERNEL_SOURCE_REVISION" || [ "$KERNEL_INPUT_COUNT" -lt "$KERNEL_INPUT_MIN_FILES" ]; then
+        KERNEL_BUILD_STATUS=source-revision-unavailable
+        kernel_input_verdict error
+        emit_failure "wm-simple-web-source-revision-unavailable"
+        exit 1
+    fi
+    # gui_entry_desktop.spl is the production baremetal desktop target
+    # (os.qemu_runner._needs_freestanding_stub_env /
+    # _uses_baremetal_wrapper_profile): it needs freestanding stub linking
+    # plus an llvm-objcopy on PATH for the ELF32 wrap step.
+    OBJCOPY_PREFIX=""
+    for candidate_dir in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/lib/llvm-17/bin; do
+        if [ -f "$candidate_dir/llvm-objcopy" ]; then
+            OBJCOPY_PREFIX="$candidate_dir"
+            break
+        fi
+    done
+    # This tree is shared with concurrent sessions (and, at times, an in-flight
+    # `git am`) that rewrite thousands of files under the hashed source roots.
+    # Losing that race mid-build is expected and benign; it is not evidence of
+    # anything about the kernel. Retry the whole build against the re-sampled
+    # tree state instead of aborting the lane. The admission invariant is
+    # NOT relaxed: the attempt that actually admits must still observe
+    # before == after over the same input set, so a kernel is never admitted
+    # against source it was not compiled from.
+    while :; do
+    KERNEL_BUILD_ATTEMPTS=$((KERNEL_BUILD_ATTEMPTS + 1))
+    rm -f "$KERNEL_CANDIDATE"
+    set +e
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    SIMPLE_FREESTANDING_ELF32_MULTIBOOT_WRAP=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$TIMEOUT_BIN" --kill-after=10s "${NATIVE_BUILD_TIMEOUT_SECONDS}s" \
+        "$SIMPLE_BIN" native-build \
+        --source build/os/generated --source "$ENTRY" \
+        --timeout "$NATIVE_BUILD_WORKER_TIMEOUT_SECONDS" \
+        --backend cranelift --cpu x86-64-v1 --opt-level=none --log off \
+        --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
+        --entry-closure --entry "$ENTRY" \
+        --target x86_64-unknown-none -o "$KERNEL_CANDIDATE" \
+        --linker-script "$LINKER_SCRIPT" \
+        >"$BUILD_DIR/native-build.out" 2>&1
+    build_code=$?
+    set -e
+    if [ "$build_code" -eq 124 ] || [ "$build_code" -eq 137 ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=timeout-cache-preserved
+        emit_failure "wm-simple-web-build-timeout"
+        exit 1
+    elif [ "$build_code" -eq 139 ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=compiler-crash-signal-11-cache-preserved
+        emit_failure "wm-simple-web-build-failed"
+        exit 1
+    elif [ "$build_code" -ne 0 ] || [ ! -s "$KERNEL_CANDIDATE" ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=failed-cache-preserved
+        emit_failure "wm-simple-web-build-failed"
+        exit 1
+    elif [ "$(elf_file_status "$KERNEL_CANDIDATE")" != pass ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=invalid-elf-cache-preserved
+        emit_failure "wm-simple-web-build-invalid-elf"
+        exit 1
+    fi
+    candidate_sha256="$(file_sha256 "$KERNEL_CANDIDATE")"
+    if ! is_sha256 "$candidate_sha256"; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=invalid-hash-cache-preserved
+        emit_failure "artifact-sha256-invalid"
+        exit 1
+    fi
+    # Re-resolve and re-hash the input set so a mid-build edit to any linked
+    # input still refuses admission of this candidate. The set must resolve to
+    # the same file count as the pre-build sampling (checked below); a revision
+    # mismatch means a concurrent session edited a linked input during the
+    # build, which is retried above rather than admitted.
+    revision_pair_after="$(kernel_source_revision)"
+    input_count_after="${revision_pair_after%% *}"
+    source_revision_after="${revision_pair_after#* }"
+    if ! is_sha256 "$source_revision_after" || [ "$input_count_after" != "$KERNEL_INPUT_COUNT" ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=source-input-set-unresolved-cache-preserved
+        kernel_input_verdict error
+        emit_failure "wm-simple-web-source-revision-unavailable"
+        exit 1
+    fi
+    if [ "$source_revision_after" != "$KERNEL_SOURCE_REVISION" ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        if [ "$KERNEL_BUILD_ATTEMPTS" -lt "$KERNEL_BUILD_MAX_ATTEMPTS" ]; then
+            # Re-sample to the tree state observed at the end of the lost race
+            # and rebuild against exactly that.
+            KERNEL_SOURCE_REVISION="$source_revision_after"
+            KERNEL_INPUT_COUNT="$input_count_after"
+            continue
+        fi
+        KERNEL_BUILD_STATUS=source-changed-cache-preserved
+        kernel_input_verdict changed
+        emit_failure "wm-simple-web-build-source-changed"
+        exit 1
+    fi
+    break
+    done
+    kernel_input_verdict pass
+    mv "$KERNEL_CANDIDATE" "$KERNEL_OUTPUT"
+    KERNEL_SHA256="$candidate_sha256"
+    {
+        echo "schema=simpleos-wm-kernel-admission-v3"
+        echo "wrapper_sha256=$WRAPPER_SHA256"
+        echo "wrapper_bundle_sha256=$WRAPPER_BUNDLE_SHA256"
+        echo "simple_bin_sha256=$SIMPLE_BIN_SHA256"
+        echo "profile=cranelift|x86-64-v1|none|dynload"
+        echo "source_input_files=$KERNEL_INPUT_COUNT"
+        echo "source_revision_sha256=$KERNEL_SOURCE_REVISION"
+        echo "kernel_sha256=$KERNEL_SHA256"
+    } >"$KERNEL_ADMISSION.candidate"
+    mv "$KERNEL_ADMISSION.candidate" "$KERNEL_ADMISSION"
+    KERNEL_BUILD_STATUS=current-source-built
+elif [ -z "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
+    KERNEL_BUILD_STATUS=current-source-cache
+    kernel_input_verdict pass
+fi
+
+KERNEL_SHA256="$(file_sha256 "$KERNEL_OUTPUT")"
+if ! is_sha256 "$KERNEL_SHA256"; then
+    emit_failure "artifact-sha256-invalid"
+    exit 1
+fi
+
+set +e
+scripts/os/build_browser_demo_client.shs >"$BUILD_DIR/build-browser-demo.out" 2>&1
+browser_demo_build_code=$?
+set -e
+if [ "$browser_demo_build_code" -ne 0 ] || [ ! -s "$BROWSER_DEMO_BINARY" ]; then
+    browser_demo_build_status=failed
+    emit_failure "browser-demo-client-build-failed"
+    exit 1
+fi
+BROWSER_DEMO_BINARY_SHA256="$(file_sha256 "$BROWSER_DEMO_BINARY")"
+if ! is_sha256 "$BROWSER_DEMO_BINARY_SHA256"; then
+    browser_demo_build_status=invalid-hash
+    emit_failure "browser-demo-client-hash-invalid"
+    exit 1
+fi
+browser_demo_build_status=pass
+
+rm -f "$QMP_SOCKET" "$SERIAL_LOG"
+
+DISK_IMAGE="${SIMPLEOS_WM_DISK_IMAGE:-$BUILD_DIR/fat32-x86_64-font.img}"
+if [ -n "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
+    disk_image_provenance=external-unvalidated
+fi
+if [ -z "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
+    set +e
+    SIMPLEOS_FONT_ASSET="$FONT_ASSET" \
+    SIMPLEOS_BROWSER_DEMO_BINARY="$BROWSER_DEMO_BINARY" \
+    scripts/os/make_os_disk.shs \
+        256 "$DISK_IMAGE" "$KERNEL_OUTPUT" x86_64 \
+        >"$BUILD_DIR/make-os-disk.out" 2>&1
+    disk_build_code=$?
+    set -e
+    if [ "$disk_build_code" -ne 0 ]; then
+        disk_image_status=build-failed
+        emit_failure "pinned-font-disk-staging-failed"
+        exit 1
+    fi
+    case "$KERNEL_BUILD_STATUS" in
+        current-source-built|current-source-cache)
+            disk_image_provenance=built-from-admitted-kernel
+            ;;
+        external-elf-validated)
+            disk_image_provenance=built-from-external-elf-validated
+            ;;
+        *)
+            disk_image_provenance=kernel-not-admitted
+            emit_failure "default-disk-kernel-not-admitted"
+            exit 1
+            ;;
+    esac
+fi
+disk_file_status="$(fat32_image_status "$DISK_IMAGE")"
+if [ "$disk_file_status" != pass ]; then
+    disk_image_status="$disk_file_status"
+    emit_failure "production-fat32-disk-invalid"
+    exit 1
+fi
+disk_image_status=pass
+if [ -n "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
+    disk_image_provenance=external-fat32-validated
+fi
+DISK_IMAGE_SHA256="$(file_sha256 "$DISK_IMAGE")"
+if ! is_sha256 "$DISK_IMAGE_SHA256"; then
+    emit_failure "artifact-sha256-invalid"
+    exit 1
+fi
+browser_demo_disk_status="$(browser_demo_disk_payload_status "$DISK_IMAGE" "$BROWSER_DEMO_BINARY")"
+if [ "$browser_demo_disk_status" != pass ]; then
+    emit_failure "browser-demo-real-elf-not-staged"
+    exit 1
+fi
+
+# --- Package the kernel as a self-contained UEFI boot app (OVMF pflash) -----
+# Board-runnable rule (.claude/rules/board-runnable.md) forbids QEMU `-kernel`
+# fast-path semantics. Adapted from the proven pattern in
+# scripts/os/ssh_ring3_uefi_boot.shs (lines 57-84).
+UEFI_BUILD="$BUILD_DIR/uefi"
+ESP="$UEFI_BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+rm -rf "$UEFI_BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+# Load the UEFI GOP + generic video drivers before GRUB negotiates std-vga.
+# Without these modules, screendump boots can fail with "no suitable video
+# mode found" and fault in firmware/GRUB before the kernel entry point.
+insmod efi_gop
+insmod all_video
+set gfxpayload=text
+menuentry "SimpleOS WM fullscreen (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+set +e
+"$GRUB_MKSTANDALONE" \
+    --format=x86_64-efi \
+    --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat efi_gop efi_uga all_video gfxterm video_bochs video_fb" \
+    "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL_OUTPUT"
+grub_mkstandalone_code=$?
+set -e
+if [ "$grub_mkstandalone_code" -ne 0 ] || [ ! -f "$EFIAPP" ]; then
+    emit_failure "grub-mkstandalone-did-not-produce-BOOTX64.EFI"
+    exit 1
+fi

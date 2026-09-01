@@ -1,0 +1,231 @@
+#!/bin/sh
+# check-interp-env-cache-bounded.shs — pin the seed interpreter's env-template
+# cache to a BOUNDED memory footprint.
+#
+# WHY THIS EXISTS
+# ---------------
+# `captured_env_with_live_globals()` (src/compiler_rust/compiler/src/
+# interpreter_call/core/function_exec.rs) caches a fully-built callee `Env` per
+# (module owner, captured-env base identity). The second half of that key is
+# `Env::template_key()` = `Arc::as_ptr(base) as usize` — a raw ADDRESS. A fresh
+# base is allocated for every call frame that owns one, so the key space is
+# unbounded even though the module count is small: interpreting a large file
+# mints a new key per distinct base, and every entry retains a full `Env` clone
+# plus its `by_source` reverse index. Nothing ever evicted.
+#
+# Measured 2026-08-21, seed lint of
+# src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl (4831 lines):
+#
+#   seed                                   wall     peak RSS
+#   /mnt/data/seedperf/simple.v2           220.5s     863 MB
+#   env-cache seed, cache ON  (unbounded)  744.9s   13596 MB   <- this defect
+#   env-cache seed, cache OFF              (fast)     ~700 MB
+#
+# 15.8x the memory and 3.4x the wall, with the ONLY difference being this cache.
+# The fix bounds the map (OWNED_ENV_TEMPLATE_CACHE_CAP, default 4096 entries,
+# cleared wholesale on overflow), which keeps the hot-path win for the steady
+# state — a module uses far fewer than CAP distinct bases — while making the
+# pathological case impossible.
+#
+# WHAT THIS GATE ASSERTS
+# ----------------------
+# It runs the SAME binary twice on the same fixture and compares peak RSS:
+#   * SIMPLE_INTERP_ENV_CACHE_CAP=0  -> unbounded, i.e. the pre-fix behaviour
+#   * (unset)                        -> the shipped bound
+# and FAILs unless the bounded run's peak RSS is at least RATIO times smaller.
+# Comparing two modes of one binary — instead of two binaries, or one binary
+# against a recorded number — is what makes this discriminating: it cannot pass
+# by accident on a faster box, and on a binary built BEFORE the fix the env var
+# is ignored, the two runs are identical, and the gate FAILS. That is the
+# required "fails before, passes after" property.
+#
+# CONVENTION (matches the other scripts/check guards)
+#   verdict is the LAST line of stdout:
+#     PASS  — <n> run(s) measured, ...            exit 0   (n is always > 0)
+#     FAIL  — ...                                  exit 1
+#     ERROR — nothing was checked                  exit 2
+#   A run that measured 0 invocations is ERROR, never a pass. `--selftest` runs
+#   before every scan and is fatal.
+#
+# The measured command's exit status is read into a variable on the line AFTER
+# the invocation, never through a pipe — a pipeline's $? is the last stage's
+# status, and that exact trap has produced false greens in this repo.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+
+SIMPLE_BIN_DEFAULT="bin/simple"
+# Mid-size real compiler module: large enough that the unbounded cache is
+# visibly pathological, small enough for a gate to run it twice.
+FIXTURE_DEFAULT="src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl"
+# Bounded peak RSS must be at least this many times smaller than unbounded.
+# Measured separation is ~15x; 3x leaves generous room for allocator noise and
+# a loaded box while still failing on a cache that is not bounded at all.
+RATIO_DEFAULT=3
+TIMEOUT_DEFAULT=1500
+
+usage() {
+    echo "usage: $0 [--fixture PATH] [--simple-bin PATH] [--ratio N] [--timeout SECONDS] [--selftest-only]"
+}
+
+# measure <bin> <fixture> <timeout> <cap_env_or_empty>
+# echoes "<peak_rss_kb> <rc>"; 0 rss means the measurement failed outright.
+measure() {
+    m_bin=$1
+    m_fixture=$2
+    m_timeout=$3
+    m_cap=$4
+    m_out=$(mktemp)
+    if [ -n "$m_cap" ]; then
+        SIMPLE_INTERP_ENV_CACHE_CAP="$m_cap" \
+            /usr/bin/time -f 'RSSKB=%M' timeout "$m_timeout" "$m_bin" lint "$m_fixture" >/dev/null 2>"$m_out"
+        m_rc=$?
+    else
+        /usr/bin/time -f 'RSSKB=%M' timeout "$m_timeout" "$m_bin" lint "$m_fixture" >/dev/null 2>"$m_out"
+        m_rc=$?
+    fi
+    m_rss=$(grep -o 'RSSKB=[0-9]*' "$m_out" | tail -1 | cut -d= -f2)
+    rm -f "$m_out"
+    [ -n "${m_rss:-}" ] || m_rss=0
+    echo "$m_rss $m_rc"
+}
+
+selftest() {
+    st_dir=$(mktemp -d)
+    st_fail=0
+
+    # A stub that allocates a lot only when the cap is unbounded, and a stub
+    # that ignores the variable entirely (the pre-fix binary). The scanner must
+    # separate them.
+    cat >"$st_dir/aware" <<'EOF'
+#!/bin/sh
+if [ "${SIMPLE_INTERP_ENV_CACHE_CAP:-}" = "0" ]; then
+    exec /usr/bin/awk 'BEGIN{for(i=0;i<400000;i++)a[i]=sprintf("%d-padpadpadpadpadpad",i); print "Lint passed"}'
+fi
+echo "Lint passed"
+EOF
+    cat >"$st_dir/unaware" <<'EOF'
+#!/bin/sh
+exec /usr/bin/awk 'BEGIN{for(i=0;i<400000;i++)a[i]=sprintf("%d-padpadpadpadpadpad",i); print "Lint passed"}'
+EOF
+    cat >"$st_dir/broken" <<'EOF'
+#!/bin/sh
+exit 3
+EOF
+    chmod +x "$st_dir/aware" "$st_dir/unaware" "$st_dir/broken"
+    : >"$st_dir/fixture.spl"
+
+    # fixture 1: a cap-aware binary must separate the two modes
+    st_unb=$(measure "$st_dir/aware" "$st_dir/fixture.spl" 60 0)
+    st_bnd=$(measure "$st_dir/aware" "$st_dir/fixture.spl" 60 "")
+    st_u=${st_unb% *}
+    st_b=${st_bnd% *}
+    if [ "$st_u" -le 0 ] || [ "$st_b" -le 0 ] || [ "$st_u" -le $((st_b * 2)) ]; then
+        echo "selftest: FAILED — cap-aware stub did not separate (unbounded=${st_u}KB bounded=${st_b}KB)"
+        st_fail=1
+    fi
+
+    # fixture 2: a binary that ignores the cap must NOT separate — this is the
+    # pre-fix case the gate has to catch.
+    st_unb=$(measure "$st_dir/unaware" "$st_dir/fixture.spl" 60 0)
+    st_bnd=$(measure "$st_dir/unaware" "$st_dir/fixture.spl" 60 "")
+    st_u=${st_unb% *}
+    st_b=${st_bnd% *}
+    if [ "$st_u" -gt $((st_b * 2)) ]; then
+        echo "selftest: FAILED — cap-unaware stub separated, gate would false-green a pre-fix binary"
+        st_fail=1
+    fi
+
+    # fixture 3: a failing binary must not look like a measurement
+    st_res=$(measure "$st_dir/broken" "$st_dir/fixture.spl" 60 "")
+    if [ "${st_res#* }" -eq 0 ]; then
+        echo "selftest: FAILED — a binary exiting 3 was recorded as rc 0"
+        st_fail=1
+    fi
+
+    # fixture 4: a missing binary must not produce a usable measurement
+    st_res=$(measure "$st_dir/does-not-exist" "$st_dir/fixture.spl" 60 "")
+    if [ "${st_res%% *}" -gt 0 ] && [ "${st_res#* }" -eq 0 ]; then
+        echo "selftest: FAILED — a missing binary produced a passing measurement"
+        st_fail=1
+    fi
+
+    rm -rf "$st_dir"
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "selftest: 4 fixture(s) passed"
+}
+
+SIMPLE_BIN=$SIMPLE_BIN_DEFAULT
+FIXTURE=$FIXTURE_DEFAULT
+RATIO=$RATIO_DEFAULT
+TIMEOUT=$TIMEOUT_DEFAULT
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --fixture)      FIXTURE=$2; shift 2 ;;
+        --simple-bin)   SIMPLE_BIN=$2; shift 2 ;;
+        --ratio)        RATIO=$2; shift 2 ;;
+        --timeout)      TIMEOUT=$2; shift 2 ;;
+        --selftest-only) SELFTEST_ONLY=1; shift ;;
+        -h|--help)      usage; exit 0 ;;
+        *)              usage; exit 2 ;;
+    esac
+done
+
+selftest
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 4 fixture(s) checked, selftest only, no cache measurement taken"
+    exit 0
+fi
+
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (repo root unavailable)"; exit 2; }
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable seed at $SIMPLE_BIN)"
+    exit 2
+fi
+if [ ! -f "$FIXTURE" ]; then
+    echo "ERROR — nothing was checked (missing fixture $FIXTURE)"
+    exit 2
+fi
+
+MEASURED=0
+
+UNBOUNDED=$(measure "$SIMPLE_BIN" "$FIXTURE" "$TIMEOUT" 0)
+U_RSS=${UNBOUNDED%% *}
+U_RC=${UNBOUNDED#* }
+MEASURED=$((MEASURED + 1))
+
+BOUNDED=$(measure "$SIMPLE_BIN" "$FIXTURE" "$TIMEOUT" "")
+B_RSS=${BOUNDED%% *}
+B_RC=${BOUNDED#* }
+MEASURED=$((MEASURED + 1))
+
+if [ "$MEASURED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no run completed)"
+    exit 2
+fi
+if [ "$U_RSS" -le 0 ] || [ "$B_RSS" -le 0 ]; then
+    echo "ERROR — nothing was checked (no peak-RSS reading from /usr/bin/time)"
+    exit 2
+fi
+# The unbounded run is EXPECTED to be slow; a timeout there is still a data
+# point, but a bounded run that timed out or failed is a real regression.
+if [ "$B_RC" -ne 0 ]; then
+    echo "FAIL — $MEASURED run(s) measured, bounded run exited $B_RC on $FIXTURE (peak ${B_RSS}KB)"
+    exit 1
+fi
+
+if [ "$U_RSS" -le $((B_RSS * RATIO)) ]; then
+    echo "FAIL — $MEASURED run(s) measured, env-template cache is not bounded: unbounded peak ${U_RSS}KB vs bounded ${B_RSS}KB on $FIXTURE (need >${RATIO}x separation)"
+    exit 1
+fi
+
+echo "PASS — $MEASURED run(s) measured, env-template cache bounded: ${U_RSS}KB unbounded vs ${B_RSS}KB bounded on $FIXTURE (>${RATIO}x)"
+exit 0

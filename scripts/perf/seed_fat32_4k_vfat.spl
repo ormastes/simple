@@ -1,0 +1,59 @@
+# Seed VFAT benchmark files with deterministic ASCII payloads.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+fn digit_value(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    return -1
+
+fn parse_i64(value: text) -> i64:
+    var out: i64 = 0
+    var i = 0
+    while i < value.len():
+        val digit = digit_value(value.substring(i, i + 1))
+        if digit < 0:
+            return out
+        out = (out * 10) + digit
+        i = i + 1
+    out
+
+fn join_path(root: text, name: text) -> text:
+    if root.ends_with("/"):
+        return root + name
+    root + "/" + name
+
+fn seed(mount_path: text, size: i64) -> i32:
+    if mount_path == "" or size <= 0:
+        print "usage: seed_fat32_4k_vfat.spl <mount-path> <bytes>"
+        return 1
+    val read_path = join_path(mount_path, "simple_fat32_4k_vfat_read.bin")
+    val write_path = join_path(mount_path, "simple_fat32_4k_vfat_write.bin")
+    val read_result = rt_process_run("/bin/sh", ["-c", "head -c " + size.to_string() + " /dev/zero | tr '\\000' A > " + shell_quote(read_path)])
+    if read_result.2 != 0:
+        print "failed to write " + read_path
+        return 1
+    val write_result = rt_process_run("/bin/sh", ["-c", "head -c " + size.to_string() + " /dev/zero | tr '\\000' A > " + shell_quote(write_path)])
+    if write_result.2 != 0:
+        print "failed to write " + write_path
+        return 1
+    print "seeded " + size.to_string() + " bytes x2 under " + mount_path
+    return 0
+
+fn main() -> i32:
+    val mount_path = rt_env_get("VFAT_SEED_MNT") ?? ""
+    val size_text = rt_env_get("VFAT_SEED_BYTES") ?? "0"
+    val size = parse_i64(size_text)
+    return seed(mount_path, size)

@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+PROBE_BIN=${PROCESSING_CUDA_FILL_PROBE_BIN:-build/simpleos_gpu_host/cuda_fill_native/processing_cuda_fill_probe}
+TIMEOUT_SECONDS=${PROCESSING_CUDA_FILL_TIMEOUT_SECONDS:-30}
+MODE=${PROCESSING_CUDA_FILL_MODE:-parity}
+RECOVERY_PHASE=
+RECOVERY_REASON=
+case "$TIMEOUT_SECONDS" in ''|0|*[!0-9]*) exit 2 ;; esac
+case "$MODE" in
+    parity) PROBE_ARG=; COUNT=64; CHECKSUM=1082179840; COLD=0 ;;
+    large) PROBE_ARG=--large; COUNT=1048576; CHECKSUM=17730434498560; COLD=0 ;;
+    warm) PROBE_ARG=--warm; COUNT=1048576; CHECKSUM=17730434498560; COLD='[1-9][0-9]*' ;;
+    recovery) RECOVERY_PHASE=readback; RECOVERY_REASON=cuda-readback-failed ;;
+    recovery-submit) RECOVERY_PHASE=submit; RECOVERY_REASON=cuda-submit-failed ;;
+    recovery-mismatch) RECOVERY_PHASE=mismatch; RECOVERY_REASON=checksum-mismatch ;;
+    *) exit 2 ;;
+esac
+if [ "${RECOVERY_PHASE:-}" ]; then
+    PROBE_ARG=--recover=$RECOVERY_PHASE; COUNT=64; CHECKSUM=1082179840; COLD=0
+fi
+
+if [ ! -x "$PROBE_BIN" ]; then
+    echo "processing_cuda_fill_native_status=blocked"
+    echo "processing_cuda_fill_native_reason=probe-binary-missing"
+    exit 1
+fi
+
+set +e
+output=$(timeout -k 5 "$TIMEOUT_SECONDS" env \
+    -u SIMPLE_GPU_TEST \
+    -u SIMPLE_GPU_FAULT_INJECT \
+    -u SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES \
+    "$PROBE_BIN" $PROBE_ARG 2>&1)
+probe_rc=$?
+set -e
+printf '%s\n' "$output"
+if [ "$probe_rc" -ne 0 ]; then
+    echo "processing_cuda_fill_native_status=fail"
+    echo "processing_cuda_fill_native_reason=probe-failed"
+    exit "$probe_rc"
+fi
+if [ "${RECOVERY_PHASE:-}" ]; then
+    receipt_count=$(printf '%s\n' "$output" | grep -Ec '^PROCESSING_CUDA_RECOVERY ' || true)
+    valid=$(printf '%s\n' "$output" | grep -Ec "^PROCESSING_CUDA_RECOVERY status=pass phase=$RECOVERY_PHASE before_completed=true before_count=64 before_checksum=1082179840 before_exact=true before_handle=[1-9][0-9]* before_identity=[1-9][0-9]* test_armed=true fault_armed=true failed_completed=false failed_reason=$RECOVERY_REASON failed_count=0 failed_handle=0 failed_identity=0 fault_cleared=true test_cleared=true recovered=true recovered_count=64 recovered_checksum=1082179840 recovered_exact=true recovered_handle=[1-9][0-9]* recovered_identity=[1-9][0-9]* identity_stable=true cpu_fallback=false$" || true)
+else
+    receipt_count=$(printf '%s\n' "$output" | grep -Ec '^PROCESSING_CUDA_NATIVE ' || true)
+    valid=$(printf '%s\n' "$output" | grep -Ec "^PROCESSING_CUDA_NATIVE status=pass reason=ok op=fill_u32 mode=$MODE completed=true count=$COUNT value=16909060 expected_checksum=$CHECKSUM actual_checksum=$CHECKSUM mismatch_count=0 values_exact=true cold_us=$COLD elapsed_us=[1-9][0-9]* warm_improved=true backend=cuda readback_source=device_readback handle=[1-9][0-9]* identity=[1-9][0-9]* cpu_fallback=false$" || true)
+fi
+if [ "$receipt_count" -ne 1 ] || [ "$valid" -ne 1 ]; then
+    echo "processing_cuda_fill_native_status=fail"
+    echo "processing_cuda_fill_native_reason=invalid-receipt"
+    exit 1
+fi
+echo "processing_cuda_fill_native_status=pass"

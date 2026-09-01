@@ -1,0 +1,344 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui_web_2d_headless_handoff_prep}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_web_2d_headless_handoff_prep_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+CRITERIA_BUILD_DIR="$BUILD_DIR/completion-criteria"
+CRITERIA_REPORT="$BUILD_DIR/completion-criteria.md"
+HANDOFF_SPEC="test/03_system/check/gui_web_2d_five_platform_handoff_contract_spec.spl"
+HANDOFF_OUT="$BUILD_DIR/five-platform-handoff-spec.out"
+NEGATIVE_SELFTEST_OUT="$BUILD_DIR/negative-selftest.out"
+EXPECTED_NEGATIVE_SELFTEST_CASES="duplicate-gate|gate-value|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id"
+EXPECTED_NEGATIVE_SELFTEST_CASE_STATUSES="duplicate-gate:pass|gate-value:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass"
+CONTRACT_SELFTEST="${GUI_WEB_2D_HEADLESS_HANDOFF_PREP_CONTRACT_SELFTEST:-0}"
+FRESHNESS_GATE="cross-platform-freshness"
+FRESHNESS_HOST="cross-platform-freshness:main-plus-platform-freshness-review"
+FRESHNESS_RUNBOOK="cross-platform-freshness:doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md+scripts/check/check-gui-web-2d-headless-handoff-prep.shs"
+FRESHNESS_PROOF="cross-platform-freshness:same-source-revision+runtime-build+browser-webview-electron-revision+graphics-sdk-driver+runbook-version"
+DEFAULT_REMAINING_LIVE_COMPLETION_GATES="linux-vulkan-renderdoc|macos-metal-xcode-gpu-capture|windows-d3d12-pix|ios-tauri-wkwebview-metal|android-tauri-webview-vulkan|retained-4k-8k-current-source|full-html-css|production-gui-web-parity|$FRESHNESS_GATE"
+DEFAULT_REMAINING_LIVE_COMPLETION_HOSTS="linux-vulkan-renderdoc:prepared-ubuntu-gui-vulkan-renderdoc|macos-metal-xcode-gpu-capture:macos-gui-metal-xcode|windows-d3d12-pix:windows-gui-d3d12-pix|ios-tauri-wkwebview-metal:macos-ios-simulator-or-device|android-tauri-webview-vulkan:android-emulator-or-device-vulkan|retained-4k-8k-current-source:perf-capable-native-gui-host|full-html-css:headless-or-gui-source-plus-renderer-evidence|production-gui-web-parity:gui-host-with-tauri-chrome-backend-readback|$FRESHNESS_HOST"
+DEFAULT_REMAINING_LIVE_COMPLETION_RUNBOOKS="linux-vulkan-renderdoc:scripts/setup/setup-gui-web-2d-vulkan-env.shs+scripts/tool/renderdoc-evidence.shs+scripts/check/check-linux-vulkan-render-log-compare.shs|macos-metal-xcode-gpu-capture:doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md|windows-d3d12-pix:doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md|ios-tauri-wkwebview-metal:doc/07_guide/platform/mobile/tauri_mobile_guide.md+scripts/check/check-tauri-mobile-renderer-parity-evidence.shs|android-tauri-webview-vulkan:doc/07_guide/platform/mobile/tauri_mobile_guide.md+scripts/check/check-tauri-mobile-renderer-parity-evidence.shs|retained-4k-8k-current-source:scripts/check/check-widget-showcase-4k-200fps.shs|full-html-css:scripts/check/check-html-css-full-rendering-goal-status.shs|production-gui-web-parity:scripts/check/check-production-gui-web-renderer-parity-evidence.shs|$FRESHNESS_RUNBOOK"
+DEFAULT_REMAINING_LIVE_COMPLETION_PROOFS="linux-vulkan-renderdoc:browser-backing+simple-backend+argb-pairwise+rdoc-magic+linux-render-log|macos-metal-xcode-gpu-capture:metal-readback+browser-backing+argb-pairwise+xcode-gputrace|windows-d3d12-pix:d3d12-readback+browser-backing+argb-pairwise+pix-artifact+gpu-debugger|ios-tauri-wkwebview-metal:ios-screenshot+metal-marker+mdi-proof+render-log-source|android-tauri-webview-vulkan:android-screenshot+vulkan-marker+foreground+mdi-proof+render-log-source|retained-4k-8k-current-source:4k-200fps+8k-200fps+source-revision+rss+checksum+fallback-none|full-html-css:all-html+all-css-inventory+zero-unrendered+animation-css|production-gui-web-parity:tauri-chrome-captures+device-readback+event-routing+checksum-match+no-tolerance|$FRESHNESS_PROOF"
+REMAINING_LIVE_COMPLETION_GATES="${GUI_WEB_2D_HEADLESS_HANDOFF_PREP_REMAINING_GATES:-$DEFAULT_REMAINING_LIVE_COMPLETION_GATES}"
+REMAINING_LIVE_COMPLETION_GATE_COUNT="$(printf '%s\n' "$REMAINING_LIVE_COMPLETION_GATES" | awk -F'|' '{print NF}')"
+REMAINING_LIVE_COMPLETION_UNIQUE_GATE_COUNT="$(printf '%s\n' "$REMAINING_LIVE_COMPLETION_GATES" | awk -F'|' '{
+    for (i = 1; i <= NF; i++) {
+        if (!seen[$i]++) {
+            count++
+        }
+    }
+    print count
+}')"
+gate_bad_value_count() {
+    printf '%s\n' "$1" | awk -F'|' '{
+        count = 0
+        for (i = 1; i <= NF; i++) {
+            if ($i == "") {
+                count++
+            }
+        }
+        print count
+    }'
+}
+REMAINING_LIVE_COMPLETION_HOSTS="${GUI_WEB_2D_HEADLESS_HANDOFF_PREP_REMAINING_HOSTS:-$DEFAULT_REMAINING_LIVE_COMPLETION_HOSTS}"
+REMAINING_LIVE_COMPLETION_HOST_COUNT="$(printf '%s\n' "$REMAINING_LIVE_COMPLETION_HOSTS" | awk -F'|' '{print NF}')"
+REMAINING_LIVE_COMPLETION_RUNBOOKS="${GUI_WEB_2D_HEADLESS_HANDOFF_PREP_REMAINING_RUNBOOKS:-$DEFAULT_REMAINING_LIVE_COMPLETION_RUNBOOKS}"
+REMAINING_LIVE_COMPLETION_RUNBOOK_COUNT="$(printf '%s\n' "$REMAINING_LIVE_COMPLETION_RUNBOOKS" | awk -F'|' '{print NF}')"
+REMAINING_LIVE_COMPLETION_PROOFS="${GUI_WEB_2D_HEADLESS_HANDOFF_PREP_REMAINING_PROOFS:-$DEFAULT_REMAINING_LIVE_COMPLETION_PROOFS}"
+REMAINING_LIVE_COMPLETION_PROOF_COUNT="$(printf '%s\n' "$REMAINING_LIVE_COMPLETION_PROOFS" | awk -F'|' '{print NF}')"
+map_gate_ids() {
+    printf '%s\n' "$1" | awk -F'|' '{
+        for (i = 1; i <= NF; i++) {
+            split($i, parts, ":")
+            printf "%s%s", (i == 1 ? "" : "|"), parts[1]
+        }
+    }'
+}
+map_values() {
+    printf '%s\n' "$1" | awk -F'|' '{
+        for (i = 1; i <= NF; i++) {
+            sub(/^[^:]*:/, "", $i)
+            printf "%s%s", (i == 1 ? "" : "|"), $i
+        }
+    }'
+}
+map_bad_value_count() {
+    printf '%s\n' "$1" | awk -F'|' '{
+        count = 0
+        for (i = 1; i <= NF; i++) {
+            value = $i
+            if (index(value, ":") == 0) {
+                count++
+            } else {
+                sub(/^[^:]*:/, "", value)
+                if (value == "") {
+                    count++
+                }
+            }
+        }
+        print count
+    }'
+}
+build_gate_matrix() {
+    awk -v gates="$1" -v hosts="$2" -v runbooks="$3" -v proofs="$4" 'BEGIN {
+        n = split(gates, g, "|")
+        split(hosts, h, "|")
+        split(runbooks, r, "|")
+        split(proofs, p, "|")
+        for (i = 1; i <= n; i++) {
+            printf "%s%s:host=%s,runbook=%s,proof=%s", (i == 1 ? "" : "|"), g[i], h[i], r[i], p[i]
+        }
+    }'
+}
+REMAINING_LIVE_COMPLETION_HOST_GATE_IDS="$(map_gate_ids "$REMAINING_LIVE_COMPLETION_HOSTS")"
+REMAINING_LIVE_COMPLETION_RUNBOOK_GATE_IDS="$(map_gate_ids "$REMAINING_LIVE_COMPLETION_RUNBOOKS")"
+REMAINING_LIVE_COMPLETION_PROOF_GATE_IDS="$(map_gate_ids "$REMAINING_LIVE_COMPLETION_PROOFS")"
+REMAINING_LIVE_COMPLETION_HOST_VALUES="$(map_values "$REMAINING_LIVE_COMPLETION_HOSTS")"
+REMAINING_LIVE_COMPLETION_RUNBOOK_VALUES="$(map_values "$REMAINING_LIVE_COMPLETION_RUNBOOKS")"
+REMAINING_LIVE_COMPLETION_PROOF_VALUES="$(map_values "$REMAINING_LIVE_COMPLETION_PROOFS")"
+REMAINING_LIVE_COMPLETION_HOST_BAD_VALUE_COUNT="$(map_bad_value_count "$REMAINING_LIVE_COMPLETION_HOSTS")"
+REMAINING_LIVE_COMPLETION_RUNBOOK_BAD_VALUE_COUNT="$(map_bad_value_count "$REMAINING_LIVE_COMPLETION_RUNBOOKS")"
+REMAINING_LIVE_COMPLETION_PROOF_BAD_VALUE_COUNT="$(map_bad_value_count "$REMAINING_LIVE_COMPLETION_PROOFS")"
+REMAINING_LIVE_COMPLETION_GATE_BAD_VALUE_COUNT="$(gate_bad_value_count "$REMAINING_LIVE_COMPLETION_GATES")"
+REMAINING_LIVE_COMPLETION_MATRIX="$(build_gate_matrix "$REMAINING_LIVE_COMPLETION_GATES" "$REMAINING_LIVE_COMPLETION_HOST_VALUES" "$REMAINING_LIVE_COMPLETION_RUNBOOK_VALUES" "$REMAINING_LIVE_COMPLETION_PROOF_VALUES")"
+REMAINING_LIVE_COMPLETION_MATRIX_COUNT="$(printf '%s\n' "$REMAINING_LIVE_COMPLETION_MATRIX" | awk -F'|' '{print NF}')"
+MAP_GATE_ALIGNMENT_STATUS=pass
+MAP_GATE_ALIGNMENT_REASON=pass
+GATE_UNIQUENESS_STATUS=pass
+GATE_UNIQUENESS_REASON=pass
+LIVE_COMPLETION_STATUS=incomplete
+LIVE_COMPLETION_REASON=remaining-live-gates-unverified
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+criteria_status=fail
+criteria_reason=not-run
+criteria_completion_scope=source-shape-only
+criteria_required_gate_count=0
+criteria_missing_required_gate_count=0
+criteria_missing_required_gates=""
+
+if [ "$CONTRACT_SELFTEST" = "1" ]; then
+    criteria_status=pass
+    criteria_reason=contract-selftest
+    criteria_completion_scope=source-shape-only
+    criteria_required_gate_count=17
+    criteria_missing_required_gate_count=0
+elif BUILD_DIR="$CRITERIA_BUILD_DIR" REPORT_PATH="$CRITERIA_REPORT" \
+    sh scripts/check/check-gui-web-2d-completion-criteria-placeholders.shs >"$BUILD_DIR/completion-criteria.out" 2>&1; then
+    if [ -f "$CRITERIA_BUILD_DIR/evidence.env" ]; then
+        criteria_status="$(sed -n 's/^gui_web_2d_completion_criteria_status=//p' "$CRITERIA_BUILD_DIR/evidence.env" | tail -n 1)"
+        criteria_reason="$(sed -n 's/^gui_web_2d_completion_criteria_reason=//p' "$CRITERIA_BUILD_DIR/evidence.env" | tail -n 1)"
+        criteria_completion_scope="$(sed -n 's/^gui_web_2d_completion_criteria_completion_scope=//p' "$CRITERIA_BUILD_DIR/evidence.env" | tail -n 1)"
+        criteria_required_gate_count="$(sed -n 's/^gui_web_2d_completion_criteria_required_gate_count=//p' "$CRITERIA_BUILD_DIR/evidence.env" | tail -n 1)"
+        criteria_missing_required_gate_count="$(sed -n 's/^gui_web_2d_completion_criteria_missing_required_gate_count=//p' "$CRITERIA_BUILD_DIR/evidence.env" | tail -n 1)"
+        criteria_missing_required_gates="$(sed -n 's/^gui_web_2d_completion_criteria_missing_required_gates=//p' "$CRITERIA_BUILD_DIR/evidence.env" | tail -n 1)"
+    fi
+else
+    criteria_status=fail
+    criteria_reason=completion-criteria-wrapper-failed
+fi
+
+handoff_status=fail
+handoff_reason=not-run
+if [ "$CONTRACT_SELFTEST" = "1" ]; then
+    handoff_status=pass
+    handoff_reason=contract-selftest
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    handoff_reason=simple-bin-missing
+elif SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" test "$HANDOFF_SPEC" --mode=interpreter --clean --fail-fast >"$HANDOFF_OUT" 2>&1; then
+    handoff_status=pass
+    handoff_reason=pass
+else
+    handoff_reason=five-platform-handoff-spec-failed
+fi
+
+negative_selftest_status=fail
+negative_selftest_reason=not-run
+negative_selftest_cases=""
+negative_selftest_case_statuses=""
+if [ "$CONTRACT_SELFTEST" = "1" ]; then
+    negative_selftest_status=skipped
+    negative_selftest_reason=contract-selftest
+elif BUILD_DIR="$BUILD_DIR/negative-selftest" \
+    sh scripts/check/check-gui-web-2d-headless-handoff-negative-selftest.shs >"$NEGATIVE_SELFTEST_OUT" 2>&1; then
+    negative_selftest_status="$(sed -n 's/^gui_web_2d_headless_handoff_negative_selftest_status=//p' "$NEGATIVE_SELFTEST_OUT" | tail -n 1)"
+    negative_selftest_reason="$(sed -n 's/^gui_web_2d_headless_handoff_negative_selftest_reason=//p' "$NEGATIVE_SELFTEST_OUT" | tail -n 1)"
+    negative_selftest_cases="$(sed -n 's/^gui_web_2d_headless_handoff_negative_selftest_cases=//p' "$NEGATIVE_SELFTEST_OUT" | tail -n 1)"
+    negative_selftest_case_statuses="$(sed -n 's/^gui_web_2d_headless_handoff_negative_selftest_case_statuses=//p' "$NEGATIVE_SELFTEST_OUT" | tail -n 1)"
+else
+    negative_selftest_status=fail
+    negative_selftest_reason=negative-selftest-wrapper-failed
+fi
+
+status=pass
+reason=pass
+if [ "$criteria_status" != "pass" ]; then
+    status=fail
+    reason=completion-criteria-failed
+elif [ "$criteria_completion_scope" != "source-shape-only" ]; then
+    status=fail
+    reason=completion-criteria-scope-mismatch
+elif [ "$criteria_required_gate_count" != "17" ]; then
+    status=fail
+    reason=completion-criteria-required-gate-count-mismatch
+elif [ "$criteria_missing_required_gate_count" != "0" ]; then
+    status=fail
+    reason=completion-criteria-missing-required-gate-count-mismatch
+elif [ "$handoff_status" != "pass" ]; then
+    status=fail
+    reason="$handoff_reason"
+elif [ "$CONTRACT_SELFTEST" != "1" ] && [ "$negative_selftest_status" != "pass" ]; then
+    status=fail
+    reason="$negative_selftest_reason"
+elif [ "$CONTRACT_SELFTEST" != "1" ] && [ "$negative_selftest_cases" != "$EXPECTED_NEGATIVE_SELFTEST_CASES" ]; then
+    status=fail
+    reason=negative-selftest-case-mismatch
+elif [ "$CONTRACT_SELFTEST" != "1" ] && [ "$negative_selftest_case_statuses" != "$EXPECTED_NEGATIVE_SELFTEST_CASE_STATUSES" ]; then
+    status=fail
+    reason=negative-selftest-case-status-mismatch
+elif [ "$REMAINING_LIVE_COMPLETION_GATE_BAD_VALUE_COUNT" != "0" ]; then
+    status=fail
+    reason=remaining-live-gate-value-missing
+elif [ "$REMAINING_LIVE_COMPLETION_UNIQUE_GATE_COUNT" != "$REMAINING_LIVE_COMPLETION_GATE_COUNT" ]; then
+    status=fail
+    reason=remaining-live-gate-duplicate
+    GATE_UNIQUENESS_STATUS=fail
+    GATE_UNIQUENESS_REASON=$reason
+elif [ "$REMAINING_LIVE_COMPLETION_HOST_COUNT" != "$REMAINING_LIVE_COMPLETION_GATE_COUNT" ]; then
+    status=fail
+    reason=remaining-live-host-count-mismatch
+elif [ "$REMAINING_LIVE_COMPLETION_RUNBOOK_COUNT" != "$REMAINING_LIVE_COMPLETION_GATE_COUNT" ]; then
+    status=fail
+    reason=remaining-live-runbook-count-mismatch
+elif [ "$REMAINING_LIVE_COMPLETION_PROOF_COUNT" != "$REMAINING_LIVE_COMPLETION_GATE_COUNT" ]; then
+    status=fail
+    reason=remaining-live-proof-count-mismatch
+elif [ "$REMAINING_LIVE_COMPLETION_HOST_BAD_VALUE_COUNT" != "0" ]; then
+    status=fail
+    reason=remaining-live-host-value-missing
+elif [ "$REMAINING_LIVE_COMPLETION_RUNBOOK_BAD_VALUE_COUNT" != "0" ]; then
+    status=fail
+    reason=remaining-live-runbook-value-missing
+elif [ "$REMAINING_LIVE_COMPLETION_PROOF_BAD_VALUE_COUNT" != "0" ]; then
+    status=fail
+    reason=remaining-live-proof-value-missing
+elif [ "$REMAINING_LIVE_COMPLETION_MATRIX_COUNT" != "$REMAINING_LIVE_COMPLETION_GATE_COUNT" ]; then
+    status=fail
+    reason=remaining-live-matrix-count-mismatch
+elif [ "$REMAINING_LIVE_COMPLETION_HOST_GATE_IDS" != "$REMAINING_LIVE_COMPLETION_GATES" ]; then
+    status=fail
+    reason=remaining-live-host-gate-id-mismatch
+    MAP_GATE_ALIGNMENT_STATUS=fail
+    MAP_GATE_ALIGNMENT_REASON=$reason
+elif [ "$REMAINING_LIVE_COMPLETION_RUNBOOK_GATE_IDS" != "$REMAINING_LIVE_COMPLETION_GATES" ]; then
+    status=fail
+    reason=remaining-live-runbook-gate-id-mismatch
+    MAP_GATE_ALIGNMENT_STATUS=fail
+    MAP_GATE_ALIGNMENT_REASON=$reason
+elif [ "$REMAINING_LIVE_COMPLETION_PROOF_GATE_IDS" != "$REMAINING_LIVE_COMPLETION_GATES" ]; then
+    status=fail
+    reason=remaining-live-proof-gate-id-mismatch
+    MAP_GATE_ALIGNMENT_STATUS=fail
+    MAP_GATE_ALIGNMENT_REASON=$reason
+fi
+
+{
+    echo "gui_web_2d_headless_handoff_prep_status=$status"
+    echo "gui_web_2d_headless_handoff_prep_reason=$reason"
+    echo "gui_web_2d_headless_handoff_prep_contract_selftest=$CONTRACT_SELFTEST"
+    echo "gui_web_2d_headless_handoff_prep_completion_scope=prepared-not-verified"
+    echo "gui_web_2d_headless_handoff_prep_live_completion_status=$LIVE_COMPLETION_STATUS"
+    echo "gui_web_2d_headless_handoff_prep_live_completion_reason=$LIVE_COMPLETION_REASON"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_count=$REMAINING_LIVE_COMPLETION_GATE_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_unique_gate_count=$REMAINING_LIVE_COMPLETION_UNIQUE_GATE_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_bad_value_count=$REMAINING_LIVE_COMPLETION_GATE_BAD_VALUE_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_gates=$REMAINING_LIVE_COMPLETION_GATES"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_host_count=$REMAINING_LIVE_COMPLETION_HOST_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_hosts=$REMAINING_LIVE_COMPLETION_HOSTS"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_host_bad_value_count=$REMAINING_LIVE_COMPLETION_HOST_BAD_VALUE_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_runbook_count=$REMAINING_LIVE_COMPLETION_RUNBOOK_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_runbooks=$REMAINING_LIVE_COMPLETION_RUNBOOKS"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_runbook_bad_value_count=$REMAINING_LIVE_COMPLETION_RUNBOOK_BAD_VALUE_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_proof_count=$REMAINING_LIVE_COMPLETION_PROOF_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_proofs=$REMAINING_LIVE_COMPLETION_PROOFS"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_proof_bad_value_count=$REMAINING_LIVE_COMPLETION_PROOF_BAD_VALUE_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_matrix_count=$REMAINING_LIVE_COMPLETION_MATRIX_COUNT"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_matrix=$REMAINING_LIVE_COMPLETION_MATRIX"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_host_gate_ids=$REMAINING_LIVE_COMPLETION_HOST_GATE_IDS"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_runbook_gate_ids=$REMAINING_LIVE_COMPLETION_RUNBOOK_GATE_IDS"
+    echo "gui_web_2d_headless_handoff_prep_remaining_live_completion_proof_gate_ids=$REMAINING_LIVE_COMPLETION_PROOF_GATE_IDS"
+    echo "gui_web_2d_headless_handoff_prep_map_gate_alignment_status=$MAP_GATE_ALIGNMENT_STATUS"
+    echo "gui_web_2d_headless_handoff_prep_map_gate_alignment_reason=$MAP_GATE_ALIGNMENT_REASON"
+    echo "gui_web_2d_headless_handoff_prep_gate_uniqueness_status=$GATE_UNIQUENESS_STATUS"
+    echo "gui_web_2d_headless_handoff_prep_gate_uniqueness_reason=$GATE_UNIQUENESS_REASON"
+    echo "gui_web_2d_headless_handoff_prep_completion_criteria_status=$criteria_status"
+    echo "gui_web_2d_headless_handoff_prep_completion_criteria_reason=$criteria_reason"
+    echo "gui_web_2d_headless_handoff_prep_completion_criteria_completion_scope=$criteria_completion_scope"
+    echo "gui_web_2d_headless_handoff_prep_required_gate_count=$criteria_required_gate_count"
+    echo "gui_web_2d_headless_handoff_prep_missing_required_gate_count=$criteria_missing_required_gate_count"
+    echo "gui_web_2d_headless_handoff_prep_missing_required_gates=$criteria_missing_required_gates"
+    echo "gui_web_2d_headless_handoff_prep_five_platform_handoff_spec_status=$handoff_status"
+    echo "gui_web_2d_headless_handoff_prep_five_platform_handoff_spec_reason=$handoff_reason"
+    echo "gui_web_2d_headless_handoff_prep_five_platform_handoff_spec=$HANDOFF_SPEC"
+    echo "gui_web_2d_headless_handoff_prep_negative_selftest_status=$negative_selftest_status"
+    echo "gui_web_2d_headless_handoff_prep_negative_selftest_reason=$negative_selftest_reason"
+    echo "gui_web_2d_headless_handoff_prep_negative_selftest_cases=$negative_selftest_cases"
+    echo "gui_web_2d_headless_handoff_prep_expected_negative_selftest_cases=$EXPECTED_NEGATIVE_SELFTEST_CASES"
+    echo "gui_web_2d_headless_handoff_prep_negative_selftest_case_statuses=$negative_selftest_case_statuses"
+    echo "gui_web_2d_headless_handoff_prep_expected_negative_selftest_case_statuses=$EXPECTED_NEGATIVE_SELFTEST_CASE_STATUSES"
+    echo "gui_web_2d_headless_handoff_prep_report=$REPORT_PATH"
+} >"$OUT_ENV"
+
+{
+    echo "# GUI/Web/2D Headless Handoff Preparation"
+    echo
+    echo "- Wrapper status: $status"
+    echo "- Reason: $reason"
+    echo "- Contract selftest: $CONTRACT_SELFTEST"
+    echo "- Completion scope: prepared-not-verified"
+    echo "- Live completion status: $LIVE_COMPLETION_STATUS"
+    echo "- Live completion reason: $LIVE_COMPLETION_REASON"
+    echo "- Remaining live completion gates: $REMAINING_LIVE_COMPLETION_GATE_COUNT"
+    echo "- Remaining live completion unique gates: $REMAINING_LIVE_COMPLETION_UNIQUE_GATE_COUNT"
+    echo "- Remaining live completion gate bad values: $REMAINING_LIVE_COMPLETION_GATE_BAD_VALUE_COUNT"
+    echo "- Remaining live completion gate IDs: $REMAINING_LIVE_COMPLETION_GATES"
+    echo "- Remaining live completion hosts: $REMAINING_LIVE_COMPLETION_HOST_COUNT"
+    echo "- Remaining live completion host bad values: $REMAINING_LIVE_COMPLETION_HOST_BAD_VALUE_COUNT"
+    echo "- Remaining live completion host map: $REMAINING_LIVE_COMPLETION_HOSTS"
+    echo "- Remaining live completion runbooks: $REMAINING_LIVE_COMPLETION_RUNBOOK_COUNT"
+    echo "- Remaining live completion runbook bad values: $REMAINING_LIVE_COMPLETION_RUNBOOK_BAD_VALUE_COUNT"
+    echo "- Remaining live completion runbook map: $REMAINING_LIVE_COMPLETION_RUNBOOKS"
+    echo "- Remaining live completion proofs: $REMAINING_LIVE_COMPLETION_PROOF_COUNT"
+    echo "- Remaining live completion proof bad values: $REMAINING_LIVE_COMPLETION_PROOF_BAD_VALUE_COUNT"
+    echo "- Remaining live completion proof map: $REMAINING_LIVE_COMPLETION_PROOFS"
+    echo "- Remaining live completion matrix: $REMAINING_LIVE_COMPLETION_MATRIX_COUNT"
+    echo "- Remaining live completion matrix map: $REMAINING_LIVE_COMPLETION_MATRIX"
+    echo "- Remaining live completion map gate alignment: $MAP_GATE_ALIGNMENT_STATUS ($MAP_GATE_ALIGNMENT_REASON)"
+    echo "- Remaining live completion gate uniqueness: $GATE_UNIQUENESS_STATUS ($GATE_UNIQUENESS_REASON)"
+    echo "- Completion criteria source-shape audit: $criteria_status ($criteria_reason)"
+    echo "- Completion criteria scope: $criteria_completion_scope"
+    echo "- Required gates: $criteria_required_gate_count"
+    echo "- Missing required gates: $criteria_missing_required_gate_count"
+    echo "- Five-platform handoff SSpec: $handoff_status ($handoff_reason)"
+    echo "- Negative selftest: $negative_selftest_status ($negative_selftest_reason)"
+    echo "- Negative selftest cases: $negative_selftest_cases"
+    echo "- Expected negative selftest cases: $EXPECTED_NEGATIVE_SELFTEST_CASES"
+    echo "- Negative selftest case statuses: $negative_selftest_case_statuses"
+    echo "- Expected negative selftest case statuses: $EXPECTED_NEGATIVE_SELFTEST_CASE_STATUSES"
+    echo
+    echo "This is a headless source-level preparation gate. It does not produce live"
+    echo "Linux Vulkan/RenderDoc, macOS Metal/Xcode GPU Capture, Windows D3D12/PIX,"
+    echo "iOS Tauri/WKWebView Metal, or Android Tauri/WebView Vulkan renderer evidence."
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$status" != "pass" ]; then
+    exit 1
+fi

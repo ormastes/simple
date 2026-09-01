@@ -1,0 +1,118 @@
+#!/bin/sh
+# emit_receipt.shs — shared include that lets any check-*.shs mint an evidence
+# receipt for its own verdict (hardening plan Phase 9).
+#
+# Contract, and why it is shaped this way:
+#   A gate already prints the one thing that matters — its verdict line. What
+#   it does NOT record is which artifact it looked at, which frozen seal it
+#   compared against, and when. Without those three, the verdict is a claim
+#   about an unrecoverable past state, i.e. a report, which §23.9 says is not
+#   evidence. This include writes them next to the verdict, in the canonical
+#   form defined ONCE in
+#       src/compiler/00.common/assurance/evidence_receipt.spl
+#   (`evidence_receipt_render`). The two forms must stay byte-identical; the
+#   census driver parses what this writes, so any drift shows up immediately as
+#   an `unparseable` receipt rather than as a silent pass.
+#
+# Usage inside a gate (ADDITIVE — never change an existing verdict):
+#
+#   . "$(dirname "$0")/lib/emit_receipt.shs"
+#   ...
+#   VERDICT="PASS — 12 thing(s) checked, bad=0"
+#   echo "$VERDICT"
+#   emit_receipt "check-my-gate" "$VERDICT" "path/to/artifact"
+#   exit 0
+#
+# emit_receipt <check_id> <verdict_line> [artifact_path] [seal_path]
+#   artifact_path defaults to the deployed compiler (bin/simple, symlink
+#   resolved) — the artifact essentially every gate is really talking about.
+#   seal_path defaults to spec/compiler_schema/contract_lock.sdn, the frozen
+#   contract lock from Phase 0.
+#
+# Failure policy: emitting a receipt must NEVER change a gate's exit status or
+# its verdict. If the evidence dir is unwritable or sha256 is unavailable, this
+# writes nothing and returns non-zero; the caller ignores it. A MISSING receipt
+# is caught downstream by check-critical-release-seal.shs, which is where that
+# failure belongs — a gate that cannot mint a receipt must not be turned into a
+# gate that fails for an unrelated reason.
+
+# EVIDENCE_DIR may be overridden by the caller (tests use a temp dir).
+: "${EVIDENCE_DIR:=build/evidence}"
+
+_receipt_sha256_file() {
+    # _receipt_sha256_file <path> — lowercase hex, or empty on any failure.
+    [ -f "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+_receipt_sha256_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 2>/dev/null | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+emit_receipt() {
+    _rc_id="${1:-}"
+    _rc_verdict="${2:-}"
+    _rc_artifact="${3:-}"
+    _rc_seal="${4:-}"
+
+    [ -n "$_rc_id" ] || return 1
+    [ -n "$_rc_verdict" ] || return 1
+
+    # Resolve the repo root from the SOURCING script's location, not from the
+    # cwd: several gates never cd, and a receipt written into whatever
+    # directory the caller happened to be in is a receipt nobody will find.
+    _rc_root=$(CDPATH= cd -- "$(dirname -- "${0:-.}")/../.." 2>/dev/null && pwd) || _rc_root=""
+    [ -n "$_rc_root" ] || _rc_root="."
+
+    [ -n "$_rc_seal" ] || _rc_seal="$_rc_root/spec/compiler_schema/contract_lock.sdn"
+    case "$EVIDENCE_DIR" in
+        /*) : ;;
+        build/evidence) EVIDENCE_DIR="$_rc_root/build/evidence" ;;
+        *) : ;;
+    esac
+
+    if [ -z "$_rc_artifact" ]; then
+        if [ -e "$_rc_root/bin/simple" ]; then
+            _rc_artifact=$(readlink -f "$_rc_root/bin/simple" 2>/dev/null || echo "$_rc_root/bin/simple")
+        else
+            return 1
+        fi
+    fi
+
+    _rc_ahash=$(_receipt_sha256_file "$_rc_artifact" 2>/dev/null) || _rc_ahash=""
+    _rc_shash=$(_receipt_sha256_file "$_rc_seal" 2>/dev/null) || _rc_shash=""
+    [ -n "$_rc_ahash" ] || return 1
+    [ -n "$_rc_shash" ] || return 1
+
+    mkdir -p "$EVIDENCE_DIR" 2>/dev/null || return 1
+    _rc_now=$(date +%s 2>/dev/null) || return 1
+    _rc_who="$(basename "${0:-unknown}")@$(uname -n 2>/dev/null || echo unknown)"
+
+    # Canonical text — field order is FROZEN and mirrors
+    # evidence_receipt_canonical_text(). verdict_line is last because it is the
+    # only field allowed to contain '='.
+    _rc_body=$(printf 'receipt/v1\ncheck_id=%s\nartifact_sha256=%s\nseal_hash=%s\nproduced_at=%s\nproducer_identity=%s\nverdict_line=%s\n' \
+        "$_rc_id" "$_rc_ahash" "$_rc_shash" "$_rc_now" "$_rc_who" "$_rc_verdict")
+    _rc_self=$(printf '%s\n' "$_rc_body" | _receipt_sha256_stdin) || return 1
+    [ -n "$_rc_self" ] || return 1
+
+    _rc_out="$EVIDENCE_DIR/$_rc_id.receipt"
+    {
+        printf '%s\n' "$_rc_body"
+        printf 'receipt_sha256=%s\n' "$_rc_self"
+    } > "$_rc_out.tmp" 2>/dev/null || return 1
+    mv -f "$_rc_out.tmp" "$_rc_out" 2>/dev/null || return 1
+    return 0
+}

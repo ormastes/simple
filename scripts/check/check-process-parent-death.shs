@@ -1,0 +1,89 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    echo "process_parent_death=false"
+    echo "error=$1"
+    exit 1
+}
+
+if [ "$(uname -s)" != Linux ]; then
+    echo "process_parent_death=skip"
+    echo "reason=linux_procfs_runtime_evidence_only"
+    exit 0
+fi
+
+[ -n "${SIMPLE_RUNTIME:-}" ] || fail "SIMPLE_RUNTIME is required"
+[ -x "$SIMPLE_RUNTIME" ] || fail "SIMPLE_RUNTIME is not executable"
+
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-pdeath.XXXXXX") || fail "mktemp failed"
+probe_pid=
+wrapper_pid=
+child_pid=
+
+owned_pid() {
+    pid=$1
+    [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] && tr '\000' ' ' < "/proc/$pid/cmdline" | grep -Fq "$run_dir"
+}
+
+cleanup() {
+    [ -z "$probe_pid" ] || kill -KILL "$probe_pid" 2>/dev/null || true
+    for pid in "$wrapper_pid" "$child_pid"; do
+        owned_pid "$pid" && kill -KILL "$pid" 2>/dev/null || true
+    done
+    rm -rf "$run_dir"
+}
+trap cleanup EXIT INT TERM
+
+probe_bin="$run_dir/process-parent-death-probe"
+SIMPLE_BIN="$SIMPLE_RUNTIME" SIMPLE_LIB=src "$SIMPLE_RUNTIME" native-build \
+    --source src/app --source src/lib --entry-closure \
+    --entry src/app/test/process_parent_death_timeout.spl \
+    --runtime-bundle core-c-bootstrap --output "$probe_bin" || fail "native probe build failed"
+[ -x "$probe_bin" ] || fail "native probe was not produced"
+
+SIMPLE_PARENT_DEATH_DIR="$run_dir" "$probe_bin" &
+probe_pid=$!
+
+i=0
+while [ "$i" -lt 100 ] && { [ ! -s "$run_dir/wrapper.pid" ] || [ ! -s "$run_dir/child.pid" ]; }; do
+    if ! kill -0 "$probe_pid" 2>/dev/null; then
+        set +e
+        wait "$probe_pid"
+        probe_code=$?
+        set -e
+        probe_pid=
+        fail "probe exited before ready: $probe_code"
+    fi
+    sleep 0.05
+    i=$((i + 1))
+done
+[ -s "$run_dir/wrapper.pid" ] || fail "wrapper pid was not recorded"
+[ -s "$run_dir/child.pid" ] || fail "child pid was not recorded"
+wrapper_pid=$(sed -n '1p' "$run_dir/wrapper.pid")
+child_pid=$(sed -n '1p' "$run_dir/child.pid")
+case "$wrapper_pid:$child_pid" in *[!0-9:]*|:*) fail "invalid recorded pid" ;; esac
+owned_pid "$wrapper_pid" || fail "wrapper pid ownership mismatch"
+owned_pid "$child_pid" || fail "child pid ownership mismatch"
+kill -0 "$probe_pid" 2>/dev/null || fail "probe exited before parent-death signal"
+
+kill -KILL "$probe_pid"
+wait "$probe_pid" 2>/dev/null || true
+probe_pid=
+
+pid_live() {
+    pid=$1
+    [ -r "/proc/$pid/stat" ] || return 1
+    state=$(awk '{print $3}' "/proc/$pid/stat")
+    [ "$state" != Z ]
+}
+
+i=0
+while [ "$i" -lt 100 ] && { pid_live "$wrapper_pid" || pid_live "$child_pid"; }; do
+    sleep 0.05
+    i=$((i + 1))
+done
+pid_live "$wrapper_pid" && fail "wrapper survived parent death"
+pid_live "$child_pid" && fail "child survived parent death"
+
+echo "process_parent_death=true"

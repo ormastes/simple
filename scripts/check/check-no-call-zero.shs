@@ -1,0 +1,66 @@
+#!/bin/sh
+# check-no-call-zero.shs — fail-closed gate against `call 0` miscompiles.
+#
+# A direct `call` whose rel32 target resolves to absolute address 0 is never
+# legitimate: it is an unmangled/undefined Simple method symbol that the link
+# silently resolved to 0 instead of erroring. Executing one is an instant
+# SIGSEGV with rip=0, and gdb misattributes the fault to the CALLER frame,
+# which is how this defect was mis-filed as a bug inside
+# `FlatAstBridge.module_assembly.flat_ast_to_module` (2026-08-09).
+#
+# Usage: sh scripts/check/check-no-call-zero.shs <elf> [<elf> ...]
+# Verdict line is always the last line of stdout:
+#   PASS  — <n> binary/binaries checked, 0 call-to-zero sites
+#   FAIL  — <n> call-to-zero site(s) in <file>
+#   ERROR — nothing was checked
+
+set -u
+
+if [ "$#" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no binary given)"
+    exit 2
+fi
+
+if ! command -v objdump >/dev/null 2>&1; then
+    echo "ERROR — nothing was checked (objdump not available)"
+    exit 2
+fi
+
+checked=0
+failed=0
+
+for bin in "$@"; do
+    if [ ! -f "$bin" ]; then
+        echo "ERROR — nothing was checked (missing file: $bin)"
+        exit 2
+    fi
+    if ! objdump -d "$bin" >/dev/null 2>&1; then
+        echo "ERROR — nothing was checked (not a disassemblable ELF: $bin)"
+        exit 2
+    fi
+
+    # Match a direct call whose resolved target symbolizes at address 0.
+    n=$(objdump -d "$bin" 2>/dev/null | grep -cE '[[:space:]]call[[:space:]]+0 <')
+    checked=$((checked + 1))
+
+    if [ "$n" -gt 0 ]; then
+        echo "call-to-zero: $bin has $n site(s)"
+        objdump -d "$bin" 2>/dev/null \
+            | grep -nE '[[:space:]]call[[:space:]]+0 <' \
+            | head -5
+        failed=$((failed + n))
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $failed call-to-zero site(s) across $checked binary/binaries"
+    exit 1
+fi
+
+echo "PASS — $checked binary/binaries checked, 0 call-to-zero sites"
+exit 0

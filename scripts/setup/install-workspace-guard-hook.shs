@@ -1,0 +1,60 @@
+#!/bin/sh
+# Idempotent installer: wire repo-managed tracking hooks into .git/hooks
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+MODE="check"
+
+usage() {
+    cat <<'EOF'
+Usage: sh scripts/install-workspace-guard-hook.shs [--check|--apply]
+
+  --check   Report whether pre-commit and pre-push hooks are wired (default)
+  --apply   Install/update hooks from scripts/hooks/
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --check) MODE="check" ;;
+        --apply) MODE="apply" ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+check_hook() {
+    name="$1"
+    src="$ROOT_DIR/scripts/hooks/$name"
+    dst="$ROOT_DIR/.git/hooks/$name"
+    if [ ! -f "$dst" ]; then
+        echo "$name: NOT INSTALLED"
+        return 1
+    fi
+    if ! cmp -s "$src" "$dst"; then
+        echo "$name: OUTDATED"
+        return 1
+    fi
+    echo "$name: INSTALLED"
+    return 0
+}
+
+install_hook() {
+    name="$1"
+    src="$ROOT_DIR/scripts/hooks/$name"
+    dst="$ROOT_DIR/.git/hooks/$name"
+    cp "$src" "$dst"
+    chmod +x "$dst"
+    echo "$name: INSTALLED"
+}
+
+if [ "$MODE" = "check" ]; then
+    ok=0
+    check_hook pre-commit || ok=1
+    check_hook pre-push || ok=1
+    exit "$ok"
+fi
+
+install_hook pre-commit
+install_hook pre-push

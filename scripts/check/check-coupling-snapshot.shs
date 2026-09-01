@@ -1,0 +1,240 @@
+#!/bin/sh
+# check-coupling-snapshot.shs — Phase E per-phase bracketing snapshot + growth band
+# (startup_perf_plan_2026-08-17.md, Phase E "re-measure per phase").
+#
+# Reuses the existing analyser: graph metrics (modules, edges, SCC counts) come
+# from `check-coupling-budget.shs --metrics` — no second dependency analyser.
+# Optional fast/normal root-closure sizes come from `bin/simple deps` on the CLI
+# root (src/app/cli/main.spl); they cost minutes, so they run only with
+# --with-deps (used when WRITING a committed snapshot, not on every check).
+#
+# Modes:
+#   --selftest              fatal fixtures (also run before every real mode)
+#   --compare PREV CUR      band-check two metric files (used by selftest/specs)
+#   --check                 measure now, band-check vs latest committed snapshot
+#   --write [--with-deps]   measure, band-check, then write a dated snapshot to
+#                           doc/10_metrics/startup/coupling_closure_snapshot_<date>.md
+#                           (refused on FAIL/ERROR — a regressing phase must not
+#                           silently become the new baseline)
+#
+# Growth band: modules and edges may grow at most BAND_PCT (2%) over the
+# previous snapshot; largest_scc may not grow at all (the budget ratchet also
+# guards SCCs, this keeps a snapshot pair self-evident). Shrinkage always
+# passes. First snapshot (no previous) is PASS by definition but still
+# non-vacuous (0 modules or 0 edges is ERROR, never a pass).
+#
+# Recorded escape: --expect-modules N / --expect-edges N recenters ONE axis for
+# ONE run and is RECORDED in the verdict line. No flag disables a check.
+#
+# Output contract: a `Results: N modules, E edges` line precedes the verdict;
+# the verdict is the LAST stdout line: PASS/FAIL/ERROR, exit 0/1/2.
+set -u
+
+SCRIPT="$0"
+case "$SCRIPT" in /*) ;; *) SCRIPT="$(pwd)/$SCRIPT";; esac
+ROOT="$(cd "$(dirname "$SCRIPT")/../.." && pwd)"
+BUDGET="$ROOT/scripts/check/check-coupling-budget.shs"
+SNAPDIR="$ROOT/doc/10_metrics/startup"
+DEPS_ROOT="src/app/cli/main.spl"
+BAND_PCT=2
+
+MODE=check
+WITH_DEPS=0
+PREV_ARG=""
+CUR_ARG=""
+EXPECT_MODULES=""
+EXPECT_EDGES=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest) MODE=selftest ;;
+    --check) MODE=check ;;
+    --write) MODE=write ;;
+    --with-deps) WITH_DEPS=1 ;;
+    --compare) MODE=compare; shift; PREV_ARG="${1:-}"; shift; CUR_ARG="${1:-}" ;;
+    --expect-modules) shift; EXPECT_MODULES="${1:-}" ;;
+    --expect-edges) shift; EXPECT_EDGES="${1:-}" ;;
+    *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (bad argument: $1)"; exit 2 ;;
+  esac
+  shift
+done
+
+metric() { # file key -> value or MISSING
+  awk -v k="$2" '$1 == k { print $2; found = 1; exit } END { if (!found) print "MISSING" }' "$1"
+}
+
+# compare PREV CUR — band check. Prints Results + verdict, returns 0/1/2.
+compare() {
+  c_prev="$1"; c_cur="$2"
+  for f in "$c_prev" "$c_cur"; do
+    if [ ! -f "$f" ]; then
+      echo "ERROR — nothing was checked (metric file not found: $f)"; return 2
+    fi
+  done
+  cm=$(metric "$c_cur" modules); ce=$(metric "$c_cur" edges)
+  case "$cm$ce" in *MISSING*) echo "ERROR — nothing was checked (current metrics missing modules/edges)"; return 2 ;; esac
+  if [ "$cm" -le 0 ] || [ "$ce" -le 0 ]; then
+    echo "Results: $cm modules, $ce edges"
+    echo "ERROR — nothing was checked (zero-module/zero-edge snapshot is never evidence)"; return 2
+  fi
+  echo "Results: $cm modules, $ce edges"
+  fail=""
+  note=""
+  # banded axes: modules, edges (+BAND_PCT%); escapes recenter one axis, recorded
+  for k in modules edges; do
+    c=$(metric "$c_cur" "$k"); p=$(metric "$c_prev" "$k")
+    [ "$p" = "MISSING" ] && { echo "ERROR — nothing was checked (previous snapshot missing key: $k)"; return 2; }
+    exp=""
+    [ "$k" = modules ] && exp="$EXPECT_MODULES"
+    [ "$k" = edges ] && exp="$EXPECT_EDGES"
+    if [ -n "$exp" ]; then
+      note="$note accepted-$k=$exp;"
+      p="$exp"
+    fi
+    lim=$(( p + (p * BAND_PCT + 99) / 100 ))
+    if [ "$c" -gt "$lim" ]; then fail="$fail $k=$c>band($p+${BAND_PCT}%=$lim)"; fi
+  done
+  # zero-growth axis: largest_scc
+  c=$(metric "$c_cur" largest_scc); p=$(metric "$c_prev" largest_scc)
+  if [ "$c" != "MISSING" ] && [ "$p" != "MISSING" ] && [ "$c" -gt "$p" ]; then
+    fail="$fail largest_scc=$c>$p"
+  fi
+  if [ -n "$fail" ]; then
+    echo "FAIL — $cm module(s) checked, coupling growth beyond band:$fail${note:+ (recorded escapes:$note)}"
+    return 1
+  fi
+  echo "PASS — $cm module(s) checked, $ce edge(s), within +${BAND_PCT}% band of previous snapshot${note:+ (recorded escapes:$note)}"
+  return 0
+}
+
+measure_now() { # -> writes metric lines to $1
+  m_out="$1"
+  raw="$(sh "$BUDGET" --metrics)"; m_rc=$?
+  if [ "$m_rc" -ne 0 ]; then
+    printf '%s\n' "$raw" >&2
+    return 2
+  fi
+  printf '%s\n' "$raw" | awk '$1=="nodes"{print "modules", $2; next} {print}' > "$m_out"
+  if [ "$WITH_DEPS" -eq 1 ]; then
+    fast=$("$ROOT/bin/simple" deps fast "$DEPS_ROOT" 2>/dev/null | awk '/^=== CYCLES/{exit} /^    src\//{u[$1]=1} END{n=0; for (f in u) n++; print n}')
+    norm=$("$ROOT/bin/simple" deps normal "$DEPS_ROOT" 2>/dev/null | awk 'match($0, /\(([0-9]+) transitive files\)/, a){ if (a[1] > mx) mx = a[1] } END{print mx+0}')
+    echo "fast_closure ${fast:-0}" >> "$m_out"
+    echo "normal_root_closure ${norm:-0}" >> "$m_out"
+  fi
+  return 0
+}
+
+latest_snapshot() {
+  ls "$SNAPDIR"/coupling_closure_snapshot_*.md 2>/dev/null | LC_ALL=C sort | tail -1
+}
+
+selftest() {
+  st="${TMPDIR:-/tmp}/coupling-snapshot-selftest.$$"
+  rm -rf "$st"; mkdir -p "$st"
+  printf 'modules 100\nedges 200\nlargest_scc 10\n' > "$st/prev"
+  # 1: in-band growth must PASS (positive control's control)
+  printf 'modules 101\nedges 203\nlargest_scc 10\n' > "$st/in"
+  v=$(compare "$st/prev" "$st/in"); rc=$?
+  case "$rc:$v" in 0:*"Results: 101 modules, 203 edges"*PASS*) : ;;
+    *) echo "selftest 1 (must-PASS in-band) rc=$rc: $v" >&2; rm -rf "$st"; return 1 ;; esac
+  # 2: growth beyond band must FAIL (positive control)
+  printf 'modules 150\nedges 300\nlargest_scc 10\n' > "$st/grow"
+  v=$(compare "$st/prev" "$st/grow"); rc=$?
+  case "$rc:$v" in 1:*FAIL*modules=150*edges=300*) : ;;
+    *) echo "selftest 2 (must-FAIL growth) rc=$rc: $v" >&2; rm -rf "$st"; return 1 ;; esac
+  # 3: SCC growth alone must FAIL even with modules/edges flat
+  printf 'modules 100\nedges 200\nlargest_scc 11\n' > "$st/scc"
+  v=$(compare "$st/prev" "$st/scc"); rc=$?
+  case "$rc:$v" in 1:*FAIL*largest_scc=11\>10*) : ;;
+    *) echo "selftest 3 (must-FAIL scc growth) rc=$rc: $v" >&2; rm -rf "$st"; return 1 ;; esac
+  # 4: zero-module snapshot must ERROR, never pass
+  printf 'modules 0\nedges 0\nlargest_scc 0\n' > "$st/zero"
+  v=$(compare "$st/prev" "$st/zero"); rc=$?
+  case "$rc:$v" in 2:*ERROR*) : ;;
+    *) echo "selftest 4 (must-ERROR zero) rc=$rc: $v" >&2; rm -rf "$st"; return 1 ;; esac
+  # 5: missing previous file must ERROR
+  v=$(compare "$st/nonexistent" "$st/in"); rc=$?
+  case "$rc:$v" in 2:*ERROR*) : ;;
+    *) echo "selftest 5 (must-ERROR missing prev) rc=$rc: $v" >&2; rm -rf "$st"; return 1 ;; esac
+  # 6: recorded escape recenters modules axis and is printed in the verdict
+  printf 'modules 150\nedges 200\nlargest_scc 10\n' > "$st/grow2"
+  save_m="$EXPECT_MODULES"; EXPECT_MODULES=150
+  v=$(compare "$st/prev" "$st/grow2"); rc=$?
+  EXPECT_MODULES="$save_m"
+  case "$rc:$v" in 0:*PASS*accepted-modules=150*) : ;;
+    *) echo "selftest 6 (escape recorded in verdict) rc=$rc: $v" >&2; rm -rf "$st"; return 1 ;; esac
+  rm -rf "$st"
+  return 0
+}
+
+if [ "$MODE" = selftest ]; then
+  if selftest; then
+    echo "PASS — 6 selftest fixture(s) checked (in-band PASS, growth FAIL, scc FAIL, zero ERROR, missing ERROR, recorded escape)"
+    exit 0
+  fi
+  echo "ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+
+# every real mode: selftest is fatal and runs first
+if ! selftest > /dev/null; then
+  echo "ERROR — nothing was checked (fatal: --selftest failed; fix the detector before trusting it)"
+  exit 2
+fi
+
+if [ "$MODE" = compare ]; then
+  compare "$PREV_ARG" "$CUR_ARG"
+  exit $?
+fi
+
+# check / write: measure now
+tmp="${TMPDIR:-/tmp}/coupling-snapshot-cur.$$"
+if ! measure_now "$tmp"; then
+  rm -f "$tmp"
+  echo "ERROR — nothing was checked (measurement failed; see stderr)"
+  exit 2
+fi
+
+prev="$(latest_snapshot)"
+if [ -z "$prev" ]; then
+  cm=$(metric "$tmp" modules); ce=$(metric "$tmp" edges)
+  if [ "$cm" = "MISSING" ] || [ "$ce" = "MISSING" ] || [ "$cm" -le 0 ] || [ "$ce" -le 0 ]; then
+    rm -f "$tmp"
+    echo "ERROR — nothing was checked (zero-module/zero-edge snapshot is never evidence)"
+    exit 2
+  fi
+  echo "Results: $cm modules, $ce edges"
+  verdict="PASS — $cm module(s) checked, $ce edge(s), first snapshot (no previous to band against)"
+  rc=0
+else
+  verdict="$(compare "$prev" "$tmp")"; rc=$?
+  printf '%s\n' "$verdict" | sed '$d'
+  verdict="$(printf '%s\n' "$verdict" | tail -1)"
+fi
+
+if [ "$MODE" = write ] && [ "$rc" -eq 0 ]; then
+  d="$(date +%Y-%m-%d)"
+  snap="$SNAPDIR/coupling_closure_snapshot_$d.md"
+  {
+    echo "# Coupling closure snapshot — $d"
+    echo
+    echo "Produced by \`scripts/check/check-coupling-snapshot.shs --write\` (Phase E"
+    echo "per-phase bracketing re-measure). Graph metrics from"
+    echo "\`check-coupling-budget.shs --metrics\` (closure of src/compiler + src/app"
+    echo "over \`use\` imports, std/lib nodes included); fast/normal closures from"
+    echo "\`bin/simple deps fast|normal $DEPS_ROOT\`."
+    echo "Machine-readable: \`key value\` lines below; band = +${BAND_PCT}% modules/edges,"
+    echo "0% largest_scc, vs the previous coupling_closure_snapshot_*.md."
+    echo
+    cat "$tmp"
+    echo
+    prevname="unset (first snapshot)"
+    [ -n "$prev" ] && prevname="$(basename "$prev")"
+    echo "previous_snapshot: $prevname"
+    cm=$(metric "$tmp" modules); ce=$(metric "$tmp" edges)
+    echo "Results: $cm modules, $ce edges"
+  } > "$snap"
+  echo "snapshot written: $snap"
+fi
+rm -f "$tmp"
+printf '%s\n' "$verdict"
+exit "$rc"

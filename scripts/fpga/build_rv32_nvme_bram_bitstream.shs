@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# build_rv32_nvme_bram_bitstream.shs — ONE reproducible Vivado build of the
+# BRAM-only rv32 NVMe-firmware bitstream for the Kria KV260 (xck26).
+#
+# Same proven Path-A pattern as build_rv32_tiny_bram_bitstream.shs (NO DDR, NO
+# block design, NO FSBL, STARTUPE3 CFGMCLK/2 clock, BSCANE2 USER4 obs readout):
+# only the BRAM INIT .mem content and the memory-size generics differ. The
+# Simple-generated NVMe self-test firmware is baked into BRAM INIT at synthesis
+# time and prints "ALL RV32 NVME FW CHECKS PASS" to the 16550 THR the moment
+# the bitstream configures; the transcript is read back over JTAG with
+# read_rv32_tiny_bram_obs.shs transcript (the marker line is the verdict — the
+# SoC's hardwired pass_seen bit matches "TEST PASSED" and stays 0 here).
+#
+# MANDATORY before this: the GHDL rehearsal must PASS with the SAME sizes,
+# clean AND garbage-filled:
+#   sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs
+#   GARBAGE_FILL=1 sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs
+#
+# Env knobs:
+#   FW_ELF     (default build/ghdl/rv32_nvme_fw/nvme_fw_rv32_bram.elf — linked
+#               with nvme_fw_rv32_bram.ld: .text@0x80000000, 8K stack, <64K)
+#   RAM_WORDS  (default 16384 = 64 KB, the fw's whole link window; 16 BRAM36)
+#   RDISK_WORDS(default 1024; fw never touches the ramdisk)
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
+BUILD_DIR="build/fpga/k26_rv32_nvme_bram"
+OUT_BIT="build/fpga/k26_rv32_nvme_bram/gateware/rv32_nvme_bram.bit"
+FW_ELF="${FW_ELF:-build/ghdl/rv32_nvme_fw/nvme_fw_rv32_bram.elf}"
+RAM_WORDS="${RAM_WORDS:-16384}"
+RDISK_WORDS="${RDISK_WORDS:-1024}"
+RAM_BYTES=$((RAM_WORDS * 4))
+SYNTH_ONLY="0"
+[ "${1:-}" = "--synth-only" ] && SYNTH_ONLY="1"
+
+[ -f "$VIVADO_SETTINGS" ] || { echo "FAIL: vivado settings missing $VIVADO_SETTINGS"; exit 1; }
+[ -f "$FW_ELF" ] || { echo "FAIL: firmware ELF missing: $FW_ELF"; exit 1; }
+if pgrep -f '[l]nx64\.o/vivado' >/dev/null 2>&1; then
+    echo "FAIL: a Vivado is already running (serialize: exactly one at a time)"; exit 1
+fi
+# shellcheck disable=SC1090
+. "$VIVADO_SETTINGS"
+
+mkdir -p "$BUILD_DIR"
+
+# Static budget gate: whole footprint (incl. stack) must fit the BRAM window.
+if command -v llvm-nm >/dev/null 2>&1; then
+  kend_hex="$(llvm-nm "$FW_ELF" | awk '$3=="_kernel_end"{print $1}')"
+  if [ -n "$kend_hex" ]; then
+    used=$(( $(printf '%d' "0x$kend_hex") - $(printf '%d' 0x80000000) ))
+    echo "Firmware footprint (incl. stack): $used bytes vs $RAM_BYTES bytes of BRAM RAM"
+    [ "$used" -le "$RAM_BYTES" ] || { echo "FAIL: fw does not fit RAM_WORDS budget"; exit 1; }
+  fi
+fi
+
+echo "=== flattening NVMe firmware to BRAM INIT .mem ==="
+llvm-objcopy -O binary "$FW_ELF" "$BUILD_DIR/fw.bin"
+od -An -v -tx4 -w4 "$BUILD_DIR/fw.bin" | awk 'NF{print $1}' > "$BUILD_DIR/rv32_flat.mem"
+printf "00000000\n" > "$BUILD_DIR/rv32_ramdisk.mem"
+echo "  firmware words: $(wc -l < "$BUILD_DIR/rv32_flat.mem")"
+RAM_MEM="$ROOT_DIR/$BUILD_DIR/rv32_flat.mem"
+RDISK_MEM="$ROOT_DIR/$BUILD_DIR/rv32_ramdisk.mem"
+
+cat > "$BUILD_DIR/k26_nvme_bram.xdc" <<'XDC'
+set_property PACKAGE_PIN H12 [get_ports uart_tx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
+create_clock -name cfgmclk -period 20.000 [get_pins u_startup/CFGMCLK]
+set_false_path -to [get_ports uart_tx]
+XDC
+
+# Synth pre-hook: raise the elaboration loop limit for the BRAM INIT impure
+# functions (one loop iteration per .mem line; default cap 65536 -> Synth 8-403).
+cat > "$BUILD_DIR/synth_pre.tcl" <<'PRE'
+set_param synth.elaboration.rodinMoreOptions {rt::set_parameter max_loop_limit 8000000}
+PRE
+
+RTL="examples/09_embedded/fpga_riscv/rtl"
+cat > "$BUILD_DIR/build_rv32_nvme_bram.tcl" <<TCL
+set synth_only $SYNTH_ONLY
+create_project k26_rv32_nvme_bram $BUILD_DIR/k26_rv32_nvme_bram -part xck26-sfvc784-2lv-c -force
+add_files [list \\
+  $RTL/rv32_exec_core_axi.vhd \\
+  $RTL/rv32_bram_soc.vhd \\
+  $RTL/soc_top_rv32_tiny_bram.vhd ]
+set_property FILE_TYPE {VHDL 2008} [get_files *.vhd]
+add_files -fileset constrs_1 $BUILD_DIR/k26_nvme_bram.xdc
+set_property top soc_top_rv32_tiny_bram [current_fileset]
+set_property generic "G_RAM_WORDS=$RAM_WORDS G_RDISK_WORDS=$RDISK_WORDS G_RAM_INIT_FILE=$RAM_MEM G_RDISK_INIT_FILE=$RDISK_MEM" [current_fileset]
+update_compile_order -fileset sources_1
+set_property STEPS.SYNTH_DESIGN.TCL.PRE [file normalize $BUILD_DIR/synth_pre.tcl] [get_runs synth_1]
+launch_runs synth_1 -jobs 8
+wait_on_run synth_1
+if {[get_property PROGRESS [get_runs synth_1]] != "100%"} { puts "SYNTH_FAILED"; exit 5 }
+open_run synth_1
+report_utilization -file $BUILD_DIR/util_synth.rpt
+report_timing_summary -file $BUILD_DIR/timing_synth.rpt
+puts "SYNTH_WNS=[get_property STATS.WNS [get_runs synth_1]]"
+if {\$synth_only} { puts "SYNTH_ONLY_DONE"; exit 0 }
+launch_runs impl_1 -to_step write_bitstream -jobs 8
+wait_on_run impl_1
+if {[get_property PROGRESS [get_runs impl_1]] != "100%"} { puts "IMPL_FAILED"; exit 6 }
+open_run impl_1
+report_timing_summary -file $BUILD_DIR/timing_routed.rpt
+report_utilization -file $BUILD_DIR/util_routed.rpt
+set wns [get_property STATS.WNS [get_runs impl_1]]
+set whs [get_property STATS.WHS [get_runs impl_1]]
+puts "IMPL_WNS=\$wns IMPL_WHS=\$whs"
+if {\$wns < 0.0 || \$whs < 0.0} { puts "TIMING_NOT_MET"; exit 3 }
+file mkdir [file dirname $OUT_BIT]
+file copy -force $BUILD_DIR/k26_rv32_nvme_bram/k26_rv32_nvme_bram.runs/impl_1/soc_top_rv32_tiny_bram.bit $OUT_BIT
+puts "BITSTREAM_WRITTEN=$OUT_BIT"
+TCL
+
+echo "=== running ONE Vivado build (BRAM-only NVMe-fw SoC, RAM_WORDS=$RAM_WORDS RDISK_WORDS=$RDISK_WORDS) ==="
+vivado -mode batch -source "$BUILD_DIR/build_rv32_nvme_bram.tcl" \
+    -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -40
+
+if [ "$SYNTH_ONLY" = "1" ]; then
+    grep -E 'SYNTH_WNS|SYNTH_ONLY_DONE' "$BUILD_DIR/vivado.log" || true
+    exit 0
+fi
+[ -f "$OUT_BIT" ] && echo "SUCCESS: bitstream at $OUT_BIT" || { echo "FAIL: no bitstream; see $BUILD_DIR/vivado.log"; exit 4; }

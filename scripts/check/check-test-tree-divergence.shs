@@ -1,0 +1,451 @@
+#!/bin/sh
+# Fail when a mirrored test-tree path diverges from its canonical copy.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# doc/09_report/infra/duplicate_test_tree_divergence_audit_2026-08-08.md
+# found that test/01_unit/ and test/unit/ (and test/02_integration/ and
+# test/integration/) are LIVE duplicate trees: test_runner_main.spl scans
+# `test/` recursively with no exclusion for either shadow tree, and the
+# discovery manifest indexes both copies as separate entries. 982 path pairs
+# (891 unit + 91 integration) differ byte-for-byte between canonical and
+# shadow, including CONTRADICTORY assertions on the same behavior
+# (os/kernel/loader/app_registry_spec.spl: len()==19 canonical vs ==18
+# shadow) and a stub silently shadowing a real 20-assertion spec
+# (app/dap/dap_spec.spl). Both run under default `bin/simple test` and can
+# report opposite verdicts for what looks like one spec. This guard turns
+# that silent drift into a loud, immediate failure — the same failure mode
+# named in the "grep is a wrapped ugrep" incident (commit 22b8d81821): a
+# sweep that reports success while missing half the call sites.
+#
+# ---------------------------------------------------------------------------
+# BASELINE DESIGN — must not fail on day one with 982 findings
+# ---------------------------------------------------------------------------
+# A guard that immediately reports 982 failures gets ignored, not fixed. So
+# this guard is baseline-relative, like a `git blame`-clean lint: the 982
+# pairs known-diverged as of 2026-08-08 are recorded in
+# scripts/check/test_tree_divergence_baseline.txt (one "label:relpath" per
+# line). The guard FAILS only on:
+#   (a) a NEW divergence not already in the baseline (regression), or
+#   (b) a baselined pair that is now IDENTICAL (the baseline is stale and
+#       MUST be shrunk — a baseline that only ever grows is exactly the
+#       kind of gate that quietly stops meaning anything).
+# Reconciling a pair (dropping it from the baseline) is therefore a real,
+# tracked improvement instead of invisible.
+#
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED CONTRACT (see .claude/rules/vcs.md verdict-line convention)
+# ---------------------------------------------------------------------------
+#   * Every command's exit status is checked; a tool failure is an ERROR
+#     (exit 2), never treated as a clean 0-diff result.
+#   * A run that compares 0 pairs is an ERROR (exit 2), not a PASS — a guard
+#     that "passes" because it checked nothing is the exact failure mode
+#     this repo has been bitten by repeatedly.
+#   * The verdict line always states how many pairs were actually compared.
+#
+#   (c) a HALF-LANDED FIX: a commit in the outgoing range edited ONE leg of a
+#       pair while leaving the twin untouched AND still divergent. Requires
+#       --base + --ref. A one-leg edit that CONVERGES the pair passes — that
+#       is what a correct reconciliation looks like.
+#
+# Usage: check-test-tree-divergence.shs [--generate-baseline] [--ref <commit-ish>] [--base <commit-ish>]
+#   --generate-baseline   overwrite the baseline file with the CURRENT
+#                          diverged-pair list (only for deliberate,
+#                          reviewed baseline updates — never run this to
+#                          make a failure go away without reading it first).
+#   --ref <commit-ish>    compare the COMMITTED content of both trees at this
+#                          ref (via `git show`/`git ls-tree`) instead of the
+#                          live on-disk working copy. This repo's dev hosts
+#                          run several agent sessions against ONE shared
+#                          working copy; an unrelated session's uncommitted
+#                          scratch edits under test/ sit in the WC and, since
+#                          `git push` only ever sends committed content, make
+#                          this guard fail (or falsely pass) on divergence
+#                          that was never part of the push. pre-push always
+#                          passes `--ref "$local_sha"` (the exact commit being
+#                          pushed) for this reason — see
+#                          doc/08_tracking/bug/pre_push_full_scan_guards_read_dirty_shared_wc_2026-08-08.md.
+#                          Without --ref, behavior is unchanged (reads disk).
+#
+# Env overrides (for sabotage/self-test only — do not use in normal runs):
+#   TEST_TREE_DIVERGENCE_PAIRS="label:canon_rel:shadow_rel[;label:canon_rel:shadow_rel...]"
+#   TEST_TREE_DIVERGENCE_BASELINE=/path/to/alternate/baseline.txt
+#
+# Exit 0 = no unbaselined divergence, 1 = divergence found, 2 = could not
+# determine (ERROR).
+
+set -u
+
+SELF=check-test-tree-divergence
+
+# --- the no-silent-exit invariant -------------------------------------------
+# See the same block in check-tree-size-push.shs. Before 2026-08-10 this guard
+# had a trap that only removed scratch dirs and printed NOTHING, so a SIGTERM (a caller's 600s cap, earlyoom, an explicit
+# kill) ended it with an EMPTY stdout and no verdict — which a caller grepping
+# the output file for a verdict cannot distinguish from a run still in
+# progress, and which on 2026-08-10 produced a real false-green push. Every
+# stop now ends in one of the three verdicts.
+VERDICT_EMITTED=0
+cleanup() {
+    # $1, when given, is the status captured by the trap BEFORE any other
+    # command ran. This is load-bearing: the trap here also sets
+    # `cleanup_extra`, and that assignment resets `$?` to 0 — so reading `$?`
+    # inside cleanup() would turn a FAIL (exit 1) into exit 0, a guard that
+    # prints FAIL and reports success. That regression was caught by the
+    # negative control on 2026-08-10; do not collapse this back to a bare `$?`.
+    cl_status=${1:-$?}
+    trap - EXIT HUP INT TERM QUIT PIPE
+    if [ "$VERDICT_EMITTED" -eq 0 ]; then
+        case "$cl_status" in
+            129) cl_why="killed by SIGHUP (129)" ;;
+            130) cl_why="interrupted by SIGINT (130)" ;;
+            131) cl_why="killed by SIGQUIT (131)" ;;
+            141) cl_why="killed by SIGPIPE (141)" ;;
+            143) cl_why="killed by SIGTERM (143) — a harness timeout, earlyoom, or an explicit kill" ;;
+            0)   cl_why="the script stopped without reaching a verdict (exit 0)" ;;
+            *)   cl_why="the script aborted before reaching a verdict (exit $cl_status)" ;;
+        esac
+        echo "$SELF: ERROR — $cl_why" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        cl_status=2
+    fi
+    [ -n "${cleanup_extra:-}" ] && rm -rf $cleanup_extra
+    exit "$cl_status"
+}
+trap 'cl_t=$?; cleanup "$cl_t"' EXIT HUP INT TERM QUIT PIPE
+
+die() {
+    VERDICT_EMITTED=1
+    status="$1"; shift
+    echo "$SELF: ERROR: $*" >&2
+    echo "$SELF: ERROR — nothing was checked"
+    exit "$status"
+}
+
+# --- 0. locate repo root, refuse to run outside a real clone ---------------
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null)
+[ -n "$toplevel" ] || die 2 "not inside a git repository (cwd=$(pwd))"
+cd "$toplevel" || die 2 "cannot cd to repo root $toplevel"
+
+BASELINE_PATH_REL="scripts/check/test_tree_divergence_baseline.txt"
+ALLOWLIST_PATH_REL="scripts/check/test_tree_mirror_only_allowlist.txt"
+
+generate=0
+ref=""
+base=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --generate-baseline) generate=1; shift ;;
+        --ref) ref="${2:-}"; [ -n "$ref" ] || die 2 "--ref requires a commit-ish argument"; shift 2 ;;
+        --base) base="${2:-}"; [ -n "$base" ] || die 2 "--base requires a commit-ish argument"; shift 2 ;;
+        *) die 2 "unrecognized argument: $1" ;;
+    esac
+done
+if [ -n "$ref" ]; then
+    git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null \
+        || die 2 "--ref '$ref' does not resolve to a commit"
+fi
+if [ -n "$base" ]; then
+    [ -n "$ref" ] || die 2 "--base requires --ref (the half-landed check reads the range base..ref)"
+    git rev-parse --verify --quiet "${base}^{commit}" >/dev/null \
+        || die 2 "--base '$base' does not resolve to a commit"
+fi
+
+# --- 0b. baseline/allowlist source: committed content at --ref, else disk ---
+# In --ref mode the tree comparison already reads committed content via
+# `git ls-tree`/`cat-file` (see section 3) — the baseline and allowlist MUST
+# come from the SAME commit, or the verdict depends on whatever another
+# session's uncommitted scratch happens to have left in the shared working
+# copy. Missing file at that ref is an ERROR, never a silent fallback to WC.
+work0=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence_src.XXXXXX") \
+    || die 2 "mktemp failed"
+trap 'cl_t=$?; cleanup_extra="$work0"; cleanup "$cl_t"' EXIT HUP INT TERM QUIT PIPE
+# (superseded by the wider trap once $work exists, below; this earlier one
+#  guarantees work0 is cleaned even if we die before that point)
+if [ -n "$ref" ]; then
+    [ -z "${TEST_TREE_DIVERGENCE_BASELINE:-}" ] \
+        || die 2 "TEST_TREE_DIVERGENCE_BASELINE override is not supported with --ref (baseline must come from \$ref)"
+    [ -z "${TEST_TREE_MIRROR_ONLY_ALLOWLIST:-}" ] \
+        || die 2 "TEST_TREE_MIRROR_ONLY_ALLOWLIST override is not supported with --ref (allowlist must come from \$ref)"
+    git cat-file -e "$ref:$BASELINE_PATH_REL" 2>/dev/null \
+        || die 2 "baseline file missing at ref $ref: $BASELINE_PATH_REL"
+    BASELINE="$work0/baseline_from_ref.txt"
+    git show "$ref:$BASELINE_PATH_REL" > "$BASELINE" 2>/dev/null \
+        || die 2 "git show $ref:$BASELINE_PATH_REL failed"
+    if git cat-file -e "$ref:$ALLOWLIST_PATH_REL" 2>/dev/null; then
+        ALLOWLIST="$work0/allowlist_from_ref.txt"
+        git show "$ref:$ALLOWLIST_PATH_REL" > "$ALLOWLIST" 2>/dev/null \
+            || die 2 "git show $ref:$ALLOWLIST_PATH_REL failed"
+    else
+        # no allowlist file at this ref is legitimate (treated as empty list
+        # below via the `[ -f "$ALLOWLIST" ]` check), not an error.
+        ALLOWLIST="/nonexistent/no-allowlist-at-ref"
+    fi
+else
+    BASELINE="${TEST_TREE_DIVERGENCE_BASELINE:-$toplevel/$BASELINE_PATH_REL}"
+    ALLOWLIST="${TEST_TREE_MIRROR_ONLY_ALLOWLIST:-$toplevel/$ALLOWLIST_PATH_REL}"
+fi
+
+# --- 1. which pairs to check ------------------------------------------------
+if [ -n "${TEST_TREE_DIVERGENCE_PAIRS:-}" ]; then
+    pairs_raw=$(printf '%s' "$TEST_TREE_DIVERGENCE_PAIRS" | tr ';' '\n')
+else
+    pairs_raw='unit:test/01_unit:test/unit
+integration:test/02_integration:test/integration'
+fi
+
+# --- 2. scratch state --------------------------------------------------------
+work=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence.XXXXXX") \
+    || die 2 "mktemp failed"
+trap 'cl_t=$?; cleanup_extra="$work $work0"; cleanup "$cl_t"' EXIT HUP INT TERM QUIT PIPE
+
+current_diverged="$work/current_diverged.txt"
+: > "$current_diverged"
+mirror_only="$work/mirror_only.txt"
+: > "$mirror_only"
+total_common=0
+total_identical=0
+total_diverged=0
+
+# --- 3. compare every pair ---------------------------------------------------
+oldifs="$IFS"
+IFS='
+'
+for line in $pairs_raw; do
+    IFS="$oldifs"
+    [ -n "$line" ] || continue
+    label=$(printf '%s' "$line" | cut -d: -f1)
+    canon_rel=$(printf '%s' "$line" | cut -d: -f2)
+    shadow_rel=$(printf '%s' "$line" | cut -d: -f3)
+    [ -n "$label" ] && [ -n "$canon_rel" ] && [ -n "$shadow_rel" ] \
+        || die 2 "malformed pair spec: '$line' (want label:canon_rel:shadow_rel)"
+
+    case "$canon_rel" in
+        /*) canon_dir="$canon_rel" ;;
+        *)  canon_dir="$toplevel/$canon_rel" ;;
+    esac
+    case "$shadow_rel" in
+        /*) shadow_dir="$shadow_rel" ;;
+        *)  shadow_dir="$toplevel/$shadow_rel" ;;
+    esac
+    if [ -n "$ref" ]; then
+        # Committed-content mode: enumerate/read via git, never the live WC —
+        # a dirty shared working copy must not affect this comparison.
+        git ls-tree -r --name-only "$ref" -- "$shadow_rel" 2>/dev/null \
+            | /usr/bin/grep -E '\.spl$' \
+            | /usr/bin/grep -vE '/\.spipe_matchers_[^/]*$|/\.sspec_wrapped_entry_[^/]*$' \
+            > "$work/shadow_files.txt"
+        fr=$?
+        [ "$fr" -eq 0 ] || die 2 "git ls-tree failed (status $fr) for $shadow_rel@$ref"
+
+        while IFS= read -r shpath; do
+            [ -n "$shpath" ] || continue
+            relpath=${shpath#"$shadow_rel"/}
+            canon_path="$canon_rel/$relpath"
+            if ! git cat-file -e "$ref:$canon_path" 2>/dev/null; then
+                # MIRROR-ONLY: file exists only in the shadow tree. Canonical-only
+                # is the norm (the shadow is a partial subset); mirror-only almost
+                # always means a spec was authored into the wrong tree.
+                echo "$label:$relpath" >> "$mirror_only"
+                continue
+            fi
+            total_common=$((total_common + 1))
+            if git diff --quiet "$ref:$canon_path" "$ref:$shpath" 2>/dev/null; then
+                total_identical=$((total_identical + 1))
+            else
+                total_diverged=$((total_diverged + 1))
+                echo "$label:$relpath" >> "$current_diverged"
+            fi
+        done < "$work/shadow_files.txt"
+    else
+        [ -d "$canon_dir" ]  || die 2 "canonical dir does not exist: $canon_dir"
+        [ -d "$shadow_dir" ] || die 2 "shadow dir does not exist: $shadow_dir"
+
+        find "$shadow_dir" -type f -name '*.spl' \
+            ! -name '.spipe_matchers_*' ! -name '.sspec_wrapped_entry_*' \
+            > "$work/shadow_files.txt"
+        fr=$?
+        [ "$fr" -eq 0 ] || die 2 "find failed (status $fr) under $shadow_dir"
+
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            relpath=${f#"$shadow_dir"/}
+            canon_file="$canon_dir/$relpath"
+            if [ ! -f "$canon_file" ]; then
+                # MIRROR-ONLY (see committed-mode note above).
+                echo "$label:$relpath" >> "$mirror_only"
+                continue
+            fi
+            total_common=$((total_common + 1))
+            if cmp -s "$canon_file" "$f"; then
+                total_identical=$((total_identical + 1))
+            else
+                total_diverged=$((total_diverged + 1))
+                echo "$label:$relpath" >> "$current_diverged"
+            fi
+        done < "$work/shadow_files.txt"
+    fi
+    IFS='
+'
+done
+IFS="$oldifs"
+
+sort -u "$current_diverged" -o "$current_diverged"
+sort -u "$mirror_only" -o "$mirror_only"
+
+[ "$total_common" -gt 0 ] \
+    || die 2 "0 mirrored pairs found across all pair specs — nothing was compared"
+
+# --- 3b. mirror-only check ---------------------------------------------------
+# Canonical-only paths are the NORM (the shadow trees are deliberate partial
+# subsets: 2,535 canonical-only unit paths as of 2026-08-10) and stay silent.
+# MIRROR-ONLY paths — a file in test/unit/** or test/integration/** with no
+# canonical twin — are anomalous: they almost always mean a spec was authored
+# into the wrong tree (h2_server_text_to_u8_spec.spl, c5881931d97). Known,
+# reviewed exceptions live in the allowlist file (label:relpath per line,
+# '#' comments allowed). The allowlist is hand-maintained — there is NO
+# --generate flag for it, by design: never auto-generate it to force green.
+# (ALLOWLIST is set in section 0b, above: from $ref via `git show` in --ref
+# mode, from disk otherwise — never re-sourced here.)
+if [ -f "$ALLOWLIST" ]; then
+    /usr/bin/grep -v '^[[:space:]]*#' "$ALLOWLIST" | /usr/bin/grep -v '^[[:space:]]*$' | sort -u > "$work/allowlist_sorted.txt"
+else
+    : > "$work/allowlist_sorted.txt"
+fi
+comm -23 "$mirror_only" "$work/allowlist_sorted.txt" > "$work/new_mirror_only.txt"
+comm -13 "$mirror_only" "$work/allowlist_sorted.txt" > "$work/stale_allowlist.txt"
+n_mirror_only=$(wc -l < "$mirror_only" | tr -d ' ')
+n_new_mirror_only=$(wc -l < "$work/new_mirror_only.txt" | tr -d ' ')
+n_stale_allowlist=$(wc -l < "$work/stale_allowlist.txt" | tr -d ' ')
+
+# --- 3c. HALF-LANDED FIX check (one-leg edit that leaves the pair diverged) --
+# The baseline check above only fires on a pair that becomes NEWLY diverged.
+# A pair that is ALREADY baselined can drift arbitrarily far apart and stay
+# silent — which is exactly how 26 half-landed fixes accumulated (a fix commit
+# landed on one leg, the twin left broken, and the bug doc marked FIXED). See
+# doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md
+#
+# So: intersect the OUTGOING DIFF with the pair table. If a commit in the range
+# edits one leg of a pair, the twin must EITHER also be edited, OR the pair must
+# be IDENTICAL after the edit (which is precisely what a correct reconciliation
+# looks like — adopting one leg wholesale converges the pair by touching only
+# the stale leg, and must keep passing).
+#
+# Cost is the already-computed name-only diff, not the content scan above.
+n_half_landed=0
+half_landed_checked=0
+half_landed_note="skipped (no --base)"
+if [ -n "$ref" ] && [ -n "$base" ]; then
+    git diff --name-only "$base" "$ref" -- 'test/*' > "$work/range_files.txt" 2>/dev/null
+    dr=$?
+    [ "$dr" -eq 0 ] || die 2 "git diff --name-only $base..$ref failed (status $dr)"
+    sort -u "$work/range_files.txt" -o "$work/range_files.txt"
+    : > "$work/half_landed.txt"
+
+    oldifs2="$IFS"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        case "$f" in *.spl) ;; *) continue ;; esac
+        twin=""
+        IFS='
+'
+        for line in $pairs_raw; do
+            IFS="$oldifs2"
+            [ -n "$line" ] || continue
+            c=$(printf '%s' "$line" | cut -d: -f2)
+            s=$(printf '%s' "$line" | cut -d: -f3)
+            case "$f" in
+                "$c"/*) twin="$s/${f#"$c"/}"; break ;;
+                "$s"/*) twin="$c/${f#"$s"/}"; break ;;
+            esac
+            IFS='
+'
+        done
+        IFS="$oldifs2"
+        [ -n "$twin" ] || continue
+        # twin absent at the tip => mirror-only / canonical-only, handled in 3b
+        git cat-file -e "$ref:$twin" 2>/dev/null || continue
+        half_landed_checked=$((half_landed_checked + 1))
+        # twin edited in the same range => both legs moved, fine
+        if /usr/bin/grep -qxF "$twin" "$work/range_files.txt"; then continue; fi
+        # pair converged after the edit => a correct one-leg reconciliation
+        if git diff --quiet "$ref:$f" "$ref:$twin" 2>/dev/null; then continue; fi
+        echo "$f  (twin untouched and still divergent: $twin)" >> "$work/half_landed.txt"
+        n_half_landed=$((n_half_landed + 1))
+    done < "$work/range_files.txt"
+    IFS="$oldifs2"
+    half_landed_note="$half_landed_checked leg-edit(s) checked, $n_half_landed half-landed"
+fi
+
+# --- 4. --generate-baseline: write and stop ---------------------------------
+if [ "$generate" -eq 1 ]; then
+    cp "$current_diverged" "$BASELINE"
+    n=$(wc -l < "$current_diverged" | tr -d ' ')
+    VERDICT_EMITTED=1
+    echo "$SELF: PASS — baseline written to $BASELINE ($n entries recorded; no divergence check performed in --generate-baseline mode)"
+    exit 0
+fi
+
+# --- 5. diff against baseline ------------------------------------------------
+[ -f "$BASELINE" ] || die 2 "baseline file missing: $BASELINE (run --generate-baseline once, reviewed, to create it)"
+sort -u "$BASELINE" > "$work/baseline_sorted.txt"
+
+comm -23 "$current_diverged" "$work/baseline_sorted.txt" > "$work/new_divergence.txt"
+comm -13 "$current_diverged" "$work/baseline_sorted.txt" > "$work/fixed_baseline.txt"
+
+n_new=$(wc -l < "$work/new_divergence.txt" | tr -d ' ')
+n_fixed=$(wc -l < "$work/fixed_baseline.txt" | tr -d ' ')
+n_baseline=$(wc -l < "$work/baseline_sorted.txt" | tr -d ' ')
+
+# machine-readable output for a future reconciliation lane (persists past
+# the trap-cleaned scratch dir unless the caller redirects it elsewhere)
+out="${TEST_TREE_DIVERGENCE_OUT:-${TMPDIR:-/tmp}/test_tree_divergence_current.txt}"
+cp "$current_diverged" "$out" 2>/dev/null || out="(failed to write $out)"
+
+echo "$SELF: $total_common pairs compared, $total_identical identical, $total_diverged diverged"
+echo "$SELF: baseline has $n_baseline known-diverged entries"
+echo "$SELF: diverged-path list written to $out"
+
+status=0
+if [ "$n_new" -gt 0 ]; then
+    echo "$SELF: NEW divergence(s) not in baseline:" >&2
+    sed 's/^/  + /' "$work/new_divergence.txt" >&2
+    status=1
+fi
+if [ "$n_fixed" -gt 0 ]; then
+    echo "$SELF: baseline entries that are now IDENTICAL (baseline is stale — remove these lines from $BASELINE):" >&2
+    sed 's/^/  - /' "$work/fixed_baseline.txt" >&2
+    status=1
+fi
+if [ "$n_new_mirror_only" -gt 0 ]; then
+    echo "$SELF: MIRROR-ONLY file(s) with no canonical twin and not in $ALLOWLIST:" >&2
+    echo "$SELF:   (a spec authored into test/unit/ or test/integration/ belongs in the canonical tree —" >&2
+    echo "$SELF:    mirror it to test/01_unit/ / test/02_integration/, or add a reviewed allowlist entry)" >&2
+    sed 's/^/  + /' "$work/new_mirror_only.txt" >&2
+    status=1
+fi
+if [ "$n_stale_allowlist" -gt 0 ]; then
+    echo "$SELF: allowlist entries that are NO LONGER mirror-only (stale — remove these lines from $ALLOWLIST):" >&2
+    sed 's/^/  - /' "$work/stale_allowlist.txt" >&2
+    status=1
+fi
+
+if [ "$n_half_landed" -gt 0 ]; then
+    echo "$SELF: HALF-LANDED fix(es): one leg of a duplicate test-tree pair was edited in" >&2
+    echo "$SELF:   $base..$ref while its twin was left untouched AND still divergent." >&2
+    echo "$SELF:   Both legs execute — apply the same change to the twin, or adopt one leg" >&2
+    echo "$SELF:   wholesale so the pair converges (a converging one-leg edit passes)." >&2
+    sed 's/^/  ! /' "$work/half_landed.txt" >&2
+    status=1
+fi
+
+if [ "$status" -ne 0 ]; then
+    VERDICT_EMITTED=1
+    echo "$SELF: FAIL — $total_diverged diverged vs $n_baseline baselined ($n_new new, $n_fixed fixed-but-still-baselined); $n_mirror_only mirror-only ($n_new_mirror_only unallowlisted, $n_stale_allowlist stale-allowlist); half-landed: $half_landed_note"
+    exit 1
+fi
+
+VERDICT_EMITTED=1
+echo "$SELF: PASS — $total_common pairs checked, $total_diverged diverged (all baselined), 0 new, 0 stale-fixed, $n_mirror_only mirror-only (all allowlisted); half-landed: $half_landed_note"
+exit 0

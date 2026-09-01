@@ -1,0 +1,113 @@
+#!/bin/sh
+# Build one provenance-bound native X25519MLKEM768 GPU evidence runner.
+# This deliberately does not build, label, or promote the narrow C NTT probes.
+set -eu
+
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+cd "$REPO_ROOT"
+BOOTSTRAP_STAGE3_FACADE_PATH="$REPO_ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$REPO_ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+
+usage() {
+  echo "usage: $0 --backend cuda|vulkan|metal --stage4-simple <path>" >&2
+  exit 2
+}
+
+BACKEND=
+STAGE4_SIMPLE=
+while [ "$#" -gt 0 ]; do
+  [ "$#" -ge 2 ] || usage
+  case "$1" in
+    --backend) BACKEND="$2" ;;
+    --stage4-simple) STAGE4_SIMPLE="$2" ;;
+    *) usage ;;
+  esac
+  shift 2
+done
+
+case "$BACKEND" in cuda|vulkan|metal) ;; *) usage ;; esac
+[ -n "$STAGE4_SIMPLE" ] || usage
+[ -f "$STAGE4_SIMPLE" ] && [ ! -L "$STAGE4_SIMPLE" ] || {
+  echo "error=stage4_simple_not_regular" >&2
+  exit 1
+}
+[ -f "${STAGE4_SIMPLE}.provenance.env" ] && [ ! -L "${STAGE4_SIMPLE}.provenance.env" ] || {
+  echo "error=stage4_provenance_not_regular" >&2
+  exit 1
+}
+stage4_verify_candidate_provenance "${STAGE4_SIMPLE}.provenance.env" \
+  "$STAGE4_SIMPLE" "$REPO_ROOT" || {
+  echo "error=stage4_provenance_invalid" >&2
+  exit 1
+}
+
+RUNNER_SOURCE="src/app/test/x25519mlkem768_evidence.spl"
+ARTIFACT="build/evidence/x25519mlkem768/$BACKEND/x25519mlkem768_evidence_runner"
+SIDECAR="${ARTIFACT}.provenance.env"
+TMP_ARTIFACT="${ARTIFACT}.tmp.$$"
+TMP_SIDECAR="${SIDECAR}.tmp.$$"
+[ ! -e "$ARTIFACT" ] && [ ! -e "$SIDECAR" ] || {
+  echo "error=runner_or_provenance_already_exists" >&2
+  exit 1
+}
+mkdir -p "$(dirname -- "$ARTIFACT")"
+
+# A source-frozen Stage-4 compiler produces a temporary artifact.  The final
+# path appears only after the artifact digest has been captured.
+SIMPLE_LIB=src "$STAGE4_SIMPLE" native-build --source src/app --source src/lib \
+  --entry-closure --entry "$RUNNER_SOURCE" --runtime-bundle core-c-bootstrap \
+  --output "$TMP_ARTIFACT"
+[ -f "$TMP_ARTIFACT" ] && [ ! -L "$TMP_ARTIFACT" ] || {
+  echo "error=native_runner_artifact_not_regular" >&2
+  exit 1
+}
+
+# native-build reporting rc=0 is not proof of a runnable artifact -- it can
+# report success for a structurally empty (zero defined-FUNC) binary, see
+# doc/08_tracking/bug/native_build_reports_success_for_functionless_artifact_2026-08-10.md.
+# This evidence runner is later executed by other GPU-lane gates that trust
+# this build step; verify the artifact actually carries defined FUNC symbols
+# before it is promoted to its final path, reusing the existing FUNC-symbol
+# helper rather than a bespoke check.
+if ! sh "$REPO_ROOT/scripts/check/check-native-build-artifact-has-functions.shs" "$TMP_ARTIFACT" >"${TMP_ARTIFACT}.func-check.log" 2>&1; then
+  echo "error=native_runner_artifact_has_no_func_symbols" >&2
+  cat "${TMP_ARTIFACT}.func-check.log" >&2
+  rm -f "$TMP_ARTIFACT" "${TMP_ARTIFACT}.func-check.log"
+  exit 1
+fi
+rm -f "${TMP_ARTIFACT}.func-check.log"
+
+SHA256SUM="$(command -v sha256sum || true)"
+[ -n "$SHA256SUM" ] || { echo "error=sha256sum_unavailable" >&2; exit 1; }
+artifact_sha256="$($SHA256SUM "$TMP_ARTIFACT" | awk '{print $1}')"
+source_sha256="$($SHA256SUM "$RUNNER_SOURCE" | awk '{print $1}')"
+compiler_sha256="$($SHA256SUM "$STAGE4_SIMPLE" | awk '{print $1}')"
+compiler_provenance_sha256="$($SHA256SUM "${STAGE4_SIMPLE}.provenance.env" | awk '{print $1}')"
+build_command="SIMPLE_LIB=src $STAGE4_SIMPLE native-build --source src/app --source src/lib --entry-closure --entry $RUNNER_SOURCE --runtime-bundle core-c-bootstrap --output $ARTIFACT"
+build_command_sha256="$(printf %s "$build_command" | "$SHA256SUM" | awk '{print $1}')"
+
+umask 077
+{
+  echo "schema=x25519mlkem768-runner-artifact-provenance-v1"
+  echo "status=pass"
+  echo "backend=$BACKEND"
+  echo "artifact_path=$ARTIFACT"
+  echo "artifact_sha256=$artifact_sha256"
+  echo "source_path=$RUNNER_SOURCE"
+  echo "source_sha256=$source_sha256"
+  echo "compiler_artifact_sha256=$compiler_sha256"
+  echo "compiler_provenance_sha256=$compiler_provenance_sha256"
+  echo "build_command_sha256=$build_command_sha256"
+  echo "completed_gate=native-runner-build"
+} >"$TMP_SIDECAR"
+[ -f "$TMP_SIDECAR" ] && [ ! -L "$TMP_SIDECAR" ] || {
+  echo "error=runner_provenance_not_regular" >&2
+  exit 1
+}
+mv "$TMP_ARTIFACT" "$ARTIFACT"
+mv "$TMP_SIDECAR" "$SIDECAR"
+printf 'status=pass\nbackend=%s\nartifact=%s\nprovenance=%s\n' \
+  "$BACKEND" "$ARTIFACT" "$SIDECAR"

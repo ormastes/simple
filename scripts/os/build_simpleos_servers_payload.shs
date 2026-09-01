@@ -1,0 +1,109 @@
+#!/bin/sh
+# Build the current-source Pure-Simple HTTP/database process for one SimpleOS ISA.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+ARCH=${1:-}
+case "$ARCH" in
+    x86_64)
+        TARGET=x86_64-unknown-simpleos
+        MACHINE='Advanced Micro Devices X86-64'
+        SYSROOT=${SIMPLEOS_SYSROOT_X86_64:-build/os/sysroot}
+        CC_WRAPPER=cc-x86_64-simpleos
+        RUNTIME=build/os/simple-core-simpleos-x86_64/libsimple_runtime.a
+        ;;
+    arm64)
+        TARGET=aarch64-unknown-simpleos
+        MACHINE=AArch64
+        SYSROOT=${SIMPLEOS_SYSROOT_AARCH64:-build/os/sysroot-aarch64}
+        CC_WRAPPER=cc-aarch64-simpleos
+        RUNTIME=build/os/simple-core-simpleos-aarch64/libsimple_runtime.a
+        ;;
+    riscv64)
+        TARGET=riscv64-unknown-simpleos
+        MACHINE='RISC-V'
+        SYSROOT=${SIMPLEOS_SYSROOT_RISCV64:-build/os/sysroot-riscv64}
+        CC_WRAPPER=cc-riscv64-simpleos
+        RUNTIME=build/os/simple-core-simpleos-riscv64/libsimple_runtime.a
+        ;;
+    *)
+        echo "usage: $0 x86_64|arm64|riscv64" >&2
+        exit 2
+        ;;
+esac
+
+ENTRY=src/os/apps/servers_user/main.spl
+OUT_DIR=build/os/${ARCH}_servers
+OUT=$OUT_DIR/servers.elf
+BACKEND=${SIMPLE_NATIVE_BACKEND:-cranelift}
+
+. "$ROOT_DIR/scripts/lib/simple-compiler-select.shs"
+if [ -n "${SIMPLE_BUILD_COMPILER:-}" ]; then
+    COMPILER=$SIMPLE_BUILD_COMPILER
+else
+    COMPILER=$(simple_compiler_select --root "$ROOT_DIR" --builder-target "$TARGET") || {
+        echo "error: no current Simple compiler passed the native-build probe" >&2
+        exit 1
+    }
+fi
+[ -x "$COMPILER" ] || { echo "error: compiler is not executable: $COMPILER" >&2; exit 1; }
+
+for piece in "$SYSROOT/lib/crt0.o" "$SYSROOT/lib/libsimpleos_all.a" \
+             "$SYSROOT/lib/$CC_WRAPPER" "$SYSROOT/share/simpleos/simpleos.ld" "$RUNTIME"; do
+    [ -s "$piece" ] || {
+        echo "error: missing $ARCH SimpleOS server prerequisite: $piece" >&2
+        exit 1
+    }
+done
+
+for symbol in rt_array_data_ptr rt_array_set_len_known; do
+    count=$(nm -g --defined-only "$RUNTIME" 2>/dev/null |
+        awk -v wanted="$symbol" '$3 == wanted { count++ } END { print count + 0 }')
+    [ "$count" -eq 1 ] || {
+        echo "error: $ARCH simple-core owner count for $symbol is $count, expected 1" >&2
+        exit 1
+    }
+done
+
+mkdir -p "$OUT_DIR"
+rm -f "$OUT"
+CC="$SYSROOT/lib/$CC_WRAPPER" \
+SIMPLEOS_SYSROOT="$SYSROOT" SIMPLE_SIMPLE_CORE_PATH="$RUNTIME" \
+SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 "$COMPILER" native-build \
+    --source src/os --source src/lib --backend "$BACKEND" --runtime-bundle simple-core \
+    --entry-closure --entry "$ENTRY" --target "$TARGET" \
+    --linker-script "$SYSROOT/share/simpleos/simpleos.ld" -o "$OUT"
+[ -s "$OUT" ] || {
+    echo "error: $ARCH server build produced no executable" >&2
+    exit 1
+}
+
+header=$(readelf -h "$OUT")
+printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF64' || {
+    echo "error: server payload is not ELF64" >&2; exit 1; }
+printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+EXEC' || {
+    echo "error: server payload is not ET_EXEC" >&2; exit 1; }
+printf '%s\n' "$header" | grep -Eq "Machine:[[:space:]]+$MACHINE" || {
+    echo "error: server payload machine does not match $ARCH" >&2; exit 1; }
+
+undefined=$(nm -u "$OUT" 2>/dev/null | awk '$1 == "U" { print $2 }')
+[ -z "$undefined" ] || {
+    echo "error: server payload retained undefined strong symbols: $undefined" >&2
+    exit 1
+}
+for symbol in lib__common__crypto__secure_memory__secure_zero_u8_slots \
+    lib__common__crypto__secure_memory__secure_zero_i64_slots \
+    lib__common__crypto__sha256__sha256_u8_hex_zeroizing \
+    rt_volatile_read_u8 rt_volatile_write_u8 rt_volatile_read_u64 \
+    rt_volatile_write_u64 rt_memory_barrier; do
+    count=$(nm -g --defined-only "$OUT" 2>/dev/null |
+        awk -v wanted="$symbol" '$3 == wanted { count++ } END { print count + 0 }')
+    [ "$count" -eq 1 ] || {
+        echo "error: server payload strong owner count for $symbol is $count, expected 1" >&2
+        exit 1
+    }
+done
+
+printf 'built=%s\nentry=%s\ntarget=%s\ncompiler=%s\n' "$OUT" "$ENTRY" "$TARGET" "$COMPILER"

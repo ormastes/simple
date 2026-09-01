@@ -1,0 +1,257 @@
+#!/bin/sh
+# Fail-closed static census for owned rt_* boundaries and implementations.
+#
+# Source annotations are claims, never proof. A symbol is reported
+# verified_and_signed only after sffi-evidence-admission.shs recomputes every
+# bound digest and verifies a provider-scoped Ed25519 signature against a
+# separately provisioned trust store. Caller-provided booleans are never trust.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+summary_out=${1:-/dev/stdout}
+declarations_out=${2:-${TMPDIR:-/tmp}/rt-safety-declarations.tsv}
+languages_out=${3:-${TMPDIR:-/tmp}/rt-safety-languages.tsv}
+families_out=${4:-${TMPDIR:-/tmp}/rt-safety-families.tsv}
+scopes_out=${5:-${TMPDIR:-/tmp}/rt-safety-scopes.tsv}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+sh "$root/scripts/audit/sffi-contract-inventory.shs" \
+    "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>&1
+
+if [ -n "${RT_VERIFIED_ADMISSION_TSV:-}" ] ||
+   [ -n "${RT_VERIFIED_ADMISSION_TRUSTED:-}" ]; then
+    echo 'legacy RT_VERIFIED_ADMISSION_* trust assertions are forbidden; use signed SFFI evidence inputs' >&2
+    exit 2
+fi
+
+evidence_count=0
+for input in "${RT_SFFI_EVIDENCE_MANIFEST:-}" \
+    "${RT_SFFI_EVIDENCE_SIGNATURE:-}" "${RT_SFFI_TRUST_STORE:-}" \
+    "${RT_SFFI_PROVIDER_ARTIFACT:-}" "${RT_SFFI_SOURCE_SNAPSHOT:-}" \
+    "${RT_SFFI_BUILD_INPUT:-}" "${RT_SFFI_COMPILER_ARTIFACT:-}" \
+    "${RT_SFFI_ABI_REGISTRY:-}" "${RT_SFFI_VERIFICATION_REPORT:-}"; do
+    test -z "$input" || evidence_count=$((evidence_count + 1))
+done
+if [ "$evidence_count" -ne 0 ]; then
+    test "$evidence_count" -eq 9 || {
+        echo 'all nine RT_SFFI_* evidence inputs are required' >&2
+        exit 2
+    }
+    sh "$root/scripts/audit/sffi-evidence-admission.shs" \
+        "$RT_SFFI_EVIDENCE_MANIFEST" "$RT_SFFI_EVIDENCE_SIGNATURE" \
+        "$RT_SFFI_TRUST_STORE" "$RT_SFFI_PROVIDER_ARTIFACT" \
+        "$RT_SFFI_SOURCE_SNAPSHOT" "$RT_SFFI_BUILD_INPUT" \
+        "$RT_SFFI_COMPILER_ARTIFACT" "$RT_SFFI_ABI_REGISTRY" \
+        "$RT_SFFI_VERIFICATION_REPORT" \
+        "$work/admission.tsv" >/dev/null
+    {
+        printf '__admission_header__\tfalse\tfalse\n'
+        awk -F '\t' 'BEGIN { OFS="\t" }
+        NR == 1 { next }
+        $1 ~ /^rt_[A-Za-z0-9_]+$/ && length($2) == 64 && $2 !~ /[^0-9a-f]/ &&
+        length($3) == 64 && $3 !~ /[^0-9a-f]/ &&
+        $4 == "true" && $5 == "true" { print $1, $2, "true", "true" }
+        ' "$work/admission.tsv"
+    } | sort -u >"$work/admitted.tsv"
+else
+    printf '__admission_header__\tfalse\tfalse\n' >"$work/admitted.tsv"
+fi
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == FNR { admitted[$1 SUBSEP $2]=1; next }
+    FNR == 1 {
+        print $0, "evidence_verified", "signature_verified", "safety_class"
+        next
+    }
+    $1 !~ /^rt_/ { next }
+    {
+        verified = admitted[$1 SUBSEP $3] ? "true" : "false"
+        signed = verified
+        safe = admitted[$1 SUBSEP $3] && $6 == "tagged" && $7 != "missing"
+        print $0, verified, signed, (safe ? "verified_and_signed" : "unsafe")
+    }
+' "$work/admitted.tsv" "$work/contracts.tsv" >"$declarations_out"
+
+export RT_CENSUS_ROOT=$root
+find "$root/src" -type f \
+    \( -name '*.spl' -o -name '*.rs' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' \) \
+    ! -path '*/vendor/*' ! -path '*/compiler_rust/vendor/*' \
+    ! -path '*/target/*' ! -path '*/build/*' -print0 |
+xargs -0 -r -n 200 perl -0ne '
+    my $file = $ARGV;
+    my $language = $file =~ /\.spl$/ ? "Simple" :
+                   $file =~ /\.rs$/ ? "Rust" :
+                   $file =~ /\.c$/ ? "C" : "C++";
+    my %seen;
+    if ($language eq "Simple") {
+        while (/^\s*(?!extern\b)(?:pub\s+)?(?:unsafe\s+)?fn\s+(rt_[A-Za-z0-9_]+)\s*\(/mg) {
+            $seen{$1}=1;
+        }
+    } elsif ($language eq "Rust") {
+        while (/^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+"C"\s+fn\s+(rt_[A-Za-z0-9_]+)\s*\(/mg) {
+            $seen{$1}=1;
+        }
+    } else {
+        my @lines = split /\n/, $_, -1;
+        for (my $i = 0; $i <= $#lines; $i++) {
+            next if $lines[$i] !~ /\b(rt_[A-Za-z0-9_]+)\s*\(/;
+            my $symbol = $1;
+            my $candidate = $lines[$i];
+            my $j = $i;
+            while ($candidate !~ /[;{]/ && $j < $#lines && $j - $i < 8) {
+                $j++;
+                $candidate .= " " . $lines[$j];
+            }
+            $seen{$symbol}=1 if $candidate =~ /\{/ && $candidate !~ /;[^{}]*\{/;
+        }
+    }
+    $file =~ s/^\Q$ENV{RT_CENSUS_ROOT}\E\///;
+    for my $symbol (sort keys %seen) {
+        print join("\t", $language, $symbol, $file), "\n";
+    }
+' | sort -u >"$work/definitions.tsv"
+
+{
+    printf 'language\timplementation_definitions\tdistinct_symbols\tfiles\n'
+    awk -F '\t' 'BEGIN { OFS="\t" }
+        {
+            rows[$1]++
+            sk=$1 SUBSEP $2
+            fk=$1 SUBSEP $3
+            if (!(sk in symbols)) { symbols[sk]=1; symbol_count[$1]++ }
+            if (!(fk in files)) { files[fk]=1; file_count[$1]++ }
+        }
+        END {
+            for (language in rows)
+                print language, rows[language], symbol_count[language], file_count[language]
+        }
+    ' "$work/definitions.tsv" | sort
+} >"$languages_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == 1 { next }
+    {
+        rows++
+        symbol[$1]=1
+        if ($6 == "tagged") tagged++
+        if ($7 != "missing") contracted++
+        if ($8 == "claim_present_unverified") claims++
+        if ($10 == "true") verified++
+        if ($11 == "true") signed++
+        if ($12 == "verified_and_signed") admitted++
+        else {
+            unsafe++
+            if ($6 == "tagged" && $7 != "missing") minimized++
+            else unminimized++
+        }
+        if ($6 == "missing" && $7 == "missing" && $8 == "missing") untouched++
+        signature[$1 SUBSEP $3]=1
+    }
+    END {
+        for (s in symbol) symbols++
+        for (key in signature) {
+            split(key, p, SUBSEP)
+            signature_count[p[1]]++
+        }
+        for (s in signature_count) if (signature_count[s] > 1) variants++
+        print "metric", "value"
+        print "declaration_rows", rows + 0
+        print "distinct_declared_symbols", symbols + 0
+        print "unsafe_tagged_rows", tagged + 0
+        print "contract_documented_rows", contracted + 0
+        print "evidence_claim_unverified_rows", claims + 0
+        print "evidence_verified_rows", verified + 0
+        print "signature_verified_rows", signed + 0
+        print "verified_and_signed_rows", admitted + 0
+        print "fail_closed_unsafe_rows", unsafe + 0
+        print "unsafe_minimized_rows", minimized + 0
+        print "unsafe_unminimized_rows", unminimized + 0
+        print "untouched_rows", untouched + 0
+        print "source_signature_variant_symbols", variants + 0
+    }
+' "$declarations_out" >"$summary_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == 1 { next }
+    {
+        split($1, parts, "_")
+        family = parts[1] "_" parts[2]
+        rows[family]++
+        symbol_key = family SUBSEP $1
+        if (!(symbol_key in symbols)) { symbols[symbol_key]=1; symbol_count[family]++ }
+        if ($6 == "tagged") tagged[family]++
+        if ($7 != "missing") contracted[family]++
+        if ($10 == "true") verified[family]++
+        if ($11 == "true") signed[family]++
+        if ($12 == "verified_and_signed") admitted[family]++
+        else {
+            unsafe[family]++
+            if ($6 == "tagged" && $7 != "missing") minimized[family]++
+        }
+        if ($6 == "missing" && $7 == "missing" && $8 == "missing") untouched[family]++
+    }
+    END {
+        print "family", "declaration_rows", "distinct_symbols", "unsafe_tagged_rows", \
+              "contract_documented_rows", "evidence_verified_rows", \
+              "signature_verified_rows", "verified_and_signed_rows", \
+              "fail_closed_unsafe_rows", "unsafe_minimized_rows", "untouched_rows"
+        for (family in rows)
+            print family, rows[family], symbol_count[family], tagged[family] + 0, \
+                  contracted[family] + 0, verified[family] + 0, signed[family] + 0, \
+                  admitted[family] + 0, unsafe[family] + 0, minimized[family] + 0, \
+                  untouched[family] + 0
+    }
+' "$declarations_out" | {
+    IFS= read -r header
+    printf '%s\n' "$header"
+    sort -t "$(printf '\t')" -k11,11nr -k2,2nr -k1,1
+} >"$families_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == 1 { next }
+    {
+        if ($4 ~ /^test\//) scope="test"
+        else if ($4 ~ /^src\/compiler_rust\/lib\/std\//) scope="bootstrap_library"
+        else if ($4 ~ /^src\//) scope="production"
+        else scope="unknown"
+        rows[scope]++
+        symbol_key=scope SUBSEP $1
+        if (!(symbol_key in symbols)) { symbols[symbol_key]=1; symbol_count[scope]++ }
+        if ($6 == "tagged") tagged[scope]++
+        if ($7 != "missing") contracted[scope]++
+        if ($10 == "true") verified[scope]++
+        if ($11 == "true") signed[scope]++
+        if ($12 == "verified_and_signed") admitted[scope]++
+        else {
+            unsafe[scope]++
+            if ($6 == "tagged" && $7 != "missing") minimized[scope]++
+        }
+        if ($6 == "missing" && $7 == "missing" && $8 == "missing") untouched[scope]++
+    }
+    END {
+        print "scope", "declaration_rows", "distinct_symbols", "unsafe_tagged_rows", \
+              "contract_documented_rows", "evidence_verified_rows", \
+              "signature_verified_rows", "verified_and_signed_rows", \
+              "fail_closed_unsafe_rows", "unsafe_minimized_rows", "untouched_rows"
+        for (scope in rows)
+            print scope, rows[scope], symbol_count[scope], tagged[scope] + 0, \
+                  contracted[scope] + 0, verified[scope] + 0, signed[scope] + 0, \
+                  admitted[scope] + 0, unsafe[scope] + 0, minimized[scope] + 0, \
+                  untouched[scope] + 0
+    }
+' "$declarations_out" | {
+    IFS= read -r header
+    printf '%s\n' "$header"
+    sort
+} >"$scopes_out"
+
+if [ "$summary_out" != /dev/stdout ]; then
+    cat "$summary_out"
+fi
+printf '\nlanguage statistics\n'
+cat "$languages_out"
+printf '\ntop untouched families\n'
+head -n 21 "$families_out"
+printf '\ndeclaration scope statistics\n'
+cat "$scopes_out"

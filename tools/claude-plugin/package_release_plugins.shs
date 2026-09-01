@@ -1,0 +1,156 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+OUTPUT_DIR="$PROJECT_ROOT/build/release/plugins"
+PLUGIN="all"
+VERSION=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --plugin)
+            PLUGIN="$2"
+            shift 2
+            ;;
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$VERSION" ]; then
+    echo "--version is required" >&2
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+
+rewrite_plugin_version() {
+    PLUGIN_JSON="$1"
+    sed "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$PLUGIN_JSON" > "$PLUGIN_JSON.tmp"
+    mv "$PLUGIN_JSON.tmp" "$PLUGIN_JSON"
+}
+
+copy_license_material() {
+    BUNDLE_DIR="$1"
+    cp "$PROJECT_ROOT/LICENSE" "$BUNDLE_DIR/LICENSE"
+    cp "$PROJECT_ROOT/THIRD_PARTY_NOTICES.md" "$BUNDLE_DIR/THIRD_PARTY_NOTICES.md"
+}
+
+verify_bundle_version() {
+    ARCHIVE_PATH="$1"
+    PLUGIN_JSON_PATH="$2"
+    EXTRACTED_VERSION="$(tar -xOf "$ARCHIVE_PATH" "$PLUGIN_JSON_PATH" | sed -n 's/.*"version": "\([^"]*\)".*/\1/p' | head -n 1)"
+    if [ "$EXTRACTED_VERSION" != "$VERSION" ]; then
+        echo "Packaged plugin version mismatch in $ARCHIVE_PATH: expected $VERSION, found $EXTRACTED_VERSION" >&2
+        exit 1
+    fi
+}
+
+package_simple_lsp() {
+    BUNDLE_DIR="$TMP_DIR/simple-lsp"
+    mkdir -p "$BUNDLE_DIR/.claude-plugin"
+    cp "$PROJECT_ROOT/tools/claude-plugin/simple-lsp/.claude-plugin/plugin.json" "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    rewrite_plugin_version "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    cp "$PROJECT_ROOT/tools/claude-plugin/simple-lsp/README.md" "$BUNDLE_DIR/README.md"
+    copy_license_material "$BUNDLE_DIR"
+    cat > "$BUNDLE_DIR/.lsp.json" <<'EOF'
+{
+  "languages": [
+    {
+      "fileExtensions": [".spl", ".shs"],
+      "languageId": "simple",
+      "command": ["simple-lsp"],
+      "initializationOptions": {}
+    }
+  ]
+}
+EOF
+    tar -czf "$OUTPUT_DIR/simple-lsp-claude-plugin-$VERSION.tar.gz" -C "$TMP_DIR" simple-lsp
+    verify_bundle_version "$OUTPUT_DIR/simple-lsp-claude-plugin-$VERSION.tar.gz" "simple-lsp/.claude-plugin/plugin.json"
+}
+
+package_simple_mcp() {
+    BUNDLE_DIR="$TMP_DIR/simple-mcp"
+    mkdir -p "$BUNDLE_DIR/.claude-plugin"
+    cp "$PROJECT_ROOT/tools/claude-plugin/simple-mcp/.claude-plugin/plugin.json" "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    rewrite_plugin_version "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    cp "$PROJECT_ROOT/tools/claude-plugin/simple-mcp/README.md" "$BUNDLE_DIR/README.md"
+    cp "$PROJECT_ROOT/tools/claude-plugin/simple-mcp/.mcp.json" "$BUNDLE_DIR/.mcp.json"
+    copy_license_material "$BUNDLE_DIR"
+    tar -czf "$OUTPUT_DIR/simple-mcp-claude-plugin-$VERSION.tar.gz" -C "$TMP_DIR" simple-mcp
+    verify_bundle_version "$OUTPUT_DIR/simple-mcp-claude-plugin-$VERSION.tar.gz" "simple-mcp/.claude-plugin/plugin.json"
+}
+
+package_cmm_lsp() {
+    BUNDLE_DIR="$TMP_DIR/cmm-lsp"
+    mkdir -p "$BUNDLE_DIR/.claude-plugin"
+    cp "$PROJECT_ROOT/examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/.claude-plugin/plugin.json" "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    rewrite_plugin_version "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    cp "$PROJECT_ROOT/examples/10_tooling/trace32_tools/claude-plugin/cmm-lsp/README.md" "$BUNDLE_DIR/README.md"
+    copy_license_material "$BUNDLE_DIR"
+    cat > "$BUNDLE_DIR/.lsp.json" <<'EOF'
+{
+  "languages": [
+    {
+      "fileExtensions": [".cmm"],
+      "languageId": "cmm",
+      "command": ["cmm-lsp"],
+      "initializationOptions": {}
+    }
+  ]
+}
+EOF
+    tar -czf "$OUTPUT_DIR/cmm-lsp-claude-plugin-$VERSION.tar.gz" -C "$TMP_DIR" cmm-lsp
+    verify_bundle_version "$OUTPUT_DIR/cmm-lsp-claude-plugin-$VERSION.tar.gz" "cmm-lsp/.claude-plugin/plugin.json"
+}
+
+package_obsidian_search() {
+    BUNDLE_DIR="$TMP_DIR/obsidian-search"
+    mkdir -p "$BUNDLE_DIR/.claude-plugin"
+    cp "$PROJECT_ROOT/tools/claude-plugin/obsidian-search/.claude-plugin/plugin.json" "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    rewrite_plugin_version "$BUNDLE_DIR/.claude-plugin/plugin.json"
+    cp "$PROJECT_ROOT/tools/claude-plugin/obsidian-search/README.md" "$BUNDLE_DIR/README.md"
+    cp "$PROJECT_ROOT/tools/claude-plugin/obsidian-search/.mcp.json" "$BUNDLE_DIR/.mcp.json"
+    cp "$PROJECT_ROOT/tools/claude-plugin/obsidian-search/.lsp.json" "$BUNDLE_DIR/.lsp.json"
+    copy_license_material "$BUNDLE_DIR"
+    tar -czf "$OUTPUT_DIR/obsidian-search-claude-plugin-$VERSION.tar.gz" -C "$TMP_DIR" obsidian-search
+    verify_bundle_version "$OUTPUT_DIR/obsidian-search-claude-plugin-$VERSION.tar.gz" "obsidian-search/.claude-plugin/plugin.json"
+}
+
+case "$PLUGIN" in
+    simple-mcp)
+        package_simple_mcp
+        ;;
+    simple-lsp)
+        package_simple_lsp
+        ;;
+    cmm-lsp)
+        package_cmm_lsp
+        ;;
+    obsidian-search)
+        package_obsidian_search
+        ;;
+    all)
+        package_simple_mcp
+        package_simple_lsp
+        package_cmm_lsp
+        package_obsidian_search
+        ;;
+    *)
+        echo "Unsupported plugin: $PLUGIN" >&2
+        exit 1
+        ;;
+esac

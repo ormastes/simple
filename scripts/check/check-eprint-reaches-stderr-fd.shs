@@ -1,0 +1,143 @@
+#!/bin/sh
+# check-eprint-reaches-stderr-fd.shs
+#
+# Fences doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md.
+#
+# DEFECT: any module that imports std.io_runtime (directly or transitively) had
+# its `eprint` builtin REBOUND to a user function in
+# src/lib/nogc_sync_mut/io/process_ops.spl whose body was
+#     print "[STDERR] {msg}"
+# -- i.e. fd 1 with a cosmetic text prefix, never fd 2. Dozens of self-hosted
+# compiler modules `use std.nogc_sync_mut.io.process_ops.{eprint}` explicitly, so
+# this silently put compiler diagnostics into the DATA stream:
+#   prog > out.txt 2> err.log   =>  errors in out.txt, err.log empty.
+#
+# Mechanism (root cause, for the record): interpreter_call/mod.rs `evaluate_call`
+# Priority 1 skips builtin/extern dispatch whenever `has_local_def` is true, so a
+# transitively imported top-level `fn eprint` wins over the builtin.
+#
+# FOUR-SIDED, because a count-only or 2>&1 probe passes on the broken code:
+#   positive      -- the marker appears on the real STDERR fd, LABELLED with its
+#                    own unique token, from a module that DOES import
+#                    std.io_runtime. The label is the assertion that bites; a
+#                    line count would have been satisfied by unrelated warnings
+#                    the seed already writes to fd 2.
+#   sink control  -- the same marker must NOT be on STDOUT. Without this the
+#                    check passes on the unfixed code, because the broken code
+#                    does emit the marker -- just on the wrong fd.
+#   prefix control-- the literal "[STDERR] " text prefix must appear on NEITHER
+#                    sink. A text prefix is not an fd; re-adding it is the exact
+#                    regression this guards.
+#   negative ctrl -- a token that the fixture never emits must appear on neither
+#                    sink, proving the greps can actually fail.
+#   contrast      -- a module WITHOUT the import must also reach fd 2, proving the
+#                    fix did not simply route everything to one sink.
+#
+# Runs BOTH lanes (interpreter and jit); engines diverge here routinely.
+#
+# Verdict line is the last line of stdout:
+#   PASS -- <n> assertion(s) checked ...   exit 0
+#   FAIL -- ...                            exit 1
+#   ERROR -- nothing was checked           exit 2
+#
+# Usage: sh scripts/check/check-eprint-reaches-stderr-fd.shs
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR -- nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="./bin/simple"
+if [ ! -e "$SIMPLE_BIN" ]; then
+    echo "ERROR -- nothing was checked (no $SIMPLE_BIN in $REPO_ROOT)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# Fixture A: imports std.io_runtime -> exercises the rebound `eprint`.
+cat > "$WORK/with_import.spl" <<'SPL'
+# Fixture for check-eprint-reaches-stderr-fd.shs (import present).
+use std.io_runtime.{file_exists}
+
+fn main():
+    val _seen = file_exists("/nonexistent-eprint-fence")
+    eprint("EPRINT_FENCE_WITH_IMPORT")
+    print "EPRINT_FENCE_STDOUT_SENTINEL"
+SPL
+
+# Fixture B: no import -> contrast, the builtin is not rebound.
+cat > "$WORK/no_import.spl" <<'SPL'
+# Fixture for check-eprint-reaches-stderr-fd.shs (no import).
+fn main():
+    eprint("EPRINT_FENCE_NO_IMPORT")
+    print "EPRINT_FENCE_STDOUT_SENTINEL"
+SPL
+
+PASS_N=0
+FAIL_N=0
+RAN=0
+
+note_pass() { PASS_N=$((PASS_N + 1)); }
+note_fail() { FAIL_N=$((FAIL_N + 1)); echo "  FAIL: $1"; }
+
+# assert_absent/assert_present operate on a captured stream file.
+assert_present() { # file token label
+    if grep -q -- "$2" "$1"; then note_pass; else note_fail "$3 (expected '$2', absent)"; fi
+}
+assert_absent() { # file token label
+    if grep -q -- "$2" "$1"; then note_fail "$3 (unexpected '$2', present)"; else note_pass; fi
+}
+
+for MODE in interpreter jit; do
+    for FIX in with_import no_import; do
+        if [ "$FIX" = with_import ]; then TOKEN=EPRINT_FENCE_WITH_IMPORT; else TOKEN=EPRINT_FENCE_NO_IMPORT; fi
+
+        OUT="$WORK/$MODE.$FIX.out"
+        ERR="$WORK/$MODE.$FIX.err"
+        SIMPLE_EXECUTION_MODE="$MODE" timeout 300 "$SIMPLE_BIN" run "$WORK/$FIX.spl" \
+            >"$OUT" 2>"$ERR"
+        RC=$?
+        if [ "$RC" -ne 0 ] && [ ! -s "$ERR" ] && [ ! -s "$OUT" ]; then
+            echo "ERROR -- nothing was checked ($MODE/$FIX produced no output, rc=$RC)"
+            exit 2
+        fi
+        RAN=$((RAN + 1))
+
+        # positive: labelled marker on the real stderr fd
+        assert_present "$ERR" "$TOKEN" "$MODE/$FIX: eprint marker missing from STDERR fd"
+        # sink control: must NOT be on stdout
+        assert_absent  "$OUT" "$TOKEN" "$MODE/$FIX: eprint marker leaked onto STDOUT"
+        # prefix control: the cosmetic text prefix must be gone from both sinks
+        assert_absent  "$OUT" '\[STDERR\] ' "$MODE/$FIX: literal '[STDERR] ' prefix back on STDOUT"
+        assert_absent  "$ERR" '\[STDERR\] ' "$MODE/$FIX: literal '[STDERR] ' prefix back on STDERR"
+        # stdout still works (the fix must not have hijacked print)
+        assert_present "$OUT" 'EPRINT_FENCE_STDOUT_SENTINEL' "$MODE/$FIX: print no longer reaches STDOUT"
+        # negative control: a token never emitted must be absent from both sinks
+        assert_absent  "$OUT" 'EPRINT_FENCE_NEVER_EMITTED' "$MODE/$FIX: negative control fired on STDOUT"
+        assert_absent  "$ERR" 'EPRINT_FENCE_NEVER_EMITTED' "$MODE/$FIX: negative control fired on STDERR"
+    done
+done
+
+# Source-level fence: no `eprint`/`eprintln` definition may route to `print`.
+SRC_HITS=$(grep -rnE '^[[:space:]]+print "\[STDERR\] ' --include='*.spl' src/ 2>/dev/null | wc -l | tr -d ' ')
+RAN=$((RAN + 1))
+if [ "$SRC_HITS" = "0" ]; then
+    note_pass
+else
+    note_fail "source still routes a stderr API to print: $SRC_HITS site(s) of 'print \"[STDERR] '"
+    grep -rnE '^[[:space:]]+print "\[STDERR\] ' --include='*.spl' src/ 2>/dev/null | sed 's/^/    /'
+fi
+
+TOTAL=$((PASS_N + FAIL_N))
+if [ "$RAN" -eq 0 ] || [ "$TOTAL" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+if [ "$FAIL_N" -ne 0 ]; then
+    echo "FAIL -- $FAIL_N of $TOTAL assertion(s) failed across $RAN probe(s) (interpreter+jit)"
+    exit 1
+fi
+echo "PASS -- $TOTAL assertion(s) checked across $RAN probe(s): eprint reaches fd 2 in both lanes, with and without the std.io_runtime import; no '[STDERR] ' text prefix remains"
+exit 0

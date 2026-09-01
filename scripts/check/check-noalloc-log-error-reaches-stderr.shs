@@ -1,0 +1,151 @@
+#!/bin/sh
+# check-noalloc-log-error-reaches-stderr.shs
+#
+# Fences src/lib/nogc_async_mut_noalloc/log/logger.spl (OPEN 1 of
+# doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md).
+#
+# The bug was filed as "hosted errors are dropped entirely". Reproduction showed
+# that is NOT what happens: the println fallthrough the C header comment promises
+# does exist -- it lives in targets.spl (target_device_write's own extern fails
+# hosted and ends at `print`), not in logger.spl. Errors were emitted.
+#
+# The real defect is the SINK. ERROR and FATAL went to STDOUT, so
+#   prog > data.txt 2> errors.log
+# put the diagnostics into data.txt and left errors.log empty. A diagnostic that
+# lands in the data stream is the same silent-failure class as one that is
+# dropped: nothing an operator watches ever shows it.
+#
+# TWO-SIDED, because a "fix" that simply routed EVERYTHING to stderr would pass a
+# positive-only probe while destroying the level gate:
+#   positive        -- ERROR and FATAL each appear on stderr, LABELLED
+#                      ("[ERROR] <msg>"), not merely present as some bare line.
+#                      The label is the assertion that bites: an unlabelled line
+#                      cannot tell an operator what level or subsystem failed.
+#   sink control    -- ERROR/FATAL must NOT be on stdout. Without this the check
+#                      passes on the unfixed code, since 2>&1 hides which sink
+#                      the line came from.
+#   negative control-- a sub-threshold level (DEBUG, below the default LOG_INFO)
+#                      must emit ZERO lines on BOTH sinks. This is what catches a
+#                      fix that removed the gate rather than redirecting it.
+#   gate control    -- WARN (>= default INFO, < ERROR) must still appear, and on
+#                      STDOUT, proving the redirect is level-scoped rather than
+#                      applied to everything.
+#
+# Verdict line is the last line of stdout:
+#   PASS -- <n> assertion(s) checked ...   exit 0
+#   FAIL -- ...                            exit 1
+#   ERROR -- nothing was checked           exit 2
+#
+# Usage: sh scripts/check/check-noalloc-log-error-reaches-stderr.shs
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR -- nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="./bin/simple"
+if [ ! -e "$SIMPLE_BIN" ]; then
+    echo "ERROR -- nothing was checked (no $SIMPLE_BIN in $REPO_ROOT)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+FIXTURE="$WORK/noalloc_log_sink_probe.spl"
+cat > "$FIXTURE" <<'SPL'
+# Fixture for check-noalloc-log-error-reaches-stderr.shs.
+use std.nogc_async_mut_noalloc.log.logger as LG
+
+fn main():
+    LG.log_error("NALOG_ERROR_MARK")
+    LG.log_fatal("NALOG_FATAL_MARK")
+    LG.log_warn("NALOG_WARN_MARK")
+    LG.log_debug("NALOG_DEBUG_MARK")
+SPL
+
+FAILURES=0
+ASSERTIONS=0
+
+fail() {
+    echo "  FAIL: $1"
+    FAILURES=$((FAILURES + 1))
+}
+
+# Engines diverge in this repo: a log path that works interpreted can be
+# dead-code-eliminated or left unresolved in a compiled lane, so check both.
+for MODE in interpreter jit; do
+    echo "== lane: $MODE =="
+
+    # Capture the two sinks SEPARATELY -- the whole defect is about which one.
+    SIMPLE_EXECUTION_MODE="$MODE" timeout 300 "$SIMPLE_BIN" run "$FIXTURE" \
+        > "$WORK/out.$MODE" 2> "$WORK/err.$MODE"
+    RC=$?
+    if [ $RC -ne 0 ]; then
+        fail "$MODE: fixture exited $RC (expected 0)"
+        ASSERTIONS=$((ASSERTIONS + 1))
+        continue
+    fi
+
+    O="$WORK/out.$MODE"
+    E="$WORK/err.$MODE"
+
+    # --- POSITIVE: error/fatal labelled, on stderr ------------------------
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! grep -q '\[ERROR\] NALOG_ERROR_MARK' "$E"; then
+        fail "$MODE: log_error produced no labelled '[ERROR] ...' line on STDERR"
+    fi
+
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! grep -q '\[FATAL\] NALOG_FATAL_MARK' "$E"; then
+        fail "$MODE: log_fatal produced no labelled '[FATAL] ...' line on STDERR"
+    fi
+
+    # --- SINK CONTROL: they must have LEFT stdout -------------------------
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if grep -q 'NALOG_ERROR_MARK' "$O"; then
+        fail "$MODE: log_error is still on STDOUT -- diagnostics are being mixed into the data stream"
+    fi
+
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if grep -q 'NALOG_FATAL_MARK' "$O"; then
+        fail "$MODE: log_fatal is still on STDOUT -- diagnostics are being mixed into the data stream"
+    fi
+
+    # --- GATE CONTROL: WARN still emitted, and still on stdout ------------
+    # Proves the stderr redirect is scoped to >= ERROR rather than applied to
+    # every level, and that raising the sink did not raise the threshold.
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! grep -q '\[WARN\] NALOG_WARN_MARK' "$O"; then
+        fail "$MODE: log_warn vanished from STDOUT -- the >= ERROR sink split leaked into sub-error levels"
+    fi
+
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if grep -q 'NALOG_WARN_MARK' "$E"; then
+        fail "$MODE: log_warn appeared on STDERR -- the redirect is not level-scoped"
+    fi
+
+    # --- NEGATIVE CONTROL: sub-threshold emits NOTHING, on either sink ----
+    # Default level is LOG_INFO, so DEBUG is below it. Without this assertion
+    # the check passes on a module whose level gate was deleted outright.
+    N_DEBUG=$(cat "$O" "$E" | grep -c 'NALOG_DEBUG_MARK')
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if [ "$N_DEBUG" -ne 0 ]; then
+        fail "$MODE: negative control -- log_debug emitted $N_DEBUG line(s) (DEBUG is below the default LOG_INFO; the level gate looks removed)"
+    fi
+
+    echo "  stdout: $(grep -c NALOG_ "$O") NALOG line(s); stderr: $(grep -c NALOG_ "$E") NALOG line(s); debug=$N_DEBUG (expect debug==0)"
+done
+
+if [ "$ASSERTIONS" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+
+if [ "$FAILURES" -ne 0 ]; then
+    echo "FAIL -- $FAILURES of $ASSERTIONS assertion(s) failed across 2 execution lanes"
+    exit 1
+fi
+
+echo "PASS -- $ASSERTIONS assertion(s) checked across 2 execution lanes (interpreter, jit), including the stdout sink control, the sub-threshold negative control, and the WARN level-scope control"
+exit 0

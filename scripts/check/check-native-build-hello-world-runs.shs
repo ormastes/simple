@@ -1,0 +1,256 @@
+#!/bin/sh
+# check-native-build-hello-world-runs.shs
+#
+# End-to-end runnability gate for the `native-build` CALL PATH.
+#
+# Incident (2026-08-23, doc/08_tracking/bug/shard_threads_no_memavailable_clamp_2026-08-23.md):
+# ff095d31591 added src/app/cli/shard_mem_clamp.spl. Every `native-build` then
+# died in <9 s with `rc=134, fatal runtime error: stack overflow`, before a
+# single `[build]` line, on a 3-line hello world with `--threads 2` -- so not
+# load-dependent, and `main` was unbuildable. It shipped WITH a passing test:
+# that test called the clamp FUNCTION directly and asserted its arithmetic.
+#
+# THE LESSON THIS GUARD ENCODES: a unit test of a helper cannot substitute for
+# exercising the path that CALLS it. The clamp function was correct in
+# isolation; the crash lived in what the call path did around it. Root cause,
+# established 2026-08-23 (doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md):
+# `std.io_runtime.read_file_text` and `src/lib/nogc_sync_mut/io/file_ops.spl:76
+# file_read` were two one-line forwarders that closed into unbounded MUTUAL
+# RECURSION under last-definition-wins dispatch, so the first read of ANY file
+# aborted the process. Not procfs-specific -- the clamp merely happened to be
+# the first caller to read a file. No amount of unit testing the clamp could
+# have caught that; only running the real command could. It also means a green
+# repro never clears a case here, because which duplicate dispatch picks is a
+# property of the BUILD, not of the source -- which is the second reason this
+# guard runs a binary instead of asserting over source.
+#
+# So this guard runs the real `native-build` on a real hello world and asserts
+# two things about the real process:
+#   1. rc is not a crash (>=128, i.e. any signal; 134=abort/stack-overflow,
+#      139=SEGV) and not 124 (timed out)
+#   2. the build actually STARTED producing pipeline output -- a
+#      `[build] ... step 1/6` line appears. rc=0 alone is not accepted: the
+#      incident's shape was "dies before any [build] line", and a build that
+#      exits 0 having emitted nothing has not been shown to run. Conversely,
+#      once that line appears the contract is met and the guard stops the child
+#      it started -- a full hello-world native-build measured >5 min under the
+#      seed on this host, and a guard too slow to run protects nothing.
+#
+# The exit status is read DIRECTLY into a variable on the line after the
+# invocation, NEVER through a pipe -- a pipeline's $? is the last command's
+# status and has produced false greens in this repo before.
+#
+# Scope note: like check-c-runtime-compiles-push.shs and unlike the range-based
+# pre-push guards, this checks a TREE, not a BASE..NEW delta. Runnability is a
+# property of a tree: a change anywhere on the shard/driver path can break a
+# build for a file it never touched, which is exactly what happened.
+#
+# Binary under test: the deployed pure-Simple `bin/simple`. A Rust SEED is
+# REFUSED with ERROR, not passed -- see the is_seed() note below the selftest.
+#
+# Known limit, stated rather than papered over: this proves the build starts and
+# does not crash. It does not assert the produced binary is correct, and it stops
+# at the first pipeline step so it stays affordable enough to actually be run.
+#
+# Verdict is the last line of stdout:
+#   PASS  — <n> invocation(s) executed, '[build] ... step 1/6' reached ...   exit 0
+#   FAIL  — <reason>                                                           exit 1
+#   ERROR — nothing was checked (<reason>)                                     exit 2
+#
+# Env: SIMPLE_BIN (binary under test, default $ROOT/bin/simple)
+#      NBHW_TIMEOUT (seconds to reach step 1/6, default 600)
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE=${SIMPLE_BIN:-"$ROOT/bin/simple"}
+TIMEOUT=${NBHW_TIMEOUT:-600}
+
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+oops() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+
+# Probe driver, factored out so the selftest drives the SHIPPING logic with
+# fixtures instead of re-implementing it (a selftest that re-implements the
+# logic proves nothing about the logic that ships).
+#
+# Runs the command in the background, writing to $2, and polls until either
+#   (a) a `[build] ... step 1/6` line appears  -> STARTED, and we terminate the
+#       child WE started (never anything else), or
+#   (b) the child exits                        -> classify its exit status, or
+#   (c) $1 seconds elapse                      -> TIMEOUT.
+#
+# Waiting for the whole build to finish was measured at >5 min for a 3-line
+# hello world under the seed on this host, which is too slow for a guard that
+# must actually get run. The contract the incident violated is precisely
+# "reaches the first pipeline step without dying", so that is what is asserted.
+#
+# The exit status is read DIRECTLY into a variable, NEVER through a pipe -- a
+# pipeline's $? is the last command's status and has produced false greens here.
+#
+# echoes: STARTED | CRASH:<rc> | EXIT:<rc> | NOSTART | TIMEOUT
+probe() {
+    _budget=$1; _log=$2; shift 2
+    : > "$_log"
+    "$@" > "$_log" 2>&1 &
+    _pid=$!
+    _waited=0
+    while :; do
+        if grep -qE '^\[build\].*step 1/6' "$_log" 2>/dev/null; then
+            kill "$_pid" 2>/dev/null
+            wait "$_pid" 2>/dev/null
+            echo "STARTED"; return 0
+        fi
+        if ! kill -0 "$_pid" 2>/dev/null; then
+            wait "$_pid"
+            _rc=$?
+            # the line may have landed in the same instant the child exited
+            if grep -qE '^\[build\].*step 1/6' "$_log" 2>/dev/null; then
+                echo "STARTED"; return 0
+            fi
+            if [ "$_rc" -ge 128 ]; then echo "CRASH:$_rc"; return 0; fi
+            if [ "$_rc" -ne 0 ]; then echo "EXIT:$_rc"; return 0; fi
+            echo "NOSTART"; return 0
+        fi
+        sleep 1
+        _waited=$((_waited + 1))
+        if [ "$_waited" -ge "$_budget" ]; then
+            kill "$_pid" 2>/dev/null
+            wait "$_pid" 2>/dev/null
+            echo "TIMEOUT"; return 0
+        fi
+    done
+}
+
+# --------------------------------------------------------------------------
+# selftest: fatal, runs before the scan. Fixtures are real executables driven
+# through the real probe path, not string comparisons.
+# --------------------------------------------------------------------------
+selftest() {
+    st=$(mktemp -d) || return 1
+    st_rc=0
+
+    # A: healthy -- emits the step line, then keeps working  => STARTED
+    cat > "$st/a" <<'EOF'
+#!/bin/sh
+echo "[build] source_closure 1/1 step 1/6 complete"
+sleep 60
+EOF
+    # B: the incident shape -- aborts (SIGABRT=134) before any [build] line.
+    #    A version banner still prints, exactly as in the incident, which is
+    #    why a liveness banner is never accepted as evidence of a working build.
+    cat > "$st/b" <<'EOF'
+#!/bin/sh
+echo "Simple Language v1.0.0-RC"
+echo "fatal runtime error: stack overflow" >&2
+kill -ABRT $$
+EOF
+    # C: SEGV before any output => CRASH:139
+    cat > "$st/c" <<'EOF'
+#!/bin/sh
+kill -SEGV $$
+EOF
+    # D: plain non-zero exit before the step line => EXIT:3
+    cat > "$st/d" <<'EOF'
+#!/bin/sh
+echo "starting"
+exit 3
+EOF
+    # E: silent success -- exits 0 having emitted NO pipeline line => NOSTART.
+    #    This fixture is the point of the second assertion: rc=0 is not proof.
+    cat > "$st/e" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    # F: hangs with no output => TIMEOUT
+    cat > "$st/f" <<'EOF'
+#!/bin/sh
+sleep 60
+EOF
+    # G: emits the step line only AFTER a delay => STARTED (polling works)
+    cat > "$st/g" <<'EOF'
+#!/bin/sh
+sleep 2
+echo "[build] source_closure 1/1 step 1/6 complete"
+sleep 60
+EOF
+    chmod +x "$st"/a "$st"/b "$st"/c "$st"/d "$st"/e "$st"/f "$st"/g
+
+    for pair in a:STARTED b:CRASH:134 c:CRASH:139 d:EXIT:3 e:NOSTART f:TIMEOUT g:STARTED; do
+        f=${pair%%:*}; want=${pair#*:}
+        got=$(probe 6 "$st/out.$f" "$st/$f")
+        if [ "$got" != "$want" ]; then
+            printf 'selftest: fixture %s expected %s, got %s\n' "$f" "$want" "$got" >&2
+            st_rc=1
+        fi
+    done
+    # provenance fixtures: the seed banner must be recognised, a pure-Simple
+    # banner must not. Without this the guard silently green-lights a binary
+    # that cannot execute the code under test.
+    cat > "$st/seed" <<'EOF'
+#!/bin/sh
+echo "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool."
+echo "Simple Language v1.0.0-RC"
+EOF
+    cat > "$st/pure" <<'EOF'
+#!/bin/sh
+echo "Simple Language v1.0.0-RC"
+EOF
+    chmod +x "$st/seed" "$st/pure"
+    is_seed "$st/seed" || { echo "selftest: seed banner not recognised" >&2; st_rc=1; }
+    is_seed "$st/pure" && { echo "selftest: pure-Simple banner misread as seed" >&2; st_rc=1; }
+
+    rm -rf "$st"
+    return $st_rc
+}
+
+# Provenance, fail-closed. The Rust SEED serves `native-build` from its own
+# compiled-in implementation and never executes src/app/cli/native_build_main.spl
+# -- so on a seed this guard cannot see the shard path the incident lived on, and
+# a PASS would be a false green of exactly the kind this whole family of guards
+# exists to prevent. Measured 2026-08-23: the pre-fix tree at ff095d31591 (clamp
+# present) ran to `[build] ... step 1/6` under the seed with no crash, i.e. the
+# seed is provably blind to the defect. Absence of a real tool binary is absence
+# of evidence, so that case is ERROR, never PASS.
+is_seed() {
+    "$1" --version 2>&1 | grep -q 'bootstrap seed only'
+}
+
+selftest || oops "selftest failed"
+
+[ -x "$SIMPLE" ] || oops "no executable Simple binary at $SIMPLE"
+if is_seed "$SIMPLE"; then
+    oops "$SIMPLE is the Rust bootstrap seed — its native-build is served by Rust and never runs src/app/cli/native_build_main.spl, so this guard would be blind; deploy a pure-Simple bin/simple or point SIMPLE_BIN at one"
+fi
+
+WORK=$(mktemp -d) || oops "cannot create work dir"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+cat > "$WORK/hello.spl" <<'EOF'
+fun main()
+    print("hello")
+EOF
+
+cd "$ROOT" || oops "cannot cd to $ROOT"
+VERDICT=$(probe "$TIMEOUT" "$WORK/log" \
+    "$SIMPLE" native-build "$WORK/hello.spl" -o "$WORK/hello.out" --threads 2)
+
+case "$VERDICT" in
+    STARTED)
+        printf "PASS — 1 invocation(s) executed, '[build] ... step 1/6' reached without a crash\n"
+        exit 0 ;;
+    CRASH:*)
+        sed -n '1,20p' "$WORK/log" >&2
+        rc=${VERDICT#CRASH:}
+        fail "native-build crashed on a 3-line hello world (rc=$rc, signal $((rc - 128))) before reaching '[build] ... step 1/6'" ;;
+    TIMEOUT)
+        sed -n '1,20p' "$WORK/log" >&2
+        fail "native-build produced no '[build] ... step 1/6' line within ${TIMEOUT}s" ;;
+    NOSTART)
+        sed -n '1,20p' "$WORK/log" >&2
+        fail "native-build exited 0 but emitted no '[build] ... step 1/6' line — the build never started" ;;
+    EXIT:*)
+        sed -n '1,20p' "$WORK/log" >&2
+        fail "native-build exited non-zero (rc=${VERDICT#EXIT:}) on a 3-line hello world before reaching '[build] ... step 1/6'" ;;
+    *)
+        oops "unclassifiable result ($VERDICT)" ;;
+esac

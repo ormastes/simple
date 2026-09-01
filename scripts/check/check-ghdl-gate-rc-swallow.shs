@@ -1,0 +1,171 @@
+#!/bin/sh
+# Detector for the "gate discards the tool's exit status" fail-open class.
+#
+# Defect shape (reproduced 2026-08-17 in scripts/fpga/ghdl_validate_rv32.shs):
+#
+#     out="$(ghdl -a ... 2>&1)" || true      # <-- rc thrown away
+#     if echo "$out" | grep -q ":error:"; then ... exit 1; fi
+#     echo "OK"
+#
+# The gate's verdict then rests ENTIRELY on a substring of stdout. A ghdl that
+# exits nonzero while printing a diagnostic that does not contain the matched
+# substring -- e.g. "ghdl: cannot open work library" -- makes the gate print
+# "OK" for every unit and exit 0. Measured: five consecutive "OK" lines and
+# exit 0 while every single ghdl invocation had exited 1.
+#
+# The correct shape assigns rc on the line AFTER the command (never through a
+# pipe, whose $? is the last pipeline element's status) and treats a nonzero rc
+# as FAIL in addition to any output matching:
+#
+#     out="$(ghdl -a ... 2>&1)" && rc=0 || rc=$?
+#     [ "$rc" -eq 0 ] || fail ...
+#
+# This guard is fail-closed for NEW code: the files that carried the defect when
+# the detector landed are listed in KNOWN_OFFENDERS below, so the guard does not
+# block unrelated work, but any file that is not on that list and any NEW
+# occurrence in a listed file is a hard FAIL. Removing a file from the list once
+# it is fixed is the intended direction of travel; adding one is not.
+#
+# Verdict convention (.claude/rules/vcs.md § Pre-push guards): the LAST line of
+# stdout is PASS/FAIL/ERROR; a run that scanned zero files is ERROR, never PASS.
+
+set -e
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+
+# Files known to carry the defect when this detector landed (2026-08-17).
+# scripts/fpga/ghdl_validate_rv32.shs is deliberately ABSENT: it was fixed in
+# the same change, so a regression there is a hard FAIL.
+KNOWN_OFFENDERS="scripts/fpga/ghdl_rv32_nvme_fw.shs
+scripts/fpga/ghdl_rv32_simpleos_boot_axi.shs
+scripts/fpga/ghdl_rv32_simpleos_boot.shs
+scripts/fpga/ghdl_rv32_simpleos_boot_tiny.shs
+scripts/fpga/ghdl_rv32_tiny_bram_soc.shs
+scripts/fpga/ghdl_rv64_k26_ddr_boot.shs
+scripts/fpga/ghdl_rv64_simpleos_boot_axi.shs
+scripts/fpga/ghdl_rv64_simpleos_boot.shs"
+
+# Matches a command substitution capturing a tool invocation whose exit status
+# is then discarded with `|| true`. Comment lines are excluded by the caller.
+SWALLOW_RE='^[^#]*="\$\(.*\)"[[:space:]]*\|\|[[:space:]]*true[[:space:]]*$'
+
+is_known() {
+    printf '%s\n' "$KNOWN_OFFENDERS" | grep -qx -- "$1"
+}
+
+scan() {
+    root="$1"
+    scanned=0
+    bad=""
+    stale=""
+
+    for f in "$root"/scripts/fpga/*.shs; do
+        [ -f "$f" ] || continue
+        rel="${f#$root/}"
+        scanned=$((scanned + 1))
+        hits="$(grep -cE "$SWALLOW_RE" "$f" 2>/dev/null || true)"
+        [ -n "$hits" ] || hits=0
+        if [ "$hits" -gt 0 ]; then
+            if ! is_known "$rel"; then
+                bad="$bad $rel($hits)"
+            fi
+        else
+            if is_known "$rel"; then
+                stale="$stale $rel"
+            fi
+        fi
+    done
+
+    if [ "$scanned" -eq 0 ]; then
+        echo "ERROR — nothing was checked: no scripts/fpga/*.shs found under $root"
+        return 2
+    fi
+
+    if [ -n "$bad" ]; then
+        echo "FAIL — $scanned file(s) checked, exit-status-discarding gate(s) outside the baseline:$bad"
+        return 1
+    fi
+    if [ -n "$stale" ]; then
+        # A fixed file left on the list would silently re-admit the defect later.
+        echo "FAIL — $scanned file(s) checked, stale baseline entr(ies) now clean, remove from KNOWN_OFFENDERS:$stale"
+        return 1
+    fi
+    echo "PASS — $scanned file(s) checked, 0 new exit-status-discarding gates"
+    return 0
+}
+
+selftest() {
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    fails=0
+    echo "=== check-ghdl-gate-rc-swallow --selftest ==="
+
+    mkfix() { mkdir -p "$tmp/$1/scripts/fpga"; }
+
+    check() { # check <desc> <root> <want_rc> <want_regex>
+        out="$(scan "$2" 2>&1)" && rc=0 || rc=$?
+        last="$(printf '%s\n' "$out" | tail -1)"
+        if [ "$rc" = "$3" ] && printf '%s\n' "$last" | grep -qE "$4"; then
+            echo "  selftest ok [$1]"
+        else
+            echo "  SELFTEST FAIL [$1]: exit $rc (wanted $3), last line: $last"
+            fails=$((fails + 1))
+        fi
+    }
+
+    # 1. must-PASS: a correctly written gate that assigns rc on the next line.
+    mkfix clean
+    cat >"$tmp/clean/scripts/fpga/good.shs" <<'EOF'
+#!/bin/sh
+out="$(ghdl -a foo.vhd 2>&1)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] || exit 1
+EOF
+    check "correct rc handling must PASS" "$tmp/clean" 0 '^PASS — 1 file\(s\) checked, 0 new'
+
+    # 2. must-FAIL: the incident shape in a file not on the baseline.
+    mkfix dirty
+    cat >"$tmp/dirty/scripts/fpga/bad.shs" <<'EOF'
+#!/bin/sh
+out="$(ghdl -a foo.vhd 2>&1)" || true
+if echo "$out" | grep -q ":error:"; then exit 1; fi
+echo OK
+EOF
+    check "rc discarded with || true must FAIL" "$tmp/dirty" 1 '^FAIL — 1 file\(s\) checked, exit-status-discarding'
+
+    # 3. must-FAIL: an empty tree must be ERROR, never a vacuous PASS.
+    mkfix empty
+    check "empty tree must ERROR, never PASS" "$tmp/empty" 2 '^ERROR — nothing was checked'
+
+    # 4. must-PASS: the pattern inside a COMMENT is not an occurrence.
+    mkfix commented
+    cat >"$tmp/commented/scripts/fpga/doc.shs" <<'EOF'
+#!/bin/sh
+# out="$(ghdl -a foo.vhd 2>&1)" || true
+echo fine
+EOF
+    check "commented-out pattern must not false-positive" "$tmp/commented" 0 '^PASS — 1 file\(s\) checked'
+
+    if [ "$fails" -ne 0 ]; then
+        echo "FAIL — selftest: $fails of 4 fixture(s) failed"
+        exit 1
+    fi
+    echo "  (4 selftest fixture(s) passed)"
+}
+
+case "${1:-}" in
+    --selftest)
+        selftest
+        exit 0
+        ;;
+    "") ;;
+    *)
+        echo "usage: $0 [--selftest]"
+        echo "ERROR — nothing was checked: unknown argument '$1'"
+        exit 2
+        ;;
+esac
+
+# The selftest runs before every real scan and is fatal.
+selftest || exit 1
+scan "$ROOT_DIR"
+exit $?

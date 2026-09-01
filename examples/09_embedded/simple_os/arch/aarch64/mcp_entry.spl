@@ -1,0 +1,53 @@
+# aarch64 Limine entry for the IN-GUEST MCP SERVER kernel (Route A).
+#
+# This is a SECOND entry file, deliberately separate from limine_entry.spl.
+# Both satisfy the same two native-build conventions (see limine_entry.spl's
+# header for boot-object autodiscovery and the `_start` entry-symbol alias);
+# the only difference is what runs after the boot sequence.
+#
+# WHY A SEPARATE ENTRY RATHER THAN A FLAG. `--entry-closure` starts its module
+# walk at the entry file, so a `use app.mcp.main` anywhere in
+# src/os/kernel/boot/limine_boot_aarch64.spl would pull the whole 49-module
+# MCP graph into EVERY build of the plain kernel — measured, 133 KB -> 933 KB —
+# and every other lane consuming build/os/aarch64_limine/kernel.elf would
+# silently get it. A runtime flag cannot avoid that: the call site alone is
+# enough to keep the graph alive through --gc-sections. Two entry files is the
+# only split that actually separates the artifacts.
+#
+# Build to a DISTINCT output dir so the plain kernel's path is never clobbered:
+#   bin/simple native-build --backend cranelift --entry-closure \
+#     --entry examples/09_embedded/simple_os/arch/aarch64/mcp_entry.spl \
+#     --target aarch64-unknown-none-elf \
+#     --linker-script examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld \
+#     -o build/os/aarch64_limine_mcp/kernel.elf
+
+use os.kernel.boot.limine_boot_aarch64.{limine_aarch64_boot_sequence, halt_loop}
+use os.kernel.log.klog_api.{log_raw_println}
+use app.mcp.main.{main as mcp_server_main}
+
+# Non-consuming RX arming wait — see freestanding_runtime.c for why this is a
+# transport-shim concern and deliberately NOT a change to the UART primitive.
+extern fn rt_aarch64_stdin_wait_ready(rounds: i64) -> i64
+
+@noreturn
+fn _start():
+    """aarch64 Limine ELF entry point for the MCP kernel.
+
+    Runs the shared boot sequence first, so every marker the real-firmware
+    boot gate greps for is already on the wire before the MCP server is
+    entered. Nothing below this point can turn that gate's PASS into a FAIL.
+    """
+    limine_aarch64_boot_sequence()
+
+    # Arm the transport BEFORE entering the serve loop. Without this the
+    # server's first read is bounded at ~100k spins, which no host round trip
+    # can beat, so it would take the empty-string branch as EOF and exit(0)
+    # before the request lands. Bounded: if nothing ever arrives this reports
+    # 0 and the server still runs (and still exits on the honest EOF).
+    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-ENTERING")
+    val armed = rt_aarch64_stdin_wait_ready(20000)
+    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MCP-STDIN-ARMED ready={armed}")
+    val mcp_rc = mcp_server_main()
+    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-RETURNED rc={mcp_rc}")
+
+    halt_loop()

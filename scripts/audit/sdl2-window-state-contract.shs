@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+runtime="$root/src/runtime/runtime_sdl2.c"
+header="$root/src/runtime/runtime.h"
+bridge="$root/src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs"
+wrapper="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+probe="$root/test/01_unit/lib/nogc_sync_mut/io/probe_sdl2_window_contract.spl"
+
+require() {
+    pattern=$1
+    file=$2
+    message=$3
+    if ! grep -Eq "$pattern" "$file"; then
+        echo "FAIL: $message" >&2
+        exit 1
+    fi
+}
+
+require 'bool[[:space:]]+rt_sdl2_clear_quit\(void\);' "$header" \
+    'clear-quit must expose an explicit status'
+require 'if \(!sdl2_on_owner_thread\(\)\) return -1;' "$runtime" \
+    'quit-state reads must reject a missing/wrong owner'
+require 'bool rt_sdl2_clear_quit\(void\)' "$runtime" \
+    'clear-quit must return status'
+require 'return win \? \(int64_t\)SDL_GetWindowFlags\(win\) : -1;' "$runtime" \
+    'window flags must not fabricate zero for an invalid handle'
+require '\("rt_sdl2_clear_quit", Ret::B, ""\)' "$bridge" \
+    'interpreter bridge must preserve clear-quit boolean status'
+require 'fn window_should_close\(\) -> bool\?' "$wrapper" \
+    'quit-state failure must lift to typed absence'
+require 'fn window_clear_quit\(\) -> bool' "$wrapper" \
+    'clear-quit wrapper must propagate status'
+require 'fn window_is_visible\(window: Window\) -> bool\?' "$wrapper" \
+    'visibility failure must lift to typed absence'
+require 'fn window_is_maximized\(window: Window\) -> bool\?' "$wrapper" \
+    'maximize-state failure must lift to typed absence'
+require 'fn window_is_fullscreen\(window: Window\) -> bool\?' "$wrapper" \
+    'fullscreen-state failure must lift to typed absence'
+require 'window_is_visible\(window\)\.\?' "$probe" \
+    'invalid-handle probe must assert absence rather than fabricated false'
+
+flag_body=$(sed -n '/int64_t rt_sdl2_window_flags/,/^}/p' "$runtime")
+calls=$(printf '%s\n' "$flag_body" | grep -c 'SDL_GetWindowFlags' || true)
+if [ "$calls" -ne 1 ]; then
+    echo "FAIL: window-flags hot path must contain exactly one SDL query" >&2
+    exit 1
+fi
+if printf '%s\n' "$flag_body" | grep -Eq 'malloc|calloc|realloc|free|mutex|hash|dlsym|SDL_GetError'; then
+    echo "FAIL: window-flags hot path gained allocation, lookup, lock, hash, or error-query work" >&2
+    exit 1
+fi
+
+echo 'PASS: SDL2 window-state contracts are fail-closed and keep the direct query hot path'

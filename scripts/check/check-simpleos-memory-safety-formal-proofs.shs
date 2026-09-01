@@ -1,0 +1,99 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+CHECK_LEAN="$ROOT_DIR/scripts/check/check-lean-proofs.shs"
+
+require_theorem() {
+    file="$1"
+    name="$2"
+    if ! grep -Eq "^[[:space:]]*theorem[[:space:]]+$name([[:space:]]|:|\\(|$)" "$ROOT_DIR/$file"; then
+        echo "FAIL: missing theorem $name in $file" >&2
+        exit 1
+    fi
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "$tmp_dir"' EXIT
+
+    assert_stripped_theorem_rejected() {
+        source_file="$1"
+        theorem="$2"
+        mutated="$tmp_dir/$theorem.lean"
+        grep -v "^theorem $theorem" "$ROOT_DIR/$source_file" >"$mutated"
+        if (ROOT_DIR="$tmp_dir" require_theorem "$(basename -- "$mutated")" "$theorem" 2>/dev/null); then
+            echo "STATUS: FAIL simpleos-memory-safety-formal-proofs self-test: require_theorem did not fail after stripping $theorem" >&2
+            exit 1
+        fi
+    }
+
+    assert_stripped_theorem_rejected \
+        "src/verification/gc_reachability/src/GcReachability.lean" \
+        "notWhite_true_iff"
+    assert_stripped_theorem_rejected \
+        "src/verification/gc_boundary/GcBoundary/Theorems.lean" \
+        "noalloc_closed"
+    echo "STATUS: PASS simpleos-memory-safety-formal-proofs self-test (require_theorem correctly rejects a stripped theorem)"
+    exit 0
+fi
+
+sh "$CHECK_LEAN" --self-test >/dev/null
+sh "$CHECK_LEAN" --project "$ROOT_DIR/src/verification/gc_reachability" "verification/gc_reachability"
+sh "$CHECK_LEAN" --project "$ROOT_DIR/src/verification/gc_boundary" "verification/gc_boundary"
+sh "$CHECK_LEAN" --project "$ROOT_DIR/src/verification/gc_manual_borrow" "verification/gc_manual_borrow"
+sh "$CHECK_LEAN" --project "$ROOT_DIR/src/verification/manual_pointer_borrow" "verification/manual_pointer_borrow"
+sh "$CHECK_LEAN" --project "$ROOT_DIR/src/verification/nogc_compile" "verification/nogc_compile"
+
+require_theorem "src/verification/gc_reachability/src/GcReachability.lean" "notWhite_true_iff"
+require_theorem "src/verification/gc_reachability/src/GcReachability.lean" "markStep_never_whitens"
+require_theorem "src/verification/gc_reachability/src/GcReachability.lean" "markStep_child_not_white"
+require_theorem "src/verification/gc_reachability/src/GcReachability.lean" "markStep_preserves_invariant"
+require_theorem "src/verification/gc_reachability/src/GcReachability.lean" "mem_sweep"
+require_theorem "src/verification/gc_reachability/src/GcReachability.lean" "sweep_reclaims_white"
+require_theorem "src/verification/gc_reachability/src/GcReachability.lean" "sweep_keeps_live"
+require_theorem "src/verification/gc_reachability/src/GcReachability.lean" "no_dangling_after_sweep"
+require_theorem "src/verification/gc_boundary/GcBoundary/Theorems.lean" "copy_alias_free"
+require_theorem "src/verification/gc_boundary/GcBoundary/Theorems.lean" "check_sound_wrt_model"
+require_theorem "src/verification/gc_boundary/GcBoundary/Theorems.lean" "noalloc_closed"
+require_theorem "src/verification/gc_boundary/GcBoundary/Theorems.lean" "noalloc_rejects_alloc_call"
+require_theorem "src/verification/gc_boundary/GcBoundary/Theorems.lean" "copy_result_not_gc"
+require_theorem "src/verification/gc_boundary/GcBoundary/Theorems.lean" "copy_isolates"
+require_theorem "src/verification/gc_boundary/GcBoundary/AliasCounterexample.lean" "aliasExpr_not_alias_free"
+require_theorem "src/verification/gc_boundary/GcBoundary/AliasCounterexample.lean" "aliasExpr_has_tier_gc"
+require_theorem "src/verification/gc_boundary/GcBoundary/AliasCounterexample.lean" "aliasExpr_noalloc_body_ok"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrow.lean" "borrow_preserves"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrow.lean" "collect_preserves"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "borrow_live_then_collect_noop"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "collect_preserves_borrowed_list"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "allocate_preserves"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "allocate_then_borrow_records_pin"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "borrow_nonlive_noop"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "collect_keeps_borrowed_live"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "release_then_collect_preserves"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "collect_borrowed_noop"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "allocate_unborrowed_then_collect_decrements_live_count"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "release_preserves"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "release_decrements_borrow_count"
+require_theorem "src/verification/gc_manual_borrow/src/GcManualBorrowConstraints.lean" "release_zero_count_stays_zero"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean" "validState_always_valid"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean" "toValid_toState"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean" "exclusive_ok"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean" "shared_ok"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "valid_exclusive_has_no_shared"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "take_shared_exclusive_noop"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "take_shared_increments_when_not_exclusive"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "take_exclusive_shared_noop"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "take_exclusive_sets_flag_when_no_shared"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "take_exclusive_valid_has_no_shared"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "take_exclusive_then_release_no_shared"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "release_exclusive_clears"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "release_shared_zero_noop"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "take_shared_then_release_when_not_exclusive"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrowConstraints.lean" "release_shared_decreases_when_present"
+require_theorem "src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean" "release_ok"
+require_theorem "src/verification/nogc_compile/src/NogcCompile.lean" "nogc_append"
+require_theorem "src/verification/nogc_compile/src/NogcCompile.lean" "nogc_singleton"
+require_theorem "src/verification/nogc_compile/src/NogcCompileConstraints.lean" "gc_alloc_singleton_not_nogc"
+
+echo "STATUS: PASS simpleos-memory-safety-formal-proofs"

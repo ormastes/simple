@@ -1,0 +1,158 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+# Configuration
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+APP="${1:-examples/06_io/ui/widget_showcase_gui.spl}"
+TIMEOUT_SECS="${SIMPLE_GUI_READABILITY_TIMEOUT_SECS:-180}"
+WORK_DIR="${SIMPLE_GUI_READABILITY_WORK_DIR:-build/gui-low-res-readability}"
+EVIDENCE_LOG="$WORK_DIR/evidence.log"
+ENV_PATH="$WORK_DIR/evidence.env"
+
+# Resolutions to test
+RESOLUTIONS="640x480 800x600 1280x720"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_with_timeout() {
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+emit_file_status() {
+    key="$1"
+    path="$2"
+    if [ -s "$path" ]; then
+        echo "$key=$path"
+    else
+        echo "$key="
+    fi
+}
+
+mkdir -p "$WORK_DIR"
+rm -f "$EVIDENCE_LOG" "$ENV_PATH"
+
+echo "check=gui_low_res_readability"
+echo "simple_bin=$SIMPLE_BIN"
+echo "gui_app=$APP"
+echo "timeout_secs=$TIMEOUT_SECS"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "overall=fail"
+    echo "error=missing_executable:$SIMPLE_BIN"
+    exit 1
+fi
+
+if [ ! -f "$APP" ]; then
+    echo "overall=fail"
+    echo "error=missing_app:$APP"
+    exit 1
+fi
+
+# Verify readability oracle exists
+ORACLE="src/app/test/gui_readability_oracle.spl"
+if [ ! -f "$ORACLE" ]; then
+    echo "overall=fail"
+    echo "error=missing_oracle:$ORACLE"
+    exit 1
+fi
+
+# Extract app name
+app_name=$(basename "$APP" .spl)
+
+# Test each resolution
+all_pass=true
+{
+    for res in $RESOLUTIONS; do
+        width=$(echo "$res" | cut -d x -f 1)
+        height=$(echo "$res" | cut -d x -f 2)
+        res_work_dir="$WORK_DIR/res_${width}x${height}"
+        mkdir -p "$res_work_dir"
+
+        echo ""
+        echo "Testing resolution: ${width}x${height}"
+
+        # Run the GUI app with this resolution using linux-gui-run.shs
+        # and capture the PPM
+        ppm_file="$res_work_dir/capture.ppm"
+
+        # We need to set up the environment and run linux-gui-run.shs
+        # First, export SIMPLE_LIB in case it's needed
+        export SIMPLE_LIB="${SIMPLE_LIB:-src}"
+
+        # Run linux-gui-run with this resolution (note: it sets SHOWCASE_PPM)
+        # For a headless test, we'll just use the app's native SHOWCASE_PPM support
+        # by running it directly under Xvfb
+        # Offscreen only: SIMPLE_GUI=0 skips the winit loop; the PPM is the evidence.
+        # Never point this at a live display — a live-display run crashed the
+        # whole login session on 2026-07-02.
+        set +e
+        timeout 90 env \
+            DISPLAY="" \
+            SIMPLE_GUI=0 \
+            SIMPLE_TIMEOUT_SECONDS=60 \
+            SHOWCASE_PPM="$ppm_file" \
+            SHOWCASE_W="$width" \
+            SHOWCASE_H="$height" \
+            "$SIMPLE_BIN" run "$APP" >"$res_work_dir/app.log" 2>&1
+        app_exit=$?
+        set -e
+
+        echo "App exit code: $app_exit"
+
+        # Check if PPM was created
+        if [ -f "$ppm_file" ]; then
+            ppm_size=$(wc -c <"$ppm_file")
+            echo "PPM created: $ppm_file ($ppm_size bytes)"
+
+            # Run readability oracle
+            set +e
+            timeout 30 "$SIMPLE_BIN" run "$ORACLE" "$ppm_file" >"$res_work_dir/oracle.log" 2>&1
+            oracle_exit=$?
+            set -e
+
+            if [ "$oracle_exit" -eq 0 ]; then
+                echo "res_${width}x${height}_status=pass"
+                echo "res_${width}x${height}_oracle_exit=$oracle_exit"
+            else
+                echo "res_${width}x${height}_status=fail"
+                echo "res_${width}x${height}_oracle_exit=$oracle_exit"
+                all_pass=false
+                # Print oracle output for debugging
+                if [ -f "$res_work_dir/oracle.log" ]; then
+                    echo "Oracle output:"
+                    cat "$res_work_dir/oracle.log"
+                fi
+            fi
+
+            emit_file_status "res_${width}x${height}_ppm" "$ppm_file"
+            emit_file_status "res_${width}x${height}_oracle_log" "$res_work_dir/oracle.log"
+            emit_file_status "res_${width}x${height}_app_log" "$res_work_dir/app.log"
+        else
+            echo "res_${width}x${height}_status=unavailable"
+            echo "res_${width}x${height}_reason=ppm_not_created"
+            all_pass=false
+            emit_file_status "res_${width}x${height}_app_log" "$res_work_dir/app.log"
+        fi
+    done
+
+    # Overall status
+    if [ "$all_pass" = "true" ]; then
+        echo "overall=pass"
+    else
+        echo "overall=fail"
+    fi
+} 2>&1 | tee "$EVIDENCE_LOG"
+
+# Write evidence.env
+cp "$EVIDENCE_LOG" "$ENV_PATH" || true
+echo "evidence_log=$EVIDENCE_LOG"
+grep -q '^overall=pass$' "$EVIDENCE_LOG"

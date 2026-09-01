@@ -1,0 +1,483 @@
+#!/bin/sh
+set -eu
+
+# Focused fail-closed guard for the canonical dynamic-call and Ed25519 SFFI
+# owners. This complements semantic SFFI layout linting with cross-lane symbol
+# and contract checks that are visible only across Rust/Simple source files.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+failed=0
+
+require_text() {
+    pattern=$1
+    file=$2
+    if ! rg -q -- "$pattern" "$root/$file"; then
+        echo "SFFI lint: missing '$pattern' in $file" >&2
+        failed=1
+    fi
+}
+
+require_fixed() {
+    needle=$1
+    file=$2
+    if ! rg -F -q -- "$needle" "$root/$file"; then
+        echo "SFFI lint: missing '$needle' in $file" >&2
+        failed=1
+    fi
+}
+
+for owner in \
+    src/compiler_rust/runtime/src/value/wsffi_native.rs \
+    src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs \
+    src/compiler_rust/compiler/src/interpreter_extern/mod.rs \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs \
+    src/compiler_rust/common/src/runtime_symbols.rs \
+    src/lib/nogc_sync_mut/sffi/dynamic.spl
+do
+    require_text 'spl_wffi_call_i64_checked' "$owner"
+done
+
+require_text 'null_owned_text_return_is_a_contract_error' \
+    src/compiler_rust/compiler/src/interpreter_extern/screenshot_sffi.rs
+screenshot_text_lift=$(sed -n \
+    '/fn take_owned_cstring(/,/^}/p' \
+    "$root/src/compiler_rust/compiler/src/interpreter_extern/screenshot_sffi.rs")
+if printf '%s\n' "$screenshot_text_lift" | rg -U -q \
+    'ptr\.is_null\(\)[\s\S]{0,180}String::new\(\)'; then
+    echo "SFFI lint: screenshot NULL owned text is fabricated as empty text" >&2
+    failed=1
+fi
+
+require_text 'invalid_builder_finish_is_a_contract_error' \
+    src/compiler_rust/compiler/src/interpreter_extern/sffi_string.rs
+builder_finish_lift=$(sed -n \
+    '/pub fn rt_string_builder_finish_fn(/,/^}/p' \
+    "$root/src/compiler_rust/compiler/src/interpreter_extern/sffi_string.rs")
+if printf '%s\n' "$builder_finish_lift" | rg -U -q \
+    'data\.is_null\(\)[\s\S]{0,180}Value::text\(String::new\(\)\)'; then
+    echo "SFFI lint: string-builder NULL data is fabricated as empty text" >&2
+    failed=1
+fi
+
+require_text 'n > available' src/compiler_rust/runtime/src/value/wsffi_native.rs
+require_text 'nargs > call_args.len' src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs
+require_text 'pub extern "C" fn rt_ed25519_verify\(message: RuntimeValue, pubkey: RuntimeValue' \
+    src/compiler_rust/runtime/src/value/sffi/signature.rs
+require_text 'rt_ed25519_verify_checked' src/compiler_rust/runtime/src/value/sffi/signature.rs
+require_text 'if data.is_nil()' src/compiler_rust/runtime/src/value/sffi/signature.rs
+require_text 'return if len == 0 \{ Some\(Vec::new\(\)\) \} else \{ None \}' \
+    src/compiler_rust/runtime/src/value/sffi/signature.rs
+require_text 'empty_byte_bridge_remains_valid_but_nil_is_rejected' \
+    src/compiler_rust/runtime/src/value/sffi/signature.rs
+require_text 'ed25519_verify_native_checked' src/lib/nogc_sync_mut/io/signature_sffi.spl
+for symbol in \
+    rt_rsa_sha256_verify_checked \
+    rt_rsa_sha512_verify_checked \
+    rt_rsa_pss_sha256_verify_checked \
+    rt_rsa_pss_sha384_verify_checked \
+    rt_rsa_pss_sha512_verify_checked \
+    rt_ecdsa_p256_verify_checked
+do
+    require_text "$symbol" src/compiler_rust/runtime/src/value/sffi/signature.rs
+    require_text "$symbol" src/compiler_rust/compiler/src/interpreter_extern/signatures.rs
+    require_text "$symbol" src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+    require_text "$symbol" src/compiler_rust/common/src/runtime_symbols.rs
+    require_text "$symbol" src/lib/nogc_sync_mut/io/signature_sffi.spl
+done
+for symbol in \
+    rt_rsa_sha256_sign_checked \
+    rt_rsa_sha512_sign_checked \
+    rt_ed25519_sign_checked \
+    rt_ecdsa_p256_sign_checked
+do
+    require_text "$symbol" src/compiler_rust/runtime/src/value/sffi/signature.rs
+    require_text "$symbol" src/compiler_rust/compiler/src/interpreter_extern/signatures.rs
+    require_text "$symbol" src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+    require_text "$symbol" src/compiler_rust/common/src/runtime_symbols.rs
+    require_text "$symbol" src/lib/nogc_sync_mut/io/signature_sffi.spl
+done
+require_text 'verify_host_key_checked' src/os/tools/net/_SshTool/run.spl
+require_text 'spl_wffi_try_call_i64_c' src/runtime/runtime.c
+require_text '!out || !fptr || nargs < 0 || nargs > 8' src/runtime/runtime.c
+require_text 'if \(!handle\) return -1;' src/runtime/runtime_dynload.c
+require_text 'if \(!handle\) return -1;' src/runtime/runtime_native.c
+
+# SDL text providers use explicit non-null fallback strings. The Rust
+# interpreter lift must treat NULL as a provider-contract failure, never as a
+# successful empty string.
+require_text 'foreign text contract returned null' \
+    src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs
+require_text 'text_from_ptr(f(), name)?' \
+    src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs
+require_text 'text_from_ptr(f(raw\[0\]), name)?' \
+    src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs
+
+sdl_text_lift=$(sed -n \
+    '/unsafe fn text_from_ptr(/,/^}/p' \
+    "$root/src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs")
+if printf '%s\n' "$sdl_text_lift" | rg -U -q \
+    'ptr\.is_null\(\)[\s\S]{0,180}(Value::Str|String::new\(\))'; then
+    echo "SFFI lint: SDL NULL text return is fabricated as successful empty text" >&2
+    failed=1
+fi
+
+# RuntimeValue strings may represent an empty string with zero length, but a
+# positive length paired with NULL data is corruption and must fail closed.
+require_text 'foreign text contract returned null with length' \
+    src/compiler_rust/compiler/src/interpreter_extern/net_tls_client.rs
+require_text 'null_positive_length_text_is_a_contract_error' \
+    src/compiler_rust/compiler/src/interpreter_extern/net_tls_client.rs
+
+tls_text_lift=$(sed -n \
+    '/unsafe fn text_from_runtime_parts(/,/^}/p' \
+    "$root/src/compiler_rust/compiler/src/interpreter_extern/net_tls_client.rs")
+if printf '%s\n' "$tls_text_lift" | rg -U -q \
+    'data\.is_null\(\)[\s\S]{0,180}Value::text\(String::new\(\)\)'; then
+    echo "SFFI lint: TLS NULL/positive-length text is fabricated as empty text" >&2
+    failed=1
+fi
+
+require_text 'runtime_string_null_positive_length_is_a_contract_error' \
+    src/compiler_rust/compiler/src/interpreter_extern/cranelift.rs
+cranelift_text_lift=$(sed -n \
+    '/unsafe fn runtime_string_parts_to_value(/,/^}/p' \
+    "$root/src/compiler_rust/compiler/src/interpreter_extern/cranelift.rs")
+if printf '%s\n' "$cranelift_text_lift" | rg -U -q \
+    'data\.is_null\(\)[\s\S]{0,180}Value::text\(String::new\(\)\)'; then
+    echo "SFFI lint: Cranelift NULL/positive-length text is fabricated as empty text" >&2
+    failed=1
+fi
+
+require_text 'null_backend_name_is_a_contract_error' \
+    src/compiler_rust/compiler/src/interpreter_extern/audio.rs
+audio_text_lift=$(sed -n \
+    '/fn c_str_to_value(/,/^}/p' \
+    "$root/src/compiler_rust/compiler/src/interpreter_extern/audio.rs")
+if printf '%s\n' "$audio_text_lift" | rg -U -q \
+    'ptr\.is_null\(\)[\s\S]{0,180}(Value::Str|String::new\(\))'; then
+    echo "SFFI lint: audio NULL backend name is fabricated as empty text" >&2
+    failed=1
+fi
+
+for spec in \
+    vulkan:src/compiler_rust/compiler/src/interpreter_extern/vulkan.rs \
+    glfw:src/compiler_rust/compiler/src/interpreter_extern/glfw.rs \
+    sdl3:src/compiler_rust/compiler/src/interpreter_extern/sdl3.rs
+do
+    label=${spec%%:*}
+    file=${spec#*:}
+    require_text 'null_text_return_is_a_contract_error' "$file"
+    text_lift=$(sed -n '/unsafe fn text_from_ptr(/,/^}/p' "$root/$file")
+    if printf '%s\n' "$text_lift" | rg -U -q \
+        'ptr\.is_null\(\)[\s\S]{0,180}(Value::Str|String::new\(\))'; then
+        echo "SFFI lint: $label NULL text is fabricated as empty text" >&2
+        failed=1
+    fi
+done
+
+legacy_i64_body=$(sed -n \
+    '/pub extern "C" fn spl_wffi_call_i64(/,/^}/p' \
+    "$root/src/compiler_rust/runtime/src/value/wsffi_native.rs")
+if printf '%s\n' "$legacy_i64_body" | rg -q 'rt_array_new|Vec::|HashMap|Mutex|dlsym'; then
+    echo "SFFI lint: legacy integer hot path allocates or performs dynamic lookup" >&2
+    failed=1
+fi
+
+legacy_f64_body=$(sed -n \
+    '/pub extern "C" fn spl_wffi_call_f64(/,/^}/p' \
+    "$root/src/compiler_rust/runtime/src/value/wsffi_native.rs")
+if printf '%s\n' "$legacy_f64_body" | rg -q 'rt_array_new|Vec::|HashMap|Mutex|dlsym'; then
+    echo "SFFI lint: legacy float hot path allocates or performs dynamic lookup" >&2
+    failed=1
+fi
+
+for helper in ed25519_sign_value ecdsa_p256_sign_value
+do
+    helper_body=$(sed -n "/fn $helper(/,/^}/p" \
+        "$root/src/compiler_rust/runtime/src/value/sffi/signature.rs")
+    if printf '%s\n' "$helper_body" | rg -q '\.to_vec\(|rt_array_new|checked_sign_result'; then
+        echo "SFFI lint: legacy $helper path gained a temporary copy or descriptor allocation" >&2
+        failed=1
+    fi
+done
+
+# Packed-span resolution may use zero as its raw C sentinel, but the public
+# Simple boundary must immediately lift it into a typed Result. The success
+# path stays one raw call plus one comparison; the verdict lookup is failure-only.
+require_fixed 'fn packed_span_resolve_base(backing: [u8], r: BufferSpanRef) -> Result<i64, i64>:' \
+    src/lib/common/memory/packed_span.spl
+require_fixed 'return Ok(base)' src/lib/common/memory/packed_span.spl
+require_fixed 'Err(rt_packed_span_v1_last_verdict())' src/lib/common/memory/packed_span.spl
+require_text 'pub mod packed_span;' \
+    src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+require_text 'packed_span_contract_family_is_registered' \
+    src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+require_text 'parse_capability_scoped_unsafe_block' \
+    src/compiler_rust/parser/tests/control_flow.rs
+
+packed_resolve_body=$(sed -n \
+    '/fn packed_span_resolve_base(/,/^$/p' \
+    "$root/src/lib/common/memory/packed_span.spl")
+raw_resolve_calls=$(printf '%s\n' "$packed_resolve_body" | \
+    rg -c 'rt_packed_span_v1_resolve_base\(' || true)
+if [ "$raw_resolve_calls" -ne 1 ]; then
+    echo "SFFI lint: packed-span safe resolve must perform exactly one raw resolve call" >&2
+    failed=1
+fi
+if printf '%s\n' "$packed_resolve_body" | rg -q 'HashMap|Mutex|sha|dlsym'; then
+    echo "SFFI lint: packed-span resolve hot path gained lookup, locking, or hashing" >&2
+    failed=1
+fi
+
+# The generated static symbol table must not redeclare these callable symbols
+# with the legacy all-zero-argument ABI merely to retain their addresses.
+require_fixed 'fn runtime_symbol_declaration(' \
+    src/compiler_rust/runtime/build.rs
+for symbol in \
+    rt_alloc rt_free rt_ptr_read_i64 rt_ptr_read_u8 rt_ptr_read_i32 \
+    rt_ptr_write_u8 rt_ptr_write_i32 rt_ptr_write_i64 \
+    rt_ptr_write_bytes_raw rt_memset rt_memcpy \
+    rt_time_now_nanos rt_time_now_micros rt_time_now_unix_micros
+do
+    require_fixed "\"$symbol\"" src/compiler_rust/runtime/build.rs
+done
+require_fixed 'runtime_symbol_table_typed_memory_contracts_dispatch' \
+    src/compiler_rust/runtime/src/lib.rs
+require_fixed 'runtime_signature_scan::runtime_signatures' \
+    src/compiler_rust/runtime/build.rs
+require_fixed '../compiler/src/codegen/runtime_sffi.rs' \
+    src/compiler_rust/runtime/build.rs
+require_fixed 'compiler_registry_supplies_broad_runtime_abi_coverage' \
+    src/compiler_rust/runtime/src/runtime_signature_scan.rs
+
+# Arena allocation previously declared two arguments in Simple while the Rust
+# provider consumed three. Keep the canonical arity and raw authority aligned.
+require_fixed 'RuntimeFuncSpec::new("rt_arena_alloc", &[I64, I64, I64], &[I64])' \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+require_fixed 'extern fn rt_arena_alloc(arena: i64, size: i64, align: i64) -> i64' \
+    src/compiler_rust/lib/std/src/infra/alloc.spl
+require_fixed 'rt_arena_alloc(self._handle, size, 8)' \
+    src/compiler_rust/lib/std/src/infra/alloc.spl
+require_fixed 'capabilities: [ffi, raw_ptr]' \
+    src/compiler_rust/lib/std/src/infra/alloc.spl
+
+arena_alloc_body=$(sed -n \
+    '/pub extern "C" fn rt_arena_alloc(/,/^}/p' \
+    "$root/src/compiler_rust/runtime/src/value/sffi/concurrent/arena.rs")
+arena_lock_count=$(printf '%s\n' "$arena_alloc_body" | rg -c 'ARENA_MAP\.lock\(' || true)
+if [ "$arena_lock_count" -ne 1 ]; then
+    echo "SFFI lint: arena allocation hot path must take exactly one registry lock" >&2
+    failed=1
+fi
+if printf '%s\n' "$arena_alloc_body" | rg -q 'HashMap::|Vec::|sha|dlsym'; then
+    echo "SFFI lint: arena allocation hot path gained allocation, hashing, or dynamic lookup" >&2
+    failed=1
+fi
+
+# AES block bridges must have compiler-owned signatures. Legacy payload-only
+# native exports remain raw/unsafe, while interpreter failures are typed errors
+# rather than empty arrays or all-zero blocks.
+for symbol in \
+    rt_aes128_encrypt_block_pure rt_aes128_decrypt_block_pure \
+    rt_aes256_encrypt_block_into rt_aes256_encrypt_block_pure
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+done
+require_fixed 'pub unsafe extern "C" fn rt_aes128_encrypt_block_pure' \
+    src/compiler_rust/runtime/src/value/aes.rs
+require_fixed 'pub unsafe extern "C" fn rt_aes128_decrypt_block_pure' \
+    src/compiler_rust/runtime/src/value/aes.rs
+require_fixed 'pub unsafe extern "C" fn rt_aes256_encrypt_block_into' \
+    src/compiler_rust/runtime/src/value/aes.rs
+require_fixed 'pub unsafe extern "C" fn rt_aes256_encrypt_block_pure' \
+    src/compiler_rust/runtime/src/value/aes.rs
+require_fixed 'pure_block_bridges_reject_bad_lengths_instead_of_fabricating_bytes' \
+    src/compiler_rust/compiler/src/interpreter_extern/simd.rs
+
+aes_handler_region=$(sed -n \
+    '/pub fn rt_aes128_encrypt_block_pure(/,/pub fn rt_tls13_aes256_gcm_encrypt(/p' \
+    "$root/src/compiler_rust/compiler/src/interpreter_extern/simd.rs")
+if printf '%s\n' "$aes_handler_region" | rg -q \
+    'unwrap_or\(\[0u8; 16\]\)|unwrap_or_default\(\)|return Ok\(Value::array\(vec!\[\]\)\)|InvalidInput => out = Vec::new\(\)'; then
+    echo "SFFI lint: interpreter AES bridge fabricates empty/zero output on failure" >&2
+    failed=1
+fi
+
+# Every current atomic provider has compiler-owned ABI metadata. Exact bool and
+# pointer declarations in build.rs prevent coarse I8/I64 specs from creating a
+# second, clashing Rust declaration.
+for symbol in \
+    rt_atomic_new rt_atomic_load rt_atomic_store rt_atomic_swap \
+    rt_atomic_compare_exchange rt_atomic_fetch_add rt_atomic_fetch_sub \
+    rt_atomic_fetch_and rt_atomic_fetch_or rt_atomic_free \
+    rt_atomic_bool_new rt_atomic_bool_load rt_atomic_bool_store \
+    rt_atomic_bool_swap rt_atomic_bool_free \
+    rt_atomic_int_new rt_atomic_int_load rt_atomic_int_store rt_atomic_int_swap \
+    rt_atomic_int_compare_exchange rt_atomic_int_fetch_add rt_atomic_int_fetch_sub \
+    rt_atomic_int_fetch_and rt_atomic_int_fetch_or rt_atomic_int_fetch_xor \
+    rt_atomic_int_free rt_atomic_flag_new rt_atomic_flag_test_and_set \
+    rt_atomic_flag_clear rt_atomic_flag_free
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+done
+require_fixed '"rt_atomic_compare_exchange" =>' src/compiler_rust/runtime/build.rs
+require_fixed '"rt_atomic_bool_new" => "(initial: bool) -> i64"' \
+    src/compiler_rust/runtime/build.rs
+require_fixed 'runtime_symbol_table_atomic_contracts_dispatch' \
+    src/compiler_rust/runtime/src/lib.rs
+
+# Raw file mappings use exact pointer/u64 ABI declarations in every generated
+# lane. Their provider boundary must reject invalid pointer/size inputs without
+# adding allocation, hashing, registry lookup, or synchronization to syscalls.
+for symbol in rt_file_mmap rt_file_munmap rt_file_madvise rt_file_msync
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+    require_fixed "\"$symbol\" =>" src/compiler_rust/runtime/build.rs
+    require_fixed "pub unsafe extern \"C\" fn $symbol" \
+        src/compiler_rust/runtime/src/value/sffi/file_io/mmap.rs
+done
+require_fixed 'extern fn rt_file_mmap(addr: *void, length: u64' \
+    src/compiler_rust/lib/std/src/file/__init__.spl
+require_fixed 'raw_mapping_lifecycle_rejects_invalid_pointer_and_size' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/mmap.rs
+
+mmap_provider_region=$(sed -n \
+    '/pub unsafe extern "C" fn rt_file_mmap(/,/Wrapper for native_msync/p' \
+    "$root/src/compiler_rust/runtime/src/value/sffi/file_io/mmap.rs")
+if printf '%s\n' "$mmap_provider_region" | rg -q \
+    'HashMap|Mutex|RwLock|Vec::|sha|dlsym|dlopen'; then
+    echo "SFFI lint: raw mapping hot path gained allocation, hashing, locking, or dynamic lookup" >&2
+    failed=1
+fi
+
+# File locks are owned OS descriptors, not link-only success stubs. The text
+# argument is expanded to pointer/length once, and every compiled lane must
+# retain the timeout and descriptor result ABI.
+require_fixed 'RuntimeFuncSpec::new("rt_file_lock", &[I64, I64, I64], &[I64])' \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+require_fixed 'RuntimeFuncSpec::new("rt_file_unlock", &[I64], &[I8])' \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+require_fixed '"(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64"' \
+    src/compiler_rust/runtime/build.rs
+require_fixed 'pub unsafe extern "C" fn rt_file_lock' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs
+require_fixed 'pub unsafe extern "C" fn rt_file_unlock' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs
+require_fixed 'file_lock_provider_owns_and_releases_real_descriptor' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs
+require_fixed 'runtime_symbol_table_file_lock_contracts_resolve_exact_providers' \
+    src/compiler_rust/runtime/src/lib.rs
+require_fixed 'declare i64 @rt_file_lock(ptr, i64, i64)' \
+    src/compiler/70.backend/backend/llvm_backend.spl
+
+file_lock_provider_region=$(sed -n \
+    '/pub unsafe extern "C" fn rt_file_lock(/,/pub unsafe extern "C" fn rt_file_mmap_read_text/p' \
+    "$root/src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs")
+if printf '%s\n' "$file_lock_provider_region" | rg -q \
+    'HashMap|Mutex|RwLock|sha|dlsym|dlopen|return 1;|return true;'; then
+    echo "SFFI lint: file-lock provider regained fabricated success or per-call registry work" >&2
+    failed=1
+fi
+
+# Offset reads used by live process relay preserve valid empty text while
+# reporting I/O/shape failures as nil to a typed Option/Result wrapper. The
+# checked path uses the existing managed-text allocation only—no status array,
+# registry, hash, lock, or dynamic lookup on each polling read.
+require_fixed 'RuntimeFuncSpec::new("rt_file_read_text_at_checked", &[I64, I64, I64], &[I64])' \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+require_fixed 'pub extern "C" fn rt_file_read_text_at_checked' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs
+require_fixed 'pub fn rt_file_read_text_at_checked' \
+    src/compiler_rust/compiler/src/interpreter_extern/file_io.rs
+require_fixed 'int64_t rt_file_read_text_at_checked' src/runtime/runtime_native.c
+require_fixed 'runtime_symbol_table_checked_offset_read_resolves_exact_provider' \
+    src/compiler_rust/runtime/src/lib.rs
+require_fixed 'checked_offset_read_distinguishes_empty_success_from_failure' \
+    src/compiler_rust/compiler/src/interpreter_extern/file_io.rs
+require_fixed 'fn _read_text_at_checked(path: text, offset: i64, size: i64) -> Result<text, text>' \
+    src/app/io/process_ops.spl
+
+checked_read_region=$(sed -n \
+    '/pub extern "C" fn rt_file_read_text_at_checked(/,/pub extern "C" fn rt_file_write_text_at/p' \
+    "$root/src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs")
+if printf '%s\n' "$checked_read_region" | rg -q \
+    'HashMap|Mutex|RwLock|sha|dlsym|dlopen|RuntimeValue::NIL.*size == 0'; then
+    echo "SFFI lint: checked offset read regressed empty semantics or gained registry work" >&2
+    failed=1
+fi
+
+if rg -q 'extern fn rt_file_read_text_at\(' \
+    "$root/src/app" "$root/src/lib" "$root/src/compiler_rust/lib"; then
+    echo "SFFI lint: safe-looking Simple code still declares the ambiguous legacy offset-read ABI" >&2
+    failed=1
+fi
+for legacy_owner in \
+    src/runtime/runtime.h \
+    src/runtime/runtime_native.c \
+    src/runtime/platform/unix_common.h \
+    src/runtime/platform/platform_win.h
+do
+    require_fixed 'SFFI_LEGACY_UNSAFE' "$legacy_owner"
+done
+require_fixed 'fn file_read_text_at(path: text, offset: i64, size: i64) -> Result<text, text>' \
+    src/lib/nogc_sync_mut/io/file_ops.spl
+require_fixed 'fn fb_read(path: text) -> Result<text, text>' \
+    src/lib/nogc_sync_mut/enterprise_store/file_backend.spl
+require_fixed 'fn read_bounded_temp_output(path: text) -> Result<text, text>' \
+    src/lib/nogc_sync_mut/test_runner/test_runner_async.spl
+require_fixed 'fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?' \
+    src/os/userlib/rt_file_facade.spl
+require_fixed 'body_file: path' src/lib/nogc_async_mut/http_server/static_file.spl
+require_fixed 'reason: "Internal Server Error"' \
+    src/lib/nogc_async_mut/http_server/range.spl
+
+static_range_region=$(sed -n \
+    '/fn static_file_serve_range(/,/fn strip_prefix(/p' \
+    "$root/src/lib/nogc_async_mut/http_server/static_file.spl")
+if printf '%s\n' "$static_range_region" | rg -q 'file_read_text_at\('; then
+    echo "SFFI lint: single HTTP range regained an eager read before body-file streaming" >&2
+    failed=1
+fi
+
+# Cryptographic sign/verify symbols must resolve through the same typed static
+# registry as their checked tri-state/status-payload wrappers.
+for symbol in \
+    rt_rsa_sha256_verify rt_rsa_sha256_verify_checked \
+    rt_rsa_sha512_verify rt_rsa_sha512_verify_checked \
+    rt_rsa_pss_sha256_verify rt_rsa_pss_sha256_verify_checked \
+    rt_rsa_pss_sha384_verify rt_rsa_pss_sha384_verify_checked \
+    rt_rsa_pss_sha512_verify rt_rsa_pss_sha512_verify_checked \
+    rt_ed25519_verify rt_ed25519_verify_checked \
+    rt_ecdsa_p256_verify rt_ecdsa_p256_verify_checked \
+    rt_rsa_sha256_sign rt_rsa_sha256_sign_checked \
+    rt_rsa_sha512_sign rt_rsa_sha512_sign_checked \
+    rt_ed25519_sign rt_ed25519_sign_checked \
+    rt_ecdsa_p256_sign rt_ecdsa_p256_sign_checked
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+done
+require_fixed 'runtime_symbol_table_signature_contracts_resolve_exact_providers' \
+    src/compiler_rust/runtime/src/lib.rs
+
+for symbol in \
+    rt_tls13_aes128_gcm_decrypt \
+    rt_tls13_aes256_gcm_encrypt \
+    rt_tls13_aes256_gcm_decrypt
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+    require_fixed "pub unsafe extern \"C\" fn $symbol" \
+        src/compiler_rust/runtime/src/value/aes.rs
+done
+require_fixed 'tls_aes_gcm_bridges_reject_invalid_shapes_instead_of_empty_payloads' \
+    src/compiler_rust/compiler/src/interpreter_extern/simd.rs
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "SFFI null/signature contract guard: PASS"

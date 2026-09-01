@@ -1,0 +1,50 @@
+#!/bin/sh
+# Build an NVFS POSIX DBFS-backed root image with an admitted Simple runtime.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+RUNTIME=${SIMPLE_RUNTIME_PATH:-}
+RECEIPT=${SIMPLE_RUNTIME_RECEIPT:-}
+
+if [ -z "$RUNTIME" ] || [ -z "$RECEIPT" ]; then
+    printf '%s\n' 'mkfs-nvfs: SIMPLE_RUNTIME_PATH and SIMPLE_RUNTIME_RECEIPT are required' >&2
+    exit 1
+fi
+
+cd "$ROOT_DIR"
+ADMISSION=$(sh scripts/check/check-sosix-qemu-runtime-admission.shs \
+    --verify "$RUNTIME" "$RECEIPT")
+RUNTIME_SHA=$(printf '%s\n' "$ADMISSION" | awk -F= '$1 == "runtime_sha256" { print $2 }')
+[ -n "$RUNTIME_SHA" ] || {
+    printf '%s\n' 'mkfs-nvfs: admitted runtime SHA-256 is missing' >&2
+    exit 1
+}
+
+mkdir -p build/os
+"$RUNTIME" run src/os/port/mkfs_nvfs.spl -- "$@"
+
+IMAGE_PATH=${1:-build/os/simpleos_nvfs_root.img}
+IMAGE_REAL=$(readlink -f -- "$IMAGE_PATH")
+[ -f "$IMAGE_REAL" ] || {
+    printf '%s\n' "mkfs-nvfs: output image is missing: $IMAGE_PATH" >&2
+    exit 1
+}
+if command -v sha256sum >/dev/null 2>&1; then
+    IMAGE_SHA=$(sha256sum "$IMAGE_REAL" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+    IMAGE_SHA=$(shasum -a 256 "$IMAGE_REAL" | awk '{print $1}')
+else
+    printf '%s\n' 'mkfs-nvfs: no SHA-256 tool is available' >&2
+    exit 1
+fi
+SOURCE_REVISION=$(git rev-parse HEAD)
+MANIFEST=${IMAGE_PATH}.manifest.env
+{
+    printf '%s\n' 'schema_version=1'
+    printf '%s\n' 'provider=nvfs-dbfs-backed-v1'
+    printf 'image_path=%s\n' "$IMAGE_REAL"
+    printf 'image_sha256=%s\n' "$IMAGE_SHA"
+    printf 'source_revision=%s\n' "$SOURCE_REVISION"
+    printf 'runtime_sha256=%s\n' "$RUNTIME_SHA"
+} > "$MANIFEST"
+printf '%s\n' "mkfs-nvfs: wrote manifest $MANIFEST"

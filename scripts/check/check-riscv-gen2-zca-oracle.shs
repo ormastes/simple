@@ -1,0 +1,105 @@
+#!/bin/sh
+# Validate independently generated exhaustive Zca truth tables.
+# This gate deliberately knows nothing about the Simple/HWIR decoder.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+fixture_dir=${1:-"$root/test/fixtures/hardware/riscv_gen2/zca_sail_oracle"}
+lock="$fixture_dir/oracle.lock"
+
+fail() {
+    echo "ERROR: RISC-V Gen2 Zca oracle: $*" >&2
+    exit 1
+}
+
+[ -f "$lock" ] || fail "missing lock manifest: $lock"
+
+get_key() {
+    key=$1
+    count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$lock")
+    [ "$count" -eq 1 ] || fail "manifest key $key must occur exactly once"
+    awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print }' "$lock"
+}
+
+schema=$(get_key schema)
+status=$(get_key status)
+qualification=$(get_key qualification)
+scope=$(get_key evidence_scope)
+canonical=$(get_key canonical_expansion)
+equivalence=$(get_key exhaustive_equivalence)
+comparison=$(get_key simple_classifier_comparison)
+comparison_reason=$(get_key comparison_reason)
+repository=$(get_key oracle_repository)
+revision=$(get_key oracle_revision)
+archive_sha=$(get_key oracle_archive_sha256)
+zca_sha=$(get_key oracle_zca_source_sha256)
+adapter_sha=$(get_key adapter_sha256)
+generator_sha=$(get_key generator_sha256)
+rv32_sha=$(get_key rv32_fixture_sha256)
+rv64_sha=$(get_key rv64_fixture_sha256)
+rv32_prelude_sha=$(get_key rv32_prelude_sha256)
+rv64_prelude_sha=$(get_key rv64_prelude_sha256)
+postlude_sha=$(get_key postlude_sha256)
+
+[ "$schema" = "simple-riscv-zca-oracle-v2" ] || fail "unsupported schema: $schema"
+[ "$status" = "generated" ] || fail "truth is absent; run the pinned external generator"
+[ "$qualification" = "false" ] || fail "fixture manifests may never assert product qualification"
+[ "$scope" = "classification-only" ] || fail "fixture may assert only classification evidence"
+[ "$canonical" = "false" ] || fail "classification fixture may not assert canonical expansion"
+[ "$equivalence" = "false" ] || fail "classification fixture may not assert exhaustive equivalence"
+[ "$comparison" = "not-run" ] || fail "Simple comparison requires a separate trustworthy classifier receipt"
+[ "$comparison_reason" = "canonical-simple-classifier-api-unavailable" ] || fail "missing canonical comparison blocker"
+[ "$repository" = "https://github.com/riscv/sail-riscv.git" ] || fail "oracle repository is not the approved independent source"
+[ "$revision" = "a33475aeb80090127433b5a8b30e717edaa19e71" ] || fail "oracle revision is missing or unpinned"
+[ "$archive_sha" = "665822b80f1f0ad2dd33709673a5fb92980ea051d9f977d50c70d587d2f0cdc8" ] || fail "oracle archive SHA-256 does not match the pinned revision"
+[ "$zca_sha" = "b6dee98f5fa917dfcf37452f3f475eefd59215f949c21dda541c54f14a5de039" ] || fail "pinned Zca semantic source SHA-256 mismatch"
+
+for item in "$adapter_sha" "$generator_sha" "$rv32_prelude_sha" "$rv64_prelude_sha" "$postlude_sha" "$rv32_sha" "$rv64_sha"; do
+    echo "$item" | awk 'length($0) == 64 && $0 ~ /^[0-9a-fA-F]+$/ { ok=1 } END { exit !ok }' || fail "missing or malformed SHA-256 pin"
+done
+
+actual_generator_sha=$(sha256sum "$root/scripts/tool/generate-riscv-gen2-zca-oracle.shs" | awk '{print $1}')
+[ "$generator_sha" = "$actual_generator_sha" ] || fail "generator SHA-256 mismatch"
+[ "$adapter_sha" = "$(sha256sum "$root/scripts/tool/build-riscv-gen2-zca-sail-classifier.shs" | awk '{print $1}')" ] || fail "classification extractor SHA-256 mismatch"
+[ "$rv32_prelude_sha" = "$(sha256sum "$root/scripts/tool/riscv-gen2-zca-sail-classifier-prelude-rv32.sail" | awk '{print $1}')" ] || fail "RV32 classifier prelude SHA-256 mismatch"
+[ "$rv64_prelude_sha" = "$(sha256sum "$root/scripts/tool/riscv-gen2-zca-sail-classifier-prelude-rv64.sail" | awk '{print $1}')" ] || fail "RV64 classifier prelude SHA-256 mismatch"
+[ "$postlude_sha" = "$(sha256sum "$root/scripts/tool/riscv-gen2-zca-sail-classifier-postlude.sail" | awk '{print $1}')" ] || fail "classifier postlude SHA-256 mismatch"
+
+validate_table() {
+    xlen=$1
+    expected_sha=$2
+    table="$fixture_dir/rv${xlen}-zca.tsv"
+    [ -f "$table" ] || fail "missing RV$xlen exhaustive truth table"
+    actual_sha=$(sha256sum "$table" | awk '{print $1}')
+    [ "$actual_sha" = "$expected_sha" ] || fail "RV$xlen truth-table SHA-256 mismatch"
+    awk -F '\t' -v xlen="$xlen" '
+        function expected_hex(n, a, b, c, d) {
+            a = int(n / 4096); n %= 4096
+            b = int(n / 256);  n %= 256
+            c = int(n / 16);   d = n % 16
+            return substr("0123456789ABCDEF", a + 1, 1) substr("0123456789ABCDEF", b + 1, 1) substr("0123456789ABCDEF", c + 1, 1) substr("0123456789ABCDEF", d + 1, 1)
+        }
+        BEGIN { good = 1 }
+        {
+            if (NF != 5 || $1 != expected_hex(NR - 1)) good = 0
+            if ($2 != "legal" && $2 != "illegal" && $2 != "not-compressed") good = 0
+            if ($3 != "--------") good = 0
+            if ($4 != "2" && $4 != "4") good = 0
+            if ($5 !~ /^[A-Za-z0-9_.-]+$/) good = 0
+            if ($2 == "legal" && $5 != "zca-classification-only") good = 0
+            if ($2 == "illegal" && $5 != "illegal") good = 0
+            if ($2 == "not-compressed" && ($4 != "4" || $5 != "not-compressed")) good = 0
+        }
+        END {
+            if (NR != 65536 || !good) {
+                print "ERROR: RV" xlen " table is not a complete ordered 65,536-parcel classification-only v2 fixture" > "/dev/stderr"
+                exit 1
+            }
+        }
+    ' "$table" || fail "RV$xlen exhaustive table validation failed"
+}
+
+validate_table 32 "$rv32_sha"
+validate_table 64 "$rv64_sha"
+
+echo "PASS: pinned Sail Zca decoder contains ordered RV32/RV64 65,536-parcel classification-only tables; canonical/equivalence claims remain false"

@@ -1,0 +1,90 @@
+#!/bin/sh
+# Gate: rt_process_wait() must retry an interrupted wait and must report a
+# signal-terminated child distinguishably from a failed wait; and the Simple
+# wrapper must never tear down a session whose child is still alive.
+#
+# Pins doc/08_tracking/bug/native_build_wrapper_wait_eintr_misreported_as_abnormal_2026-08-23.md
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> check(s) executed, 0 failures            exit 0
+#   FAIL  — ...                                           exit 1
+#   ERROR — nothing was checked (<reason>)                exit 2
+# A run that executed 0 checks is ERROR, never a pass. Absence of a compiler is
+# ERROR, never a pass.
+set -u
+ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)
+SELF="$ROOT_DIR/src/runtime/test/rt_process_wait_eintr_selfcheck.c"
+SRC="$ROOT_DIR/src/runtime/runtime_process.c"
+LIVE="$ROOT_DIR/src/lib/nogc_sync_mut/io/process_ops.spl"
+TMP=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT
+CHECKED=0
+FAILED=""
+
+CC_BIN=""
+for c in "${CC:-}" clang cc gcc; do
+    [ -n "$c" ] && command -v "$c" >/dev/null 2>&1 && { CC_BIN=$c; break; }
+done
+[ -n "$CC_BIN" ] || { echo "ERROR — nothing was checked (no C compiler: absence of a compiler is not evidence)"; exit 2; }
+
+selftest() {
+    # A deliberately broken copy of the runtime (no EINTR retry, signal death
+    # collapsed onto -1) MUST make the executable self-check fail. If it does
+    # not, the self-check is not discriminating and this gate is worthless.
+    mkdir -p "$TMP/st"
+    sed -e 's/if (errno == EINTR) continue;.*$/;/' "$SRC" > "$TMP/st/broken.c"
+    sed -i 's/if (WIFSIGNALED(status)) return (int64_t)(128 + WTERMSIG(status));//' "$TMP/st/broken.c"
+    "$CC_BIN" -O1 -I "$ROOT_DIR/src/runtime" -o "$TMP/st/bin" "$SELF" "$TMP/st/broken.c" >"$TMP/st/cc.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "selftest: ERROR — could not build the broken fixture; see $TMP/st/cc.log"
+        return 1
+    fi
+    "$TMP/st/bin" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "selftest: FAIL — a runtime with no EINTR retry and no signal reporting still passed the self-check"
+        return 1
+    fi
+    return 0
+}
+
+if ! selftest; then
+    echo "FAIL — selftest failed; gate cannot be trusted"
+    exit 1
+fi
+
+# 1. The real runtime, really executed.
+"$CC_BIN" -O1 -I "$ROOT_DIR/src/runtime" -o "$TMP/bin" "$SELF" "$SRC" >"$TMP/cc.log" 2>&1
+CC_RC=$?
+if [ "$CC_RC" -ne 0 ]; then
+    echo "FAIL — self-check did not compile against the real runtime; see $TMP/cc.log"
+    exit 1
+fi
+"$TMP/bin" > "$TMP/run.log" 2>&1
+RUN_RC=$?
+CHECKED=$((CHECKED + 1))
+if [ "$RUN_RC" -ne 0 ]; then
+    sed 's/^/    /' "$TMP/run.log"
+    FAILED="$FAILED rt_process_wait_eintr_selfcheck"
+fi
+
+# 2. The Simple wrapper must not kill a live session on an indeterminate wait.
+CHECKED=$((CHECKED + 1))
+if ! grep -q '_process_group_alive' "$LIVE"; then
+    FAILED="$FAILED process_run_timeout_live:no_liveness_probe"
+fi
+CHECKED=$((CHECKED + 1))
+if ! grep -q 'if exit_code != 0 and (timed_out or not _process_group_alive(pgid_file)):' "$LIVE"; then
+    FAILED="$FAILED process_run_timeout_live:kills_live_group"
+fi
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no checks executed)"
+    exit 2
+fi
+if [ -n "$FAILED" ]; then
+    echo "FAIL — $CHECKED check(s) executed, offenders:$FAILED"
+    exit 1
+fi
+echo "PASS — $CHECKED check(s) executed, 0 failures"
+exit 0

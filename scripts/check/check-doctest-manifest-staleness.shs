@@ -1,0 +1,319 @@
+#!/bin/sh
+# check-doctest-manifest-staleness.shs
+#
+# Pins the test-manifest cache invariants proved in
+# doc/08_tracking/bug/test_manifest_invalidation_is_size_only_mtime_never_read_2026-08-17.md
+#
+# STATUS: ADVISORY. It is honestly RED on main today (invariant 1 is a real,
+# filed defect), and per doc/07_guide/infra/detector/detector_standard.md a
+# detector that is red is landed advisory first, never promoted to blocking.
+# No FP-RATE header line yet => it stays advisory and its counts are exactly
+# what they say they are (invariants checked, not defects estimated).
+#
+# Three INDEPENDENT invariants, deliberately not folded into one clever check
+# (detector_standard rule 6) -- each of the three failures measured on
+# 2026-08-17 is invisible to the other two:
+#
+#   1. SCANNER-MTIME. test_manifest_scanner.spl must not source its mtime from
+#      rt_file_stat(), which returns the file SIZE
+#      (compiler_rust/compiler/src/interpreter_extern/file_io.rs:289-294 ->
+#      meta.len(); runtime/simple_core/core_fs.spl:396-400 -> constant 0).
+#      Using it makes the invalidation predicate size==size AND size==size.
+#      rt_file_stat_mtime() is the correct accessor and is NOT flagged -- the
+#      match is on the literal "rt_file_stat(" including the paren.
+#   2. MANIFEST-COLUMNS. In a manifest with >=3 entry rows, the size and mtime
+#      columns must not be identical on every row. That equality is the on-disk
+#      fingerprint of invariant 1 having already been violated, and it survives
+#      in .idx files long after the source is fixed, because
+#      manifest_incremental_update carries stale rows forward.
+#   3. MANIFEST-EXISTENCE. Every path in the entries section must exist on
+#      disk. A carried-over row for a deleted file is dispatched by discovery
+#      (measured: a deleted alpha_spec.spl was selected and run).
+#
+# Anti-FP decisions recorded here so they can be reread:
+#   - The scanner check greps the ONE file that owns the predicate, not the
+#     tree. rt_file_stat() is a legitimate size accessor elsewhere; a tree-wide
+#     grep would be almost entirely false positives.
+#   - Invariant 2 requires >=3 rows. A 1-2 row manifest can have size==mtime by
+#     coincidence, and calling that a defect would cry wolf on tiny sandboxes.
+#   - Invariants 2 and 3 are SKIPped, never passed, when no manifest is present
+#     (detector_standard rule 3: absence of evidence is not a pass).
+#
+# Verdict is the LAST line of stdout:
+#   PASS  -- <n> invariant(s) checked, ...      exit 0
+#   FAIL  -- ...                                exit 1
+#   ERROR -- nothing was checked                exit 2
+
+set -u
+
+ROOT=""
+SCANNER=""
+MANIFEST=""
+SELFTEST_ONLY=0
+
+EV_CHECKED=0
+EV_SKIPPED=0
+EV_FAILS=""
+
+DEFAULT_SCANNER="src/lib/nogc_sync_mut/test_runner/test_manifest_scanner.spl"
+DEFAULT_MANIFEST=".simple/test-manifest.idx"
+
+add_fail() {
+    if [ -z "$EV_FAILS" ]; then
+        EV_FAILS="$1"
+    else
+        EV_FAILS="$EV_FAILS; $1"
+    fi
+}
+
+# ---------------------------------------------------------------- invariant 1
+check_scanner() {
+    _f="$1"
+    if [ ! -f "$_f" ]; then
+        EV_SKIPPED=$((EV_SKIPPED + 1))
+        echo "  SKIP  scanner-mtime: no scanner at $_f"
+        return 0
+    fi
+    EV_CHECKED=$((EV_CHECKED + 1))
+    _hits=$(grep -c 'rt_file_stat(' "$_f")
+    _rc=$?
+    if [ "$_rc" -gt 1 ]; then
+        add_fail "scanner-mtime: grep failed on $_f"
+        return 0
+    fi
+    if [ "$_hits" -gt 0 ]; then
+        echo "  FAIL  scanner-mtime: $_f uses rt_file_stat() ($_hits site(s)) -- that returns SIZE, not mtime"
+        add_fail "scanner-mtime: $_hits rt_file_stat() site(s) in $_f"
+    else
+        echo "  ok    scanner-mtime: $_f sources mtime from something other than rt_file_stat()"
+    fi
+}
+
+# ------------------------------------------------------------- invariants 2,3
+# Entries section runs from the "# entries" comment to the "# sdoctest" one.
+manifest_entry_rows() {
+    awk '
+        /^# entries/   { inent = 1; next }
+        /^# sdoctest/  { inent = 0; next }
+        inent && $0 ~ /\|/ { print }
+    ' "$1"
+}
+
+check_manifest_columns() {
+    _m="$1"
+    if [ ! -f "$_m" ]; then
+        EV_SKIPPED=$((EV_SKIPPED + 1))
+        echo "  SKIP  manifest-columns: no manifest at $_m"
+        return 0
+    fi
+    EV_CHECKED=$((EV_CHECKED + 1))
+    _rows=$(manifest_entry_rows "$_m" | wc -l | tr -d ' ')
+    if [ "$_rows" -lt 3 ]; then
+        EV_CHECKED=$((EV_CHECKED - 1))
+        EV_SKIPPED=$((EV_SKIPPED + 1))
+        echo "  SKIP  manifest-columns: only $_rows entry row(s), below the 3-row coincidence floor"
+        return 0
+    fi
+    _same=$(manifest_entry_rows "$_m" | awk -F'|' '$2 == $3 { n++ } END { print n + 0 }')
+    if [ "$_same" -eq "$_rows" ]; then
+        echo "  FAIL  manifest-columns: all $_rows row(s) in $_m have size == mtime -- size-only invalidation fingerprint"
+        add_fail "manifest-columns: $_rows/$_rows rows size==mtime in $_m"
+    else
+        echo "  ok    manifest-columns: $_same/$_rows row(s) have size == mtime in $_m"
+    fi
+}
+
+check_manifest_existence() {
+    _m="$1"
+    _root="$2"
+    if [ ! -f "$_m" ]; then
+        EV_SKIPPED=$((EV_SKIPPED + 1))
+        echo "  SKIP  manifest-existence: no manifest at $_m"
+        return 0
+    fi
+    EV_CHECKED=$((EV_CHECKED + 1))
+    _rows=0
+    _missing=0
+    _names=""
+    for _p in $(manifest_entry_rows "$_m" | awk -F'|' '{ print $1 }'); do
+        _rows=$((_rows + 1))
+        if [ ! -e "$_root/$_p" ] && [ ! -e "$_p" ]; then
+            _missing=$((_missing + 1))
+            if [ "$_missing" -le 5 ]; then
+                _names="$_names $_p"
+            fi
+        fi
+    done
+    if [ "$_rows" -eq 0 ]; then
+        EV_CHECKED=$((EV_CHECKED - 1))
+        EV_SKIPPED=$((EV_SKIPPED + 1))
+        echo "  SKIP  manifest-existence: $_m has no entry rows"
+        return 0
+    fi
+    if [ "$_missing" -gt 0 ]; then
+        echo "  FAIL  manifest-existence: $_missing of $_rows path(s) in $_m do not exist:$_names"
+        add_fail "manifest-existence: $_missing stale row(s) in $_m"
+    else
+        echo "  ok    manifest-existence: all $_rows path(s) in $_m exist"
+    fi
+}
+
+run_scan() {
+    _root="$1"
+    _scanner="$2"
+    _manifest="$3"
+    EV_CHECKED=0
+    EV_SKIPPED=0
+    EV_FAILS=""
+    check_scanner "$_scanner"
+    check_manifest_columns "$_manifest"
+    check_manifest_existence "$_manifest" "$_root"
+}
+
+emit_verdict() {
+    if [ "$EV_CHECKED" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+    if [ -n "$EV_FAILS" ]; then
+        echo "FAIL — $EV_CHECKED invariant(s) checked, violations: $EV_FAILS"
+        return 1
+    fi
+    if [ "$EV_SKIPPED" -gt 0 ]; then
+        echo "PASS — $EV_CHECKED invariant(s) checked, 0 violations ($EV_SKIPPED skipped for missing inputs)"
+        return 0
+    fi
+    echo "PASS — $EV_CHECKED invariant(s) checked, 0 violations"
+    return 0
+}
+
+# --------------------------------------------------------------------- selftest
+# Fatal, runs before every scan. Must-detect AND must-not-detect fixtures
+# (detector_standard rules 1 and 10). Fixture 1 and fixture 5 are the mutation
+# proof: they are the measured defects, replayed.
+selftest() {
+    _tmp=$(mktemp -d)
+    _fails=0
+    _n=0
+
+    _expect() { # name expected_rc actual_rc
+        _n=$((_n + 1))
+        if [ "$2" != "$3" ]; then
+            echo "  SELFTEST FAIL  $1: expected rc=$2 got rc=$3"
+            _fails=$((_fails + 1))
+        fi
+    }
+
+    # --- fixture 1 (must-DETECT): scanner sources mtime from rt_file_stat()
+    mkdir -p "$_tmp/f1"
+    printf 'val mtime = rt_file_stat(path)\n' > "$_tmp/f1/scanner.spl"
+    run_scan "$_tmp/f1" "$_tmp/f1/scanner.spl" "$_tmp/f1/none.idx" >/dev/null
+    emit_verdict >/dev/null; _rc=$?
+    _expect "f1 scanner-uses-rt_file_stat must FAIL" 1 "$_rc"
+
+    # --- fixture 2 (must-NOT-detect): scanner uses the real mtime accessor
+    mkdir -p "$_tmp/f2"
+    printf 'val mtime = rt_file_stat_mtime(h)\n' > "$_tmp/f2/scanner.spl"
+    run_scan "$_tmp/f2" "$_tmp/f2/scanner.spl" "$_tmp/f2/none.idx" >/dev/null
+    emit_verdict >/dev/null; _rc=$?
+    _expect "f2 scanner-uses-rt_file_stat_mtime must PASS" 0 "$_rc"
+
+    # --- fixture 3 (must-DETECT): manifest whose mtime column duplicates size
+    mkdir -p "$_tmp/f3"
+    printf 'val mtime = rt_file_stat_mtime(h)\n' > "$_tmp/f3/scanner.spl"
+    : > "$_tmp/f3/a_spec.spl"; : > "$_tmp/f3/b_spec.spl"; : > "$_tmp/f3/c_spec.spl"
+    {
+        echo "# entries (path|size|mtime|...)"
+        echo "a_spec.spl|160|160|1|0|0|0|||0|0|0|0|0|0"
+        echo "b_spec.spl|162|162|1|0|0|0|||0|0|0|0|0|0"
+        echo "c_spec.spl|164|164|1|0|0|0|||0|0|0|0|0|0"
+        echo "# sdoctest (path|size|mtime|blocks)"
+    } > "$_tmp/f3/m.idx"
+    run_scan "$_tmp/f3" "$_tmp/f3/scanner.spl" "$_tmp/f3/m.idx" >/dev/null
+    emit_verdict >/dev/null; _rc=$?
+    _expect "f3 size==mtime on every row must FAIL" 1 "$_rc"
+
+    # --- fixture 4 (must-NOT-detect): healthy manifest, distinct columns
+    mkdir -p "$_tmp/f4"
+    printf 'val mtime = rt_file_stat_mtime(h)\n' > "$_tmp/f4/scanner.spl"
+    : > "$_tmp/f4/a_spec.spl"; : > "$_tmp/f4/b_spec.spl"; : > "$_tmp/f4/c_spec.spl"
+    {
+        echo "# entries (path|size|mtime|...)"
+        echo "a_spec.spl|160|1787027073|1|0|0|0|||0|0|0|0|0|0"
+        echo "b_spec.spl|162|1787027074|1|0|0|0|||0|0|0|0|0|0"
+        echo "c_spec.spl|164|1787027075|1|0|0|0|||0|0|0|0|0|0"
+        echo "# sdoctest (path|size|mtime|blocks)"
+    } > "$_tmp/f4/m.idx"
+    run_scan "$_tmp/f4" "$_tmp/f4/scanner.spl" "$_tmp/f4/m.idx" >/dev/null
+    emit_verdict >/dev/null; _rc=$?
+    _expect "f4 healthy manifest must PASS" 0 "$_rc"
+
+    # --- fixture 5 (must-DETECT): stale row for a DELETED source (the case-4
+    #     replay -- discovery dispatched exactly such a path on 2026-08-17)
+    mkdir -p "$_tmp/f5"
+    printf 'val mtime = rt_file_stat_mtime(h)\n' > "$_tmp/f5/scanner.spl"
+    : > "$_tmp/f5/b_spec.spl"; : > "$_tmp/f5/c_spec.spl"
+    {
+        echo "# entries (path|size|mtime|...)"
+        echo "deleted_spec.spl|160|1787027073|1|0|0|0|||0|0|0|0|0|0"
+        echo "b_spec.spl|162|1787027074|1|0|0|0|||0|0|0|0|0|0"
+        echo "c_spec.spl|164|1787027075|1|0|0|0|||0|0|0|0|0|0"
+        echo "# sdoctest (path|size|mtime|blocks)"
+    } > "$_tmp/f5/m.idx"
+    run_scan "$_tmp/f5" "$_tmp/f5/scanner.spl" "$_tmp/f5/m.idx" >/dev/null
+    emit_verdict >/dev/null; _rc=$?
+    _expect "f5 stale row for deleted source must FAIL" 1 "$_rc"
+
+    # --- fixture 6 (non-vacuity): nothing to inspect at all must be ERROR
+    mkdir -p "$_tmp/f6"
+    run_scan "$_tmp/f6" "$_tmp/f6/absent.spl" "$_tmp/f6/absent.idx" >/dev/null
+    emit_verdict >/dev/null; _rc=$?
+    _expect "f6 empty input must ERROR" 2 "$_rc"
+
+    rm -rf "$_tmp"
+    if [ "$_fails" -gt 0 ]; then
+        echo "SELFTEST: $_fails of $_n fixture(s) failed"
+        return 1
+    fi
+    echo "selftest: $_n/$_n fixtures ok"
+    return 0
+}
+
+# ------------------------------------------------------------------------ main
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root)     ROOT="$2"; shift 2 ;;
+        --scanner)  SCANNER="$2"; shift 2 ;;
+        --manifest) MANIFEST="$2"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -h|--help)
+            echo "usage: $0 [--root DIR] [--scanner FILE] [--manifest FILE] [--selftest]"
+            exit 0 ;;
+        *)
+            echo "unknown argument: $1" >&2
+            echo "ERROR — nothing was checked"
+            exit 2 ;;
+    esac
+done
+
+selftest
+ST_RC=$?
+if [ "$ST_RC" -ne 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 6 invariant(s) checked, 0 violations"
+    exit 0
+fi
+
+[ -n "$ROOT" ] || ROOT="$(pwd)"
+[ -n "$SCANNER" ] || SCANNER="$ROOT/$DEFAULT_SCANNER"
+[ -n "$MANIFEST" ] || MANIFEST="$ROOT/$DEFAULT_MANIFEST"
+
+echo "root:     $ROOT"
+echo "scanner:  $SCANNER"
+echo "manifest: $MANIFEST"
+run_scan "$ROOT" "$SCANNER" "$MANIFEST"
+emit_verdict
+exit $?

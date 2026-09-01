@@ -1,0 +1,94 @@
+#!/bin/sh
+# Authenticated, fail-closed MCI-v2 rendering evidence producer.
+set -eu
+LC_ALL=C; export LC_ALL
+
+usage() { echo "usage: $0 --evidence AGGREGATE_DIR --manifest FILE --manifest-signature FILE --collector-key PEM --collector-key-id ID --collector-trust-policy FILE --run-id ID --source-hash SHA256 --configuration-hash SHA256 --captured-at-utc-ns NS --valid-until-utc-ns NS --now-utc-ns NS [--contract-fixture]" >&2; exit 2; }
+evidence= manifest= signature= key= key_id= policy= run_id= source_hash= config_hash= captured= valid= now= fixture=false
+while [ "$#" -gt 0 ]; do case "$1" in
+ --evidence) evidence=$2; shift 2;; --manifest) manifest=$2; shift 2;; --manifest-signature) signature=$2; shift 2;;
+ --collector-key) key=$2; shift 2;; --collector-key-id) key_id=$2; shift 2;; --collector-trust-policy) policy=$2; shift 2;; --run-id) run_id=$2; shift 2;;
+ --source-hash) source_hash=$2; shift 2;; --configuration-hash) config_hash=$2; shift 2;;
+ --captured-at-utc-ns) captured=$2; shift 2;; --valid-until-utc-ns) valid=$2; shift 2;; --now-utc-ns) now=$2; shift 2;;
+ --contract-fixture) fixture=true; shift;; *) usage;; esac; done
+sha() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+token() { [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; }
+uint() { [ -n "$1" ] && case "$1" in *[!0-9]*) return 1;; esac; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+hash_text() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi; }
+field() { [ "$(grep -c "^$1=" "$2")" -eq 1 ] || return 1; sed -n "s/^$1=//p" "$2"; }
+blocked() { echo "BLOCKED: $1" >&2; exit 1; }
+snapshot() { s=$1 d=$2; regular "$s" || return 1; b=$(stat -c '%d:%i:%s:%y:%z' "$s")/$(hash_file "$s"); cp -- "$s" "$d"; [ "$b" = "$(stat -c '%d:%i:%s:%y:%z' "$s")/$(hash_file "$s")" ] && [ "${b##*/}" = "$(hash_file "$d")" ]; }
+dec_le() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";exit !((length(a)<length(b))||(length(a)==length(b)&&a<=b))}'; }
+age_day() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";if(length(b)<length(a)||(length(b)==length(a)&&b<a))exit 1;borrow=0;out="";i=length(b);j=length(a);while(i>0){x=substr(b,i,1)+0-borrow;y=(j>0?substr(a,j,1)+0:0);if(x<y){x+=10;borrow=1}else borrow=0;out=(x-y)out;i--;j--}sub(/^0+/,"",out);if(out=="")out="0";lim="86400000000000";exit !((length(out)<length(lim))||(length(out)==length(lim)&&out<=lim))}'; }
+window_ok() { uint "$1" && uint "$2" && uint "$3" && dec_le "$1" "$2" && dec_le "$2" "$3" && age_day "$1" "$2" && age_day "$1" "$3"; }
+
+[ -n "$evidence" ] && regular "$manifest" && regular "$signature" && regular "$key" && regular "$policy" && token "$key_id" && token "$run_id" && sha "$source_hash" && sha "$config_hash" && uint "$captured" && uint "$valid" && uint "$now" || usage
+window_ok "$captured" "$now" "$valid" || blocked 'stale or invalid lifetime'
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+case "$evidence" in /*) out=$evidence;; *) out=$root/$evidence;; esac
+case "$out" in "$root"/*) :;; *) blocked 'evidence path escapes repository';; esac
+# Validate every existing ancestor before mkdir; no symlink may redirect publication.
+walk=$root; rel=${out#"$root"/}; oldifs=$IFS; IFS=/
+for c in $rel; do [ -n "$c" ] && [ "$c" != . ] && [ "$c" != .. ] || blocked 'unsafe evidence path'; walk=$walk/$c; [ ! -L "$walk" ] || blocked 'symlink in evidence path'; done
+IFS=$oldifs
+mkdir -p "$out/artifacts" "$out/receipts"; chmod 0700 "$out" "$out/artifacts" "$out/receipts"; [ "$(CDPATH= cd -- "$out" && pwd -P)" = "$out" ] || blocked 'non-canonical evidence path'
+work=$(mktemp -d "$out/.rendering.XXXXXX"); trap 'rm -rf "$work"' EXIT HUP INT TERM
+for pair in "$manifest:manifest.env" "$signature:manifest.sig" "$key:collector.pem" "$policy:trust.env"; do s=${pair%%:*}; n=${pair#*:}; snapshot "$s" "$work/$n" || blocked 'collector input changed during snapshot'; done
+expected_mode=live; [ "$fixture" = false ] || expected_mode=fixture
+[ "$(field policy_schema "$work/trust.env" 2>/dev/null || true)" = mci-rendering-collector-trust-v1 ] && [ "$(field scope "$work/trust.env" 2>/dev/null || true)" = "$expected_mode" ] && [ "$(field collector_key_id "$work/trust.env" 2>/dev/null || true)" = "$key_id" ] && [ "$(field collector_key_sha256 "$work/trust.env" 2>/dev/null || true)" = "$(hash_file "$work/collector.pem")" ] || blocked 'collector is not trusted for requested mode'
+openssl dgst -sha256 -verify "$work/collector.pem" -signature "$work/manifest.sig" "$work/manifest.env" >/dev/null 2>&1 || blocked 'invalid collector signature'
+m=$work/manifest.env; manifest_hash=$(hash_file "$m")
+[ "$(field manifest_schema "$m" 2>/dev/null || true)" = mci-rendering-collector-manifest-v1 ] || blocked 'invalid manifest schema'
+for binding in "run_id:$run_id" "source_hash:$source_hash" "configuration_hash:$config_hash" "captured_at_utc_ns:$captured" "valid_until_utc_ns:$valid" "collector_key_id:$key_id"; do f=${binding%%:*}; v=${binding#*:}; [ "$(field "$f" "$m" 2>/dev/null || true)" = "$v" ] || blocked "collector binding mismatch: $f"; done
+[ "$(field artifact_mode "$m" 2>/dev/null || true)" = "$expected_mode" ] || blocked 'fixture promotion or mode mismatch'
+device=$(field device_identity "$m" 2>/dev/null || true); token "$device" || blocked 'missing or unsafe device identity'
+
+for budget in frame_p95_ns frame_p99_ns frame_deadline_ns max_rss_bytes command_limit glyph_limit image_limit queue_limit inflight_limit; do uint "$(field "$budget" "$work/trust.env" 2>/dev/null || true)" || blocked "missing numeric policy budget: $budget"; done
+[ "$(field load_profile "$work/trust.env" 2>/dev/null || true)" = nominal-exact ] || blocked 'policy load profile must be nominal-exact'
+publisher=$root/scripts/check/lib/mci-secure-publish.c; snapshot "$publisher" "$work/mci-secure-publish.c" || blocked 'secure publisher source changed'; cc -std=c11 -O2 "$work/mci-secure-publish.c" -o "$work/secure-publish" || blocked 'secure publisher build failed'; chmod 0500 "$work/secure-publish"; secure_publish() { "$work/secure-publish" "$1" "$2" "$3"; }
+ids='packed_generation engine2d_owner gui_parity web_parity cpu_readback device_readback backend_device queue_submit_fence renderdoc allocation_bounds queue_bounds inflight_bounds overflow_rejection fallback_absence atlas_absence interaction latency_rss'
+[ "$(grep -c '^row=' "$m")" -eq 17 ] || blocked 'rendering manifest must contain exactly 17 rows'
+failed=; row_archive=$work/rows.env; : > "$row_archive"; manifest_dir=$(CDPATH= cd -- "$(dirname "$manifest")" && pwd -P)
+for id in $ids; do
+ row=$(sed -n "s/^row=$id|//p" "$m"); [ -n "$row" ] && [ "$(grep -c "^row=$id|" "$m")" -eq 1 ] || blocked "missing or duplicate row: $id"
+ oldifs=$IFS; IFS='|'; set -- $row; IFS=$oldifs; [ "$#" -eq 8 ] || blocked "row $id must bind status, command receipt/hash, raw artifact/hash, provenance, measurement, negative control"
+ status=$1; command_rel=$2; command_hash=$3; artifact_rel=$4; declared_hash=$5; provenance=$6; measurement=$7; negative=$8
+ sha "$command_hash" && sha "$declared_hash" && token "$provenance" && token "$measurement" && token "$negative" || blocked "invalid structured row: $id"
+ case "$command_rel:$artifact_rel" in *..*|*'|'*|:*/*:/*) blocked "unsafe evidence path: $id";; esac
+ command_receipt=$manifest_dir/$command_rel; regular "$command_receipt" && [ "$(hash_file "$command_receipt")" = "$command_hash" ] || blocked "command receipt/hash mismatch: $id"
+ command_text=$(field command "$command_receipt" 2>/dev/null || true); expected_command_hash=$(field "command_${id}_sha256" "$work/trust.env" 2>/dev/null || true)
+ sha "$expected_command_hash" && [ "$(printf '%s' "$command_text" | hash_text)" = "$expected_command_hash" ] && grep -Fqx "evidence_id=$id" "$command_receipt" && grep -Fqx "command_id=mci-rendering-$id-v1" "$command_receipt" && grep -Fqx "run_id=$run_id" "$command_receipt" && grep -Fqx "source_hash=$source_hash" "$command_receipt" && grep -Fqx "configuration_hash=$config_hash" "$command_receipt" && grep -Fqx 'exit_code=0' "$command_receipt" || blocked "command receipt invalid: $id"
+ artifact=$manifest_dir/$artifact_rel; regular "$artifact" || { [ "$status" = blocked ] && [ "$fixture" = true ] && { failed=${failed}${failed:+,}$id; continue; }; blocked "missing live artifact: $id"; }
+ canonical=$(CDPATH= cd -- "$(dirname "$artifact")" && pwd -P)/$(basename "$artifact"); case "$canonical" in "$manifest_dir"/*) :;; *) blocked "artifact escapes collector root: $id";; esac
+ [ "$(hash_file "$artifact")" = "$declared_hash" ] || blocked "artifact hash mismatch: $id"
+ grep -Fqx "evidence_id=$id" "$artifact" || blocked "artifact identity marker missing: $id"
+ grep -Fqx "run_id=$run_id" "$artifact" && grep -Fqx "source_hash=$source_hash" "$artifact" && grep -Fqx "configuration_hash=$config_hash" "$artifact" || blocked "artifact correlation mismatch: $id"
+ case "$id" in
+  packed_generation) generation=$(field generation "$artifact"); composition=$(field composition_sha256 "$artifact"); sha "$composition" && uint "$generation" && [ "$generation" != 0 ] && grep -Fqx 'state=sealed' "$artifact" && for d in command glyph image; do used=$(field "${d}_count" "$artifact"); limit=$(field "${d}_limit" "$work/trust.env"); uint "$used" && dec_le "$used" "$limit" || exit 1; done;;
+  engine2d_owner) [ "$(field generation "$artifact")" = "$generation" ] && [ "$(field composition_sha256 "$artifact")" = "$composition" ] && grep -Fqx 'owner=engine2d' "$artifact";;
+  gui_parity) gui_hash=$(field drawir_sha256 "$artifact"); sha "$gui_hash" && [ "$(field generation "$artifact")" = "$generation" ];;
+  web_parity) web_hash=$(field drawir_sha256 "$artifact"); sha "$web_hash" && [ "$web_hash" = "$gui_hash" ] && [ "$web_hash" = "$composition" ] && [ "$(field generation "$artifact")" = "$generation" ];;
+  cpu_readback) cpu_pixels=$(field pixel_sha256 "$artifact"); sha "$cpu_pixels" && grep -Fqx 'oracle=exact' "$artifact";;
+  device_readback) device_pixels=$(field pixel_sha256 "$artifact"); sha "$device_pixels" && [ "$device_pixels" = "${cpu_pixels:-}" ] && grep -Fqx 'matches_cpu_exact=true' "$artifact";;
+  backend_device) grep -Fqx "device_identity=$device" "$artifact" && grep -Fqx 'synthetic=false' "$artifact";;
+  queue_submit_fence) [ "$(field generation "$artifact")" = "$generation" ] && token "$(field queue_id "$artifact")" && token "$(field submit_id "$artifact")" && token "$(field fence_id "$artifact")" && grep -Fqx 'fence_signaled=true' "$artifact";;
+  renderdoc) rdc=$(field rdc_path "$artifact"); replay=$(field replay_transcript_path "$artifact"); rdc_hash=$(field rdc_sha256 "$m"); replay_hash=$(field replay_sha256 "$m"); sha "$rdc_hash" && sha "$replay_hash" && case "$rdc:$replay" in *..*|/*) false;; *) snapshot "$manifest_dir/$rdc" "$work/frame.rdc" && snapshot "$manifest_dir/$replay" "$work/replay.log" && [ "$(hash_file "$work/frame.rdc")" = "$rdc_hash" ] && [ "$(hash_file "$work/replay.log")" = "$replay_hash" ] && [ "$(dd if="$work/frame.rdc" bs=4 count=1 2>/dev/null)" = RDOC ] && grep -Fqx 'replay_open=pass' "$work/replay.log" && grep -Fqx "generation=$generation" "$work/replay.log" && secure_publish "$out/artifacts" "$work/frame.rdc" rendering-renderdoc.rdc && secure_publish "$out/artifacts" "$work/replay.log" rendering-renderdoc-replay.log;; esac;;
+  allocation_bounds|queue_bounds|inflight_bounds) used=$(field used "$artifact"); dimension=${id%_bounds}; [ "$dimension" = allocation ] && policy_limit=$(field command_limit "$work/trust.env") || policy_limit=$(field "${dimension}_limit" "$work/trust.env"); [ "$(field limit "$artifact")" = "$policy_limit" ] && uint "$used" && dec_le "$used" "$policy_limit" && grep -Fqx "negative_used=$((policy_limit+1))" "$artifact" && grep -Fqx 'negative_rejected=true' "$artifact";;
+  overflow_rejection) before=$(field active_state_before_sha256 "$artifact"); after=$(field active_state_after_sha256 "$artifact"); sha "$before" && [ "$before" = "$after" ] && grep -Fqx 'publication_count=0' "$artifact";;
+  fallback_absence) grep -Fqx 'fallback_count=0' "$artifact";; atlas_absence) grep -Fqx 'drawir_atlas_entry_count=0' "$artifact" && grep -Fqx 'drawir_cache_entry_count=0' "$artifact";;
+  interaction) [ "$(field generation "$artifact")" = "$generation" ] && [ "$(field events "$artifact")" = focus,key_input,pointer_down,pointer_up,click ] && grep -Fqx 'semantic_target_count=5' "$artifact";;
+  latency_rss) samples=$(field sample_ns_csv "$artifact"); computed=$(printf '%s\n' "$samples" | tr , '\n' | sort -n | awk '{a[++n]=$1} END{if(n<2)exit 1;p95=int((95*n+99)/100);p99=int((99*n+99)/100);print a[p95]" "a[p99]" "a[n]}'); set -- $computed; p95=$1; p99=$2; worst=$3; rss=$(field max_rss_bytes "$artifact"); deadline=$(field frame_deadline_ns "$work/trust.env"); [ "$p95" = "$(field p95_ns "$artifact")" ] && [ "$p99" = "$(field p99_ns "$artifact")" ] && dec_le "$p95" "$(field frame_p95_ns "$work/trust.env")" && dec_le "$p99" "$(field frame_p99_ns "$work/trust.env")" && dec_le "$worst" "$deadline" && dec_le "$rss" "$(field max_rss_bytes "$work/trust.env")" && grep -Fqx "deadline_negative_ns=$((deadline+1))" "$artifact" && grep -Fqx 'deadline_negative_rejected=true' "$artifact";;
+ *) grep -Fqx 'result=pass' "$artifact";; esac || blocked "artifact semantic inspection failed: $id"
+ [ "$status" = pass ] || failed=${failed}${failed:+,}$id
+ secure_publish "$out/artifacts" "$command_receipt" "rendering-$id.command" && secure_publish "$out/artifacts" "$artifact" "rendering-$id.raw" || blocked "secure row retention failed: $id"
+ printf 'row=%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$status" "rendering-$id.command" "$command_hash" "rendering-$id.raw" "$declared_hash" "$provenance" "$measurement" "$negative" >> "$row_archive"
+done
+[ "$fixture" = true ] || [ -z "$failed" ] || blocked "live rendering rows unavailable: $failed"
+mode=fixture; release=false; result=CONTRACT_ONLY; [ "$fixture" = true ] || { mode=live; release=true; result=PASS; }
+artifact=$work/rendering-v1.evidence
+{ echo artifact_schema=mci-rendering-evidence-v1; echo artifact_mode=$mode; echo release_eligible=$release; echo run_id=$run_id; echo source_hash=$source_hash; echo configuration_hash=$config_hash; echo captured_at_utc_ns=$captured; echo valid_until_utc_ns=$valid; echo collector_key_id=$key_id; echo collector_key_sha256=$(hash_file "$work/collector.pem"); echo collector_signature_sha256=$(hash_file "$work/manifest.sig"); echo collector_manifest_sha256=$manifest_hash; echo device_identity=$device; echo scenarios=MCI-REN-001,MCI-REN-002,MCI-REN-003,MCI-REN-004,MCI-REN-005,MCI-REN-006,MCI-NFR-011,MCI-NFR-012; echo result=$result; cat "$row_archive"; } > "$artifact"
+secure_publish "$out/artifacts" "$artifact" rendering-v1.evidence || blocked 'secure aggregate-root artifact publication failed'; artifact_hash=$(hash_file "$out/artifacts/rendering-v1.evidence")
+if [ "$fixture" = false ]; then receipt=$work/rendering.unsigned.template; { echo receipt_schema=mci-lane-receipt-v1; echo check_id=rendering; echo producer_class=rendering-target; echo attestation=EXTERNAL_SIGNER_SETS_signed-v1; echo trusted_key_id=EXTERNAL_SIGNER_KEY_ID; echo signature_relpath=rendering.sig; echo run_id=$run_id; echo source_hash=$source_hash; echo configuration_hash=$config_hash; echo captured_at_utc_ns=$captured; echo valid_until_utc_ns=$valid; echo result=pass; echo scenarios=MCI-REN-001,MCI-REN-002,MCI-REN-003,MCI-REN-004,MCI-REN-005,MCI-REN-006,MCI-NFR-011,MCI-NFR-012; echo artifact_relpath=rendering-v1.evidence; echo artifact_sha256=$artifact_hash; echo artifact_schema=mci-rendering-evidence-v1; echo artifact_mode=live; echo release_eligible=true; echo receipt_hash=EXTERNAL_SIGNER_RECOMPUTES_CANONICAL_SHA256; } > "$receipt"; secure_publish "$out/receipts" "$receipt" rendering.unsigned.template || blocked 'secure receipt-template publication failed'; fi
+echo rendering_contract_result=$result; echo rendering_release_eligible=$release; echo rendering_artifact=$out/artifacts/rendering-v1.evidence

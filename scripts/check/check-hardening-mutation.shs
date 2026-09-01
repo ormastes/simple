@@ -1,0 +1,418 @@
+#!/bin/sh
+# Mutation harness for the hardening gates (plan §19.5, row A6).
+#
+# A gate that is green tells you nothing until you know it CAN go red. Every
+# gate in this repo's history that failed open — the seed-build path filter, the
+# pre-push cwd guards — looked green precisely because it was checking nothing.
+# This harness injects a real defect of the exact class each gate claims to
+# catch, into a private copy of a minimal input tree, and requires the gate to
+# turn RED. A gate that still PASSes on a mutated input is reported as an
+# UNDETECTED mutation and fails this harness.
+#
+# Contract (mirrors the pre-push guards):
+#   PASS  — <n> mutation(s) executed across <k> gate(s), all detected   exit 0
+#   FAIL  — <m> undetected: <gate:mutation>[, ...]                      exit 1
+#   ERROR — nothing was checked (<reason>)                              exit 2
+# The verdict is ALWAYS the last line of stdout. Read it from stdout; never
+# take a pipeline's exit status.
+#
+# Non-vacuity is absolute:
+#   * zero gates present            -> ERROR, never PASS
+#   * a gate script that is absent  -> reported ERROR-skip, never PASS
+#   * a gate that FAILs on the UNMUTATED baseline -> ERROR (the mutation would
+#     prove nothing: it cannot be distinguished from the pre-existing red)
+#   * a gate with no --root/path argument -> reported as a GATE DEFECT and
+#     ERROR-skipped. This harness never edits a gate to make itself work.
+#
+# Usage:
+#   sh scripts/check/check-hardening-mutation.shs [--selftest] [--gates-dir DIR]
+#                                                 [--fixtures DIR] [--verbose]
+#   --selftest runs first when requested and is fatal.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+GATES_DIR="$REPO_ROOT/scripts/check"
+FIXTURES="$REPO_ROOT/test/fixtures/hardening/mutation"
+SCRATCH_BASE="${SIMPLE_MUTATION_SCRATCH:-/mnt/data/tmp/claude-1000/-mnt-data-worktrees-simple-main/d313fe25-14f1-48b9-bf9c-88e2d7b0025b/scratchpad}"
+VERBOSE=0
+RUN_SELFTEST=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest)   RUN_SELFTEST=1 ;;
+        --gates-dir)  GATES_DIR=$2; shift ;;
+        --fixtures)   FIXTURES=$2; shift ;;
+        --verbose)    VERBOSE=1 ;;
+        -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+log() { [ "$VERBOSE" = 1 ] && echo "  . $*"; return 0; }
+
+# ---------------------------------------------------------------------------
+# Gate registry.  One line per gate:
+#   <gate_id>|<script name>|<fixture dir>|<root flag>|<mutation ids, space sep>|<extra args>
+# <root flag> is either a bare flag (passed as `<flag> <tree>`) or a template
+# containing {TREE} (passed as a single already-substituted argument), so gates
+# using `--dir=DIR` are supported without editing the gate.
+# <extra args> is optional; it exists for ratchet gates that need to be pointed
+# at a per-fixture baseline instead of the repo-wide one.  {FX} expands to the
+# fixture directory (the parent of baseline/).
+# The mutations are implemented in apply_mutation() below.
+# ---------------------------------------------------------------------------
+gate_table() {
+    cat <<'EOF'
+transition-coverage|check-compiler-transition-coverage.shs|transition_coverage|--dir={TREE}/spec/compiler_schema/transitions|drop_transition_row
+critical-wildcard-ban|check-critical-wildcard-ban.shs|critical_wildcard|--root|inject_wildcard_nil|--baseline {FX}/baseline.txt
+any-escape-census|check-any-escape-census.shs|any_escape|--root|add_any_return
+post-mono-invariants|check-post-mono-invariants.shs|post_mono|--corpus {TREE}/test/fixtures/mono/post_mono|leave_type_param|
+compiler-schema-fresh|check-compiler-schema-fresh.shs|schema_fresh|--root|orphan_enum_variant hand_edit_registry_row
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Mutations.  Each takes the scratch tree root and injects ONE real defect of
+# the class the owning gate claims to catch.  Each must actually change a file;
+# a mutation that is a no-op is a harness bug and is detected below.
+# ---------------------------------------------------------------------------
+# Materialise a fixture baseline into $2.  Two forms:
+#   <fixture>/baseline/           — a checked-in toy tree, copied verbatim
+#   <fixture>/baseline.manifest   — repo-relative paths copied read-only from
+#                                   the real tree, for gates whose generator
+#                                   reads a hardcoded source list and would
+#                                   otherwise extract nothing from a toy tree.
+materialise() {
+    _fx=$1; _dest=$2
+    if [ -f "$_fx/baseline.manifest" ]; then
+        _n=0
+        while IFS= read -r rel; do
+            case "$rel" in ''|'#'*) continue ;; esac
+            [ -e "$REPO_ROOT/$rel" ] || return 1
+            mkdir -p "$_dest/$(dirname "$rel")"
+            cp -r "$REPO_ROOT/$rel" "$_dest/$rel" || return 1
+            _n=$((_n + 1))
+        done < "$_fx/baseline.manifest"
+        [ "$_n" -gt 0 ] || return 1
+        return 0
+    fi
+    [ -d "$_fx/baseline" ] || return 1
+    cp -r "$_fx/baseline"/. "$_dest"/ || return 1
+    return 0
+}
+
+apply_mutation() {
+    _root=$1; _mut=$2
+    case "$_mut" in
+        drop_transition_row)
+            # Delete one whole `transition:` record from a real table. The
+            # producer variant still exists, so the table no longer covers it.
+            _f="$_root/spec/compiler_schema/transitions/hir_type_to_mir_type.sdn"
+            [ -f "$_f" ] || return 1
+            awk '/^transition:$/ { buf=$0; inrec=1; drop=0; next }
+                 inrec { buf = buf "\n" $0
+                         if ($0 ~ /^  from: HirTypeKind\.Bool$/) drop=1
+                         if ($0 ~ /^$/) { if (!drop) print buf; inrec=0; buf="" }
+                         next }
+                 { print }
+                 END { if (inrec && !drop) print buf }' "$_f" > "$_f.mut" && mv "$_f.mut" "$_f"
+            grep -q '^  from: HirTypeKind\.Bool$' "$_f" && return 1
+            ;;
+        inject_wildcard_nil)
+            _f=$(find "$_root" -name 'lower_expr.spl' | head -1)
+            [ -n "$_f" ] || return 1
+            # Canonical §11.6 silent-fallback shape. NOTE: the wrapped form
+            # `case _: return Hir.NilLit()` is the SAME defect but is not
+            # matched by check-critical-wildcard-ban.shs (its forbidden_shape()
+            # anchors on a bare `NilLit`, so `return` + a call form slips past).
+            # Reported as a gate gap; not mutated here, because this harness
+            # asserts a gate's stated contract, it does not widen it.
+            printf '        case _: NilLit\n' >> "$_f"
+            ;;
+        add_any_return)
+            _f=$(find "$_root" -name 'safe_ops.spl' | head -1)
+            [ -n "$_f" ] || return 1
+            printf '\nfn leak_any(v: i64) -> Any:\n    return v\n' >> "$_f"
+            ;;
+        leave_type_param)
+            # A fixture that DECLARES `@expect: clean` is made to leave an
+            # unresolved TypeParam in a let annotation: the real counter now
+            # disagrees with the fixture's own header, so the gate must go red.
+            _f="$_root/test/fixtures/mono/post_mono/pos_monomorphic_function.spl"
+            [ -f "$_f" ] || return 1
+            sed 's/SymbolId(id: 11), fx_i64(),/SymbolId(id: 11), fx_tparam_type(),/' \
+                "$_f" > "$_f.mut" && mv "$_f.mut" "$_f"
+            grep -q 'SymbolId(id: 11), fx_tparam_type(),' "$_f" || return 1
+            ;;
+        orphan_enum_variant)
+            # A new enum variant with no consumer anywhere: the generator picks
+            # it up, the checked-in registry does not carry it, so the registry
+            # is stale and the gate must go red.
+            _f="$_root/src/compiler/50.mir/mir_types.spl"
+            [ -f "$_f" ] || return 1
+            awk '/^enum MirTypeKind:/ { print; print "    OrphanMutationKind"; next } { print }' \
+                "$_f" > "$_f.mut" && mv "$_f.mut" "$_f"
+            grep -q 'OrphanMutationKind' "$_f" || return 1
+            ;;
+        hand_edit_registry_row)
+            # A registry row edited by hand rather than regenerated — exactly
+            # what §11.2 forbids: the generated output no longer matches.
+            _f="$_root/spec/compiler_schema/registry/compiler.mir.MirTypeKind.sdn"
+            [ -f "$_f" ] || return 1
+            sed 's/^  since_edition: 2026$/  since_edition: 2027/' "$_f" > "$_f.mut" \
+                && mv "$_f.mut" "$_f"
+            grep -q 'since_edition: 2027' "$_f" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# Run a gate against a tree; echo its verdict token (PASS/FAIL/ERROR/UNKNOWN).
+# The verdict is the LAST line of stdout.  The gate's own exit status is
+# deliberately not consulted for classification — the verdict line is the
+# contract in this repo, and a gate that exits non-zero without one is UNKNOWN.
+run_gate() {
+    _script=$1; _flag=$2; _tree=$3; _extra=${4:-}
+    case "$_flag" in
+        *"{TREE}"*)
+            _arg=$(printf '%s' "$_flag" | sed "s|{TREE}|$_tree|g")
+            # Deliberately unquoted: the template may expand to one word
+            # (`--dir=DIR`) or two (`--corpus DIR`), matching whichever form
+            # the gate actually parses. This harness adapts to the gate; it
+            # never edits the gate to suit itself.
+            # shellcheck disable=SC2086
+            _out=$(sh "$_script" $_arg $_extra 2>/dev/null) ;;
+        *)
+            # shellcheck disable=SC2086
+            _out=$(sh "$_script" "$_flag" "$_tree" $_extra 2>/dev/null) ;;
+    esac
+    _last=$(printf '%s\n' "$_out" | tail -1)
+    case "$_last" in
+        PASS*)  echo PASS ;;
+        FAIL*)  echo FAIL ;;
+        ERROR*) echo ERROR ;;
+        *)      echo UNKNOWN ;;
+    esac
+}
+
+# Does the gate accept the root flag at all?  A gate with no way to be pointed
+# at a test tree cannot be mutation-tested; that is a GATE DEFECT, reported,
+# never worked around by editing the gate.
+gate_accepts_root() {
+    _script=$1; _flag=$2
+    _name=$(printf '%s' "$_flag" | sed 's/[= ].*$//')
+    grep -q -- "$_name" "$_script" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — fatal.  Builds fake gates with known behaviour and requires the
+# harness to classify them correctly.
+# ---------------------------------------------------------------------------
+selftest() {
+    _st=$(mktemp -d "${SCRATCH_BASE}/mut_selftest.XXXXXX" 2>/dev/null) || {
+        echo "selftest: cannot create scratch dir under $SCRATCH_BASE" >&2; return 1; }
+    _fail=0
+
+    _tr=spec/compiler_schema/transitions
+    mkdir -p "$_st/gates" "$_st/fx/always_pass/baseline/$_tr" "$_st/fx/always_fail/baseline/$_tr"
+    cat > "$_st/fx/always_pass/baseline/$_tr/hir_type_to_mir_type.sdn" <<'EOS'
+transition:
+  from: HirTypeKind.Int
+  to: MirTypeKind.I64
+  state: implemented
+
+transition:
+  from: HirTypeKind.Bool
+  to: MirTypeKind.Bool
+  state: implemented
+
+EOS
+    cp "$_st/fx/always_pass/baseline/$_tr/hir_type_to_mir_type.sdn" \
+       "$_st/fx/always_fail/baseline/$_tr/hir_type_to_mir_type.sdn"
+
+    # A gate that always PASSes — the false-green a mutation must expose.
+    cat > "$_st/gates/fake-pass.shs" <<'EOS'
+#!/bin/sh
+# --root accepted and ignored: this is the failure mode under test.
+echo "PASS — 1 thing checked, 0 problems"
+EOS
+    # A gate that PASSes clean and FAILs once the row is gone — correct gate.
+    cat > "$_st/gates/fake-real.shs" <<'EOS'
+#!/bin/sh
+root=""
+while [ $# -gt 0 ]; do case "$1" in --root) root=$2; shift ;; esac; shift; done
+f=$(find "$root" -name hir_type_to_mir_type.sdn | head -1)
+if [ -z "$f" ]; then echo "ERROR — nothing was checked"; exit 2; fi
+if grep -q 'HirTypeKind.Bool' "$f"; then echo "PASS — 2 row(s) checked, 0 missing"; exit 0; fi
+echo "FAIL — 1 row missing: Bool"; exit 1
+EOS
+    # A gate that always FAILs — detected, but useless on a clean baseline.
+    cat > "$_st/gates/fake-fail.shs" <<'EOS'
+#!/bin/sh
+echo "FAIL — always"
+exit 1
+EOS
+    chmod +x "$_st/gates"/*.shs
+
+    # 1. always-PASS gate must be classified PASS on a mutated tree (undetected).
+    cp -r "$_st/fx/always_pass/baseline" "$_st/m1"
+    apply_mutation "$_st/m1" drop_transition_row || { echo "selftest: mutation no-op" >&2; _fail=1; }
+    if grep -q 'HirTypeKind.Bool' "$_st/m1/$_tr/hir_type_to_mir_type.sdn"; then
+        echo "selftest: drop_transition_row did not mutate the file" >&2; _fail=1
+    fi
+    _v=$(run_gate "$_st/gates/fake-pass.shs" --root "$_st/m1")
+    [ "$_v" = PASS ] || { echo "selftest: always-PASS gate classified $_v, want PASS" >&2; _fail=1; }
+
+    # 2. always-FAIL gate must be classified FAIL (i.e. counted as detected).
+    _v=$(run_gate "$_st/gates/fake-fail.shs" --root "$_st/m1")
+    [ "$_v" = FAIL ] || { echo "selftest: always-FAIL gate classified $_v, want FAIL" >&2; _fail=1; }
+
+    # 3. real gate: PASS on clean baseline, FAIL on mutated tree.
+    _v=$(run_gate "$_st/gates/fake-real.shs" --root "$_st/fx/always_fail/baseline")
+    [ "$_v" = PASS ] || { echo "selftest: real gate on clean baseline gave $_v, want PASS" >&2; _fail=1; }
+    _v=$(run_gate "$_st/gates/fake-real.shs" --root "$_st/m1")
+    [ "$_v" = FAIL ] || { echo "selftest: real gate on mutated tree gave $_v, want FAIL" >&2; _fail=1; }
+
+    # 4. missing gate script must not be classified PASS.
+    _v=$(run_gate "$_st/gates/does-not-exist.shs" --root "$_st/m1")
+    [ "$_v" = PASS ] && { echo "selftest: absent gate classified PASS" >&2; _fail=1; }
+
+    # 5. zero gates must yield ERROR from a full run.
+    mkdir -p "$_st/emptygates"
+    _out=$(sh "$0" --gates-dir "$_st/emptygates" --fixtures "$FIXTURES" 2>/dev/null)
+    _last=$(printf '%s\n' "$_out" | tail -1)
+    case "$_last" in
+        ERROR*) : ;;
+        *) echo "selftest: zero-gate run gave '$_last', want ERROR" >&2; _fail=1 ;;
+    esac
+
+    # 6. gate_accepts_root must reject a gate with no root flag.
+    printf '#!/bin/sh\necho "PASS — 0"\n' > "$_st/gates/no-root.shs"
+    gate_accepts_root "$_st/gates/no-root.shs" --root && {
+        echo "selftest: gate with no --root reported as accepting it" >&2; _fail=1; }
+
+    rm -rf "$_st"
+    return $_fail
+}
+
+if [ "$RUN_SELFTEST" = 1 ]; then
+    if ! selftest; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "selftest: OK"
+fi
+
+# ---------------------------------------------------------------------------
+# Main scan
+# ---------------------------------------------------------------------------
+mkdir -p "$SCRATCH_BASE" 2>/dev/null
+
+EXECUTED=0
+GATES_RUN=0
+UNDETECTED=""
+SKIPPED=""
+DEFECTS=""
+
+TABLE=$(gate_table)
+OLDIFS=$IFS
+IFS='
+'
+set -f
+# shellcheck disable=SC2086
+set -- $TABLE
+set +f
+IFS=$OLDIFS
+for row in "$@"; do
+    gid=$(echo "$row" | cut -d'|' -f1)
+    gscript="$GATES_DIR/$(echo "$row" | cut -d'|' -f2)"
+    gfxdir="$FIXTURES/$(echo "$row" | cut -d'|' -f3)"
+    gfx="$gfxdir/baseline"
+    gflag=$(echo "$row" | cut -d'|' -f4)
+    gmuts=$(echo "$row" | cut -d'|' -f5)
+    gextra=$(echo "$row" | cut -d'|' -f6)
+    gextra=$(echo "$gextra" | sed "s|{FX}|$FIXTURES/$(echo "$row" | cut -d'|' -f3)|g")
+
+    if [ ! -f "$gscript" ]; then
+        SKIPPED="$SKIPPED $gid:absent"
+        log "$gid: gate script absent ($gscript) — ERROR-skip"
+        continue
+    fi
+    if [ ! -d "$gfx" ] && [ ! -f "$gfxdir/baseline.manifest" ]; then
+        DEFECTS="$DEFECTS $gid:missing-fixture"
+        continue
+    fi
+    if ! gate_accepts_root "$gscript" "$gflag"; then
+        DEFECTS="$DEFECTS $gid:no-$gflag-argument"
+        SKIPPED="$SKIPPED $gid:unpointable"
+        log "$gid: gate has no $gflag argument — GATE DEFECT, ERROR-skip"
+        continue
+    fi
+
+    # Baseline sanity: the gate MUST be green on the unmutated fixture, or a
+    # later red proves nothing.
+    base=$(mktemp -d "$SCRATCH_BASE/mut_${gid}_base.XXXXXX")
+    if ! materialise "$gfxdir" "$base"; then
+        DEFECTS="$DEFECTS $gid:fixture-materialisation-failed"
+        rm -rf "$base"
+        continue
+    fi
+    bv=$(run_gate "$gscript" "$gflag" "$base" "$gextra")
+    rm -rf "$base"
+    if [ "$bv" != PASS ]; then
+        DEFECTS="$DEFECTS $gid:baseline-not-green($bv)"
+        SKIPPED="$SKIPPED $gid:baseline-$bv"
+        log "$gid: gate is $bv on the UNMUTATED baseline — cannot attribute a red"
+        continue
+    fi
+
+    GATES_RUN=$((GATES_RUN + 1))
+    for mut in $gmuts; do
+        tree=$(mktemp -d "$SCRATCH_BASE/mut_${gid}_${mut}.XXXXXX")
+        if ! materialise "$gfxdir" "$tree"; then
+            DEFECTS="$DEFECTS $gid:$mut:fixture-materialisation-failed"
+            rm -rf "$tree"
+            continue
+        fi
+        cp -r "$tree" "$tree.pristine"
+        if ! apply_mutation "$tree" "$mut"; then
+            DEFECTS="$DEFECTS $gid:$mut:mutation-failed"
+            rm -rf "$tree"
+            continue
+        fi
+        if diff -r "$tree.pristine" "$tree" >/dev/null 2>&1; then
+            DEFECTS="$DEFECTS $gid:$mut:mutation-was-a-noop"
+            rm -rf "$tree" "$tree.pristine"
+            continue
+        fi
+        rm -rf "$tree.pristine"
+        EXECUTED=$((EXECUTED + 1))
+        v=$(run_gate "$gscript" "$gflag" "$tree" "$gextra")
+        log "$gid/$mut -> $v"
+        case "$v" in
+            FAIL) : ;;                               # detected
+            *)    UNDETECTED="$UNDETECTED $gid:$mut" ;;
+        esac
+        rm -rf "$tree"
+    done
+done
+
+[ -n "$SKIPPED" ] && echo "ERROR-skipped gates (absent or unusable, NOT passes):$SKIPPED"
+[ -n "$DEFECTS" ] && echo "gate defects found:$DEFECTS"
+
+if [ "$GATES_RUN" -eq 0 ] || [ "$EXECUTED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 usable gate(s) of 5 registered; skipped:${SKIPPED:- none})"
+    exit 2
+fi
+
+if [ -n "$UNDETECTED" ]; then
+    n=$(echo "$UNDETECTED" | wc -w | tr -d ' ')
+    echo "FAIL — $n undetected:$UNDETECTED"
+    exit 1
+fi
+
+echo "PASS — $EXECUTED mutation(s) executed across $GATES_RUN gate(s), all detected"
+exit 0

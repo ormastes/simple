@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+provider="$root/src/runtime/runtime_sdl2.c"
+binding="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+failed=0
+
+for symbol in get_window_width get_window_height; do
+    body=$(sed -n "/^int64_t rt_sdl2_$symbol/,/^}/p" "$provider")
+    if ! printf '%s\n' "$body" | grep -q 'if (!win) return -1' ||
+       ! grep -q "^@unsafe(reason: .*negative sentinel.*invalid handle" "$binding"; then
+        echo "rt_sdl2_$symbol must retain its negative invalid-handle sentinel" >&2
+        failed=1
+    fi
+done
+for symbol in get_window_position_x get_window_position_y; do
+    body=$(sed -n "/^int64_t rt_sdl2_$symbol/,/^}/p" "$provider")
+    if ! printf '%s\n' "$body" | grep -q 'if (!win) return INT64_MIN'; then
+        echo "rt_sdl2_$symbol must retain its INT64_MIN invalid-handle sentinel" >&2
+        failed=1
+    fi
+done
+
+size_read=$(sed -n '/^fn window_get_size/,/^fn window_set_size/p' "$binding")
+position_read=$(sed -n '/^fn window_get_position/,/^fn window_set_position/p' "$binding")
+if ! printf '%s\n' "$size_read" | grep -q '^fn window_get_size(window: Window) -> Size?:' ||
+   ! printf '%s\n' "$position_read" | grep -q '^fn window_get_position(window: Window) -> Position?:' ||
+   [ "$(printf '%s\n' "$size_read" | grep -c 'unsafe(capabilities: \[ffi\]):' || true)" -ne 1 ] ||
+   [ "$(printf '%s\n' "$position_read" | grep -c 'unsafe(capabilities: \[ffi\]):' || true)" -ne 1 ]; then
+    echo "window size/position reads must lift sentinels in two lexical scopes" >&2
+    failed=1
+fi
+if grep -B1 '^fn window_get_\(size\|position\)' "$binding" | grep -q '^@unsafe' ||
+   ! grep -q '^fn window_get_inner_size(window: Window) -> Size?:' "$binding" ||
+   ! grep -q '^fn window_get_outer_size(window: Window) -> Size?:' "$binding"; then
+    echo "safe size APIs must preserve typed absence" >&2
+    failed=1
+fi
+
+provider_reads=$(sed -n '/^int64_t rt_sdl2_get_window_width/,/^bool rt_sdl2_set_window_title/p' "$provider";
+                 sed -n '/^int64_t rt_sdl2_get_window_position_x/,/^bool rt_sdl2_show_window/p' "$provider")
+if printf '%s\n' "$provider_reads" | grep -Eq 'malloc|calloc|realloc|pthread_|mutex|SDL_GetError'; then
+    echo "window reads must remain allocation-, lock-, and extra-query-free" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "SDL2 window read contract audit: PASS"

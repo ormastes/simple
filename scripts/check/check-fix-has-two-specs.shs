@@ -1,0 +1,321 @@
+#!/bin/sh
+# check-fix-has-two-specs.shs
+#
+# Enforce, mechanically, the standing user requirement:
+#   "all bug should add reproducing bug and similar bug prevention tests."
+#
+# Prose did not enforce it. In one day ~20 lanes were told the rule in prose and
+# several still landed a fix with no RED baseline, one wrote both specs AFTER the
+# fix, and one shipped a spec that could never fail. This script is the checkable
+# form of the rule.
+#
+# For every commit in a range (default `main@origin..@-`, the same range the
+# other push guards use) whose SUBJECT starts with `fix(`:
+#
+#   1. it must add or modify at least one `*_spec.spl`;
+#   2. it must carry TWO distinct spec artifacts -- a REPRODUCER and a
+#      CLASS/PREVENTION artifact;
+#   3. where a spec is genuinely impossible (shell/daemon-level defect,
+#      toolchain configuration), a `scripts/check/*.shs` guard is the accepted
+#      substitute -- but ONLY when the commit touches no `.spl` product code.
+#
+# NAMING CONVENTION -- inferred from this repo, not invented. Real pairs:
+#   u64_high_bit_ordering_comparison_spec.spl  +  unsigned_ordering_signedness_CLASS_spec.spl
+#   silent_default_REPRODUCER_spec.spl         +  silent_default_DETECTION_spec.spl
+#   probe_wide_int_boundary_jit.spl            +  wide_int_boundary_CLASS_spec.spl
+# So: a spec artifact is `*_spec.spl` or `probe_*.spl`; it counts as the
+# PREVENTION half when its basename contains one of
+#   class | detection | generalization | regression | property | sweep | fails_closed
+# and as the REPRODUCER half otherwise. Both halves must be present, in
+# DISTINCT files.
+#
+# WHY THE PREVENTION SPEC SPECIFICALLY (lanes keep treating it as ceremony; it is
+# the highest-yield artifact in the process). In one day it caught a gap its own
+# reproducer missed six separate times:
+#   * occurs_check: the first fix looked right and the `T=[T]` reproducer PASSED
+#     it, but TYPE_VAR_BASE(50000) > TYPE_NAMED_BASE(10000) meant every unbound
+#     type var fell into the named-type arm and over-reported. Only the
+#     prevention spec's over-report guards caught it.
+#   * u64 ordering: prevention failed 6 cases to the reproducer's 3, covering
+#     unsuffixed `u64 > 0` (Int-typed) -- the pairing a UInt-only fix misses, and
+#     by far the commoner way to write it.
+#   * ed25519: the reproducer audited only `ed_scalar_mul`; prevention swept
+#     every scalar-mul entry point and caught that the function signing ACTUALLY
+#     CALLS was also branchful, despite a docstring promising constant time.
+#   * silent_default lint: removing its suppression-reason requirement left the
+#     reproducer 6/6 GREEN; only prevention went red.
+#   * a dotted-path resolver: the repro spec passed an incomplete fix; only the
+#     3-segment prevention case caught it.
+#   * an aliased-param sweep found five shapes the filed reproducer missed,
+#     including a distinct new defect.
+#
+# VACUITY CHECK. Three vacuous specs shipped in one day, one of them guarding
+# CRYPTO. This script also flags, on the spec files a `fix(` commit touches:
+#   * a `find("...")` / path literal naming a `.spl` file that does not exist --
+#     `ed25519_ct_property_spec` searched `ed25519.spl` while the function lives
+#     in `ed25519_ops.spl`, so `find()` returned -1 and it could never pass OR
+#     catch a regression;
+#   * a subprocess spec that asserts on output CONTENT without first asserting
+#     rc == 0 and non-empty stdout -- one shelled out to `bin/release/simple`, a
+#     production-guard wrapper that refuses the seed and exits WITHOUT running
+#     the fixture, so all three assertions failed on empty stdout and looked
+#     exactly like a live codegen defect;
+#   * an embedded fixture source string containing `{` -- the SPEC's lexer
+#     resolves the interpolation, not the fixture's, so the file dies with
+#     `zero-examples` before any example runs.
+#
+# BASELINE. Like `check-no-phantom-module-imports.shs`, this fails only on NEW
+# violations, so it can be adopted immediately without blocking every lane on
+# the pre-existing backlog. Baseline lines are keyed by commit SUBJECT (stable
+# across the rebases this repo does constantly), not by sha.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> commit(s) checked, 0 new violation(s) (baselined: <k>)   exit 0
+#   FAIL  — <n> commit(s) checked, <k> NEW violation(s)                  exit 1
+#   ERROR — nothing was checked                                          exit 2
+set -u
+
+SELF="$0"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+BASELINE="${FIX2SPEC_BASELINE:-$SCRIPT_DIR/fix_two_specs_baseline.txt}"
+
+usage() {
+    sed -n '2,80p' "$SELF" | sed 's/^# \{0,1\}//'
+    echo ""
+    echo "usage: sh scripts/check/check-fix-has-two-specs.shs [RANGE] [--generate-baseline]"
+    echo "       sh scripts/check/check-fix-has-two-specs.shs --selftest"
+    echo "       RANGE defaults to main@origin..@- (must contain '..')"
+}
+
+case "${1:-}" in
+    --help|-h) usage; exit 0 ;;
+esac
+
+# ---------------------------------------------------------------- selftest ---
+# A gate that cannot fail is not evidence, and is itself an instance of the
+# class this repo is fighting. Fixtures run BEFORE any real scan and are fatal.
+if [ "${1:-}" = "--selftest" ]; then
+    TMP=$(mktemp -d "${TMPDIR:-/tmp}/fix2spec.XXXXXX") || { echo "ERROR — nothing was checked"; exit 2; }
+    EMPTY_BASE="$TMP/empty_baseline.txt"
+    : > "$EMPTY_BASE"
+    R="$TMP/repo"
+    mkdir -p "$R/test/01_unit" "$R/src/lib" "$R/doc"
+    (
+        cd "$R" || exit 1
+        git init -q .
+        git config user.email selftest@example.com
+        git config user.name selftest
+        echo "base" > README.md
+        git add -A >/dev/null 2>&1
+        git commit -qm "chore: base"
+    ) || { rm -rf "$TMP"; echo "ERROR — nothing was checked"; exit 2; }
+    BASE_SHA=$(cd "$R" && git rev-parse HEAD)
+
+    mk() { # mk <subject> <file>...
+        _sub="$1"; shift
+        for _f in "$@"; do
+            mkdir -p "$R/$(dirname "$_f")"
+            printf 'fn t():\n    print "ok"\n' > "$R/$_f"
+        done
+        (cd "$R" && git add -A >/dev/null 2>&1 && git commit -qm "$_sub")
+    }
+
+    # (a) fix( with BOTH halves -> must not be a violation
+    mk "fix(x): repro + prevention" src/lib/x.spl \
+        test/01_unit/x_alpha_spec.spl test/01_unit/x_alpha_class_spec.spl
+    # (d) docs-only commit -> ignored, must not make the run vacuous
+    mk "docs(x): notes" doc/x.md
+    # (c) fix( with only a reproducer -> must FAIL
+    mk "fix(y): reproducer only" src/lib/y.spl test/01_unit/y_beta_spec.spl
+    # (b) fix( with no spec at all -> must FAIL
+    mk "fix(z): no spec" src/lib/z.spl
+
+    RANGE="$BASE_SHA..HEAD"
+    OUT=$(cd "$R" && FIX2SPEC_BASELINE="$EMPTY_BASE" sh "$SCRIPT_DIR/$(basename "$SELF")" "$RANGE" 2>&1)
+    RC=$?
+    FAILED=0
+    if [ "$RC" -ne 1 ]; then
+        echo "$OUT"
+        echo "selftest FAILED: mixed fixture repo did not FAIL (rc=$RC)"
+        FAILED=1
+    fi
+    case "$OUT" in *"fix(z): no spec"*) ;; *) echo "selftest FAILED: fixture (b) no-spec commit not reported"; FAILED=1 ;; esac
+    case "$OUT" in *"fix(y): reproducer only"*) ;; *) echo "selftest FAILED: fixture (c) reproducer-only commit not reported"; FAILED=1 ;; esac
+    case "$OUT" in *"fix(x): repro + prevention"*) echo "selftest FAILED: fixture (a) well-formed pair was reported"; FAILED=1 ;; *) ;; esac
+    case "$OUT" in *"docs(x): notes"*) echo "selftest FAILED: fixture (d) docs-only commit was reported"; FAILED=1 ;; *) ;; esac
+    # non-vacuity: the run must state it checked the 3 fix( commits, not 0
+    NCHK=$(printf '%s\n' "$OUT" | tail -1 | sed -n 's/^[A-Z]* — \([0-9]*\) commit(s) checked.*/\1/p')
+    [ "${NCHK:-0}" = "3" ] || { echo "selftest FAILED: expected 3 commit(s) checked, verdict said '${NCHK:-}'"; FAILED=1; }
+
+    # fixture (e): with only the two bad commits baselined, the same range PASSes
+    printf '%s\n' "$OUT" | grep '^fix-without-' | sort -u > "$TMP/base2.txt"
+    OUT2=$(cd "$R" && FIX2SPEC_BASELINE="$TMP/base2.txt" sh "$SCRIPT_DIR/$(basename "$SELF")" "$RANGE" 2>&1)
+    RC2=$?
+    [ "$RC2" -eq 0 ] || { echo "$OUT2"; echo "selftest FAILED: fully-baselined range did not PASS (rc=$RC2)"; FAILED=1; }
+
+    # fixture (f): an empty range must be ERROR, never a vacuous PASS
+    OUT3=$(cd "$R" && FIX2SPEC_BASELINE="$EMPTY_BASE" sh "$SCRIPT_DIR/$(basename "$SELF")" "HEAD..HEAD" 2>&1)
+    RC3=$?
+    [ "$RC3" -eq 2 ] || { echo "$OUT3"; echo "selftest FAILED: empty range was not ERROR (rc=$RC3)"; FAILED=1; }
+
+    rm -rf "$TMP"
+    if [ "$FAILED" -ne 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+    echo "selftest: 6 fixture(s) passed"
+    exit 0
+fi
+
+# ------------------------------------------------------------------- scan ---
+RANGE=""
+GEN=0
+for a in "$@"; do
+    case "$a" in
+        --generate-baseline) GEN=1 ;;
+        --selftest|--help|-h) ;;
+        -*) ;;
+        *) RANGE="$a" ;;
+    esac
+done
+
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "ERROR — nothing was checked"; exit 2; }
+
+if [ -z "$RANGE" ]; then
+    if git rev-parse --verify -q "main@origin" >/dev/null 2>&1; then
+        RANGE="main@origin..@-"
+    elif git rev-parse --verify -q "origin/main" >/dev/null 2>&1; then
+        RANGE="origin/main..HEAD"
+    else
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+fi
+case "$RANGE" in
+    *..*) ;;
+    *) echo "a bare revision is not a range; pass BASE..NEW"; echo "ERROR — nothing was checked"; exit 2 ;;
+esac
+
+REVS=$(git rev-list "$RANGE" 2>/dev/null)
+RC=$?
+if [ "$RC" -ne 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/fix2spec-scan.XXXXXX") || { echo "ERROR — nothing was checked"; exit 2; }
+FIND="$WORK/findings"
+: > "$FIND"
+
+is_prevention() {
+    case "$(basename "$1")" in
+        *class*|*detection*|*generaliz*|*regression*|*property*|*sweep*|*fails_closed*) return 0 ;;
+    esac
+    return 1
+}
+
+CHECKED=0
+for sha in $REVS; do
+    SUB=$(git log -1 --format=%s "$sha")
+    case "$SUB" in fix\(*) ;; *) continue ;; esac
+    CHECKED=$((CHECKED + 1))
+
+    FILES=$(git diff-tree -r --no-commit-id --name-only --diff-filter=AM "$sha" 2>/dev/null)
+    SPECS=""
+    REPRO=0
+    PREV=0
+    GUARDS=0
+    PRODSPL=0
+    for f in $FILES; do
+        case "$f" in
+            *_spec.spl|*/probe_*.spl)
+                SPECS="$SPECS $f"
+                if is_prevention "$f"; then PREV=$((PREV + 1)); else REPRO=$((REPRO + 1)); fi
+                ;;
+            scripts/check/*.shs) GUARDS=$((GUARDS + 1)) ;;
+            src/*.spl) PRODSPL=$((PRODSPL + 1)) ;;
+        esac
+    done
+
+    NSPEC=0
+    for s in $SPECS; do NSPEC=$((NSPEC + 1)); done
+
+    # Rule 3: a scripts/check guard substitutes for specs ONLY when the commit
+    # touches no .spl product code (shell/daemon/toolchain-level defects).
+    if [ "$NSPEC" -eq 0 ] && [ "$GUARDS" -gt 0 ] && [ "$PRODSPL" -eq 0 ]; then
+        continue
+    fi
+
+    if [ "$NSPEC" -eq 0 ]; then
+        echo "fix-without-spec: $SUB" >> "$FIND"
+        continue
+    fi
+    if [ "$PREV" -eq 0 ] || [ "$REPRO" -eq 0 ] || [ "$NSPEC" -lt 2 ]; then
+        # A guard counts as the prevention half when one is present.
+        if [ "$PREV" -eq 0 ] && [ "$GUARDS" -gt 0 ] && [ "$NSPEC" -ge 1 ]; then
+            :
+        else
+            echo "fix-without-prevention-spec: $SUB" >> "$FIND"
+        fi
+    fi
+
+    # ---- vacuity checks on the spec files this commit touched ----
+    for s in $SPECS; do
+        BODY=$(git show "$sha:$s" 2>/dev/null) || continue
+        [ -n "$BODY" ] || continue
+
+        # (1) find()/path literal naming a .spl file that does not exist
+        for tgt in $(printf '%s\n' "$BODY" | grep -oE '"[A-Za-z0-9_./-]+\.spl"' | tr -d '"' | sort -u); do
+            case "$tgt" in */*) ;; *) continue ;; esac
+            [ -e "$tgt" ] && continue
+            git cat-file -e "$sha:$tgt" 2>/dev/null && continue
+            echo "vacuous-spec-missing-target: $s references \`$tgt\` which does not exist ($SUB)" >> "$FIND"
+        done
+
+        # (2) subprocess spec asserting content without asserting rc and stdout
+        if printf '%s\n' "$BODY" | grep -qE 'run_command|run_process|spawn|exec_|bin/release|bin/simple'; then
+            HAS_RC=$(printf '%s\n' "$BODY" | grep -cE 'exit_code|\.rc\b|status *== *0|returncode')
+            HAS_OUT=$(printf '%s\n' "$BODY" | grep -cE 'stdout.*(len|is_empty|!= *"")|len\(\) *> *0')
+            if [ "$HAS_RC" -eq 0 ] || [ "$HAS_OUT" -eq 0 ]; then
+                echo "vacuous-subprocess-spec: $s asserts output content without asserting rc==0 and non-empty stdout ($SUB)" >> "$FIND"
+            fi
+        fi
+
+        # (3) embedded fixture source containing `{` -> zero-examples at load
+        if printf '%s\n' "$BODY" | grep -qF '"""'; then
+            if printf '%s\n' "$BODY" | awk '/"""/{n++} n%2==1 && /{/{found=1} END{exit !found}'; then
+                echo "vacuous-fixture-interpolation: $s embeds a fixture string containing \`{\` (spec lexer resolves it; file dies with zero-examples) ($SUB)" >> "$FIND"
+            fi
+        fi
+    done
+done
+
+if [ "$CHECKED" -eq 0 ]; then
+    rm -rf "$WORK"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+sort -u "$FIND" > "$WORK/now"
+NTOTAL=$(wc -l < "$WORK/now" | tr -d ' ')
+
+if [ "$GEN" -eq 1 ]; then
+    cp "$WORK/now" "$BASELINE"
+    echo "wrote $BASELINE ($NTOTAL entr(ies))"
+    rm -rf "$WORK"
+    echo "PASS — $CHECKED commit(s) checked, baseline regenerated"
+    exit 0
+fi
+
+if [ -f "$BASELINE" ]; then
+    sort -u "$BASELINE" > "$WORK/base"
+else
+    : > "$WORK/base"
+fi
+comm -23 "$WORK/now" "$WORK/base" > "$WORK/new"
+NNEW=$(wc -l < "$WORK/new" | tr -d ' ')
+NBASE=$((NTOTAL - NNEW))
+
+if [ "$NNEW" -gt 0 ]; then
+    cat "$WORK/new"
+    rm -rf "$WORK"
+    echo "FAIL — $CHECKED commit(s) checked, $NNEW NEW violation(s) (baselined: $NBASE)"
+    exit 1
+fi
+rm -rf "$WORK"
+echo "PASS — $CHECKED commit(s) checked, 0 new violation(s) (baselined: $NBASE)"
+exit 0

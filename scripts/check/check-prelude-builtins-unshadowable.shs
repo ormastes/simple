@@ -1,0 +1,128 @@
+#!/bin/sh
+# Fails if a prelude builtin listed in PRELUDE_UNSHADOWABLE becomes rebindable
+# by a transitively-imported top-level `fn` again.
+#
+# Guards doc/08_tracking/bug/prelude_builtins_rebindable_by_transitive_import_2026-08-10.md:
+# a top-level `fn exit` anywhere in a module's transitive import closure used to
+# silently replace the prelude `exit`. Because such a shim need not terminate,
+# failure paths kept running and the process exited 0 — a false-GREEN generator
+# for every harness that reads exit status.
+#
+# Shape: main.spl imports ONLY `mid_helper` from q29mid, which imports ONLY
+# `helper` from q29lib. main never names `exit`; q29lib defines one. If the
+# fence holds, the builtin runs, the process terminates, and exit status is 3.
+#
+# Both lanes are probed because the hole had TWO independent causes: the
+# interpreter's Priority-1 `has_local_def` hatch (interpreter_call/mod.rs) and
+# the JIT/native HIR builtin whitelist (hir/lower/expr/calls.rs). Fixing one
+# leaves the other open, so a single-lane probe would have passed while the
+# defect was still live.
+#
+# Binary under test: $SIMPLE_BIN (default bin/simple). The verdict line always
+# names it, so a result can never be attributed to the wrong binary.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> probes checked, binary <path>
+#   FAIL — ...            (exit 1)
+#   ERROR — nothing was checked (exit 2)
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/prelude-shadow-check.XXXXXX") || exit 2
+trap 'rm -rf "$WORK"' EXIT
+
+# The probes run with cwd inside $WORK, so a relative SIMPLE_BIN would resolve
+# to nothing there and every run would exit 127 — absolutize it first.
+case "$BIN" in
+  /*) ;;
+  *) BIN=$(cd "$(dirname "$BIN")" 2>/dev/null && pwd)/$(basename "$BIN") ;;
+esac
+
+if [ ! -x "$BIN" ]; then
+  echo "ERROR — nothing was checked (no executable binary at $BIN)"
+  exit 2
+fi
+
+checked=0
+failed=0
+
+# Emit the 3-module transitive-import program shadowing $1 with a body that
+# does NOT terminate, so a shadow that wins is unmistakable.
+emit() {
+  cat > "$WORK/q29lib.spl" <<EOF
+pub fn $1(code: i64):
+    print "SHADOW_RAN"
+
+pub fn helper() -> i64:
+    42
+EOF
+  cat > "$WORK/q29mid.spl" <<'EOF'
+use q29lib.{helper}
+
+pub fn mid_helper() -> i64:
+    helper()
+EOF
+  cat > "$WORK/main.spl" <<EOF
+use q29mid.{mid_helper}
+
+fn main():
+    print "BEFORE={mid_helper()}"
+    $1(3)
+    print "AFTER_STILL_RUNNING"
+EOF
+}
+
+# --- Probe 1 (positive control / the actual guard): `exit` must be fenced. ----
+for MODE in interpret jit; do
+  emit exit
+  if [ "$MODE" = interpret ]; then
+    out=$(cd "$WORK" && SIMPLE_EXECUTION_MODE=interpret "$BIN" main.spl 2>&1); rc=$?
+  else
+    out=$(cd "$WORK" && "$BIN" main.spl 2>&1); rc=$?
+  fi
+  checked=$((checked + 1))
+
+  case "$out" in
+    *SHADOW_RAN*)
+      echo "FAIL — [$MODE] a transitive \`fn exit\` shadowed the prelude builtin \`exit\`"
+      failed=1 ;;
+    *AFTER_STILL_RUNNING*)
+      echo "FAIL — [$MODE] \`exit(3)\` did not terminate the process"
+      failed=1 ;;
+    *)
+      if [ "$rc" -ne 3 ]; then
+        echo "FAIL — [$MODE] \`exit(3)\` produced exit status $rc, expected 3"
+        failed=1
+      fi ;;
+  esac
+done
+
+# --- Probe 2 (NEGATIVE CONTROL): a non-prelude name MUST still be shadowable. -
+# Without this, the check would also "pass" if the harness had simply lost the
+# ability to observe a shadow running at all (bad import syntax, a silently
+# empty run, a binary that errors before main). It also pins the scope of the
+# fix: only PRELUDE_UNSHADOWABLE names are fenced, ordinary user functions and
+# the `rt_*` escape hatch that motivated the hatch keep working.
+emit q29_definitely_not_a_builtin
+out=$(cd "$WORK" && SIMPLE_EXECUTION_MODE=interpret "$BIN" main.spl 2>&1)
+checked=$((checked + 1))
+case "$out" in
+  *SHADOW_RAN*) : ;;
+  *)
+    echo "FAIL — negative control did not fire: a plain transitive user function"
+    echo "       was not called, so this harness cannot observe a shadow at all"
+    echo "       and a PASS above would have been vacuous."
+    failed=1 ;;
+esac
+
+if [ "$checked" -eq 0 ]; then
+  echo "ERROR — nothing was checked"
+  exit 2
+fi
+if [ "$failed" -ne 0 ]; then
+  echo "FAIL — $checked probes checked, binary $BIN"
+  exit 1
+fi
+echo "PASS — $checked probes checked, binary $BIN"
+exit 0

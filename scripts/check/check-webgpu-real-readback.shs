@@ -1,0 +1,155 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/webgpu-real-readback}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/webgpu_real_readback_$(date -u +%F).md}"
+TIMEOUT_SECS="${SIMPLE_WEBGPU_REAL_TIMEOUT_SECS:-180}"
+ENV_PATH="$BUILD_DIR/evidence.env"
+OUT_PATH="$BUILD_DIR/stdout.env"
+ERR_PATH="$BUILD_DIR/stderr.log"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_with_timeout() {
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+is_unsigned_int() {
+    case "${1:-}" in
+        '' | *[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+is_positive_int() {
+    is_unsigned_int "${1:-}" || return 1
+    [ "$1" != "0" ]
+}
+
+webgpu_real_pass_valid() {
+    arg_status="$1"
+    arg_source="$2"
+    arg_handle="$3"
+    arg_expected="$4"
+    arg_actual="$5"
+
+    [ "$arg_status" = "pass" ] || return 1
+    [ "$arg_source" = "device_readback" ] || return 1
+    is_positive_int "$arg_handle" || return 1
+    is_positive_int "$arg_expected" || return 1
+    is_positive_int "$arg_actual" || return 1
+    [ "$arg_expected" = "$arg_actual" ] || return 1
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "webgpu_real_readback_status=unavailable"
+        echo "webgpu_real_readback_reason=$reason"
+        echo "webgpu_real_readback_source=not_device_readback"
+        echo "webgpu_real_readback_backend_handle=0"
+        echo "webgpu_real_readback_expected_checksum=0"
+        echo "webgpu_real_readback_actual_checksum=-1"
+        echo "webgpu_real_readback_timeout_seconds=$TIMEOUT_SECS"
+    } >"$ENV_PATH"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    if ! webgpu_real_pass_valid pass device_readback 7 9 9; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=valid-readback-rejected"
+        exit 1
+    fi
+    if webgpu_real_pass_valid pass device_readback 0 9 9; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=zero-handle-accepted"
+        exit 1
+    fi
+    if webgpu_real_pass_valid pass device_readback handle 9 9; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=nonnumeric-handle-accepted"
+        exit 1
+    fi
+    if webgpu_real_pass_valid pass device_readback 7 0 0; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=zero-checksum-accepted"
+        exit 1
+    fi
+    if webgpu_real_pass_valid pass surface_upload 7 9 9; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=surface-upload-accepted"
+        exit 1
+    fi
+    if webgpu_real_pass_valid pass device_readback 7 9 10; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=checksum-mismatch-accepted"
+        exit 1
+    fi
+    echo "self_test_status=pass"
+    echo "self_test_reason=webgpu-real-readback-gate"
+    exit 0
+fi
+
+if ! have cargo; then
+    emit_unavailable "missing-cargo"
+else
+    set +e
+    run_with_timeout cargo run \
+        --manifest-path src/runtime/hosted/Cargo.toml \
+        --features webgpu-real \
+        --example webgpu_readback_probe \
+        >"$OUT_PATH" 2>"$ERR_PATH"
+    code=$?
+    set -e
+    if [ "$code" = "0" ] && [ -s "$OUT_PATH" ]; then
+        cp "$OUT_PATH" "$ENV_PATH"
+        echo "webgpu_real_readback_timeout_seconds=$TIMEOUT_SECS" >>"$ENV_PATH"
+    else
+        emit_unavailable "webgpu-real-probe-run-failed"
+    fi
+fi
+
+status="$(sed -n 's/^webgpu_real_readback_status=//p' "$ENV_PATH" | tail -n 1)"
+reason="$(sed -n 's/^webgpu_real_readback_reason=//p' "$ENV_PATH" | tail -n 1)"
+source="$(sed -n 's/^webgpu_real_readback_source=//p' "$ENV_PATH" | tail -n 1)"
+handle="$(sed -n 's/^webgpu_real_readback_backend_handle=//p' "$ENV_PATH" | tail -n 1)"
+expected="$(sed -n 's/^webgpu_real_readback_expected_checksum=//p' "$ENV_PATH" | tail -n 1)"
+actual="$(sed -n 's/^webgpu_real_readback_actual_checksum=//p' "$ENV_PATH" | tail -n 1)"
+
+echo "webgpu_real_readback_report=$REPORT_PATH" >>"$ENV_PATH"
+
+{
+    echo "# WebGPU Real Device Readback Evidence"
+    echo
+    echo "- status: ${status:-missing}"
+    echo "- reason: ${reason:-missing}"
+    echo "- source: ${source:-missing}"
+    echo "- backend handle: ${handle:-missing}"
+    echo "- expected checksum: ${expected:-missing}"
+    echo "- actual checksum: ${actual:-missing}"
+    echo "- timeout seconds: $TIMEOUT_SECS"
+    echo
+    echo "## Raw Evidence"
+    echo
+    sed 's/^/- /' "$ENV_PATH"
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+echo "report_path=$REPORT_PATH"
+
+if webgpu_real_pass_valid "${status:-}" "${source:-}" "${handle:-}" "${expected:-}" "${actual:-}"; then
+    exit 0
+fi
+
+exit 1

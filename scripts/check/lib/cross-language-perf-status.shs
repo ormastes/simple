@@ -1,0 +1,63 @@
+#!/bin/sh
+
+# Final admission gate for the cross-language performance harness.  Keep this
+# separate from report construction so focused tests can exercise every exit
+# path without compiling the benchmark matrix.
+cross_language_perf_require_simple_compiles() {
+    _native_failures="$1"
+    _smf_failures="$2"
+    _failure_status="${3:-1}"
+
+    if [ -z "$_native_failures$_smf_failures" ]; then
+        return 0
+    fi
+
+    echo "error=Simple workload compilation failed; report retained for diagnostics" >&2
+    [ -z "$_native_failures" ] || echo "native_compile_failures=$_native_failures" >&2
+    [ -z "$_smf_failures" ] || echo "smf_compile_failures=$_smf_failures" >&2
+    return "$_failure_status"
+}
+
+cross_language_perf_status_label() {
+    if [ "$1" -eq 124 ]; then echo timeout; else echo failed; fi
+}
+
+cross_language_perf_append_failure() {
+    _report="$1"
+    _phase="$2"
+    _tool="$3"
+    _lane="$4"
+    _status="$5"
+    _classification="$(cross_language_perf_status_label "$_status")"
+    {
+        printf '\n## Terminal status\n\n'
+        printf 'profile_status: failure\n\n'
+        printf -- '- phase: `%s`\n- tool: `%s`\n- lane: `%s`\n- exit_status: `%s`\n- classification: `%s`\n' \
+            "$_phase" "$_tool" "$_lane" "$_status" "$_classification"
+    } >>"$_report"
+}
+
+cross_language_perf_initialize_report() {
+    PROFILE_PHASE=report-init
+    PROFILE_TOOL=harness
+    PROFILE_LANE=initialization
+    PROFILE_TERMINAL_WRITTEN=0
+    if ! printf '# Cross-Language Performance Profile\n\nprofile_status: running\n\n**Date:** %s\n**Profile script:** `%s`\n' \
+        "$3" "$4" >"$1"; then
+        printf '# Cross-Language Performance Profile\n\nprofile_status: failure\n\n- phase: `report-init`\n- tool: `harness`\n- lane: `report-write`\n- exit_status: `1`\n- classification: `failed`\n' >"$2" 2>/dev/null || :
+        echo "error=unable to initialize report: $1" >&2
+        echo "failure_report=$2" >&2
+        return 1
+    fi
+    REPORT_PATH="$1"
+}
+
+cross_language_perf_terminal_receipt() {
+    _profile_status=$?
+    trap - EXIT
+    if [ "$_profile_status" -ne 0 ] && [ "${PROFILE_TERMINAL_WRITTEN:-0}" -eq 0 ]; then
+        PROFILE_TERMINAL_WRITTEN=1
+        cross_language_perf_append_failure "$REPORT_PATH" "$PROFILE_PHASE" "$PROFILE_TOOL" "$PROFILE_LANE" "$_profile_status" 2>/dev/null || :
+    fi
+    exit "$_profile_status"
+}

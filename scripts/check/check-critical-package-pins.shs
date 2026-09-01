@@ -1,0 +1,257 @@
+#!/bin/sh
+# check-critical-package-pins.shs — Phase 8 exit gate for critical package pins.
+#
+# Plan:   doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (Phase 8)
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §15 (migrate by executable gates), §16.1-16.3 (assurance config),
+#         §20.9 (per-package migration shards), §8.2 (profile matrix)
+#
+# WHAT IT MEASURES
+#   Runs the pure-Simple package-pin model
+#   (`src/compiler/00.common/assurance/package_pins.spl`) over every package
+#   manifest in the tree and fails when any package carrying a `critical` pin
+#   violates one of Phase 8's four preconditions:
+#
+#     waiver-without-owner    E-PIN-001
+#     waiver-without-expiry   E-PIN-002
+#     waiver-expired          E-PIN-003
+#     dependency-below-robust E-PIN-004  (an UNRESOLVABLE edge counts here too)
+#     advisory-in-critical    E-PIN-005
+#     no-differential         E-PIN-006
+#
+#   Every decision is made by the real model module, run via `bin/simple run`.
+#   Nothing here greps a manifest: a text scan cannot compute a transitive
+#   dependency closure and cannot tell an EXPLICIT pin from an inherited
+#   default, which is precisely the distinction the non-vacuity floor rests on.
+#
+# SCOPE, STATED PLAINLY
+#   Precondition 3 ("every critical check actually executes") is answered from
+#   the DECLARED manifest `spec/compiler_schema/critical_checks.sdn`, seeded
+#   from the guard list in `.claude/rules/vcs.md`. That manifest is a recorded
+#   claim, not a measurement — this gate does not run the other gates and
+#   cannot prove one is wired. It is written down rather than inferred because
+#   "the script exists" is not evidence that it enforces anything, and the two
+#   advisory guards recorded there are honestly RED on `main` today.
+#
+# WHY A HARD ZERO AND NOT A RATCHET
+#   A critical pin is a claim a package makes about itself. A package that
+#   cannot meet the preconditions simply does not carry the pin — the honest
+#   state is `profile: robust`, not a baselined exemption. So there is no
+#   baseline file and no `--generate-baseline` escape.
+#
+# VERDICT (always the last line of stdout)
+#   PASS  — <n> pinned package(s) checked, advisory-in-critical=0 waiver-without-expiry=0   exit 0
+#   FAIL  — ...                                                                             exit 1
+#   ERROR — nothing was checked (<reason>)                                                  exit 2
+#
+#   A run that examined 0 EXPLICITLY pinned packages is ERROR, never a pass:
+#   absence of analysis is absence of evidence. So is a run whose check
+#   manifest contributed 0 rows, or one where any manifest failed to parse — an
+#   unparsed manifest means the package set is incomplete, and an incomplete
+#   set cannot support a whole-tree claim.
+#
+# USAGE
+#   sh scripts/check/check-critical-package-pins.shs
+#   sh scripts/check/check-critical-package-pins.shs --selftest
+#   sh scripts/check/check-critical-package-pins.shs --why <package-name>
+#
+#   `--selftest` runs before every scan and is FATAL. A checker that reports
+#   zero because it never detected anything would otherwise be
+#   indistinguishable from a clean tree.
+#
+#   `--why <package>` prints the reasons a package could NOT be pinned critical
+#   today, for a package that is deliberately still robust. It does not change
+#   the verdict — reporting a blocked pin is not a failure, hiding one is.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="bin/simple"
+DRIVER="src/app/check/critical_package_pins_census.spl"
+CHECKS="spec/compiler_schema/critical_checks.sdn"
+FIXTURES="test/fixtures/package_pins"
+
+# Every package manifest in the tree. Enumerated, never hardcoded, so a
+# package added tomorrow is covered the day its manifest lands. Vendored and
+# snapshot trees are excluded per CLAUDE.md's Owned-Code Scope; a stale
+# bootstrap input snapshot is not a package.
+discover_packages() {
+    find src -name simple.sdn \
+        -not -path 'src/*/vendor/*' \
+        2>/dev/null | sort
+}
+
+MODE="scan"
+WHY=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE="selftest"; shift ;;
+        --why) WHY="${2:-}"; shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a compiler is absence of evidence)"
+    exit 2
+fi
+if [ ! -f "$DRIVER" ]; then
+    echo "ERROR — nothing was checked (no driver at $DRIVER)"
+    exit 2
+fi
+if [ ! -f "$CHECKS" ]; then
+    echo "ERROR — nothing was checked (no critical-check manifest at $CHECKS)"
+    exit 2
+fi
+
+TMPDIR_RUN=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMPDIR_RUN"' EXIT
+
+# ---------------------------------------------------------------------------
+# run_census <out-file> <checks-manifest> <today> <extra-args> <package-paths...>
+# The driver's exit status is read DIRECTLY into a variable on the line after
+# the invocation, never through a pipe: a pipeline's $? is the last stage's
+# status, which has produced false greens in this repo before.
+# ---------------------------------------------------------------------------
+run_census() {
+    OUT="$1"; CHECKS_FILE="$2"; TODAY="$3"; EXTRA="$4"; shift 4
+    ARGS=""
+    for f in $1; do ARGS="$ARGS --package $f"; done
+    # shellcheck disable=SC2086
+    nice -n 10 "$SIMPLE_BIN" run "$DRIVER" \
+        --checks "$CHECKS_FILE" --today "$TODAY" $EXTRA $ARGS \
+        >"$OUT" 2>"$OUT.err" </dev/null
+    RC=$?
+    return $RC
+}
+
+field() { # field <summary-line> <key>
+    echo "$1" | tr ' ' '\n' | grep "^$2=" | cut -d= -f2
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — fatal, runs before every scan.
+#
+# Seven fixtures. One positive proves a clean critical pin is ACCEPTED (a gate
+# that rejected everything would also "detect" every negative). The other six
+# are one per closed reason, so no reason can silently stop being computed.
+# The date is pinned so the expiry fixture cannot rot into a false green when
+# the wall clock passes some threshold.
+# ---------------------------------------------------------------------------
+SELFTEST_TODAY="2026-08-21"
+BASE="$FIXTURES/base/simple.sdn"
+BASE_WEAK="$FIXTURES/base_weak/simple.sdn"
+
+selftest() {
+    FAILURES=""
+
+    run_census "$TMPDIR_RUN/pos.txt" "$FIXTURES/checks_clean.sdn" "$SELFTEST_TODAY" "" \
+        "$BASE $FIXTURES/clean/simple.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/pos.txt" | tail -1)
+    if [ -z "$S" ]; then
+        FAILURES="$FAILURES positive-fixture-produced-no-summary"
+    else
+        [ "$(field "$S" critical)" = "1" ] || FAILURES="$FAILURES positive-fixture-not-critical"
+        [ "$(field "$S" pinned)" = "2" ] || FAILURES="$FAILURES positive-fixture-pin-count"
+        [ "$(field "$S" parse_fail)" = "0" ] || FAILURES="$FAILURES positive-fixture-parse-fail"
+        for K in waiver_without_owner waiver_without_expiry waiver_expired \
+                 dependency_below_robust advisory_in_critical no_differential; do
+            [ "$(field "$S" $K)" = "0" ] || FAILURES="$FAILURES positive-fixture-$K"
+        done
+    fi
+
+    # negative <label> <checks-manifest> <support-pkg> <subject-dir> <summary-key>
+    negative() {
+        run_census "$TMPDIR_RUN/$1.txt" "$2" "$SELFTEST_TODAY" "" "$3 $FIXTURES/$4/simple.sdn"
+        NS=$(grep '^SUMMARY ' "$TMPDIR_RUN/$1.txt" | tail -1)
+        if [ -z "$NS" ]; then
+            FAILURES="$FAILURES $1-produced-no-summary"
+            return 0
+        fi
+        V=$(field "$NS" "$5")
+        [ -n "$V" ] && [ "$V" -ge 1 ] || FAILURES="$FAILURES $1-not-detected"
+    }
+
+    negative waiver-no-owner   "$FIXTURES/checks_clean.sdn"           "$BASE"      waiver_no_owner   waiver_without_owner
+    negative waiver-no-expiry  "$FIXTURES/checks_clean.sdn"           "$BASE"      waiver_no_expiry  waiver_without_expiry
+    negative waiver-expired    "$FIXTURES/checks_clean.sdn"           "$BASE"      waiver_expired    waiver_expired
+    negative dep-below-robust  "$FIXTURES/checks_clean.sdn"           "$BASE_WEAK" dep_below_robust  dependency_below_robust
+    negative advisory-in-crit  "$FIXTURES/checks_advisory.sdn"        "$BASE"      clean             advisory_in_critical
+    negative no-differential   "$FIXTURES/checks_no_differential.sdn" "$BASE"      clean             no_differential
+
+    if [ -n "$FAILURES" ]; then
+        echo "ERROR — nothing was checked (selftest failed:$FAILURES)"
+        exit 2
+    fi
+}
+
+selftest
+if [ "$MODE" = "selftest" ]; then
+    echo "PASS — 7 selftest fixture(s) checked, scanner accepts a clean pin and detects all six rejection classes"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# SCAN
+# ---------------------------------------------------------------------------
+PACKAGES=$(discover_packages)
+if [ -z "$PACKAGES" ]; then
+    echo "ERROR — nothing was checked (no package manifest found under src/)"
+    exit 2
+fi
+
+TODAY=$(date +%Y-%m-%d)
+EXTRA=""
+[ -n "$WHY" ] && EXTRA="--why $WHY"
+
+run_census "$TMPDIR_RUN/scan.txt" "$CHECKS" "$TODAY" "$EXTRA" "$PACKAGES"
+SUMMARY=$(grep '^SUMMARY ' "$TMPDIR_RUN/scan.txt" | tail -1)
+if [ -z "$SUMMARY" ]; then
+    echo "ERROR — nothing was checked (driver produced no SUMMARY record)"
+    sed -n '1,10p' "$TMPDIR_RUN/scan.txt.err"
+    exit 2
+fi
+
+grep -E '^(PIN|BLOCK|WHY) ' "$TMPDIR_RUN/scan.txt"
+
+PKGS=$(field "$SUMMARY" packages)
+PINNED=$(field "$SUMMARY" pinned)
+CRIT=$(field "$SUMMARY" critical)
+ROWS=$(field "$SUMMARY" check_rows)
+PARSEFAIL=$(field "$SUMMARY" parse_fail)
+NO_OWNER=$(field "$SUMMARY" waiver_without_owner)
+NO_EXPIRY=$(field "$SUMMARY" waiver_without_expiry)
+EXPIRED=$(field "$SUMMARY" waiver_expired)
+DEPLOW=$(field "$SUMMARY" dependency_below_robust)
+ADVISORY=$(field "$SUMMARY" advisory_in_critical)
+NODIFF=$(field "$SUMMARY" no_differential)
+
+if [ -z "$PARSEFAIL" ] || [ "$PARSEFAIL" -ne 0 ]; then
+    echo "ERROR — nothing was checked ($PARSEFAIL manifest(s) failed to parse; the package set is incomplete)"
+    grep '^PARSE-FAIL ' "$TMPDIR_RUN/scan.txt"
+    exit 2
+fi
+if [ -z "$PKGS" ] || [ "$PKGS" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 package manifests parsed)"
+    exit 2
+fi
+if [ -z "$ROWS" ] || [ "$ROWS" -eq 0 ]; then
+    echo "ERROR — nothing was checked (critical-check manifest contributed 0 rows; a vacuous manifest is not evidence)"
+    exit 2
+fi
+if [ -z "$PINNED" ] || [ "$PINNED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 explicitly pinned package(s); an inherited default is not a pin)"
+    exit 2
+fi
+
+if [ "$NO_OWNER" -ne 0 ] || [ "$NO_EXPIRY" -ne 0 ] || [ "$EXPIRED" -ne 0 ] \
+        || [ "$DEPLOW" -ne 0 ] || [ "$ADVISORY" -ne 0 ] || [ "$NODIFF" -ne 0 ]; then
+    echo "FAIL — $PINNED pinned package(s) checked ($CRIT critical), advisory-in-critical=$ADVISORY waiver-without-owner=$NO_OWNER waiver-without-expiry=$NO_EXPIRY waiver-expired=$EXPIRED dependency-below-robust=$DEPLOW no-differential=$NODIFF"
+    grep '^REJECT ' "$TMPDIR_RUN/scan.txt" | sed -n '1,20p'
+    exit 1
+fi
+
+echo "PASS — $PINNED pinned package(s) checked, advisory-in-critical=0 waiver-without-expiry=0"
+exit 0

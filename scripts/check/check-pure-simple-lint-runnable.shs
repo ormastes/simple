@@ -1,0 +1,132 @@
+#!/bin/sh
+# check-pure-simple-lint-runnable.shs
+#
+# Fences the claim "no pure-Simple binary can lint" (.claude/rules/commands.md).
+#
+# That claim conflated two different things. `lint` IS implemented entirely in
+# pure Simple (src/app/cli/lint_entry.spl -> app.io.cli_lint_commands, plus
+# src/app/lint/main.spl) and is wired into the full self-hosted CLI dispatch
+# (src/app/cli/dispatch/table.spl and src/app/cli/_CliMain/main_and_help.spl).
+# What answers `unknown command 'lint'` is bootstrap/stage3/simple, which is the
+# BOOTSTRAP CLI (src/app/cli/bootstrap_main.spl) and by design exposes exactly
+# two commands -- `compile` and `native-build`. It has no `run`, `test` or `fmt`
+# either. Probing it for `lint` is a category error, not a missing port.
+#
+# This guard therefore checks the thing that actually decides the question:
+# the pure-Simple lint program EXECUTES as an ordinary Simple program and its
+# findings discriminate. It does NOT grep any source file for a symbol -- see
+# .claude/skills/spipe.md 'Source-text assertions are not evidence'.
+#
+# Two fixtures, so a pass cannot be vacuous:
+#   clean fixture -> must reach the "Lint passed" verdict and emit NO
+#                    "Found N error(s), M warning(s)" line with M > 0
+#   dirty fixture -> must emit RAW-RT-001 for a raw `extern fn rt_*` declaration
+# A run where the dirty fixture comes back clean is the false-green this guard
+# exists to catch, and is a FAIL, never a pass.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md convention:
+#   PASS  - <n> fixture(s) linted, ...        exit 0
+#   FAIL  - ...                               exit 1
+#   ERROR - nothing was checked               exit 2
+#
+# Usage:
+#   sh scripts/check/check-pure-simple-lint-runnable.shs [--binary PATH]
+#   sh scripts/check/check-pure-simple-lint-runnable.shs --selftest
+
+set -u
+
+BINARY="bin/simple"
+SELFTEST=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) BINARY="$2"; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        *) printf 'ERROR - nothing was checked (unknown argument: %s)\n' "$1"; exit 2 ;;
+    esac
+done
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT" || { printf 'ERROR - nothing was checked (cannot cd to repo root)\n'; exit 2; }
+
+if [ ! -x "$BINARY" ]; then
+    printf 'ERROR - nothing was checked (no executable at %s)\n' "$BINARY"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { printf 'ERROR - nothing was checked (mktemp failed)\n'; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+# Keep fixtures TINY. Lint cost is superlinear in file content -- see the
+# measured table in .claude/rules/commands.md. Do not grow these, and do not
+# batch them into one invocation.
+CLEAN="$WORK/clean_fixture.spl"
+DIRTY="$WORK/dirty_fixture.spl"
+
+printf 'fn add(a: i64, b: i64) -> i64:\n    a + b\n' > "$CLEAN"
+printf 'extern fn rt_file_write_text(a: text, b: text) -> bool\n\nfn go() -> bool:\n    rt_file_write_text("a", "b")\n' > "$DIRTY"
+
+# Run the pure-Simple lint program directly, not the host binary's own `lint`
+# subcommand: on the Rust seed those are different code paths, and only this one
+# proves the .spl implementation executed.
+run_lint() {
+    timeout 600 "$BINARY" run src/app/cli/lint_entry.spl lint "$1" 2>&1
+    # status is read on the NEXT line by the caller, never through a pipe
+}
+
+CHECKED=0
+FAILURES=""
+
+CLEAN_OUT=$(run_lint "$CLEAN")
+CLEAN_RC=$?
+CHECKED=$((CHECKED + 1))
+
+if [ "$CLEAN_RC" -eq 124 ] || [ "$CLEAN_RC" -eq 137 ]; then
+    printf 'ERROR - nothing was checked (clean fixture timed out; host may be saturated)\n'
+    exit 2
+fi
+
+case "$CLEAN_OUT" in
+    *"Lint passed"*) : ;;
+    *) FAILURES="$FAILURES clean-fixture-no-passed-verdict" ;;
+esac
+case "$CLEAN_OUT" in
+    *"warning(s)"*) FAILURES="$FAILURES clean-fixture-reported-findings" ;;
+esac
+
+DIRTY_OUT=$(run_lint "$DIRTY")
+DIRTY_RC=$?
+CHECKED=$((CHECKED + 1))
+
+if [ "$DIRTY_RC" -eq 124 ] || [ "$DIRTY_RC" -eq 137 ]; then
+    printf 'ERROR - nothing was checked (dirty fixture timed out; host may be saturated)\n'
+    exit 2
+fi
+
+case "$DIRTY_OUT" in
+    *"RAW-RT-001"*) : ;;
+    *) FAILURES="$FAILURES dirty-fixture-missed-RAW-RT-001" ;;
+esac
+
+if [ "$SELFTEST" -eq 1 ]; then
+    # The selftest is the discrimination proof: the two fixtures must NOT
+    # produce the same verdict. If they do, the oracle is inert.
+    if [ "$CLEAN_OUT" = "$DIRTY_OUT" ]; then
+        printf 'FAIL - selftest: clean and dirty fixtures produced identical output; oracle is inert\n'
+        exit 1
+    fi
+fi
+
+if [ "$CHECKED" -eq 0 ]; then
+    printf 'ERROR - nothing was checked\n'
+    exit 2
+fi
+
+if [ -n "$FAILURES" ]; then
+    printf 'FAIL - %s fixture(s) linted via %s, defects:%s\n' "$CHECKED" "$BINARY" "$FAILURES"
+    exit 1
+fi
+
+printf 'PASS - %s fixture(s) linted, pure-Simple lint_entry.spl executed and its findings discriminate (%s)\n' \
+    "$CHECKED" "$BINARY"
+exit 0

@@ -1,0 +1,187 @@
+#!/bin/sh
+# check-coverage-not-silent-noop.shs — coverage must never exit 0 having written nothing.
+#
+# Incident 2026-08-17: `SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<p> bin/simple
+# run x.spl` wrote NO file to any of the three candidate locations and exited 0.
+#
+# Root cause was a call-graph gap, not a logic bug in the writer:
+# `real_main()` calls `init_coverage_from_env()`, which turns COLLECTION on for
+# EVERY command whenever SIMPLE_COVERAGE is set — but `save_global_coverage()`
+# had exactly one caller, `driver/src/cli/test_runner/coverage.rs`, reached only
+# by the `test` subcommand. Every other command therefore collected coverage
+# into a global that was never flushed.
+#
+# A silent no-op in a coverage tool is worse than a crash: it makes every
+# coverage number unverified while looking green. This guard asserts the flush
+# is wired at the shared exit path and that it is fail-closed.
+#
+# Verdict convention (last line of stdout is authoritative):
+#   PASS  — <n> invariant(s) checked, ...   exit 0
+#   FAIL  — ...                             exit 1
+#   ERROR — nothing was checked             exit 2
+#
+# Non-vacuity is absolute: a run that checked 0 invariants is ERROR, never PASS.
+
+set -u
+
+MAIN="${MAIN_PATH:-src/compiler_rust/driver/src/main.rs}"
+COV="${COV_PATH:-src/compiler_rust/compiler/src/coverage.rs}"
+CHECKED=0
+FAILURES=""
+
+fail() { FAILURES="${FAILURES}${FAILURES:+; }$1"; }
+note() { CHECKED=$(( CHECKED + 1 )); }
+
+# ---------------------------------------------------------------- selftest ---
+# Fixtures are synthetic Rust-shaped text, so the selftest never needs cargo.
+run_selftest() {
+    _d=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    _sf=""
+
+    # Fixture A: the INCIDENT shape — collection initialised, never flushed.
+    cat > "$_d/bad.rs" <<'EOF'
+fn real_main() {
+    simple_compiler::init_coverage_from_env();
+    let exit_code = dispatch();
+    simple_compiler::interpreter::print_resolve_stats();
+    std::process::exit(exit_code);
+}
+EOF
+    if MAIN_PATH="$_d/bad.rs" COV_PATH="$COV" sh "$0" --no-selftest >/dev/null 2>&1; then
+        _sf="${_sf}${_sf:+; }incident-shape fixture PASSED but must FAIL"
+    fi
+
+    # Fixture B: the FIXED shape must pass.
+    cat > "$_d/good.rs" <<'EOF'
+fn flush_coverage_before_exit() -> i32 {
+    if !simple_compiler::is_coverage_enabled() { return 0; }
+    if let Err(e) = simple_compiler::save_global_coverage() {
+        eprintln!("error: coverage: {e}");
+        return 1;
+    }
+    if let Some(path) = simple_compiler::get_coverage_output_path() {
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("error: no coverage artifact at {path}");
+            return 1;
+        }
+    }
+    0
+}
+fn real_main() {
+    simple_compiler::init_coverage_from_env();
+    let exit_code = dispatch();
+    simple_compiler::interpreter::print_resolve_stats();
+    let coverage_exit = flush_coverage_before_exit();
+    let exit_code = if coverage_exit != 0 { coverage_exit } else { exit_code };
+    std::process::exit(exit_code);
+}
+EOF
+    if ! MAIN_PATH="$_d/good.rs" COV_PATH="$COV" sh "$0" --no-selftest >/dev/null 2>&1; then
+        _sf="${_sf}${_sf:+; }fixed-shape fixture FAILED but must PASS"
+    fi
+
+    # Fixture C: a missing file must be ERROR (exit 2), never a pass.
+    MAIN_PATH="$_d/nope.rs" COV_PATH="$COV" sh "$0" --no-selftest >/dev/null 2>&1
+    if [ "$?" -ne 2 ]; then
+        _sf="${_sf}${_sf:+; }missing main.rs did not yield ERROR exit 2"
+    fi
+
+    # Fixture D: flush present but NOT fail-closed must FAIL.
+    cat > "$_d/soft.rs" <<'EOF'
+fn flush_coverage_before_exit() -> i32 {
+    if !simple_compiler::is_coverage_enabled() { return 0; }
+    let _ = simple_compiler::save_global_coverage();
+    0
+}
+fn real_main() {
+    simple_compiler::init_coverage_from_env();
+    let exit_code = dispatch();
+    let coverage_exit = flush_coverage_before_exit();
+    let exit_code = if coverage_exit != 0 { coverage_exit } else { exit_code };
+    std::process::exit(exit_code);
+}
+EOF
+    if MAIN_PATH="$_d/soft.rs" COV_PATH="$COV" sh "$0" --no-selftest >/dev/null 2>&1; then
+        _sf="${_sf}${_sf:+; }non-fail-closed fixture PASSED but must FAIL"
+    fi
+
+    rm -rf "$_d" 2>/dev/null || true
+
+    if [ -n "$_sf" ]; then
+        echo "selftest FAILED: $_sf" >&2
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "selftest: 4 fixture(s) passed"
+}
+
+case "${1:-}" in
+    --no-selftest) ;;
+    *) run_selftest ;;
+esac
+
+# ------------------------------------------------------------- invariants ---
+if [ ! -f "$MAIN" ]; then
+    echo "ERROR — nothing was checked (driver main not found at $MAIN)"
+    exit 2
+fi
+
+# 1. A flush helper must exist.
+note
+grep -q 'fn flush_coverage_before_exit' "$MAIN" || \
+    fail "flush_coverage_before_exit() is not defined in $MAIN"
+
+# 2. It must actually be called on the shared exit path.
+note
+grep -q 'flush_coverage_before_exit()' "$MAIN" || \
+    fail "flush_coverage_before_exit() is never called; coverage is collected but never written"
+
+# 3. It must reach save_global_coverage.
+note
+grep -q 'save_global_coverage()' "$MAIN" || \
+    fail "$MAIN never calls save_global_coverage(); the 'run' path cannot emit an artifact"
+
+# 4. Fail-closed: a write failure must not be swallowed.
+note
+if grep -q 'let _ = simple_compiler::save_global_coverage' "$MAIN"; then
+    fail "save_global_coverage() result is discarded; a write failure would exit 0 silently"
+fi
+note
+grep -q 'if let Err(e) = simple_compiler::save_global_coverage' "$MAIN" || \
+    fail "save_global_coverage() error is not handled explicitly"
+
+# 5. The flush result must be able to change the process exit code.
+note
+grep -q 'coverage_exit != 0' "$MAIN" || \
+    fail "flush result never influences the exit code; a coverage failure would still exit 0"
+
+# 6. Existence must be verified, not trusted — the incident was a missing file
+#    with a clean exit, which a write that reports Ok would not have caught.
+note
+grep -q 'exists()' "$MAIN" || \
+    fail "artifact existence is never verified after writing"
+
+# 7. Collection is still initialised from the environment.
+note
+grep -q 'init_coverage_from_env()' "$MAIN" || \
+    fail "init_coverage_from_env() missing; coverage would never be collected at all"
+
+# 8. The writer still honours SIMPLE_COVERAGE_OUTPUT.
+if [ -f "$COV" ]; then
+    note
+    grep -q 'SIMPLE_COVERAGE_OUTPUT' "$COV" || \
+        fail "$COV no longer reads SIMPLE_COVERAGE_OUTPUT"
+fi
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ -n "$FAILURES" ]; then
+    echo "FAIL — $CHECKED invariant(s) checked in $MAIN: $FAILURES"
+    exit 1
+fi
+
+echo "PASS — $CHECKED invariant(s) checked, coverage flush is wired at the shared exit path and fail-closed"
+exit 0

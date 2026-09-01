@@ -1,0 +1,241 @@
+#!/bin/sh
+# Fail-closed admission for a real Aetheric host Web/GUI evidence bundle.
+#
+# This wrapper does not manufacture a DOM, pixels, or UI-access history. Its
+# input must be emitted by the production HTML/WebIR-to-DrawIR Electron run.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/aetheric-host-web-gui-evidence}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+PROOF_PATH="${AETHERIC_HOST_WEB_GUI_PROOF:-$BUILD_DIR/aetheric-host-web-gui.env}"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SNAPSHOT="src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl"
+EXPECTED_ELECTRON_VERSION="42.5.0"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+BUILD_DIR_CANONICAL="$(CDPATH= cd -- "$BUILD_DIR" && pwd -P)"
+CURRENT_REVISION="$(git rev-parse HEAD)"
+
+field() { sed -n "s/^$1=//p" "$PROOF_PATH" | tail -n 1; }
+regular_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
+positive() { case "$1" in ''|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] ;; esac; }
+sha256() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) false ;; *) true ;; esac; }
+contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+numeric_version() { printf '%s\n' "$1" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; }
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
+    fi
+}
+artifact_under_build_dir() {
+    candidate="$1"
+    case "$candidate" in /*) ;; *) candidate="$ROOT_DIR/$candidate" ;; esac
+    regular_file "$candidate" || return 1
+    artifact_dir="$(CDPATH= cd -- "$(dirname -- "$candidate")" && pwd -P)"
+    artifact_canonical="$artifact_dir/$(basename -- "$candidate")"
+    case "$artifact_canonical" in "$BUILD_DIR_CANONICAL"/*) return 0 ;; *) return 1 ;; esac
+}
+canonical_regular_file() {
+    candidate="$1"
+    case "$candidate" in /*) ;; *) return 1 ;; esac
+    regular_file "$candidate" || return 1
+    candidate_dir="$(CDPATH= cd -- "$(dirname -- "$candidate")" && pwd -P)"
+    [ "$candidate" = "$candidate_dir/$(basename -- "$candidate")" ]
+}
+manifest_field() {
+    manifest="$1"
+    key="$2"
+    sed -n "s/^$key=//p" "$manifest" | tail -n 1
+}
+
+emit() {
+    status="$1"; reason="$2"
+    {
+        echo "aetheric_host_web_gui_status=$status"
+        echo "aetheric_host_web_gui_reason=$reason"
+        echo "aetheric_host_web_gui_proof=$PROOF_PATH"
+        echo "aetheric_host_web_gui_simple_bin=$SIMPLE_BIN"
+        echo "aetheric_host_web_gui_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "aetheric_host_web_gui_live_qemu=not-applicable"
+        echo "aetheric_host_web_gui_live_execution=$([ "$status" = pass ] && echo pass || echo pending-or-failed)"
+        [ -f "$PROOF_PATH" ] && sed 's/^/aetheric_host_web_gui_proof_/' "$PROOF_PATH"
+    } | tee "$BUILD_DIR/evidence.env"
+    {
+        echo "# Aetheric Host Web/GUI Evidence"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- proof: $PROOF_PATH"
+        echo "- binary: $SIMPLE_BIN ($SIMPLE_BIN_SOURCE)"
+        echo "- contract: production HTML/WebIR-to-DrawIR Electron evidence only; no fixture, compatibility renderer, raw source execution, blur, or tolerance."
+    } > "$REPORT_PATH"
+    [ "$status" = pass ]
+}
+
+if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
+    emit fail missing-simple-bin
+    exit 1
+fi
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+canonical_simple_bin="$(bootstrap_stage3_canonical_file "$SIMPLE_BIN")" || {
+    emit fail unprovenanced-simple-bin
+    exit 1
+}
+stage4_verify_candidate_provenance "${canonical_simple_bin}.provenance.env" \
+    "$canonical_simple_bin" "$ROOT_DIR" || {
+    emit fail unprovenanced-simple-bin
+    exit 1
+}
+SIMPLE_BIN="$canonical_simple_bin"
+if ! regular_file "$PROOF_PATH"; then
+    emit fail missing-production-proof
+    exit 1
+fi
+if ! regular_file "$SNAPSHOT"; then
+    emit fail generated-aetheric-snapshot-missing
+    exit 1
+fi
+
+expected_manifest="$(sed -n 's/.*source_manifest_sha256: "\([0-9a-f]*\)".*/\1/p' "$SNAPSHOT" | head -n 1)"
+expected_material="$(sed -n 's/.*material_sha256: "\([0-9a-f]*\)".*/\1/p' "$SNAPSHOT" | head -n 1)"
+required='schema status producer theme_id theme_source_manifest_sha256 theme_material_sha256 source_revision binary_sha256 generator_binary_path generator_binary_sha256 renderer_binary_path renderer_binary_sha256 ui_driver_binary_path ui_driver_binary_sha256 source_log_path source_log_sha256 html_path html_sha256 observation_path observation_sha256 electron_process_version chrome_process_version electron_launcher_path electron_launcher_sha256 electron_app_executable_path electron_app_executable_sha256 electron_package_path electron_package_sha256 electron_lock_path electron_lock_sha256 backend simple_renderer_producer simple_requested_backend simple_resolved_backend simple_readback_source simple_width simple_height electron_producer electron_width electron_height capture_path capture_sha256 pixel_artifact_path pixel_artifact_sha256 pixel_count pixel_checksum screenshot_path screenshot_sha256 screenshot_nonblank_pixels ui_access_snapshot_status ui_access_surface_status ui_access_find_status ui_access_act_focus_status ui_access_act_pointer_down_status ui_access_act_pointer_up_status ui_access_act_keyboard_status ui_access_act_text_status ui_access_history_status ui_access_revision_status ui_access_snapshot_path ui_access_snapshot_sha256 ui_access_surface_path ui_access_surface_sha256 ui_access_find_path ui_access_find_sha256 ui_access_act_focus_path ui_access_act_focus_sha256 ui_access_act_focus_revision_path ui_access_act_focus_revision_sha256 ui_access_act_pointer_down_path ui_access_act_pointer_down_sha256 ui_access_act_pointer_down_revision_path ui_access_act_pointer_down_revision_sha256 ui_access_act_pointer_up_path ui_access_act_pointer_up_sha256 ui_access_act_pointer_up_revision_path ui_access_act_pointer_up_revision_sha256 ui_access_act_keyboard_path ui_access_act_keyboard_sha256 ui_access_act_keyboard_revision_path ui_access_act_keyboard_revision_sha256 ui_access_act_text_path ui_access_act_text_sha256 ui_access_act_text_revision_path ui_access_act_text_revision_sha256 ui_access_post_action_path ui_access_post_action_sha256 ui_access_history_path ui_access_history_sha256 post_action_semantic_state computed_window_background computed_window_border_color computed_window_border_radius computed_window_box_shadow computed_titlebar_backdrop_filter computed_titlebar_webkit_backdrop_filter computed_typography_family computed_typography_weight computed_inactive_border computed_inactive_shadow computed_active_border computed_active_shadow computed_button_transition_duration performance_now_available performance_now_delta_ms animation_frame_available animation_frame_count css_animation_probe blur_or_tolerance_used synthetic_fixture raw_source_execution compatibility_renderer'
+required="$required provider_provenance_path provider_provenance_sha256 renderer_wm_provider_path renderer_wm_provider_sha256 renderer_c_wm_provider_path renderer_c_wm_provider_sha256 ui_sqlite_provider_path ui_sqlite_provider_sha256 ui_sqlite_system_provider_path ui_sqlite_system_provider_sha256"
+for key in $required; do
+    value="$(field "$key")"
+    [ -n "$value" ] || { emit fail "missing-required-field:$key"; exit 1; }
+done
+
+[ "$(field schema)" = aetheric-host-web-gui-v1 ] || { emit fail invalid-schema; exit 1; }
+[ "$(field status)" = pass ] || { emit fail producer-status-not-pass; exit 1; }
+[ "$(field producer)" = production-html-webir-drawir-electron ] || { emit fail producer-not-canonical; exit 1; }
+[ "$(field theme_id)" = aetheric_dark ] || { emit fail theme-id-mismatch; exit 1; }
+[ "$(field theme_source_manifest_sha256)" = "$expected_manifest" ] || { emit fail theme-manifest-mismatch; exit 1; }
+[ "$(field theme_material_sha256)" = "$expected_material" ] || { emit fail theme-material-mismatch; exit 1; }
+[ "$(field source_revision)" = "$CURRENT_REVISION" ] || { emit fail source-revision-mismatch; exit 1; }
+[ "$(field backend)" = cpu_simd ] || { emit fail backend-not-cpu-simd; exit 1; }
+[ "$(field simple_requested_backend)" = cpu_simd ] && [ "$(field simple_resolved_backend)" = cpu_simd ] || { emit fail simple-backend-provenance-mismatch; exit 1; }
+contains "$(field simple_renderer_producer)" simple-web-core-renderer-cpu_simd- || { emit fail simple-renderer-producer-mismatch; exit 1; }
+[ "$(field simple_readback_source)" = cpu_mirror ] || { emit fail simple-readback-source-mismatch; exit 1; }
+[ "$(field electron_producer)" = electron-chromium-capture ] || { emit fail electron-producer-mismatch; exit 1; }
+[ "$(field electron_process_version)" = "$EXPECTED_ELECTRON_VERSION" ] || { emit fail electron-version-mismatch; exit 1; }
+numeric_version "$(field chrome_process_version)" || { emit fail chrome-version-invalid; exit 1; }
+command -v node >/dev/null 2>&1 || { emit fail electron-identity-validator-missing; exit 1; }
+if ! electron_identity_output="$(node tools/electron-live-bitmap/aetheric_electron_identity.js \
+    verify-proof --root "$ROOT_DIR" --proof "$PROOF_PATH" 2>/dev/null)"; then
+    electron_identity_reason="$(printf '%s\n' "$electron_identity_output" |
+        sed -n 's/^aetheric_electron_identity_reason=//p' | tail -n 1)"
+    [ -n "$electron_identity_reason" ] || electron_identity_reason="electron-identity-validation-failed"
+    emit fail "$electron_identity_reason"
+    exit 1
+fi
+[ "$(field simple_width)" = "$(field electron_width)" ] && [ "$(field simple_height)" = "$(field electron_height)" ] || { emit fail renderer-dimension-mismatch; exit 1; }
+sha256 "$(field binary_sha256)" && sha256 "$(field pixel_checksum)" || { emit fail invalid-binary-or-pixel-sha256; exit 1; }
+[ "$(field binary_sha256)" = "$(sha256_file "$SIMPLE_BIN")" ] || { emit fail binary-sha256-mismatch; exit 1; }
+for path_key in generator_binary_path renderer_binary_path ui_driver_binary_path provider_provenance_path ui_sqlite_provider_path source_log_path html_path observation_path capture_path pixel_artifact_path screenshot_path ui_access_snapshot_path ui_access_surface_path ui_access_find_path ui_access_act_focus_path ui_access_act_focus_revision_path ui_access_act_pointer_down_path ui_access_act_pointer_down_revision_path ui_access_act_pointer_up_path ui_access_act_pointer_up_revision_path ui_access_act_keyboard_path ui_access_act_keyboard_revision_path ui_access_act_text_path ui_access_act_text_revision_path ui_access_post_action_path ui_access_history_path; do artifact_under_build_dir "$(field "$path_key")" || { emit fail "artifact-outside-build-or-linked:$path_key"; exit 1; }; done
+[ -x "$(field generator_binary_path)" ] && [ -x "$(field renderer_binary_path)" ] && [ -x "$(field ui_driver_binary_path)" ] || { emit fail native-producer-not-executable; exit 1; }
+[ "$(field generator_binary_sha256)" = "$(sha256_file "$(field generator_binary_path)")" ] || { emit fail generator-binary-sha256-mismatch; exit 1; }
+[ "$(field renderer_binary_sha256)" = "$(sha256_file "$(field renderer_binary_path)")" ] || { emit fail renderer-binary-sha256-mismatch; exit 1; }
+[ "$(field ui_driver_binary_sha256)" = "$(sha256_file "$(field ui_driver_binary_path)")" ] || { emit fail ui-driver-binary-sha256-mismatch; exit 1; }
+for provider_key in renderer_wm_provider renderer_c_wm_provider ui_sqlite_provider ui_sqlite_system_provider; do
+    provider_path="$(field "${provider_key}_path")"
+    canonical_regular_file "$provider_path" || { emit fail "provider-path-not-canonical:$provider_key"; exit 1; }
+    [ "$(field "${provider_key}_sha256")" = "$(sha256_file "$provider_path")" ] ||
+        { emit fail "provider-sha256-mismatch:$provider_key"; exit 1; }
+done
+PROVIDER_PROVENANCE="$(field provider_provenance_path)"
+canonical_regular_file "$PROVIDER_PROVENANCE" ||
+    { emit fail provider-provenance-path-not-canonical; exit 1; }
+[ "$(field provider_provenance_sha256)" = "$(sha256_file "$PROVIDER_PROVENANCE")" ] ||
+    { emit fail provider-provenance-sha256-mismatch; exit 1; }
+[ "$(manifest_field "$PROVIDER_PROVENANCE" schema)" = aetheric-host-web-gui-provider-provenance-v1 ] ||
+    { emit fail provider-provenance-schema-mismatch; exit 1; }
+[ "$(manifest_field "$PROVIDER_PROVENANCE" status)" = pass ] ||
+    { emit fail provider-provenance-status-not-pass; exit 1; }
+[ "$(manifest_field "$PROVIDER_PROVENANCE" source_revision)" = "$CURRENT_REVISION" ] ||
+    { emit fail provider-provenance-revision-mismatch; exit 1; }
+PROVENANCE_COMPILER="$(manifest_field "$PROVIDER_PROVENANCE" compiler_path)"
+canonical_regular_file "$PROVENANCE_COMPILER" &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" compiler_sha256)" = "$(sha256_file "$PROVENANCE_COMPILER")" ] &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" compiler_sha256)" = "$(field binary_sha256)" ] ||
+    { emit fail provider-provenance-compiler-mismatch; exit 1; }
+for binding in renderer_wm_provider renderer_c_wm_provider; do
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" "${binding}_path")" = "$(field "${binding}_path")" ] &&
+        [ "$(manifest_field "$PROVIDER_PROVENANCE" "${binding}_sha256")" = "$(field "${binding}_sha256")" ] ||
+        { emit fail "provider-provenance-binding-mismatch:$binding"; exit 1; }
+done
+[ "$(manifest_field "$PROVIDER_PROVENANCE" sqlite_object_path)" = "$(field ui_sqlite_provider_path)" ] &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" sqlite_object_sha256)" = "$(field ui_sqlite_provider_sha256)" ] ||
+    { emit fail provider-provenance-binding-mismatch:ui-sqlite; exit 1; }
+[ "$(manifest_field "$PROVIDER_PROVENANCE" sqlite_system_provider_path)" = "$(field ui_sqlite_system_provider_path)" ] &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" sqlite_system_provider_sha256)" = "$(field ui_sqlite_system_provider_sha256)" ] ||
+    { emit fail provider-provenance-binding-mismatch:ui-sqlite-system; exit 1; }
+SQLITE_SOURCE="$ROOT_DIR/src/runtime/runtime_sqlite.c"
+[ "$(manifest_field "$PROVIDER_PROVENANCE" sqlite_source_path)" = "$SQLITE_SOURCE" ] &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" sqlite_source_sha256)" = "$(sha256_file "$SQLITE_SOURCE")" ] ||
+    { emit fail provider-provenance-sqlite-source-mismatch; exit 1; }
+SQLITE_COMPILER="$(manifest_field "$PROVIDER_PROVENANCE" sqlite_compiler_path)"
+canonical_regular_file "$SQLITE_COMPILER" &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" sqlite_compiler_sha256)" = "$(sha256_file "$SQLITE_COMPILER")" ] ||
+    { emit fail provider-provenance-sqlite-compiler-mismatch; exit 1; }
+SQLITE_SDK="$(manifest_field "$PROVIDER_PROVENANCE" sqlite_sdk_path)"
+[ -d "$SQLITE_SDK" ] && [ "$SQLITE_SDK" = "$(CDPATH= cd -- "$SQLITE_SDK" && pwd -P)" ] &&
+    [ "$(field ui_sqlite_system_provider_path)" = "$SQLITE_SDK/usr/lib/libsqlite3.tbd" ] ||
+    { emit fail provider-provenance-sqlite-sdk-mismatch; exit 1; }
+[ "$(manifest_field "$PROVIDER_PROVENANCE" sqlite_compile_flags)" = '-Os -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-stack-protector -fno-builtin -fPIC -std=gnu11' ] ||
+    { emit fail provider-provenance-sqlite-flags-mismatch; exit 1; }
+[ "$(manifest_field "$PROVIDER_PROVENANCE" generator_cache_path)" = "$BUILD_DIR_CANONICAL/native-cache/generator" ] &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" renderer_cache_path)" = "$BUILD_DIR_CANONICAL/native-cache/renderer" ] &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" ui_access_cache_path)" = "$BUILD_DIR_CANONICAL/native-cache/ui-access" ] ||
+    { emit fail provider-provenance-cache-scope-mismatch; exit 1; }
+[ "$(manifest_field "$PROVIDER_PROVENANCE" generator_binary_sha256)" = "$(field generator_binary_sha256)" ] &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" renderer_binary_sha256)" = "$(field renderer_binary_sha256)" ] &&
+    [ "$(manifest_field "$PROVIDER_PROVENANCE" ui_driver_binary_sha256)" = "$(field ui_driver_binary_sha256)" ] ||
+    { emit fail provider-provenance-binary-mismatch; exit 1; }
+[ "$(field source_log_sha256)" = "$(sha256_file "$(field source_log_path)")" ] || { emit fail source-log-sha256-mismatch; exit 1; }
+[ "$(field html_sha256)" = "$(sha256_file "$(field html_path)")" ] || { emit fail html-sha256-mismatch; exit 1; }
+[ "$(field observation_sha256)" = "$(sha256_file "$(field observation_path)")" ] || { emit fail observation-sha256-mismatch; exit 1; }
+for stem in snapshot surface find act_focus act_focus_revision act_pointer_down act_pointer_down_revision act_pointer_up act_pointer_up_revision act_keyboard act_keyboard_revision act_text act_text_revision post_action history; do
+    path_value="$(field "ui_access_${stem}_path")"
+    [ "$(field "ui_access_${stem}_sha256")" = "$(sha256_file "$path_value")" ] || { emit fail "ui-access-sha256-mismatch:$stem"; exit 1; }
+done
+[ "$(field capture_sha256)" = "$(sha256_file "$(field capture_path)")" ] || { emit fail capture-sha256-mismatch; exit 1; }
+[ "$(field pixel_artifact_sha256)" = "$(sha256_file "$(field pixel_artifact_path)")" ] || { emit fail pixel-artifact-sha256-mismatch; exit 1; }
+[ "$(field screenshot_sha256)" = "$(sha256_file "$(field screenshot_path)")" ] || { emit fail screenshot-sha256-mismatch; exit 1; }
+[ "$(field pixel_checksum)" = "$(field pixel_artifact_sha256)" ] || { emit fail pixel-checksum-mismatch; exit 1; }
+positive "$(field pixel_count)" && positive "$(field screenshot_nonblank_pixels)" || { emit fail blank-or-empty-pixels; exit 1; }
+
+[ "$(field computed_window_background)" = 'rgba(31, 31, 33, 0.8)' ] || { emit fail window-background-mismatch; exit 1; }
+[ "$(field computed_window_border_color)" = 'rgba(139, 144, 160, 0.2)' ] || { emit fail window-border-mismatch; exit 1; }
+[ "$(field computed_window_border_radius)" = 18px ] || { emit fail window-radius-mismatch; exit 1; }
+contains "$(field computed_inactive_shadow)" 'rgba(0, 0, 0, 0.34)' || { emit fail inactive-layered-shadow-missing; exit 1; }
+contains "$(field computed_inactive_shadow)" 'rgba(255, 255, 255, 0.1)' || { emit fail inactive-inset-shadow-missing; exit 1; }
+[ "$(field computed_titlebar_backdrop_filter)" = 'blur(30px) saturate(170%)' ] || { emit fail backdrop-filter-mismatch; exit 1; }
+[ "$(field computed_titlebar_webkit_backdrop_filter)" = 'blur(30px) saturate(170%)' ] || { emit fail webkit-backdrop-filter-mismatch; exit 1; }
+contains "$(field computed_typography_family)" Manrope || { emit fail typography-family-mismatch; exit 1; }
+[ "$(field computed_typography_weight)" = 650 ] || { emit fail typography-weight-mismatch; exit 1; }
+[ "$(field computed_inactive_border)" = 'rgba(139, 144, 160, 0.2)' ] || { emit fail inactive-state-mismatch; exit 1; }
+[ "$(field computed_active_border)" = 'rgba(193, 198, 215, 0.3)' ] || { emit fail active-state-mismatch; exit 1; }
+contains "$(field computed_active_shadow)" 'rgba(173, 198, 255, 0.4)' || { emit fail active-shadow-missing; exit 1; }
+contains "$(field computed_active_shadow)" 'rgba(0, 0, 0, 0.46)' || { emit fail active-elevation-missing; exit 1; }
+[ "$(field computed_button_transition_duration)" = '0.15s, 0.15s' ] || { emit fail theme-motion-token-missing; exit 1; }
+
+for key in ui_access_snapshot_status ui_access_surface_status ui_access_find_status ui_access_act_focus_status ui_access_act_pointer_down_status ui_access_act_pointer_up_status ui_access_act_keyboard_status ui_access_act_text_status ui_access_history_status; do [ "$(field "$key")" = pass ] || { emit fail "ui-access-not-pass:$key"; exit 1; }; done
+[ "$(field ui_access_revision_status)" = pass ] || { emit fail ui-access-revision-not-pass; exit 1; }
+[ "$(field post_action_semantic_state)" = text-mutated-and-focused ] || { emit fail post-action-state-missing; exit 1; }
+[ "$(field performance_now_available)" = true ] && positive "$(field performance_now_delta_ms)" || { emit fail performance-now-missing; exit 1; }
+[ "$(field animation_frame_available)" = true ] && [ "$(field animation_frame_count)" -ge 2 ] || { emit fail animation-frame-missing; exit 1; }
+[ "$(field css_animation_probe)" = true ] || { emit fail css-animation-not-applied; exit 1; }
+[ "$(field blur_or_tolerance_used)" = false ] && [ "$(field synthetic_fixture)" = false ] && [ "$(field raw_source_execution)" = false ] && [ "$(field compatibility_renderer)" = false ] || { emit fail forbidden-evidence-shortcut; exit 1; }
+
+emit pass production-aetheric-web-gui-evidence-verified

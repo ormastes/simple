@@ -1,0 +1,84 @@
+#!/bin/sh
+# check-no-phantom-field-push.shs — fail-closed ratchet for the defect class
+# that broke the Stage-2 bootstrap link on 2026-08-23.
+#
+# Shape: `recv.FIELD = recv.FIELD_push(recv.FIELD, v)` where FIELD_push is a
+# method that exists NOWHERE — not on the receiver's type, not in any `extend`
+# block, not as a free fn. The frontend and typechecker accept it, codegen
+# emits a call to the mangled symbol `<Type>.<FIELD>_push`, and the failure
+# only lands at the final native link as an undefined symbol (or, in the
+# interpreter, as `Runtime error: Function '<Type>.<FIELD>_push' not found`).
+#
+# 28 such sites (14 each in src/compiler/10.frontend/treesitter/outline.spl and
+# the shadowed facade src/compiler/10.frontend/treesitter.spl) sat in `main`
+# and killed Stage 2 with 14 undefined symbols. Correct form is direct
+# mutation through the owner — `recv.FIELD.push(v)` — which is also what
+# .claude/rules/code-style.md requires: `x = f(x, v)` deep-copies the whole
+# array per write under COW.
+#
+# This is a SOURCE-level guard on purpose. It cannot be a unit spec: a spec
+# executes inside a deployed `simple` binary that carries its OWN compiled
+# copy of src/compiler, so it cannot observe an edit to src/compiler at all,
+# and the only oracle that sees the real defect is the link step itself.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> file(s) scanned, 0 phantom field-push site(s)   exit 0
+#   FAIL — <n> file(s) scanned, <k> phantom site(s): <list>    exit 1
+#   ERROR — nothing was checked (<reason>)                     exit 2
+set -u
+
+ROOT="."
+SELFTEST=0
+for a in "$@"; do
+    case "$a" in
+        --selftest) SELFTEST=1 ;;
+        --root=*) ROOT="${a#--root=}" ;;
+        *) echo "unknown argument: $a" >&2; exit 2 ;;
+    esac
+done
+
+# The pattern, as one place both the scan and the selftest read.
+PAT='([A-Za-z_][A-Za-z0-9_]*)\.([a-z_][a-z0-9_]*) = \1\.\2_push\(\1\.\2,'
+
+scan() {
+    # $1 = root dir. Prints one "file:line: text" per offender on stdout.
+    grep -rnE --include='*.spl' "$PAT" "$1" 2>/dev/null | grep -v '/vendor/'
+}
+
+count_files() {
+    find "$1" -name '*.spl' -not -path '*/vendor/*' 2>/dev/null | wc -l
+}
+
+if [ "$SELFTEST" = 1 ]; then
+    TD=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    trap 'rm -rf "$TD"' EXIT
+    mkdir -p "$TD/dirty" "$TD/clean" "$TD/vend/vendor"
+    # fixture 1: the real incident shape must be FOUND
+    printf 'fn f():\n    module.imports = module.imports_push(module.imports, i)\n' > "$TD/dirty/a.spl"
+    # fixture 2: the correct form must NOT be found
+    printf 'fn f():\n    module.imports.push(i)\n' > "$TD/clean/a.spl"
+    # fixture 3: a legitimate free-function idiom (no receiver) must NOT be found
+    printf 'fn f():\n    items = items_push(items, x)\n' >> "$TD/clean/a.spl"
+    # fixture 4: vendored code must not be scanned
+    printf 'fn f():\n    m.xs = m.xs_push(m.xs, i)\n' > "$TD/vend/vendor/v.spl"
+    [ "$(scan "$TD/dirty" | wc -l)" -eq 1 ] || { echo "ERROR — nothing was checked (selftest: incident fixture not detected)"; exit 2; }
+    [ "$(scan "$TD/clean" | wc -l)" -eq 0 ] || { echo "ERROR — nothing was checked (selftest: false positive on clean fixture)"; exit 2; }
+    [ "$(scan "$TD/vend" | wc -l)" -eq 0 ] || { echo "ERROR — nothing was checked (selftest: vendor not excluded)"; exit 2; }
+    rm -rf "$TD"; trap - EXIT
+fi
+
+[ -d "$ROOT" ] || { echo "ERROR — nothing was checked (root '$ROOT' is not a directory)"; exit 2; }
+
+NFILES=$(count_files "$ROOT")
+[ "$NFILES" -gt 0 ] 2>/dev/null || { echo "ERROR — nothing was checked (0 .spl files under '$ROOT')"; exit 2; }
+
+HITS=$(scan "$ROOT")
+if [ -n "$HITS" ]; then
+    echo "$HITS"
+    K=$(echo "$HITS" | wc -l)
+    NAMES=$(echo "$HITS" | cut -d: -f1 | sort -u | tr '\n' ' ')
+    echo "FAIL — $NFILES file(s) scanned, $K phantom field-push site(s): $NAMES"
+    exit 1
+fi
+echo "PASS — $NFILES file(s) scanned, 0 phantom field-push site(s)"
+exit 0

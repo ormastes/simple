@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+owner=src/lib/nogc_sync_mut/game2d/backend/sdl_backend.spl
+provider=src/runtime/spl_winit/src/lib.rs
+input_dispatch=src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/winit_sffi_input.rs
+window_dispatch=src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/winit_sffi_window.rs
+event_dispatch=src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/winit_sffi_events.rs
+
+symbols='rt_winit_event_loop_new rt_winit_event_loop_free rt_winit_event_loop_poll_events rt_winit_window_new rt_winit_window_free rt_winit_event_get_type rt_winit_event_key_packed rt_winit_event_free'
+for symbol in $symbols; do
+    grep -B1 -F "extern fn $symbol" "$owner" | grep -q 'sentinel'
+done
+
+! grep -q 'rt_winit_event_keyboard_input' "$owner"
+grep -q 'fn rt_winit_event_key_packed' "$provider"
+grep -q '"rt_winit_event_key_packed"' "$input_dispatch"
+grep -q 'Ok(bool_value(true))' "$window_dispatch"
+grep -q 'Ok(bool_value(EVENTS.lock().remove' "$event_dispatch"
+
+# The packed snapshot replaces the prior single tuple call with one direct
+# scalar call and one lock; no extra per-key dispatch or allocation is added.
+test "$(grep -c 'packed = rt_winit_event_key_packed' "$owner")" -eq 1
+test "$(grep -c 'rt_winit_event_free(ev)' "$owner")" -eq 1
+if grep -E 'dlsym|HashMap|Mutex|retry|sleep\(' "$owner" >/dev/null; then
+    echo 'game2d Winit owner contains forbidden hot-path machinery' >&2
+    exit 1
+fi
+
+echo 'game2d Winit contract audit: PASS'

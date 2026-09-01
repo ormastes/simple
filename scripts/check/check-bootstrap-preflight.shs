@@ -1,0 +1,204 @@
+#!/bin/sh
+# check-bootstrap-preflight.shs — pre-bootstrap readiness detector (ADVISORY)
+#
+# Verifies, WITHOUT building anything, that a full bootstrap run has a fighting
+# chance. Five independent invariants (detector_standard.md rule 6):
+#   1. seed    — bin/simple resolves, executes, prints the version banner
+#   2. cargo   — `cargo check --release --bin simple` passes on the Rust seed
+#                (warm CARGO_TARGET_DIR; skipped with --no-cargo, counted as SKIP)
+#   3. probe   — known-blocker T0 probe: a tiny .spl using the lazy-import
+#                `use std.binary_io.{ByteOrder}` shape (the 2026-08-06 Stage 3
+#                blocker, RESOLVED — this fences its regression) runs under the
+#                current seed and prints the expected value
+#   4. disk    — free space on the build/ partition >= MIN_FREE_GB (default 20)
+#   5. markers — no PAIRED conflict markers in src/compiler_rust (open '<<<<<<<'
+#                plus close '>>>>>>>' in the same file; prose mentioning one
+#                marker does not false-positive — anti-FP decision per rule 7)
+#
+# Verdict (last stdout line): PASS/FAIL/ERROR, exit 0/1/2. n>0 or ERROR.
+# SKIPs are counted and printed separately, never folded into checked.
+# FP-RATE: not yet measured — ADVISORY; treat FAIL lists as an UPPER BOUND.
+# --selftest is fatal and runs before every scan (must-PASS and must-FAIL fixtures).
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+MIN_FREE_GB=${MIN_FREE_GB:-20}
+CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/mnt/data/tmp/cargo-seed-rebuild}
+export CARGO_TARGET_DIR
+NO_CARGO=0
+SELFTEST_ONLY=0
+for a in "$@"; do
+  case "$a" in
+    --no-cargo) NO_CARGO=1 ;;
+    --selftest) SELFTEST_ONLY=1 ;;
+    *) echo "usage: $0 [--no-cargo] [--selftest]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
+  esac
+done
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/preflight.XXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT
+
+# ---- helper classifiers (pure functions so selftest can fixture them) ----
+
+# banner_ok <version-output-file> : 0 if it looks like a simple version banner
+banner_ok() {
+  grep -q "Simple Language v" "$1"
+  return $?
+}
+
+# paired_markers <dir> : prints files having BOTH an open and a close marker
+paired_markers() {
+  _dir=$1
+  /usr/bin/grep -rl "^<<<<<<< " "$_dir" 2>/dev/null | while IFS= read -r _f; do
+    if /usr/bin/grep -q "^>>>>>>>" "$_f"; then echo "$_f"; fi
+  done
+}
+
+# probe_ok <output-file> : 0 if the blocker probe printed the expected line
+probe_ok() {
+  grep -q "^PROBE_BYTEORDER=little,big$" "$1"
+  return $?
+}
+
+write_probe_spl() {
+  cat > "$1" <<'EOF'
+use std.binary_io.{ByteOrder}
+
+fn order_name(o: ByteOrder) -> text:
+    match o:
+        case ByteOrder.LittleEndian: "little"
+        case ByteOrder.BigEndian: "big"
+
+fn main():
+    # Both variants must discriminate: the seed's unresolved-pattern path
+    # fails OPEN (an unresolved Enum.Variant case binds irrefutably), so a
+    # single-variant probe passes even when the import is broken. Requiring
+    # little AND big defeats that.
+    print("PROBE_BYTEORDER=" + order_name(ByteOrder.LittleEndian) + "," + order_name(ByteOrder.BigEndian))
+EOF
+}
+
+# ---- selftest (fatal, runs before every scan) ----
+selftest() {
+  st_fail=0
+  # banner: must-PASS
+  printf 'WARNING: seed\nSimple Language v1.0.0-RC\n' > "$TMP/b_ok"
+  banner_ok "$TMP/b_ok" || { echo "selftest FAIL: banner must-pass fixture"; st_fail=1; }
+  # banner: must-FAIL
+  printf 'command not found\n' > "$TMP/b_bad"
+  if banner_ok "$TMP/b_bad"; then echo "selftest FAIL: banner must-fail fixture passed"; st_fail=1; fi
+  # markers: must-FAIL (paired markers detected)
+  mkdir -p "$TMP/mk_bad" "$TMP/mk_ok" "$TMP/mk_prose"
+  printf '<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\n' > "$TMP/mk_bad/f.rs"
+  n=$(paired_markers "$TMP/mk_bad" | wc -l)
+  [ "$n" -eq 1 ] || { echo "selftest FAIL: paired-marker must-fail fixture (got $n)"; st_fail=1; }
+  # markers: must-PASS (clean)
+  printf 'fn main() {}\n' > "$TMP/mk_ok/f.rs"
+  n=$(paired_markers "$TMP/mk_ok" | wc -l)
+  [ "$n" -eq 0 ] || { echo "selftest FAIL: clean fixture flagged"; st_fail=1; }
+  # markers: must-PASS (prose mentioning one open marker only — no close pair)
+  printf 'doc: a line starting with conflict text\n<<<<<<< example only\n' > "$TMP/mk_prose/doc.rs"
+  n=$(paired_markers "$TMP/mk_prose" | wc -l)
+  [ "$n" -eq 0 ] || { echo "selftest FAIL: unpaired prose marker flagged (FP)"; st_fail=1; }
+  # probe classifier: must-PASS and must-FAIL
+  printf 'noise\nPROBE_BYTEORDER=little,big\n' > "$TMP/p_ok"
+  probe_ok "$TMP/p_ok" || { echo "selftest FAIL: probe must-pass fixture"; st_fail=1; }
+  printf 'error: unresolved type: ByteOrder\n' > "$TMP/p_bad"
+  if probe_ok "$TMP/p_bad"; then echo "selftest FAIL: probe must-fail fixture passed"; st_fail=1; fi
+  printf 'PROBE_BYTEORDER=little,little\n' > "$TMP/p_wrong"
+  if probe_ok "$TMP/p_wrong"; then echo "selftest FAIL: probe wrong-value fixture passed"; st_fail=1; fi
+  # disk arithmetic: must-FAIL when below threshold, must-PASS above
+  [ 5 -ge 3 ] || st_fail=1
+  if [ 2 -ge 3 ]; then echo "selftest FAIL: disk threshold arithmetic"; st_fail=1; fi
+  return $st_fail
+}
+
+if ! selftest; then
+  echo "ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+  echo "PASS — selftest only: 9 fixture(s) checked, 0 failed"
+  exit 0
+fi
+
+CHECKED=0; SKIPPED=0; FAILS=""
+
+# ---- 1. seed binary present + banner ----
+CHECKED=$((CHECKED+1))
+"$ROOT/bin/simple" --version > "$TMP/ver" 2>&1
+_rc=$?
+if [ "$_rc" -ne 0 ] || ! banner_ok "$TMP/ver"; then
+  FAILS="$FAILS seed-banner"
+fi
+echo "check seed: $(head -c 200 "$TMP/ver" | tr '\n' ' ')"
+
+# ---- 2. cargo check on the Rust seed ----
+if [ "$NO_CARGO" -eq 1 ]; then
+  SKIPPED=$((SKIPPED+1)); echo "check cargo: SKIP (--no-cargo)"
+elif ! command -v cargo >/dev/null 2>&1; then
+  echo "ERROR — nothing was checked (cargo not installed; absence of the tool is not a pass)"
+  exit 2
+else
+  CHECKED=$((CHECKED+1))
+  ( cd "$ROOT/src/compiler_rust" && cargo check --release --bin simple ) > "$TMP/cargo.log" 2>&1
+  _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    FAILS="$FAILS cargo-check"
+    echo "check cargo: FAIL — first error: $(grep -m1 '^error' "$TMP/cargo.log" || echo 'see log')"
+  else
+    echo "check cargo: ok"
+  fi
+fi
+
+# ---- 3. known-blocker T0 probe under the current seed ----
+CHECKED=$((CHECKED+1))
+PROBE_DIR="$ROOT/build/preflight_probe.$$"
+mkdir -p "$PROBE_DIR"
+write_probe_spl "$PROBE_DIR/probe.spl"
+( cd "$ROOT" && timeout 300 bin/simple run "$PROBE_DIR/probe.spl" ) > "$TMP/probe.out" 2>&1
+_rc=$?
+if [ "$_rc" -ne 0 ] || ! probe_ok "$TMP/probe.out"; then
+  FAILS="$FAILS blocker-probe"
+  echo "check probe: FAIL (exit=$_rc): $(tail -3 "$TMP/probe.out" | tr '\n' ' ')"
+else
+  echo "check probe: ok (ByteOrder lazy-import shape resolves under seed)"
+fi
+rm -rf "$PROBE_DIR"
+
+# ---- 4. disk space on build/ partition ----
+CHECKED=$((CHECKED+1))
+mkdir -p "$ROOT/build" 2>/dev/null
+free_kb=$(df -Pk "$ROOT/build" | awk 'NR==2{print $4}')
+_rc=$?
+if [ "$_rc" -ne 0 ] || [ -z "${free_kb:-}" ]; then
+  FAILS="$FAILS disk-unreadable"
+else
+  free_gb=$((free_kb / 1024 / 1024))
+  if [ "$free_gb" -ge "$MIN_FREE_GB" ]; then
+    echo "check disk: ok (${free_gb} GiB free >= ${MIN_FREE_GB})"
+  else
+    FAILS="$FAILS disk-space(${free_gb}GiB<${MIN_FREE_GB})"
+  fi
+fi
+
+# ---- 5. no paired conflict markers in src/compiler_rust ----
+CHECKED=$((CHECKED+1))
+mk=$(paired_markers "$ROOT/src/compiler_rust" | grep -v "/vendor/" | head -20)
+if [ -n "$mk" ]; then
+  FAILS="$FAILS conflict-markers($(echo "$mk" | wc -l) file(s))"
+  echo "check markers: FAIL:"; echo "$mk"
+else
+  echo "check markers: ok"
+fi
+
+# ---- verdict ----
+if [ "$CHECKED" -eq 0 ]; then
+  echo "ERROR — nothing was checked"
+  exit 2
+fi
+if [ -n "$FAILS" ]; then
+  echo "FAIL — $CHECKED check(s) run, failing:$FAILS ($SKIPPED skipped)"
+  exit 1
+fi
+echo "PASS — $CHECKED check(s) run, 0 failed ($SKIPPED skipped)"
+exit 0

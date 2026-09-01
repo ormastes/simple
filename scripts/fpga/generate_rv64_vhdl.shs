@@ -1,0 +1,163 @@
+#!/bin/sh
+# generate_rv64_vhdl.shs — Generate all RV64GC SoC VHDL files.
+#
+# Usage: sh scripts/fpga/generate_rv64_vhdl.shs [--output-dir=build/vhdl/rv64]
+#
+# Contract: this script NEVER silently reports success on a partial pipeline.
+# It always ends in exactly one of:
+#   RV64_VHDL_GEN: PASS      (all expected .vhd emitted AND ghdl -a --std=08 clean)
+#   RV64_VHDL_GEN: BLOCKED   (one or more precise reasons printed, non-zero exit)
+#
+# The authoritative CPU is compiled from rv64gc_rtl/imac_entry.spl through the
+# core-safe VHDL compiler entry. Handwritten/string-emitted CPU executors are
+# never accepted as a fallback; any compiler or product-core failure leaves
+# this pipeline BLOCKED.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+OUTPUT_DIR="build/vhdl/rv64"
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/release/simple}"
+RV64_PAYLOAD_ELF="${RV64_PAYLOAD_ELF:-build/os/simpleos_riscv64_fpga.elf}"
+
+for arg in "$@"; do
+    case "$arg" in
+        --output-dir=*) OUTPUT_DIR="${arg#--output-dir=}" ;;
+    esac
+done
+
+cd "$PROJECT_ROOT"
+mkdir -p "$OUTPUT_DIR"
+
+echo "=== RV64GC VHDL Generation Pipeline ==="
+echo "Output directory: $OUTPUT_DIR"
+echo ""
+
+# POSIX sh (no arrays): blockers accumulate as newline-separated lines.
+BLOCKERS=""
+add_blocker() {
+    if [ -z "$BLOCKERS" ]; then BLOCKERS="$1"; else BLOCKERS="$BLOCKERS
+$1"; fi
+}
+
+# --- Step 1: run the .spl driver (SoC glue + peripherals; never a parallel CPU) ---
+DRIVER_LOG="$OUTPUT_DIR/driver.log"
+echo "[1/4] Running VHDL generation driver..."
+if "$SIMPLE_BINARY" run scripts/fpga/rv64_vhdl_driver.spl >"$DRIVER_LOG" 2>&1; then
+    DRIVER_EXIT=0
+else
+    DRIVER_EXIT=$?
+fi
+tail -20 "$DRIVER_LOG"
+
+if [ $DRIVER_EXIT -ne 0 ]; then
+    reason="$(grep -m1 -E '^error(\[|:)' "$DRIVER_LOG")"
+    if [ -z "$reason" ]; then
+        reason="driver exited $DRIVER_EXIT with no 'error' line — check for a native crash (segfault seen intermittently on this exact failure in prior runs); see $DRIVER_LOG"
+    fi
+    add_blocker "driver (rv64_vhdl_driver.spl) failed: $reason"
+fi
+
+# --- Step 2: compile the authoritative Simple RV64IMAC product entry ---
+CORE_LOG="$OUTPUT_DIR/product_core.log"
+CORE_OUTPUT="$OUTPUT_DIR/rv64imac_core_product.vhd"
+echo ""
+echo "[2/4] Compiling Simple RV64IMAC product core..."
+if "$SIMPLE_BINARY" run src/app/cli/vhdl_compile_entry.spl \
+    src/lib/hardware/rv64gc_rtl/imac_entry.spl -o "$CORE_OUTPUT" \
+    >"$CORE_LOG" 2>&1; then
+    CORE_EXIT=0
+else
+    CORE_EXIT=$?
+fi
+tail -20 "$CORE_LOG"
+if [ $CORE_EXIT -ne 0 ] || [ ! -s "$CORE_OUTPUT" ]; then
+    add_blocker "compiler-emitted RV64 product core failed; see $CORE_LOG"
+fi
+
+# --- Step 3: verify every required artifact actually landed ---
+# (never trust a raw .vhd file count — check the exact expected set by name)
+EXPECTED_FILES="rv64imac_core_product rv64imac_core_product_wb clint plic uart16550 ram bootrom wb_interconnect soc_top_rv64 soc_top_rv64_external_ddr wb64_axi_hp_bridge soc_top_rv64_k26_pl soc_top_rv64_k26"
+EXPECTED_COUNT=0
+for f in $EXPECTED_FILES; do EXPECTED_COUNT=$((EXPECTED_COUNT + 1)); done
+echo ""
+echo "[3/4] Checking expected VHDL outputs..."
+MISSING=""
+MISSING_COUNT=0
+for f in $EXPECTED_FILES; do
+    if [ -s "$OUTPUT_DIR/$f.vhd" ]; then
+        echo "  OK: $f.vhd"
+    else
+        echo "  MISSING: $f.vhd"
+        MISSING="$MISSING $f.vhd"
+        MISSING_COUNT=$((MISSING_COUNT + 1))
+    fi
+done
+if [ $MISSING_COUNT -gt 0 ]; then
+    add_blocker "missing expected VHDL files ($MISSING_COUNT/$EXPECTED_COUNT):$MISSING"
+fi
+
+# --- Step 4: ghdl -a --std=08 on whatever .vhd files exist, one at a time ---
+# soc_top_rv64_k26.vhd needs the Xilinx `unisim` library (STARTUPE3/BUFGCE_DIV
+# primitives) which raw GHDL does not ship; that is an expected/known
+# elaboration-only dependency, not a generation defect, so its ghdl failure is
+# reported but does not by itself flip an otherwise-clean run to BLOCKED.
+echo ""
+echo "[4/5] Running ghdl -a --std=08 on generated VHDL..."
+GHDL_WORKDIR="$OUTPUT_DIR/.ghdl_work"
+mkdir -p "$GHDL_WORKDIR"
+GHDL_FAILS=""
+# Analysis order matters: soc tops instantiate the other units, so analyze
+# leaf units first, soc_top_* last (alphabetical order broke on soc_top_rv64
+# needing uart once the driver actually emitted files).
+for base in $EXPECTED_FILES; do
+    f="$OUTPUT_DIR/$base.vhd"
+    [ -e "$f" ] || continue
+    err_file="$GHDL_WORKDIR/$base.ghdl_err.txt"
+    if ghdl -a --std=08 --workdir="$GHDL_WORKDIR" "$f" >"$err_file" 2>&1; then
+        echo "  GHDL PASS: $base"
+    else
+        echo "  GHDL FAIL: $base — $(head -1 "$err_file")"
+        if [ "$base" = "soc_top_rv64_k26" ]; then
+            echo "    (expected: needs Xilinx unisim library, only available under Vivado)"
+        else
+            GHDL_FAILS="$GHDL_FAILS $base:$(head -1 "$err_file" | tr -d '\n')"
+        fi
+    fi
+done
+if [ -n "$GHDL_FAILS" ]; then
+    add_blocker "ghdl -a --std=08 failed on:$GHDL_FAILS"
+fi
+
+# --- Step 5: product wrapper and AXI bridge behavior ---
+if [ -z "$BLOCKERS" ]; then
+    echo ""
+    echo "[5/5] Running product/Wishbone/AXI behavior check..."
+    if ! sh "$SCRIPT_DIR/ghdl_rv64_product_wb_axi_behavior.shs" "$OUTPUT_DIR"; then
+        add_blocker "product/Wishbone/AXI behavior check failed"
+    fi
+fi
+
+# --- Verdict ---
+echo ""
+echo "=== Generation Summary ==="
+VHD_COUNT=$(find "$OUTPUT_DIR" -maxdepth 1 -name '*.vhd' 2>/dev/null | wc -l | tr -d ' ')
+echo "VHDL files present: $VHD_COUNT/$EXPECTED_COUNT expected"
+
+if [ -z "$BLOCKERS" ]; then
+    if [ -f "$RV64_PAYLOAD_ELF" ] && command -v riscv64-unknown-elf-objcopy >/dev/null 2>&1; then
+        riscv64-unknown-elf-objcopy -O binary "$RV64_PAYLOAD_ELF" "$OUTPUT_DIR/simpleos_riscv64_fpga.bin"
+        od -An -v -tx8 -w8 "$OUTPUT_DIR/simpleos_riscv64_fpga.bin" | tr -d ' ' | awk 'NF { print }' >"$OUTPUT_DIR/rv64_payload.mem"
+    fi
+    echo "RV64_VHDL_GEN: PASS"
+    exit 0
+else
+    echo "RV64_VHDL_GEN: BLOCKED"
+    echo "$BLOCKERS" | while IFS= read -r b; do
+        echo "  - $b"
+    done
+    echo ""
+    echo "NOTE: no handwritten CPU fallback is accepted; fix the blocker above."
+    echo "See doc/03_plan/hardware/riscv/rv64_fpga_synthesis_plan_2026-07-22.md and"
+    echo "    doc/03_plan/hardware/riscv/fpga_board_bringup_jtag_10min_plan_2026-07-24.md."
+    exit 1
+fi

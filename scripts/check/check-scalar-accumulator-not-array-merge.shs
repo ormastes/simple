@@ -1,0 +1,156 @@
+#!/bin/bash
+# check-scalar-accumulator-not-array-merge.shs
+#
+# GATE: `x = x + y` on a SCALAR must compute a sum, not an array extend.
+#
+# Incident (2026-08-23,
+# doc/08_tracking/bug/scalar_accumulator_desugared_to_array_merge_2026-08-23.md):
+# collection_desugar.spl Pattern B rewrites `x = x + other` into
+# `x.merge(other)` at the AST level, before type-checking. Its scalar gate can
+# only suppress addend SHAPES that are provably scalar, so `var s = 0;
+# s = s + x` with `x` an identifier was rewritten and lowered to
+# `rt_array_extend_i64(s, x, -1)`. The build reported rc=0 / step 6/6 / linked
+# and the program printed 0. Native only -- the interpreter was right, so this
+# is caught by comparing the two ENGINES, not by rc.
+#
+# This gate is engine-differential ON PURPOSE. Asserting native output against
+# a hardcoded expectation would pass the day both engines break together; a
+# disagreement between them is the signal that actually discriminates.
+#
+# DELIBERATELY OUT OF SCOPE, stated rather than silently omitted: a `text`
+# receiver. `txt = txt + more` with an identifier addend is the same Pattern-B
+# shape and is ALSO wrong (native prints "a" for "a" + "bc"). It is not
+# asserted here because it is not fixed -- an emit_raw_strcat arm was tried
+# and measured producing the same wrong answer, so text was left on exactly
+# the path it was already on. Add the `str=` row to the compared set the day
+# the text case is fixed; do NOT add it before, and do not read its absence
+# as text being correct.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> line(s) compared, native matches the interpreter
+#   FAIL  — ...
+#   ERROR — nothing was checked
+# 0 lines compared, a missing compiler, or a timed-out build are ERROR, never
+# a pass.
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-}
+WORK=${WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/scalar-accum-XXXXXX")}
+mkdir -p "$WORK" 2>/dev/null
+
+verdict_error() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+# ------------------------------------------------------------------ selftest
+# Fatal, first, no compiler needed: the comparison must call a disagreement a
+# disagreement and an agreement an agreement, and must refuse an empty compare.
+selftest() {
+    printf 'forin=6\nstr=abc\n' > "$WORK/st_a"
+    printf 'forin=0\nstr=abc\n' > "$WORK/st_b"
+    : > "$WORK/st_empty"
+    if diff -q "$WORK/st_a" "$WORK/st_b" >/dev/null 2>&1; then
+        echo "selftest FAILED: a real disagreement compared equal"; exit 2
+    fi
+    if ! diff -q "$WORK/st_a" "$WORK/st_a" >/dev/null 2>&1; then
+        echo "selftest FAILED: identical output compared unequal"; exit 2
+    fi
+    if [ "$(grep -c . "$WORK/st_empty")" -ne 0 ]; then
+        echo "selftest FAILED: empty output counted as lines"; exit 2
+    fi
+    # Normalisation symmetry. The native binary emits no trailing newlines, so
+    # its stream is split on `key=`; the interpreter's is newline-separated.
+    # If only ONE side goes through the splitter, a line carrying two keys
+    # ("mergelen=4 last=5") survives on one side and is dropped on the other,
+    # and the gate reports a FAIL that is its own artifact. That happened on
+    # this gate's first real run, so it is pinned here: the same two-key input
+    # must normalise to the same thing whether or not it arrived with
+    # newlines.
+    printf 'mergelen=4 last=5\naugmergelen=3\n' > "$WORK/st_nl"
+    printf 'mergelen=4 last=5augmergelen=3' > "$WORK/st_nonl"
+    norm() { sed 's/\([a-z]*=\)/\n\1/g' "$1" | grep -E '^(mergelen|last|augmergelen)=' ; }
+    if ! diff -q <(norm "$WORK/st_nl") <(norm "$WORK/st_nonl") >/dev/null 2>&1; then
+        echo "selftest FAILED: normalisation is asymmetric between newline and no-newline streams"; exit 2
+    fi
+    if [ "$(norm "$WORK/st_nl" | grep -c .)" -ne 3 ]; then
+        echo "selftest FAILED: normalisation dropped a key from a two-key line"; exit 2
+    fi
+}
+selftest
+
+if [ -z "$SIMPLE_BIN" ]; then
+    for cand in "$ROOT/bin/simple" "$ROOT/bin/release/x86_64-unknown-linux-gnu/simple"; do
+        [ -x "$cand" ] && { SIMPLE_BIN="$cand"; break; }
+    done
+fi
+[ -n "$SIMPLE_BIN" ] && [ -x "$SIMPLE_BIN" ] || verdict_error "no runnable simple compiler; set SIMPLE_BIN"
+
+SRC="$WORK/src"; mkdir -p "$SRC/accum"
+cat > "$SRC/accum/main.spl" <<'SPL'
+fn main() -> void:
+    var a: [i64] = [1, 2, 3]
+    var s = 0
+    for x in a:
+        s = s + x
+    print("forin={s}")
+    var t = 0
+    var i = 0
+    while i < a.len():
+        t = t + a[i]
+        i = i + 1
+    print("while={t}")
+    var v = 0
+    for x in a:
+        v += x
+    print("aug={v}")
+    var n = 0
+    n = n + a[0]
+    print("noloop={n}")
+    val e = a[1]
+    var m = 0
+    m = m + e
+    print("viaval={m}")
+    val b: [i64] = [4, 5]
+    var c: [i64] = [1, 2]
+    c = c + b
+    print("mergelen={c.len()}")
+    print("mergelast={c[3]}")
+    var d: [i64] = [9]
+    d += b
+    print("augmergelen={d.len()}")
+    var f = 1.5
+    val g = 2.25
+    f = f + g
+    print("float={f}")
+SPL
+
+# Reference: the interpreter. It has always been right on this fixture.
+SIMPLE_TIMEOUT_SECONDS=0 timeout "${RUN_TIMEOUT:-600}" "$SIMPLE_BIN" run "$SRC/accum/main.spl" 2>/dev/null \
+    | sed 's/\([a-z]*=\)/\n\1/g' \
+    | grep -E '^(forin|while|aug|noloop|viaval|mergelen|mergelast|augmergelen|float)=' > "$WORK/interp.txt"
+INTERP_LINES=$(grep -c . "$WORK/interp.txt")
+[ "$INTERP_LINES" -gt 0 ] || verdict_error "interpreter produced 0 comparable lines"
+
+OUT="$WORK/out_accum"
+SIMPLE_TIMEOUT_SECONDS=0 TMPDIR="$WORK" SIMPLE_CACHE_SCOPE="${CACHE_SCOPE:-scalar_accum_gate}" \
+    timeout "${BUILD_TIMEOUT:-2400}" "$SIMPLE_BIN" native-build \
+    --source "$SRC" --entry-closure --entry "$SRC/accum/main.spl" \
+    --threads "${THREADS:-4}" -o "$OUT" > "$WORK/build.log" 2>&1
+BRC=$?
+[ "$BRC" -eq 124 ] && verdict_error "native build timed out; no evidence either way"
+[ "$BRC" -eq 0 ] && [ -x "$OUT" ] || { echo "FAIL — native build failed (rc=$BRC); log $WORK/build.log"; exit 1; }
+
+# print() emits without trailing newlines here, so normalise both sides the
+# same way rather than assuming a line-per-value layout.
+"$OUT" 2>/dev/null | tr '=' '=' | sed 's/\([a-z]*=\)/\n\1/g' \
+    | grep -E '^(forin|while|aug|noloop|viaval|mergelen|mergelast|augmergelen|float)=' > "$WORK/native.txt"
+NATIVE_LINES=$(grep -c . "$WORK/native.txt")
+[ "$NATIVE_LINES" -gt 0 ] || verdict_error "native binary produced 0 comparable lines"
+
+if ! diff -u "$WORK/interp.txt" "$WORK/native.txt" > "$WORK/diff.txt" 2>&1; then
+    echo "FAIL — $INTERP_LINES line(s) compared, native disagrees with the interpreter:"
+    sed -n '1,20p' "$WORK/diff.txt"
+    echo "FAIL — $INTERP_LINES line(s) compared, native disagrees with the interpreter (diff $WORK/diff.txt)"
+    exit 1
+fi
+echo "PASS — $INTERP_LINES line(s) compared, native matches the interpreter"
+exit 0

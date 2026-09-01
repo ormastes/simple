@@ -1,0 +1,67 @@
+#!/bin/sh
+# Build + deploy the cached native lint artifact (`simple_lint`).
+#
+# Why: `simple lint|fmt|fix` dispatches to src/app/cli/lint_entry.spl via
+# raw-source parse+JIT of the whole lint closure (~380 .spl files), a fixed
+# ~4.5s / ~340MB tax per invocation. Per .claude/rules/code-style.md,
+# production wrappers must execute cached compiled artifacts, not raw source.
+# This script native-builds the lint entry closure once and deploys it next to
+# the driver binary; the driver's `try_cached_lint_native` fast path
+# (src/compiler_rust/driver/src/main.rs) execs it when present and fresh.
+#
+# Usage: sh scripts/build/build-lint-native.shs [--no-deploy]
+set -eu
+
+repo_root="$(CDPATH= cd "$(dirname "$0")/../.." && pwd)"
+cd "${repo_root}"
+
+triple="x86_64-unknown-linux-gnu"
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) triple="x86_64-unknown-linux-gnu" ;;
+  Linux-aarch64) triple="aarch64-unknown-linux-gnu" ;;
+  Darwin-arm64) triple="aarch64-apple-darwin" ;;
+  Darwin-x86_64) triple="x86_64-apple-darwin" ;;
+esac
+
+out_dir="build/lint_native"
+out="${out_dir}/simple_lint"
+deploy_dir="bin/release/${triple}"
+mkdir -p "${out_dir}"
+
+# Same recipe family as the MCP native servers (doc/07_guide/app/mcp/mcp.md).
+bin/simple native-build \
+  --runtime-bundle core-c-bootstrap \
+  --source src/app \
+  --entry-closure \
+  --entry src/app/cli/lint_entry.spl \
+  --strip \
+  --output "${out}"
+
+[ -x "${out}" ] || { echo "FAIL — native-build produced no executable at ${out}"; exit 1; }
+
+# Smoke gate: the artifact must produce a lint verdict on a real file and exit
+# cleanly, before it is allowed to shadow the raw-source path.
+smoke_target="src/app/cli/lint_entry.spl"
+if ! "${out}" lint "${smoke_target}" >"${out_dir}/smoke.log" 2>&1; then
+  status=$?
+  echo "FAIL — artifact smoke lint of ${smoke_target} exited ${status}; see ${out_dir}/smoke.log"
+  exit 1
+fi
+grep -qi 'lint\|issue\|clean\|pass' "${out_dir}/smoke.log" || {
+  echo "FAIL — artifact smoke output has no lint verdict; see ${out_dir}/smoke.log"
+  exit 1
+}
+
+if [ "${1:-}" = "--no-deploy" ]; then
+  echo "PASS — built ${out} (not deployed)"
+  exit 0
+fi
+
+mkdir -p "${deploy_dir}"
+# Deployed binaries can be busy; stage as .new then mv (same dance as MCP).
+cp "${out}" "${deploy_dir}/simple_lint.new"
+mv "${deploy_dir}/simple_lint.new" "${deploy_dir}/simple_lint"
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "${deploy_dir}" && sha256sum simple_lint > simple_lint.sha256)
+fi
+echo "PASS — deployed ${deploy_dir}/simple_lint"

@@ -1,0 +1,49 @@
+#!/bin/sh
+# Regenerate / verify src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx
+# (Task B3, doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md).
+#
+# There is no .cu source: the checked-in PTX file IS the source (matching
+# the existing precedent in this repo of hand-written, checked-in PTX with
+# no .cu counterpart -- src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx).
+# "Regenerate" therefore means: re-assemble it with ptxas for every SM
+# target this repo cares about (syntax/register-allocation validation) and
+# recompute its SHA-256 sidecar, which this script also does after every
+# hand-edit of the .ptx file. It does NOT invoke a compiler from a
+# higher-level source -- editing the interpreter loop means editing the
+# .ptx directly and then running this script to re-verify + re-hash it.
+#
+# Usage: sh scripts/build/regen_svmg_cuda_kernel.shs [sm_75 sm_86 ...]
+# Requires: ptxas (from a local CUDA toolkit) on PATH, or CUDA_PTXAS env
+# var pointing at one. Prints SKIP (not a failure) if ptxas is unavailable
+# -- this is a verification aid, not a build-blocking step, since the PTX
+# artifact is already checked in and the CUDA lane itself degrades to
+# `skip:cuda-driver-unavailable` on a host with no driver (see
+# CudaLaneSession.probe()).
+
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PTX_PATH="$REPO_ROOT/src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx"
+SHA_PATH="$PTX_PATH.sha256"
+
+if [ ! -f "$PTX_PATH" ]; then
+    echo "ERROR: $PTX_PATH not found" >&2
+    exit 1
+fi
+
+PTXAS="${CUDA_PTXAS:-$(command -v ptxas || true)}"
+if [ -z "$PTXAS" ]; then
+    echo "SKIP: ptxas not found on PATH and CUDA_PTXAS unset -- cannot re-verify assembly on this host."
+    echo "      (the checked-in .ptx and its .sha256 sidecar are unaffected; this is a verification-only skip)"
+else
+    ARCHES="${*:-sm_75 sm_86}"
+    for arch in $ARCHES; do
+        echo "==> ptxas -arch=$arch (syntax + register-allocation check)"
+        "$PTXAS" -arch="$arch" -o /dev/null "$PTX_PATH"
+        echo "    OK"
+    done
+fi
+
+NEW_SHA="$(sha256sum "$PTX_PATH" | awk '{print $1}')"
+echo "$NEW_SHA  svmg_cuda_kernel.ptx" > "$SHA_PATH"
+echo "==> wrote $SHA_PATH: $NEW_SHA"

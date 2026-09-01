@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+provider="$root/src/runtime/runtime_sdl2.c"
+binding="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+async_binding="$root/src/lib/nogc_async_mut/io/window_sffi.spl"
+failed=0
+
+key_body=$(sed -n '/^int64_t rt_sdl2_is_key_pressed/,/^}/p' "$provider")
+mouse_x_body=$(sed -n '/^int64_t rt_sdl2_get_mouse_x/,/^}/p' "$provider")
+mouse_y_body=$(sed -n '/^int64_t rt_sdl2_get_mouse_y/,/^}/p' "$provider")
+button_body=$(sed -n '/^int64_t rt_sdl2_is_mouse_button_pressed/,/^}/p' "$provider")
+if ! printf '%s\n' "$key_body" | grep -q 'SDL2_REQUIRE(-1)' ||
+   ! printf '%s\n' "$key_body" | grep -q 'return -1' ||
+   ! printf '%s\n' "$mouse_x_body" | grep -q 'SDL2_REQUIRE(INT64_MIN)' ||
+   ! printf '%s\n' "$mouse_y_body" | grep -q 'SDL2_REQUIRE(INT64_MIN)' ||
+   ! printf '%s\n' "$button_body" | grep -q 'SDL2_REQUIRE(-1)' ||
+   ! printf '%s\n' "$button_body" | grep -q 'default: return -1'; then
+    echo "SDL2 polled input must retain disjoint provider/argument sentinels" >&2
+    failed=1
+fi
+if printf '%s\n%s\n%s\n%s\n' "$key_body" "$mouse_x_body" "$mouse_y_body" "$button_body" |
+   grep -Eq 'malloc|calloc|realloc|pthread_|mutex|SDL_GetError'; then
+    echo "SDL2 polled input must remain allocation-, lock-, and extra-call-free" >&2
+    failed=1
+fi
+
+declarations=$(sed -n '/^# --- Keyboard State (polled) ---/,/^# --- Time ---/p' "$binding")
+if [ "$(printf '%s\n' "$declarations" | grep -c '^extern fn rt_sdl2_' || true)" -ne 4 ] ||
+   [ "$(printf '%s\n' "$declarations" | grep -c '^@unsafe(reason: "raw SDL2 provider ABI;' || true)" -ne 4 ]; then
+    echo "all SDL2 polled-input declarations must retain exact sentinel contracts" >&2
+    failed=1
+fi
+for wrapper in window_is_key_pressed window_mouse_position window_is_mouse_button_pressed; do
+    if ! grep -q "^fn $wrapper" "$binding" ||
+       grep -B1 "^fn $wrapper" "$binding" | grep -q '^@unsafe'; then
+        echo "$wrapper must be a checked wrapper with lexical FFI authority" >&2
+        failed=1
+    fi
+    if ! grep -q "$wrapper" "$async_binding"; then
+        echo "$wrapper must be exported through the async compatibility facade" >&2
+        failed=1
+    fi
+done
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "SDL2 polled input contract audit: PASS"

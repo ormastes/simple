@@ -1,0 +1,117 @@
+#!/bin/sh
+# Regression gate for AOT (`native-build`) `if val v = opt:` and `opt == nil`
+# / `opt != nil` against a STATICALLY Optional-typed operand.
+#
+# WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk
+# interpreter and has no AOT mode, so a spec can only ever prove the
+# interpreter lane. This defect was silent-wrong in BOTH directions at once:
+# `if val v = opt:` ALWAYS took the Some branch (even for real nil), and
+# `opt == nil` ALWAYS evaluated false (even for real nil) -- for i64?/bool?/
+# text? alike.
+#
+# Bug: doc/08_tracking/bug/pure_simple_option_i64_ifval_always_some_eqnil_always_false_2026-08-08.md
+# Root cause: `if val v = opt:` desugars to a Binary `v != nil` node (not an
+# ExistsCheck), so it never routed through lower_cond_expr's rt_is_some path
+# and instead fell into the representation-blind raw scalar Eq/NotEq compare
+# in expr_dispatch.spl's Binary `case _:` arm -- the same family as the
+# Option<bool>-vs-literal defect fixed in ab773bb5d5e/ab3af6f728e, just never
+# extended to a nil-literal-vs-Optional-typed-operand pairing.
+#
+# Fix: src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl, Binary's
+# `case _:` arm -- when exactly one operand of `==`/`!=` is the nil literal
+# and the OTHER operand's STATIC HIR type is Optional(_), route straight
+# through rt_is_none (Eq)/rt_is_some (NotEq) instead of the enum-equality
+# machinery below.
+#
+# This gate hard-asserts the full truth table across i64?/bool?/text?:
+# ifval/eqnil/neqnil (the defect rows) alongside ??/is_none/is_some (already
+# correct today -- must not regress).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-option-ifval-eqnil.$$}"
+FIXTURE="test/fixtures/native_option_i64_ifval_eqnil/main.spl"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+binary="$WORK_DIR/option-ifval-eqnil"
+log="$WORK_DIR/option-ifval-eqnil.log"
+
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BINARY" native-build \
+    --source test/fixtures/native_option_i64_ifval_eqnil --entry-closure --entry "$FIXTURE" \
+    --cache-dir "$WORK_DIR/cache" --output "$binary" >"$log" 2>&1
+
+if [ ! -x "$binary" ]; then
+    echo "ERROR — nothing was checked (native-build did not produce a binary)"
+    tail -n 40 "$log" || true
+    exit 2
+fi
+
+out="$(timeout 60 "$binary" 2>>"$log")"
+
+get() {
+    # $1 = label (e.g. i64_Some0), $2 = field (e.g. ifval)
+    printf '%s\n' "$out" | sed -n "s/^$1: .*\b$2=\([^ ]*\).*/\1/p"
+}
+
+fail=0
+check() {
+    name="$1"; actual="$2"; expected="$3"
+    if [ "$actual" != "$expected" ]; then
+        echo "FAIL — native-build $name wrong (expected '$expected', got '$actual')"
+        fail=1
+    fi
+}
+
+# --- i64? ---
+for row in i64_Some0:0 i64_Some1:1 i64_Some2:2 i64_Some3:3 i64_Some4:4 i64_SomeNeg1:-1; do
+    label="${row%%:*}"; val="${row##*:}"
+    check "$label ifval" "$(get "$label" ifval)" "Some($val)"
+    check "$label eqnil" "$(get "$label" eqnil)" "false"
+    check "$label neqnil" "$(get "$label" neqnil)" "true"
+    check "$label coalesce" "$(get "$label" coalesce)" "$val"
+    check "$label is_none" "$(get "$label" is_none)" "false"
+    check "$label is_some" "$(get "$label" is_some)" "true"
+done
+check "i64_Nil ifval" "$(get i64_Nil ifval)" "no-match"
+check "i64_Nil eqnil" "$(get i64_Nil eqnil)" "true"
+check "i64_Nil neqnil" "$(get i64_Nil neqnil)" "false"
+check "i64_Nil coalesce" "$(get i64_Nil coalesce)" "-999"
+check "i64_Nil is_none" "$(get i64_Nil is_none)" "true"
+check "i64_Nil is_some" "$(get i64_Nil is_some)" "false"
+
+# --- bool? (must not regress ab3af6f728e) ---
+check "bool_SomeTrue ifval" "$(get bool_SomeTrue ifval)" "Some(true)"
+check "bool_SomeTrue eqnil" "$(get bool_SomeTrue eqnil)" "false"
+check "bool_SomeTrue neqnil" "$(get bool_SomeTrue neqnil)" "true"
+check "bool_SomeFalse ifval" "$(get bool_SomeFalse ifval)" "Some(false)"
+check "bool_SomeFalse eqnil" "$(get bool_SomeFalse eqnil)" "false"
+check "bool_SomeFalse neqnil" "$(get bool_SomeFalse neqnil)" "true"
+check "bool_Nil ifval" "$(get bool_Nil ifval)" "no-match"
+check "bool_Nil eqnil" "$(get bool_Nil eqnil)" "true"
+check "bool_Nil neqnil" "$(get bool_Nil neqnil)" "false"
+
+# --- text? ---
+check "text_SomeA ifval" "$(get text_SomeA ifval)" "Some(a)"
+check "text_SomeA eqnil" "$(get text_SomeA eqnil)" "false"
+check "text_SomeA neqnil" "$(get text_SomeA neqnil)" "true"
+check "text_SomeA coalesce" "$(get text_SomeA coalesce)" "a"
+check "text_SomeEmpty ifval" "$(get text_SomeEmpty ifval)" "Some()"
+check "text_SomeEmpty eqnil" "$(get text_SomeEmpty eqnil)" "false"
+check "text_Nil ifval" "$(get text_Nil ifval)" "no-match"
+check "text_Nil eqnil" "$(get text_Nil eqnil)" "true"
+check "text_Nil neqnil" "$(get text_Nil neqnil)" "false"
+check "text_Nil coalesce" "$(get text_Nil coalesce)" "DEFAULT"
+
+if [ "$fail" -ne 0 ]; then
+    echo "raw output:"
+    printf '%s\n' "$out"
+    exit 1
+fi
+echo "PASS — native-build if-val/eqnil/neqnil/coalesce/is_none/is_some: all rows correct across i64?/bool?/text?"
