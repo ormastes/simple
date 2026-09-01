@@ -584,3 +584,32 @@ it stops on deeper, still-open x86_64 bring-up gaps:
 So the x86_64 pixel-evidence row is blocked by **two independent chains**: the
 host daemon (closure defect, fixed above) and this guest kernel. Only the first
 was in the previous diagnosis.
+
+### Status at hand-off (2026-09-01)
+
+The gate that owns `build/simpleos_wm_vulkan/` is
+`scripts/check/check-simpleos-x86-64-wm-host-vulkan-pixel-evidence.shs` (not
+`check-simpleos-qemu-host-gpu-2d.shs`). It takes a PRE-BUILT daemon at
+`build/simpleos_wm_vulkan/simpleos_gpu_host` and uses
+`KERNEL_ELF=build/os/simpleos_x86_64_desktop_engine2d.elf`, which exists. Its
+`--selftest` is green here: `PASS — 17 selftest fixture(s) checked, classifier
+and pixel bar behave (no boot attempted), renderer=n/a`. So the daemon is
+genuinely the only missing input, exactly as originally scoped — the guest
+probe kernel discussed above belongs to the OTHER gate and is not on this path.
+
+The daemon native-build is running detached with the closure fix in place:
+`source_closure 230/230`, `load_sources 313/313`, **0 `hir-fatal`** (against 772
+before the fix). It is slow precisely because the closure is now complete —
+230 modules instead of the truncated 96 — and `surface_build` costs 20-60 s for
+the heavy engine2d modules.
+
+A chained runner is armed so the remaining steps complete without supervision:
+when the build exits it writes the undefined-`rt_*` census, the WEAK-definition
+scan (type column `$(NF-1)`), the gate-required Vulkan provider symbol table,
+and then the full gate verdict to
+**`build/simpleos_wm_vulkan/post-build-report.txt`**.
+
+Resume by reading that file. Build log:
+`build/simpleos_wm_vulkan/daemon-build2.log`. Neither
+`SIMPLE_ALLOW_STUB_FALLBACK` nor `SIMPLE_ALLOW_UNRESOLVED_RUNTIME` was ever set,
+and the gate's classifier and blank-frame must-FAIL were not touched.
