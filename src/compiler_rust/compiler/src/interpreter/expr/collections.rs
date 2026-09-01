@@ -1007,6 +1007,16 @@ pub(super) fn eval_collection_expr(
                     }
                     Ok(Value::text_from_bytes(sliced))
                 }
+                Value::StrBytes(bytes) => {
+                    // Already-raw text bytes (e.g. from a prior mid-codepoint
+                    // slice or a step-slice source) -- slice the raw bytes
+                    // directly and re-wrap the same way `text_from_bytes`
+                    // does for `Value::Str`, so a StrBytes receiver isn't
+                    // fatal here (see the StrBytes step-slice gap noted in
+                    // fix(mir): lower tuple-destructuring assignment).
+                    let sliced = slice_collection(bytes.as_slice(), start_idx, end_idx, step_val);
+                    Ok(Value::text_from_bytes(sliced))
+                }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
                 Value::LabeledTuple { values, .. } => {
                     Ok(Value::Tuple(slice_collection(&values, start_idx, end_idx, step_val)))
