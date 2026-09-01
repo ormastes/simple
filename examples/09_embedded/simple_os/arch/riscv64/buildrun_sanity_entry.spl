@@ -53,7 +53,7 @@ use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.desugar.desugar_async.{desugar_module}
 use compiler.frontend.desugar.collection_desugar.{desugar_collections_static}
 use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
-use compiler.hir.hir_types.{HirModule, HirFunction}
+use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
@@ -88,15 +88,6 @@ fn buildrun_sanity_row() -> i64:
     parsed = desugar_module(parsed)
     desugar_collections_static(0, 0)
 
-    # TEMPORARY PROBE: the functions carrier is `parsed.functions`
-    # (Dict<text, ParserFunction>) plus `parsed.function_order` (source order) --
-    # NOT `AstModule.items`, which an earlier probe measured as 0 while lowering
-    # still produced a function, i.e. it was the wrong field.
-    serial_println("[probe] parsed-fns=" + parsed.functions.len().to_string())
-    for pname in parsed.function_order:
-        serial_println("[probe] parsed-fn-order=[" + pname + "]")
-    serial_println("[probe] parsed-order-listed")
-
     var lowering: HirLowering = HirLowering.with_filename(path)
     val hir: HirModule = lowering.lower_module(parsed)
     if lowering.errors.len() > 0:
@@ -114,34 +105,6 @@ fn buildrun_sanity_row() -> i64:
         serial_println("[buildrun] FAIL mir module produced no functions — the build was vacuous")
         return 1
     serial_println("[buildrun] phase=mir-ok functions lowered")
-
-    # --- TEMPORARY PROBE (row-2 investigation, 2026-09-01) -------------------
-    # Prints RAW counts and names, never a comparison result: the `.len() == 0`
-    # fail-open tracked in
-    # doc/08_tracking/bug/riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01.md
-    # means a boolean answer here would prove nothing.
-    serial_println("[probe] hir-fn-count=" + hir.functions.len().to_string())
-    serial_println("[probe] mir-fn-count=" + mir.functions.len().to_string())
-    for probe_fn in hir.functions.values():
-        val pf: HirFunction = probe_fn
-        serial_println("[probe] hir-fn-name=[" + pf.name + "] len=" + pf.name.len().to_string())
-    serial_println("[probe] names-listed")
-    # Key-collision check: functions are inserted into HirModule.functions keyed
-    # by SymbolId (module_build.spl:462-465). If both names resolve to the SAME
-    # id, the second insert OVERWRITES the first and len() == 1 with no error --
-    # a documented prior defect class for this exact site.
-    val sid_add = hir.symbols.lookup_or_invalid("add")
-    val sid_main = hir.symbols.lookup_or_invalid("main")
-    serial_println("[probe] sym-add-id=" + sid_add.id.to_string())
-    serial_println("[probe] sym-main-id=" + sid_main.id.to_string())
-    if sid_add.is_valid():
-        serial_println("[probe] sym-add-valid=YES")
-    else:
-        serial_println("[probe] sym-add-valid=NO")
-    if sid_main.is_valid():
-        serial_println("[probe] sym-main-valid=YES")
-    else:
-        serial_println("[probe] sym-main-valid=NO")
 
     # --- the RUN half: the program actually executes -------------------------
     serial_println("[buildrun] running the built program")
