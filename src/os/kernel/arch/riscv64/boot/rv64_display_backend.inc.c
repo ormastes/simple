@@ -237,7 +237,7 @@ static spl_u64 rt_alloc_contiguous_pages(spl_u64 pages) {
         return 0;
     }
     for (spl_u64 i = 0; i < pages; i = i + 1) {
-        spl_u64 page = rt_riscv_noalloc_alloc_page();
+        spl_u64 page = spl_riscv_noalloc_alloc_page();
         if (page == 0) {
             return 0;
         }
@@ -768,8 +768,8 @@ spl_i64 rt_display_init(void) {
                     RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER | RT_VIRTIO_STATUS_FEATURES_OK | RT_VIRTIO_STATUS_DRIVER_OK
                 );
             }
-            g_rt_gpu_cmd = rt_riscv_noalloc_alloc_page();
-            g_rt_gpu_resp = rt_riscv_noalloc_alloc_page();
+            g_rt_gpu_cmd = spl_riscv_noalloc_alloc_page();
+            g_rt_gpu_resp = spl_riscv_noalloc_alloc_page();
             g_rt_gpu_fb = rt_alloc_contiguous_pages((RT_GPU_WIDTH * RT_GPU_HEIGHT * 4ULL + 4095ULL) / 4096ULL);
             if (!g_rt_gpu_cmd || !g_rt_gpu_resp || !g_rt_gpu_fb) {
                 g_rt_display_ready = 0;
