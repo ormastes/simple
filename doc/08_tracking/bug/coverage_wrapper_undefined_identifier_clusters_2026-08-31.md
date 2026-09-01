@@ -441,3 +441,20 @@ regression from this change.
   unchanged.
 - The remaining ~350 long-tail symbols are unre-baselined; every one of them
   needs the stale-vs-live check above before it is worked.
+
+### Round-3 verification addenda (measured, not inferred)
+
+- **Mutation-red on the 3 new `pmm_spec` scenarios.** With `pmm.spl` reverted to
+  `c0cae452481` and the spec unchanged: `25 total, 22 passed, 3 failed` — exactly
+  the three new scenarios, and only those. Restored: `25/25`. The earlier
+  "do not compile before the fix" wording was an inference; this is the run.
+- **Downstream importer.** `use os.kernel.memory.memory_leveling_manager.*`
+  compiles **rc=0, fully clean** after the restore. That module's `use` of
+  `pmm_is_live_contiguous_allocation` (`:30`) had been dangling since the merge,
+  so this is the strongest confirmation that the restored surface is the one its
+  real caller expects — not just that pmm's own closure resolves.
+- **Scope of proof, restated so it is not misquoted.** "430 rows" is the count
+  *attributed to these five symbols in the suite4 log*. Per round 1's retraction,
+  the mapping from a fixed module to a wrapper count is still NOT established —
+  no failing wrapper was captured here either. Read it as attribution, never as
+  a measured effect of this change.
