@@ -77,3 +77,35 @@ Produce and admit a pure-Simple Stage4 full CLI. Blocker 2 of
 `arm64_wm_vulkan_real_firmware_lane_blocked_2026-09-01.md` — the AAVMF ->
 `BOOTAA64.EFI` -> `kernel.elf` `protocol: linux` handover of the arm64 desktop
 kernel — remains **UNPROVEN**; no boot was reached.
+
+## Finding 4 — verified against the real builder, and the stage binaries are not the answer
+
+With the **fresh** seed deployed at `bin/release/x86_64-unknown-linux-gnu/simple`,
+`sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs` still ends:
+
+```
+arm64_desktop_engine2d_attested_build_status=fail
+arm64_desktop_engine2d_attested_build_reason=compiler-version-invalid
+```
+exit 1. Rebuilding the seed changes nothing, as predicted.
+
+A full 3-stage bootstrap was run with the fresh seed (Stage 1 and Stage 2
+complete; Stage 3 still linking at the end of this session). Stage 1's artifact:
+
+```
+$ bootstrap/stage1/x86_64-unknown-linux-gnu/simple --version
+simple-bootstrap 1.0.0-rc.1
+$ bootstrap/stage1/x86_64-unknown-linux-gnu/simple os build --help
+error: unknown command 'os'
+```
+
+So a stage binary **passes** the version filter (`simple-bootstrap X.Y.Z` is an
+accepted form) but **cannot run the command the attested builder issues**,
+`$COMPILER os build --scenario=arm64-desktop-engine2d` — stage binaries are
+`src/app/cli/bootstrap_main.spl`, `compile`/`native-build` only.
+
+The admissible artifact is therefore specifically a **Stage 4 full CLI**
+(`src/app/cli/main.spl`, built by `scripts/bootstrap/stage4-tooling-matrix.shs`,
+target `cli`), which is exactly the artifact
+`scripts/check/admit-simpleos-arm64-server-compiler.shs` exists to admit and
+which CLAUDE.md records as not currently deployed anywhere.
