@@ -441,8 +441,19 @@ fn unbox_from_closure_boundary<M: Module>(
         }
         TypeId::F64 => call_runtime_1(ctx, builder, "rt_value_as_float", tagged),
         TypeId::BOOL => {
-            let raw = call_runtime_1(ctx, builder, "rt_value_unbox_int", tagged);
-            builder.ins().icmp_imm(IntCC::NotEqual, raw, 0)
+            // `rt_value_unbox_int` PASSES THROUGH a tagged BOOL (TAG_SPECIAL,
+            // not TAG_INT), so the old `unbox_int(v) != 0` read TRUE for both
+            // `true` (11) and `false` (19). Decode the tagged value directly,
+            // using the same falsy set as the LLVM backend's
+            // `runtime_int_truthy_i1`. Kept byte-for-byte in step with
+            // `closure_boxed_entry::unbox_arg`, which this function mirrors.
+            // See doc/08_tracking/bug/riscv64_freestanding_bool_in_collection_always_true_2026-09-01.md
+            let is_zero = builder.ins().icmp_imm(IntCC::Equal, tagged, 0);
+            let is_tagged_false = builder.ins().icmp_imm(IntCC::Equal, tagged, 19);
+            let is_nil = builder.ins().icmp_imm(IntCC::Equal, tagged, 3);
+            let zero_or_false = builder.ins().bor(is_zero, is_tagged_false);
+            let falsy = builder.ins().bor(zero_or_false, is_nil);
+            builder.ins().icmp_imm(IntCC::Equal, falsy, 0)
         }
         TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32 => {
             let raw = call_runtime_1(ctx, builder, "rt_value_unbox_int", tagged);
