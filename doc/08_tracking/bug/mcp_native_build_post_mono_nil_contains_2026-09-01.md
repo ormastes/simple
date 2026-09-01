@@ -46,3 +46,23 @@ and `doc/08_tracking/bug/self_rooted_chain_val_binding_clobbers_receiver_2026-09
 ## MIR error count
 Still NOT obtainable — MIR lowering (step 3+/6) is never entered. The last
 real full-build number remains 133, measured before this lane's fixes.
+
+## Lead REFUTED by experiment (2026-09-01)
+Hypothesis: the nil receiver was one of the three `text.contains(...)` calls in
+`src/compiler/40.mono/verify/post_mono_verify.spl`
+(`check_mangling` lines 586/590, `enter` line 603) reached with a nil HIR
+definition name. All three were nil-guarded (`?? ""`) and the full build re-run:
+**identical failure, same message, same position** (hir 100/100, any-escape 548,
+enum-contract 0, `[mono] generic_fns=0`, then
+`error: semantic: method \`contains\` not found on type \`nil\``).
+The guards were therefore REVERTED rather than left as speculative dead
+robustness. The site is elsewhere in the post-mono -> MIR-entry region, and the
+region is wider than the "129-175" first written above: no receipt prints
+between the `[mono]` line and the (never reached) step 3/6 announcement, so
+nothing bounds it at 175.
+
+Next lead, in cost order:
+1. add a `[method-call-error]` dump to the seed's method-not-found path — the
+   sibling of the existing `[field-access-error]`, which is what pinned the HIR
+   blocker in minutes; it prints nothing for a method-not-found today;
+2. failing that, `eprint` bisection across the post-mono region (~21 min/run).
