@@ -26,7 +26,16 @@ use os.kernel.arch.riscv64.display.{
     riscv64_display_bpp,
     riscv64_display_present
 }
-use os.kernel.arch.riscv64.console.{serial_init}
+# The UART is brought up straight from the shared RISC-V console primitive
+# rather than through os.kernel.arch.riscv64.console. console.spl also hosts the
+# interactive console SHELL, so it imports fs_exec_spawn, vfs_write_ops and
+# ssh_auth; pulling it in for serial_init() alone dragged the scheduler, the
+# VFS, the IPC syscall table and the compression stack into this render-smoke
+# closure, which is where 66 undefined symbols at link came from. serial_init()
+# is exactly riscv_uart_init(RISCV_VIRT_UART_BASE, ...) -- console.spl's
+# UART_BASE is defined as RISCV_VIRT_UART_BASE -- so this is the same bring-up,
+# not a weaker one. console_common imports only uart16550_mmio.
+use os.kernel.arch.riscv.console_common.{RISCV_VIRT_UART_BASE, riscv_uart_init}
 use build.os.generated.rv64_wm_nonce.{rv64_wm_nonce, rv64_wm_nonce_r, rv64_wm_nonce_g, rv64_wm_nonce_b}
 
 extern fn serial_println(msg: text)
@@ -71,7 +80,7 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
         serial_println("[wm-rv64] fatal reason=display-memory")
         return
     __simple_call_module_inits()
-    serial_init()
+    riscv_uart_init(RISCV_VIRT_UART_BASE, false)
     serial_println("[wm-rv64] SimpleOS riscv64 WM render smoke (OpenSBI fw_payload)")
     serial_println("[wm-rv64] serial up, bringing up the VirtIO-GPU scanout")
 
