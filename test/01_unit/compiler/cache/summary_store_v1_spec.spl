@@ -28,7 +28,8 @@ fn summary_for(snapshot: text, path: text):
 
 fn auth(now: i64 = 10, expiry: i64 = 20) -> SummaryAuthV1:
     SummaryAuthV1(root_digest: digest("repo"), session_digest: digest("session"),
-        capability_digest: digest("capability"), request_epoch: now, expires_epoch: expiry)
+        capability_digest: digest("capability"), capability_admission_receipt: digest("admission"),
+        request_epoch: now, expires_epoch: expiry)
 
 describe "DB-backed virtual public summary store":
     it "publishes canonical bytes and serves one exact snapshot through bounded facade operations":
@@ -36,7 +37,7 @@ describe "DB-backed virtual public summary store":
         val snapshot = digest("snapshot-a")
         val summary = summary_for(snapshot, "pkg/example.spl")
         store.publish(summary, digest("ast"), "generated/untrusted;public-only").unwrap()
-        var facade = VirtualSourceStoreAdapterV1.new(store)
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
         val uri = "simple-summary://{snapshot}/pkg/example.spl/_tldr.spl"
         val listed = facade.list(auth(), snapshot, "pkg", 8, nil).unwrap()
         expect(listed.entries.len()).to_equal(1)
@@ -54,8 +55,8 @@ describe "DB-backed virtual public summary store":
     it "does not switch snapshots, shadow real paths, or generate a store miss":
         var store = SummaryStoreV1.memory().unwrap()
         val snapshot = digest("snapshot-a")
-        store.publish(summary_for(snapshot, "pkg/example.spl"), digest("ast"), "generated/untrusted").unwrap()
-        var facade = VirtualSourceStoreAdapterV1.new(store)
+        store.publish(summary_for(snapshot, "pkg/example.spl"), digest("ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
         val other = digest("snapshot-b")
         val uri = "simple-summary://{other}/pkg/example.spl/_tldr.spl"
         expect(facade.stat(auth(), other, uri).unwrap().present).to_equal(false)
@@ -64,11 +65,34 @@ describe "DB-backed virtual public summary store":
     it "binds pagination to auth, snapshot, limits, and expiry":
         var store = SummaryStoreV1.memory().unwrap()
         val snapshot = digest("snapshot")
-        store.publish(summary_for(snapshot, "pkg/example.spl"), digest("ast"), "generated/untrusted").unwrap()
-        var facade = VirtualSourceStoreAdapterV1.new(store)
+        store.publish(summary_for(snapshot, "pkg/example.spl"), digest("ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
         val uri = "simple-summary://{snapshot}/pkg/example.spl/_tldr.spl"
         val first = facade.page(auth(), snapshot, uri, nil, 16, 4).unwrap().value?
         expect(first.continuation != nil).to_equal(true)
         expect(facade.page(auth(now: 21, expiry: 20), snapshot, uri, first.continuation, 16, 4).is_err()).to_equal(true)
         expect(facade.page(auth(), snapshot, uri, first.continuation, 17, 4).is_err()).to_equal(true)
         expect(facade.read(auth(), snapshot, uri, 0, 65537).is_err()).to_equal(true)
+
+    it "keeps projection identities immutable and cleans only bounded stale rows":
+        var store = SummaryStoreV1.memory().unwrap()
+        val live = digest("live")
+        val stale = digest("stale")
+        val live_summary = summary_for(live, "pkg/live.spl")
+        store.publish(live_summary, digest("live-ast"), "generated/untrusted;public-only").unwrap()
+        expect(store.publish(live_summary, digest("live-ast"), "generated/untrusted;public-only").is_ok()).to_equal(true)
+        expect(store.publish(live_summary, digest("different-ast"), "generated/untrusted;public-only").is_err()).to_equal(true)
+        store.publish(summary_for(stale, "pkg/stale.spl"), digest("stale-ast"), "generated/untrusted;public-only").unwrap()
+        expect(store.cleanup_stale([live], 1).unwrap()).to_equal(1)
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
+        expect(facade.stat(auth(), stale, "simple-summary://{stale}/pkg/stale.spl/_tldr.spl").unwrap().present).to_equal(false)
+        expect(facade.stat(auth(), live, "simple-summary://{live}/pkg/live.spl/_tldr.spl").unwrap().present).to_equal(true)
+
+    it "rejects noncanonical digests, wildcard directories, and unadmitted receipts":
+        var store = SummaryStoreV1.memory().unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, digest("admission"))
+        expect(facade.list(auth(), digest("snapshot"), "pkg%", 4, nil).is_err()).to_equal(true)
+        var wrong = auth()
+        wrong.capability_admission_receipt = digest("wrong")
+        expect(facade.list(wrong, digest("snapshot"), "pkg", 4, nil).is_err()).to_equal(true)
+        expect(facade.list(auth(), "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "pkg", 4, nil).is_err()).to_equal(true)

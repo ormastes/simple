@@ -27,20 +27,34 @@ fn _summary_error_v1(code: SummaryErrorCodeV1, context: text) -> SummaryErrorV1:
             reason_digest: sha256_text("simple.summary.reject.v1\u0000" + context), bounded_detail: context))
 
 fn _auth_valid_v1(auth: SummaryAuthV1) -> bool:
-    auth.root_digest.len() == 64 and auth.session_digest.len() == 64 and
-        auth.capability_digest.len() == 64 and auth.request_epoch >= 0 and
+    _lower_hex_digest_v1(auth.root_digest) and _lower_hex_digest_v1(auth.session_digest) and
+        _lower_hex_digest_v1(auth.capability_digest) and _lower_hex_digest_v1(auth.capability_admission_receipt) and auth.request_epoch >= 0 and
         auth.expires_epoch >= auth.request_epoch
+
+fn _lower_hex_digest_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn _logical_path_valid_v1(repository: text, path: text) -> bool:
+    logical_source_path_valid_v1(LogicalSourcePathV1(repository_namespace_digest: repository,
+        module_relative_utf8: path, path_semantics: PathSemanticsV1.CaseSensitiveNfc))
+
+fn _directory_valid_v1(repository: text, directory: text) -> bool:
+    if directory == "": return true
+    _logical_path_valid_v1(repository, directory) and not directory.contains("%")
 
 fn _uri_v1(snapshot: text, path: text) -> text:
     "simple-summary://{snapshot}/{path}/_tldr.spl"
 
-fn _uri_path_v1(snapshot: text, uri: text) -> text?:
+fn _uri_path_v1(snapshot: text, repository: text, uri: text) -> text?:
     val prefix = "simple-summary://{snapshot}/"
     val suffix = "/_tldr.spl"
     if not uri.starts_with(prefix) or not uri.ends_with(suffix): return nil
     val path = uri.slice(prefix.len(), uri.len() - suffix.len())
-    if path == "" or path.starts_with("/") or path.contains("\\") or path.contains(".."):
-        return nil
+    if not _logical_path_valid_v1(repository, path): return nil
     Some(path)
 
 fn _token_mac_v1(auth: SummaryAuthV1, snapshot: text, path: text, cursor: i64,
@@ -63,7 +77,7 @@ fn _token_cursor_v1(auth: SummaryAuthV1, snapshot: text, path: text, token: text
     if expiry != auth.expires_epoch or auth.request_epoch > expiry:
         return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryTokenExpired, "summary continuation token expired"))
     if cursor < 0 or fields[2] != _token_mac_v1(auth, snapshot, path, cursor, max_bytes, max_entries):
-        return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryTokenInvalid, "summary continuation token authentication failed"))
+        return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryTokenInvalid, "summary continuation token binding mismatch"))
     Ok(cursor)
 
 fn _hex_bytes_v1(bytes: [u8]) -> text:
@@ -134,7 +148,9 @@ pub class SummaryStoreV1:
     # Called only by the admitted compile projection path. PureDatabase remains
     # disposable: canonical summary bytes and AST digest name immutable CAS data.
     me publish(summary: PublicSummaryV1, ast_digest: text, provenance: text) -> Result<(), text>:
-        if not logical_source_path_valid_v1(summary.logical_path) or ast_digest.len() != 64:
+        if (not logical_source_path_valid_v1(summary.logical_path) or not _lower_hex_digest_v1(summary.snapshot_id) or
+                not _lower_hex_digest_v1(summary.logical_path.repository_namespace_digest) or
+                not _lower_hex_digest_v1(ast_digest) or provenance != "generated/untrusted;public-only"):
             return Err("summary projection identity is invalid")
         val canonical = canonical_public_summary_encode_v1(summary)
         val decoded = canonical_public_summary_decode_v1(canonical)
@@ -146,13 +162,28 @@ pub class SummaryStoreV1:
             case PathSemanticsV1.CaseSensitiveNfc: 1
             case PathSemanticsV1.CaseFoldedNfc: 2
         val id = "{summary.snapshot_id}\u0000{summary.logical_path.repository_namespace_digest}\u0000{summary.logical_path.module_relative_utf8}"
+        val existing = match self.db.query("SELECT * FROM summary_projection_v1 WHERE id = ?", [DbValue.Text(value: id)]):
+            case Ok(rows): rows
+            case Err(error): return Err(error.message())
+        if existing.len() > 1: return Err("summary projection identity is not unique")
+        if existing.len() == 1:
+            val row = existing[0]
+            val same = (row.get_text("snapshot") == Some(summary.snapshot_id) and
+                row.get_text("repository") == Some(summary.logical_path.repository_namespace_digest) and
+                row.get_text("logical_path") == Some(summary.logical_path.module_relative_utf8) and
+                row.get_text("summary_bytes") == Some(_hex_bytes_v1(canonical)) and
+                row.get_text("rendered_bytes") == Some(rendered) and
+                row.get_text("content_digest") == Some(summary.virtual_text_digest) and
+                row.get_text("ast_digest") == Some(ast_digest) and row.get_text("provenance") == Some(provenance))
+            if same: return Ok(())
+            return Err("summary projection immutable identity conflict")
         val values = [DbValue.Text(value: id), DbValue.Text(value: summary.snapshot_id),
             DbValue.Text(value: summary.logical_path.repository_namespace_digest),
             DbValue.Text(value: summary.logical_path.module_relative_utf8), DbValue.Integer(value: semantics),
             DbValue.Text(value: _hex_bytes_v1(canonical)), DbValue.Text(value: rendered),
             DbValue.Text(value: summary.virtual_text_digest), DbValue.Text(value: ast_digest),
             DbValue.Text(value: provenance)]
-        match self.db.exec("INSERT OR REPLACE INTO summary_projection_v1 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", values):
+        match self.db.exec("INSERT INTO summary_projection_v1 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", values):
             case Ok(_):
                 match self.db.checkpoint():
                     case Ok(_): Ok(())
@@ -171,31 +202,80 @@ pub class SummaryStoreV1:
         if rows.len() != 1: return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryCorrupt, "summary projection identity is not unique"))
         val decoded = canonical_public_summary_decode_v1(_canonical_bytes_v1(rows[0]))
         if not decoded.ok: return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryCorrupt, "stored summary bytes failed verification"))
+        val summary = match decoded.value:
+            case nil: return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryCorrupt, "stored summary decode omitted value"))
+            case value: value
+        val rendered = rows[0].get_text("rendered_bytes")?
+        val ast_digest = rows[0].get_text("ast_digest")?
+        val provenance = rows[0].get_text("provenance")?
+        if (summary.snapshot_id != snapshot or summary.logical_path.repository_namespace_digest != repository or
+                summary.logical_path.module_relative_utf8 != path or not _lower_hex_digest_v1(ast_digest) or
+                rows[0].get_text("content_digest") != Some(summary.virtual_text_digest) or
+                sha256_text("simple.public.summary.text.v1\u0000" + rendered) != summary.virtual_text_digest or
+                render_public_summary_tldr_v1(summary) != rendered or provenance != "generated/untrusted;public-only"):
+            return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryCorrupt, "stored summary projection identity failed verification"))
         Ok(Some(rows[0]))
 
     me rows(snapshot: text, repository: text, directory: text) -> Result<[DbRow], SummaryErrorV1>:
-        val prefix = if directory == "": "%" else: directory + "/%"
-        match self.db.query("SELECT * FROM summary_projection_v1 WHERE snapshot = ? AND repository = ? AND logical_path LIKE ? ORDER BY logical_path ASC", [DbValue.Text(value: snapshot), DbValue.Text(value: repository), DbValue.Text(value: prefix)]):
-            case Ok(value): Ok(value)
-            case Err(_): Err(_summary_error_v1(SummaryErrorCodeV1.SummaryCorrupt, "summary projection list failed"))
+        val candidates = match self.db.query("SELECT * FROM summary_projection_v1 WHERE snapshot = ? ORDER BY logical_path ASC", [DbValue.Text(value: snapshot)]):
+            case Ok(value): value
+            case Err(_): return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryCorrupt, "summary projection list failed"))
+        val prefix = if directory == "": "" else: directory + "/"
+        var result: [DbRow] = []
+        for row in candidates:
+            val row_repository = row.get_text("repository")?
+            val row_path = row.get_text("logical_path")?
+            if row_repository == repository and (prefix == "" or row_path.starts_with(prefix)):
+                if (not _logical_path_valid_v1(repository, row_path) or
+                        not _lower_hex_digest_v1(row.get_text("content_digest")?) or
+                        row.get_text("provenance")? != "generated/untrusted;public-only"):
+                    return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryCorrupt, "summary list row failed verification"))
+                result.push(row)
+        Ok(result)
+
+    # Deletes rebuildable catalog rows only; immutable CAS objects are outside
+    # this owner and cannot be reached by cleanup.
+    me cleanup_stale(live_snapshots: [text], max_deletes: i64) -> Result<i64, text>:
+        if max_deletes < 0 or max_deletes > 1024: return Err("summary cleanup bound rejected")
+        for snapshot in live_snapshots:
+            if not _lower_hex_digest_v1(snapshot): return Err("summary cleanup snapshot is invalid")
+        val rows = match self.db.query("SELECT id, snapshot FROM summary_projection_v1 ORDER BY id ASC", []):
+            case Ok(value): value
+            case Err(error): return Err(error.message())
+        var deleted: i64 = 0
+        for row in rows:
+            if deleted >= max_deletes: break
+            val snapshot = row.get_text("snapshot")?
+            if not live_snapshots.contains(snapshot):
+                match self.db.delete_by_key("summary_projection_v1", "id", DbValue.Text(value: row.get_text("id")?)):
+                    case Ok(count): deleted = deleted + count
+                    case Err(error): return Err(error.message())
+        if deleted > 0:
+            match self.db.checkpoint():
+                case Ok(_): pass
+                case Err(error): return Err(error.message())
+        Ok(deleted)
 
 pub class VirtualSourceStoreAdapterV1:
     store: SummaryStoreV1
     max_bytes: i64
     max_entries: i64
+    admitted_capability_receipt: text
 
-    static fn new(store: SummaryStoreV1) -> VirtualSourceStoreAdapterV1:
-        VirtualSourceStoreAdapterV1(store: store, max_bytes: 65536, max_entries: 256)
+    static fn new(store: SummaryStoreV1, admitted_capability_receipt: text) -> VirtualSourceStoreAdapterV1:
+        VirtualSourceStoreAdapterV1(store: store, max_bytes: 65536, max_entries: 256,
+            admitted_capability_receipt: admitted_capability_receipt)
 
-    me _authorize(auth: SummaryAuthV1) -> Result<(), SummaryErrorV1>:
-        if not _auth_valid_v1(auth):
-            return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryAccessDenied, "summary authorization rejected"))
+    me _validate_request_context(auth: SummaryAuthV1) -> Result<(), SummaryErrorV1>:
+        if (not _auth_valid_v1(auth) or not _lower_hex_digest_v1(self.admitted_capability_receipt) or
+                auth.capability_admission_receipt != self.admitted_capability_receipt):
+            return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryAccessDenied, "summary admitted capability receipt rejected"))
         Ok(())
 
 impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
     fn list(auth: SummaryAuthV1, snapshot: text, logical_directory: text, max_entries: i64, continuation: text?) -> Result<VirtualSourceListPageV1, SummaryErrorV1>:
-        self._authorize(auth)?
-        if snapshot.len() != 64 or max_entries <= 0 or max_entries > self.max_entries:
+        self._validate_request_context(auth)?
+        if not _lower_hex_digest_v1(snapshot) or not _directory_valid_v1(auth.root_digest, logical_directory) or max_entries <= 0 or max_entries > self.max_entries:
             return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryBoundsExceeded, "summary list bounds rejected"))
         var cursor: i64 = 0
         if val token = continuation: cursor = _token_cursor_v1(auth, snapshot, logical_directory, token, 0, max_entries)?
@@ -217,8 +297,9 @@ impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
             entries: entries, continuation: next, complete: complete, page_digest: digest))
 
     fn stat(auth: SummaryAuthV1, snapshot: text, virtual_uri: text) -> Result<SummaryLookupV1<VirtualSourceStatV1>, SummaryErrorV1>:
-        self._authorize(auth)?
-        val path = match _uri_path_v1(snapshot, virtual_uri):
+        self._validate_request_context(auth)?
+        if not _lower_hex_digest_v1(snapshot): return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "snapshot digest rejected"))
+        val path = match _uri_path_v1(snapshot, auth.root_digest, virtual_uri):
             case nil: return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "virtual summary URI rejected"))
             case value: value
         val row = self.store.row(snapshot, auth.root_digest, path)?
@@ -231,10 +312,11 @@ impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
             content_digest: value.get_text("content_digest")?, provenance: value.get_text("provenance")?, visibility: SummaryVisibilityV1.PublicOnly))))
 
     fn read(auth: SummaryAuthV1, snapshot: text, virtual_uri: text, offset: i64, max_bytes: i64) -> Result<SummaryLookupV1<VirtualSourceReadV1>, SummaryErrorV1>:
-        self._authorize(auth)?
+        self._validate_request_context(auth)?
         if offset < 0 or max_bytes <= 0 or max_bytes > self.max_bytes:
             return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryBoundsExceeded, "summary read bounds rejected"))
-        val path = match _uri_path_v1(snapshot, virtual_uri):
+        if not _lower_hex_digest_v1(snapshot): return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "snapshot digest rejected"))
+        val path = match _uri_path_v1(snapshot, auth.root_digest, virtual_uri):
             case nil: return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "virtual summary URI rejected"))
             case value: value
         val row = self.store.row(snapshot, auth.root_digest, path)?
@@ -249,10 +331,11 @@ impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
             content_digest: value.get_text("content_digest")?, provenance: value.get_text("provenance")?))))
 
     fn page(auth: SummaryAuthV1, snapshot: text, virtual_uri: text, continuation: text?, max_bytes: i64, max_entries: i64) -> Result<SummaryLookupV1<SummaryPageV1>, SummaryErrorV1>:
-        self._authorize(auth)?
+        self._validate_request_context(auth)?
         if max_bytes <= 0 or max_bytes > self.max_bytes or max_entries <= 0 or max_entries > self.max_entries:
             return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryBoundsExceeded, "summary page bounds rejected"))
-        val path = match _uri_path_v1(snapshot, virtual_uri):
+        if not _lower_hex_digest_v1(snapshot): return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "snapshot digest rejected"))
+        val path = match _uri_path_v1(snapshot, auth.root_digest, virtual_uri):
             case nil: return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "virtual summary URI rejected"))
             case value: value
         var cursor: i64 = 0
