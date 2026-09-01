@@ -140,3 +140,45 @@ clobbers travel in `constraints` and merge in `stmt_lowering.rs`.
     `native_inline_asm_riscv_skips_block_form_operand_placeholders`
 - Full suites green: `simple-parser --lib asm` 31/31, `simple-compiler --lib
   inline_asm` 15/15.
+
+## Gate result — RESOLVED, blocker moved to the LINK stage
+
+Verdict, verbatim (`GATE_RC=2`, captured directly into a variable, never through
+a pipe; `sh scripts/check/check-simpleos-riscv64-wm-render-smoke-opensbi.shs`,
+run from a fresh worktree on this fix):
+
+```
+ERROR — nothing was checked: WM kernel build failed: ld.lld: error: too many errors emitted, stopping now (use --error-limit=0 to see all errors)  build-riscv64-wm-kernel: ERROR — native-build failed for wm (rc=1), log: /mnt/data/worktrees/inline-asm-emit-fix/build/os/riscv64_wm/wm/kernel-build.log
+```
+
+Compare the pre-fix verdict at the top of this record: `18 errors generated.`
+from the ASSEMBLER. All 18 are gone. The strongest evidence is negative and
+exact: `simple_asm_blocks.c` is mentioned **zero** times in the new
+`kernel-build.log` (it was named on every one of the 18 pre-fix error lines), so
+the generated translation unit now assembles clean for riscv64. The build gets
+past codegen and assembly and dies in `ld.lld`.
+
+The gate legitimately still ERRORs, one stage later. The 20 remaining failures
+are all `ld.lld: error: undefined symbol`, none of them from the asm sidecar:
+
+```
+rt_any_add rt_any_gt rt_any_lt rt_array_last rt_array_remove rt_load_barrier
+rt_mutex_lock rt_mutex_unlock rt_port_inb rt_port_outb rt_port_outl
+rt_text_to_bytes rt_typed_words_u64_set rt_value_as_u64 rt_value_u64
+spl_mutex_create spl_mutex_lock spl_mutex_unlock spl_thread_current_id
+text_dot_from_char_code
+```
+
+This is the PRE-EXISTING defect class already tracked, not something this fix
+introduced — codegen emits calls to runtime entry names the C runtime never
+defines. See
+`doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`
+and the advisory `scripts/check/check-no-unresolved-runtime-symbols.shs`, which
+is honestly RED on `main` with 83 such codegen-emitted names. `rt_value_u64` in
+particular is named verbatim in
+`doc/08_tracking/bug/runtime_native_c_uncompilable_unsigned_box_never_implemented_2026-08-11.md`.
+The emitted asm blocks still define their (now-empty) functions, so none of
+these undefineds can come from the skip-comments.
+
+**Status of this record: FIXED.** The next rv64 WM blocker is the runtime
+symbol closure, which belongs to those records.
