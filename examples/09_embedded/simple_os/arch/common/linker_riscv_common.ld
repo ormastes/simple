@@ -56,19 +56,10 @@ SECTIONS {
         _stack_top = .;
     } > RAM
 
-    /* Kernel heap for the bump allocator.
-     *
-     * SIZE IS PER-TARGET, defaulting to 64M. A target whose RAM can afford
-     * more assigns `__heap_size` BEFORE including this file (riscv64/linker.ld
-     * does); riscv32's tiny linkers define nothing and keep exactly the 64M
-     * they had. Measured 2026-09-01: the riscv64 build-and-run row exhausted
-     * the LOW half (baremetal_stubs.c owns half of __heap_start..__heap_end,
-     * so 64M total = 32M per TU) inside parse_and_build_module, before
-     * `[probe] c-parse-ok`, and the kernel then restarted 67 times in one
-     * boot. The arena never frees, so the frontend's peak is its total. */
+    /* Kernel heap (64MB for bump allocator) */
     .heap (NOLOAD) : ALIGN(4K) {
         __heap_start = .;
-        . += DEFINED(__heap_size) ? __heap_size : 64M;
+        . += 64M;
         __heap_end = .;
     } > RAM
 
