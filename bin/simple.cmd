@@ -51,5 +51,12 @@ if defined BOOTSTRAP_BIN (
     exit /b %ERRORLEVEL%
 )
 
+rem Final fallback: the tracked seed at bin\simple.exe (the only runtime a
+rem fresh Windows clone has; bin\release\ is gitignored and may be absent).
+if exist "%REPO_ROOT%\bin\simple.exe" (
+    "%REPO_ROOT%\bin\simple.exe" %*
+    exit /b %ERRORLEVEL%
+)
+
 echo error: no Simple runtime found 1>&2
 exit /b 1
