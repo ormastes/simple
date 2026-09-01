@@ -4,7 +4,8 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.hir.hir.*
 use compiler.driver.driver_log_helpers.{log_debug, log_build_progress}
-use compiler.semantics.resolve.{resolve_methods}
+use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.mono.monomorphize_integration.*
 use compiler.driver.driver_safety_severity.{
     SafetyPassSeverity,
@@ -52,6 +53,32 @@ impl CompilerDriver:
                     "Method resolution error in {name}: {err.message}")
 
         (ctx, not ctx.has_errors())
+
+    me run_resolve_methods_quiet_gated():
+        """SIMPLE_RESOLVE_METHODS=1 experiment (default OFF, 2026-09-01).
+
+        Runs the QUIET method-resolution pass over every assembled HIR module
+        — the pass real multi-source builds structurally never ran (see
+        doc/08_tracking/bug/resolve_methods_never_runs_on_real_compile_path_2026-09-01.md,
+        Fix scoping). Called from compile orchestration AFTER phase 3
+        succeeds, so it covers both the streaming and the non-streaming
+        lowering branches, and runs after every hir_cache store/load — the
+        cache therefore carries unresolved modules on both flag settings and
+        cannot be poisoned by the flag. Quiet mode records zero errors by
+        construction (MethodResolver.add_error early-returns), so a build
+        with the flag on can only gain resolved calls, never new failures."""
+        val quiet_module_names = self.ctx.hir_modules.keys()
+        var quiet_resolved_count = 0
+        for quiet_name in quiet_module_names:
+            val quiet_hir_module = self.ctx.hir_modules[quiet_name]
+            val (quiet_resolved_module, quiet_errors) = resolve_methods_quiet(quiet_hir_module)
+            self.ctx.hir_modules[quiet_name] = quiet_resolved_module
+            quiet_resolved_count = quiet_resolved_count + 1
+            if quiet_errors.len() > 0:
+                # Cannot happen (quiet add_error is a no-op); loud if it does,
+                # because silent error loss is this repo's worst failure class.
+                eprint("[resolve-methods-quiet] INVARIANT BREAK: {quiet_errors.len()} error(s) recorded in quiet mode for module {quiet_name}")
+        print "[resolve-methods-quiet] SIMPLE_RESOLVE_METHODS=1: {quiet_resolved_count} module(s) re-resolved"
 
     fn type_check_impl() -> (CompileContext, bool):
         var ctx = self.ctx

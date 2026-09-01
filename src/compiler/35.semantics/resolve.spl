@@ -148,6 +148,19 @@ class MethodResolver:
     # resolve_methods), so call-site default-argument fill must read callee
     # signatures (params + defaults) from here. Empty when constructed standalone.
     module_functions: Dict<SymbolId, HirFunction>
+    # Quiet/typed experiment mode (SIMPLE_RESOLVE_METHODS=1, 2026-09-01 fix
+    # scoping for resolve_methods_never_runs_on_real_compile_path_2026-09-01):
+    # when true, (a) resolution failure is a SILENT Unresolved — no error is
+    # recorded, so behaviour is monotone over today's Unresolved-with-MIR-
+    # fallback baseline; (b) receivers get attach_inferred_type() before
+    # resolve_method; (c) unannotated Let bindings are backfilled into
+    # local_value_types from their init expression. Default false keeps the
+    # bootstrap flat-HIR caller byte-identical in behaviour.
+    quiet: bool
+    # Per-function binding env for the quiet mode: raw local symbol id ->
+    # type recorded at its Let (declared, or inferred from the init).
+    # Consulted by infer_symbol_value_type ahead of the symbol table.
+    local_value_types: Dict<i64, HirType>
 
     static fn new(symbols: SymbolTable) -> MethodResolver:
         MethodResolver(
@@ -157,7 +170,9 @@ class MethodResolver:
             trait_impls: {},
             trait_solver: TraitSolver.create(),
             current_fn_sym: nil,
-            module_functions: {}
+            module_functions: {},
+            quiet: false,
+            local_value_types: {}
         )
 
     static fn with_trait_solver(symbols: SymbolTable, solver: TraitSolver) -> MethodResolver:
@@ -169,7 +184,9 @@ class MethodResolver:
             trait_impls: {},
             trait_solver: solver,
             current_fn_sym: nil,
-            module_functions: {}
+            module_functions: {},
+            quiet: false,
+            local_value_types: {}
         )
 
 fn create_trait_solver_for_resolution() -> TraitSolver:
@@ -183,7 +200,12 @@ fn create_trait_solver_for_resolution() -> TraitSolver:
         assoc_resolver: AssocTypeResolver(
             traits: {},
             impls: {}
-        )
+        ),
+        # LATENT NIL (found 2026-09-01): this partial construction omitted
+        # trait_methods, leaving it nil. It never fired because resolve_method
+        # bailed on nil receiver types before try_trait_method_with_solver
+        # could read it; the quiet typed mode reaches it on every miss.
+        trait_methods: {}
     )
 
 fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
@@ -194,7 +216,9 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
         trait_impls: {},
         trait_solver: create_trait_solver_for_resolution(),
         current_fn_sym: nil,
-        module_functions: {}
+        module_functions: {},
+        quiet: false,
+        local_value_types: {}
     )
 
 impl MethodResolver:
@@ -304,6 +328,10 @@ impl MethodResolver:
     me resolve_function(func: HirFunction) -> HirFunction:
         """Resolve method calls in a function body."""
         self.current_fn_sym = Some(func.symbol)
+        if self.quiet:
+            # Per-function binding scope: drop the previous function's Let
+            # backfill so a same-named local in another function never leaks.
+            self.local_value_types = {}
         HirFunction(
             symbol: func.symbol,
             name: func.name,
@@ -362,7 +390,18 @@ impl MethodResolver:
                 HirStmtKind.Expr(self.resolve_expr(expr))
 
             case Let(symbol, type_, init):
-                HirStmtKind.Let(symbol, type_, self.resolve_expr(init))
+                val resolved_let_init = self.resolve_expr(init)
+                if self.quiet:
+                    # Backfill the binding env: a declared type wins; an
+                    # unannotated Let takes whatever the structural helper can
+                    # synthesize from the (already resolved) init — literals
+                    # aside, this covers Var/Call/StructLit/Index provenance
+                    # (infer_expr_type, resolve_lookup_helpers.spl).
+                    if type_ != nil:
+                        self.local_value_types[symbol.id] = type_
+                    elif val let_inferred_type = self.infer_expr_type(resolved_let_init):
+                        self.local_value_types[symbol.id] = let_inferred_type
+                HirStmtKind.Let(symbol, type_, resolved_let_init)
 
             case Assign(target, op, value):
                 HirStmtKind.Assign(
@@ -419,7 +458,17 @@ impl MethodResolver:
                     case NamedVar(symbol, _): receiver_symbol_id = symbol.id
                     case _: ()
 
-                val resolved_receiver = self.resolve_expr(receiver)
+                val resolved_receiver_raw = self.resolve_expr(receiver)
+                # Quiet mode: attach the structurally known type (symbol table
+                # declared types, params/self, Let backfill, call return
+                # types) onto the receiver node itself. Used both as
+                # resolve_method's input and in the reconstructed MethodCall,
+                # so MIR's type-directed fallbacks (receiver_is_dict etc.) see
+                # it even when resolution stays Unresolved.
+                val resolved_receiver = if self.quiet:
+                    self.attach_inferred_type(resolved_receiver_raw)
+                else:
+                    resolved_receiver_raw
                 val resolved_args = self.resolve_call_args(call_args)
 
                 # Check if this is actually a static method call (Type.method())
@@ -785,6 +834,21 @@ fn resolve_methods(module: HirModule) -> (HirModule, [ResolveError]):
     # it with an empty table discarded both type identity and import ownership,
     # making same-named methods fall through to unrelated global candidates.
     val resolver = create_method_resolver(module.symbols)
+    val resolved = resolver.resolve_module(module)
+    (resolved, resolver.errors)
+
+fn resolve_methods_quiet(module: HirModule) -> (HirModule, [ResolveError]):
+    """Env-gated quiet variant (SIMPLE_RESOLVE_METHODS=1 driver pass).
+
+    Same walk as resolve_methods, but resolution failure is a SILENT
+    Unresolved (never an error), receivers get attach_inferred_type(), and
+    unannotated Lets are backfilled from their inits. Monotone over the
+    baseline: a call either becomes genuinely resolved or stays exactly as
+    the MIR ad hoc fallback sees it today. See
+    doc/08_tracking/bug/resolve_methods_never_runs_on_real_compile_path_2026-09-01.md
+    (Fix scoping)."""
+    var resolver = create_method_resolver(module.symbols)
+    resolver.quiet = true
     val resolved = resolver.resolve_module(module)
     (resolved, resolver.errors)
 
