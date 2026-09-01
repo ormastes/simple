@@ -74,3 +74,35 @@ change and its own verification, not a drive-by.
 POSIX. No POSIX host was available; both defects are platform-independent by
 inspection (module resolution and import handling), but that is inspection, not
 execution, and should not be recorded as a measurement.
+
+---
+
+## Defect 3 (found in the same pass, distinct cause) — `path_pure` is separator-blind on Windows
+
+`test/01_unit/lib/common/path_pure_{basename,dirname}_crosslang_spec.spl` are
+**RED on Windows**, 3 passed / 2 failed each:
+
+```
+assert_equal failed: expected b,   got C:\a\b
+assert_equal failed: expected x.y, got \x.y\x.y
+```
+
+**Pre-existing, not introduced by the path-commonization change.** Proven by
+execution rather than asserted: with `src/lib/common/path_pure.spl` restored
+byte-for-byte from `HEAD`, the spec fails identically (`passed=3 failed=2`,
+rc=1); the commonization diff to that file is `+45 -0`, purely appended.
+
+Cause: `path_pure`'s `last_component` scans for `/` only, while the Rust oracle
+it is differentially tested against (`rt_path_basename`, `std::path::Path`)
+treats **both** `/` and `\` as separators when compiled for Windows. So
+`path_basename("C:\a\b")` yields the whole string instead of `b`. Silent wrong
+answer, no error — the same mute class as the rest of this record.
+
+**Deliberately NOT fixed in this pass.** The obvious fix — teach
+`last_component` to split on `\` too — is **not** safe unconditionally: on
+POSIX a backslash is a legal filename character, so `basename("a\b")` must
+stay `"a\b"` there, and a blanket change would silently corrupt POSIX paths to
+"fix" Windows. The correct fix is platform-conditional recognition inside
+`path_pure` (or a documented Windows-only variant), which is a real design
+decision with a cross-platform blast radius, not a drive-by edit. Filed here
+with the tradeoff stated so the next person does not "simplify" it wrongly.
