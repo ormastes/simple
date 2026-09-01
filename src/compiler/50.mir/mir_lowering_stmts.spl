@@ -1473,6 +1473,44 @@ impl MirLowering:
                 else:
                     self.array_element_struct_syms = self.array_element_struct_syms.remove(local.id)
 
+    me lower_tuple_destructuring_assign(elements: [HirExpr], value_local: LocalId, op: HirAssignOp?):
+        """Extract a tuple RHS into the recursive lvalue targets of
+        `a, b = f()` / `(a, b) = f()`.
+
+        The HIR represents the target parens/commas as TupleLit even though
+        they are an assignment pattern, not a newly constructed tuple value.
+        A lowered tuple is a genuine MIR aggregate (MirTypeKind.Tuple(field_
+        types)), not a boxed runtime array, so elements are read back with
+        emit_get_field (the same helper the `t[N]` literal-index tuple-read
+        path already uses), not rt_array_get. See bug doc:
+        native-build on the MCP server (61-module closure) failed in MIR
+        lowering with `unsupported MIR assignment target:
+        HirExprKind::TupleLit(...)` -- the tree-walking interpreter already
+        executed `(out, exit_code) = shell_cmd(...)` correctly; only the
+        native/MIR lowering path was missing this arm."""
+        if op.?:
+            self.error_fatal("compound assignment is not supported for tuple destructuring", nil)
+            return
+        var field_types: [MirType] = []
+        if val tuple_mir_type = self.local_mir_type_of(value_local):
+            match tuple_mir_type.kind:
+                case MirTypeKind.Tuple(ft):
+                    field_types = ft
+                case _: ()
+        var element_index = 0
+        while element_index < elements.len():
+            val target_element = elements[element_index]
+            var element_type = MirType.i64()
+            if element_index < field_types.len():
+                element_type = field_types[element_index]
+            elif target_element.has_type_:
+                element_type = self.lower_type(target_element.type_)
+            var b = self.builder
+            val field_local = b.emit_get_field(mir_operand_copy(value_local), element_index, element_type)
+            self.builder = b
+            self.lower_assign(target_element, nil, field_local, target_element.kind)
+            element_index = element_index + 1
+
     me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId, value_kind: HirExprKind):
         """Lower assignment."""
         match target.kind:
@@ -1712,6 +1750,9 @@ impl MirLowering:
 
                 # Emit call with no return value
                 self.builder.emit_call(func_operand, [mir_operand_copy(receiver), mir_operand_copy(index_local), mir_operand_copy(boxed_value)], MirType.unit())
+
+            case TupleLit(elements):
+                self.lower_tuple_destructuring_assign(elements, value_local, op)
 
             case _:
                 self.error_fatal("unsupported MIR assignment target: {target.kind}", nil)
