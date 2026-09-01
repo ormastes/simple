@@ -1090,8 +1090,36 @@ RuntimeValue rt_value_int(RuntimeValue value)
     return ENCODE_INT(value);
 }
 
+/* The TAGGED-BOOL arm is load-bearing and was missing until 2026-09-01.
+ *
+ * simpleos_raw_or_encoded_int is `IS_INT(v) ? DECODE_INT(v) : v` -- it decodes
+ * TAG_INT and passes EVERYTHING ELSE through verbatim. A Simple bool is not
+ * TAG_INT: codegen encodes `true` as 11 and `false` as 19, both TAG_SPECIAL.
+ * So an unboxed `false` came back as 19, and every consumer that tests the
+ * result for non-zero read it as TRUE -- 19 is non-zero, and so is 11, so BOTH
+ * bools answered true.
+ *
+ * That is the whole of the riscv64 row-2 hang. `parse_statement` destructures
+ * `try_parse_bare_ident_string_call()`'s `return (false, 0)` early exit through
+ * rt_tuple_get -> rt_value_unbox_int -> `bnez`; the flag read `true`, so
+ * parse_expr() was never called, no token was consumed, and parse_block()'s
+ * `while true:` spun allocating until the bump arena was gone.
+ *
+ * The contract this restores is not invented here. It is what the canonical
+ * hosted runtime does (src/compiler_rust/runtime/src/value/sffi/value_ops.rs:80-87,
+ * SPECIAL_TRUE -> 1, SPECIAL_FALSE -> 0), what the codegen comments already
+ * describe as the decision table ("tagged true/false -> 1/0",
+ * codegen/instr/mod.rs:1598), and what the SIBLING freestanding implementation
+ * in arch/common/boot/freestanding_value_registry_impl.h:112-119 already
+ * implements. This definition was simply an incomplete port of the same name.
+ *
+ * Do NOT push the bool arm down into simpleos_raw_or_encoded_int: its other
+ * callers pass sizes, capacities and lengths, where a raw 11 or 19 is a
+ * legitimate count and must NOT be rewritten to 1 or 0. */
 RuntimeValue rt_value_unbox_int(RuntimeValue value)
 {
+    if (value == TAGGED_BOOL_TRUE) return 1;
+    if (value == TAGGED_BOOL_FALSE) return 0;
     return (RuntimeValue)(int64_t)simpleos_raw_or_encoded_int(value);
 }
 
