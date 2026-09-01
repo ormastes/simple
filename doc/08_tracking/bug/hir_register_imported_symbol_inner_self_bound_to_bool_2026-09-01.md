@@ -168,3 +168,66 @@ full-closure build to judge.
 - `--timeout 1200` is a floor, not a cap: parse + surface_build alone measured
   **7227 s** cold on this closure. Preserve `build/simpleos_wm_vulkan/daemon-cache`
   — it holds that work and makes a rerun far cheaper.
+
+## Re-measurement 2026-09-01 (lane: g2x86-selffix, PR #252 tip 3b62ae06871)
+
+**The `self`-bound-to-bool failure did NOT reproduce on the documented
+12-module closure at this tip.** Recorded so the next session does not spend
+another cycle re-deriving a defect that may already be absent.
+
+### Inputs verified identical to the reporting worktree (`wmvk-x86-3`)
+
+Ruling out worktree skew before drawing any conclusion — `diff -rq`:
+
+| input | result |
+|---|---|
+| `src/compiler` | byte-identical |
+| `src/lib` | byte-identical |
+| `src/app` | byte-identical (except this lane's probe entry) |
+| seed binary | same file, `60744944` bytes, mtime `2026-08-26 01:16:25` — predates the 2026-09-01 report, so it is the same seed the reporter ran |
+
+So the compiler source, the stdlib, and the seed are all the ones the original
+measurement used. Whatever differs is not the tree.
+
+### What the instrumented run measured
+
+`register_imported_symbol_inner` was instrumented with four `eprint` probes
+(entry, and after each candidate clobbering statement in the window between
+entry and the first `self.symbols` access). Sentinel satisfied: **4,778 probe
+lines fired**, so the seed was demonstrably executing THIS worktree's compiler
+source (the nested-`.git`/other-worktree stdlib hazard is excluded by
+measurement, not assumed).
+
+Result: **`hir 12/12` completed, and `grep -c field-access-error` = 0.** Not one
+receiver was a bool. The documented `hir 6/12` abort did not occur.
+
+### What fails instead, at this tip
+
+All 12 modules lower; the build then dies in phase 3 with the diagnostics
+already-filed transport defect and nothing else:
+
+```
+[hir-cache] hits=0 misses=12 stores=11
+[ERROR] phase 3 FAILED
+[ERROR] phase 3 FAILED (diagnostics unreadable: error array did not survive transport)
+error: native-build worker exited with code 1.
+```
+
+So on this closure the **diagnostics-transport drop is now the primary
+blocker**, not a secondary annoyance: the real phase-3 error is unreadable, and
+`12 misses / 11 stores` says exactly one module failed to lower cleanly without
+naming it.
+
+### Calibration for whoever picks this up
+
+- Do NOT assume the `self`/bool defect is fixed. Two readings remain open and
+  are not yet discriminated: (a) it is genuinely absent at this tip, or (b) the
+  `eprint` probes perturbed it away (an added statement changes env
+  publish/repoint traffic, which is plausible for a receiver-corruption bug).
+  A no-probe rerun is the discriminator and must be read together with the
+  `[hir-cache] hits=` line — a warm HIR cache makes modules skip lowering
+  entirely, so `hir 12/12` with hits > 0 proves nothing.
+- `error_message_at()` faulting on a zeroed `self` while `has_errors()` works on
+  the *same* receiver (`driver_orchestration.spl:236-258`) is the same
+  defect class as this bug — one interpreter receiver-corruption defect wearing
+  two costumes. Fixing the receiver bug likely closes both.
