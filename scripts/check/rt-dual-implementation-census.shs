@@ -1,0 +1,250 @@
+#!/bin/sh
+# rt-dual-implementation-census.shs — inventory every rt_* runtime primitive by
+# which implementation lanes define it (C / Rust / Simple twin / dual-run harness).
+#
+# Standing architectural directive: "rt should be written in C and Simple, and
+# use alias, and intensive tests." Target shape for every rt_* primitive is a C
+# implementation, a Simple implementation, an alias binding them to one call
+# site name, and intensive tests dual-running the two against each other.
+# This script measures how far the tree is from that shape.
+#
+# Follows scripts/check/extern-backing-census.shs: DEFINED symbols are read out
+# of real link artifacts via nm wherever an artifact can be produced, because
+# text-grep undercounts (`pub fn rt_*` without #[no_mangle] is mangled, and a
+# macro-generated definition has no greppable `fn` line at all). Text extraction
+# is used only as a declared fallback, and the census records which mode each
+# lane was measured in so a downstream reader cannot mistake one for the other.
+#
+# Output: a TSV on stdout (or --out FILE) with one row per distinct rt_* symbol:
+#   symbol  c_lane  rust_lane  simple_twin  dual_pair  class
+# and a header block of `#`-comments carrying the measurement mode and counts.
+#
+# Usage:
+#   sh scripts/check/rt-dual-implementation-census.shs [--root DIR] [--out FILE]
+#                                                      [--rust-artifact PATH]
+#                                                      [--no-build]
+#
+# Exit: 0 census produced, 2 nothing was measured (never a silent empty pass).
+
+set -u
+
+ROOT=""
+OUT=""
+RUST_ARTIFACT=""
+NO_BUILD=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="$2"; shift 2 ;;
+        --out) OUT="$2"; shift 2 ;;
+        --rust-artifact) RUST_ARTIFACT="$2"; shift 2 ;;
+        --no-build) NO_BUILD=1; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [ -z "$ROOT" ]; then
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    RC=$?
+    if [ $RC -ne 0 ] || [ -z "$ROOT" ]; then
+        echo "ERROR — nothing was measured (not inside a git repository and no --root)" >&2
+        exit 2
+    fi
+fi
+
+if [ ! -d "$ROOT/src/runtime" ]; then
+    echo "ERROR — nothing was measured (no src/runtime under $ROOT)" >&2
+    exit 2
+fi
+
+WORK=$(mktemp -d)
+RC=$?
+if [ $RC -ne 0 ]; then
+    echo "ERROR — nothing was measured (mktemp failed)" >&2
+    exit 2
+fi
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# C lane. Compile every OWNED src/runtime/*.c (CLAUDE.md Owned-Code Scope
+# excludes vendor/ and the three vendored headers), archive, and read DEFINED
+# symbols with nm. A file that fails only because an EXTERNAL SDK header is
+# absent on this host is recorded as uncompilable-external rather than being
+# silently dropped — the same three-way classification
+# check-c-runtime-compiles-push.shs uses.
+# ---------------------------------------------------------------------------
+CC_BIN=""
+for cand in clang cc gcc; do
+    if command -v "$cand" >/dev/null 2>&1; then CC_BIN="$cand"; break; fi
+done
+
+C_MODE="none"
+: > "$WORK/c_syms.txt"
+: > "$WORK/c_skipped.txt"
+C_FILES=0
+C_COMPILED=0
+
+if [ -n "$CC_BIN" ] && [ "$NO_BUILD" -eq 0 ]; then
+    mkdir -p "$WORK/obj"
+    find "$ROOT/src/runtime" -name '*.c' -not -path '*/vendor/*' -print \
+        | sort > "$WORK/c_files.txt"
+    while IFS= read -r cfile; do
+        [ -n "$cfile" ] || continue
+        C_FILES=$((C_FILES + 1))
+        obj="$WORK/obj/$(echo "$cfile" | tr '/.' '__').o"
+        "$CC_BIN" -c -w -I"$ROOT/src/runtime" -I"$ROOT/src/runtime/include" \
+            -o "$obj" "$cfile" > "$WORK/cc.err" 2>&1
+        CC_RC=$?
+        if [ $CC_RC -eq 0 ]; then
+            C_COMPILED=$((C_COMPILED + 1))
+        else
+            echo "$cfile" >> "$WORK/c_skipped.txt"
+            rm -f "$obj"
+        fi
+    done < "$WORK/c_files.txt"
+
+    if [ "$C_COMPILED" -gt 0 ]; then
+        nm -g --defined-only "$WORK"/obj/*.o 2>/dev/null \
+            | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^rt_[A-Za-z0-9_]+$/) print $i }' \
+            | sort -u > "$WORK/c_syms.txt"
+        C_MODE="nm"
+    fi
+fi
+
+if [ ! -s "$WORK/c_syms.txt" ]; then
+    # Declared fallback: the definition pattern check-runtime-api-regression-push.shs
+    # already uses on committed content. Recorded as text mode in the header.
+    C_MODE="text-fallback"
+    find "$ROOT/src/runtime" \( -name '*.c' -o -name '*.h' \) -not -path '*/vendor/*' -print0 \
+        | xargs -0 grep -hoE '\brt_[A-Za-z0-9_]+[[:space:]]*\([^;]*\)[[:space:]]*\{' 2>/dev/null \
+        | grep -oE '^rt_[A-Za-z0-9_]+' \
+        | sort -u > "$WORK/c_syms.txt"
+fi
+
+# ---------------------------------------------------------------------------
+# Rust lane. Two traps, both measured rather than assumed:
+#
+#   (1) `pub fn rt_*` without #[no_mangle] is MANGLED. A plain `nm | grep rt_`
+#       silently collapses the Rust lane to its `extern "C"` subset. Measured
+#       here: 1989 plain vs 2010 demangled. So nm -C (demangle) is mandatory.
+#
+#   (2) THE ARTIFACT IS NOT SINGLE-LANE. simple-runtime's build.rs compiles the
+#       C runtime and BUNDLES those objects into both libsimple_runtime.a and
+#       libsimple_runtime.rlib (measured: 23 non-Rust objects alongside 256
+#       Rust codegen units). nm over the whole archive therefore reports the
+#       UNION of the C and Rust lanes, which would classify every C symbol as
+#       also-Rust and collapse the c-only class to nearly zero. That is exactly
+#       the failure CLAUDE.md records for check-runtime-api-regression-push.shs
+#       ("unioning them was tried and found to mask real Rust-only removals").
+#       So the archive is unpacked and only Rust codegen units (*.rcgu.o) are
+#       read — a per-member attribution, not a whole-archive read.
+# ---------------------------------------------------------------------------
+RUST_MODE="none"
+: > "$WORK/rust_syms.txt"
+
+if [ -z "$RUST_ARTIFACT" ]; then
+    RUST_ARTIFACT=$(find "${CARGO_TARGET_DIR:-$ROOT/src/compiler_rust/target}" \
+        \( -name 'libsimple_runtime.rlib' \) 2>/dev/null | head -1)
+fi
+
+if [ -n "$RUST_ARTIFACT" ] && [ -f "$RUST_ARTIFACT" ]; then
+    mkdir -p "$WORK/rlib"
+    ( cd "$WORK/rlib" && ar x "$RUST_ARTIFACT" ) > /dev/null 2>&1
+    AR_RC=$?
+    RCGU_N=$(ls "$WORK"/rlib/*.rcgu.o 2>/dev/null | wc -l | tr -d ' ')
+    if [ $AR_RC -eq 0 ] && [ "$RCGU_N" -gt 0 ]; then
+        nm -C -g --defined-only "$WORK"/rlib/*.rcgu.o 2>/dev/null \
+            | grep -oE '\brt_[A-Za-z0-9_]+' \
+            | sort -u > "$WORK/rust_syms.txt"
+        if [ -s "$WORK/rust_syms.txt" ]; then
+            RUST_MODE="nm-rcgu:$RCGU_N-codegen-units:$RUST_ARTIFACT"
+        fi
+    fi
+fi
+
+if [ ! -s "$WORK/rust_syms.txt" ]; then
+    RUST_MODE="text-fallback"
+    find "$ROOT/src/compiler_rust/runtime/src" -name '*.rs' -print0 2>/dev/null \
+        | xargs -0 grep -hoE '\bfn[[:space:]]+rt_[A-Za-z0-9_]+' 2>/dev/null \
+        | grep -oE 'rt_[A-Za-z0-9_]+' \
+        | sort -u > "$WORK/rust_syms.txt"
+fi
+
+# ---------------------------------------------------------------------------
+# Simple twin lane. Authoritative source is the C-migration inventory, which
+# records the migrated pairs with their `cand=` Simple module path — a twin is
+# not inferrable from grepping for a similarly-named Simple function, since a
+# same-named helper is not necessarily a behavioural twin.
+# ---------------------------------------------------------------------------
+: > "$WORK/simple_syms.txt"
+INV="$ROOT/doc/08_tracking/c_migration/c_migration_inventory.sdn"
+if [ -f "$INV" ]; then
+    grep -ohE '\brt_[A-Za-z0-9_]+' "$INV" | sort -u > "$WORK/simple_syms.txt"
+fi
+
+# ---------------------------------------------------------------------------
+# Dual-run harness lane: the @dual_pair annotations the shadow gate enumerates.
+# ---------------------------------------------------------------------------
+: > "$WORK/dual_syms.txt"
+grep -rhoE '@dual_pair:.*\bref=rt_[A-Za-z0-9_]+' "$ROOT/test" 2>/dev/null \
+    | grep -oE 'rt_[A-Za-z0-9_]+' \
+    | sort -u > "$WORK/dual_syms.txt"
+
+# ---------------------------------------------------------------------------
+# Join.
+# ---------------------------------------------------------------------------
+cat "$WORK/c_syms.txt" "$WORK/rust_syms.txt" > "$WORK/all.txt"
+sort -u "$WORK/all.txt" -o "$WORK/all.txt"
+
+TOTAL=$(wc -l < "$WORK/all.txt" | tr -d ' ')
+if [ "$TOTAL" -eq 0 ]; then
+    echo "ERROR — nothing was measured (0 rt_* symbols found in either lane)" >&2
+    exit 2
+fi
+
+emit() {
+    echo "# rt_* dual-implementation census"
+    echo "# generated by scripts/check/rt-dual-implementation-census.shs"
+    echo "# root=$ROOT"
+    echo "# c_lane_mode=$C_MODE c_files=$C_FILES c_compiled=$C_COMPILED c_uncompilable_external=$(wc -l < "$WORK/c_skipped.txt" | tr -d ' ')"
+    echo "# rust_lane_mode=$RUST_MODE"
+    echo "# simple_twin_source=doc/08_tracking/c_migration/c_migration_inventory.sdn"
+    echo "# counts: total=$TOTAL c=$(wc -l < "$WORK/c_syms.txt" | tr -d ' ') rust=$(wc -l < "$WORK/rust_syms.txt" | tr -d ' ') simple_twin=$(wc -l < "$WORK/simple_syms.txt" | tr -d ' ') dual_pair=$(wc -l < "$WORK/dual_syms.txt" | tr -d ' ')"
+    echo "# class: both = defined in C and Rust; c-only / rust-only = single-lane"
+    echo "# rust-only is the directive's most severe violation: no C lane means"
+    echo "# the C and Rust runtimes can diverge with nothing detecting it."
+    printf 'symbol\tc_lane\trust_lane\tsimple_twin\tdual_pair\tclass\n'
+    awk '
+        FILENAME == ARGV[1] { c[$0] = 1; next }
+        FILENAME == ARGV[2] { r[$0] = 1; next }
+        FILENAME == ARGV[3] { s[$0] = 1; next }
+        FILENAME == ARGV[4] { d[$0] = 1; next }
+        {
+            sym = $0
+            cc = (sym in c) ? "yes" : "no"
+            rr = (sym in r) ? "yes" : "no"
+            ss = (sym in s) ? "yes" : "no"
+            dd = (sym in d) ? "yes" : "no"
+            if (cc == "yes" && rr == "yes") cls = "both"
+            else if (cc == "yes") cls = "c-only"
+            else cls = "rust-only"
+            printf "%s\t%s\t%s\t%s\t%s\t%s\n", sym, cc, rr, ss, dd, cls
+        }
+    ' "$WORK/c_syms.txt" "$WORK/rust_syms.txt" "$WORK/simple_syms.txt" \
+      "$WORK/dual_syms.txt" "$WORK/all.txt"
+}
+
+if [ -n "$OUT" ]; then
+    mkdir -p "$(dirname "$OUT")"
+    emit > "$OUT"
+    RC=$?
+    if [ $RC -ne 0 ]; then
+        echo "ERROR — nothing was measured (failed writing $OUT)" >&2
+        exit 2
+    fi
+    echo "wrote $OUT ($TOTAL symbol(s))"
+else
+    emit
+fi
+
+exit 0
