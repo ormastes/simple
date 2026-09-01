@@ -6,6 +6,17 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+/* macOS: _POSIX_C_SOURCE alone hides the BSD extensions in <unistd.h>, so
+ * sysconf's _SC_NPROCESSORS_ONLN is undeclared and this file fails to compile
+ * (`use of undeclared identifier '_SC_NPROCESSORS_ONLN'` at the sysconf call
+ * below) -- which blocks the whole macOS Stage-2 bootstrap. _DARWIN_C_SOURCE
+ * re-exposes them without widening anything on other platforms, where the
+ * guard is inert. This has now regressed out of main TWICE via merges; if it
+ * disappears again, look for a merge that reverted this hunk rather than an
+ * intentional removal. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 
 #include "runtime.h"
 
