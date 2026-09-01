@@ -64,3 +64,79 @@ instead of by a register/symbol. Both make the emitted text unassemblable.
 Out of scope for the riscv64 WM lane's reduced blocker, and defect 1 spans the
 x86_64 asm blocks another lane owns. Recorded rather than worked around: no
 `.spl` asm block was rewritten, and no gate fixture was weakened.
+
+## Fix (2026-09-01)
+
+Both defects fixed in one pass. Neither `.spl` asm block was rewritten and no
+gate fixture was weakened.
+
+### Defect 1 — `block_matches_target` was one-armed
+
+`src/compiler_rust/compiler/src/pipeline/native_project/inline_asm_emit.rs`.
+The target/arch notion was already at the emit site (the `target` triple), and
+the filter already existed — it just had **only** the x86 arm, which rejected
+RISC-V blocks from an x86 TU and did nothing in the other direction. It is now
+symmetric: an explicit `AsmArch` classification (`X86` / `Riscv` / `Arm` /
+`Neutral`) is derived from the target triple and from each instruction's
+mnemonic, and a block is rejected only when it carries **unmistakable** evidence
+of a family other than the target's. A line the emitter cannot attribute stays
+`Neutral` and is kept for every target, so the filter can never silently drop a
+block it merely failed to understand. No new arch parameter was added.
+
+`mov` is classified x86 even though ARM shares it: the only two targets this
+predicate can reject for are x86 and RISC-V, because `compile_inline_asm_c`
+already bails out of the C sidecar entirely for aarch64/arm before reaching it.
+
+### Defect 2 — the operand data is lost in the PARSER, not the emitter
+
+Reported rather than hacked around, per the brief. The `{name}` marker is
+destroyed at parse time by `Parser::extract_asm_block_strings`
+(`src/compiler_rust/parser/src/stmt_parsing/asm.rs`), which rendered each
+f-string part through `render_asm_placeholder` and pushed the **bare** token:
+`"csrr {0}, mcause"` -> `csrr 0, mcause`, `"invlpg [{addr}]"` ->
+`invlpg [addr]`, `"csrc mip, {msie}"` -> `csrc mip, msie`, `"call {3}"` ->
+`call 3`. That is exactly the mistake the sibling `expect_string_value` already
+documents and avoids for the PARENTHESIZED form ("Flattening to the bare name
+emitted `csrr result, sstatus`"); the block form was never given the same
+treatment, so the two forms disagreed on the same syntax.
+
+The fix keeps `render_asm_placeholder` (so the 2026-08-17
+`Identifier("stack_top")` Debug-format leak stays fixed and an unrenderable
+expression is still a loud parse error) and **re-braces** its output. One
+contract for both forms.
+
+Downstream nothing else had to change: `rewrite_asm_placeholders` rewrites a
+bound placeholder to `$N`, and either spelling (`$N` or a surviving `{name}`) is
+already recognised by the emitter's `has_unresolved_simple_operand`, which
+replaces the line with a skip comment instead of handing garbage to the
+assembler.
+
+### Still open, and deliberately NOT fixed here
+
+**The block form declares operands that are thrown away.** In
+`src/lib/nogc_async_mut_noalloc/baremetal/riscv/startup.spl` and
+`src/os/kernel/arch/x86_32/paging.spl` the operand statements (`out(reg) mcause`,
+`in(reg) vaddr`) sit inside the asm block, but `parse_asm` builds the block-form
+`InlineAsmStmt` with `constraints: vec![]` — those statements fall through
+`extract_asm_block_strings`'s `_ => {}` arm and vanish. So block-form asm can
+never bind an operand, on ANY backend, and the placeholder lines above become
+no-ops in the C sidecar rather than working instructions. Making the block form
+carry its constraints is a separate parser feature; file it before relying on
+block-form operands. (This is not a new regression: those lines never worked —
+they previously emitted unassemblable text.)
+
+`clobbers: vec![]` in `parse_asm_parenthesized` is NOT part of this: parenthesized
+clobbers travel in `constraints` and merge in `stmt_lowering.rs`.
+
+### Evidence
+
+- `cargo check --release --bin simple`: clean (0 errors).
+- Reproduce tests, RED against this fix's own parent, GREEN after:
+  - `parser`: `test_asm_block_form_keeps_operand_placeholder_braces`,
+    `test_asm_block_and_paren_forms_agree_on_placeholder_spelling`
+  - `compiler`: `native_inline_asm_riscv_target_rejects_x86_blocks`
+    (non-vacuous: a real riscv block in the same run must still be emitted),
+    `native_inline_asm_x86_target_still_rejects_riscv_blocks`,
+    `native_inline_asm_riscv_skips_block_form_operand_placeholders`
+- Full suites green: `simple-parser --lib asm` 31/31, `simple-compiler --lib
+  inline_asm` 15/15.
