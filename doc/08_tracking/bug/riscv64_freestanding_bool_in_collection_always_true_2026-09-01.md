@@ -368,3 +368,72 @@ express the same defect, and is captured in
 The fix as applied does not depend on which runtime is linked — it decodes the
 tagged value in codegen rather than delegating to `rt_value_unbox_int` — which
 is why it was preferred over adding a bool arm to the C.
+
+---
+
+# CORRECTION — the section above named the WRONG SITE. Read this one.
+
+The "ROOT CAUSE, MEASURED AND FIXED" section above correctly identified the
+MECHANISM (a tagged `false` = 19 surviving undecoded into a non-zero test) but
+attributed it to the Cranelift boxed-closure unbox arm
+(`closure_boxed_entry.rs` / `instr/closures_structs.rs`). **That attribution is
+wrong and the change based on it has been reverted** (`ea7df60f08b`). It is left
+in this record rather than deleted, because the way it was caught is the point.
+
+## How it was caught
+
+The rule the task set — *before concluding anything, verify with `nm`/objdump
+that your change is actually IN the image* — is what caught it. The kernel was
+rebuilt with the Cranelift change and the call site re-disassembled. It was
+**byte-identical** to the pre-fix kernel: still
+
+```
+jalr <try_parse_bare_ident_string_call>
+li   a1,0 ; jalr -> rt_tuple_get(tuple, 0)
+          ; jalr -> rt_value_unbox_int          <- STILL a call, not inline
+mv   s6,a0 ; zext.b a0,s7 ; bnez
+```
+
+with the second target still resolving to `rt_value_unbox_int`. Had the
+Cranelift arm been the live site, that call would have disappeared entirely and
+been replaced by inline tag compares. It was not. The change fixed nothing, and
+would have shipped as a false fix with a guard pinning it.
+
+## The actual root cause
+
+The live path is the MIR `UnboxInt` lowering, which calls `rt_value_unbox_int` —
+and **there are TWO definitions of that function for freestanding riscv64**:
+
+| definition | tagged-bool arm |
+|---|---|
+| `arch/common/boot/freestanding_value_registry_impl.h:112` | **present** (`if (value == 11) return 1; if (value == 19) return 0;`) |
+| `arch/riscv64/boot/baremetal_runtime_core.inc.c:1093` | **ABSENT** |
+
+The defective one is the one the image links, proven by disassembly: the
+kernel's `rt_value_unbox_int` tail-calls `simpleos_raw_or_encoded_int`, whose
+entire body is `(v & 7) == 0 ? v >> 3 : v`. Tagged `false` is 19, `19 & 7 == 3`,
+so it took the passthrough arm and returned 19; `19 != 0` is true, and so is 11.
+
+**This is exactly the duplicate-definition trap the task warned about, in a form
+nobody had checked**: the warning named `baremetal_stubs.c` vs
+`baremetal_runtime_core.inc.c`, and the real pair here is
+`baremetal_runtime_core.inc.c` vs `freestanding_value_registry_impl.h`. A
+tree-wide grep for `value == 19` finds the GOOD sibling and reports success
+while the image links the bad one — which is very likely why this defect
+survived several investigations.
+
+## The fix
+
+Give the linked definition the missing arm (`71222183a0a`), restoring the
+contract that the canonical hosted runtime
+(`src/compiler_rust/runtime/src/value/sffi/value_ops.rs:80-87`), the codegen
+comments (`codegen/instr/mod.rs:1598`) and the sibling freestanding
+implementation all already state. `TAGGED_BOOL_TRUE`/`TAGGED_BOOL_FALSE` were
+added to `baremetal_runtime.h`; the pre-existing `TRUE_VALUE`/`FALSE_VALUE` were
+deliberately left alone so their separately-tracked disagreement with codegen
+does not change as a side effect of this fix.
+
+Guard: `scripts/check/check-baremetal-tagged-bool-decode.shs` — judges each
+definition body separately, so a good sibling cannot excuse a bad one. RED
+before the fix (naming `baremetal_runtime_core.inc.c:1093`), GREEN after, fatal
+6-fixture `--selftest` including the duplicate-definition case itself.
