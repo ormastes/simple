@@ -4,48 +4,33 @@ use compiler.driver.cache.daemon.cache_daemon_lifecycle
 use compiler.driver.cache.daemon.cache_daemon_transport
 
 describe "compiler cache daemon lifecycle":
-    it "rejects stale or hostile readiness identity":
-        val receipt = CacheDaemonReadinessReceipt(
-            owner_instance_nonce: "owner-7", peer_user_id: "user-a", writer_epoch: 7i64,
-            protocol_digest: "protocol-v1", readiness_nonce: "ready-7",
-        )
-        expect(cache_daemon_receipt_valid(receipt, "user-a", "owner-7", "protocol-v1", "ready-7")).to_equal(true)
-        expect(cache_daemon_receipt_valid(receipt, "user-b", "owner-7", "protocol-v1", "ready-7")).to_equal(false)
-        expect(cache_daemon_receipt_valid(receipt, "user-a", "owner-reused", "protocol-v1", "ready-7")).to_equal(false)
-        expect(cache_daemon_receipt_valid(receipt, "user-a", "owner-7", "protocol-v1", "stale")).to_equal(false)
+    it "runs one monotonic launch and reconnect before fallback":
+        val machine = cache_connect_state_machine_new(100i64)
+        val first = machine.connect(false, 110i64)
+        expect(first.reason).to_equal("launch_then_reconnect")
+        expect(machine.launch_count).to_equal(1i64)
+        val retry = machine.connect(false, 350i64)
+        expect(retry.route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+        expect(retry.reconnect_count).to_equal(1i64)
+        expect(machine.connect(true, 351i64).route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
 
-    it "admits only a strictly newer writer epoch":
-        expect(cache_writer_epoch_can_advance(0i64, 1i64)).to_equal(true)
-        expect(cache_writer_epoch_can_advance(7i64, 8i64)).to_equal(true)
-        expect(cache_writer_epoch_can_advance(7i64, 7i64)).to_equal(false)
-        expect(cache_writer_epoch_can_advance(7i64, 6i64)).to_equal(false)
-        expect(cache_writer_epoch_can_advance(0i64, 0i64)).to_equal(false)
+    it "accepts authenticated readiness only inside the total budget":
+        val ready = cache_connect_state_machine_new(0i64)
+        ready.connect(false, 1i64)
+        expect(ready.connect(true, 250i64).route).to_equal(CACHE_ROUTE_DAEMON)
+        val late = cache_connect_state_machine_new(0i64)
+        late.connect(false, 1i64)
+        expect(late.connect(true, 251i64).route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
 
-    it "attempts exactly one reconnect then selects isolated direct spool":
-        val decision = cache_transport_decide(false, false, 249i64)
-        expect(decision.route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
-        expect(decision.reconnect_count).to_equal(1i64)
-        expect(isolated_spool_path("/cache/spool", "client-9")).to_equal("/cache/spool/client-9")
-        expect(isolated_spool_path("/cache/spool", "../shared")).to_equal("")
-
-    it "rejects spool nonce aliases and platform path syntax":
-        expect(isolated_spool_path("/cache/spool", ".")).to_equal("")
-        expect(isolated_spool_path("/cache/spool", "..")).to_equal("")
-        expect(isolated_spool_path("/cache/spool", " client-9")).to_equal("")
-        expect(isolated_spool_path("/cache/spool", "client-9 ")).to_equal("")
-        expect(isolated_spool_path("/cache/spool", "client:ads")).to_equal("")
-        expect(isolated_spool_path("/cache/spool", "client\\child")).to_equal("")
-        expect(isolated_spool_path("/cache/spool", "client.child")).to_equal("")
-
-    it "uses daemon only when readiness arrives inside the budget":
-        val ready = cache_transport_decide(false, true, 250i64)
-        expect(ready.route).to_equal(CACHE_ROUTE_DAEMON)
-        expect(ready.reconnect_count).to_equal(1i64)
-        val late = cache_transport_decide(true, true, 251i64)
-        expect(late.route).to_equal(CACHE_ROUTE_DIRECT_SPOOL)
+    it "rejects negative or reversing monotonic time":
+        val negative = cache_connect_state_machine_new(-1i64)
+        expect(negative.connect(true, 0i64).reason).to_equal("invalid_monotonic_time")
+        val reverse = cache_connect_state_machine_new(10i64)
+        reverse.connect(false, 20i64)
+        expect(reverse.connect(true, 19i64).reason).to_equal("invalid_monotonic_time")
 
     it "exits no earlier than ten seconds after every inhibitor ends":
-        val lifecycle = cache_daemon_lifecycle_new()
+        val lifecycle = cache_daemon_lifecycle_new(0i64)
         expect(lifecycle.begin_request(0i64)).to_equal(true)
         expect(lifecycle.begin_lease(1i64)).to_equal(true)
         expect(lifecycle.begin_publication(2i64)).to_equal(true)
@@ -59,10 +44,26 @@ describe "compiler cache daemon lifecycle":
         expect(lifecycle.begin_request(10008i64)).to_equal(false)
 
     it "new admitted work cancels an armed idle deadline":
-        val lifecycle = cache_daemon_lifecycle_new()
+        val lifecycle = cache_daemon_lifecycle_new(0i64)
         lifecycle.arm_if_idle(0i64)
         expect(lifecycle.should_begin_shutdown(9999i64)).to_equal(false)
         expect(lifecycle.begin_request(9999i64)).to_equal(true)
         lifecycle.end_request(10000i64)
         expect(lifecycle.should_begin_shutdown(19999i64)).to_equal(false)
         expect(lifecycle.should_begin_shutdown(20000i64)).to_equal(true)
+
+    it "arms at startup and drains checkpoint and epoch release before stop":
+        val lifecycle = cache_daemon_lifecycle_new(50i64)
+        expect(lifecycle.should_begin_shutdown(10049i64)).to_equal(false)
+        expect(lifecycle.should_begin_shutdown(10050i64)).to_equal(true)
+        expect(lifecycle.finish_shutdown()).to_equal(false)
+        lifecycle.note_checkpoint_complete()
+        expect(lifecycle.finish_shutdown()).to_equal(false)
+        lifecycle.note_writer_epoch_released()
+        expect(lifecycle.finish_shutdown()).to_equal(true)
+        expect(lifecycle.shutdown_state).to_equal(CACHE_DAEMON_STOPPED)
+
+    it "treats twelve seconds as the exact exit bound":
+        val lifecycle = cache_daemon_lifecycle_new(5i64)
+        expect(lifecycle.exceeded_exit_bound(12004i64)).to_equal(false)
+        expect(lifecycle.exceeded_exit_bound(12005i64)).to_equal(true)

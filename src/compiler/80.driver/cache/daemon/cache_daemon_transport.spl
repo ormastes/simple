@@ -15,23 +15,41 @@ struct CacheTransportDecision:
     elapsed_ms: i64
     reason: text
 
-fn cache_transport_decide(first_ready: bool, retry_ready: bool, elapsed_ms: i64) -> CacheTransportDecision:
-    if first_ready and elapsed_ms <= CACHE_CONNECT_BUDGET_MS:
-        return CacheTransportDecision(route: CACHE_ROUTE_DAEMON, reconnect_count: 0i64, elapsed_ms: elapsed_ms, reason: "ready")
-    if retry_ready and elapsed_ms <= CACHE_CONNECT_BUDGET_MS:
-        return CacheTransportDecision(route: CACHE_ROUTE_DAEMON, reconnect_count: 1i64, elapsed_ms: elapsed_ms, reason: "ready_after_restart")
-    CacheTransportDecision(route: CACHE_ROUTE_DIRECT_SPOOL, reconnect_count: 1i64, elapsed_ms: elapsed_ms, reason: "bounded_fallback")
+class CacheConnectStateMachine:
+    start_ms: i64
+    last_ms: i64
+    launch_count: i64
+    connect_count: i64
+    finished: bool
+    invalid_clock: bool
 
-fn isolated_spool_path(spool_root: text, client_instance_nonce: text) -> text:
-    if spool_root == "" or not cache_spool_nonce_valid(client_instance_nonce):
-        return ""
-    "{spool_root}/{client_instance_nonce}"
+    static fn create(start_ms: i64) -> CacheConnectStateMachine:
+        CacheConnectStateMachine(
+            start_ms: start_ms, last_ms: start_ms, launch_count: 0i64,
+            connect_count: 0i64, finished: false, invalid_clock: start_ms < 0i64,
+        )
 
-fn cache_spool_nonce_valid(value: text) -> bool:
-    if value == "" or value != value.trim() or value == "." or value == ".." or value.len() > 96i64:
-        return false
-    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-    for ch in value.chars():
-        if not allowed.contains(ch.to_text()):
-            return false
-    true
+    me connect(authenticated_ready: bool, now_ms: i64) -> CacheTransportDecision:
+        if self.finished:
+            return CacheTransportDecision(route: CACHE_ROUTE_DIRECT_SPOOL, reconnect_count: self.connect_count - 1i64, elapsed_ms: self.last_ms - self.start_ms, reason: "already_finished")
+        if self.invalid_clock or now_ms < 0i64 or now_ms < self.last_ms:
+            self.finished = true
+            self.invalid_clock = true
+            return CacheTransportDecision(route: CACHE_ROUTE_DIRECT_SPOOL, reconnect_count: self.connect_count, elapsed_ms: 0i64, reason: "invalid_monotonic_time")
+        self.last_ms = now_ms
+        self.connect_count = self.connect_count + 1i64
+        val elapsed = now_ms - self.start_ms
+        if elapsed > CACHE_CONNECT_BUDGET_MS:
+            self.finished = true
+            return CacheTransportDecision(route: CACHE_ROUTE_DIRECT_SPOOL, reconnect_count: self.connect_count - 1i64, elapsed_ms: elapsed, reason: "budget_exhausted")
+        if authenticated_ready:
+            self.finished = true
+            return CacheTransportDecision(route: CACHE_ROUTE_DAEMON, reconnect_count: self.connect_count - 1i64, elapsed_ms: elapsed, reason: "authenticated_ready")
+        if self.connect_count == 1i64:
+            self.launch_count = 1i64
+            return CacheTransportDecision(route: 0i64, reconnect_count: 0i64, elapsed_ms: elapsed, reason: "launch_then_reconnect")
+        self.finished = true
+        CacheTransportDecision(route: CACHE_ROUTE_DIRECT_SPOOL, reconnect_count: 1i64, elapsed_ms: elapsed, reason: "bounded_fallback")
+
+fn cache_connect_state_machine_new(start_ms: i64) -> CacheConnectStateMachine:
+    CacheConnectStateMachine.create(start_ms)

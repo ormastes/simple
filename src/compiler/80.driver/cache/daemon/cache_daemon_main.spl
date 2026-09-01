@@ -6,30 +6,20 @@ use compiler.driver.cache.daemon.cache_daemon_lifecycle
 class CacheDaemonHost:
     base: DaemonBase
     lifecycle: CacheDaemonLifecycle
-    writer_epoch: i64
-    owner_instance_nonce: text
-    peer_user_id: text
 
-    static fn create(config: DaemonConfig, owner_instance_nonce: text, peer_user_id: text) -> CacheDaemonHost:
+    static fn create(config: DaemonConfig, start_ms: i64) -> CacheDaemonHost:
         CacheDaemonHost(
             base: daemon_base_new(config),
-            lifecycle: cache_daemon_lifecycle_new(),
-            writer_epoch: 0i64,
-            owner_instance_nonce: owner_instance_nonce,
-            peer_user_id: peer_user_id,
+            lifecycle: cache_daemon_lifecycle_new(start_ms),
         )
 
-    me admit(expected_user_id: text, next_writer_epoch: i64) -> bool:
-        if self.owner_instance_nonce == "" or self.peer_user_id != expected_user_id or not cache_writer_epoch_can_advance(self.writer_epoch, next_writer_epoch):
+    # Called only after the host-authority layer has closed admission, drained
+    # work, checkpointed, and released its opaque exclusive-writer receipt.
+    me stop_after_authority_release() -> bool:
+        if not self.lifecycle.finish_shutdown():
             return false
-        if not daemon_base_start(self.base):
-            return false
-        self.writer_epoch = next_writer_epoch
+        daemon_base_stop(self.base)
         true
 
-    me stop():
-        self.lifecycle.admission_open = false
-        daemon_base_stop(self.base)
-
-fn cache_daemon_host_new(config: DaemonConfig, owner_instance_nonce: text, peer_user_id: text) -> CacheDaemonHost:
-    CacheDaemonHost.create(config, owner_instance_nonce, peer_user_id)
+fn cache_daemon_host_new(config: DaemonConfig, start_ms: i64) -> CacheDaemonHost:
+    CacheDaemonHost.create(config, start_ms)
