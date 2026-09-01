@@ -66,3 +66,13 @@ Next lead, in cost order:
    sibling of the existing `[field-access-error]`, which is what pinned the HIR
    blocker in minutes; it prints nothing for a method-not-found today;
 2. failing that, `eprint` bisection across the post-mono region (~21 min/run).
+
+## `SIMPLE_DUMP_COMPILE_ERRORS` gate verified both ways (2026-09-01)
+The gate reads the ambiguous `env_get` (6 co-compiled defs, 2 signatures), so it
+was tested rather than assumed, using the worker on a 2-line file with a
+deliberate unresolved name:
+- `SIMPLE_DUMP_COMPILE_ERRORS=1` -> `[compile-error] HIR lowering error ...:
+  unresolved name: definitely_not_a_real_symbol` (1 line), then the usual
+  `phase 3 FAILED (diagnostics unreadable...)`;
+- unset -> **0** `[compile-error]` lines.
+So the dump fires when asked and is silent by default.
