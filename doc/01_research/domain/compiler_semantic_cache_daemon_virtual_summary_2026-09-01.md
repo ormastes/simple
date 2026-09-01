@@ -41,8 +41,6 @@
 | hard links/cache mutation | mutable aliases can corrupt a shared cached result | immutable no-replace CAS publication, verified digest on read, quarantine on mismatch |
 | remote storage | corrupt/untrusted remote values can be treated as hits | remote is an untrusted blob source; verify manifest, size, magic and digest locally before any action hit |
 
-## Performance methodology
-
 ## Portable per-user cache locations
 
 - Go centralizes this policy in [`os.UserCacheDir`](https://pkg.go.dev/os#UserCacheDir): Windows uses the local application-data directory, Darwin uses `~/Library/Caches`, and Unix uses `XDG_CACHE_HOME` or `~/.cache`. Simple's existing `std.env.platform.get_cache_dir` already follows the same useful shape; cache consumers should call a common application accessor instead of reproducing OS branches.
@@ -50,6 +48,8 @@
 - Windows exposes `FOLDERID_LocalAppData` as a per-user local application-data known folder in the [Known Folder ID reference](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid). `%LOCALAPPDATA%` is a compatibility input, while a native host implementation should ultimately resolve the known folder and then enforce containment by opened handles.
 - The [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/) requires `XDG_CACHE_HOME` to be absolute and defaults it below `$HOME/.cache`. Simple should likewise accept `SIMPLE_CACHE` only as an absolute physical root; a relative override is ambiguous across daemon/client working directories and must fail closed.
 
-Selected common API consequence: `user_local_location_v1()` owns per-user local storage selection, while `cache_location_v1(app, override)` owns the application suffix and validates the optional override. Neither performs security admission. `HostPathAuthorityV1` separately converts the selected physical root into an anchored capability, so convenient platform selection cannot be confused with symlink/junction safety.
+Selected common API consequence: the pure selectors `user_local_location_v1` and `cache_location_v1` keep platform policy testable, while the public environment facade exposes `get_user_local_dir()` and `get_cache_location(app)`. Only the latter reads the single `SIMPLE_CACHE` override. None performs security admission. `HostPathAuthorityV1` separately converts the selected physical root into an anchored capability, so convenient platform selection cannot be confused with symlink/junction safety.
+
+## Performance methodology
 
 Measure cold, unchanged warm, private-body edit, public-signature edit, AOP/trait edit and link lanes separately. Use one warmup and at least seven alternating baseline/candidate pairs on a quiet runner. Compute both the median and 20%-trimmed mean over per-pair candidate/baseline ratios. With coefficient of variation at most 5%, fail when both exceed 1.10 and pass when both are at most 1.10. Report `INCONCLUSIVE` when they disagree across 1.10, variance exceeds the bound, or admitted-runner/evidence requirements are incomplete; permit one bounded quiet-runner retry and block release if it remains inconclusive. Pin source/compiler/provider/cache/baseline digests and record wall, CPU, RSS, hit/miss/reparse counts and output identity.
