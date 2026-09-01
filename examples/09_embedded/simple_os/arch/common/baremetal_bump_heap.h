@@ -22,12 +22,26 @@ static inline int rv_size_align16(size_t size, size_t *out){
     return 1;
 }
 
+/* Heap extent. By default the arena is the includer's own `g_heap` array, which
+ * is what every existing caller of this header expects. A TU whose linker
+ * script already RESERVES a heap region (riscv64's linker_riscv_common.ld
+ * reserves 64 MB between __heap_start and __heap_end, documented there as "for
+ * bump allocator") defines RV_HEAP_BASE/RV_HEAP_SIZE to point at it instead, so
+ * that reservation stops being dead address space. Nothing else in this header
+ * changes: same bump discipline, same overflow rejection, same NULL-on-full. */
+#ifndef RV_HEAP_BASE
+#define RV_HEAP_BASE  (g_heap)
+#endif
+#ifndef RV_HEAP_SIZE
+#define RV_HEAP_SIZE  (sizeof(g_heap))
+#endif
+
 static void *rv_alloc(size_t size){
     size_t aligned = 0;
     if (!rv_size_align16(size, &aligned)) return 0;
-    if (g_heap_off > sizeof(g_heap)) return 0;
-    if (aligned > sizeof(g_heap) - g_heap_off) return 0;
-    void *p = &g_heap[g_heap_off];
+    if (g_heap_off > (size_t)RV_HEAP_SIZE) return 0;
+    if (aligned > (size_t)RV_HEAP_SIZE - g_heap_off) return 0;
+    void *p = &(RV_HEAP_BASE)[g_heap_off];
     g_heap_off += aligned;
     return p;
 }
@@ -54,14 +68,14 @@ static inline void *rv_realloc(void *ptr, size_t size){
 static void *rv_alloc_aligned(size_t size, size_t align){
     if (align == 0) align = 16U;
     size_t offset = g_heap_off;
-    if (offset > sizeof(g_heap)) return 0;
+    if (offset > (size_t)RV_HEAP_SIZE) return 0;
     size_t rem = offset % align;
     if (rem != 0 && !rv_size_add(offset, align - rem, &offset)) return 0;
     size_t aligned = 0;
     if (!rv_size_align16(size, &aligned)) return 0;
-    if (offset > sizeof(g_heap)) return 0;
-    if (aligned > sizeof(g_heap) - offset) return 0;
-    void *p = &g_heap[offset];
+    if (offset > (size_t)RV_HEAP_SIZE) return 0;
+    if (aligned > (size_t)RV_HEAP_SIZE - offset) return 0;
+    void *p = &(RV_HEAP_BASE)[offset];
     g_heap_off = offset + aligned;
     return p;
 }

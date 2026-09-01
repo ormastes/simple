@@ -70,7 +70,25 @@ typedef struct {
 
 /* Pure-Simple driver/service receipts and PCM staging outgrow the historical
  * 64 KiB bootstrap heap. Keep a fixed, linker-accounted 1 MiB arena. */
-static unsigned char g_heap[1024 * 1024] __attribute__((aligned(16)));
+/* The bump arena is the region the LINKER SCRIPT already reserves for it:
+ * arch/common/linker_riscv_common.ld carves a 64 MB `.heap` between
+ * __heap_start and __heap_end and documents it as "for bump allocator", but
+ * nothing ever read those symbols -- the arena was a 1 MiB static array and the
+ * 64 MB stayed dead address space. 1 MiB cannot hold the in-guest Simple
+ * frontend: the riscv64 build-and-run row exhausted it inside make_core_lexer,
+ * rv_alloc returned NULL, and the unchecked store faulted with tval=0. `.heap`
+ * is NOLOAD, so using it costs the kernel Image no bytes. g_heap_off stays in
+ * .bss (zeroed by crt0); rv_alloc does not require a zeroed arena, and
+ * rv_calloc zeroes what it hands out. */
+extern unsigned char __heap_start[];
+extern unsigned char __heap_end[];
+/* The region is SPLIT IN HALF between the two riscv64 runtime TUs, which each
+ * carry their own private `g_heap_off` bump cursor. Pointing both cursors at
+ * one shared base would let them hand out the same bytes twice; before this
+ * change each TU owned a separate 1 MiB array, and halving preserves exactly
+ * that disjointness at 32x the size. baremetal_stubs.c takes the LOW half. */
+#define RV_HEAP_BASE (__heap_start)
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 2U)
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));
@@ -96,6 +114,41 @@ extern char _stack_top[];
  * rt_qemu_exit_success, rt_native_eq/neq, rt_riscv_nvfs_probe). */
 #include "../../common/riscv_common.h"
 
+/* Raw UART printers, defined further down; declared here because the
+ * allocation-free failure paths above and below must not allocate. */
+static void serial_puts(const char *s);
+static void serial_put_dec(int64_t value);
+
+/* rt_exit — the riscv64 freestanding definition of an EXISTING runtime symbol,
+ * not a new one. MIR lowering emits a call to it from
+ * _MirLowering/bootstrap_globals.spl, and riscv64 was the only SimpleOS arch
+ * that never defined it (aarch64 and arm64 both do), so the build-and-run row's
+ * link died with `ld.lld: error: undefined symbol: rt_exit`. That is the
+ * correct fail-closed behaviour and must stay that way: the fix is to supply
+ * the definition, never to let an unresolved symbol through.
+ *
+ * The parameter is i64. This is taken from codegen's own runtime symbol table
+ * (`rt_exit(arg0: i64)` in runtime_symbol_entries.rs), NOT from the arm64
+ * sibling, which declares `int32_t` -- copying that would have reproduced the
+ * cross-arch ABI drift this tree has been bitten by before.
+ *
+ * There is no parent process to report a code to in S-mode, so this prints the
+ * code and parks the hart. It deliberately does NOT poke the SiFive test
+ * device: this lane's whole point is real-firmware behaviour, and a
+ * shutdown-device exit is the riscv equivalent of the banned isa-debug-exit
+ * pass semantics. Parking is also what the row's own entry does when it
+ * finishes, and it is what real hardware would do. */
+__attribute__((noreturn))
+void rt_exit(int64_t code)
+{
+    serial_puts("[exit] rt_exit(");
+    serial_put_dec(code);
+    serial_puts(") - halting\r\n");
+    for (;;) {
+        __asm__ volatile("wfi");
+    }
+}
+
 RuntimeValue rt_qemu_exit_failure(void)
 {
     *(volatile uint32_t *)SIFIVE_TEST_BASE = 0x3333U;
@@ -118,9 +171,25 @@ static uint64_t simpleos_raw_or_encoded_int(RuntimeValue v)
     return IS_INT(v) ? (uint64_t)DECODE_INT(v) : (uint64_t)v;
 }
 
+/* An exhausted bump arena must NAME itself. Before this, rv_alloc simply
+ * returned NULL, the caller stored through it, and the only evidence was a
+ * store fault with tval=0 at an address nobody could attribute -- which is how
+ * the riscv64 build-and-run row's failure read for a whole session. One line,
+ * emitted once, turns that into a diagnosis. It does not change the return
+ * value: callers still see NULL and fail exactly as before. */
+static int g_heap_exhausted_reported = 0;
+/* serial_puts is defined below and writes the UART directly. It is the only
+ * printer usable here: serial_println() takes a RuntimeValue and would have to
+ * ALLOCATE a RuntimeString to report that allocation just failed. */
+
 void *malloc(size_t size)
 {
-    return rv_alloc(size);
+    void *p = rv_alloc(size);
+    if (!p && size != 0 && !g_heap_exhausted_reported) {
+        g_heap_exhausted_reported = 1;
+        serial_puts("[rv64] FATAL bump heap exhausted - malloc returned NULL\r\n");
+    }
+    return p;
 }
 
 void free(void *ptr)
