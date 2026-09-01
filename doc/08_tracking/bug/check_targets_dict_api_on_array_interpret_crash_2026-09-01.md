@@ -61,7 +61,7 @@ observed on the hybrid path.
 
 - Reproducing + generalization:
   `test/01_unit/app/check/expand_check_targets_dedupe_no_dict_api_spec.spl`
-  (runs under the runner's interpret mode and drives both mixed-API sites via a
+  (verified RED against the pre-fix file: 2/2 examples fail with the exact error; runs under the runner interpret mode and drives both mixed-API sites via a
   duplicate-target and a distinct-target expansion).
 - End-to-end contract (the spec that caught it):
   `test/01_unit/app/cli/check_clean_file_passes_spec.spl` and
