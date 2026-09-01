@@ -132,3 +132,75 @@ not yet measured — the guilty loop has not been located.
 `parse_and_build_module(_pp_preprocess_conditionals("fn f(a):\n    a\n"), p)`
 and boot row 2. Fast cycle: entry-only `native-build` ~60s, fw_payload + boot
 ~4 min.
+
+---
+
+# MEASURED 2026-09-01 (fifth session): `.len()` on a DICT answers **-1**, not 0
+
+This record's "Working hypothesis, explicitly UNPROVEN" section asked for the
+raw value that `.len()` returns in-guest, rather than a comparison result. It
+has now been printed, from row 2 under real OpenSBI v1.4 `-bios fw_payload`:
+
+```
+[probe] hir-fn-count=-1      <- hir.functions.len(), a Dict<SymbolId, HirFunction>
+[probe] mir-fn-count=-1      <- mir.functions.len(), also a Dict
+[probe] hir-fn-name=[add] len=3
+[probe] names-listed
+```
+
+**The answer is `-1`.** Both hypotheses this record offered are therefore wrong:
+it is not a raw-vs-tagged encoding mismatch, and it is not `NIL_VALUE` (3). It
+is the sentinel `-1`.
+
+That single value explains every symptom recorded here, with no further
+assumptions:
+
+- `x.len() == 0` is FALSE — because the length is -1, not 0.
+- `while i < x.len()` runs ZERO times — because `0 < -1` is false.
+- `rt_len` / `rt_array_len` / `rt_dict_len` are entered ZERO times in a whole
+  boot — because the -1 never comes from the runtime at all. The winning
+  `rt_len` in `baremetal_stubs.c:628` routes `HEAP_DICT` to
+  `simpleos_dict_count` and cannot return -1 on any path; `rt_dict_len`
+  (`baremetal_runtime_core.inc.c:2193`) returns `d ? d->len : 0`, likewise never
+  -1. The call never reaches either.
+
+Note the scope correction this forces: the previous session measured `.len()` as
+INNOCENT on plain `[i64]` arrays (`empty.len() == 0` and the `while i < len`
+tick both answered correctly), and that measurement stands. **The defect is
+specific to `.len()` on a DICT**, which is why the array probes cleared it and
+the `HirModule.functions` probes did not.
+
+This is the signature of the documented native-codegen pitfall in CLAUDE.md —
+"`Dict.len()` used to always return `-1`" — which is recorded there as fixed on
+2026-08-01 and re-verified 2026-08-09. That verification was on the LLVM/native
+path. **This lane is `--backend cranelift --entry-closure` freestanding, and on
+it the -1 is still live.** So the CLAUDE.md RESOLVED note should not be read as
+covering this backend.
+
+## Why this is now the blocking defect for row 2
+
+Row 2's original hang — the bare-identifier parse loop — is FIXED and verified
+(67 guest re-entries -> 1, zero heap exhaustion; see the tagged-bool record).
+Row 2 now reaches the run stage and fails with `module has no main function`,
+which is exactly the downstream symptom this record predicted.
+
+The probe above also shows `hir.functions` holds exactly ONE entry, `add`, and
+the program being built has TWO functions (`add` and `main`). So `main` was
+never inserted. A dropped write is ruled out at the store: `simpleos_dict_store`
+(`baremetal_runtime_core.inc.c:2139`) is loud on capacity exhaustion
+(`[FATAL] rt_dict_set: dictionary capacity exhausted`) and no such line appears
+in the serial log; an overwrite is ruled out too, since a colliding key would
+have left `main`'s value in the slot, and the name printed is `add`.
+
+The live hypothesis — **stated as a hypothesis, not a finding** — is that a
+`while i < something.len()` over a DICT inside HIR lowering runs zero times, or
+runs one iteration short, because of the -1. It has NOT been measured, and the
+guilty loop has NOT been located. Do not write it up as the cause until the
+parsed AST item count and the lowering loop bounds have been printed in-guest.
+
+## Next step
+
+Print the raw `AstModule.items.len()` before lowering (an ARRAY, whose `.len()`
+is known-good in-guest) to establish whether the parser produced both functions
+or only one. That single number splits the remaining search in half: a 2 blames
+HIR lowering, a 1 blames the parser.
