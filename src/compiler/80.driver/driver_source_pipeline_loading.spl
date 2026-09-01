@@ -307,6 +307,8 @@ impl CompilerDriver:
                     closure_imports.push("std.nogc_sync_mut.mcdc.dynamic_probe")
                 elif mcdc_closure_mode == "on":
                     closure_imports.push("std.nogc_sync_mut.mcdc.static_probe")
+                log_phase(
+                    "phase1:load_sources:closure:scan path={closure_src.path} imports={closure_imports.len()} content_len={closure_src.content.len()}")
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
@@ -316,6 +318,12 @@ impl CompilerDriver:
                     if closure_loaded_mods.contains_key(closure_mp):
                         # Already satisfied by an explicit --source root (or an
                         # earlier closure step): nothing to resolve, not an error.
+                        # Traced anyway: this branch and the unresolved branch
+                        # above are the only two ways a module can leave the
+                        # closure, so a silent one costs a full bootstrap cycle
+                        # to tell apart. Same bug record as above.
+                        log_phase(
+                            "phase1:load_sources:closure:already-loaded module={closure_mp} used_in={closure_src.path}")
                         continue
                     var closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)
                     if closure_file == "":
@@ -329,6 +337,15 @@ impl CompilerDriver:
                         # prose/scoped pseudo-imports than real module files.
                         if closure_mp.contains("."):
                             self.ctx.add_error("unresolved import '{closure_mp}' (used in {closure_src.path}): no source file found for this module path relative to the working directory, src/, src/lib/, or '{closure_dir}'")
+                        # add_error alone is not observable from a staged
+                        # bootstrap: the Stage-3 native-build worker does not
+                        # forward phase-1 ctx errors, so a run that dropped a
+                        # module here printed only `native-build failed without
+                        # diagnostics` 10,000 lines later, and the drop had to be
+                        # inferred. log_phase IS captured. See
+                        # doc/08_tracking/bug/stage3_closure_omits_definition_owner_modules_2026-09-01.md
+                        log_phase(
+                            "phase1:load_sources:closure:unresolved module={closure_mp} used_in={closure_src.path} dir={closure_dir}")
                         continue
                     val closure_loaded = if explicit_entry_closure:
                         _driver_collect_explicit_compiler_source(closure_file)
@@ -336,6 +353,12 @@ impl CompilerDriver:
                         _driver_collect_entry_import_source(closure_file)
                     if closure_loaded.len() == 0:
                         self.ctx.add_error("import '{closure_mp}' (used in {closure_src.path}) resolved to '{closure_file}' but that file is empty or excluded from compilation")
+                        # Third silent exit from this loop, and the one that hid
+                        # longest: the module RESOLVES to a real file, so the
+                        # unresolved trace never fires, but the collect policy
+                        # returns nothing and the module leaves the closure.
+                        log_phase(
+                            "phase1:load_sources:closure:excluded module={closure_mp} used_in={closure_src.path} file={closure_file}")
                         continue
                     var closure_has_exact = false
                     var closure_content = ""

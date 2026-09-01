@@ -483,7 +483,9 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
     var i = 0
     val path_len = path_text.len()
     while i < path_len:
-        val byte = path_text.char_code_at(i)
+        # byte_at, not char_code_at: the loop bound is a BYTE length. Same
+        # mixing defect as _driver_line_end below.
+        val byte = path_text.byte_at(i)
         if not ((byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or (byte >= 48 and byte <= 57) or byte == 95 or byte == 46):
             return false
         i = i + 1
@@ -496,8 +498,16 @@ fn _driver_line_end(content: text, start: i64) -> i64:
     phases. `content.split("\n")` therefore created a second, source-sized
     array plus one text object per line at the peak of closure discovery. This
     bounded cursor keeps only the current line live."""
+    # char_code_at is CHARACTER-indexed (it decodes UTF-8 --
+    # runtime_native.c:2882), while text.len() and slicing are BYTE-based. Mixing
+    # them desynchronizes at the first multi-byte character, so every line after
+    # it was sliced from the wrong offsets and silently dropped. Measured on the
+    # Stage-3 closure: 90 of 91 files that lost imports contained non-ASCII, and
+    # 248 of 249 pure-ASCII files were complete. byte_at is the byte-indexed
+    # accessor that pairs with len(). See
+    # doc/08_tracking/bug/stage3_closure_omits_definition_owner_modules_2026-09-01.md
     var end = start
-    while end < content.len() and content.char_code_at(end) != 10:
+    while end < content.len() and content.byte_at(end) != 10:
         end = end + 1
     end
 
