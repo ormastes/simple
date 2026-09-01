@@ -481,3 +481,23 @@ must keep admitting.
 This spec doubles as the methodology sentinel: it discriminates between the two
 binaries, so the results cannot be a stale-source / cross-worktree artifact.
 `cargo check --release --bin simple` is clean.
+
+### End state of the 12-module reproducer after the fix
+
+Final run (fixture's own `return ()` removed): **`hir 12/12`, 0
+`[field-access-error]`, 0 `[self-slot-write]`.** The `self`-bound-to-bool
+blocker is gone.
+
+The build still ends `BUILD_RC=1`, but at a **new and different** failure past
+HIR:
+
+```
+error: semantic: type mismatch: cannot convert enum to int
+```
+
+This is NOT the `self` defect and NOT `native-capsule-receipt-invalid`
+(that reason string does not appear in this run). It is a newly-reachable
+downstream defect that no build had ever got far enough to see. It needs its
+own record and is out of scope for this one. Note also that diagnostics
+survived transport on every post-fix run, so secondary defect 1
+("error array did not survive transport") did not reproduce here.
