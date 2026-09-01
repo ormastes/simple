@@ -40,6 +40,43 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    /// Render `" (declared variants: A, B, C)"` for the enum this rejection
+    /// actually resolved, or `""` when the registry cannot name them.
+    ///
+    /// The `unknown variant or method` rejections surface through
+    /// `MirLowerError::Unsupported`, so a suite log shows them as
+    /// `MIR lowering: Unsupported HIR construct: ...` — which reads like a
+    /// compiler limitation and is untriageable without opening the tree. The
+    /// declared-variant list separates the two real causes at a glance:
+    ///   * a near-miss spelling (`SkPathDirection.CW` against `Cw, Ccw`) is a
+    ///     source typo, and the correction is right there in the message;
+    ///   * a list from an unrelated same-named enum (`TokenKind.Integer` against
+    ///     a `TokenKind` that has no `Integer`) exposes a duplicate enum NAME
+    ///     across modules, where the guard resolved the wrong definition.
+    /// Truncated so a wide enum cannot flood the log.
+    pub(super) fn declared_variants_hint(&self, enum_name: &str) -> String {
+        const MAX_LISTED: usize = 12;
+        let Some(registry) = self.type_registry else {
+            return String::new();
+        };
+        let Some(type_id) = registry.lookup(enum_name) else {
+            return String::new();
+        };
+        let Some(HirType::Enum { variants, .. }) = registry.get(type_id) else {
+            return String::new();
+        };
+        if variants.is_empty() {
+            return String::new();
+        }
+        let listed: Vec<&str> = variants.iter().take(MAX_LISTED).map(|(n, _)| n.as_str()).collect();
+        let ellipsis = if variants.len() > MAX_LISTED {
+            format!(", ... ({} total)", variants.len())
+        } else {
+            String::new()
+        };
+        format!(" (declared variants: {}{})", listed.join(", "), ellipsis)
+    }
+
     fn enum_payload_type_for_call_receiver(&self, ty: TypeId) -> Option<TypeId> {
         let registry = self.type_registry?;
         match registry.get(ty) {
@@ -483,8 +520,9 @@ impl<'a> MirLowerer<'a> {
                     && !self.available_functions.contains(name.as_str())
                 {
                     return Err(MirLowerError::Unsupported(format!(
-                        "unknown variant or method '{}' on enum {}",
-                        variant_name, enum_name
+                        "unknown variant or method '{}' on enum {}{}",
+                        variant_name, enum_name,
+                        self.declared_variants_hint(enum_name)
                     )));
                 }
 
