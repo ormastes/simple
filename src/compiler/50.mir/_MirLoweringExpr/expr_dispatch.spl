@@ -45,7 +45,12 @@ fn _sffi_enum_payload(value: Any) -> i64:
         rt_enum_payload(value)
 
 @always_inline
-fn _sffi_tuple_get(tuple: i64, index: i64) -> Any:
+# Returns nil for an absent optional payload slot (e.g. HirExprKind.If's
+# `else` block, HirExprKind.IfChain's trailing else). The non-optional
+# `-> Any` form made every such read a hard `nil is forbidden by the
+# non-optional return contract` semantic error, so ANY `if` without an
+# `else` failed native-build in the pure-Simple MIR lowerer.
+fn _sffi_tuple_get(tuple: i64, index: i64) -> Any?:
     unsafe(capabilities: [ffi]):
         rt_tuple_get(tuple, index)
 
@@ -1822,6 +1827,13 @@ impl MirLowering:
         lowering each finally prevents a return inside that finally from
         recursively re-entering itself; such a return may still run outers.
         """
+        # `finally_stack` has no initializer on any construction path, so on a
+        # function with no try/finally region it is still nil when a `return`
+        # inside a nested block reaches here. `.len()` on nil then aborts the
+        # whole native-build with `method \`len\` not found on type \`nil\``.
+        # An absent stack is exactly an empty stack: nothing to run.
+        if self.finally_stack == nil:
+            return ()
         val saved = self.finally_stack
         while self.finally_stack.len() > 0:
             val i = self.finally_stack.len() - 1

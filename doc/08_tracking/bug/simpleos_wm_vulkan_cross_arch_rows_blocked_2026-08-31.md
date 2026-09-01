@@ -326,3 +326,102 @@ to what `src/app/simpleos_gpu_host/main.spl` pulls in — and, given `Option`,
 `Result` and `Mutex` are among the unresolved types, most likely to a module in
 that closure whose failure cascades into the shared type environment, rather
 than to the engine2d types the error messages name.
+
+## x86_64 daemon — ROOT CAUSE FOUND (2026-09-01), two MIR-lowering defects
+
+Everything above about the daemon's *import closure* is retired. The failure
+was never closure-specific and never about type resolution.
+
+### Retire the "772 unresolved type" framing
+
+Measured on a seed freshly built from `origin/main` (`ea48917812b`, which
+carries #197 and #198): a 4-line fixture importing
+`std.gpu.engine2d.backend_capability` **reaches HIR cleanly** —
+`[hir-cache] hits=0 misses=2 stores=2`, `unresolved type` count **0** — and
+fails two phases later, at `native_compile` (step 5/6). The 772 figure was
+measured on the older seed and does not reproduce. Do not chase it.
+
+The record's "hosted native-build itself is FINE" contrast was also
+misleading, for a mundane reason: the hello world used as the control
+contains no `if`. That is exactly what it needed to contain.
+
+### Defect 1 — `_sffi_tuple_get` is declared non-nil but must return nil
+
+`fn _sffi_tuple_get(tuple: i64, index: i64) -> Any`
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:48`, and a second
+copy at `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl:112`)
+reads HIR enum payload tuple slots. `HirExprKind.If`'s slot 2 is the OPTIONAL
+else block; the decoder binds it to `HirBlock?` (`:3313`) and explicitly
+tolerates nil. But the helper's non-optional `-> Any` return contract rejects
+that nil first:
+
+    error: semantic: nil is forbidden by the non-optional return contract of '_sffi_tuple_get'
+
+**Minimal repro — 5 lines, one file, no imports:**
+
+    fn main():
+        var x = 0
+        if 3 > 0:
+            x = 1
+        print "{x}"
+
+`native-build` rc=1 pre-fix, rc=0 post-fix. Any `if` without an `else`, in any
+module, anywhere, failed. Fixed by declaring the helper `-> Any?` at both
+sites. The same helper serves the IfChain, Cast and NamedVar optional slots.
+
+### Defect 2 — nil `finally_stack` on every `return` inside `if/else`
+
+With defect 1 fixed, the ladder moved to a second, independent abort:
+
+    error: semantic: method `len` not found on type `nil` (receiver value: nil)
+
+`MirLowering.finally_stack` (`src/compiler/50.mir/mir_lowering_types.spl:56`)
+is declared but **never initialized on any construction path**, so a function
+with no try/finally region still holds nil there. A `return` inside a nested
+block calls `emit_pending_finally_for_transfer()`
+(`expr_dispatch.spl:1815`), whose `self.finally_stack.len()` then aborts the
+whole build. An absent stack is exactly an empty stack; guarded accordingly.
+
+**Minimal repro — 7 lines:**
+
+    fn f(op: i64) -> bool:
+        if op > 0:
+            return true
+        else:
+            return false
+    fn main():
+        print "{f(3)}"
+
+### How the exact frame was found (reuse this, do not re-derive)
+
+The error carries no span and the misattributed `HIR lowering error in <file>`
+banner is worthless here. The repo already has the right probe:
+
+    SIMPLE_INTERP_OOB_DEBUG=1 SIMPLE_DEBUG_FIELD_ACCESS=1 <native-build ...>
+
+prints `[mnf-debug-spl]` — the interpreted **.spl** frame list — which ended
+exactly at `... -> lower_return_expr -> emit_pending_finally_for_transfer`.
+One 60-second run replaced an open-ended source hunt. Note the full worker
+stderr is truncated in the MIDDLE; the untruncated copy is written to
+`/mnt/data/tmp/native-build-stderr-<pid>.log` and the log names the path.
+
+Also note `SIMPLE_HIR_UNRESOLVED_TYPE_TRACE=1` (`types.spl:988`) prints
+`span_file` for a genuine unresolved type — the fix for the wrong-file
+attribution complained about above already exists.
+
+### Measured ladder, all with the same daemon invocation shape
+
+| fixture | pre-fix | post-fix |
+|---|---|---|
+| hello world (no `if`) | rc=0 | rc=0 |
+| bare `if`, single file | rc=1 `_sffi_tuple_get` | **rc=0** |
+| `if` in imported free fn | rc=1 `_sffi_tuple_get` | **rc=0** |
+| `if`/`elif` | rc=0 | rc=0 |
+| `if`/`else`, no return | rc=0 | rc=0 |
+| `return` in both `if`/`else` arms | rc=1 `len` on nil | **rc=0** |
+| verbatim copy of `backend_capability.spl` | rc=1 | **rc=0** |
+| `use std.gpu.engine2d.backend_capability` | rc=1 | **rc=0** |
+
+Both defects are in the pure-Simple compiler, not the Rust seed, and neither
+is engine2d-specific — they blocked essentially every non-trivial
+`native-build` on this lane.
