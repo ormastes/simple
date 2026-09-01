@@ -1,0 +1,194 @@
+#!/bin/sh
+# check-phase3-diagnostics-reported.shs
+#
+# Reproduce gate for
+# doc/08_tracking/bug/native_build_stderr_spill_drops_fatal_error_2026-09-01.md
+# (the "diagnostics transport" half) and for the DIAGREAD fix in
+# src/compiler/80.driver/driver_orchestration.spl.
+#
+# THE DEFECT. When phase 3 (HIR lowering / typecheck) failed, the driver's
+# failure branch refused to read `ctx.errors` at all and unconditionally
+# printed
+#
+#     [ERROR] phase 3 FAILED (diagnostics unreadable: error array did not
+#             survive transport)
+#     error: native-build failed without diagnostics
+#
+# so a precise, actionable HIR error reached the operator as "it failed, no
+# idea why". That is how the x86_64 WM host-GPU-daemon blocker sat misdiagnosed:
+# the real message ("untyped function returns a value: function 'main' returns a
+# value but declares no return type") was formed, recorded, and readable the
+# whole time -- the same `error_message_at` accessor printed it fine from the
+# SIMPLE_BOOTSTRAP_DEBUG block twenty lines earlier in the same file. Only the
+# non-debug branch declined to read it.
+#
+# WHAT THIS GATE ASSERTS, and why it is not vacuous. It is NOT enough to assert
+# "the build failed" -- it failed before the fix too, which is exactly why the
+# defect survived. The gate asserts the build fails AND NAMES THE REASON:
+#   * the specific diagnostic text must appear on the build output, and
+#   * the "diagnostics unreadable" / "failed without diagnostics" wording must
+#     NOT appear.
+# Both halves are required. Dropping the second half would let a future change
+# print the error AND still claim the array was lost; dropping the first would
+# pass on any failure at all.
+#
+# The fixture is a two-line entry whose `main` returns a value without declaring
+# a return type -- a real HIR lowering error, reached only after parse and
+# surface_build succeed, so it exercises the phase-3 branch specifically rather
+# than an early parse bail-out.
+#
+# Exit-status discipline: the build's status is read DIRECTLY into a variable on
+# the line after the invocation, never through a pipe -- a pipeline's $? is the
+# last stage's status and has produced false greens in this repo before.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> assertion(s) checked, phase-3 diagnostics reported   exit 0
+#   FAIL  — ...                                                      exit 1
+#   ERROR — nothing was checked (<reason>)                           exit 2
+# A run that made 0 assertions is ERROR, never a pass. A missing seed binary is
+# ERROR, never a pass: absence of a compiler is absence of evidence.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+WANT_TEXT="declares no return type"
+BAD_TEXT_A="diagnostics unreadable"
+BAD_TEXT_B="failed without diagnostics"
+
+EV_CHECKED=0
+FAILURES=""
+
+log() { printf '%s\n' "$*"; }
+
+# --- selftest ---------------------------------------------------------------
+# Runs before every scan and is fatal. It exercises the CLASSIFIER on captured
+# output rather than on a real build, so a broken machine cannot silently turn
+# the gate green.
+classify_output() {
+    # $1 = file with build output. echoes ok|missing-diag|claims-unreadable
+    _f=$1
+    if grep -q "$BAD_TEXT_A" "$_f" 2>/dev/null || grep -q "$BAD_TEXT_B" "$_f" 2>/dev/null; then
+        echo "claims-unreadable"
+        return
+    fi
+    if grep -q "$WANT_TEXT" "$_f" 2>/dev/null; then
+        echo "ok"
+        return
+    fi
+    echo "missing-diag"
+}
+
+selftest() {
+    _d=$(mktemp -d)
+    _rc=0
+
+    # 1. post-fix shape: the real diagnostic is printed -> ok
+    printf '[ERROR] phase 3 FAILED\nphase 3 error: HIR lowering error in x.spl: untyped function returns a value: function %s returns a value but declares no return type; add "-> T"\n' "'main'" > "$_d/a"
+    [ "$(classify_output "$_d/a")" = "ok" ] || { _rc=1; log "selftest: post-fix shape misclassified"; }
+
+    # 2. pre-fix shape: the incident's exact wording -> claims-unreadable
+    printf '[ERROR] phase 3 FAILED\n[ERROR] phase 3 FAILED (diagnostics unreadable: error array did not survive transport)\nerror: native-build failed without diagnostics\n' > "$_d/b"
+    [ "$(classify_output "$_d/b")" = "claims-unreadable" ] || { _rc=1; log "selftest: pre-fix shape misclassified"; }
+
+    # 3. the trap: prints the real error AND still claims the array was lost.
+    #    Must NOT be accepted -- this is why the negative assertion exists.
+    printf 'phase 3 error: ... declares no return type\n[ERROR] phase 3 FAILED (diagnostics unreadable: error array did not survive transport)\n' > "$_d/c"
+    [ "$(classify_output "$_d/c")" = "claims-unreadable" ] || { _rc=1; log "selftest: unreadable-claim must outrank a printed diagnostic"; }
+
+    # 4. failed with no diagnostic text at all -> missing-diag, never ok
+    printf '[ERROR] phase 3 FAILED\n' > "$_d/d"
+    [ "$(classify_output "$_d/d")" = "missing-diag" ] || { _rc=1; log "selftest: silent failure misclassified"; }
+
+    # 5. empty output must not classify as ok
+    : > "$_d/e"
+    [ "$(classify_output "$_d/e")" = "missing-diag" ] || { _rc=1; log "selftest: empty output misclassified"; }
+
+    rm -rf "$_d"
+    return $_rc
+}
+
+if ! selftest; then
+    log "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    log "PASS — 5 selftest fixture(s) checked"
+    exit 0
+fi
+
+# --- locate the seed --------------------------------------------------------
+SEED=${SIMPLE_SEED:-}
+if [ -z "$SEED" ]; then
+    for cand in \
+        "$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple" \
+        "$REPO_ROOT/bin/simple"; do
+        if [ -x "$cand" ] && [ ! -L "$cand" -o -e "$cand" ]; then SEED=$cand; break; fi
+    done
+fi
+if [ -z "$SEED" ] || [ ! -x "$SEED" ]; then
+    log "ERROR — nothing was checked (no seed binary; set SIMPLE_SEED)"
+    exit 2
+fi
+
+# --- the real check ---------------------------------------------------------
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/app"
+# `main` returns a value but declares no return type: a genuine phase-3 HIR
+# lowering error, reached only after parse and surface_build succeed.
+cat > "$WORK/app/p3diag.spl" <<'SPL'
+fn main():
+    print("p3diag")
+    return ()
+SPL
+
+OUT="$WORK/build.log"
+SIMPLE_LIB="$REPO_ROOT/src" \
+"$SEED" native-build --backend cranelift \
+    --source "$WORK/app" --source "$REPO_ROOT/src/lib" --entry-closure \
+    --entry "$WORK/app/p3diag.spl" \
+    --cache-dir "$WORK/cache" --timeout 900 \
+    --output "$WORK/p3diag.out" > "$OUT" 2>&1
+BUILD_RC=$?
+
+if [ ! -s "$OUT" ]; then
+    log "ERROR — nothing was checked (build produced no output)"
+    exit 2
+fi
+
+# The build MUST fail -- the fixture is deliberately ill-typed. A success means
+# the fixture stopped being an error and the gate is measuring nothing.
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$BUILD_RC" -eq 0 ]; then
+    log "ERROR — nothing was checked (fixture built successfully; it must fail)"
+    exit 2
+fi
+
+VERDICT=$(classify_output "$OUT")
+
+EV_CHECKED=$((EV_CHECKED + 1))
+case "$VERDICT" in
+    ok) ;;
+    claims-unreadable)
+        FAILURES="$FAILURES build claimed the diagnostics were unreadable instead of reporting them;"
+        ;;
+    missing-diag)
+        FAILURES="$FAILURES build failed without naming the diagnostic ('$WANT_TEXT' absent);"
+        ;;
+esac
+
+if [ "$EV_CHECKED" -eq 0 ]; then
+    log "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ -n "$FAILURES" ]; then
+    log "--- build output (tail) ---"
+    tail -20 "$OUT"
+    log "FAIL — $EV_CHECKED assertion(s) checked, phase-3 diagnostics not reported:$FAILURES"
+    exit 1
+fi
+
+log "PASS — $EV_CHECKED assertion(s) checked, phase-3 diagnostics reported"
+exit 0
