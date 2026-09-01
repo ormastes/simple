@@ -63,12 +63,13 @@
 #
 #  (1) FRESH VOLUME.  The ESP image and the ivshmem backing file are rebuilt
 #      from scratch every run.  BEFORE boot, the gate greps the raw bytes of
-#      both for this run's nonce AND for every receipt token it will later
-#      accept as evidence (`desktop-ready`, `HOST_GPU_DAEMON_DRAWIR`,
-#      `host-gpu-presented`) AND for the evidence output path.  If any is
-#      already present pre-boot, the volume is contaminated and the gate
-#      ERRORs — a receipt baked into the image can never be mistaken for one
-#      produced by a running guest.
+#      both for this run's nonce AND for the evidence output path.  If either
+#      is already present pre-boot, the volume is contaminated and the gate
+#      ERRORs.  Receipt BANNERS are deliberately not checked here: they are
+#      format literals in the WM kernel's rodata, and the ESP carries
+#      kernel.elf, so banning them would make the gate un-passable on any real
+#      image.  Their staleness is fenced by (2) instead, which a rodata string
+#      cannot satisfy.
 #
 #  (2) CROSS-SIDE TUPLE ANCHORING.  A pass requires the guest serial receipt
 #      and the host daemon receipt to name the SAME (frame, submit_id,
@@ -159,15 +160,24 @@ argv_is_board_runnable() {
 
 # ------------------------------------------------------ fresh-volume check --
 # A "volume" here is any host-side byte container handed to the guest: the ESP
-# image and the ivshmem backing file.  Pre-boot it must contain NONE of the
-# tokens this gate later accepts as evidence, and not the run nonce.  Grepping
-# raw bytes (grep -a) is deliberate: the ESP is a FAT image, not text, and the
-# point is that the bytes are absent however they might be encoded.
+# image and the ivshmem backing file.  Pre-boot it must contain NEITHER this
+# run's nonce NOR the evidence target path.  Grepping raw bytes (grep -a) is
+# deliberate: the ESP is a FAT image, not text, and the point is that the bytes
+# are absent however they might be encoded.
+#
+# DELIBERATELY NOT CHECKED HERE: the receipt banners (`desktop-ready`,
+# `host-gpu-presented`, `HOST_GPU_DAEMON_DRAWIR`).  Those strings are format
+# literals compiled into the WM kernel's rodata, and the ESP carries kernel.elf
+# — measured: `grep -ac desktop-ready` on a real desktop kernel ELF returns 1.
+# Checking them here would make the gate permanently un-passable on any
+# legitimately built image.  Staleness of the receipts is fenced by the
+# per-boot frame/submit/fence triple in classify_renderer(), which a banner
+# baked into rodata cannot satisfy — see the banner-only selftest fixture.
 volume_is_clean() {
-    _vol=$1; _nonce=$2
+    _vol=$1; _nonce=$2; _target=$3
     [ -s "$_vol" ] || return 1
-    for _tok in "$_nonce" 'desktop-ready' 'HOST_GPU_DAEMON_DRAWIR' \
-                'host-gpu-presented' 'wm-frame.ppm'; do
+    for _tok in "$_nonce" "$_target"; do
+        [ -n "$_tok" ] || continue
         if grep -aqF "$_tok" "$_vol" 2>/dev/null; then
             VOLUME_DIRTY_TOKEN=$_tok
             return 1
@@ -285,25 +295,28 @@ run_selftest() {
     ppm_has_real_content "$_t/empty.ppm" && _bad "zero-byte capture accepted"
 
     # --- fresh-volume anchoring --------------------------------------------
+    _vtarget=build/x/evidence/wm-frame.ppm
     _n=$((_n + 1))
-    printf 'this is a fresh esp image with no receipts in it at all\n' > "$_t/clean.img"
-    volume_is_clean "$_t/clean.img" "NONCE-abc123" ||
+    printf 'this is a fresh esp image with no nonce and no target path in it\n' > "$_t/clean.img"
+    volume_is_clean "$_t/clean.img" "NONCE-abc123" "$_vtarget" ||
         _bad "a genuinely clean volume was rejected"
     _n=$((_n + 1))
     printf 'junk NONCE-abc123 junk\n' > "$_t/noncepre.img"
-    volume_is_clean "$_t/noncepre.img" "NONCE-abc123" &&
+    volume_is_clean "$_t/noncepre.img" "NONCE-abc123" "$_vtarget" &&
         _bad "a volume already containing this run's nonce was accepted"
     _n=$((_n + 1))
-    printf 'junk [desktop-gui-arm64] desktop-ready junk\n' > "$_t/receiptpre.img"
-    volume_is_clean "$_t/receiptpre.img" "NONCE-abc123" &&
-        _bad "a volume with a pre-baked desktop-ready receipt was accepted"
-    _n=$((_n + 1))
     printf 'junk build/x/evidence/wm-frame.ppm junk\n' > "$_t/pathpre.img"
-    volume_is_clean "$_t/pathpre.img" "NONCE-abc123" &&
+    volume_is_clean "$_t/pathpre.img" "NONCE-abc123" "$_vtarget" &&
         _bad "a volume already naming the evidence target path was accepted"
+    # A kernel ELF legitimately carries the receipt banners in rodata; that must
+    # NOT read as contamination, or the gate could never pass on a real image.
+    _n=$((_n + 1))
+    printf 'ELF junk [desktop-gui-arm64] desktop-ready ... [wm-frame] host-gpu-presented junk\n' > "$_t/rodata.img"
+    volume_is_clean "$_t/rodata.img" "NONCE-abc123" "$_vtarget" ||
+        _bad "a volume carrying only compiled-in receipt format literals was rejected as contaminated"
     _n=$((_n + 1))
     : > "$_t/zero.img"
-    volume_is_clean "$_t/zero.img" "NONCE-abc123" &&
+    volume_is_clean "$_t/zero.img" "NONCE-abc123" "$_vtarget" &&
         _bad "a zero-byte volume was accepted as a clean fresh volume"
 
     # --- renderer classification -------------------------------------------
@@ -470,16 +483,28 @@ fi
 
 mkdir -p "$EVIDENCE_DIR" "$ESP_DIR"
 
+# The env overrides may legitimately carry absolute paths, so paths handed to
+# other programs are normalised rather than blindly prefixed with $ROOT_DIR.
+abspath() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s/%s\n' "$ROOT_DIR" "$1" ;; esac; }
+KERNEL_ELF_ABS=$(abspath "$KERNEL_ELF")
+ESP_DIR_ABS=$(abspath "$ESP_DIR")
+
 # ---------------------------------------- build the host GPU Vulkan daemon --
 # Never with SIMPLE_ALLOW_STUB_FALLBACK / SIMPLE_ALLOW_UNRESOLVED_RUNTIME: a
 # stubbed daemon would be exactly the thing this gate exists to refuse.
 if [ ! -x "$DAEMON_BIN" ]; then
     [ -f "$DAEMON_SRC" ] || error_verdict "host GPU daemon source missing: $DAEMON_SRC"
+    # `set -e` would kill the script on the invocation line itself and the
+    # gate would exit with no verdict, so -e is lifted across the call and the
+    # status is read DIRECTLY into a variable on the next line — never through
+    # a pipe, whose $? is the last stage's status.
+    set +e
     env -u SIMPLE_ALLOW_STUB_FALLBACK -u SIMPLE_ALLOW_UNRESOLVED_RUNTIME \
         SIMPLE_NO_STUB_FALLBACK=1 \
         "$SIMPLE_RUNNER" native-build "$DAEMON_SRC" --timeout 1200 -o "$DAEMON_BIN" \
         >"$EVIDENCE_DIR/daemon-build.log" 2>&1
     DAEMON_BUILD_RC=$?
+    set -e
     [ "$DAEMON_BUILD_RC" -eq 0 ] ||
         error_verdict "host GPU daemon native-build failed (rc=$DAEMON_BUILD_RC, see $EVIDENCE_DIR/daemon-build.log): $(tail -n 1 "$EVIDENCE_DIR/daemon-build.log" 2>/dev/null)"
 fi
@@ -504,11 +529,15 @@ printf 'simpleos_arm64_wm_vulkan_run_nonce=%s\n' "$RUN_NONCE"
 # BOOT_PROTOCOL=linux: the unified arm64 desktop kernel's crt0.S carries an
 # arm64 Linux `Image` header, so BOOTAA64.EFI hands it over MMU-off in physical
 # space — the same contract `-kernel` gave it, but from real firmware.
-env KERNEL_ELF="$ROOT_DIR/$KERNEL_ELF" OUT_DIR="$ROOT_DIR/$ESP_DIR" \
+# Same -e lifting as the daemon build above: a failed ESP build must produce
+# ERROR (exit 2), not a bare non-zero exit with no verdict line.
+set +e
+env KERNEL_ELF="$KERNEL_ELF_ABS" OUT_DIR="$ESP_DIR_ABS" \
     BOOT_PROTOCOL=linux AAVMF_CODE="$AAVMF_CODE" \
     sh "$ROOT_DIR/scripts/os/build-simpleos-aarch64-efi-esp.shs" \
     >"$EVIDENCE_DIR/esp-build.log" 2>&1
 ESP_BUILD_RC=$?
+set -e
 [ "$ESP_BUILD_RC" -eq 0 ] ||
     error_verdict "ESP build failed (rc=$ESP_BUILD_RC, see $EVIDENCE_DIR/esp-build.log): $(tail -n 1 "$EVIDENCE_DIR/esp-build.log" 2>/dev/null)"
 [ -s "$ESP_IMG" ] || error_verdict "ESP builder produced no $ESP_IMG"
@@ -524,10 +553,10 @@ dd if=/dev/zero of="$SHM_FILE" bs=1M count=8 status=none 2>/dev/null ||
 # ---------------------------- 3. PRE-BOOT fresh-volume nonce/receipt check ---
 # Verified on the BYTES of the images, host-side, not on a serial line.
 VOLUME_DIRTY_TOKEN=
-volume_is_clean "$ESP_IMG" "$RUN_NONCE" ||
-    error_verdict "pre-boot ESP image is contaminated (contains '${VOLUME_DIRTY_TOKEN:-<empty image>}') — a receipt baked into the volume cannot serve as evidence of a running guest"
+volume_is_clean "$ESP_IMG" "$RUN_NONCE" "$PPM_FRAME" ||
+    error_verdict "pre-boot ESP image is contaminated (contains '${VOLUME_DIRTY_TOKEN:-<empty image>}') — a nonce or evidence path already in the volume cannot serve as evidence of a running guest"
 EV_CHECKED=$((EV_CHECKED + 1))
-volume_is_clean "$SHM_FILE" "$RUN_NONCE" ||
+volume_is_clean "$SHM_FILE" "$RUN_NONCE" "$PPM_FRAME" ||
     error_verdict "pre-boot ivshmem backing file is contaminated (contains '${VOLUME_DIRTY_TOKEN:-<empty file>}')"
 EV_CHECKED=$((EV_CHECKED + 1))
 
@@ -586,7 +615,7 @@ EV_CHECKED=$((EV_CHECKED + 1))
 sleep 3
 
 # ------------------------------------------------ 7. capture a REAL frame ----
-"$SIMPLE_RUNNER" run "$QMP_SCREENDUMP" "$QMP_SOCKET" "$ROOT_DIR/$PPM_FRAME" \
+"$SIMPLE_RUNNER" run "$QMP_SCREENDUMP" "$QMP_SOCKET" "$(abspath "$PPM_FRAME")" \
     >/dev/null 2>&1 || true
 [ -s "$PPM_FRAME" ] ||
     error_verdict "zero frames captured (QMP screendump produced no file); a device being present is not evidence"

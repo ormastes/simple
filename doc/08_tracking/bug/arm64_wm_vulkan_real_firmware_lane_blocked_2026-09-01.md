@@ -113,9 +113,19 @@ by other lanes, and it needs its own reproduce spec plus the neighbours in
   `cpu`.
 - Per-run nonce + fresh-volume anchoring, checked on raw BYTES host-side: the
   freshly built `esp.img` and the freshly zeroed ivshmem backing file are
-  grepped pre-boot for the run nonce, for every receipt token the gate will
-  later accept (`desktop-ready`, `HOST_GPU_DAEMON_DRAWIR`,
-  `host-gpu-presented`) and for the evidence target path. Any hit is ERROR.
+  grepped pre-boot for the run nonce and for the evidence target path. Any hit
+  is ERROR.
+
+  Receipt BANNERS are deliberately **not** part of that volume check. They are
+  format literals in the WM kernel's rodata and the ESP carries `kernel.elf`;
+  measured on the x86 sibling's real desktop kernel,
+  `grep -ac 'desktop-ready'` and `grep -ac 'host-gpu-presented'` both return 1.
+  Banning them on the volume would have made this gate permanently un-passable
+  on any legitimately built image. Their staleness is instead fenced by the
+  per-boot frame/submit/fence triple, which a rodata string cannot satisfy —
+  and a selftest fixture pins exactly this: a volume carrying only the
+  compiled-in banners must read as CLEAN, while the banner-only *log* fixture
+  must classify as `cpu`.
 - `renderer=host-vulkan` needs the guest serial receipt and the host daemon
   receipt to name the **same per-boot triple**; a stale daemon log, a different
   frame, a different submission, a `backend=cpu` receipt, a guest-emitted
@@ -139,3 +149,20 @@ with `host_vulkan_driver=hardware:<name>`. That requires, in order:
 3. Confirm `protocol: linux` handover of that kernel from `BOOTAA64.EFI`
    (Blocker 2), and that it reaches `[desktop-gui-arm64] desktop-ready`.
 4. Confirm the ivshmem offload negotiates so the dual receipt anchors.
+
+## What IS already proven by this change
+
+Running the gate with a deliberately junk kernel exercises the real ESP path
+end to end and it works: real `/usr/share/AAVMF/AAVMF_CODE.fd` +
+`AAVMF_VARS.fd` are found and staged, `vendor/limine/BOOTAA64.EFI` is present,
+`mkfs.vfat` builds the FAT image, and the builder only fails when asked to
+stage the junk payload —
+
+```
+ERROR — nothing was checked: ESP build failed (rc=1, ...):
+  build-aarch64-efi-esp: ERROR — populating the FAT image failed
+```
+
+i.e. the failure is correctly reported as ERROR (exit 2) with a verdict line,
+not as a bare non-zero exit. The only missing input to a real boot is the
+kernel, which is Blocker 1.
