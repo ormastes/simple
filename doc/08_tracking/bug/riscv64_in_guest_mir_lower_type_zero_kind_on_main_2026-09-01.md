@@ -104,3 +104,33 @@ Which of `main`'s body constructs produces a zeroed `HirType` at call 5.
 `type_.kind` reads raw 0 while `type_` itself is a live object, so the `kind`
 slot was never written or was overwritten with 0. Next probe: tag the
 `lower_type` CALL SITE, since the object carries nothing else readable.
+
+### CORRECTION to round 1 (same day, before acting on it)
+
+**The "rt_enum_discriminant answers garbage" claim above is WITHDRAWN. It was
+wrong, and the error was mine: I compared the measured values against
+declaration indices without checking what this compiler actually uses.**
+
+Simple discriminants are **hashes of the variant NAME**, not declaration
+indices — `simple_runtime::value::hash_variant_discriminant`, used consistently
+by the HIR lowerer (`hir/lower/expr/mod.rs:102`), the interpreter's enum SFFI
+(`interpreter_extern/enum_sffi.rs:26`) and stmt lowering
+(`hir/lower/stmt_lowering.rs:2802`, "All enums use hashed variant name
+discriminants consistently"). So `discStr=3560734392`, `discInt=2375492728`,
+`discUnit=406810393` are three correct, distinct u32 name hashes. Expecting
+`Int`=0 / `Str`=4 / `Unit`=5 was the mistake; nothing about them is corrupt,
+and `lower_type`'s four discriminant pre-dispatch arms are FINE in-guest —
+they compare a hash against a hash of a freshly built exemplar.
+
+What survives from round 1, unchanged and still measured:
+
+* `calls=5` — the failure is inside `main`'s BODY; the implicit-return lead
+  stays refuted.
+* `strHit=Y` / `intHit=Y` — enum construct and match work in-guest.
+* `kindnil=N` with `type_.kind == 0` — the `kind` slot reads raw 0.
+* `fn_ctx` is not real function attribution (see above).
+* The hosted-vs-baremetal `rt_enum_discriminant` / `rt_enum_id` failure
+  sentinel really does differ (hosted `-1`, riscv64 baremetal `0`). With hashed
+  discriminants a 0 collision is improbable rather than certain, so this is a
+  latent divergence worth aligning, NOT the cause of this bug. Recorded so the
+  next reader does not re-derive it, and explicitly de-escalated.
