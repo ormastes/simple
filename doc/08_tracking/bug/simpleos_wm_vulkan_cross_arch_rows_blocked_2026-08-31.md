@@ -425,3 +425,85 @@ attribution complained about above already exists.
 Both defects are in the pure-Simple compiler, not the Rust seed, and neither
 is engine2d-specific — they blocked essentially every non-trivial
 `native-build` on this lane.
+
+## 2026-09-01 — the 772 unresolved types were NOT a symptom of the MIR defects
+
+The two MIR fixes above are real, but they are **not** what blocked the daemon.
+They live in `70.backend/_MirToLlvm` (pipeline step 5/6); the daemon build dies
+in **step 1/6 -> 2/6**, which never reaches them. The build log taken *after*
+both fixes landed (started ~01:46, both fixes committed 00:17 and 00:34) ends at
+the identical `errors=770->772`. Reclassify them: correct fixes, wrong blocker.
+
+### Actual root cause: the closure import scanner desynced byte and char cursors
+
+`text.len()` and `text[a:b]` are **BYTE**-indexed; `text.char_code_at(i)` is
+**CHAR**-indexed. Measured directly:
+
+```
+s = "ab—cd\nef"   # 8 chars, 10 bytes
+s.len()            -> 10          (bytes)
+s.char_code_at(2)  -> 8212        (chars — the em-dash)
+s[0:5]             -> "ab—"       (bytes)
+```
+
+`_driver_line_end` (`src/compiler/80.driver/driver_source_loading.spl`) scanned
+for `\n` with `char_code_at`, returning a CHAR offset, and both of its callers
+sliced that offset as BYTES. The two cursors therefore diverged at the FIRST
+multi-byte character in a file, and every line after it was mis-sliced, so no
+`use` line was recognised.
+
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl` has an em-dash on **line 2**.
+Probing `_driver_cached_entry_source_scan` on it directly:
+
+| file | imports found | expected |
+|---|---|---|
+| `engine.spl` (as tracked) | **1** | 39 |
+| same file, non-ASCII folded to ASCII | 39 | 39 |
+| `platform_all.spl` (pure ASCII, control) | 9 | 9 |
+
+Losing 38 of engine.spl's 39 imports dropped 28 modules from the native-build
+source closure. `module_surface_registry_index` then resolved those imports to
+`target_index = -1`, the callable-dependency sweep in
+`module_reexport_materialization.spl:766` found no route, and each missing type
+resurfaced as `unresolved type: X` attributed to whichever module imported the
+CALLABLE — `daemon_runner.spl` and `platform_all.spl`, neither of which names
+those types. That is the whole of the "772 unresolved types incl.
+`Option`/`Mutex`/`Result`", and it explains why disabling entry-closure pruning
+changed nothing: the modules were never *collected*, so there was nothing to
+prune.
+
+### Fix and evidence
+
+`_driver_line_end` now returns a `(byte_offset, char_offset)` pair and both
+callers advance both cursors in lockstep.
+
+| measurement | before | after |
+|---|---|---|
+| `engine.spl` imports scanned | 1 | **39** |
+| ASCII-folded control | 39 | 39 (unchanged) |
+| daemon `source_closure` | 96/96 | **230/230** |
+| daemon `load_sources` | 111/111 | **313/313** |
+
+Regression spec:
+`test/01_unit/compiler/bootstrap/entry_closure_non_ascii_import_scan_spec.spl`
+(5 steps, all pass). The pre-existing unicode case in
+`entry_closure_physical_source_dedup_spec.spl:166` did **not** catch this — it
+places a single `use` immediately after the non-ASCII text, where the small
+cursor drift still lands inside the keyword. The defect only shows with several
+imports after the multi-byte character.
+
+Scope note: this is not engine2d-specific. Any `.spl` file whose imports follow
+a non-ASCII character — an em-dash in a header comment is enough — has been
+silently contributing a truncated import list to every `--entry-closure`
+native build.
+
+### Still blocked: the x86_64 gate needs a deployed pure-Simple compiler
+
+`check-simpleos-qemu-host-gpu-2d.shs` reports
+`simpleos_qemu_host_gpu_2d_reason=pure-simple-compiler-missing`. `find_simple`
+admits the Rust seed only through `bootstrap_diagnostic_binary_is_valid`, which
+is restricted to `GUEST_ISA_REQUEST=aarch64` and a `build/*diag*` build dir, and
+explicitly rejects any binary whose smoke output says `Rust-built` /
+`bootstrap seed only`. No `bin/release/x86_64-unknown-linux-gnu/simple` is
+deployed here. That admission was NOT weakened. The gate remains blocked on a
+bootstrap deploy, independently of the closure fix.
