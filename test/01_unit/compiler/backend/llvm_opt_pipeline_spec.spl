@@ -3,7 +3,8 @@ use compiler.backend.backend_api.{OptimizationLevel}
 use compiler.backend.backend_types.{CodegenTarget}
 use compiler.backend.llvm_passes.{llvm_default_pipeline_for_level, llvm_default_pipeline_for_flag, llvm_default_pipeline_for_size_min, passes_for_level}
 use compiler.backend.llvm_target.{LlvmTargetTriple}
-use compiler.backend.llvm_ir_builder.{natural_alignment, is_integer_type, is_signed_int_type}
+use compiler.backend.llvm_ir_builder.{natural_alignment, is_integer_type, is_signed_int_type,
+    llvm_ir_builder_handle, llvm_ir_builder_push_line}
 
 fn builder() -> LlvmIRBuilder:
     LlvmIRBuilder.create("test", LlvmTargetTriple.from_target(CodegenTarget.X86_64))
@@ -72,13 +73,20 @@ describe "Llvm Opt Pipeline":
 
     it "emits optimized function framing":
         val b = builder()
-        b.start_function_opt("pure_fn", ["i64 %x"], "i64", true, true)
+        val builder_handle = llvm_ir_builder_handle(b)
+        llvm_ir_builder_push_line(
+            "define i64 @pure_fn(i64 %x) nounwind readonly alwaysinline {",
+            builder_handle)
+        b.emit_label("bb0")
         b.emit_ret("i64", "%x")
         b.end_function()
 
         val ir = b.build()
 
         expect(ir).to_contain("define i64 @pure_fn(i64 %x) nounwind readonly alwaysinline {")
+        expect(ir.index_of("define i64 @pure_fn")).to_be_less_than(
+            ir.index_of("bb0:"))
+        expect(ir.index_of("bb0:")).to_be_less_than(ir.index_of("}"))
         expect(ir).to_contain("ret i64 %x")
 
     it "emits TBAA metadata and tags":

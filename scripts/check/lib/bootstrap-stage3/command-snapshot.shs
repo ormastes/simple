@@ -88,14 +88,50 @@ bootstrap_stage3_write_command_transcript() {
     mv "$bootstrap_stage3_transcript_tmp" "$bootstrap_stage3_transcript"
 }
 
-bootstrap_stage3_verify_command_transcript() {
+bootstrap_stage3_verify_command_transcript() (
+    [ "$#" -ge 3 ] || return 1
     bootstrap_stage3_transcript=$1
     bootstrap_stage3_command_cwd=$2
     shift 2
-    [ -f "$bootstrap_stage3_transcript" ] &&
-        [ ! -L "$bootstrap_stage3_transcript" ] || return 1
-    bootstrap_stage3_expected="${bootstrap_stage3_transcript}.expected.$$"
-    bootstrap_stage3_host="${bootstrap_stage3_transcript}.host.$$"
+    bootstrap_stage3_transcript_descriptor_mode=0
+    case "$bootstrap_stage3_transcript" in
+        /proc/*)
+            if expr "$bootstrap_stage3_transcript" : \
+                '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null; then
+                :
+            elif expr "$bootstrap_stage3_transcript" : \
+                '/proc/[1-9][0-9]*/fd/[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9._-]*$' \
+                >/dev/null; then
+                :
+            else
+                return 1
+            fi
+            [ -f "$bootstrap_stage3_transcript" ] || return 1
+            [ -n "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX-}" ] || return 1
+            case "$BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX" in
+                /*) ;;
+                *) return 1 ;;
+            esac
+            bootstrap_stage3_expected="${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-expected"
+            bootstrap_stage3_host="${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-host"
+            bootstrap_stage3_transcript_descriptor_mode=1
+            ;;
+        *)
+            [ -f "$bootstrap_stage3_transcript" ] &&
+                [ ! -L "$bootstrap_stage3_transcript" ] || return 1
+            bootstrap_stage3_expected="${bootstrap_stage3_transcript}.expected.$$"
+            bootstrap_stage3_host="${bootstrap_stage3_transcript}.host.$$"
+            ;;
+    esac
+    trap 'rm -f -- "$bootstrap_stage3_expected" "$bootstrap_stage3_host"' EXIT
+    if [ "$bootstrap_stage3_transcript_descriptor_mode" = 1 ]; then
+        (
+            umask 077
+            set -C
+            : >"$bootstrap_stage3_expected" && : >"$bootstrap_stage3_host"
+        ) || return 1
+        chmod 600 "$bootstrap_stage3_expected" "$bootstrap_stage3_host" || return 1
+    fi
     # Inherited records are forbidden: the producer executes with env -i.
     ! grep -Eq '^inherited-env:' "$bootstrap_stage3_transcript" || return 1
     grep '^host-env:' "$bootstrap_stage3_transcript" \
@@ -214,7 +250,7 @@ bootstrap_stage3_verify_command_transcript() {
     bootstrap_stage3_transcript_status=$?
     rm -f "$bootstrap_stage3_expected" "$bootstrap_stage3_host"
     return "$bootstrap_stage3_transcript_status"
-}
+)
 
 bootstrap_stage3_run_transcribed() {
     bootstrap_stage3_run_transcript=$1
@@ -624,7 +660,8 @@ bootstrap_stage3_source_snapshot() {
     rm -f "$bootstrap_stage3_first"
 }
 
-bootstrap_stage3_manifest_value() {
+bootstrap_stage3_manifest_value() (
+    [ "$#" -eq 2 ] || return 1
     bootstrap_stage3_key=$1
     bootstrap_stage3_manifest=$2
     bootstrap_stage3_count=$(
@@ -633,7 +670,7 @@ bootstrap_stage3_manifest_value() {
     )
     [ "$bootstrap_stage3_count" = 1 ] || return 1
     sed -n "s/^${bootstrap_stage3_key}=//p" "$bootstrap_stage3_manifest"
-}
+)
 
 bootstrap_stage3_verify_bound_file() {
     bootstrap_stage3_binding_manifest=$1

@@ -26,7 +26,8 @@ test("tools remain ordered and contain the compatibility surface", () => {
     "spipe_release_guide", "spipe_release_capabilities",
     "spipe_release_session_plan", "spipe_release_beta_backport_plan",
     "spipe_release_candidate_plan", "spipe_release_promotion_plan",
-    "spipe_release_main_fix_discovery_plan", "spipe_release_forward_port_plan"
+    "spipe_release_main_fix_discovery_plan", "spipe_release_forward_port_plan",
+    "spipe_folder_reverse_references"
   ]);
   for (const name of [
     "spipe_release_session_plan", "spipe_release_beta_backport_plan",
@@ -63,7 +64,7 @@ test("recognized legacy messages without ids still produce id-less responses", (
   assert.equal(output.length, 3);
   assert.equal(Object.hasOwn(output[0], "id"), false);
   assert.equal(output[0].result.protocolVersion, "2024-11-05");
-  assert.equal(output[1].result.tools.length, 14);
+  assert.equal(output[1].result.tools.length, 15);
   assert.deepEqual(output[2].result.resources.map(({ uri }) => uri), ["spipe://skill"]);
 });
 

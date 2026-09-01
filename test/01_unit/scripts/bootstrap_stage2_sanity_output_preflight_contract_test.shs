@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+wrapper="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage2-sanity-preflight.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+helper="$tmp/preflight.sh"
+sed -n '/^bootstrap_stage2_sanity_output_preflight() (/,/^)/p' \
+  "$wrapper" >"$helper"
+. "$helper"
+
+base="$tmp/output/stage3/platform/stage2-sanity.env"
+cache="$tmp/output/stage3/platform/stage2-native-cache/object.cache"
+mkdir -p "${base%/*}" "${cache%/*}"
+printf 'cache survives\n' >"$cache"
+
+suffixes='.frontend-driver.log|.frontend-bootstrap-0.log|.frontend-bootstrap-0.log.bounded.env|.frontend-bootstrap-0.log.stage2-mir-retention|.frontend-bootstrap-0.log.stage2-mir-retention.bounded.env|.frontend-bootstrap-0.log.stage2-module-path-naming|.frontend-bootstrap-0.log.stage2-module-path-naming.bounded.env|.frontend-bootstrap-0.log.hello-world-positional|.frontend-bootstrap-0.log.hello-world-positional.bounded.env|.frontend-bootstrap-0.status.env|.frontend-bootstrap-1.log|.frontend-bootstrap-1.log.bounded.env|.frontend-bootstrap-1.log.stage2-mir-retention|.frontend-bootstrap-1.log.stage2-mir-retention.bounded.env|.frontend-bootstrap-1.log.stage2-module-path-naming|.frontend-bootstrap-1.log.stage2-module-path-naming.bounded.env|.frontend-bootstrap-1.log.hello-world-positional|.frontend-bootstrap-1.log.hello-world-positional.bounded.env|.frontend-bootstrap-1.status.env'
+
+bootstrap_stage2_sanity_output_preflight "$base" || fail 'empty root rejected'
+
+old_ifs=$IFS
+IFS='|'
+index=1
+printf 'prior-1\n' >"$base"
+outer_before=$(cksum <"$base")
+if bootstrap_stage2_sanity_output_preflight "$base" 2>"$tmp/diagnostic-1"; then
+  fail 'stale outer receipt accepted'
+fi
+grep -qx 'stage2-sanity-error: stale-evidence-output-root; use a new output root with a cache clone' \
+  "$tmp/diagnostic-1" || fail 'typed diagnostic missing for outer receipt'
+[ "$(cksum <"$base")" = "$outer_before" ] || fail 'outer receipt mutated'
+rm "$base"
+for suffix in $suffixes; do
+  index=$((index + 1))
+  printf 'prior-%s\n' "$index" >"$base$suffix"
+  before=$(cksum <"$base$suffix")
+  diagnostic="$tmp/diagnostic-$index"
+  if bootstrap_stage2_sanity_output_preflight "$base" 2>"$diagnostic"; then
+    fail "stale leaf $index accepted"
+  fi
+  grep -qx 'stage2-sanity-error: stale-evidence-output-root; use a new output root with a cache clone' \
+    "$diagnostic" || fail "typed diagnostic missing for leaf $index"
+  [ "$(cksum <"$base$suffix")" = "$before" ] || fail "leaf $index mutated"
+  [ "$(cat "$cache")" = 'cache survives' ] || fail "cache changed for leaf $index"
+  rm "$base$suffix"
+done
+IFS=$old_ifs
+[ "$index" -eq 20 ] || fail "expected 20 leaves, got $index"
+
+target="$tmp/foreign"
+printf 'foreign\n' >"$target"
+ln -s "$target" "$base.frontend-bootstrap-1.log.bounded.env"
+if bootstrap_stage2_sanity_output_preflight "$base" >/dev/null 2>&1; then
+  fail 'stale symlink accepted'
+fi
+[ -L "$base.frontend-bootstrap-1.log.bounded.env" ] || fail 'symlink mutated'
+[ "$(cat "$target")" = foreign ] || fail 'symlink target mutated'
+[ "$(cat "$cache")" = 'cache survives' ] || fail 'cache changed by symlink check'
+
+# Both outer calls must run after the output directory exists but before the
+# first broad permission change or evidence deletion. The inner call remains
+# in bootstrap_stage_sanity as a race defense.
+stage2_outer=$(grep -n -F 'bootstrap_stage2_sanity_output_preflight "${stage2_sanity_evidence}" || exit 1' \
+  "$wrapper" | sed -n '1s/:.*//p')
+stage3_outer=$(grep -n -F 'bootstrap_stage2_sanity_output_preflight "${stage3_sanity_evidence}" || exit 1' \
+  "$wrapper" | sed -n '1s/:.*//p')
+outer_chmod=$(grep -n -F 'chmod -R u+w "${stage3_provenance_dir}" || {' \
+  "$wrapper" | sed -n '1s/:.*//p')
+outer_rm=$(grep -n -F 'rm -f "${stage3_provenance_manifest}"' \
+  "$wrapper" | sed -n '1s/:.*//p')
+inner=$(grep -n -F 'bootstrap_stage2_sanity_output_preflight "${evidence_path}" || return 1' \
+  "$wrapper" | sed -n '1s/:.*//p')
+case "$stage2_outer:$stage3_outer:$outer_chmod:$outer_rm:$inner" in
+  *[!0-9:]*|:*|*::*) fail 'production preflight ordering markers missing' ;;
+esac
+[ "$stage2_outer" -lt "$outer_chmod" ] || fail 'Stage2 outer preflight follows chmod'
+[ "$stage3_outer" -lt "$outer_chmod" ] || fail 'Stage3 outer preflight follows chmod'
+[ "$stage2_outer" -lt "$outer_rm" ] || fail 'Stage2 outer preflight follows rm'
+[ "$stage3_outer" -lt "$outer_rm" ] || fail 'Stage3 outer preflight follows rm'
+
+echo 'bootstrap_stage2_sanity_output_preflight_contract_test: PASS'

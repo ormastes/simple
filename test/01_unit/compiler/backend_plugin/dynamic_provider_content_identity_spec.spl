@@ -1,0 +1,53 @@
+use std.spec.{describe, it, expect, fail}
+use std.nogc_sync_mut.io_runtime.{
+    file_read, file_write, file_hash_sha256_or_empty, dir_remove_all
+}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use compiler.backend_plugin.dynamic_loader.{
+    stage_dynamic_backend_plugin_artifact_v1
+}
+
+describe "dynamic backend provider content identity":
+    it "keeps identity and load path bound after the selected path is swapped":
+        val source_dir = secure_temp_dir_raw(".", "plugin-swap-spec")
+        expect(source_dir == "").to_equal(false)
+        val source_path = source_dir + "/selected-provider"
+        expect(file_write(source_path, "provider-version-a")).to_equal(true)
+
+        var staged = stage_dynamic_backend_plugin_artifact_v1(
+            source_path).ok().unwrap()
+        expect(staged.build_id).to_equal(
+            "1d671187723c820d2be8caf0e51945db1dd06042d6437f4253d6bca0c129625f")
+        expect(staged.staged_path == source_path).to_equal(false)
+
+        # Deterministic path-swap reproducer: the public selection changes only
+        # after the private copy. Admission must continue to name/hash the copy.
+        expect(file_write(source_path, "provider-version-b")).to_equal(true)
+        expect(file_hash_sha256_or_empty(source_path)).to_equal(
+            "d00ca90c5b5d273f28fd5e3eb1b85678a2bb570c3ab09d29daadf4cca890364e")
+        expect(file_hash_sha256_or_empty(staged.staged_path)).to_equal(
+            staged.build_id)
+        expect(staged.close()).to_equal(true)
+        expect(dir_remove_all(source_dir)).to_equal(true)
+
+    it "fails closed when provider bytes cannot be staged":
+        val result = stage_dynamic_backend_plugin_artifact_v1(
+            "test/01_unit/compiler/backend_plugin/fixtures/missing-provider.bin")
+        match result:
+            case Ok(_): fail("missing provider must not receive a cache identity")
+            case Err(error):
+                expect(error.code()).to_equal("BACKEND_PLUGIN_LOAD_FAILED")
+
+    it "binds descriptor receipt and adapter calls to the staged artifact":
+        val loader = file_read(
+            "src/compiler/70.backend/backend_plugin/loader.spl")
+        val dynamic_loader = file_read(
+            "src/compiler/70.backend/backend_plugin/dynamic_loader.spl")
+        expect(loader).to_contain("lease.build_id,")
+        expect(loader).to_contain("provider_path: lease.provider_path")
+        expect(loader.contains(
+            "sha256_text(request.plugin_path)")).to_equal(false)
+        expect(dynamic_loader).to_contain(
+            "DynLib.load_checked(staged.staged_path)")
+        expect(dynamic_loader).to_contain(
+            "loaded_build_id != staged.build_id")

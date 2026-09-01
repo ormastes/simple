@@ -35,7 +35,31 @@ fn stage4_split_whitespace(value: text) -> [text]:
     parts
 
 fn stage4_is_runtime_abi_symbol(name: text) -> bool:
-    name.starts_with("rt_") or name.starts_with("spl_") or name.starts_with("__simple_") or name == "g_memtrack_enabled"
+    name.starts_with("rt_") or name.starts_with("spl_") or name.starts_with("__simple_") or name == "sys_get_args" or name == "g_memtrack_enabled"
+
+fn stage4_argv_provider_symbols() -> [text]:
+    # These functions read and write one process-global argv store. Keeping
+    # only a selected setter or getter global permits a sibling runtime archive
+    # to satisfy the localized half from unrelated state.
+    [
+        "spl_init_args", "spl_arg_count", "spl_get_arg", "rt_set_args",
+        "rt_get_argc", "rt_get_args", "sys_get_args", "rt_cli_get_args",
+        "rt_cli_arg_count", "rt_cli_arg_at"
+    ]
+
+pub fn stage4_expand_argv_provider_roots(requested: [text]) -> [text]:
+    """Expand any argv initializer/setter/getter root to its complete provider family."""
+    var expanded: Dict<text, bool> = {}
+    var selects_argv_provider = false
+    val argv_symbols = stage4_argv_provider_symbols()
+    for symbol in requested:
+        expanded[symbol] = true
+        if argv_symbols.contains(symbol):
+            selects_argv_provider = true
+    if selects_argv_provider:
+        for symbol in argv_symbols:
+            expanded[symbol] = true
+    stage4_sorted_text(expanded.keys())
 
 fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
     if macho_prefixes and name.starts_with("_"):
@@ -838,7 +862,8 @@ pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels
     var owner_rows: [text] = []
     var pending_symbols: [text] = []
     var pending_sources: [text] = []
-    for symbol in requested:
+    val expanded_requested = stage4_expand_argv_provider_roots(requested)
+    for symbol in expanded_requested:
         if queued.has(symbol):
             continue
         queued[symbol] = true
@@ -889,12 +914,16 @@ pub fn stage4_projection_localization_symbols(nm_output: text, object_format: te
         return Err("Unsupported Stage4 projection object format '" + object_format + "'")
     if requested.len() == 0:
         return Err("Stage4 projection requested symbol set is empty")
-    var expected: Dict<text, bool> = {}
+    var requested_seen: Dict<text, bool> = {}
     for symbol in requested:
         if not stage4_is_runtime_abi_symbol(symbol):
             return Err("Stage4 projection root '" + symbol + "' is not a runtime ABI symbol")
-        if expected.has(symbol):
+        if requested_seen.has(symbol):
             return Err("Stage4 projection root '" + symbol + "' is repeated")
+        requested_seen[symbol] = true
+    val expanded_requested = stage4_expand_argv_provider_roots(requested)
+    var expected: Dict<text, bool> = {}
+    for symbol in expanded_requested:
         expected[symbol] = true
 
     var counts: Dict<text, i64> = {}
@@ -909,7 +938,7 @@ pub fn stage4_projection_localization_symbols(nm_output: text, object_format: te
             return Err("Stage4 projection closure repeats global definition '" + symbol + "'")
         if not expected.has(symbol):
             localize = localize.push(raw_symbol)
-    for symbol in requested:
+    for symbol in expanded_requested:
         if (counts[symbol] ?? 0) != 1:
             return Err("Stage4 projection root '" + symbol + "' must exist exactly once")
     for raw_symbol in raw_undefined:

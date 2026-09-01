@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+cd "$ROOT_DIR"
+
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/simple-core-c-capsule-failure.XXXXXX")
+trap 'rm -rf "$TEST_ROOT"' EXIT INT TERM
+OUTPUT_ROOT="$TEST_ROOT/output"
+COMMAND_LOG="$TEST_ROOT/command.out"
+
+if SIMPLE_CORE_C_CAPSULE_TEST_FORCE_SELFCHECK_FAILURE=1 \
+    sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs \
+        --output "$OUTPUT_ROOT" >"$COMMAND_LOG" 2>&1; then
+    echo "FAIL: forced selfcheck failure unexpectedly passed" >&2
+    exit 1
+fi
+
+FAILURE_DIR="$OUTPUT_ROOT/core-c-bootstrap"
+test -f "$FAILURE_DIR/failure.manifest"
+test -f "$FAILURE_DIR/failure.receipt"
+test -f "$FAILURE_DIR/forced_selfcheck.out"
+grep -q '^status=fail$' "$FAILURE_DIR/failure.manifest"
+grep -q '^reason=forced-selfcheck-failed$' "$FAILURE_DIR/failure.manifest"
+grep -q '^temporary_artifacts_preserved=true$' "$FAILURE_DIR/failure.manifest"
+grep -q '^core_c_runtime_capsule_reason=forced-selfcheck-failed$' \
+    "$FAILURE_DIR/failure.receipt"
+grep -q '^forced selfcheck stdout/stderr$' "$FAILURE_DIR/forced_selfcheck.out"
+grep -q "^core_c_runtime_capsule_failure_dir=$FAILURE_DIR$" "$COMMAND_LOG"
+
+PRODUCER=scripts/check/build-core-c-bootstrap-runtime-capsule.shs
+for symbol in \
+    spl_init_args spl_arg_count spl_get_arg rt_set_args rt_get_argc \
+    rt_get_args sys_get_args rt_cli_arg_count rt_cli_arg_at rt_cli_get_args; do
+    grep -q "^$symbol$" "$PRODUCER"
+done
+grep -q '^CHECKS_EXPECTED=63$' "$PRODUCER"
+
+echo "PASS: core-C capsule retains failure evidence and gates all argv providers"

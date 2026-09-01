@@ -17,6 +17,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_secure_staging.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
@@ -326,6 +327,9 @@ fn compile_c_runtime_sources() {
         // exact-equivalent since every value it deep-frees is a string.
         // Re-added after the tree-wipe restore ae55a746719 dropped it again.
         "runtime_process_owned.c",
+        // Narrow Stage2 provider: runtime.c/runtime_native.c cannot be linked
+        // into this Rust archive without colliding with Rust-owned rt_* APIs.
+        "runtime_secure_staging.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");

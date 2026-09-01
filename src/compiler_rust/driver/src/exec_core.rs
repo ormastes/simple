@@ -1018,7 +1018,11 @@ impl ExecCore {
                             // JIT failure reason (lambda/closure ABI mismatch, genuine
                             // compiler bugs, etc.) still falls back leniently as before,
                             // unchanged blast radius outside the unresolved-import family.
-                            if jit_err.contains("SIMPLE_JIT_STRICT:") {
+                            if jit_failure_must_propagate(
+                                &jit_err,
+                                std::env::var_os("SIMPLE_JIT_STRICT_ALL")
+                                    .is_some_and(|value| value != "0"),
+                            ) {
                                 return Err(jit_err);
                             }
                             jit_coverage_report(path, "jit-compile-error");
@@ -1361,6 +1365,16 @@ impl ExecCore {
         self.collect_gc();
         Ok(exit_code)
     }
+}
+
+/// Whether a JIT compile error must be returned instead of interpreted.
+///
+/// `SIMPLE_JIT_STRICT` deliberately stays limited to errors explicitly tagged
+/// by the lowering/codegen paths. `SIMPLE_JIT_STRICT_ALL=1` is a separate,
+/// opt-in diagnostic switch for callers that need the raw first JIT failure;
+/// it never changes the default fallback behavior.
+fn jit_failure_must_propagate(jit_err: &str, strict_all: bool) -> bool {
+    strict_all || jit_err.contains("SIMPLE_JIT_STRICT:")
 }
 
 /// Shared helper for the JIT-compile failure paths that represent a genuine
@@ -1883,7 +1897,18 @@ fn run_module_init(module: &LoadedModule) -> Result<(), String> {
 
 #[cfg(test)]
 mod execution_mode_validation_tests {
-    use super::ExecutionMode;
+    use super::{jit_failure_must_propagate, ExecutionMode};
+
+    #[test]
+    fn strict_all_propagates_raw_jit_errors_without_widening_default_strict() {
+        let raw_codegen_error = "Cranelift JIT compile: Module error codegen 4 bodies failed";
+        assert!(!jit_failure_must_propagate(raw_codegen_error, false));
+        assert!(jit_failure_must_propagate(
+            "SIMPLE_JIT_STRICT: unresolved import",
+            false
+        ));
+        assert!(jit_failure_must_propagate(raw_codegen_error, true));
+    }
 
     /// Every documented spelling must parse, and must parse to the lane its
     /// name promises. The `interpret`/`interpreter` pair is the one that

@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$repo/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage3-output-path.XXXXXX")
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+fixture="$scratch/repo"
+external="$scratch/external"
+mkdir -p "$fixture/build/bootstrap" "$fixture/build/nested/output" \
+    "$fixture/src/output" "$external/nested" "$scratch/external-evil"
+
+accept() {
+    bootstrap_stage3_resume_output_path "$1" "$fixture" "$2" || {
+        printf 'FAIL: rejected %s with external root %s\n' "$1" "${2:-<unset>}" >&2
+        exit 1
+    }
+}
+
+reject() {
+    if bootstrap_stage3_resume_output_path "$1" "$fixture" "$2"; then
+        printf 'FAIL: accepted %s with external root %s\n' "$1" "${2:-<unset>}" >&2
+        exit 1
+    fi
+}
+
+accept build/bootstrap ''
+accept "$fixture/build/nested/output" ''
+reject "$fixture" ''
+reject "$fixture/src/output" ''
+reject ../external ''
+reject "$external" ''
+reject "$external" "$scratch/external-evil"
+reject "$scratch/external-evil" "$external"
+accept "$external" "$external"
+accept "$external/nested" "$external"
+reject "$external-evil" "$external"
+reject "$external" /
+
+ln -s "$external" "$scratch/external-link"
+reject "$scratch/external-link" "$external"
+reject "$external" "$scratch/external-link"
+ln -s "$external/nested" "$external/alias"
+reject "$external/alias" "$external"
+
+printf 'bootstrap stage3 resume output path: PASS\n'

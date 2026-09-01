@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-secure-archive.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+grep -Fq '"runtime_secure_staging.c",' "$root/src/compiler_rust/runtime/build.rs" || {
+    echo "FAIL: Stage2 simple-runtime build omits runtime_secure_staging.c" >&2
+    exit 1
+}
+cc -std=gnu11 -I"$root/src/runtime" -c "$root/src/runtime/runtime_secure_staging.c" -o "$work/runtime_secure_staging.o"
+ar rcs "$work/libsimple_runtime_secure.a" "$work/runtime_secure_staging.o"
+for symbol in rt_secure_temp_dir rt_file_publish_noreplace; do
+    count=$(nm -g --defined-only "$work/libsimple_runtime_secure.a" | awk -v symbol="$symbol" '$NF == symbol { count++ } END { print count + 0 }')
+    [ "$count" -eq 1 ] || { echo "FAIL: expected one archive definition for $symbol, found $count" >&2; exit 1; }
+done
+echo "PASS: secure staging runtime archive exports both symbols exactly once"

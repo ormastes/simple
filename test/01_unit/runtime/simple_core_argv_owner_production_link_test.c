@@ -44,6 +44,8 @@ int main(void) {
     assert(rt_get_argc() == 3);
     assert(rt_cli_arg_count() == 3);
     assert(strcmp(spl_get_arg(1), "build") == 0);
+    assert(spl_get_arg(-1) == NULL);
+    assert(spl_get_arg(3) == NULL);
     assert(args > 4095);
     assert(array_is_valid(args) == 1);
     assert(array_len_value(args) == 3);
@@ -64,8 +66,18 @@ int main(void) {
         assert(memcmp(rt_string_data(direct), expected[i], (size_t)length) == 0);
     }
 
-    assert((int64_t)(uintptr_t)rt_get_args() == args ||
-           array_len_value((int64_t)(uintptr_t)rt_get_args()) == 3);
-    assert(array_len_value((int64_t)(uintptr_t)sys_get_args()) == 3);
+    const int64_t get_args = (int64_t)(uintptr_t)rt_get_args();
+    const int64_t sys_args = (int64_t)(uintptr_t)sys_get_args();
+    assert(array_len_value(get_args) == 3);
+    assert(array_len_value(sys_args) == 3);
+
+    /* The startup vector is borrowed; every public value view owns its text. */
+    arg1[0] = 'B';
+    assert(strcmp(spl_get_arg(1), "Build") == 0);
+    assert(memcmp(rt_string_data(array_get_raw(args, 1)), "build", 5) == 0);
+    assert(memcmp(rt_string_data(array_get_raw(get_args, 1)), "build", 5) == 0);
+    assert(memcmp(rt_string_data(array_get_raw(sys_args, 1)), "build", 5) == 0);
+    assert(rt_string_len(rt_cli_arg_at(-1)) == 0);
+    assert(rt_string_len(rt_cli_arg_at(3)) == 0);
     return 0;
 }

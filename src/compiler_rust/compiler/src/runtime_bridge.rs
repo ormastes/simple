@@ -163,6 +163,20 @@ fn values_to_runtime_array<'a>(items: impl IntoIterator<Item = &'a Value>) -> Ru
 pub fn runtime_to_value(rv: RuntimeValue) -> Value {
     use simple_runtime::value::tags as rt_tags;
 
+    // Full-precision floats use HeapObjectType::Float at erased/Any/container
+    // boundaries. Checking only TAG_FLOAT below silently converted every such
+    // value to Value::Nil through the unsupported-heap fallback. This surfaced
+    // in the self-hosted compiler when FloatLit/Json Number pattern payloads
+    // crossed rt_interp_call before ast_semantic_value called f64_to_bits.
+    if rv.is_float() {
+        return Value::Float(rv.as_float());
+    }
+    // Wide signed integers use the adjacent HeapObjectType::Int carrier. Keep
+    // that scalar distinct from HeapUInt and from enum/object wrappers.
+    if let Some(value) = rv.as_heap_i64() {
+        return Value::Int(value);
+    }
+
     match rv.tag() {
         rt_tags::TAG_INT => Value::Int(rv.as_int()),
         rt_tags::TAG_FLOAT => Value::Float(rv.as_float()),
@@ -342,6 +356,40 @@ mod tests {
             let runtime = value_to_runtime(&source);
             assert_eq!(runtime.as_heap_u64(), Some(value));
             assert_eq!(runtime_to_value(runtime), source);
+        }
+    }
+
+    #[test]
+    fn heap_boxed_float_runtime_roundtrip_preserves_exact_bits() {
+        for value in [0.0, -0.0, 0.1, f64::MIN_POSITIVE, f64::MAX] {
+            let runtime = RuntimeValue::from_float(value);
+            assert_eq!(runtime.heap_type(), Some(simple_runtime::value::HeapObjectType::Float));
+            match runtime_to_value(runtime) {
+                Value::Float(actual) => assert_eq!(actual.to_bits(), value.to_bits()),
+                other => panic!("expected exact Float bridge value, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn heap_boxed_wide_signed_int_runtime_roundtrip_stays_int() {
+        for value in [i64::MIN, -(1i64 << 61), 1i64 << 61, i64::MAX] {
+            let runtime = RuntimeValue::from_int(value);
+            assert_eq!(runtime.heap_type(), Some(simple_runtime::value::HeapObjectType::Int));
+            assert_eq!(runtime_to_value(runtime), Value::Int(value));
+        }
+    }
+
+    #[test]
+    fn enum_wrapper_is_not_implicitly_coerced_to_its_float_payload() {
+        use simple_runtime::value::{rt_enum_new, rt_enum_payload};
+
+        let payload = RuntimeValue::from_float(0.1);
+        let wrapper = rt_enum_new(77, 3, payload);
+        assert_eq!(runtime_to_value(wrapper), Value::Nil);
+        match runtime_to_value(rt_enum_payload(wrapper)) {
+            Value::Float(actual) => assert_eq!(actual.to_bits(), 0.1f64.to_bits()),
+            other => panic!("explicit enum payload extraction lost float: {other:?}"),
         }
     }
 

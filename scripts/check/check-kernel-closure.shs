@@ -1,0 +1,120 @@
+#!/bin/sh
+# Fail-closed compiler kernel partition verifier (Phase 0).
+set -eu
+
+usage() { echo "usage: $0 [--root DIR] [--manifest FILE] [--selftest]" >&2; exit 2; }
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+root=$repo_root
+manifest=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+selftest=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root) [ "$#" -ge 2 ] || usage; root=$2; shift 2 ;;
+        --manifest) [ "$#" -ge 2 ] || usage; manifest=$2; shift 2 ;;
+        --selftest|--self-test) selftest=1; shift ;;
+        *) usage ;;
+    esac
+done
+
+manifest_rows() { sed -n 's/^[[:space:]]*-[[:space:]]*\(K0\|K1\|P_STATIC\|P_DYN\)|/\1|/p' "$1"; }
+
+run_check() {
+    check_root=$1; check_manifest=$2
+    case "$check_manifest" in /*) ;; *) check_manifest=$check_root/$check_manifest ;; esac
+    [ -f "$check_manifest" ] || { echo "ERROR — manifest missing: $check_manifest"; return 2; }
+    grep -q '^schema: simple/compiler/kernel-closure/v1$' "$check_manifest" || { echo "ERROR — unsupported or missing kernel closure schema"; return 2; }
+    temp_dir=$(mktemp -d); trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
+    rows=$temp_dir/rows; files=$temp_dir/files; index=$temp_dir/index
+    imports=$temp_dir/imports; violations_file=$temp_dir/violations
+    manifest_rows "$check_manifest" > "$rows"
+    [ -s "$rows" ] || { echo "ERROR — no classification rows"; return 2; }
+    (cd "$check_root" && find src/compiler -type f -name '*.spl' -print | LC_ALL=C sort) > "$files"
+    [ -s "$files" ] || { echo "ERROR — nothing was checked"; return 2; }
+    classification_errors=$temp_dir/classification-errors
+    if ! awk -F '|' -v errors="$classification_errors" '
+        function pattern_regex(pattern, r) {
+            r = pattern
+            gsub(/[.]/, "[.]", r)
+            gsub(/[*][*]/, "\034", r)
+            gsub(/[*]/, "[^/]*", r)
+            gsub(/\034/, ".*", r)
+            return "^" r "$"
+        }
+        function module_for(path, p, n, a, first, prefix, rest) {
+            p = path; sub(/^src\/compiler\//, "", p)
+            n = split(p, a, "/"); first = a[1]
+            if (n == 1) { prefix = "compiler"; rest = first }
+            else {
+                prefix = first
+                sub(/^[0-9][0-9][.]/, "", prefix)
+                prefix = "compiler." prefix
+                rest = p; sub(/^[^/]*\//, "", rest)
+            }
+            sub(/[.]spl$/, "", rest); gsub(/\//, ".", rest)
+            sub(/[.]__init__$/, "", rest)
+            if (rest == "__init__") return prefix
+            return prefix "." rest
+        }
+        NR == FNR { classes[++rules] = $1; regex[rules] = pattern_regex($2); next }
+        {
+            class = ""
+            for (i = 1; i <= rules; i++) if ($0 ~ regex[i]) { class = classes[i]; break }
+            if (class == "") {
+                print "FAIL KERNEL-CLOSURE-001 unclassified: " $0 >> errors
+                missing++
+            } else {
+                print module_for($0) "|" class "|" $0
+            }
+        }
+        END { if (missing > 0) exit 1 }
+    ' "$rows" "$files" > "$index"; then
+        cat "$classification_errors"
+        count=$(wc -l < "$index" | tr -d ' ')
+        unclassified=$(wc -l < "$classification_errors" | tr -d ' ')
+        echo "FAIL — $count file(s) classified, $unclassified unclassified"
+        return 1
+    fi
+    count=$(wc -l < "$index" | tr -d ' ')
+    (cd "$check_root" && xargs grep -H -E '^[[:space:]]*use[[:space:]]+compiler\.' < "$files" 2>/dev/null || true) |
+        sed -n 's/^\([^:]*\):[[:space:]]*use[[:space:]]\+\(compiler\.[A-Za-z0-9_.]*\).*/\1|\2/p' > "$imports"
+    awk -F '|' -v index_file="$index" '
+        BEGIN {
+            while ((getline < index_file) > 0) {
+                class_by_module[$1] = $2
+                class_by_path[$3] = $2
+            }
+            close(index_file)
+        }
+        {
+            path = $1; imported = $2; probe = imported
+            sub(/[.]$/, "", probe)
+            target = ""
+            while (probe ~ /^compiler[.]/) {
+                if (probe in class_by_module) { target = class_by_module[probe]; break }
+                sub(/[.][^.]*$/, "", probe)
+            }
+            if (class_by_path[path] == "K0" && (target == "P_STATIC" || target == "P_DYN"))
+                print "FAIL KERNEL-CLOSURE-003 K0 imports " target ": " path " -> " imported
+        }
+    ' "$imports" > "$violations_file"
+    violations=$(wc -l < "$violations_file" | tr -d ' ')
+    cat "$violations_file"
+    [ "$violations" -eq 0 ] || { echo "FAIL — $count file(s) classified, 0 unclassified, $violations K0->P imports"; return 1; }
+    echo "PASS — $count file(s) classified, 0 unclassified, 0 K0->P imports"
+}
+
+run_selftest() {
+    fixture=$(mktemp -d); trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+    mkdir -p "$fixture/src/compiler/10.frontend" "$fixture/src/compiler/90.tools"
+    printf '%s\n' 'schema: simple/compiler/kernel-closure/v1' 'entries:' '  - K0|src/compiler/10.frontend/**' '  - P_STATIC|src/compiler/90.tools/**' > "$fixture/closure.sdn"
+    printf 'fn clean() -> i64:\n    1\n' > "$fixture/src/compiler/10.frontend/clean.spl"
+    printf 'fn plugin() -> i64:\n    2\n' > "$fixture/src/compiler/90.tools/plugin.spl"
+    run_check "$fixture" "$fixture/closure.sdn" >/dev/null || { echo "self-test clean fixture failed"; return 1; }
+    printf 'use compiler.tools.plugin.{plugin}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
+    if run_check "$fixture" "$fixture/closure.sdn" >/dev/null 2>&1; then echo "self-test dirty fixture unexpectedly passed"; return 1; fi
+    rm -f "$fixture/src/compiler/10.frontend/clean.spl" "$fixture/src/compiler/90.tools/plugin.spl"
+    if run_check "$fixture" "$fixture/closure.sdn" >/dev/null 2>&1; then echo "self-test empty fixture unexpectedly passed"; return 1; fi
+    echo "kernel closure self-test OK"
+}
+
+if [ "$selftest" -eq 1 ]; then run_selftest; else run_check "$root" "$manifest"; fi

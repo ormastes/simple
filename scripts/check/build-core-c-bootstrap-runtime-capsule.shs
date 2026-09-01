@@ -8,9 +8,40 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT_DIR"
 
+preserve_failure_evidence() {
+    failure_reason=$1
+    [ -n "${TMP_DIR:-}" ] || return 0
+    [ -d "$TMP_DIR" ] || return 0
+    [ -n "${FINAL_DIR:-}" ] || return 0
+    [ ! -e "$FINAL_DIR" ] || return 0
+
+    {
+        echo "schema=core-c-bootstrap-runtime-capsule-failure-v1"
+        echo "status=fail"
+        echo "reason=$failure_reason"
+        echo "checks_executed=${CHECKS_RUN:-0}"
+        echo "head_revision=$(git rev-parse HEAD 2>/dev/null || echo unavailable)"
+        echo "temporary_artifacts_preserved=true"
+    } >"$TMP_DIR/failure.manifest"
+    {
+        echo "core_c_runtime_capsule_status=fail"
+        echo "core_c_runtime_capsule_reason=$failure_reason"
+        echo "core_c_runtime_capsule_failure_manifest=failure.manifest"
+        echo "core_c_runtime_capsule_failure_logs=*.out"
+    } >"$TMP_DIR/failure.receipt"
+    mv "$TMP_DIR" "$FINAL_DIR"
+}
+
 die() {
+    failure_reason=$1
+    preserve_failure_evidence "$failure_reason"
     echo "core_c_runtime_capsule_status=fail"
-    echo "core_c_runtime_capsule_reason=$1"
+    echo "core_c_runtime_capsule_reason=$failure_reason"
+    if [ -n "${FINAL_DIR:-}" ] && [ -d "$FINAL_DIR" ]; then
+        echo "core_c_runtime_capsule_failure_dir=$FINAL_DIR"
+        echo "core_c_runtime_capsule_failure_manifest=$FINAL_DIR/failure.manifest"
+        echo "core_c_runtime_capsule_failure_receipt=$FINAL_DIR/failure.receipt"
+    fi
     exit 1
 }
 
@@ -158,6 +189,13 @@ LOCAL_INPUTS_FILE="$TMP_DIR/local-runtime-inputs.txt"
 mkdir -p "$OBJECT_DIR" "$REPEAT_OBJECT_DIR"
 : >"$LOCAL_INPUTS_FILE"
 
+# Test-only failpoint: exercises the failure publication path without compiling
+# the runtime. Production invocations leave it unset.
+if [ "${SIMPLE_CORE_C_CAPSULE_TEST_FORCE_SELFCHECK_FAILURE:-0}" = "1" ]; then
+    printf '%s\n' 'forced selfcheck stdout/stderr' >"$TMP_DIR/forced_selfcheck.out"
+    die "forced-selfcheck-failed"
+fi
+
 CC_VERSION_FILE="$TMP_DIR/cc.version.txt"
 AR_VERSION_FILE="$TMP_DIR/ar.version.txt"
 NM_VERSION_FILE="$TMP_DIR/nm.version.txt"
@@ -209,6 +247,7 @@ done
 printf '%s\n' "$RUNTIME_DIR/test/rt_string_free_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/runtime_coverage_core_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_transient_heap_scope_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/rt_transient_heap_thread_affinity_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_mem_guard_native_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_mem_guard_stale_slot_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_heap_ref_wellformed_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
@@ -290,6 +329,18 @@ nm_has_text_symbol() {
     ' "$1"
 }
 
+nm_has_callable_symbol() {
+    awk -v expected="$2" '
+        NF >= 3 {
+            type = $(NF - 1)
+            symbol = $NF
+            sub(/^_/, "", symbol)
+            if ((type == "T" || type == "W") && symbol == expected) found = 1
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$1"
+}
+
 nm_has_text_symbol "$TMP_DIR/archive.nm.txt" rt_string_free ||
     die "archive-rt-string-free-provider-missing"
 record_check
@@ -353,6 +404,51 @@ assert_single_provider rt_string_free runtime_native.o
 assert_single_provider simple_contract_check runtime_contracts.o
 assert_single_provider simple_contract_check_msg runtime_contracts.o
 
+ARGV_PROVIDER_SYMBOLS="
+spl_init_args
+spl_arg_count
+spl_get_arg
+rt_set_args
+rt_get_argc
+rt_get_args
+sys_get_args
+rt_cli_arg_count
+rt_cli_arg_at
+rt_cli_get_args
+"
+assert_single_callable_provider() {
+    assert_symbol=$1
+    assert_expected=$2
+    assert_slug=$(printf '%s' "$assert_symbol" | tr '_' '-')
+    PROVIDER_FILE="$TMP_DIR/$assert_symbol.providers.txt"
+    : >"$PROVIDER_FILE"
+    for object in $OBJECT_DIR/*.o; do
+        "$NM_PATH" -g "$object" 2>/dev/null |
+            awk -v member="$(basename "$object")" -v expected="$assert_symbol" '
+                NF >= 3 {
+                    type = $(NF - 1)
+                    symbol = $NF
+                    sub(/^_/, "", symbol)
+                    if ((type == "T" || type == "W") && symbol == expected) print member
+                }
+            ' >>"$PROVIDER_FILE"
+    done
+    [ "$(wc -l <"$PROVIDER_FILE" | tr -d ' ')" = "1" ] ||
+        die "$assert_slug-provider-count"
+    [ "$(sed -n '1p' "$PROVIDER_FILE")" = "$assert_expected" ] ||
+        die "$assert_slug-provider-not-$assert_expected"
+    record_check
+}
+for symbol in $ARGV_PROVIDER_SYMBOLS; do
+    nm_has_callable_symbol "$TMP_DIR/archive.nm.txt" "$symbol" ||
+        die "archive-$symbol-provider-missing"
+    record_check
+    nm_has_callable_symbol "$TMP_DIR/runtime_native.nm.txt" "$symbol" ||
+        die "runtime-native-$symbol-provider-missing"
+    record_check
+    assert_single_callable_provider "$symbol" runtime_native.o
+done
+
 SELF_CHECK_BIN="$TMP_DIR/rt_string_free_selfcheck"
 SELF_CHECK_LOG="$TMP_DIR/rt_string_free_selfcheck.out"
 SELF_CHECK_LIBS="-lm -lpthread"
@@ -360,7 +456,8 @@ SELF_CHECK_LIBS="-lm -lpthread"
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/rt_string_free_selfcheck.c" \
-    "$ARCHIVE" $SELF_CHECK_LIBS -o "$SELF_CHECK_BIN" ||
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_string_free_selfcheck.link.out" 2>&1 ||
     die "rt-string-free-selfcheck-link-failed"
 "$SELF_CHECK_BIN" >"$SELF_CHECK_LOG" 2>&1 ||
     die "rt-string-free-selfcheck-failed"
@@ -368,12 +465,27 @@ grep -q '^SELFCHECK PASSED (0 failures)$' "$SELF_CHECK_LOG" ||
     die "rt-string-free-selfcheck-receipt-missing"
 record_check
 
+THREAD_AFFINITY_SELF_CHECK_BIN="$TMP_DIR/rt_transient_heap_thread_affinity_selfcheck"
+THREAD_AFFINITY_SELF_CHECK_LOG="$TMP_DIR/rt_transient_heap_thread_affinity_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 \
+    "$RUNTIME_DIR/test/rt_transient_heap_thread_affinity_selfcheck.c" \
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$THREAD_AFFINITY_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_transient_heap_thread_affinity_selfcheck.link.out" 2>&1 ||
+    die "rt-transient-heap-thread-affinity-selfcheck-link-failed"
+"$THREAD_AFFINITY_SELF_CHECK_BIN" >"$THREAD_AFFINITY_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-transient-heap-thread-affinity-selfcheck-failed"
+grep -q '^SELFCHECK PASSED (0 failures)$' "$THREAD_AFFINITY_SELF_CHECK_LOG" ||
+    die "rt-transient-heap-thread-affinity-selfcheck-receipt-missing"
+record_check
+
 COVERAGE_SELF_CHECK_BIN="$TMP_DIR/runtime_coverage_core_selfcheck"
 COVERAGE_SELF_CHECK_LOG="$TMP_DIR/runtime_coverage_core_selfcheck.out"
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/runtime_coverage_core_selfcheck.c" \
-    "$OBJECT_DIR/runtime_coverage_core.o" $SELF_CHECK_LIBS -o "$COVERAGE_SELF_CHECK_BIN" ||
+    "$OBJECT_DIR/runtime_coverage_core.o" $SELF_CHECK_LIBS -o "$COVERAGE_SELF_CHECK_BIN" \
+    >"$TMP_DIR/runtime_coverage_core_selfcheck.link.out" 2>&1 ||
     die "runtime-coverage-core-selfcheck-link-failed"
 "$COVERAGE_SELF_CHECK_BIN" >"$COVERAGE_SELF_CHECK_LOG" 2>&1 ||
     die "runtime-coverage-core-selfcheck-failed"
@@ -388,7 +500,8 @@ TRANSIENT_SELF_CHECK_LOG="$TMP_DIR/rt_transient_heap_scope_selfcheck.out"
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/rt_transient_heap_scope_selfcheck.c" \
-    "$ARCHIVE" $SELF_CHECK_LIBS -o "$TRANSIENT_SELF_CHECK_BIN" ||
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$TRANSIENT_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_transient_heap_scope_selfcheck.link.out" 2>&1 ||
     die "rt-transient-heap-scope-selfcheck-link-failed"
 "$TRANSIENT_SELF_CHECK_BIN" >"$TRANSIENT_SELF_CHECK_LOG" 2>&1 ||
     die "rt-transient-heap-scope-selfcheck-failed"
@@ -401,7 +514,8 @@ MEM_GUARD_SELF_CHECK_LOG="$TMP_DIR/rt_mem_guard_native_selfcheck.out"
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/rt_mem_guard_native_selfcheck.c" \
-    "$ARCHIVE" $SELF_CHECK_LIBS -o "$MEM_GUARD_SELF_CHECK_BIN" ||
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$MEM_GUARD_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_mem_guard_native_selfcheck.link.out" 2>&1 ||
     die "rt-mem-guard-native-selfcheck-link-failed"
 "$MEM_GUARD_SELF_CHECK_BIN" >"$MEM_GUARD_SELF_CHECK_LOG" 2>&1 ||
     die "rt-mem-guard-native-selfcheck-failed"
@@ -414,7 +528,8 @@ MEM_GUARD_STALE_SLOT_SELF_CHECK_LOG="$TMP_DIR/rt_mem_guard_stale_slot_selfcheck.
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/rt_mem_guard_stale_slot_selfcheck.c" \
-    "$ARCHIVE" $SELF_CHECK_LIBS -o "$MEM_GUARD_STALE_SLOT_SELF_CHECK_BIN" ||
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$MEM_GUARD_STALE_SLOT_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_mem_guard_stale_slot_selfcheck.link.out" 2>&1 ||
     die "rt-mem-guard-stale-slot-selfcheck-link-failed"
 "$MEM_GUARD_STALE_SLOT_SELF_CHECK_BIN" >"$MEM_GUARD_STALE_SLOT_SELF_CHECK_LOG" 2>&1 ||
     die "rt-mem-guard-stale-slot-selfcheck-failed"
@@ -427,7 +542,8 @@ HEAP_REF_WELLFORMED_SELF_CHECK_LOG="$TMP_DIR/rt_heap_ref_wellformed_selfcheck.ou
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/rt_heap_ref_wellformed_selfcheck.c" \
-    "$ARCHIVE" $SELF_CHECK_LIBS -o "$HEAP_REF_WELLFORMED_SELF_CHECK_BIN" ||
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$HEAP_REF_WELLFORMED_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_heap_ref_wellformed_selfcheck.link.out" 2>&1 ||
     die "rt-heap-ref-wellformed-selfcheck-link-failed"
 "$HEAP_REF_WELLFORMED_SELF_CHECK_BIN" >"$HEAP_REF_WELLFORMED_SELF_CHECK_LOG" 2>&1 ||
     die "rt-heap-ref-wellformed-selfcheck-failed"
@@ -440,7 +556,8 @@ MEM_GUARD_AFTER_SWEEP_SELF_CHECK_LOG="$TMP_DIR/rt_mem_guard_after_sweep_selfchec
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/rt_mem_guard_after_sweep_selfcheck.c" \
-    "$ARCHIVE" $SELF_CHECK_LIBS -o "$MEM_GUARD_AFTER_SWEEP_SELF_CHECK_BIN" ||
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$MEM_GUARD_AFTER_SWEEP_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_mem_guard_after_sweep_selfcheck.link.out" 2>&1 ||
     die "rt-mem-guard-after-sweep-selfcheck-link-failed"
 "$MEM_GUARD_AFTER_SWEEP_SELF_CHECK_BIN" >"$MEM_GUARD_AFTER_SWEEP_SELF_CHECK_LOG" 2>&1 ||
     die "rt-mem-guard-after-sweep-selfcheck-failed"
@@ -453,7 +570,8 @@ HOST_PRIMITIVE_SELF_CHECK_LOG="$TMP_DIR/rt_tls13_sha256_sleep_selfcheck.out"
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/rt_tls13_sha256_sleep_selfcheck.c" \
-    "$ARCHIVE" $SELF_CHECK_LIBS -o "$HOST_PRIMITIVE_SELF_CHECK_BIN" ||
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$HOST_PRIMITIVE_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_tls13_sha256_sleep_selfcheck.link.out" 2>&1 ||
     die "rt-tls13-sha256-sleep-selfcheck-link-failed"
 "$HOST_PRIMITIVE_SELF_CHECK_BIN" >"$HOST_PRIMITIVE_SELF_CHECK_LOG" 2>&1 ||
     die "rt-tls13-sha256-sleep-selfcheck-failed"
@@ -464,8 +582,8 @@ record_check
 # A run that reached here having executed fewer checks than the capsule
 # declares is a vacuous pass, not a pass. The floor is raised whenever a
 # check is added; it is never lowered to make a run green.
-CHECKS_EXPECTED=33
-[ "$CHECKS_RUN" -ge "$CHECKS_EXPECTED" ] ||
+CHECKS_EXPECTED=65
+[ "$CHECKS_RUN" = "$CHECKS_EXPECTED" ] ||
     die "checks-executed-below-floor:$CHECKS_RUN/$CHECKS_EXPECTED"
 
 if [ -d "$ROOT_DIR/.jj" ] && command -v jj >/dev/null 2>&1; then
@@ -521,6 +639,10 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "runtime_coverage_core_selfcheck_output_sha256=$(hash_file "$COVERAGE_SELF_CHECK_LOG")"
     echo "rt_transient_heap_scope_selfcheck=pass"
     echo "rt_transient_heap_scope_selfcheck_output_sha256=$(hash_file "$TRANSIENT_SELF_CHECK_LOG")"
+    echo "rt_transient_heap_thread_affinity_selfcheck=pass"
+    echo "rt_transient_heap_thread_affinity_selfcheck_output_sha256=$(hash_file "$THREAD_AFFINITY_SELF_CHECK_LOG")"
+    echo "rt_heap_ref_wellformed_selfcheck=pass"
+    echo "rt_heap_ref_wellformed_selfcheck_output_sha256=$(hash_file "$HEAP_REF_WELLFORMED_SELF_CHECK_LOG")"
     echo "rt_mem_guard_native_selfcheck=pass"
     echo "rt_mem_guard_native_selfcheck_output_sha256=$(hash_file "$MEM_GUARD_SELF_CHECK_LOG")"
     echo "rt_mem_guard_stale_slot_selfcheck=pass"
@@ -535,6 +657,11 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "simple_contract_check_provider=runtime_contracts.o"
     echo "simple_contract_check_msg_archive_symbol=T"
     echo "simple_contract_check_msg_provider=runtime_contracts.o"
+    echo "argv_provider_symbol_count=10"
+    for symbol in $ARGV_PROVIDER_SYMBOLS; do
+        echo "argv_${symbol}_archive_symbol=defined"
+        echo "argv_${symbol}_provider=runtime_native.o"
+    done
     echo "checks_executed=$CHECKS_RUN"
     echo "producer_script_sha256=$(hash_file scripts/check/build-core-c-bootstrap-runtime-capsule.shs)"
     while IFS= read -r input; do

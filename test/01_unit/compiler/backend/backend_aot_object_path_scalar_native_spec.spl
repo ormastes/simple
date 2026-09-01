@@ -1,0 +1,100 @@
+# Native regression for diagnostic-file and scalar-only status transport.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
+use std.nogc_sync_mut.io.file_ops.{file_delete,
+    file_read_regular_no_follow_bounded, file_atomic_write, file_size_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.io_runtime.{dir_create}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+
+fn scalar_provider_failure(diagnostic_path: text) -> i64:
+    val parts = ["llc failed", "object-path-sentinel-731"]
+    backend_aot_write_diagnostic(diagnostic_path, parts.join(": "))
+    17
+
+fn scalar_session_forward(diagnostic_path: text) -> i64:
+    scalar_provider_failure(diagnostic_path)
+
+fn scalar_driver_result(diagnostic_path: text) -> Result<text, text>:
+    val status = scalar_session_forward(diagnostic_path)
+    if status != 0:
+        var detail = "backend object-path status {status}"
+        match file_read_regular_no_follow_bounded(diagnostic_path, 4096):
+            case Ok(message):
+                if message != "":
+                    detail = message
+            case Err(_): ()
+        return Err("AOT compile error: {detail}")
+    Ok("module.o")
+
+fn scalar_capsule_result(diagnostic_path: text) -> Result<text, text>:
+    # Reconstruct the matched variant at the frozen-capsule boundary.
+    match scalar_driver_result(diagnostic_path):
+        case Err(error): Err(error)
+        case Ok(object_path): Ok(object_path)
+
+fn churn_scalar_path_allocations(rounds: i64) -> text:
+    var retained = ""
+    var index = 0
+    while index < rounds:
+        retained = "object-path-churn-{index}-{retained.len()}"
+        index = index + 1
+    retained
+
+describe "backend AOT object-path scalar boundary":
+    it "retains diagnostics across provider and session frames":
+        step("forward only scalar status through two compiled frames")
+        val diagnostic_path = "/tmp/simple-aot-diagnostic-{getpid()}"
+        file_delete(diagnostic_path)
+        val status = scalar_session_forward(diagnostic_path)
+        val churn = churn_scalar_path_allocations(256)
+        expect(churn).to_contain("object-path-churn-255")
+
+        step("read the caller-owned diagnostic after provider frames end")
+        expect(status).to_equal(17)
+        val diagnostic = file_read_regular_no_follow_bounded(
+            diagnostic_path, 4096).ok().unwrap()
+        expect(diagnostic).to_equal("llc failed: object-path-sentinel-731")
+        expect(diagnostic).not.to_contain("<invalid-heap:")
+
+        step("preserve the diagnostic through the driver Result boundary")
+        match scalar_capsule_result(diagnostic_path):
+            case Err(error):
+                expect(error).to_equal(
+                    "AOT compile error: llc failed: object-path-sentinel-731")
+            case Ok(_):
+                expect(false).to_equal(true)
+        file_delete(diagnostic_path)
+
+    it "bounds Unicode diagnostics and rejects absent invalid artifacts":
+        val base = "/tmp/simple-aot-diagnostic-contract-{getpid()}"
+        file_delete(base)
+        var unicode_message = ""
+        var index = 0
+        while index < 3000:
+            unicode_message = unicode_message + "é"
+            index = index + 1
+        expect(backend_aot_write_diagnostic(base, unicode_message)).to_equal(true)
+        expect(file_size_raw(base)).to_be_less_than(4097)
+        expect(file_read_regular_no_follow_bounded(base, 4096).is_ok()).to_equal(true)
+
+        file_delete(base)
+        expect(file_read_regular_no_follow_bounded(base, 4096).is_err()).to_equal(true)
+        expect(file_atomic_write(base, "")).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(
+            base, 4096).ok().unwrap()).to_equal("")
+
+        var oversized = ""
+        index = 0
+        while index < 5000:
+            oversized = oversized + "x"
+            index = index + 1
+        expect(file_atomic_write(base, oversized)).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(base, 4096).is_err()).to_equal(true)
+        file_delete(base)
+
+        expect(dir_create(base, false)).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(base, 4096).is_err()).to_equal(true)
+        expect(dir_remove(base, true)).to_equal(true)

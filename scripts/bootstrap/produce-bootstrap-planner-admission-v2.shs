@@ -84,7 +84,10 @@ if [ -z "$adm_bootstrap_output" ]; then
 fi
 case "$adm_bootstrap_output" in /*) ;; *) adm_bootstrap_output="$physical_cwd/$adm_bootstrap_output" ;; esac
 adm_bootstrap_output=$(bootstrap_planner_v2_canonical_dir "$adm_bootstrap_output") || adm_fail bootstrap-output-missing
-case "$adm_bootstrap_output" in "$adm_root"/build/*) ;; *) adm_fail bootstrap-output-outside-build-root ;; esac
+bootstrap_stage3_resume_output_path "$adm_bootstrap_output" "$adm_root" \
+    "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ||
+    adm_fail bootstrap-output-outside-allowlisted-root
+adm_bootstrap_output=$BOOTSTRAP_STAGE3_RESUME_OUTPUT
 
 case "$adm_parent" in /*) ;; *) adm_parent="$physical_cwd/$adm_parent" ;; esac
 if [ -z "$adm_runtime" ]; then adm_runtime="$adm_root/src/runtime"; fi
@@ -123,7 +126,7 @@ parent_sha=$(bootstrap_planner_v2_hash_file "$parent_file")
 admission_file=$(parent_field "$sanity_file" admission_receipt_path || true)
 [ -n "$admission_file" ] && [ "$admission_file" = "$(parent_field "$prov_file" admission_receipt_path || true)" ] || adm_fail parent-stage2-admission-path-mismatch
 admission_file=$(bootstrap_planner_v2_canonical_file "$admission_file") || adm_fail parent-stage2-admission-unavailable
-case "$admission_file" in "$adm_root/build/bootstrap"/*) ;; *) adm_fail parent-stage2-admission-outside-bootstrap ;; esac
+case "$admission_file" in "$adm_bootstrap_output"/*) ;; *) adm_fail parent-stage2-admission-outside-bootstrap ;; esac
 admission_sha=$(bootstrap_planner_v2_hash_file "$admission_file")
 [ "$(parent_field "$sanity_file" admission_receipt_sha256 || true)" = "$admission_sha" ] || adm_fail parent-stage2-sanity-admission-mismatch
 [ "$(parent_field "$prov_file" admission_receipt_sha256 || true)" = "$admission_sha" ] || adm_fail parent-stage2-provenance-admission-mismatch
@@ -134,10 +137,22 @@ admission_tool=$(parent_field "$admission_file" tool_authority_path || true)
 admission_args_sha=$(parent_field "$admission_file" build_args_sha256 || true)
 admission_sanity=$(parent_field "$admission_file" sanity_evidence_path || true)
 admission_receiver=$(parent_field "$admission_file" receiver_evidence_path || true)
+admission_root=$(dirname -- "$(dirname -- "$admission_file")")
+admission_candidate=$admission_root/stage2-admitted/simple
+admission_source=$admission_root/source-inputs-before.txt
+admission_runtime=$admission_root/runtime-admitted.txt
+admission_tool=$admission_root/tool-authority-before.txt
+admission_sanity=$admission_root/stage2-sanity.env
+admission_receiver=$admission_root/stage2-receiver.env
 bootstrap_stage3_verify_stage2_admission_receipt \
-    "$admission_file" "$admission_candidate" "$admission_source" \
-    "$admission_runtime" "$admission_tool" "$admission_args_sha" \
-    "$admission_sanity" "$admission_receiver" "$root" || adm_fail parent-stage2-admission-invalid
+    "$admission_file" "$admission_file" "$admission_candidate" "$admission_candidate" \
+    "$admission_source" "$admission_source" "$admission_runtime" "$admission_runtime" \
+    "$admission_root/stage2-runtime-authority" "$admission_root/stage2-runtime-authority" \
+    "$admission_tool" "$admission_tool" "$admission_args_sha" \
+    "$admission_sanity" "$admission_sanity" "$(dirname -- "$admission_sanity")" \
+    "$admission_receiver" "$admission_receiver" \
+    "$(dirname -- "$admission_receiver")/stage2-receiver.log" "$(dirname -- "$admission_receiver")/stage2-receiver.log" \
+    "$root" || adm_fail parent-stage2-admission-invalid
 [ "$(bootstrap_planner_v2_hash_file "$admission_candidate")" = "$parent_sha" ] || adm_fail parent-stage2-admission-candidate-mismatch
 
 planner_source="$adm_root/src/app/cli/bootstrap_reason_planner.spl"
@@ -146,8 +161,8 @@ bootstrap_planner_v2_canonical_dir "$adm_runtime" >/dev/null || adm_fail runtime
 case "$adm_runtime" in "$adm_root"/*) ;; *) adm_fail runtime-dir-outside-root ;; esac
 
 # --- 1. pre-exec lock --------------------------------------------------------
-lock_dir="$adm_root/build/bootstrap/admission/.lock"
-mkdir -p "$adm_root/build/bootstrap/admission"
+lock_dir="$adm_bootstrap_output/admission/.lock"
+mkdir -p "$adm_bootstrap_output/admission"
 mkdir "$lock_dir" 2>/dev/null || adm_fail admission-lock-held
 trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT HUP INT TERM
 
@@ -182,7 +197,7 @@ closure_sha=$(bootstrap_planner_v2_hash_file "$stage/planner-source-closure.snap
 } >"$stage/git-state.txt"
 
 scope_key=$(printf '%s:%s\n' "$runtime_sha" "$closure_sha" | sha256sum | awk '{print $1}')
-adm_dir=$(bootstrap_planner_v2_admission_dir "$adm_root" "$scope_key")
+adm_dir=$(bootstrap_planner_v2_admission_dir "$adm_bootstrap_output" "$scope_key")
 rm -rf -- "$adm_dir"
 mkdir -p "$adm_dir"
 adm_dir=$(bootstrap_planner_v2_canonical_dir "$adm_dir") || adm_fail admission-dir-not-canonical

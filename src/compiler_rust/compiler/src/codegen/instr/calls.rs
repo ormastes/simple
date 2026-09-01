@@ -154,7 +154,10 @@ fn emit_profiler_call<M: Module>(
 mod tests {
     use cranelift_module::Linkage;
 
-    use super::{boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target, sffi_alias_target_shadowed};
+    use super::{
+        boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target,
+        sffi_alias_target_shadowed, text_arg_indices,
+    };
 
     /// doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md:
     /// a module-level `fn len(xs)` must not be replaced by `rt_len` in the JIT.
@@ -176,6 +179,13 @@ mod tests {
         assert_eq!(boxed_text_arg_indices("rt_string_builder_push"), Some(&[1][..]));
         assert_eq!(boxed_text_arg_indices("rt_string_builder_finish"), None);
         assert_eq!(boxed_text_arg_indices("rt_print_str"), None);
+    }
+
+    #[test]
+    fn secure_staging_expands_both_text_arguments_to_ptr_len_pairs() {
+        for name in ["rt_secure_temp_dir", "rt_file_publish_noreplace"] {
+            assert_eq!(text_arg_indices(name), Some(&[0, 1][..]), "{name}");
+        }
     }
 
     #[test]
@@ -2601,6 +2611,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
         "rt_lexer_source_set" => Some(&[0]),
 
+        // Secure AOT staging accepts two Simple text arguments. Keep both
+        // registered so the Rust seed expands each value to its C ABI
+        // (ptr, len) pair instead of passing boxed RuntimeValue payloads.
+        "rt_secure_temp_dir" | "rt_file_publish_noreplace" => Some(&[0, 1]),
+
         // Package SFFI (runtime/src/value/sffi/package.rs). Every text param is
         // a (ptr, len) pair — the family was converted off `*const c_char`
         // because Simple heap strings carry no trailing NUL, so no sound
@@ -3115,6 +3130,12 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "rt_dict_insert" => Some("rt_dict_set"),
         "rt_println" => Some("rt_println_value"),
         "rt_print" => Some("rt_print_value"),
+        // `std.sffi.system` is commonly imported as
+        // `env_get_i64 as sffi_env_get_i64`.  Flattened JIT modules preserve
+        // that import alias at the call site, but it is only a Simple-facing
+        // spelling: its ABI is exactly the registered `(text, i64) -> i64`
+        // `rt_env_get_i64` runtime provider.
+        "sffi_env_get_i64" => Some("rt_env_get_i64"),
         "dealloc" | "free" => Some("rt_free"),
         "len" | "length" => Some("rt_len"),
         "to_text" | "to_string" | "str" => Some("rt_to_string"),

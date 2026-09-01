@@ -34,3 +34,19 @@ Requirement selection is explicit:
 node cli/spipe.js fine-tune-options
 node cli/spipe.js fine-tune-select-requirements <attempt_id> <feature_option> <nfr_option> <selected_by>
 ```
+
+Folder reverse references are queried from one immutable compiled-inventory
+JSON file. The cursor key is caller-owned so an authenticated cursor remains
+valid across CLI processes; it must contain 32 raw bytes or 64 lowercase hex
+digits. Results are stable one-line JSON and remain bound to the snapshot,
+graph root, target, folder, limit, and work limit:
+
+```sh
+node cli/spipe.js reverse-references inventory.json A-target \
+  --cursor-key-file .spipe/reverse-reference.key \
+  --folder doc/04_architecture --limit 100 --max-work-units 10000
+```
+
+Pass the returned `next_cursor` through `--cursor` for the next page. Inputs
+larger than 64 MiB, non-canonical folder paths, unknown flags, malformed keys,
+and cursor rebinding fail closed.

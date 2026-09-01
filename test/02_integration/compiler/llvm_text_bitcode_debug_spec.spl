@@ -3,6 +3,10 @@ use std.nogc_sync_mut.env.variables.{env_get, env_set, env_unset}
 use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.llvm_target.{LlvmTargetConfig__for_target}
+use compiler.backend.llvm_ir_builder.{
+    LlvmIRBuilder, llvm_ir_builder_handle, llvm_ir_builder_build,
+    llvm_ir_builder_push_line,
+}
 use compiler.backend.llvm_backend_tools.{
     compile_ir_to_object,
     find_llvm_as,
@@ -18,6 +22,44 @@ fn restore_env(name: text, previous: text):
         env_set(name, previous)
 
 describe "Pure-Simple textual LLVM bitcode debug mode":
+    it "assembles and compiles an optimized function opener before its body":
+        expect(find_llvm_as() != "").to_equal(true)
+        expect(find_opt() != "").to_equal(true)
+        expect(find_llc() != "").to_equal(true)
+
+        val previous_debug = env_get("SIMPLE_LLVM_BITCODE_DEBUG")
+        val previous_keep = env_get("SIMPLE_KEEP_LLVM_IR")
+        val previous_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+        env_set("SIMPLE_LLVM_BITCODE_DEBUG", "1")
+        env_set("SIMPLE_KEEP_LLVM_IR", "1")
+        env_set("SIMPLE_BOOTSTRAP", "0")
+
+        val config = LlvmTargetConfig__for_target(CodegenTarget.X86_64, nil)
+        val builder = LlvmIRBuilder.create("optimized_opener", config.triple)
+        builder.emit_module_header()
+        val builder_handle = llvm_ir_builder_handle(builder)
+        llvm_ir_builder_push_line(
+            "define i64 @pure_fn(i64 %x) nounwind readonly alwaysinline {",
+            builder_handle)
+        builder.emit_label("bb0")
+        builder.emit_ret("i64", "%x")
+        builder.end_function()
+        val ir = llvm_ir_builder_build(builder)
+        expect(ir.index_of("define i64 @pure_fn")).to_be_less_than(
+            ir.index_of("bb0:"))
+        expect(ir.index_of("bb0:")).to_be_less_than(ir.index_of("}"))
+
+        val result = compile_ir_to_object(ir, config, OptimizationLevel.Debug)
+        val (ll_path, bc_path, obj_path) = llvm_debug_artifact_paths()
+        expect(result.is_ok()).to_equal(true)
+        file_delete(ll_path)
+        file_delete(bc_path)
+        if file_exists(obj_path):
+            file_delete(obj_path)
+        restore_env("SIMPLE_LLVM_BITCODE_DEBUG", previous_debug)
+        restore_env("SIMPLE_KEEP_LLVM_IR", previous_keep)
+        restore_env("SIMPLE_BOOTSTRAP", previous_bootstrap)
+
     it "assembles verifies and compiles retained text and bitcode":
         expect(find_llvm_as() != "").to_equal(true)
         expect(find_opt() != "").to_equal(true)

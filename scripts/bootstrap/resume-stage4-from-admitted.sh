@@ -40,7 +40,9 @@ resume_stage4_prepare() {
   case "$platform" in *windows*) candidate="${candidate}.exe" ;; esac
   manifest=$(bootstrap_stage3_canonical_file "$manifest") || return 1
   candidate=$(bootstrap_stage3_canonical_file "$candidate") || return 1
-  bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate" || {
+  stage2_sanity="${manifest%/*}/stage2-sanity.env"
+  bootstrap_stage3_verify_manifest "$manifest" "$manifest" "$root" "$candidate" \
+    "$candidate" "${manifest}.authority-map.env" || {
     echo "error: admitted Stage 3 provenance did not verify" >&2; return 1;
   }
   [ "$(bootstrap_stage3_manifest_value backend "$manifest")" = "$backend" ] || return 1
