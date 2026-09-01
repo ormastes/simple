@@ -237,3 +237,65 @@ naming it.
   the *same* receiver (`driver_orchestration.spl:236-258`) is the same
   defect class as this bug — one interpreter receiver-corruption defect wearing
   two costumes. Fixing the receiver bug likely closes both.
+
+## Diagnostics-transport defect: FIXED, with RED/GREEN evidence
+
+Secondary defect 1 above ("Diagnostics transport drops the error array") is
+fixed in `src/compiler/80.driver/driver_orchestration.spl` (DIAGREAD).
+
+**It was never a transport failure.** The errors were formed, recorded and
+readable the whole time. The failure branch simply declined to read them and
+asserted they were lost. Proof, from the same process, same failure, twenty
+lines apart in the same function: the `SIMPLE_BOOTSTRAP_DEBUG` block called
+`error_message_at` and printed
+
+```
+[bootstrap-phase3-errors] count=1
+[bootstrap-phase3-error] index=0 len=156 text=HIR lowering error in <entry>:
+  untyped function returns a value: function 'main' returns a value but
+  declares no return type; add '-> T'
+```
+
+while the non-debug branch printed `diagnostics unreadable: error array did not
+survive transport`. The accessors (`error_message_at` / `errors_safe`,
+`driver_types.spl:1115/1131`) had since been hardened to probe
+`rt_heap_ref_wellformed(self.errors)` and return `""` / `[]`, so the hazard the
+old comment described was already handled at the callee. The unreadable case is
+still covered — it is now DETECTED (empty `errors_safe()`) rather than presumed.
+
+Gate: `scripts/check/check-phase3-diagnostics-reported.shs`
+(`--selftest`: `PASS — 5 selftest fixture(s) checked`).
+
+RED at the fix's own parent (`6e91c42c2ee`), verdict verbatim:
+
+```
+FAIL — 2 assertion(s) checked, phase-3 diagnostics not reported: build claimed the diagnostics were unreadable instead of reporting them;
+```
+exit 1.
+
+GREEN at the fix (`26ca3d22efb`), verdict verbatim:
+
+```
+PASS — 2 assertion(s) checked, phase-3 diagnostics reported
+```
+exit 0.
+
+The gate asserts BOTH that the specific diagnostic text appears AND that the
+"unreadable"/"without diagnostics" wording does not. Asserting only "the build
+failed" would be vacuous: it failed before the fix too, which is precisely how
+this defect survived.
+
+### Note on the repro snippet in this document
+
+The 12-module repro entry printed above uses
+
+```
+fn main():
+    print("hello-i")
+    return ()
+```
+
+and **that entry does not compile** — `return ()` in a `main` with no declared
+return type is itself the HIR error quoted above. Every run of the documented
+repro therefore died on the fixture, not on the defect under investigation, and
+the transport defect hid which. Drop the `return ()` line before reusing it.
