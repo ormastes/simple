@@ -1,8 +1,9 @@
 use std.common.crypto.sha256 (sha256_text)
-use compiler.common.cache_contract.cache_gateway_v1.{CacheWriterV1, CacheWriterEpochV1}
 use compiler.common.cache_contract.errors_v1.*
 use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1, ActionRootRecordV1}
 use compiler.driver.cache.catalog.cache_catalog_projection (CacheCatalogProjectionV1)
+use common.cache_daemon_host_authority_v1.{AuthenticatedPeerReceiptV1, CacheReadinessReceiptV1,
+    DurableWriterEpochV1, cache_host_validate_readiness_v1}
 
 fn _cache_error_v1(code: CacheErrorCodeV1) -> CacheErrorV1:
     CacheErrorV1(code: code, retry: RetryClassV1.Never, severity: ErrorSeverityV1.Error,
@@ -10,26 +11,20 @@ fn _cache_error_v1(code: CacheErrorCodeV1) -> CacheErrorV1:
             safe_context: cache_error_safe_context_v1(code), reason_digest: sha256_text("simple.cache.reject.v1\u0000" + cache_error_safe_context_v1(code)),
             bounded_detail: cache_error_safe_context_v1(code)))
 
-fn _writer_binding_v1(epoch: CacheWriterEpochV1) -> text:
-    sha256_text("simple.cache.writer.binding.v1\u0000{epoch.epoch_uuid}\u0000{epoch.owner_instance_nonce}\u0000" +
-        "{epoch.peer_user_id}\u0000{epoch.boot_identity_digest}\u0000{epoch.acquired_monotonic_nonce}\u0000" +
-        "{epoch.protocol_digest}\u0000{epoch.expires_or_lease_generation}\u0000{epoch.authentication_digest}")
-
+# Private and constructible only after runtime validation of opaque receipts.
 class CacheWriterAuthorityV1:
-    writer: CacheWriterV1
+    host_admitted: bool
 
-    static fn admit(writer: CacheWriterV1, expected_epoch: CacheWriterEpochV1) -> Result<CacheWriterAuthorityV1, CacheErrorV1>:
-        if (writer.authority_digest != _writer_binding_v1(expected_epoch) or
-                writer.epoch.epoch_uuid != expected_epoch.epoch_uuid or
-                writer.epoch.owner_instance_nonce != expected_epoch.owner_instance_nonce or
-                writer.epoch.boot_identity_digest != expected_epoch.boot_identity_digest or
-                writer.epoch.expires_or_lease_generation != expected_epoch.expires_or_lease_generation):
+    static fn admit(peer: AuthenticatedPeerReceiptV1, readiness: CacheReadinessReceiptV1,
+                    readiness_nonce: [u8], epoch: DurableWriterEpochV1) -> Result<CacheWriterAuthorityV1, CacheErrorV1>:
+        if cache_host_validate_readiness_v1(peer, readiness, readiness_nonce, epoch) != 1:
             return Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))
-        Ok(CacheWriterAuthorityV1(writer: writer))
+        Ok(CacheWriterAuthorityV1(host_admitted: true))
 
     me append(journal: ActionRootJournalV1, catalog: CacheCatalogProjectionV1,
               action_digest: text, object_kind: text, object_digest: text,
               manifest_digest: text) -> Result<ActionRootRecordV1, CacheErrorV1>:
+        if not self.host_admitted: return Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))
         val before = match catalog.lookup(action_digest):
             case Ok(value): value
             case Err(_): return Err(_cache_error_v1(CacheErrorCodeV1.CacheCorrupt))
@@ -44,12 +39,19 @@ class CacheWriterAuthorityV1:
             return Err(_cache_error_v1(CacheErrorCodeV1.CacheNondeterminism))
         Ok(record)
 
-pub fn cache_writer_token_v1(epoch: CacheWriterEpochV1) -> CacheWriterV1:
-    CacheWriterV1(epoch: epoch, authority_digest: _writer_binding_v1(epoch))
-
-pub fn cache_writer_append_v1(writer: CacheWriterV1, expected_epoch: CacheWriterEpochV1,
-                              journal: ActionRootJournalV1, catalog: CacheCatalogProjectionV1,
-                              action_digest: text, object_kind: text, object_digest: text,
-                              manifest_digest: text) -> Result<ActionRootRecordV1, CacheErrorV1>:
-    val authority = CacheWriterAuthorityV1.admit(writer, expected_epoch)?
+# The opaque host readiness/epoch pair is revalidated at every mutation. The
+# current unsupported provider returns -1, so the journal remains unchanged.
+pub fn cache_writer_append_host_admitted_v1(
+    peer: AuthenticatedPeerReceiptV1,
+    readiness: CacheReadinessReceiptV1,
+    readiness_nonce: [u8],
+    epoch: DurableWriterEpochV1,
+    journal: ActionRootJournalV1,
+    catalog: CacheCatalogProjectionV1,
+    action_digest: text,
+    object_kind: text,
+    object_digest: text,
+    manifest_digest: text,
+) -> Result<ActionRootRecordV1, CacheErrorV1>:
+    val authority = CacheWriterAuthorityV1.admit(peer, readiness, readiness_nonce, epoch)?
     authority.append(journal, catalog, action_digest, object_kind, object_digest, manifest_digest)

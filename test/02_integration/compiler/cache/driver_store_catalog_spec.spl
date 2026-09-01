@@ -9,6 +9,7 @@ use std.spec.{describe, it, expect}
 use std.spec.step
 use std.common.crypto.sha256 (sha256_text)
 use compiler.common.cache_contract.cache_gateway_v1.*
+use compiler.common.cache_contract.direct_read_pin_v1 (DirectReadPinV1)
 use compiler.common.cache_contract.errors_v1 (CacheErrorCodeV1)
 use compiler.driver.cache.journal.action_root_journal_v1.*
 use compiler.driver.cache.journal.checkpoint_superblock_v1.*
@@ -16,15 +17,13 @@ use compiler.driver.cache.catalog.cache_catalog_projection.*
 use compiler.driver.cache.gateway.cache_writer_v1.*
 use compiler.driver.cache.gateway.cache_gateway_adapter.*
 use compiler.driver.cache.summary.summary_store_v1.{SummaryStoreV1, VirtualSourceStoreAdapterV1}
+use common.cache_host_authority_v1 (cache_host_open_root_v1)
+use common.cache_daemon_host_authority_v1.{cache_host_authenticate_peer_v1,
+    cache_host_acquire_exclusive_lock_v1, cache_host_boot_identity_v1,
+    cache_host_advance_writer_epoch_v1, cache_host_publish_readiness_v1}
 
 fn digest(ch: text) -> text:
     ch.repeat(64)
-
-fn epoch(generation: i64) -> CacheWriterEpochV1:
-    CacheWriterEpochV1(epoch_uuid: digest("1"), owner_instance_nonce: digest("2"),
-        peer_user_id: "local-user", boot_identity_digest: digest("3"), acquired_monotonic_nonce: 1,
-        protocol_digest: digest("4"), expires_or_lease_generation: generation,
-        authentication_digest: digest("5"))
 
 describe "action-root journal recovery":
     it "accepts a checksummed prefix and quarantines a torn tail":
@@ -78,24 +77,25 @@ describe "rebuildable catalog and private writer authority":
         step("Make conflicting action roots permanently non-authoritative")
         val journal = ActionRootJournalV1.empty(3)
         val catalog = CacheCatalogProjectionV1.memory().unwrap()
-        val owner = epoch(3)
-        val writer = cache_writer_token_v1(owner)
-        cache_writer_append_v1(writer, owner, journal, catalog,
-            digest("a"), "file_ast", digest("b"), digest("c")).unwrap()
-        val conflict = cache_writer_append_v1(writer, owner, journal, catalog,
-            digest("a"), "file_ast", digest("d"), digest("c"))
-        expect(conflict.is_err()).to_equal(true)
-        expect(conflict.unwrap_err().code).to_equal(CacheErrorCodeV1.CacheNondeterminism)
+        val first = journal.append(digest("a"), "file_ast", digest("b"), digest("c")).unwrap()
+        val conflict = journal.append(digest("a"), "file_ast", digest("d"), digest("c")).unwrap()
+        catalog.apply(first, 3).unwrap()
+        catalog.apply(conflict, 3).unwrap()
         expect(catalog.lookup(digest("a")).unwrap().quarantined).to_equal(true)
 
-    it "rejects a stale writer epoch before journal mutation":
-        step("Require the exact opaque writer epoch binding")
+    it "rejects unsupported opaque host receipts before journal mutation":
+        step("Require runtime-authenticated writer authority instead of plain fields")
         val journal = ActionRootJournalV1.empty(4)
         val catalog = CacheCatalogProjectionV1.memory().unwrap()
-        val admitted = epoch(4)
-        val stale = cache_writer_token_v1(epoch(3))
-        val result = cache_writer_append_v1(stale, admitted, journal, catalog,
-            digest("a"), "file_ast", digest("b"), digest("c"))
+        val root = cache_host_open_root_v1("build/test-artifacts/cache-writer-forgery")
+        val peer = cache_host_authenticate_peer_v1(root, -1)
+        val lock = cache_host_acquire_exclusive_lock_v1(root, peer)
+        val boot = cache_host_boot_identity_v1(lock)
+        val host_epoch = cache_host_advance_writer_epoch_v1(lock, boot)
+        val nonce: [u8] = [1, 2, 3]
+        val readiness = cache_host_publish_readiness_v1(lock, host_epoch, nonce)
+        val result = cache_writer_append_host_admitted_v1(peer, readiness, nonce, host_epoch,
+            journal, catalog, digest("a"), "file_ast", digest("b"), digest("c"))
         expect(result.is_err()).to_equal(true)
         expect(journal.bytes).to_equal("")
 
@@ -111,10 +111,7 @@ describe "generation-first cache gateway":
             process_instance_nonce: digest("1"), boot_identity_digest: digest("2"),
             reader_admission_epoch: 8, journal_generation: 6,
             pinned_manifest_digest: digest("3"), monotonic_now: 100, next_pin: 0)
-        val pin = gateway.begin_direct_read(10).unwrap()
-        val lookup = gateway.lookup_verified_action(digest("a"), pin).unwrap()
-        expect(lookup.present).to_equal(false)
-        expect(lookup.canonical_bytes.len()).to_equal(0)
+        expect(gateway.begin_direct_read(10).is_err()).to_equal(true)
 
     it "rejects a pin from a different journal generation":
         step("Compare generation before consulting the catalog")
@@ -125,6 +122,9 @@ describe "generation-first cache gateway":
             process_instance_nonce: digest("1"), boot_identity_digest: digest("2"),
             reader_admission_epoch: 8, journal_generation: 6,
             pinned_manifest_digest: digest("3"), monotonic_now: 100, next_pin: 0)
-        var pin = gateway.begin_direct_read(10).unwrap()
-        pin.journal_superblock_generation = 5
+        val pin = DirectReadPinV1(pin_id: digest("4"), process_instance_nonce: digest("1"),
+            boot_identity_digest: digest("2"), reader_admission_epoch: 8,
+            journal_superblock_generation: 5, pinned_manifest_digest: digest("3"),
+            created_monotonic: 100, expires_monotonic: 110,
+            namespace_entry_digest: digest("5"))
         expect(gateway.lookup_verified_action(digest("a"), pin).is_err()).to_equal(true)

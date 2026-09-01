@@ -1,6 +1,6 @@
 use std.common.crypto.sha256 (sha256_text)
 use compiler.common.cache_contract.cache_gateway_v1.*
-use compiler.common.cache_contract.direct_read_pin_v1.{DirectReadPinV1, direct_read_pin_time_valid_v1}
+use compiler.common.cache_contract.direct_read_pin_v1 (DirectReadPinV1)
 use compiler.common.cache_contract.errors_v1.*
 use compiler.common.cache_contract.virtual_source_store_v1 (VirtualSourceStoreV1)
 use compiler.driver.cache.catalog.cache_catalog_projection (CacheCatalogProjectionV1)
@@ -24,11 +24,10 @@ pub class CacheGatewayAdapterV1:
     next_pin: i64
 
     me _pin_valid(pin: DirectReadPinV1) -> bool:
-        direct_read_pin_time_valid_v1(pin) and pin.process_instance_nonce == self.process_instance_nonce and
-            pin.boot_identity_digest == self.boot_identity_digest and pin.reader_admission_epoch == self.reader_admission_epoch and
-            pin.reader_admission_epoch % 2 == 0 and pin.journal_superblock_generation == self.journal_generation and
-            pin.pinned_manifest_digest == self.pinned_manifest_digest and pin.expires_monotonic > self.monotonic_now and
-            pin.namespace_entry_digest == sha256_text("simple.cache.pin.namespace.v1\u0000{pin.pin_id}\u0000{pin.journal_superblock_generation}\u0000{pin.pinned_manifest_digest}")
+        # Structural equality and an unkeyed digest are not authority. This
+        # becomes true only when Lane 4 supplies an opaque host-owned reader
+        # admission receipt and manifest handle.
+        false
 
     me advance_monotonic(now: i64) -> bool:
         if now < self.monotonic_now: return false
@@ -37,15 +36,9 @@ pub class CacheGatewayAdapterV1:
 
 impl CacheGatewayV1 for CacheGatewayAdapterV1:
     fn begin_direct_read(ttl: i64) -> Result<DirectReadPinV1, CacheErrorV1>:
-        if ttl <= 0 or ttl > 60000 or self.reader_admission_epoch % 2 != 0:
-            return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinExpired))
-        val pin_id = sha256_text("simple.cache.pin.v1\u0000{self.process_instance_nonce}\u0000{self.next_pin}\u0000{self.monotonic_now}")
-        self.next_pin = self.next_pin + 1
-        Ok(DirectReadPinV1(pin_id: pin_id, process_instance_nonce: self.process_instance_nonce,
-            boot_identity_digest: self.boot_identity_digest, reader_admission_epoch: self.reader_admission_epoch,
-            journal_superblock_generation: self.journal_generation, pinned_manifest_digest: self.pinned_manifest_digest,
-            created_monotonic: self.monotonic_now, expires_monotonic: self.monotonic_now + ttl,
-            namespace_entry_digest: sha256_text("simple.cache.pin.namespace.v1\u0000{pin_id}\u0000{self.journal_generation}\u0000{self.pinned_manifest_digest}")))
+        # No opaque host-owned reader-admission/manifest receipt exists yet.
+        # Mutable adapter fields cannot authorize a pin.
+        Err(_gateway_error_v1(CacheErrorCodeV1.CacheUnavailable))
 
     fn lookup_verified_action(action_digest: text, pin: DirectReadPinV1) -> Result<CacheLookupV1, CacheErrorV1>:
         if not self._pin_valid(pin): return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinExpired))
