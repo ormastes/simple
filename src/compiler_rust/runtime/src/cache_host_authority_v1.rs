@@ -23,8 +23,17 @@ mod unix {
     enum Entry {
         Root(RawFd),
         Dir(RawFd),
+        CasRoot(RawFd),
+        CasKind(RawFd),
+        CasShard1(RawFd),
+        CasShard2(RawFd),
         Read(RawFd),
-        Temp { fd: RawFd, root_fd: RawFd, name: CString },
+        Temp {
+            fd: RawFd,
+            root_fd: RawFd,
+            name: CString,
+            cas_leaf: bool,
+        },
     }
 
     fn handles() -> &'static Mutex<HashMap<i64, Entry>> {
@@ -63,6 +72,29 @@ mod unix {
     fn relative_name(name: &CString) -> bool {
         let b = name.as_bytes();
         !b.is_empty() && b[0] != b'/' && !b.split(|c| *c == b'/').any(|p| p.is_empty() || p == b"." || p == b"..")
+    }
+
+    fn lower_hex_component(name: &CString, length: usize) -> bool {
+        let bytes = name.as_bytes();
+        bytes.len() == length && bytes.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    }
+
+    fn cas_kind(name: &CString) -> bool {
+        matches!(
+            name.as_bytes(),
+            b"source_blob" | b"compile_snapshot" | b"public_summary"
+        )
+    }
+
+    unsafe fn open_dir_component(parent_fd: RawFd, name: &CString, create: i64) -> RawFd {
+        if create != 0 && libc::mkdirat(parent_fd, name.as_ptr(), 0o700) != 0 && errno() != libc::EEXIST {
+            return -1;
+        }
+        libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
     }
 
     fn dup_fd(fd: RawFd) -> RawFd {
@@ -241,11 +273,91 @@ mod unix {
             name.as_ptr(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         );
+        let is_cas_root = matches!(guard.get(&parent), Some(Entry::Root(_))) && name.as_bytes() == b"cas";
+        drop(guard);
+        if fd < 0 {
+            INVALID
+        } else if is_cas_root {
+            insert(Entry::CasRoot(fd))
+        } else {
+            insert(Entry::Dir(fd))
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_open_cas_kind_v1(
+        parent: i64,
+        name: *const u8,
+        len: i64,
+        create: i64,
+    ) -> i64 {
+        let Some(name) = input(name, len) else { return INVALID };
+        if !cas_kind(&name) {
+            return INVALID;
+        }
+        let guard = handles().lock().expect("cache authority handle lock");
+        let parent_fd = match guard.get(&parent) {
+            Some(Entry::CasRoot(fd)) => *fd,
+            _ => return INVALID,
+        };
+        let fd = open_dir_component(parent_fd, &name, create);
         drop(guard);
         if fd < 0 {
             INVALID
         } else {
-            insert(Entry::Dir(fd))
+            insert(Entry::CasKind(fd))
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_open_cas_shard_v1(
+        parent: i64,
+        name: *const u8,
+        len: i64,
+        level: i64,
+        create: i64,
+    ) -> i64 {
+        let Some(name) = input(name, len) else { return INVALID };
+        if !lower_hex_component(&name, 2) {
+            return INVALID;
+        }
+        let guard = handles().lock().expect("cache authority handle lock");
+        let parent_fd = match (level, guard.get(&parent)) {
+            (1, Some(Entry::CasKind(fd))) | (2, Some(Entry::CasShard1(fd))) => *fd,
+            _ => return INVALID,
+        };
+        let fd = open_dir_component(parent_fd, &name, create);
+        drop(guard);
+        if fd < 0 {
+            INVALID
+        } else if level == 1 {
+            insert(Entry::CasShard1(fd))
+        } else {
+            insert(Entry::CasShard2(fd))
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_open_cas_leaf_v1(parent: i64, name: *const u8, len: i64) -> i64 {
+        let Some(name) = input(name, len) else { return INVALID };
+        if !lower_hex_component(&name, 60) {
+            return INVALID;
+        }
+        let guard = handles().lock().expect("cache authority handle lock");
+        let parent_fd = match guard.get(&parent) {
+            Some(Entry::CasShard2(fd)) => *fd,
+            _ => return INVALID,
+        };
+        let fd = libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        );
+        drop(guard);
+        if fd < 0 {
+            INVALID
+        } else {
+            insert(Entry::Read(fd))
         }
     }
 
@@ -253,8 +365,30 @@ mod unix {
     /// count, -1 on bounds/I/O failure, or -2 if its same-handle receipt
     /// changed. Partial/chunked reads are deliberately unsupported.
     #[no_mangle]
+    pub unsafe extern "C" fn rt_cache_host_size_v1(handle: i64, maximum: i64) -> i64 {
+        if maximum < 0 || maximum > 512 * 1024 * 1024 {
+            return INVALID;
+        }
+        let guard = handles().lock().expect("cache authority handle lock");
+        let fd = match guard.get(&handle) {
+            Some(Entry::Read(fd)) => *fd,
+            _ => return INVALID,
+        };
+        let mut stat: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut stat) != 0
+            || (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
+            || stat.st_size < 0
+            || stat.st_size > maximum
+        {
+            INVALID
+        } else {
+            stat.st_size
+        }
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn rt_cache_host_pread_receipt_v1(handle: i64, offset: i64, out: *mut u8, cap: i64) -> i64 {
-        if out.is_null() || offset != 0 || cap < 0 || cap > 64 * 1024 * 1024 {
+        if out.is_null() || offset != 0 || cap < 0 || cap > 512 * 1024 * 1024 {
             return INVALID;
         }
         let guard = handles().lock().expect("cache authority handle lock");
@@ -322,9 +456,10 @@ mod unix {
     pub unsafe extern "C" fn rt_cache_host_secure_temp_v1(root: i64) -> i64 {
         let guard = handles().lock().expect("cache authority handle lock");
         let root_fd = match guard.get(&root) {
-            Some(Entry::Root(fd)) | Some(Entry::Dir(fd)) => *fd,
+            Some(Entry::Root(fd)) | Some(Entry::Dir(fd)) | Some(Entry::CasShard2(fd)) => *fd,
             _ => return INVALID,
         };
+        let cas_leaf = matches!(guard.get(&root), Some(Entry::CasShard2(_)));
         let owned_root = dup_fd(root_fd);
         drop(guard);
         if owned_root < 0 {
@@ -344,6 +479,7 @@ mod unix {
                     fd,
                     root_fd: owned_root,
                     name,
+                    cas_leaf,
                 });
             }
             if errno() != libc::EEXIST {
@@ -373,9 +509,18 @@ mod unix {
             return INVALID;
         }
         let mut guard = handles().lock().expect("cache authority handle lock");
-        let Some(Entry::Temp { fd, root_fd, name }) = guard.get(&handle) else {
+        let Some(Entry::Temp {
+            fd,
+            root_fd,
+            name,
+            cas_leaf,
+        }) = guard.get(&handle)
+        else {
             return INVALID;
         };
+        if *cas_leaf && !lower_hex_component(&dest, 60) {
+            return INVALID;
+        }
         if libc::fsync(*fd) != 0 || libc::fchmod(*fd, 0o444) != 0 {
             return INVALID;
         }
@@ -447,7 +592,14 @@ mod unix {
     pub unsafe extern "C" fn rt_cache_host_fsync_v1(handle: i64) -> i64 {
         let guard = handles().lock().expect("cache authority handle lock");
         let fd = match guard.get(&handle) {
-            Some(Entry::Root(fd)) | Some(Entry::Dir(fd)) | Some(Entry::Read(fd)) | Some(Entry::Temp { fd, .. }) => *fd,
+            Some(Entry::Root(fd))
+            | Some(Entry::Dir(fd))
+            | Some(Entry::CasRoot(fd))
+            | Some(Entry::CasKind(fd))
+            | Some(Entry::CasShard1(fd))
+            | Some(Entry::CasShard2(fd))
+            | Some(Entry::Read(fd))
+            | Some(Entry::Temp { fd, .. }) => *fd,
             None => return INVALID,
         };
         if libc::fsync(fd) == 0 {
@@ -463,8 +615,14 @@ mod unix {
             return INVALID;
         };
         match entry {
-            Entry::Root(fd) | Entry::Dir(fd) | Entry::Read(fd) => libc::close(fd) as i64,
-            Entry::Temp { fd, root_fd, name } => {
+            Entry::Root(fd)
+            | Entry::Dir(fd)
+            | Entry::CasRoot(fd)
+            | Entry::CasKind(fd)
+            | Entry::CasShard1(fd)
+            | Entry::CasShard2(fd)
+            | Entry::Read(fd) => libc::close(fd) as i64,
+            Entry::Temp { fd, root_fd, name, .. } => {
                 libc::unlinkat(root_fd, name.as_ptr(), 0);
                 libc::close(root_fd);
                 libc::close(fd) as i64
@@ -529,11 +687,87 @@ mod unix {
             fs::remove_file(dir.path().join("spool")).unwrap();
             let cas = unsafe { rt_cache_host_open_child_v1(r, b"cas".as_ptr(), 3, 1) };
             assert!(cas > 0);
-            let shard = unsafe { rt_cache_host_open_child_v1(cas, b"a9".as_ptr(), 2, 1) };
+            assert_eq!(
+                unsafe { rt_cache_host_open_child_v1(cas, b"a9".as_ptr(), 2, 1) },
+                INVALID
+            );
+            let kind = unsafe { rt_cache_host_open_cas_kind_v1(cas, b"source_blob".as_ptr(), 11, 1) };
+            assert!(kind > 0);
+            assert_eq!(
+                unsafe { rt_cache_host_open_cas_kind_v1(cas, b"Source_Blob".as_ptr(), 11, 1) },
+                INVALID
+            );
+            let shard = unsafe { rt_cache_host_open_cas_shard_v1(kind, b"a9".as_ptr(), 2, 1, 1) };
             assert!(shard > 0);
-            assert_ne!(cas.wrapping_add(1), shard);
+            assert_eq!(
+                unsafe { rt_cache_host_open_cas_shard_v1(kind, b"A9".as_ptr(), 2, 1, 1) },
+                INVALID
+            );
+            assert_eq!(
+                unsafe { rt_cache_host_open_cas_shard_v1(kind, b"a90".as_ptr(), 3, 1, 1) },
+                INVALID
+            );
+            let shard2 = unsafe { rt_cache_host_open_cas_shard_v1(shard, b"ff".as_ptr(), 2, 2, 1) };
+            assert!(shard2 > 0);
+            assert_eq!(
+                unsafe { rt_cache_host_open_cas_leaf_v1(shard2, b"bad".as_ptr(), 3) },
+                INVALID
+            );
             unsafe {
+                rt_cache_host_close_v1(shard2);
                 rt_cache_host_close_v1(shard);
+                rt_cache_host_close_v1(kind);
+                rt_cache_host_close_v1(cas);
+                rt_cache_host_close_v1(r);
+            }
+        }
+
+        #[test]
+        fn cas_leaf_publish_is_no_replace_and_symlink_safe() {
+            let dir = tempfile::tempdir().unwrap();
+            let r = root(dir.path());
+            let cas = unsafe { rt_cache_host_open_child_v1(r, b"cas".as_ptr(), 3, 1) };
+            let kind = unsafe { rt_cache_host_open_cas_kind_v1(cas, b"source_blob".as_ptr(), 11, 1) };
+            let first = unsafe { rt_cache_host_open_cas_shard_v1(kind, b"aa".as_ptr(), 2, 1, 1) };
+            let second = unsafe { rt_cache_host_open_cas_shard_v1(first, b"bb".as_ptr(), 2, 2, 1) };
+            let leaf = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
+            assert_eq!(leaf.len(), 60);
+            let a = unsafe { rt_cache_host_secure_temp_v1(second) };
+            let b = unsafe { rt_cache_host_secure_temp_v1(second) };
+            assert_eq!(unsafe { rt_cache_host_write_temp_v1(a, 0, b"good".as_ptr(), 4) }, 4);
+            assert_eq!(unsafe { rt_cache_host_write_temp_v1(b, 0, b"evil".as_ptr(), 4) }, 4);
+            assert_eq!(
+                unsafe { rt_cache_host_publish_noreplace_v1(a, leaf.as_ptr(), leaf.len() as i64) },
+                1
+            );
+            assert_eq!(
+                unsafe { rt_cache_host_publish_noreplace_v1(b, leaf.as_ptr(), leaf.len() as i64) },
+                0
+            );
+            let object = unsafe { rt_cache_host_open_cas_leaf_v1(second, leaf.as_ptr(), leaf.len() as i64) };
+            let mut out = [0u8; 4];
+            assert_eq!(
+                unsafe { rt_cache_host_pread_receipt_v1(object, 0, out.as_mut_ptr(), 4) },
+                4
+            );
+            assert_eq!(&out, b"good");
+            let linked = b"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+            symlink(
+                "/etc/passwd",
+                dir.path()
+                    .join("cas/source_blob/aa/bb/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+            )
+            .unwrap();
+            assert_eq!(
+                unsafe { rt_cache_host_open_cas_leaf_v1(second, linked.as_ptr(), linked.len() as i64) },
+                INVALID
+            );
+            unsafe {
+                rt_cache_host_close_v1(object);
+                rt_cache_host_close_v1(b);
+                rt_cache_host_close_v1(second);
+                rt_cache_host_close_v1(first);
+                rt_cache_host_close_v1(kind);
                 rt_cache_host_close_v1(cas);
                 rt_cache_host_close_v1(r);
             }
@@ -620,6 +854,10 @@ mod windows_unsupported {
     unsupported!(rt_cache_host_open_root_v1(path: *const u8, len: i64));
     unsupported!(rt_cache_host_open_read_v1(root: i64, path: *const u8, len: i64));
     unsupported!(rt_cache_host_open_child_v1(parent: i64, name: *const u8, len: i64, create: i64));
+    unsupported!(rt_cache_host_open_cas_kind_v1(parent: i64, name: *const u8, len: i64, create: i64));
+    unsupported!(rt_cache_host_open_cas_shard_v1(parent: i64, name: *const u8, len: i64, level: i64, create: i64));
+    unsupported!(rt_cache_host_open_cas_leaf_v1(parent: i64, name: *const u8, len: i64));
+    unsupported!(rt_cache_host_size_v1(handle: i64, maximum: i64));
     unsupported!(rt_cache_host_pread_receipt_v1(handle: i64, offset: i64, out: *mut u8, cap: i64));
     unsupported!(rt_cache_host_secure_temp_v1(root: i64));
     unsupported!(rt_cache_host_write_temp_v1(handle: i64, offset: i64, data: *const u8, len: i64));
