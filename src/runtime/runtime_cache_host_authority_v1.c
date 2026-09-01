@@ -8,6 +8,16 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Native-C daemon authority remains fail-closed until its canonical byte
+ * records and cryptographic corruption checks exactly match the Rust provider. */
+int64_t rt_cache_host_authenticate_peer_v1(int64_t root, int64_t peer) {(void)root;(void)peer;return -1;}
+int64_t rt_cache_host_acquire_exclusive_lock_v1(int64_t root, int64_t peer) {(void)root;(void)peer;return -1;}
+int64_t rt_cache_host_boot_identity_v1(int64_t lock) {(void)lock;return -1;}
+int64_t rt_cache_host_advance_writer_epoch_v1(int64_t lock, int64_t boot) {(void)lock;(void)boot;return -1;}
+int64_t rt_cache_host_publish_readiness_v1(int64_t lock,int64_t epoch,const uint8_t*nonce,int64_t len){(void)lock;(void)epoch;(void)nonce;(void)len;return -1;}
+int64_t rt_cache_host_validate_readiness_v1(int64_t peer,int64_t ready,const uint8_t*nonce,int64_t len,int64_t epoch){(void)peer;(void)ready;(void)nonce;(void)len;(void)epoch;return -1;}
+int64_t rt_cache_host_release_daemon_receipt_v1(int64_t handle){(void)handle;return -1;}
+
 #ifdef _WIN32
 #define UNSUPPORTED(name, args) int64_t name args { return -1; }
 UNSUPPORTED(rt_cache_host_open_root_v1, (const uint8_t *p, int64_t n))
@@ -44,15 +54,6 @@ static int64_t random_token(void) {
 }
 static struct cache_cap *find_cap(int64_t token) {
     struct cache_cap *p; for (p = caps; p; p = p->next) if (p->token == token) return p; return NULL;
-}
-/* Runtime-internal bridge: duplicates a root descriptor without exposing it
- * through the Simple ABI.  The daemon authority provider consumes this only. */
-int rt_cache_host_duplicate_root_fd_internal_v1(int64_t token) {
-    pthread_mutex_lock(&caps_lock);
-    struct cache_cap *cap = find_cap(token);
-    int fd = cap && cap->kind == CAP_ROOT ? fcntl(cap->fd, F_DUPFD_CLOEXEC, 3) : -1;
-    pthread_mutex_unlock(&caps_lock);
-    return fd;
 }
 static int64_t add_cap(enum cache_cap_kind kind, int fd, int parent_fd, const char *temp) {
     struct cache_cap *cap = calloc(1, sizeof *cap); if (!cap) return -1;

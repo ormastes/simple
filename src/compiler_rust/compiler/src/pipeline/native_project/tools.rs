@@ -345,7 +345,6 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     let mut runtime_inputs = vec![
         "runtime_native.c",
         "runtime_cache_host_authority_v1.c",
-        "runtime_cache_daemon_authority_v1.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
         "runtime_legacy_core.c",

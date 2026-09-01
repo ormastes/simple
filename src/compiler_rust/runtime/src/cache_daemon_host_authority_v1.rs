@@ -36,6 +36,7 @@ mod linux {
         uid: u32,
         root_dev: u64,
         root_ino: u64,
+        issued_epoch: u64,
     }
     #[derive(Debug)]
     enum Receipt {
@@ -248,6 +249,7 @@ mod linux {
             uid: libc::geteuid(),
             root_dev: dev,
             root_ino: ino,
+            issued_epoch: 0,
         }))
     }
     #[no_mangle]
@@ -332,11 +334,19 @@ mod linux {
         let ok = pwrite_all(fd, &epoch_bytes(next, current)) && libc::fsync(root_fd) == 0;
         libc::close(fd);
         libc::close(root_fd);
-        if ok && next <= i64::MAX as u64 {
-            next as i64
-        } else {
-            INVALID
+        if !ok || next > i64::MAX as u64 {
+            return INVALID;
         }
+        let updated = receipts().lock().ok().map(|mut guard| {
+            match guard.get_mut(&lock) {
+                Some(Receipt::Lock(value)) => {
+                    value.issued_epoch = next;
+                    true
+                }
+                _ => false,
+            }
+        }).unwrap_or(false);
+        if updated { next as i64 } else { INVALID }
     }
     #[no_mangle]
     pub unsafe extern "C" fn rt_cache_host_publish_readiness_v1(
@@ -357,7 +367,9 @@ mod linux {
                 Err(_) => return INVALID,
             };
             match guard.get(&lock) {
-                Some(Receipt::Lock(v)) => (libc::fcntl(v.root_fd, libc::F_DUPFD_CLOEXEC, 3), v.pid, v.uid),
+                Some(Receipt::Lock(v)) if v.issued_epoch == epoch as u64 => {
+                    (libc::fcntl(v.root_fd, libc::F_DUPFD_CLOEXEC, 3), v.pid, v.uid)
+                }
                 _ => return INVALID,
             }
         };
