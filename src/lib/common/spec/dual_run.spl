@@ -72,6 +72,69 @@ pub fn dual_check_text(name: text, simple_result: text, oracle_result: text) -> 
         oracle_repr: oracle_result,
     )
 
+pub fn dual_check_i64(name: text, simple_result: i64, oracle_result: i64) -> DualVerdict:
+    # Integer pairs previously had to be routed through dual_check_text by
+    # formatting both sides, which silently made the CHECK depend on the
+    # formatter under test (i64_to_text is itself a migrated pair). Comparing
+    # the integers directly removes that circularity.
+    DualVerdict(
+        pair_name: name,
+        agree: simple_result == oracle_result,
+        simple_repr: "{simple_result}",
+        oracle_repr: "{oracle_result}",
+    )
+
+pub fn dual_check_bool(name: text, simple_result: bool, oracle_result: bool) -> DualVerdict:
+    DualVerdict(
+        pair_name: name,
+        agree: simple_result == oracle_result,
+        simple_repr: if simple_result: "true" else: "false",
+        oracle_repr: if oracle_result: "true" else: "false",
+    )
+
+pub fn dual_check_bytes(name: text, simple_result: [i64], oracle_result: [i64]) -> DualVerdict:
+    # Length first, then element-wise. A byte-sequence pair that agreed only on
+    # a shared prefix must be a DIVERGENCE, so the length check is not an
+    # optimisation — it is part of the contract.
+    var agree = simple_result.len() == oracle_result.len()
+    if agree:
+        var i = 0
+        while i < simple_result.len():
+            if simple_result[i] != oracle_result[i]:
+                agree = false
+            i = i + 1
+    DualVerdict(
+        pair_name: name,
+        agree: agree,
+        simple_repr: "len={simple_result.len()}",
+        oracle_repr: "len={oracle_result.len()}",
+    )
+
+struct DualSummary:
+    total: i64
+    divergent: i64
+    first_divergence: text
+
+# Table-driven aggregation. A spec builds a list of DualVerdict — one entry per
+# input case, produced by whichever typed dual_check_* fits the pair — and
+# asserts on the summary, instead of hand-writing a bespoke while/assert block
+# per pair. Adding a pair is then a `use`, an `extern fn`, and one list.
+pub fn dual_summarize(verdicts: [DualVerdict]) -> DualSummary:
+    var divergent = 0
+    var first = ""
+    var i = 0
+    while i < verdicts.len():
+        if not verdicts[i].agree:
+            divergent = divergent + 1
+            if first == "":
+                first = dual_verdict_report(verdicts[i])
+        i = i + 1
+    DualSummary(
+        total: verdicts.len(),
+        divergent: divergent,
+        first_divergence: first,
+    )
+
 pub fn dual_verdict_report(v: DualVerdict) -> text:
     if v.agree:
         "OK   {v.pair_name}: simple={v.simple_repr} oracle={v.oracle_repr}"
