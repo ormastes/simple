@@ -338,7 +338,7 @@ impl<'a> Parser<'a> {
             }
             "clobber" => {
                 self.expect(&TokenKind::LParen)?;
-                let rc = self.expect_identifier()?;
+                let rc = self.expect_clobber_name()?;
                 self.expect(&TokenKind::RParen)?;
                 Ok(AsmConstraint {
                     span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column),
@@ -548,6 +548,26 @@ impl<'a> Parser<'a> {
         }
         self.expect(&TokenKind::RBracket)?;
         Ok(clobbers)
+    }
+
+    /// Clobber name inside the parenthesized asm form: `clobber(memory)` or
+    /// `clobber("memory")`. Both spellings are accepted because the two forms
+    /// of the design doc disagree on purpose: the braced form
+    /// (`asm volatile clobbers(rax, memory) { ... }`, design A.4) spells
+    /// register names as bare identifiers, while the parenthesized operand form
+    /// spells register-name arguments as STRINGS — `in("rax") arg`,
+    /// `clobber_abi("C")` in
+    /// `doc/05_design/language/language_features/syntax_features/inline_assembly_design.md`.
+    /// `clobber("memory")` is the string spelling of that same form, and before
+    /// this it was the only register-name argument in the parenthesized form
+    /// that rejected a string. Validation of the NAME still happens once, at HIR
+    /// lowering (`is_known_asm_clobber`, E-ASM-CLOBBER), where the target is
+    /// known; this helper only decides the surface spelling.
+    fn expect_clobber_name(&mut self) -> Result<String, ParseError> {
+        if self.is_asm_string_token() {
+            return self.expect_string_value();
+        }
+        self.expect_identifier()
     }
 
     fn expect_string_value(&mut self) -> Result<String, ParseError> {
@@ -776,6 +796,56 @@ mod tests {
     fn test_asm_volatile_paren_constraints() {
         let source = "fn test(op: u32, pp: u32):\n    var result: i64 = 0\n    asm volatile(\n        \"mov r0, {op}\",\n        \"bkpt #0xAB\",\n        op = in(reg) op,\n        params = in(reg) pp,\n        result = out(reg) result,\n        clobber_abi(\"C\")\n    )\n";
         parse_succeeds(source);
+    }
+
+    /// Reproduce for
+    /// `doc/08_tracking/bug/riscv64_wm_closure_unbuildable_asm_clobber_string_2026-09-01.md`.
+    /// RED before the fix: `expect_identifier()` in the `clobber` arm rejected
+    /// the string with `expected identifier, found FString([Literal("memory")])`,
+    /// which made every riscv64 entry reaching `os.kernel.arch.riscv64.display`
+    /// unbuildable at discovery (`src/os/kernel/arch/riscv64/cpu.spl:150`).
+    #[test]
+    fn test_asm_volatile_paren_clobber_string_literal() {
+        let asm = parse_first_asm(
+            "fn test(v: u64):\n    asm volatile(\n        \"csrw sstatus, {operand}\",\n        operand = in(reg) v,\n        clobber(\"memory\")\n    )\n",
+        );
+        let clobbers: Vec<&str> = asm
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.kind, crate::ast::AsmConstraintKind::Clobber))
+            .filter_map(|c| c.reg_class.as_deref())
+            .collect();
+        assert_eq!(clobbers, vec!["memory"]);
+    }
+
+    /// The x86 backend spells the same form with register names rather than the
+    /// `memory` pseudo-register (`src/compiler/70.backend/backend/x86_asm.spl`).
+    #[test]
+    fn test_asm_volatile_paren_clobber_string_registers() {
+        let asm = parse_first_asm(
+            "fn test():\n    asm volatile(\n        \"cpuid\",\n        clobber(\"eax\"),\n        clobber(\"ebx\")\n    )\n",
+        );
+        let clobbers: Vec<&str> = asm
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.kind, crate::ast::AsmConstraintKind::Clobber))
+            .filter_map(|c| c.reg_class.as_deref())
+            .collect();
+        assert_eq!(clobbers, vec!["eax", "ebx"]);
+    }
+
+    /// The bare-identifier spelling must keep working — this fix widens the
+    /// grammar, it does not move it.
+    #[test]
+    fn test_asm_volatile_paren_clobber_bare_identifier_still_parses() {
+        let asm = parse_first_asm(
+            "fn test(v: u64):\n    asm volatile(\n        \"csrw sstatus, {operand}\",\n        operand = in(reg) v,\n        clobber(memory)\n    )\n",
+        );
+        assert!(asm
+            .constraints
+            .iter()
+            .any(|c| matches!(c.kind, crate::ast::AsmConstraintKind::Clobber)
+                && c.reg_class.as_deref() == Some("memory")));
     }
 
     #[test]
