@@ -57,18 +57,35 @@ fn _body_effect_kind_v1(kind: ExceptionalBodyKindV1) -> SemanticEffectKindV1:
         case ExceptionalBodyKindV1.MacroExpansion: SemanticEffectKindV1.MacroCtfeInput
         case _: SemanticEffectKindV1.Source
 
-fn _read_key_v1(entry: SemanticReadEntryV1) -> text:
-    "{_effect_rank_v1(entry.effect_kind)}\u0000{entry.logical_name}\u0000{entry.provider_id}\u0000{entry.provider_manifest_digest}\u0000{entry.value_digest}"
+fn _read_identity_v1(entry: SemanticReadEntryV1) -> text:
+    "{_effect_rank_v1(entry.effect_kind)}\u0000{entry.logical_name}\u0000{entry.provider_id}"
+
+fn _read_order_key_v1(entry: SemanticReadEntryV1) -> text:
+    "{_read_identity_v1(entry)}\u0000{entry.provider_manifest_digest}\u0000{entry.value_digest}"
+
+fn _provider_identity_valid_v1(entry: SemanticReadEntryV1) -> bool:
+    # Provider id and manifest are one identity: admitting only half permits a
+    # provider implementation/configuration change to alias an old read.
+    if (entry.provider_id == "") != (entry.provider_manifest_digest == ""):
+        return false
+    match entry.effect_kind:
+        case SemanticEffectKindV1.Source: true
+        case _: entry.provider_id != ""
 
 fn _insert_read_v1(entries: [SemanticReadEntryV1], value: SemanticReadEntryV1) -> Result<[SemanticReadEntryV1], text>:
-    val key = _read_key_v1(value)
+    if not _provider_identity_valid_v1(value):
+        return Err("semantic read provider identity is incomplete")
+    val identity = _read_identity_v1(value)
+    val key = _read_order_key_v1(value)
     var inserted = false
     var result: [SemanticReadEntryV1] = []
     for current in entries:
-        val current_key = _read_key_v1(current)
-        if current_key == key:
-            if current.replay_policy != value.replay_policy:
-                return Err("semantic read has conflicting replay policies")
+        val current_key = _read_order_key_v1(current)
+        if _read_identity_v1(current) == identity:
+            if current.provider_manifest_digest != value.provider_manifest_digest or
+                    current.value_digest != value.value_digest or
+                    current.replay_policy != value.replay_policy:
+                return Err("semantic read identity has conflicting observations")
             return Ok(entries)
         if not inserted and key < current_key:
             result.push(value)
