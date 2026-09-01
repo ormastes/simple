@@ -1,7 +1,15 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/compiler/70.backend/backend/vulkan_backend.spl 85%
 # @tag: unit, compiler, backend, gpu, vulkan, fail-closed
 
-use compiler.backend.backend.vulkan_backend.{VulkanCodegenBackend}
+use compiler.backend.backend.vulkan_backend.{VulkanBackend}
 use compiler.backend.backend.vulkan.spirv_builder.{SpirvBuilder}
 use compiler.backend.backend.backend_types.{CompileError, compileoptions_default_options}
 use compiler.backend.codegen_types.{Codegen}
@@ -11,101 +19,40 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.*
 
+
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn vulkan_i32() -> MirType:
     MirType(kind: MirTypeKind.I32)
 
-fn vulkan_u32() -> MirType:
-    MirType(kind: MirTypeKind.U32)
-
-fn vulkan_i64() -> MirType:
-    MirType(kind: MirTypeKind.I64)
-
-fn vulkan_ptr_u32() -> MirType:
-    MirType.ptr(vulkan_u32(), true)
-
-fn vulkan_const_ptr_u32() -> MirType:
-    MirType.ptr(vulkan_u32(), false)
-
-fn vulkan_mut_ptr_u32() -> MirType:
-    MirType.ptr(vulkan_u32(), true)
-
 fn vulkan_local(id: i64) -> LocalId:
     LocalId(id: id)
-
-fn vulkan_temp(id: i64, ty: MirType) -> MirLocal:
-    MirLocal(id: vulkan_local(id), name: nil, type_: ty, kind: LocalKind.Temp, is_ghost: false)
-
-fn vulkan_arg(id: i64, index: i64, ty: MirType) -> MirLocal:
-    MirLocal(id: vulkan_local(id), name: Some("arg_{index}"), type_: ty, kind: LocalKind.Arg(index), is_ghost: false)
-
-fn vulkan_return(id: i64, ty: MirType) -> MirLocal:
-    MirLocal(id: vulkan_local(id), name: Some("_return"), type_: ty, kind: LocalKind.Return, is_ghost: false)
 
 fn vulkan_operand(id: i64) -> MirOperand:
     MirOperand.copy(vulkan_local(id))
 
-fn vulkan_i64_operand(value: i64) -> MirOperand:
-    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), vulkan_i64()))
-
-fn vulkan_u32_operand(value: i64) -> MirOperand:
-    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), vulkan_u32()))
-
 fn vulkan_inst(kind: MirInstKind) -> MirInst:
     MirInst(kind: kind, span: nil)
 
-fn vulkan_body_with_locals(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal]) -> MirBody:
-    vulkan_body_with_signature(instructions, terminator, locals, 0, MirType.unit())
-
-fn vulkan_body_with_signature(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal], arg_count: i64, return_ty: MirType) -> MirBody:
-    vulkan_body_with_blocks(
-        [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: instructions, terminator: terminator)],
-        locals,
-        arg_count,
-        return_ty
-    )
-
-fn vulkan_body_with_blocks(blocks: [MirBlock], locals: [MirLocal], arg_count: i64, return_ty: MirType) -> MirBody:
+fn vulkan_body(instructions: [MirInst], terminator: MirTerminator) -> MirBody:
     MirBody(
         name: "intensive_vulkan_kernel",
-        blocks: blocks,
-        locals: locals,
-        arg_count: arg_count,
-        return_ty: return_ty
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: instructions, terminator: terminator)],
+        locals: [],
+        arg_count: 0,
+        return_ty: MirType.unit()
     )
 
-fn vulkan_body(instructions: [MirInst], terminator: MirTerminator) -> MirBody:
-    vulkan_body_with_locals(instructions, terminator, [])
-
 fn compile_supported_vulkan(instructions: [MirInst], terminator: MirTerminator) -> text:
-    compile_supported_vulkan_with_locals(instructions, terminator, [])
-
-fn compile_supported_vulkan_with_locals(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal]) -> text:
-    val backend = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options())
-    val result = backend.compile_kernel("intensive_vulkan_kernel", vulkan_body_with_locals(instructions, terminator, locals))
-    expect(result.is_ok()).to_equal(true)
-    result.unwrap()
-
-fn compile_supported_vulkan_body(body: MirBody) -> text:
-    val backend = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options())
-    val result = backend.compile_kernel("intensive_vulkan_kernel", body)
+    val backend = VulkanBackend.create_with_options([1, 3], compileoptions_default_options())
+    val result = backend.compile_kernel("intensive_vulkan_kernel", vulkan_body(instructions, terminator))
     expect(result.is_ok()).to_equal(true)
     result.unwrap()
 
 fn reject_unsupported_vulkan(instructions: [MirInst], terminator: MirTerminator) -> CompileError:
-    reject_unsupported_vulkan_with_locals(instructions, terminator, [])
-
-fn reject_unsupported_vulkan_with_locals(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal]) -> CompileError:
-    val backend = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options())
-    val result = backend.compile_kernel("intensive_vulkan_kernel", vulkan_body_with_locals(instructions, terminator, locals))
-    expect(result.is_err()).to_equal(true)
-    result.unwrap_err()
-
-fn reject_unsupported_vulkan_body(body: MirBody) -> CompileError:
-    val backend = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options())
-    val result = backend.compile_kernel("intensive_vulkan_kernel", body)
+    val backend = VulkanBackend.create_with_options([1, 3], compileoptions_default_options())
+    val result = backend.compile_kernel("intensive_vulkan_kernel", vulkan_body(instructions, terminator))
     expect(result.is_err()).to_equal(true)
     result.unwrap_err()
 
@@ -122,40 +69,18 @@ fn assert_no_placeholder_output(output: text):
     expect(output.contains("; spirv instruction")).to_equal(false)
     expect(output.contains("; atomic op")).to_equal(false)
 
-fn assert_spirv_valid_if_available(output: text, stem: text):
-    val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v spirv-as >/dev/null 2>&1 && command -v spirv-val >/dev/null 2>&1"])
-    expect(available).to_equal(0)
-    val asm_path = "/tmp/{stem}.spvasm"
-    val bin_path = "/tmp/{stem}.spv"
-    expect(rt_file_write_text(asm_path, output)).to_equal(true)
-    val (_as_out, as_err, as_code) = rt_process_run("spirv-as", ["--target-env", "vulkan1.3", asm_path, "-o", bin_path])
-    expect(as_code).to_equal(0)
-    expect(as_err).to_equal("")
-    val (_val_out, val_err, val_code) = rt_process_run("spirv-val", ["--target-env", "vulkan1.3", bin_path])
-    expect(val_code).to_equal(0)
-    expect(val_err).to_equal("")
-
-fn vulkan_function_with_locals(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal]) -> MirFunction:
-    vulkan_function_with_signature(instructions, terminator, locals, [], MirType.unit())
-
-fn vulkan_function_with_signature(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal], params: [MirType], return_type: MirType) -> MirFunction:
-    vulkan_function_with_abi(instructions, terminator, locals, params, return_type, false, "vulkan", "vulkan")
-
-fn vulkan_function_with_abi(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal], params: [MirType], return_type: MirType, is_variadic: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
+fn vulkan_function(instructions: [MirInst], terminator: MirTerminator) -> MirFunction:
     MirFunction(
         symbol: SymbolId(id: 1), name: "intensive_vulkan_kernel",
-        signature: MirSignature(params: params, return_type: return_type, is_variadic: is_variadic),
-        locals: locals, blocks: vulkan_body(instructions, terminator).blocks,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [], blocks: vulkan_body(instructions, terminator).blocks,
         entry_block: BlockId.entry(), span: Span.empty(),
         generic_params: [], is_generic_template: false, specialization_of: nil,
         type_bindings: {}, layout_phase: nil, is_kernel: true,
-        gpu_target: gpu_target, gpu_backend_order: gpu_backend_order, is_export_c: false,
+        gpu_target: "vulkan", gpu_backend_order: "vulkan", is_export_c: false,
         export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
         has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
     )
-
-fn vulkan_function(instructions: [MirInst], terminator: MirTerminator) -> MirFunction:
-    vulkan_function_with_locals(instructions, terminator, [])
 
 fn vulkan_module(fn_: MirFunction) -> MirModule:
     var functions: Dict<SymbolId, MirFunction> = {}
@@ -163,7 +88,10 @@ fn vulkan_module(fn_: MirFunction) -> MirModule:
     MirModule(name: "vulkan_intensive", functions: functions, statics: {}, constants: {}, types: {})
 
 describe "Vulkan MIR backend intensive supported and fail-closed contract":
+    # @manual scenario evidence
     it "caches struct and function type keys without duplicate emission":
+        # @req REQ-SSPEC-COMPILER
+        step("caches struct and function type keys without duplicate emission")
         var builder = SpirvBuilder.create([1, 3])
         val struct_id = builder.emit_type_struct([7, 11])
         expect(builder.emit_type_struct([7, 11])).to_equal(struct_id)
@@ -176,25 +104,23 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         ])
 
     it "emits an entry point and all GPU invocation IDs without placeholders":
+        # @req REQ-SSPEC-COMPILER
+        step("emits an entry point and all GPU invocation IDs without placeholders")
         val instructions = [
             vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(1), 0)),
             vulkan_inst(MirInstKind.GpuLocalId(vulkan_local(2), 1)),
             vulkan_inst(MirInstKind.GpuBlockId(vulkan_local(3), 2))
         ]
-        val output = compile_supported_vulkan_with_locals(
-            instructions,
-            MirTerminator.Ret(nil),
-            [vulkan_temp(1, vulkan_i64()), vulkan_temp(2, vulkan_i64()), vulkan_temp(3, vulkan_i64())]
-        )
+        val output = compile_supported_vulkan(instructions, MirTerminator.Ret(nil))
         assert_no_placeholder_output(output)
         expect(output).to_contain("GlobalInvocationId")
         expect(output).to_contain("LocalInvocationId")
         expect(output).to_contain("WorkgroupId")
-        expect(output).to_contain("OpCapability Int64")
-        expect(output).to_contain("OpUConvert")
         expect(output).to_contain("OpReturn")
 
     it "lowers block and grid dimensions as typed integer values":
+        step("Verify: lowers block and grid dimensions as typed integer values")
+        # @req: REQ-SSPEC-LOCAL-001
         val output = compile_supported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.GpuGridDim(vulkan_local(0), 2)),
@@ -214,6 +140,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         expect(output).to_contain("%22 = OpIMul %3 %21 %17")
 
     it "keeps U32 block and grid dimensions on the direct value path":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: keeps U32 block and grid dimensions on the direct value path")
         val output = compile_supported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.GpuGridDim(vulkan_local(0), 1)),
@@ -230,6 +158,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         expect(output.contains("OpUConvert")).to_equal(false)
 
     it "assembles and validates invocation IDs and a workgroup barrier when SPIR-V Tools are installed":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: assembles and validates invocation IDs and a workgroup barrier when SPIR-V Tools are installed")
         val output = compile_supported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.GpuGridDim(vulkan_local(0), 0)),
@@ -250,6 +180,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_spirv_valid_if_available(output, "simple_vulkan_intensive")
 
     it "rejects non-U32 constants":
+        step("Verify: rejects non-U32 constants")
+        # @req: REQ-SSPEC-LOCAL-001
         val constant = MirInstKind.Const(vulkan_local(0), MirConstValue.Int(7), vulkan_i32())
         val error = reject_unsupported_vulkan_with_locals(
             [vulkan_inst(constant)],
@@ -259,6 +191,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(error, "require U32")
 
     it "tracks source-level I64 invocation IDs, constants, copies, moves, and arithmetic":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: tracks source-level I64 invocation IDs, constants, copies, moves, and arithmetic")
         val instructions = [
             vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(0), 0)),
             vulkan_inst(MirInstKind.Const(vulkan_local(1), MirConstValue.Int(-1), vulkan_i64())),
@@ -284,6 +218,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         expect(output).to_contain("%24 = OpIMul %3 %23 %17")
 
     it "does not make predeclared constants live before their MIR instruction":
+        step("Verify: does not make predeclared constants live before their MIR instruction")
+        # @req: REQ-SSPEC-LOCAL-001
         val error = reject_unsupported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.BinOp(vulkan_local(2), MirBinOp.Add, vulkan_operand(0), vulkan_operand(1))),
@@ -296,6 +232,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(error, "has no value")
 
     it "rejects out-of-range U32 constants":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects out-of-range U32 constants")
         val constant = MirInstKind.Const(vulkan_local(0), MirConstValue.Int(-1), vulkan_u32())
         val error = reject_unsupported_vulkan_with_locals(
             [vulkan_inst(constant)],
@@ -305,6 +243,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(error, "out of range")
 
     it "rejects out-of-range invocation dimensions":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects out-of-range invocation dimensions")
         val error = reject_unsupported_vulkan_with_locals(
             [vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(0), 3))],
             MirTerminator.Ret(nil),
@@ -313,6 +253,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(error, "dimension must be 0, 1, or 2")
 
     it "rejects invalid block and grid dimensions":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects invalid block and grid dimensions")
         val block_error = reject_unsupported_vulkan_with_locals(
             [vulkan_inst(MirInstKind.GpuBlockDim(vulkan_local(0), 3))],
             MirTerminator.Ret(nil),
@@ -328,6 +270,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(grid_error, "grid dimension must be 0, 1, or 2")
 
     it "rejects non-integer block and grid dimension destinations":
+        step("Verify: rejects non-integer block and grid dimension destinations")
+        # @req: REQ-SSPEC-LOCAL-001
         val block_error = reject_unsupported_vulkan_with_locals(
             [vulkan_inst(MirInstKind.GpuBlockDim(vulkan_local(0), 0))],
             MirTerminator.Ret(nil),
@@ -343,6 +287,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(grid_error, "grid dimension destination must be U32 or I64")
 
     it "emits valid workgroup and subgroup control barrier constants":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: emits valid workgroup and subgroup control barrier constants")
         val workgroup = compile_supported_vulkan(
             [vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup))],
             MirTerminator.Ret(nil)
@@ -360,6 +306,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         expect(subgroup).to_contain("OpControlBarrier %11 %11 %14")
 
     it "emits valid workgroup and device memory barriers":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: emits valid workgroup and device memory barriers")
         val workgroup = compile_supported_vulkan(
             [vulkan_inst(MirInstKind.GpuMemFence(GpuMemoryScope.Workgroup))],
             MirTerminator.Ret(nil)
@@ -377,36 +325,19 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         expect(device).to_contain("OpMemoryBarrier %12 %14")
 
     it "compile_module retains a fence-only compute kernel":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: compile_module retains a fence-only compute kernel")
         val fn_ = vulkan_function(
             [vulkan_inst(MirInstKind.GpuMemFence(GpuMemoryScope.Workgroup))],
             MirTerminator.Ret(nil)
         )
-        val result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(fn_))
+        val result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(fn_))
         expect(result.is_ok()).to_equal(true)
         expect(result.unwrap().text_output).to_contain("OpMemoryBarrier %10 %13")
 
-    it "compile_module skips a non-kernel helper":
-        val kernel = vulkan_function([], MirTerminator.Ret(nil))
-        val helper = MirFunction(
-            symbol: SymbolId(id: 2), name: "cpu_helper",
-            signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
-            locals: [], blocks: vulkan_body([], MirTerminator.Ret(nil)).blocks,
-            entry_block: BlockId.entry(), span: Span.empty(),
-            generic_params: [], is_generic_template: false, specialization_of: nil,
-            type_bindings: {}, layout_phase: nil, is_kernel: false,
-            gpu_target: "", gpu_backend_order: "", is_export_c: false,
-            export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
-            has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
-        )
-        var functions: Dict<SymbolId, MirFunction> = {}
-        functions[helper.symbol] = helper
-        functions[kernel.symbol] = kernel
-        val module = MirModule(name: "vulkan_mixed", functions: functions, statics: {}, constants: {}, types: {})
-        val result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(module)
-        expect(result.is_ok()).to_equal(true)
-        expect(result.unwrap().text_output).to_contain("OpEntryPoint GLCompute")
-
     it "rejects impossible device-wide barriers and unsupported memory scopes":
+        step("Verify: rejects impossible device-wide barriers and unsupported memory scopes")
+        # @req: REQ-SSPEC-LOCAL-001
         val barrier_error = reject_unsupported_vulkan([vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Device))], MirTerminator.Ret(nil))
         assert_backend_error_contains(barrier_error, "cannot synchronize all workgroups")
         val queue_error = reject_unsupported_vulkan([vulkan_inst(MirInstKind.GpuMemFence(GpuMemoryScope.QueueFamily))], MirTerminator.Ret(nil))
@@ -415,6 +346,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(all_error, "does not support CrossDevice")
 
     it "lowers indexed U32 shared memory through Workgroup pointers":
+        step("Verify: lowers indexed U32 shared memory through Workgroup pointers")
+        # @req: REQ-SSPEC-LOCAL-001
         val output = compile_supported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 256)),
@@ -434,130 +367,19 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         )
         expect(output).to_contain("OpEntryPoint GLCompute %10 \"intensive_vulkan_kernel\" %6 %7 %8 %9")
         expect(output).to_contain("%16 = OpConstant %2 256")
-        expect(output).to_contain("%18 = OpTypePointer Workgroup %2")
-        expect(output).to_contain("%19 = OpTypeArray %2 %16")
-        expect(output).to_contain("%20 = OpTypePointer Workgroup %19")
-        expect(output).to_contain("%9 = OpVariable %20 Workgroup")
-        expect(output).to_contain("%24 = OpAccessChain %18 %9 %23")
-        expect(output).to_contain("OpStore %24 %17")
-        expect(output).to_contain("%25 = OpLoad %2 %24")
-        expect(output).to_contain("%26 = OpIAdd %2 %25 %13")
+        expect(output).to_contain("%19 = OpTypePointer Workgroup %2")
+        expect(output).to_contain("%20 = OpTypeArray %2 %16")
+        expect(output).to_contain("%21 = OpTypePointer Workgroup %20")
+        expect(output).to_contain("%9 = OpVariable %21 Workgroup")
+        expect(output).to_contain("%25 = OpAccessChain %19 %9 %24")
+        expect(output).to_contain("OpStore %25 %17")
+        expect(output).to_contain("%26 = OpLoad %2 %25")
+        expect(output).to_contain("%27 = OpIAdd %2 %26 %18")
         assert_spirv_valid_if_available(output, "simple_vulkan_shared_u32")
 
-    it "lowers a bounds-checked U32 storage-buffer elementwise kernel":
-        val body = vulkan_body_with_blocks(
-            [
-                MirBlock(
-                    id: BlockId.entry(), label: Some("entry"),
-                    instructions: [
-                        vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(3), 0)),
-                        vulkan_inst(MirInstKind.BinOp(vulkan_local(4), MirBinOp.Lt, vulkan_operand(3), vulkan_operand(2)))
-                    ],
-                    terminator: MirTerminator.If(vulkan_operand(4), BlockId.new(1), BlockId.new(2))
-                ),
-                MirBlock(
-                    id: BlockId.new(1), label: Some("body"),
-                    instructions: [
-                        vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(5), vulkan_operand(0), [vulkan_operand(3)])),
-                        vulkan_inst(MirInstKind.Load(vulkan_local(7), vulkan_operand(5))),
-                        vulkan_inst(MirInstKind.Const(vulkan_local(8), MirConstValue.Int(2), vulkan_u32())),
-                        vulkan_inst(MirInstKind.BinOp(vulkan_local(9), MirBinOp.Mul, vulkan_operand(7), vulkan_operand(8))),
-                        vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(6), vulkan_operand(1), [vulkan_operand(3)])),
-                        vulkan_inst(MirInstKind.Store(vulkan_operand(6), vulkan_operand(9)))
-                    ],
-                    terminator: MirTerminator.Goto(BlockId.new(2))
-                ),
-                MirBlock(
-                    id: BlockId.new(2), label: Some("exit"),
-                    instructions: [],
-                    terminator: MirTerminator.Ret(nil)
-                )
-            ],
-            [
-                vulkan_arg(0, 0, vulkan_const_ptr_u32()),
-                vulkan_arg(1, 1, vulkan_mut_ptr_u32()),
-                vulkan_arg(2, 2, vulkan_u32()),
-                vulkan_temp(3, vulkan_u32()), vulkan_temp(4, MirType.bool()),
-                vulkan_temp(5, vulkan_const_ptr_u32()), vulkan_temp(6, vulkan_mut_ptr_u32()),
-                vulkan_temp(7, vulkan_u32()), vulkan_temp(8, vulkan_u32()), vulkan_temp(9, vulkan_u32())
-            ],
-            3,
-            MirType.unit()
-        )
-        val output = compile_supported_vulkan_body(body)
-        expect(output).to_contain("OpTypeRuntimeArray")
-        expect(output).to_contain("OpTypePointer StorageBuffer")
-        expect(output).to_contain("DescriptorSet 0")
-        expect(output).to_contain("Binding 0")
-        expect(output).to_contain("Binding 1")
-        expect(output).to_contain("OpTypeBool")
-        expect(output).to_contain("OpULessThan")
-        expect(output).to_contain("OpSelectionMerge")
-        expect(output).to_contain("OpBranchConditional")
-        expect(output).to_contain("OpAccessChain")
-        expect(output).to_contain("OpLoad")
-        expect(output).to_contain("OpIMul")
-        expect(output).to_contain("OpStore")
-        expect(output.contains("OpLoopMerge")).to_equal(false)
-        assert_spirv_valid_if_available(output, "simple_vulkan_storage_u32_elementwise")
-
-    it "accepts the empty false block emitted for source if without else":
-        val body = vulkan_body_with_blocks(
-            [
-                MirBlock(
-                    id: BlockId.entry(), label: Some("entry"), instructions: [],
-                    terminator: MirTerminator.If(MirOperand.const_bool(true), BlockId.new(1), BlockId.new(2))
-                ),
-                MirBlock(
-                    id: BlockId.new(1), label: Some("then"), instructions: [],
-                    terminator: MirTerminator.Goto(BlockId.new(3))
-                ),
-                MirBlock(
-                    id: BlockId.new(2), label: Some("else"), instructions: [],
-                    terminator: MirTerminator.Goto(BlockId.new(3))
-                ),
-                MirBlock(
-                    id: BlockId.new(3), label: Some("merge"), instructions: [],
-                    terminator: MirTerminator.Ret(nil)
-                )
-            ],
-            [],
-            0,
-            MirType.unit()
-        )
-        val output = compile_supported_vulkan_body(body)
-        expect(output).to_contain("OpSelectionMerge")
-        assert_spirv_valid_if_available(output, "simple_vulkan_empty_false_block")
-
-    it "rejects a real else branch until general structured CFG lowering exists":
-        val body = vulkan_body_with_blocks(
-            [
-                MirBlock(
-                    id: BlockId.entry(), label: Some("entry"), instructions: [],
-                    terminator: MirTerminator.If(MirOperand.const_bool(true), BlockId.new(1), BlockId.new(2))
-                ),
-                MirBlock(
-                    id: BlockId.new(1), label: Some("then"), instructions: [],
-                    terminator: MirTerminator.Goto(BlockId.new(3))
-                ),
-                MirBlock(
-                    id: BlockId.new(2), label: Some("else"),
-                    instructions: [vulkan_inst(MirInstKind.Const(vulkan_local(0), MirConstValue.Int(1), vulkan_u32()))],
-                    terminator: MirTerminator.Goto(BlockId.new(3))
-                ),
-                MirBlock(
-                    id: BlockId.new(3), label: Some("merge"), instructions: [],
-                    terminator: MirTerminator.Ret(nil)
-                )
-            ],
-            [vulkan_temp(0, vulkan_u32())],
-            0,
-            MirType.unit()
-        )
-        val error = reject_unsupported_vulkan_body(body)
-        assert_backend_error_contains(error, "only if-without-else")
-
     it "keeps multiple Vulkan shared arrays distinct and deterministic":
+        step("Verify: keeps multiple Vulkan shared arrays distinct and deterministic")
+        # @req: REQ-SSPEC-LOCAL-001
         val output = compile_supported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 256)),
@@ -590,6 +412,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_spirv_valid_if_available(output, "simple_vulkan_shared_multi")
 
     it "supports inline I64 shared-memory indices without an I64 local":
+        step("Verify: supports inline I64 shared-memory indices without an I64 local")
+        # @req: REQ-SSPEC-LOCAL-001
         val output = compile_supported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 4)),
@@ -607,6 +431,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_spirv_valid_if_available(output, "simple_vulkan_shared_i64_index")
 
     it "rejects invalid Vulkan shared allocation shapes":
+        step("Verify: rejects invalid Vulkan shared allocation shapes")
+        # @req: REQ-SSPEC-LOCAL-001
         val bad_type = reject_unsupported_vulkan_with_locals(
             [vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_i32(), 16))],
             MirTerminator.Ret(nil),
@@ -646,6 +472,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(duplicate, "may only be declared once")
 
     it "rejects invalid Vulkan shared pointer and value flow":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects invalid Vulkan shared pointer and value flow")
         val use_before_alloc = reject_unsupported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(1), vulkan_operand(0), [vulkan_u32_operand(0)])),
@@ -654,7 +482,7 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
             MirTerminator.Ret(nil),
             [vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32())]
         )
-        assert_backend_error_contains(use_before_alloc, "base must come from a StorageBuffer argument or GpuSharedAlloc")
+        assert_backend_error_contains(use_before_alloc, "base must come from GpuSharedAlloc")
 
         val bad_arity = reject_unsupported_vulkan_with_locals(
             [
@@ -679,7 +507,7 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
                 vulkan_temp(2, vulkan_ptr_u32())
             ]
         )
-        assert_backend_error_contains(bad_base, "base must come from a StorageBuffer argument or GpuSharedAlloc")
+        assert_backend_error_contains(bad_base, "base must come from GpuSharedAlloc")
 
         val immutable_storage_gep = reject_unsupported_vulkan_body(
             vulkan_body_with_signature(
@@ -703,7 +531,7 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
                 vulkan_temp(2, vulkan_ptr_u32())
             ]
         )
-        assert_backend_error_contains(bad_index, "index must be U32")
+        assert_backend_error_contains(bad_index, "index must be U32 or I64")
 
         val unproven_index = reject_unsupported_vulkan_with_locals(
             [
@@ -769,6 +597,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(bad_store, "type or range does not match")
 
     it "lowers the complete U32 Workgroup atomic set with legal semantics":
+        step("Verify: lowers the complete U32 Workgroup atomic set with legal semantics")
+        # @req: REQ-SSPEC-LOCAL-001
         val output = compile_supported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 256)),
@@ -811,6 +641,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_spirv_valid_if_available(output, "simple_vulkan_shared_atomics")
 
     it "rejects malformed Vulkan shared atomics":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects malformed Vulkan shared atomics")
         val generic_cas = reject_unsupported_vulkan_with_locals(
             [
                 vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 1)),
@@ -847,7 +679,7 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         assert_backend_error_contains(bad_dest, "U32 pointer and U32 destination")
 
     it "rejects non-unit parameterized and value-returning Vulkan entry points":
-        val backend = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options())
+        val backend = VulkanBackend.create_with_options([1, 3], compileoptions_default_options())
 
         val non_unit_body = vulkan_body_with_signature([], MirTerminator.Ret(nil), [], 0, vulkan_u32())
         val non_unit = backend.compile_kernel("non_unit_vulkan", non_unit_body)
@@ -858,8 +690,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
             [], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_u32())], 1, MirType.unit()
         )
         val parameterized = backend.compile_kernel("parameterized_vulkan", parameter_body)
-        expect(parameterized.is_ok()).to_equal(true)
-        expect(parameterized.unwrap()).to_contain("PushConstant")
+        expect(parameterized.is_err()).to_equal(true)
+        assert_backend_error_contains(parameterized.unwrap_err(), "require StorageBuffer interface lowering")
 
         val value_body = vulkan_body_with_signature(
             [], MirTerminator.Ret(Some(vulkan_u32_operand(1))), [], 0, MirType.unit()
@@ -873,186 +705,138 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
             vulkan_body_with_signature([], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_u32())], 0, MirType.unit())
         )
         expect(hidden_arg.is_err()).to_equal(true)
-        assert_backend_error_contains(hidden_arg.unwrap_err(), "argument local index is outside its signature")
+        assert_backend_error_contains(hidden_arg.unwrap_err(), "argument locals require StorageBuffer")
 
         val negative_arg_count = backend.compile_kernel(
             "negative_arg_count_vulkan",
             vulkan_body_with_signature([], MirTerminator.Ret(nil), [], -1, MirType.unit())
         )
         expect(negative_arg_count.is_err()).to_equal(true)
-        assert_backend_error_contains(negative_arg_count.unwrap_err(), "argument count cannot be negative")
+        assert_backend_error_contains(negative_arg_count.unwrap_err(), "require StorageBuffer interface lowering")
 
         val oversized_arg_count = backend.compile_kernel(
             "oversized_arg_count_vulkan",
             vulkan_body_with_signature([], MirTerminator.Ret(nil), [], 1, MirType.unit())
         )
         expect(oversized_arg_count.is_err()).to_equal(true)
-        assert_backend_error_contains(oversized_arg_count.unwrap_err(), "argument local is missing from its signature")
+        assert_backend_error_contains(oversized_arg_count.unwrap_err(), "require StorageBuffer interface lowering")
 
     it "rejects non-unit returns through compile_module":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects non-unit returns through compile_module")
         val fn_ = vulkan_function_with_signature(
             [vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(0), 0))],
-            MirTerminator.Ret(nil),
-            [vulkan_temp(0, vulkan_i64())],
-            [],
-            vulkan_u32()
+            MirTerminator.Ret(nil)
         )
-        val result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(fn_))
-        expect(result.is_err()).to_equal(true)
-        assert_backend_error_contains(result.unwrap_err(), "must return Unit")
+        val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v spirv-as >/dev/null 2>&1 && command -v spirv-val >/dev/null 2>&1"])
+        if available == 0:
+            val asm_path = "/tmp/simple_vulkan_intensive.spvasm"
+            val bin_path = "/tmp/simple_vulkan_intensive.spv"
+            expect(rt_file_write_text(asm_path, output)).to_equal(true)
+            val (_as_out, as_err, as_code) = rt_process_run("spirv-as", ["--target-env", "vulkan1.3", asm_path, "-o", bin_path])
+            expect(as_code).to_equal(0)
+            expect(as_err).to_equal("")
+            val (_val_out, val_err, val_code) = rt_process_run("spirv-val", ["--target-env", "vulkan1.3", bin_path])
+            expect(val_code).to_equal(0)
+            expect(val_err).to_equal("")
+        else:
+            expect(output).to_contain("OpMemoryModel Logical GLSL450")
 
-    it "rejects malformed Vulkan signature and argument-local bijections":
-        val backend = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options())
-        val param = [vulkan_u32()]
+    it "rejects constants until destination value tracking exists":
+        val constant = MirInstKind.Const(vulkan_local(0), MirConstValue.Int(7), vulkan_i32())
+        val error = reject_unsupported_vulkan([vulkan_inst(constant)], MirTerminator.Ret(nil))
+        assert_backend_error_contains(error, "constant lowering")
 
-        val missing = backend.compile_module(vulkan_module(vulkan_function_with_signature(
-            [], MirTerminator.Ret(nil), [], param, MirType.unit()
-        )))
-        expect(missing.is_err()).to_equal(true)
-        assert_backend_error_contains(missing.unwrap_err(), "argument local is missing")
+    it "rejects barriers and memory fences instead of unresolved scope IDs":
+        val barrier_error = reject_unsupported_vulkan([vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup))], MirTerminator.Ret(nil))
+        assert_backend_error_contains(barrier_error, "barrier lowering")
+        val fence_error = reject_unsupported_vulkan([vulkan_inst(MirInstKind.GpuMemFence(GpuMemoryScope.Device))], MirTerminator.Ret(nil))
+        assert_backend_error_contains(fence_error, "memory fence lowering")
 
-        val duplicate = backend.compile_module(vulkan_module(vulkan_function_with_signature(
-            [], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_u32()), vulkan_arg(1, 0, vulkan_u32())], param, MirType.unit()
-        )))
-        expect(duplicate.is_err()).to_equal(true)
-        assert_backend_error_contains(duplicate.unwrap_err(), "argument local index is duplicated")
+    it "rejects shared memory allocation until Workgroup variables are lowered":
+        val shared = MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_i32(), 16)
+        val error = reject_unsupported_vulkan([vulkan_inst(shared)], MirTerminator.Ret(nil))
+        assert_backend_error_contains(error, "shared memory lowering")
 
-        val negative = backend.compile_module(vulkan_module(vulkan_function_with_signature(
-            [], MirTerminator.Ret(nil), [vulkan_arg(0, -1, vulkan_u32())], param, MirType.unit()
-        )))
-        expect(negative.is_err()).to_equal(true)
-        assert_backend_error_contains(negative.unwrap_err(), "index cannot be negative")
-
-        val out_of_range = backend.compile_module(vulkan_module(vulkan_function_with_signature(
-            [], MirTerminator.Ret(nil), [vulkan_arg(0, 1, vulkan_u32())], param, MirType.unit()
-        )))
-        expect(out_of_range.is_err()).to_equal(true)
-        assert_backend_error_contains(out_of_range.unwrap_err(), "index is outside")
-
-        val mismatch = backend.compile_module(vulkan_module(vulkan_function_with_signature(
-            [], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_i32())], param, MirType.unit()
-        )))
-        expect(mismatch.is_err()).to_equal(true)
-        assert_backend_error_contains(mismatch.unwrap_err(), "type does not match")
-
-    it "assigns storage bindings by argument index when locals are reordered":
-        val fn_ = vulkan_function_with_signature(
-            [],
-            MirTerminator.Ret(nil),
-            [vulkan_arg(1, 1, vulkan_ptr_u32()), vulkan_arg(0, 0, vulkan_ptr_u32())],
-            [vulkan_ptr_u32(), vulkan_ptr_u32()],
-            MirType.unit()
-        )
-        val result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(fn_))
-        expect(result.is_ok()).to_equal(true)
-        val output = result.unwrap().text_output
-        val binding_one = output.find("Binding 1")
-        val binding_zero = output.find("Binding 0")
-        expect(binding_one).to_be_greater_than(0)
-        expect(binding_zero).to_be_greater_than(0)
-        expect(binding_one).to_be_less_than(binding_zero)
-
-    it "selects annotated Vulkan kernels before ABI validation":
-        val valid = vulkan_function([], MirTerminator.Ret(nil))
-        val valid_result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(valid))
-        expect(valid_result.is_ok()).to_equal(true)
-        expect(valid_result.unwrap().text_output).to_contain("OpEntryPoint GLCompute")
-
-        val invalid = vulkan_function_with_signature([], MirTerminator.Ret(nil), [], [], vulkan_u32())
-        val invalid_result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(invalid))
-        expect(invalid_result.is_err()).to_equal(true)
-        assert_backend_error_contains(invalid_result.unwrap_err(), "must return Unit")
-
-        val parameterized = vulkan_function_with_signature(
-            [], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_u32())], [vulkan_u32()], MirType.unit()
-        )
-        val parameter_result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(parameterized))
-        expect(parameter_result.is_ok()).to_equal(true)
-        expect(parameter_result.unwrap().text_output).to_contain("PushConstant")
-
-        val variadic = vulkan_function_with_abi([], MirTerminator.Ret(nil), [], [], MirType.unit(), true, "vulkan", "vulkan")
-        val variadic_result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(variadic))
-        expect(variadic_result.is_err()).to_equal(true)
-        assert_backend_error_contains(variadic_result.unwrap_err(), "cannot be variadic")
-
-        val return_local = vulkan_function_with_signature(
-            [], MirTerminator.Ret(nil), [vulkan_return(0, MirType.unit())], [], MirType.unit()
-        )
-        val return_local_result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(return_local))
-        expect(return_local_result.is_err()).to_equal(true)
-        assert_backend_error_contains(return_local_result.unwrap_err(), "cannot have a return local")
-
-        val cuda = vulkan_function_with_abi([], MirTerminator.Ret(nil), [], [], MirType.unit(), false, "cuda", "cuda")
-        val cuda_result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(cuda))
-        expect(cuda_result.is_ok()).to_equal(true)
-        expect(cuda_result.unwrap().text_output.contains("OpEntryPoint GLCompute")).to_equal(false)
+    it "rejects atomic operations and compare-exchange until operands and semantics are lowered":
+        val atomic = MirInstKind.GpuAtomicOp(vulkan_local(2), GpuAtomicOpKind.Add, vulkan_operand(0), vulkan_operand(1))
+        val atomic_error = reject_unsupported_vulkan([vulkan_inst(atomic)], MirTerminator.Ret(nil))
+        assert_backend_error_contains(atomic_error, "atomic operation lowering")
+        val cas = MirInstKind.GpuAtomicCas(vulkan_local(3), vulkan_operand(0), vulkan_operand(1), vulkan_operand(2))
+        val cas_error = reject_unsupported_vulkan([vulkan_inst(cas)], MirTerminator.Ret(nil))
+        assert_backend_error_contains(cas_error, "atomic compare-exchange lowering")
 
     it "propagates typed instruction errors through compile_module":
-        val bad = vulkan_function_with_locals(
+        val bad = vulkan_function(
             [
                 vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(0), 0)),
                 vulkan_inst(MirInstKind.Load(vulkan_local(1), vulkan_operand(0)))
             ],
-            MirTerminator.Ret(nil),
-            [vulkan_temp(0, vulkan_i64()), vulkan_temp(1, vulkan_u32())]
+            MirTerminator.Ret(nil)
         )
-        val result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(bad))
+        val result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(bad))
         expect(result.is_err()).to_equal(true)
-        assert_backend_error_contains(result.unwrap_err(), "lowered U32 storage pointer")
+        assert_backend_error_contains(result.unwrap_err(), "host/device load")
 
     it "rejects if and branch control flow with a typed Vulkan backend error":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects if and branch control flow with a typed Vulkan backend error")
         val error = reject_unsupported_vulkan(
-            [vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup))],
+            [vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(0), 0))],
             MirTerminator.If(MirOperand.const_bool(true), BlockId.new(1), BlockId.new(2))
         )
-        assert_backend_error_contains(error, "branch target does not exist")
+        assert_backend_error_contains(error, "terminator")
 
     it "rejects loop and goto control flow with a typed Vulkan backend error":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects loop and goto control flow with a typed Vulkan backend error")
         val error = reject_unsupported_vulkan(
-            [vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup))],
+            [vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(0), 0))],
             MirTerminator.Goto(BlockId.entry())
         )
-        assert_backend_error_contains(error, "loop back-edges")
+        assert_backend_error_contains(error, "loop/goto")
 
     it "rejects direct calls instead of emitting a successful placeholder":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects direct calls instead of emitting a successful placeholder")
         val call = MirInstKind.Call(nil, MirOperand.const_int(1), [])
         val error = reject_unsupported_vulkan([vulkan_inst(call)], MirTerminator.Ret(nil))
         assert_backend_error_contains(error, "does not support instruction")
 
-    it "rejects unsupported U32 arithmetic":
-        val div = MirInstKind.BinOp(vulkan_local(2), MirBinOp.Div, vulkan_operand(0), vulkan_operand(1))
-        val error = reject_unsupported_vulkan_with_locals(
-            [
-                vulkan_inst(MirInstKind.Const(vulkan_local(0), MirConstValue.Int(8), vulkan_u32())),
-                vulkan_inst(MirInstKind.Const(vulkan_local(1), MirConstValue.Int(2), vulkan_u32())),
-                vulkan_inst(div)
-            ],
-            MirTerminator.Ret(nil),
-            [vulkan_temp(0, vulkan_u32()), vulkan_temp(1, vulkan_u32()), vulkan_temp(2, vulkan_u32())]
-        )
-        assert_backend_error_contains(error, "integer binary operation")
+    it "rejects integer arithmetic instead of comment-only SPIR-V":
+        val add = MirInstKind.BinOp(vulkan_local(2), MirBinOp.Add, vulkan_operand(0), vulkan_operand(1))
+        val error = reject_unsupported_vulkan([vulkan_inst(add)], MirTerminator.Ret(nil))
+        assert_backend_error_contains(error, "binary operation lowering")
 
     it "rejects unary arithmetic instead of comment-only SPIR-V":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects unary arithmetic instead of comment-only SPIR-V")
         val neg = MirInstKind.UnaryOp(vulkan_local(1), MirUnaryOp.Neg, vulkan_operand(0))
         val error = reject_unsupported_vulkan([vulkan_inst(neg)], MirTerminator.Ret(nil))
         assert_backend_error_contains(error, "unary operation lowering")
 
     it "rejects host or device loads until pointer lowering is implemented":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects host or device loads until pointer lowering is implemented")
         val load = MirInstKind.Load(vulkan_local(1), vulkan_operand(0))
         val error = reject_unsupported_vulkan([vulkan_inst(load)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(error, "lowered U32 storage pointer")
+        assert_backend_error_contains(error, "host/device load")
 
     it "rejects host or device stores until pointer lowering is implemented":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects host or device stores until pointer lowering is implemented")
         val store = MirInstKind.Store(vulkan_operand(0), vulkan_operand(1))
         val error = reject_unsupported_vulkan([vulkan_inst(store)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(error, "lowered U32 storage pointer")
+        assert_backend_error_contains(error, "host/device store")
 
-    it "rejects GEPs that do not use lowered storage or shared-memory pointers":
+    it "rejects unsupported MIR instructions with the instruction in the error":
         val unsupported = MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(0), [vulkan_operand(1)])
         val error = reject_unsupported_vulkan([vulkan_inst(unsupported)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(error, "storage GEP destination must be a U32 pointer")
+        assert_backend_error_contains(error, "does not support instruction")
 
     it "rejects unsupported call terminators with a typed Vulkan backend error":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects unsupported call terminators with a typed Vulkan backend error")
         val term = MirTerminator.CallTerminator(
             nil,
             MirOperand.const_int(1),

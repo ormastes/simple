@@ -1,28 +1,4 @@
-"""
-## Purpose and audience
-
-This specification is maintained for compiler and library engineers reviewing PERF-TEST_RUNNER_BENCHMARK behavior, and for operators verifying a build.
-
-## Operator workflow
-
-Run `bin/simple test --no-session-daemon test/perf/test_runner_benchmark_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
-
-## Compatibility and limitations
-
-Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
-
-## Recovery and troubleshooting
-
-If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
-"""
-use std.spec.{step}
-# @manual: primary
-# REQ-PERF-TEST_RUNNER_BENCHMARK-001
-# doc-path: doc/01_research/app/
-# doc-path: doc/03_plan/app/
-# doc-path: doc/04_architecture/app/
-# doc-path: doc/05_design/app/
-# # Test Runner Benchmark Framework Tests
+# Test Runner Benchmark Framework Tests
 #
 # **Feature IDs:** Testing Infrastructure - Benchmarking
 # **Category:** Testing | Performance
@@ -43,342 +19,157 @@ use std.spec.{step}
 # - BenchmarkSuite: Grouping benchmarks and running with config
 # - BenchmarkComparison: Baseline comparison, speedup calculation, regression detection
 
+use std.spec.{describe, it, slow_it, expect, step}
+use std.nogc_sync_mut.perf.{BenchmarkConfig, BenchmarkResult, BenchmarkComparison, Benchmark, BenchmarkSuite, run_benchmark}
+
+# Test doubles: a no-op benchmark body, and a counting probe used to prove that
+# setup()/teardown() actually invoke their attached hooks.
+var _probe_calls: i64 = 0
+
+fn _noop():
+    ()
+
+fn _probe():
+    _probe_calls = _probe_calls + 1
+
 describe "BenchmarkResult":
-    # Tests for BenchmarkResult: timing sample storage, statistical
-    # calculations (min, max, avg, std dev), and human-readable time formatting.
-    slow_it "creates result from timing samples":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-001
-        step("Verify: creates result from timing samples")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # BenchmarkResult.create("test", [100, 110, 105])
-        # result.avg_time_ns is approximately 105
-        pass
+    # @manual benchmark result evidence
+    slow_it "run_benchmark records name and iteration count":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("execute run_benchmark and inspect the returned result")
+        val r = run_benchmark("probe", 5, _noop)
+        expect(r.name).to_equal("probe")
+        # oracle: run_benchmark ran exactly the 5 requested iterations.
+        expect(r.iterations.value).to_equal(5)
 
-    slow_it "calculates min time":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-002
-        step("Verify: calculates min time")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.min_time_ns == minimum of samples
-        pass
+    slow_it "summary contains the benchmark name and iteration count":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("render a BenchmarkResult summary and check its fields")
+        val r = run_benchmark("named_probe", 4, _noop)
+        val s = r.summary()
+        expect(s.contains("named_probe")).to_equal(true)
+        # oracle: summary always reports Iterations line (framework contract).
+        expect(s.contains("Iterations: 4")).to_equal(true)
 
-    slow_it "calculates max time":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-003
-        step("Verify: calculates max time")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.max_time_ns == maximum of samples
-        pass
-
-    slow_it "calculates standard deviation":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-004
-        step("Verify: calculates standard deviation")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.std_dev_ns reflects variation in samples
-        pass
-
-    slow_it "handles empty samples":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-005
-        step("Verify: handles empty samples")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # BenchmarkResult.create("test", [])
-        # result.iterations == 0
-        pass
-
-    slow_it "formats time in nanoseconds":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-006
-        step("Verify: formats time in nanoseconds")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.format_time(500) == "500 ns"
-        pass
-
-    slow_it "formats time in microseconds":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-007
-        step("Verify: formats time in microseconds")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.format_time(5000) contains "us"
-        pass
-
-    slow_it "formats time in milliseconds":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-008
-        step("Verify: formats time in milliseconds")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.format_time(5000000) contains "ms"
-        pass
-
-    slow_it "formats time in seconds":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-009
-        step("Verify: formats time in seconds")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.format_time(5000000000) contains "s"
-        pass
+    slow_it "zero mean time yields zero ops/sec and zero CV":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("compute derived stats on a zero-timed result")
+        val r = BenchmarkResult.new("zeroed")
+        # oracle: run_benchmark timing is stubbed to 0 ns in the current
+        # framework, so derived stats must be exactly 0.0, never NaN.
+        expect(r.ops_per_second()).to_equal(0.0)
+        expect(r.coefficient_of_variation()).to_equal(0.0)
 
 describe "BenchmarkConfig":
-    # Tests for BenchmarkConfig presets: default, quick, and thorough
-    # configurations that control warmup and measurement iteration counts.
-    slow_it "creates default config":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-010
-        step("Verify: creates default config")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # BenchmarkConfig.default_config()
-        # config.warmup_iterations > 0
-        pass
+    # @manual benchmark config evidence
+    slow_it "presets quick, default, thorough differ in iteration counts":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("construct the three config presets and compare them")
+        val q = BenchmarkConfig.quick()
+        val d = BenchmarkConfig.default()
+        val t = BenchmarkConfig.thorough()
+        # oracle: fixed preset values from perf.spl (quick 3/20, default
+        # 10/100, thorough 50/1000 warmup/iterations).
+        expect(q.warmup_iterations.value).to_equal(3)
+        expect(d.iterations.value).to_equal(100)
+        expect(t.iterations.value).to_equal(1000)
 
-    slow_it "creates quick config":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-011
-        step("Verify: creates quick config")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # BenchmarkConfig.quick()
-        # config.measurement_iterations < default
-        pass
-
-    slow_it "creates thorough config":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-012
-        step("Verify: creates thorough config")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # BenchmarkConfig.thorough()
-        # config.measurement_iterations > default
-        pass
+    slow_it "presets carry their names":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("read the preset names")
+        # oracle: preset names are part of the public report format.
+        expect(BenchmarkConfig.quick().name).to_equal("quick")
+        expect(BenchmarkConfig.thorough().name).to_equal("thorough")
 
 describe "Benchmark":
-    # Tests for Benchmark construction and builder methods: attaching name,
-    # description, category, setup, and teardown functions.
-    slow_it "creates benchmark with name and function":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-013
-        step("Verify: creates benchmark with name and function")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # Benchmark.create("test", fn)
-        # bench.name == "test"
-        pass
+    # @manual benchmark construction evidence
+    slow_it "creates benchmark with name and run function":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("construct a Benchmark and inspect its fields")
+        val b = Benchmark.new("bench_a", _noop)
+        expect(b.name).to_equal("bench_a")
+        # oracle: fresh benchmark has no description until with_description.
+        expect(b.description_text).to_equal("")
 
-    slow_it "adds description":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-014
-        step("Verify: adds description")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # bench.with_description("desc")
-        # bench.description == "desc"
-        pass
+    slow_it "builder methods attach description and lifecycle hooks":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("apply with_description/with_setup/with_teardown and check flags")
+        val b0 = Benchmark.new("hooked", _noop)
+        val b = b0.with_description("desc").with_setup(_probe).with_teardown(_probe)
+        expect(b.description_text).to_equal("desc")
+        expect(b.setup_enabled).to_equal(true)
+        expect(b.teardown_enabled).to_equal(true)
+        # oracle: setup()/teardown() must actually invoke the attached hooks.
+        val before = _probe_calls
+        b.setup()
+        b.teardown()
+        expect(_probe_calls - before).to_equal(2)
 
-    slow_it "adds category":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-015
-        step("Verify: adds category")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # bench.with_category("memory")
-        # bench.category == "memory"
-        pass
-
-    slow_it "adds setup function":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-016
-        step("Verify: adds setup function")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # bench.with_setup(fn)
-        # bench.setup_fn != nil
-        pass
-
-    slow_it "adds teardown function":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-017
-        step("Verify: adds teardown function")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # bench.with_teardown(fn)
-        # bench.teardown_fn != nil
-        pass
-
-describe "BenchmarkRunner":
-    # Tests for BenchmarkRunner: creating runners, adding benchmarks,
-    # and verifying warmup and measurement execution phases.
-    slow_it "creates runner with config":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-018
-        step("Verify: creates runner with config")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # BenchmarkRunner.create(config)
-        pass
-
-    slow_it "creates default runner":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-019
-        step("Verify: creates default runner")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # BenchmarkRunner.default_runner()
-        pass
-
-    slow_it "adds benchmarks":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-020
-        step("Verify: adds benchmarks")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # runner.add_benchmark(bench)
-        # runner.benchmarks.len() == 1
-        pass
-
-    slow_it "runs all benchmarks":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-021
-        step("Verify: runs all benchmarks")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # runner.run_all() returns results
-        pass
-
-    slow_it "runs warmup iterations":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-022
-        step("Verify: runs warmup iterations")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # warmup iterations run before measurement
-        pass
-
-    slow_it "runs measurement iterations":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-023
-        step("Verify: runs measurement iterations")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # measurement iterations collected for stats
-        pass
+    slow_it "setup is inert until a hook is attached":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("call setup on a fresh benchmark and observe no probe calls")
+        val b = Benchmark.new("bare", _noop)
+        val before = _probe_calls
+        b.setup()
+        # oracle: setup_enabled defaults to false, so no side effect fires.
+        expect(_probe_calls - before).to_equal(0)
+        expect(b.setup_enabled).to_equal(false)
 
 describe "BenchmarkSuite":
-    # Tests for BenchmarkSuite: grouping multiple benchmarks under a named
-    # suite and running them together with a shared config.
-    slow_it "creates suite with name":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-024
-        step("Verify: creates suite with name")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # BenchmarkSuite.create("my_suite").name == "my_suite"
-        pass
+    # @manual benchmark suite evidence
+    slow_it "creates suite with name and default config":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("construct a suite and inspect name/config")
+        val s = BenchmarkSuite.new("my_suite")
+        expect(s.name).to_equal("my_suite")
+        # oracle: suites default to the "default" config preset.
+        expect(s.config.name).to_equal("default")
 
-    slow_it "adds benchmarks":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-025
-        step("Verify: adds benchmarks")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # suite.add(bench)
-        # suite.benchmarks.len() == 1
-        pass
+    slow_it "add_fn accumulates runnable benchmarks":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("add two benchmarks to a suite and count them")
+        val s = BenchmarkSuite.new("acc")
+        s.add_fn("first", _noop)
+        s.add_fn("second", _noop)
+        # oracle: two adds, two entries, second one named "second".
+        expect(s.benchmarks.len()).to_equal(2)
+        expect(s.benchmarks[1].name).to_equal("second")
 
-    slow_it "runs with config":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-026
-        step("Verify: runs with config")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # suite.run(config) returns BenchmarkSuiteResult
-        pass
-
-describe "BenchmarkSuiteResult":
-    # Tests for BenchmarkSuiteResult: aggregating individual results,
-    # computing total time, and formatting summary output.
-    slow_it "contains all results":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-027
-        step("Verify: contains all results")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.results.len() == number of benchmarks
-        pass
-
-    slow_it "calculates total time":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-028
-        step("Verify: calculates total time")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.total_time_ns == sum of all benchmark times
-        pass
-
-    slow_it "formats summary":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-029
-        step("Verify: formats summary")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # result.format_summary() contains suite name
-        pass
+    slow_it "with_config returns a suite carrying the new config":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("reconfigure a suite immutably")
+        val s = BenchmarkSuite.new("cfg").with_config(BenchmarkConfig.quick())
+        # oracle: with_config replaces the default preset with "quick".
+        expect(s.config.name).to_equal("quick")
 
 describe "BenchmarkComparison":
-    # Tests for BenchmarkComparison: comparing a baseline result to a current
-    # result, calculating speedup ratios, and detecting performance regressions.
-    slow_it "compares baseline to current":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-030
-        step("Verify: compares baseline to current")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # BenchmarkComparison.compare(baseline, current)
-        pass
+    # @manual benchmark comparison evidence
+    slow_it "compares baseline to current via compare_to":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("compare two results and read the comparison")
+        val base = BenchmarkResult.new("base")
+        val cand = run_benchmark("cand", 3, _noop)
+        val cmp = base.compare_to(cand)
+        expect(cmp.baseline_name).to_equal("base")
+        expect(cmp.candidate_name).to_equal("cand")
 
-    slow_it "calculates speedup":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-031
-        step("Verify: calculates speedup")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # If current is faster, speedup > 1.0
-        pass
+    slow_it "speedup direction flags agree with the ratio":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("check is_faster/is_slower against computed speedup")
+        val base = BenchmarkResult.new("base")
+        val cmp = base.compare_to(base)
+        # oracle: identical zero-timed results give speedup exactly 0.0
+        # (0/0 guarded); 0.0 < 1.0 so the contract labels it "slower".
+        expect(cmp.speedup).to_equal(0.0)
+        expect(cmp.is_faster()).to_equal(false)
+        expect(cmp.is_slower()).to_equal(true)
 
-    slow_it "detects regression":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-032
-        step("Verify: detects regression")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # If current is 5% slower, is_regression == true
-        pass
-
-    slow_it "formats comparison":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-033
-        step("Verify: formats comparison")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # comparison.format_comparison() contains speedup
-        pass
-
-describe "Standard Benchmarks":
-    # Tests for the built-in standard benchmark suite: fibonacci, array sum,
-    # string concatenation, allocation, and the combined standard suite.
-    slow_it "creates fibonacci benchmark":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-034
-        step("Verify: creates fibonacci benchmark")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # fibonacci_benchmark().name == "fibonacci_30"
-        pass
-
-    slow_it "creates array sum benchmark":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-035
-        step("Verify: creates array sum benchmark")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # array_sum_benchmark().name contains "array_sum"
-        pass
-
-    slow_it "creates string concat benchmark":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-036
-        step("Verify: creates string concat benchmark")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # string_concat_benchmark().category == "string"
-        pass
-
-    slow_it "creates allocation benchmark":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-037
-        step("Verify: creates allocation benchmark")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # allocation_benchmark().category == "memory"
-        pass
-
-    slow_it "creates standard suite":
-        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-        # @req: REQ-PERF-TEST_RUNNER_BENCHMARK-038
-        step("Verify: creates standard suite")
-        # @capture: assertion outcomes retained in the spec Results output as evidence
-        # standard_benchmarks().benchmarks.len() >= 4
-        pass
+    slow_it "summary names both results and a direction":
+        # @req REQ-PERF-TESTRUNNER-BENCH
+        step("render a comparison summary")
+        val base = BenchmarkResult.new("b1")
+        val cmp = base.compare_to(base)
+        val s = cmp.summary()
+        expect(s.contains("b1")).to_equal(true)
+        # oracle: zero speedup is below 1.0, labelled "slower" by contract.
+        expect(s.contains("slower")).to_equal(true)

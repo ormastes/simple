@@ -41,10 +41,10 @@ fn counter_lock() -> &'static Mutex<()> {
 }
 
 fn enable_counters() {
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        std::env::set_var("SIMPLE_PERF_COUNTERS", "1");
-    });
+    // Mechanism tests share this process with a semantic control that may run
+    // first and latch the default-off gate. Override the latch explicitly;
+    // callers hold `counter_lock`, so activation and measurement cannot race.
+    perf_counters::set_enabled(true);
 }
 
 fn run_program(src: &str) -> Result<i32, String> {
@@ -82,35 +82,75 @@ fn fixture(n: usize, depth: usize) -> String {
     src
 }
 
-/// Elements deep-copied by the object-field array mutation path while pushing
-/// `n` items through `depth` parameter hops.
-fn elems_cloned(n: usize, depth: usize) -> u64 {
+#[derive(Debug)]
+struct Work {
+    mutations: u64,
+    cow_clones: u64,
+    elems_cloned: u64,
+    parked_args: u64,
+}
+
+/// Exact interpreter work performed while pushing `n` items through `depth`
+/// parameter hops. Keeping the work counters alongside the clone counters
+/// distinguishes genuinely linear execution from a merely generous clone
+/// threshold.
+fn measure_work(n: usize, depth: usize) -> Work {
     enable_counters();
     simple_compiler::set_execution_limit(HIGH_LIMIT);
-    let before = perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed);
+    let before_mutations = perf_counters::SELF_FIELD_ARR_MUT_CALLS.load(Ordering::Relaxed);
+    let before_clones = perf_counters::SELF_FIELD_ARR_COW_CLONES.load(Ordering::Relaxed);
+    let before_elems = perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed);
+    let before_parks = perf_counters::PARK_ARG_OK.load(Ordering::Relaxed);
     let result = run_program(&fixture(n, depth));
-    let after = perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed);
     assert_eq!(result, Ok(0), "depth {depth} fixture must push exactly {n} lines");
-    after - before
+    Work {
+        mutations: perf_counters::SELF_FIELD_ARR_MUT_CALLS.load(Ordering::Relaxed) - before_mutations,
+        cow_clones: perf_counters::SELF_FIELD_ARR_COW_CLONES.load(Ordering::Relaxed) - before_clones,
+        elems_cloned: perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed) - before_elems,
+        parked_args: perf_counters::PARK_ARG_OK.load(Ordering::Relaxed) - before_parks,
+    }
 }
 
 #[test]
 fn me_method_field_push_is_linear_at_every_hop_depth() {
     let _guard = counter_lock().lock().unwrap_or_else(|e| e.into_inner());
     let n = 4_000usize;
-    // Quadratic accumulation copies ~n^2/2 elements; linear accumulation copies
-    // O(1) per push. 4n is far above any constant-factor slack and far below
-    // n^2/2 (8,000 vs 8,000,000 at n = 4,000).
-    let budget = (4 * n) as u64;
-    let direct = elems_cloned(n, 0);
-    assert!(direct <= budget, "direct receiver: {direct} elements cloned (budget {budget})");
-    for depth in 1..=3usize {
-        let cloned = elems_cloned(n, depth);
-        eprintln!("[hop] depth {depth}: {cloned} elements cloned");
-        assert!(
-            cloned <= budget,
-            "{depth}-hop receiver deep-copied {cloned} elements for {n} pushes (budget {budget}) — \
-             an intermediate frame is pinning the field Arc again"
+    for depth in [0usize, 1, 3] {
+        let small = measure_work(n, depth);
+        let large = measure_work(4 * n, depth);
+        eprintln!("[hop] depth {depth}: n={n} {small:?}; n={} {large:?}", 4 * n);
+
+        assert_eq!(
+            small.mutations, n as u64,
+            "depth {depth}: one field mutation per push at n"
+        );
+        assert_eq!(
+            large.mutations,
+            (4 * n) as u64,
+            "depth {depth}: mutation work must scale exactly 4x"
+        );
+        assert_eq!(
+            small.parked_args,
+            (depth * n) as u64,
+            "depth {depth}: park every intermediate binding at n"
+        );
+        assert_eq!(
+            large.parked_args,
+            (depth * 4 * n) as u64,
+            "depth {depth}: parking work must scale exactly 4x"
+        );
+
+        // Quadratic accumulation copies ~n^2/2 elements. The fixed unaliased
+        // path needs no COW clone at all, at either problem size.
+        assert_eq!(small.cow_clones, 0, "depth {depth}: unaliased n run must not clone");
+        assert_eq!(large.cow_clones, 0, "depth {depth}: unaliased 4n run must not clone");
+        assert_eq!(
+            small.elems_cloned, 0,
+            "depth {depth}: unaliased n run must not copy elements"
+        );
+        assert_eq!(
+            large.elems_cloned, 0,
+            "{depth}-hop receiver copied elements at 4n — an intermediate frame is pinning the field Arc again"
         );
     }
 }
@@ -129,9 +169,19 @@ fn a_genuine_alias_still_forces_the_copy() {
         n + 1
     );
     let before = perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed);
-    assert_eq!(run_program(&src), Ok(0), "an alias taken before the pushes must not observe them");
+    let before_clones = perf_counters::SELF_FIELD_ARR_COW_CLONES.load(Ordering::Relaxed);
+    assert_eq!(
+        run_program(&src),
+        Ok(0),
+        "an alias taken before the pushes must not observe them"
+    );
     let cloned = perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed) - before;
-    eprintln!("[hop-alias] {cloned} elements cloned");
+    let clone_ops = perf_counters::SELF_FIELD_ARR_COW_CLONES.load(Ordering::Relaxed) - before_clones;
+    eprintln!("[hop-alias] {clone_ops} clone operations, {cloned} elements cloned");
+    assert!(
+        clone_ops > 0,
+        "a genuinely aliased field array must execute copy-on-write"
+    );
     assert!(
         cloned > 0,
         "a genuinely aliased field array must still copy-on-write — the park must not steal a live alias"

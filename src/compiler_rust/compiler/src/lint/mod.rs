@@ -1714,11 +1714,15 @@ fn my_function():
     fn test_known_decorator_no_warning() {
         let code = r#"
 @pure
+@always_inline
+@force_inline
 fn my_function():
     pass
 "#;
         let diagnostics = check_code(code);
-        assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator));
+        assert!(diagnostics
+            .iter()
+            .all(|d| { d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute }));
     }
 
     #[test]

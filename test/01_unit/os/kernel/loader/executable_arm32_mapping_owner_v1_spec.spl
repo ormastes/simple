@@ -1,0 +1,329 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1
+}
+use os.kernel.loader.executable_arm32_mapping_owner_v1.{
+    ExecutableArm32MappingReadinessErrorV1,
+    executable_arm32_mapping_readiness_v1,
+    executable_arm32_process_image_ready_v1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityArmedIdentityV1
+}
+use os.kernel.loader.executable_load_plan_v1.{
+    ExecutableLoadConsumerErrorV1,
+    executable_load_consumer_new_v1
+}
+use os.kernel.loader.executable_target_dispatch_v1.{
+    executable_target_process_image_ready_v1
+}
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _arm32_elf_with_mem(virtual_address: i64, memory_size: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0u8)
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 40)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, virtual_address)
+    bytes = _push_u32_le(bytes, 52)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 52)
+    bytes = _push_u16_le(bytes, 32)
+    bytes = _push_u16_le(bytes, 1)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 0x1000)
+    bytes = _push_u32_le(bytes, virtual_address)
+    bytes = _push_u32_le(bytes, virtual_address)
+    bytes = _push_u32_le(bytes, 4)
+    bytes = _push_u32_le(bytes, memory_size)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u32_le(bytes, 0x1000)
+    while bytes.len() < 0x1000:
+        bytes.push(0u8)
+    bytes.push(0x00u8)
+    bytes.push(0x00u8)
+    bytes.push(0xA0u8)
+    bytes.push(0xE1u8)
+    bytes
+
+fn _arm32_elf(virtual_address: i64) -> [u8]:
+    _arm32_elf_with_mem(virtual_address, 4096)
+
+fn _arm32_page_alias_elf() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    while bytes.len() < 16: bytes.push(0u8)
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 40)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 0x10000)
+    bytes = _push_u32_le(bytes, 52)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 52)
+    bytes = _push_u16_le(bytes, 32)
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    # Executable [0x10000, 0x10800), backed at file page offset 0.
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 0x1000)
+    bytes = _push_u32_le(bytes, 0x10000)
+    bytes = _push_u32_le(bytes, 0x10000)
+    bytes = _push_u32_le(bytes, 4)
+    bytes = _push_u32_le(bytes, 0x800)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u32_le(bytes, 1)
+    # Nonoverlapping [0x10800, 0x11000) still aliases the same mapped page.
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 0x1800)
+    bytes = _push_u32_le(bytes, 0x10800)
+    bytes = _push_u32_le(bytes, 0x10800)
+    bytes = _push_u32_le(bytes, 4)
+    bytes = _push_u32_le(bytes, 0x800)
+    bytes = _push_u32_le(bytes, 4)
+    bytes = _push_u32_le(bytes, 1)
+    while bytes.len() < 0x1804: bytes.push(0u8)
+    bytes[0x1000] = 1.to_u8()
+    bytes
+
+fn _handle_with_mem(
+    bytes: [u8], arch: text, virtual_address: u64, memory_size: u64
+) -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1, open_handle_id: 41u64, mount_id: 7u64,
+        filesystem_name: "fat32", canonical_source_path: "/bin/hello-arm",
+        mount_generation: 3u64, file_id: 41u64, file_generation: 9u64,
+        size_bytes: bytes.len() as u64, role: "main-image",
+        target: ManifestTarget(os: "simpleos", arch: arch, abi: "simpleos"),
+        verified_load_ranges: [ExecutableLoadRangeV1(
+            file_offset: 0x1000u64, file_size: 4u64,
+            virtual_address: virtual_address, memory_size: memory_size,
+            writable: false, executable: true)],
+        image_hash: sha256_u8_hex(bytes), admission_id: "arm32-admission-1",
+        trust_epoch: 5u64, read_count: 0u64, read_bytes: 0u64,
+        consumed: false)
+
+fn _handle(bytes: [u8], arch: text, virtual_address: u64) -> ExecutableImageHandleV1:
+    _handle_with_mem(bytes, arch, virtual_address, 4096u64)
+
+fn _alias_handle(bytes: [u8]) -> ExecutableImageHandleV1:
+    var handle = _handle_with_mem(bytes, "arm", 0x10000u64, 0x800u64)
+    handle.verified_load_ranges.push(ExecutableLoadRangeV1(
+        file_offset: 0x1800u64, file_size: 4u64,
+        virtual_address: 0x10800u64, memory_size: 0x800u64,
+        writable: false, executable: false))
+    handle
+
+fn _identity(
+    handle: ExecutableImageHandleV1,
+    entry_point: u64
+) -> ExecutableAuthorityArmedIdentityV1:
+    ExecutableAuthorityArmedIdentityV1(
+        slot_index: 2, token_generation: 7u64, token_nonce: 11u64,
+        canonical_source_path: handle.canonical_source_path,
+        image_hash: handle.image_hash, admission_id: handle.admission_id,
+        role: handle.role, target: handle.target,
+        has_entry_identity: true, entry_point: entry_point)
+
+describe "authenticated ARM32 mapping readiness owner":
+    it "accepts exact bounded ELF32 EM_ARM evidence without authority state":
+        step("Bind canonical arm target, digest, entry, and PT_LOAD layout")
+        val bytes = _arm32_elf(0x10000)
+        val ready = executable_arm32_mapping_readiness_v1(
+            _handle(bytes, "arm", 0x10000u64), bytes)
+        expect(ready.candidate_ready).to_be_true()
+        expect(ready.process_image_ready).to_be_false()
+        expect(ready.authority_consumed).to_be_false()
+        expect(executable_target_process_image_ready_v1(
+            ManifestTarget(os: "simpleos", arch: "arm", abi: "simpleos")
+        )).to_be_false()
+        expect(ready.error).to_equal(
+            ExecutableArm32MappingReadinessErrorV1.None)
+        expect(ready.entry_point).to_equal(0x10000u64)
+        expect(ready.segment_count).to_equal(1)
+        expect(ready.planned_pages).to_equal(1u64)
+        expect(ready.admission_id).to_equal("arm32-admission-1")
+
+    it "rejects target digest and authenticated layout substitution":
+        step("Fail closed before a loader authority token can be consumed")
+        val bytes = _arm32_elf(0x10000)
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle(bytes, "aarch64", 0x10000u64), bytes).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.TargetMismatch)
+        var wrong_digest = _handle(bytes, "arm", 0x10000u64)
+        wrong_digest.image_hash =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(executable_arm32_mapping_readiness_v1(
+            wrong_digest, bytes).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.DigestMismatch)
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle(bytes, "arm", 0x11000u64), bytes).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.LayoutMismatch)
+
+    it "reserves the bounded ARM32 process stack window":
+        step("Accept below/above and reject at the canonical stack boundary")
+        val below = _arm32_elf(0x807FF000)
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle(below, "arm", 0x807FF000u64), below
+        ).candidate_ready).to_be_true()
+        val at_start = _arm32_elf(0x80800000)
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle(at_start, "arm", 0x80800000u64), at_start).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.StackCollision)
+        val at_top = _arm32_elf(0x81000000)
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle(at_top, "arm", 0x81000000u64), at_top
+        ).candidate_ready).to_be_true()
+
+    it "rejects invalid handles source shape malformed ELF and address limits":
+        step("Exercise fail-closed boundaries without loader authority")
+        val bytes = _arm32_elf(0x10000)
+        var consumed = _handle(bytes, "arm", 0x10000u64)
+        consumed.consumed = true
+        expect(executable_arm32_mapping_readiness_v1(
+            consumed, bytes).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.InvalidAuthenticatedHandle)
+        var short_source = bytes
+        short_source.pop()
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle(bytes, "arm", 0x10000u64), short_source).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.SourceSizeInvalid)
+        var wrong_machine = bytes
+        wrong_machine[18] = 3.to_u8()
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle(wrong_machine, "arm", 0x10000u64), wrong_machine).error
+        ).to_equal(ExecutableArm32MappingReadinessErrorV1.ElfRejected)
+        val zero = _arm32_elf(0)
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle(zero, "arm", 0u64), zero).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.AddressOutOfRange)
+        val above = _arm32_elf(0xC0000000)
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle(above, "arm", 0xC0000000u64), above).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.AddressOutOfRange)
+
+    it "rejects a segment plan over the bounded page budget":
+        step("Keep page planning bounded even for a valid ELF32 memory extent")
+        val bytes = _arm32_elf_with_mem(0x10000, 0x10001000)
+        expect(executable_arm32_mapping_readiness_v1(
+            _handle_with_mem(bytes, "arm", 0x10000u64, 0x10001000u64),
+            bytes).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.PageLimitExceeded)
+
+    it "rejects nonoverlapping ELF ranges that alias one mapped page":
+        step("Apply page-granular isolation after byte-range ELF admission")
+        val bytes = _arm32_page_alias_elf()
+        expect(executable_arm32_mapping_readiness_v1(
+            _alias_handle(bytes), bytes).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.PageOverlap)
+
+    it "binds Armed snapshot consumer and parsed entry without consuming authority":
+        step("Produce a blocked candidate receipt from exact pre-consumption evidence")
+        val bytes = _arm32_elf(0x10000)
+        val handle = _handle(bytes, "arm", 0x10000u64)
+        val consumer = executable_load_consumer_new_v1(
+            "simpleos", "arm", "simpleos")
+        val receipt = executable_arm32_process_image_ready_v1(
+            _identity(handle, 0x10000u64), handle, consumer, bytes, 0x10000u64)
+        expect(receipt.candidate_ready).to_be_true()
+        expect(receipt.process_image_ready).to_be_false()
+        expect(receipt.authority_consumed).to_be_false()
+        expect(receipt.error).to_equal(
+            ExecutableArm32MappingReadinessErrorV1.MissingArm32ProcessImageOwner)
+
+    it "rejects invalid stale-able identity coordinates before structural work":
+        step("Reject invalid generation nonce and every bound identity field")
+        val bytes = _arm32_elf(0x10000)
+        val handle = _handle(bytes, "arm", 0x10000u64)
+        val consumer = executable_load_consumer_new_v1(
+            "simpleos", "arm", "simpleos")
+        var invalid = _identity(handle, 0x10000u64)
+        invalid.token_generation = 0u64
+        expect(executable_arm32_process_image_ready_v1(
+            invalid, handle, consumer, bytes, 0x10000u64).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.InvalidArmedIdentity)
+        invalid = _identity(handle, 0x10000u64)
+        invalid.token_nonce = 0u64
+        expect(executable_arm32_process_image_ready_v1(
+            invalid, handle, consumer, bytes, 0x10000u64).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.InvalidArmedIdentity)
+        var mismatch = _identity(handle, 0x10000u64)
+        mismatch.canonical_source_path = "/bin/other"
+        expect(executable_arm32_process_image_ready_v1(
+            mismatch, handle, consumer, bytes, 0x10000u64).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.IdentityMismatch)
+        mismatch = _identity(handle, 0x10000u64)
+        mismatch.image_hash =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        expect(executable_arm32_process_image_ready_v1(
+            mismatch, handle, consumer, bytes, 0x10000u64).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.IdentityMismatch)
+        mismatch = _identity(handle, 0x10000u64)
+        mismatch.admission_id = "other-admission"
+        expect(executable_arm32_process_image_ready_v1(
+            mismatch, handle, consumer, bytes, 0x10000u64).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.IdentityMismatch)
+        mismatch = _identity(handle, 0x10000u64)
+        mismatch.role = "other-role"
+        expect(executable_arm32_process_image_ready_v1(
+            mismatch, handle, consumer, bytes, 0x10000u64).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.IdentityMismatch)
+        mismatch = _identity(handle, 0x10000u64)
+        mismatch.target = ManifestTarget(
+            os: "simpleos", arch: "aarch64", abi: "simpleos")
+        expect(executable_arm32_process_image_ready_v1(
+            mismatch, handle, consumer, bytes, 0x10000u64).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.IdentityMismatch)
+        mismatch = _identity(handle, 0x11000u64)
+        expect(executable_arm32_process_image_ready_v1(
+            mismatch, handle, consumer, bytes, 0x11000u64).error).to_equal(
+                ExecutableArm32MappingReadinessErrorV1.IdentityMismatch)
+
+    it "rejects a non-pristine or previously failed ARM consumer":
+        step("Require a fresh Ready consumer including its failure field")
+        val bytes = _arm32_elf(0x10000)
+        val handle = _handle(bytes, "arm", 0x10000u64)
+        var consumer = executable_load_consumer_new_v1(
+            "simpleos", "arm", "simpleos")
+        consumer.failure = ExecutableLoadConsumerErrorV1.ElfRejected
+        expect(executable_arm32_process_image_ready_v1(
+            _identity(handle, 0x10000u64), handle, consumer, bytes, 0x10000u64
+        ).error).to_equal(ExecutableArm32MappingReadinessErrorV1.InvalidConsumer)

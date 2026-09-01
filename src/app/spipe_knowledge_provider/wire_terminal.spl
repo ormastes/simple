@@ -1,0 +1,227 @@
+use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1}
+use app.spipe_knowledge_provider.service_deadline.*
+use app.spipe_knowledge_provider.wire_types.{ProviderWireOwnedDispatchV1, provider_owned_response}
+use app.spipe_knowledge_provider.generation_quarantine.{create_generation_quarantine_record, generation_quarantine_replay}
+use app.spipe_knowledge_provider.query_clock.{QueryClockPort, query_stop_reason}
+
+# Convergence is allowed a finite amount of local work.  A writer that keeps
+# winning beyond this bound has not established a semantic result for this
+# request, so the adapter returns an internal error and leaves retry/recovery
+# to a fresh dispatch.  It never fabricates a terminal outcome.
+val WIRE_LIFECYCLE_CONVERGENCE_ATTEMPTS = 3
+
+fn _terminal_stop_reason(clock: QueryClockPort, request_id: text,
+                         admitted_at_ms: i64, deadline_ms: i64) -> text:
+    query_stop_reason(clock, request_id, admitted_at_ms, deadline_ms)
+
+fn wire_terminal_error_code(state_value: text) -> text:
+    if state_value == "expired": return "candidate_expired"
+    if state_value == "aborted": return "candidate_aborted"
+    "stale_base"
+
+# Persist a deterministic loser response against the observed terminal record.
+# Each failed CAS reloads and prefers exact durable replay; after the finite
+# budget, no semantic outcome is fabricated and no generic CAS error leaks.
+fn wire_record_terminal_error_converged(mut service: SpipeProviderServiceV1,
+                                        request_id: text, operation: text,
+                                        operation_id: text, payload_hash: text,
+                                        candidate_uid: text,
+                                        detail: text,
+                                        admitted_at_ms: i64,
+                                        deadline_ms: i64,
+                                        clock: QueryClockPort) -> ProviderWireOwnedDispatchV1:
+    var attempt = 0
+    while attempt < WIRE_LIFECYCLE_CONVERGENCE_ATTEMPTS:
+        val stop_reason = _terminal_stop_reason(clock, request_id,
+            admitted_at_ms, deadline_ms)
+        if stop_reason != "":
+            return provider_owned_response(service.bound_error(request_id,
+                operation, stop_reason, "terminal convergence interrupted"),
+                false, service)
+        val observation = service.candidate_terminal_observation(candidate_uid)
+        if val Err(reason) = observation:
+            return provider_owned_response(service.bound_error(request_id,
+                operation, reason, "terminal observation failed"), false,
+                service)
+        val observed = observation.unwrap()
+        val response = service.bound_error(request_id, operation,
+            wire_terminal_error_code(observed.0), detail)
+        val recorded_at = service.next_transition_at_ms(
+            service.receipt_authority.now_ms())
+        if val Err(reason) = recorded_at:
+            return provider_owned_response(service.bound_error(request_id,
+                operation, reason, "transition authority failed"), false,
+                service)
+        val before_record = _terminal_stop_reason(clock, request_id,
+            admitted_at_ms, deadline_ms)
+        if before_record != "":
+            return provider_owned_response(service.bound_error(request_id,
+                operation, before_record,
+                "terminal journal interrupted before linearization"), false,
+                service)
+        val recorded = service.record_terminal_error_controlled(candidate_uid, request_id,
+            operation_id, payload_hash, response, observed.0, observed.1,
+            observed.2, recorded_at.unwrap(), admitted_at_ms, deadline_ms,
+            clock)
+        if val Ok(_) = recorded:
+            return provider_owned_response(response, false, service)
+        val record_reason = recorded.unwrap_err()
+        if record_reason != "lifecycle_conflict":
+            return provider_owned_response(service.bound_error(request_id,
+                operation, record_reason, "durable terminal error failed"),
+                false, service)
+        val before_reload = _terminal_stop_reason(clock, request_id,
+            admitted_at_ms, deadline_ms)
+        if before_reload != "":
+            return provider_owned_response(service.bound_error(request_id,
+                operation, before_reload,
+                "terminal convergence interrupted before reload"), false,
+                service)
+        if val Err(reason) = service.reload_lifecycle_after_conflict():
+            return provider_owned_response(service.bound_error(request_id,
+                operation, reason, "terminal convergence refresh failed"),
+                false, service)
+        val after_reload = _terminal_stop_reason(clock, request_id,
+            admitted_at_ms, deadline_ms)
+        if after_reload != "":
+            return provider_owned_response(service.bound_error(request_id,
+                operation, after_reload,
+                "terminal convergence interrupted after reload"), false,
+                service)
+        if val Ok(replayed) = service.replay_response(operation, operation_id,
+                payload_hash):
+            if replayed != nil:
+                return provider_owned_response(replayed.unwrap(), false, service)
+        else:
+            return provider_owned_response(service.bound_error(request_id,
+                operation, "operation_conflict", "operation id reused"),
+                false, service)
+        # The candidate terminal is durable but this loser response is not.
+        # Rebind to the refreshed truth and retry instead of fabricating an
+        # unjournaled semantic result.
+        attempt = attempt + 1
+    provider_owned_response(service.bound_error(request_id, operation,
+        "internal_error",
+        "bounded terminal journal contention; no semantic result committed"),
+        false, service)
+
+fn wire_quarantine_generation_converged(mut service: SpipeProviderServiceV1,
+                                        request_id: text, operation: text,
+                                        operation_id: text, payload_hash: text,
+                                        candidate_uid: text,
+                                        candidate_root: text,
+                                        base_root: text,
+                                        admitted_at_ms: i64,
+                                        deadline_ms: i64,
+                                        clock: QueryClockPort) -> ProviderWireOwnedDispatchV1:
+    # Establish stable replay and restart denial in the same lock domain as
+    # lifecycle CAS. The lock winner is authoritative: an earlier lifecycle
+    # success is replayed exactly; otherwise this tombstone closes generation
+    # mutation without inventing a candidate state or operation outcome.
+    val initial_stop = _terminal_stop_reason(clock, request_id,
+        admitted_at_ms, deadline_ms)
+    if initial_stop != "":
+        return provider_owned_response(service.bound_error(request_id,
+            operation, initial_stop, "generation close interrupted"), false,
+            service)
+    if val Ok(replayed) = service.replay_response(operation, operation_id,
+            payload_hash):
+        if replayed != nil:
+            return provider_owned_response(replayed.unwrap(), false, service)
+    else:
+        return provider_owned_response(service.bound_error(request_id,
+            operation, "operation_conflict", "operation id reused"), false,
+            service)
+    val initial_status = service.candidate_state(candidate_uid, candidate_root,
+        base_root)
+    if val Err(reason) = initial_status:
+        return provider_owned_response(service.bound_error(request_id,
+            operation, reason, "candidate rejected during quarantine"), false,
+            service)
+    if initial_status.unwrap() != "staged":
+        return wire_record_terminal_error_converged(service, request_id,
+            operation, operation_id, payload_hash, candidate_uid,
+            "candidate lost lifecycle CAS", admitted_at_ms, deadline_ms,
+            clock)
+    val tombstone = create_generation_quarantine_record(
+        service.receipt_authority, service.state.provider_generation,
+        service.state.workspace, service.state.snapshot_id,
+        service.state.scope_digest, request_id, operation_id, payload_hash,
+        candidate_uid, base_root, service.state.logical_root)
+    if val Err(reason) = tombstone:
+        return provider_owned_response(service.bound_error(request_id,
+            operation, reason, "generation close record rejected"), false,
+            service)
+    val record = tombstone.unwrap()
+    var close_attempt = 0
+    var close_committed = false
+    while close_attempt < WIRE_LIFECYCLE_CONVERGENCE_ATTEMPTS:
+        val close_stop = _terminal_stop_reason(clock, request_id,
+            admitted_at_ms, deadline_ms)
+        if close_stop != "":
+            return provider_owned_response(service.bound_error(request_id,
+                operation, close_stop, "generation close interrupted"), false,
+                service)
+        val existing = service.durable_lifecycle.load_generation_quarantine(
+            service.state.provider_generation)
+        if val Err(reason) = existing:
+            return provider_owned_response(service.bound_error(request_id,
+                operation, reason, "generation close unavailable"), false,
+                service)
+        if existing.unwrap() != "":
+            val replayed = generation_quarantine_replay(existing.unwrap(),
+                service.receipt_authority, service.state.provider_generation,
+                service.state.workspace, service.state.snapshot_id,
+                service.state.scope_digest, operation_id, payload_hash)
+            if val Ok(response) = replayed:
+                if response != "":
+                    service.state.quarantine_generation()
+                    return provider_owned_response(response, false, service)
+            if val Err(reason) = replayed:
+                return provider_owned_response(service.bound_error(request_id,
+                    operation, if reason == "operation_conflict":
+                        "operation_conflict"
+                    else:
+                        "fatal_provider_error",
+                    "provider generation is closed"), false, service)
+            return provider_owned_response(service.bound_error(request_id,
+                operation, "fatal_provider_error",
+                "provider generation is closed"), false, service)
+        val before_close = _terminal_stop_reason(clock, request_id,
+            admitted_at_ms, deadline_ms)
+        if before_close != "":
+            return provider_owned_response(service.bound_error(request_id,
+                operation, before_close,
+                "generation close interrupted before linearization"), false,
+                service)
+        if val Ok(_) = service.durable_lifecycle.commit_generation_quarantine(
+                service.state.provider_generation, record.0):
+            close_committed = true
+            close_attempt = WIRE_LIFECYCLE_CONVERGENCE_ATTEMPTS
+        else:
+            close_attempt = close_attempt + 1
+    if not close_committed:
+        # No generation-close or lifecycle mutation was committed by this
+        # request. Return a bounded recoverable implementation error rather
+        # than silently closing a valid authenticated envelope.
+        return provider_owned_response(service.bound_error(request_id,
+            operation, "internal_error",
+            "generation close could not linearize"), false, service)
+    service.state.quarantine_generation()
+    # The lifecycle file and tombstone share one lock. Reload once after the
+    # tombstone commit: a lifecycle success that acquired the lock first is
+    # authoritative and must be returned byte-for-byte now, just as restart
+    # will replay it. If no such success exists, the tombstone won and blocks
+    # every later lifecycle commit for this provider generation.
+    if val Err(_) = service.reload_lifecycle_after_conflict():
+        return provider_owned_response(record.1, false, service)
+    service.state.quarantine_generation()
+    if val Ok(replayed) = service.replay_response(operation, operation_id,
+            payload_hash):
+        if replayed != nil:
+            return provider_owned_response(replayed.unwrap(), false, service)
+    else:
+        return provider_owned_response(service.bound_error(request_id,
+            operation, "operation_conflict", "operation id reused"), false,
+            service)
+    provider_owned_response(record.1, false, service)

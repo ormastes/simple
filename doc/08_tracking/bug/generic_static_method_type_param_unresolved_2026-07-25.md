@@ -4,8 +4,7 @@
 - **Area:** semantic analysis / static-method resolution on generic classes
 - **Severity:** medium-high — breaks a documented, in-use production API and
   forces every generic class to ship free-function factory duplicates.
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN.
 
 ## Symptom
 

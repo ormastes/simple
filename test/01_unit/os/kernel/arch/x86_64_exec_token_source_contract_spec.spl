@@ -1,0 +1,28 @@
+use std.spec.{describe, it, expect, step}
+use std.fs.{file_read}
+
+describe "x86_64 scheduler-owned execution token source contract":
+    it "binds entry to task generation and expected CR3":
+        step("inspect the validated entry bridge")
+        val bridge = file_read("src/os/kernel/arch/x86_64/user_entry.spl")
+        expect(bridge).to_contain("rt_x86_exec_token_install(validation.pid, validation.generation, validation.cr3)")
+        expect(bridge).to_contain("rt_x86_exec_token_take_result(validation.pid, validation.generation, validation.cr3)")
+
+    it "rejects wrong identity and CR3 before stdout or exit":
+        step("inspect the architecture syscall owner")
+        val owner = file_read("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+        expect(owner).to_contain("task != _x86_exec_token_task")
+        expect(owner).to_contain("generation != _x86_exec_token_generation")
+        expect(owner).to_contain("_x86_current_cr3() == _x86_exec_token_cr3")
+        expect(owner).to_contain("case 0:   /* exit(status)")
+        expect(owner).to_contain("case 60:  /* debug_write(char)")
+        expect(owner).to_contain("if (_x86_exec_token_required && !_x86_exec_token_current_valid())")
+
+    it "consumes the result once and reaps the exact scheduler child":
+        step("inspect result consumption and lifecycle coordination")
+        val owner = file_read("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+        val launcher = file_read("src/os/kernel/loader/x86_64_fs_exec_spawn.spl")
+        expect(owner).to_contain("_x86_exec_result_valid = 0")
+        expect(launcher).to_contain("scheduler.exit_task_by_id(child, rc as i32)")
+        expect(launcher).to_contain("scheduler.wait_for_collect(TaskId(id: 0), child, false)")
+        expect(launcher).to_contain("wait_collect_result_status(collected) != rc as i32")

@@ -15,6 +15,8 @@
 use compiler.backend.native.mach_inst.{MachReg, MachRegKind, physical_reg, reg_id, Operand, OperandKind, MachInst, MachBlock, MachFunction, MachModule, EncodedReloc, EncodedFunction, new_encoded_function}
 use compiler.backend.native.mach_inst.{X86_RAX, X86_RCX, X86_RDX, X86_RBX, X86_RSP, X86_RBP, X86_RSI, X86_RDI, X86_R8, X86_R9, X86_R10, X86_R11, X86_R12, X86_R13, X86_R14, X86_R15}
 use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV, X86_OP_AND, X86_OP_OR, X86_OP_XOR, X86_OP_SHL, X86_OP_SAR, X86_OP_SHR, X86_OP_NEG, X86_OP_NOT, X86_OP_BSWAP, X86_OP_POPCNT, X86_OP_CMP, X86_OP_TEST, X86_OP_SETE, X86_OP_SETNE, X86_OP_SETL, X86_OP_SETLE, X86_OP_SETG, X86_OP_SETGE, X86_OP_SETB, X86_OP_SETBE, X86_OP_SETA, X86_OP_SETAE, X86_OP_JMP, X86_OP_JE, X86_OP_JNE, X86_OP_JNZ, X86_OP_JZ, X86_OP_CALL, X86_OP_RET, X86_OP_PUSH, X86_OP_POP, X86_OP_LEA, X86_OP_MOVZX, X86_OP_CQO, X86_OP_NOP, X86_OP_INT3, X86_OP_SYSCALL, X86_OP_ADD_IMM, X86_OP_SUB_IMM, X86_OP_CMP_IMM, X86_OP_MOV_REG_IMM32, X86_OP_CALL_INDIRECT}
+use compiler.backend.native.mach_inst.{X86_OP_MOVZX_REG_MEM8, X86_OP_MOVZX_REG_MEM16, X86_OP_MOV_REG_MEM32, X86_OP_MOV_MEM8_REG, X86_OP_MOV_MEM16_REG, X86_OP_MOV_MEM32_REG}
+use compiler.backend.native.mach_inst.{X86_OP_MOVSX_REG_MEM8, X86_OP_MOVSX_REG_MEM16, X86_OP_MOVSX_REG_MEM32}
 use compiler.backend.native.mach_inst.{X86_OP_VMOVAPS_LOAD_YMM, X86_OP_VMOVAPS_STORE_YMM, X86_OP_VADDPS_YMM, X86_OP_VSUBPS_YMM, X86_OP_VMULPS_YMM, X86_OP_VDIVPS_YMM}
 use compiler.backend.native.x86_64_simd.{encode_vaddps_ymm, encode_vsubps_ymm, encode_vmulps_ymm, encode_vdivps_ymm, ymm_to_index}
 use compiler.backend.native.encode_common.{encode_module_with}
@@ -52,6 +54,12 @@ fn rex_wb(rm: i64) -> i64:
     var rx = 0x48  # REX.W
     if rm >= 8:
         rx = rx + 1  # REX.B
+    rx
+
+fn rex_rb32(reg: i64, rm: i64) -> i64:
+    var rx = 0x40
+    if reg >= 8: rx = rx + 4
+    if rm >= 8: rx = rx + 1
     rx
 
 fn modrm(md: i64, reg: i64, rm: i64) -> i64:
@@ -252,19 +260,115 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
 
     elif inst.opcode == X86_OP_MOV_REG_MEM:
         val dst = get_phys_reg_id(inst.operands[0])
-        val base = get_mem_base_id(inst.operands[1])
-        val offset = get_mem_offset(inst.operands[1])
-        code.push(rex_wrb(dst, base))
-        code.push(0x8b)
-        code = encode_mem_operand(code, dst, base, offset)
+        match inst.operands[1].kind:
+            case Sym(name):
+                code.push(rex_wr(dst))
+                code.push(0x8b)
+                code.push(modrm(0, dst, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[1])
+                val offset = get_mem_offset(inst.operands[1])
+                code.push(rex_wrb(dst, base))
+                code.push(0x8b)
+                code = encode_mem_operand(code, dst, base, offset)
 
     elif inst.opcode == X86_OP_MOV_MEM_REG:
-        val base = get_mem_base_id(inst.operands[0])
-        val offset = get_mem_offset(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code.push(rex_wrb(src, base))
-        code.push(0x89)
-        code = encode_mem_operand(code, src, base, offset)
+        match inst.operands[0].kind:
+            case Sym(name):
+                code.push(rex_wr(src))
+                code.push(0x89)
+                code.push(modrm(0, src, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[0])
+                val offset = get_mem_offset(inst.operands[0])
+                code.push(rex_wrb(src, base))
+                code.push(0x89)
+                code = encode_mem_operand(code, src, base, offset)
+
+    elif inst.opcode == X86_OP_MOVZX_REG_MEM8 or inst.opcode == X86_OP_MOVZX_REG_MEM16:
+        val dst = get_phys_reg_id(inst.operands[0])
+        match inst.operands[1].kind:
+            case Sym(name):
+                code.push(rex_wr(dst))
+                code.push(0x0f)
+                if inst.opcode == X86_OP_MOVZX_REG_MEM8: code.push(0xb6)
+                else: code.push(0xb7)
+                code.push(modrm(0, dst, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[1])
+                val offset = get_mem_offset(inst.operands[1])
+                code.push(rex_wrb(dst, base))
+                code.push(0x0f)
+                if inst.opcode == X86_OP_MOVZX_REG_MEM8: code.push(0xb6)
+                else: code.push(0xb7)
+                code = encode_mem_operand(code, dst, base, offset)
+
+    elif inst.opcode == X86_OP_MOV_REG_MEM32:
+        val dst = get_phys_reg_id(inst.operands[0])
+        match inst.operands[1].kind:
+            case Sym(name):
+                code.push(rex_rb32(dst, 5))
+                code.push(0x8b)
+                code.push(modrm(0, dst, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[1])
+                val offset = get_mem_offset(inst.operands[1])
+                code.push(rex_rb32(dst, base))
+                code.push(0x8b)
+                code = encode_mem_operand(code, dst, base, offset)
+
+    elif inst.opcode == X86_OP_MOVSX_REG_MEM8 or inst.opcode == X86_OP_MOVSX_REG_MEM16 or inst.opcode == X86_OP_MOVSX_REG_MEM32:
+        val dst = get_phys_reg_id(inst.operands[0])
+        match inst.operands[1].kind:
+            case Sym(name):
+                code.push(rex_wr(dst))
+                if inst.opcode == X86_OP_MOVSX_REG_MEM32: code.push(0x63)
+                else:
+                    code.push(0x0f)
+                    if inst.opcode == X86_OP_MOVSX_REG_MEM8: code.push(0xbe)
+                    else: code.push(0xbf)
+                code.push(modrm(0, dst, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[1])
+                val offset = get_mem_offset(inst.operands[1])
+                code.push(rex_wrb(dst, base))
+                if inst.opcode == X86_OP_MOVSX_REG_MEM32: code.push(0x63)
+                else:
+                    code.push(0x0f)
+                    if inst.opcode == X86_OP_MOVSX_REG_MEM8: code.push(0xbe)
+                    else: code.push(0xbf)
+                code = encode_mem_operand(code, dst, base, offset)
+
+    elif inst.opcode == X86_OP_MOV_MEM8_REG or inst.opcode == X86_OP_MOV_MEM16_REG or inst.opcode == X86_OP_MOV_MEM32_REG:
+        val src = get_phys_reg_id(inst.operands[1])
+        match inst.operands[0].kind:
+            case Sym(name):
+                if inst.opcode == X86_OP_MOV_MEM16_REG: code.push(0x66)
+                code.push(rex_rb32(src, 5))
+                if inst.opcode == X86_OP_MOV_MEM8_REG: code.push(0x88)
+                else: code.push(0x89)
+                code.push(modrm(0, src, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[0])
+                val offset = get_mem_offset(inst.operands[0])
+                if inst.opcode == X86_OP_MOV_MEM16_REG: code.push(0x66)
+                code.push(rex_rb32(src, base))
+                if inst.opcode == X86_OP_MOV_MEM8_REG: code.push(0x88)
+                else: code.push(0x89)
+                code = encode_mem_operand(code, src, base, offset)
 
     elif inst.opcode == X86_OP_ADD:
         val dst = get_phys_reg_id(inst.operands[0])

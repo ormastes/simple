@@ -27,7 +27,7 @@ web_renderer_backend_parity_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -37,20 +37,6 @@ web_renderer_backend_parity_spec -> std
 ## Scenarios
 
 ### Simple web renderer 2D-backend parity
-
-#### invalid viewport
-
-#### fails closed before Engine2D creation
-
-The pixel and readback entrypoints reject a zero dimension before creating an
-Engine2D surface; readback reports an empty `unavailable` result.
-
-```simple
-expect(simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 0, 32, "software").len()).to_equal(0)
-val readback = simple_web_render_html_to_readback_with_engine2d_backend(sample_html(), 48, 0, "software")
-expect(readback.pixels.len()).to_equal(0)
-expect(readback.source).to_equal("unavailable")
-```
 
 #### framebuffer output
 

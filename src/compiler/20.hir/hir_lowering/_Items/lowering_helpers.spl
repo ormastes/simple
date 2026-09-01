@@ -25,9 +25,27 @@ use compiler.core.types.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw process termination ABI", capabilities: [ffi])
 extern fn rt_exit(code: i64)
+@unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_exit(code: i64):
+    unsafe(capabilities: [ffi]):
+        rt_exit(code)
+
+@always_inline
+fn _sffi_transient_heap_promote(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
 
 var _bootstrap_hir_functions: [HirFunction] = []
 var _bootstrap_hir_module_names: [text] = []
@@ -57,7 +75,8 @@ val _BOOTSTRAP_HIR_ITEMS_PER_MODULE_LIMIT: i64 = 131072
 
 fn bootstrap_hir_store_fail(message: text):
     eprint("error: bootstrap HIR store rejected update: {message}\n")
-    rt_exit(1)
+    _sffi_exit(1)
+    panic("rt_exit returned after bootstrap HIR store rejection")
 
 fn bootstrap_hir_store_aligned(expected: i64) -> bool:
     _bootstrap_hir_module_names.len() == expected and
@@ -115,28 +134,64 @@ fn bootstrap_hir_modules_add(name: text, is_entry: bool, symbols: [HirSymbol], f
 # published from the decoded module instead. Same flattening, same order
 # (Dict.keys() order), same mode gate; a no-op outside bootstrap_flat_mode.
 fn bootstrap_hir_modules_add_from_module(module: HirModule, registry_module_name: text, is_entry: bool):
-    val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-    val bootstrap_flat_mode = bootstrap_mode and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
+    val bootstrap_mode = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    val bootstrap_flat_mode = bootstrap_mode and (_sffi_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
     if not bootstrap_flat_mode:
         return
+    # DETERMINISM -- the SECOND hand-kept copy of this flattening. The first copy lives in
+    # _Items/module_build.spl:89-134 and was sorted separately; both call
+    # `bootstrap_hir_modules_add` below, both feed the same `_bootstrap_hir_module_*`
+    # accumulators, and those drive the prescan loop AND the MIR lowering order. Sorting
+    # only one copy stabilised nothing, which is exactly the partial-fix-to-duplicated-code
+    # defect class that 00.common/module_path_naming.spl's own header warns about
+    # ("70a29867bc2 changed only one of the four hand-kept copies").
+    # `rt_dict_keys` (src/runtime/runtime_native.c:8652) walks BUCKET order, so an
+    # unsorted `.keys()` here is a per-process ordering. Keys are hoisted, sorted, then
+    # indexed because these were `for k in D.keys():` loops.
+    # MEASUREMENT PREREQUISITE ONLY -- this makes error counts comparable between runs. It
+    # fixes nothing else; the disc=-1 defect is untouched by it.
     var flat_symbols: [HirSymbol] = []
-    for symbol_key in module.symbols.symbols.keys():
-        flat_symbols = flat_symbols.push(module.symbols.symbols[symbol_key])
+    var symbol_keys = module.symbols.symbols.keys()
+    symbol_keys.sort()
+    var symbol_i = 0
+    while symbol_i < symbol_keys.len():
+        flat_symbols = flat_symbols.push(module.symbols.symbols[symbol_keys[symbol_i]])
+        symbol_i = symbol_i + 1
     var flat_functions: [HirFunction] = []
-    for function_key in module.functions.keys():
-        flat_functions = flat_functions.push(module.functions[function_key])
+    var function_keys = module.functions.keys()
+    function_keys.sort()
+    var function_i = 0
+    while function_i < function_keys.len():
+        flat_functions = flat_functions.push(module.functions[function_keys[function_i]])
+        function_i = function_i + 1
     var flat_constants: [HirConst] = []
-    for constant_key in module.constants.keys():
-        flat_constants = flat_constants.push(module.constants[constant_key])
+    var constant_keys = module.constants.keys()
+    constant_keys.sort()
+    var constant_i = 0
+    while constant_i < constant_keys.len():
+        flat_constants = flat_constants.push(module.constants[constant_keys[constant_i]])
+        constant_i = constant_i + 1
     var flat_enums: [HirEnum] = []
-    for enum_key in module.enums.keys():
-        flat_enums = flat_enums.push(module.enums[enum_key])
+    var enum_keys = module.enums.keys()
+    enum_keys.sort()
+    var enum_i = 0
+    while enum_i < enum_keys.len():
+        flat_enums = flat_enums.push(module.enums[enum_keys[enum_i]])
+        enum_i = enum_i + 1
     var flat_structs: [HirStruct] = []
-    for struct_key in module.structs.keys():
-        flat_structs = flat_structs.push(module.structs[struct_key])
+    var struct_keys = module.structs.keys()
+    struct_keys.sort()
+    var struct_i = 0
+    while struct_i < struct_keys.len():
+        flat_structs = flat_structs.push(module.structs[struct_keys[struct_i]])
+        struct_i = struct_i + 1
     var flat_classes: [HirClass] = []
-    for class_key in module.classes.keys():
-        flat_classes = flat_classes.push(module.classes[class_key])
+    var class_keys = module.classes.keys()
+    class_keys.sort()
+    var class_i = 0
+    while class_i < class_keys.len():
+        flat_classes = flat_classes.push(module.classes[class_keys[class_i]])
+        class_i = class_i + 1
     bootstrap_hir_modules_add(registry_module_name, is_entry, flat_symbols, flat_functions, flat_constants, flat_enums, flat_structs, flat_classes)
 
 fn bootstrap_hir_modules_promote_last() -> bool:
@@ -148,20 +203,20 @@ fn bootstrap_hir_modules_promote_last() -> bool:
     # returned HirModule. Promote both the seven outer owners and the exact
     # newly committed row so ending the per-file scope cannot leave a dangling
     # global owner. Do not expose the raw arrays to the driver.
-    val name_ok = rt_transient_heap_promote(_bootstrap_hir_module_names[last])
-    val symbols_ok = rt_transient_heap_promote(_bootstrap_hir_module_symbols[last])
-    val functions_ok = rt_transient_heap_promote(_bootstrap_hir_module_functions[last])
-    val constants_ok = rt_transient_heap_promote(_bootstrap_hir_module_constants[last])
-    val enums_ok = rt_transient_heap_promote(_bootstrap_hir_module_enums[last])
-    val structs_ok = rt_transient_heap_promote(_bootstrap_hir_module_structs[last])
-    val classes_ok = rt_transient_heap_promote(_bootstrap_hir_module_classes[last])
-    val names_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_names)
-    val symbols_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_symbols)
-    val functions_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_functions)
-    val constants_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_constants)
-    val enums_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_enums)
-    val structs_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_structs)
-    val classes_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_classes)
+    val name_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_names[last])
+    val symbols_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_symbols[last])
+    val functions_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_functions[last])
+    val constants_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_constants[last])
+    val enums_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_enums[last])
+    val structs_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_structs[last])
+    val classes_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_classes[last])
+    val names_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_names)
+    val symbols_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_symbols)
+    val functions_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_functions)
+    val constants_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_constants)
+    val enums_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_enums)
+    val structs_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_structs)
+    val classes_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_classes)
     name_ok and symbols_ok and functions_ok and constants_ok and enums_ok and
         structs_ok and classes_ok and names_outer_ok and symbols_outer_ok and
         functions_outer_ok and constants_outer_ok and enums_outer_ok and
@@ -279,13 +334,13 @@ fn bootstrap_hir_function_count() -> i64:
 fn bootstrap_hir_function_at(index: i64) -> HirFunction:
     if index >= 0 and index < _bootstrap_hir_functions.len():
         return _bootstrap_hir_functions[index]
-    if index >= 0 and index < flat_bootstrap_function_count() and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+    if index >= 0 and index < flat_bootstrap_function_count() and (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         val fn_: ParserFunction = flat_bootstrap_function_at(index)
         var lowering = HirLowering.new()
         return lowering.lower_function(fn_)
     eprint("error: bootstrap HIR function index out of range: {index}\n")
-    rt_exit(1)
-    _bootstrap_hir_functions[index]
+    _sffi_exit(1)
+    panic("rt_exit returned after bootstrap HIR function bounds failure")
 
 # Item Lowering (Functions, Classes, Structs, Enums, Traits, Impls)
 # ============================================================================
@@ -344,9 +399,9 @@ fn bootstrap_function_names_from_env() -> [text]:
     var names: [text] = []
     var i = 0
     while i < 64:
-        val tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
+        val tag = _sffi_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
         if tag == "1":
-            val name = rt_env_get("SIMPLE_BOOTSTRAP_DECL_NAME_" + int_to_str(i)) ?? ""
+            val name = _sffi_env_get("SIMPLE_BOOTSTRAP_DECL_NAME_" + int_to_str(i)) ?? ""
             if name != "":
                 names.push(name)
         i = i + 1

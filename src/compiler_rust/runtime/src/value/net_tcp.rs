@@ -5,7 +5,11 @@
 /// Simple-facing raw TCP socket creation for pre-bind socket options.
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_socket_create(family: i64) -> i64 {
-    let domain = if family == 1 { Domain::IPV6 } else { Domain::IPV4 };
+    let domain = match family {
+        0 => Domain::IPV4,
+        1 => Domain::IPV6,
+        _ => return -(NetError::InvalidInput as i64),
+    };
     match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
         Ok(socket) => register_tcp_socket(socket),
         Err(e) => -(NetError::from(e) as i64),
@@ -370,18 +374,11 @@ fn runtime_byte_array_to_vec(data: crate::value::RuntimeValue) -> Option<Vec<u8>
     Some(out)
 }
 
-fn timeout_from_optional_ms(ms: crate::value::RuntimeValue) -> Option<Duration> {
-    if ms.is_nil() {
-        return None;
-    }
-    if !ms.is_int() {
-        return None;
-    }
-    let millis = ms.as_int();
-    if millis < 0 {
-        None
+fn timeout_nanos_from_ms(millis: i64) -> i64 {
+    if millis <= 0 {
+        -1
     } else {
-        Some(Duration::from_millis(millis as u64))
+        millis.saturating_mul(1_000_000)
     }
 }
 
@@ -409,11 +406,11 @@ pub extern "C" fn rt_io_tcp_accept(handle: i64) -> i64 {
 /// Simple-facing TCP accept with timeout wrapper.
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_accept_timeout(handle: i64, ms: i64) -> i64 {
-    let deadline = if ms <= 0 {
-        None
-    } else {
-        Some(std::time::Instant::now() + Duration::from_millis(ms as u64))
-    };
+    if ms <= 0 {
+        return -(NetError::InvalidInput as i64);
+    }
+    let bounded_ms = ms.min(i32::MAX as i64) as u64;
+    let deadline = std::time::Instant::now() + Duration::from_millis(bounded_ms);
 
     loop {
         let accept_result = {
@@ -435,10 +432,8 @@ pub extern "C" fn rt_io_tcp_accept_timeout(handle: i64, ms: i64) -> i64 {
         match accept_result {
             Ok((stream, _peer)) => return register_tcp_stream(stream),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if let Some(limit) = deadline {
-                    if std::time::Instant::now() >= limit {
-                        return -(NetError::TimedOut as i64);
-                    }
+                if std::time::Instant::now() >= deadline {
+                    return -(NetError::TimedOut as i64);
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -458,10 +453,13 @@ pub extern "C" fn rt_io_tcp_connect(addr: crate::value::RuntimeValue) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_connect_timeout(addr: crate::value::RuntimeValue, ms: i64) -> i64 {
+    if ms <= 0 {
+        return -(NetError::InvalidInput as i64);
+    }
     let Some((ptr, len)) = runtime_text_ptr_len(addr) else {
         return -(NetError::InvalidAddress as i64);
     };
-    let timeout_ns = if ms <= 0 { 0 } else { ms.saturating_mul(1_000_000) };
+    let timeout_ns = ms.saturating_mul(1_000_000);
     let (handle, _local_addr, err) = unsafe { native_tcp_connect_timeout(ptr, len, timeout_ns) };
     if err == NetError::Success as i64 { handle } else { -err }
 }
@@ -492,12 +490,18 @@ pub extern "C" fn rt_dns_lookup(hostname: crate::value::RuntimeValue) -> crate::
 
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_read(handle: i64, size: i64) -> crate::value::RuntimeValue {
-    if size <= 0 {
+    if size < 0 {
+        return crate::value::RuntimeValue::NIL;
+    }
+    if size == 0 {
         return crate::value::collections::rt_array_new(0);
     }
     let mut buffer = vec![0u8; size as usize];
     let (read, err) = unsafe { native_tcp_read(handle, buffer.as_mut_ptr() as i64, size) };
-    if err != NetError::Success as i64 || read <= 0 {
+    if err != NetError::Success as i64 {
+        return crate::value::RuntimeValue::NIL;
+    }
+    if read <= 0 {
         return crate::value::collections::rt_array_new(0);
     }
     unsafe { crate::value::sffi::file_io::rt_bytes_from_raw(buffer.as_ptr() as i64, read) }
@@ -679,20 +683,60 @@ pub extern "C" fn rt_io_tcp_set_nodelay(handle: i64, enabled: bool) -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_io_tcp_set_read_timeout(handle: i64, ms: crate::value::RuntimeValue) -> bool {
-    let timeout = timeout_from_optional_ms(ms);
-    let nanos = timeout.map(|d| d.as_nanos() as i64).unwrap_or(-1);
-    native_tcp_set_read_timeout(handle, nanos) == NetError::Success as i64
+pub extern "C" fn rt_io_tcp_set_read_timeout(handle: i64, ms: i64) -> bool {
+    native_tcp_set_read_timeout(handle, timeout_nanos_from_ms(ms))
+        == NetError::Success as i64
 }
 
 #[no_mangle]
-pub extern "C" fn rt_io_tcp_set_write_timeout(handle: i64, ms: crate::value::RuntimeValue) -> bool {
-    let timeout = timeout_from_optional_ms(ms);
-    let nanos = timeout.map(|d| d.as_nanos() as i64).unwrap_or(-1);
-    native_tcp_set_write_timeout(handle, nanos) == NetError::Success as i64
+pub extern "C" fn rt_io_tcp_set_write_timeout(handle: i64, ms: i64) -> bool {
+    native_tcp_set_write_timeout(handle, timeout_nanos_from_ms(ms))
+        == NetError::Success as i64
 }
 
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_shutdown(handle: i64, how: i64) -> bool {
     native_tcp_shutdown(handle, how) == NetError::Success as i64
+}
+
+#[cfg(test)]
+mod tcp_read_contract_tests {
+    use super::*;
+
+    #[test]
+    fn socket_family_contract_rejects_unknown_values() {
+        assert_eq!(
+            rt_io_tcp_socket_create(4),
+            -(NetError::InvalidInput as i64)
+        );
+    }
+
+    #[test]
+    fn scalar_timeout_sentinel_maps_without_runtime_value() {
+        assert_eq!(timeout_nanos_from_ms(-1), -1);
+        assert_eq!(timeout_nanos_from_ms(0), -1);
+        assert_eq!(timeout_nanos_from_ms(25), 25_000_000);
+        assert_eq!(timeout_nanos_from_ms(i64::MAX), i64::MAX);
+    }
+
+    #[test]
+    fn connect_timeout_rejects_non_positive_budget_before_network_io() {
+        assert_eq!(
+            rt_io_tcp_connect_timeout(crate::value::RuntimeValue::NIL, 0),
+            -(NetError::InvalidInput as i64)
+        );
+    }
+
+    #[test]
+    fn accept_timeout_rejects_non_positive_budget_before_polling() {
+        assert_eq!(
+            rt_io_tcp_accept_timeout(-1, 0),
+            -(NetError::InvalidInput as i64)
+        );
+    }
+
+    #[test]
+    fn tcp_read_failure_is_nil_not_empty_bytes() {
+        assert_eq!(rt_io_tcp_read(-1, 16), crate::value::RuntimeValue::NIL);
+    }
 }

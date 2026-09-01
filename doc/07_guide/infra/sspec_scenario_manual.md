@@ -1,19 +1,9 @@
 # SSpec Scenario Manual Guide
 
-Run `simple sspec-maintain scan <spec>` after authoring or changing a scenario.
-It scores narrative, structure, oracle quality, traceability, evidence,
-coverage, and maintainability. Use `improve` as preview-only until explicit
-confirmation and `scaffold` for reference Markdown with fail-fast unresolved
-oracles. See [SSpec documentization maintenance](sspec_documentization_maintenance.md).
-
 Use this guide when writing SSpec scenario manuals whose generated
 `doc/06_spec/...` output should read like a scenario-based manual. SSpec
 scenarios are executable `.spl` specs. SPipe is the related runner/docgen
 process around those specs, not a separate `.spipe` scenario format.
-
-> For what makes a manual read as amateur — 12 real anti-patterns with
-> BAD→GOOD fixes and a modern-SSpec checklist — see
-> [`sspec_antipatterns.md`](sspec_antipatterns.md).
 
 ## Principle
 
@@ -252,14 +242,6 @@ should use `ScenarioCaptureMode`, `ScenarioCaptureKind`,
 module includes pure constructors for API, execution, binary, redacted, and
 checker-linked evidence.
 
-Formal-verification scenarios must name the proof layer and exact gate in the
-manual text or evidence row. Cite generated Lean/BYL artifacts separately from
-durable manual theorem or constraint files, and distinguish RVFI/SymbiYosys
-readiness from an actual `sby` proof pass. Starvation, fairness,
-race-condition, scheduler, channel, lock, or resource-lifecycle claims need a
-concurrency/resource model gate or an explicit blocker; a single interleaving
-test is not formal evidence.
-
 Examples:
 
 ```simple
@@ -497,7 +479,7 @@ bin/simple md-diagram-update doc/06_spec/
 ```
 
 This renders the ASCII art and fills in the hash. The lint check
-`bin/simple lint <scenario files>` reports `DIAG001` warnings for stale or placeholder
+`bin/simple build lint` reports `DIAG001` warnings for stale or placeholder
 diagrams.
 
 For phase docs (research, architecture, refactor), include at least one SDN
@@ -508,7 +490,7 @@ diagram manually using the `<!-- sdn-diagram:id=... -->` format. See
 
 After writing or changing a scenario:
 
-1. Generate the doc with `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`.
+1. Generate the doc with `bin/simple spipe-docgen <spec> --output doc/06_spec`.
 2. Run `bin/simple md-diagram-update` to render diagram placeholders.
 3. Read the generated doc as if it were a hand-written manual.
 4. Check that the summary card (title, overview, diagram, stats) is readable
@@ -545,3 +527,33 @@ fingerprints with `--baseline`; pass reviewed
 Blockers cannot be suppressed, and an unrecorded exception is not PASS. See
 `doc/07_guide/infra/sspec_documentization_maintenance.md` for the complete
 policy and offline/diagnostic boundary.
+
+## Fail-closed SSpec count gate
+
+When a test run is used as acceptance evidence, route it through
+[`check-sspec-count-truthful.shs`](../../../scripts/check/check-sspec-count-truthful.shs).
+The gate first admits the selected runner through the canonical self-hosted
+identity check, preserves a nonzero runner exit, anchors the source count to
+actual `it` statements, and requires that declared count to equal the first
+`Results: N total` summary. Missing identity, missing summary, runner failure,
+or a count mismatch is non-PASS; the Rust bootstrap seed is never acceptable
+evidence.
+
+The focused contract is executable in
+[`sspec_count_truthfulness_spec.spl`](../../../test/03_system/infra/sspec_count_truthfulness_spec.spl),
+mirrored as the Markdown-only
+[`sspec_count_truthfulness_spec.md`](../../06_spec/03_system/infra/sspec_count_truthfulness_spec.md),
+and traced in the
+[`sspec_count_truthfulness` test plan](../../03_plan/sys_test/sspec_count_truthfulness.md).
+Its reusable helper is `run_count_truthfulness_guard`; displayed scenarios keep
+the exact `step("...")` flow for admitted selection, a two-example success,
+anchored-count edge input, deliberate runner failure, and missing-compiler
+identity rejection. Assertions use built-in matchers and cover positive, edge,
+and error outcomes for `REQ-SCT-001` through `REQ-SCT-003`.
+
+If no current-source admitted pure-Simple CLI exists, record `TEST_BLOCKED` and
+leave the scenario fail-closed for later execution. Do not run the Rust seed,
+claim generated provenance for a manually refreshed mirror, or turn the blocked
+environment into a skip/pass. The live blocker and implementation history are
+tracked in
+[`check_scripts_seed_identity_fail_open_2026-07-28.md`](../../08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md).

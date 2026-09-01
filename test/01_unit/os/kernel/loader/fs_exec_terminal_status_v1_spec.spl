@@ -1,0 +1,43 @@
+use os.kernel.loader.fs_exec_terminal_status_v1.{
+    fs_exec_terminal_status_matches_v1
+}
+use os.kernel.scheduler.scheduler_types.{WaitCollectResult}
+use std.io_runtime.{file_read}
+
+describe "filesystem execution terminal collection":
+    it "accepts only an exact successful child collection":
+        val exact = WaitCollectResult(pid: 42u64, status: 7, error: 0)
+        expect(fs_exec_terminal_status_matches_v1(exact, 42u64, 7)).to_equal(true)
+
+        val wrong_pid = WaitCollectResult(pid: 41u64, status: 7, error: 0)
+        expect(fs_exec_terminal_status_matches_v1(wrong_pid, 42u64, 7)).to_equal(false)
+
+        val wrong_status = WaitCollectResult(pid: 42u64, status: 8, error: 0)
+        expect(fs_exec_terminal_status_matches_v1(wrong_status, 42u64, 7)).to_equal(false)
+
+        val failed = WaitCollectResult(pid: 42u64, status: 7, error: -10)
+        expect(fs_exec_terminal_status_matches_v1(failed, 42u64, 7)).to_equal(false)
+
+        expect(fs_exec_terminal_status_matches_v1(exact, 0u64, 7)).to_equal(false)
+
+    it "retires the ARM64 ring3 task after dropping the global shim owner":
+        val source = file_read("src/os/kernel/loader/arm64_fs_exec_spawn.spl")
+        val body = source.split(
+            "pub fn arm64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:")[1].split(
+            "pub fn arm64_fs_exec_spawn_authenticated_v1(")[0]
+        val dispatch = body.index_of("val rc = dispatch_fs_exec_user_handoff(")
+        val disable = body.index_of("shim_server_startup_runtime_owner_disable_v1()")
+        val reset = body.index_of("shim_init(Scheduler.new_bootstrap()")
+        val exit = body.index_of("owner.exit_task_by_id(launch_id, rc.to_i32())")
+        val reap = body.index_of("owner.wait_for_collect(")
+        val network = body.index_of("net_arm64_task_teardown(launch_id.id)")
+        val validate = body.index_of("if not fs_exec_terminal_status_matches_v1(")
+
+        expect(dispatch).to_be_greater_than(-1)
+        expect(dispatch).to_be_less_than(disable)
+        expect(disable).to_be_less_than(reset)
+        expect(reset).to_be_less_than(exit)
+        expect(exit).to_be_less_than(reap)
+        expect(reap).to_be_less_than(network)
+        expect(network).to_be_less_than(validate)
+        expect(body).to_contain("return -10")

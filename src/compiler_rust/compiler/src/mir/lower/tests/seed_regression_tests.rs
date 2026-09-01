@@ -40,6 +40,19 @@ fn has_exact_declared_call(func: &MirFunction, name: &str) -> bool {
 }
 
 #[test]
+fn value_bound_unsafe_capability_does_not_become_global_load() {
+    let mir = compile_to_mir(
+        "@unsafe(reason: \"raw provider\", capabilities: [ffi])\nextern fn rt_probe() -> i64\nfn owner() -> i64:\n    val value = unsafe(capabilities: [ffi]):\n        rt_probe()\n    value\n",
+    )
+    .expect("value-bound unsafe owner must lower to MIR");
+    let owner = mir.functions.iter().find(|function| function.name == "owner").unwrap();
+    assert!(has_exact_declared_call(owner, "rt_probe"));
+    assert!(owner.blocks.iter().flat_map(|block| &block.instructions).all(|instruction| {
+        !matches!(instruction, MirInst::GlobalLoad { global_name, .. } if global_name == "unsafe" || global_name == "ffi")
+    }));
+}
+
+#[test]
 fn typed_text_bytes_does_not_bind_same_leaf_user_owner() {
     let source = include_str!("../../../../../../../test/fixtures/compiler/text_bytes_owner_collision.spl");
     let mir = compile_to_mir(source).expect("collision fixture must lower to MIR");

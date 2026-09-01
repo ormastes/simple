@@ -8,45 +8,23 @@
 # - mir_to_llvm.spl: MirToLlvm translation class
 
 use compiler.backend.llvm_target.{LlvmTargetTriple}
-use compiler.backend.backend.backend_types.{CodegenTarget}
-use compiler.common.mir_target_context.{mir_target_context_os_from}
 use compiler.common.attributes.FunctionAttr
 
-extern fn rt_env_get(key: text) -> text
 # Amortized-O(1) string accumulation (same runtime builder as
 # src/lib/common/string_builder.spl; bug rt_string_concat_quadratic_2026-06-12).
+@unsafe(reason: "raw opaque builder acquisition; zero/sentinel and allocation failure are not represented by a typed contract", capabilities: [ffi])
 extern fn rt_string_builder_new() -> i64
+@unsafe(reason: "raw opaque builder mutation; invalid-handle and allocation failure are not represented by a typed contract", capabilities: [ffi])
 extern fn rt_string_builder_push(handle: i64, s: text) -> i64
+@unsafe(reason: "raw opaque builder ownership transfer; invalid-handle and finish failure are not represented by a typed contract", capabilities: [ffi])
 extern fn rt_string_builder_finish(handle: i64) -> text
+@unsafe(reason: "raw opaque builder query; invalid-handle failure is indistinguishable from a valid zero length", capabilities: [ffi])
 extern fn rt_string_builder_len(handle: i64) -> i64
 
 var _llvm_simpleos_header: bool = false
 
 pub fn llvm_ir_builder_set_simpleos_header(enabled: bool):
     _llvm_simpleos_header = enabled
-
-fn llvm_builder_target() -> CodegenTarget:
-    val requested = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-    if requested.contains("simpleos"):
-        CodegenTarget.SimpleOS_X86_64
-    elif requested.starts_with("aarch64-") or requested.starts_with("arm64-"):
-        CodegenTarget.AArch64
-    elif requested.starts_with("riscv64-") or requested.starts_with("rv64-"):
-        CodegenTarget.Riscv64
-    elif requested.starts_with("riscv32-") or requested.starts_with("rv32-"):
-        CodegenTarget.Riscv32
-    elif requested.starts_with("wasm64-") or requested == "wasm64":
-        CodegenTarget.Wasm64
-    elif requested.starts_with("wasm32-") or requested == "wasm32":
-        CodegenTarget.Wasm32
-    elif requested.starts_with("i686-") or requested.starts_with("i386-") or requested == "x86":
-        CodegenTarget.X86
-    elif requested.starts_with("armv") or requested.starts_with("thumbv") or requested == "arm":
-        CodegenTarget.Arm
-    elif requested.starts_with("x86_64-") or requested.starts_with("amd64-") or requested == "x64":
-        CodegenTarget.X86_64
-    else:
-        CodegenTarget.Host
 
 # Re-import from split module for re-export (backward compatibility)
 use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
@@ -73,6 +51,16 @@ class LlvmIRBuilder:
     debug_counter: i64
     size_type: text            # "i32" for 32-bit targets, "i64" for 64-bit
     tbaa_counter: i64          # Counter for TBAA metadata nodes
+    # Scalar snapshot of the constructor-supplied target. Keeping the fields
+    # here avoids both an aggregate read across the builder boundary and the
+    # old ambient-environment re-resolution in emit_module_header().
+    target_arch: text
+    target_vendor: text
+    target_os: text
+    target_env: text
+    target_has_env: bool
+    target_datalayout: text
+    allow_ambient_header_policy: bool
     header_emitted: bool       # set by emit_module_header(); see emit_baremetal_attributes
     # Bare-metal attribute lines queued by emit_baremetal_attributes() when it
     # is called before emit_module_header() (the normal construction order:
@@ -86,66 +74,97 @@ class LlvmIRBuilder:
     pending_baremetal_attrs: [text]
 
     static fn create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
-        val st = if target.is_32bit(): "i32" else: "i64"
+        LlvmIRBuilder.create_with_header_policy(name, target, true)
+
+    static fn create_explicit_from_scalars(
+        name: text,
+        target_arch: text,
+        target_vendor: text,
+        target_os: text,
+        target_env: text,
+        target_has_env: bool,
+        target_datalayout: text
+    ) -> LlvmIRBuilder:
+        LlvmIRBuilder.create_from_target_scalars(
+            name, target_arch, target_vendor, target_os,
+            target_env, target_has_env, target_datalayout, false)
+
+    static fn create_with_header_policy(
+        name: text,
+        target: LlvmTargetTriple,
+        allow_ambient_header_policy: bool
+    ) -> LlvmIRBuilder:
+        var target_env = ""
+        var target_has_env = false
+        match target.env:
+            Some(value):
+                target_env = value
+                target_has_env = value != ""
+            nil:
+                ()
+        LlvmIRBuilder.create_from_target_scalars(
+            name, target.arch, target.vendor, target.os,
+            target_env, target_has_env, target.datalayout(),
+            allow_ambient_header_policy)
+
+    static fn create_from_target_scalars(
+        name: text,
+        target_arch: text,
+        target_vendor: text,
+        target_os: text,
+        target_env: text,
+        target_has_env: bool,
+        target_datalayout: text,
+        allow_ambient_header_policy: bool
+    ) -> LlvmIRBuilder:
+        val is_32bit = (
+            target_arch == "i686" or target_arch == "armv7" or
+            target_arch == "riscv32" or target_arch == "riscv32imac" or
+            target_arch == "wasm32")
+        val st = if is_32bit: "i32" else: "i64"
+        var builder_handle = 0
+        unsafe(capabilities: [ffi]):
+            builder_handle = rt_string_builder_new()
         LlvmIRBuilder(
             module_name: name,
-            sb: rt_string_builder_new(),
+            sb: builder_handle,
             current_function: nil,
             local_counter: 0,
             debug_counter: 10,
             size_type: st,
             tbaa_counter: 100,
+            target_arch: target_arch,
+            target_vendor: target_vendor,
+            target_os: target_os,
+            target_env: target_env,
+            target_has_env: target_has_env,
+            target_datalayout: target_datalayout,
+            allow_ambient_header_policy: allow_ambient_header_policy,
             header_emitted: false,
             pending_baremetal_attrs: []
         )
 
     me emit(line: text):
         """Emit an IR line."""
-        if rt_string_builder_len(self.sb) > 0:
-            rt_string_builder_push(self.sb, "\n")
-        rt_string_builder_push(self.sb, line)
+        unsafe(capabilities: [ffi]):
+            if rt_string_builder_len(self.sb) > 0:
+                rt_string_builder_push(self.sb, "\n")
+            rt_string_builder_push(self.sb, line)
 
     me emit_module_header():
         """Emit module header."""
-        # Do not retain or snapshot the incoming LlvmTargetTriple across the
-        # builder class boundary. On the compiled pure-Simple lane its optional
-        # env payload can already be corrupt at create(), while reconstructing
-        # a fresh local from the scalar requested-target environment is stable.
-        # Both locals MUST carry the explicit `: LlvmTargetTriple` annotation.
-        # Untyped, the owner type is lost and every field read of the value is
-        # displaced by one slot: .arch returns vendor, .vendor returns os, .os
-        # returns the env Option (which then renders through the enum-to-text
-        # path as `<enum@0x...>`), and .env reads past the end so the Some arm
-        # never fires. That produced `target triple = "unknown-linux-<enum@0x...>"`
-        # and llc "unable to get target". Note the absence of a leading `-`:
-        # that is the tell that this is a shift, not an empty arch. The exact
-        # seed mechanism is NOT established -- compiler.rs:1707 sets
-        # owner_has_vtable = Some(false), which does not by itself explain a +1
-        # displacement. Details and scope:
-        # doc/08_tracking/bug/stage3_selfhost_llvm_triple_field_offset_shift_2026-08-06.md
-        val target: LlvmTargetTriple = LlvmTargetTriple.from_target(llvm_builder_target())
-        val requested = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-        val header_target: LlvmTargetTriple = if mir_target_context_os_from(requested, "") == "baremetal":
-            LlvmTargetTriple.from_target_baremetal(llvm_builder_target())
-        else:
-            target
-        # LlvmTargetTriple.to_text() returns newly interpolated text across a
-        # compiled method boundary, which can arrive here as <invalid-heap>.
-        # Compose the fresh local's scalar fields in this caller instead.
-        var target_triple_text = "{header_target.arch}-{header_target.vendor}-{header_target.os}"
-        match header_target.env:
-            Some(target_env):
-                if target_env != "":
-                    target_triple_text = "{target_triple_text}-{target_env}"
-            nil:
-                ()
+        # Compose from the scalar constructor snapshot. The call argument is
+        # authoritative; header emission performs no host or environment probe.
+        var target_triple_text = "{self.target_arch}-{self.target_vendor}-{self.target_os}"
+        if self.target_has_env:
+            target_triple_text = "{target_triple_text}-{self.target_env}"
         self.emit("; ModuleID = '{self.module_name}'")
         self.emit("source_filename = \"{self.module_name}.spl\"")
-        if _llvm_simpleos_header:
+        if self.allow_ambient_header_policy and _llvm_simpleos_header:
             self.emit("target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\"")
             self.emit("target triple = \"x86_64-unknown-simpleos\"")
         else:
-            self.emit("target datalayout = \"{header_target.datalayout()}\"")
+            self.emit("target datalayout = \"{self.target_datalayout}\"")
             self.emit("target triple = \"{target_triple_text}\"")
         self.emit("")
         self.header_emitted = true
@@ -650,7 +669,8 @@ class LlvmIRBuilder:
 
     me build() -> text:
         """Build final IR string."""
-        rt_string_builder_finish(self.sb)
+        unsafe(capabilities: [ffi]):
+            return rt_string_builder_finish(self.sb)
 
 # ============================================================================
 # Helper Functions
@@ -658,9 +678,10 @@ class LlvmIRBuilder:
 
 pub fn llvm_ir_builder_push_line(line: text, handle: i64):
     """Append one LLVM IR line through the scalar builder handle."""
-    if rt_string_builder_len(handle) > 0:
-        rt_string_builder_push(handle, "\n")
-    rt_string_builder_push(handle, line)
+    unsafe(capabilities: [ffi]):
+        if rt_string_builder_len(handle) > 0:
+            rt_string_builder_push(handle, "\n")
+        rt_string_builder_push(handle, line)
 
 pub fn llvm_ir_builder_handle(builder: LlvmIRBuilder) -> i64:
     """Project the scalar accumulator handle in the builder owner module."""
@@ -668,7 +689,8 @@ pub fn llvm_ir_builder_handle(builder: LlvmIRBuilder) -> i64:
 
 pub fn llvm_ir_builder_build(builder: LlvmIRBuilder) -> text:
     """Build final IR without relying on receiver-method dispatch."""
-    return rt_string_builder_finish(builder.sb)
+    unsafe(capabilities: [ffi]):
+        return rt_string_builder_finish(builder.sb)
 
 fn natural_alignment(ty: text) -> i64:
     """Return natural alignment in bytes for an LLVM type."""

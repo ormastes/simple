@@ -1,82 +1,49 @@
-# @req: REQ-LIB-MCP-001 — core language semantics hold under execution. 
-"""
-## Purpose and audience
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
-reading this spec to confirm the behavior still holds.
+# MCP lazy registry v2 behavior, exercised directly: the registry
+# starts empty, metadata makes categories resolvable, and loaders flip
+# per-category loaded state. (Rewritten from the removed `mcp_lib` API.)
 
-## Operator workflow
+use std.spec.step
+use std.nogc_async_mut.mcp.lazy_registry_v2.{
+    init_registry,
+    register_handler_metadata,
+    get_tool_category,
+    is_category_loaded,
+    get_registry_stats
+}
+use std.nogc_async_mut.mcp.category_loaders_v2.{
+    load_edit_category,
+    is_edit_loaded
+}
 
-1. Run `bin/simple test test/01_unit/lib/mcp/lazy_loading_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the
-   behavior under test.
+describe "MCP lazy registry v2 - unit mirror":
+    # @manual scenario evidence
+    it "starts with an empty registry after init":
+        # @req REQ-SSPEC-UNIT
+        step("re-init and read stats")
+        init_registry()
+        expect(get_registry_stats().contains("handlers")).to_equal(true)
 
-## Compatibility and limitations
+    it "answers unknown for tools never registered":
+        # @req REQ-SSPEC-UNIT
+        step("look up an unregistered tool")
+        init_registry()
+        expect(get_tool_category("never_registered")).to_equal("unknown")
 
-Covers the interpreter and native lanes for the constructs
-asserted here; platform-specific behavior is out of scope.
-"""
+    it "loads the edit category explicitly and observes its flag":
+        # @req REQ-SSPEC-UNIT
+        step("call the edit loader, check its loaded flag")
+        init_registry()
+        load_edit_category()
+        expect(is_edit_loaded()).to_equal(true)
+        expect(is_category_loaded("edit")).to_equal(true)
 
-use std.spec
-
-# doc-path: doc/01_research/local/lazy_loading.md
-# doc-path: doc/03_plan/sys_test/lazy_loading.md
-# doc-path: doc/04_architecture/lazy_loading.md
-# doc-path: doc/05_design/lazy_loading.md
-
-# @manual: primary
-
-describe "Executed behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
-
-    it "truncating division and signed remainder":
-        step("Verify: truncating division and signed remainder")
-        # @req: REQ-LIB-MCP-001
-        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
-        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
-        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
-        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
-
-    it "integer arithmetic precedence":
-        step("Verify: integer arithmetic precedence")
-        # @req: REQ-LIB-MCP-001
-        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
-        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
-        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
-
-    it "for-range iterates the half-open span":
-        step("Verify: for-range iterates the half-open span")
-        # @req: REQ-LIB-MCP-001
-        var seen = 0
-        for i in 0..4:
-            seen = seen + 1
-        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
-
-describe "Additional behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
-
-    it "sha256 known-answer vectors":
-        step("Verify: sha256 known-answer vectors")
-        # @req: REQ-LIB-MCP-001
-        use std.common.crypto.sha256.{sha256_text}
-        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")  # oracle: FIPS 180-2 vector for "abc"
-        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")  # oracle: empty-input vector
-
-    it "function calls and closure values":
-        step("Verify: function calls and closure values")
-        # @req: REQ-LIB-MCP-001
-        fn add(a: i64, b: i64) -> i64: a + b
-        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
-        val f = fn(x: i64) -> i64: x * x
-        expect(f(4)).to_equal(16)  # oracle: 4 squared
-
-    it "string case and strip methods":
-        step("Verify: string case and strip methods")
-        # @req: REQ-LIB-MCP-001
-        expect("AbC".to_lower()).to_equal("abc")
-        expect("AbC".to_upper()).to_equal("ABC")
-        expect("  x ".trim()).to_equal("x")
+    it "resolves a registered tool to its declared category":
+        # @req REQ-SSPEC-UNIT
+        step("register metadata then query it")
+        init_registry()
+        register_handler_metadata("my_tool", "my_category")
+        expect(get_tool_category("my_tool")).to_equal("my_category")

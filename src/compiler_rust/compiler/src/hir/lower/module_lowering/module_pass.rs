@@ -652,6 +652,18 @@ impl Lowerer {
                 self.globals.insert(ec.name.clone(), type_id);
             }
             Node::Static(s) => {
+                // Design A.5: a placed data item is a raw byte image, not a
+                // Simple global — it never enters the tagged-global tables.
+                if let Some(item) = self.raw_data_item_from(
+                    &s.name,
+                    &s.attributes,
+                    s.ty.as_ref(),
+                    &s.value,
+                    matches!(s.mutability, ast::Mutability::Immutable),
+                )? {
+                    self.module.raw_data_items.push(item);
+                    return Ok(());
+                }
                 // Register global/static variable (the explicit `static`
                 // keyword -- NOT `val`/`var` at module scope, which parses
                 // as Node::Let and is handled separately below with the
@@ -727,6 +739,11 @@ impl Lowerer {
                 record_struct_literal_init(&mut self.global_init_structs, &s.name, ty, &self.module.types, &s.value);
             }
             Node::Const(c) => {
+                // Design A.5 placed data item (see the Node::Static arm).
+                if let Some(item) = self.raw_data_item_from(&c.name, &c.attributes, c.ty.as_ref(), &c.value, true)? {
+                    self.module.raw_data_items.push(item);
+                    return Ok(());
+                }
                 // Register constant
                 let ty = if let Some(ref t) = c.ty {
                     self.resolve_type(t).unwrap_or(TypeId::ANY)
@@ -909,6 +926,135 @@ impl Lowerer {
     ///
     /// This collects all lean blocks (inline code and imports) for later
     /// emission during Lean code generation.
+    /// Design A.5 data items. Returns `Some` when the `const`/`static`
+    /// carries any of `@section`, `@align`, `@global` — it is then a raw
+    /// byte image with a fixed-width integer element type and a
+    /// compile-time array initializer (or `zeroed()`), never a Simple
+    /// value. Anything else under those attributes is an error rather than
+    /// a silent fall-through to the tagged-global path.
+    fn raw_data_item_from(
+        &mut self,
+        name: &str,
+        attributes: &[ast::Attribute],
+        ty: Option<&ast::Type>,
+        value: &Expr,
+        is_const: bool,
+    ) -> LowerResult<Option<crate::hir::HirRawDataItem>> {
+        let mut section = None;
+        let mut align = 0u32;
+        let mut is_global = false;
+        let mut placed = false;
+        for attr in attributes {
+            match attr.name.as_str() {
+                "section" => {
+                    placed = true;
+                    section = attr
+                        .args
+                        .as_ref()
+                        .and_then(|args| args.first())
+                        .and_then(const_string_of);
+                    if section.is_none() {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ASM-DIRECTIVE: @section on `{name}` needs a string section name"
+                        )));
+                    }
+                }
+                "align" => {
+                    placed = true;
+                    let n = match attr.args.as_ref().and_then(|args| args.first()) {
+                        Some(Expr::Integer(n)) => *n,
+                        _ => -1,
+                    };
+                    if n < 1 || n > 4096 || (n & (n - 1)) != 0 {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ALIGN-RANGE: @align on `{name}` must be a power of two in 1..4096, got {n}"
+                        )));
+                    }
+                    align = n as u32;
+                }
+                "global" => {
+                    placed = true;
+                    is_global = true;
+                }
+                _ => {}
+            }
+        }
+        if !placed {
+            return Ok(None);
+        }
+        if is_global
+            && !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'$')
+        {
+            return Err(LowerError::Unsupported(format!(
+                "E-GLOBAL-MANGLE: `{name}` is not a valid assembler symbol name"
+            )));
+        }
+        let Some(ty) = ty else {
+            return Err(LowerError::Unsupported(format!(
+                "E-RAW-DATA-TYPE: placed data item `{name}` needs an explicit `[T; N]` type"
+            )));
+        };
+        let ty_id = self.resolve_type(ty)?;
+        let (element, size) = match self.module.types.get(ty_id) {
+            Some(HirType::Array { element, size }) => (*element, *size),
+            _ => {
+                return Err(LowerError::Unsupported(format!(
+                    "E-RAW-DATA-TYPE: placed data item `{name}` must be a fixed-width integer array `[T; N]`"
+                )))
+            }
+        };
+        let element_bits = match element {
+            TypeId::U8 | TypeId::I8 => 8,
+            TypeId::U16 | TypeId::I16 => 16,
+            TypeId::U32 | TypeId::I32 => 32,
+            TypeId::U64 | TypeId::I64 => 64,
+            _ => {
+                return Err(LowerError::Unsupported(format!(
+                    "E-RAW-DATA-TYPE: placed data item `{name}` element type must be u8/u16/u32/u64 or i8..i64"
+                )))
+            }
+        };
+        let zeroed =
+            matches!(value, Expr::Call { callee, .. } if matches!(&**callee, Expr::Identifier(f) if f == "zeroed"));
+        let values = if zeroed {
+            Vec::new()
+        } else if let Some(values) = try_const_array_eval(value) {
+            values
+        } else {
+            return Err(LowerError::Unsupported(format!(
+                "E-RAW-DATA-INIT: placed data item `{name}` initializer must be a compile-time integer array or zeroed()"
+            )));
+        };
+        let count = match size {
+            Some(n) => n,
+            None if !zeroed => values.len(),
+            None => {
+                return Err(LowerError::Unsupported(format!(
+                    "E-RAW-DATA-TYPE: zeroed() data item `{name}` needs an explicit `[T; N]` length"
+                )))
+            }
+        };
+        if !zeroed && values.len() != count {
+            return Err(LowerError::Unsupported(format!(
+                "E-RAW-DATA-INIT: `{name}` declares {count} elements but the initializer has {}",
+                values.len()
+            )));
+        }
+        Ok(Some(crate::hir::HirRawDataItem {
+            name: name.to_string(),
+            section,
+            align,
+            is_global,
+            is_const,
+            element_bits,
+            count,
+            values,
+            zeroed,
+        }))
+    }
+
     fn lower_lean_blocks(&mut self, ast_module: &Module) {
         let module_name = ast_module.name.clone().unwrap_or_else(|| "module".to_string());
 
@@ -1330,9 +1476,24 @@ impl Lowerer {
         // `BeDomNode { style: StyleProps }` and StyleProps is in css.spl,
         // pre-registering ensures StyleProps exists when BeDomNode's fields
         // are resolved in Pass 0.5b.
+        // `export use m.*` re-exports a module AND imports it here; it was
+        // matched by neither pass, so every type reached only that way stayed
+        // unregistered and `resolve_type` degraded it to ANY under
+        // `lenient_types`. That erasure is what made `CompileContext.create`
+        // (driver_types.spl, whose only route to `CompileOptions` is
+        // `export use compiler.common.driver_core_types.*`) resolve field
+        // indices through the receiver-blind "most fields wins" fallback and
+        // read `mcdc_owner_bytes` at MirLowering's index 26 (0xd0) instead of
+        // CompilerConfig's 10 (0x50) -- past the end of a 112-byte object.
         for item in &ast_module.items {
-            if let Node::UseStmt(use_stmt) = item {
-                let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+            match item {
+                Node::UseStmt(use_stmt) => {
+                    let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+                }
+                Node::ExportUseStmt(export_use) if !export_use.path.segments.is_empty() => {
+                    let _ = self.preregister_imported_type_names(&export_use.path, &export_use.target);
+                }
+                _ => {}
             }
         }
 
@@ -1340,6 +1501,15 @@ impl Lowerer {
         // Now that all type names are pre-registered (Pass 0.5a), field type resolution
         // can find types from other imported modules.
         for item in &ast_module.items {
+            if let Node::ExportUseStmt(export_use) = item {
+                if !export_use.path.segments.is_empty() {
+                    // Best-effort, exactly like the other `export use` loader in
+                    // `import_loader.rs`: a re-export that cannot be loaded must
+                    // not turn into a hard error here, because it was never
+                    // loaded at all before this change.
+                    let _ = self.load_imported_types(&export_use.path, &export_use.target);
+                }
+            }
             if let Node::UseStmt(use_stmt) = item {
                 // Log import loading failures -- silent failures cause cross-module
                 // FieldGet bugs (wrong byte_offset when type falls back to ANY).
@@ -1467,6 +1637,25 @@ impl Lowerer {
                         self.method_return_types.insert(qualified, ret_ty);
                     }
                 }
+                // Enum BODY methods (`enum SdnValue: ... fn get(self, k) -> SdnValue?`)
+                // were the one method-carrying declaration missing from this
+                // table. Their bodies are lowered (second pass below, and
+                // `globals` gets `Enum.method` in pass 0.5), but with no
+                // `method_return_types` entry `lookup_method_return_type` on
+                // a KNOWN enum receiver answered ANY, so `case Some(x)` over
+                // `v.get(k)` bound `x: ANY` and the next `x.get(k2)` became a
+                // bare erased-receiver call that codegen routes to
+                // `rt_index_get` (nil on a user enum) instead of the user
+                // method. Same file, no imports, no parser needed.
+                // doc/08_tracking/bug/jit_option_of_enum_payload_double_unwrap_2026-08-24.md
+                // (## Second defect)
+                Node::Enum(e) => {
+                    for method in &e.methods {
+                        let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                        let qualified = format!("{}.{}", e.name, method.name);
+                        self.method_return_types.insert(qualified, ret_ty);
+                    }
+                }
                 Node::Actor(a) => {
                     for method in &a.methods {
                         let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
@@ -1576,8 +1765,7 @@ impl Lowerer {
                             .resolve_type(&simple_parser::ast::Type::Simple(s.name.clone()))
                             .unwrap_or(TypeId::ANY);
                         let mut methods_map = HashMap::new();
-                        let own: std::collections::HashSet<&str> =
-                            s.methods.iter().map(|m| m.name.as_str()).collect();
+                        let own: std::collections::HashSet<&str> = s.methods.iter().map(|m| m.name.as_str()).collect();
                         for method in &s.methods {
                             methods_map.insert(method.name.clone(), format!("{}.{}", s.name, method.name));
                         }
@@ -1753,6 +1941,11 @@ impl Lowerer {
                     Node::Const(c) => (c.name.clone(), &c.value),
                     _ => continue,
                 };
+                // Design A.5 raw data items are placed byte images, never
+                // runtime-initialized Simple globals.
+                if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
+                    continue;
+                }
                 let has_static_init = self.global_init_values.contains_key(&name)
                     || self.global_init_strings.contains_key(&name)
                     || self.global_init_arrays.contains_key(&name)
@@ -1956,14 +2149,26 @@ impl Lowerer {
         }
 
         // Pass 0.5a: Pre-register type NAMES from ALL imported modules as empty placeholders
+        // `export use m.*` counts as an import here too -- see the sibling pass.
         for item in &ast_module.items {
-            if let Node::UseStmt(use_stmt) = item {
-                let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+            match item {
+                Node::UseStmt(use_stmt) => {
+                    let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+                }
+                Node::ExportUseStmt(export_use) if !export_use.path.segments.is_empty() => {
+                    let _ = self.preregister_imported_type_names(&export_use.path, &export_use.target);
+                }
+                _ => {}
             }
         }
 
         // Pass 0.5b: Load full types from imported modules
         for item in &ast_module.items {
+            if let Node::ExportUseStmt(export_use) = item {
+                if !export_use.path.segments.is_empty() {
+                    let _ = self.load_imported_types(&export_use.path, &export_use.target);
+                }
+            }
             if let Node::UseStmt(use_stmt) = item {
                 if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
                     unresolved_import_fatal(&use_stmt.path.segments, &e)?;
@@ -2090,6 +2295,11 @@ impl Lowerer {
                     Node::Const(c) => (c.name.clone(), &c.value),
                     _ => continue,
                 };
+                // Design A.5 raw data items are placed byte images, never
+                // runtime-initialized Simple globals.
+                if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
+                    continue;
+                }
                 let has_static_init = self.global_init_values.contains_key(&name)
                     || self.global_init_strings.contains_key(&name)
                     || self.global_init_arrays.contains_key(&name)

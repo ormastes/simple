@@ -11,11 +11,8 @@ fn run_program(source: &str) -> Result<i32, String> {
     fs::write(&main_path, source).unwrap();
     interpreter::clear_module_cache();
     interpreter::clear_interpreter_state();
-    let module = simple_compiler::pipeline::module_loader::load_module_with_imports(
-        &main_path,
-        &mut HashSet::new(),
-    )
-    .map_err(|error| format!("{error:?}"))?;
+    let module = simple_compiler::pipeline::module_loader::load_module_with_imports(&main_path, &mut HashSet::new())
+        .map_err(|error| format!("{error:?}"))?;
     interpreter::set_current_file(Some(main_path.clone()));
     let result = interpreter::evaluate_module(&module.items).map_err(|error| format!("{error:?}"));
     interpreter::set_current_file(None);

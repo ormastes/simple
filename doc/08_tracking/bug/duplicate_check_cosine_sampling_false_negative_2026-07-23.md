@@ -1,7 +1,6 @@
 # Cosine duplicate sampling drops late clones
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING.
 - **Observed:** cosine mode discarded every candidate after a round-robin sample
   of 320 blocks, so renamed clones near the end of large files were never
   featureized or compared.

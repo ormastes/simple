@@ -1,0 +1,92 @@
+# @cover src/lib/nogc_sync_mut/mission_critical/domain_arena_v2.spl 80%
+# @tag: unit, mission_critical, memory, arena, compatibility
+
+use std.spec.*
+use nogc_sync_mut.mission_critical.domain_arena_v1.*
+use nogc_sync_mut.mission_critical.domain_arena_v2.*
+
+fn relaxed_test_profile_v2(quota: u64) -> RelaxedAllocationProfileV1:
+    RelaxedAllocationProfileV1(
+        schema_version: 1u16, profile_id: "render-domain", strict_default: true,
+        domain_id: 4u32, quota_bytes: quota, alignment: 8u32,
+        max_allocations_per_generation: 4u32,
+        allowed_context_mask: ARENA_CONTEXT_NORMAL,
+        forbidden_context_mask: ARENA_CONTEXT_CRITICAL_MASK, sealed: true)
+
+describe "sealed relaxed-allocation domain arena v2 compatibility":
+
+    it "rejects invalid and oversize profiles before creating an arena":
+        match DomainArenaV2.try_create(0u64, relaxed_test_profile_v2(64u64)):
+            DomainArenaV2Creation.Rejected(error):
+                expect(error.reason).to_equal(DOMAIN_ARENA_V2_REJECT_INVALID_ARENA)
+            DomainArenaV2Creation.Created(arena): expect(false).to_equal(true)
+        match DomainArenaV2.try_create(91u64, relaxed_test_profile_v2(DOMAIN_ARENA_V2_MAX_QUOTA_BYTES + 1u64)):
+            DomainArenaV2Creation.Rejected(error):
+                expect(error.reason).to_equal(DOMAIN_ARENA_V2_REJECT_OVERSIZE)
+            DomainArenaV2Creation.Created(arena): expect(false).to_equal(true)
+
+    it "keeps staging writes invisible and commits exact minted spans":
+        match DomainArenaV2.create(31u64, relaxed_test_profile_v2(32u64)):
+            DomainArenaV2Creation.Created(arena):
+                val checkpoint = arena.checkpoint()
+                var reference = DomainArenaRefV2(0u64, 0u32, 0u64, 0u64, 0u64, 0u64)
+                match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+                    DomainArenaV2Allocation.Allocated(value): reference = value
+                    DomainArenaV2Allocation.Rejected(receipt): expect(false).to_equal(true)
+                expect(arena.write_byte(reference, 0u64, 0x5Au8)).to_equal(true)
+                expect(arena.read_byte(reference, 0u64)).to_be_nil()
+                val owner = arena._owner_capability_v2()
+                expect(arena.commit(owner, checkpoint)).to_equal(true)
+                match arena.read_byte(reference, 0u64):
+                    Some(value): expect(value).to_equal(0x5Au8)
+                    nil: expect(false).to_equal(true)
+                val forged = DomainArenaRefV2(
+                    reference.arena_id, reference.domain_id, reference.generation,
+                    reference.offset_bytes, reference.size_bytes + 1u64, reference.mint)
+                expect(arena.read_byte(forged, 0u64)).to_be_nil()
+            DomainArenaV2Creation.Rejected(error): expect(false).to_equal(true)
+
+    it "clears a faulted staging generation on rollback and changes V2 bytes hash":
+        match DomainArenaV2.from_sealed_profile(32u64, relaxed_test_profile_v2(32u64)):
+            DomainArenaV2Creation.Created(arena):
+                val checkpoint = arena.checkpoint()
+                match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+                    DomainArenaV2Allocation.Allocated(reference):
+                        arena.write_byte(reference, 0u64, 0xA5u8)
+                    DomainArenaV2Allocation.Rejected(receipt): expect(false).to_equal(true)
+                val owner = arena._owner_capability_v2()
+                expect(arena.rollback(checkpoint)).to_equal(true)
+                expect(arena.cursor_bytes).to_equal(0u64)
+                val second = arena.checkpoint()
+                match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+                    DomainArenaV2Allocation.Allocated(reference):
+                        arena.write_byte(reference, 0u64, 0x11u8)
+                    DomainArenaV2Allocation.Rejected(receipt): expect(false).to_equal(true)
+                expect(arena.commit(owner, second)).to_equal(true)
+                val first_hash = domain_arena_committed_bytes_hash_v2(arena)
+                val checkpoint_two = arena.checkpoint()
+                match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+                    DomainArenaV2Allocation.Allocated(reference):
+                        arena.write_byte(reference, 0u64, 0x12u8)
+                        expect(arena.rollback(checkpoint_two)).to_equal(true)
+                    DomainArenaV2Allocation.Rejected(receipt): expect(false).to_equal(true)
+                expect(domain_arena_committed_bytes_hash_v2(arena)).to_equal(first_hash)
+                expect(domain_arena_evidence_snapshot_row_v2(first_hash)).to_contain("schema=2")
+            DomainArenaV2Creation.Rejected(error): expect(false).to_equal(true)
+
+    it "rejects a foreign owner, profile mutation, and armed publication fault":
+        match DomainArenaV2.create(44u64, relaxed_test_profile_v2(32u64)):
+            DomainArenaV2Creation.Created(arena):
+                val checkpoint = arena.checkpoint()
+                val owner = arena._owner_capability_v2()
+                arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL)
+                var foreign = owner
+                foreign.arena_id = 45u64
+                expect(arena.commit(foreign, checkpoint)).to_equal(false)
+                arena.profile.domain_id = 9u32
+                expect(arena.commit(owner, checkpoint)).to_equal(false)
+                arena.profile.domain_id = 4u32
+                expect(arena.arm_fault_once(DOMAIN_ARENA_V2_FAULT_BEFORE_PUBLICATION)).to_equal(true)
+                expect(arena.commit(owner, checkpoint)).to_equal(false)
+                expect(arena.rollback(checkpoint)).to_equal(true)
+            DomainArenaV2Creation.Rejected(error): expect(false).to_equal(true)

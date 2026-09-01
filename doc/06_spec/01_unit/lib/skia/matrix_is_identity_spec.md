@@ -20,14 +20,8 @@ Regression + detection specs for
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/skia/matrix_is_identity_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
-
-# Matrix3x3.is_identity
 
 Regression + detection specs for
 `doc/08_tracking/bug/skia_matrix3x3_missing_is_identity_2026-07-20.md`.
@@ -45,47 +39,27 @@ Regression + detection specs for
 
 #### returns true for the identity and for identity-equivalent factories
 
-- Verify: returns true for the identity and for identity-equivalent factories
-   - Expected: Matrix3x3.identity().is_identity() is true
-   - Expected: Matrix3x3.scale(sx: 1.0, sy: 1.0).is_identity() is true
-   - Expected: Matrix3x3.rotate_degrees(deg: 0.0).is_identity() is true
-   - Expected: Matrix3x3.identity().mul(Matrix3x3.identity()).is_identity() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-SKIA_MATRIX_IS_IDENTITY-001
-step("Verify: returns true for the identity and for identity-equivalent factories")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(Matrix3x3.identity().is_identity()).to_equal(true)
-expect(Matrix3x3.scale(sx: 1.0, sy: 1.0).is_identity()).to_equal(true)
-expect(Matrix3x3.rotate_degrees(deg: 0.0).is_identity()).to_equal(true)
-expect(Matrix3x3.identity().mul(Matrix3x3.identity()).is_identity()).to_equal(true)
+# @req REQ-SSPEC-UNIT
 ```
 
 </details>
 
 #### returns false for a translation
 
-- Verify: returns false for a translation
-   - Expected: Matrix3x3.translate(tx: 10.0, ty: 20.0).is_identity() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-SKIA_MATRIX_IS_IDENTITY-001
-step("Verify: returns false for a translation")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(Matrix3x3.translate(tx: 10.0, ty: 20.0).is_identity()).to_equal(false)
 ```
 
@@ -98,27 +72,20 @@ expect(Matrix3x3.translate(tx: 10.0, ty: 20.0).is_identity()).to_equal(false)
 
 #### rejects a matrix perturbed in any single one of the nine slots
 
-- Verify: rejects a matrix perturbed in any single one of the nine slots
-   - Expected: missed equals `0)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-SKIA_MATRIX_IS_IDENTITY-001
-step("Verify: rejects a matrix perturbed in any single one of the nine slots")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var missed = 0
 var slot = 0
 while slot < 9:
     if _perturbed(slot).is_identity():
         missed = missed + 1
     slot = slot + 1
-expect(missed).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(missed).to_equal(0)
 ```
 
 </details>
@@ -139,36 +106,56 @@ expect(missed).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `3fdc62c79ac2f1dcbc4736a83c7f916545a4b291f6affc37a434be9ceb6e6af2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `8791a4bbd733554a196424b2a34673997deb44e8062eaad9c46abee9fe2ae084`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `3fdc62c79ac2f1dcbc4736a83c7f916545a4b291f6affc37a434be9ceb6e6af2`.
+Source SHA-256: `8791a4bbd733554a196424b2a34673997deb44e8062eaad9c46abee9fe2ae084`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `3fdc62c79ac2f1dcbc4736a83c7f916545a4b291f6affc37a434be9ceb6e6af2`  
+Source SHA-256: `8791a4bbd733554a196424b2a34673997deb44e8062eaad9c46abee9fe2ae084`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 89/100
 source: test/01_unit/lib/skia/matrix_is_identity_spec.spl
 mirror: doc/06_spec/01_unit/lib/skia/matrix_is_identity_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 7 blockers: 0
+  narrative=100 structure=70 oracle=90
+  traceability=100 evidence=100 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/skia/matrix_is_identity_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/lib/skia/matrix_is_identity_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/skia/matrix_is_identity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/lib/skia/matrix_is_identity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/skia/matrix_is_identity_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/lib/skia/matrix_is_identity_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/skia/matrix_is_identity_spec.spl:57:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'returns true for the identity and for identity-equivalent factories' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/lib/skia/matrix_is_identity_spec.spl:65:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'returns false for a translation' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/lib/skia/matrix_is_identity_spec.spl:70:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'rejects a matrix perturbed in any single one of the nine slots' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->

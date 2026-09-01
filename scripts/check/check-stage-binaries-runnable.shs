@@ -60,8 +60,18 @@
 #    artifact is still exercised rather than silently skipped. `--rev <r>`
 #    forces committed content for ALL paths, which is how a plumbing-built
 #    commit that was never checked out gets checked.
-# 3. For each binary, run each supported command on a three-line hello world
-#    in a private temp directory, under `timeout` when available.
+# 3. FORMAT CHECK before any exec (incident 2026-08-31, deploy clobber:
+#    darwin Mach-O blobs at the bare stage paths probed as "fail,rc=2" and
+#    read like a crashing compiler). Magic bytes decide first:
+#      * foreign format at a BARE/unscoped path (or in this host's own triple
+#        dir) = OFFENDER, reason wrong-architecture-...(deploy-clobber,<fmt>);
+#      * foreign format correctly scoped under a NON-host triple dir = SKIP,
+#        counted and named separately, NEVER counted as passing;
+#      * scripts, unknown formats, and host-native formats proceed to exec.
+#    If skips leave ZERO executable binaries and no offenders, the verdict is
+#    ERROR — nothing was checked, never PASS.
+# 3b. For each remaining binary, run each supported command on a three-line
+#    hello world in a private temp directory, under `timeout` when available.
 # 4. Take the exit status DIRECTLY into a variable on the line after the
 #    invocation. NEVER through a pipe: a pipeline's `$?` is the LAST
 #    command's status, and this repo has produced false greens exactly that
@@ -103,6 +113,8 @@
 # Runnability is a property of an artifact, not of a diff -- the incident
 # binary was untouched by the push that would have shipped it.
 
+# Recursion guard: refuse to run at SIMPLE_SHS_DEPTH >= SIMPLE_SHS_MAX_DEPTH (exit 3).
+case "$0" in */*) . "${0%/*}/../lib/recursion_guard.shs" ;; *) . ./scripts/lib/recursion_guard.shs ;; esac
 set -u
 
 SELF_NAME='check-stage-binaries-runnable'
@@ -261,6 +273,67 @@ probe_binary() {
 }
 
 # ---------------------------------------------------------------------------
+# Artifact-format classification (incident 2026-08-31: darwin Mach-O blobs at
+# the BARE stage paths were classified as "fail,rc=2" -- exec failure -- which
+# reads as a crashing compiler and misled an investigation. They are not
+# crashing; Linux cannot exec a Mach-O at all. Classify format FIRST.)
+#
+# artifact_format <file> -> elf-x86_64 | elf-aarch64 | elf-other | macho |
+#                           pe | script | unknown
+# ---------------------------------------------------------------------------
+artifact_format() {
+    _magic=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
+    case "$_magic" in
+        7f454c46)
+            _mach=$(od -An -tx1 -j18 -N2 "$1" 2>/dev/null | tr -d ' \n')
+            case "$_mach" in
+                3e00|003e) printf 'elf-x86_64' ;;
+                b700|00b7) printf 'elf-aarch64' ;;
+                *)         printf 'elf-other' ;;
+            esac ;;
+        cffaedfe|cefaedfe|feedface|feedfacf|cafebabe|bebafeca) printf 'macho' ;;
+        4d5a*)   printf 'pe' ;;
+        2321*)   printf 'script' ;;
+        *)       printf 'unknown' ;;
+    esac
+}
+
+# Format this host can exec natively. `script` and `unknown` are always
+# probed (unknown falls through to a real exec attempt -- conservative).
+host_native_format() {
+    case "$(uname -s)-$(uname -m)" in
+        Linux-x86_64)  printf 'elf-x86_64' ;;
+        Linux-aarch64) printf 'elf-aarch64' ;;
+        Darwin-*)      printf 'macho' ;;
+        FreeBSD-amd64|FreeBSD-x86_64) printf 'elf-x86_64' ;;
+        *)             printf 'unknown' ;;
+    esac
+}
+
+# This host's stage-triple directory name ('' when unrecognized).
+host_triple() {
+    case "$(uname -s)-$(uname -m)" in
+        Linux-x86_64)  printf 'x86_64-unknown-linux-gnu' ;;
+        Linux-aarch64) printf 'aarch64-unknown-linux-gnu' ;;
+        Darwin-arm64|Darwin-aarch64) printf 'aarch64-apple-darwin-macho' ;;
+        Darwin-x86_64) printf 'x86_64-apple-darwin-macho' ;;
+        FreeBSD-amd64|FreeBSD-x86_64) printf 'x86_64-unknown-freebsd' ;;
+        *) printf '' ;;
+    esac
+}
+
+# path_triple <tracked-path> -> the triple subdirectory the artifact sits in,
+# or '' when the path is BARE (unscoped). A triple dir looks like
+# `arch-vendor-os[-abi]`; a bare stage dir (`stage3`) has no dash.
+path_triple() {
+    _parent=$(basename "$(dirname "$1")")
+    case "$_parent" in
+        *-*-*) printf '%s' "$_parent" ;;
+        *)     printf '' ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # list_stage_binaries <root> -- tracked `simple` files under bootstrap/
 # ---------------------------------------------------------------------------
 list_stage_binaries() {
@@ -277,12 +350,17 @@ SCAN_BINS=0
 SCAN_RUNS=0
 SCAN_BAD=0
 SCAN_BADNAMES=''
+SCAN_SKIP=0
+SCAN_SKIPNAMES=''
 SCAN_ERR=''
 
 scan_tree() {
     _root="$1"
     SCAN_BINS=0; SCAN_RUNS=0; SCAN_BAD=0; SCAN_BADNAMES=''; SCAN_ERR=''
+    SCAN_SKIP=0; SCAN_SKIPNAMES=''
     PB_RUNS=0; PB_BAD=0; PB_BADNAMES=''
+    _host_fmt=$(host_native_format)
+    _host_triple=$(host_triple)
 
     _paths=$(list_stage_binaries "$_root")
     if [ -z "$_paths" ]; then
@@ -319,6 +397,34 @@ scan_tree() {
             continue
         fi
 
+        # Format check BEFORE any exec attempt. A foreign-format binary is not
+        # a crashing compiler -- this host cannot exec it at all -- and
+        # classifying it as "crashed/failed" already misled one investigation.
+        _fmt=$(artifact_format "$_exe")
+        _ptriple=$(path_triple "$_p")
+        if [ "$_fmt" != 'script' ] && [ "$_fmt" != 'unknown' ] \
+            && [ "$_host_fmt" != 'unknown' ] && [ "$_fmt" != "$_host_fmt" ]; then
+            if [ -n "$_ptriple" ] && [ "$_ptriple" != "$_host_triple" ]; then
+                # Correctly triple-scoped artifact for another platform: this
+                # host legitimately cannot run it. SKIP -- counted and named
+                # separately, NEVER counted as passing.
+                SCAN_SKIP=$((SCAN_SKIP + 1))
+                SCAN_SKIPNAMES="$SCAN_SKIPNAMES $_p:foreign-triple($_fmt)"
+                [ "$CFG_VERBOSE" -eq 1 ] && printf '%s: skipping %s (%s, scoped for %s)\n' \
+                    "$SELF_NAME" "$_p" "$_fmt" "$_ptriple"
+                continue
+            fi
+            # Foreign format at a BARE (unscoped) path, or in this host's own
+            # triple dir: a deploy clobber, an offender with an honest reason.
+            SCAN_BAD=$((SCAN_BAD + 1))
+            if [ -n "$_ptriple" ]; then
+                SCAN_BADNAMES="$SCAN_BADNAMES $_p:wrong-architecture-in-host-triple-dir(deploy-clobber,$_fmt)"
+            else
+                SCAN_BADNAMES="$SCAN_BADNAMES $_p:wrong-architecture-for-host-at-unscoped-path(deploy-clobber,$_fmt)"
+            fi
+            continue
+        fi
+
         printf '%s: probing %s\n' "$SELF_NAME" "$_p"
         probe_binary "$_p" "$_exe" "$_wd"
         SCAN_BINS=$((SCAN_BINS + 1))
@@ -343,6 +449,11 @@ scan_tree() {
 #  4 must-FAIL : a tracked-but-not-executable artifact
 #  5 non-vacuity: an empty set yields 0 executed, forcing the caller to ERROR
 #  6 must-FAIL : a fake whose --version itself crashes
+#  7 must-FAIL : a foreign-format blob at a BARE stage path, named as
+#                wrong-architecture (deploy clobber), never as crashed
+#  8 must-SKIP : a foreign-format blob correctly scoped in a foreign-triple
+#                subdir -- a named skip, not an offender, not a pass
+#  9 must-ERROR: only foreign-triple scoped artifacts -> 0 executed, ERROR
 # ---------------------------------------------------------------------------
 make_fake_repo() { # <dir> <script-body>
     _d="$1"; _body="$2"
@@ -403,6 +514,77 @@ kill -SEGV $$
     _case fixture2_segv_on_compile "$_segv" 1
     _case fixture3_nonzero_exit "$_exit1" 1
     _case fixture6_version_crashes "$_versegv" 1
+
+    # A binary format this host cannot exec: Mach-O magic on an ELF host,
+    # ELF magic on a Mach-O host. Written as raw magic bytes.
+    write_foreign_blob() { # <path>
+        if [ "$(host_native_format)" = 'macho' ]; then
+            printf '\177ELF\002\001\001' >"$1"
+        else
+            printf '\317\372\355\376\014\000\000\001' >"$1"
+        fi
+        chmod +x "$1"
+    }
+    _foreign_triple='aarch64-apple-darwin-macho'
+    [ "$(host_triple)" = "$_foreign_triple" ] && _foreign_triple='x86_64-unknown-linux-gnu'
+
+    # 7: must-FAIL -- foreign-format blob at a BARE stage path (the 2026-08-31
+    # deploy-clobber incident's exact shape), named as wrong-architecture, and
+    # NEVER as crashed. A good native script rides along at another stage so
+    # the run is non-vacuous.
+    _total=$((_total + 1))
+    _d="$TMPROOT/fx_foreign_bare"
+    make_fake_repo "$_d" "$_good"
+    mkdir -p "$_d/bootstrap/stage8"
+    write_foreign_blob "$_d/bootstrap/stage8/simple"
+    ( cd "$_d" && git add -A >/dev/null 2>&1 )
+    scan_tree "$_d"
+    case "$SCAN_BADNAMES" in
+        *wrong-architecture-for-host-at-unscoped-path*)
+            if [ -z "$SCAN_ERR" ] && [ "$SCAN_BAD" -eq 1 ] && [ "$SCAN_SKIP" -eq 0 ] \
+                && [ "$SCAN_RUNS" -gt 0 ]; then
+                _pass=$((_pass + 1))
+            else
+                _bad="$_bad fixture7_foreign_bare(bad=$SCAN_BAD,skip=$SCAN_SKIP,runs=$SCAN_RUNS,err=$SCAN_ERR)"
+            fi ;;
+        *)
+            _bad="$_bad fixture7_foreign_bare(reason-not-wrong-architecture:$SCAN_BADNAMES)" ;;
+    esac
+
+    # 8: must-SKIP -- foreign-format blob correctly scoped in a foreign-triple
+    # subdir: counted and named as a skip, never an offender, never a pass
+    # contribution.
+    _total=$((_total + 1))
+    _d="$TMPROOT/fx_foreign_scoped"
+    make_fake_repo "$_d" "$_good"
+    mkdir -p "$_d/bootstrap/stage8/$_foreign_triple"
+    write_foreign_blob "$_d/bootstrap/stage8/$_foreign_triple/simple"
+    ( cd "$_d" && git add -A >/dev/null 2>&1 )
+    scan_tree "$_d"
+    if [ -z "$SCAN_ERR" ] && [ "$SCAN_BAD" -eq 0 ] && [ "$SCAN_SKIP" -eq 1 ] \
+        && [ "$SCAN_RUNS" -gt 0 ]; then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture8_foreign_scoped(bad=$SCAN_BAD,skip=$SCAN_SKIP,runs=$SCAN_RUNS,err=$SCAN_ERR)"
+    fi
+
+    # 9: non-vacuity under skips -- ONLY foreign-triple scoped artifacts leaves
+    # zero executable binaries: 0 runs + 0 offenders, forcing ERROR, never PASS.
+    _total=$((_total + 1))
+    _d="$TMPROOT/fx_all_skipped"
+    mkdir -p "$_d/bootstrap/stage8/$_foreign_triple"
+    ( cd "$_d" && git init -q . >/dev/null 2>&1 \
+        && git config user.email fx@example.invalid \
+        && git config user.name fx )
+    write_foreign_blob "$_d/bootstrap/stage8/$_foreign_triple/simple"
+    ( cd "$_d" && git add -A >/dev/null 2>&1 )
+    scan_tree "$_d"
+    if [ -z "$SCAN_ERR" ] && [ "$SCAN_BAD" -eq 0 ] && [ "$SCAN_SKIP" -eq 1 ] \
+        && [ "$SCAN_RUNS" -eq 0 ]; then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture9_all_skipped(bad=$SCAN_BAD,skip=$SCAN_SKIP,runs=$SCAN_RUNS,err=$SCAN_ERR)"
+    fi
 
     # 4: tracked but not executable -> offender, never a skip.
     _total=$((_total + 1))
@@ -481,7 +663,7 @@ if ! selftest; then
 fi
 CFG_REV="$_saved_rev"
 if [ "$CFG_SELFTEST_ONLY" -eq 1 ]; then
-    verdict_pass "selftest only, no scan requested (6 fixture(s) correct)"
+    verdict_pass "selftest only, no scan requested (9 fixture(s) correct)"
 fi
 
 printf '%s: scanning %s (rev=%s)\n' "$SELF_NAME" "$CFG_ROOT" "${CFG_REV:-<working tree>}"
@@ -492,13 +674,19 @@ scan_tree "$CFG_ROOT"
 # ---------------------------------------------------------------------------
 [ -z "$SCAN_ERR" ] || verdict_error "$SCAN_ERR"
 
-if [ "$SCAN_RUNS" -eq 0 ]; then
-    verdict_error "0 stage binaries were executed under $CFG_ROOT/bootstrap"
+_skipnote=''
+if [ "$SCAN_SKIP" -gt 0 ]; then
+    _sn=$(printf '%s' "$SCAN_SKIPNAMES" | tr ' ' '\n' | grep -v '^$' | head -"$CFG_MAX_NAMES" | tr '\n' ' ')
+    _skipnote=" ($SCAN_SKIP foreign-triple scoped artifact(s) skipped, not counted as passing:$_sn)"
+fi
+
+if [ "$SCAN_RUNS" -eq 0 ] && [ "$SCAN_BAD" -eq 0 ]; then
+    verdict_error "0 stage binaries were executed under $CFG_ROOT/bootstrap$_skipnote"
 fi
 
 if [ "$SCAN_BAD" -gt 0 ]; then
     _names=$(printf '%s' "$SCAN_BADNAMES" | tr ' ' '\n' | grep -v '^$' | head -"$CFG_MAX_NAMES" | tr '\n' ' ')
-    verdict_fail "$SCAN_RUNS invocation(s) executed across $SCAN_BINS binary(ies), $SCAN_BAD crashed/failed: $_names"
+    verdict_fail "$SCAN_RUNS invocation(s) executed across $SCAN_BINS binary(ies), $SCAN_BAD crashed/failed/wrong-arch: $_names$_skipnote"
 fi
 
-verdict_pass "$SCAN_RUNS invocation(s) executed across $SCAN_BINS binary(ies), 0 crashes"
+verdict_pass "$SCAN_RUNS invocation(s) executed across $SCAN_BINS binary(ies), 0 crashes$_skipnote"

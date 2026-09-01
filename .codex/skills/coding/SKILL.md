@@ -159,16 +159,6 @@ items.map(\x:
 user?.name ?? "Anonymous"      # Optional chaining + nil coalescing
 ```
 
-`nil` is absence, like an empty `Option`, not a showable value. Use `if val x = maybe_value`, `.?`, `?.`, or `??` before field access, method calls, or user-facing output.
-
-Compiler backend code must treat `nil` metadata as invalid output. Do not emit
-or cache `nil` as a target type. For LLVM result positions, wrap local/type
-metadata with `valid_llvm_type(...)`; `simple lint` reports `LLVM001` for raw
-`ret_ty`/`phi_ty = self.get_local_type(...)` in LLVM emitters. For backend
-function signatures, guard `sig.return_type == nil` before mapping it; use the
-destination local type when a call has a destination and explicit `void`/backend
-void only for no-result calls.
-
 ### Operators
 
 ```simple
@@ -207,7 +197,6 @@ alias Optional = Option        # Class alias
 | `?` in names | Not allowed — `?` is operator only; use `.?` over `is_*` predicates |
 | `:=` walrus shorthand | Use `val name = expr` until real `:=` parser/runtime tests pass |
 | Native pipe-forward dispatch | Use direct calls or run native tests with `SIMPLE_NO_STUB_FALLBACK=1` |
-| `nil` display/field access | Unwrap or default first; `nil` is absence, not an object |
 
 ## Concurrency API Map
 
@@ -223,6 +212,25 @@ execution model:
 | `multicore_green_spawn` / `multicore_green_spawn_sliced` / `multicore_green_safepoint` / `multicore_green_set_parallelism` / `multicore_green_parallelism` / `multicore_green_submitted_count` / `multicore_green_completed_count` / `multicore_green_pending_count` / `multicore_green_busy_count` / `multicore_green_blocked_count` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` / `MulticoreGreenSliceResult` / `MulticoreGreenSlicedHandle.used_runtime_pool()` / `MulticoreGreenSlicedHandle.ran_inline_fallback()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple bounded-worker facade over runtime-seed `rt_pool_*` support; cross-language profile rows require runtime-pool acceptance through `used_runtime_pool()` and treat `ran_inline_fallback()` as non-M:N. Public counter helpers expose submitted/completed progress and queue/worker state; they do not prove ordinary-closure preemption. `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work; `multicore_green_safepoint` is an explicit runtime/compiler poll hook, not automatic preemption for ordinary closures |
 | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Lower-level task facade that reuses `multicore_green_spawn` for runtime-pool execution and inline fallback; not the named cross-language M:N profile row |
 | `channel_new` / `channel_from_id` | `src/lib/nogc_sync_mut/concurrent/channel.spl` re-exported through `std.concurrent.channel` | Native compatibility channel: validated inline transfer packets, capacity 256, and fail-closed full/closed/non-transferable sends. Heap graphs require future typed frozen/owned/encoded payload support. |
+
+### SimpleRing/task/profile V1 foundation
+
+The V1 async foundation is a contract and bounded-lifecycle layer, not a new
+executor. Keep these surfaces distinct from the Future/green/thread APIs above:
+
+| API/contract | Path | Model and current boundary |
+|---|---|---|
+| `SimpleRing<Op, Cpl>` | `src/lib/nogc_async_mut/async_ring/simple_ring.spl` | Fixed-capacity, single-owner lifecycle with metadata/payload leases, batches, cancellation state, and bounded telemetry; no scheduler or native provider |
+| `RingToken`, `StacklessAsyncTask`, `AsyncTaskFrame`, `TaskContext`, `TaskPollResult` | `src/lib/common/contracts/execution/simple_ring_async_v1.spl` | Versioned ring/task values and callable nonblocking poll contract; not compiler-generated lowering |
+| `AsyncProfile` V1 presets | `src/lib/common/contracts/execution/async_profile_v1.spl` | Configuration, fail-closed validation, canonical text, and fingerprints; mission presets do not implement static storage or a migrated executor |
+| Software provider, hosted mission adapter, trace ring | `src/lib/nogc_async_mut/async_ring`, `src/lib/nogc_async_mut_noalloc/async/async_trace_ring.spl` | Bounded reference mechanisms whose explicit proof flags do not claim native mapping, allocation freedom, or link-time-static placement |
+
+The V1 foundation does not make `Future`, `HostFuture`, `cooperative_green_spawn`,
+`multicore_green_spawn`, `task_spawn`, or `thread_spawn` canonical. Adapters
+must preserve each surface's blocking, fallback, ownership, cancellation, and
+completion facts before it can be used as V1 evidence. Do not claim implicit
+await/compiler frame lowering, native `io_uring`, mission static storage, or
+migrated executors without executable gates.
 
 Use `cooperative_green_spawn` for lightweight cooperative scheduling tests, and
 `cooperative_green_spawn_value` when a direct-run benchmark needs to exercise
@@ -331,7 +339,21 @@ use lib.common.text            # Also works (std -> lib internally)
 
 ## Code Quality
 
-- **One App, One Host Interface:** When coding `src/app/` or `src/os/apps/`, write once for all OSes. Platform difference lives only behind HAL (SOSIX, CompositorBackend, DedicatedHost). Never add per-OS app files, platform conditionals in app logic, or adapter copies in app code. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - NEVER over-engineer — only make requested changes
 - NEVER add unused code — delete completely
 - STUB001 = hard fail — no `pass_todo` in production code
+
+## Implementation Language Policy (Pure Simple First)
+
+- Never write a C version of a fix/feature when pure Simple can do it. Only the
+  Rust seed and the 3 bootstrap scripts are sanctioned non-Simple code; the C
+  runtime is a boundary, not a place for logic.
+- Bootstrap-required C keeps a pure-Simple twin, verified by the dual-run
+  shadow gate `scripts/check/check-dual-run-shadow.shs`.
+- HAL/low-level code minimizes asm: typed bitfield register views + MMIO-typed
+  access > no-reorder/no-elide/exact-layout tags or strict mode > compiler
+  intrinsics > inline asm only for architecturally irreplaceable ops (boot
+  entry, CSR/MSR, context switch, interrupt entry, ISA-required
+  barriers/atomics).
+
+Full policy: `doc/07_guide/os/hal/pure_simple_hal.md`.

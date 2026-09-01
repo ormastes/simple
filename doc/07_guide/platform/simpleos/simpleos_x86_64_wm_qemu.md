@@ -465,11 +465,8 @@ and
 
 The canonical executable scenario and manual now fail closed through combined
 owner `scripts/check/check-simpleos-toolchain-desktop-boot.shs`; that production
-wrapper now implements canonical Stage-4 provenance admission, fail-closed
-artifact/receipt preflight, and a hermetic 16-case validator self-test. It does
-not claim live acceptance: the canonical fullscreen owner still uses
-`-net none`, terminates QEMU after capture, and `gui_entry_desktop.spl` has no
-cooperative SSHD poll. The remaining B-DESKTOP-LIVE implementation must preserve one
+wrapper does not exist yet and remains B-DESKTOP-LIVE. After implementation it
+must preserve one
 canonical `gui_entry_desktop.spl` OVMF CODE/per-run VARS/GRUB QEMU lifetime,
 bind `[desktop-gui]`, `[production-readiness]`, `[scanout-evidence]`, and
 framebuffer proof to the admitted kernel/image, then run the embedded toolchain

@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/gpu/engine2d/sffi_cuda.spl"
+
+declarations=$(grep -c '^[[:space:]]*extern fn rt_\(cuda\|engine2d\)_' "$owner")
+if [ "$declarations" -ne 23 ]; then
+    echo "Engine2D CUDA extern inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_(cuda|engine2d)_/ { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every Engine2D CUDA declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /unsafe\(capabilities: \[.*ffi.*\]\):[[:space:]]*$/ {
+        unsafe_indent = indent($0)
+        inside_unsafe = 1
+        next
+    }
+    inside_unsafe && NF && indent($0) <= unsafe_indent { inside_unsafe = 0 }
+    /rt_(cuda|engine2d)_[A-Za-z0-9_]+\(/ && !/^[[:space:]]*extern fn / && !inside_unsafe {
+        print "unscoped Engine2D CUDA call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$owner"
+
+grep -q '@unsafe(reason: "CUDA dispatch exposes raw generationless handles' "$owner"
+
+# Generic all-i64 calls cannot implement CUDA out-parameter contracts.
+if grep -q 'call0("cuInit")\|call0("cuDeviceGetCount")\|call2("cuCtxCreate"\|call1("cuMemAlloc"' "$owner"; then
+    echo "Engine2D CUDA dynamic path misuses a generic call for an out-parameter ABI" >&2
+    exit 1
+fi
+grep -q 'call1("cuInit", 0)' "$owner"
+grep -q 'case Dynamic: false' "$owner"
+
+# These six declarations have no owned implementation. Keep them visible and
+# fail closed until generated provider admission supplies exact symbols.
+for symbol in rt_cuda_shutdown rt_engine2d_pack_args_4 rt_engine2d_pack_args_8 rt_engine2d_upload_pixels rt_engine2d_download_pixels rt_engine2d_upload_host_buf; do
+    definitions=$(rg -l "(fn|int64_t|bool) $symbol\\b" "$root/src/runtime" "$root/src/compiler_rust/runtime/src" --glob '*.{c,cc,cpp,rs}' | wc -l)
+    if [ "$definitions" -ne 0 ]; then
+        echo "new provider for $symbol requires typed ABI review" >&2
+        exit 1
+    fi
+done
+
+grep -q 'count > pixels.len()' "$owner"
+grep -q 'byte_size % 4 != 0 or byte_size / 4 > pixels.len()' "$owner"
+grep -q 'byte_size % 4 != 0 or byte_size / 4 > host_buf.len()' "$owner"
+
+echo "Engine2D CUDA SFFI contract audit: PASS (23 unsafe declarations; generic out-parameter calls removed; 6 symbols unbacked)"

@@ -1,0 +1,96 @@
+# @req REQ-001 REQ-003 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/kernel/lifecycle/device_mapping_resources.spl 80%
+# @tag: unit, simpleos, kernel, lifecycle, device, mmio
+
+use std.spec.*
+use os.kernel.lifecycle.device_mapping_resources.*
+
+describe "device mapping resource lifecycle":
+    it "reserves before mapping and commits immutable mapping provenance":
+        device_mapping_resources_reset_for_test()
+        val slot = device_mapping_resource_reserve(7u64, 0x000102u64,
+            4u8, 0x1800u64)
+        expect(slot >= 0).to_be(true)
+        val reserved = device_mapping_resource_at(slot.to_u64()).unwrap()
+        expect(reserved.state).to_equal(DEVICE_MAPPING_RESERVED)
+        expect(reserved.bdf).to_equal(0x000102u64)
+        expect(reserved.bar_index).to_equal(4u8)
+        expect(device_mapping_resource_commit(slot.to_u64(), 7u64,
+            0x800123u64, 0x800000u64, 0x2000u64,
+            0x120000000u64)).to_be(true)
+        val live = device_mapping_resource_find(7u64, 0x800123u64,
+            0x1800u64).unwrap()
+        expect(live.slot).to_equal(slot.to_u64())
+        expect(live.map_start).to_equal(0x800000u64)
+        expect(live.map_len).to_equal(0x2000u64)
+        expect(live.physical_page).to_equal(0x120000000u64)
+
+    it "rejects invalid reservations and wrong-owner transitions":
+        device_mapping_resources_reset_for_test()
+        expect(device_mapping_resource_reserve(1u64, 0u64, 6u8,
+            1u64)).to_equal(-1)
+        expect(device_mapping_resource_reserve(1u64, 0u64, 0u8,
+            0u64)).to_equal(-1)
+        val slot = device_mapping_resource_reserve(1u64, 0x10u64, 0u8,
+            4096u64).to_u64()
+        expect(device_mapping_resource_commit(slot, 2u64, 0x800000u64,
+            0x800000u64, 4096u64, 0x90000000u64)).to_be(false)
+        expect(device_mapping_resource_cancel(slot, 2u64)).to_be(false)
+        expect(device_mapping_resource_cancel(slot, 1u64)).to_be(true)
+
+    it "finds only an exact owner address and requested length":
+        device_mapping_resources_reset_for_test()
+        val slot = device_mapping_resource_reserve(3u64, 0x20u64, 2u8,
+            100u64).to_u64()
+        expect(device_mapping_resource_commit(slot, 3u64, 0x900010u64,
+            0x900000u64, 4096u64, 0xA0000000u64)).to_be(true)
+        expect(device_mapping_resource_find(4u64, 0x900010u64,
+            100u64) == nil).to_be(true)
+        expect(device_mapping_resource_find(3u64, 0x900010u64,
+            99u64) == nil).to_be(true)
+        expect(device_mapping_resource_find(3u64, 0x900000u64,
+            100u64) == nil).to_be(true)
+        expect(device_mapping_resource_find(3u64, 0x900010u64,
+            100u64) != nil).to_be(true)
+
+    it "retires live mappings but never reserved or foreign slots":
+        device_mapping_resources_reset_for_test()
+        val slot = device_mapping_resource_reserve(5u64, 0x30u64, 1u8,
+            4096u64).to_u64()
+        expect(device_mapping_resource_retire(slot, 5u64)).to_be(false)
+        expect(device_mapping_resource_commit(slot, 5u64, 0xA00000u64,
+            0xA00000u64, 4096u64, 0xB0000000u64)).to_be(true)
+        expect(device_mapping_resource_owner_has_any(5u64)).to_be(true)
+        expect(device_mapping_resource_retire(slot, 6u64)).to_be(false)
+        expect(device_mapping_resource_retire(slot, 5u64)).to_be(true)
+        expect(device_mapping_resource_owner_has_any(5u64)).to_be(false)
+        expect(device_mapping_resource_at(slot) == nil).to_be(true)
+
+    it "keeps release transactional until explicit finish":
+        device_mapping_resources_reset_for_test()
+        val slot = device_mapping_resource_reserve(8u64, 0x40u64, 4u8,
+            4096u64).to_u64()
+        expect(device_mapping_resource_commit(slot, 8u64, 0xB00000u64,
+            0xB00000u64, 4096u64, 0xC0000000u64)).to_be(true)
+        expect(device_mapping_resource_begin_release(slot, 9u64)).to_be(false)
+        expect(device_mapping_resource_begin_release(slot, 8u64)).to_be(true)
+        expect(device_mapping_resource_find(8u64, 0xB00000u64,
+            4096u64) == nil).to_be(true)
+        expect(device_mapping_resource_abort_release(slot, 8u64)).to_be(true)
+        expect(device_mapping_resource_find(8u64, 0xB00000u64,
+            4096u64) != nil).to_be(true)
+        expect(device_mapping_resource_begin_release(slot, 8u64)).to_be(true)
+        expect(device_mapping_resource_finish_release(slot, 8u64)).to_be(true)
+        expect(device_mapping_resource_owner_has_any(8u64)).to_be(false)
+
+    it "fails closed when every ownership slot is reserved":
+        device_mapping_resources_reset_for_test()
+        var index: u64 = 0u64
+        var reserved: u64 = 0u64
+        while index < MAX_DEVICE_MAPPING_RESOURCES:
+            if device_mapping_resource_reserve(index, index, 0u8, 1u64) >= 0:
+                reserved = reserved + 1u64
+            index = index + 1u64
+        expect(reserved).to_equal(MAX_DEVICE_MAPPING_RESOURCES)
+        expect(device_mapping_resource_reserve(999u64, 0u64, 0u8,
+            1u64)).to_equal(-1)

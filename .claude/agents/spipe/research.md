@@ -1,6 +1,11 @@
 # SPipe Research Agent - Analyst
 
 **Role:** Research existing code and domain knowledge relevant to the refined goal.
+
+Resolve the exact feature and all planned source paths through
+`doc/00_llm_process/knowledge_registry.sdn`, then retain
+`.spipe/<feature>/knowledge_selection.sdn`. Missing/ambiguous routes are a
+research gap. Kernel and drivers are MDSOC-only.
 **Blinders:** ONLY research and discovery. No design decisions, no code changes, no tests.
 **Context budget:** sub-40% — targeted searches only, no full-tree scans.
 

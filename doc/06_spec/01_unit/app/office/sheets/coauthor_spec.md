@@ -20,7 +20,7 @@ Office sheets live co-authoring spec.
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/office/sheets/coauthor_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Office sheets live co-authoring spec.
@@ -39,13 +39,18 @@ peers edited (the side merged LAST wins).
 
 #### starts a new session at revision 0
 
+- starts a new session at revision 0
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("starts a new session at revision 0")
 val session = coauthor_new(coauthor_fixture(), "alice")
 assert_equal(coauthor_revision(session), 0)
 ```
@@ -54,13 +59,18 @@ assert_equal(coauthor_revision(session), 0)
 
 #### bumps the revision by 1 per local edit
 
+- bumps the revision by 1 per local edit
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("bumps the revision by 1 per local edit")
 var session = coauthor_new(coauthor_fixture(), "alice")
 session = coauthor_local_edit(session, "C1", "first")
 assert_equal(coauthor_revision(session), 1)
@@ -76,13 +86,18 @@ assert_equal(cell_display_text(session.sheet.get_cell("D1")), "second")
 
 #### broadcasts only the local edits as ops vs the shared base
 
+- broadcasts only the local edits as ops vs the shared base
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("broadcasts only the local edits as ops vs the shared base")
 val base = coauthor_fixture()
 var session = coauthor_new(coauthor_fixture(), "alice")
 session = coauthor_local_edit(session, "C1", "alice-edit")
@@ -95,13 +110,18 @@ assert_equal(lines[0], "op|set|C1|alice-edit")
 
 #### advances the revision by the number of ops merged
 
+- advances the revision by the number of ops merged
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("advances the revision by the number of ops merged")
 val base = coauthor_fixture()
 var alice = coauthor_new(coauthor_fixture(), "alice")
 var bob = coauthor_new(coauthor_fixture(), "bob")
@@ -119,13 +139,18 @@ assert_equal(coauthor_revision(alice), 2)
 
 #### two peers exchanging disjoint edits converge to identical sheets
 
+- two peers exchanging disjoint edits converge to identical sheets
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("two peers exchanging disjoint edits converge to identical sheets")
 val base = coauthor_fixture()
 var alice = coauthor_new(coauthor_fixture(), "alice")
 var bob = coauthor_new(coauthor_fixture(), "bob")
@@ -170,13 +195,18 @@ assert_equal(coauthor_revision(bob), 2)
 
 #### the side merged LAST wins on a cell both peers edited
 
+- the side merged LAST wins on a cell both peers edited
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("the side merged LAST wins on a cell both peers edited")
 val base = coauthor_fixture()
 var alice = coauthor_new(coauthor_fixture(), "alice")
 var bob = coauthor_new(coauthor_fixture(), "bob")
@@ -199,13 +229,18 @@ assert_equal(coauthor_revision(alice), 2)
 
 #### probe: merging zero ops leaves the cell and revision alone (deliberate check)
 
+- probe: merging zero ops leaves the cell and revision alone (deliberate check)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("probe: merging zero ops leaves the cell and revision alone (deliberate check)")
 val base = coauthor_fixture()
 var alice = coauthor_new(coauthor_fixture(), "alice")
 alice = coauthor_local_edit(alice, "A1", "alice-only")
@@ -228,3 +263,54 @@ assert_equal(coauthor_revision(alice), 1)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `486e0fa21c0c17dbcc05ba8a76a7563f04c0cc42f09f05c59d794bb9ab5a4b26`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `486e0fa21c0c17dbcc05ba8a76a7563f04c0cc42f09f05c59d794bb9ab5a4b26`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `486e0fa21c0c17dbcc05ba8a76a7563f04c0cc42f09f05c59d794bb9ab5a4b26`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+
+SSpec documentization score: 91/100
+source: test/01_unit/app/office/sheets/coauthor_spec.spl
+mirror: doc/06_spec/01_unit/app/office/sheets/coauthor_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=55
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/office/sheets/coauthor_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/sheets/coauthor_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/sheets/coauthor_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/app/office/sheets/coauthor_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'starts a new session at revision 0' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/coauthor_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'bumps the revision by 1 per local edit' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/coauthor_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'broadcasts only the local edits as ops vs the shared base' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

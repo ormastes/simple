@@ -1,3 +1,28 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/lib/nogc_async_mut/http_server/worker_wire_shutdown_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/worker_wire_shutdown_spec.md
+# doc-path: doc/03_plan/sys_test/worker_wire_shutdown_spec.md
+# doc-path: doc/04_architecture/worker_wire_shutdown_spec.md
+# doc-path: doc/05_design/worker_wire_shutdown_spec_oracles.md
+# @manual: primary
+
 """
 # HTTP worker wire and shutdown ownership coverage.
 
@@ -6,7 +31,10 @@ These cases pin the fail-closed wire boundaries and observe the public cleanup
 counters while runtime/socket admission remains unavailable in the static lane.
 """
 
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use std.http.h2.h2_preface.{
     h2_connection_preface_bytes,
     h2_validate_preface
@@ -24,6 +52,7 @@ use std.http_server.server.{build_default_pipeline}
 use std.http_server.handler.{create_default_registry}
 use std.concurrent.channel.{channel_new}
 
+
 fn synthetic_tls_record(payload_len: i64) -> [u8]:
     var record: [u8] = [23, 3, 3, (payload_len / 256).to_u8(), (payload_len % 256).to_u8()]
     var i = 0
@@ -33,7 +62,10 @@ fn synthetic_tls_record(payload_len: i64) -> [u8]:
     record
 
 describe "HTTP worker malformed wire handling":
+    # @manual scenario evidence
     it "rejects a header line without a field name instead of dropping it":
+        # @req REQ-SSPEC-UNIT
+        step("rejects a header line without a field name instead of dropping it")
         val parser = HttpRequestParser.new()
         val result = parser.feed("GET / HTTP/1.1\r\nBroken\r\n")
         match result:
@@ -41,6 +73,8 @@ describe "HTTP worker malformed wire handling":
             Err(_): expect(parser.error_message.starts_with("400")).to_be(true)
 
     it "rejects an over-limit partial header before more buffering":
+        # @req REQ-SSPEC-UNIT
+        step("rejects an over-limit partial header before more buffering")
         val parser = HttpRequestParser.with_limits(8192, 8, 16, 1024)
         val first = parser.feed("GET / HTTP/1.1\r\n")
         match first:
@@ -53,6 +87,8 @@ describe "HTTP worker malformed wire handling":
 
 describe "HTTP/2 preface admission":
     it "requires the complete canonical preface":
+        # @req REQ-SSPEC-UNIT
+        step("requires the complete canonical preface")
         val preface = h2_connection_preface_bytes()
         expect(h2_validate_preface(preface)).to_be(true)
         val short = preface.slice(0, 3)
@@ -63,6 +99,8 @@ describe "HTTP/2 preface admission":
 
 describe "TLS application-record accumulation":
     it "retains split records and consumes multiple complete records":
+        # @req REQ-SSPEC-UNIT
+        step("retains split records and consumes multiple complete records")
         val record_a = synthetic_tls_record(16)
         val record_b = synthetic_tls_record(16)
         val first = record_a.slice(0, 7)
@@ -102,6 +140,8 @@ describe "TLS application-record accumulation":
         expect(multiple_stream.sequence()).to_be(3)
 
     it "rejects malformed framing and bounded-buffer overflow":
+        # @req REQ-SSPEC-UNIT
+        step("rejects malformed framing and bounded-buffer overflow")
         var malformed = synthetic_tls_record(16)
         malformed[0] = 22
         var malformed_stream = tls_application_record_stream_new_v1(1)
@@ -137,6 +177,8 @@ describe "TLS application-record accumulation":
         expect(overflow_result.is_overflow()).to_be(true)
 
     it "rejects a second ingest while authentication is pending":
+        # @req REQ-SSPEC-UNIT
+        step("rejects a second ingest while authentication is pending")
         val record = synthetic_tls_record(16)
         var stream = tls_application_record_stream_new_v1(0)
         var proposal = stream.ingest(record)
@@ -146,6 +188,8 @@ describe "TLS application-record accumulation":
         stream.reject_authentication(proposal.proposal_token())
 
     it "preserves mapped ownership through maximum one-byte fragmentation":
+        # @req REQ-SSPEC-UNIT
+        step("preserves mapped ownership through maximum one-byte fragmentation")
         val record = synthetic_tls_record(16400)
         var streams: Dict<i64, TlsApplicationRecordStreamV1> = {}
         streams[7] = tls_application_record_stream_new_v1(0)
@@ -185,6 +229,8 @@ describe "TLS application-record accumulation":
         expect(streams[7].byte_work()).to_be(record.len() * 7 - 10)
 
     it "rejects exhausted and invalid record sequences":
+        # @req REQ-SSPEC-UNIT
+        step("rejects exhausted and invalid record sequences")
         expect(tls_application_record_sequence_can_advance_v1(0)).to_be(true)
         expect(tls_application_record_sequence_can_advance_v1(9223372036854775806)).to_be(true)
         expect(tls_application_record_sequence_can_advance_v1(9223372036854775807)).to_be(false)
@@ -192,6 +238,8 @@ describe "TLS application-record accumulation":
 
 describe "HTTP worker shutdown ownership contract":
     it "cancels an unstarted owner without retaining reservations":
+        # @req REQ-SSPEC-UNIT
+        step("cancels an unstarted owner without retaining reservations")
         var config = default_server_config()
         config.worker_count = 1
         val server = HttpServer.new(config)
@@ -204,6 +252,8 @@ describe "HTTP worker shutdown ownership contract":
             Err(_): fail("unstarted owner cancellation failed")
 
     it "reports zero retained resources after owner abort cleanup":
+        # @req REQ-SSPEC-UNIT
+        step("reports zero retained resources after owner abort cleanup")
         var config = default_server_config()
         config.listen_addr = "127.0.0.1:0"
         config.worker_count = 1

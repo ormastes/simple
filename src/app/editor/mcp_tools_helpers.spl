@@ -9,13 +9,14 @@ use std.editor.core.path_text.*
 use std.editor.services.lsp_client.{LspResponse}
 use app.editor.editor_controller.{EditorController}
 
+extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
 extern fn rt_file_read_bytes(path: text) -> [u8]?
-use std.io_runtime.{file_write_bytes}
-use std.io_runtime.{dir_create_all}
-use std.io_runtime.{dir_walk}
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_walk(path: text) -> [text]
 
 # Outcome of one editor MCP tool call.
 struct McpToolResult:
@@ -62,11 +63,11 @@ fn editor_mcp_wiki_vault_index(root: text) -> MdWikiIndex:
 
 fn editor_mcp_wiki_vault_documents(root: text) -> [MdWikiDocument]:
     var docs: [MdWikiDocument] = []
-    val files = dir_walk(root)
+    val files = rt_dir_walk(root)
     for file in files:
         val lower = file.to_lower()
         if lower.ends_with(".md") or lower.ends_with(".markdown"):
-            docs.push(md_wiki_document(file, read_file_text(file)))
+            docs.push(md_wiki_document(file, rt_file_read_text(file) ?? ""))
     docs
 
 fn editor_mcp_vault_search_index(root: text) -> MdVaultSearchIndex:
@@ -86,7 +87,7 @@ fn editor_mcp_vault_search_cache_path(root: text) -> text:
 
 fn editor_mcp_template_list(folder: text) -> text:
     var out = ""
-    val files = dir_walk(folder)
+    val files = rt_dir_walk(folder)
     for file in files:
         val lower = file.to_lower()
         if lower.ends_with(".md") or lower.ends_with(".markdown"):
@@ -94,33 +95,33 @@ fn editor_mcp_template_list(folder: text) -> text:
     out
 
 fn editor_mcp_insert_attachment(target_path: text, attachment_path: text, label: text, storage_dir: text) -> bool:
-    val existing = read_file_text(target_path)
+    val existing = rt_file_read_text(target_path) ?? ""
     val stored_path = editor_mcp_attachment_storage_path(target_path, attachment_path, storage_dir)
     if stored_path == "":
         return false
     val embed = editor_mcp_attachment_embed(stored_path, label)
     val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
-    file_write(target_path, existing + sep + embed + "\n")
+    rt_file_write_text(target_path, existing + sep + embed + "\n")
 
 fn editor_mcp_attachment_storage_path(target_path: text, attachment_path: text, storage_dir: text) -> text:
     if storage_dir == "":
         return attachment_path
     val data = rt_file_read_bytes(attachment_path) ?? []
-    if data.len() == 0 and not file_exists(attachment_path):
+    if data.len() == 0 and not rt_file_exists(attachment_path):
         return ""
     val clean_dir = editor_clean_relative_dir(storage_dir)
     if clean_dir == "":
         return ""
     val note_dir = editor_dirname(target_path)
     val dest_dir = if note_dir == "" then clean_dir else: note_dir + "/" + clean_dir
-    if not dir_create_all(dest_dir):
+    if not rt_dir_create_all(dest_dir):
         return ""
     val name = editor_path_basename(attachment_path)
     if name == "":
         return ""
     val unique_name = editor_mcp_unique_attachment_name(dest_dir, name)
     val dest_path = dest_dir + "/" + unique_name
-    if not file_write_bytes(dest_path, data):
+    if not rt_file_write_bytes(dest_path, data):
         return ""
     clean_dir + "/" + unique_name
 
@@ -130,7 +131,7 @@ fn editor_mcp_unique_attachment_name(dest_dir: text, name: text) -> text:
     val ext = if dot > 0 then name.slice(dot, name.len()) else: ""
     var candidate = name
     var idx = 1
-    while file_exists(dest_dir + "/" + candidate):
+    while rt_file_exists(dest_dir + "/" + candidate):
         candidate = base + "-" + idx.to_text() + ext
         idx = idx + 1
     candidate
@@ -201,7 +202,7 @@ fn editor_mcp_template_vars(args: [text], start: i64) -> [MdWikiTemplateVar]:
     var i = start
     while i < args.len():
         val item = args[i].trim()
-        val eq = item.index_of("=")
+        val eq = item.index_of("=") ?? -1
         if eq > 0:
             vars.push(md_wiki_template_var(item.slice(0, eq).trim(), item.slice(eq + 1, item.len()).trim()))
             i = i + 1
@@ -231,9 +232,9 @@ fn editor_mcp_format_vault_search(matches: [MdVaultSearchMatch]) -> text:
     out
 
 fn editor_mcp_set_markdown_property(path: text, key: text, value: text) -> bool:
-    val content = read_file_text(path)
+    val content = rt_file_read_text(path) ?? ""
     val next = editor_mcp_markdown_property_content(content, key.trim(), value)
-    file_write(path, next)
+    rt_file_write_text(path, next)
 
 fn editor_mcp_markdown_property_content(content: text, key: text, value: text) -> text:
     if key == "":

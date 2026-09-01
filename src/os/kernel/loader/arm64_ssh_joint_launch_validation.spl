@@ -1,0 +1,79 @@
+# Pure loader-owned validation for an ARM64 SSH joint launch.
+#
+# This module deliberately cannot mutate either owner.  It validates the
+# complete immutable loader half before a future reserved-token transaction
+# consumes the SSH launch lease and enters scheduler adoption.
+
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityArmedIdentityV1, ExecutableAuthorityTokenV1
+}
+use os.kernel.loader.executable_load_plan_v1.{
+    ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
+    ExecutableLoadConsumerV1, executable_load_consumer_schema_version_v1
+}
+
+pub enum Arm64SshJointLaunchValidationErrorV1:
+    None
+    InvalidPath
+    TokenIdentityMismatch
+    MissingEntryIdentity
+    EntryIdentityMismatch
+    TargetMismatch
+    InvalidConsumer
+
+pub struct Arm64SshJointLaunchValidationV1:
+    ok: bool
+    error: Arm64SshJointLaunchValidationErrorV1
+
+fn _arm64_ssh_joint_validation(
+    error: Arm64SshJointLaunchValidationErrorV1
+) -> Arm64SshJointLaunchValidationV1:
+    Arm64SshJointLaunchValidationV1(
+        ok: error == Arm64SshJointLaunchValidationErrorV1.None,
+        error: error)
+
+pub(package) fn arm64_ssh_joint_launch_validate_loader_half_v1(
+    identity: ExecutableAuthorityArmedIdentityV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    canonical_path: text
+) -> Arm64SshJointLaunchValidationV1:
+    if canonical_path == "" or canonical_path.len() > 16384 or
+        identity.canonical_source_path != canonical_path:
+        return _arm64_ssh_joint_validation(
+            Arm64SshJointLaunchValidationErrorV1.InvalidPath)
+    if identity.slot_index < 0 or token.slot_index < 0 or
+        identity.token_generation == 0u64 or token.generation == 0u64 or
+        identity.token_nonce == 0u64 or token.nonce == 0u64 or
+        identity.slot_index != token.slot_index or
+        identity.token_generation != token.generation or
+        identity.token_nonce != token.nonce:
+        return _arm64_ssh_joint_validation(
+            Arm64SshJointLaunchValidationErrorV1.TokenIdentityMismatch)
+    if not identity.has_entry_identity or identity.entry_point == 0u64:
+        return _arm64_ssh_joint_validation(
+            Arm64SshJointLaunchValidationErrorV1.MissingEntryIdentity)
+    if entry_point == 0u64 or identity.entry_point != entry_point:
+        return _arm64_ssh_joint_validation(
+            Arm64SshJointLaunchValidationErrorV1.EntryIdentityMismatch)
+    if identity.target.os != "simpleos" or
+        identity.target.arch != "aarch64" or
+        identity.target.abi != "simpleos":
+        return _arm64_ssh_joint_validation(
+            Arm64SshJointLaunchValidationErrorV1.TargetMismatch)
+    if (consumer.schema_version != executable_load_consumer_schema_version_v1() or
+        consumer.state != ExecutableLoadConsumerStateV1.Ready or
+        consumer.expected_os != identity.target.os or
+        consumer.expected_arch != identity.target.arch or
+        consumer.expected_abi != identity.target.abi or
+        consumer.segment_count != 0 or consumer.planned_pages != 0u64 or
+        consumer.mapped_pages != 0u64 or consumer.pages_to_unmap != 0u64 or
+        consumer.close_attempt != 0u64 or consumer.entry_point != 0u64 or
+        consumer.failure != ExecutableLoadConsumerErrorV1.None):
+        return _arm64_ssh_joint_validation(
+            Arm64SshJointLaunchValidationErrorV1.InvalidConsumer)
+    _arm64_ssh_joint_validation(Arm64SshJointLaunchValidationErrorV1.None)
+
+export Arm64SshJointLaunchValidationErrorV1
+export Arm64SshJointLaunchValidationV1

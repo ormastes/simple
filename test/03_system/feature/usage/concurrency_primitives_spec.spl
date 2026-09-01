@@ -1,77 +1,72 @@
 """
-## Purpose and audience
-Purpose: Prove that Concurrency Primitives.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-doc/01_research/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
-doc/03_plan/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
-doc/04_architecture/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
-doc/05_design/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
+Concurrency Primitives Specification
+
+**Feature:** Async/await, futures, and concurrency primitives
+**Category:** Concurrency
+**Status:** Active
+
+As a user of the concurrency API I pass messages between concurrent parts of
+a program through queues and coordinate them with atomic flags, once latches,
+and barriers, so that concurrent workers exchange work safely without shared
+mutable state.
+
+## Syntax
+
+```simple
+use std.nogc_async_mut.{mpsc_queue_new, atomic_flag_new, once_new, barrier_new}
+
+var queue = mpsc_queue_new()
+queue.push(42)
+val item = queue.pop()
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| MpscQueue | Multi-producer, single-consumer message queue |
+| AtomicFlag | Test-and-set flag for lock-free signaling |
+| Once | One-time initialization latch |
+| Barrier | Rendezvous point for a fixed number of participants |
 """
 
-use std.spec.*
 use std.spec.step
-use std.concurrent.green_thread.{
-    green_spawn, green_spawn_value, green_fail, green_task_error,
-    green_run_one, green_run_all}
 
-var CP_SEEN: i64 = 0
-
-fn cp_task() -> i64:
-    CP_SEEN = CP_SEEN + 1
-    21
-
-fn cp_failing_task() -> i64:
-    green_fail("concurrency-primitives probe failure")
-    0
+use std.nogc_async_mut.{mpsc_queue_new, atomic_flag_new, once_new, barrier_new}
 
 describe "Concurrency Primitives":
-    context "Futures":
-        it "executes a spawned task to completion when the scheduler runs":
-            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            step("Spawn a task and drive it through green_run_one")
-            val before = CP_SEEN
-            val handle = green_spawn(cp_task)
-            assert_true(not handle.is_done())
-            assert_equal(green_run_one(), true)
-            assert_true(handle.is_done())
-            assert_equal(handle.join(), 21)
-            assert_equal(CP_SEEN - before, 1)
+    # @manual scenario evidence
+    it "delivers queued messages in FIFO order":
+        # @req REQ-SSPEC-SYSTEM
+        step("delivers queued messages in FIFO order")
+        step("Push three messages and drain the queue")
+        var queue = mpsc_queue_new()
+        queue.push(1)
+        queue.push(2)
+        queue.push(3)
 
-    context "Value futures":
-        it "resolves a pre-computed future without a scheduler step":
-            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            step("Create a green_spawn_value future and resolve it with run_one")
-            val handle = green_spawn_value(42)
-            assert_equal(green_run_one(), true)
-            assert_true(handle.is_done())
-            assert_equal(handle.join(), 42)
+        expect queue.len() == 3
+        expect queue.pop() == 1
+        expect queue.pop() == 2
+        expect queue.pop() == 3
+        expect queue.is_empty() == true
 
-    context "Concurrent execution":
-        it "runs every queued task to completion with green_run_all":
-            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            step("Queue three tasks then drain them with green_run_all")
-            val before = CP_SEEN
-            val h1 = green_spawn(cp_task)
-            val h2 = green_spawn(cp_task)
-            val h3 = green_spawn(cp_task)
-            val ran = green_run_all()
-            assert_equal(CP_SEEN - before, 3)
-            assert_true(h1.is_done() and h2.is_done() and h3.is_done())
-            assert_equal(h1.id() != h2.id(), true)
+    it "signals through an atomic flag with test-and-set":
+        # @req REQ-SSPEC-SYSTEM
+        step("signals through an atomic flag with test-and-set")
+        step("First test-and-set flips the flag, second observes it set")
+        var flag = atomic_flag_new()
+        expect flag.test_and_set() == false
+        expect flag.test_and_set() == true
+        flag.clear()
+        expect flag.test_and_set() == false
 
-    context "Error handling in async":
-        it "captures a failed task's reason for the caller":
-            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            step("Run a failing task and read green_task_error")
-            val handle = green_spawn(cp_failing_task)
-            assert_equal(green_run_one(), true)
-            assert_true(handle.is_done())
-            assert_equal(green_task_error(handle.id()),
-                "concurrency-primitives probe failure")
+    it "runs one-time initialization exactly once":
+        # @req REQ-SSPEC-SYSTEM
+        step("runs one-time initialization exactly once")
+        step("Call once twice; the latch completes and stays completed")
+        var latch = once_new()
+        expect latch.is_completed() == false
+        latch.call_once(fn(): pass_dn)
+        latch.call_once(fn(): pass_dn)
+        expect latch.is_completed() == true

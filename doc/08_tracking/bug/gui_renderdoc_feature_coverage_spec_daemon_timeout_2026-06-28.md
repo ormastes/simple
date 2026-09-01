@@ -1,8 +1,7 @@
 # GUI RenderDoc Feature Coverage SSpec Daemon Timeout
 
 Date: 2026-06-28
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: open-long-profile
 Owner: rendering verification lane
 
 ## Summary

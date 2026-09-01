@@ -1,10 +1,79 @@
 # SCV three-way tree merge with conflicts as data.
 
-use app.io.mod (file_exists, file_read, file_delete, dir_walk)
+use app.io.mod (file_exists, file_read, file_delete, file_size, dir_walk)
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.scv.core.{scv_object_path, scv_chunk_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe}
-use std.scv.store.{scv_hash_text, scv_write_text, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op, scv_commit_tree}
+use std.scv.store.{scv_hash_text, scv_write_text, scv_write_chunk_from_file, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op, scv_commit_tree}
+use std.scv.identity_merge.{scv_identity_merge_groups}
 use std.scv.structural_match.{scv_default_match_config, scv_compute_edit_script, scv_parser_index_root_node, scv_text_block_names, scv_structural_merge_from_text}
+use std.scv.region_merge.{scv_region_merge_text}
+use std.scv.merge_validation.{scv_merge_validation_accept}
+use std.scv.conflict_v2.{scv_conflict_v2_payload, scv_conflict_v2_write, scv_conflict_v2_classify}
+use std.scv.preprocessor_regions.{scv_pp_divergence, scv_pp_guard_rewritten, scv_pp_has_construct}
+
+# ---------------------------------------------------------------------------
+# Preprocessor-region conflict detection.
+#
+# Fixes the missed-real-conflict class recorded in
+# `doc/08_tracking/bug/scv_merge_silently_merges_across_divergent_preprocessor_branches_2026-08-26.md`:
+# the syntax-node and line rungs below compute disjointness over raw line
+# indices, so a `#ifdef` line and the statements it governs look independent.
+# Corpus case 22 was merged CLEAN into `int mode = 7;` under `#ifdef FEATURE_B`
+# — a configuration neither side authored. See preprocessor_regions.spl for the
+# region model and its honest lexical-only ceiling.
+#
+# Scope: `.spl` is excluded outright — Simple has no preprocessor and uses `#`
+# as its comment character, so running the detector there could only ever
+# manufacture spurious conflicts.
+# ---------------------------------------------------------------------------
+
+fn scv_pp_applicable_path(rel: text) -> bool:
+    not rel.ends_with(".spl")
+
+# The chunk text behind a tree line, or "" when unreadable/binary.
+fn scv_read_line_text(root: text, line: text) -> text:
+    if line == "":
+        return ""
+    val path = scv_chunk_path(root, scv_tree_line_chunk_id(line))
+    if not file_exists(path):
+        return ""
+    val t = file_read(path)
+    if t.contains("\u0000"):
+        return ""
+    t
+
+# Diagnostic when the two sides' edits are preprocessor-divergent, else "".
+fn scv_pp_merge_divergence(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
+    if not scv_pp_applicable_path(rel):
+        return ""
+    val b = scv_read_line_text(root, base_line)
+    val l = scv_read_line_text(root, left_line)
+    val r = scv_read_line_text(root, right_line)
+    if b == "" or l == "" or r == "":
+        return ""
+    scv_pp_divergence(b, l, r)
+
+# Rename companion: one side renamed the file, the other rewrote its guard
+# conditions. Carrying the edit onto the new path would silently change which
+# build configuration compiles it. A body-only edit is NOT flagged — that is
+# ordinary rename+edit, which corpus cases 07/12 pin as clean.
+fn scv_pp_rename_guard_divergence(root: text, rel: text, base_line: text, edited_line: text) -> text:
+    if not scv_pp_applicable_path(rel):
+        return ""
+    val b = scv_read_line_text(root, base_line)
+    val s = scv_read_line_text(root, edited_line)
+    if b == "" or s == "":
+        return ""
+    if not scv_pp_has_construct(b):
+        return ""
+    if not scv_pp_guard_rewritten(b, s):
+        return ""
+    "one side renamed the file while the other rewrote its preprocessor guard conditions; carrying the edit onto the new path changes which build configuration compiles it"
+
+fn scv_write_pp_conflict(root: text, rel: text, base_line: text, left_line: text, right_line: text, diagnostics: text, attempted: text) -> text:
+    val id = scv_write_conflict_kind(root, rel, "preprocessor_region_divergent", "", base_line, left_line, right_line)
+    scv_conflict_v2_write(root, scv_conflict_v2_payload(rel, "preprocessor_region_divergent", "", base_line, left_line, right_line, attempted, diagnostics))
+    id
 
 # ---------------------------------------------------------------------------
 # Structural merge helpers
@@ -60,6 +129,9 @@ fn scv_try_structural_merge(root: text, rel: text, base_line: text, left_line: t
         return ""
     val merged = scv_structural_merge_from_text(base_text, left_text, right_text)
     if merged == "":
+        return ""
+    # SCV-IMPL-D-06: aggressive output is validated before acceptance.
+    if not scv_merge_validation_accept(merged):
         return ""
     scv_write_merged_line_file(root, rel, merged)
 
@@ -160,6 +232,32 @@ fn scv_add_paths_from_tree(tree_content: text, paths: text) -> text:
             out = out + rel + "\n"
     out
 
+# SCV-IMPL-D-07 — v2 typed conflict emission for content conflicts. Reads the
+# three sides, classifies signature_conflict vs content_overlap over the
+# region parser's view, and records the attempted algorithms. v1 objects stay
+# byte-stable; v2 lives in objects/conflicts_v2.
+fn scv_write_conflict_v2_content(root: text, rel: text, base_line: text, left_line: text, right_line: text, attempted: text) -> text:
+    var kind = "content_overlap"
+    val base_path = scv_chunk_path(root, scv_tree_line_chunk_id(base_line))
+    val left_path = scv_chunk_path(root, scv_tree_line_chunk_id(left_line))
+    val right_path = scv_chunk_path(root, scv_tree_line_chunk_id(right_line))
+    if file_exists(base_path) and file_exists(left_path) and file_exists(right_path):
+        kind = scv_conflict_v2_classify(file_read(base_path), file_read(left_path), file_read(right_path))
+    val payload = scv_conflict_v2_payload(rel, kind, "", base_line, left_line, right_line, attempted, "no non-conflicting merge found by the attempted algorithms")
+    scv_conflict_v2_write(root, payload)
+
+# True when `side_tree` carries a path absent from `base_tree` — for the D-07
+# entity_identity_ambiguous detection in the identity pre-pass.
+fn scv_tree_has_added_path(side_tree: text, base_tree: text) -> bool:
+    for line in side_tree.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val rel = scv_tree_line_path(trimmed)
+        if rel != "" and scv_tree_line_for_path(base_tree, rel) == "":
+            return true
+    false
+
 fn scv_write_conflict(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     val payload = "path: {rel}\nbase: {base_line}\nleft: {left_line}\nright: {right_line}\ntime_ms: {current_time_ms()}\n"
     val id = scv_hash_text("conflict", payload)
@@ -224,13 +322,18 @@ fn scv_apply_line_side(base_text: text, side_text: text, side_changes: text) -> 
 fn scv_write_merged_line_file(root: text, rel: text, content: text) -> text:
     if not scv_worktree_path_safe(rel):
         return ""
-    val chunk = scv_hash_text("sha256", content)
-    scv_write_text(scv_chunk_path(root, chunk), content)
-    val payload = "path: {rel}\nchunk: {chunk}\nsize: {content.len()}\nmtime: 0\n"
+    # The chunk id MUST be the sha256 of the bytes on disk (export-tree and
+    # fsck recompute it from the file), so the merged text is staged to a file
+    # and chunked exactly like a snapshot does (one digest path, no drift).
+    val staged = "{root}/.scv/merge_stage_{current_time_ms()}_{scv_hash_text(\"stage\", content)}"
+    scv_write_text(staged, content)
+    val chunk = scv_write_chunk_from_file(root, staged)
+    val size = file_size(staged)
+    file_delete(staged)
+    val payload = "path: {rel}\nchunk: {chunk}\nsize: {size}\nmtime: 0\n"
     val file_id = scv_hash_text("file", payload)
     scv_write_text(scv_object_path(root, "files", file_id), payload)
-    "{rel}|{file_id}|{chunk}|{content.len()}|0"
-
+    "{rel}|{file_id}|{chunk}|{size}|0"
 fn scv_try_syntax_node_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     if base_line == "" or left_line == "" or right_line == "":
         return ""
@@ -254,6 +357,29 @@ fn scv_try_syntax_node_merge(root: text, rel: text, base_line: text, left_line: 
     val left_applied = scv_apply_line_side(base_text, left_text, left_changes)
     val merged_text = scv_apply_line_side(left_applied, right_text, right_changes)
     scv_write_merged_line_file(root, rel, merged_text)
+
+# SCV-IMPL-D-05 — semistructured region merge, attempted only where every
+# earlier rung failed and a conflict would otherwise be written. Its output is
+# validated by the D-06 ladder's always-available rungs before acceptance.
+fn scv_try_region_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
+    if base_line == "" or left_line == "" or right_line == "":
+        return ""
+    val base_path = scv_chunk_path(root, scv_tree_line_chunk_id(base_line))
+    val left_path = scv_chunk_path(root, scv_tree_line_chunk_id(left_line))
+    val right_path = scv_chunk_path(root, scv_tree_line_chunk_id(right_line))
+    if not file_exists(base_path) or not file_exists(left_path) or not file_exists(right_path):
+        return ""
+    val base_text = file_read(base_path)
+    val left_text = file_read(left_path)
+    val right_text = file_read(right_path)
+    if base_text.contains("\u0000") or left_text.contains("\u0000") or right_text.contains("\u0000"):
+        return ""
+    val merged = scv_region_merge_text(base_text, left_text, right_text)
+    if merged == "":
+        return ""
+    if not scv_merge_validation_accept(merged):
+        return ""
+    scv_write_merged_line_file(root, rel, merged)
 
 fn scv_try_line_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     if base_line == "" or left_line == "" or right_line == "":
@@ -295,18 +421,36 @@ fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, 
         val old_left = scv_tree_find_old_line_by_chunk(base_tree, left_tree, left_chunk)
         val old_right_line = scv_tree_line_for_path(right_tree, scv_tree_line_path(old_left))
         if old_left != "" and old_right_line != "" and scv_tree_line_chunk_id(old_right_line) != left_chunk:
-            return (scv_tree_line_with_path(old_right_line, rel), "", "left-rename-right-edit")
+            val carried_r = scv_tree_line_with_path(old_right_line, rel)
+            val rdiag = scv_pp_rename_guard_divergence(root, rel, old_left, carried_r)
+            if rdiag != "":
+                val rid = scv_write_pp_conflict(root, rel, old_left, left_line, carried_r, rdiag, "path-rename")
+                return (carried_r, rid, "preprocessor-rename-guard-conflict")
+            return (carried_r, "", "left-rename-right-edit")
     if base_line == "" and right_line != "" and left_line == "":
         val old_right = scv_tree_find_old_line_by_chunk(base_tree, right_tree, right_chunk)
         val old_left_line = scv_tree_line_for_path(left_tree, scv_tree_line_path(old_right))
         if old_right != "" and old_left_line != "" and scv_tree_line_chunk_id(old_left_line) != right_chunk:
-            return (scv_tree_line_with_path(old_left_line, rel), "", "right-rename-left-edit")
+            val carried_l = scv_tree_line_with_path(old_left_line, rel)
+            val ldiag = scv_pp_rename_guard_divergence(root, rel, old_right, carried_l)
+            if ldiag != "":
+                val lid = scv_write_pp_conflict(root, rel, old_right, carried_l, right_line, ldiag, "path-rename")
+                return (carried_l, lid, "preprocessor-rename-guard-conflict")
+            return (carried_l, "", "right-rename-left-edit")
     if left_chunk == right_chunk:
         return (left_line, "", "same-content")
     if left_chunk == base_chunk:
         return (right_line, "", "right-only")
     if right_chunk == base_chunk:
         return (left_line, "", "left-only")
+    # Both sides changed the file differently. Before ANY aggressive rung runs,
+    # refuse when the two edits are preprocessor-region divergent: the line and
+    # syntax-node rungs below reason on raw line indices and would merge these
+    # clean into a build configuration neither side authored.
+    val pp_diag = scv_pp_merge_divergence(root, rel, base_line, left_line, right_line)
+    if pp_diag != "":
+        val pp_id = scv_write_pp_conflict(root, rel, base_line, left_line, right_line, pp_diag, "preprocessor-regions")
+        return (left_line, pp_id, "preprocessor-region-conflict")
     # Attempt structural merge (WS-B: GumTree-grade anchor merge).
     # Only for .spl files or files with parser_index entries.
     # scv_try_structural_merge returns non-empty on success → structural-anchor-merge.
@@ -323,7 +467,13 @@ fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, 
         val merged_line = scv_try_line_merge(root, rel, base_line, left_line, right_line)
         if merged_line != "":
             return (merged_line, "", "structural-fallback-line")
+        # SCV-IMPL-D-05: last aggressive rung before conflict — semistructured
+        # region merge (validated by the D-06 gate inside the helper).
+        val region_line = scv_try_region_merge(root, rel, base_line, left_line, right_line)
+        if region_line != "":
+            return (region_line, "", "region-merge")
         val conflict_id = scv_write_conflict(root, rel, base_line, left_line, right_line)
+        scv_write_conflict_v2_content(root, rel, base_line, left_line, right_line, "structural-anchor,syntax-node,line,region")
         return (left_line, conflict_id, "conflict-data")
     val syntax_merged_line2 = scv_try_syntax_node_merge(root, rel, base_line, left_line, right_line)
     if syntax_merged_line2 != "":
@@ -332,7 +482,63 @@ fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, 
     if merged_line2 != "":
         return (merged_line2, "", "line-fallback")
     val conflict_id2 = scv_write_conflict(root, rel, base_line, left_line, right_line)
+    scv_write_conflict_v2_content(root, rel, base_line, left_line, right_line, "syntax-node,line")
     (left_line, conflict_id2, "conflict-data")
+
+# SCV-IMPL-D-04 — identity-aware pre-pass. Groups are entities the path/chunk
+# logic cannot resolve (rename+edit vs edit, rename vs rename, rename vs
+# delete); each consumes its paths so the path loop below never sees them.
+# Conflicts stay DATA objects (jj remains the conflict-storage authority).
+fn scv_write_conflict_kind(root: text, rel: text, kind: text, entity: text, base_line: text, left_line: text, right_line: text) -> text:
+    val payload = "path: {rel}\nkind: {kind}\nentity: {entity}\nbase: {base_line}\nleft: {left_line}\nright: {right_line}\ntime_ms: {current_time_ms()}\n"
+    val id = scv_hash_text("conflict", payload)
+    scv_write_text(scv_object_path(root, "conflicts", id), payload)
+    id
+
+# Returns (picked_line, conflict_id, strategy_rows, consumed_paths).
+fn scv_apply_identity_group(root: text, group: text, base_tree: text, left_tree: text, right_tree: text) -> (text, text, text, text):
+    val f = group.split("\t")
+    if f.len() != 7:
+        return ("", "", "", "")
+    val kind = f[0]
+    val entity = f[1]
+    val target = f[2]
+    var consumed = ""
+    for p in f[3].split(","):
+        if p != "":
+            consumed = consumed + p + "\n"
+    val base_line = if f[4] != "": scv_tree_line_with_path(f[4], target) else: ""
+    val left_line = if f[5] != "": scv_tree_line_with_path(f[5], target) else: ""
+    val right_line = if f[6] != "": scv_tree_line_with_path(f[6], target) else: ""
+    val source = scv_tree_line_path(f[4])
+    if kind == "rename_edit":
+        val (picked, conflict_id, strategy) = scv_pick_merge_line(root, target, base_tree, left_tree, right_tree, base_line, left_line, right_line)
+        val rows = "{source}: identity-rename-source\n{target}: identity-rename-clobbered ({strategy}) entity={entity}\n"
+        return (picked, conflict_id, rows, consumed)
+    if kind == "rename_rename":
+        val conflict_id = scv_write_conflict_kind(root, target, "entity_identity_ambiguous", entity, f[4], f[5], f[6])
+        scv_conflict_v2_write(root, scv_conflict_v2_payload(target, "entity_identity_ambiguous", entity, f[4], f[5], f[6], "identity-prepass", "both sides renamed entity {entity} to different paths"))
+        val rows = "{source}: identity-rename-source\n{target}: identity-rename-rename conflict entity={entity}\n"
+        return (left_line, conflict_id, rows, consumed)
+    if kind == "rename_delete":
+        val kept = if left_line != "": left_line else: right_line
+        val conflict_id = scv_write_conflict_kind(root, target, "entity_rename_delete", entity, f[4], f[5], f[6])
+        # SCV-IMPL-D-07: name the D-04 store ceiling properly. The linear
+        # identity store attributes only ONE accepted rename per EntityId, so
+        # a rename-vs-rename surfaces here as rename-vs-"delete" with the
+        # second rename left as an unattributed ADDED path on the deleting
+        # side. When that added path exists, the v2 kind is
+        # entity_identity_ambiguous; v1 keeps its store's-eye label.
+        val deleting_tree = if left_line == "": left_tree else: right_tree
+        var v2_kind = "entity_rename_delete"
+        var v2_diag = "entity {entity} renamed on one side and deleted on the other"
+        if scv_tree_has_added_path(deleting_tree, base_tree):
+            v2_kind = "entity_identity_ambiguous"
+            v2_diag = "identity store attributes only one accepted rename per EntityId; the deleting side carries an unattributed added path that may be a second rename of entity {entity}"
+        scv_conflict_v2_write(root, scv_conflict_v2_payload(target, v2_kind, entity, f[4], f[5], f[6], "identity-prepass", v2_diag))
+        val rows = "{source}: identity-rename-source\n{target}: identity-rename-delete conflict entity={entity}\n"
+        return (kept, conflict_id, rows, consumed)
+    ("", "", "", "")
 
 fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_commit: text) -> text:
     val base_tree = scv_tree_content(root, base_commit)
@@ -357,9 +563,23 @@ fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_com
     var conflict_count = 0
     var conflict_ids = ""
     var strategies = ""
+    var consumed = ""
+    for group in scv_identity_merge_groups(root, base_commit, left_commit, right_commit):
+        val (g_picked, g_conflict, g_rows, g_consumed) = scv_apply_identity_group(root, group, base_tree, left_tree, right_tree)
+        if g_consumed == "":
+            continue
+        consumed = consumed + g_consumed
+        if g_picked != "":
+            merged_lines.push(g_picked)
+        strategies = strategies + g_rows
+        if g_conflict != "":
+            conflict_count = conflict_count + 1
+            conflict_ids = conflict_ids + g_conflict + "\n"
     for rel in paths.split("\n"):
         val path = rel.trim()
         if path == "":
+            continue
+        if scv_line_set_contains(consumed, path):
             continue
         val base_line = scv_tree_line_for_path(base_tree, path)
         val left_line = scv_tree_line_for_path(left_tree, path)
@@ -373,7 +593,9 @@ fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_com
             conflict_count = conflict_count + 1
             conflict_ids = conflict_ids + conflict_id + "\n"
     val tree = scv_write_tree_object(root, merged_lines)
-    val commit = scv_write_commit(root, "{left_commit},{right_commit}", tree, scv_state_private())
+    # Parents are SPACE-joined: scv_write_operation validates each parent by
+    # splitting on " " (store.spl), so the old comma join could never be recorded.
+    val commit = scv_write_commit(root, "{left_commit} {right_commit}", tree, scv_state_private())
     val op = scv_write_operation(root, scv_current_op(root), commit, "merge-commits {base_commit} {left_commit} {right_commit}")
     if op.starts_with("ERROR"):
         return op
@@ -383,12 +605,13 @@ fn scv_conflicts(root: text) -> text:
     val dir = "{root}/.scv/objects/conflicts"
     if not file_exists(dir):
         return "no conflicts\n"
-    var out = ""
+    var rows: [text] = []
     for path in dir_walk(dir):
         val content = file_read(path)
         val id_parts = path.split("/")
         val file_name = id_parts[id_parts.len() - 1]
-        out = out + "{file_name}: {content}"
+        rows.push("{file_name}: {content}")
+    val out = rows.join("")
     if out == "":
         "no conflicts\n"
     else:

@@ -6,7 +6,7 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 # @req: REQ-APP-TOOLING-001 — stable requirement identity for this spec.
 use app.io.context_ops.{context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source, context_args_allow_sourceless_sql_query}
-use std.io_runtime.{file_write, dir_create_all}
+use std.io_runtime.{file_write, dir_create_all, file_read}
 
 fn _context_fixture_path() -> text:
     "build/test/context_generate_fixture.spl"
@@ -16,10 +16,60 @@ fn _write_context_fixture() -> text:
     dir_create_all("build/test")
     file_write(path, "fn hello() -> text:\n    \"hello context\"\n")
     path
+
+fn _context_multi_fixture_path() -> text:
+    "build/test/context_generate_multi_fixture.spl"
+
+fn _write_context_multi_fixture() -> text:
+    # Several sizable declarations so a real pack (extract-one, signature the
+    # rest) is measurably smaller than the raw file, and so different targets
+    # produce genuinely different packs.
+    val path = _context_multi_fixture_path()
+    dir_create_all("build/test")
+    var body = "fn alpha_target(x: i64) -> i64:\n"
+    var line_idx = 0
+    while line_idx < 40:
+        body = body + "    x = x + " + str(line_idx) + "\n"
+        line_idx = line_idx + 1
+    body = body + "    x\n\n"
+    body = body + "fn beta_target(y: i64) -> i64:\n"
+    line_idx = 0
+    while line_idx < 40:
+        body = body + "    y = y + " + str(line_idx) + "\n"
+        line_idx = line_idx + 1
+    body = body + "    y\n\n"
+    body = body + "fn gamma_unused() -> bool:\n    true\n"
+    file_write(path, body)
+    path
 use std.spec.step
 
 
 describe "simple context generator":
+    it "produces a pack materially smaller than the source (size property)":
+        step("Verify: pack is materially smaller than the raw source, not merely re-labeled")
+        # @req: REQ-APP-TOOLING-001
+        val path = _write_context_multi_fixture()
+        val raw = file_read(path)
+        val output = context_generate(path, "no_such_symbol_matches", "text")
+        # A pack that merely echoes the file back (the regression this guards
+        # against) would be >= the raw byte count. A real extraction that
+        # drops non-target bodies to signatures must be well under it.
+        expect(output.len() < raw.len()).to_equal(true)
+        expect(output.len() * 2 < raw.len()).to_equal(true)  # more than 2x smaller
+
+    it "is target-sensitive: different targets produce different packs":
+        step("Verify: selecting a different target changes which body is expanded")
+        # @req: REQ-APP-TOOLING-001
+        val path = _write_context_multi_fixture()
+        val pack_alpha = context_generate(path, "alpha_target", "text")
+        val pack_beta = context_generate(path, "beta_target", "text")
+        expect(pack_alpha == pack_beta).to_equal(false)
+        # alpha's pack carries alpha's full body (the `x = x + N` lines) but
+        # only beta's signature; beta's pack is the mirror image.
+        expect(pack_alpha).to_contain("x = x + 39")
+        expect(pack_beta).to_contain("fn alpha_target(x: i64) -> i64:")
+        expect(pack_beta.split("x = x + 39").len()).to_equal(1)  # oracle: 1 — alpha body absent from beta's pack
+
     it "renders markdown context":
         step("Verify: renders markdown context")
         # @req: REQ-APP-TOOLING-001

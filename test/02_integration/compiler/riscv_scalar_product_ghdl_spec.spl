@@ -1,0 +1,55 @@
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_product_to_vhdl.{compile_strict_riscv_scalar_product}
+
+fn m_config(xlen: i32) -> CoreConfig:
+    CoreConfig(xlen: xlen, physical_address_bits: xlen, register_count: 32,
+        profile: if xlen == 32: "riscv-gen2-rv32im" else: "riscv-gen2-rv64im",
+        isa_profile: if xlen == 32: "rv32im" else: "rv64im",
+        compressed_decode_profile: "none")
+
+describe "closed scalar product VHDL":
+    slow_it "analyzes and elaborates ALU/control/LSU and iterative M products when GHDL exists":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+        val products = [("scalar_ghdl_alu32", CoreConfig.rv32_zca_mission_critical(),
+                0x002081B3, LsuConfig.rv32_product_default()),
+            ("scalar_ghdl_control32", CoreConfig.rv32_zca_mission_critical(),
+                0x00208463, LsuConfig.rv32_product_default()),
+            ("scalar_ghdl_ecall32", CoreConfig.rv32(),
+                0x00000073, LsuConfig.rv32_product_default()),
+            ("scalar_ghdl_ebreak64", CoreConfig.rv64(),
+                0x00100073, LsuConfig.rv64_product_default()),
+            ("scalar_ghdl_sra32", CoreConfig.rv32(),
+                0x4020D1B3, LsuConfig.rv32_product_default()),
+            ("scalar_ghdl_addw64", CoreConfig.rv64(),
+                0x002081BB, LsuConfig.rv64_product_default()),
+            ("scalar_ghdl_lsu64", CoreConfig.rv64_zca_mission_critical(),
+                0x0000B083, LsuConfig.rv64_product_default()),
+            ("scalar_ghdl_mul32", m_config(32),
+                0x022081B3, LsuConfig.rv32_product_default()),
+            ("scalar_ghdl_div64", m_config(64),
+                0x0220C1B3, LsuConfig.rv64_product_default()),
+            ("scalar_ghdl_csrrw32", CoreConfig.rv32_zicsr_zifencei(),
+                0x300092F3, LsuConfig.rv32_product_default()),
+            ("scalar_ghdl_csrrs64", CoreConfig.rv64_zicsr_zifencei(),
+                0x3000A2F3, LsuConfig.rv64_product_default()),
+            ("scalar_ghdl_fence32", CoreConfig.rv32(),
+                0x0FF0000F, LsuConfig.rv32_product_default()),
+            ("scalar_ghdl_fence_i64", CoreConfig.rv64_zicsr_zifencei(),
+                0x0000100F, LsuConfig.rv64_product_default())]
+        for product in products:
+            val emitted = compile_strict_riscv_scalar_product(
+                product[0], product[1], product[2], product[3])
+            expect(emitted.is_success()).to_equal(true)
+            if emitted.is_success():
+                expect(emitted.vhdl).to_contain("fault_aggregator: entity work")
+                val path = "/tmp/" + product[0] + ".vhd"
+                expect(vhdl_write_file(path, emitted.vhdl)).to_equal(true)
+                expect(ghdl_analyze(path).success).to_equal(true)
+                # Elaboration proves closed entity/component binding only.  It
+                # deliberately makes no behavioral simulation claim.
+                expect(ghdl_elaborate(product[0]).success).to_equal(true)

@@ -45,6 +45,16 @@ fn llvm_inline_asm_rewrite_template(
         operand_index = operand_index + 1
     rewritten
 
+fn llvm_raw_asm_escape_template(asm_template: text) -> text:
+    """Design A.3.1 raw-block text contract: `$` -> `$$` so LLVM's inline-asm
+    template engine emits a literal `$` (AT&T immediates, `$$`-free `.S`
+    bodies pasted verbatim). Braces need no escaping in an LLVM IR asm string.
+    Fast path: no `$` -> the input text is returned untouched (one scan, no
+    per-character concatenation)."""
+    if not asm_template.contains("$"):
+        return asm_template
+    asm_template.split("$").join("$$")
+
 fn llvm_c_abi_clobbers(arch: text) -> [text]:
     """LLVM register clobbers for the platform C calling convention."""
     if arch == "x86_64":
@@ -68,7 +78,7 @@ fn llvm_c_abi_clobbers(arch: text) -> [text]:
 # ============================================================================
 
 impl MirToLlvm:
-    me translate_gep(dest: LocalId, base: MirOperand, indices: [MirOperand]):
+    me llvm_gep_impl(dest: LocalId, base: MirOperand, indices: [MirOperand]):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val base_val = self.translate_operand(base)
@@ -83,10 +93,38 @@ impl MirToLlvm:
     # === Overrides: aggregates ===
 
     me translate_aggregate(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
+        """Trait-named entry point. Delegates to the uniquely-named impl below.
+
+        Keep this delegation: `translate_aggregate` is ALSO declared on the
+        MirTextCodegen trait (common/mir_text_codegen.spl:190) with a body of
+        `()` -- a silent no-op. On the staged lane a call through the trait name
+        reaches that default instead of this override, so the instruction is
+        consumed and NOTHING is emitted, with no diagnostic anywhere. Measured:
+        the Aggregate arrives at backend dispatch, the discriminant matches and
+        collides with nothing, the call "succeeds", and yet no probe inside this
+        method fires and the emitted module skips the aggregate's dest entirely
+        (%l1 -> %l4) while the Copy consuming it IS emitted -> llc "use of
+        undefined value".
+        """
+        self.llvm_emit_aggregate_impl(dest, kind, operands)
+
+    me llvm_emit_aggregate_impl(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
+        """Real aggregate emission. Named so the trait cannot shadow it."""
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
+        # PROBE (2026-08-31), default OFF (SIMPLE_MIRB_TRACE=1). Narrow by
+        # construction -- one line per aggregate -- so it survives the
+        # native-build worker's stderr cap. Measured context: the backend DOES
+        # receive the Aggregate, yet the emitted module shows the Let's copy
+        # reading an undefined %lN and the id sequence skipping the aggregate's
+        # dest entirely (%l1 -> %l4). Every arm below emits something, so
+        # whichever arm is taken must be reported to find the silent path.
+        if mir_trace_enabled():
+            eprint("MIRB-AGG enter dest={dest_id} name={dest_name} operands={operands.len()}\n")
         match kind:
             case Array(_):
+                if mir_trace_enabled():
+                    eprint("MIRB-AGG arm=array dest={dest_id}\n")
                 self.mark_ptr_local(dest_id)
                 self.value_types[dest_name] = "ptr"
                 self.remember_function_return_type("rt_array_new", "ptr")
@@ -183,7 +221,11 @@ impl MirToLlvm:
                 self.value_types[dest_name] = "ptr"
                 self.builder.emit("  {dest_name} = getelementptr i8, ptr {tup_agg}, {tup_nit} 0  ; tuple ptr")
                 return
-            case _: ()
+            case _:
+                if mir_trace_enabled():
+                    eprint("MIRB-AGG arm=fallthrough dest={dest_id}\n")
+        if mir_trace_enabled():
+            eprint("MIRB-AGG generic-path dest={dest_id}\n")
         val agg_ty = self.valid_llvm_type(self.get_local_type(dest_id))
         val agg_ptr = self.builder.fresh_local()
         self.builder.emit_alloca(agg_ptr, agg_ty)
@@ -196,7 +238,7 @@ impl MirToLlvm:
             self.builder.emit_store(elem_ty, elem_val, elem_ptr)
         self.builder.emit_load(dest_name, agg_ty, agg_ptr)
 
-    me translate_get_field(dest: LocalId, base: MirOperand, field: i64):
+    me llvm_get_field_impl(dest: LocalId, base: MirOperand, field: i64):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val raw_base_val = self.translate_operand(base)
@@ -267,7 +309,7 @@ impl MirToLlvm:
         else:
             self.builder.emit_load(dest_name, nit, field_ptr)
 
-    me translate_set_field(base: MirOperand, field: i64, value: MirOperand):
+    me llvm_set_field_impl(base: MirOperand, field: i64, value: MirOperand):
         val raw_base_val = self.translate_operand(base)
         # Same hoist as translate_get_field -- see the comment there.
         val set_base_as_ptr = self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr")
@@ -352,7 +394,7 @@ impl MirToLlvm:
 
     # === Overrides: casts ===
 
-    me translate_cast(dest: LocalId, operand: MirOperand, target: MirType):
+    me llvm_cast_impl(dest: LocalId, operand: MirOperand, target: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
@@ -388,7 +430,7 @@ impl MirToLlvm:
             else:
                 self.builder.emit("  {dest_name} = add {target_ty} {casted}, 0  ; cast")
 
-    me translate_bitcast(dest: LocalId, operand: MirOperand, target: MirType):
+    me llvm_bitcast_impl(dest: LocalId, operand: MirOperand, target: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
@@ -413,7 +455,7 @@ impl MirToLlvm:
 
     # === Overrides: indirect calls / intrinsics ===
 
-    me translate_call_indirect(dest: LocalId?, ptr: MirOperand, args: [MirOperand], sig: MirSignature):
+    me llvm_call_indirect_impl(dest: LocalId?, ptr: MirOperand, args: [MirOperand], sig: MirSignature):
         # Guard (#138 Wall #1): a CallIndirect whose callee operand carries a
         # nil local means the frontend lowered an unresolved callee
         # (HirExprKind.Error -> CallIndirect(func=Copy(nil))). Reading `.id`
@@ -494,7 +536,7 @@ impl MirToLlvm:
         self.builder.emit("  {dest_name} = phi {phi_ty} [ {then_val}, %bb{then_id} ], [ {else_val}, %bb{else_id} ]")
         true
 
-    me translate_intrinsic(dest: LocalId?, name: text, args: [MirOperand]):
+    me llvm_intrinsic_impl(dest: LocalId?, name: text, args: [MirOperand]):
         # Dispatch cipher intrinsics to real LLVM x86 intrinsics.
         # Falls back to __simple_intrinsic_<name> for unknown names.
         match name:
@@ -544,7 +586,7 @@ impl MirToLlvm:
                 else:
                     self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
 
-    me translate_inline_asm(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text], clobber_abis: [text], options: [text]):
+    me llvm_inline_asm_impl(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text], clobber_abis: [text], options: [text]):
         """Translate inline assembly to LLVM inline asm call."""
         var constraint_parts: [text] = []
         var arg_values: [text] = []
@@ -573,15 +615,24 @@ impl MirToLlvm:
         val preserves_flags = options.contains("preserves_flags")
         for clobber in clobbers:
             if not (no_memory and clobber == "memory") and not (preserves_flags and clobber == "cc"):
-                constraint_parts.push("~{{clobber}}")
+                val clobber_reg = if clobber == "flags": "cc" else: clobber
+                constraint_parts.push("~{{" + clobber_reg + "}}")
 
         for clobber_abi in clobber_abis:
             if clobber_abi == "C" or clobber_abi == "C-unwind":
-                for register in llvm_c_abi_clobbers(self.config.triple.arch):
-                    constraint_parts.push("~{{register}}")
+                for register in llvm_c_abi_clobbers(self.target_arch):
+                    constraint_parts.push("~{{" + register + "}}")
 
         val constraints = constraint_parts.join(",")
-        val llvm_asm_template = llvm_inline_asm_rewrite_template(asm_template, outputs, inputs)
+        # Design A.3.1: a RAW block (no operands) is opaque assembler text --
+        # every `$` must reach LLVM's template engine as `$$`, or an AT&T
+        # immediate like `and $~0xF, %rsp` aborts llc with
+        # `Bad $ operand number in inline asm string`. Operand-bound blocks
+        # keep `{name}` -> `$N` substitution and the author writes `$$`.
+        val llvm_asm_template = if inputs.len() == 0 and outputs.len() == 0:
+            llvm_raw_asm_escape_template(asm_template)
+        else:
+            llvm_inline_asm_rewrite_template(asm_template, outputs, inputs)
 
         var arg_list_parts: [text] = []
         for i in 0..arg_values.len():
@@ -624,7 +675,7 @@ impl MirToLlvm:
 
     # === Overrides: pipeline operators ===
 
-    me translate_pipe_forward(dest: LocalId, value: MirOperand, func: MirOperand):
+    me llvm_pipe_forward_impl(dest: LocalId, value: MirOperand, func: MirOperand):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val value_val = self.translate_operand(value)
@@ -632,7 +683,7 @@ impl MirToLlvm:
         val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
         self.builder.emit("  {dest_name} = call {ret_ty} {func_val}(i64 {value_val})  ; pipe forward")
 
-    me translate_compose(dest: LocalId, f: MirOperand, g: MirOperand, forward: bool):
+    me llvm_compose_impl(dest: LocalId, f: MirOperand, g: MirOperand, forward: bool):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val f_val = self.translate_operand(f)
@@ -641,14 +692,14 @@ impl MirToLlvm:
         self.mark_ptr_local(dest_id)
         self.builder.emit("  {dest_name} = call ptr @__simple_runtime_compose(ptr {f_val}, ptr {g_val})  ; compose ({dir})")
 
-    me translate_parallel(dest: LocalId, funcs: [MirOperand]):
+    me llvm_parallel_impl(dest: LocalId, funcs: [MirOperand]):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val count = funcs.len()
         self.mark_ptr_local(dest_id)
         self.builder.emit("  {dest_name} = call ptr @__simple_runtime_parallel(i64 {count})  ; parallel ({count} functions)")
 
-    me translate_layer_connect(dest: LocalId, l1: MirOperand, l2: MirOperand):
+    me llvm_layer_connect_impl(dest: LocalId, l1: MirOperand, l2: MirOperand):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val l1_val = self.translate_operand(l1)
@@ -658,12 +709,33 @@ impl MirToLlvm:
 
     # === Overrides: borrow checking ===
 
-    me translate_ref(dest: LocalId, kind: MirBorrowKind, place: MirPlace):
+    me llvm_ref_impl(dest: LocalId, kind: MirBorrowKind, place: MirPlace):
+        # A borrow lowers to the identity on the borrowed place's value, so the
+        # emitted instruction must carry the PLACE's actual LLVM type. It used
+        # to hardcode `native_int()`, which is correct only when the place
+        # happens to be i64: borrowing an i32/u32/i1/f64/ptr local emitted
+        # `add i64 %lN, 0` over a differently-typed value and llc rejected the
+        # WHOLE module ("'%lN' defined with type 'i32' but expected 'i64'"),
+        # taking std.nogc_sync_mut.io.process_ops -- and so every native-build
+        # of an io_runtime importer -- down with it. Mirrors the type-directed
+        # dispatch translate_copy_move already uses for the same identity
+        # shape, including the -0.0 float form that preserves negative zero.
+        # See doc/08_tracking/bug/native_compile_unresolved_option_result_io_modules_2026-08-24.md
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
-        val place_val = self.get_local(self.local_id_value(place.local))
-        val nit = self.native_int()
-        self.builder.emit("  {dest_name} = add {nit} {place_val}, 0  ; Ref (borrow)")
+        val place_id = self.local_id_value(place.local)
+        val place_val = self.get_local(place_id)
+        val ty = self.valid_llvm_type(self.get_local_type(place_id))
+        self.local_types[dest_id] = ty
+        self.value_types[dest_name] = ty
+        if ty == "ptr":
+            self.mark_ptr_local(dest_id)
+            val nit = self.native_int()
+            self.builder.emit("  {dest_name} = getelementptr i8, ptr {place_val}, {nit} 0  ; Ref (borrow)")
+        elif is_float_type(ty):
+            self.builder.emit("  {dest_name} = fadd {ty} {place_val}, -0.0  ; Ref (borrow)")
+        else:
+            self.builder.emit("  {dest_name} = add {ty} {place_val}, 0  ; Ref (borrow)")
 
     # === Overrides: unsupported async/actor lowering ===
 
@@ -762,4 +834,3 @@ impl MirToLlvm:
 # ============================================================================
 
 export llvm_inline_asm_rewrite_template
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection

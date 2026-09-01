@@ -1,0 +1,362 @@
+"""
+## Purpose and audience
+Purpose: Prove structured evidence and uncertainty survive lint formatting.
+Audience: lint CLI, LSP, and machine-output maintainers.
+"""
+# @req: REQ-009, REQ-010
+
+use std.spec.*
+use std.fs.{read_file}
+use compiler.tools.lint._LintMain.config_and_model.{
+    LintDiag, LintRunResult, LintLevel, LintCategory, LintEvidenceTier,
+    LintConfig, LintProfile, apply_config_level_for_evidence,
+    lint_diag_effective_level, lint_run_result_apply_cli_policy,
+    lint_policy_decision, map_lint_code_to_config_name
+}
+use compiler.tools.lint._LintMain.lint_checks.{lint_rule_code_from_easyfix_id}
+use compiler.tools.fix.rules.impl_.lint_annotation.{check_unknown_annotation}
+use compiler.tools.fix.rules.impl_.lint_wide_public.{
+    check_wide_public_text_with_lines}
+
+describe "performance diagnostic records":
+    it "uses one honest text fallback for unknown annotations":
+        step("Avoid decorator-versus-attribute false positives and duplicate warnings")
+        expect(check_unknown_annotation("@extern(c)\nfn f(): pass\n", "sample.spl").len()).to_equal(0)
+        expect(check_unknown_annotation("@allow(todo_format)\nfn f(): pass\n", "sample.spl").len()).to_equal(0)
+        expect(check_unknown_annotation("@not_a_real_annotation\nfn f(): pass\n", "sample.spl").len()).to_equal(1)
+
+    it "extracts EasyFix lint codes without array splitting":
+        step("Preserve prefixed and direct EasyFix code formats")
+        expect(lint_rule_code_from_easyfix_id("L:primitive_api:9")).to_equal("primitive_api")
+        expect(lint_rule_code_from_easyfix_id("E:parser_contextual_keyword:4")).to_equal(
+            "parser_contextual_keyword")
+        expect(lint_rule_code_from_easyfix_id("W0406:17")).to_equal("W0406")
+        expect(lint_rule_code_from_easyfix_id("malformed")).to_equal("malformed")
+        expect(map_lint_code_to_config_name("W0406")).to_equal("visibility_boundary")
+        expect(map_lint_code_to_config_name("export_outside_init")).to_equal(
+            "export_outside_init")
+        expect(map_lint_code_to_config_name("spipe_no_print_based_tests")).to_equal(
+            "spipe_no_print_based_tests")
+        expect(map_lint_code_to_config_name("resource_leak")).to_equal("resource_leak")
+        expect(map_lint_code_to_config_name("unknown_annotation")).to_equal(
+            "unknown_annotation")
+        expect(map_lint_code_to_config_name("parser_contextual_keyword")).to_equal(
+            "parser_contextual_keyword")
+        expect(map_lint_code_to_config_name("deprecated_if_let")).to_equal(
+            "deprecated_if_let")
+        expect(map_lint_code_to_config_name("struct_construction_parens")).to_equal(
+            "struct_construction_parens")
+        expect(map_lint_code_to_config_name("short_grammar_method_ref")).to_equal(
+            "short_grammar_refactor")
+        expect(map_lint_code_to_config_name("raw_unit_postfix")).to_equal(
+            "raw_unit_postfix")
+        expect(map_lint_code_to_config_name("simd_opportunity")).to_equal(
+            "simd_opportunity")
+        var easyfix_policy = LintConfig.new()
+        val denied_export = lint_policy_decision(
+            easyfix_policy, "export_outside_init", LintLevel.Warn,
+            LintEvidenceTier.LegacyCompatible)
+        expect(denied_export.keep).to_equal(true)
+        expect(denied_export.level).to_equal(LintLevel.Deny)
+        easyfix_policy.set_level("export_outside_init", LintLevel.Allow)
+        expect(lint_policy_decision(
+            easyfix_policy, "export_outside_init", LintLevel.Warn,
+            LintEvidenceTier.LegacyCompatible).keep).to_equal(false)
+        easyfix_policy.set_level("short_grammar_refactor", LintLevel.Allow)
+        expect(lint_policy_decision(
+            easyfix_policy, "short_grammar_placeholder", LintLevel.Warn,
+            LintEvidenceTier.LegacyCompatible).keep).to_equal(false)
+        easyfix_policy.set_level("unknown_decorator", LintLevel.Allow)
+        expect(lint_policy_decision(
+            easyfix_policy, "unknown_annotation", LintLevel.Warn,
+            LintEvidenceTier.LegacyCompatible).keep).to_equal(false)
+
+    it "renders stable evidence and uncertainty without claiming a proven fix":
+        step("Report actionable performance and memory diagnostics")
+        val lint = LintDiag.new(
+            "COLL010", LintLevel.Warn, LintCategory.Warning,
+            "repeated linear lookup inside a dynamic loop"
+        ).with_fix("consider building an index")
+         .with_evidence(["outer=orders.len", "lookup=users.len", "cost=O(orders.len*users.len)"])
+         .with_uncertainty("receiver mutation summary unavailable")
+         .with_evidence_tier(LintEvidenceTier.SourcePattern)
+        val rendered = LintRunResult.new("fixture.spl", 7, 3, lint).format()
+        expect(rendered).to_equal(
+            "fixture.spl:7:3: warning[COLL010]: repeated linear lookup inside a dynamic loop\n" +
+            "  hint: consider building an index\n" +
+            "  evidence: outer=orders.len\n" +
+            "  evidence: lookup=users.len\n" +
+            "  evidence: cost=O(orders.len*users.len)\n" +
+            "  confidence: source-pattern\n" +
+            "  uncertainty: receiver mutation summary unavailable")
+        expect(lint.easy_fix).to_be_nil()
+
+    it "joins diagnostic evidence without quadratic immutable text growth":
+        step("Keep warning and JSON evidence rendering linear in payload size")
+        val human_source = read_file(
+            "src/compiler/90.tools/lint/_LintMain/config_and_model.spl")
+        val json_source = read_file(
+            "src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl")
+        expect(human_source).to_contain("lines.join(\"\\n\")")
+        expect(human_source).not.to_contain(
+            "output = output + \"\\n  evidence: \"")
+        expect(json_source).to_contain("items.join(\",\")")
+        expect(json_source).not.to_contain("output = output + \",\"")
+
+    it "scans spec docstrings with one forward cursor and one warning owner":
+        step("Prevent suffix allocation and duplicate warning method bodies")
+        val spec_source = read_file(
+            "src/compiler/90.tools/fix/rules/impl_/lint_spec.spl")
+        val lint_source = read_file(
+            "src/compiler/90.tools/lint/_LintMain/lint_checks.spl")
+        expect(spec_source).to_contain(
+            "source.index_of_from(\"\\\"\\\"\\\"\", search_pos)")
+        expect(spec_source).to_contain("search_pos = pos + 3")
+        expect(spec_source).not.to_contain(
+            "source.slice(search_pos).find(\"\\\"\\\"\\\"\")")
+        expect(lint_source.count("me check_silent_default_spl(")).to_equal(1)
+
+    it "deduplicates wide-public exports with indexed membership":
+        step("Keep export counting linear and exact")
+        var distinct: [text] = []
+        var index = 0
+        while index < 31:
+            distinct.push("export public_name_{index}")
+            index = index + 1
+        val over = check_wide_public_text_with_lines("regular.spl", distinct)
+        expect(over.len()).to_equal(1)
+        expect(over[0].description).to_contain("exports 31 public symbols")
+        var duplicates: [text] = []
+        index = 0
+        while index < 31:
+            duplicates.push("export repeated_name")
+            index = index + 1
+        expect(check_wide_public_text_with_lines(
+            "regular.spl", duplicates).len()).to_equal(0)
+        val source = read_file(
+            "src/compiler/90.tools/fix/rules/impl_/lint_wide_public.spl")
+        expect(source).to_contain("seen_exports.has(name)")
+        expect(source).to_contain("exported_count = exported_count + 1")
+        expect(source).not.to_contain("list_has(exported_names")
+        expect(source).not.to_contain("fn list_has(")
+
+    it "keeps uncertain performance advice non-deniable":
+        step("Apply one evidence-aware CLI severity policy")
+        val uncertain = LintDiag.new(
+            "COLL010", LintLevel.Warn, LintCategory.Warning,
+            "source-shape lookup candidate"
+        ).with_uncertainty("receiver type unavailable")
+         .with_evidence_tier(LintEvidenceTier.SourcePattern)
+        val proven = LintDiag.new(
+            "COLL010", LintLevel.Warn, LintCategory.Warning,
+            "typed repeated linear lookup"
+        ).with_evidence(["receiver=Array<User>", "lookup_cost=linear"])
+         .with_evidence_tier(LintEvidenceTier.TypedProven)
+        expect(lint_diag_effective_level(uncertain, true)).to_equal(LintLevel.Warn)
+        expect(lint_diag_effective_level(proven, true)).to_equal(LintLevel.Deny)
+        val robust = LintConfig.new()
+        robust.set_profile(LintProfile.Robust)
+        expect(apply_config_level_for_evidence(
+            robust, "COLL010", LintLevel.Warn,
+            LintEvidenceTier.SourcePattern)).to_equal(LintLevel.Warn)
+        expect(apply_config_level_for_evidence(
+            robust, "COLL010", LintLevel.Warn,
+            LintEvidenceTier.TypedProven)).to_equal(LintLevel.Deny)
+        val rendered = lint_run_result_apply_cli_policy(
+            LintRunResult.new("fixture.spl", 9, 1, uncertain), true).format()
+        expect(rendered).to_contain("warning[COLL010]")
+
+    it "reuses diagnostics whose CLI policy level is unchanged":
+        step("Avoid rebuilding unchanged diagnostic payloads")
+        val source = read_file(
+            "src/compiler/90.tools/lint/_LintMain/config_and_model.spl")
+        val begin = source.find("fn lint_run_result_apply_cli_policy(")
+        val finish = source.find("enum LintFileResult:")
+        val policy = source.substring(begin, finish)
+        expect(policy).to_contain(
+            "if effective_level == result.lint.level:")
+        expect(policy).to_contain("return result")
+        expect(policy).to_contain("result.lint.with_level(effective_level)")
+
+    it "projects evidence severity without parsing or scanning source":
+        step("Keep performance severity metadata-only")
+        val source = read_file("src/compiler/90.tools/lint/_LintMain/config_and_model.spl")
+        val begin = source.find("fn apply_config_level_for_evidence(")
+        val finish = source.find("fn lint_diag_effective_level(")
+        val policy = source.substring(begin, finish)
+        expect(begin).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(begin)
+        expect(policy).not.to_contain("parse_module")
+        expect(policy).not.to_contain("read_file")
+        expect(policy).not.to_contain("split(")
+        expect(policy).not.to_contain("check_collection_patterns")
+
+    it "resolves suppression and evidence severity with one policy decision":
+        step("Avoid duplicate code mapping and level lookup per diagnostic")
+        var config = LintConfig.new()
+        config.set_level("collection_performance", LintLevel.Allow)
+        val allowed = lint_policy_decision(
+            config, "COLL010", LintLevel.Warn, LintEvidenceTier.SourcePattern)
+        expect(allowed.keep).to_equal(false)
+
+        config.set_level("collection_performance", LintLevel.Deny)
+        val advisory = lint_policy_decision(
+            config, "COLL010", LintLevel.Warn, LintEvidenceTier.SourcePattern)
+        expect(advisory.keep).to_equal(true)
+        expect(advisory.level).to_equal(LintLevel.Warn)
+        val proven = lint_policy_decision(
+            config, "COLL010", LintLevel.Warn, LintEvidenceTier.TypedProven)
+        expect(proven.keep).to_equal(true)
+        expect(proven.level).to_equal(LintLevel.Deny)
+
+        val checks_source = read_file(
+            "src/compiler/90.tools/lint/_LintMain/lint_checks.spl")
+        val append_source = read_file(
+            "src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl")
+        expect(checks_source).not.to_contain("should_keep_lint_result(file_config")
+        expect(append_source).not.to_contain("should_keep_lint_result(config")
+        expect(checks_source).not.to_contain(
+            "var filtered_results: [LintRunResult] = []")
+        expect(checks_source).to_contain(
+            "while result_read < original_result_count:")
+        expect(checks_source).to_contain(
+            "self.results[result_write] = kept_result")
+        expect(checks_source).to_contain(
+            "while self.results.len() > result_write:\n            self.results.pop()")
+        expect(checks_source).to_contain(
+            "val locations = lint_source_location_index(lines)")
+        expect(checks_source).to_contain(
+            "if self.retain_combined_view and path.ends_with(\".spl\"):")
+        expect(checks_source).to_contain(
+            "self.last_source_export_star_lines = locations.export_star_lines\n            # Publish only after")
+        expect(checks_source).not.to_contain("self.last_source_lines = lines")
+        expect(append_source).to_contain(
+            "linter.lint_source_for_parsed_append(path, content)")
+        expect(append_source).to_contain(
+            "linter.last_source_locations_valid")
+        expect(append_source).to_contain(
+            "linter.release_combined_lint_view()\n    val stub_profile_name")
+        expect(append_source).to_contain(
+            "linter.release_combined_lint_view()")
+        expect(append_source).not.to_contain(
+            "var results = linter.lint_source(path, content)")
+        expect(checks_source).to_contain(
+            "resolve_lint_config_with_lines(self.config, path, lines)")
+        expect(checks_source).to_contain(
+            "self.check_param_tag_spl(path, lines)")
+        expect(checks_source).to_contain(
+            "self.check_accessor_and_parent_names(path, lines)")
+        expect(checks_source).to_contain(
+            "self.check_os_freestanding_patterns(path, lines)")
+        expect(checks_source).to_contain(
+            "self.check_wm_lane_boundary(file_config, path, lines)")
+        expect(checks_source).to_contain(
+            "self.check_feature_tracking_done_gate(path, lines)")
+        expect(checks_source).to_contain(
+            "self.check_spipe_quality(path, lines)")
+        expect(checks_source).to_contain(
+            "self.check_ui_raw_widget_kind(path, lines)")
+        expect(checks_source).to_contain(
+            "self.check_ui_raw_variant(path, lines)")
+        expect(checks_source).to_contain(
+            "self.check_ui_raw_theme_name(path, lines)")
+        expect(checks_source).not.to_contain(
+            "val primitive_api_fixes = check_primitive_api(content, path)")
+        expect(checks_source).not.to_contain(
+            "val script_language_fixes = check_simple_script_required(content, path)")
+        val easyfix_registry_source = read_file(
+            "src/compiler/90.tools/fix/rules/registry.spl")
+        expect(checks_source).to_contain(
+            "check_all_rules_with_lines(content, path, lines)")
+        expect(checks_source).to_contain(
+            "lint_rule_code_from_easyfix_id(easyfix_id(fix))")
+        expect(checks_source).not.to_contain(
+            "easyfix_id(fix).split(\":\")")
+        expect(easyfix_registry_source).to_contain(
+            "val std_view: EasyFixSourceView = easy_fix_source_view(lines)")
+        expect(easyfix_registry_source).to_contain(
+            "val contexts: [LineContext] = std_view.contexts")
+        expect(easyfix_registry_source).to_contain(
+            "check_parser_contextual_keyword_with_view(file, std_view)")
+        expect(easyfix_registry_source).to_contain(
+            "check_deprecated_if_let_with_view(file, std_view)")
+        expect(easyfix_registry_source).to_contain(
+            "check_stub_impl_text_with_view(file, std_view)")
+        expect(easyfix_registry_source).to_contain(
+            "check_print_in_test_spec_with_contexts(file, contexts)")
+        expect(easyfix_registry_source).to_contain(
+            "check_spipe_missing_docstrings_with_lines(file, lines)")
+        expect(easyfix_registry_source).to_contain(
+            "check_spipe_manual_assertions_with_contexts(file, contexts)")
+        expect(easyfix_registry_source).to_contain(
+            "check_spipe_no_print_based_tests_with_contexts(file, contexts)")
+        expect(easyfix_registry_source).to_contain(
+            "check_unnamed_duplicate_typed_args_with_view(file, lines, contexts)")
+        val easyfix_code_source = read_file(
+            "src/compiler/90.tools/fix/rules/impl_/lint_code.spl")
+        expect(easyfix_code_source).to_contain(
+            "val indexed_calls = _collect_indexed_call_replacements(lines, file, signatures)")
+        expect(easyfix_code_source).to_contain(
+            "var target_by_key: Dict<text, i64> = {}")
+        expect(easyfix_code_source).to_contain(
+            "var eligible_names: Dict<text, bool> = {}")
+        expect(easyfix_code_source).not.to_contain(
+            "_collect_call_replacements_for_signature_lines")
+        expect(easyfix_code_source).not.to_contain(
+            "fn _is_unique_call_target(")
+        val annotation_source = read_file(
+            "src/compiler/90.tools/fix/rules/impl_/lint_annotation.spl")
+        expect(annotation_source).not.to_contain("fn known_decorators() -> [text]")
+        expect(annotation_source).not.to_contain("fn known_attributes() -> [text]")
+        expect(annotation_source).to_contain("fn _is_known_decorator(name: text) -> bool:")
+        expect(annotation_source).to_contain("fn _is_known_attribute(name: text) -> bool:")
+        expect(easyfix_registry_source).to_contain(
+            "check_resource_leak_with_contexts(file, contexts)")
+        expect(easyfix_registry_source).to_contain(
+            "check_non_exhaustive_match_with_lines(file, lines)")
+        expect(easyfix_registry_source).to_contain(
+            "check_struct_construction_parens_with_contexts(file, contexts)")
+        expect(easyfix_registry_source).to_contain(
+            "check_unknown_annotation_with_contexts(file, contexts)")
+        expect(easyfix_registry_source).not.to_contain(
+            "val fixes14 = check_unknown_attribute_with_contexts(file, contexts)")
+        expect(easyfix_registry_source).to_contain(
+            "check_export_outside_init_with_view(file, lines, contexts)")
+        expect(easyfix_registry_source).to_contain(
+            "check_init_boundary_violation_with_contexts(file, contexts)")
+        expect(easyfix_registry_source).to_contain(
+            "check_bypass_with_code_files_with_lines(file, lines)")
+        expect(easyfix_registry_source).to_contain(
+            "val fixes11 = check_star_import_text_with_lines(file, lines)")
+        expect(easyfix_registry_source).to_contain(
+            "val fixes12 = check_wide_public_text_with_lines(file, lines)")
+        expect(easyfix_registry_source).to_contain(
+            "val fixes18 = check_bare_bool_with_lines(file, lines)")
+        expect(easyfix_registry_source).to_contain(
+            "val fixes21 = check_primitive_api_with_lines(file, lines)")
+        expect(easyfix_registry_source).to_contain(
+            "val fixes22 = check_short_grammar_refactor_with_contexts(file, contexts)")
+        expect(easyfix_registry_source).to_contain(
+            "val fixes23 = check_simple_script_required_with_lines(file, lines)")
+        val compiler_easyfix_helpers = read_file(
+            "src/compiler/90.tools/fix/rules/helpers.spl")
+        expect(compiler_easyfix_helpers).to_contain(
+            "export use std.tooling.easy_fix.rules_helpers")
+        expect(compiler_easyfix_helpers).not.to_contain(
+            "struct LineContext:")
+        val traceability_source = read_file(
+            "src/compiler/90.tools/lint/_LintMain/traceability_and_assertions.spl")
+        expect(traceability_source).not.to_contain(
+            "me check_feature_tracking_done_gate(path: String, content: String)")
+        expect(traceability_source).not.to_contain(
+            "me check_spipe_quality(path: String, content: String)")
+        expect(traceability_source).not.to_contain(
+            "me check_ui_raw_widget_kind(path: String, content: String)")
+        expect(traceability_source).not.to_contain(
+            "me check_ui_raw_variant(path: String, content: String)")
+        expect(traceability_source).not.to_contain(
+            "me check_ui_raw_theme_name(path: String, content: String)")
+        expect(checks_source).not.to_contain(
+            "me check_stale_md_diagrams(path: String, content: String)")
+        expect(checks_source).not.to_contain(
+            "me check_llvm_backend_type_safety(path: String, content: String)")

@@ -1,7 +1,6 @@
 # The ML-KEM AVX2 C lane has no reproducible build recipe
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** OPEN
 **Found:** 2026-08-05
 **Component:** `test/09_baselines/crypto/x25519mlkem768/`, `src/runtime/runtime_simd_dispatch.c`
 **Impact:** the only artifact producing the campaign's first real paired timing

@@ -18,12 +18,12 @@ the reason; they are not claimed as implemented anywhere.
 | 5.3 | Explicit optional API access | OUT-OF-SCOPE (frontend) | — |
 | 5.4-5.5 | Binding completeness/uniqueness | PARTIAL | catalog-level uniqueness only: `apk_build_catalog_v2` rejects duplicate `(kind, key)`; `apk_build_pack_v2` rejects duplicate module ids. Type-level binding uniqueness is a compiler check. |
 | 5.6 | ABI compatibility | IMPLEMENTED | `ApkModuleSourceV2.module_abi_hash` / `ApkCatalogEntryV2.abi_hash`; `_apk_acquire_facet` fails `APK_ABI_MISMATCH` |
-| 5.7 | Atomic activation | PARTIAL | a failed bind is never published to the resident registry (`_apk_acquire_facet` publishes only on the success path); no generation/epoch object exists |
+| 5.7 | Atomic activation | PARTIAL | `prepare/publish/abort` retains canonical server-side receipt state; the production `ModuleLoader` parses, section-maps, relocates, and then publishes generation/binding/counters under one exclusion gate. This is process-local loader atomicity, not the design's future cross-runtime activation-future protocol. |
 | 5.8 | Deterministic configuration | IMPLEMENTED | activation is a recorded catalog field, not runtime inference |
 | 5.9 | No hidden runtime search | IMPLEMENTED | `apk_catalog_route_v1` / `_apk_acquire_facet`: exact key + exact pack path, no scan path in the module |
 | 5.10 | Exact performance claims | IMPLEMENTED | loader counters `packs_opened` / `modules_decompressed` / `bytes_decompressed` / `cache_hits`, asserted in REQ-APK-DC-01, -08 |
 | 6.1-6.6 | Grammar, facet decls, impls | OUT-OF-SCOPE (parser/HIR) | — |
-| 6.7 | Facet acquisition API | IMPLEMENTED (loader analogue) | `apk_try_facet` (no I/O, resident only), `apk_load_facet` (policy-gated), `apk_load_aspect_manual` (`aspect.load`). `unload` MISSING — §14.7 states hot unload is not required initially. |
+| 6.7 | Facet acquisition API | PARTIAL (loader analogue) | `apk_try_facet` is Dict-backed, no-I/O resident lookup; `ModuleLoader.aspect_facet_visible` performs strict nested-SMF activation; explicit loader-owned unload exists. Typed language `facet<T>` lowering remains outside this slice. |
 | 6.8-6.12 | Nominal static mode, mixins, advice eligibility | OUT-OF-SCOPE (frontend) | — |
 | 7-8 | Ownership, source placement, root registry | OUT-OF-SCOPE (resolver) | — |
 | 9.1-9.2 | Variant overlay, selection axes | OUT-OF-SCOPE (build config) | — |
@@ -34,16 +34,16 @@ the reason; they are not claimed as implemented anywhere.
 | 10 | Deployment layout | OUT-OF-SCOPE (packaging) | packs are addressed by catalog-relative path (`apk_loader_register_pack`) |
 | 11.1 | Level 1 Aspect Catalog | PARTIAL | FacetRoute (`apk_catalog_route_v1`), JoinpointRoute (`apk_catalog_route_joinpoint_v1`), StartupAspect (`apk_catalog_startup_keys_v1`) implemented as one kind-discriminated record array; `activation_mode` + `facet_contract_abi_hash` carried. **PackRef is MISSING** (`content_hash`, `index_hash`, `signature_policy`, `required_runtime_abi`) — signature/trust policy has no verifier in-tree, so a hash field with no checker would be decoration. `ProfileRecord[]` missing per §9.6. |
 | 11.2 | Level 2 pack directory | PARTIAL | ModuleEntry: `module_id`, `aspect_id`, `module_abi_hash`, `required_core_public_abi_hash`, `variant_fingerprint`, chunk offset/size/crc — all uncompressed. `AspectEntry`, `BindingSummaryEntry`, `DependencyEntry`, `SignatureTable` MISSING (a module is one chunk here, so chunk_range/dependency ranges have nothing to range over; see §12). |
-| 11.3 | Full metadata inside chunks | IMPLEMENTED by construction | only routing/compat data is duplicated uncompressed; payload bytes are opaque |
+| 11.3 | Full metadata inside chunks | IMPLEMENTED by construction | only routing/compat data is duplicated uncompressed; the pack layer treats payload bytes as opaque, while `ModuleLoader` parses a selected member as an ordinary SMF before publication |
 | 12 | Backward-compatible pack SMF | IMPLEMENTED | `apk_build_pack_v2` embeds complete module blobs; `apk_load_module_v1` returns the blob bytes for the existing SMF reader |
-| 12.1 | SMF header compatibility | PARTIAL | `APK_FLAG_ASPECT_PACK` is set and an unflagged file is REJECTED (`APK_NOT_ASPECT_PACK`, REQ-APK-DC-04). UPDATED 2026-08-19: `SectionType.AspectPackDirectory` IS now a registered SMF section type (wire byte 16, `.aspect_pack`) in `src/compiler/70.backend/linker/smf_writer.spl` and in the authoritative Rust enum `src/compiler_rust/common/src/smf/section.rs`; `SMF_FLAG_ASPECT_PACK` (0x20) is defined in `smf_header.spl`, stamped by the writer whenever the section is present, and parsed into `SmfFlags.aspect_pack`. `AspectPackSignature`/`AspectPackDictionary` are still NOT registered: no signature verifier and no shared dictionary codec exist in-tree. |
+| 12.1 | SMF header compatibility | PARTIAL | The Pure Simple writer/reader registers `.aspect_pack` wire type 16 and `SMF_FLAG_ASPECT_PACK`; `ModuleLoader.load` admits standalone packs and strict facet routing loads complete ordinary nested SMFs through the canonical in-memory reader/mapper. Automatic `--mode dynload` packaging, signatures, and dictionaries remain open. |
 | 12.2 | Compression policy | PARTIAL | directory + catalog uncompressed, one independent deflate frame per module, per-frame crc and declared uncompressed size — all present. Co-load clusters, page-aligned uncompressed hot chunks, split cold debug chunks and a pack-level zstd dictionary are MISSING (all explicitly optional in the design). |
 | 12.3 | Whole-pack stream forbidden | IMPLEMENTED + MEASURED | REQ-APK-DC-01: `bytes_decompressed` equals exactly the selected frame; REQ-APK-DC-05: corrupting an unselected frame leaves other modules loadable |
 | 13.1-13.2 | Hard/soft grouping constraints | OUT-OF-SCOPE (packer policy) | this module consumes a grouping decision, it does not make one |
 | 13.3 | Independent loading mandatory | IMPLEMENTED | `apk_load_module_v1` loads exactly one module by id |
 | 13.4 | Repacking does not recompile | IMPLEMENTED by construction | the builder takes opaque module payloads |
 | 14.1 AspectCatalogReader | | IMPLEMENTED | `apk_open_catalog_v1` + route fns |
-| 14.1 AspectPackProvider | | IMPLEMENTED | `apk_open_pack_v1` + `apk_load_module_v1` by `(pack_path, module_id)` |
+| 14.1 AspectPackProvider | | PARTIAL | Byte-array provider APIs (`apk_open_pack_v1` + `apk_load_module_v1`) exist; automatic `ModuleLoader` registration and facet routing remain OPEN. |
 | 14.1 AspectPackIndexCache | | MISSING | needs a real mmap/file layer; this module works on byte arrays, so caching a directory mapping has nothing to map. Tied to §15. |
 | 14.1 FacetBindingRegistry | | PARTIAL | a facet-key -> loaded-module registry exists (`apk_try_facet`, `from_cache`, `cache_hits`); the `(concrete_type_id, facet_interface_id, generation) -> witness` map is runtime/codegen work |
 | 14.1 AdviceBindingRegistry | | MISSING (out of scope) | needs join-point slots and patchpoints in the backend; only the catalog ROUTE to a slot exists here |
@@ -52,8 +52,8 @@ the reason; they are not claimed as implemented anywhere.
 | 14.3 | First `facet<T>()` operation | IMPLEMENTED for steps 3-5 | resident-registry check, FacetRoute consult, policy gate, exact pack open, one frame inflate, ABI validation, publish. Steps 1-2 (type id, inline cache) and 6-7 (sidecar state, `FacetRef`) are runtime/codegen. |
 | 14.4 | Open-world interface bindings | OUT-OF-SCOPE (runtime type registry) | — |
 | 14.5 | Stateless/per-type/per-object state | OUT-OF-SCOPE (runtime) | — |
-| 14.6 | Concurrency | PARTIAL | duplicate work is avoided by the resident registry; there is no activation future/dependency-cycle stack (this module has no concurrency primitives) |
-| 14.7 | Unload | MISSING, by design | "Hot unload is not required for the initial release." |
+| 14.6 | Concurrency | PARTIAL | A lazy per-loader mutex makes resident lookup, first-use mapping/publication, catalog replacement, and explicit facet unload mutually exclusive; contended operations fail closed with `APK_ACTIVATION_BUSY`. The activation stack rejects dependency cycles. Waiting activation futures, cross-process coordination, and concurrent stress evidence remain missing. |
+| 14.7 | Unload | PARTIAL | Loader-owned unload refuses pinned facets, decrements shared nested-module references, and unmaps each owned section exactly once at zero references. Hot advice/sidecar teardown and concurrent stress evidence remain outside this slice. |
 | 15 | Mapping and I/O policy | MISSING (out of scope here) | the module is byte-array based; `pread`/`WILLNEED`/partial mapping belong to the loader's file layer |
 | 16 | Facet contracts and SHB metadata | OUT-OF-SCOPE | — |
 | 17 | ABI and compatibility model | PARTIAL | `facet_contract_abi_hash` is enforced; `required_core_public_abi_hash` and `variant_fingerprint` are CARRIED and readable but not compared (nothing in-tree publishes a core ABI hash to compare against — comparing against an invented value would be a fake gate) |
@@ -62,7 +62,7 @@ the reason; they are not claimed as implemented anywhere.
 | 20 | Exact performance contract | PARTIAL, the container half MEASURED | §20.3/20.4 first-use and steady-state claims are asserted by counters (REQ-APK-DC-01, REQ-APK-DC-08). §20.1/20.2 startup and hot-path costs need generated code to measure. |
 | 21 | Diagnostics | PARTIAL | pack/load diagnostics are explicit typed codes (`APK_*`, 14 of them); compile/type and source/path diagnostics are frontend work |
 | 22 | Compiler and IR architecture | OUT-OF-SCOPE | — |
-| 23 | Integration with existing architecture | PARTIAL (2026-08-19) | `src/compiler/99.loader/aspect_pack_section.spl` finds the `.aspect_pack` section in a parsed `SmfReaderMemory` and registers its payload with the aspect-pack provider; `ModuleLoader.load` calls it and exposes `aspect_facet`/`resident_aspect_facet`. Spec: `test/01_unit/compiler/loader/aspect_pack_smf_section_wiring_spec.spl`. The three `ModuleLoader`-driven examples are RED on a pre-existing interpreter defect — `doc/08_tracking/bug/module_loader_load_unrunnable_jit_method_not_found_2026-08-19.md` |
+| 23 | Integration with existing architecture | PARTIAL (2026-08-25) | `ModuleLoader.load` registers standalone pack sections; visible facet routing uses the same in-memory reader, one mapping per referenced SMF section, all-defined-symbol relocation resolution, and exported-only publication. Packaging automation and full typed facet/runtime integration remain open. |
 | 24 | Development plan | Phase 4 (aspect pack v1) and the catalog half of Phase 5 are the parts this file covers | — |
 | 25.3 | Pack behaviour tests | IMPLEMENTED | REQ-APK-01..07, REQ-APK-DC-01..09 |
 | 26-30 | Example, rejected alternatives, references | N/A prose | — |
@@ -89,6 +89,25 @@ the reason; they are not claimed as implemented anywhere.
 - Multi-profile catalogs (§9.6), zstd dictionaries and co-load clusters (§12.2),
   AspectPackIndexCache and the partial-mapping I/O policy (§14.1, §15) — all
   require a file/mapping layer this byte-array module does not have.
-- Unload (§14.7) — the design states it is not required initially.
+- Hot-advice/sidecar teardown beyond the implemented nested-module facet unload
+  (§14.7) — the design states that broader unload machinery is not required
+  initially.
 - `required_core_public_abi_hash` COMPARISON (§17) — carried but not compared,
   because nothing in-tree publishes a core public ABI hash to compare with.
+
+## 2026-08-25 nested-SMF activation addendum (unverified)
+
+The policy-independent §12/§14.3 runtime slice now treats each selected member
+as a complete ordinary SMF instead of publishing opaque bytes. `aspect_pack`
+exposes prepare/publish/abort receipts: inflation and ABI admission are
+provisional, and binding generation plus I/O counters move only at publish.
+`ModuleLoader` places its canonical in-memory `SmfReaderMemory` parse,
+executable mapping, and relocation transaction between prepare and publish.
+All provisional mappings are released on failure; nested modules use stable
+injective length-prefixed `(pack,module)` identities, resident lookup is Dict-backed O(1), and
+owned unload removes binding, symbols, mappings, and module metadata together.
+
+The executable spec uses an `Abs64` relocation-bearing member and a corrupt-SMF
+sabotage member. The sabotage oracle requires zero generation/counter movement,
+no resident facet, and no nested module. This addendum records implementation
+and static review scope only; no test/build/benchmark was run for this change.

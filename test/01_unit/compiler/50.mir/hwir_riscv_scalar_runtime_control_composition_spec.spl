@@ -1,0 +1,50 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_control_composition.{
+    strict_riscv_scalar_runtime_control_composition}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+describe "canonical runtime scalar control composition":
+    it "closes exact registered-uop inputs through datapath and provider":
+        val config = CoreConfig.rv32()
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val result = strict_riscv_scalar_runtime_control_composition(
+            "runtime_control_composed", config, plan)
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val graph = result.ok().unwrap()
+            expect(graph.diagnostic()).to_equal("")
+            expect(graph.composition.children.len()).to_equal(2)
+            expect(graph.composition.top_ports.any(_.name == "uop_valid")).to_be(true)
+            expect(graph.composition.top_ports.any(
+                _.name == "completion_redirect_target")).to_be(true)
+            expect(graph.composition.top_ports.any(
+                _.name == "branch_target")).to_be(false)
+            expect(graph.composition.bindings.any(\row:
+                row.source_owner == "datapath" and row.source_port == "jalr_target" and
+                    row.destination_owner == "provider" and
+                    row.destination_port == "jalr_target")).to_be(true)
+            expect(graph.composition.bindings.any(\row:
+                row.source_owner == "composition" and row.source_port == "rs1_value" and
+                    row.destination_owner == "datapath")).to_be(true)
+            expect(graph.composition.bindings.any(\row:
+                row.source_owner == "composition" and row.source_port == "rs1_value" and
+                    row.destination_owner == "provider")).to_be(true)
+
+    it "is deterministic across exact RV32 and RV64 rebuilds":
+        for product in [(CoreConfig.rv32(), "rv32i"),
+                (CoreConfig.rv64(), "rv64i")]:
+            val plan = riscv_scalar_decoder_plan(product[1]).unwrap()
+            val first = strict_riscv_scalar_runtime_control_composition(
+                "runtime_control_exact_" + product[1], product[0], plan).unwrap()
+            val second = strict_riscv_scalar_runtime_control_composition(
+                "runtime_control_exact_" + product[1], product[0], plan).unwrap()
+            expect(first.structural_sha256()).to_equal(second.structural_sha256())
+            expect(first.structural_sha256().len()).to_equal(64)
+
+    it "rejects missing identity and mismatched decoder plans":
+        val rv32_plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        expect(strict_riscv_scalar_runtime_control_composition(
+            "", CoreConfig.rv32(), rv32_plan).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_control_composition(
+            "runtime_control_wrong_plan", CoreConfig.rv64(), rv32_plan).is_err()).to_be(true)

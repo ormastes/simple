@@ -2,7 +2,10 @@
 use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffer, STATE};
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
-use crate::value::{byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_byte_array_new, rt_byte_array_new_len, RuntimeValue};
+use crate::value::{
+    byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_byte_array_new, rt_byte_array_new_len,
+    RuntimeValue,
+};
 
 // A tightly packed 8K ARGB framebuffer is 132,710,400 bytes. Keep the raw ABI
 // bounded while allowing one complete 8K seed/upload.
@@ -200,12 +203,7 @@ pub extern "C" fn rt_vulkan_copy_to_buffer_raw(_handle: i64, _data_ptr: i64, _by
 
 /// Call-scoped packed-byte upload with an explicit bounded prefix.
 #[no_mangle]
-pub extern "C" fn rt_vulkan_copy_to_buffer_array(
-    handle: i64,
-    data: RuntimeValue,
-    byte_count: i64,
-    offset: i64,
-) -> i64 {
+pub extern "C" fn rt_vulkan_copy_to_buffer_array(handle: i64, data: RuntimeValue, byte_count: i64, offset: i64) -> i64 {
     let Some(bytes) = byte_array_bytes(data) else {
         return 0;
     };
@@ -395,7 +393,6 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_strided_raw(
     0
 }
 
-
 fn runtime_i64_array_bytes(values: RuntimeValue, fields_per_record: usize) -> Option<Vec<u8>> {
     let len = usize::try_from(rt_array_len(values)).ok()?;
     if len == 0 || len % fields_per_record != 0 {
@@ -463,11 +460,7 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_strided(
 }
 
 #[no_mangle]
-pub extern "C" fn rt_vulkan_copy_from_buffer_regions(
-    data: RuntimeValue,
-    handle: i64,
-    regions: RuntimeValue,
-) -> i64 {
+pub extern "C" fn rt_vulkan_copy_from_buffer_regions(data: RuntimeValue, handle: i64, regions: RuntimeValue) -> i64 {
     let Some(mut bytes) = byte_array_bytes(data) else {
         return 0;
     };

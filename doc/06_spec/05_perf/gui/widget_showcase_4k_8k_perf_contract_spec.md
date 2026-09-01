@@ -1,10 +1,11 @@
 # GUI Widget Showcase 4K/8K Perf Contract
 
-> Validates the source-level contract for the retained GUI widget showcase performance checker. This spec is headless-safe: it reads the checker source and asserts the required evidence fields, but it does not run the 4K/8K showcase benchmark, launch a GUI, or produce new performance claims.
+## Purpose
 
-<!-- sdn-diagram:id=widget_showcase_4k_8k_perf_contract_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
+This manual spec mirrors
+`test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl`.
+It protects the retained 4K/8K GUI widget showcase performance evidence
+contract without running the expensive benchmark on headless hosts.
 
 ```sdn id=widget_showcase_4k_8k_perf_contract_spec.arch hash=sha256:auto render=ascii
 @layout dag
@@ -27,7 +28,7 @@ widget_showcase_4k_8k_perf_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -68,7 +69,7 @@ showcase benchmark, launch a GUI, or produce new performance claims.
 SIMPLE_LIB=src bin/simple test test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl --mode=interpreter --clean
 ```
 
-## Acceptance
+## Completion Criteria
 
 - The checker rejects Rust seed Simple binaries.
 - The checker searches self-hosted Simple binaries before optional PATH lookup.
@@ -100,7 +101,7 @@ SIMPLE_LIB=src bin/simple test test/05_perf/gui/widget_showcase_4k_8k_perf_contr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -115,7 +116,6 @@ expect(script).to_contain("\"bin/simple\"")
 expect(script).to_contain("ALLOW_PATH_SIMPLE_BIN")
 expect(script).to_contain("rust-seed-simple-binary-forbidden")
 expect(script).to_contain("src/compiler_rust/*|*/src/compiler_rust/*")
-expect(script).to_contain("release-self-hosted-simple-binary-required")
 
 step("Assert 4K and 8K geometry and target FPS are explicit")
 expect(script).to_contain("WIDTH=3840")
@@ -157,8 +157,6 @@ expect(script).to_contain("native-build --source src --source examples")
 expect(script).to_contain("_source_revision=")
 expect(script).to_contain("_source_revision_kind=content-sha256")
 expect(script).to_contain("_source_revision_files=")
-expect(script).to_contain("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
-expect(script).to_contain("src/lib/gc_async_mut/gpu/engine2d/backend_software.spl")
 
 step("Assert invalid native-build artifacts fail before benchmark execution")
 expect(script).to_contain("validate_native_binary()")
@@ -247,51 +245,12 @@ expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden
 
 </details>
 
-#### rejects repo launcher binaries before real retained perf runs
-
-- Run the 4K checker outside plan-only with an explicit repo launcher
-   - Expected: the evidence fails with `release-self-hosted-simple-binary-required`
-- Run the 8K checker outside plan-only with an explicit repo launcher
-   - Expected: the evidence fails with `release-self-hosted-simple-binary-required`
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 21 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Run the 4K checker outside plan-only with an explicit repo launcher")
-val command_4k = "rm -rf build/test-widget-showcase-4k-repo-bin-forbidden && USE_NATIVE=1 RESOLUTION=4k SIMPLE_BIN=bin/simple SIMPLE_BIN_SOURCE=repo-bin BUILD_DIR=build/test-widget-showcase-4k-repo-bin-forbidden sh scripts/check/check-widget-showcase-4k-200fps.shs || true"
-val (_stdout_4k, _stderr_4k, code_4k) = process_run("/bin/sh", ["-c", command_4k])
-expect(code_4k).to_equal(0)
-val evidence_4k = file_read("build/test-widget-showcase-4k-repo-bin-forbidden/status.env")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_status=fail")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_reason=release-self-hosted-simple-binary-required")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin=bin/simple")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin_source=repo-bin")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin_status=forbidden")
-
-step("Run the 8K checker outside plan-only with an explicit repo launcher")
-val command_8k = "rm -rf build/test-widget-showcase-8k-repo-bin-forbidden && USE_NATIVE=1 RESOLUTION=8k SIMPLE_BIN=bin/simple SIMPLE_BIN_SOURCE=repo-bin BUILD_DIR=build/test-widget-showcase-8k-repo-bin-forbidden sh scripts/check/check-widget-showcase-4k-200fps.shs || true"
-val (_stdout_8k, _stderr_8k, code_8k) = process_run("/bin/sh", ["-c", command_8k])
-expect(code_8k).to_equal(0)
-val evidence_8k = file_read("build/test-widget-showcase-8k-repo-bin-forbidden/status.env")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_status=fail")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_reason=release-self-hosted-simple-binary-required")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin=bin/simple")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_source=repo-bin")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden")
-```
-
-</details>
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

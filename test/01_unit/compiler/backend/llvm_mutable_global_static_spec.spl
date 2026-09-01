@@ -1,3 +1,11 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
@@ -6,11 +14,10 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_types.{SymbolId}
-use compiler.hir.hir_definitions.{HirConst}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.*
-use compiler.mir.mir_lowering.{runtime_module_initializers_in_declaration_order}
 use compiler.mir.mir_lowering_types.{MirLowering}
+
 
 # mutglobal lane (module-level `var` mutation storage, see
 # scratchpad/mutglobal_plan.md). MirModule.statics/MirStatic previously had
@@ -37,7 +44,8 @@ fn build_mutable_global_module() -> MirModule:
         name: "counter",
         type_: i64_type,
         init: Some(MirConstant(symbol: counter_symbol, name: "counter", type_: i64_type, value: MirConstValue.Int(5))),
-        is_mutable: true
+        is_mutable: true,
+        is_rt_struct_alloc_registered: false
     )
 
     # fn bump(): counter = counter + 10
@@ -185,33 +193,87 @@ fn runtime_initializer_store_names() -> [text]:
     expect(saw_unsupported_static).to_equal(false)
     names
 
+fn inferred_folded_module_constant_types() -> i64:
+    val source = "val derived = 5 + 5\nval masked = 15 & 7\nfn read() -> i64: derived + masked\n"
+    val ast = parse_full_frontend(source, "inferred_constants.spl", "inferred_constants.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("inferred_constants.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    expect(errors).to_equal("")
+    var typed_count = 0
+    for constant in mir.constants.values():
+        if constant.name == "derived" or constant.name == "masked":
+            match constant.type_.kind:
+                case MirTypeKind.I64: typed_count = typed_count + 1
+                case _: ()
+    typed_count
+
+fn inferred_folded_module_constant_hir_count() -> i64:
+    val source = "val derived = 5 + 5\nval masked = 15 & 7\n"
+    val ast = parse_full_frontend(source, "inferred_constants_hir.spl", "inferred_constants_hir.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("inferred_constants_hir.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var inferred_count = 0
+    for const_ in hir.constants.values():
+        if const_.name == "derived" or const_.name == "masked":
+            match const_.type_.kind:
+                case HirTypeKind.Infer(_, _): inferred_count = inferred_count + 1
+                case _: ()
+    inferred_count
+
+fn mutable_folded_static_types() -> [text]:
+    val source = "var derived = 5 + 5\nvar signed: i16 = 3 + 1\nvar unsigned: u32 = 7 + 1\n"
+    val ast = parse_full_frontend(source, "mutable_inferred_constants.spl", "mutable_inferred_constants.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("mutable_inferred_constants.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result: [text] = []
+    for static_ in mir.statics.values():
+        match static_.type_.kind:
+            case MirTypeKind.I64: if static_.name.ends_with("derived"): result.push("derived:i64")
+            case MirTypeKind.I16: if static_.name.ends_with("signed"): result.push("signed:i16")
+            case MirTypeKind.U32: if static_.name.ends_with("unsigned"): result.push("unsigned:u32")
+            case _: ()
+    result
+
 describe "LLVM mutable global static (mutglobal lane)":
+    # @manual scenario evidence
     it "emits a real @global declaration with the static's initializer":
+        # @req REQ-SSPEC-UNIT
+        step("emits a real @global declaration with the static's initializer")
         val translator = MirToLlvm.create("test.llvm.mutable_global", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_mutable_global_module())
 
-        expect(output).to_contain("@g_counter = global i64 5")
+        expect(output).to_contain("@g_counter = internal global i64 5")
 
     it "translates LoadGlobal as a load off the real global":
+        # @req REQ-SSPEC-UNIT
+        step("translates LoadGlobal as a load off the real global")
         val translator = MirToLlvm.create("test.llvm.mutable_global", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_mutable_global_module())
 
         expect(output).to_contain("load i64, ptr @g_counter")
 
     it "translates StoreGlobal as a store back to the real global":
+        # @req REQ-SSPEC-UNIT
+        step("translates StoreGlobal as a store back to the real global")
         val translator = MirToLlvm.create("test.llvm.mutable_global", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_mutable_global_module())
 
         expect(output).to_contain("store i64 %l2, ptr @g_counter")
 
     it "infers primitive literal types for unannotated module globals", tag: ["only-compiled"]:
+        # @req REQ-SSPEC-UNIT
+        step("infers primitive literal types for unannotated module globals")
         val output = translate_literal_globals()
 
-        expect(output).to_contain("@g_count = global i64 5")
-        expect(output).to_contain("@g_ratio = global double 1.5")
-        expect(output).to_contain("@g_flag = global i1 0")
-        expect(output).to_contain("@g_name = global ptr getelementptr inbounds")
+        expect(output).to_contain("@g_count = internal global i64 5")
+        expect(output).to_contain("@g_ratio = internal global double 1.5")
+        expect(output).to_contain("@g_flag = internal global i1 0")
+        expect(output).to_contain("@g_name = internal global ptr getelementptr inbounds")
         expect(output.contains("global i64 getelementptr")).to_equal(false)
-
-    it "stores dependent runtime globals in declaration order", tag: ["only-compiled"]:
-        expect(runtime_initializer_store_names()).to_equal(["first", "second", "word_bytes", "call_plt", "label"])

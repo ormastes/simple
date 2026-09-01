@@ -1,6 +1,6 @@
 # SimpleOS Duplicate-Owner Architecture Guard
 
-> Verifies the duplicate owner behaviour end to end so maintainers of this
+> Enforces master-plan §4/§24: one canonical owner per kernel subsystem. Fails closed when the frozen ABI v1 owner list drifts from disk or from the production status ledger, and when a parallel duplicate tree (`*_v2.spl`, `new_vfs*`, `fast_loader2*`) appears under the OS sources.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # SimpleOS Duplicate-Owner Architecture Guard
 
-Verifies the duplicate owner behaviour end to end so maintainers of this
+Enforces master-plan §4/§24: one canonical owner per kernel subsystem. Fails closed when the frozen ABI v1 owner list drifts from disk or from the production status ledger, and when a parallel duplicate tree (`*_v2.spl`, `new_vfs*`, `fast_loader2*`) appears under the OS sources.
 
 ## At a Glance
 
@@ -21,18 +21,22 @@ Verifies the duplicate owner behaviour end to end so maintainers of this
 | Status | Implemented |
 | Requirements | doc/03_plan/agent_tasks/simpleos_production_harden_parallel.md (Stage S) |
 | Source | `test/01_unit/os/arch/duplicate_owner_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the duplicate owner behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+## Overview
+
+Enforces master-plan §4/§24: one canonical owner per kernel subsystem. Fails
+closed when the frozen ABI v1 owner list drifts from disk or from the
+production status ledger, and when a parallel duplicate tree (`*_v2.spl`,
+`new_vfs*`, `fast_loader2*`) appears under the OS sources.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| ABI v1 index | `os.kernel.abi.abi_v1` freezes owners by reference |
+| Ledger | `doc/08_tracking/os/production_status.sdn` maturity + owner per subsystem |
 
 ## Scenarios
 
@@ -40,43 +44,45 @@ unrelated sibling features are out of scope.
 
 #### freezes the kernel contract at ABI v1
 
-- Verify: freezes the kernel contract at ABI v1
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- freezes the kernel contract at ABI v1
 - Read the ABI version from the frozen contract index
-   - Expected: abi_v1_major() equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: abi_v1_major() equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-S3
-step("Verify: freezes the kernel contract at ABI v1")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("freezes the kernel contract at ABI v1")
 step("Read the ABI version from the frozen contract index")
-expect(abi_v1_major()).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(abi_v1_major()).to_equal(1)
 ```
 
 </details>
 
 #### every frozen canonical owner exists on disk
 
-- Verify: every frozen canonical owner exists on disk
+- every frozen canonical owner exists on disk
 - Map each canonical owner module to its source file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-S3
-step("Verify: every frozen canonical owner exists on disk")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("every frozen canonical owner exists on disk")
 step("Map each canonical owner module to its source file")
 val owners = abi_v1_canonical_owners()
 expect(owners.len()).to_be_greater_than(10)
@@ -91,7 +97,7 @@ for owner in owners:
 
 #### the production status ledger names the core subsystem owners
 
-- Verify: the production status ledger names the core subsystem owners
+- the production status ledger names the core subsystem owners
 - Read the production status ledger
 - Check ledger covers the enforced subsystems
 
@@ -99,13 +105,12 @@ for owner in owners:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-S3
-step("Verify: the production status ledger names the core subsystem owners")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("the production status ledger names the core subsystem owners")
 step("Read the production status ledger")
 expect(file_exists(LEDGER_PATH)).to_be(true)
 val ledger = file_read_text(LEDGER_PATH)
@@ -124,20 +129,19 @@ expect(ledger).to_contain("maturity:")
 
 #### no parallel duplicate trees shadow frozen subsystems
 
-- Verify: no parallel duplicate trees shadow frozen subsystems
+- no parallel duplicate trees shadow frozen subsystems
 - Scan OS sources for banned duplicate-suffix names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-S3
-step("Verify: no parallel duplicate trees shadow frozen subsystems")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("no parallel duplicate trees shadow frozen subsystems")
 step("Scan OS sources for banned duplicate-suffix names")
 Then_no_duplicate_trees("find src/os -name '*_v2.spl' -not -path '*vendor*'")
 Then_no_duplicate_trees("find src/os -name 'new_vfs*' -o -name 'fast_loader2*'")
@@ -149,26 +153,25 @@ Then_no_duplicate_trees("find src/os -name 'new_vfs*' -o -name 'fast_loader2*'")
 
 #### the scan helper detects a known-present file
 
-- Verify: the scan helper detects a known-present file
-   - Expected: hits equals `1)  # oracle: pinned constant asserted by this scenario`
+- the scan helper detects a known-present file
+   - Expected: hits equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-S3
-step("Verify: the scan helper detects a known-present file")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("the scan helper detects a known-present file")
 val lines = shell_lines("find test/01_unit/os/arch -name 'duplicate_owner_spec.spl'")
 var hits = 0
 for line in lines:
     if line != "":
         hits = hits + 1
-expect(hits).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(hits).to_equal(1)
 ```
 
 </details>
@@ -177,7 +180,7 @@ expect(hits).to_equal(1)  # oracle: pinned constant asserted by this scenario
 
 #### the production status ledger receipt verdict is PASS
 
-- Verify: the production status ledger receipt verdict is PASS
+- the production status ledger receipt verdict is PASS
 - Observe ledger existence and mtime via app.io facades
 - Build a receipt claiming the ledger as its artifact and verify fail-closed
    - Expected: verify_verdict(outcome) equals `PASS`
@@ -186,13 +189,12 @@ expect(hits).to_equal(1)  # oracle: pinned constant asserted by this scenario
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-S3
-step("Verify: the production status ledger receipt verdict is PASS")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("the production status ledger receipt verdict is PASS")
 step("Observe ledger existence and mtime via app.io facades")
 val ledger_exists = file_exists(LEDGER_PATH)
 val ledger_mtime = file_modified_time(LEDGER_PATH)
@@ -208,7 +210,7 @@ expect(verify_verdict(outcome)).to_equal("PASS")
 
 #### a receipt for a nonexistent artifact fails closed
 
-- Verify: a receipt for a nonexistent artifact fails closed
+- a receipt for a nonexistent artifact fails closed
 - Build a receipt whose declared artifact does not exist on disk
 - Missing artifact must yield FAIL, never a silent pass
    - Expected: verify_verdict(outcome) equals `FAIL`
@@ -218,13 +220,12 @@ expect(verify_verdict(outcome)).to_equal("PASS")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-S3
-step("Verify: a receipt for a nonexistent artifact fails closed")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-OS
+step("a receipt for a nonexistent artifact fails closed")
 step("Build a receipt whose declared artifact does not exist on disk")
 val ghost = "doc/08_tracking/os/__no_such_ledger__.sdn"
 val receipt = receipt_new("duplicate_owner_ledger_parity_red", "generic", "hosted", "PASS", ghost)
@@ -254,36 +255,59 @@ expect(outcome.rule).to_equal("artifact_present")
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-SIMPLEOS-HARDEN-S3`
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `180e89f6de96f597fe03d484b3deac8b04387f6d9f2a419eeba55cfe26d2e9c1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `91c82b432df0a0e73e9f704b2ef5d8eee624527d70c5cc47316227f10a85e1e9`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `180e89f6de96f597fe03d484b3deac8b04387f6d9f2a419eeba55cfe26d2e9c1`.
+Source SHA-256: `91c82b432df0a0e73e9f704b2ef5d8eee624527d70c5cc47316227f10a85e1e9`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `180e89f6de96f597fe03d484b3deac8b04387f6d9f2a419eeba55cfe26d2e9c1`  
+Source SHA-256: `91c82b432df0a0e73e9f704b2ef5d8eee624527d70c5cc47316227f10a85e1e9`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/os/arch/duplicate_owner_spec.spl
 mirror: doc/06_spec/01_unit/os/arch/duplicate_owner_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=80
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/arch/duplicate_owner_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=82; blocker cap makes effective=49
 doc/06_spec/01_unit/os/arch/duplicate_owner_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/arch/duplicate_owner_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, recovery/troubleshooting
+doc/06_spec/01_unit/os/arch/duplicate_owner_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/arch/duplicate_owner_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/arch/duplicate_owner_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/os/arch/duplicate_owner_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'freezes the kernel contract at ABI v1' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/arch/duplicate_owner_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'every frozen canonical owner exists on disk' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/arch/duplicate_owner_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'the production status ledger names the core subsystem owners' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

@@ -46,11 +46,5 @@ contextBridge.exposeInMainWorld('simpleElectron', {
     sendInput,
     envelope() {
         return window.__SIMPLE_WEB_RENDER_ENVELOPE__ || null;
-    },
-    runtimeVersions() {
-        return {
-            electron: process.versions.electron || '',
-            chrome: process.versions.chrome || ''
-        };
     }
 });

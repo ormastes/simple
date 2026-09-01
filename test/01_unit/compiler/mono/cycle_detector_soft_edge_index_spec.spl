@@ -1,0 +1,49 @@
+"""Regression coverage for indexed monomorphization cycle classification."""
+
+use std.spec
+use compiler.mono.monomorphize.{CycleDetectionResult, NoteSdnMetadata, DependencyEdge, DependencyKind, detect_cycles}
+
+fn classify(dependencies: [DependencyEdge]) -> CycleDetectionResult:
+    var metadata = NoteSdnMetadata.new()
+    for dependency in dependencies:
+        metadata.add_dependency(dependency)
+    detect_cycles(metadata)
+
+describe "monomorphization cycle soft-edge index":
+    it "preserves hard and nullable-indirection classification":
+        step("Index hard and soft dependency edges once")
+        val hard = classify([
+            DependencyEdge.new("Direct$A", "Direct$B", DependencyKind.FieldType),
+            DependencyEdge.new("Direct$B", "Direct$A", DependencyKind.FieldType)
+        ])
+        val soft = classify([
+            DependencyEdge.new("Option$Node", "Node", DependencyKind.InnerType),
+            DependencyEdge.new("Node", "Option$Node", DependencyKind.FieldType)
+        ])
+
+        step("Keep direct cycles hard")
+        expect(hard.errors.len()).to_equal(1)
+        expect(hard.warnings.len()).to_equal(0)
+
+        step("Keep Option inner-type cycles soft")
+        expect(soft.errors.len()).to_equal(0)
+        expect(soft.warnings.len()).to_equal(1)
+
+    it "keeps any qualifying duplicate edge soft regardless of insertion order":
+        step("Index a hard duplicate before its qualifying soft duplicate")
+        val hard_then_soft = classify([
+            DependencyEdge.new("Result$Node", "Node", DependencyKind.FieldType),
+            DependencyEdge.new("Result$Node", "Node", DependencyKind.InnerType),
+            DependencyEdge.new("Node", "Result$Node", DependencyKind.FieldType)
+        ])
+        val soft_then_hard = classify([
+            DependencyEdge.new("Result$Node", "Node", DependencyKind.InnerType),
+            DependencyEdge.new("Result$Node", "Node", DependencyKind.FieldType),
+            DependencyEdge.new("Node", "Result$Node", DependencyKind.FieldType)
+        ])
+
+        step("Preserve the prior scan's any-soft-edge behavior")
+        expect(hard_then_soft.errors.len()).to_equal(0)
+        expect(hard_then_soft.warnings.len()).to_equal(1)
+        expect(soft_then_hard.errors.len()).to_equal(0)
+        expect(soft_then_hard.warnings.len()).to_equal(1)

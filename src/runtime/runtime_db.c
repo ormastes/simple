@@ -9,6 +9,7 @@
  */
 
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -44,9 +45,7 @@ extern int64_t rt_string_new(const uint8_t* bytes, uint64_t len);
 /* Copy a Simple (ptr, len) text argument into a NUL-terminated C string so the
  * table's internal strdup/strcmp machinery stays unchanged. Caller frees. */
 static char* db_text_dup(const uint8_t* ptr, int64_t len) {
-    if (!ptr || len < 0) {
-        len = 0;
-    }
+    if ((!ptr && len != 0) || len < 0 || (uint64_t)len > SIZE_MAX - 1) return NULL;
     char* out = (char*)malloc((size_t)len + 1);
     if (!out) {
         return NULL;
@@ -149,14 +148,24 @@ static uint64_t fnv1a(const char* s) {
  * PK hash index operations
  * ================================================================ */
 
-static void pk_index_init(DbTable* t, int64_t cap) {
+static int pk_index_init(DbTable* t, int64_t cap) {
+    if (cap <= 0 || (uint64_t)cap > SIZE_MAX / sizeof(int64_t) ||
+        (uint64_t)cap > SIZE_MAX / sizeof(char*)) return 0;
+    int64_t* index = (int64_t*)malloc((size_t)cap * sizeof(int64_t));
+    char** keys = (char**)calloc((size_t)cap, sizeof(char*));
+    if (!index || !keys) {
+        free(index);
+        free(keys);
+        return 0;
+    }
+    for (int64_t i = 0; i < cap; i++) {
+        index[i] = -1;
+    }
     t->pk_cap = cap;
     t->pk_used = 0;
-    t->pk_index = (int64_t*)malloc((size_t)cap * sizeof(int64_t));
-    t->pk_keys  = (char**)calloc((size_t)cap, sizeof(char*));
-    for (int64_t i = 0; i < cap; i++) {
-        t->pk_index[i] = -1;
-    }
+    t->pk_index = index;
+    t->pk_keys = keys;
+    return 1;
 }
 
 static int64_t pk_lookup(DbTable* t, const char* key) {
@@ -183,12 +192,12 @@ static int64_t pk_lookup(DbTable* t, const char* key) {
     return -1;
 }
 
-static void pk_resize(DbTable* t);
+static int pk_resize(DbTable* t);
 
-static void pk_insert(DbTable* t, const char* key, int64_t row_idx) {
+static int pk_insert(DbTable* t, const char* key, int64_t row_idx) {
     /* Check load factor */
     if ((double)(t->pk_used + 1) / (double)t->pk_cap > DB_LOAD_FACTOR) {
-        pk_resize(t);
+        if (!pk_resize(t)) return 0;
     }
 
     uint64_t h = fnv1a(key);
@@ -199,43 +208,54 @@ static void pk_insert(DbTable* t, const char* key, int64_t row_idx) {
         int64_t slot = (idx + probe) & mask;
         if (t->pk_index[slot] == -1 || t->pk_keys[slot] == NULL) {
             /* empty or tombstone slot */
+            char* key_copy = strdup(key);
+            if (!key_copy) return 0;
             if (t->pk_keys[slot]) free(t->pk_keys[slot]);
-            t->pk_keys[slot] = strdup(key);
+            t->pk_keys[slot] = key_copy;
             t->pk_index[slot] = row_idx;
             t->pk_used++;
-            return;
+            return 1;
         }
         if (strcmp(t->pk_keys[slot], key) == 0) {
             /* update existing */
             t->pk_index[slot] = row_idx;
-            return;
+            return 1;
         }
     }
+    return 0;
 }
 
-static void pk_resize(DbTable* t) {
+static int pk_resize(DbTable* t) {
     int64_t old_cap = t->pk_cap;
     int64_t* old_index = t->pk_index;
     char** old_keys = t->pk_keys;
 
+    if (old_cap <= 0 || old_cap > INT64_MAX / 2) return 0;
     int64_t new_cap = old_cap * 2;
-    t->pk_cap = new_cap;
-    t->pk_used = 0;
-    t->pk_index = (int64_t*)malloc((size_t)new_cap * sizeof(int64_t));
-    t->pk_keys  = (char**)calloc((size_t)new_cap, sizeof(char*));
-    for (int64_t i = 0; i < new_cap; i++) {
-        t->pk_index[i] = -1;
-    }
+    DbTable replacement = *t;
+    replacement.pk_index = NULL;
+    replacement.pk_keys = NULL;
+    if (!pk_index_init(&replacement, new_cap)) return 0;
 
     /* Re-insert live entries */
     for (int64_t i = 0; i < old_cap; i++) {
         if (old_keys[i] != NULL && old_index[i] >= 0) {
-            pk_insert(t, old_keys[i], old_index[i]);
-            free(old_keys[i]);
+            if (!pk_insert(&replacement, old_keys[i], old_index[i])) {
+                for (int64_t j = 0; j < replacement.pk_cap; j++) free(replacement.pk_keys[j]);
+                free(replacement.pk_index);
+                free(replacement.pk_keys);
+                return 0;
+            }
         }
     }
+    t->pk_cap = replacement.pk_cap;
+    t->pk_used = replacement.pk_used;
+    t->pk_index = replacement.pk_index;
+    t->pk_keys = replacement.pk_keys;
+    for (int64_t i = 0; i < old_cap; i++) free(old_keys[i]);
     free(old_index);
     free(old_keys);
+    return 1;
 }
 
 static void pk_remove(DbTable* t, const char* key) {
@@ -262,24 +282,39 @@ static void pk_remove(DbTable* t, const char* key) {
  * Row allocation
  * ================================================================ */
 
-static void ensure_row_cap(DbTable* t, int64_t needed) {
-    if (needed <= t->row_cap) return;
+static int ensure_row_cap(DbTable* t, int64_t needed) {
+    if (needed <= t->row_cap) return 1;
+    if (needed <= 0 || t->row_cap > INT64_MAX / 2) return 0;
     int64_t new_cap = t->row_cap * 2;
     if (new_cap < needed) new_cap = needed;
-    t->rows = (DbRow*)realloc(t->rows, (size_t)new_cap * sizeof(DbRow));
-    memset(t->rows + t->row_cap, 0, (size_t)(new_cap - t->row_cap) * sizeof(DbRow));
+    if ((uint64_t)new_cap > SIZE_MAX / sizeof(DbRow)) return 0;
+    DbRow* rows = (DbRow*)realloc(t->rows, (size_t)new_cap * sizeof(DbRow));
+    if (!rows) return 0;
+    memset(rows + t->row_cap, 0, (size_t)(new_cap - t->row_cap) * sizeof(DbRow));
+    t->rows = rows;
     t->row_cap = new_cap;
+    return 1;
 }
 
 static int64_t alloc_row(DbTable* t) {
-    ensure_row_cap(t, t->row_count + 1);
-    int64_t idx = t->row_count++;
+    if (t->row_count == INT64_MAX || !ensure_row_cap(t, t->row_count + 1)) return -1;
+    int64_t idx = t->row_count;
     DbRow* r = &t->rows[idx];
+    int64_t* ints = (int64_t*)calloc((size_t)t->num_cols, sizeof(int64_t));
+    char** texts = (char**)calloc((size_t)t->num_cols, sizeof(char*));
+    ColType* types = (ColType*)calloc((size_t)t->num_cols, sizeof(ColType));
+    if (!ints || !texts || !types) {
+        free(ints);
+        free(texts);
+        free(types);
+        return -1;
+    }
     r->pk_text = NULL;
-    r->int_values = (int64_t*)calloc((size_t)t->num_cols, sizeof(int64_t));
-    r->text_values = (char**)calloc((size_t)t->num_cols, sizeof(char*));
-    r->col_types = (ColType*)calloc((size_t)t->num_cols, sizeof(ColType));
+    r->int_values = ints;
+    r->text_values = texts;
+    r->col_types = types;
     r->alive = 1;
+    t->row_count++;
     t->alive_count++;
     return idx;
 }
@@ -322,7 +357,15 @@ static int64_t db_table_create_cstr(const char* name, int64_t num_cols_in, int64
             t->alive_count = 0;
             t->scan_results = (int64_t*)malloc((size_t)DB_SCAN_MAX * sizeof(int64_t));
             t->scan_count = 0;
-            pk_index_init(t, DB_INIT_CAP);
+            if (!t->name || !t->rows || !t->scan_results || !pk_index_init(t, DB_INIT_CAP)) {
+                free(t->name);
+                free(t->rows);
+                free(t->scan_results);
+                free(t->pk_index);
+                free(t->pk_keys);
+                memset(t, 0, sizeof(DbTable));
+                return -1;
+            }
             t->in_use = 1;
             return ((int64_t)i);
         }
@@ -373,8 +416,14 @@ static int64_t db_put_cstr(int64_t handle_in, const char* pk_text, int64_t num_v
 
     /* Allocate new row */
     int64_t row = alloc_row(t);
+    if (row < 0) return -1;
     t->rows[row].pk_text = strdup(pk_text ? pk_text : "");
-    pk_insert(t, pk_text ? pk_text : "", row);
+    if (!t->rows[row].pk_text || !pk_insert(t, pk_text ? pk_text : "", row)) {
+        free_row(&t->rows[row], t->num_cols);
+        t->row_count--;
+        t->alive_count--;
+        return -1;
+    }
     return (row);
 }
 
@@ -391,6 +440,10 @@ void rt_db_put_value_int(int64_t handle_in, int64_t row_in, int64_t col_in, int6
     if (col < 0 || col >= t->num_cols) return;
     DbRow* r = &t->rows[row];
     if (!r->alive) return;
+    if (r->col_types[col] == COL_TEXT) {
+        free(r->text_values[col]);
+        r->text_values[col] = NULL;
+    }
     r->int_values[col] = value;
     r->col_types[col] = COL_INT;
 }
@@ -407,8 +460,10 @@ static void db_put_value_text_cstr(int64_t handle_in, int64_t row_in, int64_t co
     if (col < 0 || col >= t->num_cols) return;
     DbRow* r = &t->rows[row];
     if (!r->alive) return;
+    char* value_copy = strdup(value ? value : "");
+    if (!value_copy) return;
     if (r->text_values[col]) free(r->text_values[col]);
-    r->text_values[col] = strdup(value ? value : "");
+    r->text_values[col] = value_copy;
     r->col_types[col] = COL_TEXT;
 }
 
@@ -529,10 +584,8 @@ int64_t rt_db_col_count(int64_t handle_in) {
  * Batched operations — reduce interpreter dispatch overhead
  * ================================================================ */
 
-/* Insert a 3-column row: (int, text, int) in one call.
- * type_mask encodes column types: bit i = 1 means text, 0 means int.
- * For type_mask=0b010 (=2): col0=int, col1=text, col2=int.
- * v0,v1,v2 are i64 values; for text cols the value is a char* cast to i64. */
+/* Insert three integer columns in one call. type_mask is retained for ABI
+ * compatibility and must be zero; text values require the typed text API. */
 static int64_t db_put_row3_cstr(int64_t handle_in, const char* pk,
                        int64_t type_mask_in,
                        int64_t v0_in, int64_t v1_in, int64_t v2_in) {
@@ -542,43 +595,38 @@ static int64_t db_put_row3_cstr(int64_t handle_in, const char* pk,
     if (handle < 0 || handle >= DB_MAX_TABLES) return (-1);
     DbTable* t = &g_tables[handle];
     if (!t->in_use || t->num_cols < 3) return (-1);
+    /* v0/v1/v2 are integer ABI values, never pointers. The legacy text-mask
+     * branch cast them to addresses and passed them to strdup, which is
+     * undefined behavior for every safe Simple caller. */
+    if (type_mask != 0) return (-1);
 
     const char* key = pk ? pk : "";
     int64_t existing = pk_lookup(t, key);
     if (existing >= 0) return (existing);
 
-    int64_t row_idx = t->row_count;
-    if (row_idx >= t->row_cap) {
-        int64_t new_cap = t->row_cap * 2;
-        t->rows = (DbRow*)realloc(t->rows, (size_t)new_cap * sizeof(DbRow));
-        for (int64_t i = t->row_cap; i < new_cap; i++) {
-            memset(&t->rows[i], 0, sizeof(DbRow));
-        }
-        t->row_cap = new_cap;
-    }
-
+    int64_t row_idx = alloc_row(t);
+    if (row_idx < 0) return -1;
     DbRow* r = &t->rows[row_idx];
     r->pk_text = strdup(key);
-    r->int_values = (int64_t*)calloc((size_t)t->num_cols, sizeof(int64_t));
-    r->text_values = (char**)calloc((size_t)t->num_cols, sizeof(char*));
-    r->col_types = (ColType*)calloc((size_t)t->num_cols, sizeof(ColType));
-    r->alive = 1;
+    if (!r->pk_text) {
+        free_row(r, t->num_cols);
+        t->row_count--;
+        t->alive_count--;
+        return -1;
+    }
 
     int64_t vals[3] = {(v0_in), (v1_in), (v2_in)};
     for (int c = 0; c < 3; c++) {
-        if (type_mask & (1 << c)) {
-            const char* s = (const char*)(uintptr_t)vals[c];
-            r->text_values[c] = strdup(s ? s : "");
-            r->col_types[c] = COL_TEXT;
-        } else {
-            r->int_values[c] = vals[c];
-            r->col_types[c] = COL_INT;
-        }
+        r->int_values[c] = vals[c];
+        r->col_types[c] = COL_INT;
     }
 
-    pk_insert(t, key, row_idx);
-    t->row_count++;
-    t->alive_count++;
+    if (!pk_insert(t, key, row_idx)) {
+        free_row(r, t->num_cols);
+        t->row_count--;
+        t->alive_count--;
+        return -1;
+    }
     return (row_idx);
 }
 
@@ -618,6 +666,10 @@ static int64_t db_update_int_cstr(int64_t handle_in, const char* pk, int64_t col
     if (col < 0 || col >= t->num_cols) return (0);
     DbRow* r = &t->rows[row];
     if (!r->alive) return (0);
+    if (r->col_types[col] == COL_TEXT) {
+        free(r->text_values[col]);
+        r->text_values[col] = NULL;
+    }
     r->int_values[col] = value;
     r->col_types[col] = COL_INT;
     return (1);
@@ -638,8 +690,10 @@ static int64_t db_update_text_cstr(int64_t handle_in, const char* pk, int64_t co
     if (col < 0 || col >= t->num_cols) return (0);
     DbRow* r = &t->rows[row];
     if (!r->alive) return (0);
+    char* value_copy = strdup(value ? value : "");
+    if (!value_copy) return (0);
     if (r->text_values[col]) free(r->text_values[col]);
-    r->text_values[col] = strdup(value ? value : "");
+    r->text_values[col] = value_copy;
     r->col_types[col] = COL_TEXT;
     return (1);
 }
@@ -649,7 +703,7 @@ static int64_t db_update_text_cstr(int64_t handle_in, const char* pk, int64_t co
  * ================================================================ */
 
 static inline void ipk_to_str(int64_t pk, char buf[32]) {
-    snprintf(buf, 32, "%ld", (long)pk);
+    snprintf(buf, 32, "%" PRId64, pk);
 }
 
 /* Integer-PK variants: no caller-side string allocation. The PK is rendered
@@ -693,30 +747,38 @@ int64_t rt_db_idelete(int64_t handle_in, int64_t pk_int_in) {
 
 int64_t rt_db_table_create(const uint8_t* name_ptr, int64_t name_len,
                            int64_t num_cols, int64_t pk_col) {
+    if ((!name_ptr && name_len != 0) || name_len < 0) return -1;
     char* name = db_text_dup(name_ptr, name_len);
-    int64_t result = db_table_create_cstr(name ? name : "", num_cols, pk_col);
+    if (!name) return -1;
+    int64_t result = db_table_create_cstr(name, num_cols, pk_col);
     free(name);
     return result;
 }
 
 int64_t rt_db_put(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                   int64_t num_values) {
+    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return -1;
     char* pk = db_text_dup(pk_ptr, pk_len);
-    int64_t result = db_put_cstr(handle, pk ? pk : "", num_values);
+    if (!pk) return -1;
+    int64_t result = db_put_cstr(handle, pk, num_values);
     free(pk);
     return result;
 }
 
 void rt_db_put_value_text(int64_t handle, int64_t row, int64_t col,
                           const uint8_t* value_ptr, int64_t value_len) {
+    if ((!value_ptr && value_len != 0) || value_len < 0) return;
     char* value = db_text_dup(value_ptr, value_len);
-    db_put_value_text_cstr(handle, row, col, value ? value : "");
+    if (!value) return;
+    db_put_value_text_cstr(handle, row, col, value);
     free(value);
 }
 
 int64_t rt_db_get(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len) {
+    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return -1;
     char* pk = db_text_dup(pk_ptr, pk_len);
-    int64_t result = db_get_cstr(handle, pk ? pk : "");
+    if (!pk) return -1;
+    int64_t result = db_get_cstr(handle, pk);
     free(pk);
     return result;
 }
@@ -733,41 +795,56 @@ int64_t rt_db_get_text(int64_t handle, int64_t row, int64_t col) {
 }
 
 int64_t rt_db_delete(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len) {
+    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return 0;
     char* pk = db_text_dup(pk_ptr, pk_len);
-    int64_t result = db_delete_cstr(handle, pk ? pk : "");
+    if (!pk) return 0;
+    int64_t result = db_delete_cstr(handle, pk);
     free(pk);
     return result;
 }
 
 int64_t rt_db_put_row3(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                        int64_t type_mask, int64_t v0, int64_t v1, int64_t v2) {
+    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return -1;
     char* pk = db_text_dup(pk_ptr, pk_len);
-    int64_t result = db_put_row3_cstr(handle, pk ? pk : "", type_mask, v0, v1, v2);
+    if (!pk) return -1;
+    int64_t result = db_put_row3_cstr(handle, pk, type_mask, v0, v1, v2);
     free(pk);
     return result;
 }
 
 int64_t rt_db_get_int_by_pk(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                             int64_t col, int64_t default_val) {
+    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return default_val;
     char* pk = db_text_dup(pk_ptr, pk_len);
-    int64_t result = db_get_int_by_pk_cstr(handle, pk ? pk : "", col, default_val);
+    if (!pk) return default_val;
+    int64_t result = db_get_int_by_pk_cstr(handle, pk, col, default_val);
     free(pk);
     return result;
 }
 
 int64_t rt_db_update_int(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                          int64_t col, int64_t value) {
+    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return 0;
     char* pk = db_text_dup(pk_ptr, pk_len);
-    int64_t result = db_update_int_cstr(handle, pk ? pk : "", col, value);
+    if (!pk) return 0;
+    int64_t result = db_update_int_cstr(handle, pk, col, value);
     free(pk);
     return result;
 }
 
 int64_t rt_db_update_text(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                           int64_t col, const uint8_t* value_ptr, int64_t value_len) {
+    if ((!pk_ptr && pk_len != 0) || pk_len < 0 ||
+        (!value_ptr && value_len != 0) || value_len < 0) return 0;
     char* pk = db_text_dup(pk_ptr, pk_len);
     char* value = db_text_dup(value_ptr, value_len);
-    int64_t result = db_update_text_cstr(handle, pk ? pk : "", col, value ? value : "");
+    if (!pk || !value) {
+        free(pk);
+        free(value);
+        return 0;
+    }
+    int64_t result = db_update_text_cstr(handle, pk, col, value);
     free(pk);
     free(value);
     return result;

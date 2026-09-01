@@ -70,22 +70,25 @@ fn _count_pixel_differences(left: [u32], right: [u32]) -> i32:
         i = i + 1
     count
 
-fn _expect_valid_advances(command: DrawIrCommand, advances: [i32]):
+fn _expect_valid_advances(command: DrawIrCommand, advances: text):
+    val parts = advances.split(",")
     var character_count = 0
     for ch in command.text_value:
         character_count = character_count + 1
-    expect(advances.len()).to_equal(character_count)
+    expect(parts.len()).to_equal(character_count)
     var measured_width = 0
-    for advance in advances:
+    for raw in parts:
+        val advance = raw.to_int() ?? -1
         expect(advance).to_be_greater_than(-1)
         measured_width = measured_width + advance
     expect(measured_width).to_equal(command.width)
 
 fn expect_resolved_font_metrics(command: DrawIrCommand):
-    expect(command.advance_widths.len()).to_be_greater_than(0)
+    val advances = _style_value(command, "font-advance-widths")
+    expect(advances.len()).to_be_greater_than(0)
     expect(command.width).to_be_greater_than(0)
     expect(command.height).to_be_greater_than(0)
-    _expect_valid_advances(command, command.advance_widths)
+    _expect_valid_advances(command, advances)
 
 fn expect_draw_ir_font_identity(command: DrawIrCommand) -> text:
     val identity = _style_value(command, "font-identity")
@@ -93,14 +96,14 @@ fn expect_draw_ir_font_identity(command: DrawIrCommand) -> text:
     expect_resolved_font_metrics(command)
     identity
 
-fn expect_font_render_parity(before: DrawIrCommand, after: DrawIrCommand, result: Engine2dDrawIrAdvResult, identity: text, advances: [i32], command_count: i32, width: i32, height: i32):
+fn expect_font_render_parity(before: DrawIrCommand, after: DrawIrCommand, result: Engine2dDrawIrAdvResult, identity: text, advances: text, command_count: i32, width: i32, height: i32):
     # CPU route/metadata parity; native glyph pixel promotion is a separate gate.
     expect(result.selected_backend).to_equal("cpu")
     expect(result.skipped_command_count).to_equal(0)
     expect(result.rendered_command_count).to_equal(command_count)
     expect(result.pixels.len()).to_equal(width * height)
     expect(_style_value(after, "font-identity")).to_equal(identity)
-    expect(after.advance_widths).to_equal(advances)
+    expect(_style_value(after, "font-advance-widths")).to_equal(advances)
     expect(after.x).to_equal(before.x)
     expect(after.y).to_equal(before.y)
     expect(after.width).to_equal(before.width)
@@ -109,7 +112,7 @@ fn expect_font_render_parity(before: DrawIrCommand, after: DrawIrCommand, result
 fn expect_legacy_draw_ir_font_parity(composition: DrawIrComposition, value: text, width: i32, height: i32) -> text:
     val before = _text_command(composition, value)
     val identity = expect_draw_ir_font_identity(before)
-    val advances = before.advance_widths
+    val advances = _style_value(before, "font-advance-widths")
     expect(before.kind).to_equal(DRAW_IR_COMMAND_TEXT)
 
     var engine = Engine2D.create_with_backend(width, height, "cpu")
@@ -133,9 +136,11 @@ fn _wm_composition() -> DrawIrComposition:
     shared_wm_scene_draw_ir_composition(scene, taskbar, DRAW_IR_BACKEND_CPU, 1000, "12:00", 0)
 
 describe "legacy Web GUI and WM shared font route":
-    # @req REQ-006 REQ-011
-    it "should preserve resolved font metadata and geometry through canonical CPU execution":
-        # @req: REQ-006 REQ-011
+    # @manual scenario evidence
+        # @req REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM
+    it "preserve resolved font metadata and geometry through canonical CPU execution":
+        # @req REQ-SSPEC-SYSTEM
+        step("preserve resolved font metadata and geometry through canonical CPU execution")
         step("Render legacy Web GUI and WM text through DrawIR")
         step("Resolve one selected font for layout and DrawIR paint")
         val web_backend = WebRenderBackend.create("pure_simple", 160, 80)
@@ -196,12 +201,12 @@ describe "legacy Web GUI and WM shared font route":
         expect(browser_source).to_contain("if result.skipped_command_count != 0")
         expect(browser_source).to_contain("if non_bg <= 0 or not captured")
         expect(browser_source.contains("simple_web_layout_render_html_software_pixels")).to_equal(false)
-        val mode_pos = browser_source.index_of("    font_renderer_use_registered_selected_bytes_only()")
-        val register_pos = browser_source.index_of("font_renderer_register_selected_bytes(candidate.local_path, blob)")
-        val catalog_pos = browser_source.index_of("if registered_fonts != required_fonts")
-        val render_pos = browser_source.index_of("    val result = simple_web_layout_render_html_engine2d_result(")
-        val capture_gate_pos = browser_source.index_of("    if non_bg <= 0 or not captured:")
-        val marker_pos = browser_source.index_of("    serial_println(simple_browser_render_marker(")
+        val mode_pos = browser_source.index_of("    font_renderer_use_registered_selected_bytes_only()") ?? -1
+        val register_pos = browser_source.index_of("font_renderer_register_selected_bytes(candidate.local_path, blob)") ?? -1
+        val catalog_pos = browser_source.index_of("if registered_fonts != required_fonts") ?? -1
+        val render_pos = browser_source.index_of("    val result = simple_web_layout_render_html_engine2d_result(") ?? -1
+        val capture_gate_pos = browser_source.index_of("    if non_bg <= 0 or not captured:") ?? -1
+        val marker_pos = browser_source.index_of("    serial_println(simple_browser_render_marker(") ?? -1
         expect(mode_pos).to_be_greater_than(-1)
         expect(register_pos).to_be_greater_than(mode_pos)
         expect(catalog_pos).to_be_greater_than(register_pos)
@@ -211,7 +216,7 @@ describe "legacy Web GUI and WM shared font route":
 
         val vfs_source = rt_file_read_text("src/os/services/vfs/vfs_init.spl")
         val adapter_source = rt_file_read_text("src/os/services/vfs/c_nvme_block_adapter.spl")
-        val boot_vfs_source = (rt_file_read_text("src/os/services/vfs/vfs_boot_init.spl") + rt_file_read_text("src/os/services/vfs/vfs_boot_core.spl") + rt_file_read_text("src/os/services/vfs/vfs_boot_state.spl") + rt_file_read_text("src/os/services/vfs/vfs_ambient_context.spl") + rt_file_read_text("src/os/services/vfs/nvme_boot_runtime_owner.spl") + rt_file_read_text("src/os/services/vfs/nvme_filesystem_direct_io.spl") + rt_file_read_text("src/os/services/vfs/nvme_q35_lease_perf.spl") + rt_file_read_text("src/os/services/vfs/direct_fat32_boot_reader.spl"))
+        val boot_vfs_source = rt_file_read_text("src/os/services/vfs/vfs_boot_init.spl")
         expect(vfs_source).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432")
         expect(adapter_source).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432")
         expect(boot_vfs_source).to_contain("PURE_FAT32_FILE_READ_MAX: u64 = 33554432")

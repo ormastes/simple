@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/runtime/simple_core/core_closure.spl"
+cranelift="$root/src/compiler_rust/compiler/src/codegen/instr/calls.rs"
+llvm="$root/src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+for raw in calloc spl_load_i64 spl_store_i64 spl_store_u8 abort; do
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+done
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 5 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 5 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi, raw_ptr\]):' "$module")" -eq 4 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 1 ]
+for expected in _sffi_calloc:2 _sffi_load_i64:6 _sffi_store_i64:5 \
+    _sffi_store_u8:2 _sffi_abort:2; do
+    owner=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+grep -A3 'if closure == 0:' "$module" | grep -q '_sffi_abort()'
+for intrinsic in spl_load_i64 spl_store_i64 spl_store_u8; do
+    grep -q "\"$intrinsic\"" "$cranelift"
+    grep -q "\"$intrinsic\"" "$llvm"
+done
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "simple-core closure authority audit: PASS (all raw calls confined; allocation failure traps)"

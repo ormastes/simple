@@ -1,8 +1,5 @@
 # Compiled checker pure-parser parity gaps
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 ## Status
 
 Open, P1.  The compiled checker rejects 247 individually reproduced repository
@@ -42,11 +39,7 @@ identifier falls from 21 to eight, and keyword receiver remains four. The
 remaining 15 diagnostics are owned by later class, pattern, comprehension, or
 primary-expression lanes, including six `static fn nil` methods, two `me fn`
 methods, tuple binding, comprehension `_`, three keyword receivers, one
-`while val` pattern, and one generic-call surface. Their owners now retain
-exact plus adjacent coverage in `parser_category_c_spec.spl`, including
-malformed pattern recovery. The available stale diagnostic runner terminated
-before a verdict for the expanded fixture, so the immutable 43-path admitted
-checker replay remains pending.
+`while val` pattern, and one generic-call surface.
 
 Focused exact, adjacent, and malformed-to-valid recovery coverage passes 8/8
 in `test/01_unit/compiler/parser/parser_category_c_spec.spl`. Strict checker

@@ -32,10 +32,12 @@ tab_render_loop_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # =========================================================================
 
 it "new tab starts dirty — compositor must render first frame":
 
+```
 ## At a Glance
 
 | Field | Value |
@@ -46,6 +48,7 @@ it "new tab starts dirty — compositor must render first frame":
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 it "new tab starts dirty — compositor must render first frame":
         """BrowserTab.new() sets dirty=true so render_active_tab() fires immediately."""
         var mgr = TabManager.new()
@@ -71,6 +74,7 @@ describe "TabManager active_tab routing":
     The render loop calls active_tab() every frame to get the render target;
     it must track the focused tab correctly after switch operations.
 
+```
 ## Scenarios
 
 ### TabManager render-loop dirty flag

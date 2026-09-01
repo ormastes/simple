@@ -7,6 +7,8 @@ use crate::target::{LinkerFlavor, Target, TargetOS};
 
 const WINDOWS_GNU_C_COMPILERS: &[&str] = &["gcc", "clang"];
 const WINDOWS_GNU_CXX_COMPILERS: &[&str] = &["g++", "clang++"];
+const WINDOWS_GNU_CROSS_C_COMPILERS: &[&str] = &["x86_64-w64-mingw32-gcc"];
+const WINDOWS_GNU_CROSS_CXX_COMPILERS: &[&str] = &["x86_64-w64-mingw32-g++"];
 const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang", "cl.exe"];
 const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang"];
 
@@ -45,6 +47,9 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
         return cc;
     }
     let flavor = target.linker_flavor();
+    if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !target.is_host() {
+        return WINDOWS_GNU_CROSS_C_COMPILERS[0].to_string();
+    }
     if flavor == LinkerFlavor::Msvc {
         for cc in MSVC_C_COMPILERS {
             if command_exists(cc) && compiler_matches_flavor(cc, flavor) {
@@ -84,6 +89,9 @@ pub fn detect_cxx_compiler_for_target(target: &Target) -> String {
         return cxx;
     }
     let flavor = target.linker_flavor();
+    if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !target.is_host() {
+        return WINDOWS_GNU_CROSS_CXX_COMPILERS[0].to_string();
+    }
     for cxx in cxx_candidates(target, flavor) {
         if command_exists(cxx) && compiler_matches_flavor(cxx, flavor) {
             return cxx.to_string();
@@ -213,20 +221,26 @@ mod tests {
 
     #[test]
     fn windows_gnu_prefers_gnu_compilers() {
-        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
         assert_eq!(WINDOWS_GNU_C_COMPILERS, &["gcc", "clang"]);
         assert_eq!(cxx_candidates(&target, LinkerFlavor::Gnu), &["g++", "clang++"]);
         assert!(!compiler_matches_flavor("clang-cl", LinkerFlavor::Gnu));
+        assert_eq!(target.linker_flavor(), LinkerFlavor::Gnu);
+        assert_eq!(target.triple_str(), "x86_64-pc-windows-gnu");
+        assert_eq!(detect_c_compiler_for_target(&target), "x86_64-w64-mingw32-gcc");
+        assert_eq!(detect_cxx_compiler_for_target(&target), "x86_64-w64-mingw32-g++");
     }
 
     #[test]
     fn windows_msvc_keeps_msvc_compilers() {
-        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        let target = Target::parse("x86_64-pc-windows-msvc").unwrap();
         assert_eq!(MSVC_C_COMPILERS, &["clang-cl", "clang", "cl.exe"]);
         assert_eq!(
             cxx_candidates(&target, LinkerFlavor::Msvc),
             &["clang-cl", "clang++", "clang"]
         );
         assert!(compiler_matches_flavor("clang-cl", LinkerFlavor::Msvc));
+        assert_eq!(target.linker_flavor(), LinkerFlavor::Msvc);
+        assert_eq!(target.triple_str(), "x86_64-pc-windows-msvc");
     }
 }

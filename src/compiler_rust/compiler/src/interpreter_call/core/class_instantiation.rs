@@ -71,6 +71,28 @@ fn pick_fitting_class_def(class_name: &str, primary: Arc<ClassDef>, args: &[Argu
         .unwrap_or(primary)
 }
 
+/// Decide whether the shorthand `Class(...)` form may implicitly dispatch to
+/// a static `new` method.
+///
+/// A named argument is an unambiguous field-construction signal.  This is
+/// deliberately fail-closed for mixed calls too: field construction owns the
+/// validation and reports an unknown field instead of letting an unrelated
+/// static factory consume it.  Positional construction keeps the historical
+/// exact-arity policy.  An injection marker may fill missing parameters, but
+/// it cannot make an over-arity call compatible.
+fn should_implicitly_call_new(
+    has_named_arg: bool,
+    supplied_arg_count: usize,
+    new_param_count: usize,
+    has_inject: bool,
+) -> bool {
+    if has_named_arg {
+        return false;
+    }
+
+    supplied_arg_count == new_param_count || (has_inject && supplied_arg_count < new_param_count)
+}
+
 pub(crate) fn instantiate_class(
     class_name: &str,
     args: &[Argument],
@@ -150,30 +172,8 @@ pub(crate) fn instantiate_class(
         // 2. Has @inject / @sys_inject marker (missing args will be injected via DI)
         let new_param_count = new_method.params.len();
         let has_inject = has_inject_attr(new_method);
-        let named_args_fit_new = args.iter().all(|arg| match &arg.name {
-            Some(name) => new_method.params.iter().any(|param| &param.name == name),
-            None => true,
-        });
-        // A fully-named literal on a value-type struct whose names all match the
-        // struct's OWN fields is the canonical `Point(x: 3, y: 4)` constructor
-        // form and must build the struct directly. Auto-routing it to a static
-        // `new` whose param names happen to coincide (but whose param TYPES may
-        // differ, e.g. `type_args: [ConcreteType]` vs field `type_args: text`)
-        // misbinds the args and surfaces spurious errors from inside `new` —
-        // seen as "method 'join' not found on value of type enum in nested call
-        // context" (doc/08_tracking/bug/enum_field_in_nested_call_arg_join_not_found_2026-08-17.md).
-        // `is_value_type` alone is not enough: the spec-module registration
-        // path registers structs with is_value_type=false, so also treat an
-        // explicit `static fn new` (an associated constructor, invoked as
-        // `Type.new(...)`) as never auto-callable from a fully-named literal.
-        let all_named_struct_literal = (class_def.is_value_type || new_method.is_static)
-            && !args.is_empty()
-            && args.iter().all(|arg| match &arg.name {
-                Some(name) => class_def.fields.iter().any(|f| &f.name == name),
-                None => false,
-            });
-        let should_call_new =
-            ((args.len() == new_param_count && named_args_fit_new) && !all_named_struct_literal) || has_inject;
+        let has_named_arg = args.iter().any(|arg| arg.name.is_some());
+        let should_call_new = should_implicitly_call_new(has_named_arg, args.len(), new_param_count, has_inject);
 
         if should_call_new && !already_in_new {
             let self_val = Value::aggregate(class_name.to_string(), fields.clone(), class_def.is_value_type);
@@ -324,23 +324,25 @@ pub(crate) fn instantiate_class(
     // `Foo(..base, field: x)` copies every field of `base` before explicit
     // fields override them (identical semantics to the brace-form
     // `Expr::StructInit` spread handled in interpreter/expr/collections.rs).
-    // The parser encodes the `..base` spread argument as an unnamed positional
-    // prefix range `Expr::Range { start: None, end: Some(base) }` (the `..`
-    // token is shared with range syntax), so recognize that shape here. Without
-    // this the spread argument was evaluated as a real range and coerced via
-    // `as_int()`, which failed with "type mismatch: cannot convert object to
-    // int" whenever the base was a struct (e.g. `MirFunction(..func, blocks:
-    // ...)` throughout the MIR optimization passes).
+    // The parser encodes the `..base` spread argument as
+    // `Expr::StructSpread(base)` (see `parse_arguments` in
+    // parser/src/expressions/helpers.rs).
+    //
+    // It used to encode it as an unnamed positional prefix range
+    // `Expr::Range { start: None, end: Some(base) }`, because `..` is shared
+    // with range syntax and the paren form had no spread rule at all. This
+    // loop matched THAT shape as a workaround. The parser now produces a real
+    // spread node, so the range shape is matched no more — a genuine
+    // `f(..n)` prefix range is a range again, and the compiled/native path
+    // (which lowered the old shape to `rt_range(0, <tagged object pointer>)`
+    // and HUNG materialising billions of elements) is fixed at the source:
+    // `doc/08_tracking/bug/struct_spread_paren_form_parses_as_range_2026-08-30.md`.
     for arg in args {
         if arg.name.is_some() {
             continue;
         }
         let base_expr = match &arg.value {
-            simple_parser::ast::Expr::Range {
-                start: None,
-                end: Some(base),
-                ..
-            } => base,
+            simple_parser::ast::Expr::StructSpread(base) => base,
             _ => continue,
         };
         let base_val = evaluate_expr(base_expr, env, functions, classes, enums, impl_methods)?;
@@ -378,19 +380,16 @@ pub(crate) fn instantiate_class(
     }
 
     // Second pass: explicit named/positional fields override any spread values.
+    //
+    // A positional argument fills the next field NOT already claimed by a named
+    // argument anywhere in the call. Without the skip, `Point(x: 10, y)` bound
+    // the trailing positional to field 0 (`x`, overwriting it) and left `y` at
+    // its default 0 — see test/feature/usage/struct_shorthand_spec.spl.
+    let named_fields: std::collections::HashSet<&str> = args.iter().filter_map(|a| a.name.as_deref()).collect();
     let mut positional_idx = 0;
     for arg in args {
         // Struct-spread arguments were consumed in the first pass above.
-        if arg.name.is_none()
-            && matches!(
-                &arg.value,
-                simple_parser::ast::Expr::Range {
-                    start: None,
-                    end: Some(_),
-                    ..
-                }
-            )
-        {
+        if arg.name.is_none() && matches!(&arg.value, simple_parser::ast::Expr::StructSpread(_)) {
             continue;
         }
         let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
@@ -437,11 +436,18 @@ pub(crate) fn instantiate_class(
                 ));
             }
             fields.insert(name.clone(), val);
-        } else if positional_idx < class_def.fields.len() {
-            let field_name = &class_def.fields[positional_idx].name;
-            fields.insert(field_name.clone(), val);
-            positional_idx += 1;
         } else {
+            while positional_idx < class_def.fields.len()
+                && named_fields.contains(class_def.fields[positional_idx].name.as_str())
+            {
+                positional_idx += 1;
+            }
+            if positional_idx < class_def.fields.len() {
+                let field_name = &class_def.fields[positional_idx].name;
+                fields.insert(field_name.clone(), val);
+                positional_idx += 1;
+                continue;
+            }
             // E1023 - Invalid Struct Literal
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_STRUCT_LITERAL)
@@ -484,4 +490,31 @@ fn has_inject_attr(method: &FunctionDef) -> bool {
 /// This should be called between test runs to prevent memory leaks.
 pub fn clear_class_instantiation_state() {
     IN_NEW_METHOD.with(|cell| cell.borrow_mut().clear());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_implicitly_call_new;
+
+    #[test]
+    fn implicit_new_route_rejects_every_named_shape() {
+        assert!(!should_implicitly_call_new(true, 1, 1, false));
+        assert!(!should_implicitly_call_new(true, 2, 2, false));
+        assert!(!should_implicitly_call_new(true, 1, 2, true));
+    }
+
+    #[test]
+    fn implicit_new_route_preserves_positional_exact_arity() {
+        assert!(should_implicitly_call_new(false, 2, 2, false));
+        assert!(!should_implicitly_call_new(false, 1, 2, false));
+        assert!(!should_implicitly_call_new(false, 3, 2, false));
+    }
+
+    #[test]
+    fn implicit_new_route_allows_only_compatible_injection_arity() {
+        assert!(should_implicitly_call_new(false, 0, 2, true));
+        assert!(should_implicitly_call_new(false, 1, 2, true));
+        assert!(should_implicitly_call_new(false, 2, 2, true));
+        assert!(!should_implicitly_call_new(false, 3, 2, true));
+    }
 }

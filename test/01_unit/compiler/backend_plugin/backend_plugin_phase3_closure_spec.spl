@@ -1,0 +1,60 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+describe "backend plugin Phase3 entry-closure convergence":
+    it "links the boxed bridge into the core C bootstrap runtime capsule":
+        val capsule = file_read(
+            "scripts/check/build-core-c-bootstrap-runtime-capsule.shs")
+        val provider = file_read("src/runtime/runtime_backend_plugin.c")
+        val header = file_read("src/runtime/runtime.h")
+        expect(capsule).to_contain("runtime_backend_plugin.c")
+        expect(provider).to_contain("int64_t spl_backend_plugin_run_v1(")
+        expect(header).to_contain("int64_t spl_backend_plugin_run_v1(")
+
+    it "registers the bridge across Rust interpreter and native symbol owners":
+        val build = file_read("src/compiler_rust/runtime/build.rs")
+        val interpreter = file_read(
+            "src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
+        val codegen = file_read(
+            "src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        val elf = file_read("src/compiler_rust/compiler/src/elf_utils.rs")
+        expect(build).to_contain("runtime_backend_plugin.c")
+        expect(build).to_contain(
+            "cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c")
+        expect(interpreter).to_contain(
+            "insert_simple!(\"spl_backend_plugin_run_v1\"")
+        expect(codegen).to_contain(
+            "RuntimeFuncSpec::new(\"spl_backend_plugin_run_v1\", &[I64, I64, I64], &[I64])")
+        expect(elf).to_contain("\"spl_backend_plugin_run_v1\"")
+
+    it "keeps the loader session transport graph directed and exported":
+        val loader = file_read(
+            "src/compiler/70.backend/backend_plugin/loader.spl")
+        val session = file_read(
+            "src/compiler/70.backend/backend_plugin/session.spl")
+        val adapter = file_read(
+            "src/compiler/70.backend/backend_plugin/dynamic_adapter.spl")
+        val transport = file_read(
+            "src/compiler/70.backend/backend_plugin/transport.spl")
+        val facade = file_read(
+            "src/compiler/70.backend/backend_plugin/__init__.spl")
+        expect(loader).to_contain("load_dynamic_backend_v1")
+        expect(session).to_contain("DynamicBackendAdapter")
+        expect(adapter).to_contain("backend_plugin_run_module_v1")
+        expect(transport).to_contain("serialize_mir_module(module)")
+        expect(session.contains("backend_plugin.loader")).to_equal(false)
+        expect(adapter.contains("backend_plugin.session")).to_equal(false)
+        expect(facade).to_contain("backend_plugin_run_module_v1")
+        expect(facade).to_contain("DynamicBackendAdapter")
+
+    it "retains CLI-to-driver plugin selection in the bootstrap source roots":
+        val bootstrap = file_read("src/app/cli/bootstrap_main.spl")
+        val driver = file_read(
+            "src/compiler/80.driver/driver_aot_native_output.spl")
+        val build_script = file_read(
+            "scripts/bootstrap/bootstrap-from-scratch.sh")
+        expect(bootstrap).to_contain("native_build_backend_plugin_from_args")
+        expect(driver).to_contain("driver_aot_backend_plugin_request_v1")
+        expect(driver).to_contain("load_backend(request)")
+        expect(build_script).to_contain(
+            "--source src/compiler --source src/app --source src/lib")

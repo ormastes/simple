@@ -1,7 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum}
-use compiler.hir.hir_lowering._Items.lowering_helpers.{bootstrap_hir_modules_add, bootstrap_hir_functions_reset, bootstrap_hir_functions_add, bootstrap_hir_function_count}
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -11,6 +9,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -45,7 +44,6 @@ use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
 impl HirLowering:
     me lower_parser_module_unstub(module: ParserModule, is_entry: bool) -> HirModule:
@@ -53,7 +51,7 @@ impl HirLowering:
         # hir_lowering modules — `(hir_*_env_get("X") ?? "") == "1"` evaluates
         # false on stage4 even when X=1 — while UNGATED eprint works fine.
         # Probe builds must use ungated eprint here.
-        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_mode = self.ambient_bootstrap_enabled()
         val bootstrap_flat_mode = bootstrap_mode and (hir_module_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
         val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val parser_constants = module.constants.values()
@@ -88,7 +86,27 @@ impl HirLowering:
             # Dict.values() aggregates in one mixed call can erase one through
             # Any in the stage4 bootstrap ABI and later produce a nil receiver.
             var flat_symbols: [HirSymbol] = []
-            val flat_symbol_keys = self.symbols.symbols.keys()
+            # DETERMINISM -- MEASUREMENT PREREQUISITE, NOT A FIX.
+            # These six lists feed `bootstrap_hir_modules_add`
+            # (lowering_helpers.spl:103,120) -> `_bootstrap_hir_module_*`, which drives
+            # BOTH the prescan loop and the MIR lowering order. `rt_dict_keys`
+            # (src/runtime/runtime_native.c:8652) walks BUCKET order, so that order varied
+            # per process. Measured over ten runs (p1..p10): the function order flipped
+            # 5/5 and correlated PERFECTLY with the outcome -- the run reported 4 errors or
+            # 20 purely according to which function got lowered first, because
+            # bootstrap_globals.spl:400 bails at the first function that accumulates fatal
+            # errors. Sorting makes that stable so counts become comparable between runs.
+            #
+            # IT FIXES NOTHING ELSE. Both functions still carry types whose `.kind` reads
+            # as a non-enum: disc=-1 on 4 of 11 lower_type calls in
+            # module_logical_name_from_path and 20 of 26 in
+            # _module_path_naming_text_index_of, matching their error counts exactly. That
+            # defect is real, per-function, stable, and entirely untouched by this change.
+            #
+            # An earlier sort in module_declarations_bootstrap.spl changed nothing here
+            # because it sorted the SYMBOL-DECLARATION pass -- a different collection.
+            var flat_symbol_keys = self.symbols.symbols.keys()
+            flat_symbol_keys.sort()
             var flat_idx = 0
             while flat_idx < flat_symbol_keys.len():
                 flat_symbols = flat_symbols.push(self.symbols.symbols[flat_symbol_keys[flat_idx]])
@@ -98,31 +116,36 @@ impl HirLowering:
             # bootstrap accumulator loses the entry's functions under the
             # bootstrap ABI even though lower_module populated its Dict.
             var flat_functions: [HirFunction] = []
-            val flat_function_keys = lowered_module.functions.keys()
+            var flat_function_keys = lowered_module.functions.keys()
+            flat_function_keys.sort()
             flat_idx = 0
             while flat_idx < flat_function_keys.len():
                 flat_functions = flat_functions.push(lowered_module.functions[flat_function_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_constants: [HirConst] = []
-            val flat_constant_keys = lowered_module.constants.keys()
+            var flat_constant_keys = lowered_module.constants.keys()
+            flat_constant_keys.sort()
             flat_idx = 0
             while flat_idx < flat_constant_keys.len():
                 flat_constants = flat_constants.push(lowered_module.constants[flat_constant_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_enums: [HirEnum] = []
-            val flat_enum_keys = lowered_module.enums.keys()
+            var flat_enum_keys = lowered_module.enums.keys()
+            flat_enum_keys.sort()
             flat_idx = 0
             while flat_idx < flat_enum_keys.len():
                 flat_enums = flat_enums.push(lowered_module.enums[flat_enum_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_structs: [HirStruct] = []
-            val flat_struct_keys = lowered_module.structs.keys()
+            var flat_struct_keys = lowered_module.structs.keys()
+            flat_struct_keys.sort()
             flat_idx = 0
             while flat_idx < flat_struct_keys.len():
                 flat_structs = flat_structs.push(lowered_module.structs[flat_struct_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_classes: [HirClass] = []
-            val flat_class_keys = lowered_module.classes.keys()
+            var flat_class_keys = lowered_module.classes.keys()
+            flat_class_keys.sort()
             flat_idx = 0
             while flat_idx < flat_class_keys.len():
                 flat_classes = flat_classes.push(lowered_module.classes[flat_class_keys[flat_idx]])
@@ -150,7 +173,7 @@ impl HirLowering:
                 enum_idx = enum_idx + 1
                 continue
             hir_phase_profile_count_enum_lowering()
-            val hir_enum = self.lower_enum_with_symbol(self.imported_enums[local_name], self.imported_enum_owners[local_name], local_name)
+            val hir_enum = self.lower_enum_with_symbol(self.imported_enums[local_name], self.imported_enum_owners[local_name], local_name, true)
             lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
 
@@ -166,7 +189,7 @@ impl HirLowering:
 
     me lower_module(module: ParserModule) -> HirModule:
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
-        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_mode = self.ambient_bootstrap_enabled()
         # Phase profiling records bounded phase boundaries. Per-item logging
         # allocates one formatted string per expression in the no-GC compiler,
         # so reserve it for explicitly requested verbose diagnostics.
@@ -526,7 +549,7 @@ impl HirLowering:
                 bootstrap_constants[bootstrap_hir_const.symbol] = bootstrap_hir_const
                 bootstrap_const_idx = bootstrap_const_idx + 1
             if bootstrap_diag:
-                eprint("[hir-lower] bootstrap-functions:count module={module.name} count={bootstrap_hir_function_count()}")
+                eprint("[hir-lower] bootstrap-functions:count module={module.name} count={_bootstrap_hir_functions.len()}")
             # Avoid passing untyped empty aggregate literals through the
             # stage4 constructor ABI. The normal path below materializes these
             # collections with their concrete element types before building

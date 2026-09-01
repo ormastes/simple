@@ -1,3 +1,11 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INFRA
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INFRA
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/lib/nogc_sync_mut/spec/evidence/counterpart/provider_registry.spl 70%
 # @cover src/lib/nogc_sync_mut/spec/evidence/counterpart/provider_runner.spl 60%
 """
@@ -70,6 +78,8 @@ shim. The `process_bridge` transport's exit-status mapping is verified as a pure
 function; spawning a real bridge executable is out of scope here.
 """
 
+use std.spec.step
+
 use std.spec.*
 use std.common.spec.evidence.counterpart.model.{
     ComponentManifest,
@@ -81,12 +91,14 @@ use std.common.spec.evidence.counterpart.model.{
     ProviderManifest,
     ProviderStatus,
     counterpart_plan,
+    execution_mode_name,
     plan_comparison,
     plan_source,
     provider_status_name
 }
 use std.nogc_sync_mut.spec.evidence.counterpart.provider_registry.{
     ProviderRegistry,
+    ProviderSelection,
     component_manifest,
     counterpart_response_artifact,
     counterpart_response_i64,
@@ -110,12 +122,26 @@ use std.nogc_sync_mut.spec.evidence.counterpart.provider_runner.{
     runner_result_index,
     runner_run,
     runner_unavailable_count,
+    runner_invoke,
+    runner_requested_count,
+    runner_with_invocation,
     runner_with_stub,
+    stubbed_failure,
     stubbed_response
 }
 use std.nogc_sync_mut.spec.evidence.counterpart.process_provider.{
-    process_status_for_exit
+    process_status_for_exit,
+    process_provider_execute,
+    process_invocation,
+    process_invocation_bounded
 }
+use std.nogc_sync_mut.spec.evidence.counterpart.native_provider.{
+    native_execution_mode,
+    native_provider_execute
+}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # ============================================================================
 # Step helpers
@@ -213,6 +239,8 @@ fn a_context_with_agreeing_stubs(registry: ProviderRegistry) -> RunnerContext:
 
 describe "Counterpart provider registry":
     it "accepts two independent providers and indexes their components":
+        # @req REQ-SSPEC-INFRA
+        step("accepts two independent providers and indexes their components")
         step("Register the Simple web provider and the Chrome bridge")
         val registry = a_registry_with_two_independent_providers()
         step("Confirm neither descriptor was refused")
@@ -221,6 +249,8 @@ describe "Counterpart provider registry":
         expect(provider_registry_component_count(registry)).to_equal(2)
 
     it "answers which providers serve a counterpart boundary":
+        # @req REQ-SSPEC-INFRA
+        step("answers which providers serve a counterpart boundary")
         step("Register both providers against one boundary")
         val registry = a_registry_with_two_independent_providers()
         step("Ask the boundary index who can answer the computed-style boundary")
@@ -231,6 +261,8 @@ describe "Counterpart provider registry":
         expect(groups.len()).to_equal(2)
 
     it "answers which providers expose a named component":
+        # @req REQ-SSPEC-INFRA
+        step("answers which providers expose a named component")
         step("Register both providers")
         val registry = a_registry_with_two_independent_providers()
         step("Look the Chrome component up by its component identifier")
@@ -240,6 +272,8 @@ describe "Counterpart provider registry":
         expect(found[0].independence_group).to_equal("blink")
 
     it "resolves a plan source to a concrete component":
+        # @req REQ-SSPEC-INFRA
+        step("resolves a plan source to a concrete component")
         step("Register both providers and declare the style plan")
         val registry = a_registry_with_two_independent_providers()
         val plan = the_style_plan()
@@ -253,6 +287,8 @@ describe "Counterpart provider registry":
 
 describe "Counterpart provider runner":
     it "runs every planned source and accepts an agreeing matrix":
+        # @req REQ-SSPEC-INFRA
+        step("runs every planned source and accepts an agreeing matrix")
         step("Register two independent providers")
         val registry = a_registry_with_two_independent_providers()
         step("Declare a response envelope for each provider, both agreeing")
@@ -265,6 +301,8 @@ describe "Counterpart provider runner":
         assert_true(run.matrix[0].matched)
 
     it "records a stub marker on every source it did not really execute":
+        # @req REQ-SSPEC-INFRA
+        step("records a stub marker on every source it did not really execute")
         step("Run the plan with declared stub envelopes")
         val ctx = a_context_with_agreeing_stubs(a_registry_with_two_independent_providers())
         val results = runner_execute_plan(ctx, the_style_plan())
@@ -278,6 +316,8 @@ describe "Counterpart provider runner":
             "stubbed: declared response, no adapter was invoked"))
 
     it "projects a response envelope onto a logical artifact":
+        # @req REQ-SSPEC-INFRA
+        step("projects a response envelope onto a logical artifact")
         step("Read the declared envelope of one component")
         val artifact = counterpart_response_artifact(a_response_envelope("bb22"), THE_BOUNDARY)
         step("Confirm every field was taken from the envelope, not defaulted")
@@ -288,6 +328,8 @@ describe "Counterpart provider runner":
         expect(artifact.canonical_hash).to_equal("bb22")
 
     it "reports a disagreement between two providers as a failed comparison":
+        # @req REQ-SSPEC-INFRA
+        step("reports a disagreement between two providers as a failed comparison")
         step("Declare envelopes whose canonical hashes differ")
         val registry = a_registry_with_two_independent_providers()
         var ctx = runner_context(registry, "run-2", "hash-package", "request: computed_style")
@@ -309,6 +351,8 @@ describe "Counterpart provider runner":
 
 describe "Counterpart provider registration refusals":
     it "refuses a second descriptor claiming an already-registered provider id":
+        # @req REQ-SSPEC-INFRA
+        step("refuses a second descriptor claiming an already-registered provider id")
         step("Register the Chrome provider")
         var registry = provider_registry()
         registry = provider_registry_register(registry, the_chrome_provider(),
@@ -324,6 +368,8 @@ describe "Counterpart provider registration refusals":
         expect(provider_registry_component_count(registry)).to_equal(1)
 
     it "refuses a component whose counterpart boundary identifier is malformed":
+        # @req REQ-SSPEC-INFRA
+        step("refuses a component whose counterpart boundary identifier is malformed")
         step("Declare a provider whose component omits its schema version")
         val malformed = provider_manifest(
             "servo-nightly", ProviderKind.process_bridge, "servo", 1,
@@ -339,6 +385,8 @@ describe "Counterpart provider registration refusals":
         expect(provider_registry_provider_count(registry)).to_equal(0)
 
     it "refuses a descriptor built against a different ABI version":
+        # @req REQ-SSPEC-INFRA
+        step("refuses a descriptor built against a different ABI version")
         step("Declare a provider claiming ABI version 2")
         val wrong_abi = provider_manifest(
             "servo-nightly", ProviderKind.process_bridge, "servo", 2,
@@ -354,6 +402,8 @@ describe "Counterpart provider registration refusals":
         expect(provider_registry_provider_count(registry)).to_equal(0)
 
     it "refuses a descriptor that declares no independence group":
+        # @req REQ-SSPEC-INFRA
+        step("refuses a descriptor that declares no independence group")
         step("Declare a provider with an empty independence group")
         val no_group = provider_manifest(
             "servo-nightly", ProviderKind.process_bridge, "", 1,
@@ -371,6 +421,8 @@ describe "Counterpart provider registration refusals":
 
 describe "Counterpart provider selection refusals":
     it "reports an unregistered provider as unavailable rather than as a pass":
+        # @req REQ-SSPEC-INFRA
+        step("reports an unregistered provider as unavailable rather than as a pass")
         step("Register only the Chrome provider")
         var registry = provider_registry()
         registry = provider_registry_register(registry, the_chrome_provider(),
@@ -384,6 +436,8 @@ describe "Counterpart provider selection refusals":
         expect(selection.diagnostics.len()).to_be_greater_than(0)
 
     it "refuses a component that serves a different counterpart boundary":
+        # @req REQ-SSPEC-INFRA
+        step("refuses a component that serves a different counterpart boundary")
         step("Register a provider whose component serves the layout boundary")
         val other_boundary = provider_manifest(
             "servo-nightly", ProviderKind.process_bridge, "servo", 1,
@@ -403,6 +457,8 @@ describe "Counterpart provider selection refusals":
 
 describe "Counterpart run refusals":
     it "fails the run when a required source is unavailable":
+        # @req REQ-SSPEC-INFRA
+        step("fails the run when a required source is unavailable")
         step("Register only the Chrome provider, leaving the candidate unregistered")
         var registry = provider_registry()
         registry = provider_registry_register(registry, the_chrome_provider(),
@@ -425,6 +481,8 @@ describe "Counterpart run refusals":
         expect(provider_status_name(run.sources[index].status)).to_equal("unavailable")
 
     it "names the required source in the diagnostics when it did not execute":
+        # @req REQ-SSPEC-INFRA
+        step("names the required source in the diagnostics when it did not execute")
         step("Run the plan whose required candidate is unregistered")
         var registry = provider_registry()
         registry = provider_registry_register(registry, the_chrome_provider(),
@@ -443,17 +501,232 @@ describe "Counterpart run refusals":
 
 describe "Counterpart process bridge status mapping":
     it "maps a clean exit to executed and a non-zero exit to crashed":
+        # @req REQ-SSPEC-INFRA
+        step("maps a clean exit to executed and a non-zero exit to crashed")
         step("Map the exit status of a bridge process that finished cleanly")
         expect(provider_status_name(process_status_for_exit(0))).to_equal("executed")
         step("Map the exit status of a bridge process that aborted")
         expect(provider_status_name(process_status_for_exit(134))).to_equal("crashed")
 
     it "keeps a timeout distinct from a crash":
+        # @req REQ-SSPEC-INFRA
+        step("keeps a timeout distinct from a crash")
         step("Map the exit status of a bridge process killed on its time bound")
         expect(provider_status_name(process_status_for_exit(124))).to_equal("timed_out")
 
     it "refuses to guess a missing count in a response envelope":
+        # @req REQ-SSPEC-INFRA
+        step("refuses to guess a missing count in a response envelope")
         step("Read a count the provider never reported")
         expect(counterpart_response_i64("schema_id: x\n", "item_count")).to_equal(-1)
         step("Read a count the provider reported with trailing junk")
         expect(counterpart_response_i64("item_count: 42x\n", "item_count")).to_equal(-1)
+
+
+# ============================================================================
+# Residual registry and transport branches
+# ============================================================================
+# @manual_section: Residual branches
+
+fn a_resolved_process_selection(adapter_path: text) -> ProviderSelection:
+    ProviderSelection(
+        source_id: "bridge",
+        provider_id: "bridge-prov",
+        component_id: "bridge.component",
+        counterpart_boundary_id: THE_BOUNDARY,
+        provider_kind: ProviderKind.process_bridge,
+        independence_group: "bridge-group",
+        provider_version: "1.0.0",
+        artifact_hash: "hash-bridge",
+        adapter_path: adapter_path,
+        config: "",
+        resolved: true,
+        unresolved_status: ProviderStatus.unavailable,
+        diagnostics: []
+    )
+
+describe "Counterpart residual registry and transport branches":
+    it "collapses duplicate independence groups for one boundary":
+        step("Register two providers claiming the SAME independence group")
+        var registry = provider_registry()
+        registry = provider_registry_register(registry, provider_manifest(
+            "prov-a", ProviderKind.native_in_process, "shared-group", 1,
+            "1.0.0", "hash-a", "MIT",
+            [a_style_component("a.style", THE_BOUNDARY)]), "a.so", "")
+        registry = provider_registry_register(registry, provider_manifest(
+            "prov-b", ProviderKind.native_in_process, "shared-group", 1,
+            "1.0.0", "hash-b", "MIT",
+            [a_style_component("b.style", THE_BOUNDARY)]), "b.so", "")
+        step("Confirm the boundary reports ONE group, not two providers' worth")
+        expect(provider_registry_independence_groups_for_boundary(
+            registry, THE_BOUNDARY).len()).to_equal(1)
+
+    it "refuses a manifest declaring the same component id twice":
+        step("Register a provider whose manifest lists one component twice")
+        val registry = provider_registry_register(provider_registry(), provider_manifest(
+            "dup-comp", ProviderKind.native_in_process, "grp", 1,
+            "1.0.0", "hash-d", "MIT",
+            [a_style_component("same.id", THE_BOUNDARY),
+             a_style_component("same.id", THE_BOUNDARY)]), "d.so", "")
+        assert_true(provider_registry_has_rejection_containing(registry, "twice"))
+
+    it "reports a registered provider without the named component as unresolved":
+        step("Select a component the provider never declared")
+        val registry = a_registry_with_two_independent_providers()
+        val selection = provider_registry_select(registry,
+            plan_source("simple_cpu", "simple-web", "no.such.component",
+                OracleAuthority.differential_peer, true), THE_BOUNDARY)
+        assert_false(selection.resolved)
+        assert_true(selection.diagnostics[0].contains("declares no component"))
+
+    it "finds a runner result by source id at any index, and -1 when absent":
+        step("Execute the plan and look up the SECOND source by id")
+        val registry = a_registry_with_two_independent_providers()
+        val results = runner_execute_plan(a_context_with_agreeing_stubs(registry), the_style_plan())
+        expect(runner_result_index(results, "chrome")).to_equal(1)
+        expect(runner_result_index(results, "nobody")).to_equal(0 - 1)
+
+    it "refuses to execute an unresolved process selection":
+        step("Feed the process transport a selection that never resolved")
+        val registry = provider_registry()
+        val selection = provider_registry_select(registry,
+            plan_source("servo", "servo-nightly", "servo.computed_style",
+                OracleAuthority.differential_peer, true), THE_BOUNDARY)
+        val outcome = process_provider_execute(selection, process_invocation([]), "request")
+        assert_false(provider_status_name(outcome.status) == "executed")
+
+    it "reports a resolved selection with no pinned executable as unavailable":
+        step("Execute a resolved selection whose adapter path is empty")
+        val outcome = process_provider_execute(
+            a_resolved_process_selection(""), process_invocation([]), "request")
+        expect(provider_status_name(outcome.status)).to_equal("unavailable")
+
+    it "runs a real bridge executable and projects its stdout envelope":
+        step("Install a shell bridge that prints a well-formed envelope")
+        val bridge = "build/counterpart/style_bridge_test.sh"
+        val (mk_out, mk_err, mk_code) = rt_process_run("/bin/mkdir", ["-p", "build/counterpart"])
+        expect(mk_code).to_equal(0)
+        assert_true(rt_file_write_text(bridge,
+            "#!/bin/sh\nprintf '%s\\n' 'schema_id: canonical_style_table'"
+                + " 'schema_version: 1' 'item_count: 42' 'canonical_hash: bb22'"
+                + " 'artifact_ref: artifact://bb22'\n"))
+        val (ch_out, ch_err, ch_code) = rt_process_run("/bin/chmod", ["+x", bridge])
+        expect(ch_code).to_equal(0)
+        step("Execute the bridge through the process transport")
+        val outcome = process_provider_execute(
+            a_resolved_process_selection(bridge), process_invocation([]), "request")
+        expect(provider_status_name(outcome.status)).to_equal("executed")
+        expect(outcome.artifact.canonical_hash).to_equal("bb22")
+
+    it "maps a nonzero bridge exit onto crashed, never a silent pass":
+        step("Install a bridge that always exits 3")
+        val bridge = "build/counterpart/style_bridge_crash.sh"
+        val (mk_out, mk_err, mk_code) = rt_process_run("/bin/mkdir", ["-p", "build/counterpart"])
+        expect(mk_code).to_equal(0)
+        assert_true(rt_file_write_text(bridge, "#!/bin/sh\nexit 3\n"))
+        val (ch_out, ch_err, ch_code) = rt_process_run("/bin/chmod", ["+x", bridge])
+        expect(ch_code).to_equal(0)
+        val outcome = process_provider_execute(
+            a_resolved_process_selection(bridge), process_invocation([]), "request")
+        expect(provider_status_name(outcome.status)).to_equal("crashed")
+        expect(outcome.exit_code).to_equal(3)
+
+# ============================================================================
+# Transport dispatch and declared failures (branches the section above leaves)
+# ============================================================================
+# @manual_section: Declared stub failures, missing transports and the native lane
+
+fn a_resolved_selection_of_kind(kind: ProviderKind, adapter_path: text) -> ProviderSelection:
+    ProviderSelection(
+        source_id: "hand",
+        provider_id: "hand-provider",
+        component_id: "hand.component",
+        counterpart_boundary_id: THE_BOUNDARY,
+        provider_kind: kind,
+        independence_group: "hand",
+        provider_version: "0",
+        artifact_hash: "hash-hand",
+        adapter_path: adapter_path,
+        config: "",
+        resolved: true,
+        unresolved_status: ProviderStatus.unavailable,
+        diagnostics: []
+    )
+
+describe "Counterpart runner transport dispatch":
+    it "reports a declared stub failure with its declared status, never a pass":
+        step("Declare a stub whose status is crashed")
+        val registry = a_registry_with_two_independent_providers()
+        var ctx = runner_context(registry, "run-stub-fail", "hash-package", "request")
+        ctx = runner_with_stub(ctx, stubbed_failure(
+            "simple-web", "simple.web.cpu.style", ProviderStatus.crashed))
+        step("Invoke the stubbed component through the uniform interface")
+        val selection = provider_registry_select(registry,
+            the_style_plan().sources[0], THE_BOUNDARY)
+        val outcome = runner_invoke(ctx, selection)
+        step("Confirm the declared failure came back as crashed with a stub marker")
+        expect(provider_status_name(outcome.status)).to_equal("crashed")
+        assert_true(outcome.diagnostics[0].contains("stubbed: declared status crashed"))
+
+    it "reports a provider kind with no Wave-1 transport as unavailable":
+        step("Invoke a resolved selection whose kind is qemu_guest_bridge")
+        val ctx = runner_context(a_registry_with_two_independent_providers(),
+            "run-no-transport", "hash-package", "request")
+        val outcome = runner_invoke(ctx,
+            a_resolved_selection_of_kind(ProviderKind.qemu_guest_bridge, "guest.img"))
+        step("Confirm the missing transport is unavailable with a named diagnostic")
+        expect(provider_status_name(outcome.status)).to_equal("unavailable")
+        assert_true(outcome.diagnostics[0].contains("has no Wave-1 transport"))
+
+    it "counts the plan's requested sources and carries a replaced invocation":
+        step("Count the style plan's sources")
+        expect(runner_requested_count(the_style_plan())).to_equal(2)
+        step("Replace the runner's process invocation with a bounded one")
+        var ctx = runner_context(a_registry_with_two_independent_providers(),
+            "run-invocation", "hash-package", "request")
+        ctx = runner_with_invocation(ctx, process_invocation_bounded(["-c"], 1000, 4096))
+        expect(ctx.invocation.timeout_ms).to_equal(1000)
+        expect(ctx.invocation.max_output_bytes).to_equal(4096)
+
+describe "Counterpart native transport refusals":
+    it "reports an unselected native source with its unresolved status":
+        step("Execute the native transport with an unresolved selection")
+        val registry = a_registry_with_two_independent_providers()
+        val plan = a_plan_naming_an_unregistered_provider()
+        val selection = provider_registry_select(registry, plan.sources[0], plan.boundary_id)
+        val outcome = native_provider_execute(selection, "request")
+        step("Confirm it is unavailable with a named reason")
+        expect(provider_status_name(outcome.status)).to_equal("unavailable")
+        assert_true(outcome.diagnostics[0].contains("was not selected"))
+
+    it "reports a native provider with no adapter path as unavailable":
+        step("Execute a resolved native selection whose adapter path is empty")
+        val outcome = native_provider_execute(
+            a_resolved_selection_of_kind(ProviderKind.native_in_process, ""), "request")
+        expect(provider_status_name(outcome.status)).to_equal("unavailable")
+        assert_true(outcome.diagnostics[0].contains("has no adapter path"))
+
+    it "maps every declared adapter execution-mode token and refuses to guess":
+        step("Map each token in the frozen execution-mode vocabulary")
+        expect(execution_mode_name(native_execution_mode("execution_mode: cpu_reference"))).to_equal("cpu_reference")
+        expect(execution_mode_name(native_execution_mode("execution_mode: simd"))).to_equal("simd")
+        expect(execution_mode_name(native_execution_mode("execution_mode: hybrid_vector_gpu"))).to_equal("hybrid_vector_gpu")
+        expect(execution_mode_name(native_execution_mode("execution_mode: resident_gpu"))).to_equal("resident_gpu")
+        expect(execution_mode_name(native_execution_mode("execution_mode: vulkan"))).to_equal("vulkan")
+        expect(execution_mode_name(native_execution_mode("execution_mode: cuda"))).to_equal("cuda")
+        step("An adapter that reports nothing is unknown, never cpu_reference")
+        expect(execution_mode_name(native_execution_mode(""))).to_equal("unknown")
+
+describe "Counterpart process bridge timeout mapping":
+    it "keeps a bridge killed on its time bound distinct from a crash":
+        step("Install a bridge that exits with the timeout convention 124")
+        val bridge = "build/counterpart/style_bridge_timeout.sh"
+        val (mk_out, mk_err, mk_code) = rt_process_run("/bin/mkdir", ["-p", "build/counterpart"])
+        expect(mk_code).to_equal(0)
+        assert_true(rt_file_write_text(bridge, "#!/bin/sh\nexit 124\n"))
+        val (ch_out, ch_err, ch_code) = rt_process_run("/bin/chmod", ["+x", bridge])
+        expect(ch_code).to_equal(0)
+        val outcome = process_provider_execute(
+            a_resolved_process_selection(bridge), process_invocation([]), "request")
+        expect(provider_status_name(outcome.status)).to_equal("timed_out")
+        expect(outcome.exit_code).to_equal(124)

@@ -74,6 +74,38 @@ fn gpu_attr_string_value(expr: &ast::Expr) -> Option<&str> {
     }
 }
 
+/// Asm-embedding contract (doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md
+/// A.2): `@section("name")` and `@align(n)` carry an argument that the plain
+/// name list drops. Encode them as `section=<name>` / `align=<n>` so the LLVM
+/// backend can place the symbol without a new MIR field (same convention as
+/// `gpu_target_<backend>` above).
+pub(crate) fn append_asm_placement_attribute_metadata(attrs: &mut Vec<String>, attr: &ast::Attribute) {
+    match attr.name.as_str() {
+        "section" => {
+            // A double-quoted literal may parse as a one-part FString.
+            let name = match attr.args.as_ref().and_then(|args| args.first()) {
+                Some(ast::Expr::String(s)) | Some(ast::Expr::Identifier(s)) => Some(s.clone()),
+                Some(ast::Expr::FString { parts, .. }) if parts.len() == 1 => match &parts[0] {
+                    ast::FStringPart::Literal(s) => Some(s.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(name) = name {
+                if !name.is_empty() {
+                    attrs.push(format!("section={name}"));
+                }
+            }
+        }
+        "align" => {
+            if let Some(ast::Expr::Integer(n)) = attr.args.as_ref().and_then(|args| args.first()) {
+                attrs.push(format!("align={n}"));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn append_gpu_attribute_metadata(attrs: &mut Vec<String>, attr: &ast::Attribute) {
     if attr.name != "gpu" {
         return;
@@ -184,6 +216,9 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
         ast::Expr::Tuple(exprs) | ast::Expr::Array(exprs) | ast::Expr::VecLiteral(exprs) => {
             exprs.iter().any(expr_uses_self)
         }
+        ast::Expr::Dict(pairs) => pairs
+            .iter()
+            .any(|(key, value)| expr_uses_self(key) || expr_uses_self(value)),
         ast::Expr::ArrayRepeat { value, count } => expr_uses_self(value) || expr_uses_self(count),
         ast::Expr::StructInit { fields, spread, .. } => {
             fields.iter().any(|(_, value)| expr_uses_self(value))
@@ -193,11 +228,11 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
         ast::Expr::Try(expr)
         | ast::Expr::ForceUnwrap(expr)
         | ast::Expr::ExistsCheck(expr)
-        | ast::Expr::UnwrapOrReturn { expr, .. }
         | ast::Expr::Await(expr)
         | ast::Expr::Spawn(expr)
         | ast::Expr::ContractOld(expr) => expr_uses_self(expr),
-        ast::Expr::DoBlock(nodes) | ast::Expr::UnsafeBlock(nodes) => nodes.iter().any(node_uses_self),
+        ast::Expr::UnwrapOrReturn { expr, default } => expr_uses_self(expr) || expr_uses_self(default),
+        ast::Expr::DoBlock(nodes) | ast::Expr::UnsafeBlock(nodes, _) => nodes.iter().any(node_uses_self),
         _ => false,
     }
 }
@@ -208,6 +243,22 @@ fn fstring_parts_use_self(parts: &[ast::FStringPart]) -> bool {
         ast::FStringPart::Expr(expr) => expr_uses_self(expr),
         ast::FStringPart::ExprWithFormat(expr, _) => expr_uses_self(expr),
     })
+}
+
+#[cfg(test)]
+mod implicit_receiver_tests {
+    use super::expr_uses_self;
+    use simple_parser::ast::Expr;
+
+    #[test]
+    fn dict_literals_retain_implicit_receiver_from_keys_and_values() {
+        let self_expr = || Expr::Identifier("self".to_string());
+        let literal = |value: &str| Expr::String(value.to_string());
+
+        assert!(expr_uses_self(&Expr::Dict(vec![(self_expr(), literal("value"))])));
+        assert!(expr_uses_self(&Expr::Dict(vec![(literal("key"), self_expr())])));
+        assert!(!expr_uses_self(&Expr::Dict(vec![(literal("key"), literal("value"))])));
+    }
 }
 
 fn driver_manifest_attr(attrs: &[ast::Attribute]) -> Option<&ast::Attribute> {
@@ -496,6 +547,12 @@ impl Lowerer {
         f: &ast::FunctionDef,
         owner_type: Option<&str>,
     ) -> LowerResult<HirFunction> {
+        // Local IDs restart for every function. Capabilities retained from the
+        // previous function would therefore alias unrelated locals that happen
+        // to reuse the same numeric ID. Reuse the table allocation but begin a
+        // fresh function-local aliasing domain.
+        self.capability_env.clear();
+
         // Set current class type for Self resolution
         let previous_class_type = self.current_class_type;
         if let Some(type_name) = owner_type {
@@ -742,6 +799,7 @@ impl Lowerer {
         let mut attributes: Vec<String> = f.attributes.iter().map(|attr| attr.name.clone()).collect();
         for attr in &f.attributes {
             append_gpu_attribute_metadata(&mut attributes, attr);
+            append_asm_placement_attribute_metadata(&mut attributes, attr);
         }
         for dec in &f.decorators {
             if let ast::Expr::Identifier(name) = &dec.name {

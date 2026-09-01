@@ -1,7 +1,6 @@
 # Bug: checker raw-text concurrency lint false positives
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** claimed and fixed by the Stage 4 root lane
 
 ## Reproduction
 

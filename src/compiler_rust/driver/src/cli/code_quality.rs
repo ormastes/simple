@@ -373,8 +373,9 @@ fn expr_references_param(expr: &Expr, params: &[String]) -> bool {
         | Expr::Spawn(expr)
         | Expr::Await(expr)
         | Expr::Spread(expr)
+        | Expr::StructSpread(expr)
         | Expr::DictSpread(expr) => expr_references_param(expr, params),
-        Expr::DoBlock(statements) | Expr::UnsafeBlock(statements) => {
+        Expr::DoBlock(statements) | Expr::UnsafeBlock(statements, _) => {
             statements.iter().any(|stmt| stmt_references_param(stmt, params))
         }
         _ => false,

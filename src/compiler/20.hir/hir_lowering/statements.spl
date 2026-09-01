@@ -2,11 +2,12 @@
 #
 # This module handles lowering of statements from AST to HIR.
 
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is not an import-origin for surface projection
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.expressions.*
@@ -25,12 +26,15 @@ impl HirLowering:
     # Nested-field-access support (native --entry path bug -- see
     # struct_field_types_by_name / local_struct_types doc comments in
     # types.spl). `val/var x = StructName(...)` is the only local-declared-
-    # type shapes this lane can recover without a full inference pass are a
-    # direct aggregate constructor and a bare function whose retained
-    # signature has a nominal return. Structs and imported signatures are
-    # registered before bodies, so both decisions are constant-time here.
-    # Qualified constructors and dynamically dispatched calls remain outside
-    # this narrow ownership projection.
+    # type shape this lane can recover without a full inference pass: the
+    # callee name is a compile-time-static struct name IF it is already
+    # registered in struct_field_types_by_name (structs are lowered in a
+    # up-front pass before function bodies, so this dict is fully populated
+    # by the time any function body -- and thus any Let -- is lowered).
+    # Deliberately narrow: only a bare `Ident(...)` call callee: qualified
+    # constructors, method calls, etc. are left untracked (Field-expr
+    # lowering then falls back to its pre-existing untyped i64 default,
+    # same as today -- this is additive, never a regression).
     me try_register_local_struct_type(sym: SymbolId, init_expr: Expr):
         match init_expr.kind:
             case ExprKind.Call(callee, call_args):
@@ -67,25 +71,6 @@ impl HirLowering:
                                         case _: ()
                                     arg_i = arg_i + 1
                                 self.struct_field_types_by_name[callee_name] = known_fields
-                        else:
-                            # Preserve a nominal function result for a later
-                            # field access (`val v = make(); v.private`). The
-                            # local symbol itself is untyped on this path, so
-                            # dropping this owner would bypass member policy.
-                            val callee_symbol = self.symbols.lookup_or_invalid(callee_name)
-                            if callee_symbol.is_valid():
-                                if val callable = self.symbols.get_symbol_raw(callee_symbol.id):
-                                    if callable.type_ != nil:
-                                        val callable_type = callable.type_ ?? HirType(
-                                            kind: HirTypeKind.Error, span: init_expr.span)
-                                        match callable_type.kind:
-                                            case HirTypeKind.Function(_, return_type, _):
-                                                val return_owner = self.named_owner_raw_from_type(return_type)
-                                                if return_owner >= 0:
-                                                    val composite_name = self.composite_name_for_owner_raw(return_owner)
-                                                    if composite_name != "":
-                                                        self.local_struct_types[sym.id] = composite_name
-                                            case _: ()
                     case _: ()
             case _: ()
 
@@ -128,8 +113,17 @@ impl HirLowering:
             case AssignOp.Mod: HirAssignOp.Mod
 
     me lower_hir_assign_op_opt(op: AssignOp?) -> HirAssignOp?:
+        # Returns a PLAIN NULLABLE, not an Option box. All three call sites (:455,
+        # :482, :538) feed the result straight into `HirStmtKind.Assign`, whose `op`
+        # slot is declared FLAT (`op: HirAssignOp`), and all five readers of that slot
+        # (monomorphize_integration.spl:1051, monomorphize/type_subst.spl:302,
+        # monomorphize/hir_subst/body_subst.spl:272, mir_lowering_stmts.spl:1352,
+        # svmg_lowering.spl:539) bind it positionally -- none tests `case Some(...)`.
+        # Boxing it was the same defect class as `HirStmtKind.Let.type_`; here the
+        # symptom is a silently wrong operator rather than a SEGV, because both the
+        # box and the payload are enums.
         if op.?:
-            Some(self.lower_hir_assign_op(op.unwrap()))
+            self.lower_hir_assign_op(op.unwrap())
         else:
             nil
 
@@ -377,28 +371,34 @@ impl HirLowering:
                     vinit
                 case _:
                     sk_dummy
-            # An OPTION HANDLE MUST NOT REACH `HirStmtKind.Let`. Its field is
-            # `type_: HirType` (hir_definitions.spl:765), NOT `HirType?`, while
-            # `SymbolTable.define` (hir_types.spl:316) legitimately takes `HirType?`.
-            # Passing one `Some(...)` local to both stored the Option's ENUM HEADER in the
-            # `type_` slot; every consumer that clones a `HirStmt` then read header word[1]
-            # (`enum_id | variant<<32`, enum_id=1 for Option) as `HirType.span` and
-            # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
-            # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
-            # Keep the bare value for the HIR node and the Option for the symbol table.
-            val v_hir_type_bare: HirType = if v_type.?:
+            val v_hir_type = if v_type.?:
                 self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span))
             else:
                 nil
-            val v_hir_type: HirType? = if v_type.?:
-                Some(v_hir_type_bare)
-            else:
-                nil
+            # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
+            # (repo rule, statements.spl:409/580 + module_declarations_bootstrap.spl:435,
+            # citing bug doc 2026-07-23: "a nullable is not an Option box"). Boxing it
+            # here made every `case Let(_, type_, _)` arm binding deep-copy an RtCoreEnum
+            # as a `HirType`, whose word[1] = (discriminant<<32)|enum_id has enum_id==1 ==
+            # RT_VALUE_TAG_HEAP, so the copy's heap-box guard passed and it dereferenced
+            # (discriminant<<32) -> SIGSEGV in any_check_stmt.
+            # The SYMBOL TABLE type slot is a SEPARATE field with its own reader set
+            # (get_symbol_type_raw -> mir_lowering_stmts.spl:812 `case Some`, plus the
+            # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
+            # deliberately NOT migrated here, so it keeps receiving the boxed form.
+            # NO `Some(...)` box. HirSymbol.type_ is declared `HirType?` -- a PLAIN
+            # NULLABLE -- and the repo rule is explicit: "a nullable is not an
+            # Option box". Boxing it forced every reader to EXTRACT a payload, and
+            # every extraction form corrupts an aggregate on this lane, measured:
+            # `case Some` deep-copies and corrupts it (disc=-1), `.unwrap()` is
+            # stolen by Poll.unwrap and returns raw 0, `??` corrupts it too.
+            # Removing the box removes the extraction, so there is nothing to corrupt.
+            val v_sym_type = v_hir_type
             val v_hir_init = self.lower_hir_expr(v_init)
-            val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, Visibility.Private, false, nil)
+            val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_sym_type, s.span, Visibility.Private, false, nil)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
-            return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type_bare, v_hir_init), span: s.span)
+            return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
             val vr_name = match stmt_kind_value:
                 case StmtKind.Var(vrname, _, _):
@@ -415,32 +415,21 @@ impl HirLowering:
                     vrinit
                 case _:
                     nil
-            # An OPTION HANDLE MUST NOT REACH `HirStmtKind.Let`. Its field is
-            # `type_: HirType` (hir_definitions.spl:765), NOT `HirType?`, while
-            # `SymbolTable.define` (hir_types.spl:316) legitimately takes `HirType?`.
-            # Passing one `Some(...)` local to both stored the Option's ENUM HEADER in the
-            # `type_` slot; every consumer that clones a `HirStmt` then read header word[1]
-            # (`enum_id | variant<<32`, enum_id=1 for Option) as `HirType.span` and
-            # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
-            # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
-            # Keep the bare value for the HIR node and the Option for the symbol table.
-            val vr_hir_type_bare: HirType = if vr_type.?:
+            val vr_hir_type = if vr_type.?:
                 self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span))
             else:
                 nil
-            val vr_hir_type: HirType? = if vr_type.?:
-                Some(vr_hir_type_bare)
-            else:
-                nil
+            # Same field migration as the `val` path above; see the note there.
+            val vr_sym_type = if vr_hir_type != nil: Some(vr_hir_type) else: nil
             val vr_hir_init = if vr_init.?:
                 self.lower_hir_expr(vr_init ?? sk_dummy)
             else:
                 HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-            val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, Visibility.Private, true, nil)
+            val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_sym_type, s.span, Visibility.Private, true, nil)
             if val vr_init_present = vr_init:
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
                 self.try_register_local_tuple_type(vr_symbol, vr_init_present)
-            return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type_bare, vr_hir_init), span: s.span)
+            return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type, vr_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Return(nil)):
             val rt_val: Expr? = match stmt_kind_value:
                 case StmtKind.Return(rvalue):
@@ -517,51 +506,49 @@ impl HirLowering:
 
         val kind: HirStmtKind = match stmt_kind_value:
             case StmtKind.Val(name, type_, init):
-                # An OPTION HANDLE MUST NOT REACH `HirStmtKind.Let`. Its field is
-                # `type_: HirType` (hir_definitions.spl:765), NOT `HirType?`, while
-                # `SymbolTable.define` (hir_types.spl:316) legitimately takes `HirType?`.
-                # Passing one `Some(...)` local to both stored the Option's ENUM HEADER in the
-                # `type_` slot; every consumer that clones a `HirStmt` then read header word[1]
-                # (`enum_id | variant<<32`, enum_id=1 for Option) as `HirType.span` and
-                # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
-                # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
-                # Keep the bare value for the HIR node and the Option for the symbol table.
-                val hir_type_bare: HirType = if type_.?:
+                val hir_type = if type_.?:
                     self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
                 else:
                     nil
-                val hir_type: HirType? = if type_.?:
-                    Some(hir_type_bare)
-                else:
-                    nil
+                # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
+                # (repo rule, statements.spl:409/580 + module_declarations_bootstrap.spl:435,
+                # citing bug doc 2026-07-23: "a nullable is not an Option box"). Boxing it
+                # here made every `case Let(_, type_, _)` arm binding deep-copy an RtCoreEnum
+                # as a `HirType`, whose word[1] = (discriminant<<32)|enum_id has enum_id==1 ==
+                # RT_VALUE_TAG_HEAP, so the copy's heap-box guard passed and it dereferenced
+                # (discriminant<<32) -> SIGSEGV in any_check_stmt.
+                # The SYMBOL TABLE type slot is a SEPARATE field with its own reader set
+                # (get_symbol_type_raw -> mir_lowering_stmts.spl:812 `case Some`, plus the
+                # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
+                # deliberately NOT migrated here, so it keeps receiving the boxed form.
+                val sym_type = hir_type
                 val hir_init = self.lower_hir_expr(init)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, Visibility.Private, false, nil)
-                HirStmtKind.Let(symbol, hir_type_bare, hir_init)
+                val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, false, nil)
+                HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Var(name, type_, init):
-                # An OPTION HANDLE MUST NOT REACH `HirStmtKind.Let`. Its field is
-                # `type_: HirType` (hir_definitions.spl:765), NOT `HirType?`, while
-                # `SymbolTable.define` (hir_types.spl:316) legitimately takes `HirType?`.
-                # Passing one `Some(...)` local to both stored the Option's ENUM HEADER in the
-                # `type_` slot; every consumer that clones a `HirStmt` then read header word[1]
-                # (`enum_id | variant<<32`, enum_id=1 for Option) as `HirType.span` and
-                # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
-                # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
-                # Keep the bare value for the HIR node and the Option for the symbol table.
-                val hir_type_bare: HirType = if type_.?:
+                val hir_type = if type_.?:
                     self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
                 else:
                     nil
-                val hir_type: HirType? = if type_.?:
-                    Some(hir_type_bare)
-                else:
-                    nil
+                # `HirStmtKind.Let.type_` is a PLAIN NULLABLE, not an Option box
+                # (repo rule, statements.spl:409/580 + module_declarations_bootstrap.spl:435,
+                # citing bug doc 2026-07-23: "a nullable is not an Option box"). Boxing it
+                # here made every `case Let(_, type_, _)` arm binding deep-copy an RtCoreEnum
+                # as a `HirType`, whose word[1] = (discriminant<<32)|enum_id has enum_id==1 ==
+                # RT_VALUE_TAG_HEAP, so the copy's heap-box guard passed and it dereferenced
+                # (discriminant<<32) -> SIGSEGV in any_check_stmt.
+                # The SYMBOL TABLE type slot is a SEPARATE field with its own reader set
+                # (get_symbol_type_raw -> mir_lowering_stmts.spl:812 `case Some`, plus the
+                # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
+                # deliberately NOT migrated here, so it keeps receiving the boxed form.
+                val sym_type = hir_type
                 val hir_init = if init.?:
                     self.lower_hir_expr(init ?? Expr(kind: ExprKind.NilLit, span: s.span))
                 else:
                     HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, Visibility.Private, true, nil)
-                HirStmtKind.Let(symbol, hir_type_bare, hir_init)
+                val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, true, nil)
+                HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Assign(target, op, value):
                 val hir_op = self.lower_hir_assign_op_opt(op)

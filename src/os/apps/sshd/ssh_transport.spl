@@ -7,8 +7,6 @@
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_bytes_to_text, SshTextResult, SshStringResult}
 use os.kernel.log.klog_api.{log_info}
 
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-
 # ============================================================================
 # Constants
 # ============================================================================
@@ -45,7 +43,9 @@ val MAC_ALGORITHM: text = "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@opens
 val COMPRESS_ALGORITHM: text = "none"
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
-    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+    if idx >= data.len():
+        return 0u8
+    data[idx]
 
 fn _push_raw_string(buf: [u8], data: [u8]) -> [u8]:
     buf = ssh_put_u32(buf, data.len().to_u32())
@@ -428,6 +428,16 @@ fn ssh_parse_kexinit(data: [u8]) -> Result<SshKexInit, text>:
     if off != data.len():
         return Err("KEXINIT: trailing bytes after reserved")
 
+    if not ssh_algorithm_name_list_is_well_formed(kex_algorithms) or
+        not ssh_algorithm_name_list_is_well_formed(host_key_algorithms) or
+        not ssh_algorithm_name_list_is_well_formed(enc_c2s) or
+        not ssh_algorithm_name_list_is_well_formed(enc_s2c) or
+        not ssh_algorithm_name_list_is_well_formed(mac_c2s) or
+        not ssh_algorithm_name_list_is_well_formed(mac_s2c) or
+        not ssh_algorithm_name_list_is_well_formed(comp_c2s) or
+        not ssh_algorithm_name_list_is_well_formed(comp_s2c):
+        return Err("KEXINIT: malformed algorithm name-list")
+
     Ok(SshKexInit(
         cookie: cookie,
         kex_algorithms: kex_algorithms,
@@ -453,6 +463,24 @@ fn _list_contains(list: text, candidate: text) -> bool:
         if item == candidate:
             return true
     false
+
+pub fn ssh_algorithm_name_list_is_well_formed(list: text) -> bool:
+    """Accept only non-empty, comma-separated SSH algorithm names.
+
+    KEXINIT algorithm fields are name-lists, not optional strings.  Reject an
+    empty member (including leading, trailing, or doubled commas) before
+    selection so a malformed peer proposal cannot be normalized into a
+    different, apparently valid algorithm set.
+    """
+    if list == "":
+        return false
+    for raw in list.split(","):
+        # Whitespace is not part of an SSH algorithm name.  Do not preserve
+        # the old selection helper's convenience trimming at this trust
+        # boundary, because it could turn a malformed peer offer into a match.
+        if raw == "" or raw != raw.trim():
+            return false
+    true
 
 fn _first_match(client_list: text, server_list: text) -> text:
     """Find the first algorithm in client_list that also appears in server_list."""
@@ -504,10 +532,8 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     Returns the first matching algorithm for each category, following
     client preference order per RFC 4253 section 7.1.
     """
-    var kex = ""
-    if _list_contains(client.kex_algorithms, "curve25519-sha256") and _list_contains(server.kex_algorithms, "curve25519-sha256"):
-        kex = "curve25519-sha256"
-    if kex == "":
+    val kex = _first_match(client.kex_algorithms, server.kex_algorithms)
+    if kex != "curve25519-sha256":
         return Err("no matching kex algorithm")
 
     val host_key = _preferred_host_key_match(client.server_host_key_algorithms, server.server_host_key_algorithms)

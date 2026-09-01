@@ -1,6 +1,6 @@
-# lifecycle_tools_spec
+# Lifecycle Tools Specification
 
-> Verifies the lifecycle tools behaviour end to end so maintainers of this
+> Tests covering t32_arch_to_binary, t32_find_install_dir, t32_check_xvfb, t32_ping_port.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# lifecycle_tools_spec
-
-Verifies the lifecycle tools behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Other |
-| Status | Active |
-| Source | `test/01_unit/t32_mcp/lifecycle_tools_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the lifecycle tools behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Lifecycle Tools Specification
 
 ## Scenarios
 
@@ -39,21 +17,23 @@ unrelated sibling features are out of scope.
 
 #### maps arm to t32marm
 
-- Verify: maps arm to t32marm
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- maps arm to t32marm
    - Expected: arch_to_binary("arm") equals `t32marm`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps arm to t32marm")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps arm to t32marm")
 expect(arch_to_binary("arm")).to_equal("t32marm")
 ```
 
@@ -61,21 +41,19 @@ expect(arch_to_binary("arm")).to_equal("t32marm")
 
 #### maps ARM (uppercase) to t32marm
 
-- Verify: maps ARM (uppercase) to t32marm
+- maps ARM (uppercase) to t32marm
    - Expected: arch_to_binary("ARM") equals `t32marm`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps ARM (uppercase) to t32marm")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps ARM (uppercase) to t32marm")
 expect(arch_to_binary("ARM")).to_equal("t32marm")
 ```
 
@@ -83,21 +61,19 @@ expect(arch_to_binary("ARM")).to_equal("t32marm")
 
 #### maps arm32 to t32marm
 
-- Verify: maps arm32 to t32marm
+- maps arm32 to t32marm
    - Expected: arch_to_binary("arm32") equals `t32marm`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps arm32 to t32marm")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps arm32 to t32marm")
 expect(arch_to_binary("arm32")).to_equal("t32marm")
 ```
 
@@ -105,21 +81,19 @@ expect(arch_to_binary("arm32")).to_equal("t32marm")
 
 #### maps cortex-m to t32marm
 
-- Verify: maps cortex-m to t32marm
+- maps cortex-m to t32marm
    - Expected: arch_to_binary("cortex-m") equals `t32marm`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps cortex-m to t32marm")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps cortex-m to t32marm")
 expect(arch_to_binary("cortex-m")).to_equal("t32marm")
 ```
 
@@ -127,21 +101,19 @@ expect(arch_to_binary("cortex-m")).to_equal("t32marm")
 
 #### maps cortex-a to t32marm
 
-- Verify: maps cortex-a to t32marm
+- maps cortex-a to t32marm
    - Expected: arch_to_binary("cortex-a") equals `t32marm`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps cortex-a to t32marm")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps cortex-a to t32marm")
 expect(arch_to_binary("cortex-a")).to_equal("t32marm")
 ```
 
@@ -149,21 +121,19 @@ expect(arch_to_binary("cortex-a")).to_equal("t32marm")
 
 #### maps empty string to default t32marm
 
-- Verify: maps empty string to default t32marm
+- maps empty string to default t32marm
    - Expected: arch_to_binary("") equals `t32marm`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps empty string to default t32marm")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps empty string to default t32marm")
 expect(arch_to_binary("")).to_equal("t32marm")
 ```
 
@@ -171,21 +141,19 @@ expect(arch_to_binary("")).to_equal("t32marm")
 
 #### maps arm64 to t32marm64
 
-- Verify: maps arm64 to t32marm64
+- maps arm64 to t32marm64
    - Expected: arch_to_binary("arm64") equals `t32marm64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps arm64 to t32marm64")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps arm64 to t32marm64")
 expect(arch_to_binary("arm64")).to_equal("t32marm64")
 ```
 
@@ -193,21 +161,19 @@ expect(arch_to_binary("arm64")).to_equal("t32marm64")
 
 #### maps aarch64 to t32marm64
 
-- Verify: maps aarch64 to t32marm64
+- maps aarch64 to t32marm64
    - Expected: arch_to_binary("aarch64") equals `t32marm64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps aarch64 to t32marm64")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps aarch64 to t32marm64")
 expect(arch_to_binary("aarch64")).to_equal("t32marm64")
 ```
 
@@ -215,21 +181,19 @@ expect(arch_to_binary("aarch64")).to_equal("t32marm64")
 
 #### maps ARM64 (uppercase) to t32marm64
 
-- Verify: maps ARM64 (uppercase) to t32marm64
+- maps ARM64 (uppercase) to t32marm64
    - Expected: arch_to_binary("ARM64") equals `t32marm64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps ARM64 (uppercase) to t32marm64")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps ARM64 (uppercase) to t32marm64")
 expect(arch_to_binary("ARM64")).to_equal("t32marm64")
 ```
 
@@ -237,21 +201,19 @@ expect(arch_to_binary("ARM64")).to_equal("t32marm64")
 
 #### maps tricore to t32mtc
 
-- Verify: maps tricore to t32mtc
+- maps tricore to t32mtc
    - Expected: arch_to_binary("tricore") equals `t32mtc`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps tricore to t32mtc")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps tricore to t32mtc")
 expect(arch_to_binary("tricore")).to_equal("t32mtc")
 ```
 
@@ -259,21 +221,19 @@ expect(arch_to_binary("tricore")).to_equal("t32mtc")
 
 #### maps tc3xx to t32mtc
 
-- Verify: maps tc3xx to t32mtc
+- maps tc3xx to t32mtc
    - Expected: arch_to_binary("tc3xx") equals `t32mtc`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps tc3xx to t32mtc")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps tc3xx to t32mtc")
 expect(arch_to_binary("tc3xx")).to_equal("t32mtc")
 ```
 
@@ -281,21 +241,19 @@ expect(arch_to_binary("tc3xx")).to_equal("t32mtc")
 
 #### maps tc to t32mtc
 
-- Verify: maps tc to t32mtc
+- maps tc to t32mtc
    - Expected: arch_to_binary("tc") equals `t32mtc`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps tc to t32mtc")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps tc to t32mtc")
 expect(arch_to_binary("tc")).to_equal("t32mtc")
 ```
 
@@ -303,21 +261,19 @@ expect(arch_to_binary("tc")).to_equal("t32mtc")
 
 #### maps ppc to t32mppc
 
-- Verify: maps ppc to t32mppc
+- maps ppc to t32mppc
    - Expected: arch_to_binary("ppc") equals `t32mppc`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps ppc to t32mppc")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps ppc to t32mppc")
 expect(arch_to_binary("ppc")).to_equal("t32mppc")
 ```
 
@@ -325,21 +281,19 @@ expect(arch_to_binary("ppc")).to_equal("t32mppc")
 
 #### maps powerpc to t32mppc
 
-- Verify: maps powerpc to t32mppc
+- maps powerpc to t32mppc
    - Expected: arch_to_binary("powerpc") equals `t32mppc`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps powerpc to t32mppc")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps powerpc to t32mppc")
 expect(arch_to_binary("powerpc")).to_equal("t32mppc")
 ```
 
@@ -347,21 +301,19 @@ expect(arch_to_binary("powerpc")).to_equal("t32mppc")
 
 #### maps riscv to t32mriscv
 
-- Verify: maps riscv to t32mriscv
+- maps riscv to t32mriscv
    - Expected: arch_to_binary("riscv") equals `t32mriscv`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps riscv to t32mriscv")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps riscv to t32mriscv")
 expect(arch_to_binary("riscv")).to_equal("t32mriscv")
 ```
 
@@ -369,21 +321,19 @@ expect(arch_to_binary("riscv")).to_equal("t32mriscv")
 
 #### maps risc-v to t32mriscv
 
-- Verify: maps risc-v to t32mriscv
+- maps risc-v to t32mriscv
    - Expected: arch_to_binary("risc-v") equals `t32mriscv`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps risc-v to t32mriscv")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps risc-v to t32mriscv")
 expect(arch_to_binary("risc-v")).to_equal("t32mriscv")
 ```
 
@@ -391,21 +341,19 @@ expect(arch_to_binary("risc-v")).to_equal("t32mriscv")
 
 #### maps x86 to t32mx86
 
-- Verify: maps x86 to t32mx86
+- maps x86 to t32mx86
    - Expected: arch_to_binary("x86") equals `t32mx86`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps x86 to t32mx86")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps x86 to t32mx86")
 expect(arch_to_binary("x86")).to_equal("t32mx86")
 ```
 
@@ -413,21 +361,19 @@ expect(arch_to_binary("x86")).to_equal("t32mx86")
 
 #### maps x86_64 to t32mx86
 
-- Verify: maps x86_64 to t32mx86
+- maps x86_64 to t32mx86
    - Expected: arch_to_binary("x86_64") equals `t32mx86`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps x86_64 to t32mx86")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps x86_64 to t32mx86")
 expect(arch_to_binary("x86_64")).to_equal("t32mx86")
 ```
 
@@ -435,21 +381,19 @@ expect(arch_to_binary("x86_64")).to_equal("t32mx86")
 
 #### maps unknown arch to default t32marm
 
-- Verify: maps unknown arch to default t32marm
+- maps unknown arch to default t32marm
    - Expected: arch_to_binary("mips") equals `t32marm`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: maps unknown arch to default t32marm")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("maps unknown arch to default t32marm")
 expect(arch_to_binary("mips")).to_equal("t32marm")
 ```
 
@@ -459,7 +403,7 @@ expect(arch_to_binary("mips")).to_equal("t32marm")
 
 #### returns configured or standard install dir when present
 
-- Verify: returns configured or standard install dir when present
+- returns configured or standard install dir when present
    - Expected: dir equals `configured`
    - Expected: dir equals `/opt/t32`
    - Expected: dir equals ``
@@ -468,14 +412,12 @@ expect(arch_to_binary("mips")).to_equal("t32marm")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: returns configured or standard install dir when present")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("returns configured or standard install dir when present")
 val dir = find_install_dir()
 val configured = env_get("T32MEM")
 if configured != "":
@@ -490,21 +432,19 @@ else:
 
 #### returns a stable result across repeated lookup
 
-- Verify: returns a stable result across repeated lookup
+- returns a stable result across repeated lookup
    - Expected: find_install_dir() equals `dir`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: returns a stable result across repeated lookup")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("returns a stable result across repeated lookup")
 val dir = find_install_dir()
 expect(find_install_dir()).to_equal(dir)
 ```
@@ -515,7 +455,7 @@ expect(find_install_dir()).to_equal(dir)
 
 #### matches xvfb-run availability on the current host
 
-- Verify: matches xvfb-run availability on the current host
+- matches xvfb-run availability on the current host
    - Expected: result is true
    - Expected: result is false
 
@@ -523,14 +463,12 @@ expect(find_install_dir()).to_equal(dir)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: matches xvfb-run availability on the current host")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("matches xvfb-run availability on the current host")
 val result = check_xvfb()
 val (_stdout, _stderr, rc) = process_run("/bin/sh", ["-c", "which xvfb-run 2>/dev/null"])
 if rc == 0:
@@ -545,21 +483,19 @@ else:
 
 #### returns false when no service is listening on an unused port
 
-- Verify: returns false when no service is listening on an unused port
+- returns false when no service is listening on an unused port
    - Expected: result is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: returns false when no service is listening on an unused port")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("returns false when no service is listening on an unused port")
 # Port 19999 should not have a T32 instance running
 val result = ping_port("t32rem64", 19999)
 expect(result).to_equal(false)
@@ -569,26 +505,42 @@ expect(result).to_equal(false)
 
 #### returns false for an invalid backend on a closed port
 
-- Verify: returns false for an invalid backend on a closed port
+- returns false for an invalid backend on a closed port
    - Expected: result is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-lifecycle
-# @req: REQ-TEST-T32_MCP_LIFECYCLE_TOOLS-001
-step("Verify: returns false for an invalid backend on a closed port")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-T32_MCP
+step("returns false for an invalid backend on a closed port")
 val result = ping_port("t32rem64", 65000)
 expect(result).to_equal(false)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/01_unit/t32_mcp/lifecycle_tools_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering t32_arch_to_binary, t32_find_install_dir, t32_check_xvfb, t32_ping_port.
+- t32_arch_to_binary
+- t32_find_install_dir
+- t32_check_xvfb
+- t32_ping_port
 
 ## Scenario Summary
 
@@ -603,36 +555,56 @@ expect(result).to_equal(false)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-lifecycle`
+- `REQ-SSPEC-T32_MCP`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `3a23bc3fd1afaf6a073bc6f0d50f8a033e7a55c582a609a2d16cfd71b057f576`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `81a99230382b770951d437ed0132f8f4732f3c60d35e5eaea68036886d57e5d4`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `3a23bc3fd1afaf6a073bc6f0d50f8a033e7a55c582a609a2d16cfd71b057f576`.
+Source SHA-256: `81a99230382b770951d437ed0132f8f4732f3c60d35e5eaea68036886d57e5d4`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `3a23bc3fd1afaf6a073bc6f0d50f8a033e7a55c582a609a2d16cfd71b057f576`  
+Source SHA-256: `81a99230382b770951d437ed0132f8f4732f3c60d35e5eaea68036886d57e5d4`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **86/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/t32_mcp/lifecycle_tools_spec.spl
 mirror: doc/06_spec/01_unit/t32_mcp/lifecycle_tools_spec.md (current)
-findings: 3 blockers: 0
+findings: 6 blockers: 1
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/t32_mcp/lifecycle_tools_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=86; blocker cap makes effective=49
 doc/06_spec/01_unit/t32_mcp/lifecycle_tools_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/t32_mcp/lifecycle_tools_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/t32_mcp/lifecycle_tools_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/t32_mcp/lifecycle_tools_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/t32_mcp/lifecycle_tools_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps arm to t32marm' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/t32_mcp/lifecycle_tools_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps ARM (uppercase) to t32marm' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/t32_mcp/lifecycle_tools_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps arm32 to t32marm' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

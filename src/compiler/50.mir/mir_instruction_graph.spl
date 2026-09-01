@@ -4,9 +4,14 @@ use compiler.hir.hir_types.{SymbolId, HirType}
 use compiler.hir.hir_definitions.{HirContractBlock}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, VhdlHardwareMetadata}
+use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
 use compiler.mir.mir_types.*
 use compiler.mir.mir_instruction_support.*
 use compiler.mir.mir_instruction_kinds.*
+# Preserve terminal providers when this graph is re-exported by mir_data.
+use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_instruction_support.{mir_operand_const_int}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
 
 struct MirInst:
     """MIR instruction."""
@@ -18,6 +23,42 @@ impl MirInst:
         match self.kind:
             case StoreGlobal(symbol, _): symbol.id
             case _: -1
+
+    # Twins of bootstrap_store_global_symbol_id for LoadGlobal. The MirToLlvm
+    # LoadGlobal handler used to decode the payload RAW
+    # (rt_enum_payload + rt_tuple_get + `slot >> 32`) on the theory that a
+    # one-field SymbolId "decays to its raw i64 when crossing the staged
+    # enum-payload ABI". Measured 2026-08-24 on the seed's tree-walk
+    # interpreter (the engine the native-build worker runs): it does NOT decay
+    # there — tuple slot 1 is a live SymbolId Object, so `slot >> 32` reached
+    # Value::as_int and failed with `type mismatch: cannot convert object to
+    # int`, with no callee and no span. A typed match is the representation-
+    # independent read, and is exactly what the StoreGlobal sibling above has
+    # always used on the same lanes.
+    fn bootstrap_load_global_dest_local_id() -> i64:
+        match self.kind:
+            case LoadGlobal(dest, _): dest.id
+            case _: -1
+
+    fn bootstrap_load_global_symbol_id() -> i64:
+        match self.kind:
+            case LoadGlobal(_, symbol): symbol.id
+            case _: -1
+
+    fn bootstrap_global_addr_dest_local_id() -> i64:
+        match self.kind:
+            case GlobalAddr(dest, _, _): dest.id
+            case _: -1
+
+    fn bootstrap_global_addr_symbol_id() -> i64:
+        match self.kind:
+            case GlobalAddr(_, symbol, _): symbol.id
+            case _: -1
+
+    fn bootstrap_global_addr_is_mutable() -> bool:
+        match self.kind:
+            case GlobalAddr(_, _, mutable): mutable
+            case _: false
 
     fn bootstrap_store_global_value_kind() -> i64:
         """Return 1=Copy, 2=Move, 3=Const, or 0=not StoreGlobal."""
@@ -207,6 +248,14 @@ struct MirFunction:
     memory_banks: i64       # @memory(n)/@memory(banks=n) port banking count
     verification_contract: HirContractBlock?
 
+    # Asm-embedding contract (doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md A.2)
+    # threaded from @naked/@section/@align/@global. Defaults keep every
+    # existing MirFunction constructor valid.
+    is_naked: bool = false       # emit `naked noinline`, body = one raw asm block, `unreachable` terminator
+    section: text = ""           # `section "<name>"` on the define; "" = target default
+    align: i64 = 0               # `align <n>` on the define; 0 = target default
+    is_global: bool = false      # unmangled symbol, external linkage
+
 impl MirFunction:
     # update field list when MirFunction gains fields — spread operator fails cross-module
     static fn with_blocks(func: MirFunction, new_blocks: [MirBlock]) -> MirFunction:
@@ -236,7 +285,11 @@ impl MirFunction:
             unroll_factor: func.unroll_factor,
             pipeline_ii: func.pipeline_ii,
             memory_banks: func.memory_banks,
-            verification_contract: func.verification_contract
+            verification_contract: func.verification_contract,
+            is_naked: func.is_naked,
+            section: func.section,
+            align: func.align,
+            is_global: func.is_global
         )
 
 """Function body wrapper for borrow checking."""
@@ -364,5 +417,6 @@ struct MirModule:
     statics: Dict<SymbolId, MirStatic>
     constants: Dict<SymbolId, MirConstant>
     types: Dict<SymbolId, MirTypeDef>
+    external_layout_traces: [MirExternalLayoutTraceV1] = []
 
 export MirInst, MirBlock, MirFunction, MirBody, MirModule, mir_fold_binop

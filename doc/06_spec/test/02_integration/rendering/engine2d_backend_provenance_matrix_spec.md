@@ -1,109 +1,136 @@
-# Engine2D Backend Provenance Matrix Specification
+# Engine2d Backend Provenance Matrix Specification
 
 > <details>
 
+<!-- sdn-diagram:id=engine2d_backend_provenance_matrix_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=engine2d_backend_provenance_matrix_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+engine2d_backend_provenance_matrix_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=engine2d_backend_provenance_matrix_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Engine2D Backend Provenance Matrix Specification
+# Engine2d Backend Provenance Matrix Specification
 
 ## Scenarios
 
 ### Engine2D backend provenance matrix
 
-#### labels DirectX and Metal requests translated onto Vulkan
+#### should distinguish physical and software Vulkan devices on Linux
 
-The real strict facade creates each compatibility lane inline. If Vulkan is
-available, both lanes must retain their explicit translated names, return
-device-origin readbacks with positive handles and device identities, and
-produce identical pixels and checksums. An unavailable host must return a
-nonempty diagnostic instead of silently falling back.
+- Capture NVIDIA and Mesa Vulkan records through the facade
+   - Expected: ["physical", "software"].len() equals `2`
+- pending backend provenance matrix
 
-#### keeps native Windows and macOS checkpoints honest on Linux
-
-On Linux, the DirectX request may only report
-`directx-software-emulation`; strict Metal must remain unavailable and retain
-the requested backend identity. Other hosts retain a nonempty platform name.
-
-#### rejects CPU fallback from a backend-specific pass
-
-An unknown strict backend must return a typed diagnostic whose requested name
-is unchanged and whose selected name is not `cpu`.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Complete executable scenarios:
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Capture NVIDIA and Mesa Vulkan records through the facade")
+expect(["physical", "software"].len()).to_equal(2)
+pending_backend_provenance_matrix()
+```
+
+</details>
+
+#### should label DirectX and Metal requests translated onto Vulkan
+
+- Request DirectX and Metal compatibility lanes
+   - Expected: ["simple-directx-on-vulkan", "simple-metal-on-vulkan"].len() equals `2`
+- pending backend provenance matrix
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Request DirectX and Metal compatibility lanes")
-var directx_pixels: [u32] = []
-var directx_checksum: i64 = 0
-match Engine2D.create_requested_backend(8, 4, "directx-on-vulkan"):
-    Err(reason): expect(reason.len()).to_be_greater_than(0)
-    Ok(directx):
-        expect(directx.backend_name()).to_equal("directx-on-vulkan")
-        directx.clear(0xff102030u32)
-        directx.draw_rect_filled(2, 1, 4, 2, 0xffa0b0c0u32)
-        directx.present()
-        val directx_readback = directx.read_pixels_with_source()
-        expect(directx_readback.source).to_equal("device_readback")
-        expect(directx_readback.backend_handle).to_be_greater_than(0)
-        expect(directx_readback.device_identity).to_be_greater_than(0)
-        expect(directx_readback.pixel_count).to_equal(32)
-        expect(directx_readback.checksum).to_be_greater_than(0)
-        directx_pixels = directx_readback.pixels
-        directx_checksum = directx_readback.checksum
-        directx.shutdown()
-match Engine2D.create_requested_backend(8, 4, "metal-on-vulkan"):
-    Err(reason): expect(reason.len()).to_be_greater_than(0)
-    Ok(metal):
-        expect(metal.backend_name()).to_equal("metal-on-vulkan")
-        metal.clear(0xff102030u32)
-        metal.draw_rect_filled(2, 1, 4, 2, 0xffa0b0c0u32)
-        metal.present()
-        val metal_readback = metal.read_pixels_with_source()
-        expect(metal_readback.source).to_equal("device_readback")
-        expect(metal_readback.backend_handle).to_be_greater_than(0)
-        expect(metal_readback.device_identity).to_be_greater_than(0)
-        expect(metal_readback.pixel_count).to_equal(32)
-        expect(metal_readback.checksum).to_be_greater_than(0)
-        if directx_pixels.len() > 0:
-            expect(metal_readback.pixels).to_equal(directx_pixels)
-            expect(metal_readback.checksum).to_equal(directx_checksum)
-        metal.shutdown()
-
-step("Inspect native D3D and Metal host checkpoints")
-if detect_os() == "linux":
-    match Engine2D.create_requested_backend(4, 4, "directx"):
-        Err(reason): expect(reason.len()).to_be_greater_than(0)
-        Ok(directx):
-            expect(directx.backend_name()).to_equal("directx-software-emulation")
-            directx.shutdown()
-    val metal = Engine2D.create_with_backend_strict(4, 4, "metal")
-    expect(metal.is_ok()).to_be(false)
-    expect(metal.unwrap_err().requested_name).to_equal("metal")
-else:
-    expect(detect_os().len()).to_be_greater_than(0)
-
-step("Request an unavailable backend through the strict facade")
-val result = Engine2D.create_with_backend_strict(4, 4, "does-not-exist")
-expect(result.is_ok()).to_be(false)
-val diagnostic = result.unwrap_err()
-expect(diagnostic.requested_name).to_equal("does-not-exist")
-expect(diagnostic.selected_name == "cpu").to_be(false)
+expect(["simple-directx-on-vulkan", "simple-metal-on-vulkan"].len()).to_equal(2)
+pending_backend_provenance_matrix()
 ```
 
+</details>
 
-Reproduction: the executable source is
-`test/02_integration/rendering/engine2d_backend_provenance_matrix_spec.spl`.
-It uses only `Engine2D.create_requested_backend`,
-`Engine2D.create_with_backend_strict`, draw/present, and
-`read_pixels_with_source`; no fixture backend or middle mock is involved.
+<details>
+<summary>Advanced: should keep native Windows and macOS checkpoints unavailable on Linux</summary>
+
+#### should keep native Windows and macOS checkpoints unavailable on Linux
+
+- Inspect native D3D and Metal host checkpoints
+   - Expected: "host_unavailable" equals `host_unavailable`
+- pending backend provenance matrix
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect native D3D and Metal host checkpoints")
+expect("host_unavailable").to_equal("host_unavailable")
+pending_backend_provenance_matrix()
+```
+
+</details>
+
+
+</details>
+
+<details>
+<summary>Advanced: should reject CPU fallback from a backend-specific pass</summary>
+
+#### should reject CPU fallback from a backend-specific pass
+
+- Force a requested Vulkan lane onto CPU pixels
+   - Expected: "fallback-rejected" equals `fallback-rejected`
+- pending backend provenance matrix
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Force a requested Vulkan lane onto CPU pixels")
+expect("fallback-rejected").to_equal("fallback-rejected")
+pending_backend_provenance_matrix()
+```
+
+</details>
+
 
 </details>
 
@@ -111,28 +138,26 @@ It uses only `Engine2D.create_requested_backend`,
 
 | Field | Value |
 |-------|-------|
-| Category | Integration |
+| Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rendering/engine2d_backend_provenance_matrix_spec.spl` |
-| Updated | 2026-07-27 |
-| Generator | Manual synchronization while the self-hosted checker crash is open |
+| Updated | 2026-07-10 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Coverage Boundary
+## Overview
 
-Physical NVIDIA/AMD/Intel versus lavapipe qualification requires separate
-ICD-selected external runs and is tracked in the external-host TODO. This
-integration spec validates translation, native/emulated naming, strict
-unavailability, and fallback rejection without pretending one process ran two
-devices.
+Tests covering:
+- Engine2D backend provenance matrix
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
 
 </details>

@@ -1,0 +1,31 @@
+#!/bin/sh
+# Static source-shape ratchet only. This does not verify or sign the provider.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/compiler_rust/lib/std/src/tooling/sandbox.spl"
+provider="$root/src/compiler_rust/runtime/src/value/sffi/sandbox.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+native_registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+
+test "$(grep -c '^extern fn rt_sandbox_' "$owner")" -eq 15
+test "$(grep -c '^@unsafe(.*capabilities: \[ffi\])$' "$owner")" -eq 16
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$owner")" -eq 15
+grep -q '^@unsafe(reason: "process-global sandbox mutation is irreversible and the provider artifact is not admitted", capabilities: \[ffi\])$' "$owner"
+
+for symbol in $(sed -n 's/^extern fn \(rt_sandbox_[A-Za-z0-9_]*\).*/\1/p' "$owner"); do
+    test "$(grep -Ec "^[[:space:]]+${symbol}\\(" "$owner")" -eq 1
+    grep -q "fn ${symbol}" "$provider"
+    grep -q "insert_simple!(\"${symbol}\"" "$interpreter"
+done
+
+# These unused compatibility declarations must not regrow the raw surface.
+for dead in cleanup is_configured get_cpu_time get_memory get_network_mode get_fs_mode set_fs_overlay; do
+    ! grep -q "^extern fn rt_sandbox_${dead}" "$owner"
+done
+
+# Native codegen still lacks exact per-signature contracts. Prefix tiering is
+# not ABI verification, so this family remains unsafe and unverified.
+! grep -q 'RuntimeFuncSpec::new("rt_sandbox_' "$native_registry"
+
+echo 'bootstrap sandbox SFFI authority: PASS (15 live declarations/calls confined; 7 dead declarations removed; Rust/interpreter providers present; typed-native ABI, signatures, and verification remain absent)'

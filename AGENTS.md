@@ -96,15 +96,6 @@ worktree and active session scope. If another session owns a dirty file or a
 different feature lane, do not fold that work into your change unless the user
 explicitly asks for a combined commit.
 
-When reporting recent Codex sessions, order rollouts by their embedded/session
-start timestamp, not filesystem modification time: resume and compaction may
-touch old rollout files in bulk. Report execution state and goal state
-separately. A live process or open rollout file does not prove an active turn;
-the latest lifecycle event must be `task_started` without a matching
-`task_complete`. Likewise, a completed turn does not complete its thread goal:
-only the latest explicit goal status does. Summarize objectives and never echo
-credentials or unrelated prompt content.
-
 When asked to "find similar" or "go the found", inspect active process/session
 IDs and continue only the requested lane. Treat all unrelated dirty files as
 other-agent work: preserve them, avoid reverting them, and mention them
@@ -311,13 +302,6 @@ MCP server available via npm: `@simple-lang/mcp-server`
 ---
 
 ## Critical Rules
-
-- Web producers lower through web semantic/layout; GUI producers lower through
-  their canonical widget/scene semantic owners. Both emit `DrawIrComposition`.
-  Engine2D lowers Draw IR text through `draw_text`; an enabled vector face uses
-  transient `FontRenderer`/`FontRenderBatch` material. Do not put
-  transient atlas/cache material in Draw IR or add private parallel font draw
-  paths. Engine3D HUD/world is a separate lane, never a GUI/web/2D shortcut.
 
 - **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). The seed (`src/compiler_rust/target/bootstrap/simple`) is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple (`src/compiler`/`src/lib`/`src/app`) and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
 - **Self-sufficient**: never fail because another LLM didn't do its step — do it yourself

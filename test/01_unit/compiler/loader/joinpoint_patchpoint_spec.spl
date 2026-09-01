@@ -1,3 +1,9 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
 # Acceptance spec for join-point patchpoints (slot-cell design).
 #
 # Scope: `doc/04_architecture/compiler/aspect_dynload/patchpoint_and_signing_prerequisites_2026-08-19.md` §A.
@@ -8,9 +14,16 @@
 # one that updated the struct but never patched memory -- passes a
 # struct-reading spec and fails every assertion here, which is the point.
 
+use std.spec.step
+
 use std.spec.{describe, it, assert_true, assert_false, assert_eq, assert_contains}
 use compiler.loader.joinpoint_slots.{JoinpointSlotTable, joinpoint_key}
 use compiler.loader.advice_binding_registry.{AdviceBindingRegistry}
+use std.common.aspect_pack.{
+    apk_loader_new, apk_activation_advance_v1,
+    APK_AS_CATALOGUED, APK_AS_INDEX_MAPPED, APK_AS_RESOLVING,
+    APK_AS_CHUNKS_LOADED, APK_AS_RELOCATED
+}
 
 # Distinct, non-zero, 8-byte-aligned stand-ins for code addresses. They are
 # never executed in this spec -- what is under test is that the right VALUE
@@ -43,8 +56,11 @@ fn err_text(r: Result<i64, text>) -> text:
             e
 
 describe "join-point slot table", fn():
+    # @manual scenario evidence
 
     it "reserves a cell whose stable key is derived from owner, symbol and site", fn():
+        # @req REQ-SSPEC-UNIT
+        step("reserves a cell whose stable key is derived from owner, symbol and site")
         val key = joinpoint_key("mod.a", "process", 3)
         assert_eq(key, "mod.a::process#3")
         # Same inputs must always give the same key -- the catalog routes on it.
@@ -52,6 +68,8 @@ describe "join-point slot table", fn():
         assert_true(key != joinpoint_key("mod.a", "process", 4))
 
     it "routes to the unadvised target by default", fn():
+        # @req REQ-SSPEC-UNIT
+        step("routes to the unadvised target by default")
         var table = ok_table(4)
         val key = joinpoint_key("mod.a", "process", 0)
         val slot = ok_i64(table.reserve(key, UNADVISED))
@@ -63,6 +81,8 @@ describe "join-point slot table", fn():
         _ = table.free()
 
     it "patches one sealed cell without disturbing its neighbours", fn():
+        # @req REQ-SSPEC-UNIT
+        step("patches one sealed cell without disturbing its neighbours")
         var table = ok_table(4)
         val k0 = joinpoint_key("mod.a", "f", 0)
         val k1 = joinpoint_key("mod.a", "g", 0)
@@ -75,6 +95,8 @@ describe "join-point slot table", fn():
         _ = table.free()
 
     it "keeps the mapping executable after a patch (W^X round trip)", fn():
+        # @req REQ-SSPEC-UNIT
+        step("keeps the mapping executable after a patch (W^X round trip)")
         var table = ok_table(2)
         val k = joinpoint_key("mod.a", "f", 0)
         val s = ok_i64(table.reserve(k, UNADVISED))
@@ -89,6 +111,8 @@ describe "join-point slot table", fn():
 describe "AdviceBindingRegistry", fn():
 
     it "dispatches a registered join point to its unadvised target before any bind", fn():
+        # @req REQ-SSPEC-UNIT
+        step("dispatches a registered join point to its unadvised target before any bind")
         var reg = ok_reg(4)
         val key = ok_key(reg.register("mod.a", "process", 0, UNADVISED))
         _ = reg.seal()
@@ -97,6 +121,8 @@ describe "AdviceBindingRegistry", fn():
         _ = reg.free()
 
     it "routes the SAME join point to the advice after binding", fn():
+        # @req REQ-SSPEC-UNIT
+        step("routes the SAME join point to the advice after binding")
         var reg = ok_reg(4)
         val key = ok_key(reg.register("mod.a", "process", 0, UNADVISED))
         _ = reg.seal()
@@ -112,6 +138,8 @@ describe "AdviceBindingRegistry", fn():
         _ = reg.free()
 
     it "makes rebinding observable", fn():
+        # @req REQ-SSPEC-UNIT
+        step("makes rebinding observable")
         var reg = ok_reg(4)
         val key = ok_key(reg.register("mod.a", "process", 0, UNADVISED))
         _ = reg.seal()
@@ -125,11 +153,43 @@ describe "AdviceBindingRegistry", fn():
         assert_eq(ok_i64(reg.dispatch_target(key)), UNADVISED)
         assert_false(reg.is_active(key))
         assert_eq(reg.rebind_count(key), 3)
+        val unbinds = reg.unbind_count
+        assert_true(is_err_i64(reg.unbind(key)))
+        assert_eq(reg.unbind_count, unbinds)
+        _ = reg.free()
+
+    it "publishes one winning activation owner and refuses joined or duplicate publication", fn():
+        var reg = ok_reg(4)
+        val key = ok_key(reg.register("mod.a", "process", 0, UNADVISED))
+        _ = reg.seal()
+        val ld = apk_loader_new()
+        val owner = reg.claim_activation(ld, "advice/process", "owner-a")
+        val joined = reg.claim_activation(ld, "advice/process", "owner-b")
+        assert_true(owner.owns)
+        assert_true(joined.joined)
+        assert_true(apk_activation_advance_v1(ld, owner, APK_AS_CATALOGUED, APK_AS_INDEX_MAPPED))
+        assert_true(apk_activation_advance_v1(ld, owner, APK_AS_INDEX_MAPPED, APK_AS_RESOLVING))
+        assert_true(apk_activation_advance_v1(ld, owner, APK_AS_RESOLVING, APK_AS_CHUNKS_LOADED))
+        assert_true(apk_activation_advance_v1(ld, owner, APK_AS_CHUNKS_LOADED, APK_AS_RELOCATED))
+
+        assert_true(is_err_i64(reg.publish_binding(ld, joined, key, ADVICE_B)))
+        assert_eq(ok_i64(reg.dispatch_target(key)), UNADVISED)
+        assert_eq(reg.bind_count, 0)
+        assert_eq(reg.rebind_count(key), 0)
+
+        assert_eq(ok_i64(reg.publish_binding(ld, owner, key, ADVICE_A)), ADVICE_A)
+        assert_eq(ok_i64(reg.dispatch_target(key)), ADVICE_A)
+        assert_eq(reg.bind_count, 1)
+        assert_true(is_err_i64(reg.publish_binding(ld, owner, key, ADVICE_B)))
+        assert_eq(ok_i64(reg.dispatch_target(key)), ADVICE_A)
+        assert_eq(reg.bind_count, 1)
         _ = reg.free()
 
 describe "join-point refusals (fail-closed)", fn():
 
     it "refuses an out-of-range slot id instead of silently ignoring it", fn():
+        # @req REQ-SSPEC-UNIT
+        step("refuses an out-of-range slot id instead of silently ignoring it")
         var table = ok_table(4)
         val s = ok_i64(table.reserve(joinpoint_key("m", "f", 0), UNADVISED))
         _ = table.seal()
@@ -144,6 +204,8 @@ describe "join-point refusals (fail-closed)", fn():
         _ = table.free()
 
     it "refuses an unknown join-point key instead of defaulting", fn():
+        # @req REQ-SSPEC-UNIT
+        step("refuses an unknown join-point key instead of defaulting")
         var reg = ok_reg(4)
         _ = reg.register("mod.a", "process", 0, UNADVISED)
         _ = reg.seal()

@@ -11,11 +11,20 @@ use std.mcp_sdk.transport.transport.{StdioTransport}
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
-use app.mcpgdb.json_helpers.{LB, RB, jp, js, jo2, shell_bin, shell_quote}
-use app.mcpgdb.state.{MCPGDB_SESSIONS, MCPGDB_WORKSPACE}
+use app.mcpgdb.json_helpers.{LB, RB, jp, js, jo2, shell_bin, shell_quote, extract_nested}
+use app.mcpgdb.state.{MCPGDB_SESSIONS, MCPGDB_WORKSPACE, current_or_named_session}
 use app.mcpgdb.state_loader.{load_persisted_state_safe}
 use app.mcpgdb.debug_backend_common.{stop_session_process}
 use app.mcpgdb.backend_common.{stop_clangd_workspace}
+use std.common.debug.contracts_v1.{DebugPerturbationV1, DebugRootOperationV1, debug_policy_development_v1}
+use app.mcpgdb.debug_service_bridge_v1.{
+    McpGdbDebugActionV1,
+    mcpgdb_debug_binding_v1, mcpgdb_debug_bind_session_v1,
+    mcpgdb_debug_action_v1, mcpgdb_debug_action_for_rule_v1, mcpgdb_debug_authorize_operation_v1,
+    mcpgdb_debug_record_operation_outcome_v1,
+    mcpgdb_debug_unbind_session_v1,
+}
+use app.mcpgdb.debug_rules.{classify_command}
 
 val DEBUG_RUNNER_SOURCE = "src/app/mcpgdb/debug_runner.spl"
 val DEBUG_EXEC_RUNNER_SOURCE = "src/app/mcpgdb/debug_exec_runner.spl"
@@ -88,10 +97,12 @@ fn schema_debug_session_close() -> text:
 fn schema_debug_launch() -> text:
     make_schema(sid()
         + "," + sp("program", "Path to executable")
-        + "," + sp("args", "Optional command-line arguments"), "[\"program\"]")
+        + "," + sp("args", "Optional command-line arguments")
+        + "," + sp("build_id", "Exact build identity when known; omitted values remain explicitly unresolved"), "[\"program\"]")
 
 fn schema_debug_attach() -> text:
-    make_schema(sid() + "," + sp("pid", "PID to attach"), "[\"pid\"]")
+    make_schema(sid() + "," + sp("pid", "PID to attach")
+        + "," + sp("build_id", "Exact build identity when known; omitted values remain explicitly unresolved"), "[\"pid\"]")
 
 fn schema_debug_connect_remote() -> text:
     make_schema(sid()
@@ -300,8 +311,73 @@ fn extract_runner_content(envelope: text) -> text:
                 return "error: " + msg
     envelope
 
+fn mcpgdb_service_action_v1(name: text) -> bool:
+    mcpgdb_debug_action_v1(name, false).managed
+
+fn mcpgdb_service_action_detail_v1(name: text, args: text) -> McpGdbDebugActionV1:
+    val dangerous_value = extract_nested(args, "dangerous").lower()
+    val dangerous = dangerous_value == "true" or dangerous_value == "1" or dangerous_value == "yes"
+    var raw_rule_class = "read_only"
+    if name == "debug_command_run":
+        var backend = "gdb"
+        match current_or_named_session(extract_nested(args, "session_id")):
+            case Some(active): backend = active.backend
+            case None: ()
+        raw_rule_class = classify_command(backend, extract_nested(args, "command"))
+    mcpgdb_debug_action_for_rule_v1(name, dangerous, raw_rule_class)
+
+fn mcpgdb_service_perturbation_v1(name: text, args: text) -> DebugPerturbationV1:
+    mcpgdb_service_action_detail_v1(name, args).perturbation
+
+fn mcpgdb_service_operation_v1(name: text, args: text) -> DebugRootOperationV1:
+    mcpgdb_service_action_detail_v1(name, args).operation
+
+fn mcpgdb_service_execution_changed_v1(name: text, args: text, succeeded: bool) -> bool:
+    if not succeeded:
+        return false
+    mcpgdb_service_action_detail_v1(name, args).execution_changes_on_success
+
+fn mcpgdb_service_prepare_v1(name: text, args: text) -> Result<text, text>:
+    load_persisted_state_safe()
+    val requested_id = extract_nested(args, "session_id")
+    val session = current_or_named_session(requested_id)
+    match session:
+        case None: return Err("session not found")
+        case Some(active):
+            var build_id = "unresolved:mcpgdb-session:" + active.session_id
+            val supplied_build_id = extract_nested(args, "build_id")
+            if supplied_build_id != "":
+                build_id = supplied_build_id
+            elif name == "debug_launch":
+                val program = extract_nested(args, "program")
+                if program != "":
+                    build_id = "unresolved:mcpgdb-program:" + program
+            elif name == "debug_attach":
+                val pid = extract_nested(args, "pid")
+                if pid != "":
+                    build_id = "unresolved:mcpgdb-attach-pid:" + pid
+            elif active.process_pid != "":
+                build_id = "unresolved:mcpgdb-process-pid:" + active.process_pid
+            mcpgdb_debug_bind_session_v1(
+                active.session_id, active.backend, build_id,
+                debug_policy_development_v1(),
+            )?
+            mcpgdb_debug_authorize_operation_v1(
+                active.session_id, mcpgdb_service_operation_v1(name, args), name,
+                mcpgdb_service_perturbation_v1(name, args),
+            )?
+            Ok(active.session_id)
+
+fn mcpgdb_runner_succeeded_v1(content: text) -> bool:
+    not content.starts_with("error:") and not content.contains("\"status\":\"error\"") and not content.contains("\"status\":\"denied\"")
+
 # Run a tool via its sub-runner. Returns plain content text for the facade.
 fn run_runner_content(name: text, args: text) -> text:
+    var service_session_id = ""
+    if mcpgdb_service_action_v1(name):
+        match mcpgdb_service_prepare_v1(name, args):
+            case Err(reason): return "error: DebugServiceV1 denied " + name + ": " + reason
+            case Ok(value): service_session_id = value
     val request_path = temp_request_path()
     if request_path == "":
         return "error: failed to allocate temp request file"
@@ -337,7 +413,20 @@ fn run_runner_content(name: text, args: text) -> text:
     val envelope = stdout.trim()
     if envelope == "":
         return "error: tool runner returned empty response"
-    extract_runner_content(envelope)
+    val content = extract_runner_content(envelope)
+    if service_session_id != "":
+        val succeeded = mcpgdb_runner_succeeded_v1(content)
+        val perturbation = mcpgdb_service_perturbation_v1(name, args)
+        var reason = ""
+        if not succeeded:
+            reason = content
+        mcpgdb_debug_record_operation_outcome_v1(
+            service_session_id, mcpgdb_service_operation_v1(name, args), name, perturbation,
+            succeeded, mcpgdb_service_execution_changed_v1(name, args, succeeded), reason,
+        )
+        if succeeded and name == "debug_session_close":
+            mcpgdb_debug_unbind_session_v1(service_session_id)
+    content
 
 fn main() -> i64:
     val raw_args = get_cli_args()

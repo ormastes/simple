@@ -1,7 +1,15 @@
 #!/bin/sh
 # QEMU media oracle for the generated RISC-V Linux terminal images.
-# It deliberately lets QEMU generate the FDT: -initrd adds the chosen initrd
-# properties, while OpenSBI and Linux are the separately pinned media files.
+#
+# REAL-FIRMWARE chain (migrated off `-kernel` 2026-08-31, board-runnable
+# rule): OpenSBI is rebuilt from the pinned, provenance-verified checkout as
+# fw_payload embedding the pinned Linux Image and the pinned DTB
+# (FW_FDT_PATH), booted via `-bios` ONLY — the firmware, not QEMU, performs
+# the S-mode handover, matching what board flash ships. The initrd is
+# RAM-preloaded by the generic loader device at the address the DTB's
+# linux,initrd-start already declares (QEMU's -initrd is unusable without
+# -kernel, and was the last pass-semantics remnant). The argv is self-checked
+# against -kernel/-initrd/-append/isa-debug-exit before launch.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -160,13 +168,54 @@ qemu_alive() {
 }
 
 echo "RISCV_QEMU_MEDIA_ORACLE arch=$ARCH port=$PORT" | tee -a "$LOG"
-"$QEMU" -machine virt -cpu "$CPU" -m 256M -display none -monitor none -no-reboot \
-    -bios "$ASSETS/fw_jump.bin" -kernel "$ASSETS/Image" \
-    -dtb "$ASSETS/soc_virt.dtb" \
-    -initrd "$ASSETS/initramfs.cpio.gz" \
-    -append "console=ttyS0,115200 earlycon=sbi rdinit=/init" \
+
+# Real-firmware chain (board-runnable rule): NO `-kernel` pass semantics.
+# OpenSBI is rebuilt from the SAME pinned checkout the provenance block above
+# already verified, as fw_payload with the pinned Linux Image as its payload
+# and the pinned DTB embedded via FW_FDT_PATH — so the FIRMWARE, not QEMU,
+# performs the S-mode handover, exactly the flash-image configuration a board
+# ships. The initrd cannot use `-initrd` (QEMU rejects it without `-kernel`);
+# it is placed at the exact address the patched DTB's linux,initrd-start
+# declares, via the generic loader device — the RAM-preload role board flash
+# tooling performs. Kernel command line comes from the DTS `chosen/bootargs`
+# (same console/earlycon; rdinit=/init appended below via a bootargs patch).
+FW_PAYLOAD_BUILD="$ASSETS/opensbi-src/build/platform/generic/firmware/fw_payload.bin"
+sed -i.oracle_bak \
+    -e 's|bootargs = "[^"]*";|bootargs = "console=ttyS0,115200 earlycon=ns16550a,mmio,0x10000000 rdinit=/init";|' \
+    "$verify_dir/soc_virt.dts"
+dtc -I dts -O dtb -o "$verify_dir/soc_virt.boot.dtb" "$verify_dir/soc_virt.dts"
+# rv64 kernels load at RAM+0x200000; rv32 at RAM+0x400000 (Linux convention).
+case "$ARCH" in
+    rv64) FW_XLEN=64; FW_OFFSET=0x200000 ;;
+    rv32) FW_XLEN=32; FW_OFFSET=0x400000 ;;
+esac
+make -C "$ASSETS/opensbi-src" PLATFORM=generic \
+    CROSS_COMPILE="${RISCV_CROSS_COMPILE:-riscv64-linux-gnu-}" \
+    PLATFORM_RISCV_XLEN="$FW_XLEN" \
+    FW_PAYLOAD=y FW_PAYLOAD_PATH="$ASSETS/Image" FW_PAYLOAD_OFFSET="$FW_OFFSET" \
+    FW_FDT_PATH="$verify_dir/soc_virt.boot.dtb" -j4 >>"$LOG" 2>&1 || {
+    echo "RISCV_QEMU_MEDIA_ORACLE_STATUS=FAIL fw_payload_build" | tee -a "$LOG" >&2
+    exit 1
+}
+[ -s "$FW_PAYLOAD_BUILD" ] || {
+    echo "RISCV_QEMU_MEDIA_ORACLE_STATUS=FAIL fw_payload_missing" | tee -a "$LOG" >&2
+    exit 1
+}
+
+set -- -machine virt -cpu "$CPU" -m 256M -display none -monitor none -no-reboot \
+    -bios "$FW_PAYLOAD_BUILD" \
+    -device "loader,file=$ASSETS/initramfs.cpio.gz,addr=0x88200000,force-raw=on" \
     -chardev "socket,id=serial0,host=127.0.0.1,port=$PORT,server=on,wait=on,nodelay=on" \
-    -serial chardev:serial0 >>"$LOG" 2>&1 &
+    -serial chardev:serial0
+# Forbidden-flag self-check against the ASSEMBLED argv (board-runnable rule).
+for _arg in "$@"; do
+    case "$_arg" in
+        -kernel|-initrd|-append|*isa-debug-exit*)
+            echo "RISCV_QEMU_MEDIA_ORACLE_STATUS=FAIL forbidden_flag:$_arg" | tee -a "$LOG" >&2
+            exit 1 ;;
+    esac
+done
+"$QEMU" "$@" >>"$LOG" 2>&1 &
 QEMU_PID=$!
 
 ready=0

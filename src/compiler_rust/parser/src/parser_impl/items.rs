@@ -405,6 +405,16 @@ impl<'a> Parser<'a> {
                 let mut decorators = Vec::new();
                 let mut effects = Vec::new();
                 while self.check(&TokenKind::At) {
+                    // Compiler attributes may follow an effect decorator. Keep
+                    // them on the attribute path instead of turning them into
+                    // runtime decorators solely because of annotation order.
+                    if self.is_at_known_attribute() {
+                        attributes.push(self.parse_at_as_attribute()?);
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                        continue;
+                    }
                     let decorator = self.parse_decorator()?;
 
                     // Check if this is an effect decorator
@@ -588,14 +598,21 @@ impl<'a> Parser<'a> {
             | TokenKind::Val
             | TokenKind::Trait
             | TokenKind::From
-            | TokenKind::Import
-            | TokenKind::Const
-            | TokenKind::Static
-            | TokenKind::Type
-            | TokenKind::Newtype
-            | TokenKind::Extend
-            | TokenKind::Bitfield
-            | TokenKind::Asm => self.parse_item(),
+            | TokenKind::Import => self.parse_item(),
+            // Design A.5 data items: `@section/@align/@global const|static`
+            // keep their attributes so the backend can place the bytes.
+            TokenKind::Const | TokenKind::Static => {
+                let mut node = self.parse_item()?;
+                match &mut node {
+                    Node::Const(c) => c.attributes = attributes,
+                    Node::Static(s) => s.attributes = attributes,
+                    _ => {}
+                }
+                Ok(node)
+            }
+            TokenKind::Type | TokenKind::Newtype | TokenKind::Extend | TokenKind::Bitfield | TokenKind::Asm => {
+                self.parse_item()
+            }
             // Handle attributes followed by empty block (Dedent/Eof)
             // This happens in conditional compilation or stub files
             TokenKind::Dedent | TokenKind::Eof => Ok(Node::Pass(PassStmt {

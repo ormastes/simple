@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+canonical="$root/src/lib/nogc_sync_mut/sffi/llvm_target.spl"
+async="$root/src/lib/nogc_async_mut/sffi/llvm_target.spl"
+compat="$root/src/lib/nogc_sync_mut/ffi/llvm_target.spl"
+legacy="$root/src/lib/nogc_sync_mut/ffi/llvm_instructions.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+for module in "$canonical" "$async" "$compat"; do
+    [ "$(grep -c '^fn ' "$module")" -eq 20 ]
+    [ "$(grep -c '^@unsafe(reason:' "$module")" -eq 20 ]
+    grep -q 'val triple_z = triple + "\\0"' "$module"
+    grep -q 'args.push(triple_z.ptr())' "$module"
+    grep -q 'val filename_z = filename + "\\0"' "$module"
+    grep -q 'args.push(filename_z.ptr())' "$module"
+    grep -q 'val passes_z = passes + "\\0"' "$module"
+    grep -q '_lc4("LLVMRunPasses", mod_, passes_z.ptr(), tm, options)' "$module"
+    grep -q 'if target_ptr == 0 or err_ptr == 0:' "$module"
+    grep -q 'if err_ptr == 0:' "$module"
+    grep -q 'if err_ptr == 0 or buf_ptr == 0:' "$module"
+    ! grep -q '^@always_inline$' "$module"
+done
+
+# All raw allocation/pointer and generic-call primitives are registered in
+# both inventories; this is coverage, not an ABI or artifact proof.
+for symbol in rt_alloc rt_free rt_ptr_write_i64 rt_ptr_read_i64 spl_wffi_call_i64; do
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry"
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter"
+done
+
+# Mirror bodies differ only in their ownership namespace/header spelling.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+sed 's/std\.nogc_async_mut\.sffi/std.nogc_sync_mut.sffi/g' "$async" >"$tmp/async"
+sed '1s/LLVM FFI/LLVM SFFI/; s/std\.nogc_sync_mut\.ffi/std.nogc_sync_mut.sffi/g; s/positional ffi llvm API/positional sffi llvm API/g' "$compat" >"$tmp/compat"
+cmp -s "$canonical" "$tmp/async"
+cmp -s "$canonical" "$tmp/compat"
+
+# The older combined compatibility module duplicates this target surface.
+[ "$(grep -c '^@unsafe(reason:' "$legacy")" -eq 20 ]
+grep -q 'val triple_z = triple + "\\0"' "$legacy"
+grep -q 'args.push(triple_z.ptr())' "$legacy"
+grep -q 'val filename_z = filename + "\\0"' "$legacy"
+grep -q 'args.push(filename_z.ptr())' "$legacy"
+grep -q 'val passes_z = passes + "\\0"' "$legacy"
+grep -q '_lc4("LLVMRunPasses", mod_, passes_z.ptr(), tm, options)' "$legacy"
+grep -q 'if target_ptr == 0 or err_ptr == 0:' "$legacy"
+grep -q 'if err_ptr == 0:' "$legacy"
+grep -q 'if err_ptr == 0 or buf_ptr == 0:' "$legacy"
+
+echo "LLVM target SFFI authority audit: PASS (3 mirrors plus combined compatibility surface x 20 APIs unsafe; null allocation cleanup and 3 C-string terminators retained; cached generic bridge unchanged; 5/5 primitives in both registries)"

@@ -8,6 +8,7 @@ alwaysApply: false
 
 - **ALL code in `.spl` or `.shs`** - No Python, no Bash (except 3 bootstrap scripts in `scripts/`)
 - **Scripts:** Use `.shs` for shell scripts that need to remain shell (e.g., container entrypoints)
+- **Pure Simple first; C is a boundary; asm last.** Never write C when pure Simple can do it; bootstrap-required C keeps a pure-Simple twin (dual-run gate `scripts/check/check-dual-run-shadow.shs`); HAL code prefers typed register views > no-reorder/no-elide tags > intrinsics > inline asm (irreplaceable ops only). Full policy: `doc/07_guide/os/hal/pure_simple_hal.md`
 - **Generics:** `<>` not `[]` - `Option<T>`, `List<Int>`
 - **Pattern binding:** `if val` not `if let`
 - **Constructors:** `Point(x: 3, y: 4)` not `.new()`

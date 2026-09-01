@@ -67,10 +67,27 @@ fn array_param_has_scalar_elements(param: &Parameter) -> bool {
     };
     matches!(
         name.as_str(),
-        "text" | "str" | "String" | "bool" | "char" | "int" | "float"
-            | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-            | "f32" | "f64"
+        "text"
+            | "str"
+            | "String"
+            | "bool"
+            | "char"
+            | "int"
+            | "float"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
     )
 }
 
@@ -193,6 +210,12 @@ pub(crate) fn bind_args_with_injected(
     // Check if there's a variadic parameter (should be last)
     let variadic_param_idx = params_to_bind.iter().position(|p| p.variadic);
 
+    // Parameters claimed by a NAMED argument anywhere in this call. A positional
+    // argument must fill the next parameter that is not in this set, otherwise
+    // `f(x: 10, y)` rebinds `x` and leaves `y` unbound (struct-shorthand bug,
+    // test/feature/usage/struct_shorthand_spec.spl).
+    let named_params: std::collections::HashSet<&str> = args.iter().filter_map(|a| a.name.as_deref()).collect();
+
     let mut bound = HashMap::with_capacity(params_to_bind.len());
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
@@ -301,6 +324,11 @@ pub(crate) fn bind_args_with_injected(
                     }
                 } else {
                     // No variadic - bind to regular parameters
+                    while positional_idx < params_to_bind.len()
+                        && named_params.contains(params_to_bind[positional_idx].name.as_str())
+                    {
+                        positional_idx += 1;
+                    }
                     if positional_idx >= params_to_bind.len() {
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -384,6 +412,11 @@ pub(crate) fn bind_args_with_injected(
                     }
                 } else {
                     // No variadic parameter - normal positional binding
+                    while positional_idx < params_to_bind.len()
+                        && named_params.contains(params_to_bind[positional_idx].name.as_str())
+                    {
+                        positional_idx += 1;
+                    }
                     if positional_idx >= params_to_bind.len() {
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -456,8 +489,7 @@ pub(crate) fn bind_args_with_injected(
                     // Built HERE, on the error path only: hoisted out of the
                     // loop it allocated one Vec plus one String per parameter
                     // on EVERY call, for a diagnostic that is off by default.
-                    let all_param_names: Vec<&str> =
-                        params_to_bind.iter().map(|p| p.name.as_str()).collect();
+                    let all_param_names: Vec<&str> = params_to_bind.iter().map(|p| p.name.as_str()).collect();
                     eprintln!(
                         "[DEBUG arg_binding TMP] missing param '{}'; full param list={:?}; args given={}",
                         param.name,
@@ -487,6 +519,39 @@ pub(crate) fn bind_args_with_injected(
 pub(crate) fn bind_args_with_values(
     params: &[Parameter],
     args: &[Value],
+    outer_env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_mode: SelfMode,
+) -> Result<HashMap<String, Value>, CompileError> {
+    bind_args_with_values_named(
+        params,
+        args,
+        &[],
+        outer_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_mode,
+    )
+}
+
+/// Map already-evaluated argument VALUES onto parameters, honouring the call's
+/// named arguments.
+///
+/// `arg_exprs` is the parallel un-evaluated argument list (same length as
+/// `args`) whose `name` fields carry `f(b = 1, a = 2)` labels. The
+/// pre-evaluated method-dispatch paths used to drop those labels and bind
+/// purely by position, so `m.subtract(subtrahend = 15, minuend = 50)` computed
+/// `15 - 50`. Pass an empty slice for a call with no labels.
+#[allow(clippy::too_many_arguments)] // reason: mirrors bind_args_with_values' locked signature
+pub(crate) fn bind_args_with_values_named(
+    params: &[Parameter],
+    args: &[Value],
+    arg_exprs: &[Argument],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
@@ -578,10 +643,60 @@ pub(crate) fn bind_args_with_values(
             params_to_bind.len()
         );
     }
+
+    // Route each supplied value to the parameter it actually names. A named
+    // argument binds by name; a positional one fills the next parameter no
+    // named argument claims.
+    let mut value_for_param: Vec<Option<Value>> = vec![None; params_to_bind.len()];
+    {
+        let named_params: std::collections::HashSet<&str> =
+            arg_exprs.iter().filter_map(|a| a.name.as_deref()).collect();
+        let mut positional_idx = 0usize;
+        for (idx, value) in args.iter().enumerate() {
+            let slot = match arg_exprs.get(idx).and_then(|a| a.name.as_deref()) {
+                Some(name) => match params_to_bind.iter().position(|p| p.name == name) {
+                    Some(pos) => pos,
+                    None => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::UNDEFINED_VARIABLE)
+                            .with_help("check the function signature for valid parameter names");
+                        return Err(CompileError::semantic_with_context(
+                            format!("unknown argument '{}'", name),
+                            ctx,
+                        ));
+                    }
+                },
+                None => {
+                    while positional_idx < params_to_bind.len()
+                        && named_params.contains(params_to_bind[positional_idx].name.as_str())
+                    {
+                        positional_idx += 1;
+                    }
+                    if positional_idx >= params_to_bind.len() {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                            .with_help("check the function signature and provide the correct number of arguments");
+                        return Err(CompileError::semantic_with_context(
+                            format!(
+                                "function expects {} argument(s), but more were provided",
+                                params_to_bind.len()
+                            ),
+                            ctx,
+                        ));
+                    }
+                    let slot = positional_idx;
+                    positional_idx += 1;
+                    slot
+                }
+            };
+            value_for_param[slot] = Some(value.clone());
+        }
+    }
+
     for (idx, param) in params_to_bind.iter().enumerate() {
-        let value = if idx < args.len() {
+        let value = if let Some(v) = value_for_param[idx].take() {
             // Automatically await Promise arguments
-            await_value(args[idx].clone())?
+            await_value(v)?
         } else if let Some(default_expr) = &param.default {
             evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
         } else {
@@ -637,19 +752,30 @@ mod scalar_array_param_tests {
     // nested array, and an unannotated parameter must all keep it.
     #[test]
     fn scalar_element_arrays_skip_the_scan_everything_else_keeps_it() {
-        for scalar in ["text", "str", "String", "bool", "char", "i64", "u8", "f64", "int", "float"] {
+        for scalar in [
+            "text", "str", "String", "bool", "char", "i64", "u8", "f64", "int", "float",
+        ] {
             assert!(
                 array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple(scalar.into()))))),
                 "[{scalar}] must skip"
             );
         }
-        assert!(!array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple("Point".into()))))));
-        assert!(!array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple("Any".into()))))));
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(array_of(Type::Simple("Point".into())))
+        )));
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(array_of(Type::Simple("Any".into())))
+        )));
         assert!(!array_param_has_scalar_elements(&param(
             "xs",
             Some(array_of(array_of(Type::Simple("text".into()))))
         )));
-        assert!(!array_param_has_scalar_elements(&param("xs", Some(Type::Simple("text".into())))));
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(Type::Simple("text".into()))
+        )));
         assert!(!array_param_has_scalar_elements(&param("xs", None)));
     }
 
@@ -680,7 +806,10 @@ mod scalar_array_param_tests {
         };
         classes.insert("Point".to_string(), Arc::new(point));
         let fields = Arc::new(HashMap::from([("x".to_string(), Value::Int(1))]));
-        let pt = Value::Object { class: "Point".to_string(), fields: Arc::clone(&fields) };
+        let pt = Value::Object {
+            class: "Point".to_string(),
+            fields: Arc::clone(&fields),
+        };
         let params = vec![
             param("chars", Some(array_of(Type::Simple("text".into())))),
             param("pts", Some(array_of(Type::Simple("Point".into())))),
@@ -708,64 +837,4 @@ mod scalar_array_param_tests {
             other => panic!("pts became {other:?}"),
         }
     }
-}
-
-/// Permute pre-evaluated argument VALUES into parameter order using the
-/// argument expressions' names.
-///
-/// `bind_args_with_values` takes a bare `&[Value]` and therefore binds purely
-/// positionally -- the names are already gone by the time it runs. Method
-/// calls evaluate their arguments up front and so went through that path,
-/// which silently ignored named-argument reordering: given
-/// `fn subtract(self, minuend, subtrahend)`, the call
-/// `m.subtract(subtrahend=15, minuend=50)` bound 15 to `minuend` and 50 to
-/// `subtrahend` and returned -35 instead of 35. Plain function calls were
-/// unaffected because they keep the `Argument` list and bind by name.
-///
-/// Returns `None` when there is nothing to do (no named arguments) or when the
-/// permutation would not produce a dense prefix -- e.g. a named argument
-/// targeting a defaulted parameter beyond the supplied count. Falling back to
-/// the previous positional behaviour in that case keeps this change strictly
-/// additive.
-pub(crate) fn reorder_named_arg_values(
-    params: &[Parameter],
-    arg_vals: &[Value],
-    arg_exprs: &[Argument],
-    self_mode: SelfMode,
-) -> Option<Vec<Value>> {
-    if arg_exprs.len() != arg_vals.len() || !arg_exprs.iter().any(|a| a.name.is_some()) {
-        return None;
-    }
-    let params_to_bind: Vec<_> = params
-        .iter()
-        .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
-        .collect();
-
-    let mut slots: Vec<Option<Value>> = vec![None; params_to_bind.len()];
-    let mut positional_idx = 0usize;
-    for (i, arg) in arg_exprs.iter().enumerate() {
-        let target = match &arg.name {
-            Some(name) => params_to_bind.iter().position(|p| &p.name == name)?,
-            None => {
-                // Positional arguments fill the first free slots in order.
-                while positional_idx < slots.len() && slots[positional_idx].is_some() {
-                    positional_idx += 1;
-                }
-                let t = positional_idx;
-                positional_idx += 1;
-                t
-            }
-        };
-        if target >= slots.len() || slots[target].is_some() {
-            return None;
-        }
-        slots[target] = Some(arg_vals[i].clone());
-    }
-
-    // Only a dense prefix is safe: bind_args_with_values still binds by index.
-    let filled = slots.iter().take_while(|s| s.is_some()).count();
-    if filled != arg_vals.len() {
-        return None;
-    }
-    Some(slots.into_iter().take(filled).map(|s| s.expect("dense prefix")).collect())
 }

@@ -1,0 +1,36 @@
+#!/bin/sh
+# SCV-IMPL-I-02 — file-history CLI + snapshot identity integration.
+# Checks: the library/spec files exist, the CLI dispatch is wired, and the
+# acceptance spec runs green (last Results line = 0 failed).
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Committed UNSIGNED.
+set -u
+LIB="src/lib/scv/file_history.spl"
+SPEC="test/integration/app/scv_file_history_spec.spl"
+MAIN="src/app/scv/main.spl"
+[ -f "$LIB" ] && [ -f "$SPEC" ] && [ -f "$MAIN" ] || { echo "ERROR — nothing was checked (missing files)"; exit 2; }
+checked=0
+bad=""
+grep -q 'case "file-history"' "$MAIN" || bad="$bad dispatch(file-history)"
+checked=$((checked + 1))
+grep -q 'scv_snapshot_with_identity' "$MAIN" || bad="$bad dispatch(snapshot-identity)"
+checked=$((checked + 1))
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-I-02.$$.log"
+SIMPLE_TIMEOUT_SECONDS=900 bin/simple test "$SPEC" > "$OUT" 2>&1
+rc=$?
+checked=$((checked + 1))
+RESULTS=$(grep 'Results:' "$OUT" | tail -1)
+rm -f "$OUT"
+[ "$rc" -eq 0 ] || bad="$bad spec-rc($rc)"
+case "$RESULTS" in
+  *", 0 failed"*) : ;;
+  "") bad="$bad spec(no-results-line)" ;;
+  *) bad="$bad spec($RESULTS)" ;;
+esac
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$bad" ]; then
+  echo "PASS — $checked check(s): file-history wired, snapshot identity integrated, $RESULTS"
+  exit 0
+fi
+echo "FAIL — $checked check(s), unmet:$bad"
+exit 1

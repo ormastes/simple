@@ -1,20 +1,6 @@
-"""
-## Purpose and audience
-Purpose: Prove that Actors.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-FEATURE-ACTORS-001
-doc/01_research/feature/REQ-FEATURE-ACTORS-001.md
-doc/03_plan/feature/REQ-FEATURE-ACTORS-001.md
-doc/04_architecture/feature/REQ-FEATURE-ACTORS-001.md
-doc/05_design/feature/REQ-FEATURE-ACTORS-001.md
-"""
-
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 """
 # Actor Model Concurrency
@@ -50,53 +36,50 @@ val result = counter.ask(GetCount())
 | Spawn | Creating a new actor instance that runs concurrently |
 """
 
-
 use std.spec.step
 
-use std.spec.step
-use std.concurrent.green_thread.{green_spawn, green_run_all}
+use std.nogc_async_mut.actors.actor.{
+    HandlerTable,
+    make_handlers,
+    spawn_actor,
+}
 
-var SPAWN_SEEN = 0
-
-actor MailboxActor:
-    val depth: i64
-
-    fn doubled() -> i64:
-        self.depth * 2
-
-fn spawn_body() -> i64:
-    SPAWN_SEEN = SPAWN_SEEN + 1
-    1
+fn double_handler(args: [text]) -> text:
+    if args.is_empty():
+        return "0"
+    "{args[0].to_i64() * 2}"
 
 describe "Actors":
-    # Actors are module-level isolated entities; these oracles pin the
-    # runtime-observable guarantees: construction, state encapsulation,
-    # methods, and coexistence with the green-thread scheduler.
-    it "constructs an actor with encapsulated state":
-        # @req: REQ-FEATURE-ACTORS-001
-        step("Verify: an actor instance carries its constructed state")
-        val a = MailboxActor(depth: 4)
-        expect(a.depth).to_equal(4)
+    # @manual scenario evidence
+    it "dispatches a message to the registered handler and returns its result":
+        # @req REQ-SSPEC-SYSTEM
+        step("register handler and dispatch a message through the handler table")
+        var handlers = make_handlers()
+        handlers.register("double", double_handler)
 
-    it "runs actor methods against the actor's own state":
-        # @req: REQ-FEATURE-ACTORS-001
-        step("Verify: the method reads the actor's field and computes on it")
-        val a = MailboxActor(depth: 21)
-        expect(a.doubled()).to_equal(42)
+        val result = handlers.dispatch("double", ["21"])
 
-    it "keeps two actor instances independently isolated":
-        # @req: REQ-FEATURE-ACTORS-001
-        step("Verify: sibling instances do not share state")
-        val a = MailboxActor(depth: 1)
-        val b = MailboxActor(depth: 2)
-        expect(a.doubled() + b.doubled()).to_equal(6)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.value).to_equal("42")
 
-    it "runs a spawned task alongside module-level actor declarations":
-        # @req: REQ-FEATURE-ACTORS-001
-        step("Verify: green_spawn executes the task body exactly once at run-all")
-        SPAWN_SEEN = 0
-        val handle = green_spawn(spawn_body)
-        val before = SPAWN_SEEN
-        green_run_all()
-        expect(before).to_equal(0)
-        expect(SPAWN_SEEN).to_equal(1)
+    it "spawning two actors yields distinct actor identities":
+        # @req REQ-SSPEC-SYSTEM
+        step("spawn two actors from the same handler table")
+        var handlers = make_handlers()
+        handlers.register("double", double_handler)
+
+        val worker_a = spawn_actor(handlers)
+        val worker_b = spawn_actor(handlers)
+
+        expect(worker_a.get_id()).to_not_equal(worker_b.get_id())
+
+    it "dispatching an unregistered method fails closed with a named error":
+        # @req REQ-SSPEC-SYSTEM
+        step("dispatch a method the actor never registered")
+        var handlers = make_handlers()
+        handlers.register("double", double_handler)
+
+        val result = handlers.dispatch("no_such_method", ["1"])
+
+        expect(result.is_ok()).to_equal(false)
+        expect(result.error_msg).to_contain("no_such_method")

@@ -1,6 +1,6 @@
-# scv_change_spec
+# Scv Change Specification
 
-> Verifies the scv change behaviour end to end so maintainers of this
+> Tests covering REQ-003 stable change ids.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,28 @@
 
 # scv_change_spec
 
-Verifies the scv change behaviour end to end so maintainers of this
+## Scenarios
+
+### REQ-003 stable change ids
+
+#### keeps a logical change id across state rewrites
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-003
+```
+
+</details>
 
 ## At a Glance
 
@@ -20,7 +41,7 @@ Verifies the scv change behaviour end to end so maintainers of this
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/scv/feature/scv_change_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -33,34 +54,8 @@ the `Results:` summary. Each scenario asserts an observable outcome.
 Covers the currently shipped behaviour only; performance, stress and
 unrelated sibling features are out of scope.
 
-## Scenarios
-
-### REQ-003 stable change ids
-
-#### keeps a logical change id across state rewrites
-
-- Verify: keeps a logical change id across state rewrites
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-003
-step("Verify: keeps a logical change id across state rewrites")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-change.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nBEFORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" log)\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nAFTER=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" log)\nprintf 'before=%s\\nafter=%s\\n' \"$BEFORE\" \"$AFTER\"\n"
-val out = _scv_change_doc_script(script)
-expect(out).to_contain("before=commit commit_")
-expect(out).to_contain("after=commit commit_")
-expect(out).to_contain("change=change_")
-expect(out).to_contain("state=test_ok")
-```
-
-</details>
+Tests covering REQ-003 stable change ids.
+- REQ-003 stable change ids
 
 ## Scenario Summary
 
@@ -75,36 +70,49 @@ expect(out).to_contain("state=test_ok")
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-003`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `b9fcf3181a20d74004abb7102f00f6fa78609353c108d44f50c8af7367a85c61`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `e21105f5b2c1951bc7626bc1e591a058410079ba0f6c089731ff5ce827fa959b`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `b9fcf3181a20d74004abb7102f00f6fa78609353c108d44f50c8af7367a85c61`.
+Source SHA-256: `e21105f5b2c1951bc7626bc1e591a058410079ba0f6c089731ff5ce827fa959b`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `b9fcf3181a20d74004abb7102f00f6fa78609353c108d44f50c8af7367a85c61`  
+Source SHA-256: `e21105f5b2c1951bc7626bc1e591a058410079ba0f6c089731ff5ce827fa959b`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/03_system/app/scv/feature/scv_change_spec.spl
 mirror: doc/06_spec/03_system/app/scv/feature/scv_change_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 4 blockers: 1
+  narrative=100 structure=90 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/scv/feature/scv_change_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=85; blocker cap makes effective=49
 doc/06_spec/03_system/app/scv/feature/scv_change_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/scv/feature/scv_change_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/scv/feature/scv_change_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/scv/feature/scv_change_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/scv/feature/scv_change_spec.spl:35:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'keeps a logical change id across state rewrites' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->

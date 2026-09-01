@@ -1,0 +1,454 @@
+#!/bin/sh
+# check-llvm-value-match-and-borrow-ir-valid.shs
+#
+# Fences blocker #7 of the io_runtime native-build chain: `native-build` of an
+# io_runtime importer emitted LLVM IR that llc rejected outright.
+#
+# DEFECT (2026-08-24) -- TWO independent defects, both required for rc=0:
+#
+#  A. `error: multiple definition of local value named 'lN'`
+#     (std.nogc_sync_mut.io.file_ops, std.nogc_sync_mut.io_runtime)
+#
+#     `ssa_alloca_transform_blocks` is the mem2reg-equivalent that slots every
+#     multi-def local so the textual LLVM path cannot emit a duplicate SSA
+#     def. Its instruction gate rejected the WHOLE function on sight of
+#     `ResultMatchSemantic` -- a verification-only witness that
+#     mir_instruction_kinds.spl itself documents as having no runtime effect
+#     and being erasable by backends. Every function holding the canonical
+#     two-arm Result match therefore kept its merge destination un-slotted and
+#     written once per arm, which llc rejects. That is EVERY two-arm Ok/Err
+#     match in value position, including io.file_ops.file_read.
+#
+#  B. `error: '%lN' defined with type 'i32' but expected 'i64'`
+#     (std.nogc_sync_mut.io.process_ops)
+#
+#     `translate_ref` hardcoded `native_int()` for a borrow, which is the
+#     identity on the borrowed place. Correct only when the place is i64; an
+#     i32/i1/f64/ptr place emitted an i64 `add` over a differently-typed
+#     value.
+#
+# WHY A SOURCE-TEXT GATE IS NOT ENOUGH, AND WHY THIS ONE BUILDS: both defects
+# are properties of EMITTED IR, and the tree looked perfectly well-formed
+# while producing IR that no llc would accept. The structural half below
+# pins the two specific mechanisms so a refactor cannot silently undo them;
+# the `--build` half is the one that actually proves the claim, by compiling
+# a fixture that contains BOTH shapes and RUNNING the result.
+#
+# The filed signature for this blocker was a red herring and this gate
+# deliberately does NOT assert anything about it. The
+# `[hir-callable-dep-origin-unresolved] ... dependency=Option/Result` eprints
+# correlate with the three ERROR modules only because those are exactly the
+# three io modules naming Option/Result in a callable signature;
+# io.signal_stubs carries the same advisory and never ERRORed. The advisory is
+# documented noise-by-design. Asserting its absence would fence a symptom that
+# was never the cause.
+#
+# Verdict convention (last line of stdout, per .claude/rules/vcs.md):
+#   PASS — <n> check(s) ... exit 0   (n is always > 0)
+#   FAIL — ...                       exit 1
+#   ERROR — nothing was checked ...  exit 2
+# A run that checked 0 things is ERROR, never a pass.
+#
+# `--build` runs a real `native-build` under `timeout`, classifying rc=124 as
+# a DISTINCT HANG failure (blocker #5 in this same chain was an exponential
+# DFS read as a hang -- a timeout must never be laundered into a plain
+# failure), and then EXECUTES the produced binary: defect A had a sibling
+# shape where the merge block returned null, so a binary that merely compiles
+# is not evidence. Output is compared against the interpreter as an oracle.
+#
+# `--selftest` runs FIRST and is FATAL.
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SSA_FILE="src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl"
+REF_FILE="src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl"
+
+DO_BUILD=0
+BUILD_TIMEOUT=${BUILD_TIMEOUT:-1800}
+SELFTEST_ONLY=0
+
+# ---------------------------------------------------------------- helpers
+
+# Body of `fn ssa_instructions_supported_for_alloca`, comments STRIPPED.
+# Comments are stripped for the same reason the blocker-#6 gate strips them:
+# this gate's own fix carries an explanatory comment naming the variant, and
+# a comment is not code. Without the strip the gate passes on a tree whose
+# admission was deleted but whose comment survived.
+extract_alloca_gate() {
+    awk '
+        /^fn[[:space:]]+ssa_instructions_supported_for_alloca/ { ing=1; next }
+        ing && /^fn[[:space:]]/ { ing=0 }
+        ing && /^[[:space:]]*#/ { next }
+        ing { print }
+    ' "$1" 2>/dev/null
+}
+
+# Body of `me translate_ref`, comments STRIPPED. Same rationale.
+extract_translate_ref() {
+    awk '
+        /^[[:space:]]*me[[:space:]]+translate_ref\(/ { inr=1; next }
+        inr && /^[[:space:]]*me[[:space:]]/ { inr=0 }
+        inr && /^[[:space:]]*#/ { next }
+        inr { print }
+    ' "$1" 2>/dev/null
+}
+
+# ------------------------------------------------------------- structural
+#
+# Returns 0 when clean, 1 when an offender is found.
+# Sets STRUCT_CHECKS (count) and STRUCT_FAILS (newline-separated reasons).
+run_structural_scan() {
+    rs_root=$1
+    STRUCT_CHECKS=0
+    STRUCT_FAILS=""
+
+    rs_ssa="$rs_root/$SSA_FILE"
+    rs_ref="$rs_root/$REF_FILE"
+
+    # -- Defect A: the alloca gate must ADMIT ResultMatchSemantic ---------
+    if [ ! -f "$rs_ssa" ]; then
+        STRUCT_FAILS="${STRUCT_FAILS}missing file $SSA_FILE
+"
+    else
+        rs_gate=$(extract_alloca_gate "$rs_ssa")
+        if [ -z "$rs_gate" ]; then
+            STRUCT_FAILS="${STRUCT_FAILS}ssa_instructions_supported_for_alloca not found in $SSA_FILE
+"
+        else
+            STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+            if ! printf '%s' "$rs_gate" | grep -q 'case[[:space:]]*ResultMatchSemantic'; then
+                STRUCT_FAILS="${STRUCT_FAILS}alloca-slot gate does not admit ResultMatchSemantic: every value-position two-arm Ok/Err match keeps a multi-def merge local and llc rejects the module with 'multiple definition of local value'
+"
+            fi
+
+            # The admission must be a pass-through, not a rejection. A
+            # `case ResultMatchSemantic(...): return false` would satisfy a
+            # naive presence grep while restoring the exact defect.
+            STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+            rs_after=$(printf '%s\n' "$rs_gate" | awk '
+                /case[[:space:]]*ResultMatchSemantic/ { found=1; next }
+                found { print; exit }
+            ')
+            case "$rs_after" in
+                *pass_do_nothing*) : ;;
+                *) STRUCT_FAILS="${STRUCT_FAILS}alloca-slot gate names ResultMatchSemantic but does not pass it through (expected pass_do_nothing, got: ${rs_after:-<nothing>})
+" ;;
+            esac
+        fi
+    fi
+
+    # -- Defect B: translate_ref must be type-directed --------------------
+    if [ ! -f "$rs_ref" ]; then
+        STRUCT_FAILS="${STRUCT_FAILS}missing file $REF_FILE
+"
+    else
+        rs_body=$(extract_translate_ref "$rs_ref")
+        if [ -z "$rs_body" ]; then
+            STRUCT_FAILS="${STRUCT_FAILS}translate_ref not found in $REF_FILE
+"
+        else
+            # B1: must not emit the borrow identity at a hardcoded native int.
+            STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+            if printf '%s' "$rs_body" | grep -q 'add {nit}'; then
+                STRUCT_FAILS="${STRUCT_FAILS}translate_ref emits the borrow identity as 'add {nit}' (hardcoded native int): a borrow of a non-i64 place emits a type-mismatched add and llc rejects the module
+"
+            fi
+
+            # B2: must consult the PLACE's registered type.
+            STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+            if ! printf '%s' "$rs_body" | grep -q 'get_local_type'; then
+                STRUCT_FAILS="${STRUCT_FAILS}translate_ref never consults get_local_type: it cannot be type-directed off the borrowed place
+"
+            fi
+
+            # B3: must handle the pointer place, which is not an integer add.
+            STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+            if ! printf '%s' "$rs_body" | grep -q 'getelementptr'; then
+                STRUCT_FAILS="${STRUCT_FAILS}translate_ref has no pointer form: a borrow of a ptr place would emit an integer add on a pointer
+"
+            fi
+        fi
+    fi
+
+    [ -z "$STRUCT_FAILS" ]
+}
+
+# ------------------------------------------------------------------ selftest
+
+selftest() {
+    st_rc=0
+    st_tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+
+    # -- Fixture A: the real tree shape must PASS -------------------------
+    st_a="$st_tmp/good"
+    mkdir -p "$st_a/$(dirname "$SSA_FILE")" "$st_a/$(dirname "$REF_FILE")"
+    cat > "$st_a/$SSA_FILE" <<'EOF'
+fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
+                    case StoreGlobal(_, _):
+                        pass_do_nothing
+                    # Verification-only witness; backends may erase it.
+                    case ResultMatchSemantic(_, _, _, _, _, _, _):
+                        pass_do_nothing
+                    case _:
+                        return false
+    true
+
+fn ssa_next_thing():
+    ()
+EOF
+    cat > "$st_a/$REF_FILE" <<'EOF'
+    me translate_ref(dest: LocalId, kind: MirBorrowKind, place: MirPlace):
+        # It used to hardcode native_int(): `add {nit} {place_val}, 0`.
+        val place_id = self.local_id_value(place.local)
+        val ty = self.valid_llvm_type(self.get_local_type(place_id))
+        if ty == "ptr":
+            self.builder.emit("  {dest_name} = getelementptr i8, ptr {place_val}, {nit} 0  ; Ref (borrow)")
+        else:
+            self.builder.emit("  {dest_name} = add {ty} {place_val}, 0  ; Ref (borrow)")
+
+    me translate_next(dest: LocalId):
+        ()
+EOF
+    if run_structural_scan "$st_a"; then
+        :
+    else
+        echo "selftest FAIL: clean fixture must PASS: $STRUCT_FAILS"
+        st_rc=1
+    fi
+
+    # -- Fixture B: MUTATION — defect A restored must FAIL ----------------
+    # Replays the real incident: the admission removed, so the gate rejects
+    # the whole function on ResultMatchSemantic again.
+    st_b="$st_tmp/defectA"
+    cp -r "$st_a" "$st_b"
+    cat > "$st_b/$SSA_FILE" <<'EOF'
+fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
+                    case StoreGlobal(_, _):
+                        pass_do_nothing
+                    case _:
+                        return false
+    true
+EOF
+    if run_structural_scan "$st_b"; then
+        echo "selftest FAIL: defect A (no ResultMatchSemantic admission) must FAIL"
+        st_rc=1
+    else
+        case "$STRUCT_FAILS" in
+            *"does not admit ResultMatchSemantic"*) : ;;
+            *) echo "selftest FAIL: defect A fixture failed for the wrong reason: $STRUCT_FAILS"; st_rc=1 ;;
+        esac
+    fi
+
+    # -- Fixture C: MUTATION — named but REJECTED must FAIL ---------------
+    # A presence-only grep would bless this. The variant is named, then
+    # rejected -- the defect, wearing the fix's clothes.
+    st_c="$st_tmp/named_rejected"
+    cp -r "$st_a" "$st_c"
+    cat > "$st_c/$SSA_FILE" <<'EOF'
+fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
+                    case ResultMatchSemantic(_, _, _, _, _, _, _):
+                        return false
+                    case _:
+                        return false
+    true
+EOF
+    if run_structural_scan "$st_c"; then
+        echo "selftest FAIL: ResultMatchSemantic named but rejected must FAIL"
+        st_rc=1
+    else
+        case "$STRUCT_FAILS" in
+            *"does not pass it through"*) : ;;
+            *) echo "selftest FAIL: named-but-rejected fixture failed for the wrong reason: $STRUCT_FAILS"; st_rc=1 ;;
+        esac
+    fi
+
+    # -- Fixture D: MUTATION — defect B restored must FAIL ----------------
+    st_d="$st_tmp/defectB"
+    cp -r "$st_a" "$st_d"
+    cat > "$st_d/$REF_FILE" <<'EOF'
+    me translate_ref(dest: LocalId, kind: MirBorrowKind, place: MirPlace):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val place_val = self.get_local(self.local_id_value(place.local))
+        val nit = self.native_int()
+        self.builder.emit("  {dest_name} = add {nit} {place_val}, 0  ; Ref (borrow)")
+EOF
+    if run_structural_scan "$st_d"; then
+        echo "selftest FAIL: defect B (hardcoded native_int borrow) must FAIL"
+        st_rc=1
+    else
+        case "$STRUCT_FAILS" in
+            *"hardcoded native int"*) : ;;
+            *) echo "selftest FAIL: defect B fixture failed for the wrong reason: $STRUCT_FAILS"; st_rc=1 ;;
+        esac
+    fi
+
+    # -- Fixture E: a COMMENT naming the old form must not false-positive --
+    # The real tree's fix explains the old `add {nit}` shape in prose. This is
+    # the exact false-positive that bit the blocker-#6 gate on 2026-08-24.
+    st_e="$st_tmp/comment"
+    cp -r "$st_a" "$st_e"
+    cat > "$st_e/$REF_FILE" <<'EOF'
+    me translate_ref(dest: LocalId, kind: MirBorrowKind, place: MirPlace):
+        # It used to emit `add {nit} {place_val}, 0`, correct only for i64.
+        val place_id = self.local_id_value(place.local)
+        val ty = self.valid_llvm_type(self.get_local_type(place_id))
+        if ty == "ptr":
+            self.builder.emit("  {dest_name} = getelementptr i8, ptr {place_val}, {nit} 0  ; Ref (borrow)")
+        else:
+            self.builder.emit("  {dest_name} = add {ty} {place_val}, 0  ; Ref (borrow)")
+EOF
+    if run_structural_scan "$st_e"; then
+        :
+    else
+        echo "selftest FAIL: a comment naming the old form must not FAIL: $STRUCT_FAILS"
+        st_rc=1
+    fi
+
+    # -- Fixture F: empty tree must check 0 sites so the caller ERRORs -----
+    st_f="$st_tmp/empty"
+    mkdir -p "$st_f"
+    if run_structural_scan "$st_f"; then
+        echo "selftest FAIL: empty tree must not PASS"
+        st_rc=1
+    fi
+    if [ "$STRUCT_CHECKS" -ne 0 ]; then
+        echo "selftest FAIL: empty tree must examine 0 sites, examined $STRUCT_CHECKS"
+        st_rc=1
+    fi
+
+    rm -rf "$st_tmp"
+    [ "$st_rc" -eq 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+}
+
+# ------------------------------------------------------------------ args
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --build) DO_BUILD=1 ;;
+        --timeout=*) BUILD_TIMEOUT=${arg#--timeout=} ;;
+        *) echo "unknown argument: $arg" >&2; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+    esac
+done
+
+# selftest runs FIRST, unconditionally, and is FATAL
+selftest
+if [ "$SELFTEST_ONLY" = "1" ]; then
+    echo "PASS — 6 selftest fixture(s) checked, selftest only"
+    exit 0
+fi
+
+# --------------------------------------------------------------- real scan
+
+TOTAL_CHECKS=0
+FAILS=""
+
+if ! run_structural_scan "$REPO_ROOT"; then
+    FAILS="$STRUCT_FAILS"
+fi
+TOTAL_CHECKS=$((TOTAL_CHECKS + STRUCT_CHECKS))
+
+if [ "$TOTAL_CHECKS" -eq 0 ]; then
+    echo "ERROR — nothing was checked (structural scan examined 0 sites)"
+    exit 2
+fi
+
+# ------------------------------------------------------- optional real build
+
+BUILD_NOTE=""
+if [ "$DO_BUILD" = "1" ]; then
+    SEED="$REPO_ROOT/src/compiler_rust/target/release/simple"
+    [ -x "$SEED" ] || SEED="$REPO_ROOT/bin/simple"
+    if [ ! -x "$SEED" ]; then
+        echo "ERROR — nothing was checked (no seed binary to run native-build with)"
+        exit 2
+    fi
+
+    BW=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+
+    # Carries BOTH defect shapes: a value-position two-arm Ok/Err match
+    # (defect A) and a borrow of a non-i64 place (defect B). Neither compiled
+    # before this gate's fix.
+    cat > "$BW/fixture.spl" <<'EOF'
+fn pick(n: i64) -> Result<text, text>:
+    if n > 0: Ok("yes") else: Err("no")
+
+fn tail_match(n: i64) -> text:
+    match pick(n):
+        case Ok(content): content
+        case Err(_): "fallback"
+
+fn main():
+    print(tail_match(1))
+    print(tail_match(-1))
+EOF
+
+    # Exit status read DIRECTLY into a variable on the line AFTER the
+    # command -- never through a pipe. A pipeline's $? is the last stage's.
+    timeout "$BUILD_TIMEOUT" "$SEED" native-build "$BW/fixture.spl" -o "$BW/fixture.bin" > "$BW/out.log" 2> "$BW/err.log"
+    NB_RC=$?
+
+    TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+
+    if [ "$NB_RC" = "124" ]; then
+        # rc=124 is a TIMEOUT: a DISTINCT failure class. Not a pass, not a
+        # crash. Blocker #5 in this chain was an exponential DFS read as a
+        # hang -- never launder a timeout into a plain failure.
+        FAILS="${FAILS}native-build HANG: timed out after ${BUILD_TIMEOUT}s (rc=124)
+"
+        BUILD_NOTE=", native-build HUNG (rc=124)"
+    elif [ "$NB_RC" != "0" ]; then
+        FB=$(grep -m1 'multiple definition of local value\|but expected' "$BW/out.log" "$BW/err.log" 2>/dev/null)
+        [ -n "$FB" ] || FB=$(grep -m1 '^error:' "$BW/err.log" 2>/dev/null)
+        FAILS="${FAILS}native-build rc=$NB_RC: ${FB:-no error line found}
+"
+        BUILD_NOTE=", native-build rc=$NB_RC"
+    else
+        # A binary that merely COMPILES is not evidence: the sibling shape of
+        # defect A left the merge block returning null, which llc accepts and
+        # which silently answers wrong. Run it.
+        TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+        timeout 120 "$BW/fixture.bin" > "$BW/run.log" 2>&1
+        RUN_RC=$?
+        if [ "$RUN_RC" = "124" ]; then
+            FAILS="${FAILS}fixture binary HANG: timed out (rc=124)
+"
+            BUILD_NOTE=", native-build rc=0 but the binary HUNG"
+        elif [ "$RUN_RC" != "0" ]; then
+            FAILS="${FAILS}fixture binary exited rc=$RUN_RC (>=128 is a signal; 139 is SEGV)
+"
+            BUILD_NOTE=", native-build rc=0 but the binary exited rc=$RUN_RC"
+        else
+            # Both arms must have produced their real values. `yes` proves
+            # the Ok arm, `fallback` proves the Err arm; a null-returning
+            # merge shows neither. Substring tests, because native `print`
+            # currently emits no trailing newline (a separate pre-existing
+            # defect, deliberately not fenced here).
+            RO=$(cat "$BW/run.log" 2>/dev/null)
+            case "$RO" in
+                *yes*fallback*) BUILD_NOTE=", native-build rc=0 and the binary printed both arm values" ;;
+                *) FAILS="${FAILS}fixture binary ran but did not print both arm values (want 'yes' then 'fallback', got: ${RO:-<empty>}) -- a value-position match whose merge dropped its arms
+"
+                   BUILD_NOTE=", native-build rc=0 but the binary answered wrong" ;;
+            esac
+        fi
+    fi
+
+    rm -rf "$BW"
+fi
+
+# ------------------------------------------------------------------ verdict
+
+if [ -n "$FAILS" ]; then
+    printf '%s' "$FAILS" | while IFS= read -r line; do
+        [ -n "$line" ] && echo "  offender: $line"
+    done
+    NF=$(printf '%s' "$FAILS" | grep -c .)
+    echo "FAIL — $TOTAL_CHECKS check(s) run, $NF offender(s)$BUILD_NOTE"
+    exit 1
+fi
+
+echo "PASS — $TOTAL_CHECKS check(s) run, value-position Result match slots its merge local and borrows are type-directed$BUILD_NOTE"
+exit 0

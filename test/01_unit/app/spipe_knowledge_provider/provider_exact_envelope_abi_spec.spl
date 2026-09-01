@@ -1,0 +1,237 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
+# Focused regression for the exact provider owner-result ABI.  This bypasses
+# JSON and frame parsing so a failure identifies the value handoff itself.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1, ProviderReplayV1, ProviderCandidateV1}
+use app.spipe_knowledge_provider.state.{SpipeProviderStateV1, ProviderCapabilitiesV1}
+use app.spipe_knowledge_provider.wire.{ProviderWireDispatchV1, ProviderWireOwnedDispatchV1}
+use app.spipe_knowledge_provider.lifecycle.{PureEd25519ReceiptAuthorityV1, FileDurableLifecycleV1, DeterministicCandidateTransitionAuthorityV1}
+use std.common.search.analyzer.{AnalyzerIdentity}
+use std.common.search.document.{SearchDocument, SearchField, SearchFacet}
+use std.common.search.snapshot.{SearchSnapshot}
+
+class ProviderClassEnvelopeAbiV1:
+    service: SpipeProviderServiceV1
+    outcome: ProviderWireDispatchV1
+
+fn abi_seed() -> [u8]:
+    var seed: [u8] = []
+    var i = 0
+    while i < 32:
+        seed.push(19u8)
+        i = i + 1
+    seed
+
+fn abi_service() -> SpipeProviderServiceV1:
+    val authority = PureEd25519ReceiptAuthorityV1.test_only(
+        abi_seed(), "AUTH-ABI", 7).unwrap()
+    val storage = FileDurableLifecycleV1.configured_absolute(
+        "/tmp/simple-spipe-provider-exact-envelope-abi").unwrap()
+    val document = SearchDocument.of("DOC-ABI", "rev-abi",
+        [SearchField.of("title", "Envelope ABI", 4000)],
+        [SearchFacet.of("feature", "search")])
+    val snapshot = SearchSnapshot.of("sha256:" + "2" * 64, "17",
+        AnalyzerIdentity.spipe_v1(), [document])
+    val state = SpipeProviderStateV1.initialized_bound(
+        "WS-ABI", "spks1-" + "3" * 64, "sha256:" + "4" * 64,
+        23, "sha256:" + "5" * 64, snapshot,
+        ProviderCapabilitiesV1.simple_lexical(), ["REQ-CANCELLED"], false)
+    val replay = ProviderReplayV1(operation: "index_apply", request_id: "",
+        operation_id: "OP-ABI", payload_hash: "sha256:" + "6" * 64,
+        response: "response-abi", receipt: "receipt-abi")
+    val candidate = ProviderCandidateV1(uid: "CAND-ABI",
+        base_root: "sha256:" + "7" * 64,
+        candidate_root: "sha256:" + "8" * 64, candidate_root_preimage: "candidate-preimage-abi",
+        apply_operation_id: "APPLY-ABI",
+        apply_payload_hash: "sha256:" + "9" * 64,
+        apply_receipt: "apply-receipt-abi", created_at_ms: 100,
+        expires_at_ms: 200, state: "staged", terminal_operation_id: "",
+        terminal_receipt_kind: "", terminal_receipt: "", terminal_result_root: "", terminal_at_ms: 0,
+        snapshot: snapshot, document_hashes: ["sha256:" + "a" * 64], document_hash_preimages: ["document-preimage-abi"])
+    SpipeProviderServiceV1(state: state,
+        staged_snapshot_id: "STAGED-ABI", staged_snapshot: snapshot,
+        receipt_authority: authority, candidate_authority: authority,
+        durable_lifecycle: storage,
+        transition_authority: DeterministicCandidateTransitionAuthorityV1.test_only(90).unwrap(),
+        lifecycle_etag: "etag-abi",
+        replay: [replay], candidates: [candidate],
+        current_document_ids: ["DOC-ABI"],
+        current_document_hashes: ["sha256:" + "b" * 64], current_document_hash_preimages: ["current-preimage-abi"])
+
+fn abi_outcome() -> ProviderWireDispatchV1:
+    ProviderWireDispatchV1(write_response: true, close_transport: false,
+        stop_after_write: true, frame: "FRAME-ABI")
+
+fn exact_struct_envelope(service: SpipeProviderServiceV1) -> ProviderWireOwnedDispatchV1:
+    ProviderWireOwnedDispatchV1(service: service, outcome: abi_outcome())
+
+fn tuple_envelope(service: SpipeProviderServiceV1) -> (SpipeProviderServiceV1, ProviderWireDispatchV1):
+    (service, abi_outcome())
+
+fn split_tuple_envelope(service: SpipeProviderServiceV1) -> (SpipeProviderStateV1, SpipeProviderServiceV1, ProviderWireDispatchV1):
+    (service.state, service, abi_outcome())
+
+fn class_envelope(service: SpipeProviderServiceV1) -> ProviderClassEnvelopeAbiV1:
+    ProviderClassEnvelopeAbiV1(service: service, outcome: abi_outcome())
+
+# Mirrors the initialize branch's owner reconstruction, including computed
+# binding texts and reuse of all ports/collections, but deliberately performs
+# no JSON parsing and does not build an initialize response from the owner.
+fn initialize_like_wire(service: SpipeProviderServiceV1) -> ProviderWireOwnedDispatchV1:
+    var owned = service
+    val workspace = "WS-REBUILT"
+    val snapshot = "spks1-" + "c" * 64
+    val scope_digest = "sha256:" + "d" * 64
+    val logical_root = "sha256:" + "e" * 64
+    val initialized_state = SpipeProviderStateV1.initialized_bound(
+        workspace, snapshot, scope_digest, 31, logical_root,
+        owned.staged_snapshot, owned.state.capabilities_value,
+        owned.state.cancelled_request_ids, false)
+    val initialized_service = SpipeProviderServiceV1(
+        state: initialized_state,
+        staged_snapshot_id: owned.staged_snapshot_id,
+        staged_snapshot: owned.staged_snapshot,
+        receipt_authority: owned.receipt_authority,
+        candidate_authority: owned.candidate_authority,
+        transition_authority: owned.transition_authority,
+        durable_lifecycle: owned.durable_lifecycle,
+        lifecycle_etag: owned.lifecycle_etag,
+        replay: owned.replay, candidates: owned.candidates,
+        current_document_ids: owned.current_document_ids,
+        current_document_hashes: owned.current_document_hashes,
+        current_document_hash_preimages: owned.current_document_hash_preimages)
+    ProviderWireOwnedDispatchV1(service: initialized_service,
+        outcome: abi_outcome())
+
+fn initialize_like_wire_with_owner_derived_outcome(service: SpipeProviderServiceV1) -> ProviderWireOwnedDispatchV1:
+    var owned = service
+    val workspace = "WS-DERIVED"
+    val snapshot = "spks1-" + "c" * 64
+    val scope_digest = "sha256:" + "d" * 64
+    val initialized_state = SpipeProviderStateV1.initialized_bound(
+        workspace, snapshot, scope_digest, 37, "sha256:" + "e" * 64,
+        owned.staged_snapshot, owned.state.capabilities_value,
+        owned.state.cancelled_request_ids, false)
+    val initialized_service = SpipeProviderServiceV1(
+        state: initialized_state,
+        staged_snapshot_id: owned.staged_snapshot_id,
+        staged_snapshot: owned.staged_snapshot,
+        receipt_authority: owned.receipt_authority,
+        candidate_authority: owned.candidate_authority,
+        transition_authority: owned.transition_authority,
+        durable_lifecycle: owned.durable_lifecycle,
+        lifecycle_etag: owned.lifecycle_etag,
+        replay: owned.replay, candidates: owned.candidates,
+        current_document_ids: owned.current_document_ids,
+        current_document_hashes: owned.current_document_hashes,
+        current_document_hash_preimages: owned.current_document_hash_preimages)
+    val derived = ProviderWireDispatchV1(write_response: true,
+        close_transport: false, stop_after_write: false,
+        frame: initialized_service.state.workspace + "|" +
+            initialized_service.state.scope_digest + "|" +
+            initialized_service.state.provider_generation.to_text())
+    ProviderWireOwnedDispatchV1(service: initialized_service, outcome: derived)
+
+fn assert_service(service: SpipeProviderServiceV1):
+    expect(service.state.initialized).to_equal(true)
+    expect(service.state.shutting_down).to_equal(false)
+    expect(service.state.provider_generation).to_equal(23)
+    expect(service.state.workspace).to_equal("WS-ABI")
+    expect(service.state.snapshot_id).to_equal("spks1-" + "3" * 64)
+    expect(service.state.scope_digest).to_equal("sha256:" + "4" * 64)
+    expect(service.state.logical_root).to_equal("sha256:" + "5" * 64)
+    expect(service.state.snapshot_value.snapshot_id).to_equal("sha256:" + "2" * 64)
+    expect(service.state.snapshot_value.documents.len()).to_equal(1)
+    expect(service.state.capabilities_value.lexical).to_equal(true)
+    expect(service.state.cancelled_request_ids).to_equal(["REQ-CANCELLED"])
+    expect(service.staged_snapshot_id).to_equal("STAGED-ABI")
+    expect(service.staged_snapshot.documents.len()).to_equal(1)
+    expect(service.receipt_authority.available()).to_equal(true)
+    expect(service.receipt_authority.authority_id()).to_equal("AUTH-ABI")
+    expect(service.receipt_authority.authority_generation()).to_equal(7)
+    expect(service.durable_lifecycle.available()).to_equal(true)
+    expect(service.replay.len()).to_equal(1)
+    expect(service.replay[0].operation_id).to_equal("OP-ABI")
+    expect(service.candidates.len()).to_equal(1)
+    expect(service.candidates[0].uid).to_equal("CAND-ABI")
+    expect(service.candidates[0].snapshot.documents.len()).to_equal(1)
+    expect(service.current_document_ids).to_equal(["DOC-ABI"])
+    expect(service.current_document_hashes).to_equal(["sha256:" + "b" * 64])
+
+fn assert_outcome(outcome: ProviderWireDispatchV1):
+    expect(outcome.write_response).to_equal(true)
+    expect(outcome.close_transport).to_equal(false)
+    expect(outcome.stop_after_write).to_equal(true)
+    expect(outcome.frame).to_equal("FRAME-ABI")
+
+describe "exact SPipe provider envelope ABI":
+    # @manual scenario evidence
+    it "preserves the complete service through the production struct envelope":
+        # @req REQ-CANCELLED
+        # @req REQ-CANCELLED
+        # @req REQ-SSPEC-APP
+        step("preserves the complete service through the production struct envelope")
+        step("Return the exact service and outcome types without wire parsing")
+        val returned = exact_struct_envelope(abi_service())
+        assert_service(returned.service)
+        assert_outcome(returned.outcome)
+
+    it "preserves the complete service through a tuple envelope":
+        # @req REQ-SSPEC-APP
+        step("preserves the complete service through a tuple envelope")
+        val returned = tuple_envelope(abi_service())
+        assert_service(returned.0)
+        assert_outcome(returned.1)
+
+    it "preserves separately returned state service and outcome":
+        # @req REQ-SSPEC-APP
+        step("preserves separately returned state service and outcome")
+        val returned = split_tuple_envelope(abi_service())
+        expect(returned.0.scope_digest).to_equal("sha256:" + "4" * 64)
+        assert_service(returned.1)
+        assert_outcome(returned.2)
+
+    it "preserves the complete service through a class envelope":
+        # @req REQ-SSPEC-APP
+        step("preserves the complete service through a class envelope")
+        val returned = class_envelope(abi_service())
+        assert_service(returned.service)
+        assert_outcome(returned.outcome)
+
+    it "preserves computed bindings through wire-shaped reconstruction":
+        # @req REQ-SSPEC-APP
+        step("preserves computed bindings through wire-shaped reconstruction")
+        val returned = initialize_like_wire(abi_service())
+        expect(returned.service.state.initialized).to_equal(true)
+        expect(returned.service.state.workspace).to_equal("WS-REBUILT")
+        expect(returned.service.state.snapshot_id).to_equal("spks1-" + "c" * 64)
+        expect(returned.service.state.scope_digest).to_equal("sha256:" + "d" * 64)
+        expect(returned.service.state.logical_root).to_equal("sha256:" + "e" * 64)
+        expect(returned.service.state.provider_generation).to_equal(31)
+        expect(returned.service.receipt_authority.available()).to_equal(true)
+        expect(returned.service.durable_lifecycle.available()).to_equal(true)
+        expect(returned.service.replay.len()).to_equal(1)
+        expect(returned.service.candidates.len()).to_equal(1)
+        expect(returned.service.current_document_ids).to_equal(["DOC-ABI"])
+        assert_outcome(returned.outcome)
+
+    it "preserves owner state when the sibling outcome is derived from it":
+        # @req REQ-SSPEC-APP
+        step("preserves owner state when the sibling outcome is derived from it")
+        val returned = initialize_like_wire_with_owner_derived_outcome(abi_service())
+        expect(returned.service.state.workspace).to_equal("WS-DERIVED")
+        expect(returned.service.state.scope_digest).to_equal("sha256:" + "d" * 64)
+        expect(returned.service.state.provider_generation).to_equal(37)
+        expect(returned.outcome.frame).to_equal(
+            "WS-DERIVED|sha256:" + "d" * 64 + "|37")
+        expect(returned.service.receipt_authority.available()).to_equal(true)
+        expect(returned.service.candidates.len()).to_equal(1)

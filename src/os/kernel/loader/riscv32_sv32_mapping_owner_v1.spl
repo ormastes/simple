@@ -1,0 +1,634 @@
+# Loader-owned RV32 authenticated Sv32 mapping capsule.
+#
+# Mapping receipts are non-authorizing coordinates. The loader transaction
+# stays pinned after a successful build; scheduler adoption is a later owner.
+
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1,
+    executable_image_handle_validate
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.loader.executable_riscv32_mapping_owner_v1.{
+    executable_riscv32_authenticated_mapping_evidence_v1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityErrorV1,
+    ExecutableRiscv32MappingTransactionV1,
+    ExecutableRiscv32MappingReleaseCoordinateV1,
+    executable_authority_bind_riscv32_mapping_root_v1,
+    executable_authority_mark_riscv32_mapping_installed_v1,
+    executable_authority_validate_riscv32_mapping_adoption_v1,
+    executable_authority_abort_unmaterialized_riscv32_mapping_v1,
+    executable_authority_begin_riscv32_mapping_release_v1,
+    executable_authority_mapping_release_indeterminate_v1,
+    executable_authority_complete_riscv32_mapping_release_v1
+}
+use os.kernel.types.riscv32_mapping_handle_v1.{
+    SchedulerRiscv32MappingHandleV1,
+    scheduler_riscv32_mapping_handle_absent_v1
+}
+use os.kernel.arch_adapt.riscv32_user_mapping.{
+    Riscv32Sv32RootLeaseV1, Riscv32Sv32RootUnreachableReceiptV1,
+    riscv32_sv32_user_root_create_v1,
+    riscv32_sv32_user_map_exact_v1,
+    riscv32_sv32_user_unmap_exact_v1,
+    riscv32_sv32_user_root_detach_v1,
+    riscv32_sv32_user_root_release_detached_v1,
+    riscv32_sv32_user_root_abort_fresh_v1
+}
+use os.kernel.types.memory_types.{PhysAddr, PageFrame, VmFlags, VM_PRESENT, VM_USER, VM_NO_EXECUTE}
+use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
+use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+pub enum Riscv32Sv32MappingStateV1:
+    MappedBlocked
+    ReleaseRetryable
+    RootDetached
+    RegistryReleased
+    Destroyed
+    Quarantined
+    TransferCommitted
+    TransferIndeterminate
+
+pub enum Riscv32Sv32MappingErrorV1:
+    None
+    InvalidAuthenticatedImage
+    OwnerExhausted
+    SerializationUnavailable
+    RootAllocationFailed
+    AuthorityRejected
+    PageAllocationFailed
+    MappingFailed
+    CopyReadbackFailed
+    RollbackFailed
+    InvalidReceipt
+
+pub struct Riscv32Sv32MappingReceiptV1:
+    slot_index: i64
+    generation: u64
+    nonce: u64
+    state: Riscv32Sv32MappingStateV1
+    error: Riscv32Sv32MappingErrorV1
+    mapped_pages: u64
+    admission_id: text
+    image_hash: text
+    execution_authorized: bool
+
+struct Riscv32Sv32OwnedLeafV1:
+    virt: u64
+    frame: PageFrame
+
+struct Riscv32Sv32MappingSlotV1:
+    generation: u64
+    nonce: u64
+    state: Riscv32Sv32MappingStateV1
+    root: Riscv32Sv32RootLeaseV1
+    leaves: [Riscv32Sv32OwnedLeafV1]
+    transaction: ExecutableRiscv32MappingTransactionV1
+    release: ExecutableRiscv32MappingReleaseCoordinateV1?
+    unreachable: Riscv32Sv32RootUnreachableReceiptV1?
+    admission_id: text
+    image_hash: text
+    entry_point: u64
+    initial_stack_pointer: u64
+    task_id: u64
+    task_lifecycle_generation: u64
+    authority_owner: ExecutableAuthorityRegistryV1
+    terminal_release: bool
+
+pub enum Riscv32Sv32TcbTransferDispositionV1:
+    Committed
+    Rejected
+    Indeterminate
+
+pub struct Riscv32Sv32TransferQuarantineCoordinateV1:
+    slot_plus_one: u32
+    mapping_generation: u64
+
+pub struct Riscv32Sv32TcbTransferResultV1:
+    disposition: Riscv32Sv32TcbTransferDispositionV1
+    handle: SchedulerRiscv32MappingHandleV1
+    quarantine: Riscv32Sv32TransferQuarantineCoordinateV1?
+    root_phys: u64
+
+val _rv32_mapping_mutex_v1: i64 = mutex_raw_create()
+var _rv32_mapping_slots_v1: [Riscv32Sv32MappingSlotV1] = []
+var _rv32_mapping_generation_v1: u64 = 1u64
+var _rv32_mapping_poisoned_v1: bool = false
+
+pub fn riscv32_sv32_mapping_max_live_v1() -> i64:
+    4
+
+pub fn riscv32_sv32_mapping_max_pages_v1() -> u64:
+    65536u64
+
+fn _rv32_mapping_reject_v1(
+    error: Riscv32Sv32MappingErrorV1
+) -> Riscv32Sv32MappingReceiptV1:
+    Riscv32Sv32MappingReceiptV1(
+        slot_index: -1, generation: 0u64, nonce: 0u64,
+        state: Riscv32Sv32MappingStateV1.Quarantined, error: error,
+        mapped_pages: 0u64,
+        admission_id: "", image_hash: "", execution_authorized: false)
+
+fn _rv32_abort_unmaterialized_reject_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    transaction: ExecutableRiscv32MappingTransactionV1,
+    error: Riscv32Sv32MappingErrorV1
+) -> Riscv32Sv32MappingReceiptV1:
+    """Return a pre-root failure only after retiring its reserved authority."""
+    val aborted = executable_authority_abort_unmaterialized_riscv32_mapping_v1(
+        owner, transaction)
+    if aborted.is_err():
+        return _rv32_mapping_reject_v1(
+            Riscv32Sv32MappingErrorV1.RollbackFailed)
+    _rv32_mapping_reject_v1(error)
+
+fn _rv32_mapping_receipt_v1(
+    index: i64,
+    slot: Riscv32Sv32MappingSlotV1,
+    error: Riscv32Sv32MappingErrorV1
+) -> Riscv32Sv32MappingReceiptV1:
+    Riscv32Sv32MappingReceiptV1(
+        slot_index: index, generation: slot.generation, nonce: slot.nonce,
+        state: slot.state, error: error,
+        mapped_pages: slot.leaves.len() as u64,
+        admission_id: slot.admission_id, image_hash: slot.image_hash,
+        execution_authorized: false)
+
+fn _rv32_page_start_v1(value: u64) -> u64:
+    value & 0xFFFFFFFFFFFFF000u64
+
+fn _rv32_page_end_v1(value: u64) -> u64:
+    if value % 4096u64 == 0u64: return value
+    value + (4096u64 - value % 4096u64)
+
+fn _rv32_mapping_layout_valid_v1(
+    handle: ExecutableImageHandleV1,
+    stack_top: u64,
+    stack_size: u64
+) -> bool:
+    """Preflight the complete Sv32 layout before allocating mapping state."""
+    if (stack_size == 0u64 or stack_top < stack_size or
+        stack_top > 0x80000000u64 or stack_top % 4096u64 != 0u64 or
+        stack_size % 4096u64 != 0u64):
+        return false
+    val stack_start = stack_top - stack_size
+    if stack_start < 4096u64: return false
+    val stack_pages = stack_size / 4096u64
+    if stack_pages > riscv32_sv32_mapping_max_pages_v1(): return false
+    var total_pages = stack_pages
+    for segment in handle.verified_load_ranges:
+        if (segment.memory_size == 0u64 or
+            segment.virtual_address >= 0x80000000u64 or
+            segment.memory_size > 0x80000000u64 - segment.virtual_address):
+            return false
+        val segment_start = _rv32_page_start_v1(segment.virtual_address)
+        val segment_end = _rv32_page_end_v1(
+            segment.virtual_address + segment.memory_size)
+        if segment_start < 4096u64 or segment_end > 0x80000000u64:
+            return false
+        if segment_start < stack_top and stack_start < segment_end:
+            return false
+        val segment_pages = (segment_end - segment_start) / 4096u64
+        if (segment_pages > riscv32_sv32_mapping_max_pages_v1() or
+            total_pages > riscv32_sv32_mapping_max_pages_v1() - segment_pages):
+            return false
+        total_pages = total_pages + segment_pages
+    true
+
+fn _rv32_copy_page_v1(
+    phys: u64,
+    page: u64,
+    segment: ExecutableLoadRangeV1,
+    source: [u8]
+) -> bool:
+    var offset = 0u64
+    while offset < 4096u64:
+        mmio_write8(phys + offset, 0u8)
+        offset = offset + 1u64
+    val file_end = segment.virtual_address + segment.file_size
+    val copy_start = if page > segment.virtual_address: page else: segment.virtual_address
+    val page_end = page + 4096u64
+    val copy_end = if page_end < file_end: page_end else: file_end
+    if copy_end > copy_start:
+        val source_start = segment.file_offset + copy_start - segment.virtual_address
+        val count = copy_end - copy_start
+        if source_start > source.len() as u64 or count > source.len() as u64 - source_start:
+            return false
+        var copied = 0u64
+        while copied < count:
+            val value = source[(source_start + copied) as i64]
+            val destination = phys + copy_start - page + copied
+            mmio_write8(destination, value)
+            if mmio_read8(destination) != value: return false
+            copied = copied + 1u64
+    true
+
+fn _rv32_slot_matches_v1(
+    receipt: Riscv32Sv32MappingReceiptV1,
+    slot: Riscv32Sv32MappingSlotV1
+) -> bool:
+    receipt.slot_index >= 0 and receipt.generation == slot.generation and
+        receipt.nonce == slot.nonce and receipt.state == slot.state and
+        not receipt.execution_authorized
+
+fn _rv32_unmap_owned_v1(slot: Riscv32Sv32MappingSlotV1) -> (bool, Riscv32Sv32MappingSlotV1):
+    var updated = slot
+    var remaining: [Riscv32Sv32OwnedLeafV1] = []
+    var index = updated.leaves.len() - 1
+    while index >= 0:
+        val leaf = updated.leaves[index]
+        val phys = leaf.frame.to_phys_addr().addr
+        if riscv32_sv32_user_unmap_exact_v1(updated.root, leaf.virt, phys):
+            pmm_free_page(leaf.frame)
+        else:
+            remaining.push(leaf)
+        index = index - 1
+    updated.leaves = remaining
+    (remaining.len() == 0, updated)
+
+fn _rv32_release_owned_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    slot: Riscv32Sv32MappingSlotV1
+) -> (bool, Riscv32Sv32MappingSlotV1):
+    var updated = slot
+    if updated.state == Riscv32Sv32MappingStateV1.RegistryReleased:
+        if updated.unreachable.? and
+            riscv32_sv32_user_root_release_detached_v1(
+                updated.unreachable.unwrap()):
+            updated.state = Riscv32Sv32MappingStateV1.Destroyed
+            return (true, updated)
+        return (false, updated)
+    if updated.release == nil:
+        val begun = executable_authority_begin_riscv32_mapping_release_v1(
+            owner, updated.transaction._pin)
+        if begun.is_err():
+            updated.state = Riscv32Sv32MappingStateV1.Quarantined
+            return (false, updated)
+        updated.release = Some(begun.unwrap())
+    if updated.unreachable == nil:
+        val (unmapped, without_leaves) = _rv32_unmap_owned_v1(updated)
+        updated = without_leaves
+        if not unmapped:
+            _ = executable_authority_mapping_release_indeterminate_v1(
+                owner, updated.release.unwrap())
+            updated.release = nil
+            updated.state = Riscv32Sv32MappingStateV1.ReleaseRetryable
+            return (false, updated)
+        val detached = riscv32_sv32_user_root_detach_v1(updated.root)
+        if not detached.?:
+            _ = executable_authority_mapping_release_indeterminate_v1(
+                owner, updated.release.unwrap())
+            updated.release = nil
+            updated.state = Riscv32Sv32MappingStateV1.ReleaseRetryable
+            return (false, updated)
+        updated.unreachable = Some(detached.unwrap())
+        updated.state = Riscv32Sv32MappingStateV1.RootDetached
+    val completed = executable_authority_complete_riscv32_mapping_release_v1(
+        owner, updated.release.unwrap(), updated.unreachable.unwrap(),
+        updated.terminal_release)
+    if completed.is_err():
+        _ = executable_authority_mapping_release_indeterminate_v1(
+            owner, updated.release.unwrap())
+        updated.release = nil
+        updated.state = Riscv32Sv32MappingStateV1.RootDetached
+        return (false, updated)
+    updated.state = Riscv32Sv32MappingStateV1.RegistryReleased
+    if not riscv32_sv32_user_root_release_detached_v1(updated.unreachable.unwrap()):
+        return (false, updated)
+    updated.state = Riscv32Sv32MappingStateV1.Destroyed
+    (true, updated)
+
+pub(package) fn riscv32_sv32_mapping_prepare_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    transaction: ExecutableRiscv32MappingTransactionV1,
+    handle: ExecutableImageHandleV1,
+    authenticated_source: [u8],
+    entry_point: u64,
+    stack_top: u64,
+    stack_size: u64,
+    initial_stack_pointer: u64,
+    initial_stack_bytes: [u8]
+) -> Riscv32Sv32MappingReceiptV1:
+    if (not executable_image_handle_validate(handle).ok or
+        not executable_riscv32_authenticated_mapping_evidence_v1(handle, entry_point) or
+        not _rv32_mapping_layout_valid_v1(handle, stack_top, stack_size) or
+        authenticated_source.len() as u64 != handle.size_bytes or
+        authenticated_source.len() == 0 or
+        authenticated_source.len() as u64 > 67108864u64 or
+        sha256_u8_hex(authenticated_source) != handle.image_hash or
+        initial_stack_pointer < stack_top - stack_size or
+        initial_stack_pointer > stack_top or
+        initial_stack_bytes.len() as u64 != stack_top - initial_stack_pointer or
+        initial_stack_pointer != transaction._entry._state.sp as u64):
+        return _rv32_abort_unmaterialized_reject_v1(
+            owner, transaction,
+            Riscv32Sv32MappingErrorV1.InvalidAuthenticatedImage)
+    if (_rv32_mapping_mutex_v1 <= 0 or _rv32_mapping_poisoned_v1 or
+        not mutex_raw_lock(_rv32_mapping_mutex_v1)):
+        return _rv32_abort_unmaterialized_reject_v1(
+            owner, transaction,
+            Riscv32Sv32MappingErrorV1.SerializationUnavailable)
+    var reusable = -1
+    var reusable_index = 0
+    while reusable_index < _rv32_mapping_slots_v1.len():
+        if reusable < 0 and _rv32_mapping_slots_v1[reusable_index].state ==
+            Riscv32Sv32MappingStateV1.Destroyed:
+            reusable = reusable_index
+        reusable_index = reusable_index + 1
+    if (reusable < 0 and
+            _rv32_mapping_slots_v1.len() >= riscv32_sv32_mapping_max_live_v1() or
+        _rv32_mapping_generation_v1 == 0u64 or
+        _rv32_mapping_generation_v1 == 18446744073709551615u64):
+        _ = mutex_raw_unlock(_rv32_mapping_mutex_v1)
+        return _rv32_abort_unmaterialized_reject_v1(
+            owner, transaction, Riscv32Sv32MappingErrorV1.OwnerExhausted)
+    val root = riscv32_sv32_user_root_create_v1()
+    if not root.?:
+        _ = mutex_raw_unlock(_rv32_mapping_mutex_v1)
+        return _rv32_abort_unmaterialized_reject_v1(
+            owner, transaction, Riscv32Sv32MappingErrorV1.RootAllocationFailed)
+    val bound = executable_authority_bind_riscv32_mapping_root_v1(
+        owner, transaction._pin, root.unwrap().root_id, root.unwrap().generation)
+    if bound.is_err():
+        val root_released = riscv32_sv32_user_root_abort_fresh_v1(root.unwrap())
+        if not root_released:
+            # The authority never adopted this root, so no registry release
+            # coordinate can recover it.  Keep the architecture slot as the
+            # sole owner and fail the whole mapper closed rather than losing
+            # the live allocation behind an ordinary authority rejection.
+            _rv32_mapping_poisoned_v1 = true
+        val unlocked = mutex_raw_unlock(_rv32_mapping_mutex_v1)
+        if not unlocked: _rv32_mapping_poisoned_v1 = true
+        if not root_released or not unlocked:
+            return _rv32_abort_unmaterialized_reject_v1(
+                owner, transaction, Riscv32Sv32MappingErrorV1.RollbackFailed)
+        return _rv32_abort_unmaterialized_reject_v1(
+            owner, transaction, Riscv32Sv32MappingErrorV1.AuthorityRejected)
+    var leaves: [Riscv32Sv32OwnedLeafV1] = []
+    var map_error = Riscv32Sv32MappingErrorV1.None
+    for segment in handle.verified_load_ranges:
+        var page = _rv32_page_start_v1(segment.virtual_address)
+        val end = _rv32_page_end_v1(segment.virtual_address + segment.memory_size)
+        while page < end and map_error == Riscv32Sv32MappingErrorV1.None:
+            if leaves.len() as u64 >= riscv32_sv32_mapping_max_pages_v1():
+                map_error = Riscv32Sv32MappingErrorV1.MappingFailed
+            else:
+                val frame = pmm_alloc_page()
+                if not frame.?:
+                    map_error = Riscv32Sv32MappingErrorV1.PageAllocationFailed
+                else:
+                    val phys = frame.unwrap().to_phys_addr().addr
+                    val flags = if segment.writable:
+                        VmFlags.user_rw()
+                    elif segment.executable:
+                        VmFlags.user_rx()
+                    else:
+                        VmFlags(bits: VM_PRESENT | VM_USER | VM_NO_EXECUTE)
+                    val mapped = riscv32_sv32_user_map_exact_v1(
+                        root.unwrap(), page, phys, flags)
+                    if not mapped.ok:
+                        pmm_free_page(frame.unwrap())
+                        map_error = Riscv32Sv32MappingErrorV1.MappingFailed
+                    else:
+                        leaves.push(Riscv32Sv32OwnedLeafV1(
+                            virt: page, frame: frame.unwrap()))
+                        if not _rv32_copy_page_v1(
+                            phys, page, segment, authenticated_source):
+                            map_error = Riscv32Sv32MappingErrorV1.CopyReadbackFailed
+            page = page + 4096u64
+    var stack_page = _rv32_page_start_v1(stack_top - stack_size)
+    while stack_page < stack_top and map_error == Riscv32Sv32MappingErrorV1.None:
+        if leaves.len() as u64 >= riscv32_sv32_mapping_max_pages_v1():
+            map_error = Riscv32Sv32MappingErrorV1.MappingFailed
+        else:
+            val frame = pmm_alloc_page()
+            if not frame.?:
+                map_error = Riscv32Sv32MappingErrorV1.PageAllocationFailed
+            else:
+                val phys = frame.unwrap().to_phys_addr().addr
+                val mapped = riscv32_sv32_user_map_exact_v1(
+                    root.unwrap(), stack_page, phys, VmFlags.user_rw())
+                if not mapped.ok:
+                    pmm_free_page(frame.unwrap())
+                    map_error = Riscv32Sv32MappingErrorV1.MappingFailed
+                else:
+                    leaves.push(Riscv32Sv32OwnedLeafV1(
+                        virt: stack_page, frame: frame.unwrap()))
+                    var byte_offset = 0u64
+                    while byte_offset < 4096u64:
+                        mmio_write8(phys + byte_offset, 0u8)
+                        byte_offset = byte_offset + 1u64
+                    val copy_start = if stack_page > initial_stack_pointer:
+                        stack_page
+                    else:
+                        initial_stack_pointer
+                    val page_end = stack_page + 4096u64
+                    val copy_end = if page_end < stack_top: page_end else: stack_top
+                    var virtual = copy_start
+                    while virtual < copy_end and map_error == Riscv32Sv32MappingErrorV1.None:
+                        val source_index = virtual - initial_stack_pointer
+                        val value = initial_stack_bytes[source_index as i64]
+                        val destination = phys + virtual - stack_page
+                        mmio_write8(destination, value)
+                        if mmio_read8(destination) != value:
+                            map_error = Riscv32Sv32MappingErrorV1.CopyReadbackFailed
+                        virtual = virtual + 1u64
+        stack_page = stack_page + 4096u64
+    val generation = _rv32_mapping_generation_v1
+    _rv32_mapping_generation_v1 = generation + 1u64
+    var nonce = root.unwrap().nonce ^ generation ^ 0x4D415052563332u64
+    if nonce == 0u64: nonce = generation ^ 0x5A3232u64
+    var slot = Riscv32Sv32MappingSlotV1(
+        generation: generation, nonce: nonce,
+        state: Riscv32Sv32MappingStateV1.MappedBlocked,
+        root: root.unwrap(), leaves: leaves, transaction: transaction,
+        release: nil, unreachable: nil,
+        admission_id: handle.admission_id, image_hash: handle.image_hash,
+        entry_point: entry_point,
+        initial_stack_pointer: initial_stack_pointer,
+        task_id: 0u64, task_lifecycle_generation: 0u64,
+        authority_owner: owner, terminal_release: false)
+    if map_error == Riscv32Sv32MappingErrorV1.None:
+        val installed = executable_authority_mark_riscv32_mapping_installed_v1(
+            owner, transaction._pin, slot.root.root_id, slot.root.generation)
+        if installed.is_err(): map_error = Riscv32Sv32MappingErrorV1.AuthorityRejected
+    if map_error != Riscv32Sv32MappingErrorV1.None:
+        val (released, after_release) = _rv32_release_owned_v1(owner, slot)
+        slot = after_release
+        if not released: map_error = Riscv32Sv32MappingErrorV1.RollbackFailed
+    val index = if reusable >= 0: reusable else: _rv32_mapping_slots_v1.len()
+    if reusable >= 0:
+        _rv32_mapping_slots_v1[reusable] = slot
+    else:
+        _rv32_mapping_slots_v1.push(slot)
+    val receipt = _rv32_mapping_receipt_v1(index, slot, map_error)
+    if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+        _rv32_mapping_poisoned_v1 = true
+        return _rv32_mapping_reject_v1(
+            Riscv32Sv32MappingErrorV1.SerializationUnavailable)
+    receipt
+
+pub(package) fn riscv32_sv32_mapping_destroy_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    receipt: Riscv32Sv32MappingReceiptV1
+) -> Riscv32Sv32MappingReceiptV1:
+    if (_rv32_mapping_mutex_v1 <= 0 or _rv32_mapping_poisoned_v1 or
+        not mutex_raw_lock(_rv32_mapping_mutex_v1)):
+        return _rv32_mapping_reject_v1(
+            Riscv32Sv32MappingErrorV1.SerializationUnavailable)
+    if receipt.slot_index < 0 or receipt.slot_index >= _rv32_mapping_slots_v1.len():
+        _ = mutex_raw_unlock(_rv32_mapping_mutex_v1)
+        return _rv32_mapping_reject_v1(Riscv32Sv32MappingErrorV1.InvalidReceipt)
+    var slot = _rv32_mapping_slots_v1[receipt.slot_index]
+    if not _rv32_slot_matches_v1(receipt, slot) or slot.state == Riscv32Sv32MappingStateV1.Destroyed:
+        _ = mutex_raw_unlock(_rv32_mapping_mutex_v1)
+        return _rv32_mapping_reject_v1(Riscv32Sv32MappingErrorV1.InvalidReceipt)
+    val (released, updated) = _rv32_release_owned_v1(owner, slot)
+    slot = updated
+    _rv32_mapping_slots_v1[receipt.slot_index] = slot
+    val error = if released:
+        Riscv32Sv32MappingErrorV1.None
+    else:
+        Riscv32Sv32MappingErrorV1.RollbackFailed
+    val result = _rv32_mapping_receipt_v1(receipt.slot_index, slot, error)
+    if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+        _rv32_mapping_poisoned_v1 = true
+        return _rv32_mapping_reject_v1(
+            Riscv32Sv32MappingErrorV1.SerializationUnavailable)
+    result
+
+fn _rv32_transfer_rejected_v1() -> Riscv32Sv32TcbTransferResultV1:
+    Riscv32Sv32TcbTransferResultV1(
+        disposition: Riscv32Sv32TcbTransferDispositionV1.Rejected,
+        handle: scheduler_riscv32_mapping_handle_absent_v1(), quarantine: nil,
+        root_phys: 0u64)
+
+fn _rv32_transfer_coordinate_v1(
+    index: i64,
+    generation: u64
+) -> Riscv32Sv32TransferQuarantineCoordinateV1:
+    Riscv32Sv32TransferQuarantineCoordinateV1(
+        slot_plus_one: (index + 1) as u32, mapping_generation: generation)
+
+fn _rv32_transfer_indeterminate_v1(
+    coordinate: Riscv32Sv32TransferQuarantineCoordinateV1?
+) -> Riscv32Sv32TcbTransferResultV1:
+    Riscv32Sv32TcbTransferResultV1(
+        disposition: Riscv32Sv32TcbTransferDispositionV1.Indeterminate,
+        handle: scheduler_riscv32_mapping_handle_absent_v1(),
+        quarantine: coordinate, root_phys: 0u64)
+
+pub(package) fn riscv32_sv32_mapping_transfer_to_tcb_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    receipt: Riscv32Sv32MappingReceiptV1,
+    task_id: u64,
+    task_lifecycle_generation: u64,
+    entry_point: u64,
+    initial_stack_pointer: u64
+) -> Riscv32Sv32TcbTransferResultV1:
+    """Consume one mapped receipt into an exact task-bound opaque locator."""
+    if (task_id == 0u64 or task_lifecycle_generation == 0u64 or
+        entry_point == 0u64 or initial_stack_pointer == 0u64):
+        return _rv32_transfer_rejected_v1()
+    if (_rv32_mapping_mutex_v1 <= 0 or _rv32_mapping_poisoned_v1 or
+        not mutex_raw_lock(_rv32_mapping_mutex_v1)):
+        # No caller identity has been authenticated. Never disclose or mint a
+        # canonical reconciliation coordinate from caller-provided fields.
+        return _rv32_transfer_indeterminate_v1(nil)
+    if receipt.slot_index < 0 or receipt.slot_index >= _rv32_mapping_slots_v1.len():
+        if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+            _rv32_mapping_poisoned_v1 = true
+            return _rv32_transfer_indeterminate_v1(nil)
+        return _rv32_transfer_rejected_v1()
+    var slot = _rv32_mapping_slots_v1[receipt.slot_index]
+    if (not _rv32_slot_matches_v1(receipt, slot) or
+        slot.state != Riscv32Sv32MappingStateV1.MappedBlocked or
+        slot.entry_point != entry_point or
+        slot.initial_stack_pointer != initial_stack_pointer):
+        if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+            _rv32_mapping_poisoned_v1 = true
+            # The receipt failed authentication; do not reveal the canonical
+            # live slot generation even though owner serialization is lost.
+            return _rv32_transfer_indeterminate_v1(nil)
+        return _rv32_transfer_rejected_v1()
+    val registry = executable_authority_validate_riscv32_mapping_adoption_v1(
+        owner, slot.transaction, slot.root.root_id, slot.root.generation,
+        entry_point, initial_stack_pointer)
+    if registry.is_err():
+        if registry.unwrap_err() == ExecutableAuthorityErrorV1.SerializationUnavailable:
+            slot.state = Riscv32Sv32MappingStateV1.TransferIndeterminate
+            slot.task_id = task_id
+            slot.task_lifecycle_generation = task_lifecycle_generation
+            _rv32_mapping_slots_v1[receipt.slot_index] = slot
+            val coordinate = _rv32_transfer_coordinate_v1(
+                receipt.slot_index, slot.generation)
+            if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+                _rv32_mapping_poisoned_v1 = true
+            return _rv32_transfer_indeterminate_v1(Some(coordinate))
+        if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+            _rv32_mapping_poisoned_v1 = true
+            return _rv32_transfer_indeterminate_v1(
+                Some(_rv32_transfer_coordinate_v1(
+                    receipt.slot_index, slot.generation)))
+        return _rv32_transfer_rejected_v1()
+    slot.state = Riscv32Sv32MappingStateV1.TransferCommitted
+    slot.terminal_release = true
+    slot.task_id = task_id
+    slot.task_lifecycle_generation = task_lifecycle_generation
+    _rv32_mapping_slots_v1[receipt.slot_index] = slot
+    val handle = SchedulerRiscv32MappingHandleV1(
+        slot_plus_one: (receipt.slot_index + 1) as u32,
+        handle_generation: slot.generation)
+    val coordinate = _rv32_transfer_coordinate_v1(receipt.slot_index, slot.generation)
+    if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+        _rv32_mapping_poisoned_v1 = true
+        return _rv32_transfer_indeterminate_v1(Some(coordinate))
+    Riscv32Sv32TcbTransferResultV1(
+        disposition: Riscv32Sv32TcbTransferDispositionV1.Committed,
+        handle: handle, quarantine: nil, root_phys: slot.root.root_id)
+
+pub(package) fn riscv32_sv32_mapping_destroy_scheduler_handle_v1(
+    handle: SchedulerRiscv32MappingHandleV1,
+    task_id: u64,
+    task_lifecycle_generation: u64
+) -> bool:
+    """Destroy exactly one task-bound Sv32 mapping during scheduler reap."""
+    if (handle.slot_plus_one == 0u32 or handle.handle_generation == 0u64 or
+        task_id == 0u64 or task_lifecycle_generation == 0u64 or
+        _rv32_mapping_mutex_v1 <= 0 or _rv32_mapping_poisoned_v1 or
+        not mutex_raw_lock(_rv32_mapping_mutex_v1)):
+        return false
+    val index = handle.slot_plus_one as i64 - 1
+    if index < 0 or index >= _rv32_mapping_slots_v1.len():
+        _ = mutex_raw_unlock(_rv32_mapping_mutex_v1)
+        return false
+    var slot = _rv32_mapping_slots_v1[index]
+    if (slot.generation != handle.handle_generation or
+        slot.state != Riscv32Sv32MappingStateV1.TransferCommitted or
+        slot.task_id != task_id or
+        slot.task_lifecycle_generation != task_lifecycle_generation):
+        _ = mutex_raw_unlock(_rv32_mapping_mutex_v1)
+        return false
+    val (released, updated) = _rv32_release_owned_v1(slot.authority_owner, slot)
+    slot = updated
+    _rv32_mapping_slots_v1[index] = slot
+    if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+        _rv32_mapping_poisoned_v1 = true
+        return false
+    released
+
+export Riscv32Sv32MappingStateV1
+export Riscv32Sv32MappingErrorV1
+export Riscv32Sv32MappingReceiptV1
+export Riscv32Sv32TcbTransferDispositionV1
+export Riscv32Sv32TransferQuarantineCoordinateV1
+export Riscv32Sv32TcbTransferResultV1
+export riscv32_sv32_mapping_max_live_v1
+export riscv32_sv32_mapping_max_pages_v1
+export riscv32_sv32_mapping_prepare_v1
+export riscv32_sv32_mapping_destroy_v1
+export riscv32_sv32_mapping_transfer_to_tcb_v1
+export riscv32_sv32_mapping_destroy_scheduler_handle_v1

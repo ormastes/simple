@@ -1,0 +1,33 @@
+#!/bin/sh
+# Ratchet the backward-compatibility app.io hub's remaining raw authority.
+# This is a source-shape audit, not provider verification or signed admission.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/app/io/mod.spl"
+
+# Environment lookup belongs to the nullable std.io_runtime owner. The hub must
+# not redeclare it or repeat the historical dead nil check on non-optional text.
+! grep -q '^extern fn rt_env_get' "$module"
+grep -q 'use std.nogc_sync_mut.io_runtime.{shell_output, read_file_text_result, env_get_opt}' "$module"
+[ "$(grep -c 'val os_env = env_get_opt("OS")' "$module")" -eq 2 ]
+
+# Only the compatibility-only random, logging, and volatile families remain.
+# Six public wrappers retain raw-pointer obligations, in addition to the
+# eleven raw declarations themselves.
+[ "$(grep -c '^extern fn rt_' "$module")" -eq 11 ]
+[ "$(grep -c '^@unsafe(' "$module")" -eq 17 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi' "$module")" -eq 11 ]
+
+# Each raw symbol appears exactly once as a declaration and once in its direct
+# wrapper. This prevents hidden call-site growth or an extra lookup/dispatch
+# layer on these hot-compatible paths.
+for symbol in \
+    rt_random_uniform rt_random_randint \
+    rt_log_emit rt_log_get_global_level rt_log_set_global_level \
+    rt_log_get_scope_level rt_log_set_scope_level rt_log_is_enabled \
+    rt_log_clear_scope_levels rt_volatile_read_u64 rt_volatile_write_u64; do
+    [ "$(grep -c "\\b${symbol}(" "$module")" -eq 2 ]
+done
+
+echo 'app.io hub SFFI authority audit: PASS (dead env extern removed; 11/11 raw declarations tagged and lexically confined; 6 raw-pointer wrappers remain explicitly unsafe; direct wrappers retain no-lookup/no-allocation shape)'

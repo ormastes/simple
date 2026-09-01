@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+owner=src/os/hosted/dedicated_host_posix.spl
+handler=src/compiler_rust/compiler/src/interpreter_extern/file_io.rs
+native_provider=src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs
+simple_provider=src/runtime/simple_core/core_fs.spl
+symbols='rt_file_mmap_read_bytes rt_file_size rt_mmap_raw rt_mprotect rt_munmap_raw'
+
+test "$(grep -c '^@unsafe(reason: .*capabilities: \[ffi' "$owner")" -eq 5
+test "$(grep -c '^@always_inline$' "$owner")" -eq 5
+
+for symbol in $symbols; do
+    # Exactly one declaration and one call inside its private inline owner.
+    test "$(grep -c "${symbol}(" "$owner")" -eq 2
+done
+
+grep -q '^extern fn rt_file_mmap_read_bytes(path: text) -> \[u8\]?$' "$owner"
+grep -q '^fn _sffi_file_mmap_read_bytes(path: text) -> \[u8\]?:$' "$owner"
+grep -q '^fn _posix_mmap_bytes(path: text) -> Result<\[u8\], text>:$' "$owner"
+grep -q 'if raw == nil:' "$owner"
+grep -q 'return Err("mmap-read-failed")' "$owner"
+grep -q 'Ok(raw ?? \[\])' "$owner"
+! grep -q 'for value in raw:' "$owner"
+! grep -q 'bytes.push(value as u8)' "$owner"
+grep -q 'if bytes.len() as i64 != expected_size:' "$owner"
+
+grep -q '"rt_file_mmap_read_bytes requires 1 argument"' "$handler"
+grep -q '"rt_file_mmap_read_bytes failed: {error}"' "$handler"
+grep -q '"rt_file_size exceeds i64 range"' "$handler"
+! grep -q '^    rt_file_read_bytes(args)$' "$handler"
+
+# Provider presence is not admission: both current provider families use a
+# nullable tagged value. Keep that exact optional contract visible until a
+# signed one-call status/out ABI replaces it; do not "fix" it with an extra
+# stat/read or a sentinel byte.
+grep -q '^pub unsafe extern "C" fn rt_file_mmap_read_bytes(' "$native_provider"
+grep -q 'None => return RuntimeValue::NIL' "$native_provider"
+grep -q 'Err(_) => return RuntimeValue::NIL' "$native_provider"
+grep -q '^pub fn rt_file_read_bytes(path_ptr_raw: i64, path_len: i64) -> i64:$' "$simple_provider"
+
+echo 'dedicated host POSIX SFFI authority: PASS'

@@ -538,7 +538,7 @@ on dirty or untracked build inputs, and COMP-001 alone remains aggregate-blocked
 | REQ-MCI-003 | `MCI-OS-001` exercises every selected manifest cell through boot, mount, target listing, arbitrary FS program, lineage, identity, and run correlation | `MCI-OS-002` retains all 24 cells visibly while certifying only the selected subset | `MCI-OS-003` removes each required witness in turn and attempts an umbrella claim; both cell and umbrella claim fail closed | versioned manifest, guest logs, boot/mount/list/run transcripts, hashes, correlation IDs | `sh scripts/check/check-mci-v2-simpleos-manifest.shs --evidence build/evidence/mci-v2/simpleos` |
 | REQ-MCI-004 | `MCI-OS-004` executes compiler/interpreter/loader payloads from canonical guest filesystem placements | `MCI-OS-005` verifies `/usr/bin`, `/bin`, `/sys/apps`, and `/SYS/SIMPLETOOL.SDN` identities agree across aliases/metadata | `MCI-OS-006` deletes, corrupts, substitutes, or makes each payload non-executable; admission fails before claim publication | guest filesystem inventory, payload hashes, invocation transcripts and exit codes | same SimpleOS manifest gate |
 | REQ-MCI-005 | `MCI-REN-001` count-plans, admits, packs, seals, queues, consumes, and retires a DrawIR-v3 generation through semantic/layout owner to Engine2D | `MCI-REN-002` accepts exact-capacity command/glyph/image/queue/in-flight values with immutable active generation | `MCI-REN-003` exceeds every capacity by one and attempts grow/truncate/clamp/fallback/mutation; emission is rejected before publication | generation receipt, planned/used capacities, composition hash, queue history, owner chain | `sh scripts/check/check-mci-v2-rendering.shs --evidence build/evidence/mci-v2/rendering` |
-| REQ-MCI-006 | `MCI-REN-004` proves generation and real backend/device provenance, semantic Draw IR, structured HTML interaction, and exact readback where profile claims it | `MCI-REN-005` validates a real RenderDoc artifact and proves transient font atlas/cache state is absent from Draw IR | `MCI-REN-006` injects synthetic handle, screenshot-only UI, mismatched readback/device, invalid RenderDoc, and atlas material in Draw IR; each fails | typed rejection receipts, UI access history, CPU/device readback, RenderDoc validation, Draw IR inspection | same rendering gate |
+| REQ-MCI-006 | `MCI-REN-004` proves generation and real backend/device provenance, semantic Draw IR, structured HTML interaction, and exact readback where profile claims it | `MCI-REN-005` validates distinct Vulkan RenderDoc capture/replay artifacts for `wm,gui,web,engine2d`, all bound to one admitted generation, plus a correlated live container/QEMU QMP WM pixel receipt, and proves transient font atlas/cache state is absent from Draw IR | `MCI-REN-006` injects a missing showcase lane, missing/stale QMP receipt, synthetic handle, screenshot-only UI, mismatched readback/device, invalid RenderDoc, non-Vulkan replay, generation mismatch, and atlas material in Draw IR; each fails | typed rejection receipts, UI access history, CPU/device readback, four RenderDoc validations, pinned container identity, QMP screendump validation, Draw IR inspection | same rendering gate |
 | REQ-MCI-007 | `MCI-ALLOC-001` proves zero post-ready allocation in strict contexts and sealed preallocated per-domain arena use in permitted relaxed contexts | `MCI-ALLOC-002` allocates the final permitted byte in a noncritical relaxed arena | `MCI-ALLOC-003` attempts relaxed allocation in kernel, ISR, storage-commit, ownership-publication, cross-domain, unsealed, and post-ready strict contexts | allocation trace, domain/context IDs, seal/quota/generation receipt | `sh scripts/check/check-mci-v2-allocation.shs --evidence build/evidence/mci-v2/allocation` |
 | REQ-MCI-008 | `MCI-ALLOC-004` records quota/high-water/generation and deterministically rolls back an exhausted operation without partial publication | `MCI-ALLOC-005` exhausts at the exact quota and returns typed exhaustion in the provoking operation | `MCI-ALLOC-006` injects every allocation failure point and tries cross-domain corruption, committed-storage mutation, isolation bypass, and fallback; state hashes remain unchanged | allocation artifact/template own 004/005; distinct fault-injection artifact/template owns 006 and its ledger/hash evidence | same allocation gate, two aggregate rows |
 | REQ-MCI-009 | `MCI-PROC-001` completes bounded parallel work and subprocess capture within fixed queue/in-flight limits | `MCI-PROC-002` cancels at admission, active execution, and completion boundaries deterministically | `MCI-PROC-003` injects timeout, capture overflow, queue overflow, and `pid` values `-1` and `0`; every kill/wait rejects invalid PID and no unrelated process is affected | pool/queue timeline, cancellation receipt, bounded output metadata, PID audit | `sh scripts/check/check-mci-v2-process-safety.shs --evidence build/evidence/mci-v2/process` |
@@ -571,11 +571,24 @@ admission.
 | NFR-MCI-004 | `MCI-NFR-007` proves strict zero allocation and nominal relaxed high-water `<= 80%` | `MCI-NFR-008` drives quota exhaustion and observes typed return within that operation | allocation event trace and operation timestamps | allocation gate |
 | NFR-MCI-005 | `MCI-NFR-009` enumerates the stable ID/name registry and injects every registered allocation failure point | `MCI-NFR-010` verifies canonical subject and independently committed-domain hashes remain unchanged and rollback restores the prior generation | one valid ledger row per registry entry; before/after SHA-256 hashes | distinct `fault-injection` aggregate row from the allocation producer + `test/01_unit/lib/nogc_sync_mut/mission_critical/domain_arena_v1_spec.spl` |
 | NFR-MCI-006 | `MCI-NFR-011` records declared command/glyph/image/queue/in-flight/RSS/p95/p99/deadline budgets under nominal and exact-capacity loads | `MCI-NFR-012` exceeds each count and deadline independently; rejection precedes emission and no truncation occurs | raw samples, percentile calculation, capacity/rejection receipts | rendering gate |
-| NFR-MCI-007 | `MCI-NFR-013` records warm CLI/MCP/LSP startup/request p95 and max RSS on pinned realistic fixtures | `MCI-NFR-014` injects a result beyond each configured regression budget; admission blocks | raw timing/RSS samples, fixture hashes, baseline comparison | tooling-admission gate |
+| NFR-MCI-007 | `MCI-NFR-013` records warm CLI/MCP/LSP startup/request p95 and max RSS on pinned realistic fixtures, with >=30 CLI and >=1,000 MCP/LSP request samples and the certified absolute ceilings | `MCI-NFR-014` injects a result beyond each absolute or configured <=5% regression budget, plus missing/zero samples and scan telemetry; admission blocks | raw timing/RSS samples, startup metric rows, fixture hashes, baseline comparison | tooling-admission gate |
 | NFR-MCI-008 | `MCI-NFR-015` runs each certified cell for 24 hours with bounded resources and zero invariant violation | `MCI-NFR-016` marks an unavailable/interrupted cell blocked and proves it cannot support a broader claim | start/end timestamps, resource series, cell result and invariant counters | `sh scripts/check/check-mci-v2-stress.shs --duration 24h --evidence build/evidence/mci-v2/stress` |
 | NFR-MCI-009 | `MCI-NFR-017` admits an ephemeral, separately keyed canonical reviewer decision binding identity/role/scope/run/source/config/time and the full content-addressed evidence graph | `MCI-NFR-018` rejects missing identity, producer-key/self-issued, stale, replayed candidate, valid A-to-B artifact/receipt/signature replacement under an old review, and unexpected-receipt add/remove | focused signed/hash-bound reviewer contract only; a real independently operated reviewer producer remains required | `sh test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` |
 
 ## Execution order and single aggregate gate
+
+## AC-6 formal-evidence matrix
+
+| AC-6 row | Gate / owner | Current status rule | Resume evidence |
+|---|---|---|---|
+| Lean model and SimpleOS formal rows | `scripts/check/check-simpleos-formal-coverage.shs` | model-only passes remain `model_proven`; release requires refinement and V2 receipt closure | exact Lake/replay output, axiom audit, VIR/source/artifact identities |
+| RISC-V dual track / RTL / SBY | `scripts/check/check-riscv-formal-dual-track.shs` | HOLD while RTL is placeholder, RVFI is nonsemantic, Sail is absent, or SBY/equivalence is missing | generated RTL, RVFI/HWIR receipt, Sail lock, SBY and netlist-equivalence logs |
+| native/codegen / CPU-SIMD | compiler and MCI admission gates | HOLD without a provenance-admitted self-hosted compiler and target execution | self-hosted artifact, correspondence certificate, target execution receipt |
+| Vulkan/RenderDoc and QEMU/FPGA | platform evidence wrappers | HOLD when host or board is unavailable; never skip | target/board identity, transcript, artifact and readback/serial hashes |
+| independent replay | `scripts/check/run-fv2-simpleos-independent-replay.shs` | HOLD for a nanoda-rejected root; fresh Lean replay is insufficient | pinned lean4export/nanoda receipts over canonical `.olean` paths |
+
+The final aggregate may consume a row only as `artifact_verified` or an explicit
+bounded-TCB boundary. Each HOLD remains an active AC-6 blocker, not an exclusion.
 
 The release-facing one-run entrypoint is:
 
@@ -594,14 +607,23 @@ fixed capture ceiling, common `run_id`, exact artifact identities, and
 aggregate scenario; focused scenarios invoke their owning subordinate runner so
 failure attribution remains executable and precise.
 
-After the executable spec exists, run docgen exactly once after the final spec
-edit:
+After an exact-current pure-Simple self-hosted binary is admitted, run docgen
+exactly once after the final spec edit. The checked-in `bin/simple` is currently
+the Rust bootstrap seed and must not be used as release evidence. Set
+`SIMPLE_BIN` to the admitted `bin/release/<triple>/simple` before running:
 
 ```sh
-bin/simple spipe-docgen \
+SIMPLE_BIN=/absolute/path/to/bin/release/<triple>/simple
+SIMPLE_BINARY="$SIMPLE_BIN" "$SIMPLE_BIN" spipe-docgen \
   test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl \
-  --output doc/06_spec --no-index
+  --output doc/06_spec --no-index \
+  --provenance-receipt \
+  doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.docgen-receipt.env
 ```
 
-Acceptance requires `0 stubs`, all scenario IDs in the generated manual, and no
+The canonical implementation owner is
+`src/app/spipe_docgen/spipe_docgen/main.spl`; `src/app/spipe_docgen/main.spl`
+is its compatibility re-export. Acceptance requires `0 stubs`, all scenario
+IDs in the generated manual, an exact ordered
+`mci-spipe-docgen-provenance-v2` receipt emitted by that real run, and no
 `*_spec.spl` anywhere under `doc/06_spec`.

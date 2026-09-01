@@ -1,7 +1,6 @@
 # Unresolved method call fails OPEN as const-0 while its sibling sites fail CLOSED via rt_panic
 
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** OPEN
 - **Filed:** 2026-07-28
 - **Class:** silent-null / fail-open (wrong-answer risk)
 - **Tree measured:** origin/main `bce219fbec1`

@@ -1,6 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering.hir_phase_profile.{hir_ambig_dep_trace, hir_ambig_dep_trace_enabled, hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum}
 use compiler.hir.hir_lowering._Items.module_lowering.*
 # HIR Lowering - Item Lowering
 #
@@ -11,11 +10,14 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is not an import-origin for surface projection
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup}
+use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_syntactically_exports}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -40,47 +42,82 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 val HIR_REEXPORT_IMPL_TRACE = false
 
 impl HirLowering:
+    me canonical_callable_dependency_candidate(
+        target_index: i64, item_name: text
+    ) -> HirReexportSource:
+        """One canonical terminal for a callable-signature dependency route.
+
+        Restored 2026-08-28 from 7236f30dc22 after the stale snapshot
+        4edef8fab8 deleted it (Stage-3 wall: `ambiguous explicit callable
+        dependency` for 112 distinct single-declaration names)."""
+        if target_index < 0 or target_index >= self.module_surfaces.surfaces.len():
+            return HirReexportSource(found: false, module_index: -1,
+                module_name: "", item_name: "")
+        val target = self.module_surfaces.surfaces[target_index]
+        # Materialized facade surfaces can list a re-exported declaration in
+        # their ordinary declaration arrays. Resolve the frozen export-origin
+        # carrier first; otherwise every facade along one route appears to be
+        # a distinct terminal and creates a phantom ambiguity.
+        var current_index = target_index
+        var current_item = item_name
+        var depth = 0
+        while depth < 8:
+            val current = self.module_surfaces.surfaces[current_index]
+            val origin = module_surface_export_origin_index_lookup(
+                current.export_origin_index, current_item)
+            if not origin.found: break
+            val owner_index = hir_export_origin_surface_index(
+                self.module_surfaces, origin.owner_module)
+            if owner_index < 0 or owner_index >= self.module_surfaces.surfaces.len():
+                return HirReexportSource(found: false, module_index: -1,
+                    module_name: "", item_name: "")
+            if owner_index == current_index and origin.source_name == current_item:
+                break
+            current_index = owner_index
+            current_item = origin.source_name
+            depth = depth + 1
+        if depth >= 8:
+            return HirReexportSource(found: false, module_index: -1,
+                module_name: "", item_name: "")
+        val terminal = self.module_surfaces.surfaces[current_index]
+        if hir_module_declares_item(terminal, current_item):
+            return HirReexportSource(found: true, module_index: current_index,
+                module_name: terminal.preferred_registry_name,
+                item_name: current_item)
+        # A module's private imports are not transitive exports.  The old
+        # fallback chased every import of every wildcard target, so importing
+        # `mir_instruction_kinds.*` also invented routes to the private
+        # `mir_types.*` dependency of that module. Admit a chase only after
+        # the origin-first/direct-declaration checks above and only for a
+        # spelling the target actually exports.
+        if not module_surface_syntactically_exports(target, item_name):
+            return HirReexportSource(found: false, module_index: -1,
+                module_name: "", item_name: "")
+        val hop = self.find_reexport_source(terminal.physical_index, current_item)
+        if hop.found: return hop
+        HirReexportSource(found: false, module_index: -1,
+            module_name: "", item_name: "")
+
     me find_reexport_source_walk(
         facade_index: i64, wanted: text, depth: i64,
         state: HirReexportWalkState
     ) -> HirReexportSource:
         """Walk frozen physical routes without path normalization or splits."""
         if depth > 8:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("chase-bail reason=depth-cap facade={facade_index} wanted={wanted} depth={depth}")
             state.complete = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if facade_index < 0 or facade_index >= self.module_surfaces.surfaces.len():
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("chase-bail reason=invalid-facade-index facade={facade_index} wanted={wanted} depth={depth}")
             state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if not module_surface_route_arrays_aligned(self.module_surfaces.surfaces[facade_index]):
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("chase-bail reason=route-arrays-misaligned facade={self.module_surfaces.surfaces[facade_index].module_name} wanted={wanted} depth={depth}")
             state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-        if (state.surface_indices.len() != state.wanted_names.len() or
-            state.surface_indices.len() != state.depths.len()):
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("chase-bail reason=walk-state-misaligned wanted={wanted} depth={depth}")
-            state.valid = false
-            return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-
-        val visit_entry = hir_reexport_parallel_find(
-            state.surface_indices, state.wanted_names,
-            facade_index, wanted)
-        if visit_entry >= 0:
-            val seen_depth = state.depths[visit_entry]
+        val visit_key = "{facade_index} {wanted}"
+        if state.visited_depth.contains_key(visit_key):
+            val seen_depth: i64 = state.visited_depth[visit_key]
             if seen_depth <= depth:
-                if hir_ambig_dep_trace_enabled():
-                    hir_ambig_dep_trace("chase-bail reason=visited-memo facade={self.module_surfaces.surfaces[facade_index].module_name} wanted={wanted} depth={depth} seen_depth={seen_depth}")
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-            state.depths[visit_entry] = depth
-        else:
-            state.surface_indices = state.surface_indices.push(facade_index)
-            state.wanted_names = state.wanted_names.push(wanted)
-            state.depths = state.depths.push(depth)
+        state.visited_depth[visit_key] = depth
 
         self.reexport_chase_calls = self.reexport_chase_calls + 1
         self.report_reexport_chase_stats()
@@ -88,12 +125,10 @@ impl HirLowering:
         val origin_index: ModuleSurfaceExportOriginIndex = facade_mod.export_origin_index
         val origin_lookup = module_surface_export_origin_index_lookup(origin_index, wanted)
         if origin_lookup.found:
-            val origin_index_value = hir_module_surface_index(
+            val origin_index_value = hir_export_origin_surface_index(
                 self.module_surfaces, origin_lookup.owner_module)
             if origin_index_value < 0 or
                origin_index_value >= self.module_surfaces.surfaces.len():
-                if hir_ambig_dep_trace_enabled():
-                    hir_ambig_dep_trace("chase-bail reason=export-origin-owner-unresolved facade={facade_mod.module_name} wanted={wanted} owner={origin_lookup.owner_module}")
                 state.valid = false
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             return HirReexportSource(
@@ -102,62 +137,41 @@ impl HirLowering:
                 module_name: self.module_surfaces.surfaces[origin_index_value].preferred_registry_name,
                 item_name: origin_lookup.source_name)
 
-        # Two passes: explicit named import rows first, glob rows only if no
-        # explicit route resolved. An explicit import binds the name; a glob
-        # only fills names the module did not import explicitly.
-        var pass_index = 0
-        while pass_index < 2:
-            var import_idx = 0
-            while import_idx < facade_mod.imports.len():
-                val item_start = facade_mod.import_item_offsets[import_idx]
-                val item_end = facade_mod.import_item_offsets[import_idx + 1]
-                val row_is_glob = item_start == item_end
-                var matches = row_is_glob
-                # EXPLICIT-OVER-GLOB (2026-08-22): pass 0 considers ONLY
-                # explicit named rows, pass 1 ONLY globs. A glob row matches
-                # ANY wanted name, so a single ordered pass let a glob in an
-                # EARLIER import slot win the name over an explicit
-                # `use m.{Name}` in a later slot -- measured in run14:
-                # `compiler.backend.backend.env` bound the GLOBBED
-                # `compiler.frontend.parser_types_expr` `enum Backend` instead
-                # of the `use ...backend_api.{Backend}` it explicitly names.
-                if (pass_index == 0 and row_is_glob) or
-                   (pass_index == 1 and not row_is_glob):
-                    matches = false
-                var source_item = wanted
-                var item_idx = item_start
-                # Only the named pass scans item rows; otherwise the scan below
-                # would set `matches` back to true for a named row in the glob
-                # pass and undo the gate above.
-                while pass_index == 0 and item_idx < item_end:
-                    val item_name = facade_mod.import_item_names[item_idx]
-                    val local = if facade_mod.import_item_has_alias[item_idx]:
-                        facade_mod.import_item_aliases[item_idx]
-                    else: item_name
-                    if local == wanted or item_name == wanted:
-                        matches = true
-                        source_item = item_name
-                    item_idx = item_idx + 1
-                if matches and import_idx < facade_mod.import_target_indices.len():
-                    val next_index = facade_mod.import_target_indices[import_idx]
-                    if next_index >= 0 and next_index < self.module_surfaces.surfaces.len():
-                        val next_mod = self.module_surfaces.surfaces[next_index]
-                        if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                            val next_declares = hir_module_declares_item(
-                                next_mod, source_item)
-                            eprint("[reexport-hop] facade={facade_mod.preferred_registry_name} wanted={wanted} import={import_idx} item_start={item_start} item_end={item_end} source_item={source_item} target={next_index} target_name={next_mod.preferred_registry_name} declares={next_declares} composites={next_mod.composite_names.len()} enums={next_mod.enum_names.len()} traits={next_mod.trait_names.len()} callables={next_mod.callable_names.len()} aliases={next_mod.type_alias_names.len()} constants={next_mod.constant_names.len()}")
-                        if hir_module_declares_item(next_mod, source_item):
-                            return HirReexportSource(
-                                found: true,
-                                module_index: next_index,
-                                module_name: next_mod.preferred_registry_name,
-                                item_name: source_item)
-                        val deeper = self.find_reexport_source_walk(
-                            next_index, source_item, depth + 1, state)
-                        if deeper.found:
-                            return deeper
-                import_idx = import_idx + 1
-            pass_index = pass_index + 1
+        var import_idx = 0
+        while import_idx < facade_mod.imports.len():
+            val item_start = facade_mod.import_item_offsets[import_idx]
+            val item_end = facade_mod.import_item_offsets[import_idx + 1]
+            var matches = item_start == item_end
+            var source_item = wanted
+            var item_idx = item_start
+            while item_idx < item_end:
+                val item_name = facade_mod.import_item_names[item_idx]
+                val local = if facade_mod.import_item_has_alias[item_idx]:
+                    facade_mod.import_item_aliases[item_idx]
+                else: item_name
+                if local == wanted or item_name == wanted:
+                    matches = true
+                    source_item = item_name
+                item_idx = item_idx + 1
+            if matches and import_idx < facade_mod.import_target_indices.len():
+                val next_index = facade_mod.import_target_indices[import_idx]
+                if next_index >= 0 and next_index < self.module_surfaces.surfaces.len():
+                    val next_mod = self.module_surfaces.surfaces[next_index]
+                    if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                        val next_declares = hir_module_declares_item(
+                            next_mod, source_item)
+                        eprint("[reexport-hop] facade={facade_mod.preferred_registry_name} wanted={wanted} import={import_idx} item_start={item_start} item_end={item_end} source_item={source_item} target={next_index} target_name={next_mod.preferred_registry_name} declares={next_declares} composites={next_mod.composite_names.len()} enums={next_mod.enum_names.len()} traits={next_mod.trait_names.len()} callables={next_mod.callable_names.len()} aliases={next_mod.type_alias_names.len()} constants={next_mod.constant_names.len()}")
+                    if hir_module_declares_item(next_mod, source_item):
+                        return HirReexportSource(
+                            found: true,
+                            module_index: next_index,
+                            module_name: next_mod.preferred_registry_name,
+                            item_name: source_item)
+                    val deeper = self.find_reexport_source_walk(
+                        next_index, source_item, depth + 1, state)
+                    if deeper.found:
+                        return deeper
+            import_idx = import_idx + 1
 
         var route_index = 0
         while route_index < facade_mod.export_route_sources.len():
@@ -244,13 +258,6 @@ impl HirLowering:
                     val facade_package = self.cached_surface_package_name(facade_mod.module_name)
                     if facade_package != "":
                         val sibling_names = self.package_sibling_registry_names(facade_package)
-                        # DISTINCT-OWNER dedup. The earlier form compared only
-                        # against the LAST match (`sibling_match_index !=
-                        # candidate`), which is order-dependent: an A, B, A
-                        # sibling ordering recorded three matches for two
-                        # owners. Keep the full set of owner indices seen so the
-                        # uniqueness test below is a real distinct count.
-                        var sibling_match_indices: [i64] = []
                         var sibling_match_index = -1
                         var sibling_match_count = 0
                         var sibling_idx = 0
@@ -262,8 +269,7 @@ impl HirLowering:
                                sibling_index != facade_index:
                                 val sibling = self.module_surfaces.surfaces[sibling_index]
                                 if hir_module_declares_item(sibling, wanted):
-                                    if not hir_i64_list_contains(sibling_match_indices, sibling_index):
-                                        sibling_match_indices.push(sibling_index)
+                                    if sibling_match_index != sibling_index:
                                         sibling_match_count = sibling_match_count + 1
                                         sibling_match_index = sibling_index
                                 else:
@@ -276,8 +282,7 @@ impl HirLowering:
                                     val via_sibling = self.find_reexport_source_walk(
                                         sibling_index, wanted, depth + 1, state)
                                     if via_sibling.found and
-                                       not hir_i64_list_contains(sibling_match_indices, via_sibling.module_index):
-                                        sibling_match_indices.push(via_sibling.module_index)
+                                       sibling_match_index != via_sibling.module_index:
                                         sibling_match_count = sibling_match_count + 1
                                         sibling_match_index = via_sibling.module_index
                             sibling_idx = sibling_idx + 1
@@ -564,6 +569,19 @@ impl HirLowering:
             imported_mod, imported_mod_name, hir_dependency_type_name(dependency), import_span, materialize_enum)
         hir_phase_profile_add(HIR_PROF_RIS_DECLARED_DEP, started)
 
+    me dep_tail_already_bound(tail_key: text) -> bool:
+        """DEPTAIL: has this importer already run this dependency tail to
+        completion? Drops the memo when `module_filename` names a different
+        module, exactly as the `register_imported_symbol` wrapper does."""
+        if self.dep_tail_memo_owner != self.module_filename:
+            val fresh_dep_tail_memo: {text: bool} = {}
+            self.dep_tail_memo = fresh_dep_tail_memo
+            self.dep_tail_memo_owner = self.module_filename
+        if self.dep_tail_memo.contains_key(tail_key):
+            self.dep_tail_skip_count = self.dep_tail_skip_count + 1
+            return true
+        false
+
     me materialize_imported_callable_declared_dependency_inner(
         imported_mod: ModuleSurface,
         imported_mod_name: text,
@@ -572,6 +590,10 @@ impl HirLowering:
         materialize_enum: bool
     ):
         val local_name = "{imported_mod.module_name}::{dependency}"
+        val declared_enum_tag = if materialize_enum: " E" else: " -"
+        val declared_tail_key = "D " + local_name + declared_enum_tag
+        if self.dep_tail_already_bound(declared_tail_key):
+            return
         self.register_imported_symbol(
             imported_mod.physical_index, imported_mod_name, dependency, local_name,
             import_span, materialize_enum)
@@ -579,6 +601,9 @@ impl HirLowering:
         if symbol.is_valid():
             self.symbols.bind_qualified_type(
                 imported_mod.module_name, dependency, symbol)
+            # Recorded only after the bind actually happened; an invalid
+            # lookup stays retryable within this importer.
+            self.dep_tail_memo[declared_tail_key] = true
 
     me materialize_imported_callable_explicit_dependency(
         imported_mod: ModuleSurface,
@@ -609,6 +634,10 @@ impl HirLowering:
         # after the memo -- register_imported_symbol and the two
         # bind_qualified_type calls -- still runs per importer, against that
         # importer's own symbol table.
+        val explicit_enum_tag = if materialize_enum: " E" else: " -"
+        val explicit_tail_key = "X " + imported_mod.module_name + " " + dependency + explicit_enum_tag
+        if self.dep_tail_already_bound(explicit_tail_key):
+            return
         val memo_key = imported_mod.module_name + " " + dependency
         var selected_target: i64 = -1
         var selected_item: text = ""
@@ -616,8 +645,6 @@ impl HirLowering:
             selected_target = self.explicit_dep_target_memo[memo_key]
             selected_item = self.explicit_dep_item_memo[memo_key]
         else:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("sweep-enter owner={imported_mod.module_name} dep={dependency} imports={imported_mod.imports.len()}")
             self.explicit_dep_scan_count = self.explicit_dep_scan_count + 1
             hir_phase_profile_count_explicit_scan(imported_mod.imports.len())
             # Resolve only an explicit named import written by the callable
@@ -625,16 +652,18 @@ impl HirLowering:
             # same short name may be present in multiple sibling modules (Span,
             # TraitBound, TraitDef), and choosing one would silently rewrite the
             # signature.
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("sweep-enter owner={imported_mod.module_name} dep={dependency} imports={imported_mod.imports.len()}")
             var import_index: i64 = 0
             var ambiguous = false
-            # EXPLICIT-OVER-GLOB (2026-08-22). Rank of the current selection:
-            # 1 = an explicit named import row written by the callable owner,
-            # 0 = a glob route, -1 = nothing selected yet. Ambiguity is only
-            # ever computed WITHIN a rank: two disagreeing EXPLICIT routes are
-            # a real ambiguity and still report, but a glob route must never
-            # compete with -- let alone override -- an explicit import.
-            # Measured in run14: this owner's four candidate rows were
-            # glob/glob/named/glob, the named row naming
+            # EXPLICIT-OVER-GLOB (2026-08-22, restored 2026-08-28). Rank of the
+            # current selection: 1 = an explicit named import row written by
+            # the callable owner, 0 = a glob route, -1 = nothing selected yet.
+            # Ambiguity is only ever computed WITHIN a rank: two disagreeing
+            # EXPLICIT routes are a real ambiguity and still report, but a
+            # glob route must never compete with -- let alone override -- an
+            # explicit import. Measured in run14: this owner's four candidate
+            # rows were glob/glob/named/glob, the named row naming
             # `compiler.backend.backend.backend_api` and the globs naming
             # `compiler.frontend.parser_types_expr`; last-writer-wins made the
             # trailing GLOB the selection and flagged the pair ambiguous.
@@ -652,18 +681,11 @@ impl HirLowering:
                     else: item_name
                     if local_name == dependency and target_index >= 0 and
                        target_index < self.module_surfaces.surfaces.len():
-                        val target = self.module_surfaces.surfaces[target_index]
-                        var candidate_target = target_index
-                        var candidate_item = item_name
-                        var candidate_found = hir_module_declares_item(
-                            target, item_name)
-                        if not candidate_found:
-                            val hop = self.find_reexport_source(
-                                target.physical_index, item_name)
-                            if hop.found and hop.module_index >= 0:
-                                candidate_target = hop.module_index
-                                candidate_item = hop.item_name
-                                candidate_found = true
+                        val candidate = self.canonical_callable_dependency_candidate(
+                            target_index, item_name)
+                        val candidate_target = candidate.module_index
+                        val candidate_item = candidate.item_name
+                        val candidate_found = candidate.found
                         if candidate_found:
                             if hir_ambig_dep_trace_enabled():
                                 hir_ambig_dep_trace("sweep-candidate route=named owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
@@ -684,18 +706,11 @@ impl HirLowering:
                 # when every matching named/glob route reaches one terminal.
                 if item_start == item_end and target_index >= 0 and
                    target_index < self.module_surfaces.surfaces.len():
-                    val target = self.module_surfaces.surfaces[target_index]
-                    var candidate_target = target_index
-                    var candidate_item = dependency
-                    var candidate_found = hir_module_declares_item(
-                        target, dependency)
-                    if not candidate_found:
-                        val hop = self.find_reexport_source(
-                            target.physical_index, dependency)
-                        if hop.found and hop.module_index >= 0:
-                            candidate_target = hop.module_index
-                            candidate_item = hop.item_name
-                            candidate_found = true
+                    val candidate = self.canonical_callable_dependency_candidate(
+                        target_index, dependency)
+                    val candidate_target = candidate.module_index
+                    val candidate_item = candidate.item_name
+                    val candidate_found = candidate.found
                     if candidate_found and selected_rank < 1:
                         if hir_ambig_dep_trace_enabled():
                             hir_ambig_dep_trace("sweep-candidate route=glob owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
@@ -732,15 +747,10 @@ impl HirLowering:
             # and the failure resurfaces much later as a hard
             # `unresolved type: {dependency}` (hir_lowering/types.spl)
             # attributed to whichever module imported the CALLABLE -- an
-            # innocent third party that never names the type. Stage-1 run13
-            # lost 12 distinct type names this way (CodegenTarget 113,
-            # MirType 87, Export 26, TypeLayout 18, HirPattern 14, HirIfArm 11,
-            # CompilationContext 6, AsmLocation 5, AsmConstraintKind 5,
-            # HirModule/HirFunction/HirExpr/CompiledModule 2 each) with ZERO
-            # diagnostic naming the real owner. Advisory (eprint, not
-            # self.error) on purpose, exactly as the payload twin: a consumer
-            # that already has the name in scope still lowers fine, so failing
-            # here would be a regression rather than a fix.
+            # innocent third party that never names the type. Advisory
+            # (eprint, not self.error) on purpose, exactly as the payload twin:
+            # a consumer that already has the name in scope still lowers fine,
+            # so failing here would be a regression rather than a fix.
             # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
             # Namespaced away from the payload keys on purpose: the callable
             # sweep's negative ("no explicit import declares it") is NARROWER
@@ -778,6 +788,11 @@ impl HirLowering:
             self.symbols.bind_qualified_type(
                 imported_mod.module_name, dependency,
                 terminal_symbol)
+            # DEPTAIL: recorded only after BOTH qualified aliases were
+            # published. The `-2` ambiguity and `< 0` unresolved branches
+            # above return earlier and are never recorded, so their
+            # diagnostics keep their exact per-call multiplicity.
+            self.dep_tail_memo[explicit_tail_key] = true
 
     me cached_surface_package_name(module_name: text) -> text:
         """Package name of `surface`, memoized by module name.
@@ -931,33 +946,6 @@ impl HirLowering:
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name, param.type_name,
                     import_span, materialize_enum)
-            # GENERIC ARGUMENTS of a scalar HEAD must be materialized too.
-            #
-            # `type_name` is the pre-captured scalar head, so for
-            # `Dict<text, Payload>` it is `Dict` -- a builtin that materializes
-            # to nothing -- and this branch then RETURNED without ever walking
-            # the arguments. `parser_type_named_dependencies` already recurses
-            # Named -> args correctly; it was simply never called on this path,
-            # because the `else` that calls it is only reached when NO scalar
-            # head was captured. So the argument was never bound in the owner's
-            # qualified scope at all.
-            #
-            # THIS is the asymmetry that made both previous attempts fail.
-            # `d481f15e1ac` taught PROJECTION to recurse into generic arguments
-            # while this walk still bound nothing for them, so every recursed
-            # argument missed the owner-scope lookup and fell through to
-            # `lower_type` in the importer's scope -- stage-1 48 -> 3716 fatals.
-            # Reproduced in miniature on the three-module fixture in
-            # `imported_generic_head_argument_owner_scope_spec.spl`: projecting
-            # arguments without this call yields `unresolved type: Payload`,
-            # exactly the flood shape, in seconds instead of 72 minutes.
-            # Projection can only resolve what materialization has bound.
-            # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-                if parser_type_kind_named_args(param.type_.kind).len() > 0:
-                    for arg_dependency in parser_type_named_dependencies(param.type_):
-                        self.materialize_imported_callable_dependency(
-                            imported_mod, imported_mod_name, arg_dependency,
-                            import_span, materialize_enum)
             elif param.array_element_name != "":
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name, param.array_element_name,
@@ -972,12 +960,6 @@ impl HirLowering:
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name, callable.return_type_name,
                     import_span, materialize_enum)
-                # Same generic-argument gap as the param branch above.
-                if parser_type_kind_named_args(callable.return_type.kind).len() > 0:
-                    for arg_dependency in parser_type_named_dependencies(callable.return_type):
-                        self.materialize_imported_callable_dependency(
-                            imported_mod, imported_mod_name, arg_dependency,
-                            import_span, materialize_enum)
             elif callable.return_array_element_name != "":
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name,
@@ -1005,28 +987,16 @@ impl HirLowering:
         registration of a zero-import member (sugar_registry.spl, context.spl,
         modes.spl, value.spl) lowered that signature first and died with
         `unresolved type: Completion` blamed on the member being lowered."""
-        if hir_ambig_dep_trace_enabled():
-            hir_ambig_dep_trace("router owner={imported_mod.module_name} dep={dependency} imports={imported_mod.imports.len()}")
         if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("router-preresolved owner={imported_mod.module_name} dep={dependency}")
             return
         self.materialize_imported_callable_declared_dependency(
             imported_mod, imported_mod_name, dependency, import_span, materialize_enum)
         if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("router-step1-declared-bound owner={imported_mod.module_name} dep={dependency}")
             return
-        if hir_ambig_dep_trace_enabled():
-            hir_ambig_dep_trace("router-step1-missed owner={imported_mod.module_name} dep={dependency} (facade chase did not bind; entering explicit sweep)")
         self.materialize_imported_callable_explicit_dependency(
             imported_mod, dependency, import_span, materialize_enum)
         if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("router-step2-explicit-bound owner={imported_mod.module_name} dep={dependency}")
             return
-        if hir_ambig_dep_trace_enabled():
-            hir_ambig_dep_trace("router-step2-missed owner={imported_mod.module_name} dep={dependency} (entering package-sibling fallback)")
         self.materialize_imported_field_package_dependency(
             imported_mod.physical_index, hir_dependency_type_name(dependency), import_span, materialize_enum)
 
@@ -1229,9 +1199,7 @@ impl HirLowering:
                     if trait_module_found and trait_position >= 0:
                         val trait_ = trait_module.trait_values[trait_position]
                         for trait_method in trait_.methods:
-                            # SYMNAMEHOIST: same invariant prefix as the impl
-                            # method loop above.
-                            val symbol_name = symbol_name_prefix + trait_method.name
+                            val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
                             if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                                 val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
                                 # The signature belongs to the trait's physical
@@ -1247,19 +1215,9 @@ impl HirLowering:
                                     Some(local_owner))
                                 self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
 
-# Concrete i64 membership scan: the native build path has no generic
-# monomorphization, so a `[i64].contains` method call is not available here.
 # Probe budget for the retained impl-methods Dict carrier. Capped so a stage-3
 # run records the shape of the first rows without flooding the transcript.
 var _hir_reexport_impl_probe_budget: i64 = 40
-
-fn hir_i64_list_contains(values: [i64], needle: i64) -> bool:
-    var idx = 0
-    while idx < values.len():
-        if values[idx] == needle:
-            return true
-        idx = idx + 1
-    false
 
 fn hir_payload_origin_miss_key(owner_key: text, dependency: text) -> text:
     """Memo key for a FAILED payload-origin search: `{owner key} {name}`.
@@ -1311,6 +1269,17 @@ fn hir_dependency_is_builtin_type(dependency: text) -> bool:
         return true
     if dependency == "bool" or dependency == "char" or dependency == "byte" or
        dependency == "void" or dependency == "nil" or dependency == "Any":
+        return true
+    # `fn` is the bare-callable-type keyword spelling (`h: fn()`), lowered by
+    # `lower_named_kind`'s primitive arm in hir_lowering/types.spl (the
+    # `case "i8" | ... | "String" | "fn":` branch) BEFORE any symbol lookup --
+    # same shape as every other entry above. No user module ever declares,
+    # re-exports, or explicitly imports a type literally named `fn`, so this
+    # fell through to the "not found" advisory and resurfaced downstream as a
+    # hard `unresolved type: fn` error, fabricated against whichever module
+    # happened to import the callable next (never the true owner). See
+    # doc/08_tracking/bug/hir_bare_fn_callable_dep_fabricated_position_2026-08-29.md
+    if dependency == "fn":
         return true
     false
 

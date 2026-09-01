@@ -227,3 +227,32 @@ the fact most likely to go stale.
   stage.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
+
+## SSpec count-truthfulness lane handoff — 2026-08-16
+
+The count gate implementation now admits the selected runner through the
+canonical self-hosted guard and preserves a nonzero runner result. Its focused
+modern system contract is
+[`test/03_system/infra/sspec_count_truthfulness_spec.spl`](../../../../test/03_system/infra/sspec_count_truthfulness_spec.spl),
+with the Markdown-only
+[`doc/06_spec` mirror](../../../06_spec/03_system/infra/sspec_count_truthfulness_spec.md),
+[`system test plan`](../../../03_plan/sys_test/sspec_count_truthfulness.md),
+[`operator guidance`](../../../07_guide/infra/sspec_scenario_manual.md), and
+[`tracking record`](../../../08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md).
+The production owner remains
+[`scripts/check/check-sspec-count-truthful.shs`](../../../../scripts/check/check-sspec-count-truthful.shs).
+
+Frozen contract: `run_count_truthfulness_guard` drives visible `step("...")`
+flows for qualified-runner selection, a two-example positive fixture, an
+anchored-count edge fixture, a deliberately failing runner, and a missing
+compiler path. `REQ-SCT-001` covers identity admission, `REQ-SCT-002` covers
+runner-exit preservation, and `REQ-SCT-003` covers exact declared/reported
+equality. New assertions use built-in matchers and must remain real positive,
+edge, and error oracles; placeholder passes and executable `.spl` mirrors under
+`doc/06_spec` are forbidden.
+
+Evidence status is **TEST_BLOCKED**: this worktree has no current-source
+admitted pure-Simple CLI. Do not use the Rust bootstrap seed, a stale binary,
+or a skipped run as PASS evidence. Once a qualified environment exists, run the
+system spec, `spipe-docgen`, and `sspec-maintain` with that same admitted CLI,
+then update the lane state and manual provenance from the retained results.

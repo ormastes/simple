@@ -1,4 +1,3 @@
-use test.helpers.compiler_native_link_source.{compiler_native_link_source}
 # codex-system-test
 use std.spec.*
 use std.io_runtime.{file_read}
@@ -12,20 +11,24 @@ describe "RV64 filesystem exec source contract":
         val user_entry = file_read("src/os/kernel/arch/riscv64/user_entry.spl")
         expect(active).to_contain("riscv64_fs_exec_spawn_ring3(path, argv, envp)")
         expect(spawn_source).to_contain("val prepared = fs_exec_prepare_spawn(path, argv, envp)")
-        expect(spawn_source).to_contain("val child = TaskId(id: prepared.pid as u64)")
-        expect(spawn_source).to_contain("dispatch_fs_exec_user_handoff(Architecture.Riscv64, child.id, prepared.scheduler)")
-        expect(spawn_source).to_contain("scheduler.wait_for_collect(TaskId(id: 0), child, false)")
+        expect(spawn_source).to_contain("dispatch_fs_exec_user_handoff(Architecture.Riscv64, prepared.pid as u64, prepared.scheduler)")
         expect(bridge).to_contain("dispatch_rv64_enter_user(pid_hint, scheduler)")
+        # `_rv64_enter_user` is a real Simple provider in trap_vector.spl, not
+        # a C-runtime stub.  A direct import makes it part of entry-closure
+        # discovery and makes the Cranelift call target match the provider's
+        # qualified symbol.
+        expect(user_entry).to_contain("use os.kernel.arch.riscv64.trap_vector.{_rv64_enter_user}")
+        expect(user_entry).to_not_contain("extern fn _rv64_enter_user(ctx_addr: u64) -> i64")
         expect(user_entry).to_contain("sched.schedule()")
         expect(user_entry).to_contain("Rv64Interrupt.install_scheduler(sched)")
         expect(user_entry).to_contain("vmm_switch_address_space(task.address_space)")
         expect(user_entry).to_contain("fence_i()")
-        val dispatch_pos = user_entry.index_of("fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:")
+        val dispatch_pos = user_entry.index_of("fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:") ?? -1
         expect(dispatch_pos).to_be_greater_than(-1)
         val dispatch_body = user_entry.slice(dispatch_pos, user_entry.len())
-        val switch_pos = dispatch_body.index_of("vmm_switch_address_space(task.address_space)")
-        val fence_pos = dispatch_body.index_of("fence_i()")
-        val enter_pos = dispatch_body.index_of("_rv64_enter_user(&rv_context as u64)")
+        val switch_pos = dispatch_body.index_of("vmm_switch_address_space(task.address_space)") ?? -1
+        val fence_pos = dispatch_body.index_of("fence_i()") ?? -1
+        val enter_pos = dispatch_body.index_of("_rv64_enter_user(&rv_context as u64)") ?? -1
         expect(fence_pos).to_be_greater_than(switch_pos)
         expect(enter_pos).to_be_greater_than(fence_pos)
 
@@ -39,12 +42,14 @@ describe "RV64 filesystem exec source contract":
         val boot_mem = file_read("src/os/kernel/boot/riscv_boot_mem.spl")
         val sysroot = file_read("scripts/os/simpleos-sysroot-riscv64.shs")
         val native_build = file_read("scripts/os/simpleos-native-build-riscv64.shs")
-        val linker_owner = compiler_native_link_source()
+        val linker_owner = file_read("src/compiler/70.backend/backend/llvm_native_link.spl")
         val arch_context = file_read("src/os/kernel/arch/arch_context.spl")
         val context_switch = file_read("src/os/kernel/arch/riscv64/context.spl")
-        val trap_entry_pos = trap.index_of("fn _rv64_trap_vector()")
-        val user_entry_pos = trap.index_of("fn _rv64_enter_user(ctx_addr: u64) -> i64:")
+        val trap_entry_pos = trap.index_of("fn _rv64_trap_vector()") ?? -1
+        val user_entry_pos = trap.index_of("fn _rv64_enter_user(ctx_addr: u64) -> i64:") ?? -1
         expect(trap_entry_pos).to_be_greater_than(-1)
+        expect(user_entry_export_pos).to_be_greater_than(trap_entry_pos)
+        expect(user_entry_export_pos).to_be_less_than(user_entry_pos)
         expect(user_entry_pos).to_be_greater_than(trap_entry_pos)
         val trap_entry = trap.slice(trap_entry_pos, user_entry_pos)
         val user_handoff = trap.slice(user_entry_pos, trap.len())
@@ -75,9 +80,9 @@ describe "RV64 filesystem exec source contract":
         expect(user_handoff).to_contain("\"lw      t0, 528(a0)\"")
         expect(user_handoff).to_contain("\"csrw    fcsr, t0\"")
 
-        val kernel_context_pos = trap_model.index_of("fn create_rv64_kernel_context")
-        val user_context_pos = trap_model.index_of("fn create_rv64_user_context")
-        val classifier_pos = trap_model.index_of("fn rv64_is_interrupt")
+        val kernel_context_pos = trap_model.index_of("fn create_rv64_kernel_context") ?? -1
+        val user_context_pos = trap_model.index_of("fn create_rv64_user_context") ?? -1
+        val classifier_pos = trap_model.index_of("fn rv64_is_interrupt") ?? -1
         expect(kernel_context_pos).to_be_greater_than(-1)
         expect(user_context_pos).to_be_greater_than(kernel_context_pos)
         expect(classifier_pos).to_be_greater_than(user_context_pos)
@@ -87,16 +92,16 @@ describe "RV64 filesystem exec source contract":
         expect(kernel_context).to_contain("fp_pad: 0")
         expect(user_context).to_contain("fp_state: ExtendedCtxRv(bytes: [0; 264])")
         expect(user_context).to_contain("fp_pad: 0")
-        val rv64_layout_pos = arch_context.index_of("struct ExtendedCtxRv:")
-        val rv32_layout_pos = arch_context.index_of("struct Riscv32Context:")
+        val rv64_layout_pos = arch_context.index_of("struct ExtendedCtxRv:") ?? -1
+        val rv32_layout_pos = arch_context.index_of("struct Riscv32Context:") ?? -1
         expect(rv64_layout_pos).to_be_greater_than(-1)
         expect(rv32_layout_pos).to_be_greater_than(rv64_layout_pos)
         val rv64_layout = arch_context.slice(rv64_layout_pos, rv32_layout_pos)
         expect(rv64_layout).to_contain("bytes: [u8; 264]")
         expect(rv64_layout).to_contain("fp_state: ExtendedCtxRv")
         expect(rv64_layout).to_contain("fp_pad: u64")
-        val voluntary_save_pos = context_switch.index_of("fn _save_callee_saved() -> Riscv64Context:")
-        val voluntary_restore_pos = context_switch.index_of("fn _restore_callee_saved(ctx: Riscv64Context):")
+        val voluntary_save_pos = context_switch.index_of("fn _save_callee_saved() -> Riscv64Context:") ?? -1
+        val voluntary_restore_pos = context_switch.index_of("fn _restore_callee_saved(ctx: Riscv64Context):") ?? -1
         expect(voluntary_save_pos).to_be_greater_than(-1)
         expect(voluntary_restore_pos).to_be_greater_than(voluntary_save_pos)
         val voluntary_save = context_switch.slice(voluntary_save_pos, voluntary_restore_pos)

@@ -1,0 +1,49 @@
+use std.io_runtime.{file_read}
+use std.spec.*
+
+fn assert_owner_before_marker(source: text, marker: text):
+    val construct = source.index_of("BaremetalWmPresentOwnerV1.create(")
+    val commit = source.index_of("wm_present_owner.commit_present(")
+    val ready = source.index_of(marker)
+    expect(construct).to_be_greater_than(0)
+    expect(commit).to_be_greater_than(construct)
+    expect(ready).to_be_greater_than(commit)
+
+describe "baremetal WM presentation entry wiring":
+    it "gates x86 readiness on a scalar owner receipt without changing its loop":
+        val source = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
+        assert_owner_before_marker(source, "serial_println(\"[desktop-gui] desktop-ready\")")
+        expect(source).to_contain("scanout_id: scanout.generation")
+        expect(source).to_contain("if not first_present_receipt.accepted:")
+        expect(source).to_contain("shell.run_baremetal(wm_frame_executor)")
+
+    it "requires RAMFB configuration and visual commit before ARM64 admission":
+        val source = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+        assert_owner_before_marker(source, "uart_writeln(\"[desktop-gui-arm64] desktop-ready")
+        expect(source).to_contain("ramfb_configured and first_platform_presented")
+        expect(source).to_contain("ramfb_configured and platform_presented")
+        expect(source).to_contain("scanout_id: 1u64")
+        val rejected_frame_exit = "if not present_receipt.accepted:\n" +
+            "                    uart_writeln(\"[desktop-gui-arm64] fatal reason=changed-frame-ramfb-receipt\")\n" +
+            "                    running = false\n" +
+            "                    # Never publish input/frame correlation for a platform or\n" +
+            "                    # owner rejection from this iteration.\n" +
+            "                    continue\n" +
+            "            if rendered_revision > 0 and pointer_event_pending:"
+        expect(source).to_contain(rejected_frame_exit)
+
+    it "admits RV64 first and changed frames only after platform presentation":
+        val source = file_read("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
+        assert_owner_before_marker(source, "serial_println(\"[desktop-gui-riscv64] desktop-ready")
+        val changed_present = source.index_of("elif not riscv64_display_present():")
+        val changed_commit = source.index_of("val present_receipt = wm_present_owner.commit_present(")
+        expect(changed_present).to_be_greater_than(0)
+        expect(changed_commit).to_be_greater_than(changed_present)
+        expect(source).to_contain("if not present_receipt.accepted:")
+        expect(source).to_contain("scanout_id: 1u64")
+
+    it "keeps framebuffer addresses outside the owner boundary":
+        val owner = file_read("src/os/compositor/baremetal_wm_present_owner.spl")
+        expect(owner.contains("address: u64")).to_be(false)
+        expect(owner.contains("framebuffer_address")).to_be(false)
+        expect(owner.contains("raw_")).to_be(false)

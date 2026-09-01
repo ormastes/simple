@@ -1,6 +1,6 @@
-# app_cli_intensive_spec
+# App Cli Intensive Specification
 
-> Verifies the app cli intensive behaviour end to end so maintainers of this
+> Tests covering CLI Build Command - Intensive, CLI Test Command - Intensive, CLI Format Command - Intensive, CLI Stats Command - Intensive, CLI TODO Scanner - Intensive, CLI Bug Tracking - Intensive, CLI Release Command - Intensive, CLI Command Dispatch - Intensive, CLI Help System - Intensive.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# app_cli_intensive_spec
-
-Verifies the app cli intensive behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/02_integration/app/app_cli_intensive_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the app cli intensive behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# App Cli Intensive Specification
 
 ## Scenarios
 
@@ -44,19 +22,18 @@ unrelated sibling features are out of scope.
 
 #### validates build command structure _(slow)_
 
-- Verify: validates build command structure
+- validates build command structure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: validates build command structure")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("validates build command structure")
 var commands = ["build", "build --release", "build lint", "build fmt"]
 
 for cmd in commands:
@@ -74,19 +51,18 @@ for cmd in commands:
 
 #### handles build arguments _(slow)_
 
-- Verify: handles build arguments
+- handles build arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: handles build arguments")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles build arguments")
 val args = ["--release", "--debug", "--verbose", "--quiet"]
 
 for arg in args:
@@ -105,19 +81,18 @@ for arg in args:
 
 #### processes linter commands _(slow)_
 
-- Verify: processes linter commands
+- processes linter commands
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: processes linter commands")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("processes linter commands")
 val lint_targets = [
     "src/compiler/10.frontend/core/lexer.spl",
     "src/lib/common/text.spl",
@@ -143,19 +118,18 @@ for target in lint_targets:
 
 #### discovers test patterns _(slow)_
 
-- Verify: discovers test patterns
+- discovers test patterns
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: discovers test patterns")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("discovers test patterns")
 val test_patterns = [
     "test/unit/std/*_spec.spl",
     "test/integration/*_spec.spl",
@@ -178,19 +152,18 @@ for pattern in test_patterns:
 
 #### handles test filters _(slow)_
 
-- Verify: handles test filters
+- handles test filters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: handles test filters")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles test filters")
 val filters = [
     "--tag=unit",
     "--tag=integration",
@@ -214,19 +187,18 @@ for filter in filters:
 
 #### simulates running 100 test files _(slow)_
 
-- Verify: simulates running 100 test files
+- simulates running 100 test files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: simulates running 100 test files")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("simulates running 100 test files")
 var executed = 0
 
 for i in 0..100:
@@ -247,19 +219,18 @@ check(executed == 100)
 
 #### tracks test results _(slow)_
 
-- Verify: tracks test results
+- tracks test results
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: tracks test results")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tracks test results")
 var results = []
 
 for i in 0..50:
@@ -293,19 +264,18 @@ check(failed == 10)
 
 #### identifies files needing formatting _(slow)_
 
-- Verify: identifies files needing formatting
+- identifies files needing formatting
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: identifies files needing formatting")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("identifies files needing formatting")
 val files = [
     "src/compiler/10.frontend/core/lexer.spl",
     "src/compiler/10.frontend/core/parser.spl",
@@ -330,19 +300,18 @@ check(spl_files.len() == 3)
 
 #### handles format options _(slow)_
 
-- Verify: handles format options
+- handles format options
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: handles format options")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles format options")
 val options = [
     "--check",
     "--dry-run",
@@ -368,19 +337,18 @@ for opt in options:
 
 #### counts lines in files _(slow)_
 
-- Verify: counts lines in files
+- counts lines in files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: counts lines in files")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("counts lines in files")
 val file_sizes = [
     100, 250, 500, 1000, 2000
 ]
@@ -402,19 +370,18 @@ check(total_lines == 3850)
 
 #### analyzes file types _(slow)_
 
-- Verify: analyzes file types
+- analyzes file types
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: analyzes file types")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("analyzes file types")
 val files = [
     "file.spl", "file.smf", "file.sdn",
     "test.spl", "doc.md", "config.sdn"
@@ -448,19 +415,18 @@ check(sdn_count == 2)
 
 #### finds TODO comments in code _(slow)_
 
-- Verify: finds TODO comments in code
+- finds TODO comments in code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: finds TODO comments in code")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("finds TODO comments in code")
 val code_samples = [
     "# TODO: implement this",
     "# FIXME: broken logic",
@@ -492,19 +458,18 @@ check(fixme_count == 1)
 
 #### scans 200 code lines for TODOs _(slow)_
 
-- Verify: scans 200 code lines for TODOs
+- scans 200 code lines for TODOs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: scans 200 code lines for TODOs")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("scans 200 code lines for TODOs")
 var lines = []
 for i in 0..200:
     if i % 20 == 0:
@@ -534,19 +499,18 @@ check(todos.len() == 10)
 
 #### simulates adding 50 bugs _(slow)_
 
-- Verify: simulates adding 50 bugs
+- simulates adding 50 bugs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: simulates adding 50 bugs")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("simulates adding 50 bugs")
 var bugs = []
 
 for i in 0..50:
@@ -567,19 +531,18 @@ check(bugs.len() == 50)
 
 #### filters bugs by status _(slow)_
 
-- Verify: filters bugs by status
+- filters bugs by status
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: filters bugs by status")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("filters bugs by status")
 var all_bugs = []
 
 for i in 0..100:
@@ -613,19 +576,18 @@ check(closed_bugs == 50)
 
 #### validates version strings _(slow)_
 
-- Verify: validates version strings
+- validates version strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: validates version strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("validates version strings")
 val versions = [
     "0.5.0",
     "0.5.1-rc.1",
@@ -647,19 +609,18 @@ for version in versions:
 
 #### handles version increments _(slow)_
 
-- Verify: handles version increments
+- handles version increments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: handles version increments")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles version increments")
 val base_version = "0.5.0"
 val parts = base_version.split(".")
 
@@ -679,19 +640,18 @@ check(parts[0] == "0")
 
 #### prepares release artifacts _(slow)_
 
-- Verify: prepares release artifacts
+- prepares release artifacts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: prepares release artifacts")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("prepares release artifacts")
 val artifacts = [
     "simple-linux-x64.tar.gz",
     "simple-macos-arm64.tar.gz",
@@ -717,19 +677,18 @@ for artifact in artifacts:
 
 #### parses 100 different commands _(slow)_
 
-- Verify: parses 100 different commands
+- parses 100 different commands
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: parses 100 different commands")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses 100 different commands")
 var commands = []
 
 var cmds = ["build", "test", "lint", "fmt", "run"]
@@ -750,19 +709,18 @@ check(commands.len() == 100)
 
 #### handles command aliases _(slow)_
 
-- Verify: handles command aliases
+- handles command aliases
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: handles command aliases")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles command aliases")
 val aliases = {
     "t": "test",
     "b": "build",
@@ -786,19 +744,18 @@ check(keys.len() == 4)
 
 #### processes complex argument combinations _(slow)_
 
-- Verify: processes complex argument combinations
+- processes complex argument combinations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: processes complex argument combinations")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("processes complex argument combinations")
 val arg_sets = [
     ["build", "--release", "--verbose"],
     ["test", "--tag=unit", "--fail-fast"],
@@ -824,19 +781,18 @@ for args in arg_sets:
 
 #### generates help for all commands _(slow)_
 
-- Verify: generates help for all commands
+- generates help for all commands
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: generates help for all commands")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("generates help for all commands")
 var commands = [
     "build", "test", "lint", "fmt",
     "run", "doc-gen", "todo-scan", "bug-add"
@@ -860,19 +816,18 @@ check(help_texts.len() == 8)
 
 #### validates help text format _(slow)_
 
-- Verify: validates help text format
+- validates help text format
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APP-APP_APP_CLI_INTENSIVE-001
-step("Verify: validates help text format")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("validates help text format")
 val help_sections = [
     "Usage:",
     "Options:",
@@ -902,36 +857,50 @@ for section in help_sections:
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `b1234e0a71752d192299e0902d10dbb607d6352402070bd50a99b70942d8ab9e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `9a1a24e0c2558dcec450be519f31f66e7800cb9ab0e5b8a99e8f8a1d3e9f305b`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `b1234e0a71752d192299e0902d10dbb607d6352402070bd50a99b70942d8ab9e`.
+Source SHA-256: `9a1a24e0c2558dcec450be519f31f66e7800cb9ab0e5b8a99e8f8a1d3e9f305b`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `b1234e0a71752d192299e0902d10dbb607d6352402070bd50a99b70942d8ab9e`  
+Source SHA-256: `9a1a24e0c2558dcec450be519f31f66e7800cb9ab0e5b8a99e8f8a1d3e9f305b`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/02_integration/app/app_cli_intensive_spec.spl
 mirror: doc/06_spec/02_integration/app/app_cli_intensive_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/app/app_cli_intensive_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/02_integration/app/app_cli_intensive_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/app/app_cli_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/02_integration/app/app_cli_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/app/app_cli_intensive_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'validates build command structure' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/app_cli_intensive_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles build arguments' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/app_cli_intensive_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'processes linter commands' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

@@ -1,8 +1,7 @@
 # Interpreter cannot index/slice `Value::StrBytes`, aborting every batch `simple test` run
 
 - **ID:** `interpreter_strbytes_not_indexable_aborts_batch_test_runs_2026-08-04`
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** OPEN
 - **Found:** 2026-08-04
 - **Severity:** critical (a whole-directory `simple test` run dies at the first
   affected file and reports **no** verdict for the remaining files)

@@ -1,0 +1,336 @@
+"""Pinned OpenType layout inventory regression gate.
+
+The SDN fixture is the reviewed, byte-derived contract.  This spec consumes
+every row in order, so a parser-selection change cannot silently omit or add a
+lookup for a selected face.
+"""
+
+use std.spipe.*
+use std.sdn.{SdnValue, parse_file}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.font_registry.{load_selected_font_file}
+use std.skia.feature.glyph.ot_parser.{OtFont, parse_offset_table, find_table, read_u16_be, read_u32_be}
+
+fn _inventory_field(value: SdnValue, key: text) -> SdnValue:
+    value.get(key) ?? SdnValue.Null
+
+fn _inventory_text(value: SdnValue) -> text:
+    value.as_str() ?? ""
+
+fn _inventory_int(value: SdnValue) -> i64:
+    value.as_i64() ?? -1
+
+fn _inventory_array(value: SdnValue) -> [SdnValue]:
+    match value.as_array():
+        Some(items): items
+        None: []
+
+fn _inventory_tag(tag: text) -> u32:
+    if tag.len() != 4: return 0u32
+    val bytes = tag.bytes()
+    (bytes[0].to_u32() << 24) | (bytes[1].to_u32() << 16) |
+        (bytes[2].to_u32() << 8) | bytes[3].to_u32()
+
+fn _inventory_language_tag(tag: text) -> u32:
+    if tag == "default": return 0u32
+    _inventory_tag(tag)
+
+fn _inventory_tags(value: SdnValue) -> [u32]:
+    var tags: [u32] = []
+    for raw in _inventory_array(value):
+        val tag = _inventory_tag(_inventory_text(raw))
+        if tag == 0u32: fail("inventory contains a non-four-character tag")
+        tags.push(tag)
+    tags
+
+fn _inventory_formats(value: SdnValue) -> [i64]:
+    var formats: [i64] = []
+    for raw in _inventory_array(value):
+        val format = _inventory_int(raw)
+        if format < 0: fail("inventory contains a non-integer subtable format")
+        formats.push(format)
+    formats
+
+fn _inventory_lookup_has_feature(lookups: [SdnValue], index: i64, feature_tag: u32) -> bool:
+    for lookup in lookups:
+        if _inventory_int(_inventory_field(lookup, "index")) == index:
+            return _inventory_tags(_inventory_field(lookup, "feature_tags")).contains(feature_tag)
+    false
+
+class _InventoryLookup:
+    index: i64
+    lookup_type: i64
+    flag: i64
+    mark_filtering_set: i64
+    table_end: i64
+    subtable_offsets: [i64]
+
+fn _inventory_lookup(font: OtFont, table_tag: u32, index: i64) -> Option<_InventoryLookup>:
+    val table = match find_table(font, table_tag):
+        Some(value): value
+        None: return None
+    val base = table.offset as i64
+    val limit = base + table.length as i64
+    val blob = font.blob
+    if base < 0 or limit < base or limit > blob.len() as i64 or base + 10 > limit: return None
+    val list = base + read_u16_be(blob, base + 8) as i64
+    if list < base or list + 2 > limit: return None
+    val count = read_u16_be(blob, list) as i64
+    if index < 0 or index >= count or list + 2 + count * 2 > limit: return None
+    val offset = read_u16_be(blob, list + 2 + index * 2) as i64
+    val lookup = list + offset
+    if offset == 0 or lookup < list + 2 + count * 2 or lookup + 6 > limit: return None
+    val lookup_type = read_u16_be(blob, lookup) as i64
+    val flag = read_u16_be(blob, lookup + 2) as i64
+    val subtable_count = read_u16_be(blob, lookup + 4) as i64
+    val metadata_end = lookup + 6 + subtable_count * 2 + (if (flag & 16) != 0: 2 else: 0)
+    if metadata_end > limit: return None
+    var offsets: [i64] = []
+    var subtable = 0
+    while subtable < subtable_count:
+        val relative = read_u16_be(blob, lookup + 6 + subtable * 2) as i64
+        val absolute = lookup + relative
+        if relative == 0 or absolute < metadata_end or absolute + 2 > limit or offsets.contains(absolute): return None
+        offsets.push(absolute)
+        subtable = subtable + 1
+    val mark_filtering_set = if (flag & 16) != 0: read_u16_be(blob, lookup + 6 + subtable_count * 2) as i64 else: -1
+    Some(_InventoryLookup(index: index, lookup_type: lookup_type, flag: flag,
+        mark_filtering_set: mark_filtering_set, table_end: limit, subtable_offsets: offsets))
+
+fn _inventory_select_indices(font: OtFont, table_tag: u32, script_tag: u32,
+                             language_tag: u32, feature_tags: [u32]) -> Option<[i64]>:
+    val table = match find_table(font, table_tag):
+        Some(value): value
+        None: return None
+    val base = table.offset as i64
+    val limit = base + table.length as i64
+    val blob = font.blob
+    if base < 0 or limit < base or limit > blob.len() as i64 or base + 10 > limit: return None
+    val scripts = base + read_u16_be(blob, base + 4) as i64
+    val features = base + read_u16_be(blob, base + 6) as i64
+    val lookups = base + read_u16_be(blob, base + 8) as i64
+    if scripts < base or features < base or lookups < base or scripts + 2 > limit or features + 2 > limit or lookups + 2 > limit: return None
+    val script_count = read_u16_be(blob, scripts) as i64
+    if scripts + 2 + script_count * 6 > limit: return None
+    var exact_script = -1
+    var default_script = -1
+    var script_index = 0
+    while script_index < script_count:
+        val record = scripts + 2 + script_index * 6
+        val tag = read_u32_be(blob, record)
+        val relative = read_u16_be(blob, record + 4) as i64
+        val absolute = scripts + relative
+        if relative == 0 or absolute < scripts + 2 + script_count * 6 or absolute + 4 > limit: return None
+        if tag == script_tag: exact_script = absolute
+        if tag == 1145457748u32: default_script = absolute
+        script_index = script_index + 1
+    val script = if exact_script >= 0: exact_script else: default_script
+    if script < 0: return None
+    val default_language = read_u16_be(blob, script) as i64
+    val language_count = read_u16_be(blob, script + 2) as i64
+    if script + 4 + language_count * 6 > limit: return None
+    var exact_language = -1
+    var language_index = 0
+    while language_index < language_count:
+        val record = script + 4 + language_index * 6
+        val tag = read_u32_be(blob, record)
+        val relative = read_u16_be(blob, record + 4) as i64
+        val absolute = script + relative
+        if relative == 0 or absolute < script + 4 + language_count * 6 or absolute + 6 > limit: return None
+        if tag == language_tag: exact_language = absolute
+        language_index = language_index + 1
+    var language = exact_language
+    if language < 0:
+        if default_language == 0: return None
+        language = script + default_language
+    if language < script + 4 + language_count * 6 or language + 6 > limit or read_u16_be(blob, language) != 0u32: return None
+    val required = read_u16_be(blob, language + 2)
+    val required_index = required as i64
+    val listed_count = read_u16_be(blob, language + 4) as i64
+    if language + 6 + listed_count * 2 > limit: return None
+    val feature_count = read_u16_be(blob, features) as i64
+    if features + 2 + feature_count * 6 > limit: return None
+    var selected_features: [i64] = []
+    if required != 65535u32:
+        if required_index >= feature_count: return None
+        selected_features.push(required_index)
+    for wanted in feature_tags:
+        var listed = 0
+        while listed < listed_count:
+            val available = read_u16_be(blob, language + 6 + listed * 2) as i64
+            if available < 0 or available >= feature_count: return None
+            if available != required_index and read_u32_be(blob, features + 2 + available * 6) == wanted and not selected_features.contains(available):
+                selected_features.push(available)
+            listed = listed + 1
+    val lookup_count = read_u16_be(blob, lookups) as i64
+    if lookups + 2 + lookup_count * 2 > limit: return None
+    var active: [i64] = []
+    for feature_index in selected_features:
+        val relative = read_u16_be(blob, features + 2 + feature_index * 6 + 4) as i64
+        val feature = features + relative
+        if relative == 0 or feature < features + 2 + feature_count * 6 or feature + 4 > limit: return None
+        val feature_lookup_count = read_u16_be(blob, feature + 2) as i64
+        if feature + 4 + feature_lookup_count * 2 > limit: return None
+        var lookup_index = 0
+        while lookup_index < feature_lookup_count:
+            val candidate = read_u16_be(blob, feature + 4 + lookup_index * 2) as i64
+            if candidate < 0 or candidate >= lookup_count: return None
+            if not active.contains(candidate): active.push(candidate)
+            lookup_index = lookup_index + 1
+    var ordered: [i64] = []
+    var ordered_index = 0
+    while ordered_index < lookup_count:
+        if active.contains(ordered_index): ordered.push(ordered_index)
+        ordered_index = ordered_index + 1
+    Some(ordered)
+
+fn _inventory_subtable_formats(blob: [u8], offsets: [i64]) -> [i64]:
+    var formats: [i64] = []
+    for offset in offsets:
+        formats.push(read_u16_be(blob, offset) as i64)
+    formats
+
+fn _inventory_extension_pos(blob: [u8], offsets: [i64], table_end: i64, expected_types: [i64], expected_formats: [i64]):
+    expect(offsets.len()).to_equal(expected_types.len())
+    expect(offsets.len()).to_equal(expected_formats.len())
+    var index: i64 = 0
+    while index < offsets.len():
+        val start = offsets[index]
+        if start < 0 or start + 8 > table_end or table_end > blob.len() as i64:
+            fail("ExtensionPos subtable is out of bounds")
+        expect(read_u16_be(blob, start)).to_equal(1u32)
+        expect(read_u16_be(blob, start + 2) as i64).to_equal(expected_types[index])
+        val wrapped = start + read_u32_be(blob, start + 4) as i64
+        if wrapped < start + 8 or wrapped + 2 > table_end:
+            fail("ExtensionPos wrapped subtable is out of bounds")
+        expect(read_u16_be(blob, wrapped) as i64).to_equal(expected_formats[index])
+        index = index + 1
+
+fn _inventory_plan_key(path: text, table: text, script: text, language: text) -> text:
+    path + "|" + table + "|" + script + "|" + language
+
+describe "pinned OpenType layout inventory":
+    # @req REQ-007 REQ-014
+    it "consumes every pinned GSUB and GPOS plan row in LookupList order":
+        val fixture_path = "test/fixtures/fonts/shared_multilingual_gpu_fonts/active_layout_plan_inventory.sdn"
+        val fixture = match parse_file(fixture_path):
+            Ok(value): value
+            Err(error): fail("cannot parse pinned layout inventory: " + error)
+        expect(_inventory_text(_inventory_field(fixture, "schema"))).to_equal("active_layout_plan_inventory/v1")
+        val plans = _inventory_array(_inventory_field(fixture, "plans"))
+        expect(plans.len()).to_equal(24)
+        val expected_keys = [
+            "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf|GSUB|latn|default", "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf|GPOS|latn|default",
+            "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf|GSUB|hani|default", "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf|GPOS|hani|default",
+            "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf|GSUB|cyrl|default", "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf|GPOS|cyrl|default",
+            "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf|GSUB|latn|default", "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf|GPOS|latn|default",
+            "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf|GSUB|hani|default", "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf|GPOS|hani|default",
+            "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf|GSUB|cyrl|default", "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf|GPOS|cyrl|default",
+            "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf|GSUB|dev2|HIN ", "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf|GPOS|dev2|HIN ",
+            "assets/fonts/google-fonts/ofl/notoserifdevanagari/NotoSerifDevanagari[wdth,wght].ttf|GSUB|dev2|HIN ", "assets/fonts/google-fonts/ofl/notoserifdevanagari/NotoSerifDevanagari[wdth,wght].ttf|GPOS|dev2|HIN ",
+            "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf|GSUB|arab|default", "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf|GPOS|arab|default",
+            "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf|GSUB|arab|URD ", "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf|GPOS|arab|URD ",
+            "assets/fonts/google-fonts/ofl/notonaskharabic/NotoNaskhArabic[wght].ttf|GSUB|arab|default", "assets/fonts/google-fonts/ofl/notonaskharabic/NotoNaskhArabic[wght].ttf|GPOS|arab|default",
+            "assets/fonts/google-fonts/ofl/notonaskharabic/NotoNaskhArabic[wght].ttf|GSUB|arab|URD ", "assets/fonts/google-fonts/ofl/notonaskharabic/NotoNaskhArabic[wght].ttf|GPOS|arab|URD "
+        ]
+        var consumed_keys: [text] = []
+        var valid_empty_plan_count: i64 = 0
+        var total_lookup_count: i64 = 0
+
+        for raw_plan in plans:
+            val path = _inventory_text(_inventory_field(raw_plan, "path"))
+            val expected_sha256 = _inventory_text(_inventory_field(raw_plan, "sha256"))
+            val table = _inventory_text(_inventory_field(raw_plan, "table"))
+            val script_text = _inventory_text(_inventory_field(raw_plan, "script_tag"))
+            val script = _inventory_tag(script_text)
+            val requested_language = _inventory_text(_inventory_field(raw_plan, "requested_language_tag"))
+            val language = _inventory_language_tag(requested_language)
+            val resolved_language = _inventory_text(_inventory_field(raw_plan, "resolved_language_tag"))
+            val resolved_tag = _inventory_language_tag(resolved_language)
+            val requested_features = _inventory_tags(_inventory_field(raw_plan, "requested_feature_tags"))
+            val required_feature = _inventory_text(_inventory_field(raw_plan, "required_feature_tag"))
+            val expected_valid = _inventory_field(raw_plan, "valid").as_bool() ?? false
+            val expected_lookups = _inventory_array(_inventory_field(raw_plan, "lookups"))
+            val expected_count = _inventory_int(_inventory_field(raw_plan, "selected_lookup_count"))
+
+            if (path == "" or expected_sha256.len() != 64 or script == 0u32 or
+                (requested_language != "default" and language == 0u32)):
+                fail("inventory plan is missing pinned identity or selector fields")
+            if resolved_language != "default" and resolved_tag == 0u32:
+                fail("inventory plan has an invalid resolved language tag")
+            # The pinned selected LangSys rows have no required feature; keep
+            # that fact executable so a required lookup cannot become hidden.
+            expect(required_feature).to_equal("")
+            expect(expected_count).to_equal(expected_lookups.len())
+            expect(table == "GSUB" or table == "GPOS").to_equal(true)
+            val key = _inventory_plan_key(path, table, script_text, requested_language)
+            expect(expected_keys.contains(key)).to_equal(true)
+            expect(consumed_keys.contains(key)).to_equal(false)
+            consumed_keys.push(key)
+            total_lookup_count = total_lookup_count + expected_count
+            if expected_count == 0:
+                expect(path == "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf" or
+                    path == "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf").to_equal(true)
+                expect(script == _inventory_tag("latn") or script == _inventory_tag("hani") or
+                    script == _inventory_tag("cyrl")).to_equal(true)
+                expect(requested_features.len()).to_equal(0)
+                valid_empty_plan_count = valid_empty_plan_count + 1
+
+            # The registry is the only loader: it resolves the asset root and
+            # validates the selected candidate before this parser sees bytes.
+            val loaded = load_selected_font_file(path)
+            val blob = loaded.0
+            val validation = loaded.1
+            expect(validation.selected).to_equal(true)
+            expect(validation.valid).to_equal(true)
+            expect(sha256_u8_hex(blob)).to_equal(expected_sha256)
+            val font = match parse_offset_table(blob):
+                Some(value): value
+                None: fail("pinned selected font did not parse: " + path)
+            val table_tag = if table == "GSUB": 1196643650u32 else: 1196445523u32
+            expect(expected_valid).to_equal(true)
+            val plan = match _inventory_select_indices(font, table_tag, script, language, requested_features):
+                Some(value): value
+                None: fail("pinned layout selection is invalid: " + key)
+            expect(plan.len()).to_equal(expected_count)
+            val resolved_plan = match _inventory_select_indices(font, table_tag, script, resolved_tag, requested_features):
+                Some(value): value
+                None: fail("resolved pinned layout selection is invalid: " + key)
+            expect(resolved_plan).to_equal(plan)
+            val empty_plan = match _inventory_select_indices(font, table_tag, script, language, []):
+                Some(value): value
+                None: fail("empty pinned layout selection is invalid: " + key)
+            expect(empty_plan.len()).to_equal(0)
+            for feature_tag in requested_features:
+                val feature_plan = match _inventory_select_indices(font, table_tag, script, language, [feature_tag]):
+                    Some(value): value
+                    None: fail("single-feature pinned layout selection is invalid: " + key)
+                for selected_index in feature_plan:
+                    expect(_inventory_lookup_has_feature(expected_lookups, selected_index, feature_tag)).to_equal(true)
+                for expected in expected_lookups:
+                    if _inventory_tags(_inventory_field(expected, "feature_tags")).contains(feature_tag):
+                        expect(feature_plan.contains(_inventory_int(_inventory_field(expected, "index")))).to_equal(true)
+            var index: i64 = 0
+            while index < expected_lookups.len():
+                val expected = expected_lookups[index]
+                val selected_index = plan[index]
+                expect(selected_index).to_equal(_inventory_int(_inventory_field(expected, "index")))
+                val lookup = match _inventory_lookup(font, table_tag, selected_index):
+                    Some(value): value
+                    None: fail("selected lookup is malformed: " + key)
+                expect(lookup.lookup_type).to_equal(_inventory_int(_inventory_field(expected, "type")))
+                expect(lookup.flag).to_equal(_inventory_int(_inventory_field(expected, "flag")))
+                expect(lookup.mark_filtering_set).to_equal(_inventory_int(_inventory_field(expected, "mark_filtering_set")))
+                expect(_inventory_subtable_formats(blob, lookup.subtable_offsets)).to_equal(_inventory_formats(_inventory_field(expected, "subtable_formats")))
+                val feature_tags = _inventory_tags(_inventory_field(expected, "feature_tags"))
+                expect(feature_tags.len() > 0).to_equal(true)
+                for feature_tag in feature_tags:
+                    expect(requested_features.contains(feature_tag)).to_equal(true)
+                if lookup.lookup_type == 9:
+                    _inventory_extension_pos(blob, lookup.subtable_offsets, lookup.table_end,
+                        _inventory_formats(_inventory_field(expected, "wrapped_types")),
+                        _inventory_formats(_inventory_field(expected, "wrapped_formats")))
+                index = index + 1
+        expect(valid_empty_plan_count).to_equal(12)
+        expect(total_lookup_count).to_equal(294)
+        expect(consumed_keys.len()).to_equal(expected_keys.len())

@@ -21,125 +21,170 @@ doc/05_design/REQ-COMPILER-PARSER-001.md
 #!/usr/bin/env simple
 # Parser Tests for Actor Definitions
 #
-# Tests that the parser correctly recognizes and parses actor definitions,
-# including outline parsing and full parsing.
+# Each scenario compiles a small actor fixture through the deployed
+# `bin/simple` and asserts the program's observable outcome, so parsing of
+# actor declarations is proven by execution, not by grepping parser source.
+#
+# Known limitation (2026-08-27): actor METHOD INVOCATION after spawn is not
+# executable on the deployed Rust seed (JIT dispatch gap; interpreter reports
+# "method not found on type `actor`"), so method-bearing actors are asserted
+# up to successful parse + spawn. Generic actor declarations (`actor W<T>:`)
+# are rejected by the parser today — covered in
+# test/01_unit/compiler/parser/desugaring_spec.spl as a fail-closed oracle.
 
 
-use std.spec.step
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
 
-describe "Parser - Actor Definitions":
-    it "parses simple actor definition":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses simple actor definition")
-        # Simple actor with one method
-        # Should parse without errors
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+fn compile_source(name: text, source: text) -> text:
+    val path = "build/test-artifacts/parser_actor_" + name + ".spl"
+    file_write(path, source)
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = bin + " run " + path + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
 
-    it "parses actor with multiple methods":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses actor with multiple methods")
-        # Actor with several methods
-        # All methods should be recognized
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+val SIMPLE_ACTOR: text = "actor Counter:\n" +
+    "    var count: i64 = 0\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val c = spawn Counter()\n" +
+    "    print(\"simple ok\")\n"
 
-    it "parses actor with type parameters":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses actor with type parameters")
-        # actor Worker<T>:
-        # Type parameters should be parsed
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+val METHODS_ACTOR: text = "actor Mut:\n" +
+    "    var n: i64 = 0\n" +
+    "    fn bump(self):\n" +
+    "        self.n = self.n + 1\n" +
+    "    fn scale(self, by: i64):\n" +
+    "        self.n = self.n * by\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val m = spawn Mut()\n" +
+    "    print(\"methods ok\")\n"
 
-    it "parses public actor":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses public actor")
-        # pub actor Counter:
-        # Visibility flag should be set
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+val PARAMS_ACTOR: text = "actor Par:\n" +
+    "    fn process(self, task: i64) -> i64:\n" +
+    "        task * 2\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val p = spawn Par()\n" +
+    "    print(\"params ok\")\n"
 
-    it "parses actor with doc comment":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses actor with doc comment")
-        # Actor with documentation
-        # Doc comment should be captured
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+val PUB_ACTOR: text = "pub actor Visible:\n" +
+    "    var v: i64 = 2\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val w = spawn Visible()\n" +
+    "    print(\"pub ok\")\n"
 
-describe "Parser - Actor Methods":
-    it "parses immutable methods":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses immutable methods")
-        # fn method():
-        # Should parse as immutable method
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+val DOC_ACTOR: text = "## A documented actor.\nactor Doc:\n" +
+    "    var v: i64 = 2\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val d = spawn Doc()\n" +
+    "    print(\"doc ok\")\n"
 
-    it "parses mutable methods":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses mutable methods")
-        # me method():
-        # Should parse as mutable method
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+val EMPTY_ACTOR: text = "actor Empty:\n" +
+    "    pass\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val e = spawn Empty()\n" +
+    "    print(\"empty ok\")\n"
 
-    it "parses static methods":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses static methods")
-        # static fn factory():
-        # Should parse as static method
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+val TWO_ACTORS: text = "actor One:\n" +
+    "    var a: i64 = 1\n" +
+    "actor Two:\n" +
+    "    var b: i64 = 2\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val x = spawn One()\n" +
+    "    val y = spawn Two()\n" +
+    "    print(\"two actors ok\")\n"
 
-    it "parses methods with parameters":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses methods with parameters")
-        # fn process(task: Task):
-        # Parameters should be parsed
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+val ACTOR_AND_CLASS: text = "class Plain:\n" +
+    "    fn hi(self) -> text:\n" +
+    "        \"class\"\n" +
+    "\n" +
+    "actor A2:\n" +
+    "    var x: i64 = 1\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val c = Plain()\n" +
+    "    val a = spawn A2()\n" +
+    "    print(c.hi() + \" and actor\")\n"
 
-    it "parses methods with return types":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses methods with return types")
-        # fn get_value() -> i64:
-        # Return type should be parsed
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+val MISSING_COLON_ACTOR: text = "actor Bad\n" +
+    "    var v: i64 = 1\n" +
+    "\n" +
+    "fn main():\n" +
+    "    print(\"no\")\n"
 
-describe "Parser - Actor Structure":
-    it "handles multiple actors in one file":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: handles multiple actors in one file")
-        # Multiple actor definitions
-        # All should be parsed correctly
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+describe "Parser actor definitions":
+    """
+    Purpose and audience: compiler engineers on the parser team who need actor
+    declarations — plain, public, documented, empty, method-bearing, and
+    alongside classes — to parse into runnable programs, and malformed actor
+    headers to be rejected with a parse error.
+    """
+    # @manual scenario evidence
+    it "a simple actor with one field parses and spawns":
+        # @req REQ-SSPEC-COMPILER
+        step("compile and run a fixture with a one-field actor")
+        val out = compile_source("simple", SIMPLE_ACTOR)
+        expect(out).to_contain("simple ok")
 
-    it "distinguishes actors from classes":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: distinguishes actors from classes")
-        # Both actor and class in same file
-        # Should populate different dicts
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "an actor with multiple methods parses":
+        # @req REQ-SSPEC-COMPILER
+        step("compile and run a fixture whose actor declares two methods")
+        val out = compile_source("methods", METHODS_ACTOR)
+        step("methods exist on the parsed actor; invocation after spawn is")
+        step("not executable on the deployed seed (see limitation note)")
+        expect(out).to_contain("methods ok")
 
-    it "parses empty actor":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: parses empty actor")
-        # actor Empty:
-        #     pass
-        # Should create valid actor
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "an actor method with parameters and a return type parses":
+        # @req REQ-SSPEC-COMPILER
+        step("compile and run a fixture with fn process(self, task: i64) -> i64")
+        val out = compile_source("params", PARAMS_ACTOR)
+        expect(out).to_contain("params ok")
 
-describe "Parser - Actor Integration":
-    it "integrates with outline parser":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: integrates with outline parser")
-        # Outline parser should recognize actor
-        # Should create ActorOutline
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "a pub actor keeps its visibility through parsing":
+        # @req REQ-SSPEC-COMPILER
+        step("compile and run a fixture with a pub actor")
+        val out = compile_source("pub", PUB_ACTOR)
+        expect(out).to_contain("pub ok")
 
-    it "integrates with full parser":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: integrates with full parser")
-        # Full parser should convert ActorOutline -> Actor
-        # Should populate module.actors
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "an actor with a doc comment parses":
+        # @req REQ-SSPEC-COMPILER
+        step("compile and run a fixture with a documented actor")
+        val out = compile_source("doc", DOC_ACTOR)
+        expect(out).to_contain("doc ok")
 
-    it "works with desugaring":
-        # @req: REQ-COMPILER-PARSER-001
-        step("Verify: works with desugaring")
-        # Desugaring should convert actor -> class
-        # module.actors should be cleared
-        expect(1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    it "an empty actor body parses":
+        # @req REQ-SSPEC-COMPILER
+        step("compile and run a fixture whose actor body is a bare pass")
+        val out = compile_source("empty", EMPTY_ACTOR)
+        expect(out).to_contain("empty ok")
+
+    it "several actors in one file each parse and spawn":
+        # @req REQ-SSPEC-COMPILER
+        step("compile and run a fixture declaring two actors")
+        val out = compile_source("two", TWO_ACTORS)
+        expect(out).to_contain("two actors ok")
+
+    it "actors and classes coexist in one file":
+        # @req REQ-SSPEC-COMPILER
+        step("compile and run a fixture with a class and an actor")
+        val out = compile_source("mixed", ACTOR_AND_CLASS)
+        step("the class method stays callable while the actor spawns")
+        expect(out).to_contain("class and actor")
+
+    it "an actor header missing its colon is rejected with a parse error":
+        # @req REQ-SSPEC-COMPILER
+        step("compile a fixture whose actor header lacks the colon")
+        val out = compile_source("missing_colon", MISSING_COLON_ACTOR)
+        step("the parser refuses the file instead of running it")
+        expect(out).to_contain("parse:")
+        expect(out).to_contain("expected Colon")
+        expect(out).to_contain("compile failed")

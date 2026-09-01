@@ -32,14 +32,10 @@
 //! `ring` is used because it is already a dependency of this crate (see
 //! `sha512.rs`); no new crate is introduced.
 //!
-//! **Deliberately NOT registered here:** `rt_sha256_finish_bytes` (the native
-//! form packs 32 raw, non-UTF-8 bytes into a runtime string; no interpreter
-//! `Value` reproduces that packing without either lossy corruption or a
-//! type divergence between lanes) and any one-shot `rt_sha256_hex` (it has no
-//! native counterpart, so a `.spl` caller would link on the interpreter and
-//! fail to link AOT). Only the five symbols whose observable behaviour is
-//! identical in both lanes are registered, so `.spl` code written against them
-//! behaves the same interpreted and compiled.
+//! `rt_sha256_finish_bytes` is registered here because the native provider now
+//! returns a typed byte array rather than packing arbitrary bytes into a runtime
+//! string. A one-shot `rt_sha256_hex` remains absent because it has no native
+//! counterpart. Every registered symbol therefore has a matching compiled ABI.
 
 use crate::error::CompileError;
 use crate::value::Value;
@@ -130,14 +126,25 @@ fn payload_bytes(v: &Value) -> Result<Vec<u8>, CompileError> {
 fn handle_of(args: &[Value], who: &str) -> Result<i64, CompileError> {
     match args.first() {
         Some(Value::Int(h)) => Ok(*h),
-        Some(Value::UInt { value, .. }) => Ok(*value as i64),
-        _ => Err(CompileError::runtime(format!("{}: missing hasher handle", who))),
+        Some(_) => Err(CompileError::runtime(format!("{who}: hasher handle must be i64"))),
+        None => Err(CompileError::runtime(format!("{who}: missing hasher handle"))),
     }
 }
 
+#[inline(always)]
+fn require_arity(args: &[Value], expected: usize, who: &str) -> Result<(), CompileError> {
+    if args.len() != expected {
+        return Err(CompileError::runtime(format!("{who}: expected {expected} arguments")));
+    }
+    Ok(())
+}
+
 /// `rt_sha256_new() -> i64`
-pub fn rt_sha256_new(_args: &[Value]) -> Result<Value, CompileError> {
-    let handle = SHA256_COUNTER.fetch_add(1, Ordering::SeqCst);
+pub fn rt_sha256_new(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 0, "rt_sha256_new")?;
+    let handle = SHA256_COUNTER
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| current.checked_add(1))
+        .map_err(|_| CompileError::runtime("rt_sha256_new: handle space exhausted"))?;
     SHA256_STATE.lock().unwrap().insert(handle, Context::new(&SHA256));
     Ok(Value::Int(handle))
 }
@@ -149,16 +156,14 @@ pub fn rt_sha256_new(_args: &[Value]) -> Result<Value, CompileError> {
 /// hashes only that prefix. A `len` longer than the payload is an error rather
 /// than a silent short hash.
 pub fn rt_sha256_write(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 3, "rt_sha256_write")?;
     let handle = handle_of(args, "rt_sha256_write")?;
     let payload = match args.get(1) {
         Some(v) => payload_bytes(v)?,
         None => return Err(CompileError::runtime("rt_sha256_write: missing data".to_string())),
     };
-    let limit = match args.get(2) {
-        Some(Value::Int(n)) if *n >= 0 => *n as usize,
-        Some(Value::UInt { value, .. }) => *value as usize,
-        _ => payload.len(),
-    };
+    let limit = usize::try_from(args[2].as_int()?)
+        .map_err(|_| CompileError::runtime("rt_sha256_write: len is outside usize range"))?;
     if limit > payload.len() {
         return Err(CompileError::runtime(format!(
             "rt_sha256_write: len {} exceeds payload length {}",
@@ -183,6 +188,7 @@ pub fn rt_sha256_write(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Consumes the handle, matching the native runtime's `map.remove`.
 pub fn rt_sha256_finish(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha256_finish")?;
     let handle = handle_of(args, "rt_sha256_finish")?;
     let ctx = SHA256_STATE.lock().unwrap().remove(&handle);
     match ctx {
@@ -194,8 +200,23 @@ pub fn rt_sha256_finish(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_sha256_finish_bytes(hasher: i64) -> [u8]` — exact 32-byte digest.
+pub fn rt_sha256_finish_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha256_finish_bytes")?;
+    let handle = handle_of(args, "rt_sha256_finish_bytes")?;
+    let ctx = SHA256_STATE.lock().unwrap().remove(&handle);
+    match ctx {
+        Some(c) => Ok(Value::byte_array(c.finish().as_ref().to_vec())),
+        None => Err(CompileError::runtime(format!(
+            "rt_sha256_finish_bytes: unknown hasher handle {}",
+            handle
+        ))),
+    }
+}
+
 /// `rt_sha256_reset(hasher: i64)`
 pub fn rt_sha256_reset(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha256_reset")?;
     let handle = handle_of(args, "rt_sha256_reset")?;
     let mut state = SHA256_STATE.lock().unwrap();
     match state.get_mut(&handle) {
@@ -212,6 +233,7 @@ pub fn rt_sha256_reset(args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_sha256_free(hasher: i64)` — idempotent.
 pub fn rt_sha256_free(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha256_free")?;
     let handle = handle_of(args, "rt_sha256_free")?;
     SHA256_STATE.lock().unwrap().remove(&handle);
     Ok(Value::Nil)
@@ -325,6 +347,34 @@ mod tests {
     fn overlong_len_errors() {
         let handle = new_handle();
         assert!(rt_sha256_write(&[Value::Int(handle), Value::text("abc".to_string()), Value::Int(9999)]).is_err());
+    }
+
+    /// ABI shape errors must fail before they can change or consume hasher state.
+    #[test]
+    fn malformed_arity_and_length_type_error() {
+        assert!(rt_sha256_new(&[Value::Int(1)]).is_err());
+
+        let handle = new_handle();
+        let payload = Value::text("abc".to_string());
+        assert!(rt_sha256_write(&[Value::Int(handle), payload.clone()]).is_err());
+        assert!(rt_sha256_write(&[Value::Int(handle), payload, Value::text("3".to_string()),]).is_err());
+        assert!(rt_sha256_finish(&[Value::Int(handle), Value::Nil]).is_err());
+        assert!(rt_sha256_finish_bytes(&[Value::Int(handle), Value::Nil]).is_err());
+        assert!(rt_sha256_reset(&[Value::Int(handle), Value::Nil]).is_err());
+        assert!(rt_sha256_free(&[Value::Int(handle), Value::Nil]).is_err());
+    }
+
+    /// Byte-result lifting must preserve all 32 digest bytes without text loss.
+    #[test]
+    fn finish_bytes_matches_published_vector() {
+        let handle = new_handle();
+        rt_sha256_write(&[Value::Int(handle), Value::text("abc".to_string()), Value::Int(3)]).unwrap();
+        let result = rt_sha256_finish_bytes(&[Value::Int(handle)]).unwrap();
+        let bytes = result.try_array_bytes().unwrap();
+        assert_eq!(
+            hex_of(&bytes),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     /// An unknown handle must error, not return a digest of nothing. Guards

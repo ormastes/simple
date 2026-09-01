@@ -60,6 +60,8 @@ struct NativeLinkConfig:
     libraries: [text]
     library_paths: [text]
     runtime_path: text       # Path to libsimple_compiler (empty = auto-detect)
+    target_triple: text = ""
+    linker_abi: text = ""
     pie: bool
     debug: bool
     verbose: bool
@@ -80,7 +82,9 @@ impl NativeLinkConfig:
             allow_duplicate_definitions: true,
             allow_cc_fallback: true,
             retained_symbols: [],
-            extra_flags: []
+            extra_flags: [],
+            target_triple: "",
+            linker_abi: ""
         )
 
 # ponytail: CrtFiles has ONE terminal declaration, in
@@ -131,12 +135,13 @@ fn linker_trace_enabled() -> bool:
     (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 fn hosted_native_link_os_supported(os: text) -> bool:
-    os == "linux" or os == "macos" or os == "darwin" or os == "windows" or os == "freebsd"
+    os == "linux" or os == "macos" or os == "darwin" or os == "windows" or
+        os == "windows-mingw" or os == "windows-msvc" or os == "freebsd"
 
 fn hosted_native_link_arch_supported(os: text, arch: text) -> bool:
     val x64 = arch == "x86_64" or arch == "amd64"
     val arm64 = arch == "aarch64" or arch == "arm64"
-    if os == "windows":
+    if os == "windows" or os == "windows-mingw" or os == "windows-msvc":
         return x64
     if os == "macos" or os == "darwin" or os == "freebsd":
         return x64 or arm64
@@ -152,6 +157,20 @@ fn hosted_native_link_unsupported_arch_error(os: text, arch: text) -> text:
         return "Windows ARM64 native linking unsupported: MSVC linker and CRT discovery are x64-only"
     "Native linking is unsupported on host architecture '" + arch + "' for OS '" + os + "'"
 
+fn native_linker_abi_for_target(target: text) -> text:
+    if target.ends_with("-pc-windows-gnu"): return "windows-gnu"
+    if target.ends_with("-pc-windows-msvc"): return "windows-msvc"
+    if target.ends_with("-apple-darwin"): return "darwin"
+    if target.ends_with("-linux-gnu") or target.ends_with("-unknown-freebsd"): return "elf"
+    ""
+
+fn native_effective_link_os(host: text, target: text, linker_abi: text) -> text:
+    if linker_abi == "windows-gnu" or target.ends_with("-pc-windows-gnu"):
+        return "windows-mingw"
+    if linker_abi == "windows-msvc" or target.ends_with("-pc-windows-msvc"):
+        return "windows-msvc"
+    host
+
 # ============================================================================
 # Native Linking
 # ============================================================================
@@ -163,7 +182,7 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
     if object_files.len() == 0:
         return Err("No object files to link")
 
-    val os = host_os()
+    val os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
     if trace:
         print "[LINKER] os={os}"
     if not hosted_native_link_os_supported(os):
@@ -183,7 +202,9 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
         return link_smf_bundle(smf_inputs, output, config)
 
     # Platform-specific linking
-    if os == "windows":
+    if os == "windows-mingw":
+        return _link_native_mingw(object_files, output, config)
+    if os == "windows-msvc" or os == "windows":
         return link_native_windows(object_files, output, config)
 
     # Unix-like: Linux, macOS, FreeBSD
@@ -261,32 +282,11 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-dynamic-linker")
         args.push(crt.dynamic_linker)
 
-    # Hardening flags (ELF-only — macOS ld64 doesn't recognize these)
-    if os != "macos" and os != "darwin":
-        args.push("--eh-frame-hdr")
-        args.push("--build-id")
-        args.push("--hash-style=gnu")
-        args.push("-z")
-        args.push("relro")
-        args.push("-z")
-        args.push("now")
-        if config.allow_duplicate_definitions:
-            for flag in unresolved_symbol_flags_for_unix_linker(os):
-                args.push(flag)
-
-    # Dead code elimination + deduplication (per-platform)
-    if os == "macos" or os == "darwin":
-        args.push("-dead_strip")
-        # Do not pass `-no_uuid`: current macOS dyld rejects executable Mach-O
-        # images with a missing LC_UUID load command before Stage 3 can run.
-    else:
-        args.push("--gc-sections")
-        # ICF: mold and lld support --icf=all, gold supports --icf=safe
-        val lt = linker_type.to_string()
-        if lt == "mold" or lt == "lld":
-            args.push("--icf=all")
-        elif lt == "gold":
-            args.push("--icf=safe")
+    for flag in native_direct_platform_flags(os, linker_type.to_string()):
+        args.push(flag)
+    if config.allow_duplicate_definitions:
+        for flag in unresolved_symbol_flags_for_unix_linker(os):
+            args.push(flag)
 
     # PIE
     if config.pie:
@@ -321,10 +321,16 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     var runtime_dir = config.runtime_path
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
+    var runtime_archives: [text] = []
     if runtime_dir != "" and runtime_dir != "none":
-        args.push("-L")
-        args.push(runtime_dir)
-        args.push("-lsimple_compiler")
+        runtime_archives = native_runtime_archive_inputs(runtime_dir)
+        if runtime_archives.is_empty():
+            args.push("-L")
+            args.push(runtime_dir)
+            args.push("-lsimple_compiler")
+        else:
+            for archive in runtime_archives:
+                args.push(archive)
         args.push("-rpath")
         args.push(runtime_dir)
 
@@ -362,7 +368,10 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("--no-as-needed")
 
     val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
-    for flag in native_all_gnu_support_args(object_files, os, brew_prefix):
+    var native_support_inputs = object_files
+    for archive in runtime_archives:
+        native_support_inputs.push(archive)
+    for flag in native_all_gnu_support_args(native_support_inputs, os, brew_prefix):
         args.push(flag)
 
     # Libraries from config
@@ -578,13 +587,30 @@ fn _cc_fallback_runtime_lib_args(config: NativeLinkConfig) -> [text]:
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir == "" or runtime_dir == "none":
         return []
-    var args: [text] = ["-L", runtime_dir]
-    if file_exists("{runtime_dir}/libsimple_compiler.a"):
-        args.push("-l:libsimple_compiler.a")
+    val archives = native_runtime_archive_inputs(runtime_dir)
+    var args: [text] = []
+    if not archives.is_empty():
+        for archive in archives:
+            args.push(archive)
     else:
+        args.push("-L")
+        args.push(runtime_dir)
         args.push("-lsimple_compiler")
         args.push("-Wl,-rpath,{runtime_dir}")
     args
+
+fn native_runtime_archive_inputs(runtime_dir: text) -> [text]:
+    if runtime_dir == "" or runtime_dir == "none":
+        return []
+    val names = native_runtime_archive_names(
+        file_exists("{runtime_dir}/libsimple_compiler.a"),
+        file_exists("{runtime_dir}/libsimple_compiler_backfill.a"),
+        file_exists("{runtime_dir}/libsimple_native_all.a")
+    )
+    var inputs: [text] = []
+    for name in names:
+        inputs.push(runtime_dir + "/" + name)
+    inputs
 
 fn cc_fallback_object_args(object_files: [text]) -> [text]:
     var args: [text] = []
@@ -611,6 +637,16 @@ fn cc_fallback_extra_flags(extra_flags: [text]) -> [text]:
 fn hosted_cross_cc_required(target: text, os: text, arch: text) -> bool:
     val plan = hosted_c_compiler_plan(target, os, arch)
     plan.requires_cross and plan.supported
+
+fn native_direct_platform_flags(os: text, linker_type: text) -> [text]:
+    if os == "linux" or os == "freebsd":
+        var flags = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu",
+            "-z", "relro", "-z", "now", "--gc-sections"]
+        if linker_type == "mold" or linker_type == "lld": flags.push("--icf=all")
+        elif linker_type == "gold": flags.push("--icf=safe")
+        return flags
+    if os == "macos" or os == "darwin": return ["-dead_strip"]
+    []
 
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # SimpleOS targets must NEVER reach this function. SimpleOS has no
@@ -667,7 +703,13 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("/usr/local/lib")
         for flag in ["-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2"]:
             args.push(flag)
-        for flag in native_all_gnu_support_args(object_files, os_name, brew_prefix):
+        val runtime_args = _cc_fallback_runtime_lib_args(config)
+        for flag in runtime_args:
+            args.push(flag)
+        var support_inputs = object_files
+        for runtime_arg in runtime_args:
+            support_inputs.push(runtime_arg)
+        for flag in native_all_gnu_support_args(support_inputs, os_name, brew_prefix):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
@@ -684,7 +726,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(obj)
         if not config.pie:
             args.push("-no-pie")
-        for flag in _cc_fallback_runtime_lib_args(config):
+        val runtime_args = _cc_fallback_runtime_lib_args(config)
+        for flag in runtime_args:
             args.push(flag)
         args.push("-lc")
         args.push("-lpthread")
@@ -692,7 +735,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-lm")
         args.push("-lSDL2")
         args.push("-Wl,--no-as-needed")
-        for flag in native_all_gnu_support_args(object_files, os_name, ""):
+        var support_inputs = object_files
+        for runtime_arg in runtime_args:
+            support_inputs.push(runtime_arg)
+        for flag in native_all_gnu_support_args(support_inputs, os_name, ""):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
@@ -716,12 +762,16 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for obj in object_files:
             args.push(obj)
-        for flag in _cc_fallback_runtime_lib_args(config):
+        val runtime_args = _cc_fallback_runtime_lib_args(config)
+        for flag in runtime_args:
             args.push(flag)
         args.push("-lc")
         args.push("-lpthread")
         args.push("-ldl")
-        for flag in native_all_gnu_support_args(object_files, os_name, ""):
+        var support_inputs = object_files
+        for runtime_arg in runtime_args:
+            support_inputs.push(runtime_arg)
+        for flag in native_all_gnu_support_args(support_inputs, os_name, ""):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)

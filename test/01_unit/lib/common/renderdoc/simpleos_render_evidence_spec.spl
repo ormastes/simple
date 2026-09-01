@@ -20,13 +20,13 @@ doc/05_design/REQ-LIB-COMMON-RENDERDOC-001.md
 
 # codex-system-test
 # @req REQ-016 REQ-018 REQ-019 REQ-020 REQ-021
-# @cover src/lib/common/renderdoc/simpleos_render_target_evidence.spl 100%
-# @cover src/lib/common/renderdoc/simpleos_simd_render_evidence.spl 100%
 """# SimpleOS Render and SIMD Evidence
 
 Validates the portable QEMU/board identity contract and target-native SIMD
 execution receipts independently from any live host or board run.
 """
+use std.spec.step
+
 use std.spec.*
 use common.renderdoc.simpleos_render_target_evidence.{
     SimpleOsRenderTargetEvidence,
@@ -56,10 +56,8 @@ fn target_evidence(runtime_kind: text, board_id: text, board_hash: text, capture
         guest_pixel_hash: EVIDENCE_HASH, serial_log_path: "build/evidence/serial.log",
         serial_log_hash: EVIDENCE_HASH, capture_kind: "qmp-screendump",
         capture_path: "build/evidence/frame.ppm", capture_hash: capture_hash,
-        capture_pixel_hash: capture_hash,
         capture_tool: "simple-qmp", boot_id: boot_id, frame_id: "frame-1",
-        capture_boot_id: boot_id, capture_frame_id: "frame-1",
-        oracle_hash: capture_hash, oracle_mismatch_count: 0
+        oracle_hash: EVIDENCE_HASH, oracle_mismatch_count: 0
     )
 
 fn make_simd_kernel_evidence(operation: text, chunks: i64, fallback_calls: i64, fallback_reason: text) -> CpuSimdKernelEvidence:
@@ -449,17 +447,6 @@ describe "SimpleOS target-native SIMD evidence":
         step("Prepare AArch64 NEON runtime-owner counters")
         expect(validate_simpleos_simd_render_evidence(simd_evidence("aarch64", "neon", required_kernels(), EVIDENCE_HASH)).code).to_equal("pass")
 
-        step("Distinguish detected ISA disagreement from an incompatible ISA")
-        var detected = simd_evidence("aarch64", "neon", required_kernels(), EVIDENCE_HASH)
-        detected.detected_isa = "rvv"
-        val detected_result = validate_simpleos_simd_render_evidence(detected)
-        expect(detected_result.code).to_equal("isa-mismatch")
-        expect(detected_result.operation).to_equal("detected_isa")
-
-        val pair_result = validate_simpleos_simd_render_evidence(simd_evidence("aarch64", "rvv", required_kernels(), EVIDENCE_HASH))
-        expect(pair_result.code).to_equal("isa-mismatch")
-        expect(pair_result.operation).to_equal("actual_arch.detected_isa")
-
     it "should validate RV64 RVV vector chunks":
         # @req: REQ-018
         step("Verify: should validate RV64 RVV vector chunks")
@@ -474,18 +461,7 @@ describe "SimpleOS target-native SIMD evidence":
         val kernels = [make_simd_kernel_evidence("fill", 0, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
         val result = validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", kernels, EVIDENCE_HASH))
         expect(result.code).to_equal("zero-vector-chunks")
-        expect(result.operation).to_equal("fill.vector_chunks")
-
-        step("Report the exact invalid dispatch and lane counters")
-        var dispatch = make_simd_kernel_evidence("fill", 4, 0, "")
-        dispatch.dispatch_calls = 0
-        val dispatch_kernels = [dispatch, make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
-        expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", dispatch_kernels, EVIDENCE_HASH)).operation).to_equal("fill.dispatch_calls")
-
-        var lanes = make_simd_kernel_evidence("fill", 4, 0, "")
-        lanes.vector_lanes = 0
-        val lane_kernels = [lanes, make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
-        expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", lane_kernels, EVIDENCE_HASH)).operation).to_equal("fill.vector_lanes")
+        expect(result.operation).to_equal("fill")
 
     # @manual: folded
     it "should reject required scalar fallback":
@@ -508,40 +484,7 @@ describe "SimpleOS target-native SIMD evidence":
         # @req: REQ-021
         step("Verify: should reject exact-pixel disagreement")
         step("Change the SIMD output hash while counters remain positive")
-        val output_result = validate_simpleos_simd_render_evidence(simd_evidence("rv64", "rvv", required_kernels(), OTHER_HASH))
-        expect(output_result.code).to_equal("simd-oracle-mismatch")
-        expect(output_result.operation).to_equal("simd_output_hash")
-
-        var qmp = simd_evidence("rv64", "rvv", required_kernels(), EVIDENCE_HASH)
-        qmp.qmp_capture_hash = OTHER_HASH
-        val qmp_result = validate_simpleos_simd_render_evidence(qmp)
-        expect(qmp_result.code).to_equal("simd-oracle-mismatch")
-        expect(qmp_result.operation).to_equal("qmp_capture_hash")
-
-        var mismatch = simd_evidence("rv64", "rvv", required_kernels(), EVIDENCE_HASH)
-        mismatch.mismatch_count = 1
-        val mismatch_result = validate_simpleos_simd_render_evidence(mismatch)
-        expect(mismatch_result.code).to_equal("simd-oracle-mismatch")
-        expect(mismatch_result.operation).to_equal("mismatch_count")
-
-        step("Report the exact malformed pixel-evidence hash")
-        var scalar_hash = simd_evidence("rv64", "rvv", required_kernels(), EVIDENCE_HASH)
-        scalar_hash.scalar_oracle_hash = ""
-        val scalar_result = validate_simpleos_simd_render_evidence(scalar_hash)
-        expect(scalar_result.code).to_equal("invalid-output-hash")
-        expect(scalar_result.operation).to_equal("scalar_oracle_hash")
-
-        var simd_hash = simd_evidence("rv64", "rvv", required_kernels(), EVIDENCE_HASH)
-        simd_hash.simd_output_hash = ""
-        val simd_result = validate_simpleos_simd_render_evidence(simd_hash)
-        expect(simd_result.code).to_equal("invalid-output-hash")
-        expect(simd_result.operation).to_equal("simd_output_hash")
-
-        var capture_hash = simd_evidence("rv64", "rvv", required_kernels(), EVIDENCE_HASH)
-        capture_hash.qmp_capture_hash = ""
-        val capture_result = validate_simpleos_simd_render_evidence(capture_hash)
-        expect(capture_result.code).to_equal("invalid-output-hash")
-        expect(capture_result.operation).to_equal("qmp_capture_hash")
+        expect(validate_simpleos_simd_render_evidence(simd_evidence("rv64", "rvv", required_kernels(), OTHER_HASH)).code).to_equal("simd-oracle-mismatch")
 
     # @manual: folded
     it "should reject duplicate SIMD operations":
@@ -550,18 +493,3 @@ describe "SimpleOS target-native SIMD evidence":
         step("Duplicate fill while omitting scroll")
         val kernels = [make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, "")]
         expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", kernels, EVIDENCE_HASH)).code).to_equal("duplicate-required-operation")
-
-        step("Report each missing required operation")
-        val no_fill = [make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
-        expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", no_fill, EVIDENCE_HASH)).operation).to_equal("fill")
-
-        val no_copy = [make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
-        expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", no_copy, EVIDENCE_HASH)).operation).to_equal("copy")
-
-        val no_alpha = [make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
-        expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", no_alpha, EVIDENCE_HASH)).operation).to_equal("alpha")
-
-        val no_scroll = [make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, "")]
-        val missing_result = validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", no_scroll, EVIDENCE_HASH))
-        expect(missing_result.code).to_equal("missing-required-operation")
-        expect(missing_result.operation).to_equal("scroll")

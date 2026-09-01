@@ -2,18 +2,20 @@
 
 use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding, LetBind};
 use super::super::interpreter_helpers::{
-    bind_pattern_value, handle_method_call_with_self_update, restore_pattern_scope, save_pattern_scope,
+    bind_pattern_value, handle_method_call_with_self_update, range_object_values, restore_pattern_scope,
+    save_pattern_scope,
 };
-use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
+use super::bdd::{BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name,
-    pattern_matches, record_decision_coverage_here, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
-    EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS,
-    MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
+    evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name, pattern_matches,
+    record_decision_coverage_here, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS,
+    GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
+use crate::interpreter_unit::{register_standalone_unit_locals, register_unit_family_locals};
 use crate::value::*;
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node};
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, WhileStmt};
 use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -174,7 +176,11 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         }
         Value::Object { class, fields } => {
             if class == "Range" || class == BUILTIN_RANGE {
-                return Ok(crate::interpreter::expand_range_fields(fields));
+                let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
+                let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
+                let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
+                let step = fields.get("step").and_then(|v| v.as_int().ok()).unwrap_or(1);
+                return Ok(range_object_values(start, end, inclusive, step));
             }
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
@@ -194,6 +200,113 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
             ))
         }
     }
+}
+
+enum WhileConditionDecision {
+    Stop,
+    Run,
+    RunWithBindings(HashMap<String, Value>),
+}
+
+/// Evaluate one block-closure `while` condition exactly once and preserve the
+/// pattern-binding semantics of the canonical statement executor.
+fn evaluate_block_while_condition(
+    while_stmt: &WhileStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<WhileConditionDecision, CompileError> {
+    let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
+    let Some(pattern) = &while_stmt.let_pattern else {
+        return Ok(if is_condition_present(&while_stmt.condition, &value) {
+            WhileConditionDecision::Run
+        } else {
+            WhileConditionDecision::Stop
+        });
+    };
+
+    match optional_let_binding(pattern, &value) {
+        LetBind::Skip => Ok(WhileConditionDecision::Stop),
+        LetBind::Bind(name, inner) => {
+            let mut bindings = HashMap::with_capacity(1);
+            bindings.insert(name, inner);
+            Ok(WhileConditionDecision::RunWithBindings(bindings))
+        }
+        LetBind::NotApplicable => {
+            let mut bindings = HashMap::new();
+            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                Ok(WhileConditionDecision::RunWithBindings(bindings))
+            } else {
+                Ok(WhileConditionDecision::Stop)
+            }
+        }
+    }
+}
+
+/// Execute a `while` in a BDD/lambda block. Pattern names are block-local for
+/// the lifetime of the loop and are restored on every exit, including errors.
+fn exec_block_while(
+    while_stmt: &WhileStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    let mut last_value = None;
+    loop {
+        if crate::interpreter::is_timeout_exceeded() {
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
+        }
+
+        // Ordinary boolean loops take the `None` arm and allocate nothing.
+        // Pattern loops snapshot only the source-sized set of names actually
+        // bound by this successful match.
+        let iteration_scope =
+            match evaluate_block_while_condition(while_stmt, env, functions, classes, enums, impl_methods)? {
+                WhileConditionDecision::Stop => break,
+                WhileConditionDecision::Run => None,
+                WhileConditionDecision::RunWithBindings(bindings) => {
+                    let mut saved = Vec::with_capacity(bindings.len());
+                    for (name, value) in bindings {
+                        saved.push((name.clone(), env.get(&name).cloned()));
+                        env.enter_block_local(name.clone());
+                        env.insert(name, value);
+                    }
+                    Some(saved)
+                }
+            };
+
+        let body_result = exec_block_closure_mut(
+            &while_stmt.body.statements,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        );
+        if let Some(saved) = iteration_scope {
+            // The pattern is scoped to this iteration's body. Restore before
+            // deciding continue/break/error so the next condition and every
+            // outward exit observe the pre-binding environment.
+            crate::interpreter::restore_block_scope_shadows(saved, env);
+        }
+
+        match body_result {
+            Ok(value) => last_value = Some(value),
+            Err(CompileError::LoopBreak(value)) => {
+                last_value = Some(value.unwrap_or(Value::Nil));
+                break;
+            }
+            Err(CompileError::LoopContinue) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(last_value)
 }
 
 /// Execute a block closure (BDD DSL colon-block) against a fresh scope.
@@ -244,6 +357,9 @@ pub(super) fn exec_block_closure_into(
     }
 
     let mut local_env = out_env;
+    // Advice declared by an `on pc{...}` statement in this block is scoped to
+    // the block, like the const/immutable name sets this executor restores.
+    let _aop_scope = super::core::aop_runtime::AdviceScope::enter();
     let mut last_value = Value::Nil;
 
     for node in nodes {
@@ -364,6 +480,7 @@ pub(super) fn exec_block_closure_into(
 
                         BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().push(vec![]));
                         BDD_AFTER_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+                        BDD_AFTER_ALL.with(|cell| cell.borrow_mut().push(vec![]));
 
                         if let Some(ctx_blocks) = ctx_def_blocks {
                             for ctx_block in ctx_blocks {
@@ -379,6 +496,15 @@ pub(super) fn exec_block_closure_into(
                             enums,
                             impl_methods,
                         )?;
+
+                        // Drain this group's `after_all` hooks now that its body
+                        // (and every example in it) has finished, in
+                        // registration order. Mirrors the same drain in the
+                        // call-form `describe`/`context` handler in bdd.rs.
+                        let after_all_hooks = BDD_AFTER_ALL.with(|cell| cell.borrow_mut().pop().unwrap_or_default());
+                        for hook in after_all_hooks {
+                            exec_block_value(hook, &mut local_env, functions, classes, enums, impl_methods)?;
+                        }
 
                         BDD_BEFORE_EACH.with(|cell| {
                             cell.borrow_mut().pop();
@@ -403,9 +529,15 @@ pub(super) fn exec_block_closure_into(
                         CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(context_obj));
                         CONTEXT_VAR_NAME.with(|cell| *cell.borrow_mut() = var_name.clone());
 
-                        last_value = exec_block_closure(
+                        // MUST run in the enclosing frame (mirror of the
+                        // `Node::If` arm below). `exec_block_closure` executes
+                        // in a COPY, so `res = double(21)` inside `context obj:`
+                        // was discarded and `res` stayed at its prior value —
+                        // test/feature/usage/classes_spec.spl "dispatches method
+                        // to context object".
+                        last_value = exec_block_closure_mut(
                             &ctx_stmt.body.statements,
-                            &local_env,
+                            &mut local_env,
                             functions,
                             classes,
                             enums,
@@ -503,10 +635,7 @@ pub(super) fn exec_block_closure_into(
                     // `exec_if` — so branch decisions inside a function body
                     // previously recorded NOTHING. See
                     // doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md.
-                    record_decision_coverage_here(if_stmt.span.line,
-                        if_stmt.span.column,
-                        decision_result,
-                    );
+                    record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
                     decision_result
                 } {
                     last_value = exec_block_closure_mut(
@@ -572,7 +701,8 @@ pub(super) fn exec_block_closure_into(
                             // COVERAGE: mirror `interpreter_control::exec_if`'s elif
                             // handling (offset the line by `elif_idx` so each elif
                             // gets a distinct decision id, same scheme as there).
-                            record_decision_coverage_here(if_stmt.span.line + elif_idx,
+                            record_decision_coverage_here(
+                                if_stmt.span.line + elif_idx,
                                 if_stmt.span.column,
                                 elif_decision,
                             );
@@ -725,14 +855,30 @@ pub(super) fn exec_block_closure_into(
                 functions.insert(f.name.clone(), Arc::clone(&arc_f));
 
                 // Also add to local_env as a Function value with captured environment
-                local_env.insert(
-                    f.name.clone(),
-                    Value::Function {
-                        name: f.name.clone(),
-                        def: arc_f,
-                        captured_env: Arc::new(local_env.clone()), // Capture current scope
-                    },
-                );
+                let plain = Value::Function {
+                    name: f.name.clone(),
+                    def: arc_f,
+                    captured_env: Arc::new(local_env.clone()), // Capture current scope
+                };
+                local_env.insert(f.name.clone(), plain.clone());
+                // A user-defined (non-directive) decorator rebinds the name to
+                // `dec(original)`.
+                if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                    f,
+                    plain,
+                    false,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    // Keep the plain definition in `functions` so the original
+                    // body can still recurse; the sentinel makes `evaluate_call`
+                    // prefer the wrapper for calls from outside it.
+                    local_env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
+                    local_env.insert(f.name.clone(), decorated);
+                }
                 last_value = Value::Nil;
             }
             Node::Class(class_def) => {
@@ -1087,45 +1233,24 @@ pub(super) fn exec_block_closure_into(
                 }
                 last_value = Value::Nil;
             }
-            Node::While(while_stmt) => loop {
-                if crate::interpreter::is_timeout_exceeded() {
-                    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
-                    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
-                }
-                let cond = evaluate_expr(
-                    &while_stmt.condition,
-                    &mut local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
-                if !is_condition_present(&while_stmt.condition, &cond) {
-                    break;
-                }
-                match exec_block_closure_mut(
-                    &while_stmt.body.statements,
-                    &mut local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                ) {
-                    Ok(val) => last_value = val,
-                    Err(CompileError::LoopBreak(val)) => {
-                        last_value = val.unwrap_or(Value::Nil);
-                        break;
+            Node::While(while_stmt) => {
+                match exec_block_while(while_stmt, &mut local_env, functions, classes, enums, impl_methods) {
+                    Ok(Some(value)) => last_value = value,
+                    Ok(None) => {}
+                    Err(error) => {
+                        CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
+                        IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
+                        return Err(error);
                     }
-                    Err(CompileError::LoopContinue) => continue,
-                    Err(e) => return Err(e),
                 }
-            },
+            }
             Node::Loop(loop_stmt) => loop {
                 if crate::interpreter::is_timeout_exceeded() {
                     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
                     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+                    return Err(CompileError::TimeoutExceeded {
+                        timeout_secs: crate::interpreter::timeout_limit_secs(),
+                    });
                 }
                 match exec_block_closure_mut(
                     &loop_stmt.body.statements,
@@ -1213,6 +1338,32 @@ pub(super) fn exec_block_closure_into(
                 }
                 last_value = Value::Nil;
             }
+            // A `unit` / `unit family` declared inside a block-closure body
+            // (a lambda, an `fn` body, or a `describe`/`it` example) used to
+            // fall through to the `_ =>` catch-all below and register nothing,
+            // so its suffixes were invisible and unit literals silently fell
+            // back to the preloaded on-disk unit tree — which is why
+            // `5_km` after `unit length(base: f64): m = 1.0` never got the
+            // kilo multiplier. Only the top-level statement path
+            // (`interpreter_eval.rs`) ever registered them.
+            Node::Unit(u) => {
+                register_standalone_unit_locals(u);
+                local_env.insert(u.name.clone(), Value::Nil);
+                last_value = Value::Nil;
+            }
+            Node::UnitFamily(uf) => {
+                register_unit_family_locals(uf);
+                local_env.insert(uf.name.clone(), Value::Nil);
+                last_value = Value::Nil;
+            }
+            // `on pc{...} use advice <kind>` inside a block (an `it`/`describe`
+            // body, a function body). Registers the advice with the runtime
+            // registry; without this the declaration was swallowed by the
+            // catch-all below and no advice ever ran.
+            Node::AopAdvice(advice) => {
+                super::core::aop_runtime::register_advice(advice, functions)?;
+                last_value = Value::Nil;
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -1249,6 +1400,9 @@ fn exec_block_closure_mut_inner(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Advice declared by an `on pc{...}` statement in this block is scoped to
+    // the block, like the const/immutable name sets this executor restores.
+    let _aop_scope = super::core::aop_runtime::AdviceScope::enter();
     let mut last_value = Value::Nil;
 
     for node in nodes {
@@ -1375,10 +1529,7 @@ fn exec_block_closure_mut_inner(
                     // COVERAGE: mirror `interpreter_control::exec_if`. This is the
                     // `exec_block_closure_into` twin of the `exec_block_closure_mut`
                     // `Node::If` handling above — same previously-missing wiring.
-                    record_decision_coverage_here(if_stmt.span.line,
-                        if_stmt.span.column,
-                        decision_result,
-                    );
+                    record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
                     decision_result
                 } {
                     last_value = exec_block_closure_mut(
@@ -1440,7 +1591,8 @@ fn exec_block_closure_mut_inner(
                         } else if {
                             let elif_val = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
                             let elif_decision = is_condition_present(cond, &elif_val);
-                            record_decision_coverage_here(if_stmt.span.line + elif_idx,
+                            record_decision_coverage_here(
+                                if_stmt.span.line + elif_idx,
                                 if_stmt.span.column,
                                 elif_decision,
                             );
@@ -1793,51 +1945,42 @@ fn exec_block_closure_mut_inner(
                 functions.insert(f.name.clone(), Arc::clone(&arc_f));
 
                 // Also add to local_env as a Function value with captured environment
-                local_env.insert(
-                    f.name.clone(),
-                    Value::Function {
-                        name: f.name.clone(),
-                        def: arc_f,
-                        captured_env: Arc::new(local_env.clone()), // Capture current scope
-                    },
-                );
+                let plain = Value::Function {
+                    name: f.name.clone(),
+                    def: arc_f,
+                    captured_env: Arc::new(local_env.clone()), // Capture current scope
+                };
+                local_env.insert(f.name.clone(), plain.clone());
+                // A user-defined (non-directive) decorator rebinds the name to
+                // `dec(original)`.
+                if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                    f,
+                    plain,
+                    false,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    // Keep the plain definition in `functions` so the original
+                    // body can still recurse; the sentinel makes `evaluate_call`
+                    // prefer the wrapper for calls from outside it.
+                    local_env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
+                    local_env.insert(f.name.clone(), decorated);
+                }
                 last_value = Value::Nil;
             }
-            Node::While(while_stmt) => loop {
-                if crate::interpreter::is_timeout_exceeded() {
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            Node::While(while_stmt) => {
+                if let Some(value) = exec_block_while(while_stmt, local_env, functions, classes, enums, impl_methods)? {
+                    last_value = value;
                 }
-                let cond = evaluate_expr(
-                    &while_stmt.condition,
-                    local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
-                if !is_condition_present(&while_stmt.condition, &cond) {
-                    break;
-                }
-                match exec_block_closure_mut(
-                    &while_stmt.body.statements,
-                    local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                ) {
-                    Ok(val) => last_value = val,
-                    Err(CompileError::LoopBreak(val)) => {
-                        last_value = val.unwrap_or(Value::Nil);
-                        break;
-                    }
-                    Err(CompileError::LoopContinue) => continue,
-                    Err(e) => return Err(e),
-                }
-            },
+            }
             Node::Loop(loop_stmt) => loop {
                 if crate::interpreter::is_timeout_exceeded() {
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+                    return Err(CompileError::TimeoutExceeded {
+                        timeout_secs: crate::interpreter::timeout_limit_secs(),
+                    });
                 }
                 match exec_block_closure_mut(
                     &loop_stmt.body.statements,
@@ -1884,11 +2027,43 @@ fn exec_block_closure_mut_inner(
                 // Same fix as the `Node::Assert` arm in `exec_block_closure_mut`
                 // above: without this arm a bare `assert <cond>` nested inside an
                 // if/match/loop body was silently inert.
-                let condition_value =
-                    evaluate_expr(&assert_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
+                let condition_value = evaluate_expr(
+                    &assert_stmt.condition,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
                 if !is_condition_present(&assert_stmt.condition, &condition_value) {
                     return Err(assert_stmt_failure(assert_stmt, &condition_value));
                 }
+                last_value = Value::Nil;
+            }
+            // A `unit` / `unit family` declared inside a block-closure body
+            // (a lambda, an `fn` body, or a `describe`/`it` example) used to
+            // fall through to the `_ =>` catch-all below and register nothing,
+            // so its suffixes were invisible and unit literals silently fell
+            // back to the preloaded on-disk unit tree — which is why
+            // `5_km` after `unit length(base: f64): m = 1.0` never got the
+            // kilo multiplier. Only the top-level statement path
+            // (`interpreter_eval.rs`) ever registered them.
+            Node::Unit(u) => {
+                register_standalone_unit_locals(u);
+                local_env.insert(u.name.clone(), Value::Nil);
+                last_value = Value::Nil;
+            }
+            Node::UnitFamily(uf) => {
+                register_unit_family_locals(uf);
+                local_env.insert(uf.name.clone(), Value::Nil);
+                last_value = Value::Nil;
+            }
+            // `on pc{...} use advice <kind>` inside a block (an `it`/`describe`
+            // body, a function body). Registers the advice with the runtime
+            // registry; without this the declaration was swallowed by the
+            // catch-all below and no advice ever ran.
+            Node::AopAdvice(advice) => {
+                super::core::aop_runtime::register_advice(advice, functions)?;
                 last_value = Value::Nil;
             }
             _ => {
@@ -2091,8 +2266,8 @@ mod tests {
     /// The message form must fail too, and must carry the custom message.
     #[test]
     fn false_bare_assert_with_message_fails_block_closure() {
-        let err = run_probe("fn probe():\n    assert 1 == 2, \"one is not two\"\n")
-            .expect_err("false assert must fail");
+        let err =
+            run_probe("fn probe():\n    assert 1 == 2, \"one is not two\"\n").expect_err("false assert must fail");
         let text = err.to_string();
         assert!(text.contains("assertion failed"), "unexpected error text: {text}");
         assert!(text.contains("one is not two"), "custom message dropped: {text}");
@@ -2102,8 +2277,8 @@ mod tests {
     /// `exec_block_closure_into`; that executor needs the same arm.
     #[test]
     fn false_bare_assert_nested_in_if_fails_block_closure() {
-        let err = run_probe("fn probe():\n    if true:\n        assert false\n")
-            .expect_err("false nested assert must fail");
+        let err =
+            run_probe("fn probe():\n    if true:\n        assert false\n").expect_err("false nested assert must fail");
         assert!(
             err.to_string().contains("assertion failed"),
             "unexpected error text: {err}"

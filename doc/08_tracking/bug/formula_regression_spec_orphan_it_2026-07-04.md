@@ -2,8 +2,7 @@
 
 **Date:** 2026-07-04
 **Severity:** medium
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** open
 
 ## Symptom
 

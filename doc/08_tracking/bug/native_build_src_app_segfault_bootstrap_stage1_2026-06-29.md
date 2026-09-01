@@ -1,8 +1,5 @@
 # Bug: seed `native-build` of `src/app` segfaults — blocks bootstrap Stage 1
 
-Status: DUPLICATE of bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
-
 **Date:** 2026-06-29
 **Area:** native-build / bootstrap (seed compiler AOT path)
 **Severity:** high (blocks `bin/simple build bootstrap`, i.e. self-hosted redeploy)
@@ -63,20 +60,3 @@ Capture the core / run under a debug seed to localize the segfault in the
 native-build pipeline (likely codegen/linker stage given `--backend=llvm-lib`).
 Until fixed, binary-level verification of self-hosted compiler changes must use
 an alternate path (e.g. Rust-seed cargo build for resolver parity).
-
-## Superseded — see `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
-
-This doc's SIGSEGV (Linux x86_64 seed, 2026-06-29) is a distinct earlier
-symptom from a different platform/seed than the actively-tracked macOS aarch64
-Stage-1 wall. All current diagnosis and fixes (SIGSEGV elimination via
-`llvm_build_call2` Name NUL-termination, and — as of 2026-07-10 — elimination
-of the two "Function return type does not match operand type of return inst"
-IR-verifier errors via named `Ret`-case fixes in `llvm_lib_translate.spl`) are
-tracked in `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`.
-As of 2026-07-10 (emission-wall session), Stage 1 is SIGSEGV-free,
-IR-verification-clean, and object-file emission now **succeeds** (fixed a
-triple-unaware `Host` CPU-string leak in `llvm_target.spl` and an ELF-only
-magic check in `linker_wrapper_helpers.spl` that rejected valid Mach-O
-objects on this aarch64 Mac host). Stage 1 still fails overall on a new,
-unrelated frontend wall (`semantic: method 'replace' not found on value of
-type str in nested call context`) — see that doc for the current state.

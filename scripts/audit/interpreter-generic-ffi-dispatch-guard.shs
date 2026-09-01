@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+# The removed interpreter extern lane erased every ABI into u64, converted nil
+# to zero, and called providerless call_ffi_0..4 trampolines.  It was private
+# and unused.  Keep it deleted; supported foreign calls must use compiler-owned
+# typed SFFI contracts rather than resurrecting a generic integer dispatcher.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+legacy="$root/src/app/interpreter/ffi/extern.spl"
+bridge="$root/src/app/interpreter/ffi/bridge.spl"
+init="$root/src/app/interpreter/ffi/__init__.spl"
+
+[ ! -e "$legacy" ]
+
+if rg -n --glob '*.spl' --glob '!**/vendor/**' \
+    '\bcall_ffi_[0-9]+\b|Simple ABI: all args passed as u64|marshal_arg\(' \
+    "$root/src/app/interpreter" >/dev/null; then
+    echo 'generic all-u64 interpreter FFI dispatcher returned' >&2
+    exit 1
+fi
+
+if rg -n 'from extern import|import \.extern|load_library|resolve_symbol|ExternLib' \
+    "$bridge" "$init" >/dev/null; then
+    echo 'interpreter bridge still exposes the removed generic dynload lane' >&2
+    exit 1
+fi
+
+rg -q '^fn call_native\(' "$bridge"
+rg -q '^fn register_native\(' "$bridge"
+
+echo 'interpreter generic FFI dispatch: PASS (providerless all-u64 lane absent; typed native registry retained)'

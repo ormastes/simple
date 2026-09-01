@@ -1,18 +1,6 @@
 # Complete the GPU layout semantic/device boundary
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
-
-**2026-08-17 (lane w02/s6a) — stale file pointer, and NOT a silent-wrong-result
-bug.** The worklist row for this doc cites
-`src/lib/gc_async_mut/gpu/browser_engine/layout_paint.spl` as the subject file.
-That pointer is stale: `layout_paint.spl` is now a **24-line ARGB opacity
-helper** (`_apply_opacity` only, zero occurrences of "gpu"/"GPU") after its
-dead `_paint_box` was removed on 2026-08-17. The real GPU-layout boundary work
-lives under `gpu/browser_engine/gpu_web/layout/`. This row is enhancement-shaped
-— remaining item 1 is explicitly blocked on a complete Stage4 binary — so it is
-correctly classified DB, but it does not belong in a silently-wrong-results
-sweep and no reproduction was attempted for it here.
+Status: OPEN — concrete boundary and bounded device slices implemented
 
 The layout framework must not publish `hybrid_vector_gpu` from policy or
 oracle copying.

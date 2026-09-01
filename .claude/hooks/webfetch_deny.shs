@@ -1,0 +1,35 @@
+#!/bin/sh
+# webfetch_deny.shs — PreToolUse(WebFetch) BLOCKER. FAIL-CLOSED.
+#
+# Every WebFetch call is denied and redirected to the repo's own
+# simple_ctx_fetch_and_index (Simple http client, size-capped, no JS) followed
+# by simple_ctx_search. The URL is echoed back (sanitized) so the caller can
+# retry with the right tool. Unreadable input still denies.
+#
+# Selftest: sh .claude/hooks/webfetch_deny.shs --selftest
+
+set -u
+HOOK_DIR=$(dirname "$0")
+. "$HOOK_DIR/ctx_common.shs"
+
+ctx_decide() {
+    url=$1
+    where="the requested URL"
+    [ -z "$url" ] || where="$url"
+    ctx_emit_deny "WebFetch is blocked by .claude/hooks/webfetch_deny.shs. Use simple-mcp: simple_ctx_fetch_and_index(url: $where, source: <label>) then simple_ctx_search(queries: [...], source: <label>). Raw HTML never enters the transcript."
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    fail=0
+    out=$(ctx_decide "https://example.org/a")
+    case "$out" in *'"permissionDecision":"deny"'*https://example.org/a*) ;; *) echo "selftest FAIL: url not denied/echoed"; fail=1 ;; esac
+    out=$(ctx_decide "")
+    case "$out" in *'"permissionDecision":"deny"'*) ;; *) echo "selftest FAIL: empty input must deny"; fail=1 ;; esac
+    [ "$fail" -eq 0 ] && echo "PASS — webfetch_deny selftest: 2 denied"
+    exit "$fail"
+fi
+
+ctx_read_input
+url=$(ctx_json_str url)
+ctx_decide "$url"
+exit 0

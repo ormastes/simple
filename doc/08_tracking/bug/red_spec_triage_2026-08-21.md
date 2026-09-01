@@ -140,3 +140,23 @@ resolver, and is left RED and unfixed here.
 
 Left untouched by this update: the raw-asm parsing item in the handoff, which
 is a genuine seed parser defect as recorded.
+
+## 2026-08-27 — sspec modernization batch resid4_bab: pre-existing RED additions
+
+Proven pre-existing at HEAD via in-place `git show HEAD:<spec>` restore
+(byte-identical) + rerun:
+
+- `test/01_unit/compiler/native/build_native_min_spec.spl` — outcome=ERROR,
+  executed=0 (`SPEC FILE VERDICT: ... outcome=ERROR declared>=2 executed=0`).
+  The spec's `use linker.*` / `use driver.*` do not resolve to any module at
+  these bare names (no top-level `linker`/`driver` module exists), so the file
+  errors before any scenario runs. Left RED; sspec score remains 49 with
+  SSDOC-ORA-001/ORA-002 blockers (scenarios only compare locally constructed
+  literals). Fixing requires rewriting the imports to real module paths and
+  adding executed oracles.
+
+- `test/01_unit/compiler/r2_probe_fail_spec.spl` — RED **by design** at HEAD
+  (byte-identical to HEAD): it is a deliberate fail-probe (`expect(1).to_equal(2)`)
+  used to prove the runner reports RED. `Results: 1 total, 0 passed, 1 failed`.
+  Left RED intentionally; sspec score 49 is expected for a probe fixture and it
+  should be excluded from modernization batches (or the census should tag it).

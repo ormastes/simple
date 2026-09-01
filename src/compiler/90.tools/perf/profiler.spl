@@ -37,7 +37,7 @@ class Profiler:
     static fn create() -> Profiler:
         Profiler(
             counters: {},
-            start_time: rt_time_monotonic_ns(),
+            start_time: _profiler_monotonic_ns_raw(),
             enabled: true
         )
 
@@ -50,13 +50,13 @@ class Profiler:
     me start_region(name: text) -> i64:
         if not self.enabled:
             return 0
-        rt_time_monotonic_ns()
+        _profiler_monotonic_ns_raw()
 
     me end_region(name: text, start_ns: i64):
         if not self.enabled:
             return
 
-        val elapsed = rt_time_monotonic_ns() - start_ns
+        val elapsed = _profiler_monotonic_ns_raw() - start_ns
 
         # Get or create counter
         if not self.counters.has(name):
@@ -88,7 +88,7 @@ class Profiler:
     fn report() -> text:
         var lines = ["Performance Profile Report", "=" * 60, ""]
 
-        val total_time = rt_time_monotonic_ns() - self.start_time
+        val total_time = _profiler_monotonic_ns_raw() - self.start_time
         lines.push("Total time: {total_time / 1000000} ms")
         lines.push("")
 
@@ -119,7 +119,7 @@ class Profiler:
             stats_list.push(counter.to_dict())
 
         json.stringify({
-            "total_time_ns": rt_time_monotonic_ns() - self.start_time,
+            "total_time_ns": _profiler_monotonic_ns_raw() - self.start_time,
             "regions": stats_list
         })
 
@@ -180,10 +180,10 @@ fn benchmark(name: text, iterations: i64, f: fn() -> ()):
     for i in 0..warmup:
         f()
 
-    val start = rt_time_monotonic_ns()
+    val start = _profiler_monotonic_ns_raw()
     for i in 0..iterations:
         f()
-    val elapsed = rt_time_monotonic_ns() - start
+    val elapsed = _profiler_monotonic_ns_raw() - start
 
     val avg_ns = elapsed / iterations
     val avg_us = avg_ns / 1000
@@ -194,4 +194,10 @@ fn benchmark(name: text, iterations: i64, f: fn() -> ()):
     print "  Throughput: {1000000000 / avg_ns} ops/sec"
 
 # Export SFFI hooks
+@unsafe(reason: "raw monotonic clock; provider is unsigned and unadmitted", capabilities: [ffi])
 extern fn rt_time_monotonic_ns() -> i64
+
+@always_inline
+fn _profiler_monotonic_ns_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_monotonic_ns()

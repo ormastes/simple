@@ -103,18 +103,68 @@ jobs:
           cargo build --profile bootstrap -p simple-native-all --features driver-compat,llvm
           cargo build --profile bootstrap -p simple-compiler-backfill
 
+      # Context-pack reduction gate.
+      #
+      # Wired HERE, not in repo-hygiene.yml, because this guard EXECUTES the
+      # packer and so needs a runnable bin/simple. The hygiene lane is a
+      # source-text lane with no built binary: the guard correctly refused to
+      # report a pass there ("ERROR — nothing was checked: no runnable
+      # bin/simple; absence of a runner is absence of evidence"), which is the
+      # fail-closed behaviour we want, in the wrong place.
+      #
+      # Why it exists: src/app/context/main.spl advertises "90% reduction in
+      # LLM context tokens" while context_generate echoed the whole file and
+      # never filtered by target, so packs came out LARGER than their input
+      # (raw=9338 pack=9497) and stayed green. Fixed 2026-08-31; this gate
+      # asserts the size property so it cannot regress unnoticed.
+      - name: Context-pack reduction gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/setup/setup.shs || true
+          sh scripts/check/check-context-pack-reduces.shs
+
       - name: Build self-hosted stage3 compiler (native-build capable)
         id: pure_simple_bootstrap
         env:
           SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
           SIMPLE_NO_STUB_FALLBACK: "1"
         run: |
+          # Admission is deliberately two-phase. First produce the narrowly
+          # scoped Stage 2 trust root, then let the canonical producer measure
+          # that exact parent, runtime snapshot, planner closure, and planner.
           sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --backend=llvm \
             --mode=dynload \
             --full-bootstrap \
+            --stop-after-stage2 \
             --no-mcp \
             --jobs=2
+          stage2="$(find build/bootstrap/stage2 -type f -name simple -print -quit)"
+          test -n "$stage2"
+          bootstrap_receipt="$PWD/build/bootstrap/aot-stage4-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage4 \
+            --reason=self-host-convergence-check \
+            --parent-compiler="$stage2" \
+            --out="$bootstrap_receipt"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --backend=llvm \
+            --mode=dynload \
+            --full-bootstrap \
+            --bootstrap-receipt="$bootstrap_receipt" \
+            --no-mcp \
+            --jobs=2
+          stage2="$(find build/bootstrap/stage2 -type f -name simple -print -quit)"
+          test -n "$stage2"
+          bootstrap_receipt="$PWD/build/bootstrap/aot-stage3-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage3 \
+            --reason=verify-landed-compiler-fix \
+            --parent-compiler="$stage2" \
+            --out="$bootstrap_receipt"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --bootstrap-receipt="$bootstrap_receipt" \
+            --resume-stage3-from-admitted=build/bootstrap
 
       - name: Upload bootstrap failure logs
         if: failure() && steps.pure_simple_bootstrap.outcome == 'failure'
@@ -151,3 +201,12 @@ jobs:
           path: build/check/aot-lane-fences/**
           if-no-files-found: warn
           retention-days: 14
+
+      # The JIT lane is unobservable to `bin/simple test` for the same reason
+      # the fences above exist. Two general seed defects (an extern declaration
+      # suppressing the SFFI alias; heap-boxed u64 rejected as an index) were
+      # first "covered" by *_spec.spl files that PASSED on the pre-fix seed,
+      # because specs never reach this lane. This gate is the non-vacuous
+      # replacement: verified RED on a pre-fix seed and GREEN on the fixed one.
+      - name: JIT index + SFFI alias regression gate
+        run: sh scripts/check/check-jit-index-and-sffi-alias.shs

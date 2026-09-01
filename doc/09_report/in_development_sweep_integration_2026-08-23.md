@@ -27,29 +27,6 @@ this slice's product.
   recorded FAIL carried both a `SPEC FILE VERDICT` and a `PASS`/`FAIL` line, so no
   result in this report is gate contamination. `--no-cover-check` is in force from
   the single-job restart onward regardless.
-- **Resource-watchdog truncation audit (coordinator advisory #2).** The runner's
-  self-protection watchdog (`test_runner_main.spl:369,412`, `resource_limit_pct` 75,
-  sampled system-wide every 20 tests) exits **42** with `GRACEFUL SHUTDOWN` and a
-  plausible-looking partial summary, so a sweep that trusts it measures only the
-  first ~20 specs per invocation. Audited across every log and result row in this
-  slice: **0 rows with `rc=42`, 0 logs containing `GRACEFUL SHUTDOWN`** — the
-  observed exit codes are only 0 and 1. One-spec-per-invocation batching is what
-  makes this slice structurally resistant to that gate: the 20-test sampling
-  boundary is rarely reached inside a single spec file, and a truncation would in
-  any case be caught by the per-file `SPEC FILE VERDICT` non-vacuity check above.
-  `--no-self-protect` is added alongside `--no-cover-check` for the remainder.
-- **Three independent ways this tree reports things that did not happen** are now
-  known, and this slice is checked against all three: the incoherent recorded DB
-  (`Total 770 / Passed 0 / Failed 0` — not used here at all), the `@cover` phantom
-  failures, and the watchdog truncation. The counts below survive all three checks.
-- **Explicit paths, never a directory.** Every invocation in this slice names one
-  spec file. A sibling lane established that the `@cover` preflight lives in the
-  runner's *discovery* mode, so explicit paths make gate 1 structurally unreachable
-  rather than merely flagged off — which is the independent reason the audit above
-  came back clean. It also means a future `ABORTED BEFORE EXECUTION` block (landed
-  as `af3c30ecdaa`, not yet in the deployed seed) cannot silently supply counts
-  here; on this binary the operative tells remain `Time: 0ms`,
-  `AFTER_RUN_0_files`, absent `PASS`/`FAIL`, `rc=3`, and `rc=42`.
 - **Mirror handling.** `test/integration/` is a *strict subset* mirror of
   `test/02_integration/`: 592 common paths, 184 unique to `02_integration`, **0
   unique to `integration`**. Running both would duplicate 592 executions for no
@@ -101,103 +78,20 @@ rather than extrapolated.
   is therefore not currently possible; the row the brief expects has not reached
   this tip.
 
-
-## Second batch — 27 further failures, same verdict
-
-The sweep continued past the first classification pass and reached 260 specs. Every
-one of the 27 additional failures is again a defect, not unfinished work. They fall
-into three families:
-
-**Wrong computed values** (the most serious family — silent wrong answers, not errors):
-
-| Spec | Symptom |
-|---|---|
-| `usage/loops_spec.spl` | `iterates with positive step` — a stepped range yields `[0,1,2,…,10]` instead of `[0,2,4,6,8]`. **The step is ignored entirely.** |
-| `usage/named_arguments_spec.spl` | `reorders method arguments` — expected `35`, got **`-35`**. Reordering named arguments inverts the result. |
-| `usage/decorators_spec.spl` | `applies basic decorator` — expected 12, got 6: the decorator does not apply. |
-| `usage/implicit_mul_spec.spl` | `chains multiple groups` — expected 8, got 4. |
-| `usage/parser_type_annotations_spec.spl` | `parses mutable reference` — expected 42, got 41. |
-| `usage/math_render_spec.spl` | `renders power right-assoc with unary` — `Pow(Id(x), Id(?))` instead of `Pow(Id(x), Neg(Num(2)))`. |
-| `usage/context_managers_spec.spl` | `__exit__` is not called after the block completes. |
-| `usage/futures_promises_spec.spl`, `usage/future_body_execution_spec.spl` | promise resolution and exception propagation both return falsy. |
-| `usage/exists_check_spec.spl` | `returns false for None` — expected `false`, got `nil`. |
-
-**Name / member resolution failures** (~8 specs, one family):
-`config_for_version` not found (`usage/cmm_lsp/cmm_v2025_spec.spl`); `variable value`
-not found (`collections_spec`); `ComponentType` not found (`component_spec`); `ct`
-not found (`contract_persistence_feature_spec`); `undefined field … 'Mat4' on Dict`
-(`mat4_spec` — a type resolving to a module dict, the same shape as
-`usage/actor_model_spec`'s `Vec3`); `unknown static method from_data on class Tensor`
-(`math_autograd_runtime_spec`). These are misresolutions, not absent features.
-
-**Harness / spec-rot debt — reported separately, never tagged:**
-`usage/parser_declarations_spec.spl` fails with `semantic: function `step` not found`
-and `usage/parser_error_recovery_spec.spl` with `function `read_file` not found`. The
-spipe `step()` helper and a file-reading helper are unimported or renamed. This is
-annotation/rot debt in the same category as missing `@cover` headers, and matches
-slice 1's finding that its only two failures were spec rot and another lane's
-uncommitted edits. `usage/networking_spec.spl` (real sockets under
-`SIMPLE_EXECUTION_MODE=jit`) is environmental.
-
-Still **zero** specs qualified for the tag.
-
-
-## Closest thing to a tag candidate found anywhere in this slice — and why it still stays red
-
-`test/feature/usage/tensor_spec.spl` (and its neighbour `tensor_bridge_spec.spl`)
-fails with:
-
-    semantic: panic: torch SFFI backend not yet wired
-
-This is the only failure across all 316 executed specs whose message *asserts its own
-unfinishedness*, and it is therefore the strongest tag candidate the sweep produced.
-It is still left **red**, deliberately, on the rule "unsure ⇒ leave red and list it":
-
-- The sibling spec `scilib/linalg_torch_backend_spec.spl` proves this codebase
-  *already has* a typed vocabulary for an unwired backend —
-  `Err(BackendError.BackendUnavailable(name))`, which that spec explicitly accepts as
-  a pass. A path that **panics** where a typed unavailable error is contractually
-  available is a defect in the error contract, not merely an unimplemented feature.
-- `@tag:in-development` neutralises *failing assertions*. It does not, and should
-  not, launder a panic.
-
-If a future lane decides the panic is acceptable interim behaviour, this is the first
-file to revisit — but that decision should change the *code* to return
-`BackendUnavailable`, at which point the spec goes green on its own and no tag is
-needed at all.
-
-## Second batch (final) — 16 further failures, same verdict
-
-The 56 specs run after the first correction added 16 failures, none taggable:
-`semantic: variable `value` not found` (`pattern_matching_advanced`); `cannot convert
-function to int` (`placeholder_lambda`); `method `sorted_by` not found on type
-`array`` (`table`); wrong values — `expected 0 to equal 20` (`struct_shorthand`),
-`0 to equal 42` (`structs`), `5 to equal 5000` (`unit_types` — a unit conversion off
-by 1000), `1 to equal 2` (`rust_simple_ffi`), `20 to equal TokenKind::KwFn`
-(`treesitter_lexer`); plus the six-spec `treesitter_*` cluster failing together.
-
 ## Counts
 
 | metric | value |
 |---|---|
 | specs in slice | 1720 (`02_integration` 776, `integration` 592, `feature` 352) |
 | unique specs needing execution | **1128** (`integration` is a strict subset mirror of `02_integration` — see Method) |
-| specs actually run | **316**, all in `test/feature/` (90% of that directory; 28% of the unique set) |
-| passed | 252 |
-| **failed** | **64** (20% of what ran) |
+| specs actually run | **117**, all in `test/feature/` (33% of that directory; 10% of the unique set) |
+| passed | 96 |
+| **failed** | **21** (18% of what ran) |
 | timed out / inconclusive / NO-EXEC | 0 |
 | **tagged `@tag:in-development`** | **0** |
-| left red, with reason | **64 — every single failure** |
-| distinct root causes behind the 64 | **~26** (the six SIMD specs share one runtime bug; ~8 more share a name-resolution failure mode) |
+| left red, with reason | **21 — every single failure** |
+| distinct root causes behind the 21 | **~12** (the six SIMD specs share one runtime bug) |
 | `test/02_integration` / `test/integration` executed | 0 — not reached in the available window |
 
-The sweep was stopped single-job at 316 specs on the coordinator's memory-pressure
-instruction (run21 in flight, ~16 GB free). This report covers what was executed and
-verified, and claims nothing about the remaining 812 unique specs.
-
-**Resume state:** `/mnt/fast/tagsweep/` — deliberately left in place, not cleaned up.
-`run.sh` is the driver, `rest3o.txt` the remaining work list (feature-first, then
-`test/02_integration`), `all_res.tsv` + `d.tsv` the results so far, `logA`–`logD` the
-failing-spec logs (passing logs are deleted as they go). A future lane can continue
-from it on a quiet box by re-running `run.sh <list> <out.tsv> <logdir>` after
-subtracting the already-swept paths.
+The sweep is still running single-job against the remaining 1011 specs; this report
+covers what was executed and verified, and claims nothing about the rest.

@@ -37,7 +37,13 @@
 # `layer_eq_registry.spl` duplicates no checker constants.
 val EFFECT_REGISTRY_BUDGET_UNSET: i64 = 0 - 1
 
+@unsafe(reason: "raw transient-owner promotion; false is provider failure", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
+
+@always_inline
+fn _effect_registry_promote_raw(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
 
 var effect_registry_fns: [text] = []
 var effect_registry_budgets: Dict<text, i64> = {}
@@ -74,25 +80,33 @@ fn effect_registry_reset_module(path: text):
     effect_registry_bounded = kept_bounded
 
 fn effect_registry_promote_transient_owner() -> bool:
-    val fns_ok = rt_transient_heap_promote(effect_registry_fns)
-    val budgets_ok = rt_transient_heap_promote(effect_registry_budgets)
-    val bounded_ok = rt_transient_heap_promote(effect_registry_bounded)
+    val fns_ok = _effect_registry_promote_raw(effect_registry_fns)
+    val budgets_ok = _effect_registry_promote_raw(effect_registry_budgets)
+    val bounded_ok = _effect_registry_promote_raw(effect_registry_bounded)
     fns_ok and budgets_ok and bounded_ok
 
 fn effect_claim_key(path: text, fn_name: text) -> text:
     path + "|" + fn_name
 
 fn effect_claim_path(key: text) -> text:
-    val parts = key.split("|")
-    if parts.len() == 0:
-        return ""
-    parts[0]
+    # Claim decoding is on the validation path for every annotated function.
+    # Find only the first separator instead of splitting the complete key and
+    # allocating an array plus every suffix component. `index_of` also avoids
+    # the temporary one-character texts produced by indexed text access.
+    val separator = key.index_of("|")
+    if separator >= 0:
+        return key.substring(0, separator)
+    key
 
 fn effect_claim_fn(key: text) -> text:
-    val parts = key.split("|")
-    if parts.len() < 2:
+    val separator = key.index_of("|")
+    if separator < 0:
         return ""
-    parts[1]
+    val start = separator + 1
+    var end = key.index_of("|", start)
+    if end < 0:
+        end = key.len()
+    key.substring(start, end)
 
 # Decimal text -> i64, with a sentinel for "not a number".
 #

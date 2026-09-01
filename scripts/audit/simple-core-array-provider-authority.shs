@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/runtime/simple_core/core_array.spl"
+cranelift="$root/src/compiler_rust/compiler/src/codegen/instr/calls.rs"
+llvm="$root/src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+for raw in calloc realloc free spl_load_i64 spl_store_i64 spl_load_u8 \
+    spl_store_u8 rt_string_char_at rt_string_is_text rt_string_chars \
+    rt_native_eq; do
+    if [ "$(grep -Ec "(^|[^A-Za-z0-9_])${raw}\\(" "$module")" -ne 2 ]; then
+        echo "simple-core array provider call escaped its mandatory-inline owner: $raw" >&2
+        exit 1
+    fi
+done
+for unused in malloc memcpy rt_string_join; do
+    [ "$(grep -Ec "(^|[^A-Za-z0-9_])${unused}\\(" "$module")" -eq 1 ]
+done
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 14 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 11 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi, raw_ptr\]):' "$module")" -eq 7 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 4 ]
+for expected in _sffi_calloc:5 _sffi_realloc:3 _sffi_free:3 \
+    _sffi_load_i64:23 _sffi_store_i64:23 _sffi_load_u8:6 \
+    _sffi_store_u8:6 _sffi_rt_string_char_at:2 \
+    _sffi_rt_string_is_text:2 _sffi_rt_string_chars:2 _sffi_rt_native_eq:2; do
+    owner=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+for intrinsic in spl_load_i64 spl_load_u8 spl_store_i64 spl_store_u8; do
+    grep -q "\"$intrinsic\"" "$cranelift"
+    grep -q "\"$intrinsic\"" "$llvm"
+done
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+grep -A2 'if items < 1:' "$module" | grep -q '_sffi_free(array)'
+
+echo "simple-core array provider authority audit: PASS (all used raw operations confined; declarations tagged; item-allocation leak closed)"

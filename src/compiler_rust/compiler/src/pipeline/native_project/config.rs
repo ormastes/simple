@@ -33,7 +33,7 @@ fn runtime_bundle_requests_simple_core(value: &str) -> bool {
     matches!(value, "simple-core" | "simple_core")
 }
 
-fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
+pub(super) fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
     matches!(
         value,
         "core-c-bootstrap" | "core_c_bootstrap" | "runtime" | "core" | "core-c" | "core_c"
@@ -161,7 +161,11 @@ fn build_bootstrap_hosted_native_all_archive(native_all_name: &str, temp_dir: &P
         return None;
     }
     let built = target_dir.join("release").join(native_all_name);
-    if built.is_file() { Some(built) } else { None }
+    if built.is_file() {
+        Some(built)
+    } else {
+        None
+    }
 }
 
 fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> bool {
@@ -331,6 +335,38 @@ impl NativeProjectBuilder {
         // (doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md);
         // it used to be let past this check and then have its explicit `hosted`
         // request silently re-routed to core-C by resolve_runtime_lane.
+        // CROSS BARE-METAL: never inject the core-C runtime archive.
+        //
+        // build_c_runtime_library() compiles src/runtime/*.c with
+        // target_c_compiler(), which resolves to the plain host `cc` when no
+        // hosted-Linux cross compiler matches — and it passes no `--target=`.
+        // For a bare-metal CROSS target that silently produces HOST-arch
+        // objects, and the freestanding link then dies with dozens of
+        //   ld.lld: error: .../libsimple_runtime.a(runtime_memory.o) is
+        //   incompatible with .../_boot_freestanding_runtime.o
+        // (verified 2026-08-31 on aarch64-unknown-none-elf: the boot object was
+        // ARM aarch64 while every core_c_runtime member was x86-64). This is why
+        // scripts/os/build-simpleos-aarch64-limine-kernel.shs cannot be
+        // reproduced from source with a freshly built seed.
+        //
+        // The core-C archive is also wrong on the merits here, not merely
+        // mis-targeted: it carries runtime_process.c, runtime_fork.c,
+        // runtime_thread.c, runtime_terminal.c and friends, which assume a
+        // hosted libc that a bare-metal image does not have. A freestanding
+        // build supplies its own runtime through the boot-object autodiscovery
+        // path (the `boot/freestanding_runtime.c` sibling of the --entry file),
+        // which is exactly the substitute for this archive.
+        //
+        // Deliberately scoped to NON-HOST bare-metal so the x86_64-on-x86_64
+        // SimpleOS lanes — where host == target and the archive links fine —
+        // keep their current behaviour byte for byte. Cross bare-metal is
+        // 100% broken today, so this cannot regress a working configuration.
+        {
+            let t = super::effective_target();
+            if t.os == simple_common::target::TargetOS::None && !t.is_host() {
+                return Ok(None);
+            }
+        }
         let bootstrap_hosted = is_bootstrap_main_entry(&self.entry_file);
         if self.runtime_bundle_requests_removed_hosted() && !bootstrap_hosted {
             return Err(
@@ -359,38 +395,14 @@ impl NativeProjectBuilder {
         }
 
         if runtime_bundle_requests_host_gpu(&self.config.runtime_bundle) {
-            let provider = self
-                .config
-                .runtime_path
-                .as_ref()
-                .and_then(|path| {
-                    runtime_authority_search_dirs(path)
-                        .into_iter()
-                        .map(|dir| dir.join(runtime_name))
-                        .find(|candidate| candidate.is_file())
-                })
-                .ok_or_else(|| {
-                    "native-build requested host-gpu but a feature-built libsimple_runtime.a is missing".to_string()
-                })?;
-            let symbols = archive_defined_symbols(&provider).ok_or_else(|| {
-                format!(
-                    "native-build could not inspect host-gpu runtime archive `{}`",
-                    provider.display()
-                )
-            })?;
-            let missing = simple_common::RUNTIME_SYMBOL_NAMES
-                .iter()
-                .copied()
-                .filter(|symbol| symbol.starts_with("rt_host_gpu_queue_") && !symbols.contains(*symbol))
-                .collect::<Vec<_>>();
-            if !missing.is_empty() {
-                return Err(format!(
-                    "native-build host-gpu runtime archive `{}` is missing Engine2D queue symbols: {}",
-                    provider.display(),
-                    missing.join(", ")
-                ));
-            }
-            return Ok(Some((provider, false)));
+            // `host-gpu` now selects the core-C loader only. CUDA, Vulkan, and
+            // Metal implementations are provider DSOs admitted at runtime;
+            // selecting a feature-built Rust archive here would install strong
+            // symbols that bypass the loader's weak trampolines.
+            let core_dir = temp_dir.join("host_gpu_core_c_runtime");
+            let core = build_core_c_runtime_library(&core_dir)
+                .ok_or_else(|| "failed to build the host-gpu core-C provider loader".to_string())?;
+            return Ok(Some((core, false)));
         }
 
         // A source checkout is authoritative for the explicit core-C lane.

@@ -22,12 +22,12 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw environment lookup; empty text is the unset or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
-@unsafe(reason: "raw process capture; nonzero code reports command or provider failure", capabilities: [ffi])
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 @unsafe(reason: "raw canonical-path lookup; empty text is the unresolved or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
 @unsafe(reason: "raw directory listing; empty data conflates empty, inaccessible, and provider failure", capabilities: [ffi])
 extern fn rt_dir_list(path: text) -> [text]
+@unsafe(reason: "raw recursive directory walk; empty data conflates empty, inaccessible, and provider failure", capabilities: [ffi])
+extern fn rt_dir_walk(path: text) -> [text]
 
 # Directories to skip during source collection
 val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
@@ -57,6 +57,12 @@ var _g_closure_ms_collect: i64 = 0
 var _g_closure_n_imports: i64 = 0
 var _g_closure_n_resolve: i64 = 0
 var _g_closure_n_collect: i64 = 0
+var _g_entry_scan_content_by_path: Dict<text, text> = {}
+var _g_entry_scan_imports_by_path: Dict<text, [text]> = {}
+var _g_entry_scan_siblings_by_path: Dict<text, [text]> = {}
+var _g_entry_scan_read_count: i64 = 0
+var _g_entry_scan_scan_count: i64 = 0
+var _g_entry_scan_hit_count: i64 = 0
 
 @unsafe(reason: "raw monotonic clock; negative values are the provider-failure sentinel", capabilities: [ffi])
 extern fn rt_time_now_monotonic_ms() -> i64
@@ -75,6 +81,28 @@ pub fn driver_closure_timing_report() -> text:
     if _g_closure_n_collect == 0 and _g_closure_n_imports == 0:
         return ""
     "[closure-timing] imports={_g_closure_ms_imports}ms/{_g_closure_n_imports} resolve={_g_closure_ms_resolve}ms/{_g_closure_n_resolve} collect={_g_closure_ms_collect}ms/{_g_closure_n_collect}"
+
+pub fn driver_entry_scan_cache_release():
+    """Release build-local scan payloads while retaining diagnostic counters."""
+    _g_entry_scan_content_by_path = {}
+    _g_entry_scan_imports_by_path = {}
+    _g_entry_scan_siblings_by_path = {}
+
+pub fn driver_entry_scan_cache_reset():
+    """Start a build with no source payload or counters from a prior build."""
+    driver_entry_scan_cache_release()
+    _g_entry_scan_read_count = 0
+    _g_entry_scan_scan_count = 0
+    _g_entry_scan_hit_count = 0
+
+pub fn driver_entry_scan_cache_read_count() -> i64:
+    _g_entry_scan_read_count
+
+pub fn driver_entry_scan_cache_scan_count() -> i64:
+    _g_entry_scan_scan_count
+
+pub fn driver_entry_scan_cache_hit_count() -> i64:
+    _g_entry_scan_hit_count
 
 fn _driver_text_index_of(value: text, needle: text) -> i64:
     if needle == "":
@@ -198,8 +226,8 @@ pub fn _driver_unique_physical_sources(sources: [SourceFile]) -> [SourceFile]:
     var seen = _driver_text_bucket_set_new(512)
     for source in sources:
         val key = _driver_physical_source_key(source.path)
-        if not _driver_text_bucket_set_has(seen, key):
-            seen = _driver_text_bucket_set_add(seen, key)
+        if not seen.contains_key(key):
+            seen[key] = true
             unique = unique.push(source)
     unique
 
@@ -353,6 +381,15 @@ fn _driver_push_unique_module_name(names: [text], name: text) -> [text]:
     names.push(name)
 
 pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [SourceFile]:
+    _driver_module_aliases_with_closure(
+        path, content, module_name, _driver_entry_closure_mode())
+
+fn _driver_module_aliases_with_closure(
+    path: text,
+    content: text,
+    module_name: text,
+    entry_closure: bool
+) -> [SourceFile]:
     """One physical file, one canonical module name, every other spelling an alias.
     ENTRY-CLOSURE ONLY. Symlinks (`src/compiler/frontend -> 10.frontend`,
     `src/std -> lib`, `src/app/lsp -> lib/nogc_sync_mut/lsp`, ...) mean the
@@ -376,7 +413,7 @@ pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [
     `parse_all_impl` collapse aliases before Phase 3 — see the coupling note on
     `_driver_entry_closure_mode`. The legacy branches further down therefore
     apply only when the mode is off."""
-    if _driver_entry_closure_mode():
+    if entry_closure:
         val physical = _driver_physical_module_name(path, module_name)
         val canonical = _driver_canonical_module_name(physical)
         var names: [text] = []
@@ -446,11 +483,33 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
     var i = 0
     val path_len = path_text.len()
     while i < path_len:
-        val byte = path_text.char_code_at(i)
+        # byte_at, not char_code_at: the loop bound is a BYTE length. Same
+        # mixing defect as _driver_line_end below.
+        val byte = path_text.byte_at(i)
         if not ((byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or (byte >= 48 and byte <= 57) or byte == 95 or byte == 46):
             return false
         i = i + 1
     path_text != ""
+
+fn _driver_line_end(content: text, start: i64) -> i64:
+    """Return the exclusive end of one source line without splitting the file.
+
+    Entry-closure discovery retains the canonical source text for later parse
+    phases. `content.split("\n")` therefore created a second, source-sized
+    array plus one text object per line at the peak of closure discovery. This
+    bounded cursor keeps only the current line live."""
+    # char_code_at is CHARACTER-indexed (it decodes UTF-8 --
+    # runtime_native.c:2882), while text.len() and slicing are BYTE-based. Mixing
+    # them desynchronizes at the first multi-byte character, so every line after
+    # it was sliced from the wrong offsets and silently dropped. Measured on the
+    # Stage-3 closure: 90 of 91 files that lost imports contained non-ASCII, and
+    # 248 of 249 pure-ASCII files were complete. byte_at is the byte-indexed
+    # accessor that pairs with len(). See
+    # doc/08_tracking/bug/stage3_closure_omits_definition_owner_modules_2026-09-01.md
+    var end = start
+    while end < content.len() and content.byte_at(end) != 10:
+        end = end + 1
+    end
 
 fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     # Whole-content early-out, mirroring the `mod `/`export ` gate in
@@ -460,7 +519,12 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
         return []
     var result: [text] = []
     var in_doc = false
-    for raw_line in content.split("\n"):
+    var line_start: i64 = 0
+    while line_start < content.len():
+        val line_end = _driver_line_end(content, line_start)
+        val raw_line = content[line_start:line_end]
+        # Advance before every fast-path continue.
+        line_start = line_end + 1
         # PERF (2026-08-21): fast reject before any comment/docstring work.
         # This body runs over every line of every file in the entry closure and
         # measured 46.7 ms per call -- 56.5 s of a 91 s `[build] source_closure`
@@ -584,6 +648,28 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     _g_closure_n_imports = _g_closure_n_imports + 1
     out
 
+pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bool):
+    """Read and scan one physical source at most once during build phase 1."""
+    val key = _driver_physical_source_key(path)
+    if _g_entry_scan_content_by_path.contains_key(key):
+        _g_entry_scan_hit_count = _g_entry_scan_hit_count + 1
+        return (
+            _g_entry_scan_content_by_path[key],
+            _g_entry_scan_imports_by_path[key],
+            _g_entry_scan_siblings_by_path[key],
+            true)
+    var content = ""
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_text(path) ?? ""
+    _g_entry_scan_read_count = _g_entry_scan_read_count + 1
+    val imports = _driver_entry_import_module_paths(content)
+    val siblings = _driver_entry_sibling_module_paths(content)
+    _g_entry_scan_scan_count = _g_entry_scan_scan_count + 1
+    _g_entry_scan_content_by_path[key] = content
+    _g_entry_scan_imports_by_path[key] = imports
+    _g_entry_scan_siblings_by_path[key] = siblings
+    (content, imports, siblings, false)
+
 fn _driver_entry_sibling_path(line: text) -> text:
     if line.starts_with("mod "):
         val tail = line.substring(4).trim()
@@ -609,7 +695,11 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
         return []
     var result: [text] = []
     var in_doc = false
-    for raw_line in content.split("\n"):
+    var line_start: i64 = 0
+    while line_start < content.len():
+        val line_end = _driver_line_end(content, line_start)
+        val raw_line = content[line_start:line_end]
+        line_start = line_end + 1
         var scan_line = raw_line
         if not in_doc:
             val comment_at = _driver_text_index_of(scan_line, "#")
@@ -1070,12 +1160,29 @@ pub fn _driver_collect_entry_import_source(p: text) -> [SourceFile]:
     Bulk collection exclusions must not hide a file named `check.spl` or an
     imported async lowering module. Test, fixture, doc, and verification trees
     remain excluded from production closure builds."""
+    _driver_collect_entry_import_source_with_policy(
+        p, _driver_entry_closure_mode())
+
+pub fn _driver_collect_explicit_compiler_source(p: text) -> [SourceFile]:
+    """Load an explicitly requested compiler input without packaging filters."""
+    if not p.ends_with(".spl"):
+        return []
+    val (content, _, _, _) = _driver_cached_entry_source_scan(p)
+    if content == "":
+        return []
+    _driver_module_aliases_with_closure(
+        p, content, _driver_module_name_from_path(p), true)
+
+fn _driver_collect_entry_import_source_with_policy(
+    p: text,
+    entry_closure: bool
+) -> [SourceFile]:
     if not _driver_closure_timing_enabled():
-        return _driver_collect_entry_import_source_untimed(p)
+        return _driver_collect_entry_import_source_untimed(p, entry_closure)
     var t0: i64 = -1
     unsafe(capabilities: [ffi]):
         t0 = rt_time_now_monotonic_ms()
-    val out = _driver_collect_entry_import_source_untimed(p)
+    val out = _driver_collect_entry_import_source_untimed(p, entry_closure)
     var t1: i64 = -1
     unsafe(capabilities: [ffi]):
         t1 = rt_time_now_monotonic_ms()
@@ -1086,7 +1193,10 @@ pub fn _driver_collect_entry_import_source(p: text) -> [SourceFile]:
         print driver_closure_timing_report()
     out
 
-fn _driver_collect_entry_import_source_untimed(p: text) -> [SourceFile]:
+fn _driver_collect_entry_import_source_untimed(
+    p: text,
+    entry_closure: bool
+) -> [SourceFile]:
     var result: [SourceFile] = []
     if not p.ends_with(".spl"):
         return result
@@ -1102,12 +1212,11 @@ fn _driver_collect_entry_import_source_untimed(p: text) -> [SourceFile]:
         normalized.starts_with("doc/") or normalized.contains("/doc/"))
     if normalized.contains("/test/") or normalized.contains("/tests/") or normalized.contains("/testdata/") or is_repository_doc or normalized.contains("/verification/"):
         return result
-    var content = ""
-    unsafe(capabilities: [ffi]):
-        content = rt_file_read_text(p) ?? ""
+    val (content, _, _, _) = _driver_cached_entry_source_scan(p)
     if content == "":
         return result
-    _driver_module_aliases(p, content, _driver_module_name_from_path(p))
+    _driver_module_aliases_with_closure(
+        p, content, _driver_module_name_from_path(p), entry_closure)
 
 fn _driver_is_filtered_test_helper_path(path: text) -> bool:
     val normalized = path.replace("\\", "/")
@@ -1139,8 +1248,15 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
             if not core_allowed3:
                 return result
         var content = ""
+        var native_entry = ""
         unsafe(capabilities: [ffi]):
-            content = rt_file_read_text(p) ?? ""
+            native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        if native_entry != "":
+            val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)
+            content = cached_content
+        else:
+            unsafe(capabilities: [ffi]):
+                content = rt_file_read_text(p) ?? ""
         if _driver_source_trace_enabled():
             print "[collect_sources] content_len {content.len()}"
         if content != "":
@@ -1152,23 +1268,18 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
     else:
         if _driver_source_trace_enabled():
             print "[collect_sources] dir {p}"
-        # Use find for directory roots. The generated bootstrap compiler corrupts
-        # some static arrays used by the old recursive walker.
-        val cmd = "find {p} -type f -name '*.spl' 2>/dev/null"
-        var stdout = ""
-        var code: i64 = -1
+        # Walk through the runtime filesystem owner. Avoid a child shell plus a
+        # complete captured manifest string and second split-line allocation.
+        var discovered: [text] = []
         unsafe(capabilities: [ffi]):
-            val capture = rt_process_run("sh", ["-c", cmd])
-            stdout = capture.0
-            code = capture.2
+            discovered = rt_dir_walk(p) ?? []
         if _driver_source_trace_enabled():
-            print "[collect_sources] find_code {code} stdout_len {stdout.len()}"
-        if code != 0 or stdout == "":
-            return result
-        val lines = stdout.split("\n")
-        for line in lines:
-            val path = line.trim()
+            print "[collect_sources] walk_count {discovered.len()}"
+        for discovered_path in discovered:
+            val path = discovered_path.trim()
             if path == "":
+                continue
+            if not path.ends_with(".spl"):
                 continue
             if path.contains("/test/") or path.contains("/tests/") or path.contains("/testdata/") or path.contains("/doc/") or path.contains("/verification/"):
                 continue

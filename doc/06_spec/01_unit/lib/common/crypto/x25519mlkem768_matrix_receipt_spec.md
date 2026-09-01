@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,8 +17,12 @@
 
 #### admits seven typed native rows and hashes canonical backend order
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- admits seven typed native rows and hashes canonical backend order
 - Admit synthetic branch-test rows with typed public receipts
--  complete matrix
    - Expected: receipt.status equals `X25519MlKem768EvidenceStatus.Pass`
    - Expected: receipt.admitted_rows equals `7`
    - Expected: receipt.matching_output_rows equals `7`
@@ -36,10 +40,12 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("admits seven typed native rows and hashes canonical backend order")
 step("Admit synthetic branch-test rows with typed public receipts")
 val receipt = x25519_mlkem768_admit_full_backend_matrix(
     _complete_matrix())
@@ -65,8 +71,8 @@ expect(reordered.row_set_sha256).to_equal(receipt.row_set_sha256)
 
 #### retains simultaneous Vulkan and Metal blockers without scalar outputs
 
+- retains simultaneous Vulkan and Metal blockers without scalar outputs
 - Retain artifact-admitted Vulkan and requested-only Metal
-- var rows =  complete matrix
    - Expected: receipt.status equals `X25519MlKem768EvidenceStatus.Blocked`
    - Expected: receipt.admitted_rows equals `5`
    - Expected: receipt.blocked_rows equals `2`
@@ -77,10 +83,12 @@ expect(reordered.row_set_sha256).to_equal(receipt.row_set_sha256)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("retains simultaneous Vulkan and Metal blockers without scalar outputs")
 step("Retain artifact-admitted Vulkan and requested-only Metal")
 var rows = _complete_matrix()
 rows[5] = _blocked_row(X25519MlKem768EvidenceBackend.Vulkan,
@@ -114,17 +122,19 @@ expect(rendered).to_contain(
 
 #### rejects requested-only rows that smuggle fixture or output claims
 
+- rejects requested-only rows that smuggle fixture or output claims
 - Mutate requested-only Metal with an unadmitted public digest
-- var rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects requested-only rows that smuggle fixture or output claims")
 step("Mutate requested-only Metal with an unadmitted public digest")
 var rows = _complete_matrix()
 var metal = _blocked_row(X25519MlKem768EvidenceBackend.Metal,
@@ -143,20 +153,20 @@ expect(receipt.rows[6].admission_reason).to_equal(
 
 #### rejects output and vector-proof claims before execution
 
+- rejects output and vector-proof claims before execution
 - Attach public Set A to fixture-admitted AVX2
-- var fixture rows =  complete matrix
-- fixture only set a = Some
 - Attach RVV execution proof to artifact-admitted RVV
-- var artifact rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects output and vector-proof claims before execution")
 step("Attach public Set A to fixture-admitted AVX2")
 var fixture_rows = _complete_matrix()
 var fixture_only = _blocked_row(
@@ -187,10 +197,9 @@ expect(artifact_receipt.rows[3].admission_reason).to_equal(
 
 #### binds runner source and rejects malformed artifact provenance
 
+- binds runner source and rejects malformed artifact provenance
 - Change the NEON runner source under an otherwise matching row
-- var mismatch rows =  complete matrix
 - Reject uppercase non-canonical CUDA runner artifact SHA-256
-- var malformed rows =  complete matrix
    - Expected: malformed.artifact_admitted_rows equals `6`
    - Expected: malformed.executed_rows equals `6`
 
@@ -198,10 +207,12 @@ expect(artifact_receipt.rows[3].admission_reason).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("binds runner source and rejects malformed artifact provenance")
 step("Change the NEON runner source under an otherwise matching row")
 var mismatch_rows = _complete_matrix()
 mismatch_rows[2].execution.runner_source_sha256 = "8" * 64
@@ -223,20 +234,20 @@ expect(malformed.executed_rows).to_equal(6)
 
 #### marks only the independently mutated public Set row mismatched
 
+- marks only the independently mutated public Set row mismatched
 - Change RVV Set B while preserving its internal typed shape
-- var rows =  complete matrix
-- var changed b =  set b
-- rows[3] set b = Some
    - Expected: receipt.matching_output_rows equals `6`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("marks only the independently mutated public Set row mismatched")
 step("Change RVV Set B while preserving its internal typed shape")
 var rows = _complete_matrix()
 var changed_b = _set_b()
@@ -256,8 +267,8 @@ expect(receipt.matching_output_rows).to_equal(6)
 
 #### keeps execution failures and QEMU rejections as separate rows
 
+- keeps execution failures and QEMU rejections as separate rows
 - Retain CUDA failure while independently rejecting emulated NEON
-- var rows =  complete matrix
    - Expected: receipt.status equals `X25519MlKem768EvidenceStatus.Fail`
    - Expected: receipt.failed_rows equals `1`
    - Expected: receipt.rejected_rows equals `1`
@@ -267,10 +278,12 @@ expect(receipt.matching_output_rows).to_equal(6)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("keeps execution failures and QEMU rejections as separate rows")
 step("Retain CUDA failure while independently rejecting emulated NEON")
 var rows = _complete_matrix()
 rows[2].execution.mode = X25519MlKem768EvidenceMode.QemuCorrectness
@@ -299,18 +312,20 @@ expect(receipt.rows[4].source_reason).to_equal("cuda-device-lost")
 
 #### does not classify an unstarted declared failure as executed
 
+- does not classify an unstarted declared failure as executed
 - Remove CUDA selection and submission from a declared failure
-- var rows =  complete matrix
    - Expected: receipt.executed_rows equals `6`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("does not classify an unstarted declared failure as executed")
 step("Remove CUDA selection and submission from a declared failure")
 var rows = _complete_matrix()
 rows[4].execution.status = X25519MlKem768EvidenceStatus.Fail
@@ -330,19 +345,20 @@ expect(receipt.executed_rows).to_equal(6)
 
 #### rejects newline injection and impossible backend host identity
 
+- rejects newline injection and impossible backend host identity
 - Inject a second rendered key through the Vulkan reason
-- var injected rows =  complete matrix
 - Claim native NEON execution on x86-64
-- var host rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects newline injection and impossible backend host identity")
 step("Inject a second rendered key through the Vulkan reason")
 var injected_rows = _complete_matrix()
 injected_rows[5].execution.reason = "pass\nstatus=pass"
@@ -361,18 +377,19 @@ expect(host.rows[2].admission_reason).to_equal(
 
 #### changes canonical hash on evidence mutation and redacts secret digests
 
+- changes canonical hash on evidence mutation and redacts secret digests
 - Bind device identity and source reason into canonical row material
--  complete matrix
-- var rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("changes canonical hash on evidence mutation and redacts secret digests")
 step("Bind device identity and source reason into canonical row material")
 val baseline = x25519_mlkem768_admit_full_backend_matrix(
     _complete_matrix())
@@ -389,10 +406,8 @@ expect(rendered.contains("mlkem_shared_sha256")).to_be(false)
 
 #### rejects seven mutually agreeing rows when the scalar oracle is fabricated
 
+- rejects seven mutually agreeing rows when the scalar oracle is fabricated
 - Replace canonical Set A in every row with one shared fake digest
-- var rows =  complete matrix
-- var fabricated =  set a
-- rows[index] set a = Some
    - Expected: receipt.status equals `X25519MlKem768EvidenceStatus.Blocked`
    - Expected: receipt.admitted_rows equals `0`
 
@@ -400,10 +415,12 @@ expect(rendered.contains("mlkem_shared_sha256")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects seven mutually agreeing rows when the scalar oracle is fabricated")
 step("Replace canonical Set A in every row with one shared fake digest")
 var rows = _complete_matrix()
 var index: i64 = 0
@@ -423,19 +440,19 @@ expect(receipt.admitted_rows).to_equal(0)
 
 #### rejects semantic label drift even when public lengths and hashes match
 
+- rejects semantic label drift even when public lengths and hashes match
 - Change the AVX2 Set B output label only
-- var rows =  complete matrix
-- var changed b =  set b
-- rows[1] set b = Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects semantic label drift even when public lengths and hashes match")
 step("Change the AVX2 Set B output label only")
 var rows = _complete_matrix()
 var changed_b = _set_b()
@@ -452,12 +469,11 @@ expect(receipt.rows[1].admission_reason).to_equal(
 
 #### retains valid fixture-only and artifact-only blocked phases
 
+- retains valid fixture-only and artifact-only blocked phases
 - Retain AVX2 after fixture admission but before artifact admission
-- var fixture rows =  complete matrix
    - Expected: fixture.fixture_admitted_rows equals `7`
    - Expected: fixture.artifact_admitted_rows equals `6`
 - Retain Vulkan after artifact admission but before execution
-- var artifact rows =  complete matrix
    - Expected: artifact.artifact_admitted_rows equals `7`
    - Expected: artifact.executed_rows equals `6`
 
@@ -465,10 +481,12 @@ expect(receipt.rows[1].admission_reason).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("retains valid fixture-only and artifact-only blocked phases")
 step("Retain AVX2 after fixture admission but before artifact admission")
 var fixture_rows = _complete_matrix()
 fixture_rows[1] = _blocked_row(
@@ -497,27 +515,24 @@ expect(artifact.executed_rows).to_equal(6)
 
 #### rejects execution contract, fixture, scope, and selection drift
 
+- rejects execution contract, fixture, scope, and selection drift
 - Reject one row whose implementation version drifts from scalar
-- var version rows =  complete matrix
 - Reject a matrix consistently using a superseded version
-- var legacy rows =  complete matrix
 - Reject a noncanonical pinned fixture shared by every row
-- var fixture rows =  complete matrix
 - Reject a correctness-only CUDA row
-- var scope rows =  complete matrix
    - Expected: scoped.rows[4].admission_reason equals `kernel-only-row`
 - Reject a selected backend that differs from the request
-- var selection rows =  complete matrix
-- Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects execution contract, fixture, scope, and selection drift")
 step("Reject one row whose implementation version drifts from scalar")
 var version_rows = _complete_matrix()
 version_rows[1].execution.implementation_version = "0.1.0"
@@ -561,23 +576,22 @@ expect(selected.rows[5].admission_reason).to_equal(
 
 #### requires ISA and GPU execution-start proof before counting execution
 
+- requires ISA and GPU execution-start proof before counting execution
 - Reject missing RVV vector-length evidence
-- var rvv rows =  complete matrix
 - Reject RVV-only evidence attached to AVX2
-- var avx rows =  complete matrix
 - Reject SIMD rows without a vector chunk
-- var neon rows =  complete matrix
 - Reject CUDA before submission
-- var cuda rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("requires ISA and GPU execution-start proof before counting execution")
 step("Reject missing RVV vector-length evidence")
 var rvv_rows = _complete_matrix()
 rvv_rows[3].execution.observed_rvv_vlen_bits = 0
@@ -608,23 +622,22 @@ expect(cuda.rows[4].admission_reason).to_equal(
 
 #### requires completed GPU lifecycle and full public output proof
 
+- requires completed GPU lifecycle and full public output proof
 - Reject Vulkan without device readback
-- var readback rows =  complete matrix
 - Reject fewer than three full-operation kernel invocations
-- var kernel rows =  complete matrix
 - Reject missing absolute-oracle proof
-- var oracle rows =  complete matrix
 - Reject incorrect hybrid public shape
-- var shape rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("requires completed GPU lifecycle and full public output proof")
 step("Reject Vulkan without device readback")
 var readback_rows = _complete_matrix()
 readback_rows[5].execution.device_readback = false
@@ -655,27 +668,22 @@ expect(shape.rows[2].admission_reason).to_equal(
 
 #### rejects incomplete pinned public receipt identities and bindings
 
+- rejects incomplete pinned public receipt identities and bindings
 - Reject missing Set A
-- var missing rows =  complete matrix
 - Reject wrong Set C identity
-- var identity rows =  complete matrix
-- var wrong c =  set c
-- identity rows[2] set c = Some
 - Reject noncanonical Set A public length
-- var length rows =  complete matrix
-- var short a =  set a
-- length rows[3] set a = Some
 - Reject Set C not bound to the row public digest
-- var binding rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects incomplete pinned public receipt identities and bindings")
 step("Reject missing Set A")
 var missing_rows = _complete_matrix()
 missing_rows[1].set_a = nil
@@ -710,18 +718,20 @@ expect(binding.rows[4].admission_reason).to_equal(
 
 #### propagates scalar rejection without admitting dependent rows
 
+- propagates scalar rejection without admitting dependent rows
 - Remove scalar promotion eligibility
-- var rows =  complete matrix
    - Expected: receipt.admitted_rows equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("propagates scalar rejection without admitting dependent rows")
 step("Remove scalar promotion eligibility")
 var rows = _complete_matrix()
 rows[0].execution.promotion_eligible = false
@@ -737,25 +747,23 @@ expect(receipt.admitted_rows).to_equal(0)
 
 #### rejects every impossible backend and host pairing
 
+- rejects every impossible backend and host pairing
 - Reject AVX2 on AArch64
-- var avx rows =  complete matrix
 - Reject RVV on x86-64
-- var rvv rows =  complete matrix
 - Reject Metal outside macOS
-- var metal rows =  complete matrix
 - Reject an unsupported but syntactically valid OS
-- var unknown rows =  complete matrix
 - Reject an empty host identity
-- var empty rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects every impossible backend and host pairing")
 step("Reject AVX2 on AArch64")
 var avx_rows = _complete_matrix()
 avx_rows[1].host_arch = "aarch64"
@@ -792,26 +800,24 @@ expect(empty.rows[0].admission_reason).to_equal(
 
 #### rejects invalid requested, provenance, blocked, and failed states
 
+- rejects invalid requested, provenance, blocked, and failed states
 - Reject requested-only execution selection
-- var requested rows =  complete matrix
-- Some
 - Reject malformed fixture provenance
-- var provenance rows =  complete matrix
+- Reject a different full-workload digest on one admitted backend
 - Reject Blocked status after execution
-- var blocked rows =  complete matrix
 - Reject failed execution carrying passing public claims
-- var failed rows =  complete matrix
 - Reject execution against a different admitted artifact
-- var artifact rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects invalid requested, provenance, blocked, and failed states")
 step("Reject requested-only execution selection")
 var requested_rows = _complete_matrix()
 var requested = _blocked_row(
@@ -831,7 +837,13 @@ provenance_rows[1].execution.fixture_manifest_sha256 = "A" * 64
 val provenance = x25519_mlkem768_admit_full_backend_matrix(
     provenance_rows)
 expect(provenance.rows[1].admission_reason).to_equal(
-    "fixture-provenance-sha256-invalid")
+    "pinned-workload-or-fixture-provenance-sha256-invalid")
+step("Reject a different full-workload digest on one admitted backend")
+var mixed_rows = _complete_matrix()
+mixed_rows[1].execution.pinned_workload_sha256 = "e" * 64
+val mixed = x25519_mlkem768_admit_full_backend_matrix(mixed_rows)
+expect(mixed.rows[1].admission_reason).to_equal(
+    "fixture-or-configuration-mismatch")
 step("Reject Blocked status after execution")
 var blocked_rows = _complete_matrix()
 blocked_rows[4].execution.status =
@@ -858,25 +870,23 @@ expect(artifact.rows[1].admission_reason).to_equal(
 
 #### rejects pinned schema, oracle, public wire, and receipt digest drift
 
+- rejects pinned schema, oracle, public wire, and receipt digest drift
 - Reject the wrong pinned workload schema
-- var schema rows =  complete matrix
 - Reject the wrong pinned oracle identity
-- var oracle rows =  complete matrix
 - Reject the wrong total public wire length
-- var length rows =  complete matrix
 - Reject malformed public wire SHA-256
-- var public hash rows =  complete matrix
 - Reject malformed public execution digest
-- var receipt hash rows =  complete matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects pinned schema, oracle, public wire, and receipt digest drift")
 step("Reject the wrong pinned workload schema")
 var schema_rows = _complete_matrix()
 schema_rows[1].pinned_workload_schema = "pinned-v2"
@@ -915,27 +925,22 @@ expect(receipt_hash.rows[5].admission_reason).to_equal(
 
 #### rejects missing or malformed typed Set receipts
 
+- rejects missing or malformed typed Set receipts
 - Reject missing Set B
-- var missing b rows =  complete matrix
 - Reject missing Set C
-- var missing c rows =  complete matrix
 - Reject malformed Set A public SHA-256
-- var hash rows =  complete matrix
-- var bad a =  set a
-- hash rows[3] set a = Some
 - Reject wrong Set B recovered-secret length metadata
-- var secret length rows =  complete matrix
-- var bad b =  set b
-- secret length rows[4] set b = Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects missing or malformed typed Set receipts")
 step("Reject missing Set B")
 var missing_b_rows = _complete_matrix()
 missing_b_rows[1].set_b = nil
@@ -973,18 +978,21 @@ expect(secret_length.rows[4].admission_reason).to_equal(
 
 #### rejects incomplete and duplicate backend sets before admission
 
-- var duplicate =  complete matrix
-- duplicate[6] =  pass row
+- rejects incomplete and duplicate backend sets before admission
+   - Expected: absent.reason equals `missing-all-backend-rows`
+   - Expected: missing.reason equals `expected-exactly-seven-backend-rows`
    - Expected: repeated.reason equals `duplicate-backend-vulkan`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects incomplete and duplicate backend sets before admission")
 val empty: [X25519MlKem768MatrixRow] = []
 val absent = x25519_mlkem768_admit_full_backend_matrix(empty)
 expect(absent.reason).to_equal("missing-all-backend-rows")
@@ -999,6 +1007,97 @@ expect(repeated.reason).to_equal("duplicate-backend-vulkan")
 
 </details>
 
+#### admits non-promotable source rows while final promotion rejects them
+
+- admits non-promotable source rows while final promotion rejects them
+- Bind all public outputs and lifecycle claims as source evidence
+   - Expected: source.status equals `X25519MlKem768EvidenceStatus.Pass`
+   - Expected: source.admitted_rows equals `7`
+   - Expected: source.rejected_rows equals `0`
+   - Expected: source.row_set_sha256.len() equals `64`
+   - Expected: final_matrix.status equals `X25519MlKem768EvidenceStatus.Blocked`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-LIB
+step("admits non-promotable source rows while final promotion rejects them")
+step("Bind all public outputs and lifecycle claims as source evidence")
+var rows = _complete_matrix()
+var index: i64 = 0
+while index < rows.len():
+    rows[index].execution.promotion_eligible = false
+    index = index + 1
+val source = x25519_mlkem768_admit_source_backend_matrix(rows)
+expect(source.status).to_equal(X25519MlKem768EvidenceStatus.Pass)
+expect(source.admitted_rows).to_equal(7)
+expect(source.rejected_rows).to_equal(0)
+expect(source.row_set_sha256.len()).to_equal(64)
+val final_matrix = x25519_mlkem768_admit_full_backend_matrix(rows)
+expect(final_matrix.status).to_equal(X25519MlKem768EvidenceStatus.Blocked)
+expect(final_matrix.rows[0].admission_reason).to_equal(
+    "row-not-promotion-eligible")
+```
+
+</details>
+
+#### rejects source integrity lifecycle and oracle violations
+
+- rejects source integrity lifecycle and oracle violations
+- Reject a promoted source row to preserve the lifecycle boundary
+- Reject a source receipt whose pinned public oracle diverges
+- Reject a tampered admitted artifact binding
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-LIB
+step("rejects source integrity lifecycle and oracle violations")
+step("Reject a promoted source row to preserve the lifecycle boundary")
+var lifecycle = _complete_matrix()
+var lifecycle_index: i64 = 0
+while lifecycle_index < lifecycle.len():
+    lifecycle[lifecycle_index].execution.promotion_eligible = false
+    lifecycle_index = lifecycle_index + 1
+lifecycle[1].admission_phase =
+    X25519MlKem768MatrixAdmissionPhase.ArtifactAdmitted
+val bad_lifecycle = x25519_mlkem768_admit_source_backend_matrix(lifecycle)
+expect(bad_lifecycle.rows[1].admission_reason).to_equal(
+    "source-row-not-executed")
+step("Reject a source receipt whose pinned public oracle diverges")
+var oracle = _complete_matrix()
+var oracle_index: i64 = 0
+while oracle_index < oracle.len():
+    oracle[oracle_index].execution.promotion_eligible = false
+    oracle_index = oracle_index + 1
+oracle[2].client_share_sha256 = "8" * 64
+val bad_oracle = x25519_mlkem768_admit_source_backend_matrix(oracle)
+expect(bad_oracle.rows[2].admission_reason).to_equal(
+    "set-c-public-wire-sha256-mismatch")
+step("Reject a tampered admitted artifact binding")
+var integrity = _complete_matrix()
+var integrity_index: i64 = 0
+while integrity_index < integrity.len():
+    integrity[integrity_index].execution.promotion_eligible = false
+    integrity_index = integrity_index + 1
+integrity[1].admitted_artifact_sha256 = "8" * 64
+val bad_integrity = x25519_mlkem768_admit_source_backend_matrix(integrity)
+expect(bad_integrity.rows[1].admission_reason).to_equal(
+    "executed-artifact-binding-mismatch")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -1006,7 +1105,7 @@ expect(repeated.reason).to_equal("duplicate-backend-vulkan")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.spl` |
-| Updated | 2026-08-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -1018,11 +1117,72 @@ Tests covering X25519MLKEM768 backend matrix v2.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-008`
+- `REQ-009`
+- `REQ-010`
+- `REQ-012`
+- `REQ-015`
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b40c5257e168391bcaa880df7764bbd5573ee4bf4db136146d7229be0ad68e6c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b40c5257e168391bcaa880df7764bbd5573ee4bf4db136146d7229be0ad68e6c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b40c5257e168391bcaa880df7764bbd5573ee4bf4db136146d7229be0ad68e6c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.spl
+mirror: doc/06_spec/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 28 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 6 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.spl:205:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'admits seven typed native rows and hashes canonical backend order' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.spl:228:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'retains simultaneous Vulkan and Metal blockers without scalar outputs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/common/crypto/x25519mlkem768_matrix_receipt_spec.spl:259:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects requested-only rows that smuggle fixture or output claims' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,7 +1,7 @@
 //! Collection types: Array, Tuple, String and their SFFI functions.
 //! Dict SFFI functions are in the dict module.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -25,33 +25,6 @@ use simple_simd::HostCpuConfigError;
 
 thread_local! {
     static TRANSIENT_HEAP_SCOPE: RefCell<Option<TransientHeapScope>> = const { RefCell::new(None) };
-    static LAST_TRANSIENT_PROMOTION: Cell<(i64, i64)> = const { Cell::new((0, 0)) };
-    static TRANSIENT_SCOPE_PROMOTION: Cell<(i64, i64)> = const { Cell::new((0, 0)) };
-}
-
-#[no_mangle]
-pub extern "C" fn rt_transient_last_promoted_nodes() -> i64 {
-    LAST_TRANSIENT_PROMOTION.with(Cell::get).0
-}
-
-#[no_mangle]
-pub extern "C" fn rt_transient_last_promoted_bytes() -> i64 {
-    LAST_TRANSIENT_PROMOTION.with(Cell::get).1
-}
-
-#[no_mangle]
-pub extern "C" fn rt_transient_promotion_stats_reset() {
-    LAST_TRANSIENT_PROMOTION.with(|last| last.set((0, 0)));
-}
-
-#[no_mangle]
-pub extern "C" fn rt_transient_scope_promoted_nodes() -> i64 {
-    TRANSIENT_SCOPE_PROMOTION.with(Cell::get).0
-}
-
-#[no_mangle]
-pub extern "C" fn rt_transient_scope_promoted_bytes() -> i64 {
-    TRANSIENT_SCOPE_PROMOTION.with(Cell::get).1
 }
 
 struct TransientHeapScope {
@@ -103,8 +76,7 @@ fn normalize_index(index: i64, len: i64) -> i64 {
 /// Number of times [`fnv1a_hash`] actually walked bytes. Test-only instrumentation
 /// used to pin the lazy-hash mechanism (see `lazy_string_hash_tests`).
 #[cfg(test)]
-pub(crate) static FNV1A_HASH_CALLS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FNV1A_HASH_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// FNV-1a hash for strings (64-bit)
 /// This is a simple, fast hash suitable for hash tables.
@@ -1824,8 +1796,6 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
             paused: false,
             objects: Vec::new(),
         });
-        rt_transient_promotion_stats_reset();
-        TRANSIENT_SCOPE_PROMOTION.with(|total| total.set((0, 0)));
         true
     })
 }
@@ -1929,7 +1899,6 @@ fn free_transient_heap(value: RuntimeValue) {
 /// Keep transient heap objects reachable from a retained graph when the scope ends.
 #[no_mangle]
 pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
-    rt_transient_promotion_stats_reset();
     let mut root_words = std::ptr::null();
     let mut root_ptr = 0usize;
     let root_raw = unsafe { rt_transient_raw_words(value.0 as i64, &mut root_words, &mut root_ptr) >= 0 };
@@ -1948,7 +1917,6 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         let mut pending = vec![value];
         let mut reachable_heap = HashSet::new();
         let mut reachable_raw = HashSet::new();
-        let mut reachable_raw_bytes = 0i64;
         while let Some(current) = pending.pop() {
             let mut words = std::ptr::null();
             let mut canonical_ptr = 0usize;
@@ -1957,7 +1925,6 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 if !reachable_raw.insert(canonical_ptr) {
                     continue;
                 }
-                reachable_raw_bytes = reachable_raw_bytes.saturating_add(word_count.saturating_mul(8));
                 if word_count > 0 {
                     if words.is_null() {
                         return false;
@@ -1974,27 +1941,12 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 pending.extend(children);
             }
         }
-        let promoted_heap_nodes = scope.objects.iter()
-            .filter(|object| reachable_heap.contains(&object.0))
-            .count() as i64;
-        let promoted_heap_bytes = scope.objects.iter()
-            .filter(|object| reachable_heap.contains(&object.0))
-            .map(|object| unsafe { (*object.as_heap_ptr()).size as i64 })
-            .fold(0i64, i64::saturating_add);
-        let promoted_raw_nodes = reachable_raw.len() as i64;
-        for ptr in &reachable_raw {
-            if unsafe { rt_transient_raw_promote(*ptr) } == 0 {
+        for ptr in reachable_raw {
+            if unsafe { rt_transient_raw_promote(ptr) } == 0 {
                 return false;
             }
         }
         scope.objects.retain(|object| !reachable_heap.contains(&object.0));
-        let promoted_nodes = promoted_heap_nodes.saturating_add(promoted_raw_nodes);
-        let promoted_bytes = promoted_heap_bytes.saturating_add(reachable_raw_bytes);
-        LAST_TRANSIENT_PROMOTION.with(|last| last.set((promoted_nodes, promoted_bytes)));
-        TRANSIENT_SCOPE_PROMOTION.with(|total| {
-            let (nodes, bytes) = total.get();
-            total.set((nodes.saturating_add(promoted_nodes), bytes.saturating_add(promoted_bytes)));
-        });
         true
     })
 }
@@ -3806,6 +3758,14 @@ pub extern "C" fn text_dot_from_char_code(code: i64) -> RuntimeValue {
     unsafe { rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
+/// Canonical raw-i64 ABI used by integer `.chr()`/`.to_char()` MIR lowering.
+/// Keep it on the same scalar-validation and UTF-8 allocation path as the
+/// legacy Text method symbol so the seed JIT can retain compiled execution.
+#[no_mangle]
+pub extern "C" fn rt_char_from_code(code: i64) -> RuntimeValue {
+    text_dot_from_char_code(code)
+}
+
 #[no_mangle]
 pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, start: i64) -> i64 {
     // Negative start clamps to 0 (the two-arg index_of contract; matches the
@@ -4603,31 +4563,19 @@ pub extern "C" fn rt_for_iterable(collection: RuntimeValue) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
     match collection.heap_type() {
-        Some(HeapObjectType::Array) => {
-            if index.is_int() {
-                rt_array_get(collection, index.as_int())
-            } else {
-                RuntimeValue::NIL
-            }
-        }
-        Some(HeapObjectType::Tuple) => {
-            if index.is_int() {
-                let idx = index.as_int();
-                if idx < 0 {
-                    RuntimeValue::NIL
-                } else {
-                    rt_tuple_get(collection, idx as u64)
-                }
-            } else {
-                RuntimeValue::NIL
-            }
-        }
+        Some(HeapObjectType::Array) => match index.as_index_i64() {
+            Some(idx) => rt_array_get(collection, idx),
+            None => RuntimeValue::NIL,
+        },
+        Some(HeapObjectType::Tuple) => match index.as_index_i64() {
+            Some(idx) if idx >= 0 => rt_tuple_get(collection, idx as u64),
+            _ => RuntimeValue::NIL,
+        },
         Some(HeapObjectType::String) => {
             // String indexing returns a single-char string (consistent with char_at)
-            if index.is_int() {
-                rt_string_char_at(collection, index.as_int())
-            } else {
-                RuntimeValue::NIL
+            match index.as_index_i64() {
+                Some(idx) => rt_string_char_at(collection, idx),
+                None => RuntimeValue::NIL,
             }
         }
         Some(HeapObjectType::Dict) => super::dict::rt_dict_get(collection, index),
@@ -4640,13 +4588,10 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
 #[no_mangle]
 pub extern "C" fn rt_index_set(collection: RuntimeValue, index: RuntimeValue, value: RuntimeValue) -> bool {
     match collection.heap_type() {
-        Some(HeapObjectType::Array) => {
-            if index.is_int() {
-                rt_array_set(collection, index.as_int(), value)
-            } else {
-                false
-            }
-        }
+        Some(HeapObjectType::Array) => match index.as_index_i64() {
+            Some(idx) => rt_array_set(collection, idx, value),
+            None => false,
+        },
         Some(HeapObjectType::Dict) => super::dict::rt_dict_set(collection, index, value),
         _ => false,
     }
@@ -5246,14 +5191,9 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
             if result.is_nil() {
                 return result;
             }
-            let dst =
-                as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    (*arr).data as *const u64,
-                    (*dst).data as *mut u64,
-                    len as usize,
-                );
+                std::ptr::copy_nonoverlapping((*arr).data as *const u64, (*dst).data as *mut u64, len as usize);
             }
             (*dst).len = len;
             return result;
@@ -5264,14 +5204,9 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
             if result.is_nil() {
                 return result;
             }
-            let dst =
-                as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    (*arr).data as *const u8,
-                    (*dst).data as *mut u8,
-                    len as usize,
-                );
+                std::ptr::copy_nonoverlapping((*arr).data as *const u8, (*dst).data as *mut u8, len as usize);
             }
             (*dst).len = len;
             return result;
@@ -6358,10 +6293,7 @@ mod array_free_deep_contract_tests {
 
 #[cfg(test)]
 mod lazy_string_hash_tests {
-    use super::{
-        rt_string_concat, rt_string_len, rt_string_new, RuntimeString, FNV1A_HASH_CALLS,
-        STRING_HASH_UNCOMPUTED,
-    };
+    use super::{rt_string_concat, rt_string_len, rt_string_new, RuntimeString, FNV1A_HASH_CALLS, STRING_HASH_UNCOMPUTED};
     use crate::value::{HeapObjectType, RuntimeValue};
     use std::sync::atomic::Ordering;
 
@@ -6374,8 +6306,7 @@ mod lazy_string_hash_tests {
     }
 
     fn raw_hash_field(v: RuntimeValue) -> u64 {
-        let p = crate::value::heap::get_typed_ptr::<RuntimeString>(v, HeapObjectType::String)
-            .expect("string");
+        let p = crate::value::heap::get_typed_ptr::<RuntimeString>(v, HeapObjectType::String).expect("string");
         unsafe { (*p).hash }
     }
 

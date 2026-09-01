@@ -17,20 +17,25 @@
 
 #### should keep compiled binary constructors from fabricating source provenance
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should keep compiled binary constructors from fabricating source provenance
 - Construct missing CUDA and Metal binaries and inspect provenance
    - Expected: cuda.source_digest equals ``
    - Expected: metal.source_digest equals ``
-- cuda shutdown
-- metal shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should keep compiled binary constructors from fabricating source provenance")
 step("Construct missing CUDA and Metal binaries and inspect provenance")
 var cuda = X25519MlKem768CudaNttExecutor.create_binary(
     "test/fixtures/crypto/x25519mlkem768/missing.cubin",
@@ -48,19 +53,19 @@ metal.shutdown()
 
 #### should load an admitted Metal metallib instead of recompiling source
 
+- should load an admitted Metal metallib instead of recompiling source
 - Trace admitted metallib bytes through the in-process loader
-- "self shader = metal sffi load library bytes
-- "insert simple!
-- "sha256 u8 hex
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should load an admitted Metal metallib instead of recompiling source")
 step("Trace admitted metallib bytes through the in-process loader")
 val facade = file_read_text(
     "src/lib/nogc_sync_mut/io/metal_sffi.spl")
@@ -95,17 +100,19 @@ expect(binary_load).to_be_greater_than(binary_init)
 
 #### should admit and load the same in-memory CUDA binary image
 
+- should admit and load the same in-memory CUDA binary image
 - Trace admitted CUDA bytes from provider to module loading
-- "self session load module binary
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should admit and load the same in-memory CUDA binary image")
 step("Trace admitted CUDA bytes from provider to module loading")
 val facade = file_read_text("src/lib/gc_async_mut/cuda.spl")
 val session = file_read_text(
@@ -124,16 +131,19 @@ expect(provider).to_contain("sha256_u8_hex(artifact_bytes)")
 
 #### should retain the CUDA module and context when completion is unknown
 
+- should retain the CUDA module and context when completion is unknown
 - Inspect CUDA shutdown guards before dependent resource release
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should retain the CUDA module and context when completion is unknown")
 step("Inspect CUDA shutdown guards before dependent resource release")
 val session = file_read_text(
     "src/lib/gc_async_mut/crypto_accel/cuda_session.spl")
@@ -157,16 +167,19 @@ expect(dependency_guard).to_be_less_than(clear_handle)
 
 #### should retain every Metal dependency while completion is unknown
 
+- should retain every Metal dependency while completion is unknown
 - Inspect Metal shutdown guards before dependent resource release
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should retain every Metal dependency while completion is unknown")
 step("Inspect Metal shutdown guards before dependent resource release")
 val session = file_read_text(
     "src/lib/gc_async_mut/crypto_accel/metal_session.spl")
@@ -185,18 +198,19 @@ expect(unknown_guard).to_be_less_than(destroy_pipeline)
 
 #### should reject missing and wrong-extension Metal binaries before hardware
 
+- should reject missing and wrong-extension Metal binaries before hardware
 - Submit missing and source-kind artifacts to the Metal provider
-- missing shutdown
-- wrong extension shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject missing and wrong-extension Metal binaries before hardware")
 step("Submit missing and source-kind artifacts to the Metal provider")
 val fixture = _binary_contract_fixture()
 var missing = X25519MlKem768MetalNttExecutor.create_binary(
@@ -223,21 +237,20 @@ wrong_extension.shutdown()
 
 #### should expose a Vulkan algorithm provider that accepts only pinned SPIR-V
 
+- should expose a Vulkan algorithm provider that accepts only pinned SPIR-V
 - Inspect Vulkan admission, binding, submission, and readback ownership
-- "sha256 u8 hex
-- "sha256 u8 hex
-- "vulkan sffi compile spirv
-- "vulkan sffi compile spirv
    - Expected: session does not contain `compile_glsl`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should expose a Vulkan algorithm provider that accepts only pinned SPIR-V")
 step("Inspect Vulkan admission, binding, submission, and readback ownership")
 val provider = file_read_text(
     "src/os/crypto/x25519_mlkem768/vulkan_ntt_provider.spl")
@@ -263,18 +276,19 @@ expect(session.contains("compile_glsl")).to_equal(false)
 
 #### should reject absent, wrong-extension, and non-SPIR-V Vulkan artifacts before hardware
 
+- should reject absent, wrong-extension, and non-SPIR-V Vulkan artifacts before hardware
 - Submit missing and GLSL artifacts to the Vulkan provider
-- missing shutdown
-- wrong extension shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject absent, wrong-extension, and non-SPIR-V Vulkan artifacts before hardware")
 step("Submit missing and GLSL artifacts to the Vulkan provider")
 val fixture = _binary_contract_fixture()
 var missing = X25519MlKem768VulkanNttExecutor.create_binaries(
@@ -306,16 +320,19 @@ wrong_extension.shutdown()
 
 #### should align Vulkan build inputs with runtime entry points
 
+- should align Vulkan build inputs with runtime entry points
 - Compare forward and inverse shader entries with provider constants
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should align Vulkan build inputs with runtime entry points")
 step("Compare forward and inverse shader entries with provider constants")
 val forward = file_read_text(
     "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.comp")
@@ -337,16 +354,19 @@ expect(provider).to_contain("X25519_MLKEM768_VULKAN_NTT_ENTRY")
 
 #### should distinguish source JIT from admitted binaries in GPU evidence
 
+- should distinguish source JIT from admitted binaries in GPU evidence
 - Inspect hybrid evidence labels and retained artifact digests
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should distinguish source JIT from admitted binaries in GPU evidence")
 step("Inspect hybrid evidence labels and retained artifact digests")
 val hybrid = file_read_text(
     "src/os/crypto/x25519_mlkem768/hybrid.spl")
@@ -364,16 +384,19 @@ expect(operation_evidence).to_contain(
 
 #### should compare every successful GPU hybrid operation with scalar ML-KEM
 
+- should compare every successful GPU hybrid operation with scalar ML-KEM
 - Count the shared scalar-verification calls across all GPU providers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should compare every successful GPU hybrid operation with scalar ML-KEM")
 step("Count the shared scalar-verification calls across all GPU providers")
 val hybrid = file_read_text(
     "src/os/crypto/x25519_mlkem768/hybrid.spl")
@@ -402,16 +425,19 @@ expect(operation_evidence).to_contain(
 
 #### should expose all three unpromoted Vulkan hybrid candidate operations
 
+- should expose all three unpromoted Vulkan hybrid candidate operations
 - Inspect key generation, encapsulation, and decapsulation exports
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should expose all three unpromoted Vulkan hybrid candidate operations")
 step("Inspect key generation, encapsulation, and decapsulation exports")
 val hybrid = file_read_text(
     "src/os/crypto/x25519_mlkem768/hybrid.spl")
@@ -434,7 +460,7 @@ expect(hybrid).to_contain(
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl` |
-| Updated | 2026-08-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -454,3 +480,69 @@ Tests covering X25519MLKEM768 exact GPU binary providers.
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `022749a376e5a81db2dba7deb139e6757bb605d8b7ca2c4701ba77d96ac6fca0`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `022749a376e5a81db2dba7deb139e6757bb605d8b7ca2c4701ba77d96ac6fca0`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `022749a376e5a81db2dba7deb139e6757bb605d8b7ca2c4701ba77d96ac6fca0`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl
+mirror: doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl:34:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep compiled binary constructors from fabricating source provenance' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep compiled binary constructors from fabricating source provenance' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl:49:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should load an admitted Metal metallib instead of recompiling source' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should load an admitted Metal metallib instead of recompiling source' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl:81:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit and load the same in-memory CUDA binary image' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should admit and load the same in-memory CUDA binary image' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl:97:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain the CUDA module and context when completion is unknown' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl:118:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain every Metal dependency while completion is unknown' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_gpu_binary_provider_contract_spec.spl:134:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject missing and wrong-extension Metal binaries before hardware' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -3,52 +3,14 @@
 # The stateless router owns applet identity. Filesystem behavior is invoked by
 # simplebox_main so this router keeps a compact compilation closure.
 
+use os.tools.simplebox.simplebox_inventory_v1.{
+    simplebox_inventory_applet_names_v1, simplebox_inventory_contains_applet_v1
+}
+
 extern fn stdout_write(data: text)
 
-val SIMPLEBOX_MAX_OUTPUT_BYTES: i64 = 65536
-
-struct SimpleboxEchoPlan:
-    parts: [text]
-    output_bytes: i64
-    accepted: bool
-
-fn simplebox_echo_plan(args: [text]) -> SimpleboxEchoPlan:
-    """Plan one bounded echo write without repeatedly copying its prefix."""
-    var newline = true
-    var start: u64 = 0u64
-    if args.len() > 0u64 and args[0] == "-n":
-        newline = false
-        start = 1u64
-
-    var parts: [text] = []
-    var output_bytes: i64 = 0
-    var index = start
-    while index < args.len():
-        if index > start:
-            output_bytes = output_bytes + 1
-            if output_bytes > SIMPLEBOX_MAX_OUTPUT_BYTES:
-                return SimpleboxEchoPlan(parts: [], output_bytes: output_bytes, accepted: false)
-            parts.push(" ")
-        val arg_bytes = args[index].len().to_i64()
-        if arg_bytes > SIMPLEBOX_MAX_OUTPUT_BYTES - output_bytes:
-            return SimpleboxEchoPlan(parts: [], output_bytes: output_bytes + arg_bytes, accepted: false)
-        output_bytes = output_bytes + arg_bytes
-        parts.push(args[index])
-        index = index + 1u64
-    if newline:
-        if output_bytes == SIMPLEBOX_MAX_OUTPUT_BYTES:
-            return SimpleboxEchoPlan(parts: [], output_bytes: output_bytes + 1, accepted: false)
-        output_bytes = output_bytes + 1
-        parts.push("\n")
-    SimpleboxEchoPlan(parts: parts, output_bytes: output_bytes, accepted: true)
-
 fn _applet_echo(args: [text]) -> i32:
-    val plan = simplebox_echo_plan(args)
-    if not plan.accepted:
-        stdout_write("echo: output exceeds 65536-byte limit\n")
-        return 1
-    stdout_write(plan.parts.join(""))
-    0
+    return 0
 
 fn _applet_true(args: [text]) -> i32:
     return 0
@@ -57,11 +19,7 @@ fn _applet_false(args: [text]) -> i32:
     return 1
 
 fn _applet_pwd(args: [text]) -> i32:
-    if args.len() != 0u64:
-        stdout_write("pwd: too many operands\n")
-        return 1
-    stdout_write("/\n")
-    0
+    return 0
 
 fn _basename(path: text) -> text:
     var last_slash = -1
@@ -87,59 +45,23 @@ fn _run_applet(name: text, args: [text]) -> i32:
     127
 
 fn simplebox_applet_names() -> [text]:
-    var names: [text] = []
-    names.push("echo")
-    names.push("true")
-    names.push("false")
-    names.push("pwd")
-    names.push("seq")
-    names.push("cat")
-    names.push("head")
-    names.push("wc")
-    names
+    simplebox_inventory_applet_names_v1()
 
 fn simplebox_has_applet(name: text) -> bool:
-    if name == "echo":
-        return true
-    elif name == "true":
-        return true
-    elif name == "false":
-        return true
-    elif name == "pwd":
-        return true
-    elif name == "seq":
-        return true
-    elif name == "cat":
-        return true
-    elif name == "head":
-        return true
-    elif name == "wc":
-        return true
-    false
+    simplebox_inventory_contains_applet_v1(name)
 
 fn simplebox_dispatch(argv: [text]) -> i32:
     if argv.len() == 0:
         return 127
-    val applet = simplebox_requested_applet(argv)
-    if applet == "":
-        return 127
     val base = _basename(argv[0])
-    val arg_start = if base == "simplebox" or base == "busybox": 2 else: 1
+    var applet = base
+    var arg_start = 1
+    if base == "simplebox" or base == "busybox":
+        if argv.len() < 2:
+            return 127
+        applet = argv[1]
+        arg_start = 2
     if applet == "--list":
-        for name in simplebox_applet_names():
-            stdout_write(name + "\n")
         return 0
     val applet_args = argv.slice(arg_start, argv.len())
     _run_applet(applet, applet_args)
-
-fn simplebox_requested_applet(argv: [text]) -> text:
-    if argv.len() == 0:
-        return ""
-    val base = _basename(argv[0])
-    if base == "simplebox" or base == "busybox":
-        if argv.len() < 2:
-            return ""
-        return argv[1]
-    base
-
-export simplebox_requested_applet

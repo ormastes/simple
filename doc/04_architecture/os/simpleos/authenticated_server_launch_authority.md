@@ -29,3 +29,32 @@ launch tokens, two reads, and eighteen `/SERVER.SDN*` read/write/create tokens).
 The shared policy builds seven exact tokens, a 17-token / 70.8% reduction in
 launch-time pouch storage and construction.  Runtime timing/RSS and optimizer
 output require the admitted self-hosted binary; no seed substitution is valid.
+
+## Dedicated DBD migration boundary
+
+`os.kernel.loader.dbd_launch_grants_v1` owns a separate ten-grant pouch for
+the canonical `/sys/services/dbd` image: execute that image, read only the
+database credential/certificate/private-key leaves, read, write, and create only in the
+canonical `/srv/data/db` subtree, and listen only on 5433. It has no ambient
+filesystem authority, `/SYS/SERVER.HTM` read, or 8080 listener. The protected DBFS startup
+receipt registry accepts a closed role set of legacy `/SERVERS.ELF` and this
+DBD image; `/WEB.ELF` is outside that set and cannot redeem a server-data
+receipt.
+
+Direct open/create and rename dispatch copy each userspace pathname once,
+canonicalize that kernel-owned value, and check authenticated managed-server
+paths against the authoritative current scheduler TCB pouch. An unavailable,
+unowned, stale, or non-pledged TCB is a terminal denial with no IPC-capability
+fallback; unmanaged paths retain the existing IPC manager check. The same
+canonical value is later used for namespace/backend selection. The generic
+empty-path precheck is intentionally absent for those calls because it cannot
+consume an attenuated subtree grant. Managed DBFS descriptor binding remains
+fail-closed with `ENOSYS`; until that owner is wired, DBD cannot advertise live
+filesystem durability. Its bounded journal also still uses whole-journal
+transactional replacement per mutation, an explicit O(total journal bytes)
+performance blocker for the future append/checkpoint owner.
+
+The task-capability adoption wiring for the new DBD recipe uses one shared
+filesystem-exec pouch owner on ARM64 and RV64. This is deliberately not a
+claim of x86 runtime launch parity: x86 authenticated adoption receives
+caller-owned capabilities and has no local minting seam to replace safely.

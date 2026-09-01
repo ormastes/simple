@@ -99,7 +99,9 @@ class FileHandle with Read, Write, Seek, Close:
             case FileMode.WriteOnly: 1
             case FileMode.ReadWrite: 2
             case FileMode.Append: 3
-        val fd = rt_io_file_open(path, mode_int)
+        var fd: i64 = -1
+        unsafe(capabilities: [ffi]):
+            fd = rt_io_file_open(path, mode_int)
         if fd < 0:
             return Err(IoError(kind: IoErrorKind.NotFound, message: "failed to open: {path}", source: nil))
         Ok(FileHandle(fd: fd, mode: mode, open: true))
@@ -150,7 +152,11 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val data = rt_io_file_read(self.fd, size)
+        if size < 0:
+            return Err(IoError(kind: IoErrorKind.Other, message: "read size must be non-negative", source: nil))
+        var data: [u8] = []
+        unsafe(capabilities: [ffi]):
+            data = rt_io_file_read(self.fd, size)
         if data.len() < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "read failed", source: nil))
         Ok(data)
@@ -166,7 +172,11 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val data = rt_io_file_read(self.fd, size)
+        if size < 0:
+            return Err(IoError(kind: IoErrorKind.Other, message: "read_exact size must be non-negative", source: nil))
+        var data: [u8] = []
+        unsafe(capabilities: [ffi]):
+            data = rt_io_file_read(self.fd, size)
         if data.len() != size:
             return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "read_exact: got {data.len()} of {size} bytes", source: nil))
         Ok(data)
@@ -179,7 +189,9 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val data = rt_io_file_read_all(self.fd)
+        var data: [u8] = []
+        unsafe(capabilities: [ffi]):
+            data = rt_io_file_read_all(self.fd)
         Ok(data)
 
     fn read_text() -> Result<text, IoError>:
@@ -200,7 +212,9 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val line = rt_io_file_read_line(self.fd)
+        var line: text? = nil
+        unsafe(capabilities: [ffi]):
+            line = rt_io_file_read_line(self.fd)
         if line == nil:
             return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "end of file", source: nil))
         Ok(line)
@@ -218,7 +232,9 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val written = rt_io_file_write(self.fd, data)
+        var written: i64 = -1
+        unsafe(capabilities: [ffi]):
+            written = rt_io_file_write(self.fd, data)
         if written < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "write failed", source: nil))
         Ok(written)
@@ -234,7 +250,9 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val ok = rt_io_file_write_all(self.fd, data)
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_io_file_write_all(self.fd, data)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "write_all failed", source: nil))
         Ok(())
@@ -259,7 +277,9 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val ok = rt_io_file_flush(self.fd)
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_io_file_flush(self.fd)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "flush failed", source: nil))
         Ok(())
@@ -281,7 +301,9 @@ class FileHandle with Read, Write, Seek, Close:
             case SeekFrom.Start(o): (o, 0)
             case SeekFrom.Current(o): (o, 1)
             case SeekFrom.End(o): (o, 2)
-        val new_pos = rt_io_file_seek(self.fd, offset, whence)
+        var new_pos: i64 = -1
+        unsafe(capabilities: [ffi]):
+            new_pos = rt_io_file_seek(self.fd, offset, whence)
         if new_pos < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "seek failed", source: nil))
         Ok(new_pos)
@@ -313,7 +335,9 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Ok(())
-        val ok = rt_io_file_close(self.fd)
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_io_file_close(self.fd)
         self.open = false
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "close failed", source: nil))
@@ -336,8 +360,15 @@ class FileHandle with Read, Write, Seek, Close:
         # Assembled here from scalars rather than marshalled whole from the
         # runtime: a Rust-side FileMetadata constructor would bake this
         # struct's field layout into the runtime ABI.
-        val flags = rt_io_file_meta_flags(self.fd)
-        val size = rt_io_file_meta_size(self.fd)
+        var flags: i64 = -1
+        var size: i64 = -1
+        var modified: i64 = 0
+        var created: i64 = 0
+        unsafe(capabilities: [ffi]):
+            flags = rt_io_file_meta_flags(self.fd)
+            size = rt_io_file_meta_size(self.fd)
+            modified = rt_io_file_meta_modified(self.fd)
+            created = rt_io_file_meta_created(self.fd)
         if flags < 0 or size < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "metadata failed", source: nil))
         Ok(FileMetadata(
@@ -346,8 +377,8 @@ class FileHandle with Read, Write, Seek, Close:
             is_dir: (flags & 2) != 0,
             is_symlink: (flags & 4) != 0,
             readonly: (flags & 8) != 0,
-            modified: rt_io_file_meta_modified(self.fd),
-            created: rt_io_file_meta_created(self.fd)))
+            modified: modified,
+            created: created))
 
     fn size() -> Result<i64, IoError>:
         """Get file size in bytes.
@@ -357,13 +388,19 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val current = rt_io_file_seek(self.fd, 0, 1)
+        var current: i64 = -1
+        unsafe(capabilities: [ffi]):
+            current = rt_io_file_seek(self.fd, 0, 1)
         if current < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "seek failed", source: nil))
-        val end = rt_io_file_seek(self.fd, 0, 2)
+        var end: i64 = -1
+        unsafe(capabilities: [ffi]):
+            end = rt_io_file_seek(self.fd, 0, 2)
         if end < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "seek failed", source: nil))
-        val restored = rt_io_file_seek(self.fd, current, 0)
+        var restored: i64 = -1
+        unsafe(capabilities: [ffi]):
+            restored = rt_io_file_seek(self.fd, current, 0)
         if restored < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "seek restore failed", source: nil))
         Ok(end)
@@ -379,7 +416,9 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val ok = rt_io_file_set_permissions(self.fd, readonly)
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_io_file_set_permissions(self.fd, readonly)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "set_permissions failed", source: nil))
         Ok(())
@@ -491,7 +530,8 @@ class File:
         Returns:
             true if exists
         """
-        rt_io_file_exists(path)
+        unsafe(capabilities: [ffi]):
+            rt_io_file_exists(path)
 
     static fn delete(path: text) -> Result<(), IoError>:
         """Delete a file.
@@ -502,7 +542,9 @@ class File:
         Returns:
             Result or error
         """
-        val ok = rt_io_file_delete(path)
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_io_file_delete(path)
         if not ok:
             return Err(IoError(kind: IoErrorKind.NotFound, message: "delete failed: {path}", source: nil))
         Ok(())

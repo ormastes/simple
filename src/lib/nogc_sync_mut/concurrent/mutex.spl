@@ -7,10 +7,14 @@ declaring duplicate lock hooks.
 """
 
 # --- SFFI declarations ---
+@unsafe(reason: "raw runtime mutex allocation ABI; contract: returned handle is runtime-owned", capabilities: [ffi])
 extern fn rt_mutex_new(initial: Any) -> Any
+@unsafe(reason: "raw runtime mutex lock ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
 extern fn rt_mutex_lock(mutex: Any) -> Any
+@unsafe(reason: "raw runtime mutex try-lock ABI; contract: nil means contended or invalid handle", capabilities: [ffi])
 extern fn rt_mutex_try_lock(mutex: Any) -> Any
-extern fn rt_mutex_unlock(mutex: Any, new_value: Any) -> Any
+@unsafe(reason: "raw runtime mutex unlock ABI; contract: one means released and zero means invalid handle", capabilities: [ffi])
+extern fn rt_mutex_unlock(mutex: Any, new_value: Any) -> i64
 
 # --- Mutex ---
 # @tag:api
@@ -41,9 +45,11 @@ class Mutex:
     # `<T>` round-trips correctly; `Any` does not.
     # @tag:api
     fn with_lock<T>(f: fn(T) -> T) -> T:
-        val current = rt_mutex_lock(self._handle)
+        val current = unsafe(capabilities: [ffi]):
+            rt_mutex_lock(self._handle)
         val updated = f(current)
-        rt_mutex_unlock(self._handle, updated)
+        unsafe(capabilities: [ffi]):
+            rt_mutex_unlock(self._handle, updated)
         updated
 
     # DEPRECATED: prefer with_lock(f) — manual lock() with no matching
@@ -60,7 +66,8 @@ class Mutex:
     # nothing, so absence is surfaced instead of coalesced.
     # @tag:api
     fn lock() -> Any?:
-        rt_mutex_lock(self._handle)
+        unsafe(capabilities: [ffi]):
+            rt_mutex_lock(self._handle)
 
     # Non-blocking lock attempt - returns nil if lock held (or the handle is
     # not a live runtime mutex). Optional return: nil is the contended case,
@@ -69,15 +76,17 @@ class Mutex:
     # If successful, must call unlock() to release.
     # @tag:api
     fn try_lock() -> Any?:
-        rt_mutex_try_lock(self._handle)
+        unsafe(capabilities: [ffi]):
+            rt_mutex_try_lock(self._handle)
 
     # DEPRECATED: prefer with_lock(f) — see lock().
     # Releases lock and updates protected value atomically.
     # new_value becomes the new protected value.
     # After unlock, other threads can acquire the lock.
     # @tag:api
-    fn unlock(new_value: Any) -> Any:
-        rt_mutex_unlock(self._handle, new_value)
+    fn unlock(new_value: Any) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_mutex_unlock(self._handle, new_value)
 
 # --- API ---
 
@@ -85,7 +94,8 @@ class Mutex:
 # Lock starts in unlocked state - first lock() succeeds immediately.
 # @tag:api
 fn mutex_new(initial: Any) -> Mutex:
-    val handle = rt_mutex_new(initial)
+    val handle = unsafe(capabilities: [ffi]):
+        rt_mutex_new(initial)
     Mutex(_handle: handle)
 
 # Free-function forms keep the Mutex value in an explicit argument. Use these
@@ -107,8 +117,11 @@ fn mutex_new(initial: Any) -> Mutex:
 #
 # Generic over `T` — see with_lock above for why `Any` is rejected here.
 fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
-    val updated = f(rt_mutex_lock(mutex._handle))
-    rt_mutex_unlock(mutex._handle, updated)
+    val current = unsafe(capabilities: [ffi]):
+        rt_mutex_lock(mutex._handle)
+    val updated = f(current)
+    unsafe(capabilities: [ffi]):
+        rt_mutex_unlock(mutex._handle, updated)
     updated
 
 # Guard-pattern variant for callers using the mutex purely as an exclusion
@@ -124,23 +137,28 @@ fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
 # — `keep_value` stays `Any` on purpose: it is always the fixed gate
 # sentinel, never real data, so it never round-trips through user code.
 fn mutex_with_lock_keeping<T>(mutex: Mutex, keep_value: Any, f: fn() -> T) -> T:
-    rt_mutex_lock(mutex._handle)
+    unsafe(capabilities: [ffi]):
+        rt_mutex_lock(mutex._handle)
     val result = f()
-    rt_mutex_unlock(mutex._handle, keep_value)
+    unsafe(capabilities: [ffi]):
+        rt_mutex_unlock(mutex._handle, keep_value)
     result
 
 # DEPRECATED: prefer mutex_with_lock — manual lock/unlock pairing is unguarded.
 # Optional for the same reason as Mutex.lock() above.
 fn mutex_lock(mutex: Mutex) -> Any?:
-    rt_mutex_lock(mutex._handle)
+    unsafe(capabilities: [ffi]):
+        rt_mutex_lock(mutex._handle)
 
 # Optional: nil means the lock was already held (or the handle is not live).
 fn mutex_try_lock(mutex: Mutex) -> Any?:
-    rt_mutex_try_lock(mutex._handle)
+    unsafe(capabilities: [ffi]):
+        rt_mutex_try_lock(mutex._handle)
 
 # DEPRECATED: prefer mutex_with_lock — see mutex_lock.
-fn mutex_unlock(mutex: Mutex, new_value: Any) -> Any:
-    rt_mutex_unlock(mutex._handle, new_value)
+fn mutex_unlock(mutex: Mutex, new_value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_mutex_unlock(mutex._handle, new_value)
 
 export Mutex
 export mutex_new, mutex_with_lock

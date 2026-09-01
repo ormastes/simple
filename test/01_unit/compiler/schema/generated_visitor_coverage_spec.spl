@@ -8,9 +8,9 @@ Audience: compiler and tooling engineers who maintain this spec.
 """
 # Generated Visitor Coverage Unit Spec
 
-Proves the two GENERATED fold visitors (hardening plan §11.5, lanes C3 + C4)
-actually cover every variant the A1 registry knows about, and that the walk
-they emit really recurses.
+Proves the two GENERATED fold visitors and the read-only HIR visitor
+(hardening plan §11.5, lanes C3 + C4) actually cover every variant the A1
+registry knows about, use resolvable fail-closed fallbacks, and recurse.
 
 Why coverage is asserted against the REGISTRY and not against a hand-written
 list: a hand-written expectation rots exactly the same way a hand-written
@@ -35,6 +35,7 @@ use compiler.frontend.generated.ast_visitor.{AstWalkNode, walk_ast_expr}
 
 val REGISTRY = "spec/compiler_schema/registry/"
 val HIR_VISITOR = "src/compiler/20.hir/generated/hir_visitor.spl"
+val HIR_VISIT = "src/compiler/20.hir/generated/hir_visit.spl"
 val AST_VISITOR = "src/compiler/10.frontend/generated/ast_visitor.spl"
 
 fn registry_variants(enum_file: text) -> [text]:
@@ -122,6 +123,22 @@ describe "generated fold visitors are marked generated and registry-pinned":
         step("Verify: uses the loud unhandled diagnostic as its only fallback")
         expect(read_file(HIR_VISITOR).find("E-HIR-VISIT-UNHANDLED") >= 0).to_equal(true)
         expect(read_file(AST_VISITOR).find("E-AST-VISIT-UNHANDLED") >= 0).to_equal(true)
+
+    it "imports exit for every generated fallback and emits no unresolved raise call":
+        step("Verify: all three generated visitors abort through imported exit, never ambient raise")
+        val hir_fold = read_file(HIR_VISITOR)
+        val hir_read_only = read_file(HIR_VISIT)
+        val ast_fold = read_file(AST_VISITOR)
+        val exit_import = "use std.nogc_sync_mut.io_runtime.{exit}"
+        expect(hir_fold.find(exit_import) >= 0).to_equal(true)
+        expect(hir_read_only.find(exit_import) >= 0).to_equal(true)
+        expect(ast_fold.find(exit_import) >= 0).to_equal(true)
+        expect(hir_fold.find("\n    exit(1)\n") >= 0).to_equal(true)
+        expect(hir_read_only.find("\n    exit(1)\n") >= 0).to_equal(true)
+        expect(ast_fold.find("\n    exit(1)\n") >= 0).to_equal(true)
+        expect(hir_fold.find("\n    raise ") < 0).to_equal(true)
+        expect(hir_read_only.find("\n    raise ") < 0).to_equal(true)
+        expect(ast_fold.find("\n    raise ") < 0).to_equal(true)
 
 describe "generated fold visitors really recurse":
     it "reaches every node of a nested HIR expression exactly once":

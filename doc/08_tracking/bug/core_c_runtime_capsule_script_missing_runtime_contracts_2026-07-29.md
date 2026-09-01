@@ -1,8 +1,7 @@
 # `build-core-c-bootstrap-runtime-capsule.shs` fails: `simple_contract_check` provider moved
 
 - **Filed:** 2026-07-29
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** OPEN
 - **Script:** `scripts/check/build-core-c-bootstrap-runtime-capsule.shs`
 - **Severity:** blocks the C-capsule lane for rebuilding `libsimple_runtime.a`
 

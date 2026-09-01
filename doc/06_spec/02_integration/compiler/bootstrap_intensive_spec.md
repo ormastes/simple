@@ -1,6 +1,29 @@
-# bootstrap_intensive_spec
+# Bootstrap Compiler Intensive Tests
 
-> Verifies the bootstrap intensive behaviour end to end so maintainers of this
+> End-to-end testing of the bootstrap compiler self-hosting workflow. Tests the complete compilation of the Simple compiler by itself.
+
+<!-- sdn-diagram:id=bootstrap_intensive_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=bootstrap_intensive_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+bootstrap_intensive_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=bootstrap_intensive_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +32,49 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# bootstrap_intensive_spec
+# Bootstrap Compiler Intensive Tests
 
-Verifies the bootstrap intensive behaviour end to end so maintainers of this
+End-to-end testing of the bootstrap compiler self-hosting workflow. Tests the complete compilation of the Simple compiler by itself.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Category | Compiler |
-| Status | Active |
+| Feature IDs | #1051-1060 |
+| Category | Testing |
+| Difficulty | 5/5 |
+| Status | Implemented |
 | Source | `test/02_integration/compiler/bootstrap_intensive_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the bootstrap intensive behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+## Overview
+
+End-to-end testing of the bootstrap compiler self-hosting workflow.
+Tests the complete compilation of the Simple compiler by itself.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Self-Hosting | Compiler compiling itself |
+| Bootstrap | Using pre-built runtime to build new runtime |
+| Verification | Ensure bootstrapped compiler works correctly |
+
+## Related Specifications
+
+- [Bootstrap](../../src/compiler/bootstrap/) - Bootstrap compiler
+- [Native](../../src/compiler/native/) - Native code generation
+
+## Examples
+
+```simple
+# Bootstrap workflow
+val stage0 = prebuilt_compiler()
+val stage1 = stage0.compile(compiler_source)
+val stage2 = stage1.compile(compiler_source)
+assert(stage1 == stage2)  # Idempotence
+```
 
 ## Scenarios
 
@@ -44,19 +87,17 @@ unrelated sibling features are out of scope.
 
 #### validates prebuilt runtime _(slow)_
 
-- Verify: validates prebuilt runtime
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: validates prebuilt runtime")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val runtime_path = "bin/simple"
 check(runtime_path.contains("release"))
 check(runtime_path.contains("simple"))
@@ -72,19 +113,17 @@ check(runtime_path.contains("simple"))
 
 #### checks runtime version _(slow)_
 
-- Verify: checks runtime version
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: checks runtime version")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val version = "0.5.0"
 val parts = version.split(".")
 check(parts.len() == 3)
@@ -103,19 +142,17 @@ check(parts[0] == "0")
 
 #### compiles core modules _(slow)_
 
-- Verify: compiles core modules
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles core modules")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val core_modules = [
     "src/compiler/10.frontend/core/tokens.spl",
     "src/compiler/10.frontend/core/lexer.spl",
@@ -139,19 +176,16 @@ for module in core_modules:
 
 #### compiles compiler modules _(slow)_
 
-- Verify: compiles compiler modules
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles compiler modules")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val compiler_modules = [
     "src/compiler/native/mod.spl",
     "src/compiler/bootstrap/mod.spl"
@@ -173,19 +207,16 @@ for module in compiler_modules:
 
 #### recompiles with stage 1 _(slow)_
 
-- Verify: recompiles with stage 1
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: recompiles with stage 1")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 # Stage 2 should produce identical output
 val stage1_hash = "abc123def456"
 val stage2_hash = "abc123def456"
@@ -203,19 +234,17 @@ check(stage1_hash == stage2_hash)
 
 #### validates idempotence _(slow)_
 
-- Verify: validates idempotence
+1. hashes = hashes append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: validates idempotence")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val iterations = 3
 var hashes = []
 
@@ -245,19 +274,16 @@ check(all_same)
 
 #### compiles tokens module _(slow)_
 
-- Verify: compiles tokens module
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles tokens module")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val module = "src/compiler/10.frontend/core/tokens.spl"
 check(module.ends_with("tokens.spl"))
 ```
@@ -272,19 +298,16 @@ check(module.ends_with("tokens.spl"))
 
 #### compiles lexer module _(slow)_
 
-- Verify: compiles lexer module
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles lexer module")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val module = "src/compiler/10.frontend/core/lexer.spl"
 check(module.ends_with("lexer.spl"))
 ```
@@ -299,19 +322,16 @@ check(module.ends_with("lexer.spl"))
 
 #### compiles parser module _(slow)_
 
-- Verify: compiles parser module
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles parser module")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val module = "src/compiler/10.frontend/core/parser.spl"
 check(module.ends_with("parser.spl"))
 ```
@@ -326,19 +346,16 @@ check(module.ends_with("parser.spl"))
 
 #### compiles ast module _(slow)_
 
-- Verify: compiles ast module
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles ast module")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val module = "src/compiler/10.frontend/core/ast.spl"
 check(module.ends_with("ast.spl"))
 ```
@@ -353,19 +370,16 @@ check(module.ends_with("ast.spl"))
 
 #### compiles types module _(slow)_
 
-- Verify: compiles types module
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles types module")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val module = "src/compiler/30.types/type_system/builtin_registry.spl"
 check(module.ends_with("builtin_registry.spl"))
 ```
@@ -380,19 +394,16 @@ check(module.ends_with("builtin_registry.spl"))
 
 #### compiles mir module _(slow)_
 
-- Verify: compiles mir module
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles mir module")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val module = "src/compiler/50.mir/mir_data.spl"
 check(module.ends_with("mir_data.spl"))
 ```
@@ -409,19 +420,16 @@ check(module.ends_with("mir_data.spl"))
 
 #### compiles native backend _(slow)_
 
-- Verify: compiles native backend
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles native backend")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val module = "src/compiler/native/mod.spl"
 check(module.contains("native"))
 ```
@@ -436,19 +444,16 @@ check(module.contains("native"))
 
 #### compiles bootstrap backend _(slow)_
 
-- Verify: compiles bootstrap backend
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compiles bootstrap backend")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val module = "src/compiler/bootstrap/mod.spl"
 check(module.contains("bootstrap"))
 ```
@@ -467,19 +472,17 @@ check(module.contains("bootstrap"))
 
 #### builds dependency graph for 50 modules _(slow)_
 
-- Verify: builds dependency graph for 50 modules
+1. dependencies = dependencies append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: builds dependency graph for 50 modules")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var dependencies = []
 
 for i in 0..50:
@@ -500,19 +503,16 @@ check(dependencies.len() == 50)
 
 #### detects circular dependencies _(slow)_
 
-- Verify: detects circular dependencies
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: detects circular dependencies")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val modules = [
     {"name": "a", "deps": ["b"]},
     {"name": "b", "deps": ["c"]},
@@ -535,19 +535,17 @@ check(modules.len() == 3)
 
 #### determines compilation order _(slow)_
 
-- Verify: determines compilation order
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: determines compilation order")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val modules = [
     "tokens",    # No deps
     "lexer",     # Depends on tokens
@@ -570,19 +568,17 @@ check(modules.len() == 5)
 
 #### handles 100 module dependencies _(slow)_
 
-- Verify: handles 100 module dependencies
+1. ordered = ordered append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: handles 100 module dependencies")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var ordered = []
 
 for i in 0..100:
@@ -605,19 +601,17 @@ check(ordered.len() == 100)
 
 #### generates code for 200 functions _(slow)_
 
-- Verify: generates code for 200 functions
+1. functions = functions append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: generates code for 200 functions")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var functions = []
 
 for i in 0..200:
@@ -638,19 +632,17 @@ check(functions.len() == 200)
 
 #### generates class methods _(slow)_
 
-- Verify: generates class methods
+1. methods = methods append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: generates class methods")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var methods = []
 
 for i in 0..100:
@@ -673,19 +665,16 @@ check(methods.len() == 100)
 
 #### applies constant folding _(slow)_
 
-- Verify: applies constant folding
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: applies constant folding")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val expressions = [
     "1 + 2",
     "3 * 4",
@@ -708,19 +697,18 @@ for expr in expressions:
 
 #### performs dead code elimination _(slow)_
 
-- Verify: performs dead code elimination
+1. live code = live code append
+2. dead code = dead code append
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: performs dead code elimination")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var live_code = []
 var dead_code = []
 
@@ -748,19 +736,17 @@ check(live_code.len() == 100)
 
 #### generates calls to 100 runtime functions _(slow)_
 
-- Verify: generates calls to 100 runtime functions
+1. rt calls = rt calls append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: generates calls to 100 runtime functions")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var rt_calls = []
 
 for i in 0..100:
@@ -780,19 +766,17 @@ check(rt_calls.len() == 100)
 
 #### validates runtime signatures _(slow)_
 
-- Verify: validates runtime signatures
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: validates runtime signatures")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val runtime_fns = [
     {"name": "rt_print", "args": 1},
     {"name": "rt_file_read", "args": 1},
@@ -816,19 +800,17 @@ for rt_fn in runtime_fns:
 
 #### tracks allocations _(slow)_
 
-- Verify: tracks allocations
+1. allocations = allocations append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: tracks allocations")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var allocations = []
 
 for i in 0..500:
@@ -848,19 +830,17 @@ check(allocations.len() == 500)
 
 #### simulates garbage collection _(slow)_
 
-- Verify: simulates garbage collection
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: simulates garbage collection")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var live_objects = 1000
 var collected = 0
 
@@ -887,19 +867,18 @@ check(live_objects == 500)
 
 #### compares stage 1 and stage 2 outputs _(slow)_
 
-- Verify: compares stage 1 and stage 2 outputs
+1. stage1 files = stage1 files append
+2. stage2 files = stage2 files append
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compares stage 1 and stage 2 outputs")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var stage1_files = []
 var stage2_files = []
 
@@ -920,19 +899,17 @@ check(stage1_files.len() == stage2_files.len())
 
 #### validates output binaries _(slow)_
 
-- Verify: validates output binaries
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: validates output binaries")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val binaries = [
     {"name": "simple", "size": 33000000, "platform": "linux-x64"},
     {"name": "simple", "size": 35000000, "platform": "macos-arm64"}
@@ -955,19 +932,18 @@ for binary in binaries:
 
 #### runs 100 regression tests _(slow)_
 
-- Verify: runs 100 regression tests
+1. tests = tests append
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: runs 100 regression tests")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var tests = []
 
 for i in 0..100:
@@ -1002,19 +978,17 @@ check(failed == 5)
 
 #### measures compilation times _(slow)_
 
-- Verify: measures compilation times
+1. times = times append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: measures compilation times")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var times = []
 
 for i in 0..100:
@@ -1038,19 +1012,17 @@ check(total > 1000)
 
 #### tracks memory usage _(slow)_
 
-- Verify: tracks memory usage
+1. memory samples = memory samples append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: tracks memory usage")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var memory_samples = []
 
 for i in 0..200:
@@ -1072,19 +1044,16 @@ check(memory_samples.len() == 200)
 
 #### compares optimized vs unoptimized _(slow)_
 
-- Verify: compares optimized vs unoptimized
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: compares optimized vs unoptimized")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val unoptimized_time = 1000
 val optimized_time = 600
 
@@ -1106,19 +1075,16 @@ check(unoptimized_time > optimized_time)
 
 #### validates platform configurations _(slow)_
 
-- Verify: validates platform configurations
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: validates platform configurations")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val platforms = [
     "linux-x64",
     "macos-arm64",
@@ -1140,19 +1106,17 @@ for platform in platforms:
 
 #### generates platform-specific code _(slow)_
 
-- Verify: generates platform-specific code
+1. platform outputs = platform outputs append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: generates platform-specific code")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var platform_outputs = []
 
 for platform in ["linux", "macos", "freebsd"]:
@@ -1177,19 +1141,17 @@ check(platform_outputs.len() == 6)
 
 #### handles 50 compilation errors _(slow)_
 
-- Verify: handles 50 compilation errors
+1. errors = errors append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: handles 50 compilation errors")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var errors = []
 
 for i in 0..50:
@@ -1209,19 +1171,16 @@ check(errors.len() == 50)
 
 #### recovers from partial failures _(slow)_
 
-- Verify: recovers from partial failures
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_BOOTSTRAP_INTENSIVE-001
-step("Verify: recovers from partial failures")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var total_modules = 100
 var failed_modules = 5
 var successful = total_modules - failed_modules
@@ -1246,34 +1205,3 @@ check(successful == 95)
 
 
 </details>
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `08929b1a182bce3465f8ea98266fbe39719a9697a869512e51d9317bab5c9537`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `08929b1a182bce3465f8ea98266fbe39719a9697a869512e51d9317bab5c9537`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `08929b1a182bce3465f8ea98266fbe39719a9697a869512e51d9317bab5c9537`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
-
-SSpec documentization score: 95/100
-source: test/02_integration/compiler/bootstrap_intensive_spec.spl
-mirror: doc/06_spec/02_integration/compiler/bootstrap_intensive_spec.md (current)
-findings: 2 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=80
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/compiler/bootstrap_intensive_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
-doc/06_spec/02_integration/compiler/bootstrap_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-<!-- sspec-maintain:scorecard:end -->

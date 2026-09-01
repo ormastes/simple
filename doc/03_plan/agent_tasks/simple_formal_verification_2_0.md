@@ -1,57 +1,74 @@
-# Simple Formal Verification 2.0 — Canonical Integration Plan
+<!-- codex-design -->
+# Simple Formal Verification 2.0 Implementation Plan
 
-**Status:** Active replacement lane; MIR evidence foundation partially implemented
-**Date:** 2026-08-14
-**Merge owner:** Primary FV2 integration agent in this isolated detached worktree
-**Final reviewer:** Separate highest-capability `$verify` reviewer after reconciliation
-**Historical input:** Accepted FV2 artifacts from the abandoned lane, including commit
-`8257fde9eb1`; they define intent but are not current-main implementation evidence.
+**Status:** In implementation; foundations, seven bounded SimpleOS source-refinement slices, typed Gate 0–7 collectors, pinned replay tooling, and one independently replayed SimpleOS root exist; six closed-lane literal-boundary replays, effectful heap/global transition proofs, actual RV32/RV64 product evidence, authorized signing policy, and final self-hosted verification remain open
+**Date:** 2026-08-12
+**Merge owner:** Formal Verification 2.0 integration owner
+**Final reviewer:** Best available normal/highest-capability reviewer independent of the production lanes
 
-## Claim boundary
+## Policy compatibility rule
 
-Formal Verification 2.0 is a fail-closed refinement chain from the exact
-expanded and woven Simple program through MIR, proof checking, compiler
-transforms, and the shipped artifact. A model proof is never an artifact proof.
-Unknown, malformed, stale, unsupported, timed-out, or missing evidence blocks
-promotion.
+The verified profile is a V2 assurance-policy interface. Do not add a fifth
+case to frozen `AssuranceStrictness` or mutate `ResolvedAssurancePolicyV1`.
+V1 consumers must conservatively enforce `verified` as `critical`; only the
+V2 resolver and FV2 evidence consumers may retain `verified` and issue an
+`APOLV2-*` identity. Work packages that ingest SDN, CLI, or child-process
+profile data must preserve this distinction.
 
-The selected baselines are `REQ-FV2-001..020` and `NFR-FV2-001..010`.
-Research, requirements, architecture, and detail-design artifacts have been
-restored, reviewed, and committed. The FV2 implementation capsule, modern
-system spec, and manual mirror are present in this working tree; executable
-admission remains blocked by the missing canonical Stage 4 runtime.
+## 2026-08-12 verification environment status
 
-## Frozen shared interfaces and manual vocabulary
+- The clean composite admission at
+  `/mnt/data/.simple/bootstrap/composite-forensic-admission2-20260812/output`
+  compiled 835 units and linked candidate
+  `f6e48bc8e878b1ad4b9abc9a29280fa80ba920f3059494ef7f4c7ea7c4e31df9`,
+  but the mandatory Stage 2 sanity gate rejected and quarantined it. Both
+  `--version` and unsupported-command probes exited 132 with
+  `runtime error: invalid field receiver`; retained evidence reports
+  `status=fail` and `admitted=no`. This artifact is diagnostic only.
+- The independently owned `/mnt/data/bs2/perf-integrated-99518` Stage 2 build
+  remains running and has not produced an executable candidate. Do not start a
+  competing bootstrap or treat its partial cache as admission evidence.
 
-The shared names are `VerificationIR v1`, `SemanticCoverage v1`,
-`ProofObligation v1`, `ProofReceipt v1`, `TrustManifest v1`,
-`WeaveManifest v1`, `CompilerCertificate v1`, `HardwareProofReceipt v1`,
-`FormalStatus v1`, and `VerificationCacheKey v1`. Incompatible changes require
-a new version, migration coverage, and stale-cache rejection.
+- A guarded pure-Simple bootstrap at
+  `/mnt/data/bs2/perf-integrated-50a996` reached Stage 2, then the 45-minute
+  guard terminated it (`exit 143`). Its retained `stage2-native-build.log`
+  reports 44 pre-existing full-compiler type-inference failures such as
+  `struct 'ANY' field ...`; no `stage2-admitted/simple` was produced.
+- The previously admitted pure-Simple compiler at
+  `/mnt/data/.simple/bootstrap/authority-22d7/output/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`
+  traps with `runtime error: invalid field receiver` (`exit 132`) for both
+  `compile` and `native-build`, including an unrelated known fixture. This is
+  the already tracked struct-allocation/receiver-guard authority defect, not a
+  focused FV2 diagnostic.
+- Consequently the new focused specs have static diff/stub review and required
+  direct-env guards (`--working` and `--staged`) passing, but no self-hosted
+  compile/test PASS is claimed. The Rust seed was intentionally not substituted.
 
-The system-manual flow is frozen as:
+## Frozen boundary
 
-- `step("Audit the formal claim boundary")`
-- `step("Construct canonical verification evidence")`
-- `step("Reject stale or unsupported evidence")`
-- `step("Replay the shipped artifact independently")`
+Before parallel work, the merge owner freezes: `VerificationIR v1`, `SemanticCoverage v1`, `ProofObligation v1`, `ProofReceipt v1`, `TrustManifest v1`, `WeaveManifest v1`, `CompilerCertificate v1`, `HardwareProofReceipt v1`, `FormalStatus v1`, and `VerificationCacheKey v1`. An incompatible revision requires a version bump and migration test. Stateful semantic-authority fields therefore live in `ExecutionContractObligation v2`; v1 remains structurally unchanged and rejects clauses it cannot soundly represent.
 
-The frozen helpers are `setup_fv2_fixture`, `check_fv2_gate`, and
-`check_fv2_replay`. Until implemented, a helper must call `fail(...)`.
+## Ordered delivery
 
-## Delivery waves and ownership
+**Current FV-1/FV-3 integration hold:** `ResolvedDirectCallManifestV1`, `ResolvedCanonicalModuleClosureV2`, and `ResolvedVerificationIrModuleV2` now make direct-call, effect, and VIR closure fail closed against exact owner/callee `SymbolId` and signature snapshots. They are not yet emitted by the canonical frontend resolver. Until that producer is wired before VIR construction, ordinary source programs cannot enter the resolved V2 closure and cannot be promoted beyond model/source evidence. The bridge must preserve the module snapshot, resolver receipt, every direct call site, and the callee signature/body hashes; deriving these bindings from a textual callee name is prohibited.
 
-| Wave | Requirements | Owner and exclusive production scope | Executable evidence | Current status / blocker |
+The producer must also classify every direct call before MIR erases extern declarations: one resolver-originated internal SymbolId binding or one explicit external boundary carrying boundary, ABI, and effect-contract identities. Generated/runtime calls cannot be inferred from a post-MIR `rt_*` name and must fail closed until this tagged boundary extension exists.
+
+| Wave | Work package | Deliverable | Depends on | Exit gate |
 |---|---|---|---|---|
-| 0 — truthful foundation | REQ-FV2-001, REQ-FV2-002, REQ-FV2-019, REQ-FV2-020 | assurance/profile and verification-report owners; `src/compiler/00.common/assurance/`, `src/compiler/90.tools/verify/` | FV2 system status/profile/failure matrix | **Implemented; executable admission blocked** |
-| 1 — canonical VIR and typed MIR evidence | REQ-FV2-003, REQ-FV2-005, REQ-FV2-011, REQ-FV2-012, REQ-FV2-018 | frontend/MIR owners; `src/compiler/20.hir/`, `src/compiler/50.mir/` | focused MIR plus canonical-program/VIR cases | **Implemented; executable admission blocked** |
-| 2 — exact proof frontend | REQ-FV2-004, REQ-FV2-006, REQ-FV2-007, REQ-FV2-008 | Lean/contract owners; MIR verification modules and `src/compiler/70.backend/backend/lean_*` | existing formal specs plus execution-linked adversarial system cases | **Implemented; Lean/tool execution blocked** |
-| 3 — receipts, replay, compiler relation | REQ-FV2-009, REQ-FV2-010, REQ-FV2-013, REQ-FV2-016, REQ-FV2-017 | verifier/replay and selected backend owners; `src/compiler/90.tools/verify/`, selected `src/compiler/60.mir_opt/` and `70.backend/` files | forged/stale receipt, unsound transform, mutation, replay cases | **Implemented; external replay blocked** |
-| 4 — SimpleOS vertical slice | REQ-FV2-014 | SimpleOS formal owners; bounded `src/verification/` and OS adapter scopes selected by reviewed design | capability/lifecycle/IPC/mapping/storage scenarios plus stable Lean entry points | **Explicitly excluded from this completion run by user direction; existing bounded slices remain unchanged** |
-| 5 — RISC-V product chain | REQ-FV2-015 | hardware formal owner; generated RTL/RVFI sidecars, manual Lean/BYL proof owners, formal wrappers | `check-riscv-formal-dual-track.shs`, strict SBY and mission-critical gates | **Blocked:** readiness cannot substitute for executed RVFI/SBY, oracle, refinement, equivalence, and artifact evidence |
-| 6 — independent release closure | REQ-FV2-001, REQ-FV2-009, REQ-FV2-010, REQ-FV2-016, REQ-FV2-019, REQ-FV2-020 | release evidence owner; no production repairs in release | fresh Lean replay, independent checker, full regression and release gates | **Blocked:** predecessor waves and canonical self-hosted runtime are incomplete |
+| 0 | FV-0 Truth audit | Status migration, dependency-aware proof roots, fail-closed trust/axiom audit | None | Gate 0 |
+| 1 | FV-1 VIR | Canonical woven HIR-to-VIR, source maps, semantic hashes, coverage registry, resolver-produced direct-call manifest | FV-0 | Gate 1 foundation |
+| 1 | FV-2 Exact Lean backend | Typed Lean IR and exact core type/expression lowering | FV-1 | Gate 1 |
+| 2 | FV-3 Contracts/automation | Execution-linked contracts, invariants, termination, frame/effect VCs, classifier | FV-1/2 | Gate 2 proof frontend |
+| 2 | FV-4 Trust/receipts | Receipts, manifests, fresh/independent replay, signing boundary | FV-0 | Gate 2 evidence |
+| 2 | FV-5 AOP/macros | Canonical weave, exact manifest, ghost noninterference, monitor semantics | FV-1 | Gate 3 |
+| 3 | FV-6 Compiler refinement | Translation validators and selected pass/backend certificates | FV-1/2/4 | Gate 2 closure |
+| 3 | FV-9 Performance | Symbol/SCC DAG, semantic cache, scheduler, metrics | Frozen interfaces | Incremental budget met |
+| 4 | FV-7 SimpleOS | First end-to-end kernel slice refinement and mapped concurrency traces | FV-1/3/4 | Gate 4 |
+| 4 | FV-8 RISC-V | HWIR retirement semantics, generated RVFI, Sail/RVFI/equivalence chain | FV-1/4 | Gates 5–6 |
+| continuous | FV-10 Adversarial tests | Vacuity, mutation, stale-cache, false-evidence tests; no production edits | All interfaces | Required at every gate |
 
-## NFR traceability
+### Resolver call-manifest migration interface
 
 | NFR | Wave / owner | Required evidence | Status |
 |---|---|---|---|
@@ -62,27 +79,24 @@ The frozen helpers are `setup_fv2_fixture`, `check_fv2_gate`, and
 | NFR-FV2-005 determinism | 1–3 / producer owners | byte-stable VIR, Lean IR, weave, receipts | Source/tests implemented; repeat-run evidence pending |
 | NFR-FV2-006 performance | 3, 6 / tooling owner | warm latency, cache metrics, max RSS, no repeated scans | Blocked by unavailable self-hosted CLI |
 | NFR-FV2-007 diagnostics | all / lane owners | source/SymbolId/value/effect/signal mapping | Source/tests implemented; execution pending |
-| NFR-FV2-008 evolvability | all / interface owner | V1 migration and stale-cache tests | V1 interfaces implemented; migration execution pending |
+| NFR-FV2-008 evolvability | all / interface owner | V1 migration and stale-cache tests | Policy V1→V2 typed migration and focused tests implemented; execution pending |
 | NFR-FV2-009 independence | 3, 5, 6 / replay and hardware owners | fresh Lean plus independent checker/oracle | Blocked |
-| NFR-FV2-010 scalability | 3 / scheduler owner | bounded parallel DAG execution metrics | Blocked |
+| NFR-FV2-010 scalability | 3 / scheduler owner | bounded parallel DAG execution metrics | Bounded task executor and deterministic commit implemented; authoritative runtime metrics pending |
 
-## Current-main acceptance inventory
+## First implementation wave — strict order
 
-- **Implemented, pending authoritative execution:** MIR probe variants,
-  insertion/identity, operand contracts, deterministic JSON, fail-closed
-  admission/backends, typed VIR/contracts/coverage, obligation closure,
-  receipts, trust/replay reducers, compiler certificates, release adapters,
-  modern unit/system specs, and RISC-V formal runners.
-- **Execution work for this run:** restore the canonical Stage 4 runtime; run
-  focused and system SSpec/docgen; run Lean trust/replay and RISC-V gates;
-  collect applicable NFR evidence; close waves 0–3, 5, and 6.
-- **Explicit exclusion:** wave 4 SimpleOS product closure is not a predecessor
-  for this bounded completion run and must not be promoted or silently marked
-  PASS.
-- **Already integrated:** the first bounded MIR bridge commits were serialized,
-  pushed, refetched, and proven reachable. This does not complete FV2.
+1. Replace existential/disconnected contract theorems with execution-linked obligations.
+2. Audit transitive axioms/trust; replace output-text proof counting.
+3. Introduce the truthful status lattice and migrate claims conservatively.
+4. Freeze and implement VIR v1 plus exhaustive semantic coverage.
+5. Replace machine `Int/Nat` lowering with exact bit-vector semantics.
+6. Replace string-oriented Lean generation with typed Lean IR.
+7. Unify AOP semantics and weave before VIR.
+8. Bind proof, compiler, trust, weave, tool, and artifact identities into receipts/cache keys.
+9. Refine one SimpleOS subsystem implementation to its model.
+10. Generate the smallest real RV32I core and prove one instruction family end to end.
 
-## Test and documentation owners
+## Gate acceptance
 
 | Artifact | Owner | State |
 |---|---|---|
@@ -91,47 +105,152 @@ The frozen helpers are `setup_fv2_fixture`, `check_fv2_gate`, and
 | `test/03_system/compiler/formal_verification_2_0_spec.spl` | system-test owner | Present; 20 REQs, 10 NFRs, frozen steps/helpers, 81 examples |
 | `doc/06_spec/03_system/compiler/formal_verification_2_0_spec.md` | docgen + merge owner | Present mirror; zero-stub regeneration blocked on Stage 4 runtime |
 | `doc/03_plan/sys_test/simple_formal_verification_2_0.md` | system-test owner | Present in this lane; planning evidence only |
-| research, requirements, architecture, detail design | research/design owners | Restored working-tree artifacts accepted by bounded high review; pending commit |
+| research, requirements, architecture, detail design | research/design owners | Committed accepted artifacts; current implementation status refreshed in this plan |
 
-## Parallel lanes and reconciliation
+Current FV-8 evidence: the bounded ADD proof/cover/killed-mutant receipt,
+the pinned concrete Sail ADD differential receipt protocol, and
+the RTL-to-synthesized-JSON equivalence receipt are implemented. The latter is
+hash-bound to the exact generated RTL, module, synthesis policy, Yosys/GHDL
+identities, netlist, and equivalence log and can reach only
+`backend_refined`. Execution of the complete lane remains blocked by the
+currently deployed Rust seed; the end-to-end wrapper deliberately exits 2
+before generation. The Sail wrapper also independently exits 2 until a pinned
+simulator and RV32 config are supplied. Executed ADD differential comparison,
+HWIR-to-RTL semantic refinement beyond code-generation identity, RV64,
+privilege/MMU, post-place-and-route/deployed identity, and Linux remain open.
 
-These file sets are exclusive. A lane stops and asks the merge owner before
-touching any file outside its set.
+Sail resume command:
 
-| Order | Lane | Exact allowed file set | Dependency | Required sidecar receipt | Acceptance |
-|---:|---|---|---|---|---|
-| 1 | A — MIR admission | `src/compiler/50.mir/mir_coverage_probe_admission.spl`; `test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl`; `doc/06_spec/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.md` | frozen opcode shapes | commit/diff hash, commands, exit codes, changed scenarios, unresolved blockers | merge owner checks malformed-before-unlowered ordering and manual parity |
-| 1 | B — native targets | `src/compiler/70.backend/backend/native/isel_x86_64.spl`; `src/compiler/70.backend/backend/native/isel_aarch64.spl`; `src/compiler/70.backend/backend/native/isel_riscv32.spl`; `src/compiler/70.backend/backend/native/isel_riscv64.spl`; `test/01_unit/compiler/backend/native_coverage_probe_rejection_spec.spl`; `doc/06_spec/01_unit/compiler/backend/native_coverage_probe_rejection_spec.md` | admission diagnostics only | same receipt fields plus all four target rows | merge owner rejects wildcard/NOP/comment handling |
-| 1 | C — portable targets | `src/compiler/70.backend/backend/c_backend.spl`; `src/compiler/70.backend/backend/lua_backend.spl`; `src/compiler/70.backend/backend/wasm/wat_codegen.spl`; `src/compiler/70.backend/backend/vhdl_expr.spl`; `src/compiler/70.backend/backend/vhdl_backend.spl`; `src/compiler/70.backend/backend/common/gpu_codegen.spl`; `test/01_unit/compiler/backend/portable_coverage_probe_rejection_spec.spl`; `doc/06_spec/01_unit/compiler/backend/portable_coverage_probe_rejection_spec.md` | admission diagnostics only | same receipt fields plus C/Lua/WASM/VHDL/GPU matrix | merge owner confirms explicit lowering or pre-artifact rejection |
-| 1 | D — interpreter/LLVM | `src/compiler/95.interp/mir_interpreter.spl`; `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`; `src/compiler/70.backend/backend/llvm_lib_translate.spl`; `src/compiler/70.backend/backend/llvm_lib_translate_expr.spl`; `src/compiler/70.backend/backend/llvm_lib_backend.spl`; `test/01_unit/compiler/backend/interpreter_llvm_coverage_probe_rejection_spec.spl`; `doc/06_spec/01_unit/compiler/backend/interpreter_llvm_coverage_probe_rejection_spec.md` | admission diagnostics only | same receipt fields plus interpreter and both LLVM paths | merge owner confirms no backend success after unlowered probe |
-| 2 | E — documentation | `.spipe/simple_formal_verification_2_0/state.md`; `doc/01_research/local/simple_formal_verification_2_0.md`; `doc/01_research/domain/simple_formal_verification_2_0.md`; `doc/02_requirements/feature/simple_formal_verification_2_0.md`; `doc/02_requirements/nfr/simple_formal_verification_2_0.md`; `doc/03_plan/agent_tasks/simple_formal_verification_2_0.md`; `doc/03_plan/sys_test/simple_formal_verification_2_0.md`; `doc/04_architecture/simple_formal_verification_2_0.md`; `doc/04_architecture/simple_formal_verification_2_0_tldr.md`; `doc/05_design/simple_formal_verification_2_0.md`; `doc/05_design/simple_formal_verification_2_0_tldr.md`; `doc/07_guide/compiler/lean_verification_workflow.md`; `doc/00_llm_process/feature_expert/formal_verification/skill.md`; `doc/00_llm_process/layer_expert/formal_verification/skill.md` | reconciled A–D statuses and frozen SPipe vocabulary | list of documents, REQ/NFR completeness audit, stale-claim audit | merge owner accepts links and blocker truthfulness after code lanes |
-| 3 | F — verification | no production edits; reports/evidence only | merged A–E unchanged tree | exact command ledger, tool/binary hashes, exit codes, retained artifacts | independent highest-capability `$verify` review |
+```sh
+sh scripts/setup/setup-fv2-sail-riscv.shs
+# export the three paths printed by setup, then:
+sh scripts/rtl/check-fv2-rv32-add-end-to-end.shs
+```
 
-Lane E's file cell is exhaustive for this delivery: it owns the SPipe state,
-every restored FV2 research/requirement/architecture/design document, both FV2
-TLDR companions, both canonical plans, the Lean workflow guide, and both expert
-skill documents. It does not own executable specs or generated manuals.
+The setup command acquires the already approved revision, requires Sail 0.20.1
+or newer through the upstream build, disables test/GMP downloads, builds the
+model and RV32 config, and emits a lock binding their hashes. Owner: FV-8
+hardware formal lane. Final reviewer: FV2 merge owner/highest-capability model.
 
-Merge order is A, then B/C/D in any order because their files are disjoint,
-then E after the merge owner reconciles every sidecar receipt, then F. The
-merge owner records accepted/rejected receipt IDs and reruns no criterion that
-already passed on the unchanged tree. A sidecar result is advisory until the
-merge owner accepts its diff, test truthfulness, exclusions, and blocker list.
+## Parallel-lane rules
 
-**Independent high-review status: PASS (cycle 3, final).** The bounded reviewer
-accepted the corrected interface mappings, current/proposed status, exhaustive
-disjoint documentation ownership, executable command ledger, and Lean links.
+**Recovery review status: source audit completed; overall acceptance
+WARN/blocked.** The rebased delta has new trust-boundary fixes but no canonical
+runtime execution. Earlier static review does not promote unavailable runtime
+or external evidence.
 
-## Blockers and stop criteria
+Current continuation review lane: Codex Spark is `N/A` because this session does
+not expose a Spark model. The merge owner retains review responsibility; this
+does not waive the final independent highest-capability review.
+
+### Recovery audit ledger (2026-08-15)
+
+Closed in source, pending canonical execution: recursively dependency-bound
+proof-DAG work identity, external schedule validation, and empty-graph
+rejection; fail-closed scalar worker measurements; exact Wave 6
+receipt multiplicity; verified cache-key identities; DCE SHA-256 certificate
+identities; V9 input symlink and mutant-counterexample checks; and rejection of
+caller-selected RV64 row authorities; reachable staged RV64 failure
+classification; strict VIR function/module identity and membership checks;
+fail-closed public replay/VC boundaries; caller-record execution-authority
+rejection for Gates 0–3, 5, and 6; and a diagnostic-only public gate finalizer
+for every non-Phase-4 gate.
+
+Still blocked and not promoted: the resolved VIR V2 companion now binds an
+exhaustive reachable `SemanticCoverageV1` manifest including every terminator,
+and additive Wave 6 V2 routes it through the exact-core V2 collector. All
+instruction and terminator variants remain truthfully `Unsupported`, and the
+collector rejects caller-authored Exact rows until a canonical typed transition
+manifest and resolved VIR V3 producer exist; frozen Wave 6 V1 remains unchanged.
+`WeaveManifestV1` lacks its canonical
+producer, so Gate 3 deliberately cannot pass; replay closure still needs
+approved checker authority plus retained material receipts rather than
+hash-only identities, so public assembly and V1 VC promotion deliberately
+cannot pass; V9 now binds only its four exact RVFI/runtime properties and
+explicitly excludes full-ISA, Zicsr, and Zifencei semantic conformance, but
+executed solver evidence is still absent; the seven canonical RV64 authority wrappers/product
+artifacts are incomplete; and Wave 6 has no release-admitted production call
+site or repository-owned approved-signer policy. Gate 5 likewise lacks a
+runner-owned SBY/equivalence/Sail assembly boundary. These are verification
+blockers, not implicit Phase 4 work.
+
+V2 signer-policy authority now uses the additive V3 schema and canonical
+SHA-256 over the full resolved policy, flight rules, and sorted signer allow
+list; legacy collision-prone `APOLV2-<decimal>` admission and the V1 CLI
+downgrade are fail-closed. The fixed signer-policy spelling is regular/no-follow
+checked, but every value reducer and CLI path remains deny-all until a trusted
+install-root resolver and atomic no-follow snapshot issue provenance. The
+tracked policy remains deny-all and no V3 signer provisioning is claimed.
+
+### Recovery audit ledger (2026-08-15)
+
+Closed in source, pending canonical execution: recursively dependency-bound
+proof-DAG work identity, external schedule validation, and empty-graph
+rejection; fail-closed scalar worker measurements; exact Wave 6
+receipt multiplicity; verified cache-key identities; DCE SHA-256 certificate
+identities; V9 input symlink and mutant-counterexample checks; and rejection of
+caller-selected RV64 row authorities; reachable staged RV64 failure
+classification; strict VIR function/module identity and membership checks;
+fail-closed public replay/VC boundaries; caller-record execution-authority
+rejection for Gates 0–3, 5, and 6; and a diagnostic-only public gate finalizer
+for every non-Phase-4 gate.
+
+Still blocked and not promoted: the resolved VIR V2 companion now binds an
+exhaustive reachable `SemanticCoverageV1` manifest including every terminator,
+and additive Wave 6 V2 routes it through the exact-core V2 collector. All
+instruction and terminator variants remain truthfully `Unsupported`, and the
+collector rejects caller-authored Exact rows until a canonical typed transition
+manifest and resolved VIR V3 producer exist; frozen Wave 6 V1 remains unchanged.
+`WeaveManifestV1` lacks its canonical
+producer, so Gate 3 deliberately cannot pass; replay closure still needs
+approved checker authority plus retained material receipts rather than
+hash-only identities, so public assembly and V1 VC promotion deliberately
+cannot pass; V9 now binds only its four exact RVFI/runtime properties and
+explicitly excludes full-ISA, Zicsr, and Zifencei semantic conformance, but
+executed solver evidence is still absent; the seven canonical RV64 authority wrappers/product
+artifacts are incomplete; and Wave 6 has no release-admitted production call
+site or repository-owned approved-signer policy. Gate 5 likewise lacks a
+runner-owned SBY/equivalence/Sail assembly boundary. These are verification
+blockers, not implicit Phase 4 work.
+
+V2 signer-policy authority now uses the additive V3 schema and canonical
+SHA-256 over the full resolved policy, flight rules, and sorted signer allow
+list; legacy collision-prone `APOLV2-<decimal>` admission and the V1 CLI
+downgrade are fail-closed. The fixed signer-policy spelling is regular/no-follow
+checked, but every value reducer and CLI path remains deny-all until a trusted
+install-root resolver and atomic no-follow snapshot issue provenance. The
+tracked policy remains deny-all and no V3 signer provisioning is claimed.
+
+### Temporary Stage 2/3 verification policy
+
+The user authorized provisional compilation and test feedback from an available
+Stage 2/3 artifact. Such runs must be labeled `PROVISIONAL`, retain the exact
+binary hash and exit status, and may drive source fixes. They cannot check an
+acceptance box, satisfy a pre-push/release gate, or produce PASS evidence.
+TODO818 requires the unchanged final tree to be rerun with the source-matched
+Stage 4 executable after TODO666/TODO667 complete.
+
+The available provisional binary SHA-256
+`04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`
+was attempted once for the RV64 runner check, its focused unit spec, and the
+FV2 system spec. All three terminated with signal-derived exit 139. Hash-bound
+logs are retained at `/tmp/restart12-fv2-provisional-{check,unit,system}.log`;
+no criterion passed and these commands must not be repeated with that binary.
 
 - `bin/simple` and the canonical deployed self-hosted binary are absent in this
   worktree. A stale/noncanonical ELF failure or Rust-seed success is not PASS.
-- The bounded two-job recovery reached the Rust seed build but was stopped
-  before memory-heavy Stage 3 when unrelated concurrent work reduced available
-  memory to about 48 GB with no swap, below the recorded ~55 GB Stage 3 peak.
-  Resume only after host memory quiesces, using the isolated recovery command
-  recorded in the verification handoff; this is an environment blocker, not an
-  approved fallback.
+- The latest receipt-authorized bounded recovery fixed the missing defer marker,
+  imported the shared module-constant/callable/argv owners, and passed Stage 2
+  plus sanity. Final cycle 3 reproduced a byte-identical Stage 3 exit 139 after
+  the frontend error counter expanded from 1 to 25. No Stage 4 or FV2 runtime
+  PASS is claimed. A fresh lane must surface the first hidden frontend
+  diagnostic; do not start a fourth cycle in this one.
+- Wave 5 RV64 has a seven-row owner wired directly to Gate 6 and now rejects
+  caller-selected executables/policies. Several frozen authority wrappers are
+  absent, so the owner intentionally fail-closes before execution. Exact kernel
+  replay proofs, netlist/equivalence artifacts, Linux image, and pinned
+  independent ISA-oracle inputs remain unavailable, so no Gate 6 PASS is
+  claimed.
 - Research, requirements, architecture, and design artifacts are committed.
   The system spec and manual mirror are present; authoritative SSpec/docgen
   execution remains blocked by the missing Stage 4 runtime.

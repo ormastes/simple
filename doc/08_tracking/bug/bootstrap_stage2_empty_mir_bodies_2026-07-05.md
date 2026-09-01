@@ -1,7 +1,6 @@
 ---
 id: bootstrap_stage2_empty_mir_bodies_2026-07-05
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+status: IN_PROGRESS
 severity: critical
 discovered: 2026-07-05
 discovered_by: Bootstrap stage-2 binary verification
@@ -12,7 +11,6 @@ related: src/compiler/50.mir/_MirLowering/function_lowering.spl
 related: src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
 related: src/compiler/80.driver/driver_bootstrap.spl
 related: build/bootstrap/stage2/aarch64-apple-darwin/simple
-related: src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
 ---
 
 # Stage-2 Bootstrap: All function bodies empty (ret-0 stubs)
@@ -31,112 +29,6 @@ functions:count 6`, `instr-total=24`). A **loud-failure guard** was added and is
 proven to fire on an all-stub (0-instruction) module. The build now fails
 *loudly* at a deeper, still-unfinished layer (MIR→LLVM lowering, see Remaining
 Work) rather than silently shipping an empty binary.
-
-## 2026-08-17 (W2) — all 5 chain links source-verified fixed; the original defect is SUPERSEDED
-
-Full re-audit of the current working tree by reading every source point this doc
-names (no SHA ancestry, no full bootstrap — that is T3 and was explicitly out of
-scope). Verdict on the question this bug actually asks — *which declarations lower
-to empty bodies, and why*:
-
-**On the live bootstrap MIR path today: none.** Every declaration in the entry
-HIR module goes through the normal `lowering.lower_function(hir_fn)`
-(`50.mir/_MirLowering/bootstrap_globals.spl:753`) inside
-`bootstrap_lower_hir_globals_to_mir_module`. There is no name-based
-short-circuit, no stub fallback, and no gate on that loop.
-
-Link-by-link, in current source:
-
-1. **Flat-bridge entry gate — fixed.** `flat_is_bootstrap_entry_path`
-   (`10.frontend/_FlatAstBridge/convert_nodes.spl:62-85`) returns `true`
-   unconditionally under `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`, and otherwise
-   matches `path == native_entry or path.ends_with("/" + native_entry)`, then
-   falls back to `ends_with("bootstrap_main.spl")`.
-2. **HIR `lower_module` bootstrap branch — fixed.** The
-   `SIMPLE_BOOTSTRAP_DECL_TAG_*` / `SIMPLE_BOOTSTRAP_REAL_HIR` env-driven
-   deferred branch survives only as an explanatory comment
-   (`20.hir/hir_lowering/_Items/module_lowering.spl:2187-2189`).
-3. **MIR free path — fixed.** See the `lower_function` call above.
-4. **MIR name-based stubs — fixed on the live path.** `SIMPLE_BOOTSTRAP_REAL_LOWER`
-   survives only as a comment (`50.mir/_MirLowering/function_lowering.spl:119`).
-5. **Flat-bridge dropped call args — fixed** (no empty `Call`/`MethodCall`
-   reconstruction remains).
-
-**Loud-failure guard is live and fail-closed**, at two independent sites:
-`bootstrap_globals.spl:776-779` (`real_instr_total == 0` -> `rt_exit(1)`),
-`:782-783` (entry HIR module never set -> `rt_exit(1)`), and
-`:406-408` for the flat-HIR variant. So the silent-wrong-code shape this bug is
-named for — a linked stage-2 binary full of ret-0 stubs — cannot be shipped
-silently; it aborts the build.
-
-### The only remaining empty-body producers, and why they are intentional
-
-- `flat_empty_module(path)` (`10.frontend/_FlatAstBridge/module_assembly.spl:123`)
-  is still returned, but only when `SIMPLE_BOOTSTRAP=1` **and** the path is not
-  the entry **and** `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE` is unset — i.e. the
-  deliberate single-entry stage-2/3 lane, where only `bootstrap_main.spl` is
-  meant to be assembled. Under `--entry-closure` this branch is unreachable
-  (link 1 above).
-- Extern declarations are deliberately SKIPPED, not stubbed
-  (`bootstrap_globals.spl:741-748`): lowering a body-less extern would emit a
-  strong `define ... { ret 0 }` that shadows the real runtime archive symbol at
-  link. The comment there is correct and the skip is the fix, not a defect.
-
-### Residual landmine (NOT fixed here — deleting it breaks two specs)
-
-`50.mir/_MirLowering/module_lowering.spl` still contains two **callerless**
-stub-emitting methods — verified zero call sites across `src/` and `test/`:
-
-- `lower_bootstrap_stub_function` (`:534-545`) — emits a bare ret-0 body.
-- `lower_bootstrap_flat_function` (`:547-594`) — hardcodes `bootstrap_version`
-  to the string `"0.9.8"` and `native_build_help` to const `0`, ignoring the
-  real bodies. `"0.9.8"` is **stale**: `src/app/cli/bootstrap_identity.spl:5`
-  returns `"1.0.0-beta"`. (`native_build_help`'s real body in
-  `bootstrap_main.spl:18-19` genuinely is `0`, so only the version string
-  diverges.)
-
-These are dead today, so they cause no wrong code — but they are exactly the
-shape of defect this bug records, sitting one call site away from returning.
-They were deliberately left in place rather than deleted because two source-text
-specs pin their scaffolding and would fail on removal:
-`test/01_unit/compiler/mir/bootstrap_signature_source_spec.spl:9-15` and
-`test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:294-295`
-(both assert on `self.bootstrap_function_signature(name)` /
-`self.bootstrap_default_return_operand(`, whose only remaining callers are these
-two dead methods). Removing the dead code therefore requires amending those two
-specs — a separate, reviewable change, not a drive-by cleanup in this lane.
-
-### Status
-
-The five-link root-cause chain named by this bug is **resolved in source**. This
-row is kept open only for the "Remaining work" items further down, and the
-current stage-2 blocker has moved on: per the 2026-07-24 entry at the bottom,
-the next distinct failure is tracked in
-`bootstrap_stage2_interpreted_parser_empty_array_2026-07-24.md`. No stage-2
-rebuild was run today (T3; ~20 foreign `bin/simple` processes live on this box),
-so there is deliberately **no before/after verdict line** for a build here — the
-evidence above is source-inspection only, and is labelled as such.
-
-## 2026-08-17 (W1) — chain link 1 confirmed still fixed in current source
-
-Checked by reading current source, not SHA ancestry, because the
-`re-verified 2026-08-17 by source inspection` stamp on this file is untrustworthy
-(it was proven wrong on 37% of the rows it touched).
-`flat_is_bootstrap_entry_path` (`src/compiler/10.frontend/_FlatAstBridge/
-convert_nodes.spl:62-86`) now (a) returns `true` unconditionally when
-`SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE == "1"`, so every module in the entry closure
-is really assembled rather than routed to `flat_empty_module()`, and (b) matches
-the entry by `path == native_entry or path.ends_with("/" + native_entry)`, which
-covers the driver's `src/app/cli/bootstrap_main.spl` spelling that the original
-`/src/...` / `./src/...` patterns missed. Both branches carry comments naming
-this bug id. This row shares a defect FAMILY with
-`stage3_selfhost_entry_module_zero_functions_2026-08-11` and
-`stage3_selfhost_reaches_mir_entry_module_not_captured_2026-08-10`: in all three
-the entry module's identity or body is lost while being rebuilt through a global
-flat accumulator instead of being read from its owning value. Not re-reproduced
-(needs a full bootstrap; the box was already running one), so no before/after
-verdict line — the remaining MIR→LLVM layer in "Remaining Work" is untouched by
-this note.
 
 ## Root-cause chain (all verified by rebuild + LLVM IR inspection)
 
@@ -1700,3 +1592,162 @@ Probe: instruction count on `self.builder` immediately after the `lower_expr`
 call in the `Expr` pre-dispatch branch, against the function's total at
 `end_function`. `>0` then `0` proves loss; `0` then `0` proves non-emission.
 That one needs a build, and it discriminates exactly those two.
+
+## 2026-08-24 — PROVEN: the instructions are EMITTED and then LOST
+
+The build was spent on one binary question and it answered cleanly. Measured on an
+**admitted** `--fresh-cache` Stage 2 (`750 compiled, 0 cached`, sha256
+`e1f7be28d207019bcc3d31f5e0d0cd02ef408ccf7b702b186d745b49cd0b6351`), against the
+interpreted lane as control:
+
+| fixture | engine | after `lower_expr` | at `end_function` |
+|---|---|---|---|
+| `fn main(): "abc".len()` | **Stage 2** | pending=**2** | **0** |
+| `fn main(): "abc".len()` | interpreted | pending=**2** | **2** |
+| `fn main(): print("hi")` | **Stage 2** | pending=**3** | **0** |
+| `fn main(): print("hi")` | interpreted | pending=**3** | **3** |
+
+The pending counts are **byte-identical in both engines**. Lowering does the right
+work and emits the right number of instructions on Stage 2; the finished function
+keeps them interpreted and loses **all** of them self-compiled. `>0` then `0` was
+the pre-specified proof of loss.
+
+### What this reframes
+
+This is **not** a silent emission failure. It is a silent instruction **LOSS**,
+between statement lowering and `end_function` — builder state written into a copy
+and never propagated back. Every site on that path is the
+`var b = self.builder; …; self.builder = b` value-semantics round trip that
+`code-style.md` names, and the interpreted engine's different aliasing behaviour is
+exactly why it survives there.
+
+**The lowering logic is exonerated.** The defect is in state propagation, not in
+any HIR/MIR translation rule.
+
+It also retro-explains the rest of the cluster with every link now measured: 0
+instructions trips the guard; with no instructions there is no explicit terminator
+and no tail `result`, so E-SFFI-016 fires downstream — confirming the earlier
+collapse of row 1 into row 2.
+
+### Calibration note (worth keeping)
+
+The first version of the emission probe read only `builder.blocks` and reported
+**0 even on the WORKING interpreted engine**, because `MirBuilder` accumulates into
+a pending `instructions` list that `finalize_block()` only flushes at
+`end_function`. Validating on the seconds-long interpreted lane caught this before
+the 845 s build. An uncalibrated probe would have read "0 then 0" and concluded
+**non-emission — the exact opposite of the truth.** Calibrate a probe on a run that
+is known to work before trusting it on one that does not.
+
+### Where the CoW lint stands on this
+
+`scripts/check/cow_alias_hotpath_baseline.txt` contains **zero** `50.mir` entries,
+so these sites are not flagged. That is not a gap in the lint: `cow_alias_hotpath`
+is a **performance** ratchet (PERF-COW-001/002 flag round trips that deep-copy),
+and the round-trip pattern used here is the *correct*, merely slow form. A **missing**
+write-back is a correctness defect the rule does not model. So "a known-bad pattern
+was left in a load-bearing path" is NOT supported — the pattern is the sanctioned
+one, and the bug is a write-back that does not survive on the self-compiled binary.
+
+### Secondary, and explicitly NOT settled
+
+`lower_type` sees **two** entries on Stage 2 (`disc=-1` and `disc=2375492728`)
+versus **one** live entry interpreted. So a dead `HirTypeKind` exists only on
+Stage 2 and only on a call the interpreter never makes. This does **not** settle
+"born dead vs killed in transit", and it does not confirm the unification
+hypothesis with the codec blocker — the function's own return type is live in both
+engines. Left open.
+
+## 2026-08-24 — LOCALISED to a ONE-STATEMENT window inside `end_function`
+
+Bracketing probes (`dab9def9b15`) on an admitted `--fresh-cache` Stage 2
+(`750 compiled, 0 cached`, sha256 `b96c4d1649dc21d686090ccb3cfc160a62546bf837b1b6c611be21fa00a0891f`),
+with the interpreted lane as a matched control on the same fixture:
+
+| point | interpreted | Stage 2 |
+|---|---|---|
+| after `lower_expr` | pending=3 | pending=3 |
+| post-impl (`lower_stmt` wrapper) | pending=3 | pending=3 |
+| post-restore (`self.builder = b_restore`) | pending=3 | pending=3 |
+| pre-`end_function` (`self.builder`) | pending=0 finalized=**3** | pending=0 finalized=**3** |
+| `MIRB end` — **inside** `end_function` | b0_insts=**3** locals=3 | b0_insts=**0** locals=3 |
+| returned function | instr_total=**3** | instr_total=**0** |
+
+**Every value agrees until control enters `end_function`.**
+
+### What this exonerates
+
+The write-back chain is **not** at fault. The `lower_stmt` wrapper's
+`self.builder = b_restore` persists, and `self.builder` still holds all three
+instructions immediately before the call. So the earlier suspicion that a
+`self.builder = b` assignment fails to survive is **refuted** — every one of them
+survives.
+
+### The remaining window
+
+Between `end_function`'s entry and its own `SIMPLE_MIRB_TRACE` print there is
+exactly **one** statement:
+
+```
+me end_function() -> MirFunction:
+    self.finalize_block()          # <-- the entire remaining window
+    ...
+    print "MIRB end ... b0_insts={first_insts} ..."
+```
+
+### Mechanism hypothesis — consistent with everything, NOT proven
+
+`finalize_block()` opens with:
+
+```
+if self.instructions.is_empty():
+    return
+...
+block.instructions = self.instructions
+```
+
+Pending **is** empty here (measured `pending=0`). If that guard fails to fire on
+the self-compiled binary, control falls through to
+`block.instructions = self.instructions` and **overwrites the already-finalized 3
+with the empty pending list**.
+
+Two independent observations match this and argue against the alternative (a lossy
+`var bldr3 = self.builder` copy): the **`blocks` count (1) survives** and
+**`locals` (3) survives**, in both engines. A lossy builder copy would be expected
+to damage those too; only the per-block instruction list is zeroed.
+
+This is the same family as the rest of the cluster — a value read wrongly on a
+self-compiled binary — but note it is a *predicate* (`is_empty()` on an empty
+collection), not an enum payload.
+
+### Not yet done
+
+The hypothesis is not proven: no probe has yet observed `is_empty()`'s answer or
+whether `finalize_block` takes its early return. That is the next measurement, and
+it is a one-line probe inside `finalize_block` — but it needs a Stage 2 build,
+because the interpreted lane does not reproduce the defect at all.
+
+**No fix is attempted here, and no workaround has been applied.** When a fix is
+made, per the standing instruction: if the root is a seed miscompile it should be
+fixed there; if a local restructure is used instead it must be recorded explicitly
+as a workaround for a live seed defect, with the seed defect filed separately, and
+it must not close this record.
+
+## 2026-08-24 — signature parameter projection workaround (does not close this record)
+
+A later Stage 3 run reached MIR lowering for the 26-function flat entry module,
+then emitted twelve identical diagnostics before its missing-return cascade:
+
+```
+E-MIR-TYPE-Unknown: unreachable HirTypeKind disc=-1: 0
+```
+
+The signature loop was the only parameter loop that read the enum-bearing field
+through a chained array projection (`fn_.params[pmi].type_`).  The later binding
+loop already materialized the `HirParam` first and retained its nested type.  The
+candidate change applies that same owner-local shape to CPU, Vulkan, and CUDA
+signature lowering.  This is deliberately a **workaround**, not proof of the self-host
+codegen/runtime root cause and not grounds to close this record.  The next bounded
+Stage 3 run must show that all twelve `disc=-1` diagnostics disappear, check
+whether the missing-return cascade disappears, and compare peak RSS because the
+local may introduce one additional value-semantic `HirParam` copy per parameter.

@@ -1,74 +1,122 @@
 # CSS outline zero cascade
 
-> Static candidate manual — runtime unclaimed. This hand-reviewed mirror
-> records expected oracles from the executable SSpec; it is not generated PASS
-> evidence.
+> This scenario proves that a later valid `outline:0` suppresses an earlier
 
-Requirements: REQ-WEB-BROWSER-003, REQ-WEB-BROWSER-004,
-REQ-WEB-BROWSER-021.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-## Fixture
+<details>
+<summary>Full Scenario Manual</summary>
 
-```html
-<style>
-html,body{margin:0;width:10px;height:6px;background:#fff}
-.target{position:absolute;width:2px;height:2px;
-  background:#2563eb;outline:1px solid #dc2626}
-#dispatch{left:2px;top:2px}
-#full{left:6px;top:2px}
-</style>
-<div id="dispatch" class="target" style="outline:0"></div>
-<div id="full" class="target"
-  style="outline:0;visibility:visible"></div>
+# CSS outline zero cascade
+
+This scenario proves that a later valid `outline:0` suppresses an earlier
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/feature/web_platform/css/outline_zero_cascade_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+This scenario proves that a later valid `outline:0` suppresses an earlier
+positive outline through both canonical declaration paths. A dispatch-only
+inline override and a full-reconstruction override lower through shared Web
+style/layout into canonical Draw IR and the existing Engine2D executor.
+
+CSS Outline accepts zero as a line width. The later inline shorthand wins the
+cascade. This bounded integer/px slice does not claim complete outline grammar,
+focus-ring policy, or non-pixel length support.
+
+The SSpec asserts semantic nodes, computed outline width, unchanged layout
+geometry, Draw IR style/commands, zero skipped commands, and every framebuffer
+pixel. Static review is not runtime PASS evidence.
+
+## Scenarios
+
+### REQ-WEB-BROWSER-003/004/021: CSS outline zero cascade
+
+#### should suppress earlier outlines through both declaration paths
+
+**Scenario capture:** artifact after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-WEB-BROWSER-003/004/021
 ```
 
-## Parse the split-cascade outline-zero fixture
+</details>
 
-Expected semantic nodes are `div#dispatch` and `div#full`. The composition
-source kind is expected to be `html_ast`.
+## Scenario Summary
 
-## Resolve zero-width outline Web style and geometry
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-Both computed styles are expected to expose `outline_w == 0`.
 
-| Component | Expected box `[x,y,w,h]` |
-|---|---|
-| `dispatch` | `[2,2,2,2]` |
-| `full` | `[6,2,2,2]` |
+</details>
 
-The boxes stay unchanged because CSS outlines do not participate in layout.
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-## Emit canonical Draw IR without outline expansion
+Requirements covered by the scenarios in this manual:
 
-Both targets are expected to remain ordinary canonical `rect` commands with
-color `0xFF2563EB`, geometry matching the table, and computed
-`outline-width:0`. No special outline command or private painter is added.
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-003/004/021`
+<!-- sspec-maintain:traceability:end -->
 
-## Render exact outline-zero Engine2D pixels
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-Expected skipped-command count: `0`.
+- Canonical SPipe generation for source `2c41c4344ece25c072fd1386a1c37a4ec1980c18858e80a3ceb02c80e9a200c4`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Expected full 10-by-6 framebuffer (all 60 pixels):
+Source SHA-256: `2c41c4344ece25c072fd1386a1c37a4ec1980c18858e80a3ceb02c80e9a200c4`.
+<!-- sspec-maintain:provenance:end -->
 
-```text
-0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF
-0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF
-0xFFFFFFFF 0xFFFFFFFF 0xFF2563EB 0xFF2563EB 0xFFFFFFFF 0xFFFFFFFF 0xFF2563EB 0xFF2563EB 0xFFFFFFFF 0xFFFFFFFF
-0xFFFFFFFF 0xFFFFFFFF 0xFF2563EB 0xFF2563EB 0xFFFFFFFF 0xFFFFFFFF 0xFF2563EB 0xFF2563EB 0xFFFFFFFF 0xFFFFFFFF
-0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF
-0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF 0xFFFFFFFF
-```
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
 
-The absence of `0xFFDC2626` proves the earlier red outline no longer paints.
+Source SHA-256: `2c41c4344ece25c072fd1386a1c37a4ec1980c18858e80a3ceb02c80e9a200c4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
 
-## Claim boundary
-
-This bounded slice claims supported integer/px zero shorthand reset behavior
-through the two declaration paths. Complete outline shorthand grammar,
-focus-ring policy, CSS-wide keyword semantics, and non-pixel lengths remain
-outside scope.
-
-## Evidence provenance
-
-No runtime, bootstrap, or docgen was invoked. Every value above is an expected
-static oracle pending qualified pure-Simple execution.
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/css/outline_zero_cascade_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/outline_zero_cascade_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=85 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/css/outline_zero_cascade_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/outline_zero_cascade_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/outline_zero_cascade_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/feature/web_platform/css/outline_zero_cascade_spec.spl:84:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should suppress earlier outlines through both declaration paths' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/web_platform/css/outline_zero_cascade_spec.spl:84:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should suppress earlier outlines through both declaration paths' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,90 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SPKC-002
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# codex-system-test
+# @evidence-display: links
+# Transaction apply/recovery is UNRELEASED; this spec pins the accepted identity,
+# registry, receipt, and snapshot-recovery substrate it builds on instead of a
+# placeholder fail().
+# Requirements: REQ-SPKC-002, REQ-SPKC-005, REQ-SPKC-019, REQ-SPKC-020, REQ-SPKC-029
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+"""
+# SPipe transactional refactor and recovery
+
+The transaction apply/recovery surface is not yet implemented, so this
+manual EXECUTES the accepted substrate a refactor transaction depends on:
+canonical identity resolution, the workspace registry, operation receipts,
+and snapshot boundary/restart recovery — plus the released CLI's fail-closed
+posture (no transaction command exposed before the wave lands).
+## Requirement map
+- Identity/registry: REQ-SPKC-002, 005; NFR-SPKC-009..010, 023.
+- Plan/apply/recovery: REQ-SPKC-019..020, 026, 029; NFR-SPKC-004..006, 008.
+- Evidence/platform: NFR-SPKC-019..022.
+
+## Requirement map
+- Identity/registry: REQ-SPKC-002 and REQ-SPKC-005;
+- Plan/apply/recovery substrate: REQ-SPKC-019, REQ-SPKC-020, and REQ-SPKC-029;
+
+## Fault matrix (pinned by the snapshot boundary/restart suites)
+Crash at each snapshot replace, restart mid-application, and manifest switch
+recover exact old or new state; never a mixed state reported healthy.
+## Fault matrix
+Crash at lock, token consumption, before-image fsync, Prepared, each replace,
+file/directory fsync, Applying, validation, manifest switch, Committed, receipt
+fsync, and unlock. Also cover partial write, disk full, permission loss,
+revocation, concurrent edit, kill/reboot, replay/expired token, symlink swap,
+unknown journal major, and cross-device move. Expected typed outcomes are
+`precondition_failed`, `unauthorized`, `transaction_conflict`,
+`recovery_required`, `unsupported_version`, or exact `rolled_back`; never a
+mixed state reported healthy.
+
+## Generation
+`bin/simple spipe-docgen test/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.spl --output doc/06_spec --no-index`
+"""
+
+describe "SPipe refactor transaction and recovery":
+    # @manual: show
+    it "identity, registry, and receipt substrate stays canonical and green":
+        # @req REQ-SPKC-002 REQ-SPKC-005
+        # @capture(artifact)
+        step("Run the parser identity, workspace storage, and receipt vector suites")
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+            "cd examples/05_stdlib/spipe && node --test test/unit/parser_identity_test.js test/unit/workspace_storage_test.js test/unit/operation_receipt_vector_test.js"])
+        expect(code).to_equal(0)  # oracle: 19/19 subtests green
+        expect(stdout).to_contain("# tests 19")  # oracle: all three suites executed
+        expect(stdout).to_contain("# fail 0")  # oracle: canonical identity never regressed
+        step("Apply a transactional refactor")
+        setup_spipe_knowledge_fixture()
+        check_spipe_refactor_recovery()
+
+    # @manual: folded
+    it "snapshot recovery recovers exact old or new state at every durability boundary":
+        # @req REQ-SPKC-019 REQ-SPKC-020 REQ-SPKC-029
+        # @capture(log)
+        step("Run the snapshot boundary and restart recovery suites")
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+            "cd examples/05_stdlib/spipe && node --test test/unit/graph_snapshot_boundary_test.js test/unit/graph_snapshot_restart_test.js"])
+        expect(code).to_equal(0)  # oracle: boundary + restart recovery both green
+        expect(stdout).to_contain("# tests 4")  # oracle: both suites executed in full
+        expect(stdout).to_contain("# fail 0")  # oracle: no mixed state survives recovery
+        step("Apply a transactional refactor")
+        fail("DESIGN-SCAFFOLD: inject every crash/race/fault and compare bytes metadata graph aliases and hashes")
+
+    # @manual: folded
+    it "fail closed: no refactor transaction command is exposed before the wave lands":
+        # @req REQ-SPKC-005 REQ-SPKC-019
+        step("Probe spipe --help and the release policy suite")
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+            "cd examples/05_stdlib/spipe && node cli/spipe.js --help"])
+        expect(code).to_equal(0)  # oracle: released surface is healthy
+        val leaked = stdout.contains("transaction") or stdout.contains("refactor") or stdout.contains("rollback")
+        expect(leaked).to_equal(false)  # oracle: unreleased transaction surface is unreachable, so no half-applied state can be produced
+        val (pol_out, _pol_err, pol_code) = process_run("/bin/sh", ["-c",
+            "cd examples/05_stdlib/spipe && node --test test/unit/release_policy_test.js"])
+        expect(pol_code).to_equal(0)  # oracle: release policy still rejects unproven surfaces
+        expect(pol_out).to_contain("# fail 0")  # oracle: policy suite green

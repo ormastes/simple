@@ -60,7 +60,7 @@ Independent section digests define narrow `ConfigProjectionDigest` values, so ch
 
 ## Provider contract
 
-`SimpleProviderQueryV1` is the sole discovery entry across native and SMF loaders. The request contains interface ID, minimum major/minor, host ABI, target identity, and requested capabilities. The result contains status, provided version, descriptor size/table, opaque provider context, provider identity, implementation digest, and ABI digest.
+`SimpleProviderQueryV1` is the sole discovery entry across native and SMF loaders. The request contains interface ID, minimum major/minor, host ABI, target identity, and requested capabilities. The result preserves the original 48-byte scalar prefix, then carries the complete 32-byte ABI SHA-256 in display byte order plus four zero reserved bytes. The loader compares that lossless identity with the canonical SCI lock before allocating a generation pin. Mutable-path/same-handle TOCTOU protection remains a separate loader criterion and is not supplied by this wire contract.
 
 `SimpleCliCommandV1` owns `describe`, `validate_args`, `run`, and `complete` operations at command granularity. `SimpleAppLaunchV1` owns launch request/result at application granularity. Neither exposes language-native objects. Optional capabilities are separate queried interfaces or known descriptor prefixes. A breaking ownership/layout/calling/error change creates a new major.
 
@@ -81,6 +81,15 @@ Build and bind are separate actions: provider targets produce artifacts; config 
 ## Bootstrap decision
 
 `build-explain` returns `Exact`, `Compatible`, `Unknown`, or `Incompatible`, the selected closure, digest deltas, reuse counts, and a typed bootstrap reason. `Unknown` never authorizes reuse. Only seed failure/unsupported target, required bootstrap language/runtime/artifact/core incompatibility, or explicit convergence/trust/DDC targets can select full bootstrap. Normal feature targets have no dependency on convergence or DDC.
+
+For an authorized full bootstrap, the compatibility control plane consumes the
+existing immutable Stage-2 smoke-admission receipt as a typed speculative edge.
+Stage 3 may build concurrently with Stage-2 qualification, but remains
+quarantined. Every scheduled task binds a generation lease; only an unchanged,
+untainted lease plus a qualified ancestor chain can admit Stage 4 or acquire the
+exclusive deploy token. Correctness/unknown failure or input drift recursively
+invalidates descendants while preserving their evidence. The existing stage
+engine remains the producer/trust owner; the scheduler cannot mint admission.
 
 ## Startup and hot paths
 

@@ -1,7 +1,7 @@
 # Short Grammar Placeholder Fails For gc_async_immut pfilter In Interpreter
 
 Date: 2026-05-27
-Status: STALE 2026-05-29 — native_combinators_spec passes with placeholder grammar as-is
+Status: FIXED 2026-08-22 — Rust postfix parser preserves the callback boundary
 
 ## Summary
 
@@ -20,16 +20,19 @@ pfilter([1, 2, 3, 4], _1 % 2 == 0)
 
 ## Evidence
 
-In `test/01_unit/lib/gc_async_immut/native_combinators_spec.spl`, changing only
-the `pfilter` callback to `_1 % 2 == 0` makes the interpreter run report
-`total_passed: 0` and `total_failed: 1`.
+The current exact reproducer is
+`test/01_unit/lib/nogc_sync_immut/native_combinators_spec.spl`; the adjacent
+named/explicit/placeholder comparison is
+`test/01_unit/lib/nogc_async_immut/combinator_return_contract_spec.spl`.
 
-The native run accepts the placeholder form, and the same file accepts
-`pmap([1, 2, 3], _1 * 3)` in interpreter mode. The mismatch appears specific
-to `pfilter` placeholder predicates in interpreter execution.
+The failure was reproduced again with the frozen Rust bootstrap seed on
+2026-08-22. Named and explicit-lambda predicates passed. The actual trigger was
+nesting the free-function combinator inside another call: `call_arg_depth`
+deferred the unrecognized `pfilter` argument, then the outer transform promoted
+the complete combinator call into a lambda.
 
 ## Impact
 
-Keep `pfilter` predicates explicit in interpreter-covered GC async immutable
-facade tests until the interpreter path supports this placeholder form.
-
+The Rust postfix parser's higher-order classifier now includes the immutable
+`p*` combinator family. Placeholder grammar remains covered in the facade test;
+no explicit-lambda normalization was needed.

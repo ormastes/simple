@@ -110,13 +110,7 @@ fn every_real_relative_brace_or_glob_import_in_the_tree_parses() {
         // census), which are a different defect and must not be conflated.
         let mut parser = Parser::new(line);
         if let Err(err) = parser.parse() {
-            failures.push(format!(
-                "{}:{}: {}\n    {}",
-                path.display(),
-                lineno,
-                err,
-                line.trim()
-            ));
+            failures.push(format!("{}:{}: {}\n    {}", path.display(), lineno, err, line.trim()));
         }
     }
 
@@ -134,13 +128,9 @@ fn the_harvester_recognises_the_shapes_it_claims_to() {
     // Guards the predicate itself: if this drifts, the corpus test above goes
     // quietly vacuous and the non-vacuity floor is the only thing left.
     assert!(is_relative_brace_or_glob_import("use .vhdl_validation.*"));
-    assert!(is_relative_brace_or_glob_import(
-        "use .vhdl.vhdl_builder.{VhdlBuilder}"
-    ));
+    assert!(is_relative_brace_or_glob_import("use .vhdl.vhdl_builder.{VhdlBuilder}"));
     assert!(is_relative_brace_or_glob_import("use ..linker.smf_reader.*"));
-    assert!(is_relative_brace_or_glob_import(
-        "use ...monomorphize.note_sdn.{A, B}"
-    ));
+    assert!(is_relative_brace_or_glob_import("use ...monomorphize.note_sdn.{A, B}"));
 
     // Absolute imports are a separate path that never regressed; parenthesised
     // and bare relative imports are not this defect's shape.

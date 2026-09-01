@@ -163,15 +163,6 @@ pub extern "C" fn rt_compile_to_native_with_opt(
     0
 }
 
-#[no_mangle]
-pub extern "C" fn rt_compile_to_llvm_ir(
-    _source_file: RuntimeValue,
-    _target_triple: RuntimeValue,
-    _bare_metal: u8,
-) -> i64 {
-    0
-}
-
 // Stub implementations for complex CLI functions
 // These require the full driver to implement properly
 

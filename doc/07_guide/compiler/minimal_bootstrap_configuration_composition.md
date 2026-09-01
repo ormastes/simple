@@ -38,10 +38,30 @@ implementation digest. Dynamic or SMF dispatch must fail closed unless
 admission retains the loader session. The runtime now has an exact `int32`
 query call, canonical packed buffers, and session pins that prevent close while
 provider-owned handles are live; naked symbol evidence remains inactive. A
-real provider artifact still needs admitted B2/B3 execution evidence before
+query result preserves its original 48-byte scalar prefix and carries the full
+32-byte ABI SHA-256 at bytes 48..79, followed by four reserved zero bytes. The
+host compares that lossless identity with the canonical SCI digest before it
+publishes a session pin. This identity check does not prove mutable-path or
+same-handle loader TOCTOU safety; that remains a separate criterion. A real
+provider artifact still needs admitted B2/B3 execution evidence before
 root dispatch is wired. Consequently the concrete bootstrap driver import
 remains in place; its exact unblock evidence is tracked in
 `doc/08_tracking/bug/compiler_driver_v1_bootstrap_activation_blocked_on_callable_loader_2026-08-14.md`.
+
+### ABI-digest system gate
+
+The focused executable contract is
+`test/03_system/app/simple/feature/sci_provider_query_abi_digest_spec.spl`,
+mirrored only as Markdown under `doc/06_spec`. It verifies the exact 84-byte
+wire result, full-digest round trip, CLI and compiler-driver producers, exact
+SCI comparison, poison-retaining legacy partial writes, reserved bytes, and
+strict total size. Its visible `step("...")` flow and REQ-005/006/014 mapping
+are release-blocking once a qualified general pure-Simple SSpec runtime exists.
+
+Until then, report `TEST_BLOCKED`; do not execute SPipe, docgen, or
+`sspec-maintain` with a Rust seed or promote compiler-only Stage 2 evidence to
+a system-runner pass. This gate does not cover mutable-path or same-handle
+loader TOCTOU, which remains a later independent loader criterion.
 
 ## Development build selection
 
@@ -102,13 +122,6 @@ It does not establish a deployed Stage 4 CLI, general SPipe/docgen/test-runner
 operation, release readiness, self-host convergence, DDC, or another host's
 behavior. Those claims require their own admitted binary and evidence.
 
-For staged-native compiler metadata, keep aggregate values inside the owning
-component. Helper boundaries should carry scalar identities and copy aligned
-metadata in the owner; do not return an aggregate and immediately pass it into
-another native method. The focused reference is
-`scripts/check/check-native-scalar-metadata-copy.shs`, tracked by
-`doc/08_tracking/bug/stage3_post_file_copy_exit139_2026-08-14.md`.
-
 ## Required build receipt
 
 Initial acceptance is structural: report modules parsed, typed, and lowered;
@@ -117,22 +130,6 @@ regenerated; and cache hits/misses. Configuration-only changes have zero code
 work. Timing and RSS may be recorded with host and producer labels but are not
 initial pass/fail thresholds. No bootstrap process may start before the planner
 emits and validates its typed reason.
-
-The current fail-closed authorization boundary is planner admission v2. The
-planner authorization leaf accepts only `//bootstrap:stage3` or
-`//bootstrap:stage4`; each target has its own closed typed-reason enumeration.
-The leaf binds the parent compiler, frozen runtime, planner source closure, and
-planner executable hashes. The canonical admission then records, in fixed
-unique field order, the parent sanity and provenance anchors, runtime and
-source-closure snapshots, git state, build argv/environment hashes,
-runtime-plus-closure cache scope, planner smoke, and authorization receipt.
-Every evidence path is absolute, canonical, nonsymlinked, and hash-checked.
-No canonical non-circular producer exists yet: it requires an independently
-admitted Stage 2 parent to build and execute the planner while capturing its
-locked exact invocation, environment, stdout/exit, derivation, and smoke.
-`scripts/check/verify-bootstrap-planner-admission-bound.shs` therefore rejects
-even a structurally perfect shell-authored body. Bootstrap remains fail-closed;
-a fixture never becomes build evidence.
 
 Current CLI boundary: `simple build explain --target <name>` validates the
 declared target graph and prints its deterministic dependency plan. It reports
@@ -170,22 +167,14 @@ convergence, release trust verification, or diverse double compilation. App
 metadata, command registration, provider-private code, documentation, cache
 absence, or merely living under `src/compiler/**` are not reasons.
 
-The intended executable gate is two-step and fail-closed. `simple build
-bootstrap` is a receipt-only planner leaf; it never starts a stage. The leaf
-requires the exact target-specific reason plus four lowercase SHA-256 bindings:
-the admitted parent compiler, frozen runtime snapshot, planner source closure,
-and planner executable:
+The executable gate is two-step and fail-closed. `simple build bootstrap` is a
+receipt-only planner; it never starts a stage:
 
 ```text
 simple build bootstrap --bootstrap-reason=self-host-convergence-check \
-  --bootstrap-target=//bootstrap:stage4 \
-  --parent-compiler-sha256=<64-lowercase-hex> \
-  --runtime-snapshot-sha256=<64-lowercase-hex> \
-  --planner-source-closure-sha256=<64-lowercase-hex> \
-  --planner-sha256=<64-lowercase-hex> \
-  --bootstrap-receipt=build/bootstrap/authorization.receipt
+  --bootstrap-receipt=build/bootstrap/reason.receipt
 scripts/bootstrap/bootstrap-from-scratch.sh \
-  --bootstrap-receipt=build/bootstrap/planner-admission-v2.env
+  --bootstrap-receipt=build/bootstrap/reason.receipt
 ```
 
 The authorization leaf is deliberately non-authoritative. Only the canonical
@@ -195,11 +184,11 @@ argv, environment, stdout, exit status, and smoke evidence, may wrap it in the
 29-field planner admission v2 envelope.
 
 **That producer now exists** (2026-08-17):
-`scripts/bootstrap/bootstrap-from-scratch.sh planner-admission-v2`. It is the only
+`scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs`. It is the only
 supported way to obtain an admissible receipt:
 
 ```text
-scripts/bootstrap/bootstrap-from-scratch.sh planner-admission-v2 \
+scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
   --target=//bootstrap:stage4 --reason=self-host-convergence-check \
   --parent-compiler=build/bootstrap/stage2/<triple>/simple
 ```
@@ -228,6 +217,16 @@ verifier. The exact
 Stage 3 target is `--bootstrap-target=//bootstrap:stage3`; Stage 4 is
 `--bootstrap-target=//bootstrap:stage4`. Missing receipts still fail earlier
 with `reason-receipt-required`.
+
+Stage 4 continuation, candidate provenance, Stage 3 current acceptance,
+deployment, and rollback receipts all carry one non-transferable current-tree
+tuple: canonical repository root, Stage 4 source-closure hash, Stage 3 source
+snapshot hash, commit identity, exact dirty-patch/untracked-byte fingerprint,
+and Stage 3 producer path/hash. Consumers re-measure that tuple at their action
+boundary. A fully rehashed but stale receipt chain, or an otherwise identical
+chain from another worktree, fails closed. Dirty worktrees are not rejected
+merely for being dirty; the exact admitted dirty fingerprint must remain
+unchanged.
 
 For recovery diagnostics, a sanctioned Rust bootstrap seed may interpret only
 the extracted minimal planner leaf, with the same four SHA-256 arguments shown

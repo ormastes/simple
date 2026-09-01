@@ -180,33 +180,6 @@ the env var points to the correct seed target.
    stage2/stage3 round-trip + test subset). Gate failures are hard stops.
 3. **stage2 binary is ephemeral:** only used during bootstrap. After stage3
    succeeds, discard it — no production reliance on stage2 artifacts.
-4. **Deployed `simple` is a frontend; SSpec needs its `simple_seed` sibling.**
-   The release CLI delegates `test` to a `simple_seed` in the SAME directory
-   (`seed sibling not found, skipping delegation` = it's missing → in-process
-   fallback fails `unresolved name: describe`). Every deploy must ship the
-   pair. Recovery: copy a known-good `{simple, simple_seed}` pair from a clean
-   worktree's `build/bootstrap/full/<triple>/` to a scratch dir.
-   See `cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
-   **Exe identity must be resolved IN-PROCESS.** `_cli_current_exe_path` now
-   canonicalizes `/proc/self/exe` via `rt_path_absolute`
-   (`std::fs::canonicalize`). Never shell out for it: a `/proc/self` read done
-   by a spawned helper describes the HELPER, so `readlink -f /proc/self/exe`
-   returned `/usr/bin/readlink` — its seed sibling `/usr/bin/simple_seed` never
-   exists, so the CLI fell through to delegate to `bin/simple` = itself and
-   `bin/simple run` became an unbounded fork bomb (2026-07-25, `0531ca8ce266`).
-   The same commit restored `_cli_resolve_symlink` on the *candidate* side of
-   `_cli_is_current_exe`: `bin/simple` is a symlink, so an unresolved candidate
-   never matches our real exe and the fork-bomb guard silently passes.
-   **Binaries deployed before `0531ca8ce266` self-delegate no matter which path
-   invokes them** — identity does not depend on argv[0] in those builds, so the
-   old "invoke the REAL path, not the symlink" workaround does not help. Drive
-   `simple_seed` directly until redeploy.
-5. **Stale untracked `.smf` stubs poison module resolution tree-wide** —
-   symptom is identical to a deploy clobber (every spec fails
-   `unresolved name: describe`). `find src test -name '*.smf'` must be empty;
-   quarantine hits. See
-   `doc/08_tracking/bug/smf_stub_shadowing_unresolved_describe_2026-07-24.md`
-   and `doc/07_guide/infra/testing.md` § Troubleshooting.
 
 ## Multi-Error Recovery Strategy
 
@@ -616,100 +589,8 @@ It retains commit-ready logs under
 `doc/08_tracking/check/evidence/<source-fingerprint>/`, refuses fingerprinted
 input drift from `HEAD`, and records external TODO receipts only through
 `--record-gate-pass <id> --evidence <repo-relative-committed-receipt>`. The
-receipt must have schema `simple.must-check-gate-receipt/v1`, bind the exact
-gate ID and source fingerprint, state final `PASS`, and hash-bind a separate
-committed artifact. The push consumer validates evidence blobs from the exact pushed revision.
+push consumer validates evidence blobs from the exact pushed revision.
 Schema v3 requires a named owner on every row, actionable unblock text for
 TODO/blocked rows, and `unblock_condition=none` for PASS. A bootstrap wrapper
 must not publish a phase PASS until its exact receipt has been validated and
 hashed; the bounded push consumer only verifies that retained state.
-A bare recorder invocation is invalid: automated rows may be promoted only by
-`--record-bootstrap-success` with exact admitted Stage 4 binary/provenance.
-
-## Phase-gating principle (2026-08-23)
-
-**What each phase tests is that the NEXT phase's prerequisites are properly
-implemented — not optional features.** A phase gate is a prerequisite check, not
-exhaustive coverage; it deliberately excludes optional/feature-surface tests no
-later phase consumes. A gate that runs everything (21,228 specs) is too slow to
-run and too noisy to read, so it gets skipped, and a skipped gate protects
-nothing.
-
-Corollaries you must honour when touching any bootstrap gate:
-
-- The verdict line names counts **and** scope —
-  `PASS — N phase-gate spec(s) run, 0 failed (M out-of-scope deferred, see <record>)`.
-  Silent narrowing is the failure mode being eliminated.
-- Excluded-but-incomplete work becomes a TODO and is explicitly disabled or made
-  to assert; never left silently half-working.
-- Zero items examined ⇒ `ERROR`, never `PASS`.
-- Optional-feature failures are held as TODOs — not fixed in-phase, not skipped
-  in source (CLAUDE.md forbids skipping failing tests without approval).
-
-Scope numbers, per-phase prerequisite table, ineligible trees
-(`test/01_unit/bugs/`, `test/fixtures/`, `test/tmp_repro/`), and the open gap
-(`check-post-bootstrap-stage4-sspec.shs` reporting capabilities it never
-exercises) are in
-`doc/07_guide/tooling/bootstrap_phase_verification.md`.
-
-## Companion rules (2026-08-23)
-
-**The bootstrap path contains exactly what the next step requires.**
-
-| policy | statement |
-|---|---|
-| **Scope** | Each phase's tests verify the next phase's prerequisites, not optional features. |
-| **Incomplete work** | Disable with skip or assert plus a TODO — **never delete**, never silently half-working. Skip is the authorised mechanism for excluding out-of-scope optional surface; it lives in the gate's scope declaration, not anonymously in spec files. In the Rust seed the equivalent is `#[ignore]` or an assert, plus a TODO. |
-| **rust simple** | For the Rust seed (`src/compiler_rust/**`): **do not implement optional features unless requested, or needed to build phase 2.** The phase-2 exception requires a demonstrable build failure the feature resolves — "phase 2 will probably want this" is not it — and whoever invokes it records what broke. Simple is the default implementation language per CLAUDE.md. Applies to new work; existing optional seed surface is an observation, not a defect. |
-
-Rationale for the seed rule: it is bootstrap-only tooling whose single job is to
-compile Simple until the self-hosted compiler takes over. Every optional feature
-added to it must then be maintained in two languages and eventually replicated on
-the self-hosted path — enlarging the bootstrap problem this phase exists to
-shrink.
-
-Full statement: `doc/07_guide/tooling/bootstrap_phase_verification.md`.
-
-## "Phase 1" is NOT a native-build (2026-08-23)
-
-The single most repeated bootstrap mistake. Cost ~26 unusable runs on
-2026-08-22/23. Record:
-`doc/08_tracking/bug/phase1_mislabelled_as_native_build_2026-08-23.md`.
-
-| phase | artifact | produced by | native-build? |
-|---|---|---|---|
-| 1 | Rust seed `src/compiler_rust/target/bootstrap/simple` | **cargo**, `--profile bootstrap` | **NO** |
-| 2 | `stage2/<platform>/simple` | seed runs `native-build` — the FIRST one | yes |
-| 3 | `stage3/simple` | stage2 binary runs `native-build` | yes |
-
-Rules:
-
-1. A command containing `native-build` is **Stage 2 or later, by definition**.
-   If someone calls it "phase 1", the label is wrong.
-2. **Never hand-type the stage native-build line.** Run
-   `sh scripts/bootstrap/bootstrap-from-scratch.sh`. Every flag is load-bearing.
-   Bare invocation exits **64** (`reason-receipt-required`) — that is policy, not
-   breakage; use `--strategy=adhoc --full-bootstrap --stop-after-stage2
-   --output=<dir>` (the trust-root exception) or plan a receipt.
-   `scripts/bootstrap/` is **two files** since `dc86db785b4` (14 -> 2):
-   `bootstrap-from-scratch.sh` and `bootstrap-windows.cmd`. Nine former sibling
-   scripts are now **positional subcommands** (first argument only):
-   `preserve-phase-binary`, `progress-watch`, `planner-admission-v2`,
-   `stage2-sanity-diagnostic`, `rollback-deploy`, `stage4-tooling-matrix`,
-   `stage4-tools-only`, `resume-stage3`, `windows-entry`; the rest are helper
-   functions reachable as
-   `BOOTSTRAP_LIB_ONLY=1 . scripts/bootstrap/bootstrap-from-scratch.sh`. All
-   nine verified in `--help` and verified to dispatch, 2026-08-23. Any path
-   naming another `scripts/bootstrap/*.shs` is stale — the file is gone. Full
-   surface: `doc/07_guide/tooling/bootstrap_options.md`.
-3. **`SIMPLE_CACHE_SCOPE` without `--cache-dir` is a silent no-op.** Zero
-   cache-hit lines in a long log ⇒ check the invocation before "warming".
-4. **`--strategy=adhoc` is a failure policy (fail-fast), not a lighter build**
-   (`scripts/bootstrap/bootstrap-from-scratch.sh:22`). There is no
-   reduced-closure stage-1 path in this repo.
-5. **A frozen progress counter is a LIVELOCK, not slowness.** Opposite fixes.
-   Signature from the incident: counter stuck at 389/688 for 2,700s while
-   `module_surface_registry_index.spl` was parsed 73 times.
-
-Guard: `scripts/check/check-sanctioned-bootstrap-invocation.shs` (ADVISORY, red).
-Phase table: `doc/07_guide/tooling/bootstrap_phase_verification.md`.

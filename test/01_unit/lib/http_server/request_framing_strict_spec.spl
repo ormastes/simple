@@ -1,0 +1,50 @@
+"""
+# HTTP/1 Request Framing Strictness
+
+Proves that the production incremental server parser rejects ambiguous request
+lines, non-ASCII field names, malformed fields, and unbounded partial lines.
+"""
+
+use std.spec.*
+use std.nogc_async_mut.http_server.parser.{
+    HTTP1_REQUEST_LINE_MAX_BYTES,
+    HttpRequestParser,
+    http1_header_name_is_token
+}
+
+fn repeated_text(value: text, count: i64) -> text:
+    var result = ""
+    var index = 0
+    while index < count:
+        result = result + value
+        index = index + 1
+    result
+
+describe "incremental HTTP/1 request framing is fail-closed":
+    it "accepts one exact request line and ASCII token field name":
+        var parser = HttpRequestParser.new()
+        expect(parser.feed("GET /ok HTTP/1.1\r\nHost: example.test\r\n\r\n").is_ok()).to_equal(true)
+        expect(parser.is_complete()).to_equal(true)
+        expect(parser.to_request("127.0.0.1").path).to_equal("/ok")
+        expect(http1_header_name_is_token("X-Trace_1")).to_equal(true)
+
+    it "rejects extra request-line fields and unsupported versions":
+        var extra = HttpRequestParser.new()
+        expect(extra.feed("GET / HTTP/1.1 smuggled\r\n\r\n").is_err()).to_equal(true)
+        expect(extra.has_error()).to_equal(true)
+        var version = HttpRequestParser.new()
+        expect(version.feed("GET / HTTP/2\r\n\r\n").is_err()).to_equal(true)
+        expect(version.has_error()).to_equal(true)
+
+    it "rejects malformed and UTF-8 field names instead of ignoring them":
+        var missing_colon = HttpRequestParser.new()
+        expect(missing_colon.feed("GET / HTTP/1.1\r\nHost example.test\r\n\r\n").is_err()).to_equal(true)
+        var unicode_name = HttpRequestParser.new()
+        expect(unicode_name.feed("GET / HTTP/1.1\r\nHöst: example.test\r\n\r\n").is_err()).to_equal(true)
+        expect(http1_header_name_is_token("Höst")).to_equal(false)
+
+    it "rejects an oversized partial request line before CRLF arrives":
+        var parser = HttpRequestParser.new()
+        val oversized = repeated_text("G", HTTP1_REQUEST_LINE_MAX_BYTES + 1)
+        expect(parser.feed(oversized).is_err()).to_equal(true)
+        expect(parser.has_error()).to_equal(true)

@@ -23,6 +23,13 @@ val IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS: [text] = [
     "/sys/apps/simple_loader", "/sys/apps/simple_loader.smf",
 ]
 val IMAGE_CLANG_GUEST_BIN_PATHS: [text] = ["/usr/bin/clang", "/sys/apps/clang"]
+val IMAGE_CLANG_SYSROOT_REQUIRED_FILES_V1: [text] = [
+    "share/simpleos/simpleos.ld",
+    "lib/crt0.o",
+    "lib/libsimpleos_c.a",
+    "lib/libsimple_runtime.a",
+    "lib/libm.a",
+]
 val IMAGE_RUSTC_GUEST_BIN_PATHS: [text] = ["/usr/bin/rustc", "/sys/apps/rust"]
 val _CLANG_CANDIDATES = ["build/os/clang_static/bin/clang_static", "build/os/clang_static/bin/clang"]
 val _RUSTC_CANDIDATES = ["build/os/rust_static/bin/rustc_static", "build/os/rustc_static/bin/rustc_static"]
@@ -127,9 +134,39 @@ fn image_effective_rustc_binary() -> text:
         if rt_file_exists(candidate): return candidate
     ""
 
-fn image_effective_sysroot_dir() -> text:
+fn image_target_triple_v1(arch: PkgArch) -> text:
+    match arch:
+        PkgArch.X86_64: "x86_64-unknown-simpleos"
+        PkgArch.Arm64: "aarch64-unknown-simpleos"
+        PkgArch.Riscv64: "riscv64gc-unknown-simpleos"
+        PkgArch.Riscv32: "riscv32-unknown-simpleos"
+        PkgArch.Any: "x86_64-unknown-simpleos"
+
+fn image_effective_sysroot_dir(arch: PkgArch) -> text:
     val env_path = rt_env_get("SIMPLEOS_SYSROOT") ?? ""
-    if env_path != "": env_path else: "build/os/sysroot"
+    if env_path != "": return env_path
+    match arch:
+        PkgArch.X86_64: "build/os/sysroot"
+        PkgArch.Arm64: "build/os/sysroot-aarch64"
+        PkgArch.Riscv64: "build/os/sysroot-riscv64"
+        PkgArch.Riscv32: "build/os/sysroot-riscv32"
+        PkgArch.Any: "build/os/sysroot"
+
+fn image_clang_sysroot_complete_v1(sysroot: text) -> bool:
+    """Require every canonical guest compile/link input before staging.
+
+    The include tree is copied to `/usr/include`; the linker and archives are
+    copied to their exact fixed paths.  A partial sysroot must never be
+    advertised as embedded because the guest pipeline has no ambient host
+    fallback.
+    """
+    if sysroot == "" or not rt_file_exists(sysroot) or
+       not rt_file_exists("{sysroot}/include"):
+        return false
+    for relative_path in IMAGE_CLANG_SYSROOT_REQUIRED_FILES_V1:
+        if not rt_file_exists("{sysroot}/{relative_path}"):
+            return false
+    true
 
 fn image_copy_tree(src: text, dst: text) -> bool:
     val (_out, _err, code) = rt_process_run_timeout("/bin/cp", ["-a", "--", "{src}/.", "{dst}/"], 180000)
@@ -144,10 +181,13 @@ fn image_simple_toolchain_manifest(simple_binary: text) -> text:
 fn image_clang_fixture_payload() -> text:
     "[clang_toolchain]\nstatus = \"fixture: clang_static not built\"\nexpected_binary = \"build/os/clang_static/bin/clang_static\"\nexpected_sysroot = \"build/os/sysroot\"\nnote = \"build clang_static + sysroot, then re-run to embed the real toolchain\"\n"
 
-fn image_clang_embedded_payload(binary: text, sysroot: text, embedded: bool) -> text:
+fn image_clang_embedded_payload(
+    binary: text, sysroot: text, embedded: bool, arch: PkgArch,
+    include_root_sha256: text
+) -> text:
     var out = "[clang_toolchain]\nstatus = \"embedded\"\nhost_payload = \"{binary}\"\n"
-    out = out + "target_triple = \"x86_64-unknown-simpleos\"\nsysroot_source = \"{sysroot}\"\n"
-    out = out + "sysroot_embedded = {embedded}\nlib_dir = \"/usr/lib\"\nsysroot_dir = \"/usr/share/simpleos\"\n"
+    out = out + "target_triple = \"{image_target_triple_v1(arch)}\"\nsysroot_source = \"{sysroot}\"\n"
+    out = out + "sysroot_embedded = {embedded}\ninclude_dir = \"/usr/include\"\ninclude_root_sha256 = \"{include_root_sha256}\"\nlib_dir = \"/usr/lib\"\nlinker_script = \"/usr/share/simpleos/simpleos.ld\"\nsysroot_dir = \"/usr\"\n"
     for path in IMAGE_CLANG_GUEST_BIN_PATHS: out = out + "role = \"{path}\"\n"
     out
 
@@ -188,10 +228,13 @@ fn image_default_bootloader_config(arch: PkgArch) -> text:
 fn image_installer_bootloader_config(arch: PkgArch) -> text:
     "TIMEOUT=5\n\n:SimpleOS Installer\n  PROTOCOL=limine\n  KERNEL_PATH=boot:///kernel.elf\n  CMDLINE=console=serial installer=1 root=/dev/sda2 arch={pkg_arch_to_text(arch)}\n\n:SimpleOS (Live)\n  PROTOCOL=limine\n  KERNEL_PATH=boot:///kernel.elf\n  CMDLINE=console=serial live=1 arch={pkg_arch_to_text(arch)}\n"
 
-export IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS, IMAGE_CLANG_GUEST_BIN_PATHS, IMAGE_RUSTC_GUEST_BIN_PATHS
+export IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS, IMAGE_CLANG_GUEST_BIN_PATHS
+export IMAGE_CLANG_SYSROOT_REQUIRED_FILES_V1, IMAGE_RUSTC_GUEST_BIN_PATHS
 export image_target_architecture, image_effective_simple_binary
+export image_target_triple_v1
 export image_load_validated_simple_binary, image_validate_simple_binary
 export image_effective_clang_binary, image_effective_rustc_binary, image_effective_sysroot_dir
+export image_clang_sysroot_complete_v1
 export image_copy_tree, image_simple_toolchain_manifest
 export image_clang_fixture_payload, image_clang_embedded_payload
 export image_rust_fixture_payload, image_rust_embedded_payload

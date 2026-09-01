@@ -10,6 +10,14 @@ use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
+/// A struct-update spread's base expression, bound to a synthetic local so it
+/// is evaluated exactly once. `finish_struct_init` turns this into the
+/// enclosing `HirExprKind::LetIn`.
+pub(super) struct SpreadBinding {
+    pub local_idx: usize,
+    pub value: HirExpr,
+}
+
 impl Lowerer {
     /// Lower a tuple literal to HIR
     ///
@@ -178,6 +186,7 @@ impl Lowerer {
         &mut self,
         name: &str,
         fields: &[(String, Expr)],
+        spread: Option<&Expr>,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         use crate::hir::lower::error::LowerError;
@@ -212,15 +221,40 @@ impl Lowerer {
         // declared-order-with-nil-fill resolver as the paren-call constructor
         // form (`S(field: v)`, hir/lower/expr/calls.rs) uses.
         let provided: Vec<(Option<&str>, &Expr)> = fields.iter().map(|(n, e)| (Some(n.as_str()), e)).collect();
-        let fields_hir = self.lower_struct_init_fields(name, struct_ty, &provided, ctx)?;
+        let (fields_hir, spread_binding) = self.lower_struct_init_fields(name, struct_ty, &provided, spread, ctx)?;
 
-        Ok(HirExpr {
+        Ok(Self::finish_struct_init(struct_ty, fields_hir, spread_binding))
+    }
+
+    /// Assemble the final `StructInit`, wrapping it in a `LetIn` when a
+    /// struct-update spread bound its base to a temp local.
+    ///
+    /// The `LetIn` is what makes "the base expression is evaluated EXACTLY
+    /// ONCE" true: every slot filled from the base reads `Local(idx)`, not a
+    /// re-evaluation of the base expression.
+    pub(super) fn finish_struct_init(
+        struct_ty: TypeId,
+        fields_hir: Vec<HirExpr>,
+        spread_binding: Option<SpreadBinding>,
+    ) -> HirExpr {
+        let init = HirExpr {
             kind: HirExprKind::StructInit {
                 ty: struct_ty,
                 fields: fields_hir,
             },
             ty: struct_ty,
-        })
+        };
+        match spread_binding {
+            None => init,
+            Some(binding) => HirExpr {
+                kind: HirExprKind::LetIn {
+                    local_idx: binding.local_idx,
+                    value: Box::new(binding.value),
+                    body: Box::new(init),
+                },
+                ty: struct_ty,
+            },
+        }
     }
 
     /// Build the declared-order field HIR list for a struct/class
@@ -254,13 +288,47 @@ impl Lowerer {
     /// not-yet-assigned slot in declared order (preserving plain positional
     /// construction), and any declared slot nothing fills gets a `nil`
     /// placeholder instead of being left unset.
+    /// STRUCT-UPDATE SPREAD (`S(..base, field: v)` / `S { field: v, ..base }`),
+    /// added 2026-08-30 for bug
+    /// `struct_spread_paren_form_parses_as_range_2026-08-30`.
+    ///
+    /// Semantics implemented here, stated explicitly:
+    ///
+    /// * **Precedence, highest first:** explicitly named field > positional
+    ///   argument > **spread base** > the field's declared `= default` > `nil`
+    ///   placeholder. The spread beats the declared default deliberately:
+    ///   `..base` means "take the rest FROM base", so a base field must not be
+    ///   silently replaced by the class-level default.
+    /// * **The base is evaluated EXACTLY ONCE.** It is bound to a synthetic
+    ///   immutable local (`$struct_spread_base`) via `HirExprKind::LetIn` (see
+    ///   `finish_struct_init`) and every base-filled slot reads that local.
+    ///   A side-effecting base (`S(..make_base(), x: 1)`) therefore runs its
+    ///   effects once, not once per unlisted field.
+    /// * **Evaluation ORDER:** the base is evaluated FIRST, before any of the
+    ///   explicitly listed field expressions; the listed expressions then run
+    ///   in the struct's DECLARED field order (not source order — that is
+    ///   pre-existing behaviour of this resolver, unchanged).
+    /// * **Aliasing:** each base-filled slot is a plain field READ of the temp.
+    ///   Simple's value semantics are copy-on-write, so the new struct's slots
+    ///   are copies of the base's field values, and mutating the result does
+    ///   not write through to `base`.
+    /// * **Field identity is by declared INDEX**: slot `i` of the result is
+    ///   filled from field `i` of the base. Struct-update syntax is only
+    ///   meaningful when the base has the same type as the constructed struct;
+    ///   this is not verified here (no type check exists at this layer), and
+    ///   is called out as a known gap.
+    /// * **Hard errors, never a silent fill:** a spread whose struct layout
+    ///   cannot be resolved (fully erased / lenient `ANY` type) is rejected
+    ///   with `LowerError::Unsupported` rather than falling through to
+    ///   source-order lowering, which would drop the spread on the floor.
     pub(super) fn lower_struct_init_fields(
         &mut self,
         name: &str,
         struct_ty: TypeId,
         provided: &[(Option<&str>, &Expr)],
+        spread: Option<&Expr>,
         ctx: &mut FunctionContext,
-    ) -> LowerResult<Vec<HirExpr>> {
+    ) -> LowerResult<(Vec<HirExpr>, Option<SpreadBinding>)> {
         // `from_registry` records whether `declared` came from the LOCAL type
         // registry (authoritative for this struct) or from the cross-module
         // `global_struct_defs` BARE-NAME fallback. The fallback keys on the
@@ -268,34 +336,59 @@ impl Lowerer {
         // collide and it can hand back the wrong field list -- fine as a
         // best-effort ORDERING hint (its prior use), but not sound enough to
         // reject a name on. Only the registry list gates the hard error below.
-        let mut from_registry = true;
-        let declared_field_names: Option<Vec<String>> = self
-            .module
-            .types
-            .get(struct_ty)
-            .and_then(|hir_ty| match hir_ty {
-                HirType::Struct { fields: sf, .. } => Some(sf.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()),
+        let registry_fields: Option<Vec<(String, TypeId)>> =
+            self.module.types.get(struct_ty).and_then(|hir_ty| match hir_ty {
+                HirType::Struct { fields: sf, .. } => Some(sf.clone()),
                 _ => None,
-            })
-            .or_else(|| {
-                from_registry = false;
-                let bare_name = name.rsplit('.').next().unwrap_or(name);
-                self.global_struct_defs.as_ref().and_then(|defs| {
-                    defs.get(bare_name)
-                        .map(|fs| fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
-                })
             });
+        let registry_declared: Option<Vec<String>> = registry_fields
+            .as_ref()
+            .map(|sf| sf.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>());
+        let from_registry = registry_declared.is_some();
+        let declared_field_names = registry_declared.or_else(|| {
+            self.global_struct_fields_for_name(name).map(|fields| {
+                fields
+                    .iter()
+                    .map(|(field_name, _)| field_name.clone())
+                    .collect::<Vec<_>>()
+            })
+        });
 
         let Some(declared) = declared_field_names else {
+            // A struct-update spread NEEDS the declared field list: without it
+            // there is no set of slots to fill from the base, and the only
+            // alternative would be to lower the listed fields in source order
+            // and DROP the spread — exactly the silent-wrongness this fix
+            // exists to remove. Fail loudly instead.
+            if spread.is_some() {
+                return Err(crate::hir::lower::error::LowerError::Unsupported(format!(
+                    "struct spread `..base` in a `{name}` construction: the declared field layout of \
+                     `{name}` is not resolvable here (type fully erased), so the fields to copy from \
+                     the base cannot be determined. Import the struct's declaring module, or list \
+                     every field explicitly."
+                )));
+            }
             // Struct declaration not found anywhere (fully erased, no
             // registry entry) -- fall back to lowering exactly what was
             // written, in source order, matching prior behavior for this
             // unresolvable case.
+            if crate::hir::lower::trace_field_get_enabled() {
+                let fpath = self
+                    .current_file
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                eprintln!(
+                    "[CTOR-TRACE] {name} ERASED source-order n={} in {fpath}",
+                    provided.len()
+                );
+            }
             let mut out = Vec::with_capacity(provided.len());
             for (_, expr) in provided {
                 out.push(self.lower_expr(expr, ctx)?);
             }
-            return Ok(out);
+            return Ok((out, None));
         };
 
         // Same-bare-name variant selection: the local registry is
@@ -310,9 +403,7 @@ impl Lowerer {
         let mut declared = declared;
         let bare_name = name.rsplit('.').next().unwrap_or(name);
         let provided_names: Vec<&str> = provided.iter().filter_map(|(n, _)| *n).collect();
-        let registry_covers = provided_names
-            .iter()
-            .all(|pn| declared.iter().any(|d| d == pn));
+        let registry_covers = provided_names.iter().all(|pn| declared.iter().any(|d| d == pn));
         if !registry_covers && !provided_names.is_empty() {
             if let Some(variants) = self
                 .duplicate_global_struct_defs
@@ -433,9 +524,35 @@ impl Lowerer {
             }
         }
 
+        // Bind the spread base to a synthetic local FIRST, so it is evaluated
+        // exactly once and before any listed field expression. `declared` may
+        // have been swapped to a variant layout above; only the registry
+        // layout carries trustworthy field TypeIds, so fall back to ANY when
+        // the two disagree.
+        let spread_binding: Option<SpreadBinding> = match spread {
+            None => None,
+            Some(base_expr) => {
+                let base_hir = self.lower_expr(base_expr, ctx)?;
+                let local_idx = ctx.add_local(
+                    "$struct_spread_base".to_string(),
+                    struct_ty,
+                    simple_parser::ast::Mutability::Immutable,
+                );
+                Some(SpreadBinding {
+                    local_idx,
+                    value: base_hir,
+                })
+            }
+        };
+        let spread_field_types: Vec<TypeId> = match (&spread_binding, &registry_fields) {
+            (Some(_), Some(rf)) if rf.len() == declared.len() => rf.iter().map(|(_, t)| *t).collect(),
+            (Some(_), _) => vec![TypeId::ANY; declared.len()],
+            (None, _) => Vec::new(),
+        };
+
         let mut pos_iter = positional.into_iter();
         let mut out = Vec::with_capacity(declared.len());
-        for field_name in &declared {
+        for (field_index, field_name) in declared.iter().enumerate() {
             // Cloned OUT of `self` first: an `if let` on a borrow of
             // `self.struct_field_defaults` would keep that borrow alive across
             // the `self.lower_expr(&mut self, ..)` call in its body.
@@ -448,6 +565,21 @@ impl Lowerer {
                 out.push(self.lower_expr(expr, ctx)?);
             } else if let Some(expr) = pos_iter.next() {
                 out.push(self.lower_expr(expr, ctx)?);
+            } else if let Some(binding) = &spread_binding {
+                // Unlisted slot, spread present: copy field `field_index` out
+                // of the once-evaluated base. Deliberately ABOVE the declared
+                // `= default` arm — `..base` means "the rest comes from base".
+                let field_ty = spread_field_types.get(field_index).copied().unwrap_or(TypeId::ANY);
+                out.push(HirExpr {
+                    kind: HirExprKind::FieldAccess {
+                        receiver: Box::new(HirExpr {
+                            kind: HirExprKind::Local(binding.local_idx),
+                            ty: struct_ty,
+                        }),
+                        field_index,
+                    },
+                    ty: field_ty,
+                });
             } else if let Some(default_expr) = declared_default {
                 // ROOT FIX (JIT omitted-field-default, 2026-08-17): a declared
                 // `= default` fills its own slot. Previously EVERY unwritten
@@ -465,7 +597,7 @@ impl Lowerer {
                 });
             }
         }
-        Ok(out)
+        Ok((out, spread_binding))
     }
 
     /// Lower a dictionary literal to HIR: {key: value, ...}

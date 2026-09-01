@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/ml/gpu_tensor.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 10 ]
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 23 ]
+[ "$(grep -c '^    @unsafe(reason:' "$module")" -eq 6 ]
+[ "$(grep -c '^@always_inline$' "$module" || true)" -eq 0 ]
+
+call_count=$(perl -ne '
+    s/#.*//;
+    next if /^extern fn /;
+    while (/\brt_(?:cuda|f64|bits|bytes)_[a-z0-9_]+\b/g) { $count++ }
+    END { print $count + 0 }
+' "$module")
+[ "$call_count" -eq 37 ]
+
+symbols=$(awk '/^extern fn /{name=$3; sub(/\(.*/, "", name); print name}' "$module")
+both=0
+one=0
+none=0
+for symbol in $symbols; do
+    providers=0
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry" && providers=$((providers + 1))
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" && providers=$((providers + 1))
+    case "$providers" in
+        2) both=$((both + 1)) ;;
+        1) one=$((one + 1)) ;;
+        0) none=$((none + 1)) ;;
+    esac
+done
+[ "$both" -eq 2 ]
+[ "$one" -eq 1 ]
+[ "$none" -eq 7 ]
+
+grep -q '^extern fn rt_cuda_memcpy_h2d.* -> bool$' "$module"
+grep -q '^extern fn rt_cuda_memcpy_d2h.* -> bool$' "$module"
+grep -q '^extern fn rt_cuda_launch_kernel.* -> bool$' "$module"
+grep -q 'For larger tensors, iterative reduction would be needed' "$module"
+
+echo "GPU tensor SFFI authority audit: PASS (37 calls/9 used symbols; 10 unsafe declarations + 19 unsafe raw-resource owners; 2 both/1 one/7 no-provider declarations; semantic bool preserved; known unchecked contracts remain unsafe; no forced inlining)"

@@ -1,0 +1,147 @@
+use std.spec.*
+use app.spipe_docgen.showcase.{
+    EvidenceShowcaseResolvedRow,
+    parse_evidence_showcase_inventory,
+    resolve_evidence_showcase_inventory,
+    render_evidence_showcase_generated,
+    replace_evidence_showcase_generated
+}
+
+fn inventory_source(extra_row: text = "") -> text:
+    "evidence_showcase:\n" +
+        "  inventory_version: 1\n" +
+        "  hubs: [\n" +
+        "    {id: simpleos, path: src/os/EVIDENCE_SHOWCASE.md, order: 10}\n" +
+        "  ]\n" +
+        "  rows: [\n" +
+        "    {id: simpleos.login, category: operating_systems, " +
+        "claim: \"SimpleOS login\", requirement: REQ-EVS-007, " +
+        "hub: simpleos, spec: test/03_system/os/evidence/login_spec.spl, " +
+        "manual: doc/06_spec/03_system/os/evidence/login_spec.md, " +
+        "manifest: build/test-artifacts/03_system/os/evidence/login/evidence.sdn, " +
+        "order: 10, critical: true}" +
+        extra_row + "\n  ]\n"
+
+describe "evidence showcase inventory and generated regions":
+    it "parses traceability without accepting evidence truth":
+        step("Capture the feature evidence")
+        val parsed = parse_evidence_showcase_inventory(inventory_source())
+        step("Verify the structured evidence")
+        match parsed:
+            case Ok(inventory):
+                expect(inventory.version).to_equal(1)
+                expect(inventory.hubs.len()).to_equal(1)
+                expect(inventory.rows.len()).to_equal(1)
+                expect(inventory.rows[0].requirement).to_equal("REQ-EVS-007")
+            case Err(error):
+                expect(error).to_equal("")
+
+    it "rejects duplicate rows and hand-authored status":
+        step("Capture the feature evidence")
+        val duplicate = (
+            ",\n    {id: simpleos.login, category: operating_systems, " +
+            "claim: Duplicate, requirement: REQ-EVS-007, hub: simpleos, " +
+            "spec: test/duplicate_spec.spl, " +
+            "manual: doc/06_spec/duplicate_spec.md, " +
+            "manifest: build/test-artifacts/duplicate/evidence.sdn, " +
+            "order: 20, critical: true}"
+        )
+        step("Verify the structured evidence")
+        match parse_evidence_showcase_inventory(inventory_source(duplicate)):
+            case Ok(_):
+                expect("duplicate row accepted").to_equal("")
+            case Err(error):
+                expect(error).to_contain("duplicate showcase row id")
+        val with_status = inventory_source().replace(
+            "order: 10, critical: true}",
+            "order: 10, critical: true, status: live-pass}"
+        )
+        match parse_evidence_showcase_inventory(with_status):
+            case Ok(_):
+                expect("hand-authored status accepted").to_equal("")
+            case Err(error):
+                expect(error).to_contain("must not contain evidence truth field")
+
+    it "renders literal status and preserves prose around one generated region":
+        step("Capture the feature evidence")
+        match parse_evidence_showcase_inventory(inventory_source()):
+            case Err(error):
+                expect(error).to_equal("")
+            case Ok(inventory):
+                val resolved = EvidenceShowcaseResolvedRow(
+                    row: inventory.rows[0],
+                    status: "contract-only",
+                    boundary: "Executable contract exists; no validated manifest",
+                    target: "qemu-riscv64",
+                    artifact_path: "",
+                    resume_command: ""
+                )
+                step("Verify the structured evidence")
+                val generated = render_evidence_showcase_generated(
+                    [resolved], "root"
+                )
+                expect(generated).to_contain("| `contract-only` | 1 |")
+                expect(generated).to_contain("SimpleOS login")
+                step("Render the evidence for review")
+                val source = (
+                    "# Human capability’s title\n\n" +
+                    "<!-- evidence-showcase:generated:start -->\n" +
+                    "old\n" +
+                    "<!-- evidence-showcase:generated:end -->\n\n" +
+                    "Human footer\n"
+                )
+                match replace_evidence_showcase_generated(source, generated):
+                    case Err(error):
+                        expect(error).to_equal("")
+                    case Ok(merged):
+                        expect(merged).to_start_with("# Human capability’s title")
+                        expect(merged).to_contain("## Generated evidence status")
+                        expect(merged.contains("\nold\n")).to_be(false)
+                        expect(merged).to_end_with("Human footer\n")
+                step("Publish the showcase link")
+                expect(inventory.hubs[0].path).to_equal(
+                    "src/os/EVIDENCE_SHOWCASE.md"
+                )
+
+    it "fails closed when generated-region markers are missing":
+        step("Render the evidence for review")
+        match replace_evidence_showcase_generated("# no markers\n", "generated"):
+            case Ok(_):
+                expect("marker-less showcase accepted").to_equal("")
+            case Err(error):
+                expect(error).to_equal("missing evidence showcase start marker")
+
+    it "requires the generated manual and escapes untrusted table prose":
+        step("Capture a critical row with no generated manual")
+        val missing_manual = inventory_source().replace(
+            "doc/06_spec/03_system/os/evidence/login_spec.md",
+            "build/definitely-missing/evidence-manual.md"
+        )
+
+        step("Verify critical publication fails closed")
+        match parse_evidence_showcase_inventory(missing_manual):
+            case Err(error):
+                expect(error).to_equal("")
+            case Ok(inventory):
+                match resolve_evidence_showcase_inventory(inventory):
+                    case Ok(_):
+                        expect("critical row without a generated manual").to_equal("")
+                    case Err(error):
+                        expect(error).to_contain("critical showcase manual not found")
+
+                step("Render hostile Markdown and HTML as inert table text")
+                val hostile = EvidenceShowcaseResolvedRow(
+                    row: inventory.rows[0],
+                    status: "blocked",
+                    boundary: "<script>& [link]\n| `code` *bold* _em_",
+                    target: "qemu<&>",
+                    artifact_path: "",
+                    resume_command: ""
+                )
+                val rendered = render_evidence_showcase_generated([hostile], "root")
+                expect(rendered).to_contain("&lt;script&gt;&amp; &#91;link&#93;")
+                expect(rendered).to_contain("&#124; &#96;code&#96;")
+                expect(rendered.index_of("<script>")).to_equal(-1)
+
+                step("Publish only inert generated content")
+                expect(rendered.index_of("\n| `code`")).to_equal(-1)

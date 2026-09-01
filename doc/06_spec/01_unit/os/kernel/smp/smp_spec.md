@@ -2,6 +2,30 @@
 
 > The SMP scaffold owns logical CPU discovery, AP startup bookkeeping, online CPU state, pending IPI masks, and the preemption disable counter used by scheduler and green-carrier wakeup paths. These tests exercise the interpreter-safe public API rather than importing private constants or mutating per-CPU globals directly.
 
+<!-- sdn-diagram:id=smp_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=smp_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+smp_spec -> std
+smp_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=smp_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -25,16 +49,8 @@ The SMP scaffold owns logical CPU discovery, AP startup bookkeeping, online CPU 
 | Design | N/A |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/01_unit/os/kernel/smp/smp_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
-
-# SMP kernel scaffolding
-**Feature IDs:** #WAVE4-G18
-**Category:** Kernel / SMP
 
 ## Overview
 
@@ -73,19 +89,18 @@ _Verify that smp_init sets up the per-CPU table with BSP online and all APs offl
 
 #### BSP alone is online after init
 
-- Verify: BSP alone is online after init
+- BSP alone is online after init
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: BSP alone is online after init")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("BSP alone is online after init")
 smp_init()
 expect smp_online_count().to_equal(1u32)
 expect percpu_is_online(0u32).to_equal(true)
@@ -98,19 +113,18 @@ expect percpu_is_online(1u32).to_equal(false)
 
 #### brings a second CPU online
 
-- Verify: brings a second CPU online
+- brings a second CPU online
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: brings a second CPU online")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("brings a second CPU online")
 smp_init()
 val ok = smp_bringup_ap(1u32)
 expect ok.to_equal(true)
@@ -121,19 +135,18 @@ expect smp_online_count().to_equal(2u32)
 
 #### refuses to bring up cpu 0 (BSP is already online)
 
-- Verify: refuses to bring up cpu 0 (BSP is already online)
+- refuses to bring up cpu 0 (BSP is already online)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: refuses to bring up cpu 0 (BSP is already online)")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("refuses to bring up cpu 0 (BSP is already online)")
 smp_init()
 val ok = smp_bringup_ap(0u32)
 expect ok.to_equal(false)
@@ -143,19 +156,18 @@ expect ok.to_equal(false)
 
 #### refuses cpu_id >= MAX_CPUS
 
-- Verify: refuses cpu_id >= MAX_CPUS
+- refuses cpu_id >= MAX_CPUS
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: refuses cpu_id >= MAX_CPUS")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("refuses cpu_id >= MAX_CPUS")
 smp_init()
 val ok = smp_bringup_ap(percpu_max_cpus())
 expect ok.to_equal(false)
@@ -167,19 +179,18 @@ expect ok.to_equal(false)
 
 #### records firmware APIC ids without marking APs online
 
-- Verify: records firmware APIC ids without marking APs online
+- records firmware APIC ids without marking APs online
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: records firmware APIC ids without marking APs online")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("records firmware APIC ids without marking APs online")
 smp_init()
 
 val count = smp_register_firmware_apic_ids([4u32, 9u32, 13u32])
@@ -197,19 +208,18 @@ expect smp_online_count().to_equal(1u32)
 
 #### tracks AP startup and marks online by APIC id
 
-- Verify: tracks AP startup and marks online by APIC id
+- tracks AP startup and marks online by APIC id
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: tracks AP startup and marks online by APIC id")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("tracks AP startup and marks online by APIC id")
 smp_init()
 smp_register_firmware_apic_ids([4u32, 9u32, 13u32])
 
@@ -225,19 +235,18 @@ expect smp_online_count().to_equal(2u32)
 
 #### rejects unknown APIC ids
 
-- Verify: rejects unknown APIC ids
+- rejects unknown APIC ids
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: rejects unknown APIC ids")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("rejects unknown APIC ids")
 smp_init()
 smp_register_firmware_apic_ids([4u32, 9u32])
 
@@ -248,19 +257,18 @@ expect smp_mark_ap_started_by_apic_id(99u32).to_equal(false)
 
 #### reports when registered APs need automatic boot startup
 
-- Verify: reports when registered APs need automatic boot startup
+- reports when registered APs need automatic boot startup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: reports when registered APs need automatic boot startup")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("reports when registered APs need automatic boot startup")
 smp_init()
 expect x86_registered_ap_boot_startup_needed().to_equal(false)
 
@@ -276,19 +284,18 @@ _IPI send/take and bitmask accumulation via g_percpu[].ipi_pending._
 
 #### send/take round-trips the reason bitmask
 
-- Verify: send/take round-trips the reason bitmask
+- send/take round-trips the reason bitmask
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: send/take round-trips the reason bitmask")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("send/take round-trips the reason bitmask")
 smp_init()
 smp_bringup_ap(1u32)
 val sent = smp_send_ipi(1u32, smp_ipi_resched())
@@ -301,19 +308,18 @@ expect got.to_equal(smp_ipi_resched())
 
 #### multiple IPIs OR into the pending mask
 
-- Verify: multiple IPIs OR into the pending mask
+- multiple IPIs OR into the pending mask
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: multiple IPIs OR into the pending mask")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("multiple IPIs OR into the pending mask")
 smp_init()
 smp_bringup_ap(1u32)
 smp_send_ipi(1u32, smp_ipi_resched())
@@ -327,19 +333,18 @@ expect got.to_equal(combined)
 
 #### take_ipi clears the pending mask
 
-- Verify: take_ipi clears the pending mask
+- take_ipi clears the pending mask
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: take_ipi clears the pending mask")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("take_ipi clears the pending mask")
 smp_init()
 smp_bringup_ap(1u32)
 smp_send_ipi(1u32, smp_ipi_halt())
@@ -352,19 +357,18 @@ expect got2.to_equal(0u32)
 
 #### send_ipi to offline CPU returns false
 
-- Verify: send_ipi to offline CPU returns false
+- send_ipi to offline CPU returns false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: send_ipi to offline CPU returns false")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("send_ipi to offline CPU returns false")
 smp_init()
 val sent = smp_send_ipi(5u32, smp_ipi_resched())
 expect sent.to_equal(false)
@@ -376,19 +380,18 @@ expect sent.to_equal(false)
 
 #### disable nests and enable decrements
 
-- Verify: disable nests and enable decrements
+- disable nests and enable decrements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: disable nests and enable decrements")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("disable nests and enable decrements")
 smp_init()
 expect percpu_preempt_enabled(0u32).to_equal(true)
 percpu_preempt_disable(0u32)
@@ -406,19 +409,18 @@ expect percpu_preempt_enabled(0u32).to_equal(true)
 
 #### have stable bit assignments
 
-- Verify: have stable bit assignments
+- have stable bit assignments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SMP_SMP-001
-step("Verify: have stable bit assignments")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("have stable bit assignments")
 expect smp_ipi_resched().to_equal(0x1u32)
 expect smp_ipi_tlb_flush().to_equal(0x2u32)
 expect smp_ipi_halt().to_equal(0x4u32)
@@ -440,42 +442,56 @@ expect smp_ipi_call_func().to_equal(0x8u32)
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
-- **Research:** `doc/01_research/local/multicore_green.md`
+- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `bdfeb2ba8454664250d361d4eca64c6daf30216979ba3cae64d789413f2b6794`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `05116c96a75c0aedf2096dc6dc917c3e664e4d3951bfd5b0797990ddbdd05c8f`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `bdfeb2ba8454664250d361d4eca64c6daf30216979ba3cae64d789413f2b6794`.
+Source SHA-256: `05116c96a75c0aedf2096dc6dc917c3e664e4d3951bfd5b0797990ddbdd05c8f`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `bdfeb2ba8454664250d361d4eca64c6daf30216979ba3cae64d789413f2b6794`  
+Source SHA-256: `05116c96a75c0aedf2096dc6dc917c3e664e4d3951bfd5b0797990ddbdd05c8f`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/01_unit/os/kernel/smp/smp_spec.spl
 mirror: doc/06_spec/01_unit/os/kernel/smp/smp_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/kernel/smp/smp_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/os/kernel/smp/smp_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/kernel/smp/smp_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, recovery/troubleshooting
+doc/06_spec/01_unit/os/kernel/smp/smp_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/smp/smp_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'BSP alone is online after init' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/smp/smp_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'brings a second CPU online' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/smp/smp_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'refuses to bring up cpu 0 (BSP is already online)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

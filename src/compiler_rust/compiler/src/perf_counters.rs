@@ -59,6 +59,11 @@ counters!(
     // imported-module AST memo (hir::lower::import_loader::parsed_imported_module)
     IMPORT_AST_PARSES,
     IMPORT_AST_HITS,
+    // numbered-layer-directory memos (module_resolver::resolution)
+    NUMBERED_DIR_MISSES,
+    NUMBERED_DIR_HITS,
+    SEGMENT_WITHIN_NUMBERED_MISSES,
+    SEGMENT_WITHIN_NUMBERED_HITS,
 );
 
 #[inline(always)]
@@ -74,17 +79,25 @@ pub fn enabled() -> bool {
 fn init() -> bool {
     let on = std::env::var("SIMPLE_PERF_COUNTERS").is_ok_and(|v| !v.is_empty() && v != "0");
     if on && !ATEXIT_REGISTERED.swap(true, Ordering::Relaxed) {
-        // See dispatch_profile::init -- `libc` is unix-only in Cargo.toml, so
-        // the at-exit hook is cfg-gated. Report rather than silently collect
-        // counters that would never be dumped.
         #[cfg(unix)]
         unsafe {
             libc::atexit(dump_at_exit);
+            libc::signal(libc::SIGTERM, dump_on_signal as libc::sighandler_t);
+            libc::signal(libc::SIGINT, dump_on_signal as libc::sighandler_t);
         }
+        // `libc` is a cfg(unix)-only dependency of this crate, so the call
+        // above cannot compile on Windows. atexit itself is standard C and the
+        // MSVC CRT exports it, so declare it directly rather than dropping the
+        // feature: SIMPLE_PERF_COUNTERS is a documented debugging tool
+        // (.claude/rules/commands.md) and a silently-inert counter dump would
+        // be worse than none.
         #[cfg(not(unix))]
-        eprintln!(
-            "[simple] SIMPLE_PERF_COUNTERS ignored: the at-exit counter dump is not wired on this platform"
-        );
+        unsafe {
+            extern "C" {
+                fn atexit(cb: extern "C" fn()) -> i32;
+            }
+            atexit(dump_at_exit);
+        }
     }
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on
@@ -105,7 +118,10 @@ pub fn set_enabled(on: bool) {
 pub fn trace_min_len() -> u64 {
     static MIN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *MIN.get_or_init(|| {
-        std::env::var("SIMPLE_PERF_COUNTERS_TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+        std::env::var("SIMPLE_PERF_COUNTERS_TRACE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
     })
 }
 
@@ -123,6 +139,25 @@ pub fn bump(counter: &AtomicU64, by: u64) {
     if enabled() {
         counter.fetch_add(by, Ordering::Relaxed);
     }
+}
+
+/// Dump on SIGTERM/SIGINT as well as at exit.
+///
+/// `atexit` never runs when the process is killed by a signal, and the
+/// workloads these counters are most useful on are exactly the ones that get
+/// killed by a `timeout` budget. Only installed when `SIMPLE_PERF_COUNTERS`
+/// is set, so the default path is unchanged. The handler allocates, which is
+/// not async-signal-safe in general; that is acceptable for an opt-in
+/// diagnostic whose next action is to terminate the process anyway.
+// `libc` is a cfg(unix)-only dependency of this crate, and the only call
+// sites (the `libc::signal` installs above) are already `#[cfg(unix)]`.
+// Without the same gate here the definition itself is compiled on Windows
+// and fails with E0433 `unresolved module or unlinked crate libc`, which
+// breaks the Rust seed build for the whole MSVC bootstrap lane.
+#[cfg(unix)]
+extern "C" fn dump_on_signal(sig: libc::c_int) {
+    dump_at_exit();
+    unsafe { libc::_exit(128 + sig) };
 }
 
 extern "C" fn dump_at_exit() {

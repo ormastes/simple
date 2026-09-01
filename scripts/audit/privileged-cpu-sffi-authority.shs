@@ -1,0 +1,59 @@
+#!/bin/sh
+# Static source/performance-shape ratchet. This is not hardware verification.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+arm32="$root/src/os/kernel/arch/arm32/cpu.spl"
+arm64="$root/src/os/kernel/arch/arm64/cpu.spl"
+rv32="$root/src/os/kernel/arch/riscv32/cpu.spl"
+rv64="$root/src/os/kernel/arch/riscv64/cpu.spl"
+rv64_provider="$root/src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
+example_stubs="$root/examples/09_embedded/simple_os/arch/x86_64/boot/auto_stubs.c"
+example_extras="$root/examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c"
+
+# These architecture primitives are compiler-owned direct instructions, not
+# unresolved SFFI declarations with fabricated nil providers.
+for file in "$arm32" "$arm64" "$rv32" "$rv64"; do
+    ! grep -Eq '^extern fn rt_(arm32|arm64|rv32|riscv64)_' "$file"
+done
+! grep -Eq 'rt_(arm32|arm64|rv32)_' "$arm32" "$arm64" "$rv32"
+! grep -Eq 'rt_riscv64_(csr_|sfence_vma_|read_tp|write_tp|read_sp|read_gp)' "$rv64"
+! grep -Eq 'rt_riscv64_(csr_|sfence_vma_|read_tp|write_tp|read_sp|read_gp)' "$rv64_provider"
+
+# Checked-in generated example providers must not retain nil/no-op definitions
+# for the declarations removed from the target owners.
+for file in "$example_stubs" "$example_extras"; do
+    ! grep -Eq 'rt_arm32_(mrc_|mcr_|isb\b|dsb\b|dmb\b|wfi\b|wfe\b|cpsid_|cpsie_)' "$file"
+    ! grep -Eq 'rt_arm64_(mrs_|msr_|isb\b|dsb\b|dmb\b|wfi\b|wfe\b|tlbi_|daif_)' "$file"
+    ! grep -Eq 'rt_rv32_(csrr_|csrw_|wfi\b|sfence_vma)' "$file"
+done
+
+# Every instruction is confined to its own explicit capability region. The
+# counts pin the reviewed instruction topology and reject unscoped `unsafe:`.
+test "$(grep -c 'unsafe(capabilities: \[inline_asm\])' "$arm32")" -eq 22
+test "$(grep -c 'unsafe(capabilities: \[inline_asm\])' "$arm64")" -eq 20
+test "$(grep -c 'unsafe(capabilities: \[inline_asm\])' "$rv32")" -eq 18
+test "$(grep -c 'unsafe(capabilities: \[inline_asm\])' "$rv64")" -eq 30
+! grep -Eq '^[[:space:]]+unsafe:$' "$arm32" "$arm64" "$rv32" "$rv64"
+
+# Semantic/performance fixes: ARM32 reads MPIDR once, ARM64 DAIF immediates
+# are encoded directly, and RV32 fencing carries both hardware operands.
+test "$(grep -c 'mrc p15, 0, {result}, c0, c0, 5' "$arm32")" -eq 1
+! grep -q 'mpidr_low16\|mpidr_high16' "$arm32"
+grep -q 'msr DAIFSet, #15' "$arm64"
+grep -q 'msr DAIFClr, #3' "$arm64"
+grep -q 'sfence.vma {addr}, {asid}' "$rv32"
+grep -q 'sfence.vma {addr}, zero' "$rv64"
+grep -q 'sfence.vma zero, {asid}' "$rv64"
+
+# Operand-bearing asm uses the parser-supported named parenthesized form. The
+# colon form is intentionally absent because it accepts instruction strings
+# only in both compiler parsers (tracked separately as a language bug).
+! grep -q 'asm volatile:' "$arm32" "$arm64" "$rv32" "$rv64"
+
+# Direct instruction wrappers must not grow allocation, lookup, hashing,
+# locking, signing, retry, or generic foreign-dispatch work.
+! grep -Ei 'alloc|malloc|calloc|realloc|free\(|hash|signature|dlsym|lookup|mutex|retry|rt_sffi_call' \
+    "$arm32" "$arm64" "$rv32" "$rv64"
+
+echo 'privileged CPU authority: PASS (73 SFFI declarations removed; 90 direct instructions capability-confined; source-only, unsigned and hardware-unverified)'

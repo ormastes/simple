@@ -1,0 +1,34 @@
+use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1}
+use app.spipe_knowledge_provider.lifecycle.{operation_receipt_unsigned, operation_receipt_domain_bytes, operation_receipt_id, provider_generation_id}
+use app.spipe_knowledge_provider.wire_json.{wire_json_string}
+
+# Single operation-receipt construction owner shared by normal publication and
+# quarantine convergence. Candidate absence is represented by canonical null.
+fn wire_operation_receipt(service: SpipeProviderServiceV1, operation: text,
+                          operation_id: text, payload_hash: text,
+                          base_root: text, result_root: text,
+                          candidate_uid: text?, outcome: text) -> Result<text, text>:
+    if not service.lifecycle_available():
+        return Err("provider_unavailable")
+    val candidate = if candidate_uid == nil:
+        "null"
+    else:
+        wire_json_string(candidate_uid.unwrap())
+    val issued_at = service.receipt_authority.now_ms()
+    val expires_at = issued_at + 86400000
+    val unsigned = operation_receipt_unsigned(
+        service.receipt_authority.authority_generation(),
+        service.receipt_authority.authority_id(), base_root, candidate,
+        expires_at, issued_at, service.receipt_authority.key_id(), operation,
+        operation_id, outcome, payload_hash, service.state.scope_digest, 1,
+        provider_generation_id(service.state.provider_generation), result_root,
+        0, service.state.scope_digest, service.state.snapshot_id,
+        service.state.workspace)
+    val receipt_id = operation_receipt_id(unsigned)
+    val signature = service.receipt_authority.sign(
+        operation_receipt_domain_bytes(unsigned))?
+    val with_id = unsigned.replace("\"result_logical_root\":",
+        "\"receipt_id\":" + wire_json_string(receipt_id) +
+        ",\"result_logical_root\":")
+    Ok(with_id.replace("\"snapshot\":", "\"signature\":" +
+        wire_json_string(signature) + ",\"snapshot\":"))

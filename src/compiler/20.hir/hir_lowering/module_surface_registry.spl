@@ -5,13 +5,8 @@ use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_index_build}
-use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_validate_index_alignment, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error}
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_declaration_matches}
-
-# Level-gated diagnostic switch, default OFF (.claude/rules/code-style.md:
-# probes are converted to level-gated logs, never deleted). Flip to true to
-# re-emit the one-shot pre-rebuild authority-carrier probe.
-val HIR_SURFACE_CARRIER_TRACE = false
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_canonical_module_name, module_surface_declaration_matches}
 
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_heap_promote(value: Any) -> bool
@@ -67,6 +62,28 @@ impl ModuleSurfaceBuilder:
         self.ordered_indices = self.ordered_indices.push(surface_index)
         Ok(())
 
+    me add_indexed_canonical_identity(
+        name: text, surface_index: i64
+    ) -> Result<(), text>:
+        """Register one resolver spelling and its logical identity once.
+
+        The first spelling for a physical source is not guaranteed to be the
+        path-derived layered spelling. Later aliases must therefore publish
+        their tier-free/std-folded identity too. add_indexed_name remains the
+        single conflict authority, so two physical surfaces can never claim
+        the same logical key.
+        """
+        val name_result = self.add_indexed_name(name, surface_index)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        val canonical_name = module_surface_canonical_module_name(name)
+        if canonical_name != name:
+            val canonical_result = self.add_indexed_name(
+                canonical_name, surface_index)
+            if canonical_result.is_err():
+                return Err(canonical_result.unwrap_err())
+        Ok(())
+
     me has_path(path: text) -> bool:
         self.index_by_path.contains_key(module_surface_canonical_path(path))
 
@@ -108,7 +125,8 @@ impl ModuleSurfaceBuilder:
         if self.index_by_path.contains_key(canonical_path):
             return Err("module surface already exists for physical source: {canonical_path}")
         val surface_index = self.surfaces.len()
-        val name_result = self.add_indexed_name(module_name, surface_index)
+        val name_result = self.add_indexed_canonical_identity(
+            module_name, surface_index)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
         self.surfaces = self.surfaces.push(surface)
@@ -138,7 +156,8 @@ impl ModuleSurfaceBuilder:
             surface.content_length != content.len() or
             surface.content_hash != rt_hash_text(content)):
             return Err("conflicting physical source: {canonical_path}")
-        val name_result = self.add_indexed_name(module_name, surface_index)
+        val name_result = self.add_indexed_canonical_identity(
+            module_name, surface_index)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
         Ok(())
@@ -258,7 +277,7 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
         # physical modules may expose the same API.
         val parsed_path = module_surface_canonical_path(module.name)
         if builder.index_by_path.contains_key(parsed_path):
-            val canonical_result = builder.add_indexed_name(
+            val canonical_result = builder.add_indexed_canonical_identity(
                 alias, builder.index_by_path[parsed_path])
             if canonical_result.is_err():
                 return Err(canonical_result.unwrap_err())
@@ -273,7 +292,8 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
             surface_index = surface_index + 1
         if matching_index < 0:
             return Err("parsed module has no source surface: {alias}")
-        val alias_result = builder.add_indexed_name(alias, matching_index)
+        val alias_result = builder.add_indexed_canonical_identity(
+            alias, matching_index)
         if alias_result.is_err():
             return Err(alias_result.unwrap_err())
     val origin_result = builder.resolve_export_origins()
@@ -281,121 +301,36 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
         return Err(origin_result.unwrap_err())
     builder.finish()
 
-# Names the ONE field whose rt_transient_heap_promote call failed in the most
-# recent module_surface_promote call, or "" after a success. Before this,
-# promotion collapsed thirty distinct causes into a bare `false` and the driver
-# could only say "module surface promotion failed for <path>" -- which cost a
-# full bootstrap-and-gdb cycle to turn back into "surface.friends was nil".
-# Single-threaded by construction: module_surface_promote is called once per
-# source file from the streaming parse loop in
-# 80.driver/driver_source_pipeline_parsing.spl.
-var _module_surface_promote_last_failure: text = ""
-
-pub fn module_surface_promote_last_failure() -> text:
-    _module_surface_promote_last_failure
-
 pub fn module_surface_promote(surface: ModuleSurface) -> bool:
     # A class/raw carrier may already outlive the current scope and therefore
     # cannot be relied on as the traversal root for children allocated in this
     # per-file scope. Promote the retained scalar/array owners explicitly.
     # Dict<text, aggregate> is construction-only; retained declaration payload
     # arrays are the required follow-up owner before Stage 3 can be admitted.
-    #
-    # Written as one guarded statement per field rather than a single fused
-    # `or` chain so a failure NAMES the field. Evaluation order and
-    # short-circuit behaviour are identical to the chain it replaces.
-    _module_surface_promote_last_failure = ""
     val origin_index = surface.export_origin_index
-    val authority_index = surface.declaration_authority_index
-    if not rt_transient_heap_promote(surface.imports):
-        _module_surface_promote_last_failure = "surface.imports"
-        return false
-    if not rt_transient_heap_promote(surface.exports):
-        _module_surface_promote_last_failure = "surface.exports"
-        return false
-    if not rt_transient_heap_promote(surface.friends):
-        _module_surface_promote_last_failure = "surface.friends"
-        return false
-    if not rt_transient_heap_promote(surface.internal_exports):
-        _module_surface_promote_last_failure = "surface.internal_exports"
-        return false
-    if not rt_transient_heap_promote(surface.composite_names):
-        _module_surface_promote_last_failure = "surface.composite_names"
-        return false
-    if not rt_transient_heap_promote(surface.enum_names):
-        _module_surface_promote_last_failure = "surface.enum_names"
-        return false
-    if not rt_transient_heap_promote(surface.trait_names):
-        _module_surface_promote_last_failure = "surface.trait_names"
-        return false
-    if not rt_transient_heap_promote(surface.callable_names):
-        _module_surface_promote_last_failure = "surface.callable_names"
-        return false
-    if not rt_transient_heap_promote(surface.type_alias_names):
-        _module_surface_promote_last_failure = "surface.type_alias_names"
-        return false
-    if not rt_transient_heap_promote(surface.constant_names):
-        _module_surface_promote_last_failure = "surface.constant_names"
-        return false
-    if not rt_transient_heap_promote(surface.import_item_offsets):
-        _module_surface_promote_last_failure = "surface.import_item_offsets"
-        return false
-    if not rt_transient_heap_promote(surface.import_item_names):
-        _module_surface_promote_last_failure = "surface.import_item_names"
-        return false
-    if not rt_transient_heap_promote(surface.import_item_aliases):
-        _module_surface_promote_last_failure = "surface.import_item_aliases"
-        return false
-    if not rt_transient_heap_promote(surface.import_item_has_alias):
-        _module_surface_promote_last_failure = "surface.import_item_has_alias"
-        return false
-    if not rt_transient_heap_promote(surface.callable_values):
-        _module_surface_promote_last_failure = "surface.callable_values"
-        return false
-    if not rt_transient_heap_promote(surface.composite_values):
-        _module_surface_promote_last_failure = "surface.composite_values"
-        return false
-    if not rt_transient_heap_promote(surface.enum_values):
-        _module_surface_promote_last_failure = "surface.enum_values"
-        return false
-    if not rt_transient_heap_promote(surface.trait_values):
-        _module_surface_promote_last_failure = "surface.trait_values"
-        return false
-    if not rt_transient_heap_promote(surface.type_alias_values):
-        _module_surface_promote_last_failure = "surface.type_alias_values"
-        return false
-    if not rt_transient_heap_promote(surface.constant_values):
-        _module_surface_promote_last_failure = "surface.constant_values"
-        return false
-    if not rt_transient_heap_promote(surface.impls):
-        _module_surface_promote_last_failure = "surface.impls"
-        return false
-    if not rt_transient_heap_promote(origin_index.names):
-        _module_surface_promote_last_failure = "origin_index.names"
-        return false
-    if not rt_transient_heap_promote(origin_index.owner_modules):
-        _module_surface_promote_last_failure = "origin_index.owner_modules"
-        return false
-    if not rt_transient_heap_promote(origin_index.source_names):
-        _module_surface_promote_last_failure = "origin_index.source_names"
-        return false
-    if not rt_transient_heap_promote(origin_index.resolution_kinds):
-        _module_surface_promote_last_failure = "origin_index.resolution_kinds"
-        return false
-    if not rt_transient_heap_promote(authority_index.index_by_name):
-        _module_surface_promote_last_failure = "authority_index.index_by_name"
-        return false
-    if not rt_transient_heap_promote(authority_index.names):
-        _module_surface_promote_last_failure = "authority_index.names"
-        return false
-    if not rt_transient_heap_promote(authority_index.declaring_modules):
-        _module_surface_promote_last_failure = "authority_index.declaring_modules"
-        return false
-    if not rt_transient_heap_promote(authority_index.source_names):
-        _module_surface_promote_last_failure = "authority_index.source_names"
-        return false
-    if not rt_transient_heap_promote(authority_index.visibilities):
-        _module_surface_promote_last_failure = "authority_index.visibilities"
+    if not rt_transient_heap_promote(surface.imports) or
+       not rt_transient_heap_promote(surface.exports) or
+       not rt_transient_heap_promote(surface.composite_names) or
+       not rt_transient_heap_promote(surface.enum_names) or
+       not rt_transient_heap_promote(surface.trait_names) or
+       not rt_transient_heap_promote(surface.callable_names) or
+       not rt_transient_heap_promote(surface.type_alias_names) or
+       not rt_transient_heap_promote(surface.constant_names) or
+       not rt_transient_heap_promote(surface.import_item_offsets) or
+       not rt_transient_heap_promote(surface.import_item_names) or
+       not rt_transient_heap_promote(surface.import_item_aliases) or
+       not rt_transient_heap_promote(surface.import_item_has_alias) or
+       not rt_transient_heap_promote(surface.callable_values) or
+       not rt_transient_heap_promote(surface.composite_values) or
+       not rt_transient_heap_promote(surface.enum_values) or
+       not rt_transient_heap_promote(surface.trait_values) or
+       not rt_transient_heap_promote(surface.type_alias_values) or
+       not rt_transient_heap_promote(surface.constant_values) or
+       not rt_transient_heap_promote(surface.impls) or
+       not rt_transient_heap_promote(origin_index.names) or
+       not rt_transient_heap_promote(origin_index.owner_modules) or
+       not rt_transient_heap_promote(origin_index.source_names) or
+       not rt_transient_heap_promote(origin_index.resolution_kinds):
         return false
     rt_transient_heap_promote(surface)
 
@@ -408,7 +343,6 @@ pub fn module_surfaces_promote(registry: ModuleSurfacesByName) -> bool:
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         val surface = registry.surfaces[surface_index]
-        val authority_index = surface.declaration_authority_index
         if not rt_transient_heap_promote(surface.composite_names) or
            not rt_transient_heap_promote(surface.enum_names) or
            not rt_transient_heap_promote(surface.trait_names) or
@@ -421,15 +355,9 @@ pub fn module_surfaces_promote(registry: ModuleSurfacesByName) -> bool:
            not rt_transient_heap_promote(surface.callable_values) or
            not rt_transient_heap_promote(surface.type_alias_values) or
            not rt_transient_heap_promote(surface.constant_values) or
-           not rt_transient_heap_promote(surface.friends) or
-           not rt_transient_heap_promote(surface.internal_exports) or
-           not rt_transient_heap_promote(authority_index.index_by_name) or
-           not rt_transient_heap_promote(authority_index.names) or
-           not rt_transient_heap_promote(authority_index.declaring_modules) or
-           not rt_transient_heap_promote(authority_index.source_names) or
-           not rt_transient_heap_promote(authority_index.visibilities) or
            not rt_transient_heap_promote(surface.import_target_indices) or
            not rt_transient_heap_promote(surface.import_target_names) or
+           not rt_transient_heap_promote(surface.import_resolution_traces) or
            not rt_transient_heap_promote(surface.import_item_offsets) or
            not rt_transient_heap_promote(surface.import_item_names) or
            not rt_transient_heap_promote(surface.import_item_aliases) or
@@ -442,63 +370,6 @@ pub fn module_surfaces_promote(registry: ModuleSurfacesByName) -> bool:
             return false
         surface_index = surface_index + 1
     rt_transient_heap_promote(registry)
-
-pub fn module_surfaces_rebuild_declaration_authority_carriers_error(
-    registry: ModuleSurfacesByName
-) -> text:
-    # The declaration-authority Dict carrier does not survive the staged
-    # transient teardown, and `module_surface_declaration_authority_lookup` is
-    # the one member of this family with no scalar fallback, so a dead carrier
-    # silently misses EVERY frozen lookup and corrupts HIR lowering. See
-    # doc/08_tracking/bug/stage3_hir_imports_memory_explosion_driver_riscv_gen2_2026-08-23.md
-    #
-    # Repair it here, at the owner site, where the field is mutable and the
-    # registry lives on the surviving driver-level heap.  This is O(total
-    # names) ONCE.  It cannot live in the by-value lookup: a lazy rebuild there
-    # is discarded on return, or deep-copies the whole index per call.
-    #
-    # Never write into the dead carrier - allocate a fresh Dict and publish it
-    # with the same explicit write-back the freeze path uses for these surfaces.
-    #
-    # Viability is judged by a FULL functional sweep through the published
-    # registry path, never by `len()`: measured 2026-08-23, a Dict<text, i64>
-    # freshly allocated and filled with 26 entries at this point reports
-    # `len() == -1` while the entries themselves are the thing that matters.
-    # A sampled probe would miss a resize-boundary loss, so every key is
-    # checked; the total is 946 keys across 692 surfaces, O(n) once.
-    var surface_index = 0
-    while surface_index < registry.surfaces.len():
-        var surface = registry.surfaces[surface_index]
-        val name_count = surface.declaration_authority_index.names.len()
-        if name_count < 0:
-            return "authority names array is dead: index={surface_index} names={name_count}"
-        if HIR_SURFACE_CARRIER_TRACE and surface_index == 0 and name_count > 0:
-            # One-shot probe of the PRE-rebuild carrier. This is the only
-            # direct evidence for whether the teardown kills lookups or merely
-            # kills `len()`, and a bootstrap cycle costs ~15 minutes, so it is
-            # kept rather than deleted -- level-gated per
-            # .claude/rules/code-style.md, default OFF.
-            # Flip HIR_SURFACE_CARRIER_TRACE below to re-enable.
-            val probe_name = surface.declaration_authority_index.names[0]
-            print "[module-surface] pre-rebuild authority carrier probe: surface=0 names={name_count} dict_len={surface.declaration_authority_index.index_by_name.len()} contains={surface.declaration_authority_index.index_by_name.contains_key(probe_name)} key={probe_name}"
-        var rebuilt: Dict<text, i64> = {}
-        var name_index = 0
-        while name_index < name_count:
-            rebuilt[surface.declaration_authority_index.names[name_index]] = name_index
-            name_index = name_index + 1
-        surface.declaration_authority_index.index_by_name = rebuilt
-        registry.surfaces[surface_index] = surface
-        val published = registry.surfaces[surface_index].declaration_authority_index
-        var verify_index = 0
-        while verify_index < name_count:
-            val verify_name = published.names[verify_index]
-            if not published.index_by_name.contains_key(verify_name):
-                return "published authority dict missing key: index={surface_index} position={verify_index} key={verify_name} names={name_count} dict_len={published.index_by_name.len()}"
-            if published.index_by_name[verify_name] != verify_index:
-                return "published authority dict wrong position: index={surface_index} position={verify_index} key={verify_name} value={published.index_by_name[verify_name]} names={name_count}"
-            verify_index = verify_index + 1
-        surface_index = surface_index + 1
-    ""
 
 pub fn module_surfaces_retained_alignment(registry: ModuleSurfacesByName) -> bool:
     module_surfaces_frozen_alignment(registry)

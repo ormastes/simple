@@ -460,6 +460,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
         },
         Expr::Spread(expr) => Expr::Spread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::DictSpread(expr) => Expr::DictSpread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
+        Expr::StructSpread(expr) => Expr::StructSpread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::StructInit { name, fields, spread } => Expr::StructInit {
             name: name.clone(),
             fields: fields
@@ -516,14 +517,14 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             ctx.pop_scope();
             Expr::DoBlock(statements)
         }
-        Expr::UnsafeBlock(nodes) => {
+        Expr::UnsafeBlock(nodes, capabilities) => {
             ctx.push_scope();
             let mut statements = Vec::new();
             for node in nodes {
                 statements.push(apply_macro_hygiene_node(node, ctx));
             }
             ctx.pop_scope();
-            Expr::UnsafeBlock(statements)
+            Expr::UnsafeBlock(statements, capabilities.clone())
         }
         _ => expr.clone(),
     }

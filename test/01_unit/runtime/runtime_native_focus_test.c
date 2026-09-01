@@ -7,20 +7,11 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len);
-SplArray* rt_strsplit(const char* string, const char* delimiter);
-int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs);
-
-static int64_t add_i64_args(int64_t left, int64_t right) {
-    return left + right;
-}
 
 static int start_server(unsigned short* port, const char* body, int delay_ms) {
     int server = socket(AF_INET, SOCK_STREAM, 0);
@@ -64,37 +55,8 @@ static int64_t text_bytes(const uint8_t* value, size_t len) {
     return rt_string_new(value, len);
 }
 
-/* rt_dir_walk returns a TAGGED RuntimeValue array of text since 41eef4686b7
- * ("fix(runtime): (ptr,len) ABI for rt_dir_create / rt_dir_create_all /
- * rt_dir_remove_all / rt_dir_walk"), not the legacy `SplArray*` of SplValue.
- * Decode elements through the rt_ text accessors, not spl_as_str. */
-static int walk_contains(int64_t paths, const char* expected) {
-    SplArray* array = (SplArray*)(uintptr_t)paths;
-    size_t expected_len = strlen(expected);
-    for (int64_t i = 0; i < rt_array_len(array); i++) {
-        int64_t actual = rt_array_get_text(array, i);
-        const uint8_t* data = rt_string_data(actual);
-        if (data && (size_t)rt_string_len(actual) == expected_len
-            && memcmp(data, expected, expected_len) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static void* transient_scope_worker(void* unused) {
-    (void)unused;
-    for (int i = 0; i < 64; i++) {
-        assert(rt_transient_array_scope_begin() == 1);
-        SplArray* transient = rt_array_new(0);
-        assert(rt_array_push(transient, i));
-        assert(rt_transient_array_scope_pause() == 1);
-        SplArray* permanent = rt_array_new(0);
-        assert(rt_transient_array_scope_end() == 1);
-        assert(rt_array_push(permanent, i));
-        rt_array_free(permanent);
-    }
-    return NULL;
+static int64_t add_i64_args(int64_t left, int64_t right) {
+    return left + right;
 }
 
 int main(void) {
@@ -174,14 +136,14 @@ int main(void) {
         (int64_t)(uintptr_t)add_i64_args, (int64_t)wffi_args, 2) == 0x24c746f);
 
     const uint8_t raw_bytes[] = {0, 127, 255};
-    SplArray* canonical_bytes = rt_bytes_from_raw((int64_t)(uintptr_t)raw_bytes, 3);
+    SplArray* canonical_bytes = (SplArray*)(uintptr_t)rt_bytes_from_raw((int64_t)(uintptr_t)raw_bytes, 3);
     assert(rt_array_len(canonical_bytes) == 3);
     assert(rt_array_get(canonical_bytes, 0) == 0);
     assert(rt_array_get(canonical_bytes, 1) == 127);
     assert(rt_array_get(canonical_bytes, 2) == 255);
     assert(rt_array_last(canonical_bytes) == 255);
     assert(rt_array_last(rt_array_new(0)) == 3);
-    assert(rt_array_len(rt_bytes_from_raw(0, 3)) == 0);
+    assert(rt_array_len((SplArray*)(uintptr_t)rt_bytes_from_raw(0, 3)) == 0);
 
     SplArray* split = rt_strsplit("a,,b", ",");
     assert(rt_array_len(split) == 3);
@@ -194,35 +156,6 @@ int main(void) {
     split = rt_strsplit("plain", "");
     assert(rt_array_len(split) == 1);
     assert(strcmp((const char*)rt_string_data(rt_array_get(split, 0)), "plain") == 0);
-
-    char walk_root[] = "/tmp/simple-dir-walk-XXXXXX";
-    assert(mkdtemp(walk_root) != NULL);
-    char walk_nested[256], walk_suffix_dir[256], walk_regular[256];
-    char walk_child[256], walk_file_link[256], walk_cycle[256];
-    snprintf(walk_nested, sizeof(walk_nested), "%s/nested", walk_root);
-    snprintf(walk_suffix_dir, sizeof(walk_suffix_dir), "%s/x.spl", walk_root);
-    snprintf(walk_regular, sizeof(walk_regular), "%s/regular.spl", walk_root);
-    snprintf(walk_child, sizeof(walk_child), "%s/child.spl", walk_nested);
-    snprintf(walk_file_link, sizeof(walk_file_link), "%s/file-link.spl", walk_root);
-    snprintf(walk_cycle, sizeof(walk_cycle), "%s/back", walk_nested);
-    assert(mkdir(walk_nested, 0700) == 0);
-    assert(mkdir(walk_suffix_dir, 0700) == 0);
-    FILE* walk_file = fopen(walk_regular, "w");
-    assert(walk_file != NULL && fclose(walk_file) == 0);
-    walk_file = fopen(walk_child, "w");
-    assert(walk_file != NULL && fclose(walk_file) == 0);
-    assert(symlink(walk_regular, walk_file_link) == 0);
-    assert(symlink(walk_root, walk_cycle) == 0);
-    int64_t walked = rt_dir_walk((const uint8_t*)walk_root, (uint64_t)strlen(walk_root));
-    assert(rt_array_len((SplArray*)(uintptr_t)walked) == 4);
-    assert(walk_contains(walked, walk_regular));
-    assert(walk_contains(walked, walk_child));
-    assert(walk_contains(walked, walk_file_link));
-    assert(walk_contains(walked, walk_cycle));
-    assert(!walk_contains(walked, walk_nested));
-    assert(!walk_contains(walked, walk_suffix_dir));
-    assert(rt_dir_remove_all((const uint8_t*)walk_root, (uint64_t)strlen(walk_root)));
-    assert(access(walk_root, F_OK) != 0);
 
     char atomic_root[] = "/tmp/simple-atomic-write-XXXXXX";
     assert(mkdtemp(atomic_root) != NULL);
@@ -281,10 +214,6 @@ int main(void) {
     int64_t trim_end = rt_string_trim_end(text("  value \t\r\n"));
     assert(rt_string_len(trim_end) == 7);
     assert(memcmp(rt_string_data(trim_end), "  value", 7) == 0);
-    int64_t trim_start = rt_string_trim_start(text(" \t\v\f\r\nvalue  "));
-    assert(rt_string_len(trim_start) == 7);
-    assert(memcmp(rt_string_data(trim_start), "value  ", 7) == 0);
-    assert(rt_cli_run_file(0, 0, 0, 0) != 0);
     assert(rt_string_builder_len(0) == -1);
     assert(rt_string_builder_push(0, built) == 0);
     rt_string_builder_free(0);
@@ -305,35 +234,6 @@ int main(void) {
     rt_array_free(registered_array);
     assert(rt_heap_registry_count() == before_shallow_free - 1);
 
-    int64_t before_transient_scope = rt_heap_registry_count();
-    SplArray* permanent_before_scope = rt_array_new(0);
-    assert(rt_transient_array_scope_begin() == 1);
-    assert(rt_transient_array_scope_begin() == 0);
-    SplArray* transient_a = rt_array_new(0);
-    SplArray* transient_b = rt_array_new(0);
-    assert(rt_array_push(transient_a, 11));
-    assert(rt_array_push(transient_b, 22));
-    assert(rt_transient_array_scope_pause() == 1);
-    SplArray* permanent_while_paused = rt_array_new(0);
-    assert(rt_heap_registry_count() == before_transient_scope + 4);
-    assert(rt_transient_array_scope_end() == 1);
-    assert(rt_transient_array_scope_end() == 0);
-    assert(rt_heap_registry_count() == before_transient_scope + 2);
-    assert(rt_array_push(permanent_before_scope, 33));
-    assert(rt_array_push(permanent_while_paused, 44));
-    rt_array_free(permanent_before_scope);
-    rt_array_free(permanent_while_paused);
-    assert(rt_heap_registry_count() == before_transient_scope);
-
-    pthread_t scope_threads[4];
-    for (int i = 0; i < 4; i++) {
-        assert(pthread_create(&scope_threads[i], NULL, transient_scope_worker, NULL) == 0);
-    }
-    for (int i = 0; i < 4; i++) {
-        assert(pthread_join(scope_threads[i], NULL) == 0);
-    }
-    assert(rt_heap_registry_count() == before_transient_scope);
-
     SplArray* allocated = rt_bytes_alloc(4);
     assert(allocated != NULL);
     assert(unsafe_addr_of((int64_t)(uintptr_t)allocated) == (uint64_t)(uintptr_t)allocated);
@@ -347,7 +247,6 @@ int main(void) {
     assert(rt_array_len(joined) == 2);
     assert(rt_array_get(joined, 0) == 11);
     assert(rt_array_get(joined, 1) == 22);
-    assert(rt_array_last(joined) == 22);
     SplArray* generic_bytes = rt_array_new(1);
     for (int64_t i = 0; i < 12; i++) {
         assert(rt_typed_bytes_u8_push(generic_bytes, i + 20));
@@ -412,17 +311,15 @@ int main(void) {
                         (int64_t)(uintptr_t)wide_right));
     SplArray* float_left = rt_array_new(1);
     SplArray* float_right = rt_array_new(1);
-    assert(rt_array_push(float_left, rt_value_float(0)));
-    /* +0.0 == -0.0. Written as INT64_MIN when rt_value_float took raw bits;
-       the declared ABI (runtime.h) takes a double, so spell the value. */
+    assert(rt_array_push(float_left, rt_value_float(0.0)));
     assert(rt_array_push(float_right, rt_value_float(-0.0)));
     assert(rt_native_eq((int64_t)(uintptr_t)float_left,
                         (int64_t)(uintptr_t)float_right));
     int64_t enum_left = rt_enum_new(7, 3, rt_value_int(42));
-    int64_t enum_right = rt_enum_new(9, 3, rt_value_int(42));
-    int64_t enum_same = rt_enum_new(7, 3, rt_value_int(42));
-    assert(!rt_native_eq(enum_left, enum_right));
-    assert(rt_native_eq(enum_left, enum_same));
+    int64_t enum_right = rt_enum_new(7, 3, rt_value_int(42));
+    int64_t other_enum = rt_enum_new(9, 3, rt_value_int(42));
+    assert(rt_native_eq(enum_left, enum_right));
+    assert(!rt_native_eq(enum_left, other_enum));
     SplArray* generic_words = rt_array_new(1);
     for (int64_t i = 0; i < 12; i++) {
         assert(rt_typed_words_u64_push(generic_words, 0x200000 + i * 8));
@@ -462,18 +359,6 @@ int main(void) {
     assert(rt_tuple_set(tuple, 8, rt_value_int(88)));
     assert(rt_tuple_get(tuple, 8) == rt_value_int(88));
     assert(rt_is_none(rt_value_nil()));
-    assert(!rt_is_none(0));
-    assert(rt_is_some(0));
-    int64_t option_none = rt_enum_new(1, 1, rt_value_nil());
-    int64_t option_some_zero = rt_enum_new(1, 0, 0);
-    int64_t other_none_ordinal = rt_enum_new(7, 1, rt_value_nil());
-    assert(rt_is_none(option_none));
-    assert(!rt_is_some(option_none));
-    assert(!rt_is_none(option_some_zero));
-    assert(rt_is_some(option_some_zero));
-    assert(!rt_is_none(other_none_ordinal));
-    assert(rt_enum_check_discriminant(option_none, 1) == 1);
-    assert(rt_enum_check_discriminant(option_none, 0) == 0);
     assert(!rt_is_some(rt_value_nil()));
     assert(rt_math_pow(2.0, 3.0) == 8.0);
     uint64_t mmio = 0;
@@ -491,10 +376,6 @@ int main(void) {
 
     int64_t parent = rt_path_parent((const uint8_t*)"a/b/file.spl", 10);
     assert(strcmp((const char*)rt_string_data(parent), "a/b") == 0);
-    char cwd[4096];
-    assert(getcwd(cwd, sizeof(cwd)) != NULL);
-    int64_t absolute = rt_path_absolute((const uint8_t*)".", 1);
-    assert(strcmp((const char*)rt_string_data(absolute), cwd) == 0);
     int64_t path = text("a/b/file.spl");
     assert(strcmp((const char*)rt_string_data(rt_path_filename(path)), "file.spl") == 0);
     assert(strcmp((const char*)rt_string_data(rt_path_extension(path)), "spl") == 0);

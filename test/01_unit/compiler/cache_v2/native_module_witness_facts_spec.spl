@@ -1,0 +1,105 @@
+# @req REQ-001 REQ-002 REQ-007
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{ParserImport}
+use compiler.hir.hir_lowering.module_surface_types.{
+    ModuleSurface, ModuleSurfacesByName
+}
+use compiler.hir.hir_lowering.module_surface_registry_index.{
+    module_surface_import_resolution_trace_v1
+}
+use compiler.driver.cache.native_module_witness_facts.{
+    NativeExternalLayoutTraceV1,
+    native_direct_dependency_facts_v1, native_resolution_facts_v1,
+    native_external_layout_facts_v1, native_module_cache_fact_set_merge_v1
+}
+
+fn fact_surfaces() -> ModuleSurfacesByName:
+    var consumer = ModuleSurface.empty("app.main")
+    consumer.preferred_registry_name = "app.main"
+    consumer.canonical_path = "src/app/main.spl"
+    consumer.imports = [ParserImport(
+        module: "lib.dep", items: [], is_lazy: false, span: Span.empty())]
+    consumer.import_target_indices = [1]
+    consumer.import_target_names = ["lib.dep"]
+    var dependency = ModuleSurface.empty("lib.dep")
+    dependency.preferred_registry_name = "lib.dep"
+    dependency.canonical_path = "src/lib/dep.spl"
+    var registry = ModuleSurfacesByName(
+        surfaces: [consumer, dependency],
+        index_by_name: {"app.main": 0, "lib.dep": 1},
+        ordered_names: ["app.main", "lib.dep"],
+        ordered_indices: [0, 1], generation: 1, frozen: true)
+    consumer.import_resolution_traces = [
+        module_surface_import_resolution_trace_v1(
+            registry, consumer, "lib.dep")]
+    registry.surfaces[0] = consumer
+    registry
+
+describe "native module cache authoritative fact producers":
+    it "derives direct dependency interface facts from the resolved surface":
+        val result = native_direct_dependency_facts_v1(
+            "app.main", fact_surfaces(), [
+                SourceFile(path: "src/app/main.spl", content: "use lib.dep.*",
+                    module_name: "app.main"),
+                SourceFile(path: "src/lib/dep.spl",
+                    content: "pub fn answer() -> i64:\n    42",
+                    module_name: "lib.dep"),
+            ])
+        expect(result.valid).to_equal(true)
+        expect(result.dependencies.len()).to_equal(1)
+        expect(result.dependencies[0].module_id).to_equal("lib.dep")
+        expect(result.dependencies[0].iface_digest == "").to_equal(false)
+
+    it "retains unsuccessful resolver candidates in source order":
+        val result = native_resolution_facts_v1("app.main", fact_surfaces())
+        expect(result.valid).to_equal(true)
+        expect(result.resolutions[0].probes.len()).to_equal(4)
+        expect(result.resolutions[0].probes[0].path).to_equal("lib.dep")
+        expect(result.resolutions[0].probes[0].found).to_equal(true)
+        expect(result.resolutions[0].probes[1].found).to_equal(false)
+        expect(result.resolutions[0].dir_generation.starts_with(
+            "module-surfaces-")).to_equal(true)
+        expect(result.resolutions[0].resolver_version).to_equal(
+            "hir-module-surface-resolver-v1")
+
+    it "fails closed when resolver instrumentation is unavailable":
+        var missing = fact_surfaces()
+        var consumer = missing.surfaces[0]
+        consumer.import_resolution_traces = []
+        missing.surfaces[0] = consumer
+        val result = native_resolution_facts_v1("app.main", missing)
+        expect(result.valid).to_equal(false)
+        expect(result.reason).to_equal("missing-resolution-instrumentation")
+
+    it "keeps only externally owned referenced layouts":
+        val result = native_external_layout_facts_v1("app.main", [
+            NativeExternalLayoutTraceV1(
+                consumer_module_id: "app.main", owner_module_id: "app.main",
+                type_id: "Local", layout_digest: "local-layout", owner_count: 1),
+            NativeExternalLayoutTraceV1(
+                consumer_module_id: "app.main", owner_module_id: "lib.dep",
+                type_id: "External", layout_digest: "external-layout", owner_count: 1),
+        ], true)
+        expect(result.valid).to_equal(true)
+        expect(result.layouts.len()).to_equal(1)
+        expect(result.layouts[0].owner_module_id).to_equal("lib.dep")
+
+    it "merges complete facts and rejects ambiguous layout ownership":
+        val deps = native_direct_dependency_facts_v1(
+            "app.main", fact_surfaces(), [
+                SourceFile(path: "src/lib/dep.spl", content: "struct External:\n    x: i64",
+                    module_name: "lib.dep")])
+        val resolutions = native_resolution_facts_v1(
+            "app.main", fact_surfaces())
+        val ambiguous = native_external_layout_facts_v1("app.main", [
+            NativeExternalLayoutTraceV1(
+                consumer_module_id: "app.main", owner_module_id: "lib.dep",
+                type_id: "External", layout_digest: "layout", owner_count: 2),
+        ], true)
+        val merged = native_module_cache_fact_set_merge_v1(
+            deps, resolutions, ambiguous)
+        expect(ambiguous.valid).to_equal(false)
+        expect(merged.valid).to_equal(false)
+        expect(merged.witness("mir-1").digest()).to_equal("")

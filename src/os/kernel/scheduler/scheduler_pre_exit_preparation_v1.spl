@@ -1,0 +1,606 @@
+"""Scheduler-owned preparation transaction for filesystem-server exit.
+
+This owner deliberately does not publish ``TaskState.Zombie``.  It first
+drives the authenticated DBD persistence provider to a terminal receipt, then
+binds and commits the server namespace followed by its launch grant.  The
+caller may publish terminal task state only after consuming this owner's exact
+terminal receipt.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.scheduler.dbd_cleanup_provider_adapter_v1.*
+use os.kernel.scheduler.server_data_cleanup_reservation_owner_v1.*
+
+pub val SCHEDULER_PRE_EXIT_PREPARATION_LIMIT_V1: i64 = 64
+
+pub enum SchedulerPreExitPreparationStateV1:
+    Free
+    Preparing
+    Persistence
+    CancelRequested
+    Cancelled
+    PersistenceComplete
+    ServerBinding
+    NamespaceBound
+    NamespaceDispatching
+    Completed
+    Consumed
+    Indeterminate
+    Retired
+
+pub(package) struct SchedulerPreExitPreparationHandleV1:
+    _slot: i64
+    _generation: u64
+    _nonce: u64
+
+pub struct SchedulerPreExitPreparationReceiptV1:
+    task_id: u64
+    lifecycle_generation: u64
+    transaction_id: u64
+    transaction_generation: u64
+    attempt_ordinal: u64
+    persistence_terminal: bool
+    namespace_committed: bool
+    grant_committed: bool
+    terminal: bool
+    retryable: bool
+    cancelled: bool
+    indeterminate: bool
+
+pub fn scheduler_pre_exit_attempt_advance_valid_v1(
+    current: u64, next: u64
+) -> bool:
+    current != 0u64 and current != 0xffffffffffffffffu64 and
+        next == current + 1u64
+
+pub fn scheduler_pre_exit_provider_completion_evidence_v1(
+    persistence_terminal: bool,
+    namespace_committed: bool,
+    grant_committed: bool
+) -> bool:
+    persistence_terminal and namespace_committed and grant_committed
+
+pub fn scheduler_pre_exit_state_authorizes_terminal_v1(
+    state: SchedulerPreExitPreparationStateV1
+) -> bool:
+    state == SchedulerPreExitPreparationStateV1.Consumed
+
+struct SchedulerPreExitPreparationSlotV1:
+    state: SchedulerPreExitPreparationStateV1
+    generation: u64
+    nonce: u64
+    task_id: u64
+    lifecycle_generation: u64
+    transaction_id: u64
+    transaction_generation: u64
+    attempt_ordinal: u64
+    dbd_handle: DbdCleanupProviderHandleV1?
+    server_handle: ServerDataCleanupBoundV1?
+    persistence_terminal: bool
+    namespace_committed: bool
+    grant_committed: bool
+    server_consumed: bool
+    dbd_consumed: bool
+
+struct SchedulerPreExitPreparationOwnerV1:
+    quarantined: bool
+    next_nonce: u64
+    slots: [SchedulerPreExitPreparationSlotV1]
+
+val _scheduler_pre_exit_mutex_v1: i64 = mutex_raw_create()
+var _scheduler_pre_exit_owner_v1 = SchedulerPreExitPreparationOwnerV1(
+    quarantined: false,
+    next_nonce: 0x5052454558495431u64,
+    slots: [])
+
+fn _scheduler_pre_exit_empty_v1(
+    generation: u64
+) -> SchedulerPreExitPreparationSlotV1:
+    SchedulerPreExitPreparationSlotV1(
+        state: SchedulerPreExitPreparationStateV1.Free,
+        generation: generation, nonce: 0u64,
+        task_id: 0u64, lifecycle_generation: 0u64,
+        transaction_id: 0u64, transaction_generation: 0u64,
+        attempt_ordinal: 0u64, dbd_handle: nil, server_handle: nil,
+        persistence_terminal: false, namespace_committed: false,
+        grant_committed: false, server_consumed: false, dbd_consumed: false)
+
+fn _scheduler_pre_exit_lock_v1() -> bool:
+    _scheduler_pre_exit_mutex_v1 > 0 and
+        not _scheduler_pre_exit_owner_v1.quarantined and
+        mutex_raw_lock(_scheduler_pre_exit_mutex_v1)
+
+fn _scheduler_pre_exit_unlock_v1() -> bool:
+    if mutex_raw_unlock(_scheduler_pre_exit_mutex_v1): return true
+    _scheduler_pre_exit_owner_v1.quarantined = true
+    false
+
+fn _scheduler_pre_exit_index_locked_v1(
+    handle: SchedulerPreExitPreparationHandleV1
+) -> i64:
+    if handle._slot < 0 or
+        handle._slot >= _scheduler_pre_exit_owner_v1.slots.len() or
+        handle._generation == 0u64 or handle._nonce == 0u64:
+        return -1
+    val slot = _scheduler_pre_exit_owner_v1.slots[handle._slot]
+    if slot.state == SchedulerPreExitPreparationStateV1.Free or
+        slot.state == SchedulerPreExitPreparationStateV1.Retired or
+        slot.generation != handle._generation or slot.nonce != handle._nonce:
+        return -1
+    handle._slot
+
+fn _scheduler_pre_exit_identity_live_locked_v1(
+    task_id: u64, lifecycle_generation: u64,
+    transaction_id: u64, transaction_generation: u64
+) -> bool:
+    for slot in _scheduler_pre_exit_owner_v1.slots:
+        if slot.state != SchedulerPreExitPreparationStateV1.Free and
+            slot.state != SchedulerPreExitPreparationStateV1.Retired and
+            slot.task_id == task_id and
+            slot.lifecycle_generation == lifecycle_generation and
+            slot.transaction_id == transaction_id and
+            slot.transaction_generation == transaction_generation:
+            return true
+    false
+
+fn _scheduler_pre_exit_receipt_v1(
+    slot: SchedulerPreExitPreparationSlotV1,
+    retryable: bool,
+    cancelled: bool,
+    indeterminate: bool
+) -> SchedulerPreExitPreparationReceiptV1:
+    SchedulerPreExitPreparationReceiptV1(
+        task_id: slot.task_id,
+        lifecycle_generation: slot.lifecycle_generation,
+        transaction_id: slot.transaction_id,
+        transaction_generation: slot.transaction_generation,
+        attempt_ordinal: slot.attempt_ordinal,
+        persistence_terminal: slot.persistence_terminal,
+        namespace_committed: slot.namespace_committed,
+        grant_committed: slot.grant_committed,
+        terminal: scheduler_pre_exit_state_authorizes_terminal_v1(slot.state),
+        retryable: retryable, cancelled: cancelled,
+        indeterminate: indeterminate)
+
+fn _scheduler_pre_exit_persistence_matches_v1(
+    slot: SchedulerPreExitPreparationSlotV1,
+    receipt: DbdCleanupProviderReceiptV1
+) -> bool:
+    receipt.task_id == slot.task_id and
+        receipt.lifecycle_generation == slot.lifecycle_generation and
+        receipt.transaction_id == slot.transaction_id and
+        receipt.transaction_generation == slot.transaction_generation and
+        receipt.attempt_ordinal == slot.attempt_ordinal
+
+fn _scheduler_pre_exit_server_matches_v1(
+    slot: SchedulerPreExitPreparationSlotV1,
+    receipt: ServerDataCleanupReceiptV1
+) -> bool:
+    receipt.task_id == slot.task_id and
+        receipt.lifecycle_generation == slot.lifecycle_generation and
+        receipt.transaction_id == slot.transaction_id and
+        receipt.transaction_generation == slot.transaction_generation and
+        receipt.attempt_ordinal == slot.attempt_ordinal
+
+fn _scheduler_pre_exit_command_matches_v1(
+    slot: SchedulerPreExitPreparationSlotV1,
+    command: DbdCleanupDispatchV1
+) -> bool:
+    if slot.dbd_handle == nil: return false
+    val expected = slot.dbd_handle.unwrap()
+    command._handle._slot == expected._slot and
+        command._handle._generation == expected._generation and
+        command._handle._nonce == expected._nonce
+
+pub(package) fn scheduler_pre_exit_prepare_v1(
+    persistence_owner: DbdCleanupPersistenceOwnerV1,
+    task_id: u64,
+    lifecycle_generation: u64,
+    transaction_id: u64,
+    transaction_generation: u64
+) -> Result<SchedulerPreExitPreparationHandleV1, text>:
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        transaction_id == 0u64 or transaction_generation == 0u64:
+        return Err("invalid scheduler pre-exit identity")
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    if _scheduler_pre_exit_identity_live_locked_v1(
+        task_id, lifecycle_generation, transaction_id, transaction_generation):
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("scheduler pre-exit identity already live")
+    var index = -1
+    var i = 0
+    while i < _scheduler_pre_exit_owner_v1.slots.len():
+        if _scheduler_pre_exit_owner_v1.slots[i].state ==
+            SchedulerPreExitPreparationStateV1.Free:
+            index = i
+            break
+        i = i + 1
+    if index < 0 and _scheduler_pre_exit_owner_v1.slots.len() >=
+        SCHEDULER_PRE_EXIT_PREPARATION_LIMIT_V1:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("scheduler pre-exit owner full")
+    val prior_generation = if index >= 0:
+        _scheduler_pre_exit_owner_v1.slots[index].generation
+    else: 0u64
+    if prior_generation == 0xffffffffffffffffu64 or
+        _scheduler_pre_exit_owner_v1.next_nonce == 0xffffffffffffffffu64:
+        if index >= 0:
+            _scheduler_pre_exit_owner_v1.slots[index].state =
+                SchedulerPreExitPreparationStateV1.Retired
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("scheduler pre-exit identity exhausted")
+    if index < 0: index = _scheduler_pre_exit_owner_v1.slots.len()
+    _scheduler_pre_exit_owner_v1.next_nonce =
+        _scheduler_pre_exit_owner_v1.next_nonce + 1u64
+    val slot = SchedulerPreExitPreparationSlotV1(
+        state: SchedulerPreExitPreparationStateV1.Preparing,
+        generation: prior_generation + 1u64,
+        nonce: _scheduler_pre_exit_owner_v1.next_nonce,
+        task_id: task_id, lifecycle_generation: lifecycle_generation,
+        transaction_id: transaction_id,
+        transaction_generation: transaction_generation,
+        attempt_ordinal: 1u64,
+        dbd_handle: nil, server_handle: nil,
+        persistence_terminal: false, namespace_committed: false,
+        grant_committed: false, server_consumed: false, dbd_consumed: false)
+    if index == _scheduler_pre_exit_owner_v1.slots.len():
+        _scheduler_pre_exit_owner_v1.slots.push(slot)
+    else:
+        _scheduler_pre_exit_owner_v1.slots[index] = slot
+    val handle = SchedulerPreExitPreparationHandleV1(
+        _slot: index, _generation: slot.generation, _nonce: slot.nonce)
+    val issued = dbd_cleanup_provider_issue_v1(
+        persistence_owner, task_id, lifecycle_generation,
+        transaction_id, transaction_generation)
+    if issued.is_err():
+        _scheduler_pre_exit_owner_v1.slots[index].state =
+            SchedulerPreExitPreparationStateV1.Indeterminate
+        if not _scheduler_pre_exit_unlock_v1():
+            return Err("scheduler pre-exit preparation indeterminate")
+        return Ok(handle)
+    _scheduler_pre_exit_owner_v1.slots[index].dbd_handle = Some(issued.unwrap())
+    _scheduler_pre_exit_owner_v1.slots[index].state =
+        SchedulerPreExitPreparationStateV1.Persistence
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("scheduler pre-exit publication indeterminate")
+    Ok(handle)
+
+pub(package) fn scheduler_pre_exit_dispatch_persistence_v1(
+    handle: SchedulerPreExitPreparationHandleV1
+) -> Result<DbdCleanupDispatchV1, text>:
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    val index = _scheduler_pre_exit_index_locked_v1(handle)
+    if index < 0 or _scheduler_pre_exit_owner_v1.slots[index].state !=
+        SchedulerPreExitPreparationStateV1.Persistence:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("persistence dispatch unavailable")
+    val dbd = _scheduler_pre_exit_owner_v1.slots[index].dbd_handle.unwrap()
+    val dispatched = dbd_cleanup_provider_dispatch_v1(dbd)
+    if dispatched.is_err():
+        _scheduler_pre_exit_owner_v1.slots[index].state =
+            SchedulerPreExitPreparationStateV1.Indeterminate
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("DBD persistence dispatch indeterminate")
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("persistence dispatch retention indeterminate")
+    dispatched
+
+pub(package) fn scheduler_pre_exit_snapshot_v1(
+    handle: SchedulerPreExitPreparationHandleV1
+) -> Result<SchedulerPreExitPreparationReceiptV1, text>:
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    val index = _scheduler_pre_exit_index_locked_v1(handle)
+    if index < 0:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("stale scheduler pre-exit handle")
+    val slot = _scheduler_pre_exit_owner_v1.slots[index]
+    val receipt = _scheduler_pre_exit_receipt_v1(
+        slot,
+        slot.state == SchedulerPreExitPreparationStateV1.Persistence or
+            slot.state == SchedulerPreExitPreparationStateV1.PersistenceComplete or
+            slot.state == SchedulerPreExitPreparationStateV1.NamespaceBound,
+        slot.state == SchedulerPreExitPreparationStateV1.Cancelled,
+        slot.state == SchedulerPreExitPreparationStateV1.Indeterminate)
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("scheduler pre-exit snapshot indeterminate")
+    Ok(receipt)
+
+pub(package) fn scheduler_pre_exit_commit_persistence_v1(
+    handle: SchedulerPreExitPreparationHandleV1,
+    command: DbdCleanupDispatchV1,
+    success: bool,
+    evidence_digest: text
+) -> Result<SchedulerPreExitPreparationReceiptV1, text>:
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    val authorized = _scheduler_pre_exit_index_locked_v1(handle)
+    if authorized < 0 or
+        (_scheduler_pre_exit_owner_v1.slots[authorized].state !=
+            SchedulerPreExitPreparationStateV1.Persistence and
+        _scheduler_pre_exit_owner_v1.slots[authorized].state !=
+            SchedulerPreExitPreparationStateV1.CancelRequested) or
+        not _scheduler_pre_exit_command_matches_v1(
+            _scheduler_pre_exit_owner_v1.slots[authorized], command):
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("foreign DBD persistence command")
+    val provider_result = dbd_cleanup_provider_commit_result_v1(
+        command, success, evidence_digest)
+    if provider_result.is_err():
+        _scheduler_pre_exit_owner_v1.slots[authorized].state =
+            SchedulerPreExitPreparationStateV1.Indeterminate
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("DBD persistence result indeterminate")
+    val provider_receipt = provider_result.unwrap()
+    val index = authorized
+    var slot = _scheduler_pre_exit_owner_v1.slots[authorized]
+    if not _scheduler_pre_exit_persistence_matches_v1(slot, provider_receipt):
+        slot.state = SchedulerPreExitPreparationStateV1.Indeterminate
+        _scheduler_pre_exit_owner_v1.slots[index] = slot
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("foreign DBD persistence receipt")
+    slot.attempt_ordinal = provider_receipt.attempt_ordinal
+    if provider_receipt.indeterminate:
+        slot.state = SchedulerPreExitPreparationStateV1.Indeterminate
+    else if provider_receipt.terminal:
+        slot.persistence_terminal = true
+        slot.state = SchedulerPreExitPreparationStateV1.PersistenceComplete
+    else if slot.state != SchedulerPreExitPreparationStateV1.CancelRequested:
+        slot.state = SchedulerPreExitPreparationStateV1.Persistence
+    _scheduler_pre_exit_owner_v1.slots[index] = slot
+    val receipt = _scheduler_pre_exit_receipt_v1(
+        slot, provider_receipt.retryable,
+        provider_receipt.cancelled, provider_receipt.indeterminate)
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("persistence receipt retention indeterminate")
+    Ok(receipt)
+
+pub(package) fn scheduler_pre_exit_bind_server_cleanup_v1(
+    handle: SchedulerPreExitPreparationHandleV1
+) -> Result<SchedulerPreExitPreparationReceiptV1, text>:
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    val index = _scheduler_pre_exit_index_locked_v1(handle)
+    if index < 0:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("stale scheduler pre-exit handle")
+    var slot = _scheduler_pre_exit_owner_v1.slots[index]
+    if slot.state == SchedulerPreExitPreparationStateV1.NamespaceBound:
+        val replay = _scheduler_pre_exit_receipt_v1(slot, true, false, false)
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Ok(replay)
+    if slot.state != SchedulerPreExitPreparationStateV1.PersistenceComplete or
+        not slot.persistence_terminal:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("persistence not terminal")
+    slot.state = SchedulerPreExitPreparationStateV1.ServerBinding
+    _scheduler_pre_exit_owner_v1.slots[index] = slot
+    val bound = server_data_cleanup_bind_v1(
+        slot.task_id, slot.lifecycle_generation, slot.transaction_id,
+        slot.transaction_generation, slot.attempt_ordinal)
+    val current = index
+    slot = _scheduler_pre_exit_owner_v1.slots[index]
+    if slot.state != SchedulerPreExitPreparationStateV1.ServerBinding:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("server cleanup binding state changed")
+    if bound.reservation != nil:
+        slot.server_handle = bound.reservation
+        slot.namespace_committed = bound.receipt.namespace_committed
+        slot.grant_committed = bound.receipt.grant_committed
+        slot.state = if bound.receipt.indeterminate:
+            SchedulerPreExitPreparationStateV1.Indeterminate
+        else: SchedulerPreExitPreparationStateV1.NamespaceBound
+    else:
+        slot.state = SchedulerPreExitPreparationStateV1.PersistenceComplete
+    _scheduler_pre_exit_owner_v1.slots[current] = slot
+    val receipt = _scheduler_pre_exit_receipt_v1(
+        slot, bound.reservation == nil or bound.receipt.retryable,
+        false, bound.receipt.indeterminate)
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("server cleanup binding retention indeterminate")
+    Ok(receipt)
+
+pub(package) fn scheduler_pre_exit_commit_server_cleanup_v1(
+    handle: SchedulerPreExitPreparationHandleV1
+) -> Result<SchedulerPreExitPreparationReceiptV1, text>:
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    val index = _scheduler_pre_exit_index_locked_v1(handle)
+    if index < 0 or _scheduler_pre_exit_owner_v1.slots[index].state !=
+        SchedulerPreExitPreparationStateV1.NamespaceBound:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("server cleanup commit unavailable")
+    var slot = _scheduler_pre_exit_owner_v1.slots[index]
+    val server = slot.server_handle.unwrap()
+    slot.state = SchedulerPreExitPreparationStateV1.NamespaceDispatching
+    _scheduler_pre_exit_owner_v1.slots[index] = slot
+    val server_result = server_data_cleanup_commit_v1(server)
+    if server_result.is_err():
+        slot.state = SchedulerPreExitPreparationStateV1.Indeterminate
+        _scheduler_pre_exit_owner_v1.slots[index] = slot
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("server cleanup result rejected")
+    val server_receipt = server_result.unwrap()
+    val current = index
+    slot = _scheduler_pre_exit_owner_v1.slots[index]
+    if slot.state != SchedulerPreExitPreparationStateV1.NamespaceDispatching:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("server cleanup dispatch state changed")
+    if not _scheduler_pre_exit_server_matches_v1(slot, server_receipt):
+        slot.state = SchedulerPreExitPreparationStateV1.Indeterminate
+        _scheduler_pre_exit_owner_v1.slots[current] = slot
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("foreign server cleanup receipt")
+    slot.namespace_committed = server_receipt.namespace_committed
+    slot.grant_committed = server_receipt.grant_committed
+    if server_receipt.indeterminate:
+        slot.state = SchedulerPreExitPreparationStateV1.Indeterminate
+    else if server_receipt.terminal:
+        slot.state = SchedulerPreExitPreparationStateV1.Completed
+    else:
+        slot.state = SchedulerPreExitPreparationStateV1.NamespaceBound
+    _scheduler_pre_exit_owner_v1.slots[current] = slot
+    val receipt = _scheduler_pre_exit_receipt_v1(
+        slot, server_receipt.retryable, false, server_receipt.indeterminate)
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("server cleanup receipt retention indeterminate")
+    Ok(receipt)
+
+pub(package) fn scheduler_pre_exit_request_cancel_v1(
+    handle: SchedulerPreExitPreparationHandleV1
+) -> Result<bool, text>:
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    val index = _scheduler_pre_exit_index_locked_v1(handle)
+    if index < 0 or _scheduler_pre_exit_owner_v1.slots[index].state !=
+        SchedulerPreExitPreparationStateV1.Persistence:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("scheduler pre-exit cancellation unavailable")
+    val dbd = _scheduler_pre_exit_owner_v1.slots[index].dbd_handle.unwrap()
+    _scheduler_pre_exit_owner_v1.slots[index].state =
+        SchedulerPreExitPreparationStateV1.CancelRequested
+    val requested = dbd_cleanup_provider_request_cancel_v1(dbd)
+    if requested.is_err():
+        _scheduler_pre_exit_owner_v1.slots[index].state =
+            SchedulerPreExitPreparationStateV1.Indeterminate
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("scheduler pre-exit cancellation retention indeterminate")
+    requested
+
+pub(package) fn scheduler_pre_exit_ack_cancelled_v1(
+    handle: SchedulerPreExitPreparationHandleV1,
+    quiescence_digest: text
+) -> Result<SchedulerPreExitPreparationReceiptV1, text>:
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    val index = _scheduler_pre_exit_index_locked_v1(handle)
+    if index < 0 or _scheduler_pre_exit_owner_v1.slots[index].state !=
+        SchedulerPreExitPreparationStateV1.CancelRequested:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("scheduler pre-exit cancellation not requested")
+    var slot = _scheduler_pre_exit_owner_v1.slots[index]
+    val provider_result = dbd_cleanup_provider_ack_cancelled_v1(
+        slot.dbd_handle.unwrap(), quiescence_digest)
+    if provider_result.is_err():
+        _scheduler_pre_exit_owner_v1.slots[index].state =
+            SchedulerPreExitPreparationStateV1.Indeterminate
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("DBD cancellation acknowledgment indeterminate")
+    val provider_receipt = provider_result.unwrap()
+    val current = index
+    if not _scheduler_pre_exit_persistence_matches_v1(
+        _scheduler_pre_exit_owner_v1.slots[index], provider_receipt):
+        _scheduler_pre_exit_owner_v1.slots[index].state =
+            SchedulerPreExitPreparationStateV1.Indeterminate
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("foreign DBD cancellation receipt")
+    slot = _scheduler_pre_exit_owner_v1.slots[current]
+    slot.state = SchedulerPreExitPreparationStateV1.Cancelled
+    slot.attempt_ordinal = provider_receipt.attempt_ordinal
+    _scheduler_pre_exit_owner_v1.slots[current] = slot
+    val receipt = _scheduler_pre_exit_receipt_v1(slot, true, true, false)
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("scheduler pre-exit cancellation retention indeterminate")
+    Ok(receipt)
+
+pub(package) fn scheduler_pre_exit_retry_cancelled_v1(
+    handle: SchedulerPreExitPreparationHandleV1
+) -> Result<SchedulerPreExitPreparationReceiptV1, text>:
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    val index = _scheduler_pre_exit_index_locked_v1(handle)
+    if index < 0 or _scheduler_pre_exit_owner_v1.slots[index].state !=
+        SchedulerPreExitPreparationStateV1.Cancelled:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("scheduler pre-exit cancellation not acknowledged")
+    var slot = _scheduler_pre_exit_owner_v1.slots[index]
+    if slot.attempt_ordinal == 0xffffffffffffffffu64:
+        slot.state = SchedulerPreExitPreparationStateV1.Indeterminate
+        _scheduler_pre_exit_owner_v1.slots[index] = slot
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("scheduler pre-exit attempt ordinal exhausted")
+    val provider_result = dbd_cleanup_provider_retry_cancelled_v1(
+        slot.dbd_handle.unwrap())
+    if provider_result.is_err():
+        _scheduler_pre_exit_owner_v1.slots[index].state =
+            SchedulerPreExitPreparationStateV1.Indeterminate
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("DBD cancellation retry indeterminate")
+    val provider_receipt = provider_result.unwrap()
+    val current = index
+    if provider_receipt.task_id != slot.task_id or
+        provider_receipt.lifecycle_generation != slot.lifecycle_generation or
+        provider_receipt.transaction_id != slot.transaction_id or
+        provider_receipt.transaction_generation != slot.transaction_generation or
+        not scheduler_pre_exit_attempt_advance_valid_v1(
+            slot.attempt_ordinal, provider_receipt.attempt_ordinal):
+        _scheduler_pre_exit_owner_v1.slots[index].state =
+            SchedulerPreExitPreparationStateV1.Indeterminate
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("foreign DBD retry receipt")
+    slot = _scheduler_pre_exit_owner_v1.slots[current]
+    slot.state = SchedulerPreExitPreparationStateV1.Persistence
+    slot.attempt_ordinal = provider_receipt.attempt_ordinal
+    _scheduler_pre_exit_owner_v1.slots[current] = slot
+    val receipt = _scheduler_pre_exit_receipt_v1(slot, true, false, false)
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("scheduler pre-exit retry retention indeterminate")
+    Ok(receipt)
+
+pub(package) fn scheduler_pre_exit_consume_terminal_v1(
+    handle: SchedulerPreExitPreparationHandleV1
+) -> Result<SchedulerPreExitPreparationReceiptV1, text>:
+    if not _scheduler_pre_exit_lock_v1():
+        return Err("scheduler pre-exit owner unavailable")
+    val index = _scheduler_pre_exit_index_locked_v1(handle)
+    if index < 0:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("stale scheduler pre-exit handle")
+    var slot = _scheduler_pre_exit_owner_v1.slots[index]
+    if slot.state != SchedulerPreExitPreparationStateV1.Completed:
+        _ = _scheduler_pre_exit_unlock_v1()
+        return Err("scheduler pre-exit transaction not terminal")
+    if not slot.server_consumed:
+        if not server_data_cleanup_consume_terminal_v1(
+            slot.server_handle.unwrap()):
+            slot.state = SchedulerPreExitPreparationStateV1.Indeterminate
+            _scheduler_pre_exit_owner_v1.slots[index] = slot
+            _ = _scheduler_pre_exit_unlock_v1()
+            return Err("server cleanup terminal receipt unavailable")
+        slot.server_consumed = true
+        _scheduler_pre_exit_owner_v1.slots[index] = slot
+    if not slot.dbd_consumed:
+        if not dbd_cleanup_provider_consume_terminal_v1(
+            slot.dbd_handle.unwrap()):
+            slot.state = SchedulerPreExitPreparationStateV1.Indeterminate
+            _scheduler_pre_exit_owner_v1.slots[index] = slot
+            _ = _scheduler_pre_exit_unlock_v1()
+            return Err("DBD cleanup terminal receipt unavailable")
+        slot.dbd_consumed = true
+    # The returned receipt is the one-shot authority to publish terminal task
+    # state.  Do not retain a replayable Consumed slot containing the departed
+    # task/artifact lifecycle identity: doing so exhausts this bounded owner and
+    # lets a copied handle recover terminal authority after teardown.  Build the
+    # receipt from a local terminal snapshot, then invalidate the handle and
+    # release the slot before making the receipt observable.
+    slot.state = SchedulerPreExitPreparationStateV1.Consumed
+    val receipt = _scheduler_pre_exit_receipt_v1(slot, false, false, false)
+    _scheduler_pre_exit_owner_v1.slots[index] =
+        _scheduler_pre_exit_empty_v1(slot.generation)
+    if not _scheduler_pre_exit_unlock_v1():
+        return Err("terminal receipt retirement indeterminate")
+    Ok(receipt)
+
+export SchedulerPreExitPreparationHandleV1
+export scheduler_pre_exit_prepare_v1
+export scheduler_pre_exit_dispatch_persistence_v1
+export scheduler_pre_exit_snapshot_v1
+export scheduler_pre_exit_commit_persistence_v1
+export scheduler_pre_exit_bind_server_cleanup_v1
+export scheduler_pre_exit_commit_server_cleanup_v1
+export scheduler_pre_exit_request_cancel_v1
+export scheduler_pre_exit_ack_cancelled_v1
+export scheduler_pre_exit_retry_cancelled_v1
+export scheduler_pre_exit_consume_terminal_v1

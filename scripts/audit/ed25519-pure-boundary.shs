@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/crypto/ed25519.spl"
+
+if grep -q '^extern fn ' "$module" ||
+   grep -E '(^|[^A-Za-z0-9_])(rt_|serial_println)[A-Za-z0-9_]*[(]' "$module" >/dev/null; then
+    echo "SimpleOS Ed25519 regained a raw foreign or serial-I/O call" >&2
+    exit 1
+fi
+
+grep -q 'use os.crypto.sha512.{sha512}' "$module"
+grep -q 'use os.crypto.ed25519_scalar.{sc_reduce, sc_muladd' "$module"
+grep -q 'use std.nogc_sync_mut.io.signature_sffi.{ed25519_sign_seed_checked}' "$module"
+grep -q 'if seed.len() != 32:' "$module"
+grep -q 'if private_seed.len() != 32 or public_key.len() != 32:' "$module"
+grep -q 'if direct.len() != 64 or component_sig.len() != 64:' "$module"
+grep -q 'return Err("Ed25519 runtime provider disagrees with Pure Simple")' "$module"
+grep -q 'case Err(error): Err(error)' "$module"
+
+if grep -E '(_ed25519_trace_bytes|s_copy_probe|dual_backend_hex)' "$module" >/dev/null; then
+    echo "SimpleOS Ed25519 regained production tracing or probe allocation" >&2
+    exit 1
+fi
+
+# The normal-mode return must precede construction of dual-run metadata, so
+# the common signing path does not allocate the empty comparison-input array.
+normal_line=$(grep -n 'if config.mode == DualBackendMode.Normal:' "$module" | cut -d: -f1)
+inputs_line=$(grep -n 'val inputs: \[text\] = \[\]' "$module" | cut -d: -f1)
+if [ -z "$normal_line" ] || [ -z "$inputs_line" ] || [ "$inputs_line" -le "$normal_line" ]; then
+    echo "Ed25519 normal path regained dual-run metadata allocation" >&2
+    exit 1
+fi
+
+echo "Ed25519 pure-boundary audit: PASS (45 raw/serial calls removed; no phantom runtime helpers; exact key/signature checks; mismatch fails closed; normal path avoids trace/probe allocations)"

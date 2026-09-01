@@ -1,14 +1,39 @@
 # QEMU System Tests Guide
 
+## Vulkan/CUDA ProcessingIR receipt
+
+The host-GPU probe routes CUDA and Vulkan compute through shared
+`ProcessingDevicePort` adapters and emits `HOST_GPU_PROCESS_OK` with the true
+backend plus `evidence_class=host-offload`. The passthrough checker keeps this
+separate from direct guest Vulkan/CUDA, which remains blocked until a real
+Venus or approved VFIO guest receipt exists.
+
+The host-independent direct-guest foundation now lives in
+`virtio_gpu_venus_protocol.spl`, `virtio_gpu_venus_environment.spl`, and
+`virtio_gpu_venus_controlq.spl`, plus the raw snapshot parser
+`virtio_gpu_venus_pci_caps.spl`. Device-free tests prove exact little-endian
+commands, response/fence rejection, separated feature/capset/SHM discovery,
+and bounded controlq admission. These are structural prerequisites only. The
+snapshot parser rejects unsafe physical/mapped address conflation, but the
+current kernel ABI still grants only BAR0 and syscall 83 is not bound to the
+requested BDF/BAR/token. The live GPU driver therefore still negotiates no
+Venus feature bits and lacks an authorized non-BAR0 mapping, a guest
+Venus ICD, and device-origin readback, so the direct row remains blocked.
+
+UNO Q promotion is owned by
+`test/03_system/os/board/uno_q_adreno_turnip_live_spec.spl`; its default blocked
+result is expected without a prepared physical board and retained receipt.
+
 ## Overview
 
 System-level SSpec tests for SimpleOS boot and execution live in `test/03_system/os/qemu/`. Each test boots a real QEMU instance per architecture, executing full end-to-end scenarios. The helper contract is defined in `src/os/qemu_systest_contract.spl`.
 
 ## Running System Tests
 
-Use a current pure-Simple self-hosted compiler, then invoke a specific test:
+Export the Simple compiler path, then invoke a specific test:
 
 ```bash
+export SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed
 bin/simple test test/03_system/os/qemu/sys_qemu_riscv64_fs_exec_spec.spl
 ```
 
@@ -107,7 +132,7 @@ The successful cycle-3 transaction runs the canonical essential-tools smoke
 internally exactly once and retains `stage4-essential-tools-smoke.log`; do not
 repeat it as a standalone smoke. Keep that deployment active through the
 source-matched focused/live rows; only afterward use the existing
-`sh scripts/bootstrap/bootstrap-from-scratch.sh rollback-deploy x86_64-unknown-linux-gnu`
+`sh scripts/bootstrap/rollback-bootstrap-deploy.shs x86_64-unknown-linux-gnu`
 and retain its rollback receipt. Earlier rollback requires TODO667's isolated
 immutable bundle and all downstream rows must execute from that bundle.
 
@@ -134,41 +159,6 @@ Do not add Python capture, `rt_process_run*`, direct `rt_env_get`, tolerance,
 automatic baseline creation, or `UPDATE_BASELINE` behavior to this gate. While
 the current pure-Simple compiler is unavailable, the live rows remain blocked;
 source inspection or a cached PPM is not a QEMU PASS.
-
-## QEMU SIMD Object Gate — Static Prerequisite Tier
-
-`scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs` is the static
-prerequisite for every SimpleOS SIMD backend claim: it compiles the arm64 and
-x86_64 baremetal stubs and asserts the emitted `rt_gui_fill4` actually contains
-NEON (`dup`, `st1`) and SSE2 (`pshufd`, `movdqu`) instructions plus the
-`rt_gui_simd_fill_*` receipt symbols. Passing it does **not** mark a backend
-verified — guest hit/chunk receipts and QMP captures remain mandatory.
-
-**Read the gate's own exit status, never a pipeline's.** On 2026-08-16 this
-gate was found exiting 1 with **zero lines of output**: its `st1` assertion
-used a doubled-backslash ERE, which matches a literal backslash, while
-llvm-objdump emits `st1` + tab + `{ v0.4s }, [x0]`. Under `set -eu` the
-unmatched `grep -Eq` aborted the script before its three remaining assertions
-ran, so the gate had never passed. `sh gate.shs | tail` reports `tail`'s 0 and
-hides this completely. Assign the status on the line after the invocation:
-
-```sh
-sh scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs > gate.log 2>&1
-rc=$?
-```
-
-Repaired at `25dc443e44a`. The regression is now pinned by the step-based
-system spec `test/03_system/check/qemu_simd_coverage_gate_lane_spec.spl`
-(mirror: `doc/06_spec/03_system/check/qemu_simd_coverage_gate_lane_spec.md`,
-plan: `doc/03_plan/sys_test/qemu_simd_coverage_gate_lane.md`), which asserts
-the gate's exit status, its non-empty verdict text, the spelling of every
-instruction assertion, and — as a negative control — that the historical
-over-escaped pattern still matches nothing in real disassembly.
-
-That spec is fail-closed: a host without `clang` or `llvm-objdump` FAILS it.
-Do not add a skip path, tolerance, or automatic baseline. Its scenarios have
-not yet been executed by a pure-Simple runner; see the TEST_BLOCKED section of
-its plan before citing it as a passing result.
 
 ## Production Desktop DrawIR Path
 
@@ -209,259 +199,6 @@ qemu-system-riscv64 \
   -kernel build/os/simpleos_riscv64_smf_fs.elf
 ```
 
-## Visible-display UEFI boot ladder
-
-`scripts/check/check-simpleos-wm-visible-display-evidence.shs` keeps QEMU alive
-from launch through renderer-marker readiness and QMP screendump. It must not
-evaluate GRUB or `_start` rungs merely because the QMP socket exists. The normal
-observation point is after the shared-renderer serial markers establish that
-the serial log exists and is current. Failure paths first quiesce QEMU through
-the wrapper’s cleanup owner, then inspect the stable log.
-
-Read the exported ladder fields together:
-
-- `simpleos_wm_visible_display_boot_ladder_status`
-- `simpleos_wm_visible_display_boot_ladder_reason`
-- `simpleos_wm_visible_display_boot_ladder_observation`
-- `simpleos_wm_visible_display_boot_ladder_grub`
-- `simpleos_wm_visible_display_boot_ladder_kernel`
-
-`serial-log-not-created-at-check-time` means no file existed at the stable
-observation point. `marker-absent-in-existing-serial-log` means a regular log
-existed but lacked a rung. Do not report the first state as a marker miss.
-
-Run the no-QEMU contract before a live capture:
-
-```sh
-sh scripts/check/check-simpleos-wm-visible-display-evidence.shs --self-test
-```
-
-## RV64 Desktop Service/GPU Profile
-
-The multi-config Vulkan/WM lane owns the pure QEMU RV64 desktop descriptor in
-`src/os/simpleos_config_matrix.spl`. Use `qemu_riscv64_desktop_qemu_args()` as
-the canonical non-hardware contract before wiring live wrappers. The existing
-system-test contract exposes the same descriptor through
-`src/os/qemu_systest_contract.spl` as `riscv64_desktop_qemu_args()` and
-`riscv64_desktop_qemu_args_status()`. It requires:
-
-- host forwarding `tcp::2222-:22` for SSH;
-- host forwarding `tcp::8080-:8080` for the SimpleOS webserver;
-- `virtio-net-pci,netdev=rvnet`;
-- `virtio-gpu-pci,disable-modern=on,disable-legacy=off`;
-- headless display with QMP screendump on `127.0.0.1:4444`;
-- serial log `build/os/systest/qemu-riscv64-desktop/serial.log`;
-- artifact root `build/os/systest/qemu-riscv64-desktop`.
-
-Live wrappers for this profile must emit the rows named by
-`simpleos_qemu_service_required_evidence_keys()`:
-
-- `simpleos_qemu_serial_console_status`;
-- `simpleos_qemu_rv64_ssh_banner`;
-- `simpleos_qemu_rv64_ssh_probe_status`;
-- `simpleos_qemu_rv64_http_status_code`;
-- `simpleos_qemu_rv64_http_probe_status`;
-- `simpleos_qemu_gpu_readback_status`;
-- `simpleos_qemu_wm_marker_status`.
-
-`SimpleOsQemuServiceEvidence.status()` is fail-closed: missing serial console,
-missing SSH banner/probe, non-200 HTTP, missing HTTP probe, missing GPU
-readback, or missing WM marker is a blocked result, not a desktop pass.
-
-On Windows, the focused QEMU RV64 evidence wrapper is:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1
-```
-
-It writes raw QEMU service rows to
-`build/simpleos_multiconfig_live_evidence/qemu-rv64-desktop.env`. Feed that file
-to the aggregate checker:
-
-```powershell
-$env:SIMPLE_LIB='src'
-src\compiler_rust\target\debug\simple.exe scripts/check/check_simpleos_multiconfig_live_evidence.spl --evidence build/simpleos_multiconfig_live_evidence/qemu-rv64-desktop.env --mode=interpreter
-```
-
-The wrapper is a fail-closed preflight unless a later live boot/probe mode
-proves serial console, SSH, HTTP, GPU readback, and WM marker evidence. On the
-current Windows host it detects `qemu-system-riscv64.exe` but blocks because
-`build/os/simpleos_riscv64_smf_fs.elf` and `build/os/fat32-riscv64.img` are
-missing.
-
-Current desktop-service proof on Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -BuildDesktopServiceKernel -BuildBackend cranelift -BuildCc C:\dev\install\clang+llvm-18.1.8-x86_64-pc-windows-msvc\bin\clang.exe -RunLiveBoot -BootTimeoutSeconds 45
-```
-
-This rebuilds `build/os/simpleos_riscv64_desktop_service.elf` and passes the
-QEMU service gate with SSH banner, HTTP `200`, QMP screendump/nonblank GPU
-readback, and WM marker rows.
-
-To attempt a live QEMU boot after the canonical artifacts exist, run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -RunLiveBoot
-```
-
-Live mode writes the same raw service rows plus:
-
-- `simpleos_qemu_rv64_live_boot_requested`;
-- `simpleos_qemu_rv64_live_boot_status`;
-- `simpleos_qemu_rv64_qemu_exit_status`;
-- `simpleos_qemu_rv64_artifact_dir`;
-- `simpleos_qemu_rv64_serial_log_path`;
-- `simpleos_qemu_rv64_qmp_port`;
-- `simpleos_qemu_rv64_qmp_status`;
-- `simpleos_qemu_rv64_screendump_path`;
-- `simpleos_qemu_rv64_screendump_status`;
-- `simpleos_qemu_rv64_screendump_nonblank_status`.
-
-It launches QEMU only after `qemu-system-riscv64`, the canonical SMF-FS kernel,
-and the canonical FAT32 image are present. It captures serial output under
-`build/os/systest/qemu-riscv64-desktop/serial.log`, waits for RV64 FS-exec or
-network/http serial markers, exposes QMP on `127.0.0.1:4444`, and probes SSH
-`2222` plus HTTP `8080`. When the serial log reports `Display service ready`,
-the wrapper asks QMP for a `screendump` PPM and requires a nonblank P6 image
-before setting `simpleos_qemu_gpu_readback_status=pass`. WM serial markers are
-diagnostic until paired with that nonblank QMP readback; structured WM compare
-and RenderDoc evidence remain separate aggregate gates.
-
-The Engine2D/RenderDoc normalizer also parses that QEMU screendump header when
-available and emits `simpleos_qemu_gpu_readback_width`,
-`simpleos_qemu_gpu_readback_height`, and
-`simpleos_qemu_gpu_readback_dimensions_status`. Those rows are viewport
-diagnostics for the QEMU framebuffer; they do not replace
-`simpleos_engine2d_runtime_backend=vulkan`.
-
-To collect fresh QEMU RV64 build blocker evidence before live boot, run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -AttemptBuild
-```
-
-The build preflight writes
-`build/os/systest/qemu-riscv64-desktop/rv64-build.log` and emits:
-
-- `simpleos_qemu_rv64_build_attempted`;
-- `simpleos_qemu_rv64_build_status`;
-- `simpleos_qemu_rv64_build_exit_code`;
-- `simpleos_qemu_rv64_native_build_exit_code`;
-- `simpleos_qemu_rv64_build_log_path`;
-- `simpleos_qemu_rv64_build_backend`;
-- `simpleos_qemu_rv64_nested_simple_binary`;
-- `simpleos_qemu_rv64_build_cc`;
-- refreshed kernel/image candidate rows.
-
-On the current Windows host the passing build path is:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -AttemptBuild -BuildDiskImage -BuildBackend cranelift -BuildCc C:\dev\install\clang+llvm-18.1.8-x86_64-pc-windows-msvc\bin\clang.exe
-```
-
-That path uses `src\compiler_rust\target\debug\simple.exe` as the nested Simple
-binary, records `simpleos_qemu_rv64_build_status=pass`, produces
-`build/os/simpleos_riscv64_smf_fs.elf`, compiles
-`scripts/os/make_os_disk.c`, and records
-`simpleos_qemu_rv64_disk_image_build_status=pass` for
-`build/os/fat32-riscv64.img`. Disk-image builder compile/run diagnostics are
-captured under `build/os/systest/qemu-riscv64-desktop/` and exposed as
-`simpleos_qemu_rv64_disk_image_builder_compile_log_path` and
-`simpleos_qemu_rv64_disk_image_builder_run_log_path`, with matching stdout path
-rows for each process. The default LLVM backend remains blocked on this
-host because the native backend is unavailable; host `gcc` is also not suitable
-for the RISC-V native compile flags used by this build.
-
-The same preflight also emits artifact-diagnostic rows so operators can see why
-the desktop lane is still blocked:
-
-- `simpleos_qemu_rv64_canonical_kernel_status` for
-  `build/os/simpleos_riscv64_smf_fs.elf`;
-- `simpleos_qemu_rv64_legacy_kernel_status` for smoke-only
-  `build/os/simpleos_riscv64.elf`;
-- `simpleos_qemu_rv64_fpga_kernel_status` for FPGA-only
-  `build/os/simpleos_riscv64_fpga.elf`;
-- `simpleos_qemu_rv64_canonical_image_status` for
-  `build/os/fat32-riscv64.img`;
-- `simpleos_qemu_rv64_storage_probe_image_status` for diagnostic-only
-  `build/qemu-rv64-storage-probe.img`;
-- `simpleos_qemu_rv64_kernel_candidate_status` and
-  `simpleos_qemu_rv64_image_candidate_status` for the first existing candidate,
-  or `none`.
-
-Legacy or FPGA kernels are diagnostics only. They must not satisfy the QEMU
-RV64 desktop service gate, which remains tied to the canonical SMF-FS kernel,
-FAT32 image, and live serial/SSH/HTTP/GPU/WM probes.
-
-QEMU service evidence is not the full Vulkan/WM completion gate. A live wrapper
-must also feed `simpleos_multiconfig_live_required_evidence_keys()`, whose
-aggregate status remains blocked until FPGA serial, Engine2D Vulkan, RenderDoc
-artifact, structured WM comparison, and WM RenderDoc evidence also pass.
-Use `scripts/check/check_simpleos_multiconfig_live_evidence.spl` as the
-operator-facing aggregate status emitter; its default no-artifact run prints
-`simpleos_multiconfig_live_status=blocked:qemu-service:blocked:missing-qemu-serial-console`.
-When a live wrapper has QEMU, FPGA, Engine2D, RenderDoc, and WM rows, write the
-six `simpleos_*_evidence_status=<status>` rows to a `key=value` file and pass it
-with `--evidence <path>` or `SIMPLEOS_MULTICONFIG_EVIDENCE`.
-The same file may instead contain raw QEMU service rows
-(`simpleos_qemu_serial_console_status`, `simpleos_qemu_rv64_ssh_banner`,
-`simpleos_qemu_rv64_http_status_code`, `simpleos_qemu_gpu_readback_status`,
-`simpleos_qemu_wm_marker_status`); the aggregate checker derives
-`simpleos_qemu_service_evidence_status` from them.
-
-For the full Windows multi-config lane, use the combined wrapper:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-multiconfig-live-evidence.ps1
-```
-
-It runs the focused QEMU wrapper, FPGA serial wrapper, WM host-compare wrapper,
-and Engine2D/RenderDoc normalizer in order. Intermediate files stay under
-`build/simpleos_multiconfig_live_evidence/`, and the merged evidence file is
-`build/simpleos_multiconfig_live_evidence/simpleos-multiconfig-live.env`. The
-wrapper then invokes
-`scripts/check/check_simpleos_multiconfig_live_evidence.spl --evidence` against
-that merged file and exits with the aggregate checker status. A nonzero result
-is expected until live QEMU serial/SSH/HTTP/GPU/WM, FPGA UART, Engine2D Vulkan,
-RenderDoc `.rdc`, and host WM comparison evidence all pass.
-
-When the merged file was produced by the Windows wrapper, the aggregate checker
-also echoes `simpleos_multiconfig_windows_wrapper` plus the QEMU, FPGA, WM,
-Engine2D, aggregate status, and aggregate exit-code rows. Use these diagnostics
-to identify which child wrapper is still producing fail-closed evidence before
-opening the full merged file.
-
-Pass `-AttemptBuild` to the combined wrapper when the operator wants those QEMU
-RV64 build rows included in
-`build/simpleos_multiconfig_live_evidence/simpleos-multiconfig-live.env` and
-echoed by the aggregate checker before the remaining FPGA, WM, and RenderDoc
-gates are evaluated.
-
-For the current Windows all-in-one desktop-service build plus live QEMU proof,
-use:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-multiconfig-live-evidence.ps1 -BuildDesktopServiceKernel -RunLiveBoot -BootTimeoutSeconds 45 -BuildBackend cranelift -BuildCc C:\dev\install\clang+llvm-18.1.8-x86_64-pc-windows-msvc\bin\clang.exe
-```
-
-Expected current result is still nonzero, but QEMU service now passes. The
-merged evidence records `simpleos_qemu_service_evidence_status=pass`, SSH
-banner `SSH-2.0-SimpleOS_1.0`, HTTP `200`, QMP screendump/nonblank GPU
-readback, and WM marker rows. The aggregate currently advances to
-`blocked:fpga-serial:blocked:missing-fpga-uart-terminal`; Engine2D Vulkan,
-RenderDoc, host-WM, and structured comparison evidence remain incomplete.
-
-The FPGA RV64 profile remains UART serial-only in the same contract. Do not
-reuse the QEMU SSH, HTTP, GPU, WM, Vulkan, or RenderDoc gates for FPGA until
-board evidence expands that profile.
-
-FPGA live wrappers must use `simpleos_fpga_serial_required_evidence_keys()`
-instead. A passing FPGA serial row set names the `fpga-riscv64-serial` profile,
-UART terminal status, serial device, serial boot marker, toolchain status, and
-bitstream status, while SSH, HTTP, GPU, WM, Vulkan, and RenderDoc statuses stay
-`blocked`.
-
 ## Pass Markers
 
 Serial output must contain ALL of these to qualify as a pass:
@@ -490,41 +227,9 @@ KV260 path in `doc/07_guide/hardware/fpga/kv260_rv64gc_fpga_boot.md` (Section 8)
 point `QEMU_RX`/`SERIAL_PORT` at a real tty to validate silicon with the same
 harness.
 
-## x86 SSH Host Forwarding
-
-The live x86 SSH smoke maps the host TCP endpoint to the guest-facing QEMU
-forwarded port. OpenSSH connections that reach the guest as destination port
-`2222` are accepted by the kernel's SSH listener on port `22`; the accepted
-socket then keeps the real packet destination port so replies match the
-host-forwarded flow.
-
-Keep this contract covered by
-`test/01_unit/os/x86_ssh_boot_tcp_contract_spec.spl` when editing the x86
-baremetal TCP listener path. The live SSH gate is
-`test/03_system/os/ssh_live_login_in_qemu_spec.spl`; a TCP accept or banner
-exchange pass is not a full SSH pass unless the later KEX/auth/session checks
-also complete.
-
 ## Known Blockers
 
 The `/bin/simple os` subcommands (e.g., `bin/simple os test`) are currently broken per `doc/08_tracking/bug/interp_simpleos_lane_contract_crash_2026-06-13.md`. System tests therefore boot `qemu-system-*` directly rather than through the compiler tool.
-
-## Alpine-Class Hardening Specs (RED until build target exists)
-
-Three new specs in `test/03_system/os/qemu/os/harden/` exercise the SimpleOS x86_64 hardening
-probe. All classify MISSING-MEDIA (RED) until `build/os/simpleos_x86_64_harden_probe.elf` and
-`build/os/fat32-x86_64-harden.img` are produced by the harden probe build target
-(see `doc/08_tracking/bug/simpleos_harden_probe_build_target_2026-06-28.md`).
-
-| Spec | AC | Markers |
-|------|----|---------|
-| `os/harden/cap_exec_gate_spec.spl` | AC-1 | `[exec] capability gate: ENFORCED`, `[exec] uncapable exec REJECTED` |
-| `os/harden/hardened_malloc_spec.spl` | AC-2 | `[hmalloc] guard-page trap OK`, `[hmalloc] double-free TRAPPED` |
-| `os/harden/pie_ssp_relro_preset_spec.spl` | AC-8/9/10 | `[hardening] PIE=1`, `[hardening] RELRO=1 BIND_NOW=1`, `[hardening] NX=1 SMEP=1 SMAP=1`, `[hardening] STACK_CANARY=1` |
-
-Each spec follows the standard fail-closed contract: a media-check `it` (expects `rt_file_exists`
-true for kernel + image) followed by a boot `it` (calls `run_qemu_systest`, expects `== SYSTEST_PASS`).
-Missing media returns `missing-media:<path>` — never `skip()`.
 
 ## Storage Policy
 
@@ -570,9 +275,6 @@ readiness alone cannot pass. This proves networking and state across requests
 within one boot only: `SimpleDbService` stores rows in module memory and the
 wrapper recreates the attached storage image. Filesystem and reboot persistence
 remain unproven.
-
-The host-configuration matrix therefore checks `/db` on the HTTP listener's
-8080 forward; it does not require a separate database port.
 
 Without `--allow-prebuilt-artifact`, the wrapper also requires a build stamp
 newer than the ELF and rejects `simple_bin` provenance naming `compiler_rust`
@@ -622,15 +324,15 @@ bin/simple os build --scenario=riscv64-display-smoke
 RV64_DISPLAY_SMOKE_BUILD=0 scripts/check/check-rv64-display-smoke-qmp-evidence.shs
 ```
 
-This routes to
-`examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl` and
-`build/os/simpleos_riscv64_display_smoke.elf`. One architecture display facade
-owns the transitional runtime boundary and exposes dynamic mode, framebuffer,
-stride, and checked present operations. The entry constructs
-`FramebufferDriver`, compositor-owned surfaces, `DesktopShell`, and
-`Engine2dWmFrameExecutor`; its completed `DrawIrComposition` is presented by a
-VirtIO-GPU transfer plus flush. TODO 567 retains the pure-Simple DMA/queue
-transport migration, so leaves do not acquire direct `rt_*` paths.
+This routes to `examples/09_embedded/simple_os/arch/riscv64/display_entry.spl`
+and `build/os/simpleos_riscv64_display_smoke.elf`. The entry calls only the
+RV64 display runtime (`rt_display_init`, `rt_display_flush_wm_anchor_test`) and then idles
+for QMP capture. Current evidence: `bin/simple os build
+--scenario=riscv64-display-smoke` emits the ELF, direct QEMU serial reaches
+`SIMPLEOS_RISCV_DISPLAY_SMOKE_READY`, and QMP `screendump` captured a nonblack
+320x240 PPM at
+`build/os/rv64_display_smoke_evidence-current/screendump.ppm`. Current report:
+`doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md`.
 
 The source-ready interactive loop reuses `serial_init`/`serial_read_byte` and
 the shared `uart_char_to_action`/`WmAction` mapping. It initializes serial only
@@ -641,8 +343,7 @@ IER is zero, so serial input cannot wake a sleeping CPU. The folded manual steps
 are `Handle non-blocking UART window actions` and
 `Present each changed frame through VirtIO-GPU`.
 
-The wrapper keeps display-smoke evidence contract v2. Its default mode
-requires ordered scanout,
+The wrapper now uses evidence contract v2. It requires ordered scanout,
 first-frame, present, and desktop-ready markers with the same positive scene
 revision, validates the dynamic PPM dimensions and stride, and accepts at least
 four canonical desktop palette witnesses. Run its parser without QEMU via
@@ -651,31 +352,6 @@ The historical 2026-07-02 fixed-anchor report remains scanout-only evidence and
 cannot pass contract v2. Until TODO 548 produces and boots a fresh pure-Simple
 ELF, the canonical RV64 desktop is source-ready only; no live QEMU PASS is
 claimed. TODO 565 and TODO 548 remain open for live proof.
-
-The stricter RV64 WM/font/input contract v1 uses the same runner with a
-distinct mode:
-
-```bash
-sh scripts/check/check-rv64-display-smoke-qmp-evidence.shs --self-test-wm-font-input
-RV64_DISPLAY_SMOKE_BUILD=0 \
-  scripts/check/check-rv64-display-smoke-qmp-evidence.shs --wm-font-input
-```
-
-It pins `/SYS/FONTS/NOTOSANS` to 1,708,408 bytes and SHA-256
-`2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`,
-requires the guest’s exact `rv64-font-evidence` marker for that identity and
-the `shared-wm-draw-ir` route, rejects either font/input unavailable marker,
-injects keyboard and pointer events through QMP VirtIO input, and requires
-guest IRQ-to-WM-to-frame correlation. It captures the RV64-only
-`right56,bottom48` RGB crop, rejects a one-byte-corrupted copy, and refuses PASS
-until `RV64_WM_FONT_REGION_EXPECTED_SHA256` contains the genuine RV64 crop hash.
-The x86_64 crop hash is never reused.
-
-This strict mode is currently **BLOCKED**: the production RV64 entry does not
-mount the selected font and does not consume VirtIO input. Its explicit
-`rv64-font-evidence-unavailable` and `rv64-input-evidence-unavailable` markers
-are blockers, not evidence. See
-`doc/06_spec/03_system/os/wm/rv64_simpleos_wm_font_input_spec.md`.
 
 ## Host-GPU rendering and ProcessingIR
 
@@ -888,12 +564,8 @@ The forced lane must negotiate processing mask `1`, emit a single
 `HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan` receipt, and retain exact
 device readback before TODO 550 can close. TODO 570 retains the
 correlated preference classification; refreshed cross-ISA CUDA receipts are
-also still required. macOS Metal Draw IR backend execution is implemented, but
-the 2026-07-27 prepared-host audit found that the QEMU daemon still cannot be
-built through the supported narrow native lane: importing Draw IR pulls the
-monolithic `Engine2D` closure and every backend provider. It therefore remains
-`blocked`, not accelerated, until the shared internal render/readback target
-described below produces a Metal-only daemon and a fresh receipt.
+also still required. macOS Metal Draw IR execution is implemented but remains
+`unsupported` evidence until a prepared native host produces a fresh receipt.
 Metal ProcessingIR FillU32 is implemented through a dedicated checked MSL
 kernel and device readback, but likewise needs a prepared-host receipt. Windows
 DirectX/CUDA rows remain `unsupported` evidence until a prepared host produces

@@ -1,6 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum}
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -10,6 +9,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.hir.hir_lowering.hir_phase_profile.{
     HIR_PROF_GLOB,
     hir_phase_profile_now,
@@ -59,7 +59,7 @@ impl HirLowering:
         A plain (non-closure) bootstrap_main.spl build has no cross-module
         imports to qualify, and a normal (non-bootstrap) compile keeps the
         local alias name -- both are unaffected by this rename."""
-        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_mode = self.ambient_bootstrap_enabled()
         val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         if bootstrap_closure:
             self.symbols.rename_symbol(sym_id, "{imported_mod_name}.{imported_name}")
@@ -245,12 +245,45 @@ impl HirLowering:
                 glob_imp_idx = glob_imp_idx + 1
 
     me resolve_import_symbols(module: ParserModule):
-        # Use the same physical-path identity as surface construction. The
-        # private spelling here did not make resolver-transparent `NN.name`
-        # directories transparent, so admitted numbered owners could not find
-        # their own surfaces during HIR import resolution.
-        val importer_key = module_logical_name_from_path(module.name)
-        val importer_surface_index = self.surface_index_for_name(importer_key)
+        # A module with NO imports has nothing to resolve, so it must not need a
+        # registered surface of its own. Requiring one made
+        # `HirLowering.with_filename(path).lower_module(parsed)` — the public
+        # single-module entry, used by the in-guest riscv64/x86_64 interpreter
+        # rows and by any embedder that drives the frontend directly without the
+        # module loader — fail with "missing importing module surface" on a
+        # self-contained hello world. The loop below is the ONLY consumer of
+        # `importer_surface`, and it does not execute when there are no imports,
+        # so returning here is exactly semantics-preserving for every module that
+        # does have imports.
+        if module.imports.len() == 0:
+            return
+        var importer_key = module.name
+        if importer_key.ends_with(".spl"):
+            importer_key = importer_key[0:importer_key.len() - 4]
+        importer_key = importer_key.replace("/", ".")
+        if importer_key.starts_with("src."):
+            importer_key = importer_key.substring(4)
+        var importer_surface_index = self.surface_index_for_name(importer_key)
+        if importer_surface_index < 0:
+            # The hand-rolled key above drops `.spl`, `/`->`.` and a leading
+            # `src.`, but NOT the all-digit tier segment. The registry keys its
+            # surfaces with `module_surface_canonical_module_name`
+            # (module_surface_registry.spl:79), whose canonical spelling also
+            # drops tier segments and folds `std.` -> `lib.`;
+            # `hir_pkg_canonical_module_name` (module_lowering.spl:90) is the
+            # in-scope twin of that rule and is already used on `module.name`
+            # at :394 below. Under SIMPLE_BOOTSTRAP `ParserModule.name` is the
+            # raw physical path, so `src/compiler/60.mir_opt/mir_opt/mod.spl`
+            # yields `compiler.60.mir_opt.mir_opt.mod` here while the surface
+            # is registered as `compiler.mir_opt.mir_opt.mod` -> exact miss ->
+            # the file gets NO import surface at all, and every name it imports
+            # is later reported as `unresolved type`/`unresolved name`. In the
+            # Stage 3 log of 2026-09-01 all 78 files whose FIRST HIR error was
+            # `missing importing module surface` carried a numbered path, no
+            # de-numbered-path file hit this error, and those 78 files account
+            # for 4796 of the run's 5024 HIR fatals.
+            importer_surface_index = self.surface_index_for_name(
+                hir_pkg_canonical_module_name(module.name))
         if importer_surface_index < 0:
             self.error("missing importing module surface for {module.name}", Span.empty())
             return

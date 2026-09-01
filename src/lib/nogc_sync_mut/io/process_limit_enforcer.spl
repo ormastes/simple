@@ -4,6 +4,7 @@
 # Used by process_run_with_limits() for resource enforcement.
 
 use std.process_limits.{ResourceProfile}
+use std.nogc_sync_mut.env.variables.{env_get}
 
 # ============================================================================
 # Ulimit Command Builder
@@ -75,8 +76,8 @@ fn detect_violation(exit_code: i64, stderr: text) -> (bool, text):
 
     Violation types:
         - "timeout": Wall-clock timeout (exit code 124)
-        - "timeout_hard": Hard kill after timeout (exit code 137)
-        - "memory": Memory limit or SIGSEGV (exit code 139)
+        Exit 137 and 139 are deliberately not classified without affirmative
+        watchdog or resource-scope evidence.
         - "cpu": CPU time limit exceeded
         - "fds": File descriptor limit
         - "procs": Process limit
@@ -88,16 +89,6 @@ fn detect_violation(exit_code: i64, stderr: text) -> (bool, text):
     if exit_code == 124:
         limit_exceeded = true
         limit_type = "timeout"
-        return (limit_exceeded, limit_type)
-
-    if exit_code == 137:
-        limit_exceeded = true
-        limit_type = "timeout_hard"
-        return (limit_exceeded, limit_type)
-
-    if exit_code == 139:
-        limit_exceeded = true
-        limit_type = "memory"
         return (limit_exceeded, limit_type)
 
     val stderr_lower = stderr.lower()
@@ -140,9 +131,6 @@ fn format_violation_message(limit_type: text, profile: ResourceProfile) -> text:
         case "timeout":
             val timeout_sec = profile.timeout_ms / 1000
             "Process exceeded wall-clock timeout ({timeout_sec}s)"
-        case "timeout_hard":
-            val timeout_sec = profile.timeout_ms / 1000
-            "Process killed after timeout ({timeout_sec}s)"
         case "cpu":
             val cpu_sec = profile.cpu_ms / 1000
             "Process exceeded CPU time limit ({cpu_sec}s)"
@@ -166,10 +154,7 @@ fn supports_ulimit() -> bool:
     Returns:
         true on Unix/Linux/macOS, false on Windows
     """
-    extern fn rt_env_get(key: text) -> text
-    val os_env = rt_env_get("OS")
-    if os_env == nil:
-        return true
+    val os_env = env_get("OS")
     not os_env.lower().contains("windows")
 
 fn get_ulimit_flags() -> text:

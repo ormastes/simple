@@ -7,6 +7,7 @@ __asm__(
     "_start:\n"
     "mv s0, a0\n"
     "mv s1, a1\n"
+    "mv tp, a0\n"
     "la sp, _stack_top\n"
     "la t0, _sbss\n"
     "la t1, _ebss\n"
@@ -32,15 +33,27 @@ spl_i64 rt_starfive_uart_read(void) {
     return (spl_i64)(uart[0] & 0xffU);
 }
 
+extern spl_u64 starfive_dtb_policy_select(
+    spl_u64 candidate_address,
+    spl_u64 candidate_magic,
+    spl_u64 fallback_magic
+);
+
+static spl_u64 starfive_read_fdt_magic(spl_u64 address) {
+    if (address == 0ULL) return 0ULL;
+    const volatile spl_u8 *dtb = (const volatile spl_u8 *)address;
+    return ((spl_u64)dtb[0] << 24) | ((spl_u64)dtb[1] << 16) |
+           ((spl_u64)dtb[2] << 8) | (spl_u64)dtb[3];
+}
+
 spl_u64 rt_starfive_resolve_dtb(spl_u64 candidate) {
-    const spl_u8 *dtb = (const spl_u8 *)candidate;
-    if (candidate != 0ULL && dtb[0] == 0xd0U && dtb[1] == 0x0dU &&
-        dtb[2] == 0xfeU && dtb[3] == 0xedU) return candidate;
-    candidate = 0x42200000ULL;
-    dtb = (const spl_u8 *)candidate;
-    if (dtb[0] == 0xd0U && dtb[1] == 0x0dU && dtb[2] == 0xfeU &&
-        dtb[3] == 0xedU) return candidate;
-    return 0ULL;
+    const spl_u64 fallback = 0x42200000ULL;
+    const spl_u64 candidate_magic = starfive_read_fdt_magic(candidate);
+    const spl_u64 selected =
+        starfive_dtb_policy_select(candidate, candidate_magic, 0ULL);
+    if (selected != 0ULL) return selected;
+    const spl_u64 fallback_magic = starfive_read_fdt_magic(fallback);
+    return starfive_dtb_policy_select(candidate, candidate_magic, fallback_magic);
 }
 
 spl_i64 rt_string_to_int_lenient(spl_i64 value) {

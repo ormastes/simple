@@ -1,0 +1,83 @@
+"""Kernel caller context must reflect persistent live TCB security bindings."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.security.execution_context.{kernel_call_context_from_task}
+use os.kernel.scheduler.scheduler_types.{task_security_binding_managed_child}
+
+describe "kernel call context":
+    it "uses task-owned identity and accounting bindings":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val parent_tcb = scheduler.get_task(parent)
+        if parent_tcb != nil:
+            val context = kernel_call_context_from_task(parent_tcb)
+            expect(context.principal_id.id).to_equal(parent.id)
+            expect(context.job_id.id).to_equal(parent.id)
+            expect(context.cspace_id.id).to_equal(parent.id)
+            expect(context.resource_domain_id.id).to_equal(parent.id)
+            expect(context.audit_context_id.id).to_equal(parent.id)
+
+    it "gives fork a fresh principal CSpace audit identity but preserves job resources":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val child = scheduler.clone_task(parent)
+        val parent_tcb = scheduler.get_task(parent)
+        val child_tcb = scheduler.get_task(child)
+        if parent_tcb != nil and child_tcb != nil:
+            val parent_context = kernel_call_context_from_task(parent_tcb)
+            val child_context = kernel_call_context_from_task(child_tcb)
+            expect(child_context.principal_id.id).to_equal(child.id)
+            expect(child_context.cspace_id.id).to_equal(child.id)
+            expect(child_context.audit_context_id.id).to_equal(child.id)
+            expect(child_context.job_id.id).to_equal(parent_context.job_id.id)
+            expect(child_context.resource_domain_id.id).to_equal(parent_context.resource_domain_id.id)
+
+    it "accepts one trusted managed-child binding and rejects rebinding":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val child = scheduler.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+        val binding = task_security_binding_managed_child(parent.id, 91u64, child)
+
+        expect(scheduler.bind_managed_child_security(child, binding)).to_equal(true)
+        expect(scheduler.bind_managed_child_security(child, binding)).to_equal(false)
+        val child_tcb = scheduler.get_task(child)
+        if child_tcb != nil:
+            val context = kernel_call_context_from_task(child_tcb)
+            expect(context.job_id.id).to_equal(child.id)
+            expect(context.resource_domain_id.id).to_equal(child.id)
+            expect(context.principal_id.id).to_equal(child.id)
+            expect(child_tcb.security.parent_job_id).to_equal(parent.id)
+            expect(child_tcb.security.parent_resource_domain_id).to_equal(91u64)
+
+    it "binds managed resource limits once and preserves them across fork":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val child = scheduler.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+        val binding = task_security_binding_managed_child(parent.id, 91u64, child)
+
+        expect(scheduler.bind_managed_child_security(child, binding)).to_equal(true)
+        expect(scheduler.bind_managed_child_resource_limits(child, 3u64, 7u64)).to_equal(true)
+        expect(scheduler.bind_managed_child_resource_limits(child, 2u64, 6u64)).to_equal(false)
+        val grandchild = scheduler.clone_task(child)
+        val grandchild_tcb = scheduler.get_task(grandchild)
+        if grandchild_tcb != nil:
+            expect(grandchild_tcb.security.process_limit).to_equal(3u64)
+            expect(grandchild_tcb.security.resource_limits_bound).to_equal(true)
+
+    it "binds a nonempty syscall filter once and inherits it across fork":
+        var scheduler = Scheduler.new()
+        val parent = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+        val child = scheduler.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+        expect(scheduler.bind_managed_child_security(
+            child, task_security_binding_managed_child(parent.id, 91u64, child)
+        )).to_equal(true)
+        expect(scheduler.bind_managed_child_syscall_filter(child, [4u64, 5u64])).to_equal(true)
+        expect(scheduler.bind_managed_child_syscall_filter(child, [4u64])).to_equal(false)
+        expect(scheduler.syscall_allowed(child, 4u64)).to_equal(true)
+        expect(scheduler.syscall_allowed(child, 7u64)).to_equal(false)
+        val grandchild = scheduler.clone_task(child)
+        expect(scheduler.syscall_allowed(grandchild, 5u64)).to_equal(true)
+        expect(scheduler.syscall_allowed(grandchild, 7u64)).to_equal(false)

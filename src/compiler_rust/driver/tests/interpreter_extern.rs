@@ -15,11 +15,8 @@ fn run_interpreted_code(source: &str) -> Result<InterpretedResult, String> {
     fs::write(&main_path, source).map_err(|error| error.to_string())?;
     simple_compiler::interpreter::clear_module_cache();
     simple_compiler::interpreter::clear_interpreter_state();
-    let module = simple_compiler::pipeline::module_loader::load_module_with_imports(
-        &main_path,
-        &mut HashSet::new(),
-    )
-    .map_err(|error| format!("{error:?}"))?;
+    let module = simple_compiler::pipeline::module_loader::load_module_with_imports(&main_path, &mut HashSet::new())
+        .map_err(|error| format!("{error:?}"))?;
     simple_compiler::interpreter::set_current_file(Some(main_path.clone()));
     let result = simple_compiler::interpreter::evaluate_module(&module.items)
         .map(|exit_code| InterpretedResult { exit_code })

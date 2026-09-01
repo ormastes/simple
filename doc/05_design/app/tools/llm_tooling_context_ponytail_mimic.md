@@ -29,10 +29,8 @@ generator.
 
 ## Second Implementation Slice
 
-Expose `simple_pipe` as the SPipe-linked app MCP front door over codebase,
-context, search, and Ponytail operations. Keep the existing app MCP
-`simple_context` and `simple_ponytail` handlers as compatibility entries in
-the same query tool registry.
+Expose the existing app MCP `simple_ponytail` handler through the same query
+tool registry used by `simple_context`.
 
 Expected edits:
 
@@ -115,11 +113,9 @@ record shape into `context_packs` through `app.io.sqlite_sffi`:
 
 `context_sql_query_packs(paths, target, query, db_path, format)` rebuilds the
 one-shot pack table when paths are supplied, then selects records where source,
-target, or content match the SQL-backed candidate predicate. The query string is
-literal context text: after SQL returns candidate rows, Simple filters source,
-target, and content with literal `contains`, so `%`, `_`, and backslash do not
-act as caller-controlled wildcards. Empty queries return `status: empty_query`; unavailable database handles return
-`status: unavailable`; no rows return `status: no_matches`.
+target, or content match the escaped SQL `LIKE` pattern. Empty queries return
+`status: empty_query`; unavailable database handles return `status:
+unavailable`; no rows return `status: no_matches`.
 
 `context_sql_query_packs_by_source(paths, target, query, source_filter, db_path,
 format)` keeps the same SQL query contract and applies the optional source
@@ -141,17 +137,8 @@ persisted context databases to be queried without a dummy file path.
 
 ## MCP Context Index/Query Options Slice
 
-App MCP `simple_pipe` dispatches to the existing CLI-backed context storage,
-codebase search, and Ponytail audit/simplification handlers according to its
-`surface`/`mode` selector. App MCP `simple_context` exposes the context storage
+App MCP `simple_context` exposes the existing CLI-backed context storage
 surface without importing the large context/compiler graph into source-mode MCP.
-For `surface=codebase`, the handler queries the existing embedded-SQL context
-DB when `sql` or `db` is supplied, keeps bounded text search as the fallback
-map, and combines those codebase results with `lsp-workspace-symbols-json` so
-broad repository search and exact LSP symbol ranking are both available from
-the one SPipe-linked front door. When the codebase result sample reaches the
-broad-result threshold and LSP has symbol matches, the response presents LSP
-first and points callers to `surface=search` for the raw search view.
 The tool schema accepts `file`, optional `target`, `format`, `index`, `query`,
 `sql`, `db`, and `source_filter`. `handle_simple_context` validates the same
 text/markdown/json format boundary and forwards index/query/sql/db/source
@@ -164,27 +151,13 @@ index/query. The only source-less accepted shape is `sql=true` with a non-empty
 --db=<path>`.
 
 App MCP `simple_ponytail` also advertises the existing `mode` selector so
-clients can discover `audit` and `simplification` through metadata. The
-`simple_pipe` front door accepts `mode=ponytail` as the short audit spelling.
+clients can discover `audit` and `simplification` through metadata.
 
 Interpreter mode implements the existing `rt_sqlite_*` facade in
 `sffi_db.rs`. The supported SQL subset is intentionally narrow: create table,
-delete all rows, prepared insert/bind, select explicit columns, count, bounded
-`LIKE` candidate scans, and ordered result enumeration. That is enough for context-mode storage
+delete all rows, prepared insert/bind, select explicit columns, count, simple
+`LIKE`, and ordered result enumeration. That is enough for context-mode storage
 without adding a new Rust dependency or app-level raw runtime shortcuts.
-
-## Full Replacement Evidence Slice
-
-`scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs`
-produces the strict replacement env consumed by
-`check-llm-tooling-context-ponytail-mimic.shs --strict-full-replacement`.
-
-The checker first runs the focused mimic evidence wrapper, then verifies that
-the repo-local replacement contract is visible in requirements, architecture,
-guide, app MCP, lower MCP, embedded-SQL source-less query handling, source
-filtering, and Ponytail audit/simplification handlers. The evidence scope is
-`repo_local_simple_owned_surfaces`; it intentionally does not claim internet
-fetch, external vector store, or third-party plugin parity.
 
 ## Output Formats
 

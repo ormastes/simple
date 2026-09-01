@@ -22,7 +22,7 @@ use ..linker.smf_reader.*
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory, SmfRelocEntry}
 use .object_mapper.{LoaderMapper, LoaderMapperConfig, ResolvedSymbol, apply_smf_relocations}
-use .smf_mmap_native.{native_alloc_rw_memory, native_make_executable, native_make_rw, native_flush_icache, native_write_exec_memory, native_call_function_0}
+use .smf_mmap_native.{native_make_executable, native_make_rw, native_flush_icache, native_call_function_0}
 use .jit_instantiator.*
 use ..metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
 use ..unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
@@ -263,7 +263,9 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
                     self.global_symbols[smf_sym.name] = (path, loaded_sym)
                     lifecycle_on_symbol_mapped(lifecycle, path, smf_sym.name)
         val reader_exports = reader.exported_symbols()
-        if symbols.keys().len() == 0 and reader_exports.len() > 0:
+        # Dict.len() reads the stored count directly.  Do not materialize a
+        # transient key array on this startup-path fallback decision.
+        if symbols.len() == 0 and reader_exports.len() > 0:
             for smf_sym in reader_exports:
                 val code_result = reader.read_code(smf_sym)
                 if code_result.is_err():
@@ -283,7 +285,7 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
                 symbols[smf_sym.name] = loaded_sym
                 self.global_symbols[smf_sym.name] = (path, loaded_sym)
                 lifecycle_on_symbol_mapped(lifecycle, path, smf_sym.name)
-        if symbols.keys().len() == 0:
+        if symbols.len() == 0:
             val load_bytes_result = provider.get_module_bytes(path)
             if load_bytes_result.is_err():
                 return LoadResult.Error(message: load_bytes_result.unwrap_err())
@@ -338,7 +340,7 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
             return LoadResult.Error(message: reloc_error)
 
         if self.config.verbose:
-            print "[loader] Loaded {symbols.keys().len()} symbols from {path}"
+            print "[loader] Loaded {symbols.len()} symbols from {path}"
 
         LoadResult.Success(module: module)
 
@@ -405,7 +407,8 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
             if addr == 0 or size == 0:
                 continue
             # mprotect to RW for patching
-            val rw_ok = native_make_rw(addr, size)
+            val rw_ok = unsafe(capabilities: [raw_ptr]):
+                native_make_rw(addr, size)
             if not rw_ok:
                 return Err("Failed to make memory writable for relocation at {sym_name}")
 
@@ -415,7 +418,8 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
                 return Err("Relocation failed for {sym_name}: {apply_result.unwrap_err()}")
 
             # Restore RX protection
-            val rx_ok = native_make_executable(addr, size)
+            val rx_ok = unsafe(capabilities: [raw_ptr]):
+                native_make_executable(addr, size)
             if not rx_ok:
                 return Err("Failed to restore RX protection for {sym_name}")
             native_flush_icache(addr, size)
@@ -610,9 +614,11 @@ fn moduleloader_execute_smf(path: text) -> Result<i64, text>:
 fn moduleloader_execute_loaded_main(loader: LazyModuleLoader, path: text) -> Result<i64, text>:
         match moduleloader_resolve_symbol(loader, "main"):
             case Found(symbol, _):
-                Ok(native_call_function_0(symbol.address))
+                unsafe(capabilities: [raw_ptr]):
+                    native_call_function_0(symbol.address)
             case JitCompiled(symbol, _):
-                Ok(native_call_function_0(symbol.address))
+                unsafe(capabilities: [raw_ptr]):
+                    native_call_function_0(symbol.address)
             case NotFound(_):
                 Err("SMF entry point 'main' not found in {path}")
             case Error(message):

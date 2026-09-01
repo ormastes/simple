@@ -1,0 +1,282 @@
+#!/bin/sh
+# check-native-build-full-closure-hello-world.shs
+#
+# TREE gate: the CURRENT SOURCE TREE must be able to `native-build` a hello
+# world with the DEFAULT (full) source closure, produce an artifact, and run it.
+#
+# WHY A THIRD HELLO-WORLD GATE EXISTS (measured 2026-08-25, evidence in
+# doc/08_tracking/bug/native_build_broken_at_tip_cannot_convert_array_to_int_2026-08-25.md):
+#
+# `origin/main` sat with EVERY `native-build` broken for a day -- a three-line
+# hello world died with `semantic: type mismatch: cannot convert array to int`
+# -- while both existing hello-world gates stayed green. That is not a wiring
+# oversight; each is blind for a STRUCTURAL reason, and both were measured:
+#
+#   1. check-native-build-hello-world-runs.shs deliberately stops as soon as a
+#      `[build] ... step 1/6` line appears (its header says so: a full build is
+#      >5 min under the seed and "a guard too slow to run protects nothing").
+#      This defect fails AFTER that line, so the gate cannot see it.
+#
+#   2. check-stage2-hello-world-native-build.shs does assert artifact + output,
+#      but `--entry-closure` is MANDATORY on both its arms (without it a stage
+#      candidate scans the default roots unbounded, >20 min). `--entry-closure`
+#      restricts the compile closure to the entry's own imports -- and the
+#      defect lived in a module (compiler.backend.linker.smf_writer) that only
+#      enters the DEFAULT closure. MEASURED: that gate reports
+#      `PASS — 2 case(s) checked` on the exact broken tree.
+#
+# So the uncovered axis is the CLOSURE axis, exactly as the argument-form axis
+# was for gate 2. This gate covers only that axis and nothing else: default
+# closure, build to completion, artifact must exist and must run and print.
+#
+# COST IS REAL AND DELIBERATE: ~4-5 min under the Rust seed on this host. That
+# is why this is a separate gate rather than a third arm bolted onto gate 2 --
+# gate 2 runs per-candidate inside bootstrap admission, and tripling its
+# latency for a property of the TREE (not of the candidate) would get it
+# routed around. Runnability of the default closure is a property of a tree,
+# so like check-c-runtime-compiles-push.shs this checks a TREE, not a range.
+#
+# The exit status is read DIRECTLY into a variable on the line AFTER the
+# invocation, NEVER through a pipe -- a pipeline's $? is the last element's
+# status and has produced false greens in this repo repeatedly.
+#
+# Verdict is the LAST line on stdout:
+#   PASS  — <n> case(s) checked          exit 0
+#   FAIL  — ...                          exit 1
+#   ERROR — nothing was checked (...)    exit 2
+
+set -u
+
+FC_BUILD_TIMEOUT_SECONDS=${FC_BUILD_TIMEOUT_SECONDS:-900}
+FC_EXEC_TIMEOUT_SECONDS=${FC_EXEC_TIMEOUT_SECONDS:-60}
+FC_KILL_GRACE_SECONDS=${FC_KILL_GRACE_SECONDS:-5}
+FC_BACKEND=${FC_BACKEND:-llvm}
+FC_EXPECT=${FC_EXPECT:-hello}
+FC_ROOT=${FC_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
+# The fixture must live INSIDE the tree and be named repo-root-relative: an
+# out-of-tree fixture is rejected by a HEALTHY compiler ("missing importing
+# module surface", rc=1), which would false-reject every good binary. Same
+# lesson as gate 2, learned the same way.
+FC_FIXTURE=${FC_FIXTURE:-scripts/check/cert/redeploy_gate/fixtures/hello_world.spl}
+
+gate_error() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+timeout_bin=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+[ -n "$timeout_bin" ] || gate_error "no timeout(1) on PATH; a build without a timeout cannot classify a hang"
+
+# fc_probe <candidate> <workdir>
+# Sets FC_CLASS (ok|crash|hang|fail) and FC_DETAIL.
+fc_probe() {
+    fcp_candidate=$1
+    fcp_work=$2
+    fcp_out=$fcp_work/out.bin
+    fcp_log=$fcp_work/build.log
+    fcp_cache=$fcp_work/cache
+    rm -rf "$fcp_cache" "$fcp_out"
+    FC_DETAIL=""
+
+    cd "${FC_PROBE_ROOT:-$FC_ROOT}" || return 1
+
+    # NOTE: no --entry-closure. That omission IS the point of this gate.
+    "$timeout_bin" -k "${FC_KILL_GRACE_SECONDS}s" "${FC_BUILD_TIMEOUT_SECONDS}s" \
+        "$fcp_candidate" native-build --backend "$FC_BACKEND" \
+        --cache-dir "$fcp_cache" "${FC_PROBE_FIXTURE:-$FC_FIXTURE}" \
+        -o "$fcp_out" >"$fcp_log" 2>&1
+    FC_RC=$?
+
+    # rc=124 is a TIMEOUT: not a pass and not a crash. Distinct class.
+    if [ "$FC_RC" -eq 124 ]; then
+        FC_CLASS=hang
+        FC_DETAIL="build timed out after ${FC_BUILD_TIMEOUT_SECONDS}s"
+        return 0
+    fi
+    # >=128 is death by signal (139 = SEGV, 134 = abort). Always a defect.
+    if [ "$FC_RC" -ge 128 ]; then
+        FC_CLASS=crash
+        FC_DETAIL="killed by signal $((FC_RC - 128)) (rc=$FC_RC)"
+        return 0
+    fi
+    if [ "$FC_RC" -ne 0 ]; then
+        FC_CLASS=fail
+        FC_DETAIL="build rc=$FC_RC: $(grep -m1 '^error' "$fcp_log" 2>/dev/null | cut -c1-160)"
+        return 0
+    fi
+    # rc=0 is NOT accepted on its own. The 2026-08-25 defect reported every
+    # error counter as 0 and simply never renamed the .tmp artifact.
+    if [ ! -f "$fcp_out" ]; then
+        FC_CLASS=fail
+        FC_DETAIL="build exited 0 but produced NO artifact: $(grep -m1 '^error' "$fcp_log" 2>/dev/null | cut -c1-160)"
+        return 0
+    fi
+
+    "$timeout_bin" -k "${FC_KILL_GRACE_SECONDS}s" "${FC_EXEC_TIMEOUT_SECONDS}s" \
+        "$fcp_out" >"$fcp_work/run.log" 2>&1
+    FC_RUN_RC=$?
+    if [ "$FC_RUN_RC" -eq 124 ]; then
+        FC_CLASS=hang; FC_DETAIL="artifact hung"; return 0
+    fi
+    if [ "$FC_RUN_RC" -ge 128 ]; then
+        FC_CLASS=crash; FC_DETAIL="artifact killed by signal $((FC_RUN_RC - 128))"; return 0
+    fi
+    if [ "$FC_RUN_RC" -ne 0 ]; then
+        FC_CLASS=fail; FC_DETAIL="artifact exited rc=$FC_RUN_RC"; return 0
+    fi
+    if ! grep -q "$FC_EXPECT" "$fcp_work/run.log" 2>/dev/null; then
+        FC_CLASS=fail
+        FC_DETAIL="artifact ran but did not print '$FC_EXPECT'"
+        return 0
+    fi
+    FC_CLASS=ok
+    return 0
+}
+
+# ---------------------------------------------------------------- selftest --
+# Runs FIRST and is FATAL. Fixtures are real executables driven by the real
+# prober, mutating in BOTH directions.
+fc_selftest() {
+    st_work=$(mktemp -d "${TMPDIR:-/tmp}/fc-hello-selftest.XXXXXX") ||
+        gate_error "selftest could not create a work dir"
+    st_fail=""
+    st_n=0
+
+    st_make() {
+        st_path=$st_work/$1
+        shift
+        {
+            echo '#!/bin/sh'
+            echo 'out=""; prev=""; sawclosure=0'
+            echo 'for a in "$@"; do'
+            echo '  if [ "$prev" = -o ]; then out=$a; fi'
+            echo '  case "$a" in --entry-closure) sawclosure=1 ;; esac'
+            echo '  prev=$a'
+            echo 'done'
+            cat
+        } >"$st_path"
+        chmod +x "$st_path"
+    }
+
+    st_expect() {
+        st_n=$((st_n + 1))
+        st_name=$1; st_want=$2
+        fc_probe "$st_work/$st_name" "$st_work/w-$st_name" >/dev/null 2>&1
+        [ "$FC_CLASS" = "$st_want" ] ||
+            st_fail="$st_fail $st_name:got=$FC_CLASS,want=$st_want"
+    }
+
+    mkdir -p "$st_work/tree"
+    printf 'fn main() -> i64:\n    print("hello")\n    0\n' > "$st_work/tree/hello.spl"
+    FC_PROBE_ROOT=$st_work/tree
+    FC_PROBE_FIXTURE=hello.spl
+    export FC_PROBE_ROOT FC_PROBE_FIXTURE
+
+    # 1. healthy: produces a runnable artifact printing hello -> ok
+    st_make good <<'EOS'
+printf '#!/bin/sh\necho hello\n' > "$out"; chmod +x "$out"; exit 0
+EOS
+    mkdir -p "$st_work/w-good"; st_expect good ok
+
+    # 2. THE INCIDENT SHAPE: exits non-zero after reporting zero errors, no
+    #    artifact. Must FAIL, not pass.
+    st_make arraytoint <<'EOS'
+echo "[bootstrap-error-count] source_idx=0 point=post-store count=0"
+echo "error: semantic: type mismatch: cannot convert array to int"
+exit 1
+EOS
+    mkdir -p "$st_work/w-arraytoint"; st_expect arraytoint fail
+
+    # 3. silent success: rc=0 but never produced the artifact. Must FAIL.
+    st_make silent <<'EOS'
+exit 0
+EOS
+    mkdir -p "$st_work/w-silent"; st_expect silent fail
+
+    # 4. SEGV must classify as crash, not fail.
+    st_make segv <<'EOS'
+kill -SEGV $$
+EOS
+    mkdir -p "$st_work/w-segv"; st_expect segv crash
+
+    # 5. artifact builds but prints the wrong thing. Must FAIL.
+    st_make wrongout <<'EOS'
+printf '#!/bin/sh\necho goodbye\n' > "$out"; chmod +x "$out"; exit 0
+EOS
+    mkdir -p "$st_work/w-wrongout"; st_expect wrongout fail
+
+    # 6. THE BLINDNESS THIS GATE EXISTS TO CLOSE: a candidate that only works
+    #    WITH --entry-closure must still FAIL here, because this gate never
+    #    passes that flag. Pins that the flag is not silently reintroduced.
+    st_make closureonly <<'EOS'
+if [ "$sawclosure" = 1 ]; then
+  printf '#!/bin/sh\necho hello\n' > "$out"; chmod +x "$out"; exit 0
+fi
+echo "error: semantic: type mismatch: cannot convert array to int"
+exit 1
+EOS
+    mkdir -p "$st_work/w-closureonly"; st_expect closureonly fail
+
+    unset FC_PROBE_ROOT FC_PROBE_FIXTURE
+
+    rm -rf "$st_work"
+    if [ -n "$st_fail" ]; then
+        printf 'selftest FAILED:%s\n' "$st_fail" >&2
+        printf 'FAIL — selftest failed (%s case(s)):%s\n' "$st_n" "$st_fail"
+        exit 1
+    fi
+    FC_SELFTEST_CASES=$st_n
+}
+
+# -------------------------------------------------------------------- main --
+FC_SELFTEST_ONLY=0
+FC_CANDIDATES=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) FC_SELFTEST_ONLY=1 ;;
+        --candidate) shift; [ $# -gt 0 ] || gate_error "--candidate needs a path"
+                     FC_CANDIDATES="$FC_CANDIDATES $1" ;;
+        -h|--help)
+            echo "usage: check-native-build-full-closure-hello-world.shs [--selftest] [--candidate PATH]..."
+            exit 0 ;;
+        -*) gate_error "unknown option: $1" ;;
+        *) FC_CANDIDATES="$FC_CANDIDATES $1" ;;
+    esac
+    shift
+done
+
+fc_selftest
+
+if [ "$FC_SELFTEST_ONLY" = 1 ]; then
+    printf 'PASS — %s case(s) checked (selftest only)\n' "$FC_SELFTEST_CASES"
+    exit 0
+fi
+
+[ -n "${FC_CANDIDATES# }" ] ||
+    gate_error "no candidate given; pass --candidate PATH (absence of a compiler is absence of evidence, never a pass)"
+
+[ -f "$FC_ROOT/$FC_FIXTURE" ] || gate_error "fixture not found: $FC_ROOT/$FC_FIXTURE"
+
+FC_CHECKED=0
+FC_FAILURES=""
+for fc_c in $FC_CANDIDATES; do
+    [ -x "$fc_c" ] || gate_error "candidate is not executable: $fc_c"
+    fc_name=$(basename "$fc_c")
+    fc_work=$(mktemp -d "${TMPDIR:-/tmp}/fc-hello.XXXXXX") || gate_error "cannot create work dir"
+    fc_probe "$fc_c" "$fc_work"
+    FC_CHECKED=$((FC_CHECKED + 1))
+    if [ "$FC_CLASS" != ok ]; then
+        FC_FAILURES="$FC_FAILURES ${fc_name}:full-closure:${FC_CLASS}(${FC_DETAIL})"
+    fi
+    rm -rf "$fc_work"
+done
+
+# A run that executed 0 probes is ERROR, never a pass.
+[ "$FC_CHECKED" -gt 0 ] || gate_error "0 probes executed"
+
+if [ -n "$FC_FAILURES" ]; then
+    printf 'FAIL — %s case(s) checked,%s\n' "$FC_CHECKED" "$FC_FAILURES"
+    exit 1
+fi
+printf 'PASS — %s case(s) checked\n' "$FC_CHECKED"
+exit 0

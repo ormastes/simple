@@ -587,11 +587,49 @@ impl<'a> Parser<'a> {
                     // Supports multi-line: expr ??\n    default
                     self.advance();
                     self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
-                    let default = self.parse_pipe()?;
-                    expr = Expr::Coalesce {
-                        expr: Box::new(expr),
-                        default: Box::new(default),
-                    };
+                    // The fallback may be a DIVERGING `return` rather than a
+                    // value: `val p = g(x) ??\n    return Err("missing")`.
+                    // `return` is usable as a plain identifier in primary
+                    // position, so `parse_pipe` read it as a NAME and its
+                    // operand as a no-paren call argument; on the multi-line
+                    // form that scan then ran past the statement's Newline and
+                    // died with "expected expression, found Dedent". A BARE
+                    // `return` parsed fine, which is what hid this.
+                    // Item 25 of doc/08_tracking/bug/
+                    // unit_sweep_language_and_interpreter_gaps_2026-08-26.md.
+                    // NOTE: `break`/`continue` fallbacks are deliberately NOT
+                    // handled here — there is no loop-control counterpart to
+                    // `UnwrapOrReturn`, and they parsed only as identifiers
+                    // before this change too, so there is no working behaviour
+                    // to preserve. Recorded as a sub-item of 25.
+                    if self.check(&TokenKind::Return) {
+                        self.advance();
+                        // `expr ?? return X` IS `expr unwrap or_return: X`, and
+                        // that node already has diverging semantics wired
+                        // through the interpreter and every backend. Building a
+                        // DoBlock instead was tried and evaluates to a thunk
+                        // ("cannot convert function to int"), because a Coalesce
+                        // default is a lazily-evaluated value.
+                        let default = if self.check(&TokenKind::Newline)
+                            || self.check(&TokenKind::Dedent)
+                            || self.check(&TokenKind::Eof)
+                        {
+                            // bare `return` — unit
+                            Expr::Tuple(vec![])
+                        } else {
+                            self.parse_pipe()?
+                        };
+                        expr = Expr::UnwrapOrReturn {
+                            expr: Box::new(expr),
+                            default: Box::new(default),
+                        };
+                    } else {
+                        let default = self.parse_pipe()?;
+                        expr = Expr::Coalesce {
+                            expr: Box::new(expr),
+                            default: Box::new(default),
+                        };
+                    }
                 }
                 TokenKind::QuestionDot => {
                     // Optional chaining: expr?.field or expr?.method(args)
@@ -924,6 +962,12 @@ impl<'a> Parser<'a> {
         })
     }
 
+    // TODO: (gpu) accept `stream:` and `shared:` slots -- `k<<<grid: g, block: b, stream: s,
+    // shared: n>>>(args)`. The runtime already supports both via rt_cuda_launch_kernel_ex,
+    // and std.io `cuda_launch_on` is the interim spelling. Deferred because the pure-Simple
+    // AST variant KernelLaunch(Expr, Expr, Expr, [CallArg]) is positional and every
+    // construction/match site ripples. See
+    // doc/08_tracking/bug/kernel_launch_grammar_no_stream_slot_2026-08-25.md
     /// Parse CUDA kernel launch: kernel<<<grid: expr, block: expr>>>(args)
     /// The `<<<` token has already been seen as the current token.
     fn parse_kernel_launch(&mut self, kernel: Expr) -> Result<Expr, ParseError> {
@@ -1317,10 +1361,7 @@ impl<'a> Parser<'a> {
             // like a type arg so the list can still reach its closing `>`; the
             // recorded span turns into a precise diagnostic below once the shape
             // is confirmed to be a generic argument list and not a comparison.
-            if matches!(
-                self.current.kind,
-                TokenKind::Integer(_) | TokenKind::TypedInteger(_, _)
-            ) {
+            if matches!(self.current.kind, TokenKind::Integer(_) | TokenKind::TypedInteger(_, _)) {
                 if need_comma {
                     break;
                 }
@@ -1463,8 +1504,8 @@ mod tuple_index_split_tests {
     #[test]
     fn refuses_anything_that_is_not_digits_dot_digits() {
         for bad in [
-            "1e3", "1.5e3", "0.1f32", "1_0.5", "0.5_0", ".5", "1.", "1.2.3", "-1.2", "+1.2",
-            "0x1.8", "", ".", "a.b", "1.2i64",
+            "1e3", "1.5e3", "0.1f32", "1_0.5", "0.5_0", ".5", "1.", "1.2.3", "-1.2", "+1.2", "0x1.8", "", ".", "a.b",
+            "1.2i64",
         ] {
             assert_eq!(split_tuple_index_pair(bad), None, "must refuse {bad:?}");
         }

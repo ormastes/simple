@@ -1,0 +1,78 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
+    BackendPluginRequestV1}
+use compiler.backend_plugin.transport.{BACKEND_PLUGIN_BRIDGE_MAGIC_V1,
+    BACKEND_PLUGIN_BRIDGE_VERSION_V1, BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1,
+    BACKEND_PLUGIN_REQUEST_SIZE_V1, backend_plugin_request_encode_v1,
+    backend_plugin_envelope_encode_v1, backend_plugin_envelope_decode_v1}
+
+fn transport_request() -> BackendPluginRequestV1:
+    BackendPluginRequestV1(
+        BackendRole.CompilerAot, "dynamic", "host", "generic", [], "debug",
+        "mir-v1", [BackendCapability.ObjectEmit, BackendCapability.Optimization],
+        "/tmp/provider.so", true)
+
+describe "backend plugin packed transport":
+    it "encodes the frozen request prefix in little-endian order":
+        val wire = backend_plugin_request_encode_v1(transport_request())
+        expect(wire.len()).to_equal(BACKEND_PLUGIN_REQUEST_SIZE_V1)
+        expect(wire[0] as i64).to_equal(BACKEND_PLUGIN_BRIDGE_VERSION_V1)
+        expect(wire[4] as i64).to_equal(2)
+        expect(wire[8] as i64).to_equal(10)
+        expect(wire[9] as i64).to_equal(0)
+
+    it "round trips payload and diagnostic through the frozen envelope":
+        val wire = backend_plugin_envelope_encode_v1(-7, 3, [1, 2, 255], "bad provider")
+        expect(wire.len()).to_equal(BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1 + 15)
+        val decoded = backend_plugin_envelope_decode_v1(wire)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.status).to_equal(-7)
+        expect(decoded.result_kind).to_equal(3)
+        expect(decoded.payload).to_equal([1, 2, 255])
+        expect(decoded.diagnostic).to_equal("bad provider")
+
+    it "fails closed for bad magic, truncation, and trailing bytes":
+        var valid = backend_plugin_envelope_encode_v1(0, 1, [9], "")
+        var bad_magic = valid
+        bad_magic[0] = 0
+        expect(backend_plugin_envelope_decode_v1(bad_magic).reason).to_equal(
+            "bad-envelope-magic")
+        expect(backend_plugin_envelope_decode_v1([1, 2]).reason).to_equal(
+            "truncated-envelope")
+        valid.push(0)
+        expect(backend_plugin_envelope_decode_v1(valid).reason).to_equal(
+            "trailing-envelope-bytes")
+
+    it "keeps the wrapper on canonical MIR serialization and the boxed byte extern":
+        val source = file_read("src/compiler/70.backend/backend_plugin/transport.spl")
+        expect(source).to_contain(
+            "extern fn spl_backend_plugin_run_v1(")
+        expect(source).to_contain(
+            "path_bytes: [u8], request_bytes: [u8], mir_bytes: [u8]")
+        expect(source).to_contain(
+            "text_to_bytes(serialize_mir_module(module))")
+        expect(source).to_contain(
+            "backend_plugin_envelope_decode_v1(response)")
+        expect(source).to_contain("unsafe(capabilities: [ffi])")
+
+    it "matches the frozen C header constants and field order":
+        val header = file_read(
+            "src/compiler/70.backend/backend_plugin/abi/simple_backend_plugin_v1.h")
+        expect(header).to_contain("0x31504253")
+        expect(header).to_contain("SIMPLE_BACKEND_BRIDGE_VERSION_V1 UINT32_C(1)")
+        expect(header).to_contain("SIMPLE_BACKEND_BRIDGE_HEADER_SIZE_V1 UINT32_C(32)")
+        expect(header).to_contain(
+            "magic:u32, version:u32, status:i32, result_kind:u32, payload_len:u64")
+
+    it "admits only finalized object envelopes in the dynamic adapter":
+        val source = file_read(
+            "src/compiler/70.backend/backend_plugin/dynamic_adapter.spl")
+        expect(source).to_contain(
+            "BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1: i64 = 2")
+        expect(source).to_contain("if not envelope.valid:")
+        expect(source).to_contain("if envelope.status != 0:")
+        expect(source).to_contain(
+            "envelope.result_kind != BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1")
+        expect(source).to_contain("if envelope.payload.len() == 0:")
+        expect(source).to_contain("CodegenOutput.object(module.name, envelope.payload)")

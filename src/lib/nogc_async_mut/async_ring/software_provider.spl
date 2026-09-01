@@ -1,0 +1,216 @@
+# Bounded in-memory reference provider for SimpleRing.  This is intentionally
+# not an executor: it neither schedules nor waits.  Each terminal result is
+# published by the owning ring, which remains the sole completion authority.
+
+use std.common.contracts.execution.async_profile_v1.{
+    AsyncProfile, AsyncProfileError, AsyncRingMapping,
+    async_profile_fingerprint_v1, async_profile_validate_v1
+}
+use std.common.contracts.execution.simple_ring_async_v1.{
+    RingMappingGrade, RingTerminalKind, RingToken
+}
+use std.nogc_async_mut.async_ring.simple_ring.{
+    SimpleRing, SimpleRingError, RingSubmission
+}
+
+pub enum SoftwareProviderAdmissionStatus:
+    Admitted
+    Rejected
+
+pub struct SoftwareProviderAdmission:
+    status: SoftwareProviderAdmissionStatus
+    provider_id: u64
+    mapping: RingMappingGrade
+    bounded: bool
+    provider_depth: i64
+    requested_depth: i64
+    profile_id: text
+    profile_fingerprint: text
+    fallback_fact: text
+    fallback_reason: text
+    profile_error: AsyncProfileError?
+
+pub struct SoftwareProviderWake:
+    provider_id: u64
+    token: RingToken
+    wake_key: u64
+    kind: RingTerminalKind
+
+pub struct SoftwareProviderCounters:
+    admissions: u64
+    rejections: u64
+    kicks: u64
+    takes: u64
+    successes: u64
+    failures: u64
+    cancellations: u64
+    wakes: u64
+
+pub enum SoftwareProviderCreateError:
+    InvalidProviderId
+    InvalidDepth
+
+class SoftwareRingProvider<Op, Cpl>:
+    provider_id_value: u64
+    maximum_depth: i64
+    counters_value: SoftwareProviderCounters
+
+impl SoftwareRingProvider<Op, Cpl>:
+    static fn create(provider_id: u64, maximum_depth: i64) -> Result<SoftwareRingProvider<Op, Cpl>, SoftwareProviderCreateError>:
+        if provider_id == 0u64:
+            return Err(SoftwareProviderCreateError.InvalidProviderId)
+        if maximum_depth <= 0:
+            return Err(SoftwareProviderCreateError.InvalidDepth)
+        Ok(SoftwareRingProvider(
+            provider_id_value: provider_id,
+            maximum_depth: maximum_depth,
+            counters_value: SoftwareProviderCounters(
+                admissions: 0u64, rejections: 0u64, kicks: 0u64, takes: 0u64,
+                successes: 0u64, failures: 0u64, cancellations: 0u64,
+                wakes: 0u64)))
+
+    fn provider_id() -> u64: self.provider_id_value
+    fn mapping_grade() -> RingMappingGrade: RingMappingGrade.Software
+    fn maximum_depth_value() -> i64: self.maximum_depth
+    fn counters() -> SoftwareProviderCounters: self.counters_value
+
+    me admit(profile: AsyncProfile) -> SoftwareProviderAdmission:
+        self.admit_for_depth(profile, self.maximum_depth)
+
+    me admit_for_depth(profile: AsyncProfile, requested_depth: i64) -> SoftwareProviderAdmission:
+        val fingerprint = async_profile_fingerprint_v1(profile)
+        if requested_depth <= 0 or requested_depth > self.maximum_depth:
+            self.counters_value.rejections = _software_provider_next(self.counters_value.rejections)
+            return SoftwareProviderAdmission(
+                status: SoftwareProviderAdmissionStatus.Rejected,
+                provider_id: self.provider_id_value,
+                mapping: RingMappingGrade.Software,
+                bounded: true, provider_depth: self.maximum_depth,
+                requested_depth: requested_depth,
+                profile_id: profile.profile_id,
+                profile_fingerprint: fingerprint,
+                fallback_fact: "",
+                fallback_reason: "requested ring depth exceeds provider bound",
+                profile_error: nil)
+        match async_profile_validate_v1(profile):
+            case Err(error):
+                self.counters_value.rejections = _software_provider_next(self.counters_value.rejections)
+                SoftwareProviderAdmission(
+                    status: SoftwareProviderAdmissionStatus.Rejected,
+                    provider_id: self.provider_id_value,
+                    mapping: RingMappingGrade.Software,
+                    bounded: true, provider_depth: self.maximum_depth,
+                    requested_depth: requested_depth,
+                    profile_id: profile.profile_id,
+                    profile_fingerprint: fingerprint,
+                    fallback_fact: "",
+                    fallback_reason: "invalid async profile",
+                    profile_error: error)
+            case Ok(_):
+                if profile.mapping == AsyncRingMapping.DirectRequired:
+                    self.counters_value.rejections = _software_provider_next(self.counters_value.rejections)
+                    return SoftwareProviderAdmission(
+                        status: SoftwareProviderAdmissionStatus.Rejected,
+                        provider_id: self.provider_id_value,
+                        mapping: RingMappingGrade.Software,
+                        bounded: true, provider_depth: self.maximum_depth,
+                        requested_depth: requested_depth,
+                        profile_id: profile.profile_id,
+                        profile_fingerprint: fingerprint,
+                        fallback_fact: "",
+                        fallback_reason: "direct ring mapping required",
+                        profile_error: nil)
+                if not profile.fallback_allowed:
+                    self.counters_value.rejections = _software_provider_next(self.counters_value.rejections)
+                    return SoftwareProviderAdmission(
+                        status: SoftwareProviderAdmissionStatus.Rejected,
+                        provider_id: self.provider_id_value,
+                        mapping: RingMappingGrade.Software,
+                        bounded: true, provider_depth: self.maximum_depth,
+                        requested_depth: requested_depth,
+                        profile_id: profile.profile_id,
+                        profile_fingerprint: fingerprint,
+                        fallback_fact: "",
+                        fallback_reason: "software fallback not admitted",
+                        profile_error: nil)
+                self.counters_value.admissions = _software_provider_next(self.counters_value.admissions)
+                SoftwareProviderAdmission(
+                    status: SoftwareProviderAdmissionStatus.Admitted,
+                    provider_id: self.provider_id_value,
+                    mapping: RingMappingGrade.Software,
+                    bounded: true, provider_depth: self.maximum_depth,
+                    requested_depth: requested_depth,
+                    profile_id: profile.profile_id,
+                    profile_fingerprint: fingerprint,
+                    fallback_fact: "software-grade-selected",
+                    fallback_reason: "software ring provider selected",
+                    profile_error: nil)
+
+    me take_one(ring: SimpleRing<Op, Cpl>) -> Result<RingSubmission<Op>?, SimpleRingError>:
+        self.take_one_at(ring, 0u64)
+
+    me take_one_at(ring: SimpleRing<Op, Cpl>, started_at: u64) -> Result<RingSubmission<Op>?, SimpleRingError>:
+        self.counters_value.kicks = _software_provider_next(self.counters_value.kicks)
+        val taken = ring.provider_take_at(1, started_at)
+        match taken:
+            case Ok(submission):
+                if submission != nil:
+                    self.counters_value.takes = _software_provider_next(self.counters_value.takes)
+                Ok(submission)
+            case Err(error): Err(error)
+
+    me complete_success(
+        ring: SimpleRing<Op, Cpl>, submission: RingSubmission<Op>, value: Cpl
+    ) -> Result<SoftwareProviderWake, SimpleRingError>:
+        val completed = ring.complete_success(submission.token, value)
+        match completed:
+            case Err(error): Err(error)
+            case Ok(_):
+                self.counters_value.successes = _software_provider_next(self.counters_value.successes)
+                Ok(self._wake(submission, RingTerminalKind.Success))
+
+    me complete_success_at(
+        ring: SimpleRing<Op, Cpl>, submission: RingSubmission<Op>, value: Cpl,
+        completed_at: u64
+    ) -> Result<SoftwareProviderWake, SimpleRingError>:
+        val completed = ring.complete_success_at(submission.token, value, completed_at)
+        match completed:
+            case Err(error): Err(error)
+            case Ok(_):
+                self.counters_value.successes = _software_provider_next(self.counters_value.successes)
+                Ok(self._wake(submission, RingTerminalKind.Success))
+
+    me complete_failure(
+        ring: SimpleRing<Op, Cpl>, submission: RingSubmission<Op>, error_text: text
+    ) -> Result<SoftwareProviderWake, SimpleRingError>:
+        val completed = ring.complete_failure(submission.token, error_text)
+        match completed:
+            case Err(error): Err(error)
+            case Ok(_):
+                self.counters_value.failures = _software_provider_next(self.counters_value.failures)
+                Ok(self._wake(submission, RingTerminalKind.Failure))
+
+    me complete_cancelled(
+        ring: SimpleRing<Op, Cpl>, submission: RingSubmission<Op>, reason: text
+    ) -> Result<SoftwareProviderWake, SimpleRingError>:
+        val completed = ring.complete_cancelled(submission.token, reason)
+        match completed:
+            case Err(error): Err(error)
+            case Ok(_):
+                self.counters_value.cancellations = _software_provider_next(self.counters_value.cancellations)
+                Ok(self._wake(submission, RingTerminalKind.Cancelled))
+
+    me _wake(submission: RingSubmission<Op>, kind: RingTerminalKind) -> SoftwareProviderWake:
+        self.counters_value.wakes = _software_provider_next(self.counters_value.wakes)
+        SoftwareProviderWake(
+            provider_id: self.provider_id_value,
+            token: submission.token,
+            wake_key: submission.task_key,
+            kind: kind)
+
+fn _software_provider_next(value: u64) -> u64:
+    if value == 18446744073709551615u64: value else: value + 1u64
+
+export SoftwareProviderAdmissionStatus, SoftwareProviderAdmission
+export SoftwareProviderWake, SoftwareProviderCounters, SoftwareProviderCreateError
+export SoftwareRingProvider

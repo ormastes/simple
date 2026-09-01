@@ -1,0 +1,119 @@
+# codex-system-test
+# @req REQ-SCT-001
+# @req REQ-SCT-002
+# @req REQ-SCT-003
+"""
+# SSpec Count Truthfulness Guard
+
+This system specification drives the production count-truthfulness shell gate
+with the explicitly inherited `SIMPLE_BIN`. The shell gate owns self-hosted
+identity admission; the system specification never substitutes the Rust seed
+or treats an unavailable compiler as a pass.
+
+The fixtures are deliberately outside discovery naming: only this system spec
+is an executable acceptance surface. The passing and anchored fixtures prove
+truthful count equality, while the red fixture proves a child runner failure
+cannot be converted into a passing count claim.
+"""
+
+use std.spec.*
+use std.io_runtime.{env_get, process_run}
+
+val COUNT_TRUTHFULNESS_GUARD: text = "scripts/check/check-sspec-count-truthful.shs"
+val COUNT_TRUTHFULNESS_FIXTURES: text = "test/03_system/infra/fixtures/sspec_count_truthfulness"
+val TWO_EXAMPLE_FIXTURE: text = COUNT_TRUTHFULNESS_FIXTURES + "/passing_two_examples.spl"
+val ANCHORED_COUNT_FIXTURE: text = COUNT_TRUTHFULNESS_FIXTURES + "/anchored_non_example_text.spl"
+val FAILING_FIXTURE: text = COUNT_TRUTHFULNESS_FIXTURES + "/deliberately_failing.spl"
+val MISSING_SIMPLE_BIN: text = "/__simple_sspec_count_truthfulness_missing__/simple"
+
+
+# Run the production gate with an explicit SIMPLE_BIN assignment. An empty
+# inherited value is converted to a guaranteed-missing path so the gate returns
+# its admission error instead of silently falling back to bin/simple.
+fn run_count_truthfulness_guard(simple_bin: text, fixture: text) -> (text, text, i64):
+    var selected = simple_bin
+    if selected == "":
+        selected = MISSING_SIMPLE_BIN
+    process_run("env", [
+        "SIMPLE_BIN=" + selected,
+        "sh",
+        COUNT_TRUTHFULNESS_GUARD,
+        fixture,
+    ])
+
+
+describe "SSpec count truthfulness guard":
+    # @manual_section: Qualified green path
+    # @manual: show
+    # @req REQ-SCT-001
+    # @req REQ-SCT-002
+    # @req REQ-SCT-003
+    it "should admit a pure-Simple runner and accept equal declared and reported counts":
+        """A qualified runner executes two real examples; only exact declared/reported equality may produce an OK verdict."""
+        step("Select the admitted pure-Simple SSpec runner")
+        val simple_bin = env_get("SIMPLE_BIN")
+        expect(simple_bin == "").to_equal(false)
+
+        step("Run the count-truthfulness gate on a two-example passing spec")
+        val (out, err, code) = run_count_truthfulness_guard(simple_bin, TWO_EXAMPLE_FIXTURE)
+        val report = out + err
+
+        step("Confirm declared and reported counts agree")
+        expect(code).to_equal(0)
+        expect(report).to_contain("identity:  self-hosted (no seed banner)  OK")
+        expect(report).to_contain("declared=2 reported=2")
+        expect(report).to_contain("OK       " + TWO_EXAMPLE_FIXTURE)
+
+    # @manual_section: Anchored-count edge
+    # @manual: show
+    # @req REQ-SCT-001
+    # @req REQ-SCT-002
+    # @req REQ-SCT-003
+    it "should count only anchored it statements in source":
+        """Comments, prose, identifiers, and strings containing `it` must not inflate the executable example count."""
+        step("Run the count-truthfulness gate on the anchored-count edge fixture")
+        val simple_bin = env_get("SIMPLE_BIN")
+        val (out, err, code) = run_count_truthfulness_guard(simple_bin, ANCHORED_COUNT_FIXTURE)
+        val report = out + err
+
+        step("Confirm non-example text does not inflate the declared count")
+        expect(code).to_equal(0)
+        expect(report).to_contain("identity:  self-hosted (no seed banner)  OK")
+        expect(report).to_contain("declared=1 reported=1")
+        expect(report.contains("declared=2")).to_equal(false)
+
+    # @manual_section: Runner failure propagation
+    # @manual: show
+    # @req REQ-SCT-001
+    # @req REQ-SCT-002
+    # @req REQ-SCT-003
+    it "should preserve a deliberately failing child runner exit":
+        """A real matcher failure remains exit 1 and cannot be rewritten as a passing count comparison."""
+        step("Run the count-truthfulness gate on a deliberately failing spec")
+        val simple_bin = env_get("SIMPLE_BIN")
+        val (out, err, code) = run_count_truthfulness_guard(simple_bin, FAILING_FIXTURE)
+        val report = out + err
+
+        step("Confirm the runner failure remains nonzero")
+        expect(code).to_equal(1)
+        expect(report).to_contain("identity:  self-hosted (no seed banner)  OK")
+        expect(report).to_contain("runner exited 1; no passing count claim is possible")
+        expect(report.contains("OK       " + FAILING_FIXTURE)).to_equal(false)
+
+    # @manual_section: Admission error
+    # @manual: show
+    # @req REQ-SCT-001
+    # @req REQ-SCT-002
+    it "should classify a missing compiler path as blocked admission":
+        """A missing compiler is classified as TEST_BLOCKED with exit 2 before any fixture executes."""
+        step("Run the count-truthfulness gate with a missing compiler path")
+        val (out, err, code) = run_count_truthfulness_guard(MISSING_SIMPLE_BIN, TWO_EXAMPLE_FIXTURE)
+        val report = out + err
+
+        step("Confirm unavailable identity is TEST_BLOCKED and never PASS")
+        val admission_status = if code == 2 and report.contains("SKIPPED (cannot test)"): "TEST_BLOCKED" else: "UNEXPECTED"
+        expect(code).to_equal(2)
+        expect(admission_status).to_equal("TEST_BLOCKED")
+        expect(report).to_contain("SKIPPED (cannot test)")
+        expect(report).to_contain("This is NOT a pass")
+        expect(report.contains("OK       " + TWO_EXAMPLE_FIXTURE)).to_equal(false)

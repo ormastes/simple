@@ -1,0 +1,134 @@
+# Pure parser and dispatcher for the minimal DebugServiceV1 CLI surface.
+#
+# This module performs no I/O and owns no mutable sessions. The CLI entrypoint
+# supplies a DebugServiceCommandConfigV1, then forwards the returned DebugWireV1
+# to the central DebugServiceV1 integration boundary.
+
+use std.common.debug.contracts_v1.{DebugSessionId, DebugWireV1, debug_wire_v1}
+
+pub enum DebugServiceCommandKindV1:
+    Doctor
+    Inspect
+    ProbeApply
+    ProbeRemove
+    ProbeList
+    Reproduce
+    Replay
+
+pub struct DebugServiceCommandRequestV1:
+    kind: DebugServiceCommandKindV1
+    resource: text
+
+pub struct DebugServiceCommandConfigV1:
+    request_id: text
+    session_id: DebugSessionId
+    build_id: text
+    supported_commands: [text]
+
+pub fn debug_service_command_config_v1(request_id: text, session_id: DebugSessionId, build_id: text, supported_commands: [text]) -> DebugServiceCommandConfigV1:
+    DebugServiceCommandConfigV1(
+        request_id: request_id,
+        session_id: session_id,
+        build_id: build_id,
+        supported_commands: supported_commands,
+    )
+
+fn _debug_service_command_name_v1(kind: DebugServiceCommandKindV1) -> text:
+    match kind:
+        case DebugServiceCommandKindV1.Doctor: "doctor"
+        case DebugServiceCommandKindV1.Inspect: "inspect"
+        case DebugServiceCommandKindV1.ProbeApply: "probe.apply"
+        case DebugServiceCommandKindV1.ProbeRemove: "probe.remove"
+        case DebugServiceCommandKindV1.ProbeList: "probe.list"
+        case DebugServiceCommandKindV1.Reproduce: "reproduce"
+        case DebugServiceCommandKindV1.Replay: "replay"
+
+fn _debug_service_command_supported_v1(config: DebugServiceCommandConfigV1, command: text) -> bool:
+    for supported in config.supported_commands:
+        if supported == command:
+            return true
+    false
+
+fn _debug_service_exactly_v1(args: [text], count: i64, usage: text) -> Result<Nil, text>:
+    if args.len() != count:
+        return Err("invalid debug command; usage: " + usage)
+    Ok(nil)
+
+pub fn parse_debug_service_command_v1(args: [text]) -> Result<DebugServiceCommandRequestV1, text>:
+    if args.len() == 0:
+        return Err("missing debug command; expected doctor, inspect, probe, reproduce, or replay")
+
+    val command = args[0]
+    if command == "doctor":
+        if args.len() > 2:
+            return Err("invalid debug command; usage: doctor [profile.sdn]")
+        val profile = if args.len() == 2: args[1] else: ""
+        return Ok(DebugServiceCommandRequestV1(kind: DebugServiceCommandKindV1.Doctor, resource: profile))
+
+    if command == "inspect":
+        val checked = _debug_service_exactly_v1(args, 2, "inspect <bundle>")
+        match checked:
+            case Err(reason): return Err(reason)
+            case Ok(_): return Ok(DebugServiceCommandRequestV1(kind: DebugServiceCommandKindV1.Inspect, resource: args[1]))
+
+    if command == "probe":
+        if args.len() != 3:
+            return Err("invalid debug command; usage: probe <apply|remove|list> <profile.sdn>")
+        val action = args[1]
+        if action == "apply":
+            return Ok(DebugServiceCommandRequestV1(kind: DebugServiceCommandKindV1.ProbeApply, resource: args[2]))
+        if action == "remove":
+            return Ok(DebugServiceCommandRequestV1(kind: DebugServiceCommandKindV1.ProbeRemove, resource: args[2]))
+        if action == "list":
+            return Ok(DebugServiceCommandRequestV1(kind: DebugServiceCommandKindV1.ProbeList, resource: args[2]))
+        return Err("unsupported debug probe action '" + action + "'; expected apply, remove, or list")
+
+    if command == "reproduce" or command == "replay":
+        val checked = _debug_service_exactly_v1(args, 2, command + " <bundle>")
+        match checked:
+            case Err(reason): return Err(reason)
+            case Ok(_):
+                val kind = if command == "reproduce": DebugServiceCommandKindV1.Reproduce else: DebugServiceCommandKindV1.Replay
+                return Ok(DebugServiceCommandRequestV1(kind: kind, resource: args[1]))
+
+    Err("unsupported debug command '" + command + "'")
+
+pub fn dispatch_debug_service_command_v1(request: DebugServiceCommandRequestV1, config: DebugServiceCommandConfigV1) -> Result<DebugWireV1, text>:
+    val command = _debug_service_command_name_v1(request.kind)
+    if config.request_id == "":
+        return Err("debug command requires a request id")
+    if config.build_id == "":
+        return Err("debug command requires an exact build id")
+    if not _debug_service_command_supported_v1(config, command):
+        return Err("debug command unsupported by configured service: " + command)
+
+    val is_doctor = command == "doctor"
+    if not is_doctor and config.session_id.value == "":
+        return Err("debug command requires a DebugSessionId: " + command)
+
+    var operation = "observe"
+    var domain = "service"
+    if command == "inspect":
+        operation = "evidence"
+        domain = "evidence"
+    elif command.starts_with("probe."):
+        operation = "probe"
+        domain = "probe"
+    elif command == "reproduce" or command == "replay":
+        operation = "control"
+        domain = "evidence"
+
+    Ok(debug_wire_v1(
+        config.request_id,
+        config.session_id.value,
+        operation,
+        domain,
+        command,
+        "debug-wire-command-v1",
+        request.resource,
+    ))
+
+pub fn resolve_debug_service_command_v1(args: [text], config: DebugServiceCommandConfigV1) -> Result<DebugWireV1, text>:
+    match parse_debug_service_command_v1(args):
+        case Err(reason): Err(reason)
+        case Ok(request): dispatch_debug_service_command_v1(request, config)

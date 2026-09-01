@@ -39,6 +39,13 @@ pub struct LlvmBackend {
     pub(super) cpu: TargetCpu,
     /// Enable coverage instrumentation
     pub(super) coverage_enabled: bool,
+    /// Memory-order mode of the function currently being compiled, set from
+    /// its `@volatile` / `@no_reorder` attributes at the top of
+    /// `compile_function` (design A.2, `asm_embedded_hal_and_dual_run.md`):
+    /// bit 0 = every Load/Store is `volatile`; bit 1 = a
+    /// `fence syncscope("singlethread") seq_cst` follows every Load/Store and
+    /// inline-asm call (compiler barrier only — no hardware fence).
+    pub(super) mem_order_mode: std::cell::Cell<u8>,
     // --- borrowing fields first (dropped before context) ---
     #[cfg(feature = "llvm")]
     pub(super) module: RefCell<Option<Module<'static>>>,
@@ -137,6 +144,7 @@ impl LlvmBackend {
             let always_inline = self.context_ref().create_enum_attribute(kind, 0);
             func.add_attribute(AttributeLoc::Function, always_inline);
         }
+        self.apply_asm_placement_attrs(func, attrs);
         // M4: mark every defined function `sanitize_address` when the ASan
         // lane is on, mirroring what clang's `-fsanitize=address` does — the
         // `asan` module pass (run in `optimize_module_ir`) only instruments
@@ -145,6 +153,41 @@ impl LlvmBackend {
             let kind = Attribute::get_named_enum_kind_id("sanitize_address");
             let asan_attr = self.context_ref().create_enum_attribute(kind, 0);
             func.add_attribute(AttributeLoc::Function, asan_attr);
+        }
+    }
+
+    /// Asm-embedding contract (design A.2): `@naked` -> LLVM `naked` +
+    /// `noinline` + `nounwind`; `@section("name")` -> `section "name"`;
+    /// `@align(n)` -> `align n`; `@global` -> external linkage (the
+    /// unmangled name is kept by `mangle.rs`, which treats `global` like
+    /// `export`). Attribute arguments arrive encoded as `section=<name>` /
+    /// `align=<n>` (see `append_asm_placement_attribute_metadata`).
+    #[cfg(feature = "llvm")]
+    fn apply_asm_placement_attrs(&self, func: FunctionValue<'static>, attrs: &[String]) {
+        for attr in attrs {
+            match attr.as_str() {
+                "naked" => {
+                    for name in ["naked", "noinline", "nounwind"] {
+                        let kind = Attribute::get_named_enum_kind_id(name);
+                        func.add_attribute(
+                            AttributeLoc::Function,
+                            self.context_ref().create_enum_attribute(kind, 0),
+                        );
+                    }
+                }
+                "global" => func.set_linkage(inkwell::module::Linkage::External),
+                _ => {
+                    if let Some(section) = attr.strip_prefix("section=") {
+                        func.set_section(Some(section));
+                    } else if let Some(align) = attr.strip_prefix("align=") {
+                        if let Ok(n) = align.parse::<u32>() {
+                            if n.is_power_of_two() && n <= 4096 {
+                                func.as_global_value().set_alignment(n);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -188,9 +231,9 @@ impl LlvmBackend {
                 (false, false) => unreachable!("handled by the early return above"),
             };
             let options = PassBuilderOptions::create();
-            return module
-                .run_passes(&pipeline, target_machine, options)
-                .map_err(|e| crate::error::factory::llvm_build_failed("run LLVM mem-infra instrumentation passes", &e.to_string()));
+            return module.run_passes(&pipeline, target_machine, options).map_err(|e| {
+                crate::error::factory::llvm_build_failed("run LLVM mem-infra instrumentation passes", &e.to_string())
+            });
         }
 
         let options = PassBuilderOptions::create();
@@ -265,6 +308,7 @@ impl LlvmBackend {
                 opt_level,
                 cpu,
                 coverage_enabled: false,
+                mem_order_mode: std::cell::Cell::new(0),
                 module: RefCell::new(None),
                 builder: RefCell::new(None),
                 coverage_counter: RefCell::new(0),
@@ -323,6 +367,53 @@ impl LlvmBackend {
 
     pub fn cpu(&self) -> &TargetCpu {
         &self.cpu
+    }
+
+    /// Design A.5 data items: emit each `@section/@align/@global`
+    /// `const`/`static` as a placed LLVM constant array (raw byte image).
+    /// `zeroed()` items get `zeroinitializer` so a `.bss`-named section stays
+    /// NOBITS-eligible; `@global` gives external linkage under the unmangled
+    /// name; without it the symbol is internal.
+    #[cfg(feature = "llvm")]
+    fn declare_raw_data_items(&self, module_ir: &MirModule) {
+        use inkwell::values::BasicValue;
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return;
+        };
+        let ctx = self.context_ref();
+        for item in &module_ir.raw_data_items {
+            let elem_ty = match item.element_bits {
+                8 => ctx.i8_type(),
+                16 => ctx.i16_type(),
+                32 => ctx.i32_type(),
+                _ => ctx.i64_type(),
+            };
+            let array_ty = elem_ty.array_type(item.count as u32);
+            let global = m.add_global(array_ty, None, &item.name);
+            if item.zeroed {
+                global.set_initializer(&array_ty.const_zero());
+            } else {
+                let values: Vec<inkwell::values::IntValue> = item
+                    .values
+                    .iter()
+                    .map(|v| elem_ty.const_int(*v as u64, false))
+                    .collect();
+                global.set_initializer(&elem_ty.const_array(&values).as_basic_value_enum());
+            }
+            if let Some(section) = &item.section {
+                global.set_section(Some(section));
+            }
+            if item.align > 0 {
+                global.set_alignment(item.align);
+            }
+            global.set_constant(item.is_const && !item.zeroed);
+            global.set_linkage(if item.is_global {
+                inkwell::module::Linkage::External
+            } else {
+                inkwell::module::Linkage::Internal
+            });
+        }
     }
 
     #[cfg(feature = "llvm")]
@@ -1296,9 +1387,13 @@ impl LlvmBackend {
     pub fn build_m4_asan_probe_function(&self, name: &str) -> Result<(), CompileError> {
         self.create_module("m4_asan_probe")?;
         let module = self.module.borrow();
-        let module = module.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let module = module
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
         let builder = self.builder.borrow();
-        let builder = builder.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let builder = builder
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
         let ctx = self.context_ref();
 
         let i8t = ctx.i8_type();
@@ -1367,9 +1462,13 @@ impl LlvmBackend {
     pub fn build_m4_memprof_probe_function(&self, name: &str) -> Result<(), CompileError> {
         self.create_module("m4_memprof_probe")?;
         let module = self.module.borrow();
-        let module = module.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let module = module
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
         let builder = self.builder.borrow();
-        let builder = builder.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let builder = builder
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
         let ctx = self.context_ref();
 
         let i32t = ctx.i32_type();
@@ -1639,6 +1738,8 @@ impl NativeBackend for LlvmBackend {
 
         #[cfg(feature = "llvm")]
         self.declare_globals(module);
+        #[cfg(feature = "llvm")]
+        self.declare_raw_data_items(module);
 
         // First pass: forward-declare all function signatures
         // This is necessary so that functions can call each other regardless of compilation order
@@ -1731,7 +1832,11 @@ impl NativeBackend for LlvmBackend {
                         // ELF section GC works at section granularity. Keep every
                         // body in its own section so an unreachable generic/helper
                         // body cannot retain its unresolved imports at final link.
-                        if emit_elf_function_sections {
+                        // A `@section("...")` body already owns its section
+                        // (design A.2); the per-body GC section must not
+                        // overwrite it — that is exactly how `.text.boot`
+                        // was measured missing (survey §0 Q1 finding 5).
+                        if emit_elf_function_sections && f.get_section().is_none() {
                             f.set_section(Some(&format!(".text.simple.{body_section_index}")));
                             body_section_index += 1;
                         }

@@ -16,7 +16,6 @@
 
 use std.nogc_sync_mut.redis.server.{RedisServer, parse_next_request}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
-use std.common.base_encoding.base64.{base64_encode, base64_decode}
 
 pub val DBD_MAX_JOURNAL_BYTES: i64 = 1024 * 1024
 pub val DBD_MAX_JOURNAL_RECORDS: i64 = 4096
@@ -35,12 +34,11 @@ pub val DBD_BOOT_CREDENTIAL_OWNER_BLOCKER: text =
 val DBD_UNKNOWN_PRINCIPAL_DIGEST: text = sha256_text("dbd-unknown-principal")
 val DBD_UNKNOWN_CREDENTIAL_DIGEST: text = sha256_text("dbd-unknown-credential")
 
-# Owner-admission facts, not user configuration. DBD wires its bounded
-# provisioning owner into tls13_accept, authenticates every application record
-# before mutable-byte AUTH ingress, and retains only credential digests after
-# provisioning. Boot credential and entropy owners are still absent, so the
-# corresponding production gates remain false. Keeping these private prevents
-# a socket caller from manufacturing a boolean "verified" claim.
+# Owner-admission facts, not user configuration. The mutable TLS-to-AUTH wire
+# owner exists, but no boot mutable-credential provisioner, certificate/key
+# owner, typed entropy-failure path, or durable DBFS commit owner is wired to
+# dbd. Keeping these private prevents a socket caller from manufacturing a
+# boolean "verified" claim.
 val DBD_AUTH_FRAMING_OWNER_VERIFIED: bool = true
 val DBD_AUTHENTICATION_OWNER_VERIFIED: bool = false
 val DBD_TLS_OWNER_VERIFIED: bool = false
@@ -359,12 +357,10 @@ pub fn dbd_journal_args_valid(args: [text]) -> bool:
         false
 
 pub fn dbd_encode_journal_line(args: [text]) -> text:
-    """Encode one mutation as a checksummed, delimiter-safe J1 record.
+    """Encode one mutating command as a single journal line: SPACE-joined args.
 
-    Each argument is canonical base64 with a non-empty ``B`` tag, so spaces,
-    empty values, CR/LF, and Unicode remain unambiguous within one journal
-    line.  The digest covers the exact encoded argument sequence; replay
-    rejects torn or modified records before applying any mutation.
+    Returns "" (caller rejects) if any arg contains a space or newline, so the
+    line-oriented journal round-trips unambiguously through split(" ")/split("\\n").
     """
     if not dbd_journal_args_valid(args):
         return ""
@@ -402,18 +398,13 @@ fn _dbd_decode_j1_journal_line(line: text) -> [text]:
     args
 
 pub fn dbd_decode_journal_line(line: text) -> [text]:
-    """Decode only an integrity-bound J1 record.
-
-    Pre-J1 scalar records are intentionally rejected.  Accepting them beside
-    J1 would let an injected ``SET``/``DEL`` line bypass the record digest.
-    Any future legacy importer must be an offline, one-shot migration owner
-    that rewrites the complete journal before production replay.
-    """
+    """Decode one journal line back into command args (whitespace split)."""
     var args: [text] = []
     if line.len() == 0 or line.len() > DBD_MAX_JOURNAL_LINE_BYTES:
         return args
-    if line.starts_with("J1 "):
-        return _dbd_decode_j1_journal_line(line)
+    for tok in line.split(" "):
+        if tok.len() > 0:
+            args.push(tok)
     args
 
 pub class DbdEngine:
@@ -426,13 +417,13 @@ pub class DbdEngine:
     """
     engine: RedisServer
 
-    pub static fn new() -> DbdEngine:
+    static fn new() -> DbdEngine:
         DbdEngine(engine: RedisServer.create())
 
-    pub me dispatch(args: [text]) -> text:
+    me dispatch(args: [text]) -> text:
         self.engine.dispatch(args)
 
-    pub me replay_journal(log_text: text) -> i64:
+    me replay_journal(log_text: text) -> i64:
         """Replay a durable journal (newline-separated encoded commands) through
         the real engine. Returns the number of commands replayed."""
         if log_text.len() > DBD_MAX_JOURNAL_BYTES:

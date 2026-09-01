@@ -1,0 +1,188 @@
+# Bounded magic and text classification for filesystem-launched SimpleOS Simplebox.
+
+use os.userlib.fs.{file_open_direct, file_read_direct, file_close_direct}
+use os.tools.simplebox.simplebox_fs_applets.{
+    SIMPLEBOX_FILE_LIMIT, SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT
+}
+
+extern fn stdout_write(data: text)
+
+pub const SIMPLEBOX_FILE_PROBE_BYTES: u64 = 4096u64
+pub const SIMPLEBOX_FILE_OUTPUT_BYTES_LIMIT: u64 = 65536u64
+
+struct SimpleboxFileState:
+    lines: [text]
+    output_bytes: u64
+    failure: text
+
+struct SimpleboxFileAdmission:
+    line: text
+    failure: text
+
+fn _file_prefix(bytes: [u8], pattern: [u8]) -> bool:
+    if bytes.len() < pattern.len():
+        return false
+    var index: u64 = 0u64
+    while index < pattern.len():
+        if bytes[index] != pattern[index]:
+            return false
+        index = index + 1u64
+    true
+
+fn _file_u16(bytes: [u8], offset: u64, little_endian: bool) -> u64:
+    if little_endian:
+        return bytes[offset].to_u64() | (bytes[offset + 1u64].to_u64() << 8)
+    (bytes[offset].to_u64() << 8) | bytes[offset + 1u64].to_u64()
+
+fn _file_elf_kind(value: u64) -> text:
+    if value == 1u64:
+        return "relocatable"
+    if value == 2u64:
+        return "executable"
+    if value == 3u64:
+        return "shared object"
+    if value == 4u64:
+        return "core file"
+    "unknown type"
+
+fn _file_elf_machine(value: u64) -> text:
+    if value == 3u64:
+        return "Intel 80386"
+    if value == 40u64:
+        return "ARM"
+    if value == 62u64:
+        return "x86-64"
+    if value == 183u64:
+        return "AArch64"
+    if value == 243u64:
+        return "RISC-V"
+    "machine " + value.to_string()
+
+fn _file_elf_description(bytes: [u8]) -> text:
+    if bytes.len() < 20u64:
+        return "ELF, truncated header"
+    if bytes[4] != 1u8 and bytes[4] != 2u8:
+        return "ELF, unknown class"
+    val word_size = if bytes[4] == 1u8: "32-bit" else: "64-bit"
+    if bytes[5] != 1u8 and bytes[5] != 2u8:
+        return "ELF " + word_size + ", unknown byte order"
+    val little_endian = bytes[5] == 1u8
+    val byte_order = if little_endian: "LSB" else: "MSB"
+    val kind = _file_elf_kind(_file_u16(bytes, 16u64, little_endian))
+    val machine = _file_elf_machine(_file_u16(bytes, 18u64, little_endian))
+    "ELF " + word_size + " " + byte_order + " " + kind + ", " + machine
+
+fn _file_is_ascii_text(bytes: [u8]) -> bool:
+    for byte in bytes:
+        if not ((byte >= 32u8 and byte <= 126u8) or byte == 9u8 or
+            byte == 10u8 or byte == 12u8 or byte == 13u8):
+            return false
+    true
+
+fn _file_description(bytes: [u8], complete: bool) -> text:
+    if bytes.len() == 0u64:
+        return "empty"
+    if _file_prefix(bytes, [127u8, 69u8, 76u8, 70u8]):
+        return _file_elf_description(bytes)
+    if _file_prefix(bytes, [35u8, 33u8]):
+        return "script text executable"
+    if _file_prefix(bytes, [31u8, 139u8]):
+        return "gzip compressed data"
+    if (_file_prefix(bytes, [80u8, 75u8, 3u8, 4u8]) or
+        _file_prefix(bytes, [80u8, 75u8, 5u8, 6u8]) or
+        _file_prefix(bytes, [80u8, 75u8, 7u8, 8u8])):
+        return "Zip archive data"
+    if _file_prefix(bytes, [137u8, 80u8, 78u8, 71u8, 13u8, 10u8, 26u8, 10u8]):
+        return "PNG image data"
+    if _file_prefix(bytes, [255u8, 216u8, 255u8]):
+        return "JPEG image data"
+    if _file_prefix(bytes, [37u8, 80u8, 68u8, 70u8, 45u8]):
+        return "PDF document"
+    if _file_prefix(bytes, [0u8, 97u8, 115u8, 109u8]):
+        return "WebAssembly binary module"
+    if _file_prefix(bytes, [33u8, 60u8, 97u8, 114u8, 99u8, 104u8, 62u8, 10u8]):
+        return "current ar archive"
+    if _file_prefix(bytes, [83u8, 81u8, 76u8, 105u8, 116u8, 101u8, 32u8, 102u8, 111u8, 114u8, 109u8, 97u8, 116u8, 32u8, 51u8, 0u8]):
+        return "SQLite 3.x database"
+    if _file_is_ascii_text(bytes):
+        if complete:
+            return "ASCII text"
+        return "ASCII text (bounded prefix)"
+    "data"
+
+fn _file_admit(path: text) -> SimpleboxFileAdmission:
+    val opened = file_open_direct(path, 0u32)
+    match opened:
+        case Err(reason):
+            SimpleboxFileAdmission(line: "", failure: path + ": " + reason)
+        case Ok(fd):
+            var prefix: [u8] = []
+            var complete = false
+            var failure = ""
+            while not complete and prefix.len() < SIMPLEBOX_FILE_PROBE_BYTES and failure == "":
+                val remaining = SIMPLEBOX_FILE_PROBE_BYTES - prefix.len()
+                match file_read_direct(fd, remaining):
+                    case Err(reason): failure = path + ": " + reason
+                    case Ok(bytes):
+                        if bytes.len() == 0u64:
+                            complete = true
+                        elif bytes.len() > remaining:
+                            failure = path + ": oversized read result"
+                        else:
+                            for byte in bytes:
+                                prefix.push(byte)
+            if not file_close_direct(fd) and failure == "":
+                failure = path + ": close failed"
+            if failure != "":
+                SimpleboxFileAdmission(line: "", failure: failure)
+            else:
+                SimpleboxFileAdmission(
+                    line: path + ": " + _file_description(prefix, complete) + "\n",
+                    failure: "")
+
+pub fn simplebox_file(args: [text]) -> i32:
+    """Classify bounded filesystem operands by stable magic and text rules.
+
+    The supported form is `file [--] FILE...`, with at most the Simplebox file
+    operand limit. Classification uses a bounded 4096-byte prefix and recognizes
+    ELF target/type, scripts, gzip, Zip, PNG, JPEG, PDF, WebAssembly, ar,
+    SQLite, ASCII text, empty files, and generic data. It does not guess from
+    extensions or claim MIME/encoding detail. Every operand is read and closed
+    successfully before any classification reaches stdout.
+    """
+    var first: u64 = 0u64
+    if args.len() > 0u64 and args[0] == "--":
+        first = 1u64
+    elif args.len() > 0u64 and args[0].starts_with("-"):
+        stdout_write("file: unsupported option: " + args[0] + "\n")
+        return 2
+    if first >= args.len():
+        stdout_write("file: missing FILE operand\n")
+        return 2
+    if args.len() - first > SIMPLEBOX_FILE_LIMIT.to_u64():
+        stdout_write("file: too many file operands\n")
+        return 2
+    var state = SimpleboxFileState(lines: [], output_bytes: 0u64, failure: "")
+    var index = first
+    while index < args.len() and state.failure == "":
+        val path = args[index]
+        if path.len() == 0u64 or path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+            state.failure = "invalid path length"
+        else:
+            val admitted = _file_admit(path)
+            if admitted.failure != "":
+                state.failure = admitted.failure
+            elif (state.output_bytes > SIMPLEBOX_FILE_OUTPUT_BYTES_LIMIT or
+                admitted.line.len() >
+                    SIMPLEBOX_FILE_OUTPUT_BYTES_LIMIT - state.output_bytes):
+                state.failure = "output exceeds simplebox byte limit"
+            else:
+                state.lines.push(admitted.line)
+                state.output_bytes = state.output_bytes + admitted.line.len()
+        index = index + 1u64
+    if state.failure != "":
+        stdout_write("file: " + state.failure + "\n")
+        return 2
+    for line in state.lines:
+        stdout_write(line)
+    0

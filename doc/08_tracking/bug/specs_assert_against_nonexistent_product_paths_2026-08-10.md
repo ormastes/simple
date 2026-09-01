@@ -329,3 +329,15 @@ already attempted and aborted (>6.8 GB before abort, ENOSPC risk on this
 host) -- that avenue is a proven dead end, not an unexplored one. Do not
 re-open this bucket without a genuinely new method; re-running the existing
 structural/historical methods against it will reproduce the same 911.
+
+## Appendendum 2026-08-26: rule_coverage_spec pre-existing RED at HEAD
+
+`test/01_unit/app/sspec_maintain/rule_coverage_spec.spl` scenario
+"covers every stable rule with an executable witness" fails at HEAD
+(verified via in-place `git show HEAD:` restore, `Results: 5 total, 4 passed,
+1 failed`). The observed rule-id union is missing `SSDOC-ORA-002`,
+`SSDOC-TRC-002`, and `SSDOC-TRC-003` relative to `sspec_rule_definitions()`.
+Left RED per testing rules. Same-session note: the spec's modernization score
+was raised 78 -> 86 (steps, captures, narrative) without touching the failing
+assertion; mutation dual-check on a passing scenario (SSDOC-MNT-008
+expectation) confirmed FAIL-then-green.

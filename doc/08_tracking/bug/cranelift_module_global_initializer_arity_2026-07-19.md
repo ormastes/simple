@@ -1,8 +1,7 @@
 # Cranelift rejected a function-initialized module global
 
 - **ID:** cranelift_module_global_initializer_arity_2026-07-19
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** FIXED (focused LLVM/Cranelift smoke PASS; cross-target gates scheduled)
 - **Severity:** high
 - **Backend:** Cranelift trigger; shared pure-Simple MIR/startup follow-on
 

@@ -12,9 +12,9 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum}
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_composite_arrays_aligned, module_surface_composite_index, module_surface_route_arrays_aligned}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}  # explicit: a glob is not an import-origin for surface projection
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_route_arrays_aligned}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
@@ -124,16 +124,20 @@ struct HirReexportSource:
     item_name: text
 
 class HirReexportWalkState:
-    """Per-root cycle state; never shared across nested re-export queries."""
-    surface_indices: [i64]
-    wanted_names: [text]
-    depths: [i64]
+    """Per-root cycle state; never shared across nested re-export queries.
+
+    Keep one owner-mutated dictionary keyed by surface and wanted name. The
+    former three-array representation performed a linear scan and three COW
+    array copies per visited node, making one re-export chase quadratic in
+    both work and transient allocation."""
+    visited_depth: {text: i64}
     complete: bool
     valid: bool
 
     static fn fresh() -> HirReexportWalkState:
+        val empty_visited: {text: i64} = {}
         HirReexportWalkState(
-            surface_indices: [], wanted_names: [], depths: [],
+            visited_depth: empty_visited,
             complete: true, valid: true)
 
 struct HirMaterializedPayloadOrigin:
@@ -163,18 +167,41 @@ fn hir_module_surface_index(surfaces: ModuleSurfacesByName, name: text) -> i64:
         position = position + 1
     -1
 
-fn hir_reexport_parallel_find(
-    surface_indices: [i64],
-    wanted_items: [text],
-    surface_index: i64,
-    wanted: text
+fn hir_export_origin_surface_index(
+    surfaces: ModuleSurfacesByName, owner_name: text
 ) -> i64:
-    var index = 0
-    while index < surface_indices.len() and index < wanted_items.len():
-        if surface_indices[index] == surface_index and wanted_items[index] == wanted:
-            return index
-        index = index + 1
-    -1
+    """Resolve one frozen logical owner through its construction-time alias.
+
+    ModuleSurfaceBuilder registers the tier-free/std-folded canonical identity
+    once and rejects collisions there. Keep the repeated import path on the
+    registry's O(1) index instead of rescanning every surface per origin.
+    """
+    val indexed = module_surface_registry_index(surfaces, owner_name)
+    if indexed >= 0:
+        return indexed
+
+    # A retained Stage-2 registry can predate canonical-alias publication even
+    # while its newly compiled HIR code consumes canonical frozen origins.
+    # Recover from that mixed-generation shape through the retained scalar
+    # alias arrays. Do not copy ModuleSurface aggregates here: native teardown
+    # can preserve the aligned scalar authority while dropping class payloads.
+    # Multiple spellings may name one index; two different physical indices
+    # remain ambiguous and fail closed.
+    val wanted = hir_pkg_canonical_module_name(owner_name)
+    var matched = -1
+    var alias_index = 0
+    while alias_index < surfaces.ordered_names.len() and
+          alias_index < surfaces.ordered_indices.len():
+        if hir_pkg_canonical_module_name(
+            surfaces.ordered_names[alias_index]) == wanted:
+            val physical_index = surfaces.ordered_indices[alias_index]
+            if physical_index < 0 or physical_index >= surfaces.surfaces.len():
+                return -1
+            if matched >= 0 and matched != physical_index:
+                return -1
+            matched = physical_index
+        alias_index = alias_index + 1
+    matched
 
 fn hir_module_declares_item(m: ModuleSurface, name: text) -> bool:
     """True when module `m` itself declares `name` as any importable decl

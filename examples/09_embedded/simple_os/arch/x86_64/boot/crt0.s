@@ -34,23 +34,6 @@ _multiboot_header:
     .long 768                 /* framebuffer height */
     .long 32                  /* framebuffer depth */
 
-/* Multiboot2 is the admitted loader contract for ELF64 UEFI images.  Keep the
- * Multiboot1 header above for legacy BIOS/QEMU lanes; both remain within their
- * mandated early-file search windows. */
-.align 8
-.set MB2_MAGIC, 0xE85250D6
-.set MB2_ARCH, 0
-.global _multiboot2_header
-_multiboot2_header:
-    .long MB2_MAGIC
-    .long MB2_ARCH
-    .long _multiboot2_header_end - _multiboot2_header
-    .long -(MB2_MAGIC + MB2_ARCH + (_multiboot2_header_end - _multiboot2_header))
-    .short 0                 /* required end tag */
-    .short 0
-    .long 8
-_multiboot2_header_end:
-
 /* ==================================================================
  * 32-bit entry point
  * ================================================================== */
@@ -59,8 +42,8 @@ _entry32:
     /* Disable interrupts */
     cli
 
-    /* Preserve the Multiboot info pointer in EBX until long mode.  ESI is the
-     * source register for the early serial routine and must not own it. */
+    /* Save multiboot info (EBX) on the stack later -- preserve in ESI */
+    movl %ebx, %esi
 
     /* Set up a temporary 32-bit stack */
     movl $_stack_top, %esp
@@ -149,6 +132,24 @@ _entry32:
     orl  $0x03, %eax
     movl %eax, 2048(%edi)      /* PDPT[256] */
 
+    /* ALSO alias the same 1 GiB window at the higher-half kernel VA
+     * 0xFFFFC00000000000.  The identity map above is what this code has
+     * always installed, but the early NVMe C path in baremetal_stubs.c
+     * translates BAR0 to NVME_BAR_VIRT_BASE (0xFFFFC00000000000) before any
+     * user address space exists, so it dereferenced an unmapped VA and the
+     * kernel page-faulted forever at BAR0+CSTS instead of reaching L3.
+     * 0xFFFFC00000000000 decodes to PML4[384], PDPT[0]; both aliases share
+     * boot_high_pd, so this costs no extra page-table memory. */
+    movl $boot_pml4, %edi
+    movl $boot_high_pdpt, %eax
+    orl  $0x03, %eax
+    movl %eax, 3072(%edi)      /* PML4[384] */
+
+    movl $boot_high_pdpt, %edi
+    movl $boot_high_pd, %eax
+    orl  $0x03, %eax
+    movl %eax, 0(%edi)         /* PDPT[0] */
+
     movl $boot_high_pd, %edi
     movl $0x00000083, %eax     /* low 32 bits: 0xC000000000 | PS | RW | P */
     movl $0x000000c0, %edx     /* high 32 bits */
@@ -160,24 +161,6 @@ _entry32:
     addl $8, %edi
     decl %ecx
     jnz .fill_high_pd
-
-    /* ALSO map the NVMe BAR at the higher-half VA 0xFFFFC00000000000
-     * (PML4[384], PDPT[0], PD[0]) -> phys 0xC000000000, reusing boot_high_pd.
-     * The C NVMe driver (NVME_BAR_VIRT_BASE) and vmm_map_nvme_bar_high() use
-     * this higher-half VA so the BAR is inherited into every user AS via the
-     * PML4[256..511] clone (the PML4[1] identity map above is NOT cloned).
-     * Reuses boot_high_pdpt: its [0] is unused; [256] serves the PML4[1] map.
-     * KEEP VA/phys in sync with baremetal_stubs.c NVME_BAR_VIRT_BASE and
-     * src/os/kernel/memory/vmm_address_space.spl vmm_map_nvme_bar_high(). */
-    movl $boot_high_pdpt, %edi
-    movl $boot_high_pd, %eax
-    orl  $0x03, %eax
-    movl %eax, 0(%edi)          /* PDPT[0] -> boot_high_pd (for PML4[384]) */
-
-    movl $boot_pml4, %edi
-    movl $boot_high_pdpt, %eax
-    orl  $0x03, %eax
-    movl %eax, 3072(%edi)       /* PML4[384] = 384*8 -> boot_high_pdpt */
 
     /* ------------------------------------------------------------------
      * Enable long mode
@@ -336,8 +319,9 @@ long_mode_entry:
     /* Run Simple module-global initializers before the entry point.
      * Freestanding builds have no C main wrapper to call this, so do it here.
      * Weak: skip if the linker didn't provide an aggregator. Preserve the
-     * multiboot info pointer already held in RBX (callee-saved). */
+     * multiboot info pointer (ESI) in RBX (callee-saved) across the call. */
     .weak __simple_call_module_inits
+    movl %esi, %ebx
     leaq __simple_call_module_inits(%rip), %rax
     testq %rax, %rax
     jz .skip_module_inits
@@ -606,7 +590,7 @@ rt_harden_text_write_trap_probe:
     ret
 
 /* ==================================================================
- * 64-bit GDT (6 segment entries + a 16-byte TSS descriptor)
+ * 64-bit GDT (5 entries for SYSCALL/SYSRET support)
  *
  * Selector layout required by MSR_STAR (Intel SDM Vol 3A §5.8.8):
  *   0x00: null
@@ -615,15 +599,11 @@ rt_harden_text_write_trap_probe:
  *   0x18: user CS 32-bit compat — SYSRET compat loads CS=0x1B (0x18|3)
  *   0x20: user SS/DS            — SYSRET loads SS=0x23 (0x20|3)
  *   0x28: user CS 64-bit        — SYSRET 64-bit loads CS=0x2B (0x28|3)
- *   0x30: TSS (16-byte system descriptor) — filled + ltr'd by rt_x86_tss_init
  *
  * MSR_STAR value: (USER_CS_32 | 3) << 48 | KERNEL_CS << 32
  *              = 0x001B_0008_0000_0000
- *
- * The table lives in .data (writable): rt_x86_tss_init patches the TSS base
- * and limit into gdt64_tss_desc at runtime, which would #GP on a .rodata page.
  * ================================================================== */
-.section .data
+.section .rodata
 .align 16
 gdt64:
     .quad 0                    /* 0x00: null descriptor */
@@ -667,16 +647,6 @@ gdt64:
     .byte 0xFA                 /* access: present, DPL=3, code, exec/read */
     .byte 0xAF                 /* flags: G=1, L=1, D=0 (64-bit) */
     .byte 0x00                 /* base high */
-
-    /* 0x30: 64-bit TSS descriptor — 16 bytes (2 slots). Reserved here (zero,
-     * so present=0) and filled at runtime by rt_x86_tss_init (baremetal_stubs.c),
-     * which writes base/limit/type=0x89 (present, available 64-bit TSS) then
-     * `ltr $0x30`. Kept INSIDE gdt64 and within the GDTR limit so the selector
-     * actually resolves — a free-floating .bss descriptor is never seen by ltr. */
-    .global gdt64_tss_desc
-gdt64_tss_desc:
-    .quad 0                    /* 0x30: TSS descriptor low  8 bytes */
-    .quad 0                    /* 0x38: TSS descriptor high 8 bytes (base 63:32) */
 
 gdt64_end:
 

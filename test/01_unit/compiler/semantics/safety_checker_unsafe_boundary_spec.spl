@@ -1,10 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that safety checker unsafe boundary.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-COMPILER-SEMANTICS-001 — stable requirement identity for this spec.
-
 #!/usr/bin/env simple
 # Safety checker unsafe-boundary rules (lane SF2).
 #
@@ -16,7 +9,10 @@ Audience: compiler and tooling engineers who maintain this spec.
 #   (iii) inline asm outside `unsafe:` still warns (original rule)
 #   (iv)  module extern-fn (FFI) call outside `unsafe:` warns
 
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
@@ -49,9 +45,8 @@ fn count_kind(errors: [SafetyError], kind: text) -> i64:
     n
 
 describe "safety checker unsafe boundary":
+    # @manual scenario evidence
     it "warns on raw-pointer primitive call outside unsafe":
-        step("Verify: warns on raw-pointer primitive call outside unsafe")
-        # @req: REQ-COMPILER-SEMANTICS-001
         val src = "extern fn rt_alloc(size: i64) -> i64\n" +
             "fn use_raw() -> i64:\n" +
             "    val p = rt_alloc(16)\n" +
@@ -60,7 +55,6 @@ describe "safety checker unsafe boundary":
         expect(count_kind(errors, "raw_ptr")).to_equal(1)
 
     it "is silent for the same raw-pointer call inside unsafe":
-        step("Verify: is silent for the same raw-pointer call inside unsafe")
         val src = "extern fn rt_alloc(size: i64) -> i64\n" +
             "fn use_raw() -> i64:\n" +
             "    unsafe:\n" +
@@ -71,7 +65,6 @@ describe "safety checker unsafe boundary":
         expect(count_kind(errors, "ffi")).to_equal(0)
 
     it "still warns on inline asm outside unsafe":
-        step("Verify: still warns on inline asm outside unsafe")
         # Raw (single-quoted) segment for the `{ nop }` text: a double-quoted
         # literal auto-interpolates `{...}`, and the self-hosted frontend
         # eagerly lowers/evaluates that embedded `nop` as a real identifier
@@ -84,7 +77,6 @@ describe "safety checker unsafe boundary":
         expect(count_kind(errors, "asm")).to_equal(1)
 
     it "is silent for inline asm inside unsafe":
-        step("Verify: is silent for inline asm inside unsafe")
         val src = "fn touch():\n" +
             "    unsafe:\n" +
             '        asm { nop }' + "\n"
@@ -92,23 +84,24 @@ describe "safety checker unsafe boundary":
         expect(count_kind(errors, "asm")).to_equal(0)
 
     it "warns on module extern fn (FFI) call outside unsafe":
-        step("Verify: warns on module extern fn (FFI) call outside unsafe")
         val src = "extern fn my_device_poke(x: i64) -> i64\n" +
             "fn use_ffi() -> i64:\n" +
             "    my_device_poke(1)\n"
         val errors = check_source(src, "safety_ffi_outside")
         expect(count_kind(errors, "ffi")).to_equal(1)
 
-    it "warns on imported-style raw runtime call outside unsafe":
-        step("Verify: imported rt identity remains ffi-unsafe")
+    it "does not infer foreign identity from an rt-prefixed Simple function":
+        step("Verify: resolved declaration identity outranks name spelling")
         val src = "fn rt_imported_probe() -> i64:\n" +
             "    1\n" +
             "fn use_imported_raw() -> i64:\n" +
             "    rt_imported_probe()\n"
         val errors = check_source(src, "safety_imported_ffi_outside")
-        expect(count_kind(errors, "ffi")).to_equal(1)
+        expect(count_kind(errors, "ffi")).to_equal(0)
 
     it "accepts imported-style raw runtime call inside unsafe":
+        # @req REQ-SSPEC-COMPILER
+        step("accepts imported-style raw runtime call inside unsafe")
         step("Verify: minimal ffi boundary admits imported rt identity")
         val src = "fn rt_imported_probe() -> i64:\n" +
             "    1\n" +
@@ -117,3 +110,144 @@ describe "safety checker unsafe boundary":
             "        rt_imported_probe()\n"
         val errors = check_source(src, "safety_imported_ffi_inside")
         expect(count_kind(errors, "ffi")).to_equal(0)
+
+    it "warns on an aliased imported extern without relying on its spelling":
+        step("Verify: resolved extern identity survives an import alias")
+        val provider = "pub extern fn device_poke(x: i64)\n"
+        val consumer = r"use ffi_provider.{device_poke as poke}" + "\n" +
+            "fn use_ffi():\n" +
+            "    poke(1)\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(errors.len()).to_equal(1)
+        expect(count_kind(errors, "ffi")).to_equal(1)
+        expect(inventory.raw_call_sites).to_equal(1)
+        expect(inventory.resolved_raw_call_sites).to_equal(1)
+        expect(inventory.aliased_raw_call_sites).to_equal(1)
+        expect(inventory.missing_authority_call_sites).to_equal(1)
+        expect(inventory.lexically_scoped_call_sites).to_equal(0)
+        expect(inventory.hir_complete).to_equal(true)
+        expect(inventory.signature_evidence_included).to_equal(false)
+        expect(inventory.verification_evidence_included).to_equal(false)
+
+    it "covers the static mutability reference unsafe MC/DC matrix":
+        step("Verify each static/ref/unsafe condition independently affects its diagnostic")
+        val immutable_ref_out = check_source(
+            "val STATIC_VALUE = 1\nfn f():\n    val p = &STATIC_VALUE\n", "static_immutable_ref_out")
+        val immutable_mut_ref_out = check_source(
+            "val STATIC_VALUE = 1\nfn f():\n    val p = &mut STATIC_VALUE\n", "static_immutable_mut_ref_out")
+        val mutable_ref_out = check_source(
+            "var STATIC_VALUE = 1\nfn f():\n    val p = &STATIC_VALUE\n", "static_mutable_ref_out")
+        val mutable_mut_ref_out = check_source(
+            "var STATIC_VALUE = 1\nfn f():\n    val p = &mut STATIC_VALUE\n", "static_mutable_mut_ref_out")
+        val immutable_ref_in = check_source(
+            "val STATIC_VALUE = 1\nfn f():\n    unsafe:\n        val p = &STATIC_VALUE\n", "static_immutable_ref_in")
+        val immutable_mut_ref_in = check_source(
+            "val STATIC_VALUE = 1\nfn f():\n    unsafe:\n        val p = &mut STATIC_VALUE\n", "static_immutable_mut_ref_in")
+        val mutable_ref_in = check_source(
+            "var STATIC_VALUE = 1\nfn f():\n    unsafe:\n        val p = &STATIC_VALUE\n", "static_mutable_ref_in")
+        val mutable_mut_ref_in = check_source(
+            "var STATIC_VALUE = 1\nfn f():\n    unsafe:\n        val p = &mut STATIC_VALUE\n", "static_mutable_mut_ref_in")
+
+        expect(count_kind(immutable_ref_out, "static_ref")).to_equal(1)
+        expect(count_kind(immutable_ref_out, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(immutable_mut_ref_out, "static_ref")).to_equal(1)
+        expect(count_kind(immutable_mut_ref_out, "immutable_static_mut_ref")).to_equal(1)
+        expect(count_kind(mutable_ref_out, "static_ref")).to_equal(1)
+        expect(count_kind(mutable_ref_out, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(mutable_mut_ref_out, "static_ref")).to_equal(1)
+        expect(count_kind(mutable_mut_ref_out, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(immutable_ref_in, "static_ref")).to_equal(0)
+        expect(count_kind(immutable_ref_in, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(immutable_mut_ref_in, "static_ref")).to_equal(0)
+        expect(count_kind(immutable_mut_ref_in, "immutable_static_mut_ref")).to_equal(1)
+        expect(count_kind(mutable_ref_in, "static_ref")).to_equal(0)
+        expect(count_kind(mutable_ref_in, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(mutable_mut_ref_in, "static_ref")).to_equal(0)
+        expect(count_kind(mutable_mut_ref_in, "immutable_static_mut_ref")).to_equal(0)
+
+    it "does not classify references to locals as static references":
+        step("Verify locals preserve their existing reference behavior")
+        val errors = check_source(
+            "fn f():\n    var local = 1\n    val p = &mut local\n", "local_mut_ref")
+        expect(count_kind(errors, "static_ref")).to_equal(0)
+        expect(count_kind(errors, "immutable_static_mut_ref")).to_equal(0)
+
+    it "restores nested unsafe depth before checking a following reference":
+        step("Verify nested unsafe blocks restore the exact enclosing depth")
+        val src = "val STATIC_VALUE = 1\nfn f():\n" +
+            "    unsafe:\n        unsafe:\n            val a = &STATIC_VALUE\n" +
+            "        val b = &STATIC_VALUE\n    val c = &STATIC_VALUE\n"
+        val errors = check_source(src, "nested_static_ref_restore")
+        expect(count_kind(errors, "static_ref")).to_equal(1)
+
+    it "preserves imported static mutability for reference diagnostics":
+        step("Verify imported immutable and mutable statics match local policy")
+        val immutable_provider = "pub val EXPORTED = 1\n"
+        val immutable_consumer = r"use ffi_provider.{EXPORTED}" + "\n" +
+            "fn f():\n    unsafe:\n        val p = &mut EXPORTED\n"
+        val (immutable_errors, _) = check_imported_source(
+            immutable_provider, immutable_consumer)
+        expect(count_kind(immutable_errors, "static_ref")).to_equal(0)
+        expect(count_kind(immutable_errors, "immutable_static_mut_ref")).to_equal(1)
+
+        val mutable_provider = "pub var EXPORTED = 1\n"
+        val mutable_consumer = r"use ffi_provider.{EXPORTED}" + "\n" +
+            "fn f():\n    unsafe:\n        val p = &mut EXPORTED\n"
+        val (mutable_errors, _) = check_imported_source(
+            mutable_provider, mutable_consumer)
+        expect(count_kind(mutable_errors, "static_ref")).to_equal(0)
+        expect(count_kind(mutable_errors, "immutable_static_mut_ref")).to_equal(0)
+
+    it "accepts the same aliased imported extern inside minimal unsafe":
+        step("Verify: alias identity respects the lexical ffi boundary")
+        val provider = "pub extern fn device_poke(x: i64)\n"
+        val consumer = r"use ffi_provider.{device_poke as poke}" + "\n" +
+            "fn use_ffi():\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        poke(1)\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(errors.len()).to_equal(0)
+        expect(inventory.raw_call_sites).to_equal(1)
+        expect(inventory.missing_authority_call_sites).to_equal(0)
+        expect(inventory.lexically_scoped_call_sites).to_equal(1)
+        expect(inventory.hir_complete).to_equal(true)
+
+    it "tracks a resolved extern reached through UFCS":
+        step("Verify: resolved UFCS identity retains the FFI boundary")
+        val provider = "pub extern fn device_poke(x: i64) -> i64\n"
+        val consumer = r"use ffi_provider.{device_poke}" + "\n" +
+            "fn use_ffi() -> i64:\n" +
+            "    1.device_poke()\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(count_kind(errors, "ffi")).to_equal(1)
+        expect(inventory.raw_call_sites).to_equal(1)
+        expect(inventory.resolved_raw_call_sites).to_equal(1)
+        expect(inventory.missing_authority_call_sites).to_equal(1)
+
+    it "accepts the same resolved UFCS extern inside minimal unsafe":
+        step("Verify: resolved UFCS identity respects lexical FFI authority")
+        val provider = "pub extern fn device_poke(x: i64) -> i64\n"
+        val consumer = r"use ffi_provider.{device_poke}" + "\n" +
+            "fn use_ffi() -> i64:\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        1.device_poke()\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(count_kind(errors, "ffi")).to_equal(0)
+        expect(inventory.raw_call_sites).to_equal(1)
+        expect(inventory.missing_authority_call_sites).to_equal(0)
+        expect(inventory.lexically_scoped_call_sites).to_equal(1)
+
+    it "does not classify an imported safe wrapper as raw ffi":
+        step("Verify: foreign identity does not leak through safe wrappers")
+        val provider = "extern fn device_poke(x: i64) -> i64\n" +
+            "pub fn checked_poke(x: i64) -> i64:\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        device_poke(x)\n"
+        val consumer = r"use ffi_provider.{checked_poke as poke}" + "\n" +
+            "fn use_wrapper() -> i64:\n" +
+            "    poke(1)\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(errors.len()).to_equal(0)
+        expect(inventory.raw_call_sites).to_equal(0)
+        expect(inventory.resolved_extern_symbols).to_equal(0)
+        expect(inventory.hir_complete).to_equal(true)

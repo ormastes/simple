@@ -7,7 +7,6 @@
 
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.*
-use std.nogc_sync_mut.io_runtime.{exit}
 
 trait HirVisitor:
     """Read-only callback surface. One hook per base HIR carrier."""
@@ -23,8 +22,7 @@ fn hir_visit_nothing():
 fn unreachable_hir_variant(kind: text, where_: text) -> text:
     """A variant no generated arm names. Fail closed, never ignore."""
     print "[hir-visit] unhandled {kind} variant at {where_}"
-    exit(1)
-    "unhandled {kind} variant at {where_}: regenerate src/compiler/20.hir/generated"
+    raise "unhandled {kind} variant at {where_}: regenerate src/compiler/20.hir/generated"
 
 fn hir_expr_kind_name(node: HirExpr) -> text:
     """Variant name of one HirExprKind, for logs and hashing."""
@@ -89,6 +87,7 @@ fn hir_expr_kind_name(node: HirExpr) -> text:
         case InlineAsmMatch(_): name = "InlineAsmMatch"
         case Error: name = "Error"
         case TypeTest(_, _): name = "TypeTest"
+        case TryCatch(_, _, _): name = "TryCatch"
         case _: name = unreachable_hir_variant("HirExprKind", "hir_expr_kind_name")
     name
 
@@ -359,6 +358,11 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
             hir_visit_nothing()
         case TypeTest(b_value, _):
             hir_visit_expr(b_value, visitor)
+        case TryCatch(b_body, b_clauses, b_finally):
+            hir_visit_block(b_body, visitor)
+            for clause in b_clauses:
+                hir_visit_catch_clause(clause, visitor)
+            hir_visit_block(b_finally, visitor)
         case _: unreachable_hir_variant("HirExprKind", "hir_visit_expr")
 
 fn hir_visit_stmt(node: HirStmt, visitor: HirVisitor):
@@ -501,7 +505,7 @@ fn hir_visit_pattern(node: HirPattern, visitor: HirVisitor):
 fn hir_visit_dim_expr(node: DimExpr, visitor: HirVisitor):
     if node == nil:
         return
-    hir_visit_nothing()
+    hir_visit_dim_expr_kind(node.kind, visitor)
 
 fn hir_visit_dim_expr_kind(node: DimExprKind, visitor: HirVisitor):
     if node == nil:
@@ -533,7 +537,7 @@ fn hir_visit_dim_expr_kind(node: DimExprKind, visitor: HirVisitor):
 fn hir_visit_effect(node: Effect, visitor: HirVisitor):
     if node == nil:
         return
-    hir_visit_nothing()
+    hir_visit_effect_kind(node.kind, visitor)
 
 fn hir_visit_effect_kind(node: EffectKind, visitor: HirVisitor):
     if node == nil:
@@ -589,7 +593,7 @@ fn hir_visit_call_arg(node: HirCallArg, visitor: HirVisitor):
 fn hir_visit_comp_clause(node: HirCompClause, visitor: HirVisitor):
     if node == nil:
         return
-    hir_visit_nothing()
+    hir_visit_comp_clause_kind(node.kind, visitor)
 
 fn hir_visit_comp_clause_kind(node: HirCompClauseKind, visitor: HirVisitor):
     if node == nil:
@@ -644,6 +648,15 @@ fn hir_visit_match_arm(node: HirMatchArm, visitor: HirVisitor):
     hir_visit_pattern(node.pattern, visitor)
     if node.has_guard:
         hir_visit_expr(node.guard, visitor)
+    hir_visit_block(node.body, visitor)
+
+fn hir_visit_catch_clause(node: HirCatchClause, visitor: HirVisitor):
+    if node == nil:
+        return
+    if node.has_pattern:
+        hir_visit_pattern(node.pattern, visitor)
+    if node.has_type_:
+        hir_visit_type(node.type_, visitor)
     hir_visit_block(node.body, visitor)
 
 fn hir_visit_param(node: HirParam, visitor: HirVisitor):

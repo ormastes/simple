@@ -132,10 +132,13 @@ fn _execute_it(name: text, block: fn()):
         test_pending > pending_before
     ):
         # pending(reason); return marks this example without inflating passes.
-        pass
+        _write_test_result_evidence(passed, failed)
     elif current_test_errors.len() == 0:
         passed = passed + 1
         test_passed = passed
+        # Persist before any later nested call can restore the caller's global
+        # snapshot and stale the local tally under interpreter writeback.
+        _write_test_result_evidence(passed, failed)
         print "{indent}  it {name} ... ok"
     else:
         # A failing example has one outcome: failure wins over an earlier
@@ -144,12 +147,14 @@ fn _execute_it(name: text, block: fn()):
             test_pending = pending_before
         failed = failed + 1
         test_failed = failed
+        # The error formatting below performs nested calls (join/push).  In
+        # pure interpreter mode those calls may restore the pre-call global
+        # snapshot, so serialize the authoritative local counters first.
+        _write_test_result_evidence(passed, failed)
         print "{indent}  it {name} ... FAILED"
         val current_test_error = current_test_errors.join("; ")
         print "{indent}    Error: {current_test_error}"
         test_errors.push("{full_name}: {current_test_error}")
-    # global write is not visible to callees until return — pass the tallies
-    _write_test_result_evidence(passed, failed)
 
 pub fn it(name: text, block: fn()):
     if not _run_test("normal"):
@@ -259,6 +264,16 @@ pub fn pending(name: text):
         return
     test_pending = test_pending + 1
     print "    it {name} ... pending"
+
+# Future-implementation marker: declares a spec that is intentionally not yet
+# implemented, so dashboards can report it as planned rather than failed.
+# Counts as pending (never pass, never fail). Deliberately NOT routed through
+# validate_bare_pending: a reasoned planned() is exactly the governed
+# replacement that gate demands of bare pending. The "... pending (planned:"
+# suffix keeps extract_pending_test_name (test_runner_helpers.spl) counting it.
+pub fn planned(name: text, reason: text):
+    test_pending = test_pending + 1
+    print "    it {name} ... pending (planned: {reason})"
 
 # @tag(name=file_name, reason=reason)
 pub fn skip(name: text, reason: text):
@@ -557,9 +572,9 @@ pub fn skip_if_missing_module(name: text, module_name: text, block: fn()):
             return
 
     # Strategy 2: Check file existence
-    extern fn rt_file_exists(path: text) -> bool
+    use std.io_runtime.{file_exists}
     val module_path = module_name_to_path(module_name)
-    if rt_file_exists(module_path):
+    if file_exists(module_path):
         it(name, block)
     else:
         test_skipped = test_skipped + 1

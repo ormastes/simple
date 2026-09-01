@@ -90,12 +90,6 @@ fn init() -> bool {
             .and_then(|v| v.parse().ok())
             .filter(|v: &i64| *v >= 100)
             .unwrap_or(10_000);
-        // SIGPROF + setitimer are POSIX-only, and `libc` is a
-        // [target.'cfg(unix)'.dependencies] entry, so this whole arming
-        // sequence must be cfg-gated or the crate does not compile on Windows.
-        // There is no Windows equivalent wired up: the sampler simply never
-        // fires there, which `render()` reports honestly as 0 samples rather
-        // than pretending to have profiled anything.
         #[cfg(unix)]
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
@@ -103,14 +97,34 @@ fn init() -> bool {
             sa.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
             libc::sigemptyset(&mut sa.sa_mask);
             libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
-            let tv = libc::timeval { tv_sec: us / 1_000_000, tv_usec: (us % 1_000_000) as libc::suseconds_t };
-            let it = libc::itimerval { it_interval: tv, it_value: tv };
+            let tv = libc::timeval {
+                tv_sec: us / 1_000_000,
+                tv_usec: (us % 1_000_000) as libc::suseconds_t,
+            };
+            let it = libc::itimerval {
+                it_interval: tv,
+                it_value: tv,
+            };
             libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
             libc::atexit(dump_at_exit);
         }
+        // This sampler is built on SIGPROF + setitimer, which Windows does not
+        // provide; `libc` is a cfg(unix)-only dependency here, so the block
+        // above cannot even be compiled. Say so LOUDLY instead of reporting
+        // "enabled" and then producing no samples: a profiler that silently
+        // emits nothing is exactly the trap .claude/rules/commands.md records
+        // under "Profiling trap: SIMPLE_INTERP_SAMPLE emits NOTHING", which has
+        // already cost two investigations.
         #[cfg(not(unix))]
-        let _ = us;
+        {
+            let _ = us;
+            eprintln!(
+                "warning: SIMPLE_INTERP_SAMPLE is set but the interpreter sampler is                  unavailable on this platform (it requires POSIX SIGPROF/setitimer);                  no samples will be collected"
+            );
+        }
     }
+    #[cfg(not(unix))]
+    let on = false;
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on
 }
@@ -171,7 +185,10 @@ impl KindGuard {
         if !enabled() {
             return KindGuard(None);
         }
-        let prev = (CUR_KIND_PTR.load(Ordering::Relaxed), CUR_KIND_LEN.load(Ordering::Relaxed));
+        let prev = (
+            CUR_KIND_PTR.load(Ordering::Relaxed),
+            CUR_KIND_LEN.load(Ordering::Relaxed),
+        );
         CUR_KIND_PTR.store(kind.as_ptr() as *mut u8, Ordering::Relaxed);
         CUR_KIND_LEN.store(kind.len(), Ordering::Relaxed);
         KindGuard(Some(prev))
@@ -221,7 +238,6 @@ fn bump(table: &'static [Slot], key: *mut u8, len: usize, incl: bool) -> bool {
     false
 }
 
-// Only referenced by the cfg(unix) sigaction arming in `init`.
 #[cfg(unix)]
 extern "C" fn on_sigprof(_sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
     TOTAL_SAMPLES.fetch_add(1, Ordering::Relaxed);
@@ -276,7 +292,13 @@ fn slot_name(s: &Slot) -> String {
 /// Render the histograms, most frequent first. Public so specs can assert on it.
 pub fn render() -> String {
     let total = TOTAL_SAMPLES.load(Ordering::Relaxed);
-    let pct = |v: u64| if total == 0 { 0.0 } else { v as f64 * 100.0 / total as f64 };
+    let pct = |v: u64| {
+        if total == 0 {
+            0.0
+        } else {
+            v as f64 * 100.0 / total as f64
+        }
+    };
     let mut out = String::from("interp-sample-profile:\n");
     out.push_str(&format!(
         "  total_samples: {}  idle: {}  dropped: {}\n",
@@ -287,12 +309,25 @@ pub fn render() -> String {
     let mut rows: Vec<(String, u64, u64)> = FRAMES
         .iter()
         .filter(|s| !s.key.load(Ordering::Acquire).is_null())
-        .map(|s| (slot_name(s), s.self_hits.load(Ordering::Relaxed), s.incl_hits.load(Ordering::Relaxed)))
+        .map(|s| {
+            (
+                slot_name(s),
+                s.self_hits.load(Ordering::Relaxed),
+                s.incl_hits.load(Ordering::Relaxed),
+            )
+        })
         .collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
     out.push_str("  frames (self / inclusive):\n");
     for (name, s, i) in rows.iter().take(60) {
-        out.push_str(&format!("    {:>8} {:>6.2}%  {:>8} {:>6.2}%  {}\n", s, pct(*s), i, pct(*i), name));
+        out.push_str(&format!(
+            "    {:>8} {:>6.2}%  {:>8} {:>6.2}%  {}\n",
+            s,
+            pct(*s),
+            i,
+            pct(*i),
+            name
+        ));
     }
     let mut kinds: Vec<(String, u64)> = KINDS
         .iter()
@@ -307,12 +342,14 @@ pub fn render() -> String {
     out
 }
 
-// Registered through libc::atexit, which only happens under cfg(unix).
 #[cfg(unix)]
 extern "C" fn dump_at_exit() {
     unsafe {
         let zero = libc::timeval { tv_sec: 0, tv_usec: 0 };
-        let it = libc::itimerval { it_interval: zero, it_value: zero };
+        let it = libc::itimerval {
+            it_interval: zero,
+            it_value: zero,
+        };
         libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
     }
     let text = render();

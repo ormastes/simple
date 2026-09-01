@@ -1,4 +1,4 @@
-# Simpleos Wine Substrate Specification
+# simpleos_wine_substrate_spec
 
 > <details>
 
@@ -32,7 +32,21 @@ simpleos_wine_substrate_spec -> common
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Simpleos Wine Substrate Specification
+# simpleos_wine_substrate_spec
+
+Wine substrate capability matrix and gates: classification, evidence policy, and hello.exe readiness.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/simpleos/feature/simpleos_wine_substrate_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Wine substrate capability matrix and gates: classification, evidence policy, and hello.exe readiness.
 
 ## Scenarios
 
@@ -77,7 +91,7 @@ expect(state).to_equal("partial")
 
 </details>
 
-#### should link verified capability rows to implementation paths and evidence commands
+#### link verified capability rows to implementation paths and evidence commands
 
 <details>
 <summary>Executable SSpec</summary>
@@ -109,7 +123,7 @@ expect(kernel32_core.evidence_command).to_contain("wine_kernel32_heap_spec")
 expect(wine_substrate_capability_state_from_gates("audio", gates)).to_equal("verified")
 expect(wine_substrate_capability_state_from_gates("audio", "host=verified")).to_equal("missing")
 val matrix = wine_substrate_capability_matrix(gates)
-expect(matrix.len()).to_equal(21)
+expect(matrix.len()).to_equal(21)  # oracle: capability matrix declares exactly 21 tracked rows
 expect(matrix[1].capability).to_equal("exec_env")
 expect(matrix[5].capability).to_equal("user32")
 expect(matrix[6].capability).to_equal("gdi32")
@@ -125,7 +139,7 @@ expect(matrix[20].capability).to_equal("hello_exe")
 
 ### REQ-002: process-backed app baseline
 
-#### should reject resident fallback as complete evidence
+#### reject resident fallback as complete evidence
 
 <details>
 <summary>Executable SSpec</summary>
@@ -159,7 +173,7 @@ expect(wine_substrate_check_process_evidence(partial)).to_equal("insufficient-ev
 
 ### REQ-005: VM and container support
 
-#### should require full SimpleOS executable-environment evidence
+#### require full SimpleOS executable-environment evidence
 
 <details>
 <summary>Executable SSpec</summary>
@@ -188,7 +202,7 @@ expect(wine_substrate_exec_env_gate_from_serial_log(serial_log)).to_equal("ready
 
 </details>
 
-#### should require fixed mappings, guard pages, and permission changes
+#### require fixed mappings, guard pages, and permission changes
 
 <details>
 <summary>Executable SSpec</summary>
@@ -205,7 +219,7 @@ expect(result).to_equal("missing-mprotect")
 
 ### REQ-006: X11-class renderer and WM backend
 
-#### should require window lifecycle, expose, input, and clipboard coverage
+#### require window lifecycle, expose, input, and clipboard coverage
 
 <details>
 <summary>Executable SSpec</summary>
@@ -223,7 +237,7 @@ expect(result).to_equal("missing-atom")
 
 ### REQ-003 and REQ-004: host ABI, thread, and dynamic loading
 
-#### should require the remaining Wine host substrate features
+#### require the remaining Wine host substrate features
 
 <details>
 <summary>Executable SSpec</summary>
@@ -241,7 +255,7 @@ expect(result).to_equal("missing-fs-attrs")
 
 ### REQ-007: PE/COFF loader preparation
 
-#### should require safe PE validation before execution
+#### require safe PE validation before execution
 
 <details>
 <summary>Executable SSpec</summary>
@@ -259,9 +273,9 @@ expect(result).to_equal("missing-section-bounds")
 ### REQ-009: nogc async substrate
 
 <details>
-<summary>Advanced: should require the existing nogc_async_mut completion and event-loop primitives</summary>
+<summary>Advanced: require the existing nogc_async_mut completion and event-loop primitives</summary>
 
-#### should require the existing nogc_async_mut completion and event-loop primitives
+#### require the existing nogc_async_mut completion and event-loop primitives
 
 <details>
 <summary>Executable SSpec</summary>
@@ -282,7 +296,7 @@ expect(result).to_equal("missing-submit-write")
 
 ### REQ-008: non-GUI hello.exe milestone
 
-#### should keep hello.exe blocked until substrate gates are verified
+#### keep hello.exe blocked until substrate gates are verified
 
 <details>
 <summary>Executable SSpec</summary>
@@ -297,7 +311,7 @@ expect(gate_state).to_equal("blocked")
 
 </details>
 
-#### should keep hello.exe blocked until the modeled NT bridge is verified
+#### keep hello.exe blocked until the modeled NT bridge is verified
 
 <details>
 <summary>Executable SSpec</summary>
@@ -312,7 +326,7 @@ expect(gate_state).to_equal("blocked")
 
 </details>
 
-#### should not execute malformed hello.exe bytes even when gates are declared verified
+#### not execute malformed hello.exe bytes even when gates are declared verified
 
 <details>
 <summary>Executable SSpec</summary>
@@ -331,7 +345,7 @@ expect(result.error).to_equal("too-small")
 
 ### REQ-010: full Wine readiness boundary
 
-#### should distinguish controlled hello.exe readiness from full Wine readiness
+#### distinguish controlled hello.exe readiness from full Wine readiness
 
 <details>
 <summary>Executable SSpec</summary>
@@ -347,7 +361,7 @@ expect(wine_substrate_full_wine_gate(hello_gates)).to_equal("blocked-missing-ren
 
 </details>
 
-#### should require all tracked Wine substrate rows for the full Wine gate
+#### require all tracked Wine substrate rows for the full Wine gate
 
 <details>
 <summary>Executable SSpec</summary>
@@ -362,7 +376,7 @@ expect(wine_substrate_full_wine_gate(gates)).to_equal("ready")
 
 </details>
 
-### REQ-011: Wine process-session handoff
+#### emit a dry-run handoff for the controlled hello path
 
 #### should keep arbitrary exe sessions blocked until full Wine readiness
 
@@ -402,7 +416,7 @@ expect(handoff.status).to_equal("dry-run-ready")
 
 ### REQ-012: controlled Wine process-session execution
 
-#### should execute only the verified hello.exe process session
+#### execute only the verified hello.exe process session
 
 <details>
 <summary>Executable SSpec</summary>
@@ -416,13 +430,13 @@ val plan = wine_process_session_plan(wine_process_session_request_new("hello.exe
 val execution = wine_process_execute_controlled_hello(plan)
 expect(execution.ok).to_equal(true)
 expect(execution.stdout).to_equal("Hello from SimpleOS Wine\n")
-expect(execution.exit_code).to_equal(0)
+expect(execution.exit_code).to_equal(0)  # oracle: successful modeled run exits 0
 expect(execution.status).to_equal("executed")
 ```
 
 </details>
 
-#### should not treat full-Wine planning as arbitrary executable support
+#### not treat full-Wine planning as arbitrary executable support
 
 <details>
 <summary>Executable SSpec</summary>
@@ -442,7 +456,7 @@ expect(execution.error).to_equal("unsupported-process-session")
 
 ### REQ-013: arbitrary process image validation boundary
 
-#### should validate PE image structure before future arbitrary execution
+#### validate PE image structure before future arbitrary execution
 
 <details>
 <summary>Executable SSpec</summary>
@@ -462,7 +476,7 @@ expect(image.status).to_equal("image-validated")
 
 </details>
 
-#### should reject malformed images at the process-session boundary
+#### reject malformed images at the process-session boundary
 
 <details>
 <summary>Executable SSpec</summary>
@@ -482,7 +496,7 @@ expect(image.error).to_equal("too-small")
 
 ### REQ-014: arbitrary process import inspection boundary
 
-#### should inspect bounded first-import DLL and symbols before future binding
+#### inspect bounded first-import DLL and symbols before future binding
 
 <details>
 <summary>Executable SSpec</summary>
@@ -496,7 +510,7 @@ val plan = wine_process_session_plan(wine_process_session_request_new("game.exe"
 val imports = wine_process_inspect_full_imports(plan, wine_known_hello_exe_fixture_bytes(), 8)
 expect(imports.ok).to_equal(true)
 expect(imports.dll_name).to_equal("KERNEL32.dll")
-expect(imports.symbol_count).to_equal(3)
+expect(imports.symbol_count).to_equal(3)  # oracle: three imports declared in the fixture PE
 expect(imports.symbols[0]).to_equal("GetStdHandle")
 expect(imports.symbols[1]).to_equal("WriteFile")
 expect(imports.symbols[2]).to_equal("ExitProcess")
@@ -505,7 +519,7 @@ expect(imports.status).to_equal("imports-inspected")
 
 </details>
 
-#### should keep import inspection bounded
+#### keep import inspection bounded
 
 <details>
 <summary>Executable SSpec</summary>
@@ -525,7 +539,7 @@ expect(imports.error).to_equal("invalid-symbol-limit")
 
 ### REQ-015: bounded process import binding plan
 
-#### should plan supported KERNEL32 import bindings before execution
+#### plan supported KERNEL32 import bindings before execution
 
 <details>
 <summary>Executable SSpec</summary>
@@ -540,13 +554,13 @@ val bindings = wine_process_bind_known_kernel32_imports(plan, wine_known_hello_e
 expect(bindings.ok).to_equal(true)
 expect(bindings.dll_name).to_equal("kernel32.dll")
 expect(bindings.call_sequence).to_equal("GetStdHandle WriteFile ExitProcess")
-expect(bindings.binding_count).to_equal(3)
+expect(bindings.binding_count).to_equal(3)  # oracle: three bindings resolved in the fixture
 expect(bindings.status).to_equal("imports-bound")
 ```
 
 </details>
 
-#### should reject unbounded or incomplete import binding attempts
+#### reject unbounded or incomplete import binding attempts
 
 <details>
 <summary>Executable SSpec</summary>
@@ -566,7 +580,7 @@ expect(bindings.error).to_equal("import-thunk-limit-exceeded")
 
 ### REQ-016: guarded process import thunk patch plan
 
-#### should produce import-thunk evidence only after supported binding
+#### produce import-thunk evidence only after supported binding
 
 <details>
 <summary>Executable SSpec</summary>
@@ -579,7 +593,7 @@ val full_gates = "process=verified exec_env=verified vm=verified renderer=verifi
 val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), full_gates)
 val patches = wine_process_plan_import_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 8)
 expect(patches.ok).to_equal(true)
-expect(patches.patch_count).to_equal(3)
+expect(patches.patch_count).to_equal(3)  # oracle: three patches applied in the fixture
 expect(patches.evidence).to_contain("import-thunks-bound")
 expect(patches.evidence).to_contain("import-thunk-table-valid")
 expect(patches.evidence).to_contain("import-thunk-symbols-resolved")
@@ -590,7 +604,7 @@ expect(patches.status).to_equal("thunk-patch-planned")
 
 </details>
 
-#### should reject thunk patch planning when binding is rejected
+#### reject thunk patch planning when binding is rejected
 
 <details>
 <summary>Executable SSpec</summary>
@@ -610,7 +624,7 @@ expect(patches.error).to_equal("import-thunk-limit-exceeded")
 
 ### REQ-017: process CPU dispatch preflight
 
-#### should require process loader evidence and CPU dispatch evidence before future execution
+#### require process loader evidence and CPU dispatch evidence before future execution
 
 <details>
 <summary>Executable SSpec</summary>
@@ -636,7 +650,7 @@ expect(preflight.status).to_equal("cpu-preflight-ready")
 
 </details>
 
-#### should block process CPU dispatch preflight when CPU evidence is missing
+#### block process CPU dispatch preflight when CPU evidence is missing
 
 <details>
 <summary>Executable SSpec</summary>

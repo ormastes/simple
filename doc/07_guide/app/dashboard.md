@@ -27,7 +27,7 @@ simple dashboard check-alerts
 ## Web Dashboard
 
 The authenticated web dashboard shell is the operator view for LLM diagnostics,
-tooling artifacts, the `/agents` assistant dashboard, and vLLM control evidence.
+tooling artifacts, and vLLM control evidence.
 
 - `view-diagnostics` renders LLM diagnostics JSONL readback with explicit
   absence text for missing session, event, and tool fields.
@@ -35,94 +35,25 @@ tooling artifacts, the `/agents` assistant dashboard, and vLLM control evidence.
   source configured for context and Ponytail analysis. The panel reports
   `simple_context` status, `simple_ponytail` audit/simplification status, and
   source/target summaries without exposing internal absence markers.
-- `/agents` renders the assistant dashboard live/replay view through the shared
-  assistant snapshot collector. Unauthenticated or blank-session requests
-  redirect to `/login`, authenticated requests render `id="agent-dashboard"`,
-  and unrelated prefixes such as `/agentship` must not be hijacked.
 - `/api/vllm/control` exposes dashboard-safe vLLM control planning. The route
-  returns `llm_runtime_vllm_dashboard_live_boundary` JSONL plus
-  `llm_dashboard_vllm_control_panel` or
-  `llm_runtime_vllm_dashboard_control_execution` JSONL for authenticated
-  requests. It accepts query-style `action`, `base_model`, `endpoint`,
-  `vllm_available`, and `gpu_available` values, and marks dashboard-side output
-  as `not_live_evidence` instead of treating planned actions as process/HTTP
-  proof.
+  returns `llm_dashboard_vllm_control_panel` JSONL for authenticated requests,
+  accepts query-style `action`, `base_model`, `endpoint`, `vllm_available`, and
+  `gpu_available` values, and stays on the dashboard collector boundary instead
+  of importing the live process/HTTP executor.
 - The embedded vLLM control form posts to `/api/vllm/control` with `start`,
   `probe`, and related actions. Missing local vLLM/GPU resources produce
-  explicit skipped evidence rather than live side effects.
+  explicit skipped evidence rather than live side effects. Runtime-control
+  JSONL uses `live_evidence_status=not_live_evidence` for planned, skipped, and
+  invalid-pid results; only a runtime-owner probe observation with running
+  process, ready models status, and 2xx HTTP response may report
+  `live_endpoint_observed`.
 
 Verification:
 
 ```bash
-sh scripts/check/check-llm-dashboard-evidence.shs
-sh scripts/check/check-llm-dashboard-live-evidence.shs
 release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl --mode=interpreter --clean
-release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl --mode=interpreter --clean
 release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl --mode=interpreter --clean
 ```
-
-Latest focused evidence:
-`doc/09_report/2026/06/llm_dashboard_evidence_2026-06-29.md` records the
-dashboard diagnostics panel, `/agents` route, vLLM control route planning,
-dashboard log modes, diagnostics collector, and tooling artifact collector
-passing locally. The evidence env/report also records per-log sizes, SHA-256
-hashes, and a checked surface manifest for the wrapper, specs, collectors, docs,
-and logs. This is dashboard route/evidence coverage; live vLLM serving still
-belongs to the LLM runtime host-probe lane.
-
-Use the focused live checker when strict dashboard evidence needs a live env:
-
-```bash
-LLM_DASHBOARD_LIVE_BASE_URL=http://127.0.0.1:3099 \
-  sh scripts/check/check-llm-dashboard-live-http-evidence.shs
-
-sh scripts/check/check-llm-dashboard-live-evidence.shs
-```
-
-The HTTP producer writes `build/llm_dashboard_live_http/evidence.env` with
-`llm_dashboard_live_http_status=pass` only after a configured running dashboard
-origin rejects an unauthenticated `/api/vllm/control` request and accepts
-authenticated dashboard HTML, `/agents`, and `/api/vllm/control?action=preflight`
-requests. A pass also requires
-`llm_dashboard_live_http_pass_integrity_status=pass`, which independently
-checks exact HTTP status codes, non-empty response bodies, and SHA-256
-fingerprints for the unauthenticated API rejection, dashboard HTML, agents HTML,
-and authenticated control JSONL responses. Provide authentication with
-`LLM_DASHBOARD_LIVE_AUTH_HEADER`, `LLM_DASHBOARD_LIVE_AUTH_COOKIE`, or
-`LLM_DASHBOARD_LIVE_COOKIE_NAME` plus `LLM_DASHBOARD_LIVE_COOKIE_VALUE`; secret
-values are not written to reports. The aggregate strict detail forwards each
-route's status and reason as
-`live_http_dashboard_status`/`live_http_dashboard_reason`,
-`live_http_agents_status`/`live_http_agents_reason`,
-`live_http_control_status`/`live_http_control_reason`, and
-`live_http_unauth_api_status`/`live_http_unauth_api_reason`, so a failed live
-dashboard run identifies whether auth, dashboard HTML, `/agents`, control JSONL,
-or unauthenticated rejection is the first route gap.
-
-That checker writes `build/llm_dashboard_live/evidence.env` with
-`llm_dashboard_live_status=pass` when authenticated dashboard HTML, `/agents`
-route rendering, and `/api/vllm/control` route execution are proven through the
-checked-in DashboardServer surface, including auth rejection, preflight JSONL,
-side-effect action routing to the runtime owner, and safe missing-resource
-execution JSONL. It also records `llm_dashboard_live_blocked_gates` and
-`llm_dashboard_live_primary_blocked_gate` so strict aggregate review can show
-the first dashboard route, auth, execution-boundary, guide, or live HTTP
-blocker to fix.
-
-Use strict live mode to consume that env:
-
-```bash
-LLM_DASHBOARD_LIVE_EVIDENCE_ENV=build/llm_dashboard_live/evidence.env \
-  sh scripts/check/check-llm-dashboard-evidence.shs --strict-live
-```
-
-The strict live gate requires the evidence env to report
-`llm_dashboard_live_status=pass`; that wrapper in turn requires
-`llm_dashboard_live_http_status=pass` and
-`llm_dashboard_live_http_pass_integrity_status=pass` from the live HTTP
-producer. This proves live dashboard route execution, not live vLLM serving.
-The aggregate LLM strict mode also generates the live env and runs this wrapper
-with `--strict-live`.
 
 ---
 

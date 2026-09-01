@@ -1017,226 +1017,241 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   priority, and stale-receipt erasure. It has an explicit production rejection
   and no emitter/product API; it does not replace the real architectural commit
   owner or resolve the retirement-lineage tracking issue.
-- impl (2026-08-14): Migrated standalone sequential VHDL emission to one typed
-  mixed combinational/sequential HWIR owner. `HwSequentialModuleDef` now owns
-  typed datapath values and operations, validates readable sources, widths,
-  names, and exactly-one-driver semantics, renders the datapath before state,
-  and commits it to the v3 structural hash. Added explicit `LsuConfig` product
-  geometry and restored the five-case executable/manual pair.
-- refactor (2026-08-14): Refreshed architecture, detail design, the RISC-V VHDL
-  guide, executable step/requirement annotations, generated/manual companion,
-  and canonical agent plan. Added the compiler-HWIR layer expert and linked the
-  existing VHDL generator/hardware-RTL experts so the distinct backend owners
-  are explicit; the private overlay wiki has no separate page for this slice.
-- verify-blocked (2026-08-14): Static numbered-artifact and direct-runtime
-  guards pass, the spec layout count is zero, and the changed files contain no
-  placeholder assertions or stubs. The canonical wrapper rejects its deployed
-  runtime ABI and direct self-hosted `check`/focused-test execution exits by
-  signal 11. Resume exactly once after an admitted self-hosted CLI is deployed.
-  Set `STAGE4` to its absolute canonical path; B6's coverage command owns the
-  single execution of the mixed-sequential, predecode/provenance, system, and
-  receipt specs. Do not rerun those focused specs in B5. Run B5 with:
-  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" check src/compiler`,
-  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" check src/lib`,
-  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" check src/app/mcp`,
-  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" check src/app/simple_lsp_mcp`,
-  `env SIMPLE_LIB=src SIMPLE_SAFETY_PROFILE=critical "$STAGE4" test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`,
-  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" lint src/compiler/50.mir/hwir/riscv_lsu_config.spl src/compiler/50.mir/hwir/riscv_scalar_retirement_owner.spl src/compiler/50.mir/hwir/sequential.spl src/compiler/70.backend/backend/hwir_to_vhdl.spl test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`,
-  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" duplicate-check src/compiler/50.mir/hwir --mode token --min-lines 5`,
-  and `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" sspec-maintain scan test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`.
-  This is an implementation handoff, not verify PASS or Gen2 umbrella
-  completion. Owner and final reviewer remain `/root`.
-- review-blocked (2026-08-14): Independent highest-capability review found the
-  qualification wrapper/composer contract is internally inconsistent before
-  runtime execution: the wrapper requests unsupported `--emit-evidence` and
-  `--compose-receipt` modes and validates a different schema/field layout from
-  `src/app/test/riscv_gen2_qualification_receipt.spl`. This is tracked in
-  `doc/08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md`.
-  A deployed runtime alone does not unblock qualification.
-- impl (2026-08-14, A13 follow-up): Parcel and trap product emission now adapts
-  the already validated fixed frontend contract into `HwSequentialModuleDef`,
-  binds the actual compiled decoder graph hash, and uses
-  `render_strict_sequential_hwir`. The former private stateful renderer and
-  hash schema were removed; decoder VHDL is prepended exactly once. The public
-  hash recomputation helper remains as a compatibility API but constructs the
-  canonical v3 typed graph, so drivers and manifests share one hash owner.
-- design-frozen (2026-08-14, A14, historical/superseded source state): The qualification runner is the phase-one
-  command/evidence owner; the admitted Simple receipt app is the sole
-  phase-two validator/copier and writes the receipt last. The final directory
-  remains absent during staging. Schema v2 must hash-bind the coverage command,
-  changed files, exclusions, testbench, and each GHDL command/log/exit. The
-  current contradictory runner is not accepted and remains WARN-blocked until
-  this contract and its deliberate-red tests execute on the repaired runtime.
-- impl (2026-08-14, A14): Replaced the contradictory runner modes with a
-  runner-owned private staging phase and an admitted-CLI invocation of the
-  fixed Simple composer. Schema v2 exact-key binds measured coverage command
-  and report, changed files, explicit exclusions, both product commands,
-  generated VHDL/manifests/testbenches, separate GHDL commands/exits/logs, and
-  source/config/graph identities. The composer rehashes and copies every bound
-  file and writes the receipt last. Static shell/source checks are development
-  evidence only; the positive and deliberate-red Simple suite plus a real
-  admitted RV32/RV64 receipt remain blocked by the deployed runtime ABI/SIG11.
-- review-blocked (2026-08-14, A14): Parallel adversarial review corrected the
-  content-SHA/Git-revision mismatch, critical-policy omission, workspace-CLI
-  child leakage, shared GHDL work library, missing reuse/identity vectors,
-  partial-final cleanup, real `riscv32`/`riscv64` artifact target binding, and
-  coverage scalar/list cross-checks. Remaining acceptance requires a complete
-  executable compiler-inventory and writer-level deliberate reds
-  for command grammar, duplicate-safe artifact parsing, destination rehash,
-  canonical parents, mutation, and cleanup. Until then A14 is WARN, not PASS.
-- review-history (2026-08-14, A14 coverage inventory): the rejected runtime-
-  extern/wrapper-time draft was removed. The accepted source now emits from the
-  compiler after complete parsing without expanding runtime ABI. Acceptance
-  still requires an admitted self-hosted end-to-end receipt; a seed or crashing
-  Stage-3 fixture is not evidence. Phase remains `implementation-handoff` / WARN.
-- review-history (2026-08-14, A14 receipt authority, superseded): the runner's
-  then-current `base..HEAD` scope included unrelated later `.spl` changes. Exact command,
-  duplicate-safe JSON, parent canonicality, and destination rehash are now
-  implemented at source level, but executable runner/writer deliberate-reds
-  remain absent. These are active resume items, not exclusions.
-- impl (2026-08-14, A14 owned evidence authority): replaced the historical
-  `base..HEAD` scope with a reviewed sorted A13/A14 set and canonical
-  `sha256  path` ledger. The runner rejects missing, empty, symlinked,
-  noncanonical, reordered, duplicated, or mutated sources; it revalidates the
-  ledger immediately before composition. The composer exact-key binds,
-  retains, and pre-receipt rechecks the list and ledger identities. Executable
-  shell deliberate reds cover the ledger and parent-symlink validator. The
-  Simple writer-level copy/publication/cleanup reds remain unchecked because
-  the proposed production fault arm was rejected and removed rather than
-  shipping a qualification bypass.
-- impl (2026-08-14, A14 inventory continuation): added constructor-defined,
-  tag-dispatched flat-AST ownership for declaration/statement/expression/arm
-  overloads, including trait and CLI declaration bodies, dict/struct/lambda
-  values, and ordinary versus assembler match arms. Parser and placeholder
-  desugar now preserve source spans; compiler inventory emits bounded,
-  deterministic, deduplicated zero-count rows with runtime-identical keys and
-  escaping. Highest-capability static review is green. At that historical
-  candidate frontier, executable acceptance remained WARN because the
-  authorized stale Stage-3 command exited 139; the current blocker is the
-  current-source cycle-3 termination recorded below.
-- verify-blocked (2026-08-14, user-authorized Stage 3): the only local candidate
-  is `bootstrap/stage3/simple`, SHA-256 `905ce03696a4726e41e410e0531d39f84df2d26d1588e2a23206ede3c177793b`.
-  It exposes only `compile`/`native-build`, is byte-identical to Stage 1/2, and
-  has no adjacent provenance receipt. The exact focused ownership-spec
-  `native-build` exited 139 before diagnostics; logs are retained at
-  `/tmp/restart12-flat-ast-ownership-stage3-build.log`. This cannot satisfy
-  AC-4/AC-5 or convert WARN to PASS.
-  The distinct advertised `compile ... --format=smf` route was attempted once
-  after the static-green source handoff and also exited 139; its log is
-  `/tmp/restart12-flat-ast-ownership-stage3-smf.log`.
-- verify-blocked (2026-08-14, current-source Stage 3 cycle 1): a provenance-
-  retained pure-Simple Stage-2 parent parsed all 616 current sources, then
-  failed closed in HIR lowering because `HirContractClauseKind` and
-  `HirContractOutcome` were referenced by verification MIR/backend consumers
-  but absent from the canonical HIR model. The typed HIR model, optional
-  function field, constructor initialization, and semantic preservation are
-  restored. Evidence: `build/native_probe/stage3-fresh/build.log`; bug:
-  `doc/08_tracking/bug/stage3_hir_contract_model_partial_integration_2026-08-14.md`.
-  At this historical cycle-1 frontier, the cache-preserving rebuild still had
-  to finish and produce a provenance-bound Stage 3 before any A13/A14
-  executable checkbox could change. Cycles 2 and 3 below supersede that resume
-  instruction.
-- verify-blocked (2026-08-14, current-source Stage 3 cycle 2): the preserved-
-  cache retry did not reproduce the missing HIR contract-name diagnostic and
-  was observed externally terminated. Its log proves only that no compiler
-  diagnostic or candidate was emitted; it does not retain the exit code or
-  sampled RSS. One final retry remained under the bounded three-cycle plan at
-  this historical point.
-- verify-blocked (2026-08-14, current-source Stage 3 cycle 3 / stop): GNU time
-  retained signal 15, 12m52s, and 24,839,624 KiB maximum RSS, but not a
-  reliable outer-wrapper exit status. The build emitted no compiler error,
-  object, candidate, provenance, or
-  sanity receipt. Evidence:
-  `build/native_probe/stage3-fresh/build-cycle3.log`; blocker:
-  `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`.
-  The three-cycle cap is exhausted. No unchanged bootstrap command may be run
-  again in this session; all self-hosted and RTL acceptance remains WARN/open.
-- resume-contract (2026-08-14, exact owners): `/root` owns compiler/bootstrap
-  recovery, A13/A14 execution, evidence integration, and merge; final review is
-  `/root`, with highest-capability plan review by `/root/plan_truth_audit`.
-  In a fresh scoped session, fix and test the retained HIR memory-lifecycle
-  owner, then resume one canonical Stage-3 transaction with
-  `scripts/bootstrap/bootstrap-from-scratch.sh
-  --resume-stage3-from-admitted=OUTPUT --jobs=1`, where `OUTPUT` is the
-  repo-relative bootstrap output root containing the frozen admitted Stage 2.
-  That recovery yields an admitted Stage 3 only; it does not build or admit
-  Stage 4. Next, from the repo root, build and internally admit the full CLI with
-  `scripts/bootstrap/bootstrap-from-scratch.sh --output=OUTPUT --mode=dynload
-  --full-cli --jobs=1`. The canonical output is
-  `OUTPUT/full/<triple>/simple` with adjacent `simple.provenance.env`. Run its
-  post-bootstrap acceptance exactly once using the command documented in
-  `doc/06_spec/03_system/check/post_bootstrap_stage4_acceptance_spec.md`, with
-  `STAGE4_POST_BOOTSTRAP_BINARY` and `STAGE4_POST_BOOTSTRAP_PROVENANCE` set to
-  the absolute canonical in-workspace candidate and adjacent provenance paths.
-  Only after that admission passes, run A14 exactly once with
-  `scripts/check/run-riscv-gen2-hwir-qualification.shs --stage4-cli
-  /mnt/data/worktrees/restart12-vhdl/OUTPUT/full/TRIPLE/simple
-  --stage4-provenance
-  /mnt/data/worktrees/restart12-vhdl/OUTPUT/full/TRIPLE/simple.provenance.env
-  --output-dir
-  /mnt/data/worktrees/restart12-vhdl/build/evidence/riscv_gen2_hwir_foundation/RESTART12_RUN_ID`.
-  The output directory must be an absent direct child of the evidence root; the
-  host must be Linux with GHDL and GNU `timeout`/`sha256sum`; the CLI and its
-  adjacent admitted provenance must be absolute canonical paths inside this
-  workspace. Success produces
-  the immutable v2 `qualification_receipt.json` last and retains its bound
-  RV32/RV64 VHDL, manifests, testbenches, isolated GHDL commands/logs/exits, and
-  measured >=8000-bp coverage. A red retains diagnostics but no claim-bearing
-  receipt. Until this and the A13 commands at lines 1035-1042 pass, phase stays
-  `implementation-handoff` / WARN and every executable gate remains unchecked.
-- impl-review (2026-08-14, A14 writer reds and Stage-4 gate): corrected
-  `check-post-bootstrap-stage4-sspec.shs` to load the complete canonical
-  Stage-3 provenance facade; the shell contract rejects the former
-  authority-only import. Added a test-only LD_PRELOAD interposer plus host
-  fixture that deterministically proves exact `fopen` copy denial, final
-  receipt-rename denial, nonmatching pass-through, exact hit identity/count,
-  and status separation. The native fixture passed once; no production
-  composer failpoint or admission bypass exists. Highest-capability review is
-  source-green. Executable writer closure remains open because the
-  qualification runner leaves its valid manifest under an unreported
-  `<run-id>.staging.<pid>/run_manifest.env` and neither invokes the harness nor
-  publishes a unique canonical manifest receipt. Resume by wiring the harness
-  after manifest revalidation and before the successful composer, or by
-  publishing that unique retained path; then run it with the admitted Stage-4
-  CLI/provenance. This does not close the broader command-failure/mutation red
-  matrix or change the WARN phase.
-- impl-review (2026-08-14, A14 runner-to-writer handoff): the runner now passes
-  its exact private manifest directly to the writer-red harness after owned
-  source revalidation and before exactly one positive composer invocation. It
-  validates the unique retained evidence path and every copy/publication
-  command, log, and hit marker, then revalidates owned sources. Each red command
-  record hash-binds the admitted CLI, adjacent provenance, and manifest; an
-  aggregate receipt written last binds all six retained artifacts. The harness
-  and runner fail closed if the executable, provenance, manifest, or harness
-  changes before, between, or after the reds. The separate writer-red receipt
-  is not embedded in the positive receipt; final runner output publishes its
-  exact path and SHA-256 beside the qualification receipt, eliminating glob or
-  manual discovery when that output is retained. Hostile same-user
-  mutation-and-restoration during the harness path execution window is outside
-  this local qualification threat model. The
-  focused shell contract passed once. No admitted Stage-4 execution was
-  available, so writer-red execution and all broader B5/B6 evidence remain
-  unchecked and phase remains `implementation-handoff` / WARN.
-- verify-blocked (2026-08-14, Stage-3 process sampler): the repo-local admitted
-  output `build/restart12-stage3-admitted` is prepared and reverified, but the
-  canonical run did not start. Final review rejected and removed the proposed
-  Python/v4 sampler because it violated the no-Python tooling rule, broke v3
-  consumers, did not safely terminate/reap the full descendant group, retained
-  executable/analyzer pathname TOCTOU, accepted weak record forms, and did not
-  bind strict phase/process correlation or atomic derived evidence. The three
-  sampler cycles are exhausted. Resume only from the redesign contract in
-  `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`;
-  do not run Stage 3 until that source is independently accepted.
-- verify-blocked (2026-08-14, Stage-3 C sampler/analyzer): the follow-up
-  non-Python implementation was rejected and fully reverted at its third fix
-  cycle; Stage 3 did not start. Although the draft added bounded run identity,
-  descriptor-bound command execution, explicit caps, strict `/proc` fields,
-  and a child-setup handshake, it could not prove identity-safe bounded
-  zero-survivor cleanup. PID/process-group reuse, subreaper-adopted and
-  `setsid` descendants, terminal truth, and bounded reaping remained unsafe.
-  Its analyzer also lacked one compatible exact schema with distinct sampler,
-  analyzer, and command identities, complete-only raw terminal semantics, and
-  strict phase/path/time correlation. The session cap is exhausted. Resume in
-  a fresh scoped lane from the jointly frozen producer/consumer contract in
-  the current-source RSS bug; keep provenance v3 unchanged and do not start
-  Stage 3 before independent source review passes.
+- impl: The active mission-critical expansion now includes typed scalar
+  completion/skid/arbitration/trap/retirement and ALU/control/LSU product
+  composition. A declarative M/Zmmul projection freezes and revalidates
+  configuration, provider, instruction, registers, operation, width/W mode,
+  and structural identity; the real iterative owner remains active work.
+- verify-blocked: Bootstrap5 compiled Stage 2 (`839 compiled, 0 failed`) but
+  its sanity gate exited 2, deleted the candidate, and discarded the captured
+  frontend diagnostic. The bootstrap owner now retains failed frontend logs,
+  hashes, and read-only rejected candidates/receipts. A fresh admitted compiler
+  is still required before scalar/GHDL evidence can qualify this lane.
+- verify-blocked: The independently running packed-memory bootstrap also
+  terminated at the same post-Stage2 `exit-2`. Its snapshot likewise predates
+  failure-evidence retention, so no rejected candidate or actionable sanity
+  log survived. This corroborates the admission-stage failure but does not
+  identify its subgate; the next attempt must use the retained-evidence flow.
+- impl: Fixed bit extraction/slicing and canonical arbitrary-width bit-vector
+  constants now close the 65/128-bit typed-HWIR prerequisites for iterative M.
+  A frozen iterative-state contract derives exact multiply/divide register
+  geometry and receipt identity from the declarative M/Zmmul projection. The
+  per-cycle engines and final completion owner remain active implementation.
+- impl: Added the real typed multiplier transition datapath used by that owner:
+  multiplier-LSB extraction, selected 2W addend, wrapping 2W accumulation,
+  one-bit multiplicand/multiplier shifts, signed product correction, fixed high/
+  low slices, and RV64 W sign extension. RV64 high multiply uses an exact
+  128-bit path. Sequential capture/iteration/finalization rules remain active.
+- impl: Added the real typed restoring-divider transition and special-result
+  graph: W+1 shifted remainder, unsigned compare/subtract, quotient-bit insert,
+  dividend shift, signed quotient/remainder correction, divide-by-zero, signed
+  minimum/-1 overflow, and RV64 W sign extension. The contract now retains the
+  original dividend needed for architectural remainder-on-zero behavior.
+- impl: Added one shared dispatch-time normalization graph for both iterative
+  engines. It truncates to W, extracts signs, computes two's-complement
+  magnitudes, freezes MULH/MULHSU/MULHU and signed-divide signedness, derives
+  quotient/remainder correction flags, and classifies divide-zero versus
+  signed-overflow without a runtime operation selector.
+- impl: Added the clocked single-outstanding iterative multiplier. It validates
+  exact canonical/register/event/length identity, captures normalized operands,
+  performs W registered shift/add iterations, finalizes on a separate edge,
+  holds result and identity under backpressure, suppresses x0 writes, and sets
+  a sticky fault on malformed idle dispatch. RV64 MULH owns 128-bit state.
+- impl: Added the matching clocked single-outstanding restoring divider. It
+  captures frozen dispatch identity and normalized magnitudes, handles
+  divide-by-zero and signed minimum/-1 through registered special paths, runs
+  exactly W restoring iterations before a separate finalize edge, preserves
+  original dividend for remainder-on-zero, holds completion under backpressure,
+  suppresses x0 writes, and faults malformed idle dispatch. Focused structural
+  and VHDL tests exist; qualification remains pending an admitted self-host CLI.
+- impl: Promoted both iterative engines to the frozen full scalar completion
+  envelope. Privilege, original/canonical instruction, length, before/after PC,
+  destination register, event/decode identity, and zero-normalized memory/trap/
+  redirect effects are captured at dispatch and held with the result. Scalar
+  product composition now admits a compile-time `muldiv` provider, routes its
+  accepted completion through the existing arbitration/trap/sole-retirement
+  chain, aggregates its protocol fault, and emits multiplier/divider products
+  under the versioned v2 RTL route. Focused and GHDL closure scenarios were
+  added but remain unqualified pending an admitted self-hosted compiler.
+- verify-blocked: The single bounded scalar-composition spec attempt did not
+  reach this worktree. The deployed Rust seed resolved imports from
+  `/mnt/data/worktrees/simple-main` and failed parsing that checkout's unrelated
+  `verification_ir.spl` (`expected Fn, found For`). Per the runaway guard it
+  was not retried and is not evidence against or for the Gen2 implementation.
+- test: Added generated-VHDL clock-cycle evidence for RV32 MUL (6*7=42) and
+  DIV (100/7=14). The scenario proves reset readiness, exact W-cycle completion,
+  no protocol fault, held result visibility, and single consume when executable.
+  It is currently an unrun gate because no admitted self-hosted runner exists.
+- impl: Hardened strict VHDL shift emission for 32/64/65/128-bit HWIR. Shift
+  amounts at least the operand width now deterministically produce zero, while
+  in-range shifts convert only the bounded low index bits to VHDL INTEGER. This
+  removes arbitrary-wide `to_integer(unsigned(rhs))` overflow from iterative
+  multiplier/divider emission.
+- impl: Added the first real system-instruction execution provider. Exact ECALL
+  and EBREAK rows now produce normalized scalar retirement payloads, privilege-
+  sensitive ECALL causes (U=8, S=9, M=11), breakpoint cause 3, and synchronous
+  execute exceptions. Scalar composition admits the `system` provider through
+  the registered completion skid, atomic arbitration, trap normalizer, sole
+  retirement owner, and fault aggregator. CSR state semantics remain separate
+  follow-on work and are not claimed.
+- verify-blocked: A newer isolated Stage2 candidate exists at bootstrap6 and
+  has a retained `stage2-sanity.env` with `status=pass` and stable SHA-256
+  `54ab792f...f90f`, but its outer bootstrap terminated `exit-1` and the binary
+  exposes only the bootstrap `compile`/`native-build` surface, not `test` or the
+  full product CLI. Bootstrap7 is actively rebuilding in the same isolated
+  snapshot. The candidate was not deployed or treated as qualification
+  authority, and no competing build was started.
+- impl: Expanded the shared stateless scalar-I provider to cover LUI/AUIPC,
+  signed/unsigned set-less-than register/immediate rows, logical/arithmetic
+  register/immediate shifts, and RV64 ADD/SUB/shift word rows. Register shift
+  counts are masked to 5/6 bits, arithmetic shift is now a typed HWIR primitive,
+  and RV64 word results truncate then sign-extend exactly once. Focused host/
+  VHDL vectors cover upper immediates, signedness, masked shifts, and W edges.
+- impl: Added a typed, stateless Zicsr access projection for CSRRW/CSRRS/CSRRC
+  and their immediate forms. Declarative dispatch freezes the instruction and
+  CSR address; the graph checks CSR presence, current/address privilege class,
+  read-only writes, and register-source identity. It preserves CSRRW `rd=x0`
+  read suppression, CSRRS/CSRRC zero-source write suppression, returns the old
+  CSR value, and emits illegal-instruction cause/tval with no CSR effect on any
+  denied access. RV32/RV64 focused vectors exist.
+- superseded-gap: The projection initially lacked a sequential CSR owner and
+  product route. The following implementation entry closes that code gap; the
+  linked tracking record now retains only qualification evidence requirements.
+- impl: Closed the stateful Zicsr implementation boundary after the projection.
+  The one-entry CSR owner validates event, canonical-instruction, length, rd,
+  and child-graph identity; suppresses projection reads while stalled; captures
+  the pre-write result, full completion, CSR address/value, and trap metadata;
+  holds them under backpressure; and asserts `csr_commit_*` only on accepted
+  completion. Scalar product composition now routes CSR through the common
+  arbitration, trap, fault aggregator, and sole retirement owner without a
+  completion skid or second architectural order source.
+- verify-blocked: RV32/RV64 CSR products were added to the combined generated-
+  VHDL/GHDL analyze/elaborate gate, but that gate has not run through an admitted
+  self-hosted CLI. Zicsr remains unadvertised until cycle simulation proves
+  pre-write old-value behavior, exactly one commit, backpressure stability,
+  identity fault containment, reset, and no commit on denied access.
+- verify-blocked: Bootstrap7 produced a stable Stage2-only candidate with
+  `stage2-sanity.env status=pass` and SHA-256
+  `77c4a749870b4655563e459a49621e9d6e9324b88774abd6984179efcfff2e5b`,
+  but the outer run terminated `exit-1`. Its command surface is only `compile`
+  and `native-build`; it has no `test`, SPipe/docgen, or full product CLI and is
+  not qualification authority. The CSR focused/GHDL gate remains unexecuted.
+
+- impl: Added a typed one-entry accepted-effect provider for exact `rv.i.fence`
+  and `rv.i.fence_i` rows. It validates full event and instruction identity,
+  rejects reserved encodings, keeps `FENCE.I` behind the explicit Zifencei
+  profile, holds `kind/fm/pred/succ` under effect backpressure, and exposes
+  completion only after the effect is acknowledged. Runtime illegal events
+  complete as cause 2 without issuing an effect. Scalar composition now routes
+  the stateful fence provider through common arbitration, trap normalization,
+  fault aggregation, and the sole retirement owner.
+- verify-blocked: Focused owner/product tests and RV32 FENCE plus RV64 FENCE.I
+  GHDL analyze/elaborate rows exist. The available `bin/simple` imported a
+  different checkout and stopped on an unrelated replay-receipt parser error,
+  so no self-hosted or generated-VHDL qualification claim is made.
+
+- hardening: Iterative multiplier and divider admission now binds both original
+  and canonical 32-bit instruction identity before accepting operands. This
+  prevents a valid M operation from retiring forged source lineage. The
+  cycle-level GHDL scenario now covers held completion plus MUL, MULH, MULHSU,
+  MULHU, DIV/DIVU, REM, divide-by-zero, signed MIN/-1 overflow, and high-bit
+  unsigned division. It remains unexecuted under an admitted self-hosted CLI.
+- evidence: Added a closed ECALL/EBREAK system-provider scenario and manual for
+  REQ-G2-014/NFR-G2-015. It requires exact row admission, normalized strict
+  HWIR, a registered completion skid, common arbitration/trap/fault ownership,
+  and one architectural retirement owner. Added a CSR cycle-level GHDL lane
+  proving pre-write value capture, commit-after-acceptance, held completion,
+  single commit, and missing-CSR illegal completion. Both remain development
+  evidence until executed by an admitted full self-hosted CLI.
+- evidence: Added the generated-product system-exception GHDL cycle gate for
+  ECALL/U, EBREAK/M, and reserved-privilege ECALL. It drives matching provider
+  and decode event identities, holds retirement backpressure, checks precise
+  cause/tval and internally assigned order, then proves one consume without a
+  protocol fault. Source-level review corrected the M/Zmmul projection to use
+  the declarative database's actual `operand_width_bits` field; execution of
+  both gates remains unavailable under the current cross-worktree CLI.
+- hardening: Versioned the M/Zmmul projection receipt to v2 and bound it to the
+  complete frozen scalar decoder-plan SHA-256, which includes every ordered ISA
+  row's encoding, XLEN scope, operation class, operand width, writeback, memory,
+  and trap metadata. A caller that forges the stored hash and recomputes the
+  outer receipt is rejected by redispatch against the concrete configuration.
+- evidence: Added integrated generated-product M cycle simulation for RV32 MUL
+  and RV64 signed DIV. Unlike leaf-owner tests, this gate crosses the emitted
+  iterative provider, event arbitration, trap normalization, fault aggregation,
+  and sole architectural retirement owner; it holds the result under
+  backpressure, proves one consume, then injects an event-identity mismatch and
+  requires a sticky aggregated fault with no second retirement. Qualification remains pending an
+  admitted full self-hosted compiler.
+- evidence: Added complete-product scalar-I cycle simulation for RV32 ADDI,
+  RV64 SRAW, and RV32 ADD-to-x0. These vectors prove immediate and word-result
+  normalization, x0 suppression, registered completion stability, internal
+  order ownership, and one retirement through the common closed product. The
+  gate remains unqualified until an admitted compiler executes it with GHDL.
+- evidence: Added complete-product RV64 LD and sign-extending LW cycle simulation. It holds a typed
+  PA56 request under memory backpressure, accepts one ID-matched response,
+  checks normalized XLEN result/address/read-mask/read-data and internal order,
+  consumes one retirement, then proves an idle rogue response becomes a sticky
+  aggregated protocol fault with no duplicate architectural event. The gate is
+  implemented but not qualification evidence without an admitted compiler.
+- correctness: Control redirect validity now comes from the normalized
+  arbitration `provider_accept` pulse rather than the skid's held completion
+  level; the target remains registered in the skid. Added full-product RV32 BEQ
+  and IALIGN32 JAL cycle tests proving one atomic redirect, no repeated redirect
+  under retirement backpressure, and precise misalignment trap suppression.
+- evidence: Extended the LSU product gate with an RV64 LD misalignment case.
+  It requires zero memory traffic, cause 4 with full effective-address `tval`,
+  suppressed register effects, held trap retirement, and clean single consume.
+- evidence: Added complete-product CSR and FENCE behavioral gates. CSR commit
+  occurs once when the provider completion enters the sole retirement owner,
+  while the old-value retirement may remain externally stalled without another
+  write. FENCE now proves a held effect, no early retirement, one acknowledged
+  effect, and one later side-effect-free retirement. Both remain unqualified
+  until an admitted self-hosted compiler runs their generated VHDL.
+- impl: Materialized locked `commit.retire` observations in the scalar product
+  HWIR. The checked weave canonicalizes observation order, adds only typed
+  retirement-owner-to-top bindings, preserves the sole retirement owner, and
+  binds lock/weave receipts into the structural hash and VHDL provenance.
+  Aspect absence still uses the original scalar compile path with no added
+  ports or logic. Focused source tests exist, but qualification remains pending
+  an admitted full self-hosted compiler.
+- evidence: Added a focused scalar-aspect product GHDL gate that compiles a
+  locked RV32 ADD observation product, checks exact retirement-owner aliases
+  and lock/weave provenance, then analyzes and elaborates the closed entity.
+  The gate is defined but remains unqualified while the current post-fix
+  self-hosted bootstrap is still producing its Stage2 candidate.
+- impl: Added a deterministic evidence-referenced HWIR PPA planning pipeline over the
+  existing width/structural/resource/FSM/memory/DSP accounting passes. It
+  chains cost state, rejects malformed or negative inputs, requires structural
+  evidence references for changed plans and retirement-equivalence references
+  for any latency delta, and emits a stable receipt while explicitly retaining
+  `graph_rewrite_complete=false`. This is not an RTL-rewrite claim.
+- impl: Added the first declarative scalar ISA-plan-to-HWIR decoder generator.
+  It emits a deterministic fixed-RV32/RV64 masked-comparison graph with stable
+  per-row origins, explicit legality and row identity, and zero-normalized
+  illegal outputs; plan/config drift fails closed. Unit host-evaluation and
+  RV32/RV64 behavioral GHDL gates cover legal canonical/field output and full
+  illegal normalization, but remain unqualified pending a full admitted CLI.
+## Runtime scalar decode-dispatch refinement (2026-08-12)
+
+- The fixed-XLEN decoder emits semantic opcode and operand-width mode from the
+  declarative ISA entry.
+- A one-entry typed decoded-uop skid captures the full decoder/operand/event
+  envelope and holds it under backpressure.
+- Provider-bank composition remains development work; this boundary does not
+  claim a complete runtime scalar core or qualification.
+- One runtime-parameterized integer ALU covers the non-shift arithmetic,
+  logic, comparison, LUI/AUIPC, and RV64 add/sub word tranche. Shifts remain
+  fail-closed and unclaimed.
+# Runtime scalar ALU pipeline status
+
+- Implemented: fixed-XLEN decoder -> decoded-uop skid -> shared integer ALU ->
+  completion skid, with atomic completion-capture acceptance, typed no-effect
+  defaults, sticky protocol fault, closed bindings, and compiler-owned VHDL.
+- Implemented: masked RV32/RV64/W shifts, arithmetic-right shift, x0 source and
+  destination semantics, row/form/class/effect/event/original/fallthrough
+  checks, and exact structural provenance.
+- Development evidence only: leaf unit/GHDL specs and pipeline backend specs
+  exist; independent source/composition/backend review is PASS.
+- Qualification pending: the deployed runner currently resolves a separate
+  source root that fails parsing before these scenarios run. No authoritative
+  combined clocked GHDL receipt is retained.

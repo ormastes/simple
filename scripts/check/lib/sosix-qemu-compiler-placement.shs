@@ -1,0 +1,71 @@
+#!/bin/sh
+# Closed target-emitted compiler placement/readback contract.
+
+sosix_qemu_compiler_placement_die() {
+    echo "sosix-qemu-compiler-placement: $*" >&2
+    return 1
+}
+
+sosix_qemu_validate_compiler_placement() {
+    sqcp_host=$1 sqcp_guest=$2 sqcp_nonce=$3 sqcp_image_identity=$4
+    sqcp_source_identity=$5 sqcp_placement_file=$6 sqcp_manifest_file=$7 sqcp_transcript=$8
+    [ -f "$sqcp_placement_file" ] && [ -f "$sqcp_manifest_file" ] && [ -f "$sqcp_transcript" ] || {
+        sosix_qemu_compiler_placement_die "missing placement, manifest, or transcript evidence"; return 1;
+    }
+    [ "$(wc -l < "$sqcp_placement_file" | tr -d ' ')" -eq 8 ] || {
+        sosix_qemu_compiler_placement_die "placement receipt must contain exactly eight lines"; return 1;
+    }
+    [ "$(wc -l < "$sqcp_manifest_file" | tr -d ' ')" -eq 1 ] || {
+        sosix_qemu_compiler_placement_die "compiler manifest must contain exactly one line"; return 1;
+    }
+    sqcp_header="SIMPLEOS_COMPILER_PLACEMENT schema=1 host=$sqcp_host guest=$sqcp_guest nonce=$sqcp_nonce image_identity=$sqcp_image_identity"
+    [ "$(sed -n '1p' "$sqcp_placement_file")" = "$sqcp_header" ] || {
+        sosix_qemu_compiler_placement_die "noncanonical placement header"; return 1;
+    }
+
+    sqcp_payload_identity=
+    sqcp_line_number=2
+    for sqcp_spec in \
+        '/usr/bin/simple|compiler|same' \
+        '/bin/simple|compiler-alias|same' \
+        '/sys/apps/simple|compiler-alias|same' \
+        '/sys/apps/simple_compiler|compiler-alias|same' \
+        '/sys/apps/simple_interpreter|interpreter|independent' \
+        '/sys/apps/simple_loader|loader|independent' \
+        '/SYS/SIMPLETOOL.SDN|toolchain-manifest|independent'
+    do
+        sqcp_path=${sqcp_spec%%|*}; sqcp_tail=${sqcp_spec#*|}
+        sqcp_role=${sqcp_tail%%|*}; sqcp_relation=${sqcp_tail#*|}
+        sqcp_prefix="SIMPLEOS_COMPILER_READBACK host=$sqcp_host guest=$sqcp_guest nonce=$sqcp_nonce path=$sqcp_path role=$sqcp_role sha256="
+        sqcp_suffix=' target_native=true'
+        sqcp_line=$(sed -n "${sqcp_line_number}p" "$sqcp_placement_file")
+        case "$sqcp_line" in "$sqcp_prefix"*"$sqcp_suffix") ;; *)
+            sosix_qemu_compiler_placement_die "noncanonical readback for $sqcp_path"; return 1;;
+        esac
+        sqcp_hash=${sqcp_line#"$sqcp_prefix"}; sqcp_hash=${sqcp_hash%"$sqcp_suffix"}
+        printf '%s\n' "$sqcp_hash" | grep -Eq '^[0-9a-f]{64}$' || {
+            sosix_qemu_compiler_placement_die "invalid readback digest for $sqcp_path"; return 1;
+        }
+        if [ -z "$sqcp_payload_identity" ]; then
+            sqcp_payload_identity=sha256:$sqcp_hash
+        elif [ "$sqcp_relation" = same ] && [ "sha256:$sqcp_hash" != "$sqcp_payload_identity" ]; then
+            sosix_qemu_compiler_placement_die "compiler alias digest differs at $sqcp_path"; return 1
+        fi
+        [ "$(grep -Fxc -- "$sqcp_line" "$sqcp_transcript")" -eq 1 ] || {
+            sosix_qemu_compiler_placement_die "readback line is not uniquely retained for $sqcp_path"; return 1;
+        }
+        sqcp_line_number=$((sqcp_line_number + 1))
+    done
+
+    sqcp_placement_hash=$(sha256sum "$sqcp_placement_file" | awk '{print $1}')
+    sqcp_expected_manifest="SIMPLEOS_COMPILER_MANIFEST schema=1 host=$sqcp_host guest=$sqcp_guest nonce=$sqcp_nonce source_identity=$sqcp_source_identity payload_path=/usr/bin/simple payload_identity=$sqcp_payload_identity image_path=guest.img image_identity=$sqcp_image_identity placement_identity=sha256:$sqcp_placement_hash"
+    [ "$(sed -n '1p' "$sqcp_manifest_file")" = "$sqcp_expected_manifest" ] || {
+        sosix_qemu_compiler_placement_die "compiler manifest does not bind target readback lineage"; return 1;
+    }
+    [ "$(grep -Fxc -- "$sqcp_expected_manifest" "$sqcp_transcript")" -eq 1 ] || {
+        sosix_qemu_compiler_placement_die "compiler manifest is not uniquely retained in transcript"; return 1;
+    }
+    SOSIX_QEMU_COMPILER_PAYLOAD_IDENTITY=$sqcp_payload_identity
+    SOSIX_QEMU_COMPILER_PLACEMENT_IDENTITY=sha256:$sqcp_placement_hash
+    SOSIX_QEMU_COMPILER_MANIFEST_IDENTITY=sha256:$(sha256sum "$sqcp_manifest_file" | awk '{print $1}')
+}

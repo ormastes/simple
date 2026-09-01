@@ -1,0 +1,305 @@
+# codex-impl
+# Durable, create-once candidate authority.  This module persists plans and
+# admission evidence but deliberately never mutates protected Git refs, signs,
+# pushes, builds, or publishes.
+
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256, file_read}
+use std.nogc_sync_mut.io.crypto_sffi.{hash_sha256}
+use app.io.mod.{process_run_bounded, dir_create_all, file_atomic_write, file_lock, file_unlock}
+use app.release.policy.{
+    ReleaseSession, CandidateManifest, ReleaseAdmission, PromotionPlan,
+    candidate_identity, check_candidate_manifest, check_candidate_create_once,
+    check_candidate_authority_binding, check_promotion_plan, expected_candidate_ref
+}
+use app.release.session_authority.{
+    begin_release_session_mutation, end_release_session_mutation
+}
+
+struct CandidateCreateResult:
+    valid: bool
+    reason: text
+    candidate_identity: text
+    state_path: text
+    state_sha256: text
+    authority_plan: text
+    mutation: text
+
+struct CandidateStatus:
+    valid: bool
+    reason: text
+    candidate: CandidateManifest
+    candidate_identity: text
+    candidate_state_sha256: text
+    admission: ReleaseAdmission
+    admission_present: bool
+    admission_state_sha256: text
+    state_digest: text
+
+struct CandidateAdmissionResult:
+    valid: bool
+    reason: text
+    admission_state_sha256: text
+    state_digest: text
+    mutation: text
+
+struct CandidatePromotionResult:
+    valid: bool
+    reason: text
+    candidate_identity: text
+    persisted_state_digest: text
+    authority_plan: text
+    mutation: text
+
+fn _empty_candidate() -> CandidateManifest:
+    CandidateManifest(version: "", attempt: -1, candidate_ref: "", commit_sha: "", source_tree_sha256: "", policy_sha256: "", version_manifest_sha256: "", toolchain_manifest_sha256: "", support_manifest_sha256: "", build_graph_sha256: "", creator_identity: "", evidence_manifest_sha256: "")
+
+fn _empty_admission() -> ReleaseAdmission:
+    ReleaseAdmission(candidate_version: "", candidate_attempt: -1, candidate_ref: "", candidate_identity: "", candidate_commit_sha: "", source_tree_sha256: "", policy_sha256: "", version_manifest_sha256: "", toolchain_manifest_sha256: "", support_manifest_sha256: "", build_graph_sha256: "", creator_identity: "", artifact_manifest_sha256: "", evidence_manifest_sha256: "", qualification_receipt_sha256: "", admission_receipt_schema: "", admission_receipt_sha256: "")
+
+fn _create_rejected(reason: text) -> CandidateCreateResult:
+    CandidateCreateResult(valid: false, reason: reason, candidate_identity: "", state_path: "", state_sha256: "", authority_plan: "", mutation: "none")
+
+fn _status_rejected(reason: text) -> CandidateStatus:
+    CandidateStatus(valid: false, reason: reason, candidate: _empty_candidate(), candidate_identity: "", candidate_state_sha256: "", admission: _empty_admission(), admission_present: false, admission_state_sha256: "", state_digest: "")
+
+fn _admission_rejected(reason: text) -> CandidateAdmissionResult:
+    CandidateAdmissionResult(valid: false, reason: reason, admission_state_sha256: "", state_digest: "", mutation: "none")
+
+fn _promotion_rejected(reason: text) -> CandidatePromotionResult:
+    CandidatePromotionResult(valid: false, reason: reason, candidate_identity: "", persisted_state_digest: "", authority_plan: "", mutation: "none")
+
+fn _safe_field(value: text) -> bool:
+    value != "" and not value.contains("|") and not value.contains("\n") and not value.contains("\r")
+
+fn _git(root: text, args: [text]) -> (text, text, i64):
+    process_run_bounded("git", ["-C", root] + args, 5000, 262144)
+
+fn _common_state_root(root: text) -> text:
+    val (stdout, _stderr, code) = _git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if code != 0:
+        return ""
+    stdout.trim() + "/simple-release/candidates"
+
+fn _attempt_name(attempt: i64) -> text:
+    if attempt < 10:
+        return "a00" + attempt.to_text()
+    if attempt < 100:
+        return "a0" + attempt.to_text()
+    "a" + attempt.to_text()
+
+fn _candidate_dir(root: text, version: text, attempt: i64) -> text:
+    _common_state_root(root) + "/v" + version + "/" + _attempt_name(attempt)
+
+fn _candidate_content(candidate: CandidateManifest) -> text:
+    [
+        "simple-candidate-state/1", candidate.version, candidate.attempt.to_text(),
+        candidate.candidate_ref, candidate.commit_sha, candidate.source_tree_sha256,
+        candidate.policy_sha256, candidate.version_manifest_sha256,
+        candidate.toolchain_manifest_sha256, candidate.support_manifest_sha256,
+        candidate.build_graph_sha256, candidate.creator_identity,
+        candidate.evidence_manifest_sha256, candidate_identity(candidate)
+    ].join("|") + "\n"
+
+fn _candidate_from_content(content: text) -> CandidateManifest:
+    val fields = content.trim().split("|")
+    if fields.len() != 14 or fields[0] != "simple-candidate-state/1":
+        return _empty_candidate()
+    CandidateManifest(
+        version: fields[1], attempt: fields[2].to_int() ?? -1,
+        candidate_ref: fields[3], commit_sha: fields[4], source_tree_sha256: fields[5],
+        policy_sha256: fields[6], version_manifest_sha256: fields[7],
+        toolchain_manifest_sha256: fields[8], support_manifest_sha256: fields[9],
+        build_graph_sha256: fields[10], creator_identity: fields[11],
+        evidence_manifest_sha256: fields[12]
+    )
+
+fn _candidate_content_valid(content: text, candidate: CandidateManifest) -> bool:
+    val fields = content.trim().split("|")
+    fields.len() == 14 and fields[13] == candidate_identity(candidate) and
+        check_candidate_manifest(candidate).valid
+
+fn _admission_content(admission: ReleaseAdmission) -> text:
+    [
+        "simple-release-admission-state/2", admission.candidate_version,
+        admission.candidate_attempt.to_text(), admission.candidate_ref,
+        admission.candidate_identity, admission.candidate_commit_sha,
+        admission.source_tree_sha256, admission.policy_sha256,
+        admission.version_manifest_sha256, admission.toolchain_manifest_sha256,
+        admission.support_manifest_sha256, admission.build_graph_sha256,
+        admission.creator_identity, admission.artifact_manifest_sha256,
+        admission.evidence_manifest_sha256, admission.qualification_receipt_sha256,
+        admission.admission_receipt_schema,
+        admission.admission_receipt_sha256
+    ].join("|") + "\n"
+
+fn _admission_from_content(content: text) -> ReleaseAdmission:
+    val fields = content.trim().split("|")
+    if fields.len() != 18 or fields[0] != "simple-release-admission-state/2":
+        return _empty_admission()
+    ReleaseAdmission(
+        candidate_version: fields[1], candidate_attempt: fields[2].to_int() ?? -1,
+        candidate_ref: fields[3], candidate_identity: fields[4],
+        candidate_commit_sha: fields[5], source_tree_sha256: fields[6],
+        policy_sha256: fields[7], version_manifest_sha256: fields[8],
+        toolchain_manifest_sha256: fields[9], support_manifest_sha256: fields[10],
+        build_graph_sha256: fields[11], creator_identity: fields[12],
+        artifact_manifest_sha256: fields[13], evidence_manifest_sha256: fields[14],
+        qualification_receipt_sha256: fields[15], admission_receipt_schema: fields[16],
+        admission_receipt_sha256: fields[17]
+    )
+
+fn _promotion_from_admission(admission: ReleaseAdmission) -> PromotionPlan:
+    PromotionPlan(
+        candidate_identity: admission.candidate_identity,
+        tag: "v" + admission.candidate_version,
+        target_commit_sha: admission.candidate_commit_sha,
+        candidate_commit_sha: admission.candidate_commit_sha,
+        artifact_manifest_sha256: admission.artifact_manifest_sha256,
+        admitted_artifact_manifest_sha256: admission.artifact_manifest_sha256,
+        signed_tag: true, annotated_tag: true, exact_tag_push: true,
+        rebuild: false, fallback_artifact: false
+    )
+
+fn _state_digest(candidate_content: text, admission_content: text) -> text:
+    hash_sha256(candidate_content.len().to_text() + ":" + candidate_content + admission_content.len().to_text() + ":" + admission_content)
+
+fn create_candidate_plan(root: text, session: ReleaseSession, candidate: CandidateManifest) -> CandidateCreateResult:
+    val lease = begin_release_session_mutation(root, session)
+    if not lease.valid:
+        return _create_rejected(lease.reason)
+    var result = _create_rejected("candidate creation failed")
+    val binding = check_candidate_authority_binding(session, candidate, lease.verification.current_head)
+    if not binding.valid:
+        result = _create_rejected(binding.reason)
+    elif not _safe_field(candidate.creator_identity):
+        result = _create_rejected("candidate creator identity is unsafe for durable state")
+    else:
+        val state_root = _common_state_root(lease.verification.canonical_root)
+        val candidate_dir = _candidate_dir(lease.verification.canonical_root, candidate.version, candidate.attempt)
+        if state_root == "" or not dir_create_all(candidate_dir):
+            result = _create_rejected("candidate state directory cannot be created")
+        else:
+            val state_path = candidate_dir + "/candidate.state"
+            val lock = file_lock(state_root + "/authority.lock", 10)
+            if lock < 0:
+                result = _create_rejected("candidate authority lock is unavailable")
+            else:
+                val content = _candidate_content(candidate)
+                var reason = ""
+                if file_exists(state_path):
+                    val existing = file_read(state_path)
+                    val existing_candidate = _candidate_from_content(existing)
+                    val once = check_candidate_create_once(candidate_identity(existing_candidate), candidate)
+                    if not _candidate_content_valid(existing, existing_candidate):
+                        reason = "persisted candidate state is malformed or has an invalid identity"
+                    elif not once.valid:
+                        reason = once.reason
+                elif not file_atomic_write(state_path, content):
+                    reason = "candidate state write failed"
+                if reason == "":
+                    val ref_name = "refs/heads/" + candidate.candidate_ref
+                    val plan = "create-once " + ref_name + " at " + candidate.commit_sha + " with protected integration authority; expected old ref: absent; no mutation performed"
+                    result = CandidateCreateResult(valid: true, reason: "", candidate_identity: candidate_identity(candidate), state_path: state_path, state_sha256: file_hash_sha256(state_path), authority_plan: plan, mutation: "candidate-state-only")
+                else:
+                    result = _create_rejected(reason)
+                if not file_unlock(lock):
+                    result = _create_rejected("candidate authority lock release failed")
+    if not end_release_session_mutation(lease):
+        return _create_rejected("release session mutation lease release failed")
+    result
+
+fn load_candidate_status(root: text, version: text, attempt: i64) -> CandidateStatus:
+    val candidate_dir = _candidate_dir(root, version, attempt)
+    val candidate_path = candidate_dir + "/candidate.state"
+    if candidate_dir.starts_with("/v") or not file_exists(candidate_path):
+        return _status_rejected("persisted candidate state was not found")
+    val candidate_content = file_read(candidate_path)
+    val candidate = _candidate_from_content(candidate_content)
+    if not _candidate_content_valid(candidate_content, candidate):
+        return _status_rejected("persisted candidate state is malformed or has an invalid identity")
+    if candidate.version != version or candidate.attempt != attempt or candidate.candidate_ref != expected_candidate_ref(version, attempt):
+        return _status_rejected("persisted candidate state does not match the requested identity")
+    val admission_path = candidate_dir + "/admission.state"
+    var admission = _empty_admission()
+    var admission_content = ""
+    var admission_present = false
+    var admission_sha = ""
+    if file_exists(admission_path):
+        admission_content = file_read(admission_path)
+        admission = _admission_from_content(admission_content)
+        val promotion_check = check_promotion_plan(admission, _promotion_from_admission(admission))
+        if not promotion_check.valid or admission.candidate_identity != candidate_identity(candidate):
+            return _status_rejected("persisted release admission is malformed or does not bind the candidate")
+        admission_present = true
+        admission_sha = file_hash_sha256(admission_path)
+    CandidateStatus(
+        valid: true, reason: "", candidate: candidate,
+        candidate_identity: candidate_identity(candidate),
+        candidate_state_sha256: file_hash_sha256(candidate_path), admission: admission,
+        admission_present: admission_present, admission_state_sha256: admission_sha,
+        state_digest: _state_digest(candidate_content, admission_content)
+    )
+
+fn record_candidate_admission(root: text, session: ReleaseSession, expected_candidate_state_sha256: text, admission: ReleaseAdmission) -> CandidateAdmissionResult:
+    val lease = begin_release_session_mutation(root, session)
+    if not lease.valid:
+        return _admission_rejected(lease.reason)
+    var result = _admission_rejected("candidate admission failed")
+    val status = load_candidate_status(lease.verification.canonical_root, admission.candidate_version, admission.candidate_attempt)
+    if not status.valid:
+        result = _admission_rejected(status.reason)
+    elif status.candidate.commit_sha != lease.verification.current_head:
+        result = _admission_rejected("candidate admission session HEAD does not match the persisted candidate")
+    elif status.candidate_state_sha256 != expected_candidate_state_sha256:
+        result = _admission_rejected("candidate state changed before admission")
+    else:
+        val promotion_check = check_promotion_plan(admission, _promotion_from_admission(admission))
+        if not promotion_check.valid:
+            result = _admission_rejected(promotion_check.reason)
+        elif admission.candidate_identity != status.candidate_identity:
+            result = _admission_rejected("release admission does not bind the persisted candidate")
+        else:
+            val candidate_dir = _candidate_dir(lease.verification.canonical_root, admission.candidate_version, admission.candidate_attempt)
+            val admission_path = candidate_dir + "/admission.state"
+            val state_root = _common_state_root(lease.verification.canonical_root)
+            val lock = file_lock(state_root + "/authority.lock", 10)
+            if lock < 0:
+                result = _admission_rejected("candidate authority lock is unavailable")
+            else:
+                val content = _admission_content(admission)
+                var reason = ""
+                if file_exists(admission_path) and file_read(admission_path) != content:
+                    reason = "release admission is create-once and cannot be mutated"
+                elif not file_exists(admission_path) and not file_atomic_write(admission_path, content):
+                    reason = "release admission state write failed"
+                if reason == "":
+                    val next = load_candidate_status(lease.verification.canonical_root, admission.candidate_version, admission.candidate_attempt)
+                    if next.valid and next.admission_present:
+                        result = CandidateAdmissionResult(valid: true, reason: "", admission_state_sha256: next.admission_state_sha256, state_digest: next.state_digest, mutation: "admission-state-only")
+                    else:
+                        reason = if next.reason != "": next.reason else: "persisted release admission could not be verified"
+                if reason != "":
+                    result = _admission_rejected(reason)
+                if not file_unlock(lock):
+                    result = _admission_rejected("candidate authority lock release failed")
+    if not end_release_session_mutation(lease):
+        return _admission_rejected("release session mutation lease release failed")
+    result
+
+fn plan_persisted_candidate_promotion(root: text, version: text, attempt: i64, expected_state_digest: text) -> CandidatePromotionResult:
+    val status = load_candidate_status(root, version, attempt)
+    if not status.valid:
+        return _promotion_rejected(status.reason)
+    if not status.admission_present:
+        return _promotion_rejected("candidate has no persisted release admission")
+    if expected_state_digest == "" or expected_state_digest != status.state_digest:
+        return _promotion_rejected("candidate/admission state digest is stale")
+    val check = check_promotion_plan(status.admission, _promotion_from_admission(status.admission))
+    if not check.valid:
+        return _promotion_rejected(check.reason)
+    val plan = "verify persisted state " + status.state_digest + "; create signed annotated tag v" + version + " at " + status.candidate.commit_sha + "; push exactly refs/tags/v" + version + "; promote artifact manifest " + status.admission.artifact_manifest_sha256 + "; no rebuild or fallback; no mutation performed"
+    CandidatePromotionResult(valid: true, reason: "", candidate_identity: status.candidate_identity, persisted_state_digest: status.state_digest, authority_plan: plan, mutation: "none")
+
+export CandidateCreateResult, CandidateStatus, CandidateAdmissionResult, CandidatePromotionResult
+export create_candidate_plan, load_candidate_status, record_candidate_admission
+export plan_persisted_candidate_promotion

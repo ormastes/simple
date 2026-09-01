@@ -8,9 +8,39 @@
 |------:|-------:|--------:|--------:|---------:|
 | 64 | 64 | 0 | 0 | 0 |
 
-**Executable source:** `test/01_unit/app/llm_caret/main_spec.spl`
+# main_spec
 
-## should default to auto ui mode, claude_cli-less provider, no server
+Purpose: Prove that parse_main_args.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/llm_caret/main_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Prove that parse_main_args.
+Audience: compiler and tooling engineers who maintain this spec.
+
+## Scenarios
+
+### parse_main_args
+
+#### should default to auto ui mode, claude_cli-less provider, no server
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should default to auto ui mode, claude_cli-less provider, no server
+- Verify: should default to auto ui mode, claude_cli-less provider, no server
+   - Expected: a.provider equals ``
+   - Expected: a.ui_mode equals `auto`
+   - Expected: a.unknown equals ``
 
 **Group:** parse_main_args
 
@@ -225,7 +255,14 @@ expect(provider_session_id).to_equal("keep-provider-session")
 
 ## should keep Metal GUI out of the core Caret entry
 
-**Group:** production entry orchestration
+- should reject an unknown option before mutating configured owner state
+- Prepare injected CLI arguments
+- Run production entry orchestration
+- Check exact exit and owner effects
+   - Expected: exit_code equals `2`
+   - Expected: observed.provider equals `dummy`
+   - Expected: observed.model equals `before-model`
+   - Expected: provider_session_id equals `keep-provider-session`
 
 1. Request the GPU-only flag through the regular Caret entry.
 2. Require the explicit GPU companion boundary.

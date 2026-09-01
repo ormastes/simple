@@ -7,41 +7,19 @@ use app.ui.web.tls_serve_loop.{ConnStream}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
 use app.ui.web.auth_params.{ui_web_extract_bearer, ui_web_ws_response_protocol}
 use app.ui.web.session_token.{verify}
-# Local SHA-1/base64 helpers wrap runtime hooks to avoid as_bytes() interpreter limitation.
-@unsafe(reason: "raw SHA-1 state provider boundary", capabilities: [ffi])
-extern fn rt_sha1_new() -> i64
-@unsafe(reason: "raw SHA-1 state provider boundary", capabilities: [ffi])
-extern fn rt_sha1_write(handle: i64, data: text) -> i64?
-@unsafe(reason: "raw SHA-1 state provider boundary", capabilities: [ffi])
-extern fn rt_sha1_finish_base64(handle: i64) -> text?
-@unsafe(reason: "raw SHA-1 state provider boundary", capabilities: [ffi])
-extern fn rt_sha1_free(handle: i64)
+use std.nogc_sync_mut.websocket.handshake.{compute_websocket_accept}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.common.string_core.{text_to_bytes}
-extern fn rt_time_ms() -> u64
 
 fn ui_web_ws_time_ms() -> u64:
-    rt_time_ms()
+    current_time_ms() as u64
 
 fn ui_web_ws_text_to_bytes(s: text) -> [u8]:
     text_to_bytes(s)
 
-fn ui_web_ws_sha1_new() -> i64:
-    rt_sha1_new()
-
-fn ui_web_ws_sha1_write(handle: i64, data: text) -> i64:
-    rt_sha1_write(handle, data) ?? 0
-
-fn ui_web_ws_sha1_finish_base64(handle: i64) -> text:
-    rt_sha1_finish_base64(handle) ?? ""
-
-fn ui_web_ws_sha1_free(handle: i64):
-    rt_sha1_free(handle)
-
 # =========================================================================
 # WebSocket Upgrade
 # =========================================================================
-
-val WS_MAGIC: text = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 fn _header_value(headers: text, name: text) -> text:
     val target = "{name.lower()}:"
@@ -133,12 +111,8 @@ fn extract_ws_key(headers: text) -> text:
 fn compute_ws_accept(key: text) -> text:
     """Compute the Sec-WebSocket-Accept value.
     WebSocket spec requires: base64(SHA-1(key + magic)).
-    Uses runtime functions directly to avoid as_bytes() interpreter limitation."""
-    val combined = key + WS_MAGIC
-    val handle = ui_web_ws_sha1_new()
-    ui_web_ws_sha1_write(handle, combined)
-    val result = ui_web_ws_sha1_finish_base64(handle)
-    return result
+    Uses the canonical pure-Simple RFC 6455 handshake owner."""
+    compute_websocket_accept(key)
 
 # =========================================================================
 # WebSocket Frame Operations

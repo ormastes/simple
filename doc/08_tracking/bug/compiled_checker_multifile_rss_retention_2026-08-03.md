@@ -1,8 +1,7 @@
 # Compiled checker per-file transient ownership
 
 - **Id:** `compiled_checker_multifile_rss_retention_2026-08-03`
-- Status: **FIXED** — verified 2026-08-21 (bug-status-consistency audit): the per-file transient scope is live at `src/app/check/main.spl:192/198` with fail-closed begin/teardown at `:226/:261`, and the regression spec `test/01_unit/app/check/check_multifile_transient_scope_spec.spl` exists. `bug_db.sdn` has said `fixed` since the landing; only this doc was stale.
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** fixed for non-string transient parser objects; residual
   process-persistent strings remain tracked separately as
   `compiled_checker_transient_string_retention_2026-08-03`
 - **Severity:** P1
@@ -68,17 +67,12 @@ The prior max RSS was 2,219,888 KiB, so this narrow lifecycle fix reduced the
 sample by 75,160 KiB (3.4%). The measured residual slope was 33,503 KiB/file
 (32.7 MiB/file).
 
-## Ordinary transient-string retention: fixed
+## Residual retention (not fixed here)
 
-The runtime-wide owner fix keeps `RtCoreString` layout unchanged and uses its
-existing reserved word to distinguish scope-owned ordinary strings from shared
-short-cache and literal-intern strings. Scope teardown unregisters and frees an
-ordinary string once regardless of how many transient containers alias it.
-Promotion walks the reachable array/dict/enum/closure graph and clears transient
-ownership, while strings created after pause remain process-persistent.
-
-The core-C and Rust runtime twins implement the same boundary. The exact Rust
-regression `transient_ordinary_string_is_reclaimed_and_aliases_free_once` passed
-fresh on 2026-08-17 (1/1). Adjacent regressions cover reachable promotion,
-unreachable sibling reclamation, short/literal shared-cache protection,
-post-pause strings, and 128 repeated scopes returning to a fixed registry bound.
+`runtime_native.c::rt_core_reclaim_transient_immortal` deliberately skips
+strings, while `rt_string_new_uncached` allocates and registers every string as
+process-persistent. Parser token text and derived diagnostic/path strings
+therefore dominate the remaining slope even after non-string transient objects
+are reclaimed. Fixing string ownership safely is a runtime-wide lifetime change,
+not a checker-only cleanup, and is intentionally outside this pure-Simple lane.
+It remains open under `compiled_checker_transient_string_retention_2026-08-03`.

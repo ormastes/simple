@@ -4,8 +4,7 @@
 **Severity:** Medium-High (silent wrong output for the first half; loud build
 error for the second — bundled here because they share one root cause: lost
 type information for bool/float results)
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** source-fixed with focused MIR regressions; native execution pending
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Part A — `starts_with`/`ends_with`/`contains` interpolate as integers, not booleans
@@ -23,10 +22,9 @@ fn main():
 
 ### Root cause
 
-`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` registered
-the dedicated `starts_with` and `ends_with` runtime-call results as
-`MirType.i64()`. The shared text-method fallback also sent `contains` through
-the default i64 destination arm:
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` (~line
+1789-1794) registers the MIR destination type for these methods as plain
+`MirType.i64()`:
 
 ```
 val ts_dest_ty = match method:
@@ -35,23 +33,14 @@ val ts_dest_ty = match method:
     case _: MirType.i64()
 ```
 
-All three therefore lost their logical boolean type. Downstream,
-string-interpolation coercion
+`starts_with`/`ends_with`/`contains` fall into the `case _` arm (i64), even
+though they are logically boolean. Downstream, string-interpolation coercion
 (`expr_dispatch.spl` ~line 274) picks the render function by inspecting the
 local's registered MIR type
 (`is_bool`/`is_float`/`is_u64` → `rt_raw_bool_to_string` /
 `rt_raw_f64_to_string` / else `rt_raw_i64_to_string`). Since the dest type says
 i64, it renders through `rt_raw_i64_to_string`, printing `1`/`0` instead of
 `true`/`false`.
-
-### Part A resolution (2026-07-19)
-
-The shared MIR lowering now records `starts_with`, `ends_with`, and `contains`
-runtime-call results as `MirType.bool()` at their existing call sites. This
-matches the LLVM runtime declarations and keeps boolean provenance for print
-and interpolation. `text_bool_result_type_source_spec.spl` pins all three
-paths. The focused pure-Simple test runner currently crashes before reporting
-the scenario, so end-to-end native execution remains pending.
 
 ## Part B — `.to_string()` on `i64`/`f64`/`bool` is unresolved outside `SIMPLE_BOOTSTRAP=1`
 
@@ -116,34 +105,6 @@ float's raw bit pattern as if it were an integer — trading a **loud** MIR
 error for a **silent wrong answer**, which is strictly worse and exactly what
 this lane's mandate says never to do.
 
-### Parts B/C resolution (2026-07-19)
-
-Primitive `to_string()` and `to_text()` recovery now runs inside the
-`MethodResolution.Unresolved` arm only after custom struct-method recovery.
-It accepts only known text or supported bool/numeric MIR types, reuses the existing
-`coerce_concat_operand` bool/f32/f64/u64/integer renderer selection, and
-normalizes the result through `rt_interp_cstr`. Unknown, boxed, aggregate, and
-custom receivers retain the loud unresolved path. The focused MIR regression
-has no `SIMPLE_BOOTSTRAP` dependency and requires each bool/f64/u64/i64
-renderer once per conversion alias. Cranelift routes the f64 renderer through
-an explicit f64-to-i64 runtime import instead of its generic all-i64 fallback.
-Strict dual-backend scenarios cover a side-effecting custom-owner collision and
-bool/f64/i64/u64/text `.to_string()` output.
-Native execution remains pending because the
-available pure-Simple test artifacts either crash before scenario output or
-lack the `test` command.
-
-### Custom predicate owner follow-up (2026-07-19)
-
-Flat/native HIR also left custom struct methods named `starts_with`,
-`ends_with`, or `contains` unresolved. Their text fallbacks ran before the
-name-keyed custom-owner recovery and could steal those calls. MIR now probes
-the receiver once, recognizes static type owners before value lowering, skips
-the text fallback when either owner owns the method, and reuses instance locals
-in owner dispatch. The focused MIR regression covers all three instance/static
-collisions; the strict-dual owner fixture and shared cross-target fixture cover
-custom precedence plus builtin predicates and both primitive conversion aliases.
-
 ## Expected
 
 - Bool-returning string methods (`starts_with`, `ends_with`, `contains`, and
@@ -163,8 +124,10 @@ custom precedence plus builtin predicates and both primitive conversion aliases.
    (or keep `find`/`rfind` as `i64` — they return indices, not booleans; only
    `starts_with`/`ends_with`/`contains` are boolean) MIR type as appropriate
    per method.
-2. Recover primitive conversions only after custom method dispatch, then reuse
-   `expr_dispatch.spl`'s existing bool/float/u64/integer render selection.
+2. In the same file's `to_string` handler (line 1316-1346): change the gate
+   to `resolution_is_unresolved`, and extend the render-function selection to
+   mirror `expr_dispatch.spl`'s `is_bool`/`is_float`/`is_u64` logic instead of
+   hardcoding `rt_raw_i64_to_string`.
 3. Re-run this lane's probes plus the full smoke matrix
    (`sh scripts/check/native-smoke-matrix.shs`) after the change, since this
    touches shared MIR codegen used by every method call in this dispatch

@@ -52,9 +52,7 @@ impl LlvmBackend {
                         .coerce_value_to_type(source_val, Some(rv_type.into()), builder)?
                         .into_int_value();
                     let fn_type = rv_type.fn_type(&[rv_type.into()], false);
-                    let unwrap_name = if *to_type == crate::hir::TypeId::U64
-                        && *from_type == crate::hir::TypeId::ANY
-                    {
+                    let unwrap_name = if *to_type == crate::hir::TypeId::U64 && *from_type == crate::hir::TypeId::ANY {
                         "rt_value_as_u64"
                     } else {
                         "rt_value_as_int"

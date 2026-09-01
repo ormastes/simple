@@ -1,0 +1,53 @@
+# Capture a QEMU framebuffer to a PPM over QMP — pure Simple, no python3.
+#
+# The older WM lifecycle gate shells out to `python3` for its QMP turn, which
+# the repo rule forbids (ALL code in .spl/.shs).  This is the .spl equivalent,
+# built on the existing std.nogc_sync_mut.qemu QMP client rather than a second
+# socket implementation.
+#
+# Usage: simple run scripts/check/qmp_screendump.spl <qmp.sock> <out.ppm>
+# Prints:
+#   screendump_socket=<path>
+#   screendump_output=<path>
+#   screendump_status=pass|fail:<reason>
+# Exit 0 only when QEMU acknowledged the screendump AND the file is non-empty.
+#
+# A non-empty file is NOT by itself proof of real content — the caller must
+# still assert on pixels (see screen_ppm_distinct_colors.spl).
+
+use std.nogc_sync_mut.io_runtime.{get_args, file_exists, file_size}
+use std.nogc_sync_mut.qemu.qmp_client.{qmp_connect, qmp_disconnect, qmp_screendump}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() < 3:
+        print "screendump_status=fail:usage"
+        return 2
+
+    val socket_path = args[1]
+    val out_path = args[2]
+    print "screendump_socket={socket_path}"
+    print "screendump_output={out_path}"
+
+    val client = qmp_connect(socket_path)
+    if client.fd < 0:
+        print "screendump_status=fail:connect"
+        return 1
+
+    val ok = qmp_screendump(client, out_path, "ppm")
+    qmp_disconnect(client)
+
+    if not ok:
+        print "screendump_status=fail:qmp-rejected"
+        return 1
+    if not file_exists(out_path):
+        print "screendump_status=fail:no-file"
+        return 1
+    if file_size(out_path) <= 0:
+        # A zero-byte dump is a failure, never a skip: it is exactly the
+        # readback_bytes=0 shape that made an earlier Vulkan gate fail open.
+        print "screendump_status=fail:empty-file"
+        return 1
+
+    print "screendump_status=pass"
+    return 0

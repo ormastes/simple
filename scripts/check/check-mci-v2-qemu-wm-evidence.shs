@@ -1,0 +1,88 @@
+#!/bin/sh
+# Normalize live container/QEMU WM evidence for later signed MCI collection.
+set -eu
+LC_ALL=C; export LC_ALL
+
+usage() { echo "usage: $0 --capability FILE --capture FILE --screendump FILE --output FILE --run-id ID --source-hash SHA256 --configuration-hash SHA256 --captured-at-utc-ns NS --valid-until-utc-ns NS --now-utc-ns NS" >&2; exit 2; }
+capability= capture= screendump= output= run_id= source_hash= config_hash= captured= valid= now=
+while [ "$#" -gt 0 ]; do case "$1" in
+ --capability) capability=$2; shift 2;; --capture) capture=$2; shift 2;; --screendump) screendump=$2; shift 2;; --output) output=$2; shift 2;;
+ --run-id) run_id=$2; shift 2;; --source-hash) source_hash=$2; shift 2;; --configuration-hash) config_hash=$2; shift 2;;
+ --captured-at-utc-ns) captured=$2; shift 2;; --valid-until-utc-ns) valid=$2; shift 2;; --now-utc-ns) now=$2; shift 2;; *) usage;; esac; done
+
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+sha() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+token() { [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; }
+uint() { [ -n "$1" ] && case "$1" in *[!0-9]*) return 1;; esac; }
+field() { [ "$(grep -c "^$1=" "$2")" -eq 1 ] || return 1; sed -n "s/^$1=//p" "$2"; }
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+fail() { echo "BLOCKED: qemu-wm-$1" >&2; exit 1; }
+dec_le() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";exit !((length(a)<length(b))||(length(a)==length(b)&&a<=b))}'; }
+age_day() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";if(length(b)<length(a)||(length(b)==length(a)&&b<a))exit 1;borrow=0;out="";i=length(b);j=length(a);while(i>0){x=substr(b,i,1)+0-borrow;y=(j>0?substr(a,j,1)+0:0);if(x<y){x+=10;borrow=1}else borrow=0;out=(x-y)out;i--;j--}sub(/^0+/,"",out);if(out=="")out="0";lim="86400000000000";exit !((length(out)<length(lim))||(length(out)==length(lim)&&out<=lim))}'; }
+
+regular "$capability" && regular "$capture" && regular "$screendump" && token "$run_id" && sha "$source_hash" && sha "$config_hash" && uint "$captured" && uint "$valid" && uint "$now" && [ -n "$output" ] || usage
+dec_le "$captured" "$now" && dec_le "$now" "$valid" && age_day "$captured" "$now" && age_day "$captured" "$valid" || fail stale-or-invalid-lifetime
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+case "$output" in /*) out=$output;; *) out=$root/$output;; esac
+case "$out" in "$root"/*) :;; *) fail output-escapes-repository;; esac
+[ ! -L "$out" ] || fail output-symlink
+[ ! -e "$out" ] || fail output-exists
+mkdir -p "$(dirname -- "$out")"
+work=$(mktemp -d "$(dirname -- "$out")/.qemu-wm.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+cp -- "$capability" "$work/capability.env"; cp -- "$capture" "$work/capture.env"; cp -- "$screendump" "$work/frame.ppm"
+[ "$(hash_file "$capability")" = "$(hash_file "$work/capability.env")" ] && [ "$(hash_file "$capture")" = "$(hash_file "$work/capture.env")" ] && [ "$(hash_file "$screendump")" = "$(hash_file "$work/frame.ppm")" ] || fail input-changed-during-snapshot
+
+[ "$(field headless_qemu_virgl_status "$work/capability.env")" = pass ] || fail capability-not-pass
+image_id=$(field headless_qemu_virgl_image_id "$work/capability.env") || fail image-id-missing
+case "$image_id" in sha256:*) image_sha=${image_id#sha256:};; *) fail image-id-invalid;; esac
+sha "$image_sha" || fail image-id-invalid
+module_sha=$(field headless_qemu_virgl_adapter_module_sha256 "$work/capability.env") || fail module-hash-missing
+sha "$module_sha" || fail module-hash-invalid
+[ "$(field headless_qemu_virgl_adapter "$work/capability.env")" = packaged-ui-opengl-preload ] || fail adapter-mismatch
+render_node=$(field headless_qemu_virgl_render_node "$work/capability.env") || fail render-node-missing
+case "$render_node" in /dev/dri/renderD[0-9]*) :;; *) fail render-node-invalid;; esac
+
+[ "$(field qemu_gtk_wm_capture_status "$work/capture.env")" = pass ] || fail capture-not-pass
+[ "$(field qemu_gtk_wm_capture_qemu_live_status "$work/capture.env")" = pass ] || fail qmp-not-pass
+pixels=$(field qemu_gtk_wm_capture_qemu_live_pixels "$work/capture.env") || fail pixels-missing
+non_black=$(field qemu_gtk_wm_capture_qemu_live_non_black_pixels "$work/capture.env") || fail non-black-missing
+matches=$(field qemu_gtk_wm_capture_qemu_live_sample_matches "$work/capture.env") || fail matches-missing
+mismatches=$(field qemu_gtk_wm_capture_qemu_live_sample_mismatches "$work/capture.env") || fail mismatches-missing
+scene_mismatches=$(field qemu_gtk_wm_capture_qemu_live_scene_mismatches "$work/capture.env") || fail scene-mismatches-missing
+uint "$pixels" && uint "$non_black" && uint "$matches" && [ "$pixels" -gt 0 ] && [ "$non_black" -gt 0 ] && [ "$matches" -gt 0 ] && [ "$mismatches" = 0 ] && [ "$scene_mismatches" = 0 ] || fail pixel-oracle-failed
+[ "$(dd if="$work/frame.ppm" bs=2 count=1 2>/dev/null)" = P6 ] || fail screendump-not-ppm-p6
+set -- $(sed -n '2p' "$work/frame.ppm")
+[ "$#" -eq 2 ] && uint "$1" && uint "$2" && [ "$1" -gt 0 ] && [ "$2" -gt 0 ] || fail screendump-dimensions-invalid
+width=$1; height=$2
+awk -v w="$width" -v h="$height" -v p="$pixels" 'BEGIN{exit !(w*h==p)}' || fail screendump-pixel-count-mismatch
+[ "$(sed -n '3p' "$work/frame.ppm")" = 255 ] || fail screendump-maxval-invalid
+
+tmp=$work/qemu-wm-v1.evidence
+{
+ echo artifact_schema=mci-rendering-qemu-wm-evidence-v1
+ echo artifact_mode=live
+ echo release_eligible=true
+ echo evidence_id=headless_qemu_wm
+ echo run_id=$run_id
+ echo source_hash=$source_hash
+ echo configuration_hash=$config_hash
+ echo captured_at_utc_ns=$captured
+ echo valid_until_utc_ns=$valid
+ echo container_image_sha256=$image_sha
+ echo qemu_adapter_module_sha256=$module_sha
+ echo render_node=$render_node
+ echo screendump_sha256=$(hash_file "$work/frame.ppm")
+ echo width=$width
+ echo height=$height
+ echo pixel_count=$pixels
+ echo non_black_pixel_count=$non_black
+ echo sample_match_count=$matches
+ echo sample_mismatch_count=0
+ echo scene_mismatch_count=0
+ echo result=pass
+} > "$tmp"
+chmod 0600 "$tmp"
+mv "$tmp" "$out"
+echo qemu_wm_evidence_status=pass
+echo qemu_wm_evidence_artifact=$out

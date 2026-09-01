@@ -1,0 +1,81 @@
+# Pure StarFive JH7110 DTB selection policy.
+#
+# Firmware-memory reads remain in starfive_runtime.c. This owner receives only
+# scalar observations and decides which already-observed address is admissible.
+
+val STARFIVE_FDT_MAGIC: u64 = 0xD00DFEEDu64
+val STARFIVE_FALLBACK_DTB_ADDRESS: u64 = 0x42200000u64
+
+val STARFIVE_DTB_POLICY_DECISIONS: u64 = 3u64
+val STARFIVE_DTB_POLICY_OUTCOMES_REQUIRED: u64 = 63u64
+var _starfive_dtb_policy_outcomes: u64 = 0u64
+
+fn _starfive_dtb_policy_record(decision_id: u64, result: bool):
+    # The explicit branch avoids lowering a boolean object through an integer
+    # cast in freestanding object emission.
+    var outcome_id = decision_id * 2u64
+    if result:
+        outcome_id = outcome_id + 1u64
+    _starfive_dtb_policy_outcomes =
+        _starfive_dtb_policy_outcomes | (1u64 << outcome_id)
+
+@export("C", name: "starfive_dtb_policy_coverage_reset")
+fn starfive_dtb_policy_coverage_reset():
+    _starfive_dtb_policy_outcomes = 0u64
+
+@export("C", name: "starfive_dtb_policy_coverage_mask")
+fn starfive_dtb_policy_coverage_mask() -> u64:
+    _starfive_dtb_policy_outcomes
+
+@export("C", name: "starfive_dtb_policy_coverage_required")
+fn starfive_dtb_policy_coverage_required() -> u64:
+    STARFIVE_DTB_POLICY_OUTCOMES_REQUIRED
+
+@export("C", name: "starfive_dtb_policy_coverage_decisions")
+fn starfive_dtb_policy_coverage_decisions() -> u64:
+    STARFIVE_DTB_POLICY_DECISIONS
+
+fn _starfive_dtb_policy_select_core(
+    candidate_address: u64,
+    candidate_magic: u64,
+    fallback_magic: u64
+) -> u64:
+    if candidate_address != 0u64:
+        if candidate_magic == STARFIVE_FDT_MAGIC:
+            return candidate_address
+    if fallback_magic == STARFIVE_FDT_MAGIC:
+        return STARFIVE_FALLBACK_DTB_ADDRESS
+    0u64
+
+@export("C", name: "starfive_dtb_policy_select")
+fn starfive_dtb_policy_select(
+    candidate_address: u64,
+    candidate_magic: u64,
+    fallback_magic: u64
+) -> u64:
+    """Select a valid firmware DTB candidate, then the fixed board fallback."""
+    _starfive_dtb_policy_select_core(
+        candidate_address, candidate_magic, fallback_magic
+    )
+
+@export("C", name: "starfive_dtb_policy_select_coverage")
+fn starfive_dtb_policy_select_coverage(
+    candidate_address: u64,
+    candidate_magic: u64,
+    fallback_magic: u64
+) -> u64:
+    """Select identically while recording the six policy branch outcomes."""
+    val candidate_present = candidate_address != 0u64
+    _starfive_dtb_policy_record(0u64, candidate_present)
+    if candidate_present:
+        _starfive_dtb_policy_record(
+            1u64, candidate_magic == STARFIVE_FDT_MAGIC
+        )
+    if (candidate_address == 0u64 or
+        candidate_magic != STARFIVE_FDT_MAGIC):
+        _starfive_dtb_policy_record(
+            2u64, fallback_magic == STARFIVE_FDT_MAGIC
+        )
+    _starfive_dtb_policy_select_core(
+        candidate_address, candidate_magic, fallback_magic
+    )

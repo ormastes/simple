@@ -1,0 +1,63 @@
+#!/bin/sh
+# Focused contract self-check. It deliberately exercises ERROR, FAIL, and PASS.
+set -u
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/mcdc-perf-gate.XXXXXX") || exit 2
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+GATE="$ROOT/scripts/check/check-mcdc-performance-gate.shs"
+FIXTURE="$ROOT/test/05_perf/mcdc/mcdc_performance_fixture.c"
+TIME_WRAPPER="$ROOT/test/05_perf/mcdc/deterministic_time_wrapper.shs"
+CC=${CC:-cc}
+CC_BIN=$(command -v "$CC") || exit 2
+
+"$CC" -std=c11 -O2 -Wall -Wextra -Werror "$FIXTURE" -o "$TMP/fixture" || exit 2
+"$CC" -std=c11 -O2 -Wall -Wextra -Werror -DPOST_SEAL_ALLOC_COUNT=1 \
+    "$FIXTURE" -o "$TMP/bad-fixture" || exit 2
+
+set +e
+MCDC_PERF_SAMPLES=1 sh "$GATE" >"$TMP/error.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || { echo "mcdc-performance-gate-selfcheck: FAIL expected-error-2 got-$rc"; exit 1; }
+
+set +e
+MCDC_CONTROL_BIN="$TMP/bad-fixture" \
+MCDC_STATIC_OFF_BIN="$TMP/bad-fixture" \
+MCDC_STATIC_ON_BIN="$TMP/bad-fixture" \
+MCDC_DYNAMIC_IDLE_BIN="$TMP/bad-fixture" \
+MCDC_DYNAMIC_ARMED_BIN="$TMP/bad-fixture" \
+MCDC_COMPILER_BIN="$CC_BIN" MCDC_PERF_BUILD_DIR="$TMP/fail-evidence" \
+MCDC_TIME_BIN="$TIME_WRAPPER" \
+MCDC_PERF_WARMUPS=1 MCDC_PERF_SAMPLES=30 MCDC_PERF_ITERATIONS=1 \
+sh "$GATE" >"$TMP/fail.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || { echo "mcdc-performance-gate-selfcheck: FAIL expected-fail-1 got-$rc"; exit 1; }
+
+cp "$TMP/fixture" "$TMP/control"
+cp "$TMP/fixture" "$TMP/static-off"
+cp "$TMP/fixture" "$TMP/static-on"
+cp "$TMP/fixture" "$TMP/dynamic-idle"
+cp "$TMP/fixture" "$TMP/dynamic-armed"
+
+MCDC_CONTROL_BIN="$TMP/control" \
+MCDC_STATIC_OFF_BIN="$TMP/static-off" \
+MCDC_STATIC_ON_BIN="$TMP/static-on" \
+MCDC_DYNAMIC_IDLE_BIN="$TMP/dynamic-idle" \
+MCDC_DYNAMIC_ARMED_BIN="$TMP/dynamic-armed" \
+MCDC_COMPILER_BIN="$CC_BIN" \
+MCDC_PERF_BUILD_DIR="$TMP/evidence" \
+MCDC_TIME_BIN="$TIME_WRAPPER" \
+MCDC_PERF_WARMUPS=1 MCDC_PERF_SAMPLES=30 MCDC_PERF_ITERATIONS=1000 \
+sh "$GATE" >"$TMP/pass.out" 2>&1 || {
+    sed -n '1,20p' "$TMP/pass.out"
+    echo "mcdc-performance-gate-selfcheck: FAIL pass-case-rejected"
+    exit 1
+}
+
+[ -s "$TMP/evidence/raw_samples.tsv" ] || exit 1
+[ -s "$TMP/evidence/summary.tsv" ] || exit 1
+[ -s "$TMP/evidence/binary_identities.tsv" ] || exit 1
+[ -s "$TMP/evidence/sections.tsv" ] || exit 1
+[ -s "$TMP/evidence/allocation_receipts.tsv" ] || exit 1
+echo "mcdc-performance-gate-selfcheck: PASS"

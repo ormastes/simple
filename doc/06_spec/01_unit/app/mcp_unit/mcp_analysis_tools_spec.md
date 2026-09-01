@@ -27,7 +27,7 @@ mcp_analysis_tools_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 34 | 34 | 0 | 0 |
+| 32 | 32 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -209,6 +209,76 @@ expect(source).to_contain("simple_dependencies (project summary)")
 
 #### requires file parameter
 
+- requires file parameter
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("Missing required parameter: file")
+```
+
+</details>
+
+#### defaults revision to HEAD
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val revision = ""
+var rev = "HEAD"
+if revision != "":
+    rev = revision
+expect(rev).to_equal("HEAD")
+```
+
+</details>
+
+#### uses custom revision
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val revision = "main~5"
+var rev = "HEAD"
+if revision != "":
+    rev = revision
+expect(rev).to_equal("main~5")
+```
+
+</details>
+
+#### builds git show command for previous API
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val file = "src/app/cli/main.spl"
+val rev = "HEAD"
+var cmd = "git show " + rev + ":" + file + " 2>/dev/null | grep -n '^fn \\|^class \\|^struct \\|^enum \\|^export '"
+expect(cmd).to_contain("git show HEAD:")
+expect(cmd).to_contain(file)
+```
+
+</details>
+
+### simple_context tool
+
+#### requires file parameter
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -278,19 +348,17 @@ expect(cmd).to_contain(file)
 
 ### simple_context tool
 
-#### requires file parameter except source-less sql query
+#### requires file parameter
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("Missing required parameter: file")
-expect(source).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
-expect(source).to_contain("if file == \"\" and not sourceless_sql_query")
 ```
 
 </details>
@@ -353,41 +421,6 @@ expect(source).to_contain("Invalid format: ")
 
 </details>
 
-#### app MCP context forwards local index query and sql options
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 22 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
-expect(source).to_contain("val query = extract_field(body, \"query\")")
-expect(source).to_contain("val index = extract_field(body, \"index\")")
-expect(source).to_contain("val sql = extract_field(body, \"sql\")")
-expect(source).to_contain("val db_path = extract_field(body, \"db\")")
-expect(source).to_contain("val source_filter = extract_field(body, \"source_filter\")")
-expect(source).to_contain("var ctx_args = [\"context\"]")
-expect(source).to_contain("ctx_args.push(\"--index\")")
-expect(source).to_contain("ctx_args.push(\"--query=\" + query)")
-expect(source).to_contain("ctx_args.push(\"--sql\")")
-expect(source).to_contain("ctx_args.push(\"--db=\" + db_path)")
-expect(source).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
-
-val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
-expect(table).to_contain("prop_str(\"format\", \"Output format: text, markdown, json\")")
-expect(table).to_contain("prop_str(\"index\", \"Emit a local context-pack index (true/false)\")")
-expect(table).to_contain("prop_str(\"file\", \"Source file path; required except when sql=true and query is non-empty\")")
-expect(table).to_contain("prop_str(\"query\", \"Query local or SQL context-pack index\")")
-expect(table).to_contain("prop_str(\"sql\", \"Use Simple embedded SQLite for index/query (true/false)\")")
-expect(table).to_contain("e.required_json = build_required([])")
-expect(table).to_contain("prop_str(\"db\", \"SQLite index database path\")")
-expect(table).to_contain("prop_str(\"source_filter\", \"Filter SQL query rows by stored source path\")")
-```
-
-</details>
-
 #### app and lower MCP context find checked-in release binaries
 
 <details>
@@ -429,7 +462,7 @@ expect(source.contains("timeout 10 \" + _mcp_find_simple_binary() + \" check \" 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -447,13 +480,8 @@ expect(schema).to_contain("elif name == \"simple_context\"")
 expect(schema).to_contain("jp(\"file\", jo2")
 expect(schema).to_contain("jp(\"target\", jo2")
 expect(schema).to_contain("jp(\"format\", jo2")
-expect(schema).to_contain("jp(\"index\", jo2")
-expect(schema).to_contain("jp(\"query\", jo2")
-expect(schema).to_contain("jp(\"sql\", jo2")
-expect(schema).to_contain("jp(\"db\", jo2")
-expect(schema).to_contain("jp(\"source_filter\", jo2")
 expect(schema).to_contain("Output format: text, markdown, json")
-expect(schema).to_contain("req = \"[]\"")
+expect(schema).to_contain("req = \"[\" + js(\"file\") + \"]\"")
 ```
 
 </details>
@@ -483,19 +511,13 @@ expect(dispatcher).to_contain("handle_simple_context(id, body)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("target_report")
 expect(source).to_contain("_mcp_render_context_pack")
-expect(source).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
-expect(source).to_contain("ctx_args.push(\"--query=\" + query)")
-expect(source).to_contain("ctx_args.push(\"--sql\")")
-expect(source).to_contain("ctx_args.push(\"--db=\" + db_path)")
-expect(source).to_contain("val source_filter = extract_field(body, \"source_filter\")")
-expect(source).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
 ```
 
 </details>
@@ -614,14 +636,13 @@ expect(dispatcher).to_contain("handle_simple_ponytail(id, body)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
 expect(table).to_contain("tool_entry(\"simple_ponytail\"")
 expect(table).to_contain("Ponytail over-engineering audit")
-expect(table).to_contain("prop_str(\"mode\", \"Mode: audit, simplification\")")
 
 val static_tools = rt_file_read_text("src/app/mcp/main_static_tools.spl") ?? ""
 expect(static_tools).to_contain("_mcp_static_tool(\"simple_ponytail\"")
@@ -856,8 +877,8 @@ expect(cmd).to_contain("^type Position")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 34 |
-| Active scenarios | 34 |
+| Total scenarios | 32 |
+| Active scenarios | 32 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

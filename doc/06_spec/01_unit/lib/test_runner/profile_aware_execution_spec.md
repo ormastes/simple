@@ -1,6 +1,6 @@
-# profile_aware_execution_spec
+# Profile Aware Execution Specification
 
-> Verifies the profile aware execution behaviour end to end so maintainers of this
+> Tests covering --profile= flag parsing (test runner), profile resolution order (CLI > simple.sdn [lints] profile= > engine default), the simple.sdn tier reads the canonical lints.profile form (WP-4), propagate_env_vars lands the resolved profile in SIMPLE_SAFETY_PROFILE, severity mapping stays consistent end-to-end (no lint-main import).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# profile_aware_execution_spec
-
-Verifies the profile aware execution behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/test_runner/profile_aware_execution_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the profile aware execution behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Profile Aware Execution Specification
 
 ## Scenarios
 
@@ -41,7 +19,7 @@ unrelated sibling features are out of scope.
 
 #### accepts moderate
 
-- Verify: accepts moderate
+- accepts moderate
    - Expected: normalize_profile_name("moderate") equals `moderate`
    - Expected: options.profile equals `moderate`
 
@@ -49,13 +27,12 @@ unrelated sibling features are out of scope.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: accepts moderate")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("accepts moderate")
 expect(normalize_profile_name("moderate")).to_equal("moderate")
 val options = parse_test_args(["--profile=moderate"])
 expect(options.profile).to_equal("moderate")
@@ -65,7 +42,7 @@ expect(options.profile).to_equal("moderate")
 
 #### accepts strict
 
-- Verify: accepts strict
+- accepts strict
    - Expected: normalize_profile_name("strict") equals `strict`
    - Expected: options.profile equals `strict`
 
@@ -73,13 +50,12 @@ expect(options.profile).to_equal("moderate")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: accepts strict")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("accepts strict")
 expect(normalize_profile_name("strict")).to_equal("strict")
 val options = parse_test_args(["--profile=strict"])
 expect(options.profile).to_equal("strict")
@@ -89,7 +65,7 @@ expect(options.profile).to_equal("strict")
 
 #### accepts robust
 
-- Verify: accepts robust
+- accepts robust
    - Expected: normalize_profile_name("robust") equals `robust`
    - Expected: options.profile equals `robust`
 
@@ -97,13 +73,12 @@ expect(options.profile).to_equal("strict")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: accepts robust")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("accepts robust")
 expect(normalize_profile_name("robust")).to_equal("robust")
 val options = parse_test_args(["--profile=robust"])
 expect(options.profile).to_equal("robust")
@@ -113,7 +88,7 @@ expect(options.profile).to_equal("robust")
 
 #### accepts critical
 
-- Verify: accepts critical
+- accepts critical
    - Expected: normalize_profile_name("critical") equals `critical`
    - Expected: options.profile equals `critical`
 
@@ -121,13 +96,12 @@ expect(options.profile).to_equal("robust")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: accepts critical")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("accepts critical")
 expect(normalize_profile_name("critical")).to_equal("critical")
 val options = parse_test_args(["--profile=critical"])
 expect(options.profile).to_equal("critical")
@@ -139,7 +113,7 @@ expect(options.profile).to_equal("critical")
 
 #### normalizes reliable onto robust
 
-- Verify: normalizes reliable onto robust
+- normalizes reliable onto robust
    - Expected: normalize_profile_name("reliable") equals `robust`
    - Expected: options.profile equals `robust`
 
@@ -147,13 +121,12 @@ expect(options.profile).to_equal("critical")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: normalizes reliable onto robust")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("normalizes reliable onto robust")
 expect(normalize_profile_name("reliable")).to_equal("robust")
 val options = parse_test_args(["--profile=reliable"])
 expect(options.profile).to_equal("robust")
@@ -165,29 +138,7 @@ expect(options.profile).to_equal("robust")
 
 #### is rejected by test_args_validation_error with a clear message
 
-- Verify: is rejected by test_args_validation_error with a clear message
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-MC-012
-step("Verify: is rejected by test_args_validation_error with a clear message")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-val err = test_args_validation_error(["--profile=not-a-real-profile"])
-expect(err).to_contain("invalid value for --profile")
-```
-
-</details>
-
-#### normalize_profile_name returns empty for garbage, never crashes
-
-- Verify: normalize_profile_name returns empty for garbage, never crashes
-   - Expected: normalize_profile_name("not-a-real-profile") equals ``
+- is rejected by test_args_validation_error with a clear message
 
 
 <details>
@@ -197,9 +148,29 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: normalize_profile_name returns empty for garbage, never crashes")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("is rejected by test_args_validation_error with a clear message")
+val err = test_args_validation_error(["--profile=not-a-real-profile"])
+expect(err).to_contain("invalid value for --profile")
+```
+
+</details>
+
+#### normalize_profile_name returns empty for garbage, never crashes
+
+- normalize_profile_name returns empty for garbage, never crashes
+   - Expected: normalize_profile_name("not-a-real-profile") equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-LIB
+step("normalize_profile_name returns empty for garbage, never crashes")
 expect(normalize_profile_name("not-a-real-profile")).to_equal("")
 ```
 
@@ -209,20 +180,19 @@ expect(normalize_profile_name("not-a-real-profile")).to_equal("")
 
 #### parses --profile <name> with a following token
 
-- Verify: parses --profile <name> with a following token
+- parses --profile <name> with a following token
    - Expected: options.profile equals `critical`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: parses --profile <name> with a following token")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("parses --profile <name> with a following token")
 val options = parse_test_args(["--profile", "critical"])
 expect(options.profile).to_equal("critical")
 ```
@@ -231,19 +201,18 @@ expect(options.profile).to_equal("critical")
 
 #### missing-value form is rejected
 
-- Verify: missing-value form is rejected
+- missing-value form is rejected
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: missing-value form is rejected")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("missing-value form is rejected")
 val err = test_args_validation_error(["--profile"])
 expect(err).to_contain("missing value for --profile")
 ```
@@ -254,20 +223,19 @@ expect(err).to_contain("missing value for --profile")
 
 #### CLI flag wins when set
 
-- Verify: CLI flag wins when set
+- CLI flag wins when set
    - Expected: resolve_effective_profile(options) equals `critical`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: CLI flag wins when set")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("CLI flag wins when set")
 val options = parse_test_args(["--profile=critical"])
 expect(resolve_effective_profile(options)).to_equal("critical")
 ```
@@ -276,7 +244,7 @@ expect(resolve_effective_profile(options)).to_equal("critical")
 
 #### falls back to \
 
-- Verify: falls back to (engine default / unset) when no CLI flag and no simple.sdn is present
+- falls back to \
    - Expected: options.profile equals ``
    - Expected: resolve_effective_profile(options) equals ``
 
@@ -284,13 +252,12 @@ expect(resolve_effective_profile(options)).to_equal("critical")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: falls back to (engine default / unset) when no CLI flag and no simple.sdn is present")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("falls back to \")
 val options = parse_test_args([])
 expect(options.profile).to_equal("")
 # This repo's cwd during `bin/simple test` has no simple.sdn at the
@@ -304,20 +271,19 @@ expect(resolve_effective_profile(options)).to_equal("")
 
 #### resolves lints.profile to critical when the key is present
 
-- Verify: resolves lints.profile to critical when the key is present
+- resolves lints.profile to critical when the key is present
    - Expected: read_sdn_lints_profile("test/fixtures/project_sdn_profile/with_profile/simple.sdn") equals `critical`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: resolves lints.profile to critical when the key is present")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("resolves lints.profile to critical when the key is present")
 expect(read_sdn_lints_profile("test/fixtures/project_sdn_profile/with_profile/simple.sdn")).to_equal("critical")
 ```
 
@@ -325,20 +291,19 @@ expect(read_sdn_lints_profile("test/fixtures/project_sdn_profile/with_profile/si
 
 #### resolves to \
 
-- Verify: resolves to when the manifest has no lints section
+- resolves to \
    - Expected: read_sdn_lints_profile("test/fixtures/project_sdn_profile/without_profile/simple.sdn") equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: resolves to when the manifest has no lints section")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("resolves to \")
 expect(read_sdn_lints_profile("test/fixtures/project_sdn_profile/without_profile/simple.sdn")).to_equal("")
 ```
 
@@ -346,20 +311,19 @@ expect(read_sdn_lints_profile("test/fixtures/project_sdn_profile/without_profile
 
 #### no longer accepts the removed TOML-ish [lints] shape
 
-- Verify: no longer accepts the removed TOML-ish [lints] shape
+- no longer accepts the removed TOML-ish [lints] shape
    - Expected: read_sdn_lints_profile("test/fixtures/project_sdn_profile/legacy_toml/simple.sdn") equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: no longer accepts the removed TOML-ish [lints] shape")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("no longer accepts the removed TOML-ish [lints] shape")
 expect(read_sdn_lints_profile("test/fixtures/project_sdn_profile/legacy_toml/simple.sdn")).to_equal("")
 ```
 
@@ -369,20 +333,19 @@ expect(read_sdn_lints_profile("test/fixtures/project_sdn_profile/legacy_toml/sim
 
 #### sets SIMPLE_SAFETY_PROFILE=critical when --profile=critical is resolved
 
-- Verify: sets SIMPLE_SAFETY_PROFILE=critical when --profile=critical is resolved
+- sets SIMPLE_SAFETY_PROFILE=critical when --profile=critical is resolved
    - Expected: rt_env_get("SIMPLE_SAFETY_PROFILE") equals `critical`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: sets SIMPLE_SAFETY_PROFILE=critical when --profile=critical is resolved")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("sets SIMPLE_SAFETY_PROFILE=critical when --profile=critical is resolved")
 rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 val options = parse_test_args(["--profile=critical"])
 propagate_env_vars(options)
@@ -394,20 +357,19 @@ rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 
 #### sets SIMPLE_SAFETY_PROFILE=robust when --profile=robust is resolved
 
-- Verify: sets SIMPLE_SAFETY_PROFILE=robust when --profile=robust is resolved
+- sets SIMPLE_SAFETY_PROFILE=robust when --profile=robust is resolved
    - Expected: rt_env_get("SIMPLE_SAFETY_PROFILE") equals `robust`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: sets SIMPLE_SAFETY_PROFILE=robust when --profile=robust is resolved")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("sets SIMPLE_SAFETY_PROFILE=robust when --profile=robust is resolved")
 rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 val options = parse_test_args(["--profile=robust"])
 propagate_env_vars(options)
@@ -419,20 +381,19 @@ rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 
 #### leaves SIMPLE_SAFETY_PROFILE untouched when no profile resolves (today's behavior)
 
-- Verify: leaves SIMPLE_SAFETY_PROFILE untouched when no profile resolves (today's behavior)
+- leaves SIMPLE_SAFETY_PROFILE untouched when no profile resolves (today's behavior)
    - Expected: rt_env_get("SIMPLE_SAFETY_PROFILE") equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: leaves SIMPLE_SAFETY_PROFILE untouched when no profile resolves (today's behavior)")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("leaves SIMPLE_SAFETY_PROFILE untouched when no profile resolves (today's behavior)")
 rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 val options = parse_test_args([])
 propagate_env_vars(options)
@@ -445,7 +406,7 @@ expect(rt_env_get("SIMPLE_SAFETY_PROFILE")).to_equal("")
 
 #### critical resolves to Deny via the same env knob propagate_env_vars sets
 
-- Verify: critical resolves to Deny via the same env knob propagate_env_vars sets
+- critical resolves to Deny via the same env knob propagate_env_vars sets
    - Expected: safety_pass_severity() equals `SafetyPassSeverity.Deny`
    - Expected: safety_pass_severity_for_name(options.profile) equals `SafetyPassSeverity.Deny`
 
@@ -453,13 +414,12 @@ expect(rt_env_get("SIMPLE_SAFETY_PROFILE")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: critical resolves to Deny via the same env knob propagate_env_vars sets")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("critical resolves to Deny via the same env knob propagate_env_vars sets")
 rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 val options = parse_test_args(["--profile=critical"])
 propagate_env_vars(options)
@@ -472,20 +432,19 @@ rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 
 #### robust resolves to Warn (migration window, never Deny)
 
-- Verify: robust resolves to Warn (migration window, never Deny)
+- robust resolves to Warn (migration window, never Deny)
    - Expected: safety_pass_severity() equals `SafetyPassSeverity.Warn`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: robust resolves to Warn (migration window, never Deny)")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("robust resolves to Warn (migration window, never Deny)")
 rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 val options = parse_test_args(["--profile=robust"])
 propagate_env_vars(options)
@@ -497,7 +456,7 @@ rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 
 #### moderate and strict stay Advisory (no build impact)
 
-- Verify: moderate and strict stay Advisory (no build impact)
+- moderate and strict stay Advisory (no build impact)
    - Expected: safety_pass_severity() equals `SafetyPassSeverity.Advisory`
    - Expected: safety_pass_severity() equals `SafetyPassSeverity.Advisory`
 
@@ -505,13 +464,12 @@ rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-MC-012
-step("Verify: moderate and strict stay Advisory (no build impact)")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("moderate and strict stay Advisory (no build impact)")
 rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 val moderate_options = parse_test_args(["--profile=moderate"])
 propagate_env_vars(moderate_options)
@@ -526,6 +484,25 @@ rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/test_runner/profile_aware_execution_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering --profile= flag parsing (test runner), profile resolution order (CLI > simple.sdn [lints] profile= > engine default), the simple.sdn tier reads the canonical lints.profile form (WP-4), propagate_env_vars lands the resolved profile in SIMPLE_SAFETY_PROFILE, severity mapping stays consistent end-to-end (no lint-main import).
+- --profile= flag parsing (test runner)
+- profile resolution order (CLI > simple.sdn [lints] profile= > engine default)
+- the simple.sdn tier reads the canonical lints.profile form (WP-4)
+- propagate_env_vars lands the resolved profile in SIMPLE_SAFETY_PROFILE
+- severity mapping stays consistent end-to-end (no lint-main import)
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -539,36 +516,56 @@ rt_env_set("SIMPLE_SAFETY_PROFILE", "")
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-MC-012`
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `1e386c353698b78ead15bb56448754ea63c810667467903eba1d77e320139a5b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `56bc3aaa91f14a7f6228fc5e06177f61cd118f1566b880afc548837f8c9049b3`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `1e386c353698b78ead15bb56448754ea63c810667467903eba1d77e320139a5b`.
+Source SHA-256: `56bc3aaa91f14a7f6228fc5e06177f61cd118f1566b880afc548837f8c9049b3`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `1e386c353698b78ead15bb56448754ea63c810667467903eba1d77e320139a5b`  
+Source SHA-256: `56bc3aaa91f14a7f6228fc5e06177f61cd118f1566b880afc548837f8c9049b3`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **86/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/lib/test_runner/profile_aware_execution_spec.spl
 mirror: doc/06_spec/01_unit/lib/test_runner/profile_aware_execution_spec.md (current)
-findings: 3 blockers: 0
+findings: 6 blockers: 1
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/test_runner/profile_aware_execution_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=86; blocker cap makes effective=49
 doc/06_spec/01_unit/lib/test_runner/profile_aware_execution_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/test_runner/profile_aware_execution_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/lib/test_runner/profile_aware_execution_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/test_runner/profile_aware_execution_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/lib/test_runner/profile_aware_execution_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts moderate' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/test_runner/profile_aware_execution_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts strict' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/test_runner/profile_aware_execution_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts robust' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,53 @@
+use std.spec
+use common.spec.differential_trace.{NormalizedTrace}
+use std.nogc_sync_mut.test.differential_conformance.{GpuEnvironmentProfile}
+use std.nogc_sync_mut.gpu.chromium_reference_oracle_sffi.{ChromiumOraclePrimitiveFixture}
+use test.helpers.web_chromium_reference_oracle.{chromium_oracle_normalize_trace, chromium_oracle_scalar_fields_valid, normalize_simple_primitive_trace, assert_chromium_primitive_trace}
+
+fn profile() -> GpuEnvironmentProfile:
+    GpuEnvironmentProfile(
+        id: "chrome-web-oracle", ui_environment_profile_id: "host-web", expected_arch: "x86_64",
+        expected_transport: "host", required_features: ["primitive-v1"], expected_venus_version: "n/a",
+        expected_device_identity: "test-gpu", expected_oracle_identity: "chrome-primitive",
+        required_operations: ["web_dom:tree", "web_style:computed", "web_layout:boxes", "web_paint:cpu_readback", "web_input:dispatch", "web_gpu:requested"],
+        requires_device_execution: false, requires_device_origin_readback: false,
+        requires_fence: false, requires_no_fallback: true, max_trace_events: 32, max_elapsed_ns: 1000,
+    )
+
+fn fixture() -> ChromiumOraclePrimitiveFixture:
+    ChromiumOraclePrimitiveFixture(
+        fixture_id: "primitive-rect", viewport_width: 16, viewport_height: 8,
+        device_scale_milli: 1000, font_identity: "fixture-font", font_digest: "font-digest",
+        image_digest: "", image_width: 0, image_height: 0, html_css: "<div></div>",
+        event_script: "[]", requested_primitives: ["background", "border", "keyboard", "pointer", "rect", "resize", "scroll", "text"],
+        requires_gpu_receipt: false,
+    )
+
+fn trace_json() -> text:
+    "{\"schema_version\":1,\"run_id\":\"run-1\",\"environment_profile_id\":\"chrome-web-oracle\",\"ui_environment_profile_id\":\"host-web\",\"arch\":\"x86_64\",\"transport\":\"host\",\"enabled_features\":[\"primitive-v1\"],\"venus_version\":\"n/a\",\"device_identity\":\"test-gpu\",\"oracle_identity\":\"chrome-primitive\",\"device_origin_readback\":true,\"fallback_used\":false,\"dropped_events\":0,\"complete\":true,\"events\":[{\"schema_version\":1,\"run_id\":\"run-1\",\"sequence\":0,\"monotonic_ns\":0,\"layer_id\":\"web_dom\",\"operation\":\"tree\",\"object_id\":\"root\",\"parent_id\":\"\",\"result_class\":\"ok\",\"error_class\":\"\",\"payload_digest\":\"dom\",\"scalar_fields\":\"tag=div\",\"environment_profile_id\":\"chrome-web-oracle\"},{\"schema_version\":1,\"run_id\":\"run-1\",\"sequence\":1,\"monotonic_ns\":1,\"layer_id\":\"web_style\",\"operation\":\"computed\",\"object_id\":\"root\",\"parent_id\":\"\",\"result_class\":\"ok\",\"error_class\":\"\",\"payload_digest\":\"style\",\"scalar_fields\":\"rgba=000000ff\",\"environment_profile_id\":\"chrome-web-oracle\"},{\"schema_version\":1,\"run_id\":\"run-1\",\"sequence\":2,\"monotonic_ns\":2,\"layer_id\":\"web_layout\",\"operation\":\"boxes\",\"object_id\":\"root\",\"parent_id\":\"\",\"result_class\":\"ok\",\"error_class\":\"\",\"payload_digest\":\"layout\",\"scalar_fields\":\"bounds=0%3D0\",\"environment_profile_id\":\"chrome-web-oracle\"},{\"schema_version\":1,\"run_id\":\"run-1\",\"sequence\":3,\"monotonic_ns\":3,\"layer_id\":\"web_paint\",\"operation\":\"cpu_readback\",\"object_id\":\"frame\",\"parent_id\":\"root\",\"result_class\":\"ok\",\"error_class\":\"\",\"payload_digest\":\"pixels\",\"scalar_fields\":\"rgba=000000ff\",\"environment_profile_id\":\"chrome-web-oracle\"},{\"schema_version\":1,\"run_id\":\"run-1\",\"sequence\":4,\"monotonic_ns\":4,\"layer_id\":\"web_input\",\"operation\":\"dispatch\",\"object_id\":\"root\",\"parent_id\":\"\",\"result_class\":\"ok\",\"error_class\":\"\",\"payload_digest\":\"input\",\"scalar_fields\":\"ctrl_left=false\",\"environment_profile_id\":\"chrome-web-oracle\"},{\"schema_version\":1,\"run_id\":\"run-1\",\"sequence\":5,\"monotonic_ns\":5,\"layer_id\":\"web_gpu\",\"operation\":\"requested\",\"object_id\":\"frame\",\"parent_id\":\"root\",\"result_class\":\"ok\",\"error_class\":\"\",\"payload_digest\":\"vulkan\",\"scalar_fields\":\"api=vulkan\",\"environment_profile_id\":\"chrome-web-oracle\"}] }"
+
+describe "Chromium primitive normalized trace converter":
+    it "normalizes all six primitive layers and compares the CPU oracle":
+        val normalized = chromium_oracle_normalize_trace(fixture(), trace_json(), profile())
+        expect(normalized != nil).to_equal(true)
+        val observation = normalized.?
+        val simple = normalize_simple_primitive_trace(fixture(), observation.trace, "pixels", 16, 8, nil)
+        expect(assert_chromium_primitive_trace(observation, simple).matched).to_equal(true)
+
+    it "rejects raw native values unsorted scalar keys and fallback":
+        expect(chromium_oracle_scalar_fields_valid("b=2;a=1")).to_equal(false)
+        expect(chromium_oracle_scalar_fields_valid("key=handle%3D42")).to_equal(false)
+        val fallback = trace_json().replace("\"fallback_used\":false", "\"fallback_used\":true")
+        expect(chromium_oracle_normalize_trace(fixture(), fallback, profile()) == nil).to_equal(true)
+
+    it "rejects CPU pixel mutations even when semantic trace identity matches":
+        val normalized = chromium_oracle_normalize_trace(fixture(), trace_json(), profile()).?
+        val mutated = normalize_simple_primitive_trace(fixture(), normalized.trace, "other-pixels", 16, 8, nil)
+        expect(assert_chromium_primitive_trace(normalized, mutated).reason).to_equal("cpu-pixel-mismatch")
+
+    it "rejects a Simple fallback even if it reports matching pixels":
+        val normalized = chromium_oracle_normalize_trace(fixture(), trace_json(), profile()).?
+        var fallback_trace = normalized.trace
+        fallback_trace.fallback_used = true
+        val fallback = normalize_simple_primitive_trace(fixture(), fallback_trace, "pixels", 16, 8, nil)
+        expect(assert_chromium_primitive_trace(normalized, fallback).reason).to_equal("fallback-forbidden")

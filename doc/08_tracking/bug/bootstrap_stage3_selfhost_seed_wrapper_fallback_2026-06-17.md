@@ -1,8 +1,7 @@
 # Bootstrap Stage 3 self-host fails — stage2 `bootstrap_main` binary can only emit a seed-wrapper, not real native code
 
 - **Id:** bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** Open
 - **Severity:** P2 — **NEEDS REVISIT (2026-06-21):** the parenthetical below
   claims "the seed-built artifacts are valid," but that assumption is now
   contradicted. A fresh `--pure-simple` Stage 4 binary **SIGSEGVs on every

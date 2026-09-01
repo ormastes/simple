@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use simple_parser::ast::Expr;
 
-use super::evaluate_expr;
+use super::{evaluate_expr, try_unwrap_option_or_result};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
@@ -396,6 +396,11 @@ pub(super) fn eval_collection_expr(
         }
         Expr::Index { receiver, index } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
+            // Flow-sensitive nil checks narrow `T?` at compile time, but the
+            // interpreter still carries the runtime Option wrapper.  Keep
+            // indexing aligned with field/method access by consuming a present
+            // Option/Result payload before dispatching on the collection kind.
+            let recv_val = try_unwrap_option_or_result(&recv_val).unwrap_or(recv_val);
             let idx_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
 
             // Check if idx_val is a range object for slicing
@@ -515,7 +520,10 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => {
                     let raw_idx = require_integer_index_value(&idx_val, "array")?;
                     let len = arr.len() as i64;
-                    // Support negative indexing
+                    // Support negative indexing. Direct language indexing is
+                    // bounds checked for every array element type; the legacy
+                    // zero-on-OOB byte policy belongs only to the explicit
+                    // `rt_bytes_u8_at` extern.
                     let idx = if raw_idx < 0 {
                         (len + raw_idx) as usize
                     } else {
@@ -546,14 +554,22 @@ pub(super) fn eval_collection_expr(
                 Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => {
                     let raw_idx = require_integer_index_value(&idx_val, "byte array")?;
                     let len = bytes.len() as i64;
-                    let idx = if raw_idx < 0 { (len + raw_idx) as usize } else { raw_idx as usize };
+                    let idx = if raw_idx < 0 {
+                        (len + raw_idx) as usize
+                    } else {
+                        raw_idx as usize
+                    };
                     bytes
                         .get(idx)
-                        .map(|byte| Value::UInt { value: u64::from(*byte), width: 8 })
+                        .map(|byte| Value::UInt {
+                            value: u64::from(*byte),
+                            width: 8,
+                        })
                         .ok_or_else(|| {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("byte array has {} element(s)", len));
+                                .with_help(format!("byte array has {} element(s)", len))
+                                .with_note("ensure the index is within bounds");
                             CompileError::semantic_with_context(
                                 format!("array index out of bounds: index is {} but length is {}", raw_idx, len),
                                 ctx,
@@ -742,6 +758,10 @@ pub(super) fn eval_collection_expr(
         }
         Expr::TupleIndex { receiver, index } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
+            // Keep positional tuple access in parity with ordinary Index: an
+            // Option<Tuple>/Result<Tuple> which has been flow-narrowed still
+            // carries its Some/Ok wrapper in the interpreter value.
+            let recv_val = try_unwrap_option_or_result(&recv_val).unwrap_or(recv_val);
             let result = match recv_val {
                 Value::Tuple(tup) => tup.get(*index).cloned().ok_or_else(|| {
                     // E1044 - Tuple Index OOB
@@ -850,6 +870,15 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => arr.len() as i64,
                 Value::ByteArray(arr) | Value::FrozenByteArray(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
+                // Byte length for an already-raw-bytes text value, matching the
+                // `Value::Str` arm above (which is also byte-indexed) and the
+                // `Value::StrBytes` arm of the dispatch match further below.
+                // That dispatch arm was added on its own, leaving this length
+                // match without a StrBytes case, so a StrBytes receiver fell to
+                // the `_` arm here and errored "cannot slice value of type str
+                // with step" BEFORE it could ever reach the working arm — the
+                // very confusion that arm's own comment describes. Step-slicing
+                // the result of a step-slice therefore still failed.
                 Value::StrBytes(b) => b.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
                 Value::LabeledTuple { values, .. } => values.len() as i64,
@@ -966,20 +995,19 @@ pub(super) fn eval_collection_expr(
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("use .reversed() to reverse a string, array, or tuple; negative step is not supported");
                 return Err(CompileError::semantic_with_context(
-                    "invalid operation: negative slice step is not supported -- use .reversed() to reverse"
-                        .to_string(),
+                    "invalid operation: negative slice step is not supported -- use .reversed() to reverse".to_string(),
                     ctx,
                 ));
             }
 
             let result = match recv_val {
                 Value::Array(arr) => Ok(Value::array(slice_collection(&arr, start_idx, end_idx, step_val))),
-                Value::ByteArray(bytes) => {
-                    Ok(Value::byte_array(slice_collection(&bytes, start_idx, end_idx, step_val)))
-                }
-                Value::FrozenByteArray(bytes) => {
-                    Ok(Value::frozen_byte_array(slice_collection(&bytes, start_idx, end_idx, step_val)))
-                }
+                Value::ByteArray(bytes) => Ok(Value::byte_array(slice_collection(
+                    &bytes, start_idx, end_idx, step_val,
+                ))),
+                Value::FrozenByteArray(bytes) => Ok(Value::frozen_byte_array(slice_collection(
+                    &bytes, start_idx, end_idx, step_val,
+                ))),
                 Value::Str(s) => {
                     // BYTE-indexed slicing. The `len` these indices were
                     // normalized against (above) is already the BYTE length
@@ -1007,14 +1035,28 @@ pub(super) fn eval_collection_expr(
                     }
                     Ok(Value::text_from_bytes(sliced))
                 }
-                Value::StrBytes(bytes) => {
-                    // Already-raw text bytes (e.g. from a prior mid-codepoint
-                    // slice or a step-slice source) -- slice the raw bytes
-                    // directly and re-wrap the same way `text_from_bytes`
-                    // does for `Value::Str`, so a StrBytes receiver isn't
-                    // fatal here (see the StrBytes step-slice gap noted in
-                    // fix(mir): lower tuple-destructuring assignment).
-                    let sliced = slice_collection(bytes.as_slice(), start_idx, end_idx, step_val);
+                Value::StrBytes(b) => {
+                    // Same BYTE-indexed slicing as the `Value::Str` arm above,
+                    // just over an already-raw-bytes text value (produced by
+                    // that very arm, or by any other mid-codepoint-preserving
+                    // path -- see `Value::text_from_bytes`). Before this arm
+                    // existed, a second step-slice applied to the result of a
+                    // first one (e.g. any expression that step-slices twice)
+                    // fell into the `_` arm below and errored
+                    // "cannot slice value of type str with step" -- a
+                    // confusing message since `StrBytes::type_name()` is also
+                    // "str", right below a working `Str` arm. Reproduced by a
+                    // one-line hello-world `native-build` on this checkout.
+                    let sliced = slice_collection(b.as_slice(), start_idx, end_idx, step_val);
+                    if simple_runtime::text_slice_audit::enabled() {
+                        simple_runtime::text_slice_audit::note(
+                            simple_runtime::text_slice_audit::site::INTERP_BRACKET,
+                            start_idx,
+                            end_idx,
+                            b.as_slice(),
+                            &sliced,
+                        );
+                    }
                     Ok(Value::text_from_bytes(sliced))
                 }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
@@ -1074,6 +1116,7 @@ mod seed_regression_tests {
     //! path (`instantiate_class`) already pre-filled every declared field;
     //! this fix brought brace-form construction to parity.
 
+    use crate::error::{codes, CompileError};
     use crate::interpreter::evaluate_module;
     use simple_parser::Parser;
 
@@ -1149,6 +1192,60 @@ else:
     result_ = 1
 main = result_
 "#;
-        assert_eq!(run(src), 0, "explicitly provided fields must not be clobbered by the default pre-fill pass");
+        assert_eq!(
+            run(src),
+            0,
+            "explicitly provided fields must not be clobbered by the default pre-fill pass"
+        );
+    }
+
+    #[test]
+    fn tuple_index_consumes_present_option_payload() {
+        let src = r#"
+val pair = Some((7, 11))
+main = pair.0
+"#;
+        assert_eq!(run(src), 7);
+    }
+
+    #[test]
+    fn tuple_index_consumes_ok_result_payload() {
+        let src = r#"
+val pair = Ok((13, 17))
+main = pair.0
+"#;
+        assert_eq!(run(src), 13);
+    }
+
+    #[test]
+    fn typed_u8_index_preserves_valid_negative_index_without_widening_u32() {
+        let src = r#"
+val bytes: [u8] = [0x2du8, 0xfeu8]
+val words: [u32] = [45u32, 254u32]
+var result_ = 1
+if bytes[-1] == 0xfeu8 and words[-1] == 254u32:
+    result_ = 0
+main = result_
+"#;
+        assert_eq!(run(src), 0);
+    }
+
+    #[test]
+    fn direct_array_oob_reports_an_interpreter_error_for_u8_and_wider_arrays() {
+        for src in [
+            "val bytes: [u8] = [45u8]\nmain = bytes[1].to_i64()\n",
+            "val bytes: [u8] = [45u8]\nmain = bytes[-2].to_i64()\n",
+            "extern fn rt_byte_array_new(capacity: i64) -> [u8]\nval bytes = rt_byte_array_new(1)\nmain = bytes[1].to_i64()\n",
+            "extern fn rt_byte_array_new(capacity: i64) -> [u8]\nval bytes = freeze(rt_byte_array_new(1))\nmain = bytes[-2].to_i64()\n",
+            "val words: [u32] = [45u32]\nmain = words[1].to_i64()\n",
+        ] {
+            let mut parser = Parser::new(src);
+            let module = parser.parse().expect("parse direct array OOB fixture");
+            let err = evaluate_module(&module.items).expect_err("direct indexing must reject OOB");
+            let CompileError::SemanticWithContext(contextual) = err else {
+                panic!("direct indexing must report a contextual semantic error");
+            };
+            assert_eq!(contextual.context.code.as_deref(), Some(codes::INDEX_OUT_OF_BOUNDS));
+        }
     }
 }

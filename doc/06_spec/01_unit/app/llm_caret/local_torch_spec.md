@@ -1,4 +1,4 @@
-# LLM Caret Local-Torch Exchange
+# @manual: primary
 
 > Hermetic script, completion, guard, and shell-free process evidence for the
 > shipped local-torch provider boundary.

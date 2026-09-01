@@ -162,7 +162,6 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val runtime_builder = file_read(RUNTIME_BUILDER)
-val winit_builder = file_read(WINIT_BUILDER)
 expect(runtime_builder).to_contain(
     "--features runtime-symbol-table,vulkan"
 )
@@ -172,10 +171,6 @@ expect(runtime_builder).to_contain(
 expect(runtime_builder).to_contain(
     "-Wl,-install_name,@rpath/libsimple_runtime_c_wm.dylib"
 )
-expect(winit_builder).to_contain(
-    "install_name_tool -id \"@rpath/libspl_winit.dylib\""
-)
-expect(winit_builder).to_contain("codesign --verify \"$DST.new\"")
 ```
 
 </details>
@@ -206,7 +201,7 @@ expect(harness.contains("val LIVE_HEIGHT:")).to_equal(false)
 
 </details>
 
-#### admits only the standalone harness through a current trusted native build manifest
+#### admits only a current trusted self-hosted native build manifest
 
 <details>
 <summary>Executable SSpec</summary>
@@ -217,36 +212,19 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val source = file_read(WRAPPER)
 val builder = file_read(BUILDER)
-expect(builder).to_contain(
-    "MANIFEST_SCHEMA=\"macos-gpu-2d-live-native-manifest-v4\""
-)
 for field in [
     "backend", "entry_sha256", "shared_harness_sha256",
     "fixture_sha256", "backend_source_sha256", "repo_revision", "repo_fingerprint",
-    "shared_scene_fingerprint", "build_compiler_abs_path", "build_compiler_sha256",
-    "build_compiler_origin_path", "build_compiler_origin_sha256",
-    "build_compiler_identity", "build_compiler_source_kind",
-    "build_compiler_provenance_manifest_path",
-    "build_compiler_provenance_manifest_sha256",
-    "build_compiler_provenance_origin_path",
-    "build_compiler_provenance_origin_sha256", "build_args_sha256",
+    "shared_scene_fingerprint", "compiler_abs_path", "compiler_sha256",
+    "compiler_identity", "compiler_source_kind", "build_args_sha256",
     "build_environment_sha256", "built_at_utc", "winit_provider_sha256",
     "simple_runtime_provider_sha256", "simple_runtime_c_provider_sha256",
-    "build_transcript_path", "build_transcript_sha256",
     "source_input_file_count", "source_input_fingerprint",
     "output_path", "output_sha256", "output_status"
 ]:
     expect(builder).to_contain("{field}=")
-for forbidden in [
-    "gui_driver_", "GUI_DRIVER_", "resolve_gui_driver",
-    "verify_manifest_gui_driver", "build-macos-full-cli-gui-provenance.shs",
-    "canonical-pure-simple-full-cli", "build/bootstrap/full/",
-    "EVIDENCE_WIDGET_SOURCE", "EVIDENCE_WEB_SOURCE", "EVIDENCE_WEB_HTML",
-    "evidence_widget_source_", "evidence_web_source_", "evidence_web_html_",
-    "widget_showcase_gui.spl", "web_standards_showcase_gui.spl",
-    "browser_common_elements_showcase.html"
-]:
-    expect(builder.contains(forbidden)).to_equal(false)
+expect(builder).to_contain("canonical-repo-release-path-v1")
+expect(builder).to_contain("canonical-repo-release-path")
 expect(builder).to_contain("digest_args native-build")
 expect(builder).to_contain("--runtime-bundle core-c-bootstrap")
 expect(builder).to_contain("SIMPLE_LINK_OBJECTS=")
@@ -286,7 +264,7 @@ expect(builder.contains(
 )).to_equal(false)
 expect(builder).to_contain("manifest-build-args-sha256-mismatch")
 expect(builder).to_contain("manifest-build-environment-sha256-mismatch")
-expect(builder).to_contain("manifest-build-compiler-sha256-mismatch")
+expect(builder).to_contain("manifest-compiler-sha256-mismatch")
 expect(builder).to_contain("manifest-shared-scene-fingerprint-mismatch")
 expect(builder).to_contain("manifest-source-input-file-count-mismatch")
 expect(builder).to_contain("manifest-source-input-fingerprint-mismatch")
@@ -323,8 +301,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val source = file_read(WRAPPER)
 val harness = file_read(HARNESS)
-expect(harness).to_contain("val live_width: i32 = 3840")
-expect(harness).to_contain("val live_height: i32 = 2160")
+expect(harness).to_contain("LIVE_WIDTH: i32 = MACOS_GPU_2D_FIXTURE_WIDTH")
+expect(harness).to_contain("LIVE_HEIGHT: i32 = MACOS_GPU_2D_FIXTURE_HEIGHT")
 expect(harness).to_contain("LIVE_DPI: i32 = 300")
 expect(harness).to_contain("LIVE_FONT_POINTS: i32 = 24")
 expect(harness).to_contain("fn dpi_points_to_pixels")
@@ -382,11 +360,129 @@ expect(harness).to_contain("native_focus_observed, native_focus_kind")
 expect(harness).to_contain(
     "gpu_2d_live_semantic_raw_winit_reduced={" + "mutation.native_focus_reduced}"
 )
-expect(harness).to_contain("gpu_2d_live_semantic_pointer_key_delivery=observed")
-expect(source).to_contain("semantic-correlation-mismatch")
-expect(source).to_contain("native-focus-not-reduced")
-expect(source).to_contain("raw-winit-focus-not-reduced")
-expect(source).to_contain("pointer-key-delivery-not-observed")
+expect(harness).to_contain("gpu_2d_live_semantic_pointer_key_delivery=decoded-and-correlated")
+expect(wrapper_text).to_contain("semantic-correlation-mismatch")
+expect(wrapper_text).to_contain("native-focus-not-reduced")
+expect(wrapper_text).to_contain("raw-winit-focus-not-reduced")
+expect(wrapper_text).to_contain("pointer-key-delivery-not-correlated")
+```
+
+</details>
+
+#### require Vulkan font device evidence and warm atlas reuse
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("decode pointer wheel ordinary and sided modifier events without collapsing identity")
+val wrapper_text = file_read(WRAPPER)
+val harness = file_read(HARNESS)
+val provider = file_read("src/runtime/spl_winit/src/lib.rs")
+for accessor in [
+    "rt_winit_event_mouse_x_milli", "rt_winit_event_mouse_y_milli",
+    "rt_winit_event_wheel_x_milli", "rt_winit_event_wheel_y_milli",
+    "rt_winit_event_mouse_button", "rt_winit_event_key_keycode"
+]:
+    expect(harness).to_contain(accessor)
+for mapping in [
+    "KeyCode::ControlLeft => 1001", "KeyCode::ControlRight => 1002",
+    "KeyCode::AltLeft => 1003", "KeyCode::AltRight => 1004"
+]:
+    expect(provider).to_contain(mapping)
+expect(wrapper_text).to_contain("CGEvent(scrollWheelEvent2Source:")
+expect(wrapper_text).to_contain("postKey(59)")
+expect(wrapper_text).to_contain("postKey(62)")
+expect(wrapper_text).to_contain("postKey(58)")
+expect(wrapper_text).to_contain("postKey(61)")
+expect(wrapper_text).to_contain("decoded-sided-modifier-mismatch")
+```
+
+</details>
+
+#### require real audio completion and twenty fenced device-readback animation frames
+
+- require real audio completion and twenty fenced device-readback animation frames
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("require real audio completion and twenty fenced device-readback animation frames")
+val wrapper_text = file_read(WRAPPER)
+val harness = file_read(HARNESS)
+val draw_ir_lowering = file_read(
+    "src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+expect(harness).to_contain("LIVE_ANIMATION_FRAMES: i64 = 20")
+expect(harness).to_contain("macos_gpu_2d_animation_composition(")
+expect(harness).to_contain("engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(")
+expect(harness).to_contain("frame_result.readback_source != \"device_readback\"")
+expect(harness).to_contain("animation-frame-correlation-failed")
+expect(draw_ir_lowering).to_contain("eng.submit_batch()")
+expect(harness).to_contain("animation_frame_p95_ns")
+expect(harness).to_contain("rt_audio_backend_is_real()")
+expect(harness).to_contain("ui_click_pcm_play(audio_pcm)")
+expect(harness).to_contain("rt_audio_is_playing(audio_playback_handle)")
+expect(harness).to_contain("gpu_2d_live_audio_fallback=false")
+expect(wrapper_text).to_contain("animation-submit-fence-count-mismatch")
+expect(wrapper_text).to_contain("animation-capture-checksum-mismatch")
+expect(wrapper_text).to_contain("animation-p95-budget-exceeded")
+expect(wrapper_text).to_contain("audio-submit-completion-contract-failed")
+expect(wrapper_text).to_contain("max-rss-budget-exceeded")
+expect(wrapper_text).to_contain("native-driver-input-import-missing:")
+expect(wrapper_text).to_contain("winit-input-provider-symbol-missing:")
+expect(wrapper_text).to_contain("native-driver-audio-import-missing:")
+expect(wrapper_text).to_contain("audio-provider-symbol-missing:")
+```
+
+</details>
+
+#### require Vulkan font device evidence and warm atlas reuse
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = file_read(WRAPPER)
+val harness = file_read(HARNESS)
+for field in [
+    "font_batch_identity", "font_readback_source",
+    "font_device_checksum", "font_oracle_checksum",
+    "font_readback_nonblank_pixels", "font_parity",
+    "font_device_executed", "font_promotion_ready",
+    "font_atlas_upload_count", "font_atlas_upload_bytes",
+    "font_atlas_payload_sha256", "font_warm_batch_identity",
+    "font_warm_atlas_upload_count", "font_warm_atlas_upload_bytes",
+    "font_warm_atlas_payload_sha256", "font_warm_atlas_upload_delta"
+]:
+    expect(harness).to_contain("gpu_2d_live_{field}=")
+expect(harness).to_contain("vulkan_font_device_evidence_valid")
+expect(harness).to_contain("result.font_execution_target == \"vulkan\"")
+expect(harness).to_contain("result.font_readback_source == \"device_readback\"")
+expect(harness).to_contain("result.font_device_checksum == result.font_oracle_checksum")
+expect(harness).to_contain("result.font_readback_nonblank_pixels > 0")
+expect(harness).to_contain("result.font_atlas_upload_count > 0")
+expect(harness).to_contain("result.font_atlas_upload_bytes > 0")
+expect(harness).to_contain("lower_hex_sha256_valid")
+expect(source).to_contain("vulkan-font-atlas-payload-sha256-invalid")
+expect(source).to_contain("vulkan-font-warm-atlas-reuploaded")
+expect(source).to_contain("vulkan-font-warm-atlas-bytes-changed")
+expect(source).to_contain("vulkan-font-warm-atlas-payload-changed")
+expect(source).to_contain("[ \"$font_warm_atlas_upload_delta\" = 0 ]")
+expect(source).to_contain("vector-font-warm-rerasterized")
+expect(source).to_contain("vector-font-warm-hit-missing")
 ```
 
 </details>

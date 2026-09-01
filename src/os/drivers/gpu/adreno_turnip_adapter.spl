@@ -1,0 +1,75 @@
+"""Staged Adreno/Turnip Vulkan adapter; native promotion remains fail closed."""
+
+use std.common.processing.processing_ir.{ProcessingIr, processing_ir_validate}
+use std.common.processing.backend_contract.{ProcessingBackendArtifact, ProcessingBackendTarget, processing_backend_artifact_reject}
+use os.drivers.gpu.vulkan_device_port.*
+
+val ADRENO_TURNIP_RESUME_COMMAND: text = "SIMPLEOS_UNO_Q_ADRENO_LIVE=1 bin/simple test test/03_system/os/board/uno_q_adreno_turnip_live_spec.spl --mode=interpreter --no-session-daemon"
+
+class AdrenoTurnipAdapter:
+    board_identity: text
+    source_revision: text
+    license_identity: text
+    linux_device_identity: i64
+    probe_generation: i64
+    probe_count: i64
+
+    static fn blocked(board_identity: text, source_revision: text, license_identity: text) -> AdrenoTurnipAdapter:
+        AdrenoTurnipAdapter(board_identity: board_identity,
+            source_revision: source_revision, license_identity: license_identity,
+            linux_device_identity: 0, probe_generation: -1, probe_count: 0)
+
+    static fn linux_board_oracle(board_identity: text, source_revision: text, license_identity: text, device_identity: i64) -> AdrenoTurnipAdapter:
+        AdrenoTurnipAdapter(board_identity: board_identity,
+            source_revision: source_revision, license_identity: license_identity,
+            linux_device_identity: device_identity, probe_generation: -1, probe_count: 0)
+
+# @decision AD_PROVENANCE
+fn adreno_turnip_provenance_valid(adapter: AdrenoTurnipAdapter) -> bool:
+    adapter.board_identity != "" and adapter.source_revision != "" and
+        adapter.license_identity != ""
+
+fn adreno_turnip_resume_gate(adapter: AdrenoTurnipAdapter) -> text:
+    if not adreno_turnip_provenance_valid(adapter):
+        return "blocked:turnip-provenance-missing"
+    # @decision AD_LINUX_ID
+    if adapter.linux_device_identity <= 0:
+        return "blocked:uno-q-linux-device-evidence-missing"
+    "blocked:simpleos-native-firmware-mmu-queue-fence-readback-missing"
+
+impl VulkanDevicePort for AdrenoTurnipAdapter:
+    fn probe_environment(generation: i64) -> VulkanDeviceCapability:
+        # @decision AD_PROBE_CACHE
+        if self.probe_generation != generation:
+            self.probe_generation = generation
+            self.probe_count = self.probe_count + 1
+        val reason = adreno_turnip_resume_gate(self)
+        VulkanDeviceCapability(generation: generation, available: false,
+            evidence_class: if self.linux_device_identity > 0: VULKAN_EVIDENCE_BOARD_LINUX else: VULKAN_EVIDENCE_BLOCKED,
+            backend: "vulkan", board_identity: self.board_identity,
+            device_identity: self.linux_device_identity,
+            supports_firmware: false, supports_mmu: false, supports_queue: false,
+            supports_fence: false, supports_readback: false, reason: reason)
+
+    fn lower_processing_ir(ir: ProcessingIr) -> ProcessingBackendArtifact:
+        val valid = processing_ir_validate(ir)
+        # @decision AD_LOWER_VALID
+        if not valid.valid:
+            return processing_backend_artifact_reject(ir, ProcessingBackendTarget.VulkanSpirv, valid.reason)
+        processing_backend_artifact_reject(ir, ProcessingBackendTarget.VulkanSpirv,
+            "adreno-turnip-simpleos-native-lowering-not-admitted")
+
+    fn submit_processing_ir(ir: ProcessingIr, generation: i64, submission_id: i64) -> VulkanDeviceReceipt:
+        val valid = processing_ir_validate(ir)
+        # @decision AD_SUBMIT_VALID
+        if not valid.valid:
+            return vulkan_device_receipt_blocked(VULKAN_EVIDENCE_BLOCKED, "vulkan", generation, valid.reason)
+        vulkan_device_receipt_blocked(
+            if self.linux_device_identity > 0: VULKAN_EVIDENCE_BOARD_LINUX else: VULKAN_EVIDENCE_BLOCKED,
+            "vulkan", generation, adreno_turnip_resume_gate(self))
+
+    fn shutdown():
+        self.probe_generation = -1
+
+export ADRENO_TURNIP_RESUME_COMMAND, AdrenoTurnipAdapter
+export adreno_turnip_provenance_valid, adreno_turnip_resume_gate

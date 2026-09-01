@@ -17,6 +17,11 @@ description: "Codex research skill (Step 2 in cooperative pipeline). Forked para
 
 ## Phase 1: Local Research
 
+Resolve the exact feature and planned source paths through
+`doc/00_llm_process/knowledge_registry.sdn`. Retain exact feature-group and
+longest-prefix layer-base selection in `.spipe/<feature>/knowledge_selection.sdn`.
+Missing/ambiguous routes are research gaps; kernel/drivers are `mdsoc_only`.
+
 Search `src/` and `doc/` for related code, types, call chains, prior research, ADRs.
 
 - Use forked parallel threads: one for `src/compiler/`, one for `src/lib/`, one for `doc/`

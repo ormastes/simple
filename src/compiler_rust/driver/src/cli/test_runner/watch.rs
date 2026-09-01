@@ -52,18 +52,15 @@ pub fn watch_tests(options: TestOptions) -> Result<(), i32> {
 
     // Set up filesystem watch
     let (tx, rx) = channel();
-    let mut watcher: RecommendedWatcher =
-        RecommendedWatcher::new(tx, Config::default()).map_err(|e| {
-            eprintln!("Failed to initialize watcher: {}", e);
-            1
-        })?;
+    let mut watcher: RecommendedWatcher = RecommendedWatcher::new(tx, Config::default()).map_err(|e| {
+        eprintln!("Failed to initialize watcher: {}", e);
+        1
+    })?;
 
-    watcher
-        .watch(&test_path, RecursiveMode::Recursive)
-        .map_err(|e| {
-            eprintln!("Failed to watch path: {}", e);
-            1
-        })?;
+    watcher.watch(&test_path, RecursiveMode::Recursive).map_err(|e| {
+        eprintln!("Failed to watch path: {}", e);
+        1
+    })?;
 
     if !quiet {
         println!();

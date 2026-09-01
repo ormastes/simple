@@ -421,22 +421,22 @@ fn emit_vhdl_function(
                 )?;
                 resume_block = Some(merge);
             } else {
-            let base_assign_len = state.assigns.len();
-            let mut then_state = state.clone();
-            let mut else_state = state.clone();
-            let then_exprs =
-                lower_vhdl_return_block(func, &mut then_state, *then_block, &return_abi, types, entity_table)?;
-            let else_exprs =
-                lower_vhdl_return_block(func, &mut else_state, *else_block, &return_abi, types, entity_table)?;
-            let then_assigns = then_state.assigns.split_off(base_assign_len);
-            let else_assigns = else_state.assigns.split_off(base_assign_len);
-            state.signals.extend(then_state.signals);
-            state.signals.extend(else_state.signals);
-            state.instances.extend(then_state.instances);
-            state.instances.extend(else_state.instances);
-            state.assigns.extend(then_assigns);
-            state.assigns.extend(else_assigns);
-            return_assignments = Some(branch_return_assignments(func, then_exprs, else_exprs, &cond_expr)?);
+                let base_assign_len = state.assigns.len();
+                let mut then_state = state.clone();
+                let mut else_state = state.clone();
+                let then_exprs =
+                    lower_vhdl_return_block(func, &mut then_state, *then_block, &return_abi, types, entity_table)?;
+                let else_exprs =
+                    lower_vhdl_return_block(func, &mut else_state, *else_block, &return_abi, types, entity_table)?;
+                let then_assigns = then_state.assigns.split_off(base_assign_len);
+                let else_assigns = else_state.assigns.split_off(base_assign_len);
+                state.signals.extend(then_state.signals);
+                state.signals.extend(else_state.signals);
+                state.instances.extend(then_state.instances);
+                state.instances.extend(else_state.instances);
+                state.assigns.extend(then_assigns);
+                state.assigns.extend(else_assigns);
+                return_assignments = Some(branch_return_assignments(func, then_exprs, else_exprs, &cond_expr)?);
             }
         }
     }
@@ -3440,7 +3440,10 @@ fn clocked_top(clk: bool, state: i32) -> i32:
             .find("u_transition_0: entity work.transition")
             .expect("expected transition entity instance");
         let process = vhdl.find("p_clk: process(clk)").expect("expected clocked process");
-        assert!(instance < process, "entity instance must be concurrent with the clocked process:\n{vhdl}");
+        assert!(
+            instance < process,
+            "entity instance must be concurrent with the clocked process:\n{vhdl}"
+        );
         assert!(vhdl.contains("state => state"), "expected typed input wiring:\n{vhdl}");
         assert!(
             vhdl.contains("result_out => u_transition_0_result_out"),

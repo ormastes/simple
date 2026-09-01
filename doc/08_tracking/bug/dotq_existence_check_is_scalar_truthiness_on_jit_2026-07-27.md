@@ -1,12 +1,9 @@
 # BUG: `.?` existence check lowers to a raw scalar truthiness test on the JIT/native backend
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
-
 - **Filed:** 2026-07-27
 - **Lane:** NILQ
 - **Severity:** High (silent wrong-branch; no diagnostic)
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** Open — root cause is in a compiler tree, NOT patched by this lane
 - **Engines affected:** JIT / native default engine only. The interpreter is correct.
 
 ## Specification

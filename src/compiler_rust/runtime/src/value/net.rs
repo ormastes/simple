@@ -388,8 +388,6 @@ include!("net_tcp.rs");
 // ============================================================================
 #[cfg(feature = "runtime-tls")]
 include!("net_tls.rs");
-#[cfg(not(feature = "runtime-tls"))]
-include!("net_tls_stub.rs");
 
 // Runtime-owned browser HTTP worker jobs.
 include!("net_http_job.rs");

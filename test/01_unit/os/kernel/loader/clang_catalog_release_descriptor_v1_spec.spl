@@ -1,0 +1,161 @@
+use std.spec.{describe, it, expect}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.crypto.ed25519.{
+    pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1}
+use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{
+    clang_sysroot_catalog_required_paths_v1}
+use os.kernel.loader.clang_catalog_release_descriptor_v1.{
+    CLANG_CATALOG_RELEASE_DESCRIPTOR_DOMAIN_V1,
+    ClangCatalogReleaseDescriptorRowV1, ClangCatalogReleaseDescriptorV1,
+    clang_catalog_release_descriptor_signing_bytes_v1,
+    clang_catalog_release_descriptor_verify_v1,
+    clang_catalog_release_descriptor_verify_media_v1}
+
+fn seed_v1() -> [u8]:
+    [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+    ]
+
+fn target_v1() -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos")
+
+fn rows_v1(reordered: bool = false, mutate_hash: bool = false) -> [ClangCatalogReleaseDescriptorRowV1]:
+    val paths = clang_sysroot_catalog_required_paths_v1()
+    var rows: [ClangCatalogReleaseDescriptorRowV1] = []
+    var index: i64 = 0
+    while index < paths.len():
+        var path = paths[index]
+        if reordered and index == 0: path = paths[1]
+        if reordered and index == 1: path = paths[0]
+        var payload = "a" * 64
+        if mutate_hash and index == 4: payload = "A" + "a" * 63
+        rows.push(ClangCatalogReleaseDescriptorRowV1(
+            canonical_path: path, payload_sha256: payload,
+            scr1_sha256: "b" * 64))
+        index = index + 1
+    rows
+
+fn unsigned_v1(
+    release_id: text = "release-2026-08-25",
+    reordered: bool = false,
+    mutate_hash: bool = false
+) -> ClangCatalogReleaseDescriptorV1:
+    ClangCatalogReleaseDescriptorV1(
+        domain: CLANG_CATALOG_RELEASE_DESCRIPTOR_DOMAIN_V1,
+        target: target_v1(), release_id: release_id,
+        signer_key_id: "release-root", rows: rows_v1(reordered, mutate_hash),
+        signature: [])
+
+fn signed_rows_v1(
+    rows: [ClangCatalogReleaseDescriptorRowV1]
+) -> ClangCatalogReleaseDescriptorV1:
+    val pair = pure_ed25519_keypair_from_seed(seed_v1())
+    val descriptor = ClangCatalogReleaseDescriptorV1(
+        domain: CLANG_CATALOG_RELEASE_DESCRIPTOR_DOMAIN_V1,
+        target: target_v1(), release_id: "release-2026-08-25",
+        signer_key_id: "release-root", rows: rows, signature: [])
+    val body = clang_catalog_release_descriptor_signing_bytes_v1(
+        descriptor).unwrap()
+    ClangCatalogReleaseDescriptorV1(
+        domain: descriptor.domain, target: descriptor.target,
+        release_id: descriptor.release_id,
+        signer_key_id: descriptor.signer_key_id, rows: descriptor.rows,
+        signature: pure_ed25519_sign(seed_v1(), pair.1, body))
+
+fn signed_v1() -> ClangCatalogReleaseDescriptorV1:
+    signed_rows_v1(rows_v1())
+
+fn media_rows_v1(
+    payloads: [[u8]], records: [[u8]]
+) -> [ClangCatalogReleaseDescriptorRowV1]:
+    val paths = clang_sysroot_catalog_required_paths_v1()
+    var rows: [ClangCatalogReleaseDescriptorRowV1] = []
+    var index: i64 = 0
+    while index < paths.len():
+        rows.push(ClangCatalogReleaseDescriptorRowV1(
+            canonical_path: paths[index],
+            payload_sha256: sha256_u8_hex(payloads[index]),
+            scr1_sha256: sha256_u8_hex(records[index])))
+        index = index + 1
+    rows
+
+fn roots_v1(ambiguous: bool = false) -> [ExecutableManifestTrustedSignerV1]:
+    val pair = pure_ed25519_keypair_from_seed(seed_v1())
+    var roots = [ExecutableManifestTrustedSignerV1(
+        key_id: "release-root", public_key: pair.1)]
+    if ambiguous:
+        roots.push(ExecutableManifestTrustedSignerV1(
+            key_id: "release-root", public_key: pair.1))
+    roots
+
+describe "Clang catalog release descriptor v1":
+    it "accepts the exact ordered nine-row signed aggregate":
+        expect(clang_catalog_release_descriptor_verify_v1(
+            signed_v1(), roots_v1()).ok).to_equal(true)
+
+    it "rejects path reorder and lowercase hash violations":
+        expect(clang_catalog_release_descriptor_signing_bytes_v1(
+            unsigned_v1(reordered: true)).is_err()).to_equal(true)
+        expect(clang_catalog_release_descriptor_signing_bytes_v1(
+            unsigned_v1(mutate_hash: true)).is_err()).to_equal(true)
+
+    it "binds a changed payload hash into the signature":
+        val signed = signed_v1()
+        var changed_rows: [ClangCatalogReleaseDescriptorRowV1] = []
+        var index: i64 = 0
+        while index < signed.rows.len():
+            val row = signed.rows[index]
+            val payload = if index == 4: "c" * 64 else: row.payload_sha256
+            changed_rows.push(ClangCatalogReleaseDescriptorRowV1(
+                canonical_path: row.canonical_path, payload_sha256: payload,
+                scr1_sha256: row.scr1_sha256))
+            index = index + 1
+        val changed = ClangCatalogReleaseDescriptorV1(
+            domain: signed.domain, target: signed.target,
+            release_id: signed.release_id,
+            signer_key_id: signed.signer_key_id, rows: changed_rows,
+            signature: signed.signature)
+        expect(clang_catalog_release_descriptor_verify_v1(
+            changed, roots_v1()).ok).to_equal(false)
+
+    it "binds the signed aggregate to every supplied payload and SCR1 byte array":
+        var payloads: [[u8]] = []
+        var records: [[u8]] = []
+        var index: i64 = 0
+        while index < 9:
+            payloads.push([index.to_u8() + 1u8])
+            records.push([index.to_u8() + 31u8])
+            index = index + 1
+        val descriptor = signed_rows_v1(media_rows_v1(payloads, records))
+        expect(clang_catalog_release_descriptor_verify_media_v1(
+            descriptor, roots_v1(), payloads, records).ok).to_equal(true)
+        payloads[4] = [99u8]
+        expect(clang_catalog_release_descriptor_verify_media_v1(
+            descriptor, roots_v1(), payloads, records).reason).to_equal(
+                "media-digest-mismatch")
+        payloads[4] = [5u8]
+        records[7] = [101u8]
+        expect(clang_catalog_release_descriptor_verify_media_v1(
+            descriptor, roots_v1(), payloads, records).reason).to_equal(
+                "media-digest-mismatch")
+
+    it "binds the release identity into the signature":
+        val signed = signed_v1()
+        val changed = ClangCatalogReleaseDescriptorV1(
+            domain: signed.domain, target: signed.target,
+            release_id: "release-2026-08-26",
+            signer_key_id: signed.signer_key_id, rows: signed.rows,
+            signature: signed.signature)
+        expect(clang_catalog_release_descriptor_verify_v1(
+            changed, roots_v1()).ok).to_equal(false)
+
+    it "rejects ambiguous matching trust roots":
+        expect(clang_catalog_release_descriptor_verify_v1(
+            signed_v1(), roots_v1(ambiguous: true)).reason).to_equal(
+                "trusted-signer-not-unique")

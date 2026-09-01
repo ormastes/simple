@@ -3,8 +3,11 @@
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.userlib.syscall_raw
-use os.userlib.ipc_protocol(VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE, VFS_STAT, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST, VFS_OPEN_O_RDONLY, VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC)
+use os.userlib.ipc_protocol(VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE, VFS_STAT, VFS_STAT_NO_FOLLOW, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST, VFS_READLINK, VFS_OPEN_O_RDONLY, VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC)
 use os.kernel.types.fs_types(DirEntry, FsNode, FsNodeKind)
+use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_fstat}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileStat}
 use os.kernel.types.ipc_types(IpcPort, IpcMessage)
 use std.common.crypto.secure_memory.{secure_zero_u8_slots, secure_set_u8_length}
 pub use std.common.contracts.os.dbfs_vfs_mount_capability_v1.{DbfsVfsMountCapabilityV1}
@@ -12,6 +15,27 @@ pub use std.common.contracts.os.dbfs_vfs_mount_capability_v1.{DbfsVfsMountCapabi
 extern fn unsafe_addr_of(ref: any) -> u64
 
 val _DIRECT_FILE_MAX_BYTES: u64 = 1048576
+pub const VFS_DIRECTORY_ENTRY_LIMIT: u64 = 128u64
+pub const VFS_DIRECTORY_NAME_BYTES_LIMIT: u64 = 255u64
+pub const VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT: u64 = 3072u64
+
+pub struct VfsDirectoryListing:
+    entries: [DirEntry]
+    total_name_bytes: u64
+
+pub struct VfsFileStat:
+    """Bounded SFTP-ready metadata with explicit availability flags."""
+    kind: FsNodeKind
+    size: u64
+    mode: u32
+    uid: u32
+    gid: u32
+    atime_ns: u64
+    mtime_ns: u64
+    kind_available: bool
+    mode_available: bool
+    uid_gid_available: bool
+    times_available: bool
 
 pub fn dbfs_vfs_mount_capability_v1() -> DbfsVfsMountCapabilityV1:
     match syscall(79, 0, 0, 0, 0, 0):
@@ -49,6 +73,22 @@ pub fn file_write_direct(fd: i32, bytes: [u8]) -> Result<u64, text>:
         return Err("write failed with code {rc}")
     if rc as u64 != bytes.len() as u64:
         return Err("short write {rc}/{bytes.len()}")
+    Ok(rc as u64)
+
+pub fn file_write_progress_direct(fd: i32, bytes: [u8]) -> Result<u64, text>:
+    """Perform one bounded descriptor write and preserve partial progress.
+
+    Callers that require complete delivery must retry the unwritten suffix.
+    A zero-byte successful write is returned as progress so the caller can
+    reject the stalled descriptor without spinning.
+    """
+    if bytes.len() == 0 or bytes.len() > _DIRECT_FILE_MAX_BYTES:
+        return Err("invalid write bound")
+    val rc = rt_simpleos_file_write_bytes(fd as u64, bytes)
+    if rc < 0:
+        return Err("write failed with code {rc}")
+    if rc as u64 > bytes.len():
+        return Err("write returned invalid length {rc}/{bytes.len()}")
     Ok(rc as u64)
 
 pub fn file_close_direct(fd: i32) -> bool:
@@ -309,11 +349,101 @@ fn stat(path: text) -> Result<FsNode, text>:
         modified_ns: 0u64
     ))
 
+fn stat_no_follow(path: text) -> Result<FsNode, text>:
+    val response = vfs_ipc_request_bytes(VFS_STAT_NO_FOLLOW, _vfs_text_bytes(path))?
+    if response.len() != 11u64:
+        return Err("malformed no-follow stat response")
+    Ok(FsNode(
+        id: 0u64,
+        kind: _fs_node_kind_from_u8(response[0u64]),
+        size: _vfs_read_u64(response, 1u64),
+        permissions: _vfs_read_u16(response, 9u64),
+        owner: 0u32, group: 0u32, created_ns: 0u64, modified_ns: 0u64
+    ))
+
+pub fn file_lstat_bounded(path: text) -> Result<VfsFileStat, text>:
+    """Stat one bounded path without following its final symlink."""
+    if path.len() == 0u64 or path.len() > 4096u64 or path.contains("\0"):
+        return Err("invalid no-follow stat path length")
+    val node = stat_no_follow(path)?
+    val type_bits = match node.kind:
+        case FsNodeKind.Directory: 0o040000u32
+        case FsNodeKind.Symlink: 0o120000u32
+        case FsNodeKind.Device: 0o060000u32
+        case FsNodeKind.Pipe: 0o010000u32
+        case _: 0o100000u32
+    Ok(VfsFileStat(
+        kind: node.kind, size: node.size,
+        mode: type_bits | node.permissions.to_u32(),
+        uid: 0u32, gid: 0u32, atime_ns: 0u64, mtime_ns: 0u64,
+        kind_available: true, mode_available: true,
+        uid_gid_available: false, times_available: false))
+
+pub fn file_stat_bounded(path: text) -> Result<VfsFileStat, text>:
+    """Stat one bounded path through canonical VFS_STAT.
+
+    The current wire reply owns kind, size, and permission bits only. UID/GID
+    and times are marked unavailable rather than presented as real zeroes.
+    """
+    if path.len() == 0u64 or path.len() > 4096u64 or path.contains("\0"):
+        return Err("invalid stat path length")
+    val node = stat(path)?
+    val type_bits = match node.kind:
+        case FsNodeKind.Directory: 0o040000u32
+        case FsNodeKind.Symlink: 0o120000u32
+        case FsNodeKind.Device: 0o060000u32
+        case FsNodeKind.Pipe: 0o010000u32
+        case _: 0o100000u32
+    Ok(VfsFileStat(
+        kind: node.kind, size: node.size,
+        mode: type_bits | node.permissions.to_u32(),
+        uid: 0u32, gid: 0u32, atime_ns: 0u64, mtime_ns: 0u64,
+        kind_available: true, mode_available: true,
+        uid_gid_available: false, times_available: false))
+
+fn _vfs_kind_from_mode(mode: u32) -> FsNodeKind:
+    val type_bits = mode & 0o170000u32
+    if type_bits == 0o040000u32: return FsNodeKind.Directory
+    if type_bits == 0o120000u32: return FsNodeKind.Symlink
+    if type_bits == 0o060000u32 or type_bits == 0o020000u32:
+        return FsNodeKind.Device
+    if type_bits == 0o010000u32: return FsNodeKind.Pipe
+    FsNodeKind.File
+
+pub fn file_fstat_bounded(file_object_id: u64) -> Result<VfsFileStat, FsError>:
+    """Stat a live positioned file object without weakening handle ownership."""
+    val value: FileStat = g_vfs_positioned_fstat(file_object_id)?
+    Ok(VfsFileStat(
+        kind: _vfs_kind_from_mode(value.mode), size: value.size,
+        mode: value.mode, uid: value.uid, gid: value.gid,
+        atime_ns: value.atime_ns, mtime_ns: value.mtime_ns,
+        kind_available: (value.mode & 0o170000u32) != 0u32,
+        mode_available: value.mode != 0u32,
+        uid_gid_available: false,
+        times_available: value.atime_ns != 0u64 or value.mtime_ns != 0u64))
+
+pub fn readlink(path: text) -> Result<text, text>:
+    """Read one symbolic-link target through the canonical VFS service."""
+    if path.len() == 0u64 or path.len() > 4096u64:
+        return Err("invalid readlink path length")
+    val response = vfs_ipc_request_bytes(VFS_READLINK, _vfs_text_bytes(path))?
+    Ok(bytes_to_string(response))
+
 fn mkdir(path: text) -> Result<bool, text>:
     val resp = _vfs_request(VFS_MKDIR, path)?
     Ok(true)
 
-fn readdir(path: text) -> Result<[DirEntry], text>:
+pub fn list_directory_bounded(path: text) -> Result<VfsDirectoryListing, text>:
+    """List one directory through the capability-enforcing canonical VFS.
+
+    The VFS manager applies the caller's file grant and container namespace
+    before dispatch.  This client additionally rejects oversized or malformed
+    replies, so a filesystem driver cannot turn ``ls`` into unbounded work.
+    Entry order is preserved here; presentation owners may sort the bounded
+    result without changing filesystem identity.
+    """
+    if path.len() == 0u64 or path.len() > 4096u64:
+        return Err("invalid directory path length")
     val response = vfs_ipc_request_bytes(VFS_READDIR, _vfs_text_bytes(path))?
     # The current VFS service serializes each directory entry as
     # `kind:u8-as-decimal:name`, separated by newlines.  The enclosing IPC
@@ -321,35 +451,51 @@ fn readdir(path: text) -> Result<[DirEntry], text>:
     # textual until the service owner publishes a different READDIR format.
     val resp = bytes_to_string(response)
     var entries: [DirEntry] = []
+    var total_name_bytes: u64 = 0u64
     if resp.len() == 0:
-        return Ok(entries)
+        return Ok(VfsDirectoryListing(entries: entries, total_name_bytes: 0u64))
     val lines = resp.split("\n")
     var i: u64 = 0
     while i < lines.len() as u64:
         val line = lines[i as i64]
-        if line.len() > 0:
-            # The service emits `kind:name`.  A Unix filename may itself
-            # contain `:`, so only the first delimiter belongs to the wire
-            # envelope; everything after it is the exact entry name.
-            val separator = line.index_of(":")
-            if separator > 0:
-                val kind_val = line.slice(0, separator).parse_u8()
-                val name_val = line.slice(separator + 1, line.len())
-                entries.push(DirEntry(
-                    name: name_val,
-                    node: FsNode(
-                        id: 0u64,
-                        kind: _fs_node_kind_from_u8(kind_val),
-                        size: 0u64,
-                        permissions: 0u16,
-                        owner: 0u32,
-                        group: 0u32,
-                        created_ns: 0u64,
-                        modified_ns: 0u64
-                    )
-                ))
+        if line.len() == 0u64:
+            return Err("malformed empty VFS directory entry")
+        if entries.len() >= VFS_DIRECTORY_ENTRY_LIMIT:
+            return Err("directory exceeds entry limit")
+        # The service emits `kind:name`. A Unix filename may itself contain
+        # `:`, so only the first delimiter belongs to the wire envelope.
+        val separator = line.index_of(":")
+        if separator <= 0:
+            return Err("malformed VFS directory entry")
+        val kind_text = line.slice(0, separator)
+        if kind_text.len() != 1u64 or kind_text.byte_at(0u64) < 48u8 or
+            kind_text.byte_at(0u64) > 52u8:
+            return Err("malformed VFS directory kind")
+        val kind_val = kind_text.parse_u8()
+        val name_val = line.slice(separator + 1, line.len())
+        val name_bytes = name_val.len().to_u64()
+        if name_bytes == 0u64 or name_bytes > VFS_DIRECTORY_NAME_BYTES_LIMIT or
+            name_val.contains("\0"):
+            return Err("invalid VFS directory entry name")
+        if total_name_bytes > VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT or
+            name_bytes > VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT - total_name_bytes:
+            return Err("directory exceeds name byte limit")
+        total_name_bytes = total_name_bytes + name_bytes
+        entries.push(DirEntry(
+            name: name_val,
+            node: FsNode(
+                id: 0u64,
+                kind: _fs_node_kind_from_u8(kind_val),
+                size: 0u64,
+                permissions: 0u16,
+                owner: 0u32,
+                group: 0u32,
+                created_ns: 0u64,
+                modified_ns: 0u64
+            )
+        ))
         i = i + 1
-    Ok(entries)
+    Ok(VfsDirectoryListing(entries: entries, total_name_bytes: total_name_bytes))
 
 fn remove(path: text) -> Result<bool, text>:
     val resp = _vfs_request(VFS_REMOVE, path)?
@@ -388,4 +534,7 @@ fn mount_list() -> Result<[text], text>:
     Ok(result)
 
 # Minimal process-side byte I/O surface used by filesystem-launched tools.
-export file_open_direct, file_read_direct, file_close_direct, stat
+export file_open_direct, file_read_direct, file_close_direct, stat, list_directory_bounded,
+    VfsDirectoryListing, VfsFileStat, file_stat_bounded, file_lstat_bounded, file_fstat_bounded,
+    VFS_DIRECTORY_ENTRY_LIMIT,
+    VFS_DIRECTORY_NAME_BYTES_LIMIT, VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT

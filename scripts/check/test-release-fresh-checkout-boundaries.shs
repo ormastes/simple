@@ -1,0 +1,115 @@
+#!/bin/sh
+# Adversarial fresh-checkout contracts for release observation and candidate ordering.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+workflow="$root/.github/workflows/candidate.yml"
+checkpoint_workflow="$root/.github/workflows/release-convergence-checkpoint.yml"
+checkpoint="$root/scripts/release/convergence-checkpoint.shs"
+
+step_line() {
+    grep -nF -- "- name: $1" "$workflow" | cut -d: -f1
+}
+
+stage2_line=$(step_line 'Build receipt-free admitted Stage 2 trust root')
+stage3_line=$(step_line 'Resume admitted Stage 3 with planner receipt')
+stage4_line=$(step_line 'Resume release-bound Stage 4 with planner receipt')
+preflight_line=$(step_line 'Validate canonical version and required support policy')
+reserve_line=$(step_line 'Reserve create-once candidate artifact after qualification')
+test "$stage2_line" -lt "$stage3_line"
+test "$stage3_line" -lt "$stage4_line"
+test "$stage4_line" -lt "$preflight_line"
+test "$preflight_line" -lt "$reserve_line"
+grep -Fq -- '--full-bootstrap' "$workflow"
+grep -Fq -- '--stop-after-stage2' "$workflow"
+grep -Fq -- '--target=//bootstrap:stage3' "$workflow"
+grep -Fq -- '--target=//bootstrap:stage4' "$workflow"
+test "$(grep -Fc -- '--bootstrap-receipt="$receipt"' "$workflow")" -ge 2
+grep -Fq 'RECEIPT_ARTIFACT: ${{ inputs.convergence_artifact }}' "$workflow"
+if awk '
+    function finish() {
+        if (active && templated && bytes > 9000) oversized = 1
+        active = 0; bytes = 0; templated = 0
+    }
+    {
+        indent = match($0, /[^ ]/) - 1
+        if (active && $0 !~ /^[[:space:]]*$/ && indent <= start_indent) finish()
+        if ($0 ~ /^[[:space:]]+run:[[:space:]]*\|[[:space:]]*$/) {
+            finish(); active = 1; start_indent = indent; next
+        }
+        if (active) bytes += length($0) + 1
+        if (active && $0 ~ /\$\{\{/) templated = 1
+    }
+    END { finish(); exit oversized }
+' "$workflow"; then
+    :
+else
+    echo 'candidate workflow contains a provider-oversized templated run block' >&2
+    exit 1
+fi
+grep -Fq 'fetch-depth: 0' "$checkpoint_workflow"
+
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-release-fresh.XXXXXX")
+cleanup() { rm -r -- "$fixture"; }
+trap cleanup EXIT HUP INT TERM
+bare="$fixture/origin.git"
+seed="$fixture/seed"
+fresh="$fixture/fresh"
+git init --bare --quiet "$bare"
+git init --quiet -b main "$seed"
+git -C "$seed" config user.name release-test
+git -C "$seed" config user.email release-test@example.invalid
+printf 'root\n' >"$seed/history"
+git -C "$seed" add history
+git -C "$seed" commit --quiet -m root
+root_sha=$(git -C "$seed" rev-parse HEAD)
+printf 'main\n' >>"$seed/history"
+git -C "$seed" commit --quiet -am main
+main_behind_depth_one=$(git -C "$seed" rev-parse HEAD)
+printf 'main-tip\n' >>"$seed/history"
+git -C "$seed" commit --quiet -am main-tip
+git -C "$seed" remote add origin "$bare"
+git -C "$seed" push --quiet origin main
+git --git-dir="$bare" symbolic-ref HEAD refs/heads/main
+git -C "$seed" checkout --quiet -b release/1.0 "$root_sha"
+printf 'release\n' >>"$seed/history"
+git -C "$seed" commit --quiet -am release
+release_behind_depth_one=$(git -C "$seed" rev-parse HEAD)
+printf 'release-tip\n' >>"$seed/history"
+git -C "$seed" commit --quiet -am release-tip
+git -C "$seed" push --quiet origin release/1.0
+git clone --quiet --depth=1 --branch=main "file://$bare" "$fresh"
+test "$(git -C "$fresh" rev-parse --is-shallow-repository)" = true
+test "$(git -C "$fresh" rev-list --count HEAD)" -eq 1
+if git -C "$fresh" cat-file -e "$main_behind_depth_one^{commit}" 2>/dev/null; then
+    echo 'release fresh-checkout fixture unexpectedly contains history behind depth 1' >&2
+    exit 1
+fi
+test ! -e "$fresh/bin/release/x86_64-unknown-linux-gnu/simple"
+
+before=$(git --git-dir="$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads)
+"$checkpoint" --root="$fresh" --release-ref=release/1.0 \
+    --require-release-line --output=build/observation >/dev/null
+after=$(git --git-dir="$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads)
+test "$before" = "$after"
+test "$(git -C "$fresh" rev-parse --is-shallow-repository)" = false
+jq -e --arg hidden "$main_behind_depth_one" '
+      .schema == "simple-release-source-convergence-observation/1" and
+      .status == "ok" and .boundary_kind == "source_hosted_read_only" and
+      .deployed_runtime_used == false and
+      .release_admission_eligible == false and .mutation == "fetch-only" and
+      .main_remains_independent == true and
+      (.source_only_commit_shas | length) == 2 and
+      (.source_only_commit_shas | index($hidden)) != null' \
+    "$fresh/build/observation/main_to_release.json" >/dev/null
+jq -e --arg hidden "$release_behind_depth_one" '
+      .schema == "simple-release-source-convergence-observation/1" and
+      .status == "ok" and .boundary_kind == "source_hosted_read_only" and
+      .deployed_runtime_used == false and
+      .release_admission_eligible == false and .mutation == "fetch-only" and
+      .main_remains_independent == true and
+      (.source_only_commit_shas | length) == 2 and
+      (.source_only_commit_shas | index($hidden)) != null' \
+    "$fresh/build/observation/release_to_main.json" >/dev/null
+
+echo 'release-fresh-checkout-boundaries: PASS'

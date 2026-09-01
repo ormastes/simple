@@ -1,0 +1,67 @@
+use std.spec.*
+use std.http_server.ssr_scalar_owner_loop.*
+use std.http_server.ssr_scalar_service.{
+    SSR_SCALAR_LIFECYCLE_UNAVAILABLE,
+    SSR_SCALAR_REASON_BRIDGE_UNAVAILABLE,
+    SSR_SCALAR_REASON_INVALID_COMMAND
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "SSR scalar persistent owner-loop shell":
+    it "keeps every lifecycle operation unavailable until native ownership is proven":
+        var loop = SsrScalarOwnerLoopV1.unavailable(8)
+        val start = loop.start()
+        val claim = loop.claim()
+        val complete = loop.complete(7, 200, 0)
+        val cancel = loop.cancel(7, 499)
+        val stop = loop.stop()
+        val join = loop.join()
+        expect(ssr_scalar_owner_loop_runtime_proven()).to_equal(false)
+        expect(loop.lifecycle()).to_equal(SSR_SCALAR_LIFECYCLE_UNAVAILABLE)
+        expect(start.reason_code).to_equal(SSR_SCALAR_REASON_BRIDGE_UNAVAILABLE)
+        expect(claim.reason_code).to_equal(SSR_SCALAR_REASON_BRIDGE_UNAVAILABLE)
+        expect(complete.reason_code).to_equal(SSR_SCALAR_REASON_BRIDGE_UNAVAILABLE)
+        expect(cancel.reason_code).to_equal(SSR_SCALAR_REASON_BRIDGE_UNAVAILABLE)
+        expect(stop.reason_code).to_equal(SSR_SCALAR_REASON_BRIDGE_UNAVAILABLE)
+        expect(join.reason_code).to_equal(SSR_SCALAR_REASON_BRIDGE_UNAVAILABLE)
+
+    it "validates lifecycle scalar inputs before bridge availability":
+        var loop = SsrScalarOwnerLoopV1.unavailable(8)
+        val invalid_complete = loop.complete(0, 200, 0)
+        val invalid_cancel = loop.cancel(0, 499)
+        expect(invalid_complete.reason_code).to_equal(SSR_SCALAR_REASON_INVALID_COMMAND)
+        expect(invalid_cancel.reason_code).to_equal(SSR_SCALAR_REASON_INVALID_COMMAND)
+
+    it "uses only scalar thread arguments and excludes detached transport":
+        val source = rt_file_read_text(
+            "src/lib/gc_async_mut/http_server/ssr_scalar_owner_loop.spl") ?? ""
+        expect(source).to_contain("thread_spawn_with_i64_args_id(port_token, control_token")
+        expect(source).to_contain("SSR_SCALAR_OWNER_LOOP_THREAD_ARGS_V1: i64 = 2")
+        expect(source).to_contain("Completion returns only success")
+        expect(source).to_contain("HTTP-side port owner alone transfers and releases the receipt")
+        expect(source).to_contain("Only after join may the parent release the native")
+        expect(source).to_contain("ssr_scalar_owner_loop_runtime_proven() -> bool")
+        expect(source).to_contain("false")
+        expect(source.find("multicore_green_spawn")).to_equal(-1)
+        expect(source.find("rt_pool_")).to_equal(-1)
+        expect(source.find("HttpRequestData")).to_equal(-1)
+        expect(source.find("raw_ptr")).to_equal(-1)
+
+    it "specifies shutdown ordering before native port release":
+        val source = rt_file_read_text(
+            "src/lib/gc_async_mut/http_server/ssr_scalar_owner_loop.spl") ?? ""
+        # The parent owns admission and receipts.  Shutdown must close
+        # admission first, cancel/resolve outstanding commands, release every
+        # transferred receipt, join the renderer, and only then release the
+        # native port (which invalidates claims and receipts).
+        val close_i = source.find("close admission")
+        val cancel_i = source.find("resolve/cancel")
+        val receipt_i = source.find("take and release every HTTP-owned receipt")
+        val join_i = source.find("then join this renderer thread")
+        val port_i = source.find("release the native port")
+        expect(close_i).to_be_greater_than(-1)
+        expect(cancel_i).to_be_greater_than(close_i)
+        expect(receipt_i).to_be_greater_than(cancel_i)
+        expect(join_i).to_be_greater_than(receipt_i)
+        expect(port_i).to_be_greater_than(join_i)

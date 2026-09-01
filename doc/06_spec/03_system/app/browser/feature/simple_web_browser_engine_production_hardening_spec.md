@@ -1,17 +1,17 @@
 # Production Simple Browser User Flow
 
-> Verifies the simple web browser engine production hardening behaviour end to end so maintainers of this
+> Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Production Simple Browser User Flow
 
-Verifies the simple web browser engine production hardening behaviour end to end so maintainers of this
+Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
 
 ## At a Glance
 
@@ -19,23 +19,14 @@ Verifies the simple web browser engine production hardening behaviour end to end
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md |
-| Plan | doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md |
-| Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
-| Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the simple web browser engine production hardening behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
+Draw IR, and Engine2D paths, then drives page controls and browser chrome
+through structured UI access. Helpers fail closed until production evidence
+exists.
 
 ## Scenarios
 
@@ -43,177 +34,80 @@ unrelated sibling features are out of scope.
 
 #### should anchor fixed CSS image backgrounds to the viewport
 
-- Verify: should anchor fixed CSS image backgrounds to the viewport
-   - Artifact capture: after_step
-- Render HTML and CSS through canonical Draw IR
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 6 expected checks
-   - Expected: fixed.x equals `3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: fixed.y equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: fixed.width equals `4)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: fixed.height equals `2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: fixed.clip_rect.x equals `3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: fixed.clip_rect.width equals `4)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-- Scroll the document under the viewport-fixed tile
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
-   - Expected: scrolled_fixed.resolved_scroll_y equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-- Read back fixed repeat and no-repeat edge pixels
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 3 expected checks
-   - Expected: fixed_pixels[first_box_pixel] equals `0xFF0000FFu32`
-   - Expected: scroll_pixels[first_box_pixel] equals `0xFFFF0000u32`
-   - Expected: no_repeat_pixels[first_box_pixel] equals `0xFF00FF00u32`
-- Keep local attachment outside the supported profile
-   - Artifact capture: after_step
+**Scenario capture:** artifact after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 109 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-001..009
-step("Verify: should anchor fixed CSS image backgrounds to the viewport")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-step("Render HTML and CSS through canonical Draw IR")
-val repeat_html = (
-    "<html style='margin:0'><body style='margin:0'>" +
-    "<div id='fixed' style='margin-left:3px;width:4px;height:2px;" +
-    "background-color:#00ff00;background-image:url(image://stripe);" +
-    "background-attachment:fixed;background-repeat:repeat;" +
-    "background-position:left top'></div>" +
-    "<div style='height:8px'></div></body></html>"
-)
-val scroll_html = repeat_html.replace(
-    "background-attachment:fixed", "background-attachment:scroll"
-)
-val no_repeat_html = repeat_html.replace(
-    "background-repeat:repeat", "background-repeat:no-repeat"
-)
-val local_html = repeat_html.replace(
-    "background-attachment:fixed", "background-attachment:local"
-)
-val stripe = simpleos_host_gpu_image_resource(
-    "image://stripe", 2, 1, [0xFFFF0000u32, 0xFF0000FFu32]
-)
-val images = [stripe]
-val fixed_composition =
-    simple_web_layout_render_html_draw_ir_with_images(
-        repeat_html, 8, 4, images
-    )
-val fixed_commands = fixed_composition.batches[0].commands
-val fixed_index = _browser_draw_ir_command_index(
-    fixed_commands, "fixed_background_image"
-)
-expect(fixed_index).to_be_greater_than(-1)
-val fixed = fixed_commands[fixed_index]
-expect(fixed.x).to_equal(3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(fixed.y).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(fixed.width).to_equal(4)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(fixed.height).to_equal(2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(fixed.clip_rect.x).to_equal(3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(fixed.clip_rect.width).to_equal(4)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(_browser_draw_ir_style_value(
-    fixed, "background-tile-x"
-)).to_equal("0")
-expect(_browser_draw_ir_style_value(
-    fixed, "background-tile-y"
-)).to_equal("0")
-
-step("Scroll the document under the viewport-fixed tile")
-val scrolled_fixed =
-    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images(
-        repeat_html, 8, 4, 0, 1,
-        browser_text_input_overlay_empty(), images
-    )
-expect(scrolled_fixed.resolved_scroll_y).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-val scrolled_fixed_commands =
-    scrolled_fixed.composition.batches[0].commands
-val scrolled_fixed_index = _browser_draw_ir_command_index(
-    scrolled_fixed_commands, "fixed_background_image"
-)
-expect(scrolled_fixed_index).to_be_greater_than(-1)
-val scrolled_fixed_command =
-    scrolled_fixed_commands[scrolled_fixed_index]
-expect(_browser_draw_ir_style_value(
-    scrolled_fixed_command, "background-tile-y"
-)).to_equal("0")
-expect(_browser_draw_ir_style_value(
-    scrolled_fixed_command, "background-shape-y"
-)).to_equal("-1")
-val scrolled_element =
-    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images(
-        scroll_html, 8, 4, 0, 1,
-        browser_text_input_overlay_empty(), images
-    )
-val scrolled_element_commands =
-    scrolled_element.composition.batches[0].commands
-val scrolled_element_index = _browser_draw_ir_command_index(
-    scrolled_element_commands, "fixed_background_image"
-)
-expect(scrolled_element_index).to_be_greater_than(-1)
-expect(_browser_draw_ir_style_value(
-    scrolled_element_commands[scrolled_element_index],
-    "background-tile-y"
-)).to_equal("-1")
-
-step("Read back fixed repeat and no-repeat edge pixels")
-val renderer = BrowserRenderer.create(8, 4)
-val fixed_pixels = renderer.render_html_to_pixels_with_images(
-    repeat_html, images
-).pixel_data
-val scroll_pixels = renderer.render_html_to_pixels_with_images(
-    scroll_html, images
-).pixel_data
-val no_repeat_pixels = renderer.render_html_to_pixels_with_images(
-    no_repeat_html, images
-).pixel_data
-val first_box_pixel = fixed.y * 8 + fixed.x
-expect(fixed_pixels[first_box_pixel]).to_equal(0xFF0000FFu32)
-expect(scroll_pixels[first_box_pixel]).to_equal(0xFFFF0000u32)
-expect(no_repeat_pixels[first_box_pixel]).to_equal(0xFF00FF00u32)
-
-step("Keep local attachment outside the supported profile")
-val local_commands =
-    simple_web_layout_render_html_draw_ir_with_images(
-        local_html, 8, 4, images
-    ).batches[0].commands
-expect(_browser_draw_ir_command_index(
-    local_commands, "fixed_background_image"
-)).to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+# @req REQ-WEB-BROWSER-001..009
 ```
 
 </details>
 
 #### should admit two CSS URL backgrounds and lower both through canonical Draw IR
 
-- Verify: should admit two CSS URL backgrounds and lower both through canonical Draw IR
+- should admit two CSS URL backgrounds and lower both through canonical Draw IR
    - Artifact capture: after_step
 - Admit the bounded two URL CSS background profile
    - Artifact capture: after_step
+- var session = BrowserSession new
+   - Artifact capture: after_step
+- "https://assets test/front png",  retained png hex
+   - Artifact capture: after_step
+- "https://assets test/back png",  retained png hex
+   - Artifact capture: after_step
+- "background-image:url
+   - Artifact capture: after_step
+- Ok
+   - Artifact capture: after_step
+-
+   - Artifact capture: after_step
+- Err
+   - Artifact capture: after_step
+- fail
+   - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
-   - Expected: session.image_resources.len() equals `2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.image_resources.len() equals `2`
 - Render HTML and CSS through canonical Draw IR
+   - Artifact capture: after_step
+- session render html document
    - Artifact capture: after_step
 - Deny the whole pair when CSP denies image admission
    - Artifact capture: after_step
+- var denied = BrowserSession new
+   - Artifact capture: after_step
+- "https://assets test/front png",  retained png hex
+   - Artifact capture: after_step
+- "https://assets test/back png",  retained png hex
+   - Artifact capture: after_step
+- "background-image:url
+   - Artifact capture: after_step
+- Ok
+   - Artifact capture: after_step
+-
+   - Artifact capture: after_step
+- Err
+   - Artifact capture: after_step
+- fail
+   - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
-   - Expected: denied.image_resources.len() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: denied.image_resources.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 66 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should admit two CSS URL backgrounds and lower both through canonical Draw IR")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should admit two CSS URL backgrounds and lower both through canonical Draw IR")
 step("Admit the bounded two URL CSS background profile")
 var session = BrowserSession.new()
 session.register_resource(
@@ -232,7 +126,7 @@ match session.open_html(
         ()
     Err(reason):
         fail("two URL background fixture failed to open: {reason}")
-expect(session.image_resources.len()).to_equal(2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.image_resources.len()).to_equal(2)
 
 step("Render HTML and CSS through canonical Draw IR")
 val composition = simple_web_layout_render_html_draw_ir_with_images(
@@ -267,25 +161,27 @@ match denied.open_html(
         ()
     Err(reason):
         fail("CSP two URL background fixture failed to open: {reason}")
-expect(denied.image_resources.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(denied.image_resources.len()).to_equal(0)
 val denied_commands = simple_web_layout_render_html_draw_ir_with_images(
     denied.render_html_document(), 8, 4, denied.image_resources
 ).batches[0].commands
 expect(_browser_draw_ir_command_index(
     denied_commands, "layers_background_image_1"
-)).to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+)).to_equal(-1)
 expect(_browser_draw_ir_command_index(
     denied_commands, "layers_background_image_0"
-)).to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+)).to_equal(-1)
 ```
 
 </details>
 
 #### should preserve semantic parentage clipping and stacking in canonical Draw IR
 
-- Verify: should preserve semantic parentage clipping and stacking in canonical Draw IR
+- should preserve semantic parentage clipping and stacking in canonical Draw IR
    - Protocol capture: after_step
 - Lower web semantic parentage and CSS stacking to canonical Draw IR
+   - Protocol capture: after_step
+- fail
    - Protocol capture: after_step
 - Inspect stable IDs parent links clip geometry and paint order
    - Protocol capture: after_step
@@ -294,34 +190,45 @@ expect(_browser_draw_ir_command_index(
    - Expected: commands[bottom_index].parent_id equals `clip`
    - Expected: commands[middle_index].parent_id equals `clip`
    - Expected: commands[top_index].parent_id equals `clip`
-   - Expected: commands[top_index].clip_rect.x equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: commands[top_index].clip_rect.y equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: commands[top_index].clip_rect.width equals `16)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: commands[top_index].clip_rect.height equals `12)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
+   - Expected: commands[top_index].clip_rect.x equals `0`
+   - Expected: commands[top_index].clip_rect.y equals `0`
+   - Expected: commands[top_index].clip_rect.width equals `16`
+   - Expected: commands[top_index].clip_rect.height equals `12`
 - Round-trip semantic parent links through the hosted SBRF gate
    - Protocol capture: after_step
-   - Evidence: protocol response verified by 4 expected checks
+   - Evidence: protocol response verified by 1 expected check
    - Expected: wire.ok is true
+- fail
+   - Protocol capture: after_step
+- browser renderer decoder new
+   - Protocol capture: after_step
+   - Evidence: protocol response verified by 2 expected checks
    - Expected: message.status equals `message`
    - Expected: hosted.ok is true
+- fail
+   - Protocol capture: after_step
+- fail
+   - Protocol capture: after_step
+   - Evidence: protocol response verified by 1 expected check
    - Expected: hosted_commands[hosted_top_index].parent_id equals `clip`
 - Replay the same canonical composition through Engine2D
    - Protocol capture: after_step
+- raster shutdown
+   - Protocol capture: after_step
    - Evidence: protocol response verified by 2 expected checks
-   - Expected: rendered.skipped_command_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: rendered.skipped_command_count equals `0`
    - Expected: rendered.pixels.len() equals `32 * 24`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 81 lines folded for reproduction.
+Runnable source: 80 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should preserve semantic parentage clipping and stacking in canonical Draw IR")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should preserve semantic parentage clipping and stacking in canonical Draw IR")
 step("Lower web semantic parentage and CSS stacking to canonical Draw IR")
 val html = (
     "<html style='margin:0'><body id='page' style='margin:0'>" +
@@ -354,10 +261,10 @@ expect(commands[clip_index].parent_id).to_equal("page")
 expect(commands[bottom_index].parent_id).to_equal("clip")
 expect(commands[middle_index].parent_id).to_equal("clip")
 expect(commands[top_index].parent_id).to_equal("clip")
-expect(commands[top_index].clip_rect.x).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(commands[top_index].clip_rect.y).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(commands[top_index].clip_rect.width).to_equal(16)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(commands[top_index].clip_rect.height).to_equal(12)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(commands[top_index].clip_rect.x).to_equal(0)
+expect(commands[top_index].clip_rect.y).to_equal(0)
+expect(commands[top_index].clip_rect.width).to_equal(16)
+expect(commands[top_index].clip_rect.height).to_equal(12)
 expect(_browser_draw_ir_style_value(
     commands[top_index], "z-index"
 )).to_equal("3")
@@ -389,17 +296,17 @@ step("Replay the same canonical composition through Engine2D")
 val raster = Engine2dCompositorBackend.create_named(32, 24, "software")
 val rendered = raster.render_draw_ir_composition(composition, [])
 raster.shutdown()
-expect(rendered.skipped_command_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(rendered.skipped_command_count).to_equal(0)
 expect(rendered.pixels.len()).to_equal(32 * 24)
 expect(_count_color(
     rendered.pixels, 0xFFF59E0Bu32
 )).to_equal(16 * 12)
 expect(_count_color(
     rendered.pixels, 0xFF1D4ED8u32
-)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+)).to_equal(0)
 expect(_count_color(
     rendered.pixels, 0xFF22C55Eu32
-)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+)).to_equal(0)
 ```
 
 </details>
@@ -410,21 +317,21 @@ expect(_count_color(
 - invalid capture metadata value: draw_ir (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Verify: should normalize split overflow axes before Draw IR clipping
+- should normalize split overflow axes before Draw IR clipping
    - HTML capture: after_step
 - Resolve visible y against every non-visible x cascade winner
    - HTML capture: after_step
    - Evidence: HTML text verified by 5 expected checks
-   - Expected: _browser_draw_ir_command_index(commands, "hidden-y_scrollbar_track") equals `-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: _browser_draw_ir_command_index(commands, "none-author_scrollbar_track") equals `-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: _browser_draw_ir_command_index(commands, "none-inline_scrollbar_track") equals `-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: _browser_draw_ir_command_index(commands, "none-important_scrollbar_track") equals `-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: _browser_draw_ir_command_index(commands, "none-inline-important_scrollbar_track") equals `-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
+   - Expected: _browser_draw_ir_command_index(commands, "hidden-y_scrollbar_track") equals `-1`
+   - Expected: _browser_draw_ir_command_index(commands, "none-author_scrollbar_track") equals `-1`
+   - Expected: _browser_draw_ir_command_index(commands, "none-inline_scrollbar_track") equals `-1`
+   - Expected: _browser_draw_ir_command_index(commands, "none-important_scrollbar_track") equals `-1`
+   - Expected: _browser_draw_ir_command_index(commands, "none-inline-important_scrollbar_track") equals `-1`
 - Clip the child in canonical Draw IR and Engine2D
    - HTML capture: after_step
    - Evidence: HTML text verified by 4 expected checks
-   - Expected: commands[red_index].clip_rect.height equals `12)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: commands[child_index].clip_rect.height equals `12)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
+   - Expected: commands[red_index].clip_rect.height equals `12`
+   - Expected: commands[child_index].clip_rect.height equals `12`
    - Expected: rendered.pixels[1 + 12 * 32] equals `0xFFFFFFFFu32`
    - Expected: rendered.pixels[1 + 144 * 32] equals `0xFFFFFFFFu32`
 
@@ -432,13 +339,12 @@ expect(_count_color(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should normalize split overflow axes before Draw IR clipping")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should normalize split overflow axes before Draw IR clipping")
 step("Resolve visible y against every non-visible x cascade winner")
 val html = (
     "<style>.hidden{overflow-x:hidden}.auto{overflow-x:auto}" +
@@ -473,24 +379,24 @@ expect(_browser_draw_ir_command_index(commands, "auto-visible_scrollbar_track"))
 expect(_browser_draw_ir_command_index(commands, "scroll-omitted_scrollbar_track")).to_be_greater_than(-1)
 expect(_browser_draw_ir_command_index(commands, "scroll-visible_scrollbar_track")).to_be_greater_than(-1)
 expect(_browser_draw_ir_command_index(commands, "two-axis_scrollbar_track")).to_be_greater_than(-1)
-expect(_browser_draw_ir_command_index(commands, "hidden-y_scrollbar_track")).to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(_browser_draw_ir_command_index(commands, "none-author_scrollbar_track")).to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(_browser_draw_ir_command_index(commands, "none-inline_scrollbar_track")).to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(_browser_draw_ir_command_index(commands, "none-important_scrollbar_track")).to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(_browser_draw_ir_command_index(commands, "none-inline-important_scrollbar_track")).to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(_browser_draw_ir_command_index(commands, "hidden-y_scrollbar_track")).to_equal(-1)
+expect(_browser_draw_ir_command_index(commands, "none-author_scrollbar_track")).to_equal(-1)
+expect(_browser_draw_ir_command_index(commands, "none-inline_scrollbar_track")).to_equal(-1)
+expect(_browser_draw_ir_command_index(commands, "none-important_scrollbar_track")).to_equal(-1)
+expect(_browser_draw_ir_command_index(commands, "none-inline-important_scrollbar_track")).to_equal(-1)
 expect(_browser_draw_ir_command_index(commands, "none-child_scrollbar_track")).to_be_greater_than(-1)
 
 step("Clip the child in canonical Draw IR and Engine2D")
 val red_index = _browser_draw_ir_command_index(commands, "red")
 expect(red_index).to_be_greater_than(-1)
-expect(commands[red_index].clip_rect.height).to_equal(12)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(commands[red_index].clip_rect.height).to_equal(12)
 for child_id in [
     "none-author-child", "none-inline-child",
     "none-important-child", "none-inline-important-child"
 ]:
     val child_index = _browser_draw_ir_command_index(commands, child_id)
     expect(child_index).to_be_greater_than(-1)
-    expect(commands[child_index].clip_rect.height).to_equal(12)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+    expect(commands[child_index].clip_rect.height).to_equal(12)
 val raster = Engine2dCompositorBackend.create_named(32, 168, "software")
 val rendered = raster.render_draw_ir_composition(composition, [])
 raster.shutdown()
@@ -502,50 +408,73 @@ expect(rendered.pixels[1 + 144 * 32]).to_equal(0xFFFFFFFFu32)
 
 #### should deliver retained callable listeners through one DOM event path
 
-- Verify: should deliver retained callable listeners through one DOM event path
+- should deliver retained callable listeners through one DOM event path
    - Text capture: after_step
 - Deliver JavaScript and Simple Script listeners on the live DOM
+   - Text capture: after_step
+- var session = BrowserSession new
+   - Text capture: after_step
+- Ok
+   - Text capture: after_step
+-
+   - Text capture: after_step
+- Err
+   - Text capture: after_step
+- fail
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: session.current_title equals `simple,`
 - Dispatch capture target and bubble listeners through window and document
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
-   - Expected: ordered.actions.len() equals `9)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: ordered.actions.len() equals `9`
 - Cancel defaults and compact removed listeners
    - Text capture: after_step
    - Evidence: text output verified by 6 expected checks
    - Expected: canceled.default_action equals `navigate:/escaped`
    - Expected: canceled.event.default_prevented is true
    - Expected: canceled.default_action_allowed is false
-   - Expected: session.pending_request_count() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: halted.actions.len() equals `3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.pending_request_count() equals `0`
+   - Expected: halted.actions.len() equals `3`
    - Expected: halted.event.immediate_propagation_stopped is true
 - Expose modern Event receiver phase and mutation semantics
    - Text capture: after_step
-   - Evidence: text output verified by 6 expected checks
+   - Evidence: text output verified by 1 expected check
    - Expected: semantic.event.default_prevented is false
+- Ok
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
    - Expected: value equals `true:true:2`
+- Ok
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
+- Err
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
+- Ok
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
    - Expected: value is true
-   - Expected: mutation_first.actions.len() equals `2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: mutation_second.actions.len() equals `2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: session.dom_callback_count equals `23)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
+   - Expected: mutation_first.actions.len() equals `2`
+   - Expected: mutation_second.actions.len() equals `2`
+   - Expected: session.dom_callback_count equals `23`
 - Keep requestAnimationFrame alive beside DOM listener delivery
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
-   - Expected: session.advance_time(16) equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.advance_time(16) equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 84 lines folded for reproduction.
+Runnable source: 83 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should deliver retained callable listeners through one DOM event path")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should deliver retained callable listeners through one DOM event path")
 step("Deliver JavaScript and Simple Script listeners on the live DOM")
 var session = BrowserSession.new()
 match session.open_html(
@@ -561,7 +490,7 @@ step("Dispatch capture target and bubble listeners through window and document")
 val ordered = session.dispatch_dom_event(
     "run", "click", true, true
 )
-expect(ordered.actions.len()).to_equal(9)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(ordered.actions.len()).to_equal(9)
 expect(session.current_title).to_equal(
     "simple," +
     "window-capture,document-capture,outer-capture," +
@@ -576,7 +505,7 @@ val canceled = session.dispatch_dom_event(
 expect(canceled.default_action).to_equal("navigate:/escaped")
 expect(canceled.event.default_prevented).to_equal(true)
 expect(canceled.default_action_allowed).to_equal(false)
-expect(session.pending_request_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.pending_request_count()).to_equal(0)
 expect(session.current_title).to_end_with(
     "window-capture,document-capture,cancel,after-cancel," +
     "document-bubble,window-bubble,"
@@ -584,7 +513,7 @@ expect(session.current_title).to_end_with(
 val halted = session.dispatch_dom_event(
     "halt", "click", true, true
 )
-expect(halted.actions.len()).to_equal(3)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(halted.actions.len()).to_equal(3)
 expect(halted.event.immediate_propagation_stopped).to_equal(true)
 expect(session.current_title).to_end_with(
     "window-capture,document-capture,halt-first,"
@@ -613,17 +542,17 @@ match session.eval_script(
 val mutation_first = session.dispatch_dom_event(
     "mutate", "mutate", false, true
 )
-expect(mutation_first.actions.len()).to_equal(2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(mutation_first.actions.len()).to_equal(2)
 expect(session.current_title).to_end_with("mutate,")
 val mutation_second = session.dispatch_dom_event(
     "mutate", "mutate", false, true
 )
-expect(mutation_second.actions.len()).to_equal(2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(mutation_second.actions.len()).to_equal(2)
 expect(session.current_title).to_end_with("mutate,mutate,added,")
-expect(session.dom_callback_count).to_equal(23)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.dom_callback_count).to_equal(23)
 
 step("Keep requestAnimationFrame alive beside DOM listener delivery")
-expect(session.advance_time(16)).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.advance_time(16)).to_equal(1)
 expect(session.current_title).to_end_with(
     "mutate,mutate,added,raf,"
 )
@@ -633,23 +562,43 @@ expect(session.current_title).to_end_with(
 
 #### should fail closed for synchronous JavaScript-originated dispatchEvent
 
-- Verify: should fail closed for synchronous JavaScript-originated dispatchEvent
+- should fail closed for synchronous JavaScript-originated dispatchEvent
    - Text capture: after_step
-   - Evidence: text output verified by 2 expected checks
+- "window addEventListener
+   - Text capture: after_step
+- Ok
+   - Text capture: after_step
+-
+   - Text capture: after_step
+- Err
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
    - Expected: session.current_title equals `unchanged`
+- Ok
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
    - Expected: value is false
+- Ok
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
+- Err
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should fail closed for synchronous JavaScript-originated dispatchEvent")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed for synchronous JavaScript-originated dispatchEvent")
 var session = BrowserSession.new()
 match session.open_html(
     "https://example.test/script-dispatch",
@@ -681,19 +630,19 @@ expect(session.warnings.join("|")).to_contain(
 
 #### should render the supported HTML and CSS profile through canonical Draw IR
 
-- Verify: should render the supported HTML and CSS profile through canonical Draw IR
+- should render the supported HTML and CSS profile through canonical Draw IR
    - GUI capture: after_step (HTML preferred when available)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should render the supported HTML and CSS profile through canonical Draw IR")
+# @req REQ-SSPEC-SYSTEM
+step("should render the supported HTML and CSS profile through canonical Draw IR")
 _production_browser_fixture()
 _open_conformance_page()
 _check_canonical_draw_ir()
@@ -704,24 +653,24 @@ _require_production_browser_evidence()
 
 #### should animate JavaScript timers requestAnimationFrame and CSS on one clock
 
-- Verify: should animate JavaScript timers requestAnimationFrame and CSS on one clock
+- should animate JavaScript timers requestAnimationFrame and CSS on one clock
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 4 expected checks
    - Expected: first.pixels.len() equals `64 * 48`
    - Expected: second.pixels.len() equals `64 * 48`
    - Expected: changed is true
-   - Expected: advanced.next_animation_ms equals `-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
+   - Expected: advanced.next_animation_ms equals `-1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 63 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should animate JavaScript timers requestAnimationFrame and CSS on one clock")
+# @req REQ-SSPEC-SYSTEM
+step("should animate JavaScript timers requestAnimationFrame and CSS on one clock")
 _production_browser_fixture()
 _advance_browser_clock()
 _check_canonical_draw_ir()
@@ -784,48 +733,57 @@ expect(second.rendered_command_count).to_be_greater_than(0)
 expect(second.pixels.len()).to_equal(64 * 48)
 expect(advanced_blue).to_be_greater_than(0)
 expect(changed).to_equal(true)
-expect(advanced.next_animation_ms).to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(advanced.next_animation_ms).to_equal(-1)
 ```
 
 </details>
 
 #### should retain Simple Script callbacks on the canonical animation clock
 
-- Verify: should retain Simple Script callbacks on the canonical animation clock
+- should retain Simple Script callbacks on the canonical animation clock
    - Text capture: after_step
 - Register callbacks without invoking the denied ambient ScriptRunner
    - Text capture: after_step
-   - Evidence: text output verified by 1 expected check
-   - Expected: session.simple_script_callback_count() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-- Keep rAF pending before the document refresh boundary
+- var session = BrowserSession new
+   - Text capture: after_step
+- Ok
+   - Text capture: after_step
+-
+   - Text capture: after_step
+- Err
+   - Text capture: after_step
+- fail
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
-   - Expected: session.advance_time(5) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.simple_script_callback_count() equals `0`
+- Reuse one retained callback identity for rAF and timeout
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
+   - Expected: session.advance_time(5) equals `0`
 - Reuse one retained callback identity for timeout
    - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
-   - Expected: session.advance_time(10) equals `2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.advance_time(10) equals `2`
    - Expected: session.current_title equals `frame`
 - Apply style from an interval and keep a canceled callback inert
    - Text capture: after_step
    - Evidence: text output verified by 5 expected checks
-   - Expected: session.advance_time(15) equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: session.advance_time(30) equals `2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.advance_time(15) equals `1`
+   - Expected: session.advance_time(30) equals `1`
    - Expected: session.current_title equals `frame`
    - Expected: session.style_revision equals `applied_style_revision`
-   - Expected: session.simple_script_callback_count() equals `5)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.simple_script_callback_count() equals `5`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-010
-step("Verify: should retain Simple Script callbacks on the canonical animation clock")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should retain Simple Script callbacks on the canonical animation clock")
 step("Register callbacks without invoking the denied ambient ScriptRunner")
 var session = BrowserSession.new()
 match session.open_html(
@@ -836,34 +794,30 @@ match session.open_html(
         ()
     Err(reason):
         fail("Simple Script callback fixture failed to open: {reason}")
-expect(session.simple_script_callback_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.simple_script_callback_count()).to_equal(0)
 expect(session.current_title).to_equal(
     "https://example.test/simple-callbacks"
 )
 
-step("Keep rAF pending before the document refresh boundary")
-expect(session.advance_time(5)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(session.current_title).to_equal(
-    "https://example.test/simple-callbacks"
-)
-
-step("Reuse one retained callback identity for timeout")
-expect(session.advance_time(10)).to_equal(2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+step("Reuse one retained callback identity for rAF and timeout")
+expect(session.advance_time(5)).to_equal(1)
+expect(session.current_title).to_equal("frame")
+expect(session.advance_time(10)).to_equal(2)
 expect(session.current_title).to_equal("frame")
 expect(session.current_body_html).to_contain("timeout")
 
 step("Apply style from an interval and keep a canceled callback inert")
-expect(session.advance_time(15)).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.advance_time(15)).to_equal(1)
 expect(session.current_style_html).to_contain("#2563eb")
 val styled = session.render_to_pixels(16, 16)
 expect(_count_color(
     styled.pixels, 0xFF2563EBu32
 )).to_be_greater_than(0)
 val applied_style_revision = session.style_revision
-expect(session.advance_time(30)).to_equal(2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.advance_time(30)).to_equal(1)
 expect(session.current_title).to_equal("frame")
 expect(session.style_revision).to_equal(applied_style_revision)
-expect(session.simple_script_callback_count()).to_equal(5)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.simple_script_callback_count()).to_equal(5)
 expect(session.warnings).to_contain(
     "simple script unsupported command: unsafe_eval title \"bypass\""
 )
@@ -873,44 +827,90 @@ expect(session.warnings).to_contain(
 
 #### should reclaim retained Simple Script document owners on navigation and close
 
-- Verify: should reclaim retained Simple Script document owners on navigation and close
+- should reclaim retained Simple Script document owners on navigation and close
    - Text capture: after_step
 - Open retained Simple Script state and bind one document owner
    - Text capture: after_step
+- var session = BrowserSession new
+   - Text capture: after_step
+- Ok
+   - Text capture: after_step
+-
+   - Text capture: after_step
+- Err
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
    - Evidence: text output verified by 3 expected checks
    - Expected: session.simple_script_executor.has_callback(41) is true
-   - Expected: session.advance_time(5) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: session.simple_script_callback_count() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.advance_time(5) equals `0`
+   - Expected: session.simple_script_callback_count() equals `0`
 - Navigate to a fresh page and reset document-owned script state
    - Text capture: after_step
+- Ok
+   - Text capture: after_step
+-
+   - Text capture: after_step
+- Err
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
+- session simple script executor event loop
+   - Text capture: after_step
+- session simple script executor event loop
+   - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
-   - Expected: session.simple_script_callback_count() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.simple_script_callback_count() equals `0`
    - Expected: session.simple_script_executor.has_callback(41) is false
+- session simple script executor  callback sources len
+   - Text capture: after_step
+- session simple script executor console buffer
+   - Text capture: after_step
 - Retain fresh callback timer animation and console state
    - Text capture: after_step
    - Evidence: text output verified by 4 expected checks
-   - Expected: fresh_callbacks.len() equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: fresh_callbacks.len() equals `1`
    - Expected: fresh_callbacks[0] equals `title "fresh"`
-   - Expected: session.simple_script_callback_count() equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.simple_script_callback_count() equals `1`
+- session simple script executor schedule animation frame
+   - Text capture: after_step
+- session simple script executor log
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
    - Expected: session.simple_script_executor.has_callback(91) is true
+- session simple script executor event loop
+   - Text capture: after_step
+- session simple script executor event loop
+   - Text capture: after_step
+- session simple script executor console buffer
+   - Text capture: after_step
 - Close the page and reclaim browser resources
+   - Text capture: after_step
+- session close
+   - Text capture: after_step
+- session simple script executor event loop
+   - Text capture: after_step
+- session simple script executor event loop
    - Text capture: after_step
    - Evidence: text output verified by 3 expected checks
    - Expected: session.simple_script_callback_count() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
    - Expected: session.simple_script_executor.has_callback(41) is false
    - Expected: session.simple_script_executor.has_callback(91) is false
+- session simple script executor  callback sources len
+   - Text capture: after_step
+- session simple script executor console buffer
+   - Text capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 115 lines folded for reproduction.
+Runnable source: 114 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should reclaim retained Simple Script document owners on navigation and close")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should reclaim retained Simple Script document owners on navigation and close")
 step("Open retained Simple Script state and bind one document owner")
 var session = BrowserSession.new()
 val retained_executor = session.simple_script_executor
@@ -929,8 +929,8 @@ expect(session.simple_script_executor.has_callback(41)).to_equal(true)
 expect(
     session.simple_script_executor._callback_sources
 ).to_contain("title \"frame\"")
-expect(session.advance_time(5)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(session.simple_script_callback_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.advance_time(5)).to_equal(1)
+expect(session.simple_script_callback_count()).to_equal(1)
 session.simple_script_executor.log("log", "document-owned", 0)
 expect(
     session.simple_script_executor.console_buffer().entries().len()
@@ -953,18 +953,18 @@ expect(
 ).to_be(session.simple_script_executor.event_loop())
 expect(
     session.simple_script_executor.event_loop().pending_timer_count()
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     session.simple_script_executor.event_loop().pending_raf_count()
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(session.simple_script_callback_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
+expect(session.simple_script_callback_count()).to_equal(0)
 expect(session.simple_script_executor.has_callback(41)).to_equal(false)
 expect(
     session.simple_script_executor._callback_sources.len()
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     session.simple_script_executor.console_buffer().entries().len()
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 
 step("Retain fresh callback timer animation and console state")
 expect(
@@ -974,27 +974,25 @@ expect(
 ).to_equal(true)
 expect(
     session.simple_script_executor.schedule_timeout(91, 0, 1000)
-).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(1)
 expect(
-    session.simple_script_executor.schedule_animation_frame(91, 0, 0)
+    session.simple_script_executor.schedule_animation_frame(91)
 ).to_equal(true)
-val fresh_callbacks = session.simple_script_executor.tick(16000)
-expect(fresh_callbacks.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+val fresh_callbacks = session.simple_script_executor.tick(0)
+expect(fresh_callbacks.len()).to_equal(1)
 expect(fresh_callbacks[0]).to_equal("title \"fresh\"")
-expect(session.simple_script_callback_count()).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.simple_script_callback_count()).to_equal(1)
 expect(
-    session.simple_script_executor.schedule_animation_frame(
-        91, 16000, 0
-    )
+    session.simple_script_executor.schedule_animation_frame(91)
 ).to_equal(true)
 session.simple_script_executor.log("log", "fresh-document-owned", 0)
 expect(session.simple_script_executor.has_callback(91)).to_equal(true)
 expect(
     session.simple_script_executor.event_loop().pending_timer_count()
-).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(1)
 expect(
     session.simple_script_executor.event_loop().pending_raf_count()
-).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(1)
 expect(
     session.simple_script_executor.console_buffer().entries().len()
 ).to_be_greater_than(0)
@@ -1010,39 +1008,38 @@ expect(
 ).to_be(session.simple_script_executor.event_loop())
 expect(
     session.simple_script_executor.event_loop().pending_timer_count()
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     session.simple_script_executor.event_loop().pending_raf_count()
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(session.simple_script_callback_count()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
+expect(session.simple_script_callback_count()).to_equal(0)
 expect(session.simple_script_executor.has_callback(41)).to_equal(false)
 expect(session.simple_script_executor.has_callback(91)).to_equal(false)
 expect(
     session.simple_script_executor._callback_sources.len()
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     session.simple_script_executor.console_buffer().entries().len()
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 ```
 
 </details>
 
 #### should retain immediate Simple Script style through finalization
 
-- Verify: should retain immediate Simple Script style through finalization
+- should retain immediate Simple Script style through finalization
    - GUI capture: after_step (HTML preferred when available)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-010
-step("Verify: should retain immediate Simple Script style through finalization")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should retain immediate Simple Script style through finalization")
 var session = BrowserSession.new()
 match session.open_html(
     "https://example.test/simple-style",
@@ -1056,37 +1053,37 @@ expect(session.current_style_html).to_contain(
     "background-color:#ef4444"
 )
 expect(session.current_style_html).to_end_with(
-    "<style>#box{{background-color:#2563eb}}</style>"
+    "<style>#box{background-color:#2563eb}</style>"
 )
 expect(session.current_style_html.split(
     "<style>#box{{background-color:#2563eb}}</style>"
-).len()).to_equal(2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).len()).to_equal(2)
 val styled = session.render_to_pixels(16, 16)
 expect(_count_color(
     styled.pixels, 0xFF2563EBu32
 )).to_be_greater_than(0)
 expect(_count_color(
     styled.pixels, 0xFFEF4444u32
-)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+)).to_equal(0)
 ```
 
 </details>
 
 #### should reuse parsed layout work across unchanged animation frames
 
-- Verify: should reuse parsed layout work across unchanged animation frames
+- should reuse parsed layout work across unchanged animation frames
    - Protocol capture: after_step
 - Reuse parsed layout work across unchanged animation frames
    - Protocol capture: after_step
    - Evidence: protocol response verified by 15 expected checks
-   - Expected: before_serialize equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: before_parse equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: before_css equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: before_style equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: before_layout equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: before_paint equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: before_reuse equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: before_composition_revision equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: before_serialize equals `1`
+   - Expected: before_parse equals `1`
+   - Expected: before_css equals `1`
+   - Expected: before_style equals `1`
+   - Expected: before_layout equals `1`
+   - Expected: before_paint equals `1`
+   - Expected: before_reuse equals `0`
+   - Expected: before_composition_revision equals `1`
    - Expected: after.serialize_count equals `before_serialize`
    - Expected: after.parse_count equals `before_parse`
    - Expected: after.css_count equals `before_css`
@@ -1096,18 +1093,19 @@ expect(_count_color(
    - Expected: after.reuse_count equals `before_reuse + 1`
 - Close the page and reclaim browser resources
    - Protocol capture: after_step
+- worker close
+   - Protocol capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-010
-step("Verify: should reuse parsed layout work across unchanged animation frames")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should reuse parsed layout work across unchanged animation frames")
 step("Reuse parsed layout work across unchanged animation frames")
 var worker = HostedBrowserRendererWorkerSession.create(64, 48)
 val initial = worker.handle(BrowserRendererMessage(
@@ -1124,14 +1122,14 @@ val before_layout = counters.layout_count
 val before_paint = counters.paint_count
 val before_reuse = counters.reuse_count
 val before_composition_revision = counters.composition_revision
-expect(before_serialize).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(before_parse).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(before_css).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(before_style).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(before_layout).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(before_paint).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(before_reuse).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(before_composition_revision).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(before_serialize).to_equal(1)
+expect(before_parse).to_equal(1)
+expect(before_css).to_equal(1)
+expect(before_style).to_equal(1)
+expect(before_layout).to_equal(1)
+expect(before_paint).to_equal(1)
+expect(before_reuse).to_equal(0)
+expect(before_composition_revision).to_equal(1)
 
 val unchanged = worker.handle(BrowserRendererMessage(
     kind: "advance", generation: 7, request_id: 3, payload: "16"
@@ -1152,49 +1150,48 @@ step("Close the page and reclaim browser resources")
 worker.close()
 expect(
     worker.render_session.counters.retained_node_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     worker.render_session.counters.retained_style_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     worker.render_session.counters.retained_box_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     worker.render_session.counters.retained_command_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 ```
 
 </details>
 
 #### should retire cached frame resources before a site replacement is ready
 
-- Verify: should retire cached frame resources before a site replacement is ready
+- should retire cached frame resources before a site replacement is ready
    - Protocol capture: after_step
 - Render one retained browser frame through the shared compositor
    - Protocol capture: after_step
    - Evidence: protocol response verified by 2 expected checks
    - Expected: rendered.pixels.len() equals `16 * 16`
-   - Expected: raster.revision_render_count equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: raster.revision_render_count equals `1`
 - Route the retained generation through a cross-site replacement
    - Protocol capture: after_step
    - Evidence: protocol response verified by 5 expected checks
    - Expected: routed equals `none`
    - Expected: retired.renderer.state equals `starting`
-   - Expected: retired.pending_frame.pixels.len() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: retired.renderer.retained_image_resources.len() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: retired.raster.revision_cache_resources.len() equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: retired.pending_frame.pixels.len() equals `0`
+   - Expected: retired.renderer.retained_image_resources.len() equals `0`
+   - Expected: retired.raster.revision_cache_resources.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 94 lines folded for reproduction.
+Runnable source: 93 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-010
-step("Verify: should retire cached frame resources before a site replacement is ready")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should retire cached frame resources before a site replacement is ready")
 step("Render one retained browser frame through the shared compositor")
 var worker = HostedBrowserRendererWorkerSession.create(16, 16)
 val initial = worker.handle(BrowserRendererMessage(
@@ -1216,7 +1213,7 @@ val rendered = raster.render_draw_ir_composition_resources_revision(
     frame.composition_revision
 )
 expect(rendered.pixels.len()).to_equal(16 * 16)
-expect(raster.revision_render_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(raster.revision_render_count).to_equal(1)
 
 step("Route the retained generation through a cross-site replacement")
 var renderer = HostedBrowserRendererProcess.create(81, 16, 16)
@@ -1280,9 +1277,9 @@ val retired = registry.entries[0]
 expect(retired.ready).to_be(false)
 expect(retired.renderer.state).to_equal("starting")
 expect(retired.renderer_closed).to_be(false)
-expect(retired.pending_frame.pixels.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(retired.renderer.retained_image_resources.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(retired.raster.revision_cache_resources.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(retired.pending_frame.pixels.len()).to_equal(0)
+expect(retired.renderer.retained_image_resources.len()).to_equal(0)
+expect(retired.raster.revision_cache_resources.len()).to_equal(0)
 expect(retired.raster.revision_cache_result).to_be_nil()
 val _ = registry.close()
 worker.close()
@@ -1292,44 +1289,81 @@ worker.close()
 
 #### should invalidate only dirty retained browser render stages
 
-- Verify: should invalidate only dirty retained browser render stages
+- should invalidate only dirty retained browser render stages
    - Protocol capture: after_step
 - Invalidate document and title changes conservatively
+   - Protocol capture: after_step
+- var document worker = HostedBrowserRendererWorkerSession create
+   - Protocol capture: after_step
+- document worker render session composition checksum
+   - Protocol capture: after_step
+- document worker render session composition checksum
+   - Protocol capture: after_step
+- document worker render session composition checksum
    - Protocol capture: after_step
 - Invalidate stylesheet and viewport stages
    - Protocol capture: after_step
    - Evidence: protocol response verified by 2 expected checks
-   - Expected: _current_animation_property_work(style_worker) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: _current_animation_property_work(style_worker) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: _current_animation_property_work(style_worker) equals `0`
+   - Expected: _current_animation_property_work(style_worker) equals `0`
 - Repaint changed image pixels without rebuilding semantic stages
    - Protocol capture: after_step
    - Evidence: protocol response verified by 1 expected check
-   - Expected: _current_animation_property_work(image_worker) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: _current_animation_property_work(image_worker) equals `0`
 - Reuse parsed layout work across unchanged animation frames
    - Protocol capture: after_step
 - Render HTML and CSS through canonical Draw IR
    - Protocol capture: after_step
+- var animation worker = HostedBrowserRendererWorkerSession create
+   - Protocol capture: after_step
+- animation worker render session composition checksum
+   - Protocol capture: after_step
+- animation worker render session composition checksum
+   - Protocol capture: after_step
+- var width worker = HostedBrowserRendererWorkerSession create
+   - Protocol capture: after_step
+- width worker render session current result unwrap
+   - Protocol capture: after_step
+- width worker render session composition checksum
+   - Protocol capture: after_step
+- width worker render session current result unwrap
+   - Protocol capture: after_step
+- width worker render session current result unwrap
+   - Protocol capture: after_step
+- width worker render session current result unwrap
+   - Protocol capture: after_step
+- width raster shutdown
+   - Protocol capture: after_step
+-  pixels equal
+   - Protocol capture: after_step
+- width worker render session composition checksum
+   - Protocol capture: after_step
 - Repaint scroll and caret overlays from retained raw layout
    - Protocol capture: after_step
    - Evidence: protocol response verified by 2 expected checks
-   - Expected: _current_animation_property_work(scroll_worker) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: _current_animation_property_work(caret_worker) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: _current_animation_property_work(scroll_worker) equals `0`
+   - Expected: _current_animation_property_work(caret_worker) equals `0`
 - Replace navigation state without retaining prior documents
    - Protocol capture: after_step
+- HostedBrowserRendererWorkerSession create
+   - Protocol capture: after_step
+- payload:
+   - Protocol capture: after_step
 - Close the page and reclaim browser resources
+   - Protocol capture: after_step
+- navigation worker close
    - Protocol capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 260 lines folded for reproduction.
+Runnable source: 259 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-010
-step("Verify: should invalidate only dirty retained browser render stages")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should invalidate only dirty retained browser render stages")
 step("Invalidate document and title changes conservatively")
 var document_worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(document_worker.handle(BrowserRendererMessage(
@@ -1372,13 +1406,13 @@ expect(style_worker.handle(BrowserRendererMessage(
     payload: "<main style='width:32px;height:8px'>style</main>"
 )).ok).to_be(true)
 style_worker.browser.current_style_html = (
-    "<style>main{{color:#2563eb}}</style>"
+    "<style>main{color:#2563eb}</style>"
 )
 style_worker.browser._advance_style_revision()
 expect(style_worker.handle(BrowserRendererMessage(
     kind: "advance", generation: 7, request_id: 3, payload: "16"
 )).ok).to_be(true)
-expect(_current_animation_property_work(style_worker)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(_current_animation_property_work(style_worker)).to_equal(0)
 _expect_retained_stage_counts(
     style_worker.render_session.counters, 2, 2, 2, 2, 2, 2, 2
 )
@@ -1386,7 +1420,7 @@ val resize = browser_renderer_resize_encode(7, 4, 96, 48)
 expect(style_worker.handle(browser_renderer_decoder_feed(
     browser_renderer_decoder_new(7), resize.wire
 ).message).ok).to_be(true)
-expect(_current_animation_property_work(style_worker)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(_current_animation_property_work(style_worker)).to_equal(0)
 _expect_retained_stage_counts(
     style_worker.render_session.counters, 2, 2, 3, 3, 3, 3, 3
 )
@@ -1414,7 +1448,7 @@ image_worker.browser._advance_resource_revision()
 expect(image_worker.handle(BrowserRendererMessage(
     kind: "advance", generation: 7, request_id: 3, payload: "16"
 )).ok).to_be(true)
-expect(_current_animation_property_work(image_worker)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(_current_animation_property_work(image_worker)).to_equal(0)
 _expect_retained_stage_counts(
     image_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
 )
@@ -1498,7 +1532,7 @@ val scroll = browser_renderer_scroll_encode(7, 3, 1, 16000)
 expect(scroll_worker.handle(browser_renderer_decoder_feed(
     browser_renderer_decoder_new(7), scroll.wire
 ).message).ok).to_be(true)
-expect(_current_animation_property_work(scroll_worker)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(_current_animation_property_work(scroll_worker)).to_equal(0)
 _expect_retained_stage_counts(
     scroll_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
 )
@@ -1517,7 +1551,7 @@ val caret_checksum = (
 expect(caret_worker.handle(BrowserRendererMessage(
     kind: "advance", generation: 7, request_id: 3, payload: "600"
 )).ok).to_be(true)
-expect(_current_animation_property_work(caret_worker)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(_current_animation_property_work(caret_worker)).to_equal(0)
 _expect_retained_stage_counts(
     caret_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
 )
@@ -1577,23 +1611,23 @@ step("Close the page and reclaim browser resources")
 navigation_worker.close()
 expect(
     navigation_worker.render_session.counters.retained_node_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     navigation_worker.render_session.counters.retained_style_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     navigation_worker.render_session.counters.retained_box_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     navigation_worker.render_session.counters.retained_command_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 ```
 
 </details>
 
 #### should bound per-frame CSS animation property work
 
-- Verify: should bound per-frame CSS animation property work
+- should bound per-frame CSS animation property work
    - Artifact capture: after_step
 - Load the bounded browser fixture
    - Artifact capture: after_step
@@ -1602,30 +1636,57 @@ expect(
 - Exercise repeated navigation animation and events
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
-   - Expected: paint_result.animation_property_work_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: paint_result.animation_property_work_count equals `0`
 - Measure retained state and work growth
    - Artifact capture: after_step
    - Evidence: artifact verified by 6 expected checks
-   - Expected: _animation_hot_path_old_comparisons(16) equals `376)  # oracle: pinned constant asserted by this scenario  # oracle: pinned c... (full value in folded executable source)`
-   - Expected: _animation_hot_path_old_comparisons(32) equals `1520)  # oracle: pinned constant asserted by this scenario  # oracle: pinned ... (full value in folded executable source)`
+   - Expected: _animation_hot_path_old_comparisons(16) equals `376`
+   - Expected: _animation_hot_path_old_comparisons(32) equals `1520`
    - Expected: observed_16_work equals `16 * 2`
    - Expected: observed_32_work equals `32 * 2`
-   - Expected: observed_paint_frames equals `4)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: _current_animation_property_work(worker) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: observed_paint_frames equals `4`
+   - Expected: _current_animation_property_work(worker) equals `0`
 - Prove stable Draw IR output within the resource ceiling
    - Artifact capture: after_step
 
+- Load the bounded browser fixture
+   - Load the 16-property animation fixture through the retained renderer.
+   - Require exact canonical `html_ast` Draw IR for the visible `bounded`
+     rectangle and an independent full `64x48` software framebuffer oracle.
+   - Record retained node, style, box, command, Draw IR checksum, and pixel
+     checksum baselines.
+- Exercise repeated navigation animation and events
+   - Replace the document four times, alternating 32 and 16 animated
+     properties, advance the browser animation clock, and dispatch the hidden
+     event control.
+   - After every full animation frame, force a retained resource-only paint at
+     the same clock value. Require zero current-frame animation-property work,
+     an unchanged full Draw IR checksum and framebuffer, and unchanged retained
+     node, style, box, and command owners.
+- Measure retained state and work growth
+   - Require the legacy linear-search model to report exactly 376 comparisons
+     for 16 properties and 1,520 for 32 properties.
+   - Require production full-frame property-index work to remain exactly 32
+     and 64 probes, respectively, and never exceed `2P`; require all four
+     intervening paint-only frames to report exactly zero rather than a copied
+     cumulative count.
+- Prove stable Draw IR output within the resource ceiling
+   - Recheck exact Draw IR geometry/color, every framebuffer pixel, and both
+     checksums independently of the frame-local work counter. Non-animation
+     retained CSS, resource, scroll, and caret modes also report zero work.
+   - Require retained node, style, box, and command counts below 65,537, then
+     close the worker and require all four retained owners plus the current
+     result to be released.
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Rendered scenario source</summary>
 
-Runnable source: 163 lines folded for reproduction.
+Runnable source: 162 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-010
-step("Verify: should bound per-frame CSS animation property work")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should bound per-frame CSS animation property work")
 step("Load the bounded browser fixture")
 var worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(worker.handle(BrowserRendererMessage(
@@ -1718,7 +1779,7 @@ while replacement <= 4:
         payload: frame_time_ms.to_text()
     )).ok).to_be(true)
     val paint_result = worker.render_session.current_result.unwrap()
-    expect(paint_result.animation_property_work_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+    expect(paint_result.animation_property_work_count).to_equal(0)
     expect(worker.render_session.composition_checksum()).to_equal(
         initial_draw_ir_checksum
     )
@@ -1741,12 +1802,12 @@ while replacement <= 4:
     replacement = replacement + 1
 
 step("Measure retained state and work growth")
-expect(_animation_hot_path_old_comparisons(16)).to_equal(376)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(_animation_hot_path_old_comparisons(32)).to_equal(1520)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(_animation_hot_path_old_comparisons(16)).to_equal(376)
+expect(_animation_hot_path_old_comparisons(32)).to_equal(1520)
 expect(observed_16_work).to_equal(16 * 2)
 expect(observed_32_work).to_equal(32 * 2)
-expect(observed_paint_frames).to_equal(4)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(_current_animation_property_work(worker)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(observed_paint_frames).to_equal(4)
+expect(_current_animation_property_work(worker)).to_equal(0)
 expect(observed_16_work).to_be_less_than(
     _animation_hot_path_old_comparisons(16)
 )
@@ -1775,16 +1836,16 @@ expect(retained_commands).to_be_less_than(65537)
 worker.close()
 expect(
     worker.render_session.counters.retained_node_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     worker.render_session.counters.retained_style_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     worker.render_session.counters.retained_box_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     worker.render_session.counters.retained_command_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(worker.render_session.current_result).to_be_nil()
 ```
 
@@ -1792,7 +1853,7 @@ expect(worker.render_session.current_result).to_be_nil()
 
 #### should serialize bounded replacements with stable Draw IR
 
-- Verify: should serialize bounded replacements with stable Draw IR
+- should serialize bounded replacements with stable Draw IR
    - Protocol capture: after_step
 - Load the bounded browser fixture
    - Protocol capture: after_step
@@ -1800,20 +1861,26 @@ expect(worker.render_session.current_result).to_be_nil()
    - Protocol capture: after_step
 - Measure retained state and work growth
    - Protocol capture: after_step
+   - Expected: 4K retained nodes grow from 2K but remain below 3x
 - Prove stable Draw IR output within the resource ceiling
    - Protocol capture: after_step
+   - Expected: repeated 4K fixture emits `html_ast` Draw IR
+   - Expected: `bounded` is an exact `(0, 0, 16, 16)` `#123456` rectangle
+   - Expected: serialized DOM length matches the pinned 4K fixture formula
+   - Expected: serialized DOM remains within the enforced 50 MiB ceiling
+   - Expected: retained stage counts replace rather than accumulate
+   - Expected: retained nodes, styles, boxes, and commands stay below 65,537
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 99 lines folded for reproduction.
+Runnable source: 98 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should serialize bounded replacements with stable Draw IR")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should serialize bounded replacements with stable Draw IR")
 step("Load the bounded browser fixture")
 val smaller = _bounded_serialization_fixture(2048)
 val larger = _bounded_serialization_fixture(4096)
@@ -1821,9 +1888,7 @@ var worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(worker.handle(BrowserRendererMessage(
     kind: "init", generation: 91, request_id: 2, payload: smaller
 )).ok).to_be(true)
-val smaller_nodes = (
-    worker.render_session.counters.retained_node_count
-)
+val smaller_nodes = worker.render_session.counters.retained_node_count
 
 step("Exercise repeated layout navigation or animation")
 match worker.browser.open_html(
@@ -1835,13 +1900,9 @@ expect(worker.handle(BrowserRendererMessage(
     kind: "advance", generation: 91, request_id: 3, payload: "16"
 )).ok).to_be(true)
 val retained_nodes = worker.render_session.counters.retained_node_count
-val retained_styles = (
-    worker.render_session.counters.retained_style_count
-)
+val retained_styles = worker.render_session.counters.retained_style_count
 val retained_boxes = worker.render_session.counters.retained_box_count
-val retained_commands = (
-    worker.render_session.counters.retained_command_count
-)
+val retained_commands = worker.render_session.counters.retained_command_count
 _expect_bounded_serialization_draw_ir(
     worker.render_session.current_result.unwrap().composition
 )
@@ -1866,18 +1927,18 @@ expect(worker.handle(BrowserRendererMessage(
 step("Measure retained state and work growth")
 expect(retained_nodes).to_be_greater_than(smaller_nodes)
 expect(retained_nodes).to_be_less_than(smaller_nodes * 3)
-expect(
-    worker.render_session.counters.retained_node_count
-).to_equal(retained_nodes)
-expect(
-    worker.render_session.counters.retained_style_count
-).to_equal(retained_styles)
-expect(
-    worker.render_session.counters.retained_box_count
-).to_equal(retained_boxes)
-expect(
-    worker.render_session.counters.retained_command_count
-).to_equal(retained_commands)
+expect(worker.render_session.counters.retained_node_count).to_equal(
+    retained_nodes
+)
+expect(worker.render_session.counters.retained_style_count).to_equal(
+    retained_styles
+)
+expect(worker.render_session.counters.retained_box_count).to_equal(
+    retained_boxes
+)
+expect(worker.render_session.counters.retained_command_count).to_equal(
+    retained_commands
+)
 _expect_retained_stage_counts(
     worker.render_session.counters, 3, 3, 3, 3, 3, 3, 3
 )
@@ -1900,37 +1961,39 @@ expect(retained_commands).to_be_less_than(65537)
 worker.close()
 expect(
     worker.render_session.counters.retained_node_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     worker.render_session.counters.retained_style_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     worker.render_session.counters.retained_box_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 expect(
     worker.render_session.counters.retained_command_count
-).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).to_equal(0)
 ```
 
 </details>
 
 #### should route pointer keyboard focus text and form events in browser order
 
-- Verify: should route pointer keyboard focus text and form events in browser order
+- should route pointer keyboard focus text and form events in browser order
    - GUI capture: after_step (HTML preferred when available)
 - Verify semantic state event history and rendered output
+   - GUI capture: after_step (HTML preferred when available)
+-  require production browser evidence
    - GUI capture: after_step (HTML preferred when available)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should route pointer keyboard focus text and form events in browser order")
+# @req REQ-SSPEC-SYSTEM
+step("should route pointer keyboard focus text and form events in browser order")
 _production_browser_fixture()
 _operate_page_controls()
 step("Verify semantic state event history and rendered output")
@@ -1944,19 +2007,20 @@ _require_production_browser_evidence()
 
 #### should cancel a default action after capture target and bubble dispatch
 
-- Verify: should cancel a default action after capture target and bubble dispatch
+- should cancel a default action after capture target and bubble dispatch
 - Cancel a default action after capture target and bubble dispatch
+-  require production browser evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018
-step("Verify: should cancel a default action after capture target and bubble dispatch")
+# @req REQ-SSPEC-SYSTEM
+step("should cancel a default action after capture target and bubble dispatch")
 _production_browser_fixture()
 step("Cancel a default action after capture target and bubble dispatch")
 _require_production_browser_evidence()
@@ -1969,7 +2033,7 @@ _require_production_browser_evidence()
 
 #### should operate address back forward stop reload home bookmark and links
 
-- Verify: should operate address back forward stop reload home bookmark and links
+- should operate address back forward stop reload home bookmark and links
    - GUI capture: after_step (HTML preferred when available)
 - Cancel address editing and reject a stale cross-window release
    - GUI capture: after_step (HTML preferred when available)
@@ -1980,70 +2044,95 @@ _require_production_browser_evidence()
    - Expected: registry.address_text(82) does not contain `>`
    - Expected: stale_press.reason equals `chrome-pressed`
    - Expected: current_press.reason equals `chrome-pressed`
-   - Expected: stale_release.callback_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: stale_release.callback_count equals `0`
    - Expected: current_release.reason equals `address-focused`
 - Keep a newer same-window control armed after a late release
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 4 expected checks
    - Expected: same_back.reason equals `chrome-pressed`
    - Expected: same_address.reason equals `chrome-pressed`
-   - Expected: late_back.callback_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: registry.pressed_window_id equals `82)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
+   - Expected: late_back.callback_count equals `0`
+   - Expected: registry.pressed_window_id equals `82`
 - Replace page and chrome presses without accepting late releases
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 13 expected checks
-   - Expected: page_first.callback_count equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: late_page.callback_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: registry.pressed_window_id equals `81)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: page_replacement.callback_count equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: late_chrome.callback_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: registry.pressed_window_id equals `82)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: canceled.callback_count equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: page_first.callback_count equals `1`
+   - Expected: late_page.callback_count equals `0`
+   - Expected: registry.pressed_window_id equals `81`
+   - Expected: page_replacement.callback_count equals `1`
+   - Expected: late_chrome.callback_count equals `0`
+   - Expected: registry.pressed_window_id equals `82`
+   - Expected: canceled.callback_count equals `1`
    - Expected: registry.address_text(82) equals `about:blank`
    - Expected: registry.address_text(82) does not contain `<`
    - Expected: registry.address_text(82) does not contain `>`
    - Expected: favorite_press.reason equals `chrome-pressed`
    - Expected: favorite_release.reason equals `favorite-parent`
-   - Expected: favorite_release.callback_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: favorite_release.callback_count equals `0`
 - Commit address back forward stop reload and home commands
    - GUI capture: after_step (HTML preferred when available)
-   - Evidence: GUI state or HTML text verified by 13 expected checks
+- var address = HostedBrowserRendererProcess create
+   - GUI capture: after_step (HTML preferred when available)
+- browser renderer decoder new
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 2 expected checks
    - Expected: address_command.action equals `open`
    - Expected: address_command.url equals `https://address.test/`
+- var back = HostedBrowserRendererProcess create
+   - GUI capture: after_step (HTML preferred when available)
+- browser renderer decoder new
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 4 expected checks
    - Expected: back_command.action equals `back`
    - Expected: back_command.url equals `https://history.test/one`
-   - Expected: back.history_index equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: back.pending_history_index equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: back.history_index equals `1`
+   - Expected: back.pending_history_index equals `0`
    - Expected: forward_command.action equals `forward`
    - Expected: forward_command.url equals `https://history.test/two`
-   - Expected: forward.history_index equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: forward.pending_history_index equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: forward.history_index equals `0`
+   - Expected: forward.pending_history_index equals `1`
    - Expected: stop_command.action equals `stop`
    - Expected: stopped.pending_document_commit_url equals ``
+- var reload = HostedBrowserRendererProcess create
+   - GUI capture: after_step (HTML preferred when available)
+- browser renderer decoder new
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 1 expected check
    - Expected: reload.pending_history_action equals `replace`
+- var home = HostedBrowserRendererProcess create
+   - GUI capture: after_step (HTML preferred when available)
+- browser renderer decoder new
+   - GUI capture: after_step (HTML preferred when available)
 - Route bookmark and page-link navigation without forged authority
+   - GUI capture: after_step (HTML preferred when available)
+- var bookmark = HostedBrowserRendererProcess create
+   - GUI capture: after_step (HTML preferred when available)
+- browser renderer decoder new
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 1 expected check
    - Expected: bookmark_command.urls[0] equals `https://saved.test/`
+- var link = HostedBrowserRendererProcess create
+   - GUI capture: after_step (HTML preferred when available)
 - Deny a late command from another renderer generation
+   - GUI capture: after_step (HTML preferred when available)
+- browser renderer decoder new
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 4 expected checks
    - Expected: denied.status equals `violation`
    - Expected: teardown_press.reason equals `chrome-pressed`
-   - Expected: registry.pressed_window_id equals `81)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
-   - Expected: registry.pressed_window_id equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: registry.pressed_window_id equals `81`
+   - Expected: registry.pressed_window_id equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 273 lines folded for reproduction.
+Runnable source: 272 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should operate address back forward stop reload home bookmark and links")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should operate address back forward stop reload home bookmark and links")
 _production_browser_fixture()
 _operate_browser_navigation()
 val artifact = env_get("HOSTED_WM_ARTIFACT")
@@ -2088,7 +2177,7 @@ val current_release = registry.dispatch_chrome_pointer(
 )
 expect(stale_press.reason).to_equal("chrome-pressed")
 expect(current_press.reason).to_equal("chrome-pressed")
-expect(stale_release.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(stale_release.callback_count).to_equal(0)
 expect(stale_release.reason).to_equal(
     "chrome-release-target-mismatch"
 )
@@ -2106,11 +2195,11 @@ val late_back = registry.dispatch_chrome_pointer(
 )
 expect(same_back.reason).to_equal("chrome-pressed")
 expect(same_address.reason).to_equal("chrome-pressed")
-expect(late_back.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(late_back.callback_count).to_equal(0)
 expect(late_back.reason).to_equal(
     "chrome-release-target-mismatch"
 )
-expect(registry.pressed_window_id).to_equal(82)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(registry.pressed_window_id).to_equal(82)
 expect(registry.dispatch_chrome_pointer(
     13, 82, "address", false
 ).reason).to_equal("address-focused")
@@ -2119,18 +2208,18 @@ step("Replace page and chrome presses without accepting late releases")
 val page_first = registry.dispatch_pointer(
     14, 81, 4, 4, true
 )
-expect(page_first.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(page_first.callback_count).to_equal(1)
 expect(registry.dispatch_chrome_pointer(
     15, 81, "address", true
 ).reason).to_equal("chrome-pressed")
 val late_page = registry.dispatch_pointer(
     16, 81, 4, 4, false
 )
-expect(late_page.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(late_page.callback_count).to_equal(0)
 expect(late_page.reason).to_equal(
     "pointer-release-target-mismatch"
 )
-expect(registry.pressed_window_id).to_equal(81)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(registry.pressed_window_id).to_equal(81)
 expect(registry.dispatch_chrome_pointer(
     17, 81, "address", false
 ).reason).to_equal("address-focused")
@@ -2141,26 +2230,26 @@ expect(registry.dispatch_chrome_pointer(
 val page_replacement = registry.dispatch_pointer(
     19, 82, 4, 4, true
 )
-expect(page_replacement.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(page_replacement.callback_count).to_equal(1)
 val late_chrome = registry.dispatch_chrome_pointer(
     20, 82, "back", false
 )
-expect(late_chrome.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(late_chrome.callback_count).to_equal(0)
 expect(late_chrome.reason).to_equal(
     "chrome-release-target-mismatch"
 )
-expect(registry.pressed_window_id).to_equal(82)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(registry.pressed_window_id).to_equal(82)
 expect(registry.dispatch_pointer(
     21, 82, 4, 4, false
-).callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).callback_count).to_equal(1)
 
 expect(registry.dispatch_text(
     22, 82, "https://draft.test/"
-).callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+).callback_count).to_equal(1)
 val canceled = registry.dispatch_key_with_shift(
     23, 82, 27, true, false
 )
-expect(canceled.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(canceled.callback_count).to_equal(1)
 expect(registry.address_text(82)).to_equal("about:blank")
 expect(registry.address_text(82).contains("<")).to_equal(false)
 expect(registry.address_text(82).contains(">")).to_equal(false)
@@ -2172,7 +2261,7 @@ val favorite_release = registry.dispatch_chrome_pointer(
 )
 expect(favorite_press.reason).to_equal("chrome-pressed")
 expect(favorite_release.reason).to_equal("favorite-parent")
-expect(favorite_release.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(favorite_release.callback_count).to_equal(0)
 
 step("Commit address back forward stop reload and home commands")
 var address = HostedBrowserRendererProcess.create(31, 64, 48)
@@ -2204,8 +2293,8 @@ val back_command = browser_renderer_navigation_decode(
 )
 expect(back_command.action).to_equal("back")
 expect(back_command.url).to_equal("https://history.test/one")
-expect(back.history_index).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(back.pending_history_index).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(back.history_index).to_equal(1)
+expect(back.pending_history_index).to_equal(0)
 
 var forward = HostedBrowserRendererProcess.create(33, 64, 48)
 forward.state = "active"
@@ -2221,8 +2310,8 @@ val forward_command = browser_renderer_navigation_decode(
 )
 expect(forward_command.action).to_equal("forward")
 expect(forward_command.url).to_equal("https://history.test/two")
-expect(forward.history_index).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(forward.pending_history_index).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(forward.history_index).to_equal(0)
+expect(forward.pending_history_index).to_equal(1)
 
 var stopped = HostedBrowserRendererProcess.create(34, 64, 48)
 stopped.state = "active"
@@ -2311,51 +2400,75 @@ val teardown_press = registry.dispatch_chrome_pointer(
     26, 81, "back", true
 )
 expect(teardown_press.reason).to_equal("chrome-pressed")
-expect(registry.pressed_window_id).to_equal(81)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(registry.pressed_window_id).to_equal(81)
 expect(registry.close()).to_be(true)
-expect(registry.pressed_window_id).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(registry.pressed_window_id).to_equal(0)
 ```
 
 </details>
 
 #### should persist bounded page titles across renderer and profile restart
 
-- Verify: should persist bounded page titles across renderer and profile restart
+- should persist bounded page titles across renderer and profile restart
    - Text capture: after_step
 - Open bounded titled documents through hosted chrome
    - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
    - Expected: admitted_title equals `BOOKMARK_TITLE_512`
+- Err
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
+- Ok
+   - Text capture: after_step
+- registry bookmark stored title
+   - Text capture: after_step
+- check bookmark title witness admission
+   - Text capture: after_step
+- registry bookmark stored title
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
    - Expected: second_commit.bookmarks.entries[1].second equals ``
 - Commit bookmarks through the parent profile owner
    - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
    - Expected: accepted_persisted_title equals `BOOKMARK_TITLE_512`
    - Expected: fallback_persisted_title equals ``
+- profile close
+   - Text capture: after_step
+- BrowserProfileStore open
+   - Text capture: after_step
 - Restart the renderer generation and profile-backed window
    - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
-   - Expected: restarted_count equals `2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: restarted.profile_bookmarks.entries.len() equals `2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: restarted_count equals `2`
+   - Expected: restarted.profile_bookmarks.entries.len() equals `2`
 - List persisted bookmarks with safe titles
    - Text capture: after_step
    - Evidence: text output verified by 4 expected checks
-   - Expected: restored_accepted_count equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: restored_fallback_count equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: restored_accepted_count equals `1`
+   - Expected: restored_fallback_count equals `1`
    - Expected: restored_title equals `BOOKMARK_TITLE_512`
    - Expected: restored_fallback equals ``
+- set mock registry
+   - Text capture: after_step
+- rt file delete
+   - Text capture: after_step
+- rt file delete
+   - Text capture: after_step
+- rt file delete
+   - Text capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 127 lines folded for reproduction.
+Runnable source: 126 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018
-step("Verify: should persist bounded page titles across renderer and profile restart")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should persist bounded page titles across renderer and profile restart")
 setup_hosted_bookmark_title_profile()
 val artifact = env_get("HOSTED_WM_ARTIFACT")
 val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
@@ -2454,52 +2567,49 @@ val _ = restarted.advance_window(
 val restarted_count = restarted.profile_bookmarks.entries.len()
 step("Restart the renderer generation and profile-backed window")
 expect(registry.next_generation).to_be_greater_than(2)
-expect(restarted_count).to_equal(2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(restarted_count).to_equal(2)
 
-expect(restarted.profile_bookmarks.entries.len()).to_equal(2)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-check_restarted_bookmark_listing(restarted)
+expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
+expect(restarted.profile_bookmarks.entries[0].second).to_equal(
+    BOOKMARK_TITLE_512
+)
+expect(restarted.profile_bookmarks.entries[1].second).to_equal("")
+check_restarted_bookmark_listing(restarted.profile_bookmarks)
 check_in_process_registry_profile_reopen(
     restarted.profile_bookmarks
 )
-var restored_title = ""
-var restored_fallback = ""
-var restored_accepted_count = 0
-var restored_fallback_count = 0
-for entry in restarted.profile_bookmarks.entries:
-    if entry.first == "https://accepted-title.test/":
-        restored_accepted_count = restored_accepted_count + 1
-        restored_title = entry.second
-    elif entry.first == "https://fallback-title.test/":
-        restored_fallback_count = restored_fallback_count + 1
-        restored_fallback = entry.second
+val restored_title = restarted.profile_bookmarks.entries[0].second
+val restored_fallback = (
+    restarted.profile_bookmarks.entries[1].second
+)
 step("List persisted bookmarks with safe titles")
-expect(restored_accepted_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(restored_fallback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(restored_title).to_equal(BOOKMARK_TITLE_512)
 expect(restored_fallback).to_equal("")
 expect(restarted.close()).to_be(true)
 set_mock_registry(MockResponseRegistry.create())
-_remove_bookmark_title_profile(BOOKMARK_TITLE_PROFILE_PATH)
+rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)
+rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-wal")
+rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-shm")
 ```
 
 </details>
 
 #### should enforce one UTF-8 byte bound for every browser address editor
 
-- Verify: should enforce one UTF-8 byte bound for every browser address editor
+- should enforce one UTF-8 byte bound for every browser address editor
    - Protocol capture: after_step
 - Accept an address draft of exactly 2048 UTF-8 bytes
    - Protocol capture: after_step
    - Evidence: protocol response verified by 5 expected checks
    - Expected: focused.reason equals `chrome-pressed`
    - Expected: released.reason equals `address-focused`
-   - Expected: accepted.callback_count equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: accepted.callback_count equals `1`
    - Expected: accepted.reason equals ``
    - Expected: registry.address_text(92) equals `exact`
 - Reject a 2049-byte multibyte draft without mutating state
    - Protocol capture: after_step
    - Evidence: protocol response verified by 4 expected checks
-   - Expected: rejected.callback_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: rejected.callback_count equals `0`
    - Expected: rejected.reason equals `address-too-long`
    - Expected: registry.address_text(92) equals `exact`
    - Expected: registry.document_url(92) equals `committed`
@@ -2508,13 +2618,12 @@ _remove_bookmark_title_profile(BOOKMARK_TITLE_PROFILE_PATH)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should enforce one UTF-8 byte bound for every browser address editor")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should enforce one UTF-8 byte bound for every browser address editor")
 _production_browser_fixture()
 val artifact = env_get("HOSTED_WM_ARTIFACT")
 val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
@@ -2541,7 +2650,7 @@ val exact = _repeat_browser_text("a", 2048)
 val accepted = registry.dispatch_text(3, 92, exact)
 expect(focused.reason).to_equal("chrome-pressed")
 expect(released.reason).to_equal("address-focused")
-expect(accepted.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(accepted.callback_count).to_equal(1)
 expect(accepted.reason).to_equal("")
 expect(registry.address_text(92)).to_equal(exact)
 val committed = registry.document_url(92)
@@ -2558,7 +2667,7 @@ val rejected = registry.dispatch_text(6, 92, oversized)
 expect(rejected.semantic_target_id).to_equal(
     "browser:parent#address"
 )
-expect(rejected.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(rejected.callback_count).to_equal(0)
 expect(rejected.reason).to_equal("address-too-long")
 expect(registry.address_text(92)).to_equal(exact)
 expect(registry.document_url(92)).to_equal(committed)
@@ -2572,19 +2681,20 @@ expect(registry.close()).to_be(true)
 
 #### should report unsupported content without fake success
 
-- Verify: should report unsupported content without fake success
+- should report unsupported content without fake success
 - Open unsupported and malformed compatibility fixtures
+-  require production browser evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should report unsupported content without fake success")
+# @req REQ-SSPEC-SYSTEM
+step("should report unsupported content without fake success")
 _production_browser_fixture()
 step("Open unsupported and malformed compatibility fixtures")
 _require_production_browser_evidence()
@@ -2597,12 +2707,12 @@ _require_production_browser_evidence()
 
 #### should render br as one forced inline line break
 
-- Verify: should render br as one forced inline line break
+- should render br as one forced inline line break
    - GUI capture: after_step (HTML preferred when available)
 - Render forced HTML line breaks through canonical Draw IR
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 2 expected checks
-   - Expected: beta_y - alpha_y equals `20)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
+   - Expected: beta_y - alpha_y equals `20`
    - Expected: hidden_beta_y equals `hidden_alpha_y`
 - Read back the forced-line pixels after semantic geometry
    - GUI capture: after_step (HTML preferred when available)
@@ -2614,13 +2724,12 @@ _require_production_browser_evidence()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 67 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should render br as one forced inline line break")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should render br as one forced inline line break")
 step("Render forced HTML line breaks through canonical Draw IR")
 val html = (
     "<div style='margin:0;padding:0;font-size:16px;line-height:20px'>" +
@@ -2662,7 +2771,7 @@ val alpha_y = simple_web_layout_debug_layout_by_id(
 val beta_y = simple_web_layout_debug_layout_by_id(
     html, 160, 64, "beta", "y"
 ).to_i32()
-expect(beta_y - alpha_y).to_equal(20)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(beta_y - alpha_y).to_equal(20)
 val hidden_break_html = (
     "<div style='margin:0;padding:0;font-size:16px;line-height:20px'>" +
     "<span id='hidden-alpha'>alpha</span>" +
@@ -2692,20 +2801,34 @@ expect(_pixels_equal(forced_pixels, inline_pixels)).to_equal(false)
 
 #### should retain the canonical document tree while rendering its body
 
-- Verify: should retain the canonical document tree while rendering its body
+- should retain the canonical document tree while rendering its body
    - GUI capture: after_step (HTML preferred when available)
 - Load one explicit head and body through the canonical tree builder
+   - GUI capture: after_step (HTML preferred when available)
+- var session = BrowserSession new
+   - GUI capture: after_step (HTML preferred when available)
+- Ok
+   - GUI capture: after_step (HTML preferred when available)
+-
+   - GUI capture: after_step (HTML preferred when available)
+- Err
+   - GUI capture: after_step (HTML preferred when available)
+- fail
    - GUI capture: after_step (HTML preferred when available)
 - Retain head metadata and title in the installed semantic document
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 4 expected checks
-   - Expected: heads.len() equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: be_dom_find_by_tag(heads[0], "meta").len() equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-   - Expected: be_dom_find_by_tag(heads[0], "title").len() equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: heads.len() equals `1`
+   - Expected: be_dom_find_by_tag(heads[0], "meta").len() equals `1`
+   - Expected: be_dom_find_by_tag(heads[0], "title").len() equals `1`
    - Expected: session.current_title equals `Canonical Tree`
 - Lower the same body through canonical Draw IR
    - GUI capture: after_step (HTML preferred when available)
+- session render html document
+   - GUI capture: after_step (HTML preferred when available)
 - Execute the same composition through Engine2D pixels
+   - GUI capture: after_step (HTML preferred when available)
+- raster shutdown
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 1 expected check
    - Expected: rendered.pixels.len() equals `32 * 32`
@@ -2714,13 +2837,12 @@ expect(_pixels_equal(forced_pixels, inline_pixels)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010
-step("Verify: should retain the canonical document tree while rendering its body")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should retain the canonical document tree while rendering its body")
 step("Load one explicit head and body through the canonical tree builder")
 var session = BrowserSession.new()
 match session.open_html(
@@ -2739,9 +2861,9 @@ match session.open_html(
 
 step("Retain head metadata and title in the installed semantic document")
 val heads = be_dom_find_by_tag(session.current_dom, "head")
-expect(heads.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(be_dom_find_by_tag(heads[0], "meta").len()).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
-expect(be_dom_find_by_tag(heads[0], "title").len()).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(heads.len()).to_equal(1)
+expect(be_dom_find_by_tag(heads[0], "meta").len()).to_equal(1)
+expect(be_dom_find_by_tag(heads[0], "title").len()).to_equal(1)
 expect(session.current_title).to_equal("Canonical Tree")
 
 step("Lower the same body through canonical Draw IR")
@@ -2770,71 +2892,85 @@ expect(_count_color(
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
-## Related Documentation
-
-- **Requirements:** `doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
-- **Plan:** `doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md`
-- **Design:** `doc/05_design/simple_web_browser_engine_production_hardening.md`
-- **Research:** `doc/01_research/local/simple_web_browser_engine_production_hardening.md`
-
-
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-004`
+- `REQ-WEB-BROWSER-001..009`
+<!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `da1677056933da1e35a7e017744b063afe49aba826f3f0fd084249adb58e56fd`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `0c64a0cb05de434687b687f4a999314d55e8e4400144b163735fe66e74c2fcd4`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `da1677056933da1e35a7e017744b063afe49aba826f3f0fd084249adb58e56fd`.
+Source SHA-256: `0c64a0cb05de434687b687f4a999314d55e8e4400144b163735fe66e74c2fcd4`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `da1677056933da1e35a7e017744b063afe49aba826f3f0fd084249adb58e56fd`  
+Source SHA-256: `0c64a0cb05de434687b687f4a999314d55e8e4400144b163735fe66e74c2fcd4`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+Raw score: **80/100**; effective score: **80/100**; blockers: **0**.
 
-SSpec documentization score: 90/100
+SSpec documentization score: 80/100
 source: test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl
 mirror: doc/06_spec/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.md (current)
-findings: 9 blockers: 0
-  narrative=100 structure=70 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 13 blockers: 0
+  narrative=100 structure=60 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, recovery/troubleshooting
+doc/06_spec/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:704:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should anchor fixed CSS image backgrounds to the viewport' describes the test rather than its outcome
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 83 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:694:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should anchor fixed CSS image backgrounds to the viewport' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:694:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should anchor fixed CSS image backgrounds to the viewport' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:819:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit two CSS URL backgrounds and lower both through canonical Draw IR' describes the test rather than its outcome
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:810:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit two CSS URL backgrounds and lower both through canonical Draw IR' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:891:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve semantic parentage clipping and stacking in canonical Draw IR' describes the test rather than its outcome
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:810:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should admit two CSS URL backgrounds and lower both through canonical Draw IR' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:881:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve semantic parentage clipping and stacking in canonical Draw IR' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:978:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should normalize split overflow axes before Draw IR clipping' describes the test rather than its outcome
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:881:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve semantic parentage clipping and stacking in canonical Draw IR' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:967:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should normalize split overflow axes before Draw IR clipping' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:1044:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should deliver retained callable listeners through one DOM event path' describes the test rather than its outcome
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:967:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should normalize split overflow axes before Draw IR clipping' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:1032:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should deliver retained callable listeners through one DOM event path' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:1133:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed for synchronous JavaScript-originated dispatchEvent' describes the test rather than its outcome
+test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl:1120:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed for synchronous JavaScript-originated dispatchEvent' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,95 @@
+#!/bin/sh
+# Focused fail-closed contract for the resume-only Stage-3 progress lifecycle.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+wrapper="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+helper="$root/scripts/check/lib/bootstrap-resume-stage3-progress.shs"
+checked=0
+failed=0
+
+expect() {
+  checked=$((checked + 1))
+  if ! "$@"; then failed=$((failed + 1)); echo "  FAIL: $*" >&2; fi
+}
+
+[ -f "$wrapper" ] && [ -f "$helper" ] || {
+  echo "ERROR — nothing was checked (resume wrapper/helper missing)"; exit 2;
+}
+. "$helper"
+
+# Production source wiring: validate before trap/begin, record ownership before
+# the pid file, and preserve a non-zero candidate status exactly.
+grep -Fq 'bootstrap_resume_stage3_progress_validate "$output"' "$wrapper"
+expect test $? -eq 0
+grep -Fq "trap 'resume_stage3_progress_cleanup \$?' EXIT" "$wrapper"
+expect test $? -eq 0
+grep -Fq 'resume_progress_lock=$lock' "$wrapper"
+expect test $? -eq 0
+grep -Fq 'bootstrap_resume_stage3_progress_finish "$resume_progress_status" "$resume_progress_lock"' "$wrapper"
+expect test $? -eq 0
+
+tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+run_real_lifecycle() {
+  fixture_rc=$1
+  fixture_dir="$tmp/rc-$fixture_rc"
+  mkdir -p "$fixture_dir/out"
+  fixture_state="$fixture_dir/out/bootstrap-progress.state"
+  fixture_lock="$fixture_dir/out.lock"
+  mkdir "$fixture_lock"
+  # Reproduce the Cycle15 precondition; production begin must overwrite it.
+  printf 'milestone=exit-0\nmain_log=stale-stage2\n' >"$fixture_state"
+  bootstrap_resume_stage3_progress_validate "$fixture_dir/out" \
+    "$fixture_dir/progress.log" "$root" "$wrapper" || return 90
+  bootstrap_resume_stage3_progress_begin "$$" 1 || return 91
+  fixture_watcher=$bootstrap_resume_progress_pid
+  bootstrap_resume_stage3_progress_finish "$fixture_rc" "$fixture_lock"
+  fixture_finish=$?
+  [ "$fixture_finish" -eq "$fixture_rc" ] || return 92
+  [ ! -e "$fixture_lock" ] || return 93
+  kill -0 "$fixture_watcher" 2>/dev/null && return 94
+  case "$fixture_rc" in
+    0)
+      grep -Fxq 'milestone=exit-0' "$fixture_state" || return 95
+      tail -n 1 "$fixture_dir/out/bootstrap-build-progress.events" | grep -Fq 'terminal=succeeded' || return 96
+      ;;
+    *)
+      grep -Fxq "milestone=exit-$fixture_rc" "$fixture_state" || return 97
+      grep -Fq 'milestone=exit-0' "$fixture_state" && return 98
+      tail -n 1 "$fixture_dir/out/bootstrap-build-progress.events" | grep -Fq 'terminal=failed' || return 99
+      ;;
+  esac
+}
+
+run_real_lifecycle 139
+expect test $? -eq 0
+run_real_lifecycle 0
+expect test $? -eq 0
+
+# Pre-create the production helper's exclusive same-directory temporary file.
+# begin must fail before it can replace state or spawn a watcher; finish(0)
+# must convert failed terminal publication into a non-zero result and remove
+# the owned lock.
+fail_dir="$tmp/publication-failure"
+mkdir -p "$fail_dir/out"
+fail_lock="$fail_dir/out.lock"
+mkdir "$fail_lock"
+bootstrap_resume_stage3_progress_validate "$fail_dir/out" "$fail_dir/progress.log" "$root" "$wrapper"
+validate_rc=$?
+expect test "$validate_rc" -eq 0
+: >"$bootstrap_resume_progress_tmp"
+bootstrap_resume_stage3_progress_begin "$$" 1
+begin_rc=$?
+expect test "$begin_rc" -ne 0
+bootstrap_resume_stage3_progress_finish 0 "$fail_lock"
+finish_rc=$?
+expect test "$finish_rc" -ne 0
+expect test ! -e "$fail_lock"
+
+if [ "$failed" -ne 0 ]; then
+  echo "FAIL — $checked resume progress contract(s) checked, $failed failed"
+  exit 1
+fi
+echo "PASS — $checked resume progress contract(s) checked"

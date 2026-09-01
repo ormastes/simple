@@ -2,100 +2,11 @@
 
 **Date:** 2026-07-04
 **Severity:** medium (blocks real mouse/keyboard click-to-select on the sheet-GUI pixel path; state-driven equivalent shipped as the honest MVP instead)
-**Status:** RESOLVED (2026-07-04) — three halves closed. `sheet_gui_view_with_
-selection`'s grid was closed same-day; see "Resolution" below. `sheet_gui_
-view`'s plain grid was closed next; see "Resolution part 2 (GUI polish
-pass)" below. The OS-input-bridge gap (residual #4, click/key routes were
-scripted, never real device input) is now closed for TERMINAL input; see
-"Resolution part 3 (live keystroke loop)" below. The only remaining
-residual is windowed/compositor mouse+keyboard for the browser-engine GUI
-backend (a real OS window's event loop, not a terminal) — out of scope for
-this office lane.
-
-## Resolution part 3 (live keystroke loop, 2026-07-04)
-
-Closes the terminal half of residual #4 ("Feed real OS mouse/keyboard input
-into `UIEvent`s ... `run_sheet_tui_mode` does it for the TUI backend only,
-via termios"): `office sheet-gui-live` now drives `SheetGuiSession` from
-REAL termios keystrokes, the same input device `run_sheet_tui_mode` already
-used for the separate TUI-grid backend — this is the sheet-GUI-session
-backend's turn.
-
-Shipped:
-- `src/app/office/interactive.spl`: `decode_key_byte`/`KeyDecodeResult` — the
-  ESC `[` A/B/C/D arrow-escape-sequence state machine `tui_apply_key` used to
-  inline, extracted so both loops share ONE decoder (`tui_apply_key` was
-  rebuilt on top of it, verified byte-for-byte behavior-preserving by the
-  full pre-existing `interactive_spec.spl` suite staying green, 8/8,
-  unmodified). `run_sheet_gui_live(sheet)` — the live loop itself: renders a
-  frame via the real `office_gui_sheet_session_pixels` pixel path, reads one
-  raw byte via the same `rt_stdin_read_byte`/`rt_terminal_enable_raw_mode`/
-  `rt_terminal_disable_raw_mode` externs `run_sheet_tui_mode` uses, decodes
-  it, and steps the session — re-rendering after every accepted key. `q` or
-  Ctrl-C (byte 3, since raw mode's `cfmakeraw()` clears `ISIG` — see
-  `raw_mode_extern_registry_2026-07-03.md`'s fix option 3) quits.
-- `src/app/office/gui.spl`: `GuiLiveStepResult`/`run_gui_live_step(session,
-  key, max_rows, max_cols, view_rows, view_cols)` — the loop's pure,
-  spec-testable per-keystroke core (a live raw-mode loop can't itself be
-  driven from a spec): forwards arrows/chars/enter/backspace/escape to
-  `session_key` unchanged, and turns `"q"`/`"ctrl_c"`/`"eof"` into
-  `GuiLiveStepResult.quit = true` with the session returned UNCHANGED (a
-  quit key never drops in-progress typing).
-- CLI: `simple office sheet-gui-live` (`_run_office_gui_sheet_live_command`
-  in `mod.spl`).
-- Non-TTY safety: `rt_terminal_enable_raw_mode()` returns `false` when stdin
-  isn't a real terminal (`tcgetattr` fails on a pipe/redirect — an existing
-  signal, not a new TTY-detection extern) — `run_sheet_gui_live` prints
-  exactly one rendered frame plus a documented notice and returns 0 instead
-  of blocking on a keystroke that will never arrive, so CI/non-interactive
-  callers can exercise the entry point without hanging.
-- Spec: `test/01_unit/app/office/sheet_gui_session_spec.spl`'s "live loop
-  step" describe block (6 new `it`s: down-moves-selection,
-  chars+enter-commits+recalculates, escape-cancels-buffer, q-quits,
-  ctrl_c-quits, eof-quits) plus the full pre-existing suite (25 `it`s)
-  staying green — 31/31.
-- Smoke: `printf '' | timeout 30 <simple> run src/app/office/mod.spl office
-  sheet-gui-live` prints one rendered frame (pixel-proof line + text_dump)
-  followed by the non-TTY notice and exits 0.
-
-Scope note: like `session_click`/`session_key` before it, this bridges REAL
-OS keystrokes into the session for the TERMINAL backend only. It does not
-feed input into `common.ui.event`'s `UIEvent` variants (still no framework
-change needed — `session_key` was already the chosen translator, see the
-"Keyboard interaction" comment block in `gui.spl`), and it does not address
-a windowed/compositor GUI's mouse+keyboard event source, which remains the
-one open item below.
-
-## Resolution part 2 (GUI polish pass, 2026-07-04)
-
-`sheet_gui_view` (the read-only, no-session grid used by the plain
-`sheet-gui` CLI) no longer builds its own `table_widget` grid at all. It is
-now a thin wrapper over `sheet_gui_view_with_selection` (session created via
-`session_new(sheet, "")` — an empty `selected_ref` never matches a real cell
-ref, so no bracket/focus ever renders), so every cell in the read-only view
-is now the SAME real, addressable `text_widget` with id `cell_<ref>` that
-`sheet_gui_view_with_selection`'s cells always were. The plain-table-grid
-code path (item 1 of "What would close this gap" below) no longer exists in
-`sheet_gui_view` at all — there was nothing left needing a shared-framework
-`table_widget`/`render_html_table` change, because the office lane simply
-stopped using `table_widget` for the sheet view (pivot's grid still does,
-and is unaffected — pivot's use of `table_widget` was never part of this
-gap).
-
-Byte-compatibility: `sheet_gui_view`'s dump format is unchanged (verified by
-the full pre-existing `sheet_gui_view_spec` suite staying green, 9/9,
-unmodified) despite the internal rewrite — see gui.spl's `sheet_gui_view`
-docstring for how the old "scan grid rows 1..max_rows, skip hidden, no
-backfill" semantics is preserved on top of `sheet_gui_view_with_selection`'s
-different (N-visible, backfilling) windowing semantics: the row count
-passed down is computed as the number of visible rows already within that
-exact range, which forces the delegated call to stop before it would ever
-need to backfill.
-
-Item 1 of "What would close this gap" below is therefore no longer
-applicable to `sheet_gui_view` (superseded by this resolution) — the
-remaining items (2-4) are unchanged and still open for whichever lane wires
-a live GUI event loop / real OS input.
+**Status:** RESOLVED (2026-07-04, same day) for `sheet_gui_view_with_selection`'s
+grid — see "Resolution" below. `sheet_gui_view`'s plain `table_widget` grid
+(no `_with_selection`) remains unaddressable per-cell; that narrower gap is
+unchanged and still needs the shared-framework fix in item 1 of "What would
+close this gap" below.
 
 ## Resolution (2026-07-04)
 
@@ -207,18 +118,13 @@ arrow-key loop-back movement, edge clamp, hidden-row skip (both
 directions), typed-buffer accumulation + dump marker, enter-commits-and-
 recalculates, escape-cancels, backspace-trims.
 
-Residual at the time of this addendum (now updated by "Resolution part 3"
-above, 2026-07-04): item #1 from "What would close this gap" above
-(per-cell `table_widget` grid) was closed the same day by "Resolution part
-2". Item #4 (real OS keyboard/mouse input) is now DONE for TERMINAL input —
-`office sheet-gui-live` bridges real termios keystrokes into
-`session_key` via `run_gui_live_step`, the same input device
-`run_sheet_tui_mode` already used for the TUI-grid backend. `session_click`
-remains a scripted entry point (no OS mouse device exists for a terminal to
-bridge from). The one item that remains open for whichever lane wires a
-real OS window: a windowed/compositor GUI backend's mouse+keyboard event
-source feeding `common.ui.event`'s `UIEvent`s (or `session_click`/
-`session_key`) — out of scope for the office/terminal lane.
+Residual, still open: item #1 from "What would close this gap" above
+(per-cell `table_widget` grid) is unchanged. Additionally, neither this
+addendum nor the click resolution wires REAL OS keyboard/mouse input into
+`UIEvent`s for the browser-engine GUI backend (item #4 from "What would
+close this gap") — `session_click`/`session_key` are both scripted entry
+points, not an input-device-to-UIEvent bridge; that remains open for
+whichever lane wires a live GUI event loop.
 
 ## Summary
 
@@ -297,13 +203,7 @@ not invent a new one.
    `process_event` per incoming `UIEvent` → re-render, instead of a single
    build-then-render call — today NOTHING in `office/gui.spl` closes that
    loop, sheet grid or otherwise.
-4. Feed real OS mouse/keyboard input into `UIEvent`s. DONE for terminal
-   keyboard input (2026-07-04, see "Resolution part 3" above) —
-   `office sheet-gui-live` / `run_sheet_gui_live` bridges real termios
-   keystrokes into `SheetGuiSession` via `run_gui_live_step`/`session_key`,
-   the same input device `run_sheet_tui_mode` already used for the TUI-grid
-   backend (still not via `common.ui.event`'s `UIEvent` variants —
-   `session_key` remains the chosen session-level translator, per the
-   "Keyboard interaction" comment block in `gui.spl`). Remaining: a
-   windowed/compositor GUI backend's real mouse+keyboard event source
-   (`os/` layer), out of scope here.
+4. Feed real OS mouse/keyboard input into `UIEvent`s (currently no office
+   GUI backend does this at all; `run_sheet_tui_mode` does it for the TUI
+   backend only, via termios, not via `common.ui.event`'s `UIEvent`
+   variants).

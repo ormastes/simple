@@ -1,6 +1,6 @@
 # spec_nullable_matcher_spec
 
-> stays a bare value, but a function declared `-> T?` returns `Option::None` /
+> Regression: `expect(<T?>)` matchers must use nullable-aware equality.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # spec_nullable_matcher_spec
 
-stays a bare value, but a function declared `-> T?` returns `Option::None` /
+Regression: `expect(<T?>)` matchers must use nullable-aware equality.
 
 ## At a Glance
 
@@ -20,13 +20,12 @@ stays a bare value, but a function declared `-> T?` returns `Option::None` /
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
+Regression: `expect(<T?>)` matchers must use nullable-aware equality.
 
+A nullable `T?` has two runtime representations. A literal assigned to a `T?`
 stays a bare value, but a function declared `-> T?` returns `Option::None` /
 `Option::Some(x)`. The BDD matcher builtins used raw equality, so on a
 function-returned nullable:
@@ -48,42 +47,15 @@ unconditionally. Fixed by routing both matcher arms and the interpreter's
 ### to_equal must not FALSE-FAIL on a nullable receiver
 
 #### matches nil against a function-returned nil i64?
-
-- Verify: matches nil against a function-returned nil i64?
-   - Expected: nil_i64() equals `nil`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: matches nil against a function-returned nil i64?")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(nil_i64()).to_equal(nil)
-```
-
-</details>
-
 #### matches nil against a function-returned nil text?
 
-- Verify: matches nil against a function-returned nil text?
-   - Expected: nil_text() equals `nil`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: matches nil against a function-returned nil text?")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(nil_text()).to_equal(nil)
 ```
 
@@ -91,41 +63,27 @@ expect(nil_text()).to_equal(nil)
 
 #### matches the payload of a function-returned i64?
 
-- Verify: matches the payload of a function-returned i64?
-   - Expected: some_i64() equals `7)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: matches the payload of a function-returned i64?")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-expect(some_i64()).to_equal(7)  # oracle: pinned constant asserted by this scenario
+expect(some_i64()).to_equal(7)
 ```
 
 </details>
 
 #### matches the payload of a function-returned text?
 
-- Verify: matches the payload of a function-returned text?
-   - Expected: some_text() equals `hi`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: matches the payload of a function-returned text?")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(some_text()).to_equal("hi")
 ```
 
@@ -135,19 +93,13 @@ expect(some_text()).to_equal("hi")
 
 #### rejects nil for a non-nil nullable
 
-- Verify: rejects nil for a non-nil nullable
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: rejects nil for a non-nil nullable")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(some_i64() == nil).to_be_false()
 ```
 
@@ -155,19 +107,13 @@ expect(some_i64() == nil).to_be_false()
 
 #### rejects a wrong payload
 
-- Verify: rejects a wrong payload
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: rejects a wrong payload")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(some_i64() == 8).to_be_false()
 ```
 
@@ -175,19 +121,13 @@ expect(some_i64() == 8).to_be_false()
 
 #### rejects a non-nil value for a nil nullable
 
-- Verify: rejects a non-nil value for a nil nullable
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: rejects a non-nil value for a nil nullable")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(nil_i64() == 7).to_be_false()
 ```
 
@@ -197,19 +137,13 @@ expect(nil_i64() == 7).to_be_false()
 
 #### treats a function-returned nil as equal to nil
 
-- Verify: treats a function-returned nil as equal to nil
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: treats a function-returned nil as equal to nil")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(nil_i64() == nil).to_be_true()
 ```
 
@@ -217,19 +151,13 @@ expect(nil_i64() == nil).to_be_true()
 
 #### treats a function-returned payload as equal to the bare value
 
-- Verify: treats a function-returned payload as equal to the bare value
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: treats a function-returned payload as equal to the bare value")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(some_i64() == 7).to_be_true()
 ```
 
@@ -237,19 +165,13 @@ expect(some_i64() == 7).to_be_true()
 
 #### still reports a genuine difference
 
-- Verify: still reports a genuine difference
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: still reports a genuine difference")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(some_i64()).to_not_equal(9)
 ```
 
@@ -257,19 +179,13 @@ expect(some_i64()).to_not_equal(9)
 
 #### still reports non-nil as not equal to nil
 
-- Verify: still reports non-nil as not equal to nil
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: still reports non-nil as not equal to nil")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(some_i64()).to_not_equal(nil)
 ```
 
@@ -279,19 +195,13 @@ expect(some_i64()).to_not_equal(nil)
 
 #### passes for a function-returned nil
 
-- Verify: passes for a function-returned nil
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: passes for a function-returned nil")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(nil_i64()).to_be_nil()
 ```
 
@@ -299,19 +209,13 @@ expect(nil_i64()).to_be_nil()
 
 #### passes to_not_be_nil for a function-returned payload
 
-- Verify: passes to_not_be_nil for a function-returned payload
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-NOGC_SYNC_MUT_SPEC_NULLABLE_-001
-step("Verify: passes to_not_be_nil for a function-returned payload")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(some_i64()).to_not_be_nil()
 ```
 
@@ -330,36 +234,63 @@ expect(some_i64()).to_not_be_nil()
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `8e49efd57518b6dacc36ae542327a9d13d91354cf0cc204603952df2e8b80e56`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `b8718080b539b4ac566abb882ee5d6d83278e1eb6b91910196603f135bb37adf`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `8e49efd57518b6dacc36ae542327a9d13d91354cf0cc204603952df2e8b80e56`.
+Source SHA-256: `b8718080b539b4ac566abb882ee5d6d83278e1eb6b91910196603f135bb37adf`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `8e49efd57518b6dacc36ae542327a9d13d91354cf0cc204603952df2e8b80e56`  
+Source SHA-256: `b8718080b539b4ac566abb882ee5d6d83278e1eb6b91910196603f135bb37adf`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **81/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.spl
 mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 9 blockers: 1
+  narrative=100 structure=60 oracle=90
+  traceability=60 evidence=100 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=81; blocker cap makes effective=49
 doc/06_spec/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.spl:44:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'matches nil against a function-returned nil i64?' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.spl:49:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'matches nil against a function-returned nil text?' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.spl:52:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'matches the payload of a function-returned i64?' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/lib/nogc_sync_mut/spec_nullable_matcher_spec.spl:55:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'matches the payload of a function-returned text?' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->

@@ -11,8 +11,7 @@
   `_needs_freestanding_stub_env`; reproduced on the `wm-simple-web` x86_64
   QEMU target, `--target x86_64-unknown-none`, host macOS aarch64 building
   x86_64)
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN — root cause isolated 2026-07-07 (see "Root cause
   (isolated)" below: two stackable seed-codegen defects B1+B2; the old
   "store-side `>>3`" theory is WRONG — the store is correct, the corruption is
   on the read/fstring-display side). Fix is Rust-seed, gated on
@@ -59,72 +58,19 @@ The *initial* (never-assigned) value is also not the declared initializer
 freestanding profile (see `project_simpleos_gui_boot_2026-05-28` in
 project memory / `doc/09_report/`).
 
-## Root cause (isolated 2026-07-07)
+## Root cause (not yet isolated)
 
-Live-reproduced with a minimal 6-line probe (real headless QEMU boot) and
-confirmed by `llvm-objdump`/`nm`/disassembly. It decomposes into **two
-independent, stackable seed defects, plus one stale lead now resolved.** The
-old "store-side `>>3` untag" theory above is WRONG: disassembly shows the
-store is a bare `movq $0x400, (%r9)` (raw 1024, correct for a primitive slot)
-— the corruption is entirely on the **read/fstring-display** side.
-
-### B0 — STALE LEAD, already fixed (do not re-investigate)
-
-The 05-28 memory's "missing module-init calls in freestanding" is resolved in
-current source: `native_project/linker.rs:255-256` now gates the Mach-O
-underscore-strip on `effective_target().os` (the target), not host OS;
-`linker.rs:649-828` generates a real `__simple_call_module_inits`; and
-`arch/x86_64/boot/crt0.s:301-311` calls it before `spl_start` (line 320). This
-machinery only covers **heap-backed** global initializers
-(`common_backend.rs:1630-1648`); a `var g_probe: i32 = 236` initializer is a
-plain compile-time constant baked by `declare_globals`
-(`common_backend.rs:1209-1238`), so B0 is unrelated to this bug.
-
-### B1 — non-zero primitive `var` globals land inside `.text`, not `.data`/`.bss`
-
-Confirmed via `llvm-objdump -h`: `.text` = `0x100000..0x159658`, `.data` at
-`0x168000`, `.bss` at `0x169000`; `nm` puts `g_probe` at **`0x159650`** — 8
-bytes inside `.text`. Explains the deterministic uninitialized-garbage read
-(the slot overlaps nearby code bytes — hence the byte-identical garbage
-constant across two independent repro files). By itself this does NOT cause
-the `>>3` corruption (the slot is still RW-mapped and addressed correctly by
-VMA). This is the same defect independently noted as "root cause A" in
-`project_simpleos_gui_boot_2026-05-28`, still present.
-
-### B2 — the actual `>>3` mechanism: unboxed value handed to a tag-ambiguous runtime fn
-
-Disassembly of `_bump_probe` shows `movq (%rsi), %rdi` (raw 8-byte load of the
-slot) then a direct `call rt_value_to_string` with **no `ishl …, 3`** between
-— i.e. `MirInst::BoxInt` was never emitted for this argument. Chain:
-1. `hir/lower/expr/literals.rs:230-249` (`lower_fstring`) emits
-   `BuiltinCall{name:"rt_value_to_string", args:[g_probe ref]}`.
-2. `mir/lower/lowering_expr_builtin.rs:120-190` boxes the arg only when
-   `arg.ty` is a primitive int (`I8..U64` → `BoxInt`, line 165-172); anything
-   else (notably `TypeId::ANY`) passes through **unboxed**.
-3. `codegen/instr/mod.rs:1305-1341` emits `ishl val,3` only if `BoxInt` is
-   present — it was absent, so `arg.ty` for the `g_probe` ref resolved to
-   **non-primitive** (inferred `TypeId::ANY`: the observed `movq`/8-byte load
-   width matches `type_id_to_cranelift(ANY)==I64`, `types_util.rs:26-46`; a
-   genuine `I32` would `movl`).
-4. `arch/x86_64/boot/baremetal_stubs.c:907-925` (`rt_value_to_string`)
-   disambiguates boxed-vs-raw by `IS_INT(v) = (v & 0x7) == 0`
-   (`baremetal_runtime.h:39-54`) — so **any raw untagged multiple of 8**
-   (1024, 768) is bit-identical to a `BoxInt`-tagged small int (`TAG_INT==0`)
-   and is wrongly `DECODE_INT`'d as `v>>3` instead of hitting the raw-value
-   fallback. This is exactly why only multiples of 8 corrupt.
-
-**Open question (not resolvable read-only):** *why* an explicitly-typed
-`var g_probe: i32` reference resolves to `ANY` at this call site under the
-`native-build` pipeline. Three hypotheses were traced and **ruled out** (dead
-ends — don't recheck): single-pass/declaration-order lowering
-(`module_pass.rs` is genuinely two-pass); `TypeRegistry::default()` vs
-`::new()` (all `Lowerer` ctors seed `"i32"->I32`); and
-`SIMPLE_ALLOW_FREESTANDING_STUBS` gating an alternate MIR path (that env var is
-link-time only). Note: the identical snippet prints correctly under both the
-interpreter and the Cranelift JIT (`pipeline/execution.rs`) — only the
-`native_project/compiler.rs` lowering path is affected. `--emit-hir/--emit-mir`
-are not wired into `native-build`'s arg parser, so the exact upstream defect
-needs a one-line diagnostic probe (see "Suggested fix direction").
+Not investigated to completion (out of scope for the WM-fullscreen feature
+this was found under). Working theory: the freestanding wrapper-profile
+Cranelift lowering for module-level primitive globals routes through the
+same value-representation path used for heap/boxed values elsewhere in the
+codebase (tagged pointers, `value >> 3` to strip a 3-bit tag), and
+mistakenly applies the untag shift to a plain immediate/stack value being
+stored into a **primitive, non-heap** global slot. This would explain both
+symptoms: the uninitialized-garbage read (the module-init writer for
+primitive globals is not run in this profile, matching the known
+`__module_init` gap for heap globals) and the exact `>>3` corruption on
+write-back.
 
 ## Repro
 
@@ -163,7 +109,7 @@ correctly and was verified end-to-end via
 QMP `pmemsave` screendumps, fullscreen marker size == 1024x768, nonzero
 pixel delta between maximized and restored captures).
 
-## Suggested fix direction (seed-gated — not implemented here)
+## Suggested fix direction (not implemented here)
 
 Fix locus is the **Rust seed** for both B1 and B2 → requires
 `scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`
@@ -196,74 +142,3 @@ relinked by any `native-build` without touching the seed/bootstrap.
   module `var` as a regression guard once fixed. Then mark this bug CLOSED and
   correct `project_simpleos_gui_boot_2026-05-28`'s "UNFIXED root cause B"
   (superseded by B0 above).
-
----
-
-## 2026-08-17 re-verification (wave_01 lane H3) — B2 mechanism STILL PRESENT in source; not reproduced (build blocked)
-
-Classified by CONTENT of current source per the wave_01 contract, since SHA
-ancestry is unsound in this repo.
-
-**B2's boxing gate is unchanged.**
-`src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs:428-480`
-still keys the decision purely on the *static* `arg.ty`:
-
-```rust
-if name == "rt_value_to_string" && args.len() == 1 {
-    ...
-    let needs_boxing = matches!(
-        arg.ty,
-        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64
-            | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
-    );
-```
-
-with `BoxInt` emitted only under `needs_boxing`. Anything whose `arg.ty` is not
-one of those eight — `TypeId::ANY` in particular — still reaches
-`rt_value_to_string` **unboxed**. The gate has gained `U64`, `BOOL` and float
-special-cases since this report was written, but none of them changes the
-conclusion: an `ANY`-typed argument still passes through raw.
-
-**The consuming heuristic is also unchanged.**
-`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:269` still
-defines
-
-```c
-#define IS_INT(v)      (((uint64_t)(v) & TAG_MASK) == TAG_INT)
-```
-
-so a raw untagged multiple of 8 remains bit-identical to a `BoxInt`-tagged small
-int and is still `DECODE_INT`'d to `v>>3`. Both halves of the B2 chain are
-therefore intact, and the "only multiples of 8 corrupt" signature still follows.
-
-**The workaround is still load-bearing.** `gui_entry_engine2d.spl` declares only
-two module-level globals (lines 27-28), both `i64` and both initialised to `0` —
-i.e. it still avoids exactly the `var X: i32 = <nonzero>` shape that corrupts.
-The report's own account of the workaround matches the tree.
-
-**Not reproduced — and deliberately so.** The repro is a freestanding
-`native-build --target x86_64-unknown-none --entry-closure` followed by a real
-headless QEMU boot. This lane is forbidden to run builds or touch
-`build/**`, and a bootstrap owning ~98% of the box was live throughout, so no
-RED evidence line could be produced. Per the wave_01 contract, no RED ⇒ no fix,
-so **nothing was patched here**.
-
-**Fix loci are all outside this lane's scope.** B1 (`.text` placement) lands in
-`pipeline/native_project/{compiler.rs,linker.rs}` and B2's root fix in the
-HIR/MIR lowering path — both explicitly claimed by other lanes. The one locus
-inside this lane's slice, `baremetal_stubs.c`, only admits the report's
-"defense-in-depth C" option, and that option is *unsound on its own*: at that
-boundary a raw multiple-of-8 and a tagged small int are genuinely
-indistinguishable, so removing the raw fallback before the root fix guarantees
-boxing would simply break the other direction. Correctly ordered, C is a
-follow-up to B2, not a substitute — so no local edit was made.
-
-**Status: OPEN (P2), unchanged.** Still a real silent-wrong-result defect by
-source content; still gated on a seed rebuild + deploy that is separately
-blocked (see `.claude/rules/bootstrap.md` § KNOWN BLOCKER, Stage 3).
-
-**Not proven by this lane:** the live `128`-instead-of-`1024` boot symptom was
-not re-observed, and the report's open question — *why* an explicitly-typed
-`var g_probe: i32` resolves to `ANY` at this call site under `native-build` —
-remains unanswered. Presence of the mechanism in source is strong evidence, not
-a reproduction; do not record this as confirmed-live-by-execution.

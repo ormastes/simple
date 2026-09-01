@@ -1,0 +1,138 @@
+# Out-of-process DebugServiceV1 adapter isolation.
+#
+# Adapter implementations remain separate executables speaking DebugWireV1.
+# This host delegates process ownership, deadlines, resource limits, and output
+# bounds to app.io.mod.  A failed adapter blocks only its target; the central
+# service and unrelated sessions remain available.
+
+use app.io.mod.{process_run_with_limits_bounded, current_time_ms}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugCapabilityV1, DebugVerificationV1,
+    DebugPerturbationV1, DebugRootOperationV1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_authorize_at,
+    central_debug_service_v1_record_at,
+    central_debug_service_v1_update_target_capability_at,
+}
+
+pub struct DebugAdapterLimitsV1:
+    timeout_ms: i64
+    memory_bytes: i64
+    cpu_seconds: i64
+    max_fds: i64
+    max_processes: i64
+    max_output_bytes: i64
+
+pub struct DebugAdapterExecutionV1:
+    succeeded: bool
+    timed_out: bool
+    crashed: bool
+    exit_code: i64
+    stdout: text
+    stderr: text
+    reason: text
+    cleanup_recorded: bool
+
+pub fn debug_adapter_default_limits_v1() -> DebugAdapterLimitsV1:
+    DebugAdapterLimitsV1(
+        timeout_ms: 2000,
+        memory_bytes: 268435456,
+        cpu_seconds: 2,
+        max_fds: 64,
+        max_processes: 8,
+        max_output_bytes: 1048576,
+    )
+
+pub fn validate_debug_adapter_limits_v1(limits: DebugAdapterLimitsV1) -> Result<Nil, text>:
+    if limits.timeout_ms <= 0:
+        return Err("debug adapter timeout must be positive")
+    if limits.memory_bytes <= 0 or limits.cpu_seconds <= 0:
+        return Err("debug adapter memory and CPU limits must be positive")
+    if limits.max_fds <= 0 or limits.max_processes <= 0:
+        return Err("debug adapter descriptor and process limits must be positive")
+    if limits.max_output_bytes <= 0:
+        return Err("debug adapter output bound must be positive")
+    Ok(nil)
+
+fn _debug_adapter_now_ns_v1() -> i64:
+    current_time_ms() * 1000000
+
+pub fn run_debug_adapter_isolated_v1(
+    session_id: DebugSessionId,
+    target_id: text,
+    command: text,
+    args: [text],
+    limits: DebugAdapterLimitsV1,
+) -> DebugAdapterExecutionV1:
+    match validate_debug_adapter_limits_v1(limits):
+        case Err(reason):
+            return DebugAdapterExecutionV1(false, false, false, -1, "", "", reason, false)
+        case Ok(_): ()
+    if target_id.trim() == "" or command.trim() == "":
+        return DebugAdapterExecutionV1(false, false, false, -1, "", "", "debug adapter requires target and command", false)
+
+    val start_ns = _debug_adapter_now_ns_v1()
+    val authorization = central_debug_service_v1_authorize_at(
+        session_id, DebugRootOperationV1.Domain,
+        DebugPerturbationV1.Cooperative, "adapter.execute", start_ns,
+    )
+    if not authorization.allowed:
+        return DebugAdapterExecutionV1(false, false, false, -1, "", "", authorization.reason, false)
+
+    val process = process_run_with_limits_bounded(
+        command, args, limits.timeout_ms, limits.memory_bytes,
+        limits.cpu_seconds, limits.max_fds, limits.max_processes,
+        limits.max_output_bytes,
+    )
+    # The bounded owner reports -1 when its deadline kills the subprocess.  A
+    # platform wrapper may not have appended its textual TIMEOUT marker yet.
+    val timed_out = (process.limit_exceeded and process.limit_type == "timeout") or process.exit_code == -1
+    val crashed = not timed_out and process.exit_code != 0
+    val succeeded = process.exit_code == 0 and not process.limit_exceeded
+    var reason = ""
+    if timed_out:
+        reason = "debug adapter timed out and was terminated"
+    elif process.limit_exceeded:
+        reason = "debug adapter exceeded " + process.limit_type + " limit and was terminated"
+    elif crashed:
+        reason = "debug adapter exited with code " + str(process.exit_code)
+
+    val finish_ns = _debug_adapter_now_ns_v1()
+    central_debug_service_v1_record_at(
+        session_id, DebugRootOperationV1.Domain,
+        DebugPerturbationV1.Cooperative, "adapter.execute.outcome",
+        succeeded, false, reason, finish_ns,
+    )
+
+    var cleanup_recorded = false
+    if not succeeded:
+        val blocked = DebugCapabilityV1(
+            target_id: target_id,
+            support: CapLevel.Unavailable,
+            verification: DebugVerificationV1.Blocked,
+            perturbation: DebugPerturbationV1.Passive,
+            reason: reason,
+        )
+        match central_debug_service_v1_update_target_capability_at(session_id, blocked, finish_ns):
+            case Ok(_): ()
+            case Err(update_reason):
+                reason = reason + "; capability update failed: " + update_reason
+        central_debug_service_v1_record_at(
+            session_id, DebugRootOperationV1.Control,
+            DebugPerturbationV1.Cooperative, "adapter.cleanup",
+            true, false, "isolated adapter resources released", finish_ns,
+        )
+        cleanup_recorded = true
+
+    DebugAdapterExecutionV1(
+        succeeded: succeeded,
+        timed_out: timed_out,
+        crashed: crashed,
+        exit_code: process.exit_code,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        reason: reason,
+        cleanup_recorded: cleanup_recorded,
+    )

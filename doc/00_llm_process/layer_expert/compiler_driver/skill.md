@@ -16,8 +16,24 @@ selection, and compiler-driver performance under `src/compiler/80.driver/`.
   module loader resolve imports lazily.
 - Native entry-closure mode loads the transitive closure selected by
   `SIMPLE_NATIVE_BUILD_ENTRY` and suppresses whole-project bulk loading.
+- The entry-closure collector excludes documentation fixtures beneath `/doc/`,
+  but must retain explicitly imported executable modules under `src/app/doc/`.
+  The regression is `driver_source_loading_spec.spl`'s application-doc closure
+  case; do not broaden the exception to arbitrary documentation trees.
 - Other project compilation modes may bulk-load the self-hosted compiler roots
   where their global compilation model requires it.
+
+## Formal Verification 2.0 invariant
+
+`CompileContext` retains `AssuranceStrictnessV2.Verified` while frozen V1
+consumers conservatively project it to `critical`. A `verified` compilation
+must not lower string-only direct calls and then claim a closed MIR/VIR path.
+Until the frontend captures resolver `SymbolId` decisions and finalizes
+`ResolvedDirectCallManifestV1` after complete MIR construction,
+`CompilerDriver.lower_to_mir` must fail with
+`FV2-E-CALL-MANIFEST-PRODUCER`. Do not weaken this to a name lookup or bypass
+it with a bootstrap/entry-closure path; runtime and generated calls require an
+explicit external-boundary model.
 
 Do not reuse the native-only entry-closure environment flag as a shortcut for
 interpretation: downstream HIR/MIR branches attach native/bootstrap semantics
@@ -80,134 +96,3 @@ green, but Stage 3/4 remain unadmitted, so do not advertise SPipe, deployment,
 or release admission. Current owner and resume condition:
 `doc/08_tracking/bug/stage3_post_file_copy_exit139_2026-08-14.md` and the
 canonical deployment plan.
-
-## Supervised / crash-safe build (80.driver, 2026-08-17)
-
-New layer contract in `src/compiler/80.driver/driver_build/`. A native build must
-reach the END of the source list even when a unit DIES, classifying each unit as
-`OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN`.
-
-**Landed public surface** — `src/compiler/80.driver/driver_build/build_outcome.spl`
-(`e89f0c6f94a`, 307 lines, unit-verified): `enum BuildOutcomeKind` (six disjoint
-variants), `BuildUnitOutcome`, `class BuildOutcomeSet` (`count_of` / `paths_in` /
-`all_ok` / `verdict` / `summary`), `build_outcome_classify_status(status,
-timed_out)` decoding the `128+N` signal convention, plus
-`build_outcome_is_unverified` / `build_outcome_is_failure` /
-`build_outcome_signal_of_status` / `build_outcome_kind_label` /
-`build_outcome_kind_order` / `build_outcome_sort_text` /
-`build_outcome_text_list`. Spec:
-`test/01_unit/compiler/driver/build_outcome_classification_spec.spl`.
-
-**`failure_count()` deliberately EXCLUDES `TERMINATED` and `TIMEOUT`.** Do not
-"fix" this. `earlyoom` on this host runs `--prefer ^(simple|...)` and actively
-SIGTERMs `simple`; the host is at ~103/125 GB with zero swap. rc 143 and a
-timeout are statements about the host, never verdicts about the unit — treat both
-as UNVERIFIED.
-
-**Extension points, in flight and separately owned** (re-grep before assuming any
-of it landed — as of this writing both files contain zero `BuildOutcome`
-references): outcome accumulation in `driver_aot_native_output.spl`, and
-separate-process "unstable mode" in `driver_build/parallel.spl`. `ParallelBuilder`
-already fans out uncached modules via `ParallelBuildConfig` (`num_threads` /
-`parallel_threshold` / `deterministic` / `verbose`); what the layer lacks is
-process isolation and outcome classification — today a worker's death is the
-parent's death.
-
-Layer rules this introduces:
-- Read a child's wait status **directly**; never through a pipe (`cmd | tail`
-  yields `tail`'s status — a documented false-green source here).
-- Fail closed at the build boundary, not at the first dead unit.
-- One supervisor, two front ends: bootstrap and ad-hoc share it. Unstable mode is
-  the DEFAULT on the bootstrap path only, and an explicit flag on both.
-- The session daemon is out of scope and stays for interactive use.
-
-Requirements: `doc/02_requirements/compiler/supervised_builder.md`.
-Feature expert: `../../feature_expert/supervised_build/skill.md`.
-Lane state: `.spipe/supervised-crash-safe-build/state.md`.
-
-## interface_digest_of has first callers (2026-08-18)
-
-As of commit 1310d8790466, `interface_digest_of`
-(`src/compiler/80.driver/cache/action_key.spl`) is no longer caller-less: it is
-now invoked for manifest recording plus a level-gated verify diagnostic. The
-long-standing "zero callers — never computed" status quoted elsewhere (e.g.
-`.claude/rules/commands.md`) is stale as of that commit; dependency-aware
-partial rebuild is still NOT wired.
-
----
-
-## 2026-08-21 — hardening gates wired around the driver
-
-New fail-closed gates the driver must keep green (all `--selftest` fatal, verdict on the last
-stdout line, 0 items checked ⇒ `ERROR` exit 2):
-`check-critical-wildcard-ban.shs`, `check-compiler-transition-coverage.shs`,
-`check-compiler-schema-fresh.shs`, `check-post-mono-invariants.shs`,
-`check-any-escape-census.shs`, `check-duplicate-pub-fn-names.shs`,
-`check-hardening-mutation.shs` (meta-gate: mutating the hardening code must kill a guard).
-
-New driver-adjacent modules: `src/compiler/00.common/transition/**` (`transition_table`,
-`validator`, `coverage_state`, `check_main`), `00.common/dynamic_identity/**`,
-`99.loader/completeness_seal/**`, and the `src/app/compiler_schema/` CLI
-(`main/registry/extract/coverage.spl`, tests in `test/01_unit/app/compiler_schema/`).
-
-`driver_hir_pipeline_passes.spl` stays **integrator-only** — the wave plan forbids feature agents
-editing it. See `feature_expert/compiler_hardening/skill.md` and
-`doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md`.
-
-**Open 2026-08-21:** `standalone_hir_lowering_aborts_on_real_compiler_files_2026-08-21.md`,
-`declare_globals_fallback_debug_print_ungated_2026-08-21.md`.
-
-## Seed interpreter extern dispatch is a THIRD registry (2026-08-23)
-
-When the driver runs under `native-build`, it is **interpreted by the seed**, so
-every `extern fn rt_*` it declares must exist in
-`src/compiler_rust/compiler/src/interpreter_extern/mod.rs`. That table is
-independent of `common/src/runtime_symbols.rs` (codegen/link) and of the
-C/Rust runtime definitions, and nothing keeps them in sync.
-
-Concretely: `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:55` declares
-`extern fn rt_heap_ref_wellformed(value: Any) -> bool` and calls it at `:142`
-and `:505`. The symbol existed in all four other registries and was missing from
-this one — which killed **every** host `native-build` with
-`error: semantic: unknown extern function: rt_heap_ref_wellformed`, on a
-three-line no-import program. Fixed 2026-08-23; class defect and TODO in
-`doc/08_tracking/bug/seed_interpreter_extern_missing_rt_heap_ref_wellformed_2026-08-23.md`.
-
-**Rule for this layer: adding an `extern rt_*` to any file under
-`src/compiler/80.driver/` (or anything else on the worker's interpreted path)
-requires an `interpreter_extern` adapter in the same change.** There is no gate
-that will tell you otherwise; you find out when a build dies.
-
-## Assurance warning phase touches this layer (planned 2026-08-23)
-
-`driver_safety_severity.spl` holds the driver's projection
-(`SafetyPassSeverity` Advisory/Warn/Deny) of the frozen profile-name table in
-`00.common/assurance/policy_names.spl`. The planned warning phase (Wave 5 of
-`doc/03_plan/agent_tasks/mission_critical_infra_hardening_v2.md`) downgrades
-Deny→Warn one rung while still reporting. Trap for implementers: the driver
-RE-READS `SIMPLE_SAFETY_PROFILE` per call while the interpreter latches it at
-`eval_init` — gates must compare `policy_hash()` across components, not env
-text. Migration order M1 driver → M2 loader → M3 interpreter (bool projection
-must be widened first there).
-
-## Warning phase in the driver projection (2026-08-23)
-
-`driver_safety_severity.spl` gained the phased half of the assurance **warning
-phase**: `safety_pass_severity_for_name_phased(raw, warning_phase)` and its
-strictness/policy siblings, plus `safety_pass_severity_downgraded(sev)` and the
-thin env wrappers `safety_pass_warning_phase()` /
-`safety_pass_severity_phased()`.
-
-Ladder: `Deny -> Warn -> Advisory`, clamped at **Advisory** — the lowest rung
-that still reports (log-only via `SIMPLE_SAFETY_WARN`). There is no silent rung
-below it, which is the property the feature requires.
-
-`warning_phase == false` returns exactly what the unphased function returns, so
-"nothing changes unless the knob is set" is a property of the code, not of an
-audit. The env read (`SIMPLE_ASSURANCE_WARNING_PHASE`) stays in its own named
-wrapper so the projection functions remain pure and testable.
-
-The driver still imports only `00.common` for this — `warning_phase.spl` sits
-below 80.driver exactly as `policy_names.spl` does, so no layering inverts.
-
-Guide: `doc/07_guide/compiler/assurance_warning_phase.md`.

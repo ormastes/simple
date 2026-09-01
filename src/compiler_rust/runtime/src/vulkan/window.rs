@@ -125,15 +125,19 @@ impl WindowManager {
     #[cfg(target_os = "linux")]
     pub fn xlib_descriptor(&self, handle: WindowHandle) -> VulkanResult<(i64, i64)> {
         let windows = self.windows.lock();
-        let state = windows.get(&handle)
+        let state = windows
+            .get(&handle)
             .ok_or_else(|| VulkanError::WindowError(format!("Window {} not found", handle)))?;
-        let display = state.window.display_handle()
+        let display = state
+            .window
+            .display_handle()
             .map_err(|e| VulkanError::WindowError(format!("display handle: {e}")))?;
-        let window = state.window.window_handle()
+        let window = state
+            .window
+            .window_handle()
             .map_err(|e| VulkanError::WindowError(format!("window handle: {e}")))?;
         match (display.as_raw(), window.as_raw()) {
-            (raw_window_handle::RawDisplayHandle::Xlib(d),
-             raw_window_handle::RawWindowHandle::Xlib(w)) => {
+            (raw_window_handle::RawDisplayHandle::Xlib(d), raw_window_handle::RawWindowHandle::Xlib(w)) => {
                 let ptr = d.display.map(|p| p.as_ptr() as i64).unwrap_or(0);
                 if ptr == 0 || w.window == 0 {
                     return Err(VulkanError::WindowError("empty Xlib descriptor".to_string()));
@@ -211,7 +215,9 @@ impl WindowManager {
             while let Ok(request) = request_receiver.recv() {
                 let shutting_down = matches!(request, WindowRequest::Shutdown);
                 let _ = proxy_clone.send_event(UserEvent::Request(request));
-                if shutting_down { break; }
+                if shutting_down {
+                    break;
+                }
             }
         });
 

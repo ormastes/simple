@@ -1,0 +1,66 @@
+# @tag: unit, contract, wm, render_perf, retained, damage
+
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "WM multiscale retained damage consumer contract":
+    it "keeps the three-scale pyramid backend neutral":
+        val source = file_read(
+            "src/lib/common/ui/render_opt/wm_retained_damage_consumer.spl")
+        expect(source).to_contain("[256u32, 64u32, 32u32]")
+        expect(source).to_contain("WM_DAMAGE_LEVEL_CPU")
+        expect(source).to_contain("WM_DAMAGE_LEVEL_PRESENTER")
+        expect(source).to_contain("retained_damage_plan(")
+        expect(source).to_contain("retained_frame_schedule(")
+        expect(source.contains("Vulkan")).to_equal(false)
+        expect(source.contains("WebIR")).to_equal(false)
+        expect(source.contains("GuiIR")).to_equal(false)
+
+    it "routes only an admitted schedule to Engine2D and falls back full":
+        val source = file_read("src/os/compositor/compositor_engine2d.spl")
+        expect(source).to_contain("WmRetainedDamageConsumer")
+        expect(source).to_contain("engine2d_draw_ir_adv_composition_damage_with_images(")
+        expect(source).to_contain("self.engine.present()")
+        val consumer = source.index_of("engine2d_draw_ir_adv_composition_damage_with_images(")
+        val fallback = source.index_of("self.engine.present()")
+        expect(consumer >= 0).to_equal(true)
+        expect(fallback >= 0).to_equal(true)
+
+    it "uses an owner-issued full seed before canonical DrawIR retained execution":
+        val source = file_read("src/os/compositor/compositor_engine2d.spl")
+        expect(source).to_contain("Engine2dRetainedDamageCalibrationReceipt")
+        expect(source).to_contain("seed_retained_damage_calibration(")
+        expect(source).to_contain("record_retained_damage_full_sample(")
+        expect(source).to_contain("_ENGINE2D_RETAINED_DAMAGE_MIN_FULL_SAMPLES")
+        expect(source).to_contain("complete_retained_damage_full_present(")
+        expect(source).to_contain("time_now_nanos()")
+        expect(source).to_contain("retained_damage_replay_manifest(")
+        expect(source).to_contain("retained_damage_resource_manifest(")
+        expect(source).to_contain("admitted_retained_damage_schedule(")
+        expect(source).to_contain("retained_schedule.unwrap().plan")
+        expect(source).to_contain("if self.retained_damage_calibration != nil:")
+        expect(source).to_contain("owner-token-retained-replay")
+        expect(source).to_contain("presenter-full-seed-unpresented")
+        expect(source).to_contain("immediate-mode-no-replay-receipt")
+        expect(source.contains("configure_retained_damage_calibration(")).to_equal(false)
+        expect(source.contains("retained_device_frame")).to_equal(false)
+        expect(source.contains("build_damage_frame_plan(pyramid, 0, 64, 60)")).to_equal(false)
+        val schedule = source.index_of("retained_schedule = self.admitted_retained_damage_schedule(")
+        val executor = source.index_of("retained_schedule.unwrap().plan")
+        val fallback = source.index_of("engine2d_draw_ir_adv_composition_submit_with_images(")
+        expect(schedule >= 0).to_equal(true)
+        expect(executor >= 0).to_equal(true)
+        expect(fallback >= 0).to_equal(true)
+        expect(schedule).to_be_less_than(executor)
+
+    it "commits CPU calibration only after the host has presented its full seed":
+        val backend = file_read("src/os/compositor/compositor_engine2d.spl")
+        val host = file_read("src/os/compositor/host_compositor_core.spl")
+        expect(backend).to_contain("full-seed-warmup")
+        expect(host).to_contain("val retained_full_started_ns = time_now_nanos()")
+        expect(host).to_contain("executor.complete_retained_damage_full_present(")
+        val present = host.index_of("self.pixel_backend.present()")
+        val commit = host.index_of("executor.complete_retained_damage_full_present(")
+        expect(present >= 0).to_equal(true)
+        expect(commit >= 0).to_equal(true)
+        expect(present).to_be_less_than(commit)

@@ -1,5 +1,6 @@
 # Decl arena: DECL_* tags, decl_* node constructors, accessors, and key/list helpers.
-use compiler.frontend.core.ast.*
+# This file is the declaration owner behind compiler.frontend.core.ast. Importing
+# that facade here creates an owner -> facade -> owner expansion cycle.
 # Core Simple — Arena-Based AST
 #
 # Shared core library: AST nodes stored in parallel arrays (arena pattern).
@@ -20,10 +21,36 @@ use compiler.core.ast_stmt.*
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.frontend.core.flat_pool_codec.*
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw environment integer-read ABI", capabilities: [ffi])
 extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
+@unsafe(reason: "raw environment mutation ABI", capabilities: [ffi])
 extern fn rt_env_set(key: text, value: text) -> bool
+@unsafe(reason: "raw environment removal ABI", capabilities: [ffi])
 extern fn rt_env_remove(key: text) -> bool
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_env_get_i64(key: text, default_value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_env_get_i64(key, default_value)
+
+@always_inline
+fn _sffi_env_set_required(key: text, value: text):
+    unsafe(capabilities: [ffi]):
+        if not rt_env_set(key, value):
+            panic("declaration environment mirror write failed for {key}")
+
+@always_inline
+fn _sffi_env_remove_required(key: text):
+    unsafe(capabilities: [ffi]):
+        if not rt_env_remove(key):
+            panic("declaration environment mirror removal failed for {key}")
 
 # High-water marks of the largest decl / module-decl index ever mirrored into
 # the environment since the last ast_reset(). ast_reset() sets both counts back
@@ -98,7 +125,7 @@ fn ast_decl_count_set(value: i64):
     if value > ast_decl_mirror_high_slot[0]:
         ast_decl_mirror_high_slot[0] = value
     if ast_decl_env_mirror_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_DECL_COUNT", int_to_str(value))
+        _sffi_env_set_required("SIMPLE_BOOTSTRAP_DECL_COUNT", int_to_str(value))
 
 fn ast_module_decl_count_get() -> i64:
     ast_count_slots_ensure()
@@ -111,7 +138,7 @@ fn ast_module_decl_count_set(value: i64):
     if value > ast_module_decl_mirror_high_slot[0]:
         ast_module_decl_mirror_high_slot[0] = value
     if ast_decl_env_mirror_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", int_to_str(value))
+        _sffi_env_set_required("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", int_to_str(value))
 
 fn ast_decl_key(idx: i64, field: text) -> text:
     "SIMPLE_BOOTSTRAP_DECL_" + int_to_str(idx) + "_" + field
@@ -161,12 +188,12 @@ fn ast_decl_arena_default() -> i64:
     # stmt_env_mirror_enabled compatibility note). Non-bootstrap runs
     # (test/LSP/plain native-build) always execute compiled code where the
     # arenas persist — they default to arena-preferred.
-    if rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1:
+    if _sffi_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1:
         return 0
     1
 
 fn ast_decl_mode_slots_refresh():
-    ast_decl_mode_cached = rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default())
+    ast_decl_mode_cached = _sffi_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default())
     ast_decl_mode_ready = true
 
 fn ast_decl_prefer_arena() -> bool:
@@ -174,30 +201,30 @@ fn ast_decl_prefer_arena() -> bool:
         return ast_decl_mode_cached == 1
     # Interpreter module variables may not persist between calls — fall back
     # to a direct env read (same compatibility note as stmt_env_mirror_enabled).
-    rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default()) == 1
+    _sffi_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default()) == 1
 
 fn ast_decl_env_mirror_enabled() -> bool:
-    rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1 and not ast_decl_prefer_arena()
+    _sffi_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1 and not ast_decl_prefer_arena()
 
 fn ast_decl_direct_set(key: text, value: text):
     if not ast_decl_prefer_arena():
-        rt_env_set(key, value)
+        _sffi_env_set_required(key, value)
 
 fn ast_decl_i64_set(idx: i64, field: text, value: i64):
     if ast_decl_env_mirror_enabled():
-        rt_env_set(ast_decl_key(idx, field), int_to_str(value))
+        _sffi_env_set_required(ast_decl_key(idx, field), int_to_str(value))
 
 fn ast_decl_i64_get(idx: i64, field: text) -> i64:
-    ast_parse_i64(rt_env_get(ast_decl_key(idx, field)) ?? "")
+    ast_parse_i64(_sffi_env_get(ast_decl_key(idx, field)) ?? "")
 
 fn ast_decl_text_set(idx: i64, field: text, value: text):
     if ast_decl_prefer_arena():
         return
     if field == "NAME" or field == "PARAM_NAMES" or field == "PARAM_TYPES" or field == "TYPE_PARAMS" or field == "BODY" or field == "IMPL_TRAIT" or ast_decl_env_mirror_enabled():
-        rt_env_set(ast_decl_key(idx, field), value)
+        _sffi_env_set_required(ast_decl_key(idx, field), value)
 
 fn ast_decl_text_get(idx: i64, field: text) -> text:
-    rt_env_get(ast_decl_key(idx, field)) ?? ""
+    _sffi_env_get(ast_decl_key(idx, field)) ?? ""
 
 fn ast_text_list_join(values: [text]) -> text:
     values.join("\n")
@@ -273,6 +300,8 @@ var decl_type_param_constraints: [[[text]]] = []  # per-param constraint lists: 
 var decl_type_param_constraint_mode: [[text]] = []  # per-param mode: "limit", "candidate", ""
 var decl_is_lazy: [i64] = []
 var decl_is_gpu_kernel: [i64] = []   # 1 if @gpu_kernel decorated, 0 otherwise
+var decl_rt_hal_flags: [i64] = []    # bit 0 tag, bit 1 C, bit 2 Rust, bit 3 invalid
+var decl_asm_placement: [text] = []  # "naked|section(.text.boot)|align(16)|global" raw decorator spellings (design A.2)
 var decl_gpu_target_text: [text] = []
 var decl_gpu_target_arg_name_text: [text] = []
 var decl_gpu_backends_text: [text] = []
@@ -351,6 +380,8 @@ fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_type_param_constraint_mode.push(decl_empty_text)
     decl_is_lazy.push(0)
     decl_is_gpu_kernel.push(0)
+    decl_rt_hal_flags.push(0)
+    decl_asm_placement.push("")
     decl_gpu_target_text.push("")
     decl_gpu_target_arg_name_text.push("")
     decl_gpu_backends_text.push("")
@@ -398,6 +429,8 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_type_param_constraint_mode[idx] = decl_empty_text
     decl_is_lazy[idx] = 0
     decl_is_gpu_kernel[idx] = 0
+    decl_rt_hal_flags[idx] = 0
+    decl_asm_placement[idx] = ""
     decl_gpu_target_text[idx] = ""
     decl_gpu_target_arg_name_text[idx] = ""
     decl_gpu_backends_text[idx] = ""
@@ -824,7 +857,7 @@ fn decl_get_tag(idx: i64) -> i64:
         if idx >= 0 and idx < decl_tag.len():
             return decl_tag[idx]
         return -1
-    val direct = rt_env_get(ast_decl_tag_key(idx)) ?? ""
+    val direct = _sffi_env_get(ast_decl_tag_key(idx)) ?? ""
     if direct != "":
         if direct == "1": return 1
         if direct == "2": return 2
@@ -865,7 +898,7 @@ fn decl_get_name(idx: i64) -> text:
         if idx >= 0 and idx < decl_name.len():
             return decl_name[idx]
         return ""
-    val direct = rt_env_get(ast_decl_name_key(idx)) ?? ""
+    val direct = _sffi_env_get(ast_decl_name_key(idx)) ?? ""
     if direct != "":
         return direct
     val env_value = ast_decl_text_get(idx, "NAME")
@@ -904,7 +937,7 @@ fn decl_get_ret_type(idx: i64) -> i64:
         if idx >= 0 and idx < decl_ret_type.len():
             return decl_ret_type[idx]
         return -1
-    val direct = rt_env_get(ast_decl_ret_key(idx)) ?? ""
+    val direct = _sffi_env_get(ast_decl_ret_key(idx)) ?? ""
     if direct != "":
         return ast_parse_i64(direct)
     val env_value = ast_decl_i64_get(idx, "RET")
@@ -924,7 +957,7 @@ fn decl_get_body(idx: i64) -> [i64]:
         if idx >= 0 and idx < decl_body_stmts_flat.len():
             return ast_i64_list_split(decl_body_stmts_flat[idx])
         return []
-    val direct = rt_env_get(ast_decl_body_key(idx)) ?? ""
+    val direct = _sffi_env_get(ast_decl_body_key(idx)) ?? ""
     if direct != "":
         return ast_i64_list_split(direct)
     val env_value = ast_decl_text_get(idx, "BODY")
@@ -939,7 +972,7 @@ fn decl_get_fields(idx: i64) -> [text]:
         if idx >= 0 and idx < decl_field_names.len():
             return decl_field_names[idx]
         return []
-    val direct = rt_env_get(ast_decl_field_names_key(idx)) ?? ""
+    val direct = _sffi_env_get(ast_decl_field_names_key(idx)) ?? ""
     if direct != "":
         return ast_text_list_split(direct)
     val env_value = ast_decl_text_get(idx, "FIELD_NAMES")
@@ -954,7 +987,7 @@ fn decl_get_field_types(idx: i64) -> [i64]:
         if idx >= 0 and idx < decl_field_types.len():
             return decl_field_types[idx]
         return []
-    val direct = rt_env_get(ast_decl_field_types_key(idx)) ?? ""
+    val direct = _sffi_env_get(ast_decl_field_types_key(idx)) ?? ""
     if direct != "":
         return ast_i64_list_split(direct)
     val env_value = ast_decl_text_get(idx, "FIELD_TYPES")
@@ -1048,7 +1081,7 @@ fn decl_get_imports(idx: i64) -> [text]:
         if idx >= 0 and idx < decl_imports.len():
             return decl_imports[idx]
         return []
-    val direct = rt_env_get(ast_decl_imports_key(idx)) ?? ""
+    val direct = _sffi_env_get(ast_decl_imports_key(idx)) ?? ""
     if direct != "":
         return ast_text_list_split(direct)
     val env_value = ast_decl_text_get(idx, "IMPORTS")
@@ -1100,6 +1133,27 @@ fn decl_get_is_gpu_kernel(idx: i64) -> i64:
     if decl_is_gpu_kernel == nil: return 0
     if idx >= decl_is_gpu_kernel.len(): return 0
     decl_is_gpu_kernel[idx]
+
+fn decl_set_rt_hal_flags(idx: i64, flags: i64):
+    if idx >= 0 and idx < decl_rt_hal_flags.len():
+        decl_rt_hal_flags[idx] = flags
+
+fn decl_get_rt_hal_flags(idx: i64) -> i64:
+    if idx < 0 or decl_rt_hal_flags == nil or idx >= decl_rt_hal_flags.len(): return 0
+    decl_rt_hal_flags[idx]
+
+# Asm-embedding contract (doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md
+# A.2): the raw `@naked` / `@section(...)` / `@align(n)` / `@global` /
+# `@noreturn` / `@entry` / `@interrupt` spellings recorded for a function
+# declaration, "|"-joined, so the flat-AST bridge can rebuild real
+# Attribute nodes (the parser otherwise keeps only rt/gpu/vhdl flags).
+fn decl_set_asm_placement(idx: i64, spellings: text):
+    if idx >= 0 and idx < decl_asm_placement.len():
+        decl_asm_placement[idx] = spellings
+
+fn decl_get_asm_placement(idx: i64) -> text:
+    if idx < 0 or decl_asm_placement == nil or idx >= decl_asm_placement.len(): return ""
+    decl_asm_placement[idx]
 
 fn decl_get_type_params(idx: i64) -> [text]:
     if ast_decl_prefer_arena():
@@ -1333,6 +1387,9 @@ fn elif_new(cond: i64, body: [i64], else_body: [i64]) -> i64:
     elif_else.push(else_body)
     idx
 
+fn elif_count() -> i64:
+    elif_cond.len()
+
 fn elif_get_cond(idx: i64) -> i64:
     elif_cond[idx]
 
@@ -1421,16 +1478,16 @@ fn ast_decl_env_mirror_clear():
     var i: i64 = 0
     while i < decl_upto:
         for field in fields:
-            rt_env_remove(ast_decl_key(i, field))
-        rt_env_remove(ast_decl_tag_key(i))
-        rt_env_remove(ast_decl_name_key(i))
-        rt_env_remove(ast_decl_ret_key(i))
+            _sffi_env_remove_required(ast_decl_key(i, field))
+        _sffi_env_remove_required(ast_decl_tag_key(i))
+        _sffi_env_remove_required(ast_decl_name_key(i))
+        _sffi_env_remove_required(ast_decl_ret_key(i))
         i = i + 1
     ast_decl_mirror_high_slot[0] = 0
     val mod_upto = ast_module_decl_mirror_high_slot[0]
     var j: i64 = 0
     while j < mod_upto:
-        rt_env_remove("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(j))
+        _sffi_env_remove_required("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(j))
         j = j + 1
     ast_module_decl_mirror_high_slot[0] = 0
 
@@ -1499,6 +1556,7 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(decl_is_async))
     parts = parts.push(flat_pool_enc_i64(decl_is_comptime))
     parts = parts.push(flat_pool_enc_i64(decl_is_gpu_kernel))
+    parts = parts.push(flat_pool_enc_i64(decl_rt_hal_flags))
     parts = parts.push(flat_pool_enc_i64(decl_is_hardware))
     parts = parts.push(flat_pool_enc_i64(decl_is_lazy))
     parts = parts.push(flat_pool_enc_i64(decl_is_packed))
@@ -1559,6 +1617,7 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     decl_is_async = flat_pool_dec_i64(r)
     decl_is_comptime = flat_pool_dec_i64(r)
     decl_is_gpu_kernel = flat_pool_dec_i64(r)
+    decl_rt_hal_flags = flat_pool_dec_i64(r)
     decl_is_hardware = flat_pool_dec_i64(r)
     decl_is_lazy = flat_pool_dec_i64(r)
     decl_is_packed = flat_pool_dec_i64(r)

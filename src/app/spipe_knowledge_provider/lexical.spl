@@ -1,0 +1,563 @@
+use std.common.search.analyzer.{analyze_text}
+use std.common.search.document.{SearchDocument, SearchFacet, SearchHit}
+use std.common.search.query.{SearchQuery}
+use std.common.search.ranking.{bm25_term_checked_trace}
+use std.common.search.snapshot.{SearchSnapshot, SearchIndexDelta}
+use std.common.search.top_k.{TextScoredDoc}
+use std.common.search.types.{Score}
+use std.common.json.serializer.{json_escape_string}
+use app.spipe_knowledge_provider.query_clock.{QueryClockPort, SystemQueryClockV1, query_stop_reason}
+
+fn _lexical_check(clock: QueryClockPort, request_id: text,
+                  admitted_at_ms: i64, deadline_ms: i64) -> Result<(), text>:
+    val reason = query_stop_reason(clock, request_id, admitted_at_ms, deadline_ms)
+    if reason != "": return Err(reason)
+    Ok(())
+
+fn _contains_bounded(values: [text], target: text, clock: QueryClockPort,
+                     request_id: text, admitted_at_ms: i64,
+                     deadline_ms: i64) -> Result<bool, text>:
+    var i = 0
+    while i < values.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if values[i] == target: return Ok(true)
+        i = i + 1
+    Ok(false)
+
+fn _distinct_terms_bounded(tokens: [text], clock: QueryClockPort,
+                           request_id: text, admitted_at_ms: i64,
+                           deadline_ms: i64) -> Result<[text], text>:
+    var out: [text] = []
+    var i = 0
+    while i < tokens.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if not _contains_bounded(out, tokens[i], clock, request_id,
+                admitted_at_ms, deadline_ms)?:
+            out.push(tokens[i])
+        i = i + 1
+    var a = 0
+    while a < out.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        var best = a
+        var b = a + 1
+        while b < out.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            if out[b] < out[best]: best = b
+            b = b + 1
+        if best != a:
+            val swap = out[a]
+            out[a] = out[best]
+            out[best] = swap
+        a = a + 1
+    Ok(out)
+
+fn _document_matches_filters_bounded(document: SearchDocument,
+                                     filters: [SearchFacet],
+                                     clock: QueryClockPort,
+                                     request_id: text,
+                                     admitted_at_ms: i64,
+                                     deadline_ms: i64) -> Result<bool, text>:
+    var f = 0
+    while f < filters.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val name = filters[f].name
+        var found = false
+        while f < filters.len() and filters[f].name == name:
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            var m = 0
+            while m < document.metadata.len():
+                _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+                if document.metadata[m].name == name and
+                        document.metadata[m].value == filters[f].value:
+                    found = true
+                m = m + 1
+            f = f + 1
+        if not found: return Ok(false)
+    Ok(true)
+
+fn _document_tokens_bounded(document: SearchDocument, clock: QueryClockPort,
+                            request_id: text, admitted_at_ms: i64,
+                            deadline_ms: i64) -> Result<[text], text>:
+    var out: [text] = []
+    var f = 0
+    while f < document.fields.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val tokens = analyze_text(document.fields[f].value)
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        var i = 0
+        while i < tokens.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            out.push(tokens[i])
+            i = i + 1
+        f = f + 1
+    Ok(out)
+
+fn _term_frequency_bounded(tokens: [text], term: text,
+                           clock: QueryClockPort, request_id: text,
+                           admitted_at_ms: i64,
+                           deadline_ms: i64) -> Result<i64, text>:
+    var count = 0
+    var i = 0
+    while i < tokens.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if tokens[i] == term: count = count + 1
+        i = i + 1
+    Ok(count)
+
+fn _field_tokens_bounded(document: SearchDocument, field_name: text,
+                         clock: QueryClockPort, request_id: text,
+                         admitted_at_ms: i64,
+                         deadline_ms: i64) -> Result<[text], text>:
+    var i = 0
+    while i < document.fields.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if document.fields[i].name == field_name:
+            val tokens = analyze_text(document.fields[i].value)
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            return Ok(tokens)
+        i = i + 1
+    Ok([])
+
+fn _field_weight_bounded(document: SearchDocument, field_name: text,
+                         clock: QueryClockPort, request_id: text,
+                         admitted_at_ms: i64,
+                         deadline_ms: i64) -> Result<i64, text>:
+    var i = 0
+    while i < document.fields.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if document.fields[i].name == field_name:
+            return Ok(document.fields[i].weight_milli)
+        i = i + 1
+    Ok(0)
+
+fn _field_names_bounded(snapshot: SearchSnapshot, clock: QueryClockPort,
+                        request_id: text, admitted_at_ms: i64,
+                        deadline_ms: i64) -> Result<[text], text>:
+    val canonical = ["identifier", "title", "heading", "classification", "body"]
+    var out: [text] = []
+    var c = 0
+    while c < canonical.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        var found = false
+        var d = 0
+        while d < snapshot.documents.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            if _field_weight_bounded(snapshot.documents[d], canonical[c], clock,
+                    request_id, admitted_at_ms, deadline_ms)? > 0:
+                found = true
+            d = d + 1
+        if found: out.push(canonical[c])
+        c = c + 1
+    Ok(out)
+
+fn _score_document(snapshot: SearchSnapshot, document_index: i64,
+                   terms: [text], clock: QueryClockPort,
+                   request_id: text, admitted_at_ms: i64,
+                   deadline_ms: i64) -> Result<i64, text>:
+    val fields = _field_names_bounded(snapshot, clock, request_id,
+                                      admitted_at_ms, deadline_ms)?
+    var total = 0
+    var f = 0
+    while f < fields.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val document_tokens = _field_tokens_bounded(
+            snapshot.documents[document_index], fields[f], clock, request_id,
+            admitted_at_ms, deadline_ms)?
+        var total_length = 0
+        var d = 0
+        while d < snapshot.documents.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            val corpus_tokens = _field_tokens_bounded(snapshot.documents[d],
+                fields[f], clock, request_id, admitted_at_ms, deadline_ms)?
+            total_length = total_length + corpus_tokens.len()
+            d = d + 1
+        var t = 0
+        while t < terms.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            val tf = _term_frequency_bounded(document_tokens, terms[t], clock,
+                request_id, admitted_at_ms, deadline_ms)?
+            if tf > 0:
+                var df = 0
+                d = 0
+                while d < snapshot.documents.len():
+                    _lexical_check(clock, request_id, admitted_at_ms,
+                                   deadline_ms)?
+                    val candidate_tokens = _field_tokens_bounded(
+                        snapshot.documents[d], fields[f], clock, request_id,
+                        admitted_at_ms, deadline_ms)?
+                    if _term_frequency_bounded(candidate_tokens, terms[t], clock,
+                            request_id, admitted_at_ms, deadline_ms)? > 0:
+                        df = df + 1
+                    d = d + 1
+                val weight = _field_weight_bounded(
+                    snapshot.documents[document_index], fields[f], clock,
+                    request_id, admitted_at_ms, deadline_ms)?
+                val trace = bm25_term_checked_trace(tf, document_tokens.len(),
+                    total_length, snapshot.documents.len(), df, weight)?
+                total = total + trace.weighted
+            t = t + 1
+        f = f + 1
+    Ok(total)
+
+# Stable bottom-up merge sort. It preserves TextScoredDoc.better_than ordering
+# while reducing the old O(documents * limit) selection path to O(n log n).
+# Every comparison and copy is a cooperative cancellation/deadline point.
+fn _text_top_k_bounded(docs: [TextScoredDoc], requested: i64,
+                       clock: QueryClockPort, request_id: text,
+                       admitted_at_ms: i64,
+                       deadline_ms: i64) -> Result<[SearchHit], text>:
+    var limit = requested
+    if limit < 0: limit = 0
+    if limit > docs.len(): limit = docs.len()
+    var work = docs
+    var width = 1
+    while width < work.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        var merged: [TextScoredDoc] = []
+        var start = 0
+        while start < work.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            var middle = start + width
+            if middle > work.len(): middle = work.len()
+            var finish = middle + width
+            if finish > work.len(): finish = work.len()
+            var left = start
+            var right = middle
+            while left < middle or right < finish:
+                _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+                if right >= finish or (left < middle and
+                        work[left].better_than(work[right])):
+                    merged.push(work[left])
+                    left = left + 1
+                else:
+                    merged.push(work[right])
+                    right = right + 1
+            start = finish
+        work = merged
+        width = width * 2
+    var out: [SearchHit] = []
+    var i = 0
+    while i < limit:
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        out.push(SearchHit.of(work[i].document_id, work[i].score, i + 1))
+        i = i + 1
+    Ok(out)
+
+fn search_snapshot_lexical_controlled(snapshot: SearchSnapshot,
+                                      query: SearchQuery,
+                                      maximum_results: i64,
+                                      request_id: text,
+                                      admitted_at_ms: i64,
+                                      deadline_ms: i64,
+                                      clock: QueryClockPort) -> Result<[SearchHit], text>:
+    if query.cursor != "": return Err("invalid_cursor")
+    _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val analyzed_terms = analyze_text(query.text_value)
+    _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val terms = _distinct_terms_bounded(analyzed_terms, clock, request_id,
+                                        admitted_at_ms, deadline_ms)?
+    if terms.len() == 0 and query.filters.len() == 0: return Err("empty_query")
+    var scored: [TextScoredDoc] = []
+    var d = 0
+    while d < snapshot.documents.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val document = snapshot.documents[d]
+        if _document_matches_filters_bounded(document, query.filters, clock,
+                request_id, admitted_at_ms, deadline_ms)?:
+            var any_term = terms.len() == 0
+            val document_tokens = _document_tokens_bounded(document, clock,
+                request_id, admitted_at_ms, deadline_ms)?
+            var t = 0
+            while t < terms.len():
+                _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+                if _term_frequency_bounded(document_tokens, terms[t], clock,
+                        request_id, admitted_at_ms, deadline_ms)? > 0:
+                    any_term = true
+                t = t + 1
+            if any_term:
+                val internal = _score_document(snapshot, d, terms, clock,
+                    request_id, admitted_at_ms, deadline_ms)?
+                scored.push(TextScoredDoc(document_id: document.id,
+                    score: Score.from_milli(internal / 1000)))
+        d = d + 1
+    var limit = query.bounded_limit(maximum_results)
+    if limit <= 0: limit = maximum_results
+    _text_top_k_bounded(scored, limit, clock, request_id,
+                        admitted_at_ms, deadline_ms)
+
+fn search_snapshot_lexical_bounded_with_clock(snapshot: SearchSnapshot,
+                                   query: SearchQuery,
+                                   maximum_results: i64,
+                                   admitted_at_ms: i64,
+                                   deadline_ms: i64,
+                                   clock: QueryClockPort) -> Result<[SearchHit], text>:
+    search_snapshot_lexical_controlled(snapshot, query, maximum_results, "",
+        admitted_at_ms, deadline_ms, clock)
+
+fn search_snapshot_lexical_bounded(snapshot: SearchSnapshot, query: SearchQuery,
+                                   maximum_results: i64,
+                                   admitted_at_ms: i64,
+                                   deadline_ms: i64) -> Result<[SearchHit], text>:
+    search_snapshot_lexical_controlled(snapshot, query, maximum_results, "",
+        admitted_at_ms, deadline_ms, SystemQueryClockV1.configured())
+
+fn search_snapshot_lexical(snapshot: SearchSnapshot, query: SearchQuery,
+                           maximum_results: i64) -> Result<[SearchHit], text>:
+    search_snapshot_lexical_bounded(snapshot, query, maximum_results, -1, 0)
+
+fn document_matches_query_controlled(snapshot: SearchSnapshot,
+                                     query: SearchQuery, document_id: text,
+                                     request_id: text,
+                                     admitted_at_ms: i64, deadline_ms: i64,
+                                     clock: QueryClockPort) -> Result<bool, text>:
+    var document_index = 0 - 1
+    var d = 0
+    while d < snapshot.documents.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if snapshot.documents[d].id == document_id: document_index = d
+        d = d + 1
+    if document_index < 0: return Err("document_not_found")
+    val document = snapshot.documents[document_index]
+    if not _document_matches_filters_bounded(document, query.filters, clock,
+            request_id, admitted_at_ms, deadline_ms)?: return Ok(false)
+    _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val analyzed = analyze_text(query.text_value)
+    _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val terms = _distinct_terms_bounded(analyzed, clock, request_id,
+                                        admitted_at_ms, deadline_ms)?
+    if terms.len() == 0: return Ok(query.filters.len() > 0)
+    val tokens = _document_tokens_bounded(document, clock, request_id,
+                                          admitted_at_ms, deadline_ms)?
+    var t = 0
+    while t < terms.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if _term_frequency_bounded(tokens, terms[t], clock, request_id,
+                admitted_at_ms, deadline_ms)? > 0: return Ok(true)
+        t = t + 1
+    Ok(false)
+
+fn document_matches_query_bounded(snapshot: SearchSnapshot, query: SearchQuery,
+                                  document_id: text, admitted_at_ms: i64,
+                                  deadline_ms: i64) -> Result<bool, text>:
+    document_matches_query_controlled(snapshot, query, document_id, "",
+        admitted_at_ms, deadline_ms, SystemQueryClockV1.configured())
+
+fn matched_fields_snapshot_lexical_controlled(snapshot: SearchSnapshot,
+                                              query: SearchQuery,
+                                              document_id: text,
+                                              request_id: text,
+                                              admitted_at_ms: i64,
+                                              deadline_ms: i64,
+                                              clock: QueryClockPort) -> Result<[text], text>:
+    var document_index = 0 - 1
+    var d = 0
+    while d < snapshot.documents.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if snapshot.documents[d].id == document_id: document_index = d
+        d = d + 1
+    if document_index < 0: return Err("document_not_found")
+    _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val analyzed = analyze_text(query.text_value)
+    _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val terms = _distinct_terms_bounded(analyzed, clock, request_id,
+                                        admitted_at_ms, deadline_ms)?
+    var matched: [text] = []
+    val fields = _field_names_bounded(snapshot, clock, request_id,
+                                      admitted_at_ms, deadline_ms)?
+    var f = 0
+    while f < fields.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val tokens = _field_tokens_bounded(snapshot.documents[document_index],
+            fields[f], clock, request_id, admitted_at_ms, deadline_ms)?
+        var found = false
+        var t = 0
+        while t < terms.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            if _term_frequency_bounded(tokens, terms[t], clock, request_id,
+                    admitted_at_ms, deadline_ms)? > 0: found = true
+            t = t + 1
+        if found: matched.push(fields[f])
+        f = f + 1
+    Ok(matched)
+
+fn matched_fields_snapshot_lexical_bounded(snapshot: SearchSnapshot,
+                                           query: SearchQuery,
+                                           document_id: text,
+                                           admitted_at_ms: i64,
+                                           deadline_ms: i64) -> Result<[text], text>:
+    matched_fields_snapshot_lexical_controlled(snapshot, query, document_id,
+        "", admitted_at_ms, deadline_ms, SystemQueryClockV1.configured())
+
+fn matched_fields_snapshot_lexical(snapshot: SearchSnapshot, query: SearchQuery,
+                                   document_id: text) -> Result<[text], text>:
+    matched_fields_snapshot_lexical_bounded(snapshot, query, document_id, -1, 0)
+
+fn _quoted(value: text) -> text: "\"" + json_escape_string(value) + "\""
+
+fn _utf8_hex_bounded(value: text, clock: QueryClockPort, request_id: text,
+                     admitted_at_ms: i64,
+                     deadline_ms: i64) -> Result<text, text>:
+    val digits = "0123456789abcdef"
+    var out = ""
+    val bytes = value.bytes()
+    var i = 0
+    while i < bytes.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val code = bytes[i] as i64
+        out = out + digits.slice(code / 16, code / 16 + 1) +
+            digits.slice(code % 16, code % 16 + 1)
+        i = i + 1
+    Ok(out)
+
+fn explain_snapshot_lexical_controlled(snapshot: SearchSnapshot,
+                                       query: SearchQuery,
+                                       document_id: text,
+                                       scope_digest: text,
+                                       logical_root: text,
+                                       request_id: text,
+                                       admitted_at_ms: i64,
+                                       deadline_ms: i64,
+                                       clock: QueryClockPort) -> Result<text, text>:
+    var document_index = 0 - 1
+    var d = 0
+    while d < snapshot.documents.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        if snapshot.documents[d].id == document_id: document_index = d
+        d = d + 1
+    if document_index < 0: return Err("document_not_found")
+    _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val analyzed = analyze_text(query.text_value)
+    _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val terms = _distinct_terms_bounded(analyzed, clock, request_id,
+                                        admitted_at_ms, deadline_ms)?
+    if analyzed.len() > 128 or terms.len() > 128: return Err("limit_exceeded")
+    val fields = _field_names_bounded(snapshot, clock, request_id,
+                                      admitted_at_ms, deadline_ms)?
+    var field_rows: [text] = []
+    var internal_total = 0
+    var f = 0
+    while f < fields.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val document_tokens = _field_tokens_bounded(
+            snapshot.documents[document_index], fields[f], clock, request_id,
+            admitted_at_ms, deadline_ms)?
+        var total_length = 0
+        d = 0
+        while d < snapshot.documents.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            val corpus_tokens = _field_tokens_bounded(snapshot.documents[d],
+                fields[f], clock, request_id, admitted_at_ms, deadline_ms)?
+            total_length = total_length + corpus_tokens.len()
+            d = d + 1
+        val average = if snapshot.documents.len() == 0: 0 else:
+            (total_length * 1000000) / snapshot.documents.len()
+        var term_rows: [text] = []
+        var field_total = 0
+        var t = 0
+        while t < terms.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            val tf = _term_frequency_bounded(document_tokens, terms[t], clock,
+                request_id, admitted_at_ms, deadline_ms)?
+            val qtf = _term_frequency_bounded(analyzed, terms[t], clock,
+                request_id, admitted_at_ms, deadline_ms)?
+            var df = 0
+            d = 0
+            while d < snapshot.documents.len():
+                _lexical_check(clock, request_id, admitted_at_ms,
+                               deadline_ms)?
+                val candidate_tokens = _field_tokens_bounded(
+                    snapshot.documents[d], fields[f], clock, request_id,
+                    admitted_at_ms, deadline_ms)?
+                if _term_frequency_bounded(candidate_tokens, terms[t], clock,
+                        request_id, admitted_at_ms, deadline_ms)? > 0:
+                    df = df + 1
+                d = d + 1
+            if tf == 0:
+                term_rows.push("{\"denominator_scaled\":null,\"df\":" + df.to_text() + ",\"idf_argument_scaled\":null,\"idf_scaled\":null,\"kind\":\"absent\",\"length_ratio_scaled\":null,\"norm_scaled\":null,\"qtf\":" + qtf.to_text() + ",\"term\":" + _quoted(terms[t]) + ",\"tf\":0,\"tf_scaled\":null,\"unweighted\":\"0\",\"weighted\":\"0\"}")
+            else:
+                val weight = _field_weight_bounded(
+                    snapshot.documents[document_index], fields[f], clock,
+                    request_id, admitted_at_ms, deadline_ms)?
+                val trace = bm25_term_checked_trace(tf, document_tokens.len(),
+                    total_length, snapshot.documents.len(), df, weight)?
+                field_total = field_total + trace.weighted
+                term_rows.push("{\"denominator_scaled\":" + _quoted(trace.denominator_scaled.to_text()) + ",\"df\":" + df.to_text() + ",\"idf_argument_scaled\":" + _quoted(trace.idf_argument_scaled.to_text()) + ",\"idf_scaled\":" + _quoted(trace.idf_scaled.to_text()) + ",\"kind\":\"scored\",\"length_ratio_scaled\":" + _quoted(trace.ratio_scaled.to_text()) + ",\"norm_scaled\":" + _quoted(trace.norm_scaled.to_text()) + ",\"qtf\":" + qtf.to_text() + ",\"term\":" + _quoted(terms[t]) + ",\"tf\":" + tf.to_text() + ",\"tf_scaled\":" + _quoted(trace.tf_scaled.to_text()) + ",\"unweighted\":" + _quoted(trace.unweighted.to_text()) + ",\"weighted\":" + _quoted(trace.weighted.to_text()) + "}")
+            t = t + 1
+        internal_total = internal_total + field_total
+        val weight = _field_weight_bounded(
+            snapshot.documents[document_index], fields[f], clock, request_id,
+            admitted_at_ms, deadline_ms)?
+        field_rows.push("{\"N\":" + snapshot.documents.len().to_text() + ",\"average_length_scaled\":" + _quoted(average.to_text()) + ",\"document_length\":" + document_tokens.len().to_text() + ",\"field\":" + _quoted(fields[f]) + ",\"field_total\":" + _quoted(field_total.to_text()) + ",\"terms\":[" + term_rows.join(",") + "],\"total_length\":" + total_length.to_text() + ",\"weight_milli\":" + weight.to_text() + "}")
+        f = f + 1
+    _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+    val tie_key = _utf8_hex_bounded(document_id, clock, request_id,
+                                    admitted_at_ms, deadline_ms)?
+    Ok("{\"analyzer\":\"spipe-unicode-lex-v1\",\"contract\":\"bm25-explain-v1\",\"document_id\":" + _quoted(document_id) + ",\"fields\":[" + field_rows.join(",") + "],\"internal_total\":" + _quoted(internal_total.to_text()) + ",\"logical_index\":\"spipe-lexical-snapshot-v1\",\"logical_root\":" + _quoted(logical_root) + ",\"public_score_milli\":" + (internal_total / 1000).to_text() + ",\"scope_digest\":" + _quoted(scope_digest) + ",\"score_contract\":\"bm25-fixed-v1\",\"tie_key_utf8_hex\":" + _quoted(tie_key) + "}")
+
+fn explain_snapshot_lexical_bounded_with_clock(snapshot: SearchSnapshot,
+                                    query: SearchQuery,
+                                    document_id: text, scope_digest: text,
+                                    logical_root: text,
+                                    admitted_at_ms: i64,
+                                    deadline_ms: i64,
+                                    clock: QueryClockPort) -> Result<text, text>:
+    explain_snapshot_lexical_controlled(snapshot, query, document_id,
+        scope_digest, logical_root, "", admitted_at_ms, deadline_ms, clock)
+
+fn explain_snapshot_lexical_bounded(snapshot: SearchSnapshot, query: SearchQuery,
+                                    document_id: text, scope_digest: text,
+                                    logical_root: text,
+                                    admitted_at_ms: i64,
+                                    deadline_ms: i64) -> Result<text, text>:
+    explain_snapshot_lexical_controlled(snapshot, query, document_id,
+        scope_digest, logical_root, "", admitted_at_ms, deadline_ms,
+        SystemQueryClockV1.configured())
+
+fn explain_snapshot_lexical(snapshot: SearchSnapshot, query: SearchQuery,
+                            document_id: text, scope_digest: text,
+                            logical_root: text) -> Result<text, text>:
+    explain_snapshot_lexical_bounded(snapshot, query, document_id,
+        scope_digest, logical_root, -1, 0)
+
+fn apply_snapshot_delta_controlled(snapshot: SearchSnapshot,
+                                   delta: SearchIndexDelta,
+                                   next_snapshot_id: text,
+                                   next_revision: text,
+                                   request_id: text,
+                                   admitted_at_ms: i64,
+                                   deadline_ms: i64,
+                                   clock: QueryClockPort) -> Result<SearchSnapshot, text>:
+    if delta.base_snapshot_id != snapshot.snapshot_id:
+        return Err("snapshot_mismatch")
+    var next: [SearchDocument] = []
+    var i = 0
+    while i < snapshot.documents.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val current = snapshot.documents[i]
+        var removed = false
+        var d = 0
+        while d < delta.deletes.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            if delta.deletes[d] == current.id: removed = true
+            d = d + 1
+        var replaced = false
+        var u = 0
+        while u < delta.upserts.len():
+            _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+            if delta.upserts[u].id == current.id: replaced = true
+            u = u + 1
+        if not removed and not replaced: next.push(current)
+        i = i + 1
+    var u = 0
+    while u < delta.upserts.len():
+        _lexical_check(clock, request_id, admitted_at_ms, deadline_ms)?
+        next.push(delta.upserts[u])
+        u = u + 1
+    Ok(SearchSnapshot.of(next_snapshot_id, next_revision,
+                         snapshot.analyzer, next))
+
+fn apply_snapshot_delta(snapshot: SearchSnapshot, delta: SearchIndexDelta,
+                        next_snapshot_id: text,
+                        next_revision: text) -> Result<SearchSnapshot, text>:
+    apply_snapshot_delta_controlled(snapshot, delta, next_snapshot_id,
+        next_revision, "", -1, 0, SystemQueryClockV1.configured())

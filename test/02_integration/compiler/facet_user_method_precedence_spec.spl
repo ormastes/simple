@@ -1,0 +1,40 @@
+"""Normal member resolution wins before typed-facet intrinsic rewriting."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_definitions.{HirExprKind, MethodResolution}
+use compiler.semantics.resolve.{resolve_methods}
+
+describe "facet user-method precedence":
+    it "preserves explicit method type arguments and keeps a resolved user method":
+        val parsed = parse_full_frontend(
+            "class Counter:\n" +
+            "    fn facet<T>(self) -> i64: 7\n" +
+            "fn use_counter(value: Counter) -> i64: value.facet<i64>()\n",
+            "facet_user_method.spl", "facet_user_method", Logger(level: 0))
+        val module = HirLowering.with_filename("facet_user_method.spl").lower_module(parsed)
+        var saw_preserved = false
+        for function in module.functions.values():
+            if function.name == "use_counter" and function.body.has:
+                match function.body.value.kind:
+                    case HirExprKind.MethodCall(_, "facet", _, _, type_args):
+                        saw_preserved = type_args.len() == 1
+                    case _: pass
+        expect(saw_preserved).to_equal(true)
+
+        val (resolved, errors) = resolve_methods(module)
+        expect(errors.len()).to_equal(0)
+        var saw_user_method = false
+        for function in resolved.functions.values():
+            if function.name == "use_counter" and function.body.has:
+                match function.body.value.kind:
+                    case HirExprKind.MethodCall(_, "facet", _, resolution, type_args):
+                        match resolution:
+                            case MethodResolution.Unresolved: pass
+                            case _: saw_user_method = type_args.len() == 1
+                    case HirExprKind.FacetAcquire(_, _, _, _, _):
+                        saw_user_method = false
+                    case _: pass
+        expect(saw_user_method).to_equal(true)

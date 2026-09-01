@@ -87,12 +87,6 @@ struct TestOptions:
     force_rebuild: bool
     keep_artifacts: bool
     run_all: bool
-    # True only for the release-complete `--whole` surface. Unlike `--all`,
-    # this also makes doctest discovery repository-scoped: the conventional
-    # positional spec root (`simple test test --whole`) must not accidentally
-    # narrow Markdown discovery to test/ or source-comment discovery away from
-    # the production src/ roots.
-    whole: bool = false
     # Unstable mode: run each unit in its own process and continue to the end
     # of the list, classifying outcomes. Default ON for the bootstrap path, OFF
     # for interactive runs; unstable_mode_set records an explicit --unstable /
@@ -163,26 +157,26 @@ struct TestOptions:
     batch_manifest: text
     batch_result: text
 
-fn doctest_discovery_scope_path(options: TestOptions) -> text:
-    """Return the explicit doctest target, or empty for repository scope.
-
-    The positional `test` in `simple test test --whole` is the spec root. It
-    is not provenance for either documentation lane: Markdown comes from the
-    configured sdoctest sources and comment doctests come from production
-    source roots. Keeping this decision pure makes the release-command scope
-    directly regression-testable without launching the full suite."""
-    if options.whole:
-        return ""
-    if options.path_explicit:
-        return options.path
-    ""
-
-fn production_spl_doctest_roots() -> [text]:
-    """Canonical source-comment provenance for a repository-wide run."""
-    ["src/lib/", "src/compiler/", "src/app/"]
-
 fn test_empty_selection_is_success(options: TestOptions) -> bool:
     not options.path_explicit or options.list or options.spl_doctest
+
+# =========================================================================
+# Test Omission Evidence
+# =========================================================================
+
+enum TestOmissionStatus:
+    Blocked
+    Unsupported
+
+struct TestOmissionEvidence:
+    status: TestOmissionStatus
+    scenario_id: text
+    reason: text
+    prerequisite: text
+    owner: text
+    tracking_id: text
+    artifact_paths: [text]
+    resume_command: text
 
 # =========================================================================
 # Test File Result
@@ -199,17 +193,32 @@ struct TestFileResult:
     error: text
     timed_out: bool
     cached: bool
-    # Examples neutralised by `# @tag:in-development` (see
-    # src/lib/nogc_sync_mut/spec/in_development.spl).
-    #
-    # A SEPARATE bucket from `skipped`, deliberately and by user directive.
-    # `skipped` means the environment could not run it (no GPU, wrong OS,
-    # `@tag:qemu`); in-development means the spec RAN and only its verdict
-    # was neutralised because the code under test is unfinished. Merging
-    # them misdescribes the mechanism and reads as if the work is being
-    # hidden. Defaulted so none of the ~85 existing constructor sites
-    # change.
+    # Examples neutralised by `# @tag:in-development` are distinct from
+    # environment skips. Defaulted to keep existing producers compatible.
     in_development: i64 = 0
+    # Bounded child-to-parent MC/DC evidence carrier. Empty means unavailable.
+    mcdc_evidence_v1: text = ""
+    # Non-empty only when MC/DC instrumentation was skipped for this spec
+    # (e.g. standalone-SMF compile is impossible because the spec uses
+    # interpreter-only constructs) and the spec was degraded to plain
+    # interpreter execution instead of being failed outright. Never affects
+    # is_ok() -- pass/fail always comes from the real interpreter run -- this
+    # is purely a truthful "coverage was not collected here" record so a
+    # green run never silently implies MC/DC evidence that was not gathered.
+    mcdc_skip_reason: text = ""
+    blocked: i64 = 0
+    unsupported: i64 = 0
+    omission_evidence: [TestOmissionEvidence] = []
+    # Resource and abnormality evidence is additive so existing result
+    # producers remain source-compatible while they migrate to observed
+    # process scopes. `nil` is explicit unavailable evidence, never zero RSS.
+    compile_ms: i64 = 0
+    execution_ms: i64 = 0
+    resource_usage: ResourceUsage? = nil
+    resource_class: text = ""
+    cohort_id: text = ""
+    budget_status: text = "incomplete"
+    anomaly_status: text = "incomplete"
 
 impl TestFileResult:
     # Routed through the single classifier below rather than re-deriving the
@@ -320,8 +329,7 @@ fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
     if file_result.failed > 0:
         return "ERROR"
     val examples = (file_result.passed + file_result.failed +
-                    file_result.skipped + file_result.pending +
-                    file_result.in_development)
+                    file_result.skipped + file_result.pending)
     if examples == 0:
         # No error and no examples of any kind: the child produced no verdict.
         return "NOT_RUN"

@@ -51,6 +51,9 @@ static inline int64_t as_int(RtValue v) { return v; }
 static inline RtValue from_ptr(void *p) { return (RtValue)((uintptr_t)p | TAG_HEAP); }
 static inline void *as_ptr(RtValue v) { return (void *)((uintptr_t)v & ~TAG_MASK); }
 static inline int is_nil(RtValue v) { return v == (RtValue)SPECIAL_NIL; }
+static inline int is_heap_handle(RtValue v) {
+    return v != (RtValue)SPECIAL_NIL && (v & TAG_MASK) == TAG_HEAP;
+}
 
 static uint64_t c_string_len(const char *s) {
     uint64_t len = 0;
@@ -151,23 +154,28 @@ RtValue rt_sqlite_open_memory(void) {
  * expect 1 for success.
  */
 RtValue rt_sqlite_close(RtValue handle) {
-    if (is_nil(handle)) return from_int(1);
+    if (!is_heap_handle(handle)) return from_int(0);
     sqlite3 *db = (sqlite3 *)as_ptr(handle);
     int rc = sqlite3_close(db);
     return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
+static RtValue sqlite_execute_cstr(sqlite3 *db, const char *sql) {
+    if (!db || !sql) return from_int(0);
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+    if (err) sqlite3_free(err);
+    return from_int(rc == SQLITE_OK ? 1 : 0);
+}
+
 RtValue rt_sqlite_execute(RtValue conn, RtValue sql) {
-    if (is_nil(conn)) return from_int(0);
-    sqlite3 *db = (sqlite3 *)as_ptr(conn);
+    if (!is_heap_handle(conn)) return from_int(0);
     CStr sbuf;
     const char *s = borrow_string(sql, &sbuf);
     if (!s) return from_int(0);
-    char *err = NULL;
-    int rc = sqlite3_exec(db, s, NULL, NULL, &err);
-    if (err) sqlite3_free(err);
+    RtValue result = sqlite_execute_cstr((sqlite3 *)as_ptr(conn), s);
     release_string(&sbuf);
-    return from_int(rc == SQLITE_OK ? 1 : 0);
+    return result;
 }
 
 RtValue rt_sqlite_execute_batch(RtValue conn, RtValue sql) {
@@ -175,7 +183,7 @@ RtValue rt_sqlite_execute_batch(RtValue conn, RtValue sql) {
 }
 
 RtValue rt_sqlite_query(RtValue conn, RtValue sql) {
-    if (is_nil(conn)) return (RtValue)SPECIAL_NIL;
+    if (!is_heap_handle(conn)) return (RtValue)SPECIAL_NIL;
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
     CStr sbuf;
     const char *s = borrow_string(sql, &sbuf);
@@ -190,52 +198,52 @@ RtValue rt_sqlite_query(RtValue conn, RtValue sql) {
 RtValue rt_sqlite_query_next(RtValue stmt_val) {
     /* `sqlite_query_all` tests `has_row == 1`, so this returns a raw 1/0 rather
        than SPECIAL_TRUE/SPECIAL_FALSE (11/19). See the from_int note above. */
-    if (is_nil(stmt_val)) return from_int(0);
+    if (!is_heap_handle(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_step(stmt);
     return from_int(rc == SQLITE_ROW ? 1 : 0);
 }
 
 void rt_sqlite_query_done(RtValue stmt_val) {
-    if (is_nil(stmt_val)) return;
+    if (!is_heap_handle(stmt_val)) return;
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     sqlite3_finalize(stmt);
 }
 
 RtValue rt_sqlite_column_count(RtValue stmt_val) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (!is_heap_handle(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     return from_int(sqlite3_column_count(stmt));
 }
 
 RtValue rt_sqlite_column_name(RtValue stmt_val, RtValue idx) {
-    if (is_nil(stmt_val)) return (RtValue)SPECIAL_NIL;
+    if (!is_heap_handle(stmt_val)) return (RtValue)SPECIAL_NIL;
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     const char *name = sqlite3_column_name(stmt, (int)as_int(idx));
     return make_string(name);
 }
 
 RtValue rt_sqlite_column_text(RtValue stmt_val, RtValue idx) {
-    if (is_nil(stmt_val)) return (RtValue)SPECIAL_NIL;
+    if (!is_heap_handle(stmt_val)) return (RtValue)SPECIAL_NIL;
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     const char *text = (const char *)sqlite3_column_text(stmt, (int)as_int(idx));
     return make_string(text);
 }
 
 RtValue rt_sqlite_column_int(RtValue stmt_val, RtValue idx) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (!is_heap_handle(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     return from_int(sqlite3_column_int64(stmt, (int)as_int(idx)));
 }
 
 double rt_sqlite_column_float(RtValue stmt_val, RtValue idx) {
-    if (is_nil(stmt_val)) return 0.0;
+    if (!is_heap_handle(stmt_val)) return 0.0;
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     return sqlite3_column_double(stmt, (int)as_int(idx));
 }
 
 RtValue rt_sqlite_column_type(RtValue stmt_val, RtValue idx) {
-    if (is_nil(stmt_val)) return make_string("null");
+    if (!is_heap_handle(stmt_val)) return make_string("null");
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int type = sqlite3_column_type(stmt, (int)as_int(idx));
     switch (type) {
@@ -248,7 +256,7 @@ RtValue rt_sqlite_column_type(RtValue stmt_val, RtValue idx) {
 }
 
 RtValue rt_sqlite_prepare(RtValue conn, RtValue sql) {
-    if (is_nil(conn)) return (RtValue)SPECIAL_NIL;
+    if (!is_heap_handle(conn)) return (RtValue)SPECIAL_NIL;
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
     CStr sbuf;
     const char *s = borrow_string(sql, &sbuf);
@@ -261,7 +269,7 @@ RtValue rt_sqlite_prepare(RtValue conn, RtValue sql) {
 }
 
 RtValue rt_sqlite_bind_text(RtValue stmt_val, RtValue idx, RtValue value) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (!is_heap_handle(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     CStr vbuf;
     const char *s = borrow_string(value, &vbuf);
@@ -273,65 +281,68 @@ RtValue rt_sqlite_bind_text(RtValue stmt_val, RtValue idx, RtValue value) {
 }
 
 RtValue rt_sqlite_bind_int(RtValue stmt_val, RtValue idx, RtValue value) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (!is_heap_handle(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_bind_int64(stmt, (int)as_int(idx), as_int(value));
     return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 RtValue rt_sqlite_bind_float(RtValue stmt_val, RtValue idx, double value) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (!is_heap_handle(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_bind_double(stmt, (int)as_int(idx), value);
     return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 RtValue rt_sqlite_bind_null(RtValue stmt_val, RtValue idx) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (!is_heap_handle(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_bind_null(stmt, (int)as_int(idx));
     return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 RtValue rt_sqlite_reset(RtValue stmt_val) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (!is_heap_handle(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_reset(stmt);
     return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 void rt_sqlite_finalize(RtValue stmt_val) {
-    if (is_nil(stmt_val)) return;
+    if (!is_heap_handle(stmt_val)) return;
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     sqlite3_finalize(stmt);
 }
 
 RtValue rt_sqlite_begin(RtValue conn) {
-    return rt_sqlite_execute(conn, make_string("BEGIN"));
+    if (!is_heap_handle(conn)) return from_int(0);
+    return sqlite_execute_cstr((sqlite3 *)as_ptr(conn), "BEGIN");
 }
 
 RtValue rt_sqlite_commit(RtValue conn) {
-    return rt_sqlite_execute(conn, make_string("COMMIT"));
+    if (!is_heap_handle(conn)) return from_int(0);
+    return sqlite_execute_cstr((sqlite3 *)as_ptr(conn), "COMMIT");
 }
 
 RtValue rt_sqlite_rollback(RtValue conn) {
-    return rt_sqlite_execute(conn, make_string("ROLLBACK"));
+    if (!is_heap_handle(conn)) return from_int(0);
+    return sqlite_execute_cstr((sqlite3 *)as_ptr(conn), "ROLLBACK");
 }
 
 RtValue rt_sqlite_last_insert_rowid(RtValue conn) {
-    if (is_nil(conn)) return from_int(0);
+    if (!is_heap_handle(conn)) return from_int(0);
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
     return from_int(sqlite3_last_insert_rowid(db));
 }
 
 RtValue rt_sqlite_changes(RtValue conn) {
-    if (is_nil(conn)) return from_int(0);
+    if (!is_heap_handle(conn)) return from_int(0);
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
     return from_int(sqlite3_changes(db));
 }
 
 RtValue rt_sqlite_error_message(RtValue conn) {
-    if (is_nil(conn)) return make_string("null connection");
+    if (!is_heap_handle(conn)) return make_string("invalid connection");
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
     return make_string(sqlite3_errmsg(db));
 }

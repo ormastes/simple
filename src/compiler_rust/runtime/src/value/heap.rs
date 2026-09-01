@@ -607,12 +607,7 @@ fn mem_attr_enabled() -> bool {
             let resolved = if on { ATTR_ON } else { ATTR_OFF };
             // Only fill in from the environment while still unresolved: an
             // explicit `mem_attr_enable()` that raced in must win.
-            match ATTR_GATE.compare_exchange(
-                ATTR_UNRESOLVED,
-                resolved,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
+            match ATTR_GATE.compare_exchange(ATTR_UNRESOLVED, resolved, Ordering::Relaxed, Ordering::Relaxed) {
                 Ok(_) => on,
                 Err(prev) => prev == ATTR_ON,
             }

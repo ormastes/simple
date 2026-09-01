@@ -1,0 +1,78 @@
+# SCV-IMPL-G-01 — explicit-commit parse policy.
+#
+# Supported source (a language the langmap/defaults recognise) requires a
+# LOCKED, AVAILABLE parser plus a successful parse — no silent fallback.
+# Unsupported text commits in `text_only` line mode; binary commits as
+# bytes/chunks. The policy never invents a green: a supported language with
+# no locked parser, or a failed parse, is an ERROR.
+
+use app.io.mod (file_exists, file_read, file_append)
+use std.scv.core.{scv_rel_path, scv_repo_dir, scv_metadata_path_safe}
+use std.scv.parser.{scv_language_for_text, scv_is_binary_text, scv_parse_gate}
+use std.scv.parser_registry.{scv_parser_for_path}
+use std.scv.profiles.{scv_profile_read, scv_profile_refuses_forced}
+
+# Classify one path under the explicit-commit parse policy.
+fn scv_commit_parse_policy(root: text, path: text) -> text:
+    if not file_exists(path):
+        return "ERROR commit-policy: no such file: {path}\n"
+    val rel = scv_rel_path(root, path)
+    val content = file_read(path)
+    if scv_is_binary_text(content):
+        return "path: {rel}\npolicy: binary\nmode: bytes-chunks\n"
+    val language = scv_language_for_text(root, path, content)
+    if language == "fallback":
+        return "path: {rel}\npolicy: text_only\nmode: line\n"
+    # supported source: a locked, available parser is mandatory
+    val (grammar, version) = scv_parser_for_path(root, path, language)
+    if grammar.starts_with("ERROR"):
+        return "ERROR commit-policy: {language} parser unavailable for {rel}: {grammar}\n"
+    if grammar == "fallback-line" or grammar == "":
+        return "ERROR commit-policy: supported source {language} requires a locked available parser ({rel})\n"
+    val gate = scv_parse_gate(root, path)
+    if gate.starts_with("ERROR"):
+        return "ERROR commit-policy: parse failed for {rel}\n{gate}"
+    if gate.contains("status: parsed_error"):
+        return "ERROR commit-policy: parse failed for {rel}\n{gate}"
+    "path: {rel}\npolicy: parsed\nlanguage: {language}\nparser: {grammar}@{version}\nmode: syntax\n"
+
+# SCV-IMPL-G-02 — forced_unparsed escape hatch. An explicit, audited override:
+# `--force-unparsed` requires a `--reason`, commits in line mode, records an
+# append-only audit entry under .scv/, and is NEVER public_ready by default.
+
+fn scv_forced_unparsed_log_path(root: text) -> text:
+    "{scv_repo_dir(root)}/forced_unparsed.log"
+
+fn scv_commit_parse_policy_forced(root: text, path: text, reason: text) -> text:
+    if not file_exists(path):
+        return "ERROR commit-policy: no such file: {path}\n"
+    if reason == "":
+        return "ERROR commit-policy: --force-unparsed requires --reason\n"
+    if not scv_metadata_path_safe(reason):
+        return "ERROR commit-policy: --reason must not contain '|' or newlines\n"
+    val rel = scv_rel_path(root, path)
+    if not scv_metadata_path_safe(rel):
+        return "ERROR commit-policy: unsafe path: {rel}\n"
+    # SCV-IMPL-G-04: strict / mission_critical profiles refuse the escape hatch
+    # outright — nothing is recorded, nothing is green-washed.
+    val profile = scv_profile_read(root)
+    if scv_profile_refuses_forced(profile):
+        return "ERROR commit-policy: profile {profile} forbids --force-unparsed ({rel})\n"
+    file_append(scv_forced_unparsed_log_path(root), "{rel}|forced_unparsed|{reason}\n")
+    "path: {rel}\npolicy: forced_unparsed\nstate: forced_unparsed\nreason: {reason}\nmode: line\npublic_ready: blocked\n"
+
+# Full audit trail of forced_unparsed commits ("" when none).
+fn scv_forced_unparsed_audit(root: text) -> text:
+    val log = scv_forced_unparsed_log_path(root)
+    if not file_exists(log):
+        return ""
+    file_read(log)
+
+# Any recorded forced_unparsed entry blocks public_ready under EVERY profile
+# (G-04): profiles only ever add strictness on top of this default.
+# See std.scv.profiles for the per-repo profile and the blocked reason text.
+fn scv_forced_unparsed_blocks_public(root: text) -> bool:
+    scv_forced_unparsed_audit(root) != ""
+
+export scv_commit_parse_policy
+export scv_commit_parse_policy_forced, scv_forced_unparsed_audit, scv_forced_unparsed_blocks_public

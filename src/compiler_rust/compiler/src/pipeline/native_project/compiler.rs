@@ -16,7 +16,7 @@ use crate::module_resolver::ModuleResolver;
 use crate::monomorphize::monomorphize_module;
 
 use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
-use super::imports::build_use_map_from_ast;
+use super::imports::{build_suffix_index, build_use_map_from_ast};
 use super::mangle::{mangle_mir, qualify_enum_runtime_names};
 use super::module_global_init::inject_freestanding_module_global_init;
 
@@ -198,7 +198,10 @@ pub(super) fn persist_compiled_object_best_effort(cache_path: &Path, object: &[u
     match persist_compiled_object(cache_path, object) {
         Ok(()) => true,
         Err(error) => {
-            eprintln!("[native-incremental] cache write skipped for {}: {error}", source_path.display());
+            eprintln!(
+                "[native-incremental] cache write skipped for {}: {error}",
+                source_path.display()
+            );
             false
         }
     }
@@ -451,7 +454,23 @@ impl NativeProjectBuilder {
         let canonical_entry = canonical_entry.clone();
         let imports = imports.clone();
 
-        entries
+        // Large public aggregation facades spend most of their time resolving
+        // hundreds of re-exports.  Running one beside every LLVM worker made
+        // its bounded wall-clock timeout measure scheduler/memory-bandwidth
+        // starvation instead of compiler progress (compiler.core reproducibly
+        // finishes in 146s alone but exceeded 300s in a 32-way build). Admit
+        // these rare units before broad fanout; cached units never reach here.
+        let (contention_sensitive, regular): (Vec<_>, Vec<_>) = entries
+            .iter()
+            .cloned()
+            .partition(|(_, _, source, _)| is_contention_sensitive_entry(source));
+        let mut results = if contention_sensitive.is_empty() {
+            Vec::new()
+        } else {
+            self.compile_entries_sequential(&contention_sensitive, &temp_dir, &canonical_entry, &imports)
+        };
+
+        let mut parallel_results: Vec<_> = regular
             .par_iter()
             .enumerate()
             .map(|(progress_i, (idx, path, source, cache_path))| {
@@ -490,7 +509,9 @@ impl NativeProjectBuilder {
                     }
                 }
             })
-            .collect()
+            .collect();
+        results.append(&mut parallel_results);
+        results
     }
 
     /// Compile entries sequentially (fallback).
@@ -543,6 +564,18 @@ impl NativeProjectBuilder {
             })
             .collect()
     }
+}
+
+/// True for a source facade whose export-resolution cost is large enough that
+/// competing LLVM workers can consume its entire wall-clock timeout budget.
+/// This is deliberately structural rather than path-based so renamed/new
+/// aggregation modules receive the same admission policy.
+fn is_contention_sensitive_entry(source: &str) -> bool {
+    source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("export "))
+        .count()
+        >= 256
 }
 
 /// Compile a single .spl file to object code.
@@ -652,6 +685,7 @@ pub(crate) fn compile_file_to_object(
     //
     // Gated on `--entry-closure` to avoid any risk to self-host bootstrap.
     if imports.populate_global_struct_defs {
+        use std::collections::{HashMap, HashSet};
         // A field name is ambiguous *only* when two structs disagree on its
         // index within the struct. Two structs that both put `name` at index
         // 0 produce the same byte offset (0), so picking either struct is
@@ -661,11 +695,21 @@ pub(crate) fn compile_file_to_object(
         // where `children` is at index 3 in one struct and index 7 in the
         // other; picking the wrong struct would silently load the wrong
         // memory location.
-        lowerer.set_global_struct_defs(std::sync::Arc::clone(&imports.struct_defs));
-        lowerer.set_unique_global_struct_owners(std::sync::Arc::clone(&imports.unique_struct_owners));
-        lowerer.set_struct_module_owners(std::sync::Arc::clone(&imports.struct_module_owners));
-        lowerer.set_duplicate_global_struct_defs(std::sync::Arc::clone(&imports.duplicate_struct_defs));
-        lowerer.set_ambiguous_field_names(std::sync::Arc::clone(&imports.ambiguous_field_names));
+        let mut field_indices: HashMap<String, HashSet<usize>> = HashMap::new();
+        for fields in imports.struct_defs.values() {
+            for (idx, (fname, _)) in fields.iter().enumerate() {
+                field_indices.entry(fname.clone()).or_default().insert(idx);
+            }
+        }
+        let ambiguous: HashSet<String> = field_indices
+            .into_iter()
+            .filter_map(|(name, indices)| if indices.len() > 1 { Some(name) } else { None })
+            .collect();
+        lowerer.set_global_struct_defs(std::sync::Arc::new((*imports.struct_defs).clone()));
+        lowerer.set_unique_global_struct_owners(std::sync::Arc::new((*imports.unique_struct_owners).clone()));
+        lowerer.set_struct_module_owners(std::sync::Arc::new((*imports.struct_module_owners).clone()));
+        lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new((*imports.duplicate_struct_defs).clone()));
+        lowerer.set_ambiguous_field_names(std::sync::Arc::new(ambiguous));
     } else {
         lowerer.set_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
         lowerer.set_unique_global_struct_owners(std::sync::Arc::new(std::collections::HashMap::new()));
@@ -689,7 +733,7 @@ pub(crate) fn compile_file_to_object(
     // `expr/access.rs::lower_field_access` was emitting
     // `Global(EnumName)` with `ty=ANY`).
     if imports.populate_global_enum_defs {
-        lowerer.set_global_enum_defs(std::sync::Arc::clone(&imports.enum_defs));
+        lowerer.set_global_enum_defs(std::sync::Arc::new((*imports.enum_defs).clone()));
         lowerer.register_global_enums();
     }
     let mut hir = lowerer
@@ -843,6 +887,7 @@ pub(crate) fn compile_file_to_object(
 
             if !no_mangle {
                 let prefix = module_prefix.clone();
+                let global_suffix_index = build_suffix_index(imports.all_mangled.as_ref());
                 let unresolved = mangle_mir(
                     &mut mir,
                     &prefix,
@@ -850,7 +895,7 @@ pub(crate) fn compile_file_to_object(
                     imports.import_map.as_ref(),
                     imports.ambiguous_names.as_ref(),
                     &use_map,
-                    imports.suffix_index.as_ref(),
+                    &global_suffix_index,
                 );
                 if unresolved > 0 && std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1") {
                     eprintln!(
@@ -898,7 +943,10 @@ pub(crate) fn compile_file_to_object(
                 }
             };
             if let Err(dump_error) = persist_llvm_codegen_success(&llvm, &mir, file_path, source_root) {
-                return Err(format!("{}: LLVM diagnostic emission: {dump_error}", file_path.display()));
+                return Err(format!(
+                    "{}: LLVM diagnostic emission: {dump_error}",
+                    file_path.display()
+                ));
             }
 
             if is_entry && std::env::var("SIMPLE_DEBUG_LLVM").is_ok() {
@@ -1016,9 +1064,70 @@ pub(crate) fn compile_file_safe(
         })
         .map_err(|e| format!("spawn: {e}"))?;
 
+    wait_for_compiler_thread(rx, handle, timeout_secs)
+}
+
+/// Wait for one native compilation worker.
+///
+/// A zero timeout is the documented spelling for an unbounded native build.
+/// Calling `recv_timeout(Duration::ZERO)` would instead fail immediately, so
+/// keep the disabled and bounded paths explicit here.
+fn wait_for_compiler_thread(
+    rx: std::sync::mpsc::Receiver<()>,
+    handle: std::thread::JoinHandle<Result<Vec<u8>, String>>,
+    timeout_secs: u64,
+) -> Result<Vec<u8>, String> {
+    if timeout_secs == 0 {
+        return handle.join().unwrap_or_else(|_| Err("thread join error".to_string()));
+    }
+
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
         Ok(()) => handle.join().unwrap_or_else(|_| Err("thread join error".to_string())),
         Err(_) => Err(format!("timeout ({}s)", timeout_secs)),
+    }
+}
+
+#[cfg(test)]
+mod native_compile_timeout_tests {
+    use super::{is_contention_sensitive_entry, wait_for_compiler_thread};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn zero_timeout_waits_until_worker_completes() {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            tx.send(()).unwrap();
+            Ok(vec![1, 2, 3])
+        });
+
+        assert_eq!(wait_for_compiler_thread(rx, handle, 0).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn positive_timeout_still_rejects_slow_worker() {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1_100));
+            let _ = tx.send(());
+            Ok(Vec::new())
+        });
+
+        assert_eq!(wait_for_compiler_thread(rx, handle, 1), Err("timeout (1s)".to_string()));
+    }
+
+    #[test]
+    fn export_heavy_facades_are_admitted_before_parallel_fanout() {
+        let below = "export value\n".repeat(255);
+        let boundary = "export value\n".repeat(256);
+        assert!(!is_contention_sensitive_entry(&below));
+        assert!(is_contention_sensitive_entry(&boundary));
+        assert!(!is_contention_sensitive_entry(&format!(
+            "{}{}",
+            "# export comment\n".repeat(300),
+            "fn main(): 0\n"
+        )));
     }
 }
 
@@ -1416,13 +1525,22 @@ mod bootstrap_rewrite_try_operator_tests {
     #[test]
     fn parseable_source_keeps_all_try_operator_forms() {
         let call = "fn f() -> Result<i64, text>:\n    val v = call(1)?\n    Ok(v)\n";
-        assert!(bootstrap_rewrite_if_unparseable(call, false).contains(")?"), "call form eaten");
+        assert!(
+            bootstrap_rewrite_if_unparseable(call, false).contains(")?"),
+            "call form eaten"
+        );
 
         let var = "fn f() -> Result<i64, text>:\n    val r = mk()\n    val h = r?\n    Ok(h)\n";
-        assert!(bootstrap_rewrite_if_unparseable(var, false).contains("r?"), "var form eaten");
+        assert!(
+            bootstrap_rewrite_if_unparseable(var, false).contains("r?"),
+            "var form eaten"
+        );
 
         let index = "fn f() -> Result<i64, text>:\n    val v = xs[0]?\n    Ok(v)\n";
-        assert!(bootstrap_rewrite_if_unparseable(index, false).contains("]?"), "index form eaten");
+        assert!(
+            bootstrap_rewrite_if_unparseable(index, false).contains("]?"),
+            "index form eaten"
+        );
     }
 
     /// Vacuity anchor: the RAW textual rewrite really does eat the var and
@@ -1455,7 +1573,10 @@ mod bootstrap_rewrite_try_operator_tests {
             simple_parser::Parser::new(legacy).parse().is_err(),
             "fixture must be unparseable for this test to exercise the fallback"
         );
-        assert!(!out.contains("[u8]?"), "optional type suffix not stripped in fallback: {out}");
+        assert!(
+            !out.contains("[u8]?"),
+            "optional type suffix not stripped in fallback: {out}"
+        );
     }
 }
 
@@ -1708,6 +1829,27 @@ fn qualify_native_struct_layouts(
                         // collision-free.
                         *owner_has_vtable = Some(false);
                     }
+                    MirInst::AggregateCopy {
+                        type_name,
+                        owner_has_vtable,
+                        deep_fields,
+                        ..
+                    } => {
+                        *owner_has_vtable = Some(resolve_owner_has_vtable(
+                            type_name.as_deref(),
+                            &resolve_exact_owner,
+                            ambiguous_names,
+                            all_mangled,
+                            vtable_type_owners,
+                        ));
+                        resolve_deep_field_vtables(
+                            deep_fields,
+                            &resolve_exact_owner,
+                            ambiguous_names,
+                            all_mangled,
+                            vtable_type_owners,
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -1715,4 +1857,81 @@ fn qualify_native_struct_layouts(
     }
 
     Ok(())
+}
+
+/// Shared resolution used for `MirInst::AggregateCopy::owner_has_vtable` and
+/// each `AggregateFieldCopy::owner_has_vtable` — the same three-way owner
+/// resolution `qualify_native_struct_layouts` already applies to
+/// `FieldGet`/`FieldSet::owner_has_vtable` above, factored out so the
+/// (top-level, nested-recursive) call sites share one implementation rather
+/// than diverging copies of the ambiguous-name tie-break logic.
+fn resolve_owner_has_vtable(
+    type_name: Option<&str>,
+    resolve_exact_owner: &impl Fn(&str) -> Option<(String, bool)>,
+    ambiguous_names: &std::collections::HashSet<String>,
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    vtable_type_owners: &std::collections::HashSet<String>,
+) -> bool {
+    let Some(name) = type_name else {
+        // No statically-known type name — no proof of a header.
+        return false;
+    };
+    if let Some((owner, _)) = resolve_exact_owner(name) {
+        return vtable_type_owners.contains(&owner);
+    }
+    if ambiguous_names.contains(name) {
+        let suffix = format!("__{name}");
+        let mut candidate_layouts: Vec<bool> = all_mangled
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|candidate| candidate.ends_with(&suffix))
+            .map(|candidate| vtable_type_owners.contains(candidate))
+            .collect();
+        candidate_layouts.sort_unstable();
+        candidate_layouts.dedup();
+        // Unlike the FieldGet/FieldSet arm above, an ambiguous owner with
+        // incompatible header layouts here does NOT hard-fail the build.
+        // AggregateCopy's byte-block copy is only WRONG when it should have
+        // shifted and didn't (the defect this fix closes); guessing `false`
+        // on a genuinely ambiguous name reproduces that same pre-existing
+        // shallow-copy behavior rather than turning a previously-successful
+        // build into a hard compile error over a byte-copy shift decision.
+        // A real header/field-offset mismatch for an ambiguous name is still
+        // caught — by the FieldGet/FieldSet arm, which every field of a
+        // struct with any accessed field will also traverse.
+        return matches!(candidate_layouts.as_slice(), [true]);
+    }
+    // Unresolved builtin/generic/imported-but-unlowered owner: no proof of a
+    // native object header, same fail-closed default as FieldGet/FieldSet.
+    false
+}
+
+/// Recursively resolve `owner_has_vtable` for every `AggregateFieldCopy` in
+/// a deep-copy descriptor tree, using each field's OWN `type_name` — a
+/// field's header-bearing-ness is a property of its own declared type, not
+/// of the enclosing struct.
+fn resolve_deep_field_vtables(
+    deep_fields: &mut [crate::mir::AggregateFieldCopy],
+    resolve_exact_owner: &impl Fn(&str) -> Option<(String, bool)>,
+    ambiguous_names: &std::collections::HashSet<String>,
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    vtable_type_owners: &std::collections::HashSet<String>,
+) {
+    for field in deep_fields.iter_mut() {
+        field.owner_has_vtable = Some(resolve_owner_has_vtable(
+            field.type_name.as_deref(),
+            resolve_exact_owner,
+            ambiguous_names,
+            all_mangled,
+            vtable_type_owners,
+        ));
+        resolve_deep_field_vtables(
+            &mut field.nested,
+            resolve_exact_owner,
+            ambiguous_names,
+            all_mangled,
+            vtable_type_owners,
+        );
+    }
 }

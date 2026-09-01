@@ -1,0 +1,68 @@
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use std.spec.{describe, it, expect}
+
+fn collision_symbol_key(module_name: text, symbol_name: text) -> text:
+    if module_name != "": "{module_name}::{symbol_name}" else: symbol_name
+
+describe "MIR class prescan ownership":
+    it "keeps same-named classes and structs distinct across modules":
+        val log = Logger(level: 0)
+        val class_source = "pub class Collision:\n    value: i64"
+        val struct_source = "pub struct Collision:\n    value: i64"
+        val class_parser = parse_full_frontend(
+            class_source, "collision/class_owner.spl", "collision.class_owner", log)
+        val struct_parser = parse_full_frontend(
+            struct_source, "collision/struct_owner.spl", "collision.struct_owner", log)
+        var modules: Dict<text, Module> = {}
+        modules["collision.class_owner"] = class_parser
+        modules["collision.struct_owner"] = struct_parser
+        val sources = [
+            SourceFile(path: "collision/class_owner.spl", content: class_source,
+                       module_name: "collision.class_owner"),
+            SourceFile(path: "collision/struct_owner.spl", content: struct_source,
+                       module_name: "collision.struct_owner")
+        ]
+        val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+        var class_lowering = hirlowering_for_module("collision.class_owner", surfaces)
+        var struct_lowering = hirlowering_for_module("collision.struct_owner", surfaces)
+        val class_hir = class_lowering.lower_module(class_parser)
+        val struct_hir = struct_lowering.lower_module(struct_parser)
+        val class_def = class_hir.classes.values()[0]
+        val struct_def = struct_hir.structs.values()[0]
+        val class_symbol = class_hir.symbols.get_symbol_raw(class_def.symbol.id)
+        val struct_symbol = struct_hir.symbols.get_symbol_raw(struct_def.symbol.id)
+        expect(class_symbol != nil).to_equal(true)
+        expect(struct_symbol != nil).to_equal(true)
+        if class_symbol == nil or struct_symbol == nil:
+            return
+        val class_info = class_symbol.unwrap()
+        val struct_info = struct_symbol.unwrap()
+        val class_key = collision_symbol_key(
+            class_info.defining_module ?? "", class_info.name)
+        val struct_key = collision_symbol_key(
+            struct_info.defining_module ?? "", struct_info.name)
+        expect(class_key == struct_key).to_equal(false)
+        expect(class_key == class_def.name).to_equal(false)
+
+        var mir_lowering = MirLowering.new(class_hir.symbols)
+        mir_lowering.prescan_module_struct_names(class_hir)
+        mir_lowering.prescan_module_struct_names(struct_hir)
+        expect(mir_lowering.class_type_names.has(class_key)).to_equal(true)
+        expect(mir_lowering.class_type_names.has(class_def.name)).to_equal(false)
+        expect(mir_lowering.class_type_names.has(struct_key)).to_equal(false)
+
+        # The real shared lowering path must preserve the same ownership
+        # distinction after module-local metadata becomes authoritative.
+        mir_lowering.lower_module(class_hir)
+        mir_lowering.lower_module(struct_hir)
+        expect(mir_lowering.class_type_names.has(class_key)).to_equal(true)
+        expect(mir_lowering.class_type_names.has(class_def.name)).to_equal(false)
+        expect(mir_lowering.class_type_names.has(struct_key)).to_equal(false)

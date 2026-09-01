@@ -73,6 +73,9 @@ val VFS_SERVICE_NAME: text = "vfs"
 val VFS_IPC_REQUEST_PAYLOAD_MAX: u32 = 4096u32
 val VFS_IPC_REPLY_PAYLOAD_MAX: u64 = 4092u64
 val VFS_IPC_BYTE_ARRAY_HEADER_BYTES: u64 = 16u64
+val VFS_READDIR_ENTRY_MAX: u64 = 128u64
+val VFS_READDIR_NAME_BYTES_MAX: u64 = 255u64
+val VFS_READDIR_TOTAL_NAME_BYTES_MAX: u64 = 3072u64
 val IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
 
 # Response status codes
@@ -226,16 +229,9 @@ impl VfsService:
             truncate: (flags_raw & VFS_OPEN_O_TRUNC) != 0u32,
             directory: false
         )
-        var mgr = self.vfs
-        val opened = mgr.open(path, flags)
-        self.vfs = mgr
-        match opened:
+        match self.vfs.open(path, flags):
             Result.Ok(fd):
-                # Reply with the VFS handle (fd.node), which is what READ/
-                # WRITE/CLOSE/SEEK resolve through the handle table. fd.fd is
-                # only the per-process descriptor number and never identified
-                # a mount.
-                self.send_u64_reply(src_port, STATUS_OK, fd.node)
+                self.send_u64_reply(src_port, STATUS_OK, fd.fd.to_u64())
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
 
@@ -243,12 +239,10 @@ impl VfsService:
         """Parse READ request: fd(u64) | size(u64)."""
         val fd = _read_u64(payload_addr)
         val size = _read_u64(payload_addr + 8)
-        # Routed by VfsManager via the handle table (converged owner:
-        # os.kernel.fs.vfs_handle_table); the mounts[0] bypass is deleted.
-        var mgr = self.vfs
-        val result = mgr.read(fd, size)
-        self.vfs = mgr
-        match result:
+        # Find the mount for this fd and read
+        # For now use the fd's underlying handle directly
+        val mount = self.vfs.mounts[0]  # Simplified: use first mount
+        match mount.fs.read(fd, size):
             Result.Ok(data):
                 self.send_bytes_reply(src_port, STATUS_OK, data)
             Result.Err(e):
@@ -263,10 +257,8 @@ impl VfsService:
         while i < data_len:
             data.push(_read_u8(payload_addr + 8 + i.to_u64()))
             i = i + 1
-        var mgr = self.vfs
-        val result = mgr.write(fd, data)
-        self.vfs = mgr
-        match result:
+        val mount = self.vfs.mounts[0]
+        match mount.fs.write(fd, data):
             Result.Ok(written):
                 self.send_u64_reply(src_port, STATUS_OK, written)
             Result.Err(e):
@@ -275,10 +267,8 @@ impl VfsService:
     me dispatch_close(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse CLOSE request: fd(u64)."""
         val fd = _read_u64(payload_addr)
-        var mgr = self.vfs
-        val result = mgr.close(fd)
-        self.vfs = mgr
-        match result:
+        val mount = self.vfs.mounts[0]
+        match mount.fs.close(fd):
             Result.Ok(v):
                 self.send_u64_reply(src_port, STATUS_OK, 1)
             Result.Err(e):
@@ -392,6 +382,15 @@ impl VfsService:
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_ERR, e)
 
+    me dispatch_readlink(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Parse READLINK request: path(text)."""
+        val path = _read_text(payload_addr, payload_len)
+        match self.vfs.readlink(path):
+            Result.Ok(target):
+                self.send_text_reply(src_port, STATUS_OK, target)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
+
     me dispatch_mount_list(src_port: u64):
         """Return list of mount points."""
         var reply_text = ""
@@ -414,10 +413,8 @@ impl VfsService:
             1: SeekWhence.Cur
             2: SeekWhence.End
             _: SeekWhence.Set
-        var mgr = self.vfs
-        val result = mgr.seek(fd, offset, whence)
-        self.vfs = mgr
-        match result:
+        val mount = self.vfs.mounts[0]
+        match mount.fs.seek(fd, offset, whence):
             Result.Ok(pos):
                 self.send_u64_reply(src_port, STATUS_OK, pos)
             Result.Err(e):
@@ -559,6 +556,8 @@ fn _vfs_request_payload_is_valid(method: u32, addr: u64, payload_len: u32) -> bo
         VFS_CHMOD: _vfs_has_exact_path_before_trailer(addr, payload_len, 2u32)
         VFS_SYMLINK: _vfs_has_exact_two_nonempty_nul_paths(addr, payload_len)
         VFS_RMDIR: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_READLINK: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_STAT_NO_FOLLOW: _vfs_has_nonempty_plain_path(addr, payload_len)
         _: true
 
 fn _read_text(addr: u64, len: u32) -> text:

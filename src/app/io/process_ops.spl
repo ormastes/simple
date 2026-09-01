@@ -1,6 +1,8 @@
 # Process Execution - Pure Simple I/O
 # Extracted from mod.spl for modularity
 
+export use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out}
+
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 
 # Extern fn declarations (runtime resolves at file level)
@@ -8,6 +10,7 @@ use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 # is in the interpreted CLI closure and that module declares externs the
 # deployed seed rejects (rt_shell_output), killing every native-build.
 
+@unsafe(reason: "raw stderr runtime-value ABI; provider status is discarded", capabilities: [ffi])
 extern fn rt_stderr_write(s: text)
 @unsafe(reason: "raw process capture; exit_code -1 is the execution-failure sentinel", capabilities: [ffi])
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -17,7 +20,9 @@ extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_o
 extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64
 @unsafe(reason: "raw timeout process capture; exit_code -1 is the timeout or execution-failure sentinel", capabilities: [ffi])
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, read_file_text_result, file_delete, file_exists, time_now_unix_micros, getpid}
+use std.nogc_sync_mut.io_runtime.{file_size_signed}
+use std.nogc_sync_mut.io.file_ops.{file_read_text_at}
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 @unsafe(reason: "raw inherited-stdio child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
@@ -26,17 +31,13 @@ extern fn rt_process_spawn_inherit() -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
+@unsafe(reason: "raw arbitrary-PID existence probe; false means absent, invalid, or provider failure", capabilities: [ffi])
+extern fn rt_process_exists(pid: i64) -> bool
 @unsafe(reason: "raw owned-child termination status; false sentinel means absent or termination failure", capabilities: [ffi])
 extern fn rt_process_kill(pid: i64) -> bool
-extern fn rt_file_read_text(path: text) -> text
-@unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
-extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
-extern fn rt_file_size(path: text) -> i64
-use std.io_runtime.{file_delete}
-use std.io_runtime.{file_exists}
-use std.io_runtime.{time_now_unix_micros}
-use std.io_runtime.{getpid}
+@unsafe(reason: "raw stdout flush ABI; native provider status is discarded", capabilities: [ffi])
 extern fn rt_stdout_flush()
+@unsafe(reason: "raw stderr flush ABI; native provider status is discarded", capabilities: [ffi])
 extern fn rt_stderr_flush()
 
 fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
@@ -71,18 +72,23 @@ fn _process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_is_running(pid)
 
+fn _process_exists_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_exists(pid)
+
 fn _process_kill_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_kill(pid)
 
+@always_inline
 fn _read_text_at_checked(path: text, offset: i64, size: i64) -> Result<text, text>:
-    var value: text? = nil
-    unsafe(capabilities: [ffi]):
-        value = rt_file_read_text_at_checked(path, offset, size)
-    if value.?:
-        Ok(value.unwrap())
-    else:
-        Err("offset file read failed for '{path}' at {offset} ({size} bytes)")
+    file_read_text_at(path, offset, size)
+
+@always_inline
+fn _read_text_or_empty(path: text) -> text:
+    match read_file_text_result(path):
+        case Ok(content): content
+        case Err(_): ""
 
 # Platform detection - inlined to avoid bootstrap runtime limitations
 fn _is_windows_platform() -> bool:
@@ -127,6 +133,13 @@ fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     val result = _process_run_raw(resolved_cmd, args)
     proc_slot_release()
     result
+
+@always_inline
+fn process_run_direct(cmd: text, args: [text]) -> (text, text, i64):
+    # Exact raw-command facade for callers that already own command lookup.
+    # Unlike process_run, this deliberately performs no PATH preflight and
+    # does not acquire the global process governor slot.
+    _process_run_raw(cmd, args)
 
 fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
     val resolved_cmd = _resolve_process_cmd(cmd)
@@ -180,10 +193,10 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stdout = ""
     var stderr = ""
     if file_exists(stdout_file):
-        stdout = rt_file_read_text(stdout_file)
+        stdout = _read_text_or_empty(stdout_file)
         file_delete(stdout_file)
     if file_exists(stderr_file):
-        stderr = rt_file_read_text(stderr_file)
+        stderr = _read_text_or_empty(stderr_file)
         file_delete(stderr_file)
 
     if pid <= 0:
@@ -271,7 +284,21 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     # cmd_line is single-quoted per part; inside the double-quoted inner `sh -c`
     # string the outer shell must not expand anything, so escape  " $ `.
     val inner_cmd = cmd_line.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
-    val redirected_cmd = "exec setsid -w sh -c \"echo \\$\\$ > '{pgid_file}'; exec {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
+    # `setsid` is util-linux and does NOT exist on macOS, where this line failed
+    # with `/bin/sh: line 0: exec: setsid: not found` and exit 127, surfacing as
+    # an UNDIAGNOSABLE Stage-2 capability failure after a ~25 min compile.
+    # perl ships with macOS and POSIX::setsid() is the same syscall, so the
+    # fallback preserves the session-leader property this depends on: the inner
+    # `$$` written to pgid_file must be a process-GROUP leader or
+    # _process_kill_group's `kill -- -PGID` cannot reap the tree.
+    # Detected in the shell rather than via a platform helper because host_os()
+    # shells out to `uname` and this IS the process runner, so importing it here
+    # would recurse. `command -v setsid` also leaves Linux byte-identical.
+    # This file is a twin of src/lib/nogc_sync_mut/io/process_ops.spl; the same
+    # fix belongs in both, and the lib-only fix did NOT take effect because the
+    # CLI resolves this app copy.
+    val sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; else exec perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' -- \"$@\"; fi; }; "
+    val redirected_cmd = "{sid_fn}sid sh -c \"echo \\$\\$ > '{pgid_file}'; exec {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
     val pid = _process_spawn_async_raw("/bin/sh", ["-c", redirected_cmd])
@@ -295,26 +322,28 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         # O(n^2) in the child's total output: relaying a 3 MB build log cost
         # 146 MB of rchar. rt_file_read_text_at seeks to the offset, so the
         # cost is now proportional to the NEW bytes only.
-        val out_size = rt_file_size(stdout_file)
+        val out_size = file_size_signed(stdout_file)
         if out_size > stdout_relayed:
             match _read_text_at_checked(stdout_file, stdout_relayed, out_size - stdout_relayed):
                 case Ok(chunk):
                     if chunk.len() > 0:
                         print chunk
-                        rt_stdout_flush()
+                        unsafe(capabilities: [ffi]):
+                            rt_stdout_flush()
                         stdout_relayed = stdout_relayed + chunk.len()
                 case Err(message):
                     relay_error = message
                     _process_kill_raw(pid)
                     wrapper_code = _process_wait_raw(pid, 5000)
                     break
-        val err_size = rt_file_size(stderr_file)
+        val err_size = file_size_signed(stderr_file)
         if err_size > stderr_relayed:
             match _read_text_at_checked(stderr_file, stderr_relayed, err_size - stderr_relayed):
                 case Ok(chunk_err):
                     if chunk_err.len() > 0:
                         eprint(chunk_err)
-                        rt_stderr_flush()
+                        unsafe(capabilities: [ffi]):
+                            rt_stderr_flush()
                         stderr_relayed = stderr_relayed + chunk_err.len()
                 case Err(message):
                     relay_error = message
@@ -332,10 +361,10 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stdout = ""
     var stderr = ""
     if file_exists(stdout_file):
-        stdout = rt_file_read_text(stdout_file)
+        stdout = _read_text_or_empty(stdout_file)
         file_delete(stdout_file)
     if file_exists(stderr_file):
-        stderr = rt_file_read_text(stderr_file)
+        stderr = _read_text_or_empty(stderr_file)
         file_delete(stderr_file)
 
     if relay_error != "":
@@ -353,7 +382,8 @@ fn _process_kill_group(pgid_file: text):
     # TERM first, then KILL.
     if not file_exists(pgid_file):
         return
-    val pgid = rt_file_read_text(pgid_file).trim()
+    val pgid_text = _read_text_or_empty(pgid_file)
+    val pgid = pgid_text.trim()
     if pgid == "":
         return
     val debug = (env_get("SIMPLE_PROC_DEBUG") ?? "") == "1"
@@ -570,10 +600,23 @@ fn process_is_running(pid: i64) -> bool:
     # Check if a process is still running.
     _process_is_running_raw(pid)
 
+fn process_exists(pid: i64) -> bool:
+    # Arbitrary-PID probe. This is intentionally distinct from
+    # process_is_running, whose provider contract is owned-child liveness.
+    if pid <= 0:
+        return false
+    _process_exists_raw(pid)
+
 fn process_kill(pid: i64) -> bool:
     # Terminate a running process.
     if pid <= 1:
         return false
+    _process_kill_raw(pid)
+
+@always_inline
+fn process_kill_unchecked(pid: i64) -> bool:
+    # Exact provider semantics for trusted supervisor PID receipts. Unlike
+    # process_kill, this intentionally permits PID 1; never use arbitrary input.
     _process_kill_raw(pid)
 
 # ============================================================================
@@ -583,4 +626,5 @@ fn process_kill(pid: i64) -> bool:
 # Shadows the `eprint` builtin for importers (see the twin in
 # src/lib/nogc_sync_mut/io/process_ops.spl). Must write fd 2, never `print`.
 fn eprint(msg: text):
-    rt_stderr_write("{msg}\n")
+    unsafe(capabilities: [ffi]):
+        rt_stderr_write("{msg}\n")

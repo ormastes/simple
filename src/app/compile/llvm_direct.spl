@@ -19,6 +19,7 @@
 # Usage:
 #   Can be run as standalone script, or imported and called directly
 
+extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{getpid}
@@ -42,7 +43,7 @@ use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 fn find_mold_linker() -> text:
     val current_dir = shell_output("pwd")
     val local_mold = current_dir + "/bin/mold/mold"
-    if file_exists(local_mold):
+    if rt_file_exists(local_mold):
         return local_mold
     val which_result = shell_output("which mold 2>/dev/null")
     if which_result.len() > 0:
@@ -54,7 +55,7 @@ fn mold_flags() -> text:
     if mold_path == "":
         return ""
     var mold_dir = "."
-    val last_slash = mold_path.last_index_of("/")
+    val last_slash = mold_path.last_index_of("/") ?? -1
     if last_slash >= 0:
         mold_dir = mold_path.substring(0, last_slash)
     "-fuse-ld=mold -B " + mold_dir + "/"
@@ -66,10 +67,7 @@ fn mold_flags() -> text:
 fn merge_pgo_profiles(input_dir: text, output_path: text, verbose: bool) -> i64:
     val glob = input_dir + "/default_*.profraw"
     # Detect clang version and try matching llvm-profdata first
-    val clang_ver_out_r = shell("clang --version 2>&1 | head -1")
-    val clang_ver_out = clang_ver_out_r.stdout
-    val _ = clang_ver_out_r.stderr
-    val _ = clang_ver_out_r.exit_code
+    val (clang_ver_out, _, _) = shell("clang --version 2>&1 | head -1")
     var profdata_tool = "llvm-profdata"
     if clang_ver_out.contains("clang version 20"):
         profdata_tool = "llvm-profdata-20"
@@ -80,17 +78,11 @@ fn merge_pgo_profiles(input_dir: text, output_path: text, verbose: bool) -> i64:
     val merge_cmd = profdata_tool + " merge -output=" + output_path + " " + glob + " 2>&1"
     if verbose:
         debug("compile", "Merging PGO profiles: " + merge_cmd)
-    val merge_out_r = shell(merge_cmd)
-    val merge_out = merge_out_r.stdout
-    val merge_err = merge_out_r.stderr
-    val merge_exit = merge_out_r.exit_code
+    val (merge_out, merge_err, merge_exit) = shell(merge_cmd)
     if merge_exit != 0:
         # Fallback: try unversioned tool
         val merge_cmd2 = "llvm-profdata merge -output=" + output_path + " " + glob + " 2>&1"
-        val out2_r = shell(merge_cmd2)
-        val out2 = out2_r.stdout
-        val err2 = out2_r.stderr
-        val exit2 = out2_r.exit_code
+        val (out2, err2, exit2) = shell(merge_cmd2)
         if exit2 != 0:
             error("compile", "llvm-profdata merge failed")
             error("compile", merge_out)
@@ -136,7 +128,7 @@ fn llvm_direct_function_name_from_simple_line(line: text) -> text:
     if not trimmed.starts_with("fn "):
         return ""
     val rest = trimmed[3:]
-    val paren = rest.index_of("(")
+    val paren = rest.index_of("(") ?? -1
     if paren <= 0:
         return ""
     rest[0:paren].trim()
@@ -188,7 +180,7 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
         info("compile", "Compiling " + source_file + " via LLVM...")
 
     # Step 1: Generate textual C for the LLVM direct lane.
-    val pid = getpid()
+    val pid = rt_getpid()
     val temp_cpp = _get_temp_dir() + "/simple_llvm_" + str(pid) + ".cpp"
     if not file_write(temp_cpp, llvm_direct_minimal_c_source_from_simple(source_file)):
         error("compile", "C generation failed")
@@ -198,7 +190,7 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
         val cpp_size = file_size(temp_cpp)
         debug("compile", "Generated C++ (" + str(cpp_size) + " bytes)")
 
-    var generated_source = read_file_text(temp_cpp)
+    var generated_source = rt_file_read_text(temp_cpp) ?? ""
     if not llvm_direct_generated_c_is_textual(generated_source):
         generated_source = llvm_direct_minimal_c_source_from_simple(source_file)
         if not file_write(temp_cpp, generated_source):
@@ -224,11 +216,11 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
             debug("compile", "Simple profile counters injected: " + str(instrumented.slot_count) + " slot(s), metadata=" + metadata_path)
 
     if opts.simple_layout_section_map_path != "":
-        if not file_exists(opts.simple_layout_section_map_path):
+        if not rt_file_exists(opts.simple_layout_section_map_path):
             error("compile", "Simple layout section map not found: " + opts.simple_layout_section_map_path)
             file_delete(temp_cpp)
             return 1
-        val section_map_text = read_file_text(opts.simple_layout_section_map_path)
+        val section_map_text = rt_file_read_text(opts.simple_layout_section_map_path) ?? ""
         val applied = native_layout_apply_c_section_map(generated_source, section_map_text, true)
         if applied.diagnostic_count > 0:
             error("compile", "Simple layout section map failed: " + applied.diagnostics.join(","))
@@ -256,10 +248,7 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
         val ir_cmd = "clang++ -std=c++20 -I src/runtime/ -S -emit-llvm -o " + temp_ll + " " + temp_cpp + " 2>&1"
         if opts.verbose:
             debug("compile", "Generating LLVM IR via clang++...")
-        val ir_out_r = shell(ir_cmd)
-        val ir_out = ir_out_r.stdout
-        val ir_err = ir_out_r.stderr
-        val ir_exit = ir_out_r.exit_code
+        val (ir_out, ir_err, ir_exit) = shell(ir_cmd)
         file_delete(temp_cpp)
         if ir_exit != 0:
             error("compile", "clang++ IR generation failed")
@@ -269,10 +258,7 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
             shell("cp " + temp_ll + " " + output_file)
             info("compile", "IR written to: " + output_file)
         else:
-            val ir_content_r = shell("cat " + temp_ll)
-            val ir_content = ir_content_r.stdout
-            val _ = ir_content_r.stderr
-            val _ = ir_content_r.exit_code
+            val (ir_content, _, _) = shell("cat " + temp_ll)
             print ir_content
         file_delete(temp_ll)
         return 0
@@ -305,10 +291,8 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
     clang_cmd = clang_cmd + "-I src/runtime/ " + temp_cpp + " " + rt_sources + " -o " + output_file + " -lpthread -ldl -lm 2>&1"
     if opts.verbose:
         debug("compile", "Command: clang++ -std=c++20 " + opts.opt_level + " " + extra_flags)
-    val clang_out_r = shell(clang_cmd)
-    val clang_out = clang_out_r.stdout
-    val clang_err = clang_out_r.stderr
-    val clang_exit = clang_out_r.exit_code
+    val (clang_out, clang_err, clang_exit) = shell(clang_cmd)
+
     if clang_exit != 0:
         error("compile", "clang++ compilation failed")
         print clang_out

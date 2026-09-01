@@ -1,11 +1,13 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # Marker Wire-Format Preservation Spec
 #
 # The SimpleOS test harness (qemu_runner.spl + markers.spl::validate) parses
 # the serial byte stream with a STRICT prefix match at byte offset 0:
 #
-#   find_spec(raw) → raw.starts_with(namespace_prefix(spec.ns) + " " + event)
-#
-# e.g. the boot-entry marker travels the wire as exactly "[BOOT] entry".
+#   find_spec(raw) → raw.starts_with("[namespace] event")
 #
 # If the log-lib migration accidentally wrapped markers with a "[INFO] "
 # prefix (as log_info does for normal logging), find_spec would return nil
@@ -15,42 +17,47 @@
 # @platform: hosted
 # @tag: os,log,markers,unit
 
+use std.spec.step
+
 use os.kernel.log.markers.{
     validate,
     find_spec,
-    MarkerNamespace,
+    NAMESPACE_BOOT,
     namespace_prefix,
     marker_string
 }
 use os.kernel.log.klog_api.{log_level_name, LOG_INFO}
 
 describe "markers.find_spec strict prefix matching":
+    # @manual scenario evidence
     """Demonstrates why log_info CANNOT be used to emit markers — the
     `[INFO] ` prefix breaks the offset-0 starts_with check that
     qemu_runner / markers.validate depend on."""
 
-    it "matches a bare '[BOOT] entry' marker":
-        val raw = "[BOOT] entry"
+    it "matches a bare '[boot] entry' marker":
+        val raw = "[boot] entry"
         val spec = find_spec(raw)
-        expect(spec).to_not_be_nil()
+        expect(spec.is_nil()).to_equal(false)
 
-    it "does NOT match '[INFO] [BOOT] entry' (the regression shape)":
-        val raw_with_level = "[INFO] [BOOT] entry"
+    it "does NOT match '[INFO] [boot] entry' (the regression shape)":
+        val raw_with_level = "[INFO] [boot] entry"
         val spec = find_spec(raw_with_level)
-        expect(spec).to_be_nil()
+        expect(spec.is_nil()).to_equal(true)
 
     it "rejects unknown namespace prefixes":
+        # @req REQ-SSPEC-UNIT
+        step("rejects unknown namespace prefixes")
         val raw = "[nonsense] event"
         val spec = find_spec(raw)
-        expect(spec).to_be_nil()
+        expect(spec.is_nil()).to_equal(true)
 
 describe "validate() rejects level-prefixed markers":
     it "validates a bare marker":
-        val result = validate("[BOOT] entry")
+        val result = validate("[boot] entry")
         expect(result.is_ok()).to_equal(true)
 
     it "rejects the same marker with an [INFO] prefix":
-        val result = validate("[INFO] [BOOT] entry")
+        val result = validate("[INFO] [boot] entry")
         expect(result.is_ok()).to_equal(false)
 
 describe "log_level_name composition (log_info wire format)":
@@ -59,6 +66,8 @@ describe "log_level_name composition (log_info wire format)":
     contains() tolerance assumptions need re-validating."""
 
     it "INFO prefix is exactly '[INFO]'":
+        # @req REQ-SSPEC-UNIT
+        step("INFO prefix is exactly '[INFO]'")
         val level_token = "[" + log_level_name(LOG_INFO) + "]"
         expect(level_token).to_equal("[INFO]")
 
@@ -67,11 +76,11 @@ describe "namespace_prefix / marker_string round-trip":
     migration ensures every caller of marker_string routes the result
     through log_raw_println."""
 
-    it "marker_string for boot namespace produces '[BOOT] event'":
-        val s = marker_string(MarkerNamespace.Boot, "entry")
-        expect(s.starts_with(namespace_prefix(MarkerNamespace.Boot) + " ")).to_equal(true)
+    it "marker_string for boot namespace produces '[boot] event'":
+        val s = marker_string(NAMESPACE_BOOT, "entry")
+        expect(s.starts_with("[boot] ")).to_equal(true)
 
     it "the produced marker is accepted by find_spec":
-        val s = marker_string(MarkerNamespace.Boot, "entry")
+        val s = marker_string(NAMESPACE_BOOT, "entry")
         val spec = find_spec(s)
-        expect(spec).to_not_be_nil()
+        expect(spec.is_nil()).to_equal(false)

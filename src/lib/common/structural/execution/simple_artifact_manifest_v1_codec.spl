@@ -1,0 +1,385 @@
+# Canonical signing bytes for SimpleArtifactManifest v1.
+#
+# The signature field is deliberately excluded. The exact image hash is
+# included as a separate subject so one signed manifest cannot admit another
+# artifact merely by carrying a list that contains several hashes.
+
+use std.common.contracts.execution.simpleos_executable_v1.{
+    SimpleArtifactManifest, ManifestTarget, ManifestResourceLimits,
+    ManifestArgument, ManifestPreload,
+    simple_artifact_manifest_bounds_validate_v1,
+    SIMPLE_ARTIFACT_MANIFEST_MAX_COLLECTION_ITEMS_V1,
+    SIMPLE_ARTIFACT_MANIFEST_MAX_TOTAL_ITEMS_V1,
+    SIMPLE_ARTIFACT_MANIFEST_MAX_ELEMENT_BYTES_V1,
+    SIMPLE_ARTIFACT_MANIFEST_MAX_TOTAL_VALUE_BYTES_V1,
+    SIMPLE_ARTIFACT_MANIFEST_MAX_SIGNING_BODY_BYTES_V1
+}
+use std.common.string_core.{bytes_to_text}
+use std.common.structural.wire.{
+    wire_magic, wire_envelope_len, wire_check_envelope, wire_has,
+    wire_get_u8, wire_get_u32, wire_get_u64,
+    wire_put_envelope, wire_put_u8, wire_put_u32, wire_put_u64
+}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.structural.digest.hash256_codec.{hash256_put, hash256_read}
+
+# Compatibility names for the original SAM1 public surface.  Their values are
+# the authoritative installed-manifest bounds rather than a second, looser set.
+pub const SIMPLE_ARTIFACT_MANIFEST_V1_MAX_TEXT_BYTES: i64 =
+    SIMPLE_ARTIFACT_MANIFEST_MAX_ELEMENT_BYTES_V1
+pub const SIMPLE_ARTIFACT_MANIFEST_V1_MAX_LIST_ITEMS: i64 =
+    SIMPLE_ARTIFACT_MANIFEST_MAX_COLLECTION_ITEMS_V1
+pub const SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES: i64 =
+    SIMPLE_ARTIFACT_MANIFEST_MAX_SIGNING_BODY_BYTES_V1
+
+pub struct SimpleArtifactManifestSigningBytesV1:
+    ok: bool
+    bytes: [u8]
+
+pub struct SimpleArtifactManifestSigningProjectionV1:
+    """Typed, signature-bound projection recovered from canonical SAM1 bytes."""
+    image_hash: text
+    manifest: SimpleArtifactManifest
+
+class _SamReaderV1:
+    data: [u8]
+    offset: i64
+    ok: bool
+    retained_text_bytes: i64
+    retained_items: i64
+
+    me read_u8() -> i64:
+        if not self.ok or not wire_has(self.data, self.offset, 1):
+            self.ok = false
+            return 0
+        val value = wire_get_u8(self.data, self.offset)
+        self.offset = self.offset + 1
+        value
+
+    me read_u32() -> i64:
+        if not self.ok or not wire_has(self.data, self.offset, 4):
+            self.ok = false
+            return 0
+        val value = wire_get_u32(self.data, self.offset)
+        self.offset = self.offset + 4
+        value
+
+    me read_u64_nonnegative() -> i64:
+        if not self.ok or not wire_has(self.data, self.offset, 8):
+            self.ok = false
+            return 0
+        val value = wire_get_u64(self.data, self.offset)
+        self.offset = self.offset + 8
+        if value < 0: self.ok = false
+        value
+
+    me read_text(allow_empty: bool) -> text:
+        val size = self.read_u32()
+        val size_rejected = not self.ok or size < 0 or
+            size > SIMPLE_ARTIFACT_MANIFEST_V1_MAX_TEXT_BYTES or
+            self.retained_text_bytes >
+                SIMPLE_ARTIFACT_MANIFEST_MAX_TOTAL_VALUE_BYTES_V1 - size or
+            not wire_has(self.data, self.offset, size)
+        if size_rejected:
+            self.ok = false
+            return ""
+        if not allow_empty and size == 0:
+            self.ok = false
+            return ""
+        var raw: [u8] = []
+        var index: i64 = 0
+        while index < size:
+            val byte = self.data[self.offset + index] as i64
+            if byte < 32 or byte > 126:
+                self.ok = false
+                return ""
+            raw.push(byte.to_u8())
+            index = index + 1
+        self.offset = self.offset + size
+        self.retained_text_bytes = self.retained_text_bytes + size
+        bytes_to_text(raw)
+
+    me read_count() -> i64:
+        val count = self.read_u32()
+        val count_rejected = not self.ok or count < 0 or
+            count > SIMPLE_ARTIFACT_MANIFEST_V1_MAX_LIST_ITEMS or
+            self.retained_items > SIMPLE_ARTIFACT_MANIFEST_MAX_TOTAL_ITEMS_V1 - count
+        if count_rejected:
+            self.ok = false
+            return 0
+        self.retained_items = self.retained_items + count
+        count
+
+fn _sam_reject() -> SimpleArtifactManifestSigningBytesV1:
+    SimpleArtifactManifestSigningBytesV1(ok: false, bytes: [])
+
+fn _sam_text_valid(value: text, allow_empty: bool) -> bool:
+    if value.len() > SIMPLE_ARTIFACT_MANIFEST_V1_MAX_TEXT_BYTES:
+        return false
+    if not allow_empty and value.len() == 0:
+        return false
+    var i: i64 = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 32 or code > 126:
+            return false
+        i = i + 1
+    true
+
+fn _sam_put_text(out: [u8], value: text) -> [u8]:
+    var bytes = wire_put_u32(out, value.len())
+    var i: i64 = 0
+    while i < value.len():
+        bytes = wire_put_u8(bytes, value.char_code_at(i))
+        i = i + 1
+    bytes
+
+fn _sam_text_list_valid(values: [text]) -> bool:
+    if values.len() > SIMPLE_ARTIFACT_MANIFEST_V1_MAX_LIST_ITEMS:
+        return false
+    for value in values:
+        if not _sam_text_valid(value, false):
+            return false
+    true
+
+fn _sam_put_text_list(out: [u8], values: [text]) -> [u8]:
+    var bytes = wire_put_u32(out, values.len())
+    for value in values:
+        bytes = _sam_put_text(bytes, value)
+    bytes
+
+fn _sam_arguments_valid(values: [ManifestArgument]) -> bool:
+    if values.len() > SIMPLE_ARTIFACT_MANIFEST_V1_MAX_LIST_ITEMS:
+        return false
+    for value in values:
+        if not _sam_text_valid(value.name, false) or
+            not _sam_text_valid(value.value_kind, false) or
+            not _sam_text_valid(value.default_value, true):
+            return false
+    true
+
+fn _sam_put_arguments(out: [u8], values: [ManifestArgument]) -> [u8]:
+    var bytes = wire_put_u32(out, values.len())
+    for value in values:
+        bytes = _sam_put_text(bytes, value.name)
+        bytes = _sam_put_text(bytes, value.value_kind)
+        bytes = wire_put_u8(bytes, if value.required: 1 else: 0)
+        bytes = _sam_put_text(bytes, value.default_value)
+    bytes
+
+fn _sam_preloads_valid(values: [ManifestPreload]) -> bool:
+    if values.len() > SIMPLE_ARTIFACT_MANIFEST_V1_MAX_LIST_ITEMS:
+        return false
+    for value in values:
+        if value.maximum_bytes < 0 or
+            not _sam_text_valid(value.source_arg, true) or
+            not _sam_text_valid(value.fixed_path, true) or
+            not _sam_text_valid(value.mode, false) or
+            not _sam_text_valid(value.access, false) or
+            not _sam_text_valid(value.hash_policy, false):
+            return false
+    true
+
+fn _sam_put_preloads(out: [u8], values: [ManifestPreload]) -> [u8]:
+    var bytes = wire_put_u32(out, values.len())
+    for value in values:
+        bytes = _sam_put_text(bytes, value.source_arg)
+        bytes = _sam_put_text(bytes, value.fixed_path)
+        bytes = _sam_put_text(bytes, value.mode)
+        bytes = wire_put_u8(bytes, if value.required: 1 else: 0)
+        bytes = wire_put_u64(bytes, value.maximum_bytes)
+        bytes = _sam_put_text(bytes, value.access)
+        bytes = wire_put_u8(bytes, if value.prefault: 1 else: 0)
+        bytes = _sam_put_text(bytes, value.hash_policy)
+    bytes
+
+fn _sam_hashes_valid(values: [text]) -> bool:
+    if values.len() == 0 or values.len() > SIMPLE_ARTIFACT_MANIFEST_V1_MAX_LIST_ITEMS:
+        return false
+    for value in values:
+        if not hash256_hex_valid(value):
+            return false
+    true
+
+fn _sam_put_hashes(out: [u8], values: [text]) -> [u8]:
+    var bytes = wire_put_u32(out, values.len())
+    for value in values:
+        bytes = hash256_put(bytes, value)
+    bytes
+
+fn _sam_manifest_valid(m: SimpleArtifactManifest, image_hash: text) -> bool:
+    if m.format_version != 1 or not hash256_hex_valid(image_hash):
+        return false
+    if not simple_artifact_manifest_bounds_validate_v1(m).ok:
+        return false
+    if m.resource_limits.max_memory_bytes < 0 or
+        m.resource_limits.max_open_handles < 0 or
+        m.resource_limits.max_threads < 0 or
+        m.resource_limits.cpu_budget_us < 0:
+        return false
+    if not _sam_text_valid(m.artifact_kind, false) or
+        not _sam_text_valid(m.target.os, false) or
+        not _sam_text_valid(m.target.arch, false) or
+        not _sam_text_valid(m.target.abi, false) or
+        not _sam_text_valid(m.entrypoint, false) or
+        not _sam_text_valid(m.namespace_template, false) or
+        not _sam_text_valid(m.interpreter, true) or
+        not _sam_text_valid(m.debug_identity, true):
+        return false
+    _sam_text_list_valid(m.required_abi_features) and
+        _sam_text_list_valid(m.required_services) and
+        _sam_text_list_valid(m.native_libraries) and
+        _sam_text_list_valid(m.smf_libraries) and
+        _sam_arguments_valid(m.argument_schema) and
+        _sam_preloads_valid(m.startup_preloads) and
+        _sam_hashes_valid(m.content_hashes)
+
+pub fn encode_simple_artifact_manifest_v1_signing_bytes(
+    m: SimpleArtifactManifest,
+    image_hash: text
+) -> SimpleArtifactManifestSigningBytesV1:
+    if not _sam_manifest_valid(m, image_hash):
+        return _sam_reject()
+    var bytes = wire_put_envelope([], wire_magic("SAM1"), 1)
+    bytes = hash256_put(bytes, image_hash)
+    bytes = wire_put_u64(bytes, m.format_version)
+    bytes = _sam_put_text(bytes, m.artifact_kind)
+    bytes = _sam_put_text(bytes, m.target.os)
+    bytes = _sam_put_text(bytes, m.target.arch)
+    bytes = _sam_put_text(bytes, m.target.abi)
+    bytes = _sam_put_text(bytes, m.entrypoint)
+    bytes = _sam_put_text_list(bytes, m.required_abi_features)
+    bytes = _sam_put_text_list(bytes, m.required_services)
+    bytes = wire_put_u32(bytes, m.required_capabilities as i64)
+    bytes = wire_put_u64(bytes, m.resource_limits.max_memory_bytes)
+    bytes = wire_put_u64(bytes, m.resource_limits.max_open_handles)
+    bytes = wire_put_u64(bytes, m.resource_limits.max_threads)
+    bytes = wire_put_u64(bytes, m.resource_limits.cpu_budget_us)
+    bytes = _sam_put_text(bytes, m.namespace_template)
+    bytes = _sam_put_text_list(bytes, m.native_libraries)
+    bytes = _sam_put_text_list(bytes, m.smf_libraries)
+    bytes = _sam_put_text(bytes, m.interpreter)
+    bytes = _sam_put_arguments(bytes, m.argument_schema)
+    bytes = _sam_put_preloads(bytes, m.startup_preloads)
+    bytes = _sam_put_hashes(bytes, m.content_hashes)
+    bytes = _sam_put_text(bytes, m.debug_identity)
+    if bytes.len() > SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES:
+        return _sam_reject()
+    SimpleArtifactManifestSigningBytesV1(ok: true, bytes: bytes)
+
+fn _sam_read_text_list_v1(reader: _SamReaderV1) -> [text]:
+    val count = reader.read_count()
+    var values: [text] = []
+    var index: i64 = 0
+    while reader.ok and index < count:
+        values.push(reader.read_text(false))
+        index = index + 1
+    values
+
+pub fn decode_simple_artifact_manifest_v1_signing_bytes(
+    bytes: [u8],
+    detached_signature: text,
+) -> SimpleArtifactManifestSigningProjectionV1?:
+    """Decode exact canonical SAM1 bytes into their typed signed projection.
+
+    The signature is carried by SCR1 and is deliberately absent from SAM1.
+    This decoder accepts it only as the field restored onto the projection;
+    signature authentication remains loader-owned.
+    """
+    if bytes.len() < wire_envelope_len() + 32 or
+        bytes.len() > SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES or
+        not wire_check_envelope(bytes, 0, wire_magic("SAM1"), 1) or
+        not _sam_text_valid(detached_signature, false):
+        return nil
+    var reader = _SamReaderV1(
+        data: bytes, offset: wire_envelope_len(), ok: true,
+        retained_text_bytes: detached_signature.len(), retained_items: 0)
+    if not wire_has(bytes, reader.offset, 32): return nil
+    val image_hash = hash256_read(bytes, reader.offset)
+    reader.offset = reader.offset + 32
+    val format_version = reader.read_u64_nonnegative()
+    val artifact_kind = reader.read_text(false)
+    val target = ManifestTarget(
+        os: reader.read_text(false), arch: reader.read_text(false),
+        abi: reader.read_text(false))
+    val entrypoint = reader.read_text(false)
+    val abi_features = _sam_read_text_list_v1(reader)
+    val services = _sam_read_text_list_v1(reader)
+    val capabilities = reader.read_u32()
+    val max_memory = reader.read_u64_nonnegative()
+    val max_handles = reader.read_u64_nonnegative()
+    val max_threads = reader.read_u64_nonnegative()
+    val cpu_budget = reader.read_u64_nonnegative()
+    val namespace_template = reader.read_text(false)
+    val native_libraries = _sam_read_text_list_v1(reader)
+    val smf_libraries = _sam_read_text_list_v1(reader)
+    val interpreter = reader.read_text(true)
+    val argument_count = reader.read_count()
+    var arguments: [ManifestArgument] = []
+    var argument_index: i64 = 0
+    while reader.ok and argument_index < argument_count:
+        val name = reader.read_text(false)
+        val value_kind = reader.read_text(false)
+        val required_wire = reader.read_u8()
+        val default_value = reader.read_text(true)
+        if required_wire != 0 and required_wire != 1:
+            reader.ok = false
+        arguments.push(ManifestArgument(
+            name: name, value_kind: value_kind,
+            required: required_wire == 1, default_value: default_value))
+        argument_index = argument_index + 1
+    val preload_count = reader.read_count()
+    var preloads: [ManifestPreload] = []
+    var preload_index: i64 = 0
+    while reader.ok and preload_index < preload_count:
+        val source_arg = reader.read_text(true)
+        val fixed_path = reader.read_text(true)
+        val mode = reader.read_text(false)
+        val required_wire = reader.read_u8()
+        val maximum_bytes = reader.read_u64_nonnegative()
+        val access = reader.read_text(false)
+        val prefault_wire = reader.read_u8()
+        val hash_policy = reader.read_text(false)
+        if (required_wire != 0 and required_wire != 1) or
+            (prefault_wire != 0 and prefault_wire != 1):
+            reader.ok = false
+        preloads.push(ManifestPreload(
+            source_arg: source_arg, fixed_path: fixed_path, mode: mode,
+            required: required_wire == 1, maximum_bytes: maximum_bytes,
+            access: access, prefault: prefault_wire == 1,
+            hash_policy: hash_policy))
+        preload_index = preload_index + 1
+    val hash_count = reader.read_count()
+    var hashes: [text] = []
+    var hash_index: i64 = 0
+    while reader.ok and hash_index < hash_count:
+        if not wire_has(bytes, reader.offset, 32):
+            reader.ok = false
+        else:
+            hashes.push(hash256_read(bytes, reader.offset))
+            reader.offset = reader.offset + 32
+        hash_index = hash_index + 1
+    val debug_identity = reader.read_text(true)
+    if not reader.ok or reader.offset != bytes.len(): return nil
+    val manifest = SimpleArtifactManifest(
+        format_version: format_version, artifact_kind: artifact_kind,
+        target: target, entrypoint: entrypoint,
+        required_abi_features: abi_features, required_services: services,
+        required_capabilities: capabilities.to_u32(),
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: max_memory, max_open_handles: max_handles,
+            max_threads: max_threads, cpu_budget_us: cpu_budget),
+        namespace_template: namespace_template,
+        native_libraries: native_libraries, smf_libraries: smf_libraries,
+        interpreter: interpreter, argument_schema: arguments,
+        startup_preloads: preloads, content_hashes: hashes,
+        signature: detached_signature, debug_identity: debug_identity)
+    val canonical = encode_simple_artifact_manifest_v1_signing_bytes(
+        manifest, image_hash)
+    if not canonical.ok or canonical.bytes != bytes: return nil
+    Some(SimpleArtifactManifestSigningProjectionV1(
+        image_hash: image_hash, manifest: manifest))
+
+export SIMPLE_ARTIFACT_MANIFEST_V1_MAX_TEXT_BYTES
+export SIMPLE_ARTIFACT_MANIFEST_V1_MAX_LIST_ITEMS
+export SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES

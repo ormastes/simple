@@ -1,6 +1,6 @@
-# mock_phase4_spec
+# Mock Phase4 Specification
 
-> Verifies the mock phase4 behaviour end to end so maintainers of this
+> Tests covering Mock Library - Phase 4 (Advanced Patterns).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# mock_phase4_spec
-
-Verifies the mock phase4 behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/std/mock_phase4_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the mock phase4 behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Mock Phase4 Specification
 
 ## Scenarios
 
@@ -41,19 +19,18 @@ unrelated sibling features are out of scope.
 
 #### returns value based on argument condition
 
-- Verify: returns value based on argument condition
+- returns value based on argument condition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: returns value based on argument condition")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("returns value based on argument condition")
 val cond_returns = ConditionalReturns.new()
 cond_returns.add_condition(
     _1.len() > 0 and _1[0] == "user",
@@ -68,19 +45,18 @@ expect cond_returns.evaluate(["admin"]) == "unknown"
 
 #### checks multiple conditions in order
 
-- Verify: checks multiple conditions in order
+- checks multiple conditions in order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: checks multiple conditions in order")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("checks multiple conditions in order")
 val cond = ConditionalReturns.new()
 cond.add_condition(
     _1.len() > 0 and _1[0] == "GET",
@@ -100,19 +76,18 @@ expect cond.evaluate(["DELETE"]) == "other"
 
 #### returns default when no conditions match
 
-- Verify: returns default when no conditions match
+- returns default when no conditions match
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: returns default when no conditions match")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("returns default when no conditions match")
 val cond = ConditionalReturns.new()
 cond.add_condition(
     _1.len() == 0,
@@ -128,19 +103,18 @@ expect cond.evaluate(["something"]) == "fallback"
 
 #### tracks parent-child call relationships
 
-- Verify: tracks parent-child call relationships
+- tracks parent-child call relationships
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: tracks parent-child call relationships")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("tracks parent-child call relationships")
 val tracker = CallChainTracker.new()
 val call1 = CallRecord(args: ["parent"], timestamp: 0, call_number: 0)
 val id1 = tracker.start_chain(-1, call1)
@@ -157,19 +131,18 @@ expect all_chains.len() == 2
 
 #### retrieves chain by parent id
 
-- Verify: retrieves chain by parent id
+- retrieves chain by parent id
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: retrieves chain by parent id")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("retrieves chain by parent id")
 val tracker = CallChainTracker.new()
 val call = CallRecord(args: ["test"], timestamp: 0, call_number: 0)
 val id = tracker.start_chain(5, call)
@@ -180,19 +153,18 @@ expect tracker.get_chain(5).is_some()
 
 #### starts multiple independent chains
 
-- Verify: starts multiple independent chains
+- starts multiple independent chains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: starts multiple independent chains")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("starts multiple independent chains")
 val tracker = CallChainTracker.new()
 val call1 = CallRecord(args: ["a"], timestamp: 0, call_number: 0)
 val call2 = CallRecord(args: ["b"], timestamp: 0, call_number: 1)
@@ -208,19 +180,18 @@ expect tracker.get_all_chains().len() == 2
 
 #### transitions through behavior states
 
-- Verify: transitions through behavior states
+- transitions through behavior states
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: transitions through behavior states")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("transitions through behavior states")
 val behavior = BehaviorSequence.new("init")
 behavior.add_state(name="init", return_value="initializing", next_state=Some("ready"))
 behavior.add_state(name="ready", return_value="operational", next_state=Some("shutdown"))
@@ -235,19 +206,18 @@ expect behavior.current_state == "shutdown"
 
 #### handles terminal states
 
-- Verify: handles terminal states
+- handles terminal states
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: handles terminal states")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("handles terminal states")
 val behavior = BehaviorSequence.new("start")
 behavior.add_state(name="start", return_value="started", next_state=Some("end"))
 behavior.add_state(name="end", return_value="finished", next_state=nil)
@@ -261,19 +231,18 @@ expect behavior.current_state == "end"
 
 #### resets to initial state
 
-- Verify: resets to initial state
+- resets to initial state
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: resets to initial state")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("resets to initial state")
 val behavior = BehaviorSequence.new("a")
 behavior.add_state(name="a", return_value="value_a", next_state=Some("b"))
 behavior.add_state(name="b", return_value="value_b", next_state=nil)
@@ -287,19 +256,18 @@ expect behavior.current_state == "a"
 
 #### manages complex state machines
 
-- Verify: manages complex state machines
+- manages complex state machines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: manages complex state machines")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("manages complex state machines")
 val behavior = BehaviorSequence.new("idle")
 behavior.add_state(name="idle", return_value="waiting", next_state=Some("running"))
 behavior.add_state(name="running", return_value="executing", next_state=Some("paused"))
@@ -315,19 +283,18 @@ expect behavior.transition() == Some("suspended")
 
 #### captures mock state at a point in time
 
-- Verify: captures mock state at a point in time
+- captures mock state at a point in time
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: captures mock state at a point in time")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("captures mock state at a point in time")
 val mockfn = MockFunction.new("service")
 mockfn.record_call(["arg1"])
 mockfn.record_call(["arg2"])
@@ -340,19 +307,18 @@ expect snapshot.last_args[0] == "arg2"
 
 #### tracks expectation satisfaction in snapshot
 
-- Verify: tracks expectation satisfaction in snapshot
+- tracks expectation satisfaction in snapshot
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: tracks expectation satisfaction in snapshot")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("tracks expectation satisfaction in snapshot")
 val mockfn = MockFunction.new("verified")
 mockfn.expect_call(1)
 mockfn.record_call([])
@@ -364,19 +330,18 @@ expect snapshot.expectations_met == true
 
 #### shows when expectations are not met
 
-- Verify: shows when expectations are not met
+- shows when expectations are not met
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: shows when expectations are not met")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("shows when expectations are not met")
 val mockfn = MockFunction.new("unverified")
 mockfn.expect_call(2)
 mockfn.record_call([])
@@ -388,19 +353,18 @@ expect snapshot.expectations_met == false
 
 #### generates snapshot summary
 
-- Verify: generates snapshot summary
+- generates snapshot summary
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: generates snapshot summary")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("generates snapshot summary")
 val mockfn = MockFunction.new("test")
 mockfn.record_call([])
 val snapshot = MockSnapshot.from_mock(mockfn)
@@ -415,19 +379,18 @@ expect summary.contains("Snapshot")
 
 #### groups multiple mocks
 
-- Verify: groups multiple mocks
+- groups multiple mocks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: groups multiple mocks")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("groups multiple mocks")
 val composition = MockComposition.new()
 val m1 = MockFunction.new("fn1")
 val m2 = MockFunction.new("fn2")
@@ -440,19 +403,18 @@ expect composition.mocks.len() == 2
 
 #### verifies all mocks in composition
 
-- Verify: verifies all mocks in composition
+- verifies all mocks in composition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: verifies all mocks in composition")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("verifies all mocks in composition")
 val composition = MockComposition.new()
 val m1 = MockFunction.new("fn1")
 val m2 = MockFunction.new("fn2")
@@ -469,19 +431,18 @@ expect composition.verify_all() == true
 
 #### fails verification if any mock fails
 
-- Verify: fails verification if any mock fails
+- fails verification if any mock fails
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: fails verification if any mock fails")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("fails verification if any mock fails")
 val composition = MockComposition.new()
 val m1 = MockFunction.new("fn1")
 val m2 = MockFunction.new("fn2")
@@ -498,19 +459,18 @@ expect composition.verify_all() == false
 
 #### counts total calls across all mocks
 
-- Verify: counts total calls across all mocks
+- counts total calls across all mocks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: counts total calls across all mocks")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("counts total calls across all mocks")
 val composition = MockComposition.new()
 val m1 = MockFunction.new("fn1")
 val m2 = MockFunction.new("fn2")
@@ -526,19 +486,18 @@ expect composition.get_total_calls() == 3
 
 #### resets all mocks in composition
 
-- Verify: resets all mocks in composition
+- resets all mocks in composition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: resets all mocks in composition")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("resets all mocks in composition")
 val composition = MockComposition.new()
 val m1 = MockFunction.new("fn1")
 val m2 = MockFunction.new("fn2")
@@ -555,19 +514,18 @@ expect composition.get_total_calls() == 0
 
 #### generates composition summary
 
-- Verify: generates composition summary
+- generates composition summary
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: generates composition summary")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("generates composition summary")
 val composition = MockComposition.new()
 val m1 = MockFunction.new("api")
 val m2 = MockFunction.new("db")
@@ -587,19 +545,18 @@ expect summary.contains("2")
 
 #### combines conditional returns with snapshots
 
-- Verify: combines conditional returns with snapshots
+- combines conditional returns with snapshots
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: combines conditional returns with snapshots")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("combines conditional returns with snapshots")
 val cond = ConditionalReturns.new()
 cond.add_condition(
     _1.len() > 0 and _1[0] == "cache",
@@ -614,19 +571,18 @@ expect cond.evaluate(["fetch"]) == "fresh_value"
 
 #### uses state machine with mock composition
 
-- Verify: uses state machine with mock composition
+- uses state machine with mock composition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: uses state machine with mock composition")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("uses state machine with mock composition")
 val composition = MockComposition.new()
 val behavior = BehaviorSequence.new("init")
 behavior.add_state(name="init", return_value="starting", next_state=Some("running"))
@@ -645,19 +601,18 @@ expect behavior.transition() == Some("starting")
 
 #### chains calls and tracks with snapshots
 
-- Verify: chains calls and tracks with snapshots
+- chains calls and tracks with snapshots
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: chains calls and tracks with snapshots")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("chains calls and tracks with snapshots")
 val tracker = CallChainTracker.new()
 val mockfn = MockFunction.new("main")
 val call1 = CallRecord(args: ["init"], timestamp: 0, call_number: 0)
@@ -675,19 +630,18 @@ expect snapshot.call_count == 2
 
 #### manages complex multi-mock workflow
 
-- Verify: manages complex multi-mock workflow
+- manages complex multi-mock workflow
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-STD_MOCK_PHASE4-001
-step("Verify: manages complex multi-mock workflow")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("manages complex multi-mock workflow")
 val api_mock = MockFunction.new("api")
 val db_mock = MockFunction.new("db")
 val cache_mock = MockFunction.new("cache")
@@ -705,6 +659,21 @@ expect summary.contains("3")
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/std/mock_phase4_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Mock Library - Phase 4 (Advanced Patterns).
+- Mock Library - Phase 4 (Advanced Patterns)
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -718,36 +687,50 @@ expect summary.contains("3")
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `143ba209ec5268f10c0d4f6ca03bcdcc6f838e5e5fe52e58363c2e1e67bcf960`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `387c65f8e5f10d8d7f185b1793af77009676a39c2049baf446f290133483c420`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `143ba209ec5268f10c0d4f6ca03bcdcc6f838e5e5fe52e58363c2e1e67bcf960`.
+Source SHA-256: `387c65f8e5f10d8d7f185b1793af77009676a39c2049baf446f290133483c420`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `143ba209ec5268f10c0d4f6ca03bcdcc6f838e5e5fe52e58363c2e1e67bcf960`  
+Source SHA-256: `387c65f8e5f10d8d7f185b1793af77009676a39c2049baf446f290133483c420`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/01_unit/std/mock_phase4_spec.spl
 mirror: doc/06_spec/01_unit/std/mock_phase4_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/std/mock_phase4_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/std/mock_phase4_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/std/mock_phase4_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/std/mock_phase4_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/mock_phase4_spec.spl:347:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns value based on argument condition' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/mock_phase4_spec.spl:359:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'checks multiple conditions in order' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/mock_phase4_spec.spl:376:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns default when no conditions match' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

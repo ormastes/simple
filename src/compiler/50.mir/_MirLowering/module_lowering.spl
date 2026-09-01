@@ -27,19 +27,20 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{FunctionAttr}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
+use compiler.types.type_layout.{LayoutAttr}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
 use std.array.{array_sort_by}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.mir.mir_types.{MirConstant, MirFieldDef, MirStatic, MirTypeDefKind}
+use std.io_runtime.{env_get_opt}
 
-extern fn rt_env_get(key: text) -> text?
-
-# `rt_env_get` yields nil for an UNSET variable, so both the extern and this
-# wrapper are OPTIONAL — every call site below already uses the optional-safe
-# `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
-# Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
+# The canonical runtime contract yields nil for both unset and explicitly empty
+# values. Every call below treats that state as disabled.
+@always_inline
 fn mir_lower_env_get(key: text) -> text?:
-    rt_env_get(key)
+    env_get_opt(key)
 
 fn _text_list_eq(a: [text], b: [text]) -> bool:
     """Order-sensitive equality for two variant-name lists.
@@ -106,8 +107,6 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
-use compiler.mir.mir_types.{MirType}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
 fn string_literal_has_runtime_interpolations(interps: [HirInterpolation]?) -> bool:
     if val parts = interps:
@@ -257,6 +256,7 @@ impl MirLowering:
             local_map: {},
             local_symbol_ids: [],
             local_symbol_values: [],
+            local_symbol_index_slots: [],
             local_hir_type_ids: [],
             local_hir_type_values: [],
             local_hir_type_isolation_states: [],
@@ -265,7 +265,12 @@ impl MirLowering:
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
+            unsafe_depth: 0,
             errors: empty_errors,
+            current_module_id: "",
+            composite_layout_digests: {},
+            composite_layout_owner_counts: {},
+            external_layout_traces: [],
             field_map: {},
             bitfield_map: {},
             bitfield_value_syms: {},
@@ -322,9 +327,17 @@ impl MirLowering:
             global_const_exprs: {},
             array_global_mutation_warned: {},
             target_context: target_context,
+            allow_ambient_bootstrap_policy: true,
             resource_owned_locals: [],
             consumed_resource_locals: {}
         )
+
+    me use_explicit_semantic_policy():
+        self.allow_ambient_bootstrap_policy = false
+
+    me ambient_bootstrap_enabled() -> bool:
+        self.allow_ambient_bootstrap_policy and
+            (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
 
     fn symbol_id_value(symbol: SymbolId) -> i64:
         symbol.id
@@ -344,6 +357,97 @@ impl MirLowering:
         if defining_module != "":
             return "{defining_module}::{symbol.name}"
         symbol.name
+
+    fn canonical_layout_digest(fields: [HirField], layout_attr: LayoutAttr) -> text:
+        val layout = compute_struct_layout(fields, layout_attr)
+        var rows: [text] = ["size={layout.size};align={layout.align};stride={layout.stride}"]
+        for field in layout.fields:
+            rows.push("field={field.name};offset={field.offset};size={field.size};align={field.align};bits={field.has_bits};width={field.bits_width};bit_offset={field.bit_offset}")
+        sha256_text(rows.join("\n"))
+
+    me register_composite_layout_identity(symbol: HirSymbol, fields: [HirField], layout_attr: LayoutAttr):
+        val owner = mir_layout_canonical_module_name(symbol.defining_module ?? "")
+        if owner == "":
+            return
+        # Trace identity is deliberately independent of the legacy composite
+        # metadata key, whose raw path spelling can differ at import sites.
+        val key = "{owner}::{symbol.name}"
+        val digest = self.canonical_layout_digest(fields, layout_attr)
+        if self.composite_layout_digests.has(key):
+            if self.composite_layout_digests[key] != digest:
+                self.composite_layout_owner_counts[key] = 2
+            return
+        self.composite_layout_digests[key] = digest
+        self.composite_layout_owner_counts[key] = 1
+
+    me record_external_layout_reference(symbol: SymbolId):
+        val symbol_info = self.symbols.get_symbol_raw(symbol.id)
+        if not symbol_info.?:
+            return
+        val info = symbol_info.unwrap()
+        var owner = mir_layout_canonical_module_name(info.defining_module ?? "")
+        var key = "{owner}::{info.name}"
+        var owner_count = 0
+        # Imported type symbols can retain the consumer filename in older HIR
+        # transports. Resolve that lossy spelling only against layouts actually
+        # prescanned in this lowering session, and retain ambiguity explicitly.
+        if owner == "" or owner == self.current_module_id or
+           not self.composite_layout_digests.has(key):
+            val suffix = "::{info.name}"
+            for candidate in self.composite_layout_digests.keys():
+                if candidate.ends_with(suffix) and
+                   not candidate.starts_with(self.current_module_id + "::"):
+                    owner_count = owner_count + 1
+                    if owner_count == 1:
+                        key = candidate
+                        owner = candidate[0:candidate.len() - suffix.len()]
+        if owner_count == 0 and self.composite_layout_digests.has(key):
+            owner_count = self.composite_layout_owner_counts[key]
+        if owner == "" or owner == self.current_module_id or owner_count == 0:
+            return
+        for trace in self.external_layout_traces:
+            if trace.owner_module_id == owner and trace.type_id == info.name:
+                return
+        self.external_layout_traces.push(MirExternalLayoutTraceV1(
+            consumer_module_id: self.current_module_id,
+            owner_module_id: owner, type_id: info.name,
+            layout_digest: self.composite_layout_digests[key],
+            owner_count: owner_count))
+
+    me attach_external_layout_traces():
+        var builder = self.builder
+        var module = builder.module
+        module.external_layout_traces = self.external_layout_traces
+        builder.module = module
+        self.builder = builder
+
+    # Bare struct name for a `MirTypeKind.Struct(symbol)`.
+    #
+    # `canonical_mir_type_symbol` above MINTS ids from 1000000000 up that exist
+    # only in `canonical_type_symbols` -- `symbols.get_symbol_raw` knows nothing
+    # about them. So a consumer that only asked the symbol table got nil for
+    # every canonicalized struct type and silently fell back to "unknown type".
+    # That is what left `for f in d.values()` with no element struct name and
+    # collapsed every field read to offset 0 (see the bug comment in
+    # _MirLoweringExpr/method_calls_literals.spl's values/keys arm). Try the
+    # real symbol table first, then reverse the canonical map, returning the
+    # bare name (the segment after the last '.') because that is the form
+    # `struct_value_syms` / `resolve_field_index` are keyed on.
+    me mir_struct_symbol_name(symbol: SymbolId) -> text:
+        match self.symbols.get_symbol_raw(symbol.id):
+            case Some(info):
+                if info != nil and info.name != "": return info.name
+            case None: ()
+        val canonical_keys = self.canonical_type_symbols.keys()
+        var cki = 0
+        while cki < canonical_keys.len():
+            val canonical_key = canonical_keys[cki]
+            if self.canonical_type_symbols[canonical_key] == symbol.id:
+                val canonical_parts = canonical_key.split(".")
+                if canonical_parts.len() == 0: return canonical_key
+                return canonical_parts[canonical_parts.len() - 1]
+            cki = cki + 1
+        ""
 
     me canonical_mir_type_symbol(symbol: SymbolId) -> SymbolId:
         val symbol_info = self.symbols.get_symbol_raw(symbol.id)
@@ -930,6 +1034,8 @@ impl MirLowering:
                 val struct_key = self.composite_layout_key(struct_symbol)
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, false)
+                val struct_attr = if struct_def.has_layout_attr: struct_def.layout_attr else: layoutattr_default_()
+                self.register_composite_layout_identity(struct_symbol, struct_def.fields, struct_attr)
             psi = psi + 1
         val prescan_class_values = module.classes.values()
         psi = 0
@@ -941,6 +1047,8 @@ impl MirLowering:
                 val class_key = self.composite_layout_key(class_symbol)
                 if class_key != class_def.name:
                     self.register_composite_field_metadata(class_key, class_def.fields, module.symbols, false)
+                val class_attr = if class_def.has_layout_attr: class_def.layout_attr else: layoutattr_default_()
+                self.register_composite_layout_identity(class_symbol, class_def.fields, class_attr)
             psi = psi + 1
         # Same ordering gap for CALL RETURN TYPES: the entry module lowers
         # before its dependency modules, so a cross-module call's declared
@@ -1045,6 +1153,9 @@ impl MirLowering:
 
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
+        self.unsafe_depth = 0
+        self.current_module_id = mir_layout_canonical_module_name(module.name)
+        self.external_layout_traces = []
         self.symbols = module.symbols
         var function_names: [text] = []
         for raw_func in module.functions.values():
@@ -1084,7 +1195,7 @@ impl MirLowering:
         self.struct_method_return_is_array = {}
         self.struct_method_return_is_optional = {}
         self.global_symbol_ids = {}
-        val bootstrap_mode = (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_mode = self.ambient_bootstrap_enabled()
         val trace_enabled = mir_lower_trace_enabled()
         val bootstrap_trace = bootstrap_mode and trace_enabled
         if bootstrap_trace:
@@ -1180,17 +1291,7 @@ impl MirLowering:
                     case HirTypeKind.Str:
                         bootstrap_fn_ret_type_register(fn_.name, self.lower_type(fn_.return_type))
                     case _: ()
-                # #158 Phase C: a generic TEMPLATE is non-emittable (hardening
-                # plan 9.3 step 12). It carries unsubstituted TypeParams, so
-                # lowering it produces opaque pointer-width slots and silent
-                # wrong answers. 40.mono emits the specializations that ARE
-                # reachable; anything still flagged here has zero live
-                # instantiations and must simply not be emitted. A generic
-                # call that mono could NOT rewrite is still a hard error
-                # (E-MONO-030), so this skip cannot hide a real use.
-                if fn_.is_generic_template:
-                    ()
-                elif not self.hir_function_is_extern(fn_):
+                if not self.hir_function_is_extern(fn_):
                     if bootstrap_trace:
                         print "[mir-lower] function:start {fn_.name}"
                     var mir_fn = self.lower_function(fn_)
@@ -1214,6 +1315,7 @@ impl MirLowering:
             # accumulators after constants/statics have already lowered. Re-add
             # the now-complete module so its statics and module index are
             # available to the flat bootstrap LLVM emitter.
+            self.attach_external_layout_traces()
             bootstrap_mir_modules_add(self.builder.module)
             return self.builder.module
 
@@ -1475,11 +1577,7 @@ impl MirLowering:
         var fni = 0
         while fni < fn_values.len():
             val fn_: HirFunction = fn_values[fni]
-            if fn_.is_generic_template:
-                fni = fni + 1
-                # #158 Phase C: generic templates are non-emittable (see the
-                # function-symbol loop above for the full rationale).
-            elif self.hir_function_is_extern(fn_):
+            if self.hir_function_is_extern(fn_):
                 fni = fni + 1
                 # skip extern functions
             else:
@@ -1508,6 +1606,7 @@ impl MirLowering:
 
         if bootstrap_trace:
             print "[mir-lower] lower_module:done"
+        self.attach_external_layout_traces()
         self.builder.module
 
     # mutglobal lane (module-level `var` mutation, see

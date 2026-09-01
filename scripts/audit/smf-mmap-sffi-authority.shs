@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/99.loader/loader/smf_mmap_native.spl"
+loader="$root/src/compiler/99.loader/loader/module_loader.spl"
+
+symbols='rt_file_size rt_ptr_write_u8 rt_ptr_write_i32 rt_ptr_write_i64 rt_ptr_read_u8 rt_array_data_ptr rt_ptr_write_bytes_raw rt_mmap_raw rt_munmap_raw rt_mprotect rt_madvise_raw rt_msync_flags rt_mlock rt_munlock rt_open_fd rt_close_fd'
+
+for raw in $symbols; do
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -o "${raw}(" "$module" | wc -l)" -eq 2 ]
+done
+
+# Twelve frequently used raw operations have mandatory-inline lexical owners;
+# four one-site operations already execute in explicit lexical unsafe blocks.
+[ "$(grep -c '^@always_inline$' "$module")" -eq 12 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi' "$module")" -eq 16 ]
+[ "$(grep -c '^@unsafe(' "$module")" -eq 37 ]
+
+# The unused page-size declaration must not acquire authority.
+! grep -q '^extern fn rt_page_size' "$module"
+
+# Pointer-bearing public helpers stay explicitly unsafe: a zero check cannot
+# prove mapped extent, lifetime, relocation bounds, or function signature.
+for owner in native_munmap native_mmap_read_bytes native_mmap_read_string native_madvise native_msync native_mlock native_munlock native_free_exec_memory native_write_exec_memory native_make_executable native_make_rw native_get_function_pointer native_call_function_0 native_call_function_1 native_call_function_2 native_call_function_3 ptr_read_u8 ptr_write_u8 slice_from_raw_parts native_reloc_write_i32 native_reloc_write_i64; do
+    grep -B1 -q "^fn ${owner}(" "$module"
+done
+
+# Invalid function addresses are typed errors, never fabricated integer zero.
+for arity in 0 1 2 3; do
+    grep -q "^fn native_call_function_${arity}(.*) -> Result<i64, text>:" "$module"
+done
+[ "$(grep -c 'return Err("cannot call a null or invalid native function address")' "$module")" -eq 4 ]
+! grep -A4 '^fn native_call_function_[0-3]' "$module" | grep -q 'return 0'
+[ "$(grep -c 'native_call_function_0(symbol.address)' "$loader")" -eq 2 ]
+[ "$(grep -c 'unsafe(capabilities: \[raw_ptr\]):' "$loader")" -ge 2 ]
+! grep -q 'Ok(native_call_function_0(symbol.address))' "$loader"
+
+echo "SMF mmap SFFI authority audit: PASS (16 raw ABIs confined; 12 mandatory-inline owners; 21 pointer-bearing APIs remain unsafe; invalid calls return typed errors)"

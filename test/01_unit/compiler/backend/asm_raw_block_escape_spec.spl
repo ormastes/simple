@@ -1,0 +1,92 @@
+"""Raw `asm { }` block text contract (design A.3, plan 1.0).
+
+A raw block is opaque assembler text: every `$` reaches LLVM's inline-asm
+template engine as `$$`, so an AT&T immediate pasted verbatim from a `.S`
+file no longer aborts llc with `Bad $ operand number`. Directives that the
+item attributes express (`.section`, `.global`, `.type`, `.size`, `.align`)
+are rejected with E-ASM-DIRECTIVE. The objdump half (`48 83 e4 f0` for
+`and $~0xF, %rsp`) runs in `scripts/check/check-naked-no-prologue.shs`.
+"""
+# @req REQ-HAL-ASM-RAW-ESCAPE
+# research: doc/01_research/os/hal/hal_asm_embedding_dual_run_survey_2026-08-28.md ; plan: doc/03_plan/os/hal/asm_to_simple_migration_plan.md ; design: doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md
+
+use std.spec
+use std.spec.step
+use compiler.common.attributes.{raw_asm_rejected_directive, vhdl_hardware_metadata_default}
+use compiler.backend.backend.mir_to_llvm.{llvm_raw_asm_escape_template, llvm_inline_asm_rewrite_template}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.frontend.parser_types_expr.{AsmConstraintKind, AsmLocation}
+
+fn asm_module(template: text, inputs: [MirAsmOperand]) -> MirModule:
+    val i64_type = MirType.i64()
+    val function = MirFunction(
+        symbol: SymbolId(id: 11), name: "raw_block_owner",
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: [MirLocal(id: LocalId(id: 0), name: Some("v"), type_: i64_type, kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), MirType.i64()), span: nil),
+                MirInst(kind: MirInstKind.InlineAsm(template, true, inputs, [], [], [], []), span: nil)
+            ],
+            terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 0))))
+        )],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    MirModule(name: "hal.rawasm.backend", functions: functions, statics: {}, constants: {}, types: {})
+
+fn ir_for(template: text, inputs: [MirAsmOperand]) -> text:
+    MirToLlvm.create("hal.rawasm.backend", CodegenTarget.X86_64, nil).translate_module(asm_module(template, inputs))
+
+describe "raw asm block `$` escaping (design A.3.1)":
+    it "doubles every `$` so AT&T immediates survive the LLVM template engine":
+        step("doubles every `$` so AT&T immediates survive the LLVM template engine")
+        expect(llvm_raw_asm_escape_template("and $~0xF, %rsp")).to_equal("and $$~0xF, %rsp")
+        expect(llvm_raw_asm_escape_template("mov $1, %eax\nmov $2, %ebx")).to_equal("mov $$1, %eax\nmov $$2, %ebx")
+
+    it "returns text without `$` untouched":
+        step("returns text without `$` untouched")
+        val body = "xor %rbp, %rbp\nmov (%rsp), %rdi\nud2"
+        expect(llvm_raw_asm_escape_template(body)).to_equal(body)
+
+    it "escapes the raw-block template in emitted LLVM IR":
+        step("escapes the raw-block template in emitted LLVM IR")
+        val ir = ir_for("and $~0xF, %rsp", [])
+        expect(ir).to_contain("call void asm sideeffect \"and $$~0xF, %rsp\"")
+        expect(ir).to_not_contain("\"and $~0xF, %rsp\"")
+
+    it "leaves operand-bound templates on the operand-substitution path":
+        step("leaves operand-bound templates on the operand-substitution path")
+        val input = MirAsmOperand(name: "v", kind: AsmConstraintKind.In, location: AsmLocation.Reg,
+            operand: mir_operand_copy(LocalId(id: 0)), constraint_index: 0)
+        val rewritten = llvm_inline_asm_rewrite_template("mov {{v}}, %eax", [], [input])
+        expect(rewritten).to_equal("mov $0, %eax")
+
+describe "raw asm block directive rejection (design A.3.4, E-ASM-DIRECTIVE)":
+    it "names the first rejected directive":
+        step("names the first rejected directive")
+        expect(raw_asm_rejected_directive(".section .text.boot\nud2")).to_equal(".section")
+        expect(raw_asm_rejected_directive("ud2\n  .global _start")).to_equal(".global")
+        expect(raw_asm_rejected_directive(".globl _start")).to_equal(".globl")
+        expect(raw_asm_rejected_directive(".type _start, @function")).to_equal(".type")
+        expect(raw_asm_rejected_directive(".size _start, . - _start")).to_equal(".size")
+        expect(raw_asm_rejected_directive(".align 16")).to_equal(".align")
+        expect(raw_asm_rejected_directive(".p2align 4")).to_equal(".p2align")
+
+    it "allows the code-model, option, arch and cfi directives":
+        step("allows the code-model, option, arch and cfi directives")
+        expect(raw_asm_rejected_directive(".code64\nud2")).to_equal("")
+        expect(raw_asm_rejected_directive(".option push\n.option norvc\n.option pop")).to_equal("")
+        expect(raw_asm_rejected_directive(".arch armv8-a")).to_equal("")
+        expect(raw_asm_rejected_directive(".cfi_startproc\nret\n.cfi_endproc")).to_equal("")
+        expect(raw_asm_rejected_directive("xor %rbp, %rbp\nand $~0xF, %rsp")).to_equal("")

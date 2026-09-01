@@ -1,8 +1,5 @@
 # Kill Monitor Generic RSS Gap - 2026-06-27
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
-
 ## Status
 
 Fixed in `scripts/resource/kill_simple_monitor.shs`.

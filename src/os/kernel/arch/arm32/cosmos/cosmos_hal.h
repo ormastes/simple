@@ -219,5 +219,7 @@ int cosmos_mmu_cache_selftest(void);
 
 int cosmos_fsbl_validate_handoff(void);
 int cosmos_fsbl_selftest(void);
+unsigned int cosmos_fsbl_mmio_read32(unsigned int address);
+int cosmos_fsbl_platform_is_qemu(void);
 
 #endif

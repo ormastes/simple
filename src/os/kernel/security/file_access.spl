@@ -1,0 +1,71 @@
+# Filesystem object-authority policy derived from an immutable kernel caller
+# context.  Path resolution happens in the syscall/VFS layer; this module
+# accepts only that canonical absolute path and never grants authority.
+
+use os.kernel.security.execution_context.{KernelCallContext, kernel_call_context_task_id, kernel_call_context_capabilities, kernel_call_context_is_kernel_origin}
+use os.kernel.types.capability_types.{CapabilityKind, capability_kind_allows}
+use os.kernel.fd_table.{O_WRONLY, O_RDWR, O_CREAT, O_TRUNC}
+
+pub fn file_access_allows(
+    context: KernelCallContext,
+    required: CapabilityKind
+) -> bool:
+    """Return whether `context` can use one exact already-resolved object.
+
+    Task 0 remains the explicit kernel-origin bootstrap exception. Every
+    userspace token must be owned by the current task as well as authorizing
+    the exact request. This prevents a copied/stale pouch from becoming a
+    transferable ambient grant; it also makes non-kernel `full()` deny because
+    that compatibility value deliberately has no concrete tokens.
+    """
+    if kernel_call_context_is_kernel_origin(context):
+        return true
+    val owner = kernel_call_context_task_id(context).id
+    val caps = kernel_call_context_capabilities(context)
+    for token in caps.caps:
+        if token.owner == owner and capability_kind_allows(token.kind, required):
+            return true
+    false
+
+pub fn file_read_access_allows(context: KernelCallContext, path: text) -> bool:
+    file_access_allows(context, CapabilityKind.FileRead(path_prefix: path))
+
+pub fn file_write_access_allows(context: KernelCallContext, path: text) -> bool:
+    file_access_allows(context, CapabilityKind.FileWrite(path_prefix: path))
+
+pub fn file_create_access_allows(context: KernelCallContext, path: text) -> bool:
+    file_access_allows(context, CapabilityKind.FileCreate(path_prefix: path))
+
+pub fn file_open_access_allows(
+    context: KernelCallContext,
+    path: text,
+    flags: u32
+) -> bool:
+    """Authorize an open according to both requested access and side effects.
+
+    O_CREAT requires an independent FileCreate grant even when the target
+    exists: allowing the flag under read authority would make an existence
+    race change the operation's authority.  Write-only/read-write/truncate
+    opens require FileWrite; a read-only open requires FileRead.
+    """
+    val access_mode = flags & 3u32
+    if access_mode == O_WRONLY or access_mode == O_RDWR or (flags & O_TRUNC) != 0u32:
+        if not file_write_access_allows(context, path):
+            return false
+    else:
+        if not file_read_access_allows(context, path):
+            return false
+    if (flags & O_CREAT) != 0u32:
+        return file_create_access_allows(context, path)
+    true
+
+pub fn file_legacy_descriptor_route_allows(context: KernelCallContext) -> bool:
+    """Whether a task may use the old numeric VFS-descriptor backend.
+
+    That backend records neither the opening isolation domain nor a concrete
+    path/handle capability, so allowing it for a managed view would bypass the
+    caller-aware FAT32 path and descriptor gates. Legacy/unbound compatibility
+    tasks retain it temporarily; managed tasks fail closed until the backend
+    carries the same metadata.
+    """
+    kernel_call_context_is_kernel_origin(context) or not context.filesystem_view_bound

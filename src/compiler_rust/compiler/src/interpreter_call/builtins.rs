@@ -5,9 +5,9 @@ use std::sync::Arc;
 use super::core::{eval_arg, eval_arg_int};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    check_effect_violations, create_range_object, create_range_object_step, evaluate_expr, exec_block_fn, message_to_value,
-    spawn_actor_with_expr, spawn_future_with_callable_and_env, spawn_future_with_expr, ACTOR_INBOX, ACTOR_OUTBOX,
-    GENERATOR_YIELDS,
+    check_effect_violations, create_range_object, create_range_object_step, evaluate_expr, exec_block_fn,
+    message_to_value, spawn_actor_with_expr, spawn_future_with_callable_and_env, spawn_future_with_expr, ACTOR_INBOX,
+    ACTOR_OUTBOX, GENERATOR_YIELDS,
 };
 use crate::value::*;
 use simple_common::actor::Message;
@@ -121,34 +121,30 @@ pub(super) fn eval_builtin(
                 )?;
                 (start, end)
             };
-            // The third argument is a STEP when it is numeric: range(0, 10, 2).
-            // It was previously read only as an "inclusive" truthy flag, which
-            // silently turned range(0, 10, 2) into 0..=10 and range(5, 0, -1)
-            // into an empty range. A Bool third argument keeps the old
-            // inclusive-flag meaning so existing callers are unaffected.
-            let third = eval_arg(
-                args,
-                2,
-                Value::Bool(false),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-            let (inclusive, step) = match &third {
-                Value::Bool(b) => (*b, 1),
-                other => match other.as_int() {
-                    Ok(n) => (false, n),
-                    Err(_) => (other.truthy(), 1),
-                },
-            };
-            let bound = if inclusive {
-                RangeBound::Inclusive
+            // Third argument is the STEP, matching `range(start, end, step)` as
+            // documented in doc/08_tracking/bug/range_builtin_missing_step_argument_2026-07-20.md.
+            // It used to be read as an inclusive-bound flag, which silently
+            // turned `range(0, 10, 2)` into `0..10` and `range(5, 0, -1)` into
+            // an empty range.
+            let step = if args.len() >= 3 {
+                eval_arg_int(
+                    args,
+                    2,
+                    1,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    "builtin function",
+                )?
             } else {
-                RangeBound::Exclusive
+                1
             };
-            Ok(Some(create_range_object_step(start, end, bound, step)))
+            if step == 0 {
+                return Err(CompileError::runtime("range() step argument must not be zero"));
+            }
+            Ok(Some(create_range_object_step(start, end, RangeBound::Exclusive, step)))
         }
         "Some" => {
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;

@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/os/kernel/net/rt_net_socket_facade.spl"
+pattern='(rt_net_init|rt_net_tx_test|rt_net_rx_ready|rt_net_stats|serial_println|rt_boot_tcp_[A-Za-z0-9_]+|rt_bytes_u8_at|rt_thread_sleep)[(]'
+
+declarations=$(grep -c '^extern fn ' "$owner")
+if [ "$declarations" -ne 19 ]; then
+    echo "OS socket foreign declaration inventory changed without review" >&2
+    exit 1
+fi
+if [ "$(grep -c '^@unsafe(reason: "raw boot/runtime network support ABI", capabilities: \[ffi\])$' "$owner")" -ne 19 ]; then
+    echo "OS socket foreign declarations lack explicit FFI authority" >&2
+    exit 1
+fi
+
+calls=$(awk -v pattern="$pattern" '
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / {
+        line = $0
+        while (match(line, pattern)) {
+            calls += 1
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    END { print calls + 0 }
+' "$owner")
+if [ "$calls" -ne 50 ]; then
+    echo "OS socket raw-call inventory changed without review" >&2
+    exit 1
+fi
+if [ "$(grep -c 'unsafe(capabilities: \[ffi\]):$' "$owner")" -ne 50 ]; then
+    echo "OS socket lexical FFI authority inventory changed without review" >&2
+    exit 1
+fi
+
+awk -v pattern="$pattern" '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    NF && unsafe_indent >= 0 &&
+    $0 !~ /unsafe\(capabilities: \[ffi\]\):$/ && indent($0) <= unsafe_indent {
+        unsafe_indent = -1
+    }
+    /unsafe\(capabilities: \[ffi\]\):$/ {
+        unsafe_indent = indent($0)
+        next
+    }
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / && $0 ~ pattern {
+        if (unsafe_indent < 0 || indent($0) <= unsafe_indent) {
+            print "raw OS socket call lacks lexical FFI authority: " NR ":" $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    BEGIN { unsafe_indent = -1 }
+    END { if (failed) exit 1 }
+' "$owner"
+
+if [ "$(grep -c 'if port_num < 0 or port_num > 65535:' "$owner")" -ne 2 ]; then
+    echo "OS socket port conversion is not bounded without rejecting ephemeral port zero" >&2
+    exit 1
+fi
+grep -q 'if os_fd < 0 or want > RT_NET_READ_EXACT_MAX:' "$owner"
+grep -q 'if chunk.len() > want - out.len():' "$owner"
+grep -q 'if max_len <= 0 or max_len > RT_NET_SOCKET_READ_MAX:' "$owner"
+grep -q 'packet_len > RT_NET_SSH_ENCRYPTED_BODY_MAX' "$owner"
+grep -q 'length_u64 > _rt_net_last_plain_payload.len() - start_u64' "$owner"
+
+if grep -E '^[[:space:]]*(sha256|verify_signature|dlsym|registry_lookup|mutex_lock|ffi_call)\(' "$owner" >/dev/null; then
+    echo "OS socket hot path gained per-call admission or generic dispatch" >&2
+    exit 1
+fi
+
+echo "OS socket SFFI authority audit: PASS (19 declarations; 50 calls in minimal lexical scopes; bounded ports, frames, reads, and slices; direct dispatch preserved)"

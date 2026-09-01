@@ -1,0 +1,95 @@
+# @req REQ-001 REQ-002 REQ-004 REQ-007
+use std.spec.{describe, it, expect}
+use compiler.driver.cache.action_key.{ActionDep, ResolutionProbe}
+use compiler.driver.cache.native_module_witness.{
+    NativeModuleResolutionFactV1, NativeModuleLayoutFactV1, NativeModuleConfigFactV1,
+    native_module_cache_witness_v1
+}
+
+fn witness_config() -> NativeModuleConfigFactV1:
+    NativeModuleConfigFactV1(compiler_identity: "compiler-a",
+        target_identity: "x86_64-linux", options_identity: "opt=2",
+        provider_identity: "llvm-a")
+
+fn witness_resolution(import_id: text) -> NativeModuleResolutionFactV1:
+    NativeModuleResolutionFactV1(
+        import_id: import_id,
+        probes: [
+            ResolutionProbe(path: "/first/{import_id}.spl", found: false),
+            ResolutionProbe(path: "/selected/{import_id}.spl", found: true),
+        ],
+        selected: "/selected/{import_id}.spl", selected_count: 1,
+        dir_generation: "generation-1", resolver_version: "resolver-v1")
+
+fn witness_layout(owner: text, type_id: text) -> NativeModuleLayoutFactV1:
+    NativeModuleLayoutFactV1(
+        owner_module_id: owner, type_id: type_id,
+        layout_digest: "layout-{owner}-{type_id}", owner_count: 1)
+
+describe "NativeModuleCacheWitnessV1":
+    it "canonicalizes dependency resolution and layout sets deterministically":
+        val first = native_module_cache_witness_v1("app.main", "mir-1", [
+            ActionDep(module_id: "dep.a", iface_digest: "iface-a"),
+            ActionDep(module_id: "dep.b", iface_digest: "iface-b"),
+        ], [witness_resolution("a"), witness_resolution("b")], [
+            witness_layout("dep.a", "A"), witness_layout("dep.b", "B")], witness_config())
+        val reordered = native_module_cache_witness_v1("app.main", "mir-1", [
+            ActionDep(module_id: "dep.b", iface_digest: "iface-b"),
+            ActionDep(module_id: "dep.a", iface_digest: "iface-a"),
+        ], [witness_resolution("b"), witness_resolution("a")], [
+            witness_layout("dep.b", "B"), witness_layout("dep.a", "A")], witness_config())
+        expect(first.valid).to_equal(true)
+        expect(first.digest()).to_equal(reordered.digest())
+
+    it "retains ordered resolver probes in the digest":
+        val normal = witness_resolution("a")
+        var reversed = witness_resolution("a")
+        reversed.probes = [
+            ResolutionProbe(path: "/selected/a.spl", found: true),
+            ResolutionProbe(path: "/first/a.spl", found: false),
+        ]
+        val first = native_module_cache_witness_v1(
+            "app.main", "mir-1", [], [normal], [], witness_config())
+        val second = native_module_cache_witness_v1(
+            "app.main", "mir-1", [], [reversed], [], witness_config())
+        expect(first.digest() == second.digest()).to_equal(false)
+
+    it "fails closed for missing facts":
+        val missing = native_module_cache_witness_v1("", "", [
+            ActionDep(module_id: "", iface_digest: "")], [], [], witness_config())
+        expect(missing.valid).to_equal(false)
+        expect(missing.digest()).to_equal("")
+
+    it "fails closed for ambiguous dependency or resolution facts":
+        val duplicate_dep = native_module_cache_witness_v1("app.main", "mir", [
+            ActionDep(module_id: "dep", iface_digest: "one"),
+            ActionDep(module_id: "dep", iface_digest: "two"),
+        ], [], [], witness_config())
+        var ambiguous_resolution = witness_resolution("a")
+        ambiguous_resolution.selected_count = 2
+        val duplicate_selection = native_module_cache_witness_v1(
+            "app.main", "mir", [], [ambiguous_resolution], [], witness_config())
+        expect(duplicate_dep.valid).to_equal(false)
+        expect(duplicate_selection.valid).to_equal(false)
+
+    it "fails closed for missing or ambiguous layout ownership":
+        var ambiguous = witness_layout("dep", "Thing")
+        ambiguous.owner_count = 2
+        val duplicate = native_module_cache_witness_v1("app.main", "mir", [], [], [
+            witness_layout("dep", "Thing"), witness_layout("dep", "Thing")], witness_config())
+        val multiple_owners = native_module_cache_witness_v1(
+            "app.main", "mir", [], [], [ambiguous], witness_config())
+        expect(duplicate.valid).to_equal(false)
+        expect(multiple_owners.valid).to_equal(false)
+
+    it "fails closed without configuration and invalidates config changes":
+        # @req REQ-001 REQ-002 REQ-007
+        val missing = native_module_cache_witness_v1("app.main", "mir", [], [], [])
+        val first = native_module_cache_witness_v1(
+            "app.main", "mir", [], [], [], witness_config())
+        val changed = native_module_cache_witness_v1(
+            "app.main", "mir", [], [], [], NativeModuleConfigFactV1(
+                compiler_identity: "compiler-a", target_identity: "aarch64-linux",
+                options_identity: "opt=2", provider_identity: "llvm-a"))
+        expect(missing.reason).to_equal("missing-config-fact")
+        expect(first.digest() == changed.digest()).to_equal(false)

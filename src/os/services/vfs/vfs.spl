@@ -32,6 +32,7 @@ trait Filesystem:
 
     # Metadata
     fn stat(path: text) -> Result<FsNode, text>
+    fn stat_no_follow(path: text) -> Result<FsNode, text>
     fn chmod(path: text, mode: u16) -> Result<bool, text>
 
     # Directory operations
@@ -43,6 +44,7 @@ trait Filesystem:
     fn unlink(path: text) -> Result<bool, text>
     fn rename(old_path: text, new_path: text) -> Result<bool, text>
     fn symlink(target: text, link_path: text) -> Result<bool, text>
+    fn readlink(path: text) -> Result<text, text>
 
 enum SeekWhence:
     Set     # From beginning
@@ -318,6 +320,18 @@ impl VfsManager:
             return entry.fs.stat(relative)
         Err("no filesystem mounted for path: {path}")
 
+    fn stat_no_follow(path: text) -> Result<FsNode, text>:
+        """Get metadata for the directory entry itself, without following its final symlink."""
+        val grant_result = self.enforce_lookup_grants("stat_no_follow", path)
+        if grant_result.is_err():
+            return Err(grant_result.unwrap_err())
+        val mount = self.resolve_mount(path)
+        if mount.?:
+            val entry = mount
+            val relative = self.strip_mount_prefix(path, entry.point.path)
+            return entry.fs.stat_no_follow(relative)
+        Err("no filesystem mounted for path: {path}")
+
     fn readdir(path: text) -> Result<[DirEntry], text>:
         """List directory contents."""
         val grant_result = self.enforce_lookup_grants("readdir", path)
@@ -438,6 +452,18 @@ impl VfsManager:
             return Err("filesystem is read-only")
         val rel_old = self.strip_mount_prefix(old_path, entry.point.path)
         val rel_new = self.strip_mount_prefix(new_path, entry.point.path)
+        # POSIX rename of one resolved name onto itself succeeds without
+        # dispatching a namespace mutation.  Keep this check after both grant
+        # checks and the read-only check: spelling an identity rename must not
+        # bypass caller authority or mount policy.  Besides avoiding needless
+        # backend work, this protects drivers whose replace algorithm removes
+        # the destination before publishing the source.
+        if rel_old == rel_new:
+            # Identity does not make a missing source successful.
+            val existing = entry.fs.stat(rel_old)
+            if existing.is_err():
+                return Err(existing.unwrap_err())
+            return Ok(true)
         entry.fs.rename(rel_old, rel_new)
 
     me symlink(target: text, link_path: text) -> Result<bool, text>:
@@ -456,6 +482,18 @@ impl VfsManager:
             val rel_link = self.strip_mount_prefix(link_path, entry.point.path)
             return entry.fs.symlink(target, rel_link)
         Err("no filesystem mounted for path: {link_path}")
+
+    fn readlink(path: text) -> Result<text, text>:
+        """Read a symbolic link target without resolving the target path."""
+        val grant = self.enforce_lookup_grants("readlink", path)
+        if grant.is_err():
+            return Err(grant.unwrap_err())
+        val mount = self.resolve_mount(path)
+        if mount.?:
+            val entry = mount
+            val relative = self.strip_mount_prefix(path, entry.point.path)
+            return entry.fs.readlink(relative)
+        Err("no filesystem mounted for path: {path}")
 
     fn _was_issued_handle(handle: u64) -> bool:
         """True for a current or stale generation issued by this table."""

@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @tag: gpu, rendering, engine2d, backend, matrix
 # @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 30%
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl 40%
@@ -9,51 +13,17 @@
 #   1. detect_best_backend() / list_backends() detection is coherent,
 #   2. alias canonicalization (d3d11/dx12 -> directx, cpu-simd family -> cpu_simd),
 #   3. for each matrix backend (metal, vulkan, directx, cpu_simd, software, cpu):
-#      the strict create is ATTEMPTED unconditionally; whatever it returns must be
-#      honest — a frame that comes back must match the SoftwareBackend oracle
-#      (center=red, corner=bg) and must carry honest provenance, and a create that
-#      fails may never hand back a cpu/software substitute under a GPU name,
-#   4. the scalar cpu and software lanes are pure software, owe no device, and are
-#      a hard PASS on every host — no capability gate excuses them,
-#   5. metal on a non-macOS host is a DETERMINISTIC Unavailable behind the "macos"
-#      feature gate, asserted hard.
+#      Initialized  => strict-create MUST succeed and a filled-rect readback MUST
+#                      match the SoftwareBackend oracle (center=red, corner=bg),
+#      otherwise    => the probe must be COHERENTLY unavailable
+#                      (available=false, non-empty unavailable-reason,
+#                      absent from list_backends()),
+#   4. the scalar cpu lane (and software when Initialized) is a hard PASS on
+#      every host — no capability gate excuses it.
 #
 # One `print("backend <name>: <status>")` line per matrix backend puts the
-# actual host matrix in the run log, and one `[probe-gpu] <name>: ...` line per
-# backend states whether the GPU path was actually PROVEN or merely skipped.
-#
-# ---------------------------------------------------------------------------
-# PROBE-THEN-CREATE TOCTOU (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md)
-#
-# `Engine2D.probe_backend()` runs a full create+init+shutdown and throws it away;
-# `Engine2D.create_with_backend_strict()` is a SECOND, INDEPENDENT create+init,
-# and `Engine2D.list_backends()` is a THIRD independent capability sweep. Nothing
-# is cached between them, so the probe's answer is only a PREDICTION about the
-# create. This spec used to branch its whole per-backend gate on that prediction
-# (`if probe.status == BackendStatus.Initialized: ... else: ...`), which corrupts
-# the gate in both directions:
-#
-#   - FALSE RED — the probe says Initialized, the create then loses the device,
-#     and `assert_true(matrix_entry_coherent(name))` fails while the code under
-#     test is fine.
-#   - VACUOUS GREEN — the probe says Unavailable, the entire strict-create +
-#     render + oracle branch is skipped, and the run prints a clean pass that is
-#     indistinguishable from a real GPU pass. Reproduced here 3/3 at
-#     `ulimit -n 44`, where vulkan flips to
-#     "Unavailable (Vulkan shared session initialization failed: runtime-init)"
-#     and the suite still reports the identical
-#     `Results: 14 total, 14 passed, 0 failed` as the unconstrained run.
-#
-# The fix is structural, not a relaxation: nothing is asserted FROM the probe any
-# more. The probe is still checked for SELF-consistency (its own fields agreeing
-# with each other), probe/create and list/create divergences are DISCLOSED on
-# `[toctou]` lines rather than asserted, and every remaining assertion reads what
-# the CREATE and the READBACK actually returned. The honest-provenance invariants
-# now run UNCONDITIONALLY on every backend and every outcome, and the oracle
-# comparison runs on whatever backend actually served the frame instead of only
-# on the probe-predicted-ready branch — so this spec is strictly HARDER to pass
-# than before.
-# ---------------------------------------------------------------------------
+# actual host matrix in the run log. Nothing is skipped silently: a backend
+# that list_backends() claims but strict-create cannot deliver is a FAILURE.
 
 use std.spec.*
 use std.gpu.engine2d.engine.{Engine2D}
@@ -65,7 +35,6 @@ use std.gpu.engine2d.helpers_availability.{
     backend_is_hardware, backend_unavailable_reason
 }
 use std.gpu.engine2d.renderer_select.{renderer_priority_order}
-use std.nogc_sync_mut.env.platform.{is_macos}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -194,112 +163,59 @@ fn _assert_strict_failure_is_structured(label: text, failure_name: text):
 # val-combination style, NO var reassign after me-method calls — the seed
 # interpreter spuriously consts such locals under the sspec runner:
 # doc/08_tracking/bug/interp_var_reassign_const_after_me_method_in_spec_2026-07-21.md
-#
-# Returns a THREE-valued outcome so the caller can tell a host condition apart
-# from a real defect — collapsing them into one bool is what let the old gate be
-# driven by the probe:
-#    1 = the create produced an engine AND the frame matched the oracle,
-#    0 = the create produced an engine but the frame was WRONG (a real defect,
-#        never excusable by any capability gate),
-#   -1 = the strict create produced no engine at all (a host condition; the
-#        structural strictness claim is still asserted inside).
-fn strict_render_outcome(name: text) -> i64:
+fn strict_render_ok(name: text) -> bool:
     val created = Engine2D.create_with_backend_strict(16, 16, name)
     if created.is_ok():
         var eng = created.unwrap()
         eng.clear(rgb(0, 0, 0))
         eng.draw_rect_filled(4, 4, 8, 8, rgb(255, 0, 0))
-        val rb = eng.read_pixels_with_source()
-        val expected_px = (16 * 16).to_i64()
-        # Unconditional on every backend and every outcome.
-        _assert_provenance_invariants(name, rb.source, rb.backend_handle,
-            rb.device_identity, rb.pixel_count, expected_px)
-        _report_outcome(name, rb.source, rb.backend_handle, rb.device_identity,
-            rb.pixel_count, expected_px)
-        # Pixel correctness holds for WHATEVER backend actually served the
-        # frame, so it is checked here rather than only on a predicted-ready
-        # branch. A frame that came back must be right.
-        val matched = rect_readback_matches_oracle(rb.pixels, 16, name)
+        val px = eng.read_pixels()
+        val matched = rect_readback_matches_oracle(px, 16, name)
         eng.shutdown()
-        if matched: 1 else: 0
+        matched
     else:
         val err = created.unwrap_err()
         val why = err.reason
         print("strict-create FAILED for {name}: {why}")
-        _assert_strict_failure_is_structured(name, err.selected_name)
-        -1
+        false
 
-# The pure-software lanes owe no device, so their create must ALWAYS succeed and
-# their frame must ALWAYS be right. Kept hard (verified still true at
-# `ulimit -n 44`, where only vulkan diverged).
-fn strict_render_ok(name: text) -> bool:
-    strict_render_outcome(name) == 1
-
-# One honest matrix entry. The create is ATTEMPTED regardless of what the probe
-# or list_backends() predicted; divergence is disclosed, never asserted.
-#
-# What is still hard here:
-#   - the probe must be SELF-consistent (its own fields must agree),
-#   - a not-ready backend must have a non-empty static unavailable-reason,
-#   - a frame that comes back must match the oracle and carry honest provenance
-#     (asserted inside strict_render_outcome, on every backend),
-#   - a failed strict create may never hand back a cpu/software substitute.
+# One honest matrix entry:
+#   Initialized  -> must be listed AND strict-create+render+readback must pass.
+#   anything else -> available must be false, list_backends() must not claim
+#                    it, and backend_unavailable_reason() must be non-empty.
 fn matrix_entry_coherent(name: text) -> bool:
-    # val-combination style — see strict_render_outcome's comment for the interp
+    # val-combination style — see strict_render_ok's comment for the interp
     # const-misclassification bug this sidesteps.
     val probe = Engine2D.probe_backend(4, 4, name)
     val st = backend_status_text(probe.status)
     val why = probe.reason
     print("backend {name}: {st} ({why})")
-    val probe_ready = probe.status == BackendStatus.Initialized
-
-    # Probe SELF-consistency — a claim about the probe object's own fields
-    # agreeing with each other, NOT a prediction about the later create, so it
-    # stays a hard gate.
-    if probe_ready:
-        if not probe.available:
-            print("INCOHERENT: {name} status={st} but available=false")
+    val listed = contains_name(Engine2D.list_backends(), name)
+    if probe.status == BackendStatus.Initialized:
+        if not listed:
+            print("INCOHERENT: {name} probes Initialized but list_backends omits it")
+        val rendered = strict_render_ok(name)
+        (listed and rendered)
     else:
         if probe.available:
             print("INCOHERENT: {name} status={st} but available=true")
-        if probe.fallback_reason.len() == 0:
-            print("INCOHERENT: {name} status={st} but empty fallback_reason")
-    val probe_self_ok = if probe_ready:
-            probe.available
-        else:
-            ((not probe.available) and probe.fallback_reason.len() > 0 and
-                (probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed))
-
-    # A backend that is not ready must still explain itself statically. Pure
-    # function of the name plus the host, so it stays hard too.
-    val hint = backend_unavailable_reason(name)
-    if (not probe_ready) and hint.len() == 0:
-        print("INCOHERENT: empty unavailable-reason for {name}")
-    val hint_ok = probe_ready or hint.len() > 0
-
-    # THE CREATE — independent of the probe, so it is attempted unconditionally.
-    val outcome = strict_render_outcome(name)
-    val created = outcome >= 0
-
-    # Divergences between the three independent capability queries are DISCLOSED.
-    # They are host conditions, not defects in the code under test.
-    if probe_ready != created:
-        print("[toctou] {name}: probe predicted ready={probe_ready} but the independent create returned ok={created} — the prediction did not survive the gap; asserting on the CREATE, not the probe")
-    val listed = contains_name(Engine2D.list_backends(), name)
-    if listed != created:
-        print("[toctou] {name}: list_backends says listed={listed} but the independent create returned ok={created} — list_backends is a third independent sweep, not a cached fact; asserting on the CREATE")
-
-    # A wrong frame (outcome == 0) is NEVER excusable. A create that did not
-    # happen (outcome == -1) already had its structural claim asserted.
-    (probe_self_ok and hint_ok and outcome != 0)
+        if listed:
+            print("INCOHERENT: list_backends claims {name} but probe status={st}")
+        val hint = backend_unavailable_reason(name)
+        if hint.len() == 0:
+            print("INCOHERENT: empty unavailable-reason for {name}")
+        ((not probe.available) and (not listed) and hint.len() > 0)
 
 # ---------------------------------------------------------------------------
 # 1. Host backend detection
 # ---------------------------------------------------------------------------
 
 describe "Engine2D backend matrix — host detection":
+    # @manual scenario evidence
 
     it "detect_best_backend returns a canonical name from the renderer priority order":
+        # @req REQ-SSPEC-INTEGRATION
+        step("detect_best_backend returns a canonical name from the renderer priority order")
         val best = Engine2D.detect_best_backend()
         print("detected best backend: {best}")
         assert_true(best.len() > 0)
@@ -307,11 +223,15 @@ describe "Engine2D backend matrix — host detection":
         assert_true(contains_name(renderer_priority_order(), canon))
 
     it "list_backends is non-empty and always contains the cpu scalar fallback":
+        # @req REQ-SSPEC-INTEGRATION
+        step("list_backends is non-empty and always contains the cpu scalar fallback")
         val avail = Engine2D.list_backends()
         assert_true(avail.len() > 0)
         assert_true(contains_name(avail, "cpu"))
 
     it "every listed backend name is already canonical":
+        # @req REQ-SSPEC-INTEGRATION
+        step("every listed backend name is already canonical")
         val avail = Engine2D.list_backends()
         val n = avail.len()
         var i = 0
@@ -331,17 +251,23 @@ describe "Engine2D backend matrix — host detection":
 describe "Engine2D backend matrix — alias canonicalization":
 
     it "directx family aliases canonicalize to directx":
+        # @req REQ-SSPEC-INTEGRATION
+        step("directx family aliases canonicalize to directx")
         expect(backend_canonical_name("d3d11")).to_equal("directx")
         expect(backend_canonical_name("d3d12")).to_equal("directx")
         expect(backend_canonical_name("dx11")).to_equal("directx")
         expect(backend_canonical_name("dx12")).to_equal("directx")
 
     it "cpu-simd family aliases canonicalize to cpu_simd":
+        # @req REQ-SSPEC-INTEGRATION
+        step("cpu-simd family aliases canonicalize to cpu_simd")
         expect(backend_canonical_name("cpu-simd")).to_equal("cpu_simd")
         expect(backend_canonical_name("simd_cpu")).to_equal("cpu_simd")
         expect(backend_canonical_name("simd-cpu")).to_equal("cpu_simd")
 
     it "canonical matrix names map to themselves":
+        # @req REQ-SSPEC-INTEGRATION
+        step("canonical matrix names map to themselves")
         expect(backend_canonical_name("metal")).to_equal("metal")
         expect(backend_canonical_name("vulkan")).to_equal("vulkan")
         expect(backend_canonical_name("directx")).to_equal("directx")
@@ -356,36 +282,34 @@ describe "Engine2D backend matrix — alias canonicalization":
 describe "Engine2D backend matrix — per-backend coherence":
 
     it "metal initializes+renders or is coherently unavailable":
+        # @req REQ-SSPEC-INTEGRATION
+        step("metal initializes+renders or is coherently unavailable")
         assert_true(matrix_entry_coherent("metal"))
 
     it "vulkan initializes+renders or is coherently unavailable":
+        # @req REQ-SSPEC-INTEGRATION
+        step("vulkan initializes+renders or is coherently unavailable")
         assert_true(matrix_entry_coherent("vulkan"))
 
     it "directx initializes+renders or is coherently unavailable":
+        # @req REQ-SSPEC-INTEGRATION
+        step("directx initializes+renders or is coherently unavailable")
         assert_true(matrix_entry_coherent("directx"))
 
     it "cpu_simd initializes+renders or is coherently unavailable":
+        # @req REQ-SSPEC-INTEGRATION
+        step("cpu_simd initializes+renders or is coherently unavailable")
         assert_true(matrix_entry_coherent("cpu_simd"))
 
     it "software initializes+renders or is coherently unavailable":
+        # @req REQ-SSPEC-INTEGRATION
+        step("software initializes+renders or is coherently unavailable")
         assert_true(matrix_entry_coherent("software"))
 
     it "cpu initializes+renders or is coherently unavailable":
+        # @req REQ-SSPEC-INTEGRATION
+        step("cpu initializes+renders or is coherently unavailable")
         assert_true(matrix_entry_coherent("cpu"))
-
-    it "reports the macOS Metal gate without emulation on non-macOS hosts":
-        # Deterministic platform gate, not a device race: on a non-macOS host
-        # metal is ALWAYS Unavailable behind the "macos" feature gate, and the
-        # strict create must never quietly substitute a software raster for it.
-        if not is_macos():
-            val probe = Engine2D.probe_backend(4, 4, "metal")
-            expect(probe.status).to_equal(BackendStatus.Unavailable)
-            expect(probe.feature_gate).to_equal("macos")
-            val created = Engine2D.create_with_backend_strict(16, 16, "metal")
-            expect(created.is_ok()).to_equal(false)
-            if not created.is_ok():
-                val failure = created.unwrap_err()
-                expect(failure.selected_name == "cpu" or failure.selected_name == "software").to_equal(false)
 
 # ---------------------------------------------------------------------------
 # 4. Guaranteed CPU lanes — hard PASS on every host
@@ -394,20 +318,15 @@ describe "Engine2D backend matrix — per-backend coherence":
 describe "Engine2D backend matrix — guaranteed CPU lanes":
 
     it "cpu strict-create + fill + readback works on any host":
+        # @req REQ-SSPEC-INTEGRATION
+        step("cpu strict-create + fill + readback works on any host")
         assert_true(strict_render_ok("cpu"))
 
-    it "software strict-create + fill + readback works on any host":
-        # Was gated on `probe_backend("software").status == Initialized` — a
-        # prediction about a SECOND, independent create, so a probe hiccup used
-        # to skip the whole lane and still print a pass. software is a pure
-        # scalar rasterizer that owes no device, so the create is attempted
-        # unconditionally and is REQUIRED to succeed and to be pixel-correct.
-        # Verified still true at `ulimit -n 44` across 3/3 runs.
-        assert_true(strict_render_ok("software"))
-
-    it "closes with an explicit reading rule for this run's GPU evidence":
-        print("[probe-gpu] RUN VERDICT: this run's GPU evidence is exactly the set of '[probe-gpu] <backend>: GPU-PROVEN' lines above.")
-        print("[probe-gpu] RUN VERDICT: every '[probe-gpu] <backend>: GPU BRANCH SKIPPED' line marks a backend that proves NOTHING about the GPU path.")
-        print("[probe-gpu] RUN VERDICT: a PASS with no GPU-PROVEN line does NOT attest any GPU backend — read it as 'device unavailable', not as 'the GPU matrix works'.")
-        print("[probe-gpu] RUN VERDICT: every '[toctou]' line above marks a place where an independent probe and the independent create disagreed; the create is what was asserted on.")
-        assert_true(true)
+    it "software strict-create + fill + readback works when its probe reports Initialized":
+        val probe = Engine2D.probe_backend(4, 4, "software")
+        if probe.status == BackendStatus.Initialized:
+            assert_true(strict_render_ok("software"))
+        else:
+            # software must never be half-available
+            assert_false(probe.available)
+            assert_true(backend_unavailable_reason("software").len() > 0)

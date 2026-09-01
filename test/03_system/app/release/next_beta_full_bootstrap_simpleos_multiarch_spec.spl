@@ -1,0 +1,133 @@
+# codex-system-test
+# @tag: system, release, bootstrap, simpleos, multiarch
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005
+# @evidence-display: links
+"""
+Source-contract acceptance for the 1.0.0-beta2 release.
+
+These checks prevent weak workflow wiring from masquerading as live platform
+evidence. Final release acceptance additionally requires the external receipts,
+QEMU transcripts, mission-critical report, and GitHub release JSON named in the
+system test plan.
+"""
+
+use std.spec.*
+use std.io_runtime.{rt_file_read_text}
+
+fn read_required(path: text) -> text:
+    val source = rt_file_read_text(path) ?? ""
+    expect(source.len()).to_be_greater_than(0)
+    source
+
+fn expect_marker(source: text, marker: text):
+    expect(source).to_contain(marker)
+
+fn expect_absent(source: text, marker: text):
+    expect(source.contains(marker)).to_be(false)
+
+describe "next beta full bootstrap and SimpleOS multiarch release":
+    describe "REQ-001: immutable beta2 identity":
+        it "should validate the tag against canonical VERSION":
+            step("Validate immutable beta2 identity")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "EXPECTED_TAG=\"v${VERSION}\"")
+            expect_marker(workflow, "GITHUB_REF_NAME")
+            expect_marker(workflow, "check-release-version-consistency.shs")
+
+        it "should derive every package version from check-version":
+            step("Validate immutable beta2 identity")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "needs.check-version.outputs.version")
+            expect_absent(workflow, "VERSION=${GITHUB_REF#refs/tags/v}")
+
+        it "should publish hyphenated versions as prereleases":
+            step("Validate immutable beta2 identity")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "--prerelease")
+            expect_marker(workflow, "prerelease")
+
+    describe "REQ-002: fail-closed full bootstrap matrix":
+        it "should run the canonical full bootstrap route":
+            step("Prove full self-hosted bootstrap")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "scripts/bootstrap/bootstrap-from-scratch.sh")
+            expect_marker(workflow, "--full-bootstrap")
+
+        it "should reject source-only and ignored bootstrap failures":
+            step("Prove full self-hosted bootstrap")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_absent(workflow, "source-only")
+            expect_absent(workflow, "continue-on-error: true")
+            expect_absent(workflow, "native-build failed (non-blocking)")
+
+        it "should require verified runtime artifacts on every row":
+            step("Prove full self-hosted bootstrap")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "if-no-files-found: error")
+            expect_marker(workflow, "Rust bootstrap seed")
+
+    describe "REQ-003: three SimpleOS release targets":
+        it "should define x86_64 AArch64 and RISC-V64 release rows":
+            step("Build and boot SimpleOS release targets")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "arch: x86_64")
+            expect_marker(workflow, "arch: aarch64")
+            expect_marker(workflow, "arch: riscv64")
+
+        it "should require target-native compiler and mission-critical evidence":
+            step("Build and boot SimpleOS release targets")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "build-simpleos-toolchain.shs")
+            expect_marker(workflow, "--require-all")
+            expect_marker(workflow, "check-simpleos-mission-critical-release.shs")
+
+        it "should package per-architecture images and checksums":
+            step("Build and boot SimpleOS release targets")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "PKG=\"simpleos-${VERSION}-${ARCH}\"")
+            expect_marker(workflow, "sha256sum")
+            expect_marker(workflow, "simple --version")
+
+    describe "REQ-004: memory and performance release gates":
+        it "should run every stage-four memory gate":
+            step("Check resource regression receipts")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "check-stage4-memory-gate.shs")
+            expect_marker(workflow, "check-stage4-selfhost-parse-memory.shs")
+            expect_marker(workflow, "check-stage4-selfhost-parse-memory-multifile.shs")
+
+        it "should retain elapsed time and peak RSS receipts":
+            step("Check resource regression receipts")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "elapsed_seconds")
+            expect_marker(workflow, "max_rss_kb")
+            expect_marker(workflow, "if: always()")
+
+        it "should enforce the selected ten-percent regression budget":
+            step("Check resource regression receipts")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "RELEASE_PERF_REGRESSION_PERCENT: 10")
+            expect_marker(workflow, "check-release-perf-baseline.shs")
+            expect_marker(workflow, "actions/cache@v4")
+
+    describe "REQ-005: verified GitHub publication":
+        it "should gate release creation on preflight and whole tests":
+            step("Publish and inspect the GitHub prerelease")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "release-preflight")
+            expect_marker(workflow, "whole-tests")
+            expect_marker(workflow, "create-release")
+
+        it "should reject incomplete assets and mutable latest":
+            step("Publish and inspect the GitHub prerelease")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "release_blockers=none")
+            expect_marker(workflow, "expected asset")
+            expect_absent(workflow, "tags: latest")
+
+        it "should query the actual GitHub prerelease after publication":
+            step("Publish and inspect the GitHub prerelease")
+            val workflow = read_required(".github/workflows/release.yml")
+            expect_marker(workflow, "verify-release")
+            expect_marker(workflow, "gh release view")
+            expect_marker(workflow, "isPrerelease")

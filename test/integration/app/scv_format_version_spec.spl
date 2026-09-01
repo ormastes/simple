@@ -1,0 +1,74 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves object/format versioning (SCV-MIG-12, P0.2): `scv
+init` writes a `.scv/format.sdn` marker at version 2, `scv doctor` reports the
+repo format version row, a v1 repo (no marker) stays fully readable — doctor
+reports v1 and fsck stays clean — and an unknown future version fails closed.
+Audience: Maintainers of the SCV storage layer (scv_v2_final_report §18.1).
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect, expect_not, step}
+use app.io.mod (process_run)
+
+fn _prelude(tag: text) -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-format-version-{tag}.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "printf 'fn main():\\n    1\\n' > a.spl",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    expect_not(out == "" and err == "")
+    combined
+
+describe "scv object/format versions (SCV-MIG-12)":
+    # @manual scenario evidence
+    it "writes a version-2 format marker on init and reports it in doctor":
+        # @req REQ-SSPEC-INTEGRATION
+        step("writes a version-2 format marker on init and reports it in doctor")
+        step("Init, read format.sdn, run doctor")
+        var lines = _prelude("v2")
+        lines.push("cat .scv/format.sdn")
+        lines.push("scv doctor")
+        val out = _run(lines)
+        expect(out).to_contain("version: 2")
+        expect(out).to_contain("format  v2  OK")
+        expect(out).to_contain("exit=0")
+
+    it "reads a v1 repo (no marker): doctor reports v1 and fsck stays clean":
+        # @req REQ-SSPEC-INTEGRATION
+        step("reads a v1 repo (no marker): doctor reports v1 and fsck stays clean")
+        step("Remove the marker to simulate a v1 repo, run doctor and fsck")
+        var lines = _prelude("v1")
+        lines.push("rm .scv/format.sdn")
+        lines.push("scv doctor")
+        lines.push("scv fsck")
+        val out = _run(lines)
+        expect(out).to_contain("format  v1  OK")
+        expect(out).to_contain("OK checked=")
+        expect(out).to_contain("exit=0")
+
+    it "fails closed on an unknown future format version":
+        # @req REQ-SSPEC-INTEGRATION
+        step("fails closed on an unknown future format version")
+        step("Write a version-9 marker, run doctor and fsck")
+        var lines = _prelude("v9")
+        lines.push("printf 'version: 9\\n' > .scv/format.sdn")
+        lines.push("scv doctor || true")
+        lines.push("scv fsck || true")
+        val out = _run(lines)
+        expect(out).to_contain("format  v9  FAIL")
+        expect(out).to_contain("bad repo format version: 9")

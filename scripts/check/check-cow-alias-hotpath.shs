@@ -23,6 +23,20 @@
 #              The field still holds the Arc while the helper's parameter binding
 #              holds it too — same aliasing, same O(n) per call.
 #
+#   CARRIERSELF    state.xs = state.xs.push(v)          (widened 2026-08-26)
+#   CARRIERBYVALUE state.xs = push_into(state.xs, v)     (widened 2026-08-26)
+#              Same aliasing as ROUNDTRIP/BYVALUE, but the carrier is ANY
+#              root — `self` or a local carrier variable — and CARRIERSELF
+#              covers the method-call-on-the-field form. The three rules above
+#              were anchored on the literal `self.` AND required the field to
+#              be a call ARGUMENT, so REXVISIT
+#              (module_reexport_materialization.spl:67-69, a local
+#              HirReexportWalkState) fell through both holes at once.
+#              Discriminator is structural, not type-based: the SAME
+#              root.field path on both sides of the `=`. `x.f = y.f.push(v)`,
+#              `x.f = x.g.push(v)` and the correct single-owner idiom
+#              `state.xs.push(v)` / `state.depths[i] = d` are NOT offenders.
+#
 #   KEYSINLOOP .keys() / .values() inside a while/for body
 #              Materializes a fresh vector of every key on each iteration: O(n)
 #              per iteration, O(n^2) per loop. Hoist it above the loop.
@@ -115,6 +129,44 @@ scan() {
         a3 = $0; sub(/^.*\([[:space:]]*self\./, "", a3); sub(/[^A-Za-z0-9_].*$/, "", a3)
         if (f3 == a3) printf "BYVALUE\t%s\t%s:%d:self.%s\n", rel, fname, NR, f3
         next
+      }
+      # ---- widened carrier rules (2026-08-26, REXVISIT) --------------------
+      # The three rules above are anchored on the literal `self.`, so a COW
+      # round trip through a LOCAL carrier variable was invisible. That is the
+      # exact hole REXVISIT fell through
+      # (20.hir/hir_lowering/_Items/module_reexport_materialization.spl:67-69):
+      #     state.surface_indices = state.surface_indices.push(facade_index)
+      # `state` is a local HirReexportWalkState, not `self`, and the shape is a
+      # method call ON the field rather than a helper call taking the field as
+      # an ARGUMENT -- so BOTH the anchoring and the shape missed it. Note the
+      # shape gap is independent of the anchoring one: `self.xs = self.xs.push(v)`
+      # was missed too, because BYVALUE above requires `helper(self.xs, ...)`.
+      #
+      # Discriminator is structural and needs no type knowledge: the SAME
+      # root.field path appears on both sides of the `=`. `x.f = y.f.push(v)`
+      # (different root) and `x.f = x.g.push(v)` (different field) are
+      # legitimate and must not be flagged. POSIX awk has no backreferences, so
+      # the two sides are extracted with sub() and compared as strings.
+      #
+      # These blocks deliberately do NOT `next`: the self-anchored rules above
+      # consume their lines, and letting these fall through keeps the
+      # KEYSINLOOP indent bookkeeping below seeing exactly the lines it saw
+      # before this widening, so no existing baseline row can shift.
+
+      # CARRIERSELF: PATH = PATH.mutator(...)  e.g. state.xs = state.xs.push(v)
+      match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+\.(push|set|insert|add|append|remove|extend|concat)\(/) {
+        cl = $0; sub(/^[[:space:]]*/, "", cl); sub(/[[:space:]]*=.*$/, "", cl)
+        cr = $0; sub(/^[^=]*=[[:space:]]*/, "", cr)
+        sub(/\.(push|set|insert|add|append|remove|extend|concat)\(.*$/, "", cr)
+        if (cl == cr) printf "CARRIERSELF\t%s\t%s:%d:%s\n", rel, fname, NR, cl
+      }
+      # CARRIERBYVALUE: PATH = helper(PATH, ...) on a non-self carrier root.
+      # The self-rooted case is already BYVALUE above; excluding it here keeps
+      # each offender in exactly one class.
+      match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*\([[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+[[:space:],)]/) {
+        bl = $0; sub(/^[[:space:]]*/, "", bl); sub(/[[:space:]]*=.*$/, "", bl)
+        br = $0; sub(/^[^(]*\([[:space:]]*/, "", br); sub(/[^A-Za-z0-9_.].*$/, "", br); sub(/\.$/, "", br)
+        if (bl == br && bl !~ /^self\./) printf "CARRIERBYVALUE\t%s\t%s:%d:%s\n", rel, fname, NR, bl
       }
       # KEYSINLOOP: .keys()/.values() inside a while/for body, on a receiver
       # that does NOT change with the loop.
@@ -261,6 +313,42 @@ fn walk_nested(self):
         print(ks2.len())
 EOF
 
+  # REXVISIT replay: a COW round trip through a LOCAL carrier variable, in the
+  # exact shape that sat unflagged in module_reexport_materialization.spl.
+  # Also pins the self-rooted method-call form, which the self-anchored
+  # BYVALUE rule missed for a second, independent reason (it wants the field as
+  # a call ARGUMENT, not as the call RECEIVER).
+  cat > "$st_dir/src/carrier_local.spl" <<'EOF'
+fn note_visit(state: HirReexportWalkState, facade_index: i64, wanted: str, depth: i64):
+    state.surface_indices = state.surface_indices.push(facade_index)
+    state.wanted_names = state.wanted_names.push(wanted)
+    state.depths = state.depths.push(depth)
+
+fn note_self(self, v: i64):
+    self.rows = self.rows.push(v)
+
+fn note_byvalue(state: HirReexportWalkState, v: i64):
+    state.rows = push_into(state.rows, v)
+EOF
+  # The legitimate single-owner idiom, plus the two near-miss negatives that
+  # pin the same-root-same-field discriminator. A false positive here would be
+  # worse than the bug: this is the CORRECT way to write the mutation.
+  cat > "$st_dir/src/carrier_clean.spl" <<'EOF'
+fn note_ok(state: HirReexportWalkState, v: i64, i: i64, depth: i64):
+    state.surface_indices.push(v)
+    state.depths[i] = depth
+    state.a.b[i].c = depth
+
+fn near_miss_other_root(x: Carrier, y: Carrier, v: i64):
+    x.rows = y.rows.push(v)
+
+fn near_miss_other_field(x: Carrier, v: i64):
+    x.rows = x.cols.push(v)
+
+fn scalar_is_not_a_collection(state: Walk, k: i64):
+    state.best = state.best.max(k)
+EOF
+
   COUNT_FILE="$st_dir/count"
   st_out="$(scan "$st_dir")"
   st_files="$(cat "$COUNT_FILE")"
@@ -274,7 +362,11 @@ EOF
   echo "$st_out" | grep -q "	src/varying.spl"            && { echo "selftest: loop-varying keys() receiver must not be flagged"; st_fail=1; }
   st_nested="$(echo "$st_out" | grep -c "^KEYSINLOOP	src/nestedloop.spl")"
   [ "$st_nested" -eq 2 ] || { echo "selftest: expected 2 nested-loop offenders, got $st_nested"; st_fail=1; }
-  [ "$st_files" -eq 7 ] || { echo "selftest: expected 7 scanned files, got $st_files"; st_fail=1; }
+  st_carrier="$(echo "$st_out" | grep -c "^CARRIERSELF	src/carrier_local.spl")"
+  [ "$st_carrier" -eq 4 ] || { echo "selftest: expected 4 CARRIERSELF offenders (3 REXVISIT + 1 self-rooted), got $st_carrier"; st_fail=1; }
+  echo "$st_out" | grep -q "^CARRIERBYVALUE	src/carrier_local.spl" || { echo "selftest: local-carrier by-value fixture not flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "	src/carrier_clean.spl"              && { echo "selftest: single-owner/near-miss carrier fixture must not be flagged"; st_fail=1; }
+  [ "$st_files" -eq 9 ] || { echo "selftest: expected 9 scanned files, got $st_files"; st_fail=1; }
 
   # Empty tree must scan 0 files, so the caller is forced to ERROR.
   st_empty="$(mktemp -d)"
@@ -298,7 +390,7 @@ if ! selftest; then
   exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-  echo "PASS — selftest only, 9 fixture(s) checked"
+  echo "PASS — selftest only, 12 fixture(s) checked"
   exit 0
 fi
 

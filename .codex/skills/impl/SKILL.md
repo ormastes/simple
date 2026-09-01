@@ -60,15 +60,10 @@ Skip if exist. See `design` skill for details.
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, and `.gemini/commands/` instructions before
   `verify`; stale process docs are implementation work, not release cleanup.
-- Do not mark the implementation goal complete if the changed workflow/tooling
-  behavior is only proven by tests. The guide/skill/SPipe-agent doc freshness
-  gate is part of completion, not a release follow-up.
 - For `simple_context` or context-mode changes, keep the MCP/tooling guide and
   mirrored generated manuals current. SQL-backed context paths must document the
-  `--sql`/`--db`/`--source-filter` CLI flags, MCP `source_filter`, the
-  file-optional `sql=true` plus non-empty `query` contract, the embedded SQLite
-  facade boundary, explicit absence statuses, and the required public-absence
-  guard.
+  `--sql`/`--db` CLI flags, the embedded SQLite facade boundary, explicit
+  absence statuses, and the required public-absence guard.
 - Do not leave primary manual output dominated by raw test code. Executable
   SPipe should be folded detail; visible content should be scenario steps and
   typed evidence.
@@ -89,9 +84,6 @@ Skip if exist. See `design` skill for details.
 - For generated GPU backends, fail closed on unsupported MIR or artifact
   states. Do not emit target source containing placeholder unsupported-operation
   comments; return a typed diagnostic and add/refresh backend contract coverage.
-- Shared-font work follows `$sp_dev` “Shared multilingual font work”: preserve
-  `FontRenderer`, transient `FontRenderBatch`, `WebIR`, `DrawIrComposition`, and
-  the plan-defined frozen SSpec vocabulary; keep secondary detail steps folded.
 - Use short grammar deliberately:
   - Prefer expression-bodied functions for small pure helpers.
   - Prefer placeholder lambdas (`_`, `_1`, `_2`) and method references (`&:name`) only for single-expression transforms.
@@ -100,15 +92,10 @@ Skip if exist. See `design` skill for details.
   - Avoid `|>` in native-targeted implementation unless the specific path passes with `SIMPLE_NO_STUB_FALLBACK=1`.
 
 ### Phases 9-10: Unit + Integration Tests
-- 80%+ branch coverage target
+- 80%+ branch coverage generally; bug-fixed unit owners require 100% branch coverage
 - Write unit tests alongside implementation
 - Write integration tests for cross-module interactions
 - Add doctests for public API functions
-- Bug fixes must claim their tracking record, reproduce the exact failure
-  before editing, and fix the pure-Simple owner before Rust/runtime. A
-  Rust/runtime fix requires evidence that the pure layer delegates correctly
-  and the defect is below that boundary. Cover the exact reproducer plus at
-  least one similar/adjacent root-cause shape; document why if none exists.
 - For short grammar changes, add interpreter and native coverage separately:
   - Interpreter specs may cover pipe-forward, composition, dynamic lambda dispatch, and no-paren DSL forms.
   - Native specs must avoid forms that only pass through codegen stub fallback.
@@ -121,18 +108,8 @@ Skip if exist. See `design` skill for details.
 
 ### Phase 14: Full Test Suite
 ```bash
-bin/simple test test --whole --mode=interpreter
-bin/simple lint <changed .spl files>
-bin/simple duplicate-check <owned-dir> --mode token --min-lines 5
+bin/simple test && bin/simple build lint
 ```
-
-For every changed SSpec/manual pair, also run
-`simple sspec-maintain scan <spec>` once. Inspect all seven component scores,
-blockers, stable findings, mirror state, and requirement traceability. Preview
-`improve`; apply only an exact confirmed patch with rollback. Reference
-scaffolds must preserve provenance and fail fast until real oracles exist.
-`documentize` must reuse SPipe, and the mirrored manual must pass a human
-operator-manual review before verification.
 
 For compiler backend changes, add or refresh focused lint/spec coverage for
 invalid target text such as `call nil`, `phi nil`, `getelementptr nil`, and raw
@@ -193,7 +170,6 @@ Before declaring implementation complete, verify:
 
 ## Rules
 
-- **One App, One Host Interface:** Implement apps to run on all OSes identically; only HAL/backend varies behind SOSIX, CompositorBackend, or DedicatedHost. Never add per-OS app logic, platform conditionals, or adapter copies in app code. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - All code in `.spl` — no Python, no Bash
 - Generics use `<>` for type parameters — `Option<T>`, `Result<T, E>`; arrays use `[]` like `[i64]`
 - Pattern binding: `if val` not `if let`
@@ -208,6 +184,12 @@ Before declaring implementation complete, verify:
   the smallest named target/provider/SCI projection, retain its compatibility
   receipt, and reserve full bootstrap for typed incompatibility or explicit
   release/trust targets.
+- When that typed decision selects a full bootstrap, use the canonical
+  `bootstrap-from-scratch.sh --strategy=normal|full` entrypoint and inspect its
+  generation lease plus lineage/failure manifest. Never deploy an artifact from
+  a tainted/invalidated generation. `clean-release` and `one-binary` remain
+  explicit `adhoc` compatibility lanes until the isolated continuation exists;
+  see `doc/07_guide/tooling/bootstrap_speculative_scheduler.md`.
 - Focused pure-Simple compiler/interpreter/loader work may use an admitted Stage
   2 or 3 binary exactly as that guide permits: record path/hash/stage/provenance
   and commands, isolate output/cache, fail closed on unsupported commands, and

@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 use simple_common::target::LinkerFlavor;
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
+use super::config::runtime_bundle_requests_core_c_bootstrap;
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
-    find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib, find_objcopy_tool,
+    find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
+    find_msvc_compiler_rt_builtins, find_objcopy_tool,
     is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
     validate_stage4_cli_c_provider_archive_disjointness,
 };
@@ -172,9 +174,7 @@ impl NativeProjectBuilder {
             (target.os == simple_common::target::TargetOS::SimpleOS
                 && matches!(
                     target.arch,
-                    simple_common::target::TargetArch::X86_64
-                        | simple_common::target::TargetArch::Aarch64
-                        | simple_common::target::TargetArch::Riscv64
+                    simple_common::target::TargetArch::X86_64 | simple_common::target::TargetArch::Aarch64
                 ))
             .then(|| simpleos_sysroot.join("share/simpleos/simpleos.ld"))
         })
@@ -220,81 +220,31 @@ impl NativeProjectBuilder {
         }
     }
 
-    pub(super) fn simpleos_sysroot_dir(arch: simple_common::target::TargetArch) -> PathBuf {
+    fn simpleos_sysroot_dir(arch: simple_common::target::TargetArch) -> PathBuf {
         if let Ok(explicit) = std::env::var("SIMPLEOS_SYSROOT") {
             return PathBuf::from(explicit);
         }
         match arch {
             // Per-arch sysroots: x86_64 keeps the historical unsuffixed path.
             simple_common::target::TargetArch::Aarch64 => PathBuf::from("build/os/sysroot-aarch64"),
-            simple_common::target::TargetArch::Riscv64 => PathBuf::from("build/os/sysroot-riscv64"),
             _ => PathBuf::from("build/os/sysroot"),
         }
     }
 
-    /// Resolve the target `simple-core` runtime archive for a SimpleOS link.
-    ///
-    /// The sysroot producers (`scripts/os/simpleos-sysroot-{aarch64,riscv64}.shs`)
-    /// install `crt0.o`, `libsimpleos_c.a` and `libsimpleos_all.a` into
-    /// `<sysroot>/lib`, but they do NOT install `libsimple_runtime.a` there --
-    /// the target core archive is produced separately by
-    /// `scripts/os/simpleos-core-archive.shs` into
-    /// `build/os/simple-core-simpleos-<arch>/` and is communicated to the build
-    /// via `SIMPLE_SIMPLE_CORE_PATH` (accepted as either the archive file or its
-    /// containing directory). Consulting only `<sysroot>/lib/libsimple_runtime.a`
-    /// therefore never found a runtime, so the archive the CI resolved and echoed
-    /// as `runtime_archive=` was never placed on the link line, and every
-    /// codegen-emitted `rt_*` came back undefined even though the archive defined
-    /// it. See
-    /// `doc/08_tracking/bug/simpleos_target_build_link_omits_simple_core_archive_2026-08-24.md`.
-    pub(super) fn simpleos_runtime_archive(sysroot: &Path) -> Option<PathBuf> {
-        for env_var in ["SIMPLE_SIMPLE_CORE_PATH", "SIMPLE_CORE_RUNTIME_PATH"] {
-            if let Ok(value) = std::env::var(env_var) {
-                if value.is_empty() {
-                    continue;
-                }
-                if let Some(found) = super::tools::archive_from_path_or_dir(Path::new(&value), "libsimple_runtime") {
-                    return Some(found);
-                }
-            }
-        }
-        let in_sysroot = sysroot.join("lib").join("libsimple_runtime.a");
-        if in_sysroot.exists() {
-            return Some(in_sysroot);
-        }
-        None
-    }
-
-    pub(super) fn simpleos_user_runtime_paths(cross_target: simple_common::target::Target) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    fn simpleos_user_runtime_paths(cross_target: simple_common::target::Target) -> Option<(PathBuf, PathBuf, PathBuf)> {
         if cross_target.os != simple_common::target::TargetOS::SimpleOS
             || !matches!(
                 cross_target.arch,
-                simple_common::target::TargetArch::X86_64
-                    | simple_common::target::TargetArch::Aarch64
-                    | simple_common::target::TargetArch::Riscv64
+                simple_common::target::TargetArch::X86_64 | simple_common::target::TargetArch::Aarch64
             )
         {
             return None;
         }
         let sysroot = Self::simpleos_sysroot_dir(cross_target.arch);
         let crt0 = sysroot.join("lib").join("crt0.o");
-        // Prefer `libsimpleos_all.a` -- the sysroot producers build it as
-        // "SimpleOS libc + the cross-compiled C runtime (src/runtime/*.c)"
-        // (plus the core objects when they were present at sysroot build time).
-        // `libsimpleos_c.a` is libc ALONE, so linking only that left every
-        // C-runtime symbol undefined. Measured 2026-08-24: `libsimpleos_all.a`
-        // defines 761 `rt_*` symbols including `rt_string_new_literal`,
-        // `rt_native_cmp` and `rt_unwrap_or_trap` -- the three the bug record
-        // listed as "genuinely missing". They were never missing; they were
-        // simply in an archive that never reached the link line.
-        let libc_all = sysroot.join("lib").join("libsimpleos_all.a");
-        let libc_only = sysroot.join("lib").join("libsimpleos_c.a");
-        let libc = if libc_all.exists() { libc_all } else { libc_only };
-        // crt0/libc come from the sysroot; the runtime archive is resolved
-        // independently. The old all-or-nothing `crt0 && runtime && libc` test
-        // silently dropped crt0 AND libc too whenever the runtime was missing.
-        let runtime = Self::simpleos_runtime_archive(&sysroot)?;
-        if crt0.exists() && libc.exists() {
+        let runtime = sysroot.join("lib").join("libsimple_runtime.a");
+        let libc = sysroot.join("lib").join("libsimpleos_c.a");
+        if crt0.exists() && runtime.exists() && libc.exists() {
             Some((crt0, runtime, libc))
         } else {
             None
@@ -302,35 +252,17 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
-        // Mach-O POSIX nm prints weak *definitions* as 'T'; weakness only
-        // appears in the `-m` flag field as `weak external`. Request `-m` on
-        // macOS and normalize those lines to "W" so weak/strong classification
-        // matches the GNU/ELF lanes.
-        let output = {
-            let mut cmd = nm_command();
-            cmd.arg("-g").arg("-p");
-            if cfg!(target_os = "macos") {
-                cmd.arg("-m");
-            }
-            cmd.arg(obj).output()
-        }
-        .map_err(|e| format!("nm: {e}"))?;
+        let output = nm_command()
+            .arg("-g")
+            .arg("-p")
+            .arg(obj)
+            .output()
+            .map_err(|e| format!("nm: {e}"))?;
         if !output.status.success() {
             return Ok(Vec::new());
         }
         let mut symbols = Vec::new();
         for line in String::from_utf8_lossy(&output.stdout).lines() {
-            if line.contains(" weak external ") || line.contains(" weak reference ") {
-                if let Some(raw_name) = line.split_whitespace().next_back() {
-                    let name = if cfg!(target_os = "macos") {
-                        raw_name.strip_prefix('_').unwrap_or(raw_name).to_string()
-                    } else {
-                        raw_name.to_string()
-                    };
-                    symbols.push(("W".to_string(), name));
-                }
-                continue;
-            }
             let parts: Vec<&str> = line.split_whitespace().collect();
             let parsed = match parts.as_slice() {
                 [sym_type, name] => Some((*sym_type, *name)),
@@ -834,6 +766,18 @@ extern "C" {
     void rt_set_args_wide(int argc, const wchar_t** argv);
     void __simple_runtime_init(void);
     void __simple_runtime_shutdown(void);
+    // generate_init_caller() ALWAYS emits a concrete (non-weak) definition
+    // of this symbol -- even when init_names is empty -- so it is safe to
+    // declare and call directly here with no /ALTERNATENAME fallback,
+    // exactly like the non-MSVC `main()` stub below does (guarded there by
+    // a weak-symbol null check instead, since MSVC/clang-cl has no
+    // __attribute__((weak))). Omitting this call was the actual bug: every
+    // module-level global that needs a heap-boxed initializer
+    // (codegen/llvm/backend_core.rs, `__module_init[_<prefix>]`) never ran
+    // its initializer on Windows, leaving the global's storage at its
+    // PE-loader-zeroed BSS default (null) -- see
+    // doc/08_tracking/bug/windows_msvc_module_init_alternatename_link_order_2026-08-31.md.
+    void __simple_call_module_inits(void);
 }
 #pragma comment(linker, "/ALTERNATENAME:spl_main=_spl_main_stub")
 #pragma comment(linker, "/ALTERNATENAME:__simple_runtime_init=___simple_runtime_init_stub")
@@ -843,6 +787,7 @@ extern "C" void ___simple_runtime_init_stub(void) {}
 extern "C" void ___simple_runtime_shutdown_stub(void) {}
 int wmain(int argc, wchar_t** argv) {
     __simple_runtime_init();
+    __simple_call_module_inits();
     rt_set_args_wide(argc, const_cast<const wchar_t**>(argv));
     int r = spl_main();
     __simple_runtime_shutdown();
@@ -882,34 +827,51 @@ int main(int argc, char** argv) {
         std::fs::write(&main_cpp, stub_code).map_err(|e| format!("write main stub: {e}"))?;
 
         let main_o = temp_dir.join("_main_stub.o");
-        let output = if is_clang_cl {
-            std::process::Command::new(&cxx)
-                .arg("/c")
-                .arg(format!("/Fo{}", main_o.display()))
-                .arg("/Gy")
-                .arg(&main_cpp)
-                .output()
-                .map_err(|e| format!("compile main stub: {e}"))?
-        } else {
-            std::process::Command::new(&cxx)
-                .args([
-                    "-c",
-                    "-Os",
-                    "-ffunction-sections",
-                    "-fdata-sections",
-                    "-fno-asynchronous-unwind-tables",
-                    "-fno-unwind-tables",
-                    "-fno-stack-protector",
-                    "-o",
-                ])
-                .arg(&main_o)
-                .arg(&main_cpp)
-                .output()
-                .map_err(|e| format!("compile main stub: {e}"))?
-        };
+        let clang_cl_args: Vec<String> = vec![
+            "/c".to_string(),
+            format!("/Fo{}", main_o.display()),
+            "/Gy".to_string(),
+            main_cpp.display().to_string(),
+        ];
+        let other_args: Vec<String> = vec![
+            "-c".to_string(),
+            "-Os".to_string(),
+            "-ffunction-sections".to_string(),
+            "-fdata-sections".to_string(),
+            "-fno-asynchronous-unwind-tables".to_string(),
+            "-fno-unwind-tables".to_string(),
+            "-fno-stack-protector".to_string(),
+            "-o".to_string(),
+            main_o.display().to_string(),
+            main_cpp.display().to_string(),
+        ];
+        let argv: &[String] = if is_clang_cl { &clang_cl_args } else { &other_args };
+        let output = std::process::Command::new(&cxx)
+            .args(argv)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "compile main stub: failed to spawn `{} {}`: {e}",
+                    cxx,
+                    argv.join(" ")
+                )
+            })?;
         if !output.status.success() {
+            // clang-cl (like cl.exe) writes diagnostics to STDOUT, not stderr --
+            // capturing only stderr here previously produced a message ending
+            // in ": " with nothing after it. Capture both streams plus the
+            // exact argv invoked so the failure is diagnosable without a
+            // manual reproduction.
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Failed to compile main stub ({}): {}", cxx, stderr));
+            return Err(format!(
+                "Failed to compile main stub ({} {}): exit={:?} stdout=[{}] stderr=[{}]",
+                cxx,
+                argv.join(" "),
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            ));
         }
         Ok(main_o)
     }
@@ -920,7 +882,7 @@ int main(int argc, char** argv) {
         temp_dir: &Path,
         object_paths: &[PathBuf],
         symbol_cache: Option<&mut HashMap<PathBuf, Vec<String>>>,
-    ) -> Result<Option<PathBuf>, String> {
+    ) -> Result<(Option<PathBuf>, Vec<String>), String> {
         let mut init_names = Vec::new();
         let mut local_cache = HashMap::new();
         let cache = match symbol_cache {
@@ -1084,7 +1046,7 @@ int main(int argc, char** argv) {
         if !status.success() {
             return Err(format!("compile init_all.cpp failed ({})", cxx));
         }
-        Ok(Some(init_o))
+        Ok((Some(init_o), init_names))
     }
 
     /// Compile C runtime sources to object files (currently disabled).
@@ -1118,7 +1080,7 @@ int main(int argc, char** argv) {
         let object_paths = link_object_paths.as_slice();
 
         let main_o = self.compile_main_stub(temp_dir)?;
-        let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
+        let (init_o, init_names) = self.generate_init_caller(temp_dir, object_paths, None)?;
         let extra_link_objects = configured_extra_link_objects()?;
         let selected_runtime = self.selected_runtime_library(temp_dir)?;
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
@@ -1449,9 +1411,39 @@ int main(int argc, char** argv) {
                 }
                 #[cfg(target_os = "windows")]
                 {
+                    // MSVC's `/ALTERNATENAME` (emitted by `generate_init_caller`
+                    // for every `__module_init_*` name, to emulate ELF/Mach-O
+                    // weak symbols) does not behave as a fallback-if-still-
+                    // undefined the way `__attribute__((weak))` does: link.exe
+                    // substitutes the alternate at the point the referencing
+                    // object (`_init_all.o`) is processed, which happens BEFORE
+                    // this archive -- appended after `_init_all.o` in the
+                    // deferred `/link` group for clang-cl, or immediately after
+                    // it here for plain MSVC -- is even scanned for its real
+                    // definitions. The archive member holding the true
+                    // `__module_init_<prefix>` then never gets pulled in, the
+                    // empty stub silently wins, and module init never runs
+                    // (doc/08_tracking/bug/windows_msvc_module_init_alternatename_link_order_2026-08-31.md).
+                    //
+                    // Force resolution the same way `runtime_retention_symbols`
+                    // already does for the runtime archive: `/INCLUDE:<name>`
+                    // pulls the archive member with that DEFINED symbol into the
+                    // link's root set regardless of ALTERNATENAME's rewrite.
+                    // Every name in `init_names` was scanned as a global symbol
+                    // out of exactly the object files this archive is built
+                    // from, so each one is guaranteed to have a real definition
+                    // here -- `/INCLUDE` on a name with no definition anywhere
+                    // is a hard unresolved-external link error, which is why
+                    // this is safe only because of that provenance.
                     if is_clang_cl {
+                        for name in &init_names {
+                            clang_cl_link_args.push(format!("/INCLUDE:{name}"));
+                        }
                         clang_cl_link_args.push(clang_cl_whole_archive_arg(&archive_path));
                     } else if is_msvc {
+                        for name in &init_names {
+                            cmd.arg(format!("-Wl,/INCLUDE:{name}"));
+                        }
                         cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
                     } else {
                         cmd.arg("-Wl,--whole-archive")
@@ -1514,14 +1506,63 @@ int main(int argc, char** argv) {
                     }
                     #[cfg(target_os = "windows")]
                     {
-                        if is_clang_cl {
-                            clang_cl_link_args.push(clang_cl_whole_archive_arg(runtime_lib));
-                        } else if is_msvc {
-                            cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
+                        // Windows used to whole-archive this unconditionally,
+                        // which is why the link failed with LNK2005 on
+                        // __IMPORT_DESCRIPTOR_kernel32: the archive bundles
+                        // rustc-synthesized raw-dylib import libraries (measured:
+                        // 4,606 members, 582 named kernel32.dll, the descriptor
+                        // defined 4x) and whole-archive forces every one in.
+                        // Lazy resolution pulls exactly one.
+                        //
+                        // Linux has never done this -- it uses retention roots
+                        // and gates whole-archive behind
+                        // SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE. This mirrors that,
+                        // including the escape hatch, so the two platforms now
+                        // agree.
+                        if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") {
+                            if is_clang_cl {
+                                clang_cl_link_args.push(clang_cl_whole_archive_arg(runtime_lib));
+                            } else if is_msvc {
+                                cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
+                            } else {
+                                cmd.arg("-Wl,--whole-archive");
+                                cmd.arg(runtime_lib);
+                                cmd.arg("-Wl,--no-whole-archive");
+                            }
                         } else {
-                            cmd.arg("-Wl,--whole-archive");
+                            let roots = Self::runtime_retention_symbols(
+                                object_paths,
+                                &main_o,
+                                init_o.as_ref(),
+                                runtime_lib,
+                                imports,
+                            )?;
+                            // read_defined_symbol_set FAILS OPEN: it returns an
+                            // empty set when `nm` cannot be run, which would
+                            // silently yield zero roots and drop the whole
+                            // archive. On this host llvm-nm dies rc=127 under
+                            // DLL shadowing, so that is a live hazard, not a
+                            // theoretical one. Refuse rather than emit a binary
+                            // missing its runtime.
+                            if roots.is_empty() {
+                                return Err(format!(
+                                    "no runtime retention roots resolved from {} -- refusing to link                                      without whole-archive, since that would drop the runtime silently.                                      Check that nm is runnable (SIMPLE_TRACE_RUNTIME_ROOTS=1 to trace),                                      or set SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 to restore the old behaviour.",
+                                    runtime_lib.display()
+                                ));
+                            }
+                            // x64 `extern "C"` names are undecorated -- measured
+                            // with nm on the real archive (`T rt_api_surface_extract`,
+                            // `I __IMPORT_DESCRIPTOR_kernel32`, both bare).
+                            for root in &roots {
+                                if is_clang_cl {
+                                    clang_cl_link_args.push(format!("/INCLUDE:{root}"));
+                                } else if is_msvc {
+                                    cmd.arg(format!("-Wl,/INCLUDE:{root}"));
+                                } else {
+                                    cmd.arg(format!("-Wl,-u,{root}"));
+                                }
+                            }
                             cmd.arg(runtime_lib);
-                            cmd.arg("-Wl,--no-whole-archive");
                         }
                     }
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -1546,6 +1587,88 @@ int main(int argc, char** argv) {
                         let core_c_runtime = build_stage4_c_runtime_library(&temp_dir.join("stage4_core_c_runtime"))
                             .ok_or_else(|| "failed to build Stage 4 core-C runtime supplement".to_string())?;
                         cmd.arg(core_c_runtime);
+                    } else if cfg!(target_os = "windows")
+                        && runtime_bundle_requests_core_c_bootstrap(&self.config.runtime_bundle)
+                    {
+                        // WINDOWS ONLY. Without this guard the branch ran on
+                        // Linux, macOS and FreeBSD too, because the sanctioned
+                        // bootstrap invokes Stage 2/3 with exactly
+                        // `--entry bootstrap_main.spl --runtime-bundle
+                        // core-c-bootstrap` on every platform. Three regressions
+                        // followed, none of them theoretical:
+                        //   * macOS: the else-arm emits
+                        //     `-Wl,--allow-multiple-definition`, which Apple ld
+                        //     does not have (native_all/src/lib.rs:1550 says so
+                        //     outright) -- a hard link failure.
+                        //   * Linux/FreeBSD: that flag disables duplicate-symbol
+                        //     detection for the WHOLE link, permanently masking
+                        //     the ~475-symbol collision class instead of
+                        //     surfacing it.
+                        //   * any platform: build_core_c_runtime_library
+                        //     returning None now aborts a previously-working
+                        //     build.
+                        // The Windows lane needs this supplement because
+                        // native_all there lacks the C-only rt_* entry points;
+                        // Unix does not have that gap and must keep its
+                        // existing link semantics untouched.
+                        // Stage 2 asks for --runtime-bundle core-c-bootstrap, but
+                        // the bootstrap_main entry short-circuits lane selection
+                        // (config.rs:357) and pins the runtime to native_all,
+                        // which does NOT define the C-only entry points.
+                        // Measured on simple_native_all.lib (354 MB):
+                        //   rt_io_udp_bind        1
+                        //   rt_iocp_create        0
+                        //   rt_event_ports_create 0
+                        //   rt_cpu_count          0
+                        // leaving 103 distinct rt_* undefined at the Stage 2 link.
+                        //
+                        // Those live in runtime_native.c, which the core-C
+                        // archive compiles and nothing else in this build does.
+                        // Supply it as an ADDITIONAL archive, exactly like the
+                        // Stage 4 supplement above, rather than replacing
+                        // native_all -- bootstrap_main needs rt_native_build
+                        // from native_all, so swapping would just trade one
+                        // undefined set for another.
+                        //
+                        // Safe against duplicate definitions BECAUSE the branch
+                        // above no longer whole-archives: with lazy resolution a
+                        // member is pulled only to satisfy a still-undefined
+                        // symbol, so the ~560 symbols defined in both archives
+                        // resolve from native_all (listed first) and the core-C
+                        // copies are never pulled. This is also why
+                        // 8ca87866c6's "just add runtime_native.c to the Rust
+                        // build" attempt failed with 475 collisions: compiling
+                        // it INTO the crate gives the linker no such choice.
+                        let core_c_runtime =
+                            build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
+                                .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
+                        cmd.arg(core_c_runtime);
+                        // Archive members resolve at OBJECT granularity, not
+                        // symbol granularity: pulling runtime_native.obj to
+                        // satisfy rt_iocp_create also drags in every other
+                        // symbol it defines, ~514 of which native_all defines
+                        // too (measured -- the same class 8ca87866c6 recorded
+                        // as 475 collisions). Lazy resolution alone therefore
+                        // does NOT avoid the duplicates.
+                        //
+                        // /FORCE:MULTIPLE takes the first definition, so
+                        // native_all (listed first) wins for every shared
+                        // symbol and the core-C copies are ignored -- exactly
+                        // the precedence the two-archive layering intends.
+                        //
+                        // Deliberately NOT /FORCE:MULTIPLE,UNRESOLVED: the
+                        // UNRESOLVED half would launder genuinely missing
+                        // symbols into NULL calls at runtime, which is the
+                        // repo's known rt_unwrap_or_trap SEGV class. Undefined
+                        // symbols must still fail the link, and they do --
+                        // LNK1120 still fires.
+                        if is_clang_cl {
+                            clang_cl_link_args.push("/FORCE:MULTIPLE".to_string());
+                        } else if is_msvc {
+                            cmd.arg("-Wl,/FORCE:MULTIPLE");
+                        } else {
+                            cmd.arg("-Wl,--allow-multiple-definition");
+                        }
                     }
                 } else {
                     #[cfg(target_os = "macos")]
@@ -1644,6 +1767,20 @@ int main(int argc, char** argv) {
                 cmd.arg("-Wl,--no-as-needed");
             }
         }
+        #[cfg(target_os = "windows")]
+        if is_msvc {
+            // __builtin_cpu_init/__builtin_cpu_supports (runtime_simd_dispatch.c)
+            // lower to references to __cpu_model/__cpu_indicator_init, owned by
+            // the compiler runtime -- never fabricated as stubs (see
+            // is_compiler_rt_builtin_symbol). The GNU/mingw lane gets these for
+            // free because g++/gcc always link libgcc; the MSVC lane does not
+            // link compiler-rt by default, so they were genuinely unresolved
+            // (LNK2019) the moment stub fabrication for them was correctly
+            // removed. Link clang's own builtins archive explicitly.
+            if let Some(builtins) = find_msvc_compiler_rt_builtins(&cc, cross_target.arch.name()) {
+                cmd.arg(&builtins);
+            }
+        }
         #[cfg(target_os = "macos")]
         if macos_runtime_host_support_required(selected_runtime.is_some(), host_gpu_lane, exact_stage4) {
             add_macos_runtime_host_support(&mut cmd);
@@ -1696,7 +1833,26 @@ int main(int argc, char** argv) {
         }
         #[cfg(target_os = "windows")]
         if is_clang_cl && !strict_no_stub_fallback {
-            cmd.arg("/link").arg("/WHOLEARCHIVE").arg("/FORCE:MULTIPLE,UNRESOLVED");
+            // Into the accumulator, NOT its own `/link`: `/link` consumes the
+            // rest of the command line, so a second group is handed to the
+            // linker as an option, answered with `LNK4044: unrecognized option
+            // '/link'`, and DISCARDED together with everything after it -- here
+            // that would silently drop the trailing group's whole-archive
+            // arguments and `/OPT:REF,ICF`. Measured; see
+            // clang_cl_whole_archive_arg.
+            //
+            // Only reachable when stub fallback is permitted; the bootstrap
+            // sets SIMPLE_NO_STUB_FALLBACK=1, which is why the two-group bug
+            // has been latent rather than fatal.
+            //
+            // NOTE (not changed here): the bare `/WHOLEARCHIVE` has no `:lib`
+            // argument, so it whole-archives EVERY input archive, which is what
+            // multiplies duplicate import descriptors such as
+            // __IMPORT_DESCRIPTOR_kernel32 (measured 4x in
+            // simple_native_all.lib). Narrowing that is a linker-contract
+            // change and is deliberately left for its own commit.
+            clang_cl_link_args.push("/WHOLEARCHIVE".to_string());
+            clang_cl_link_args.push("/FORCE:MULTIPLE,UNRESOLVED".to_string());
         } else if is_msvc && !strict_no_stub_fallback {
             cmd.arg("-Xlinker").arg("/FORCE:MULTIPLE,UNRESOLVED");
         }
@@ -1799,11 +1955,26 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         }
         let object_paths = link_object_paths.as_slice();
         let mut symbol_cache = HashMap::new();
-        let init_o = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
+        let (init_o, _init_names) = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
         let cc = find_c_compiler();
 
         let compiler_rt_builtins = find_compiler_rt_builtins(triple);
         let simpleos_user_runtime = Self::simpleos_user_runtime_paths(cross_target);
+        // `--runtime-bundle` used to be honored only by the hosted linker.
+        // Bare-metal SimpleOS kernels use an `*-unknown-none` target, so they
+        // do not satisfy `simpleos_user_runtime_paths()` even when the caller
+        // explicitly selected an ABI-complete target simple-core archive.
+        // The result was especially misleading: native-build admitted the
+        // archive during configuration, compiled the entire closure, and then
+        // omitted that archive from the final ld.lld command. Keep the
+        // SimpleOS sysroot tuple authoritative when present, but otherwise put
+        // the selected runtime bundle on the freestanding link line too.
+        let selected_freestanding_runtime = if simpleos_user_runtime.is_none() {
+            self.selected_runtime_library(temp_dir)?
+        } else {
+            None
+        };
+        self.reject_unexpected_native_all(selected_freestanding_runtime.as_ref())?;
         // Fail closed: a SimpleOS user target whose crt0/libc/runtime could not be
         // resolved must NOT silently link with none of them -- that is exactly the
         // defect tracked in
@@ -2149,17 +2320,16 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             ordered
         };
 
-        let freestanding_stub_obj =
-            generate_stub_object_freestanding(
-                temp_dir,
-                object_paths,
-                &boot_objects,
-                triple,
-                march,
-                mabi,
-                &self.project_root,
-                &self.output,
-            )?;
+        let freestanding_stub_obj = generate_stub_object_freestanding(
+            temp_dir,
+            object_paths,
+            &boot_objects,
+            triple,
+            march,
+            mabi,
+            &self.project_root,
+            &self.output,
+        )?;
         let weak_boot_defsyms = Self::freestanding_weak_boot_defsyms(object_paths, &boot_objects, imports)?;
         if !weak_boot_defsyms.is_empty() {
             eprintln!(
@@ -2224,6 +2394,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             if let Some((_, ref runtime, ref libc)) = simpleos_user_runtime {
                 c.arg(runtime);
                 c.arg(libc);
+            } else if let Some((ref runtime, _)) = selected_freestanding_runtime {
+                c.arg(runtime);
             }
             c
         } else {
@@ -2270,6 +2442,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             if let Some((_, ref runtime, ref libc)) = simpleos_user_runtime {
                 c.arg(runtime);
                 c.arg(libc);
+            } else if let Some((ref runtime, _)) = selected_freestanding_runtime {
+                c.arg(runtime);
             }
             c
         };

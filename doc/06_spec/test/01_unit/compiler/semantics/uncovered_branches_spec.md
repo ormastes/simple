@@ -563,6 +563,10 @@ expect(sub.len()).to_be_greater_than(0)
 
 #### chains replace operations
 
+- var step1 = s replace
+- var step2 = step1 replace
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -571,9 +575,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val s = "hello"
-val replaced = s.replace("h", "H")
-val chained = replaced.replace("e", "E")
-expect(chained).to_start_with("H")
+var step1 = s.replace("h", "H")
+var step2 = step1.replace("e", "E")
+expect(step2).to_start_with("H")
 ```
 
 </details>
@@ -637,7 +641,7 @@ expect(trimmed).to_equal("hello")
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/semantics/uncovered_branches_spec.spl` |
-| Updated | 2026-07-07 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

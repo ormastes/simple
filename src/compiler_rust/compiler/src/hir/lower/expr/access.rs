@@ -189,7 +189,23 @@ impl Lowerer {
             }
         }
 
-        let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
+        let lowered_receiver = self.lower_expr(receiver, ctx)?;
+        // Flow analysis may permit `.0` on Option<Tuple>/Result<Tuple>, but
+        // the lowered receiver is still the enum container.  Project the
+        // Some/Ok payload before deriving the positional element type and
+        // emitting Index, matching force-unwrap and interpreter semantics.
+        let payload_ty = self.result_like_payload_type(lowered_receiver.ty);
+        let recv_hir = Box::new(if let Some(payload_ty) = payload_ty {
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_payload".to_string(),
+                    args: vec![lowered_receiver],
+                },
+                ty: payload_ty,
+            }
+        } else {
+            lowered_receiver
+        });
         if self.should_treat_unresolved_field_as_static_variant(receiver, &recv_hir, field) {
             if let Expr::Identifier(recv_name) = receiver {
                 return Ok(HirExpr {
@@ -271,9 +287,9 @@ impl Lowerer {
                         candidate_struct_names.push(inferred_struct_name);
                     }
                 }
-                let has_known_method = candidate_struct_names
-                    .iter()
-                    .any(|name| self.has_known_method_for_struct_name(name, field));
+                let has_known_method = candidate_struct_names.iter().any(|name| {
+                    self.has_known_method_for_struct_name(name, field) || Self::is_builtin_methodful_struct_name(name)
+                });
                 // Try to resolve field type via struct name lookup before falling back.
                 // This preserves the real TypeId for self.field.method() chains — without
                 // this, the field node gets ty=ANY which causes MIR to mangle the wrong
@@ -307,8 +323,7 @@ impl Lowerer {
                                     return Err(LowerError::CannotInferFieldType {
                                         struct_name: candidate_struct_name.clone(),
                                         field: field.to_string(),
-                                        available_fields: self
-                                            .registry_field_names_for_struct(candidate_struct_name),
+                                        available_fields: self.registry_field_names_for_struct(candidate_struct_name),
                                     });
                                 }
                             }
@@ -323,6 +338,15 @@ impl Lowerer {
                     }
                     if let Some(field_index) = self.try_resolve_global_field_index_by_name(candidate_struct_name, field)
                     {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] CAND-BYNAME/{field} idx={field_index} in {fpath}");
+                        }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -343,6 +367,15 @@ impl Lowerer {
                 // because `candidate_struct_names` was empty.
                 if candidate_struct_names.is_empty() && !self.is_ambiguous_global_field(field) {
                     if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] CLASS2-GLOBAL/{field} idx={field_index} in {fpath}");
+                        }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -369,6 +402,15 @@ impl Lowerer {
                     // dispatch stays bare and tag-dispatches at runtime.
                     let ambiguous_field = self.is_ambiguous_global_field(field);
                     if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] NKM-GLOBAL/{field} idx={field_index} in {fpath}");
+                        }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -391,6 +433,15 @@ impl Lowerer {
                         }
                     }
                     if let Some((field_index, field_ty, _)) = best {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] NKM-LOCALBEST/{field} idx={field_index} in {fpath}");
+                        }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -418,6 +469,9 @@ impl Lowerer {
                         } else {
                             eprintln!("[FIELD-FAIL]   global_struct_defs=None");
                         }
+                    }
+                    if let Some(projected) = self.try_lower_dynamic_result_projection(&recv_hir, field) {
+                        return Ok(projected);
                     }
                     if let Some(func_name) = &self.current_function_name {
                         return Err(LowerError::Unsupported(format!(
@@ -647,12 +701,31 @@ impl Lowerer {
     fn try_resolve_receiver_struct_name_from_expr(&mut self, receiver: &Expr, ctx: &FunctionContext) -> Option<String> {
         match receiver {
             Expr::Identifier(name) => {
-                let ty = if let Some(idx) = ctx.lookup(name) {
-                    ctx.locals.get(idx).map(|local| local.ty)
-                } else {
-                    self.globals.get(name).copied()
-                }?;
-                self.try_named_struct_name_for_type(ty)
+                let local = ctx.lookup(name).and_then(|idx| ctx.locals.get(idx));
+                let ty = match local {
+                    Some(local) => local.ty,
+                    None => self.globals.get(name).copied()?,
+                };
+                if let Some(struct_name) = self.try_named_struct_name_for_type(ty) {
+                    return Some(struct_name);
+                }
+                // The TypeId erased to ANY, but a PARAMETER still carries its
+                // AUTHORED type name (`LocalVar::type_name_hint`, set from
+                // `param.ty` in module_lowering/function.rs). Using it here is
+                // what keeps a declared-type receiver off the receiver-blind
+                // "most fields wins" fallback: `CompileContext.create(options:
+                // CompileOptions)` was resolving `options.mcdc_owner_bytes`
+                // through that fallback to MirLowering's index 26 (0xd0, past
+                // the end of the object) instead of CompileOptions' 22 (0xb0).
+                // Purely additive -- an unusable hint simply fails the caller's
+                // subsequent field lookup and falls back to today's behaviour.
+                if let Some(hint) = local.and_then(|local| local.type_name_hint.clone()) {
+                    return Some(hint);
+                }
+                // Last resort: a local with no annotation still has the declared
+                // return type NAME of the static call that initialized it,
+                // recorded by `stmt_lowering.rs` when the TypeId erased to ANY.
+                ctx.static_call_type_hints.get(name).cloned()
             }
             Expr::FieldAccess { receiver: base, field } => {
                 let base_struct_name = self.try_resolve_receiver_struct_name_from_expr(base, ctx)?;
@@ -688,6 +761,25 @@ impl Lowerer {
         matches!(struct_name, "ANY" | "Any" | "wildcard") || struct_name.starts_with("TypeId(")
     }
 
+    /// Builtin receiver types that have NO user-declarable fields: every
+    /// `recv.name` on one of them is a paren-less method call (`xs.len`,
+    /// `s.trim`, `xs.first`), never a field read.
+    ///
+    /// Without this, a paren-less builtin method call reached the
+    /// `cannot infer field type while lowering ...: struct 'Array' field 'len'`
+    /// hard error, because `has_known_method_for_struct_name` only consults
+    /// `method_return_types` (user-declared methods) and builtin methods are
+    /// never registered there. The interpreter accepts these calls, so native
+    /// lowering rejecting them was a native-only divergence — it broke the
+    /// coverage wrappers for `no_paren_test.spl`, `exists_check_spec.spl`,
+    /// `generics_spec.spl` and friends.
+    fn is_builtin_methodful_struct_name(struct_name: &str) -> bool {
+        matches!(
+            struct_name,
+            "Array" | "String" | "Text" | "Dict" | "Map" | "Set" | "List"
+        )
+    }
+
     fn named_struct_name_from_type(ty: &simple_parser::Type) -> Option<String> {
         match ty {
             simple_parser::Type::Simple(name) => Some(name.clone()),
@@ -708,10 +800,34 @@ impl Lowerer {
             _ => return None,
         };
         let payload_ty = self.enum_variant_payload_type(recv_hir.ty, "Result", variant)?;
+        Some(self.build_result_projection(recv_hir, variant, payload_ty))
+    }
+
+    /// Last-resort `.ok` / `.err` projection for a receiver whose type never
+    /// got propagated (`TypeId::ANY`, e.g. the result of a call whose return
+    /// type was erased). Only reachable AFTER every field-resolution attempt
+    /// has failed, so it cannot hijack a real struct field named `ok`/`err`;
+    /// the payload type is unknown, so it is ANY and dispatch stays dynamic.
+    /// The discriminant check itself is a runtime call, identical to the
+    /// typed path — this only removes a native-only hard error the
+    /// interpreter never raised.
+    fn try_lower_dynamic_result_projection(&self, recv_hir: &HirExpr, field: &str) -> Option<HirExpr> {
+        if recv_hir.ty != TypeId::ANY {
+            return None;
+        }
+        let variant = match field {
+            "ok" => "Ok",
+            "err" => "Err",
+            _ => return None,
+        };
+        Some(self.build_result_projection(recv_hir, variant, TypeId::ANY))
+    }
+
+    fn build_result_projection(&self, recv_hir: &HirExpr, variant: &str, payload_ty: TypeId) -> HirExpr {
         let expected_disc = self.enum_variant_discriminant(variant);
         let subject_for_check = recv_hir.clone();
         let subject_for_payload = recv_hir.clone();
-        Some(HirExpr {
+        HirExpr {
             kind: HirExprKind::If {
                 condition: Box::new(HirExpr {
                     kind: HirExprKind::BuiltinCall {
@@ -739,7 +855,7 @@ impl Lowerer {
                 })),
             },
             ty: payload_ty,
-        })
+        }
     }
 
     fn enum_variant_payload_type(&self, ty: TypeId, enum_name: &str, variant_name: &str) -> Option<TypeId> {
@@ -891,9 +1007,7 @@ impl Lowerer {
         let tuple_elem_ty = |tid: TypeId| -> Option<TypeId> {
             match self.module.types.get(tid) {
                 Some(HirType::Tuple(elems)) => Some(elems.get(index).copied().unwrap_or(TypeId::ANY)),
-                Some(HirType::LabeledTuple(fields)) => {
-                    Some(fields.get(index).map(|(_, t)| *t).unwrap_or(TypeId::ANY))
-                }
+                Some(HirType::LabeledTuple(fields)) => Some(fields.get(index).map(|(_, t)| *t).unwrap_or(TypeId::ANY)),
                 _ => None,
             }
         };

@@ -1,0 +1,87 @@
+# SCV bulk-update generation (SCV-IMPL-E-07).
+#
+# A VCS bulk operation (checkout / rebase / branch-switch) touches many
+# files at once. Instead of reconciling each watcher event as it arrives,
+# the operation marks a GENERATION:
+#   scv_bulk_begin  — bumps the index dirty generation (E-05) and holds the
+#                     coalescer in bulk mode (E-04); nested begins are a
+#                     no-op (one generation per outermost operation)
+#   scv_bulk_defer  — records a per-file event with ZERO I/O, folding
+#                     duplicates per path (last kind wins; created+deleted
+#                     annihilate) so a path is touched at most once later
+#   scv_bulk_end    — releases the coalescer hold and reconciles ONCE via
+#                     the E-06 warm path: reads <= distinct surviving paths,
+#                     reconciled entries carry the generation; a second end
+#                     with nothing deferred is a no-op with zero I/O
+# Import direction: bulk_update -> warm_status -> worktree_index. The I/O
+# counter on the bulk state records I/O done WHILE deferring (always 0);
+# the reconcile's own counter is returned on ScvBulkEndResult.status.
+
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+use std.scv.event_coalesce.{ScvCoalescer, scv_coalesce_bulk_begin, scv_coalesce_bulk_end}
+use std.scv.core.{scv_rel_path}
+use std.scv.worktree_index.{ScvWtIndex, scv_wtindex_bump_dirty_gen, scv_wtindex_get}
+use std.scv.warm_status.{ScvIoCounter, ScvWarmStatusResult, scv_io_counter_new, scv_warm_fold_events, scv_warm_status}
+
+struct ScvBulkGeneration:
+    active: bool
+    generation: i64
+    reason: text
+    index: ScvWtIndex
+    coalescer: ScvCoalescer
+    deferred: [FsWatchEvent]
+    io: ScvIoCounter
+
+struct ScvBulkEndResult:
+    bulk: ScvBulkGeneration
+    status: ScvWarmStatusResult
+
+fn scv_bulk_begin(idx: ScvWtIndex, c: ScvCoalescer, reason: text) -> ScvBulkGeneration:
+    if c.bulk_active and idx.dirty_generation > 0:
+        # nested begin: same generation, keep deferred events
+        return ScvBulkGeneration(active: true, generation: idx.dirty_generation, reason: reason,
+                                 index: idx, coalescer: c, deferred: [], io: scv_io_counter_new())
+    val bumped = scv_wtindex_bump_dirty_gen(idx)
+    ScvBulkGeneration(active: true, generation: bumped.dirty_generation, reason: reason,
+                      index: bumped, coalescer: scv_coalesce_bulk_begin(c), deferred: [],
+                      io: scv_io_counter_new())
+
+fn scv_bulk_active(b: ScvBulkGeneration) -> bool:
+    b.active
+
+fn scv_bulk_deferred_count(b: ScvBulkGeneration) -> i64:
+    b.deferred.len()
+
+# Defer one event: fold into the per-path list. No stat, no read.
+fn scv_bulk_defer(b: ScvBulkGeneration, ev: FsWatchEvent) -> ScvBulkGeneration:
+    var next = b
+    var i = 0
+    while i < next.deferred.len():
+        if next.deferred[i].path == ev.path:
+            next.deferred[i].kind = ev.kind
+            next.deferred[i].seq = ev.seq
+            next.deferred[i].related = ev.related
+            return next
+        i = i + 1
+    next.deferred.push(ev)
+    next
+
+# Drop paths that were created and then deleted within the generation: the
+# index never saw them, so there is nothing to reconcile (and nothing to read).
+fn _bulk_survivors(root: text, b: ScvBulkGeneration, folded: [FsWatchEvent]) -> [FsWatchEvent]:
+    var out: [FsWatchEvent] = []
+    for ev in folded:
+        if ev.kind == "deleted" and scv_wtindex_get(b.index, scv_rel_path(root, ev.path)).path == "":
+            continue
+        out.push(ev)
+    out
+
+fn scv_bulk_end(root: text, b: ScvBulkGeneration) -> ScvBulkEndResult:
+    var next = b
+    next.active = false
+    next.coalescer = scv_coalesce_bulk_end(next.coalescer)
+    val work = _bulk_survivors(root, next, scv_warm_fold_events(next.deferred))
+    next.deferred = []
+    val status = scv_warm_status(root, next.index, work)
+    next.index = status.index
+    ScvBulkEndResult(bulk: next, status: status)

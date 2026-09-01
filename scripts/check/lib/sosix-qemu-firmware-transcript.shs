@@ -1,0 +1,68 @@
+#!/bin/sh
+# Shared ordered firmware/nonce transcript validation for SOSIX QEMU evidence.
+
+sosix_qemu_firmware_die() {
+    echo "sosix-qemu-firmware: $*" >&2
+    return 1
+}
+
+sosix_qemu_validate_firmware_transcript() {
+    # The boot-correlation marker is a dedicated, one-shot pre-entry marker.
+    # The execution nonce is deliberately a different identity: compiler
+    # receipts repeat it after guest-entry, so treating it as a unique boot
+    # marker would reject otherwise valid target-native evidence.
+    sqf_mode=$1 sqf_stages=$2 sqf_boot_marker=$3 sqf_nonce=$4 sqf_transcript=$5
+    case "$sqf_mode:$sqf_stages" in
+        'uefi-pflash:firmware-entry>firmware-handoff>guest-entry'|\
+        'opensbi-bios:opensbi-entry>opensbi-handoff>guest-entry'|\
+        'board-rom:rom-entry>rom-handoff>guest-entry'|\
+        'firmware-none:guest-entry') ;;
+        *) sosix_qemu_firmware_die "firmware stages do not match mode"; return 1;;
+    esac
+    [ -f "$sqf_transcript" ] || { sosix_qemu_firmware_die "missing transcript"; return 1; }
+    sqf_previous=0 sqf_entry=0
+    sqf_old_ifs=$IFS; IFS='>'
+    for sqf_marker in $sqf_stages; do
+        sqf_count=$(grep -Fxc -- "$sqf_marker" "$sqf_transcript")
+        [ "$sqf_count" -eq 1 ] || {
+            IFS=$sqf_old_ifs
+            sosix_qemu_firmware_die "stage must occur exactly once: $sqf_marker"
+            return 1
+        }
+        sqf_line=$(grep -Fxn -m1 -- "$sqf_marker" "$sqf_transcript" | cut -d: -f1)
+        [ "$sqf_line" -gt "$sqf_previous" ] || {
+            IFS=$sqf_old_ifs
+            sosix_qemu_firmware_die "firmware stage out of order: $sqf_marker"
+            return 1
+        }
+        sqf_previous=$sqf_line
+        [ "$sqf_marker" != guest-entry ] || sqf_entry=$sqf_line
+    done
+    IFS=$sqf_old_ifs
+    [ "$sqf_entry" -gt 0 ] || { sosix_qemu_firmware_die "missing guest-entry stage"; return 1; }
+    [ -n "$sqf_boot_marker" ] || { sosix_qemu_firmware_die "missing boot-correlation marker"; return 1; }
+    [ "$(grep -Fxc -- "$sqf_boot_marker" "$sqf_transcript")" -eq 1 ] || {
+        sosix_qemu_firmware_die "boot-correlation marker must occur exactly once"; return 1
+    }
+    sqf_boot_line=$(grep -Fxn -m1 -- "$sqf_boot_marker" "$sqf_transcript" | cut -d: -f1)
+    sqf_stage_before_entry=0
+    sqf_old_ifs=$IFS; IFS='>'
+    for sqf_marker in $sqf_stages; do
+        [ "$sqf_marker" = guest-entry ] || {
+            sqf_line=$(grep -Fxn -m1 -- "$sqf_marker" "$sqf_transcript" | cut -d: -f1)
+            [ "$sqf_line" -gt "$sqf_stage_before_entry" ] && sqf_stage_before_entry=$sqf_line
+        }
+    done
+    IFS=$sqf_old_ifs
+    [ "$sqf_boot_line" -gt "$sqf_stage_before_entry" ] && [ "$sqf_boot_line" -lt "$sqf_entry" ] || {
+        sosix_qemu_firmware_die "boot-correlation marker must be between firmware handoff and guest-entry"; return 1
+    }
+    [ "$(grep -Foc -- "$sqf_nonce" "$sqf_transcript")" -ge 1 ] || {
+        sosix_qemu_firmware_die "execution nonce is absent"; return 1
+    }
+    if awk -v nonce="$sqf_nonce" -v entry="$sqf_entry" 'index($0, nonce) && NR <= entry { bad=1 } END { exit bad }' "$sqf_transcript"; then
+        :
+    else
+        sosix_qemu_firmware_die "execution nonce must occur only after guest-entry"; return 1
+    fi
+}

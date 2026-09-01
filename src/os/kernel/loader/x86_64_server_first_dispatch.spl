@@ -1,0 +1,152 @@
+"""Pure preparation contract for the first x86_64 server dispatch.
+
+This is deliberately downstream of the scheduler bridge.  It consumes the
+bridge's accepted result, validates both scheduler-owned user handoffs, and
+returns scalar metadata for an eventual architecture owner.  It does not
+enter user mode, install a runtime token, or write CR3.
+"""
+
+use os.kernel.arch.x86_64.user_entry_validation.{
+    X86UserEntryHandoffValidation,
+    validate_enter_user_blocking_handoff
+}
+use os.kernel.loader.x86_64_server_scheduler_bridge.{
+    X86_64ServerSchedulerBridgeResult
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskId, TaskState}
+
+pub struct X86_64ServerFirstDispatchPreparation:
+    """Validated, non-executing first-dispatch metadata."""
+    scheduler: Scheduler
+    ipc: IpcManager
+    accepted: bool
+    reason: text
+    first_pid: u64
+    web_pid: u64
+    db_pid: u64
+    first_address_space: u64
+    web_address_space: u64
+    db_address_space: u64
+    first_generation: u64
+    web_generation: u64
+    db_generation: u64
+
+fn _rejected(scheduler: Scheduler, ipc: IpcManager, reason: text) -> X86_64ServerFirstDispatchPreparation:
+    X86_64ServerFirstDispatchPreparation(
+        scheduler: scheduler,
+        ipc: ipc,
+        accepted: false,
+        reason: reason,
+        first_pid: 0u64,
+        web_pid: 0u64,
+        db_pid: 0u64,
+        first_address_space: 0u64,
+        web_address_space: 0u64,
+        db_address_space: 0u64,
+        first_generation: 0u64,
+        web_generation: 0u64,
+        db_generation: 0u64
+    )
+
+fn _handoff_valid(validation: X86UserEntryHandoffValidation) -> bool:
+    validation.ok and validation.pid > 0u64 and
+        validation.context != nil and validation.cr3 > 0u64 and
+        validation.generation > 0u64
+
+fn _handoff_reason(label: text, validation: X86UserEntryHandoffValidation) -> text:
+    if validation.error.len() == 0:
+        label + "-handoff-invalid"
+    else:
+        label + "-" + validation.error
+
+fn _task_ready(scheduler: Scheduler, pid: u64) -> bool:
+    val task = scheduler.get_task(TaskId(id: pid))
+    if task == nil:
+        return false
+    match task.state:
+        case TaskState.Ready: true
+        case _: false
+
+fn _task_authority_matches(scheduler: Scheduler, ipc: IpcManager, pid: u64) -> bool:
+    """Require the scheduler copy to equal the authoritative IPC record."""
+    val task = scheduler.get_task(TaskId(id: pid))
+    val authoritative = ipc.capabilities_for_task(TaskId(id: pid))
+    if task == nil or authoritative == nil:
+        return false
+    val local = task.unwrap().capabilities
+    val owned = authoritative.unwrap()
+    if not local.is_pledged or not owned.is_pledged or
+            local.caps.len() == 0 or local.caps.len() != owned.caps.len():
+        return false
+    var index = 0
+    while index < local.caps.len():
+        val left = local.caps[index]
+        val right = owned.caps[index]
+        if left.owner != pid or right.owner != pid or
+                left.kind != right.kind or left.generation != right.generation or
+                left.token_id != right.token_id or
+                left.parent_token_id != right.parent_token_id or
+                left.depth != right.depth:
+            return false
+        index = index + 1
+    true
+
+pub fn x86_64_server_prepare_first_dispatch(
+    bridge: X86_64ServerSchedulerBridgeResult
+) -> X86_64ServerFirstDispatchPreparation:
+    """Validate an accepted server bridge without performing architecture work.
+
+    The lower PID is selected as the first dispatch target, independent of the
+    bridge's web/DB creation order.  Every rejection returns zero metadata so a
+    caller cannot mistake a partial handoff for an executable one.
+    """
+    if not bridge.accepted:
+        return _rejected(bridge.scheduler, bridge.ipc, "bridge-not-accepted:" + bridge.reason)
+    if bridge.web_pid == 0u64 or bridge.db_pid == 0u64:
+        return _rejected(bridge.scheduler, bridge.ipc, "non-positive-pid")
+    if bridge.web_pid == bridge.db_pid:
+        return _rejected(bridge.scheduler, bridge.ipc, "duplicate-pid")
+    if not _task_ready(bridge.scheduler, bridge.web_pid):
+        return _rejected(bridge.scheduler, bridge.ipc, "web-task-not-ready")
+    if not _task_ready(bridge.scheduler, bridge.db_pid):
+        return _rejected(bridge.scheduler, bridge.ipc, "db-task-not-ready")
+    if not _task_authority_matches(bridge.scheduler, bridge.ipc, bridge.web_pid):
+        return _rejected(bridge.scheduler, bridge.ipc, "web-authority-mismatch")
+    if not _task_authority_matches(bridge.scheduler, bridge.ipc, bridge.db_pid):
+        return _rejected(bridge.scheduler, bridge.ipc, "db-authority-mismatch")
+
+    val web = validate_enter_user_blocking_handoff(bridge.web_pid, bridge.scheduler)
+    if not _handoff_valid(web):
+        return _rejected(bridge.scheduler, bridge.ipc, _handoff_reason("web", web))
+    val db = validate_enter_user_blocking_handoff(bridge.db_pid, bridge.scheduler)
+    if not _handoff_valid(db):
+        return _rejected(bridge.scheduler, bridge.ipc, _handoff_reason("db", db))
+    if web.cr3 == db.cr3:
+        return _rejected(bridge.scheduler, bridge.ipc, "duplicate-address-space")
+    if web.generation == db.generation:
+        return _rejected(bridge.scheduler, bridge.ipc, "duplicate-address-space-generation")
+
+    val first_is_web = bridge.web_pid < bridge.db_pid
+    val first_pid = if first_is_web: bridge.web_pid else: bridge.db_pid
+    val first_address_space = if first_is_web: web.cr3 else db.cr3
+    val first_generation = if first_is_web: web.generation else db.generation
+    X86_64ServerFirstDispatchPreparation(
+        scheduler: bridge.scheduler,
+        ipc: bridge.ipc,
+        accepted: true,
+        reason: "first-dispatch-ready",
+        first_pid: first_pid,
+        web_pid: bridge.web_pid,
+        db_pid: bridge.db_pid,
+        first_address_space: first_address_space,
+        web_address_space: web.cr3,
+        db_address_space: db.cr3,
+        first_generation: first_generation,
+        web_generation: web.generation,
+        db_generation: db.generation
+    )
+
+export X86_64ServerFirstDispatchPreparation
+export x86_64_server_prepare_first_dispatch

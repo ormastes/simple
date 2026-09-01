@@ -1,6 +1,6 @@
-# map_correctness_spec
+# Map Correctness Specification
 
-> Verifies the map correctness behaviour end to end so maintainers of this
+> Tests covering Map correctness.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# map_correctness_spec
-
-Verifies the map correctness behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/std/map/map_correctness_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the map correctness behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Map Correctness Specification
 
 ## Scenarios
 
@@ -39,19 +17,22 @@ unrelated sibling features are out of scope.
 
 #### creates an empty map
 
-- Verify: creates an empty map
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates an empty map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: creates an empty map")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("creates an empty map")
 val map = MiniMap.new()
 check(map.is_empty())
 check(map.len() == 0)
@@ -62,19 +43,18 @@ check(map.capacity == 4)
 
 #### inserts and retrieves entries
 
-- Verify: inserts and retrieves entries
+- inserts and retrieves entries
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: inserts and retrieves entries")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("inserts and retrieves entries")
 var map = MiniMap.new()
 map.insert("key", 42)
 check(not map.is_empty())
@@ -87,19 +67,18 @@ check(map.has("key"))
 
 #### updates an existing key without duplicating it
 
-- Verify: updates an existing key without duplicating it
+- updates an existing key without duplicating it
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: updates an existing key without duplicating it")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("updates an existing key without duplicating it")
 var map = MiniMap.new()
 map.insert("key", 1)
 map.insert("key", 2)
@@ -111,19 +90,18 @@ check(map.get("key") == Some(2))
 
 #### returns None for a missing key
 
-- Verify: returns None for a missing key
+- returns None for a missing key
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: returns None for a missing key")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("returns None for a missing key")
 val map = MiniMap.new()
 check(map.get("missing") == None)
 check(not map.has("missing"))
@@ -133,19 +111,18 @@ check(not map.has("missing"))
 
 #### removes entries and keeps other entries intact
 
-- Verify: removes entries and keeps other entries intact
+- removes entries and keeps other entries intact
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: removes entries and keeps other entries intact")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("removes entries and keeps other entries intact")
 var map = MiniMap.new()
 map.insert("a", 1)
 map.insert("b", 2)
@@ -163,19 +140,18 @@ check(map.get("c") == Some(3))
 
 #### clears all entries
 
-- Verify: clears all entries
+- clears all entries
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: clears all entries")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("clears all entries")
 var map = MiniMap.new()
 map.insert("a", 1)
 map.insert("b", 2)
@@ -191,19 +167,18 @@ check(sum_counts(map.buckets) == 0)
 
 #### returns keys values and entries in insertion order
 
-- Verify: returns keys values and entries in insertion order
+- returns keys values and entries in insertion order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: returns keys values and entries in insertion order")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("returns keys values and entries in insertion order")
 var map = MiniMap.new()
 map.insert("a", 1)
 map.insert("b", 2)
@@ -229,19 +204,18 @@ check(entries[1].value == 2)
 
 #### grows capacity when the load threshold is exceeded
 
-- Verify: grows capacity when the load threshold is exceeded
+- grows capacity when the load threshold is exceeded
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: grows capacity when the load threshold is exceeded")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("grows capacity when the load threshold is exceeded")
 var map = MiniMap.with_capacity(4)
 val initial_capacity = map.capacity
 map.insert("a", 1)
@@ -261,19 +235,18 @@ check(map.get("dddd") == Some(4))
 
 #### clones independently
 
-- Verify: clones independently
+- clones independently
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: clones independently")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("clones independently")
 var original = MiniMap.new()
 original.insert("a", 1)
 original.insert("b", 2)
@@ -292,19 +265,18 @@ check(copy.get("b") == Some(2))
 
 #### tracks bucket counts for inserted entries
 
-- Verify: tracks bucket counts for inserted entries
+- tracks bucket counts for inserted entries
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: tracks bucket counts for inserted entries")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("tracks bucket counts for inserted entries")
 var map = MiniMap.with_capacity(4)
 map.insert("a", 1)
 map.insert("bb", 2)
@@ -320,19 +292,18 @@ check(map.capacity >= 4)
 
 #### handles special and unicode keys
 
-- Verify: handles special and unicode keys
+- handles special and unicode keys
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
-step("Verify: handles special and unicode keys")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("handles special and unicode keys")
 var map = MiniMap.new()
 map.insert("key\nwith\nnewlines", 1)
 map.insert("key\twith\ttabs", 2)
@@ -344,6 +315,21 @@ check(map.get("héllo") == Some(3))
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/std/map/map_correctness_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Map correctness.
+- Map correctness
 
 ## Scenario Summary
 
@@ -358,36 +344,50 @@ check(map.get("héllo") == Some(3))
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `033f1cdf87a554518d9b34fe0fce5961a0dc73205cb52ed084d173675a461120`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `85b31b914e8b8e2dbd855b6eae078d5dad9a6e364fd5165dc58189213588f444`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `033f1cdf87a554518d9b34fe0fce5961a0dc73205cb52ed084d173675a461120`.
+Source SHA-256: `85b31b914e8b8e2dbd855b6eae078d5dad9a6e364fd5165dc58189213588f444`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `033f1cdf87a554518d9b34fe0fce5961a0dc73205cb52ed084d173675a461120`  
+Source SHA-256: `85b31b914e8b8e2dbd855b6eae078d5dad9a6e364fd5165dc58189213588f444`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/01_unit/std/map/map_correctness_spec.spl
 mirror: doc/06_spec/01_unit/std/map/map_correctness_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/std/map/map_correctness_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/std/map/map_correctness_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/std/map/map_correctness_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/std/map/map_correctness_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/map/map_correctness_spec.spl:188:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates an empty map' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/map/map_correctness_spec.spl:196:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'inserts and retrieves entries' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/map/map_correctness_spec.spl:206:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'updates an existing key without duplicating it' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

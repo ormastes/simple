@@ -304,9 +304,6 @@ pub(crate) struct ModuleImports {
     /// Used only for bounded field-name disambiguation when `struct_defs`
     /// lost information due to same-name collisions across modules.
     pub duplicate_struct_defs: DuplicateStructDefs,
-    /// Field names whose byte offsets disagree across project structs.
-    /// Derived once from `struct_defs` and shared by every compilation unit.
-    pub ambiguous_field_names: std::sync::Arc<std::collections::HashSet<String>>,
     /// Global enum definitions with payload field types.
     /// Shared across all compilation units. The HIR lowerer consumes this in
     /// `compile_file_to_object` to eagerly seed `module.types.name_to_id` and
@@ -316,9 +313,6 @@ pub(crate) struct ModuleImports {
     /// with `ty=ANY` because the enum reached the file via re-export but
     /// not via a direct `use` chain that triggered `preregister_imported_type_names`).
     pub enum_defs: EnumDefs,
-    /// Suffix lookup used by LLVM mangling. This is a project invariant, so
-    /// building it once avoids an O(files × global-functions) hot path.
-    pub suffix_index: std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
     /// Mangled enum owner to stable dotted runtime identity.
     pub enum_runtime_names: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Set of mangled names that correspond to module-level data (`val`/`var`/
@@ -351,92 +345,6 @@ pub(crate) struct ModuleImports {
     /// don't already have them; existing local definitions (registered in
     /// Pass 0 of `module_pass.rs::lower_module`) take precedence.
     pub populate_global_enum_defs: bool,
-}
-
-fn build_ambiguous_field_names(
-    struct_defs: &std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
-) -> std::collections::HashSet<String> {
-    use std::collections::{HashMap, HashSet};
-
-    let mut field_indices: HashMap<&str, HashSet<usize>> = HashMap::new();
-    for fields in struct_defs.values() {
-        for (index, (name, _)) in fields.iter().enumerate() {
-            field_indices.entry(name.as_str()).or_default().insert(index);
-        }
-    }
-    field_indices
-        .into_iter()
-        .filter_map(|(name, indices)| (indices.len() > 1).then(|| name.to_string()))
-        .collect()
-}
-
-#[cfg(test)]
-mod shared_metadata_tests {
-    use super::build_ambiguous_field_names;
-    use simple_parser::Type;
-    use std::collections::HashMap;
-
-    #[test]
-    fn structural_metadata_marks_only_index_disagreements() {
-        let defs = HashMap::from([
-            (
-                "A".to_string(),
-                vec![
-                    ("name".to_string(), Type::Simple("str".to_string())),
-                    ("id".to_string(), Type::Simple("i64".to_string())),
-                ],
-            ),
-            (
-                "B".to_string(),
-                vec![
-                    ("name".to_string(), Type::Simple("str".to_string())),
-                    ("pad".to_string(), Type::Simple("i64".to_string())),
-                    ("id".to_string(), Type::Simple("i64".to_string())),
-                ],
-            ),
-            (
-                "C".to_string(),
-                vec![("name".to_string(), Type::Simple("str".to_string()))],
-            ),
-        ]);
-
-        let ambiguous = build_ambiguous_field_names(&defs);
-        assert_eq!(ambiguous.len(), 1);
-        assert!(ambiguous.contains("id"));
-        assert!(!ambiguous.contains("name"));
-    }
-
-    #[test]
-    fn structural_metadata_is_insertion_order_independent() {
-        let forward = HashMap::from([
-            (
-                "A".to_string(),
-                vec![("value".to_string(), Type::Simple("i64".to_string()))],
-            ),
-            (
-                "B".to_string(),
-                vec![
-                    ("pad".to_string(), Type::Simple("i64".to_string())),
-                    ("value".to_string(), Type::Simple("i64".to_string())),
-                ],
-            ),
-        ]);
-        let reverse = HashMap::from([
-            (
-                "B".to_string(),
-                vec![
-                    ("pad".to_string(), Type::Simple("i64".to_string())),
-                    ("value".to_string(), Type::Simple("i64".to_string())),
-                ],
-            ),
-            (
-                "A".to_string(),
-                vec![("value".to_string(), Type::Simple("i64".to_string()))],
-            ),
-        ]);
-
-        assert_eq!(build_ambiguous_field_names(&forward), build_ambiguous_field_names(&reverse));
-    }
 }
 
 /// Configuration for native project builds.
@@ -528,13 +436,19 @@ pub struct NativeBuildConfig {
     pub low_memory: bool,
 }
 
+/// Per-file budget shared by every native-build entrypoint.
+///
+/// Export-heavy compiler facades are deliberately compiled before parallel
+/// fanout, but still need more than 60 seconds when their cache entry is cold.
+pub const DEFAULT_NATIVE_FILE_TIMEOUT_SECS: u64 = 300;
+
 impl Default for NativeBuildConfig {
     fn default() -> Self {
         Self {
             // Large legitimate files (3000+-line controllers, big re-export hubs)
             // need more than 60s for full parse->lowering->codegen; they compile
             // fine, just slowly. Raised to avoid spurious bootstrap aborts.
-            file_timeout: 300,
+            file_timeout: DEFAULT_NATIVE_FILE_TIMEOUT_SECS,
             stack_size: 16 * 1024 * 1024,
             parallel: true,
             strip: false,
@@ -813,6 +727,7 @@ impl NativeProjectBuilder {
         }
 
         // 1. Discover files
+        let step_start = Instant::now();
         let (files, file_sources) = if self.config.entry_closure {
             let entry_file = self
                 .entry_file
@@ -869,7 +784,11 @@ impl NativeProjectBuilder {
         }
 
         if rust_trace {
-            eprintln!("[native-rust-trace] discovered {} file(s)", files.len());
+            eprintln!(
+                "[native-rust-trace] step 1 discover: {} file(s) in {:.3}s",
+                files.len(),
+                step_start.elapsed().as_secs_f64()
+            );
             for (idx, path) in files.iter().take(12).enumerate() {
                 eprintln!("  discovered[{idx}]={}", path.display());
             }
@@ -877,11 +796,21 @@ impl NativeProjectBuilder {
                 eprintln!("  discovered_more={}", files.len() - 12);
             }
         }
+        if let Ok(list_path) = std::env::var("SIMPLE_DEBUG_DISCOVERY_LIST") {
+            // Full ordered discovery list, one path per line: discovery order
+            // feeds cache keys and link order, so this is the artifact to diff
+            // when touching the discovery walk.
+            let listing: String = files.iter().map(|p| format!("{}\n", p.display())).collect();
+            if let Err(e) = std::fs::write(&list_path, listing) {
+                eprintln!("warning: could not write SIMPLE_DEBUG_DISCOVERY_LIST {list_path}: {e}");
+            }
+        }
         if self.config.verbose {
             eprintln!("Found {0} .spl files", files.len());
         }
 
         // 2. Set up incremental state
+        let step_start = Instant::now();
         let cache_base_dir = self.cache_base_dir();
         let cache_dir = self.cache_dir();
         let objects_dir = cache_dir.join("objects");
@@ -901,15 +830,31 @@ impl NativeProjectBuilder {
             std::fs::create_dir_all(&objects_dir).map_err(|e| format!("create cache dir: {e}"))?;
         }
 
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 2 incremental state: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
+
         // 3. Stage .o files beside the cache so system-temp and cache cleanup cannot remove them.
+        let step_start = Instant::now();
         let mut temp_dir = Some(native_object_staging_dir(&cache_base_dir, &cache_dir)?);
         let temp_dir_path = temp_dir
             .as_ref()
             .map(|dir| dir.path().to_path_buf())
             .ok_or_else(|| "tempdir unexpectedly missing".to_string())?;
 
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 3 stage dir: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
+
         // 4. Read all source files and determine dirty set
         let compile_start = Instant::now();
+        let step_start = Instant::now();
         // 4b. Discovery phase (hoisted above the dirty-set determination so the
         // opt-in safe-incremental object cache key can fold in every cross-module
         // codegen input): build the import map for cross-module function
@@ -918,12 +863,16 @@ impl NativeProjectBuilder {
         let incr_hardening = incremental_hardening_requested(self.config.incremental_hardening);
         let mut layout_fp: u64 = 0;
         let result = build_import_map(&file_sources, &self.source_dirs, &self.source_root);
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 4b build_import_map: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
         if let Some(collision) = &result.enum_runtime_collision {
             return Err(collision.clone());
         }
         let imports = if !self.config.no_mangle {
-            let ambiguous_field_names = build_ambiguous_field_names(&result.struct_defs);
-            let suffix_index = build_suffix_index(&result.all_mangled);
             // Always fingerprinted when the object cache is live: a module's object
             // bytes depend on OTHER modules' declarations, so the cross-module
             // digest is a CORRECTNESS input to the cache key, not an opt-in extra.
@@ -974,9 +923,7 @@ impl NativeProjectBuilder {
                 unique_struct_owners: std::sync::Arc::new(result.unique_struct_owners),
                 struct_module_owners: std::sync::Arc::new(result.struct_module_owners),
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
-                ambiguous_field_names: std::sync::Arc::new(ambiguous_field_names),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
-                suffix_index: std::sync::Arc::new(suffix_index),
                 enum_runtime_names: std::sync::Arc::new(result.enum_runtime_names),
                 data_exports: std::sync::Arc::new(result.data_exports),
                 fn_arities: std::sync::Arc::new(result.fn_arities),
@@ -997,9 +944,7 @@ impl NativeProjectBuilder {
                 unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-                ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-                suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1050,6 +995,13 @@ impl NativeProjectBuilder {
             None
         };
         let global_fp_combined: u64 = global_fp.as_ref().map(GlobalBuildFingerprint::combined).unwrap_or(0);
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 4b import map + fingerprint: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
+        let step_start = Instant::now();
 
         let effective_backend = self.config.backend.as_str();
 
@@ -1117,10 +1069,11 @@ impl NativeProjectBuilder {
         let cached_count = cached_objects.len();
         if rust_trace {
             eprintln!(
-                "[native-rust-trace] dirty set: cached={} to_compile={} use_incremental={}",
+                "[native-rust-trace] step 4 dirty set: cached={} to_compile={} use_incremental={} in {:.3}s",
                 cached_count,
                 to_compile.len(),
-                use_incremental
+                use_incremental,
+                step_start.elapsed().as_secs_f64()
             );
             for (idx, path, _, _) in to_compile.iter().take(12) {
                 eprintln!("  compile[{idx}]={}", path.display());
@@ -1151,6 +1104,9 @@ impl NativeProjectBuilder {
             self.compile_entries_sequential(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         };
         let compile_time = compile_start.elapsed();
+        if rust_trace {
+            eprintln!("[native-rust-trace] step 5 compile: {:.3}s", compile_time.as_secs_f64());
+        }
 
         // Collect results
         let mut object_paths_with_indices: Vec<(usize, PathBuf)> = cached_objects;
@@ -1241,7 +1197,8 @@ impl NativeProjectBuilder {
         let link_start = Instant::now();
         let mut final_object_paths = object_paths;
         if self.config.emit_archive {
-            if let Some(init_o) = self.generate_init_caller(&temp_dir_path, &final_object_paths, None)? {
+            let (init_o, _init_names) = self.generate_init_caller(&temp_dir_path, &final_object_paths, None)?;
+            if let Some(init_o) = init_o {
                 final_object_paths.push(init_o);
             }
         }

@@ -9,49 +9,49 @@
 # MMIO instead of port I/O).
 
 use os.kernel.interrupts.apic.{apic_send_init, apic_send_sipi, apic_get_id}
+use os.kernel.arch.x86.port_io_owner.{
+    x86_port_inb, x86_port_outb, x86_port_inw, x86_port_outw,
+    x86_port_inl, x86_port_outl, x86_port_io_wait,
+}
 use os.kernel.smp.percpu.{percpu_apic_id, percpu_is_online}
 use os.kernel.smp.smp.{smp_mark_ap_startup_sent, smp_ap_startup_sent, smp_mark_ap_started_by_apic_id, smp_num_cpus}
+use os.kernel.smp.cpu_identity_runtime_surface_v1.{
+    cpu_identity_runtime_resolve_or_unresolved_v1,
+}
+use os.kernel.smp.cpu_topology_identity_owner_v1.{CpuHardwareIdentityKindV1}
 
 # ============================================================================
 # Port I/O
 # ============================================================================
 
-extern fn rt_port_inb(port: u16) -> u8
-extern fn rt_port_outb(port: u16, value: u8)
-extern fn rt_port_inw(port: u16) -> u16
-extern fn rt_port_outw(port: u16, value: u16)
-extern fn rt_port_inl(port: u16) -> u32
-extern fn rt_port_outl(port: u16, value: u32)
-extern fn rt_port_io_wait()
-
 fn port_inb(port: u16) -> u8:
     """Read byte from I/O port."""
-    rt_port_inb(port)
+    x86_port_inb(port)
 
 fn port_outb(port: u16, value: u8):
     """Write byte to I/O port."""
-    rt_port_outb(port, value)
+    x86_port_outb(port, value)
 
 fn port_outb_wait(port: u16, value: u8):
     """Write byte to I/O port with I/O wait."""
-    rt_port_outb(port, value)
-    rt_port_io_wait()
+    x86_port_outb(port, value)
+    x86_port_io_wait()
 
 fn port_inw(port: u16) -> u16:
     """Read word from I/O port."""
-    rt_port_inw(port)
+    x86_port_inw(port)
 
 fn port_outw(port: u16, value: u16):
     """Write word to I/O port."""
-    rt_port_outw(port, value)
+    x86_port_outw(port, value)
 
 fn port_inl(port: u16) -> u32:
     """Read dword from I/O port."""
-    rt_port_inl(port)
+    x86_port_inl(port)
 
 fn port_outl(port: u16, value: u32):
     """Write dword to I/O port."""
-    rt_port_outl(port, value)
+    x86_port_outl(port, value)
 
 # ============================================================================
 # Control Registers
@@ -177,7 +177,6 @@ use os.kernel.log.klog_api.{log_raw_println}
 # must be set to once the SYSCALL install is actually enabled.
 extern fn get_kernel_syscall_entry_addr() -> u64
 extern fn rt_x86_prepare_ap_startup(cpu_id: u32, sipi_vector: u32) -> i64
-extern fn rt_x86_ap_trampoline_phys() -> u64
 
 # Use u64 sentinel instead of bool — `bool = false` in the baremetal runtime
 # tags as 0x3 (NIL), which is non-zero, so the idempotency guard below would
@@ -288,7 +287,7 @@ fn x86_ap_trampoline_vector() -> u32:
 
 fn x86_ap_trampoline_phys() -> u64:
     """Return the physical install address for the AP trampoline."""
-    rt_x86_ap_trampoline_phys()
+    0x8000u64
 
 fn x86_start_registered_aps() -> u32:
     """Send INIT/SIPI to all firmware-registered APs using the installed trampoline."""
@@ -368,8 +367,11 @@ struct X86Cpu:
 
 impl X86Cpu:
     fn cpu_id() -> u64:
-        """Return current CPU ID. Single CPU for now."""
-        0
+        """Resolve the current xAPIC identity through the boot-sealed map."""
+        cpu_identity_runtime_resolve_or_unresolved_v1(
+            CpuHardwareIdentityKindV1.X86Apic,
+            apic_get_id() as u64,
+        )
 
     fn cpu_address_width() -> u64:
         """Return virtual address width in bits."""

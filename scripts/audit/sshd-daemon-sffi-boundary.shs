@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/apps/sshd/sshd.spl"
+
+if grep -E '(serial_println|^extern fn rt_bytes_|^extern fn rt_push_byte|rt_bytes_u8_at[(]|rt_push_byte[(])' "$module" >/dev/null; then
+    echo "SSH daemon regained diagnostic or per-byte foreign work" >&2
+    exit 1
+fi
+
+externs=$(grep -c '^extern fn ' "$module")
+scopes=$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")
+if [ "$externs" -ne 3 ] || [ "$scopes" -ne 3 ]; then
+    echo "SSH daemon foreign-boundary inventory changed" >&2
+    exit 1
+fi
+
+grep -q 'bytes\[i\]' "$module"
+grep -q 'cur.push(code)' "$module"
+grep -q 'bytes.len() == 0u64' "$module"
+grep -q 'token.len() == 0u64' "$module"
+grep -q 'fd > 2147483647i64' "$module"
+grep -q 'client_fd > 2147483647i64' "$module"
+
+if grep -E '(self-test: PASS|self-test passes|Runs Ed25519 self-test)' "$module" >/dev/null; then
+    echo "SSH daemon regained an unsupported crypto-verification claim" >&2
+    exit 1
+fi
+
+echo "SSH daemon boundary audit: PASS (Pure Simple tokenization; three checked/scoped providers; unsupported self-test claim absent)"

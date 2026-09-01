@@ -1,0 +1,177 @@
+"""Static package coverage for the unwired VFS mutation owner prerequisite."""
+use std.spec.*
+use std.common.contracts.execution.simpleos_vfs_mutation_v1.*
+use os.kernel.fs.vfs_mutation_receipt_owner_v1.*
+
+fn _task(id: u64) -> TaskExecutionInstanceV1:
+    TaskExecutionInstanceV1(task_id: id, lifecycle_generation: 7u64, exec_generation: 3u64)
+
+fn _object(id: u64) -> VfsObjectIdentityV1:
+    VfsObjectIdentityV1(filesystem_instance_id: 11u64, mount_id: 12u64,
+        mount_generation: 13u64, object_id: id, object_generation: 1u64)
+
+fn _zero_object() -> VfsObjectIdentityV1:
+    VfsObjectIdentityV1(filesystem_instance_id: 0u64, mount_id: 0u64,
+        mount_generation: 0u64, object_id: 0u64, object_generation: 0u64)
+
+fn _write_intent(task_id: u64, object_id: u64) -> VfsMutationIntentV1:
+    val zero = _zero_object()
+    VfsMutationIntentV1(kind: VfsMutationKindV1.Write, actor: _task(task_id),
+        ofd: VfsOpenFileDescriptionIdentityV1(slot: 4u32, generation: 9u32),
+        subject: _object(object_id), container: zero, peer_container: zero,
+        replaced_subject: zero, byte_offset: 20u64, byte_length: 5u64,
+        subject_sequence_before: 8u64, container_sequence_before: 0u64,
+        peer_container_sequence_before: 0u64,
+        replaced_subject_sequence_before: 0u64,
+        old_name_sha256: "", new_name_sha256: "")
+
+fn _ack(intent: VfsMutationIntentV1, subject_after: u64, bytes: u64) -> VfsMutationBackendAckV1:
+    VfsMutationBackendAckV1(resolved_intent: intent,
+        subject_sequence_after: subject_after, container_sequence_after: 0u64,
+        peer_container_sequence_after: 0u64, replaced_subject_sequence_after: 0u64,
+        committed_byte_count: bytes, durable: false, backend_closed: false)
+
+describe "VFS mutation grant and receipt owner v1":
+    it "accepts an exact write acknowledgment and consumes its receipt once":
+        val intent = _write_intent(8101u64, 9101u64)
+        val grant = vfs_mutation_reserve_v1(intent).unwrap()
+        val dispatch = vfs_mutation_claim_dispatch_v1(grant, intent.actor, intent).unwrap()
+        val ready = vfs_mutation_commit_backend_ack_v1(
+            dispatch, _ack(intent, 9u64, 5u64)).unwrap()
+        val receipt = vfs_mutation_take_receipt_v1(ready).unwrap()
+        expect(receipt.intent.kind == VfsMutationKindV1.Write).to_be(true)
+        expect(receipt.ack.committed_byte_count).to_equal(5u64)
+        expect(vfs_mutation_take_receipt_v1(ready).is_err()).to_be(true)
+
+    it "rejects stale task identity and a forged resolved namespace intent":
+        val intent = _write_intent(8102u64, 9102u64)
+        val grant = vfs_mutation_reserve_v1(intent).unwrap()
+        expect(vfs_mutation_claim_dispatch_v1(
+            grant, _task(9999u64), intent).is_err()).to_be(true)
+        val altered = _write_intent(8102u64, 9992u64)
+        expect(vfs_mutation_claim_dispatch_v1(
+            grant, intent.actor, altered).is_err()).to_be(true)
+        expect(vfs_mutation_cancel_reserved_v1(grant).unwrap()).to_be(true)
+
+    it "serializes overlapping object sequences and rejects stale generation reuse":
+        val intent = _write_intent(8103u64, 9103u64)
+        val first = vfs_mutation_reserve_v1(intent).unwrap()
+        expect(vfs_mutation_reserve_v1(intent).is_err()).to_be(true)
+        expect(vfs_mutation_cancel_reserved_v1(first).unwrap()).to_be(true)
+        val second = vfs_mutation_reserve_v1(intent).unwrap()
+        expect(vfs_mutation_cancel_reserved_v1(first).is_err()).to_be(true)
+        expect(vfs_mutation_cancel_reserved_v1(second).unwrap()).to_be(true)
+
+    it "retires indeterminate dispatch and keeps its objects unavailable":
+        val intent = _write_intent(8104u64, 9104u64)
+        val grant = vfs_mutation_reserve_v1(intent).unwrap()
+        val dispatch = vfs_mutation_claim_dispatch_v1(grant, intent.actor, intent).unwrap()
+        expect(vfs_mutation_mark_indeterminate_v1(dispatch).unwrap()).to_be(true)
+        expect(vfs_mutation_take_receipt_v1(grant).is_err()).to_be(true)
+        expect(vfs_mutation_reserve_v1(intent).is_err()).to_be(true)
+
+    it "binds create parent epoch and rename replacement epochs":
+        val base = _write_intent(8105u64, 9105u64)
+        val zero = _zero_object()
+        val name_a = "1111111111111111111111111111111111111111111111111111111111111111"
+        val name_b = "2222222222222222222222222222222222222222222222222222222222222222"
+        val create = VfsMutationIntentV1(kind: VfsMutationKindV1.Create,
+            actor: base.actor, ofd: base.ofd, subject: base.subject,
+            container: _object(9205u64), peer_container: zero, replaced_subject: zero,
+            byte_offset: 0u64, byte_length: 0u64, subject_sequence_before: 0u64,
+            container_sequence_before: 4u64, peer_container_sequence_before: 0u64,
+            replaced_subject_sequence_before: 0u64,
+            old_name_sha256: "", new_name_sha256: name_a)
+        val create_ack = VfsMutationBackendAckV1(resolved_intent: create,
+            subject_sequence_after: 1u64, container_sequence_after: 5u64,
+            peer_container_sequence_after: 0u64, replaced_subject_sequence_after: 0u64,
+            committed_byte_count: 0u64, durable: false, backend_closed: false)
+        expect(vfs_mutation_ack_matches_v1(create, create_ack)).to_be(true)
+        val rename = VfsMutationIntentV1(kind: VfsMutationKindV1.Rename,
+            actor: base.actor, ofd: base.ofd, subject: base.subject,
+            container: _object(9305u64), peer_container: _object(9405u64),
+            replaced_subject: _object(9505u64), byte_offset: 0u64, byte_length: 0u64,
+            subject_sequence_before: 8u64, container_sequence_before: 12u64,
+            peer_container_sequence_before: 14u64,
+            replaced_subject_sequence_before: 6u64,
+            old_name_sha256: name_a, new_name_sha256: name_b)
+        val rename_ack = VfsMutationBackendAckV1(resolved_intent: rename,
+            subject_sequence_after: 9u64, container_sequence_after: 13u64,
+            peer_container_sequence_after: 15u64, replaced_subject_sequence_after: 7u64,
+            committed_byte_count: 0u64, durable: false, backend_closed: false)
+        expect(vfs_mutation_ack_matches_v1(rename, rename_ack)).to_be(true)
+
+    it "rejects cross-mount and contradictory duplicate rename identities":
+        val base = _write_intent(8115u64, 9115u64)
+        val name_a = "1111111111111111111111111111111111111111111111111111111111111111"
+        val name_b = "2222222222222222222222222222222222222222222222222222222222222222"
+        val parent = _object(9215u64)
+        val same_dir_bad_epoch = VfsMutationIntentV1(
+            kind: VfsMutationKindV1.Rename, actor: base.actor, ofd: base.ofd,
+            subject: base.subject, container: parent, peer_container: parent,
+            replaced_subject: _zero_object(), byte_offset: 0u64, byte_length: 0u64,
+            subject_sequence_before: 8u64, container_sequence_before: 3u64,
+            peer_container_sequence_before: 4u64,
+            replaced_subject_sequence_before: 0u64,
+            old_name_sha256: name_a, new_name_sha256: name_b)
+        expect(vfs_mutation_intent_valid_v1(same_dir_bad_epoch)).to_be(false)
+        val foreign_parent = VfsObjectIdentityV1(
+            filesystem_instance_id: 99u64, mount_id: 98u64,
+            mount_generation: 97u64, object_id: 96u64, object_generation: 1u64)
+        val cross_mount_create = VfsMutationIntentV1(
+            kind: VfsMutationKindV1.Create, actor: base.actor, ofd: base.ofd,
+            subject: base.subject, container: foreign_parent,
+            peer_container: _zero_object(), replaced_subject: _zero_object(),
+            byte_offset: 0u64, byte_length: 0u64, subject_sequence_before: 0u64,
+            container_sequence_before: 1u64, peer_container_sequence_before: 0u64,
+            replaced_subject_sequence_before: 0u64,
+            old_name_sha256: "", new_name_sha256: name_a)
+        expect(vfs_mutation_intent_valid_v1(cross_mount_create)).to_be(false)
+
+    it "keeps fork grants local and distinguishes fsync from final close":
+        val base = _write_intent(8106u64, 9106u64)
+        expect(vfs_mutation_grant_survives_fork_v1()).to_be(false)
+        expect(vfs_mutation_alias_actor_may_use_v1(
+            base.actor, base.ofd, base.actor, base.ofd)).to_be(true)
+        val zero = _zero_object()
+        val fsync = VfsMutationIntentV1(kind: VfsMutationKindV1.Fsync,
+            actor: base.actor, ofd: base.ofd, subject: base.subject,
+            container: zero, peer_container: zero, replaced_subject: zero,
+            byte_offset: 0u64, byte_length: 0u64, subject_sequence_before: 9u64,
+            container_sequence_before: 0u64, peer_container_sequence_before: 0u64,
+            replaced_subject_sequence_before: 0u64,
+            old_name_sha256: "", new_name_sha256: "")
+        val fsync_ack = VfsMutationBackendAckV1(resolved_intent: fsync,
+            subject_sequence_after: 9u64, container_sequence_after: 0u64,
+            peer_container_sequence_after: 0u64, replaced_subject_sequence_after: 0u64,
+            committed_byte_count: 0u64, durable: true, backend_closed: false)
+        expect(vfs_mutation_ack_matches_v1(fsync, fsync_ack)).to_be(true)
+        val close = VfsMutationIntentV1(kind: VfsMutationKindV1.Close,
+            actor: base.actor, ofd: base.ofd, subject: base.subject,
+            container: zero, peer_container: zero, replaced_subject: zero,
+            byte_offset: 0u64, byte_length: 0u64, subject_sequence_before: 9u64,
+            container_sequence_before: 0u64, peer_container_sequence_before: 0u64,
+            replaced_subject_sequence_before: 0u64,
+            old_name_sha256: "", new_name_sha256: "")
+        val close_ack = VfsMutationBackendAckV1(resolved_intent: close,
+            subject_sequence_after: 9u64, container_sequence_after: 0u64,
+            peer_container_sequence_after: 0u64, replaced_subject_sequence_after: 0u64,
+            committed_byte_count: 0u64, durable: false, backend_closed: true)
+        expect(vfs_mutation_ack_matches_v1(close, close_ack)).to_be(true)
+        expect(vfs_mutation_ack_matches_v1(close, fsync_ack)).to_be(false)
+
+    it "fails closed at the bounded live-slot capacity":
+        val available = vfs_mutation_owner_status_v1().unwrap().free_count
+        var grants: [VfsMutationGrantV1] = []
+        var i = 0
+        while i < available:
+            grants.push(vfs_mutation_reserve_v1(
+                _write_intent(9000u64 + i as u64, 10000u64 + i as u64)).unwrap())
+            i = i + 1
+        expect(vfs_mutation_reserve_v1(
+            _write_intent(20000u64, 30000u64)).is_err()).to_be(true)
+        for grant in grants:
+            expect(vfs_mutation_cancel_reserved_v1(grant).unwrap()).to_be(true)
+
+    it "does not claim post-receipt sequence authority":
+        expect(vfs_mutation_owner_is_sequence_authority_v1()).to_be(false)

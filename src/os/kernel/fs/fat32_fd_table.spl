@@ -19,6 +19,11 @@
 # only the userspace mmio byte-copy and `SyscallResult` wrapping.
 
 use os.kernel.fs.fat32.{FileHandle, fat32_mount_ready, fat32_mount_fs, fat32_mount_dev}
+use os.kernel.fs.fat32_capsule_mount_owner_v1.{
+    Fat32CapsuleMountSealV1, Fat32CapsuleMountOperationV1,
+    fat32_capsule_mount_acquire_v1, fat32_capsule_mount_operation_device_v1,
+    fat32_capsule_mount_release_v1
+}
 
 val FAT32_FD_EBADF: i32 = -9
 val FAT32_FD_ENOSYS: i32 = -38
@@ -38,12 +43,23 @@ struct Fat32FileObject:
     """Canonical open-file description shared by every descriptor alias."""
     object_id: u64
     handle: FileHandle
+    mount: Fat32CapsuleMountSealV1
 
 var g_fat32_fd_table: [Fat32FdEntry] = []
 var g_fat32_file_objects: [Fat32FileObject] = []
 var g_fat32_fd_table_ready: bool = false
 var g_fat32_next_object_id: u64 = 1u64
 var g_fat32_object_ids_exhausted: bool = false
+var g_fat32_fd_mount: Fat32CapsuleMountSealV1 =
+    Fat32CapsuleMountSealV1.invalid_probe()
+
+fn fat32_fd_bind_capsule_mount_v1(mount: Fat32CapsuleMountSealV1):
+    """Bind future open-file objects to an owner-issued mount capability.
+
+    Existing objects retain their original binding, preventing a remount from
+    silently redirecting an already-open descriptor to another backend.
+    """
+    g_fat32_fd_mount = mount
 
 fn _fat32_fd_empty_table() -> [Fat32FdEntry]:
     """fn-returning constant: module-level array literals never execute in
@@ -148,7 +164,8 @@ fn fat32_fd_register(task_id: u64, fd: i32, handle: FileHandle):
         g_fat32_file_objects = objects
         return
     entries.push(Fat32FdEntry(task_id: task_id, fd: fd, object_id: object_id))
-    objects.push(Fat32FileObject(object_id: object_id, handle: handle))
+    objects.push(Fat32FileObject(
+        object_id: object_id, handle: handle, mount: g_fat32_fd_mount))
     g_fat32_fd_table = entries
     g_fat32_file_objects = objects
 
@@ -212,6 +229,16 @@ fn fat32_fd_clear_for_test():
     g_fat32_fd_table = _fat32_fd_empty_table()
     g_fat32_file_objects = _fat32_object_empty_table()
     g_fat32_fd_table_ready = true
+    g_fat32_fd_mount = Fat32CapsuleMountSealV1.invalid_probe()
+
+fn _fat32_fd_begin_capsule_io(
+    object: Fat32FileObject
+) -> Result<Fat32CapsuleMountOperationV1, i32>:
+    if object.mount.generation() == 0u64:
+        return Err(FAT32_FD_ENOSYS)
+    match fat32_capsule_mount_acquire_v1(object.mount):
+        Ok(operation): Ok(operation)
+        Err(_): Err(FAT32_FD_ENOSYS)
 
 fn fat32_fd_read_into(task_id: u64, fd: i32, buf: [u8]) -> Result<u64, i32>:
     """Read up to buf.len() bytes from (task_id, fd) into buf via
@@ -238,11 +265,29 @@ fn fat32_fd_read_into(task_id: u64, fd: i32, buf: [u8]) -> Result<u64, i32>:
     var object = g_fat32_file_objects[object_idx as u64]
     var handle = object.handle
     var fs = fat32_mount_fs()
-    val dev = fat32_mount_dev()
-    val read_r = fs.read(dev, handle, buf)
+    if object.mount.generation() == 0u64:
+        val legacy_read = fs.read(fat32_mount_dev(), handle, buf)
+        if legacy_read.is_err(): return Err(legacy_read.unwrap_err())
+        val legacy_count = legacy_read.unwrap()
+        handle.offset = handle.offset + legacy_count
+        object.handle = handle
+        g_fat32_file_objects[object_idx as u64] = object
+        return Ok(legacy_count)
+    val capsule_io = _fat32_fd_begin_capsule_io(object)
+    if capsule_io.is_err():
+        return Err(capsule_io.unwrap_err())
+    val operation = capsule_io.unwrap()
+    val device = fat32_capsule_mount_operation_device_v1(operation)
+    if device.is_err():
+        fat32_capsule_mount_release_v1(operation)
+        return Err(FAT32_FD_ENOSYS)
+    val read_r = fs.read(device.unwrap(), handle, buf)
     if read_r.is_err():
+        fat32_capsule_mount_release_v1(operation)
         return Err(read_r.unwrap_err())
     val n = read_r.unwrap()
+    if fat32_capsule_mount_release_v1(operation).is_err():
+        return Err(FAT32_FD_ENOSYS)
     handle.offset = handle.offset + n
     object.handle = handle
     g_fat32_file_objects[object_idx as u64] = object
@@ -270,14 +315,35 @@ fn fat32_fd_write_from(task_id: u64, fd: i32, bytes: [u8]) -> Result<u64, i32>:
     val handle = g_fat32_file_objects[object_idx as u64].handle
     val cursor = handle.offset
     var fs = fat32_mount_fs()
-    val dev = fat32_mount_dev()
-    val write_r = fs.write_at(dev, handle, cursor, bytes)
+    if g_fat32_file_objects[object_idx as u64].mount.generation() == 0u64:
+        val legacy_write = fs.write_at(fat32_mount_dev(), handle, cursor, bytes)
+        if legacy_write.is_err(): return Err(legacy_write.unwrap_err())
+        var legacy_updated = legacy_write.unwrap()
+        legacy_updated.offset = cursor + bytes.len().to_u64()
+        g_fat32_file_objects[object_idx as u64] = Fat32FileObject(
+            object_id: g_fat32_fd_table[idx as u64].object_id,
+            handle: legacy_updated,
+            mount: g_fat32_file_objects[object_idx as u64].mount)
+        return Ok(bytes.len() as u64)
+    val capsule_io = _fat32_fd_begin_capsule_io(g_fat32_file_objects[object_idx as u64])
+    if capsule_io.is_err():
+        return Err(capsule_io.unwrap_err())
+    val operation = capsule_io.unwrap()
+    val device = fat32_capsule_mount_operation_device_v1(operation)
+    if device.is_err():
+        fat32_capsule_mount_release_v1(operation)
+        return Err(FAT32_FD_ENOSYS)
+    val write_r = fs.write_at(device.unwrap(), handle, cursor, bytes)
     if write_r.is_err():
+        fat32_capsule_mount_release_v1(operation)
         return Err(write_r.unwrap_err())
     var updated = write_r.unwrap()
     updated.offset = cursor + bytes.len().to_u64()
     g_fat32_file_objects[object_idx as u64] = Fat32FileObject(
-        object_id: g_fat32_fd_table[idx as u64].object_id, handle: updated)
+        object_id: g_fat32_fd_table[idx as u64].object_id, handle: updated,
+        mount: g_fat32_file_objects[object_idx as u64].mount)
+    if fat32_capsule_mount_release_v1(operation).is_err():
+        return Err(FAT32_FD_ENOSYS)
     Ok(bytes.len() as u64)
 
 fn fat32_fd_read_object_at_into(object_id: u64, offset: u64, buf: [u8]) -> Result<u64, i32>:
@@ -289,8 +355,19 @@ fn fat32_fd_read_object_at_into(object_id: u64, offset: u64, buf: [u8]) -> Resul
         return Err(FAT32_FD_ENOSYS)
     val handle = g_fat32_file_objects[object_idx as u64].handle
     var fs = fat32_mount_fs()
-    val dev = fat32_mount_dev()
-    fs.read_at(dev, handle, offset, buf)
+    if g_fat32_file_objects[object_idx as u64].mount.generation() == 0u64:
+        return fs.read_at(fat32_mount_dev(), handle, offset, buf)
+    val capsule_io = _fat32_fd_begin_capsule_io(g_fat32_file_objects[object_idx as u64])
+    if capsule_io.is_err(): return Err(capsule_io.unwrap_err())
+    val operation = capsule_io.unwrap()
+    val device = fat32_capsule_mount_operation_device_v1(operation)
+    if device.is_err():
+        fat32_capsule_mount_release_v1(operation)
+        return Err(FAT32_FD_ENOSYS)
+    val read_result = fs.read_at(device.unwrap(), handle, offset, buf)
+    val released = fat32_capsule_mount_release_v1(operation)
+    if released.is_err(): return Err(FAT32_FD_ENOSYS)
+    read_result
 
 fn fat32_fd_write_object_at_from(object_id: u64, offset: u64, bytes: [u8]) -> Result<u64, i32>:
     """Write at an explicit offset while preserving the shared fd cursor.
@@ -306,14 +383,31 @@ fn fat32_fd_write_object_at_from(object_id: u64, offset: u64, bytes: [u8]) -> Re
     val object = g_fat32_file_objects[object_idx as u64]
     val cursor = object.handle.offset
     var fs = fat32_mount_fs()
-    val dev = fat32_mount_dev()
-    val write_r = fs.write_at(dev, object.handle, offset, bytes)
+    if object.mount.generation() == 0u64:
+        val legacy_write = fs.write_at(fat32_mount_dev(), object.handle, offset, bytes)
+        if legacy_write.is_err(): return Err(legacy_write.unwrap_err())
+        var legacy_updated = legacy_write.unwrap()
+        legacy_updated.offset = cursor
+        g_fat32_file_objects[object_idx as u64] = Fat32FileObject(
+            object_id: object_id, handle: legacy_updated, mount: object.mount)
+        return Ok(bytes.len() as u64)
+    val capsule_io = _fat32_fd_begin_capsule_io(object)
+    if capsule_io.is_err(): return Err(capsule_io.unwrap_err())
+    val operation = capsule_io.unwrap()
+    val device = fat32_capsule_mount_operation_device_v1(operation)
+    if device.is_err():
+        fat32_capsule_mount_release_v1(operation)
+        return Err(FAT32_FD_ENOSYS)
+    val write_r = fs.write_at(device.unwrap(), object.handle, offset, bytes)
     if write_r.is_err():
+        fat32_capsule_mount_release_v1(operation)
         return Err(write_r.unwrap_err())
     var updated = write_r.unwrap()
     updated.offset = cursor
     g_fat32_file_objects[object_idx as u64] = Fat32FileObject(
-        object_id: object_id, handle: updated)
+        object_id: object_id, handle: updated, mount: object.mount)
+    if fat32_capsule_mount_release_v1(operation).is_err():
+        return Err(FAT32_FD_ENOSYS)
     Ok(bytes.len() as u64)
 
 fn _fat32_fd_sync_object(object_id: u64) -> Result<bool, i32>:
@@ -324,12 +418,29 @@ fn _fat32_fd_sync_object(object_id: u64) -> Result<bool, i32>:
     if not fat32_mount_ready():
         return Err(FAT32_FD_ENOSYS)
     var fs = fat32_mount_fs()
-    val dev = fat32_mount_dev()
-    val metadata = fs.flush(dev, g_fat32_file_objects[object_idx as u64].handle)
+    val object = g_fat32_file_objects[object_idx as u64]
+    if object.mount.generation() == 0u64:
+        val legacy_dev = fat32_mount_dev()
+        val legacy_metadata = fs.flush(legacy_dev, object.handle)
+        if legacy_metadata.is_err(): return Err(legacy_metadata.unwrap_err())
+        val legacy_durable = legacy_dev.flush()
+        if legacy_durable.is_err() or not legacy_durable.unwrap(): return Err(-5)
+        return Ok(true)
+    val capsule_io = _fat32_fd_begin_capsule_io(object)
+    if capsule_io.is_err(): return Err(capsule_io.unwrap_err())
+    val operation = capsule_io.unwrap()
+    val device_result = fat32_capsule_mount_operation_device_v1(operation)
+    if device_result.is_err():
+        fat32_capsule_mount_release_v1(operation)
+        return Err(FAT32_FD_ENOSYS)
+    var dev = device_result.unwrap()
+    val metadata = fs.flush(dev, object.handle)
     if metadata.is_err():
+        fat32_capsule_mount_release_v1(operation)
         return Err(metadata.unwrap_err())
     val durable = dev.flush()
     if durable.is_err():
+        fat32_capsule_mount_release_v1(operation)
         return Err(-5)
     if not durable.unwrap():
         return Err(-5)

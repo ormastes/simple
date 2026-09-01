@@ -379,28 +379,48 @@ fn jit_hotspot_source_has_strength_reduce_candidate(source: text) -> bool:
         return true
     source.contains("+= 16")
 
+fn jit_hotspot_source_has_bounded_byte_scan_with_shared(
+    source: text,
+    has_loop: bool,
+    has_indexed_access: bool,
+    advances_index: bool
+) -> bool:
+    val has_scan_terminator = source.contains("break") or source.contains("return")
+    has_loop and has_indexed_access and has_scan_terminator and advances_index
+
 fn jit_hotspot_source_has_bounded_byte_scan(source: text) -> bool:
     val has_loop = source.contains("while") or source.contains("for ")
     val has_indexed_access = source.contains("[") and source.contains("]")
-    val has_scan_terminator = source.contains("break") or source.contains("return")
     val advances_index = source.contains("+ 1") or source.contains("+= 1")
-    has_loop and has_indexed_access and has_scan_terminator and advances_index
+    jit_hotspot_source_has_bounded_byte_scan_with_shared(
+        source, has_loop, has_indexed_access, advances_index)
 
-fn jit_hotspot_source_has_checksum_reducer(source: text) -> bool:
-    val has_loop = source.contains("while") or source.contains("for ")
-    val has_indexed_access = source.contains("[") and source.contains("]")
+fn jit_hotspot_source_has_checksum_reducer_with_shared(
+    source: text,
+    has_loop: bool,
+    has_indexed_access: bool
+) -> bool:
     val has_accumulator_update = source.contains("^=") or source.contains("+=") or source.contains("acc =") or source.contains("checksum =")
     val has_checksum_op = source.contains("xor") or source.contains("^") or source.contains("<<") or source.contains(">>") or source.contains("+")
     has_loop and has_indexed_access and has_accumulator_update and has_checksum_op
 
+fn jit_hotspot_source_has_checksum_reducer(source: text) -> bool:
+    val has_loop = source.contains("while") or source.contains("for ")
+    val has_indexed_access = source.contains("[") and source.contains("]")
+    jit_hotspot_source_has_checksum_reducer_with_shared(
+        source, has_loop, has_indexed_access)
+
 fn jit_hotspot_source_has_structured_loop(source: text) -> bool:
     source.contains("while") or source.contains("for ")
 
-fn jit_hotspot_source_has_small_fixed_trip_loop(source: text) -> bool:
-    val has_loop = jit_hotspot_source_has_structured_loop(source)
+fn jit_hotspot_source_has_small_fixed_trip_loop_with_shared(source: text, has_loop: bool) -> bool:
     val has_small_bound = source.contains("< 2") or source.contains("< 3") or source.contains("< 4") or source.contains("< 8") or source.contains("< 16")
     val increments_by_one = source.contains("+ 1") or source.contains("+= 1")
     has_loop and has_small_bound and increments_by_one
+
+fn jit_hotspot_source_has_small_fixed_trip_loop(source: text) -> bool:
+    jit_hotspot_source_has_small_fixed_trip_loop_with_shared(
+        source, jit_hotspot_source_has_structured_loop(source))
 
 fn jit_hotspot_source_has_predication_candidate(source: text) -> bool:
     val has_branch = source.contains("if ") or source.contains("else")
@@ -409,21 +429,39 @@ fn jit_hotspot_source_has_predication_candidate(source: text) -> bool:
     val has_safe_result_shape = source.contains("return") or source.contains(" = ")
     has_branch and has_select_shape and has_scalar_compare and has_safe_result_shape
 
-fn jit_hotspot_source_has_vectorization_candidate(source: text) -> bool:
-    val has_loop = jit_hotspot_source_has_structured_loop(source)
-    val has_indexed_access = source.contains("[") and source.contains("]")
-    val advances_index = source.contains("+ 1") or source.contains("+= 1")
+fn jit_hotspot_source_has_vectorization_candidate_with_shared(
+    source: text,
+    has_loop: bool,
+    has_indexed_access: bool,
+    advances_index: bool
+) -> bool:
     val has_vector_op = source.contains("+") or source.contains("-") or source.contains("*") or source.contains("^")
     val no_early_exit = not source.contains("break") and not source.contains("return -1")
     has_loop and has_indexed_access and advances_index and has_vector_op and no_early_exit
 
+fn jit_hotspot_source_has_vectorization_candidate(source: text) -> bool:
+    val has_loop = jit_hotspot_source_has_structured_loop(source)
+    val has_indexed_access = source.contains("[") and source.contains("]")
+    val advances_index = source.contains("+ 1") or source.contains("+= 1")
+    jit_hotspot_source_has_vectorization_candidate_with_shared(
+        source, has_loop, has_indexed_access, advances_index)
+
+fn jit_hotspot_source_has_range_facts_with_shared(
+    source: text,
+    has_loop: bool,
+    has_indexed_access: bool,
+    advances_index: bool
+) -> bool:
+    val has_upper_bound = source.contains(" < n") or source.contains(" < len") or source.contains(" < length") or source.contains(".len")
+    val starts_at_zero = source.contains("= 0")
+    has_loop and has_indexed_access and has_upper_bound and starts_at_zero and advances_index
+
 fn jit_hotspot_source_has_range_facts(source: text) -> bool:
     val has_loop = jit_hotspot_source_has_structured_loop(source)
     val has_indexed_access = source.contains("[") and source.contains("]")
-    val has_upper_bound = source.contains(" < n") or source.contains(" < len") or source.contains(" < length") or source.contains(".len")
-    val starts_at_zero = source.contains("= 0")
     val advances_index = source.contains("+ 1") or source.contains("+= 1")
-    has_loop and has_indexed_access and has_upper_bound and starts_at_zero and advances_index
+    jit_hotspot_source_has_range_facts_with_shared(
+        source, has_loop, has_indexed_access, advances_index)
 
 fn jit_hotspot_source_has_hot_call_candidate(source: text) -> bool:
     val has_direct_call = source.contains("helper(") or source.contains("callee(") or source.contains("leaf(") or source.contains("inline_target(") or source.contains("hot_call(")
@@ -438,29 +476,40 @@ fn jit_hotspot_backend_plugin_facts(profile: FunctionProfile, config: TieredJitC
     if profile.typed_mir and profile.safe_deopt and jit_var_optimization_implies_scalar_cleanup(profile.var_facts):
         facts = facts.push("ssa.canonical")
         facts = facts.push("alias_stable")
-    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_structured_loop(profile.source):
-        facts = facts.push("loop_preheader")
-    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_small_fixed_trip_loop(profile.source):
-        facts = facts.push("loop_canonical")
-        facts = facts.push("loop_trip_count")
-        facts = facts.push("unroll_budget")
-    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_predication_candidate(profile.source):
-        facts = facts.push("predication_candidate")
-        facts = facts.push("predicate_safe")
-    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_vectorization_candidate(profile.source):
-        facts = facts.push("vectorization_candidate")
-    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_range_facts(profile.source):
-        facts = facts.push("range_facts")
-    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_hot_call_candidate(profile.source):
-        facts = facts.push("profile.hot_call")
-        facts = facts.push("inline_budget")
-    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_strength_reduce_candidate(profile.source):
-        facts = facts.push("strength_reduce_candidate")
-        facts = facts.push("induction_safe")
-    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_bounded_byte_scan(profile.source):
-        facts = facts.push("bounded_scan_terminates")
-    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_checksum_reducer(profile.source):
-        facts = facts.push("checksum_associative")
+    if profile.typed_mir and profile.safe_deopt:
+        # These three lexical predicates feed several independent plugin facts.
+        # Compute them once only after eligibility so ineligible profiles retain
+        # the previous zero-source-scan fast path.
+        val has_loop = jit_hotspot_source_has_structured_loop(profile.source)
+        val has_indexed_access = profile.source.contains("[") and profile.source.contains("]")
+        val advances_index = profile.source.contains("+ 1") or profile.source.contains("+= 1")
+        if has_loop:
+            facts = facts.push("loop_preheader")
+        if jit_hotspot_source_has_small_fixed_trip_loop_with_shared(profile.source, has_loop):
+            facts = facts.push("loop_canonical")
+            facts = facts.push("loop_trip_count")
+            facts = facts.push("unroll_budget")
+        if jit_hotspot_source_has_predication_candidate(profile.source):
+            facts = facts.push("predication_candidate")
+            facts = facts.push("predicate_safe")
+        if jit_hotspot_source_has_vectorization_candidate_with_shared(
+            profile.source, has_loop, has_indexed_access, advances_index):
+            facts = facts.push("vectorization_candidate")
+        if jit_hotspot_source_has_range_facts_with_shared(
+            profile.source, has_loop, has_indexed_access, advances_index):
+            facts = facts.push("range_facts")
+        if jit_hotspot_source_has_hot_call_candidate(profile.source):
+            facts = facts.push("profile.hot_call")
+            facts = facts.push("inline_budget")
+        if jit_hotspot_source_has_strength_reduce_candidate(profile.source):
+            facts = facts.push("strength_reduce_candidate")
+            facts = facts.push("induction_safe")
+        if jit_hotspot_source_has_bounded_byte_scan_with_shared(
+            profile.source, has_loop, has_indexed_access, advances_index):
+            facts = facts.push("bounded_scan_terminates")
+        if jit_hotspot_source_has_checksum_reducer_with_shared(
+            profile.source, has_loop, has_indexed_access):
+            facts = facts.push("checksum_associative")
     if backend_name == "llvm":
         facts = facts.push("llvm_backend_available")
     if backend_name == "cranelift":

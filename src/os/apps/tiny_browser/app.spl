@@ -9,12 +9,13 @@ use std.tiny.draw.writer.{TinyDrawWriter}
 use std.tiny.engine2d.pixel_format.{TINY_PIXEL_ARGB8888}
 use std.tiny.engine2d.software.{TinySoftware2D}
 use std.tiny.gui.component.{TINY_COMPONENT_BUTTON, TINY_COMPONENT_CHECKBOX, TINY_COMPONENT_TEXT_INPUT}
-use std.tiny.gui.event_dispatch.{TinyGuiDispatchReceipt, TINY_KEY_TAB, tiny_gui_dispatch}
-use std.tiny.gui.state.{TinyGuiState}
-use std.tiny.web.layout.{TinyWebLayoutResult, tiny_web_layout}
+use std.tiny.gui.state.{TinyGuiDispatchReceipt, TinyGuiNode, TinyGuiState, TINY_KEY_TAB}
+use std.tiny.web.css.{TinyCssArena}
+use std.tiny.web.layout.{TinyWebLayoutArena, TinyWebLayoutResult}
 use std.tiny.web.model.{TINY_WEB_BUTTON, TINY_WEB_INPUT}
-use std.tiny.web.paint.{tiny_web_paint, tiny_web_paint_to_draw}
-use std.tiny.web.parser.{tiny_web_parse}
+use std.tiny.web.paint.{TinyWebPaintArena, tiny_web_paint_to_draw}
+use std.tiny.web.parser.{TinyWebParseArena}
+use std.tiny.web.token.{TinyHtmlTokenArena}
 use std.tiny.web.navigation.{TinyNavigationReceipt, TINY_NAV_LOCAL, tiny_navigation_request}
 use std.tiny.web.resource.{TinyWebMemoryHost, tiny_resource_request, tiny_web_host_read_v2}
 use std.tiny.web.scroll.{TinyScrollReceipt, TinyScrollState, tiny_scroll_by}
@@ -46,7 +47,6 @@ class TinyBrowserReceipt:
 
 class TinyBrowserEventReceipt:
     status: TinyStatus
-    state: TinyGuiState
     target_index: i32
     action_id: i32
     changed: bool
@@ -56,6 +56,17 @@ class TinyBrowserEventReceipt:
     frame_id: i64
     checksum_before: i64
     checksum_after: i64
+
+class TinyBrowserArenaReceipt:
+    status: TinyStatus
+    allocation_count: i32
+    reuse_count: i32
+    token_count: i32
+    node_count: i32
+    declaration_count: i32
+    style_count: i32
+    pane_count: i32
+    paint_count: i32
 
 class TinyBrowserPopupReceipt:
     status: TinyStatus
@@ -77,6 +88,11 @@ class TinyBrowser:
     renderer: TinySoftware2D
     wm: TinyWmKiosk
     gui: TinyGuiState
+    token_arena: TinyHtmlTokenArena
+    parse_arena: TinyWebParseArena
+    css_arena: TinyCssArena
+    layout_arena: TinyWebLayoutArena
+    paint_arena: TinyWebPaintArena
     present: TinyMemoryPresent
     scroll: TinyScrollState
     root_content_id: i32
@@ -98,6 +114,11 @@ class TinyBrowser:
             renderer: TinySoftware2D.create(width, height, TINY_PIXEL_ARGB8888),
             wm: TinyWmKiosk.create(width, height, 4),
             gui: TinyGuiState.bounded(32),
+            token_arena: TinyHtmlTokenArena.bounded(516),
+            parse_arena: TinyWebParseArena.bounded(256, 32),
+            css_arena: TinyCssArena.bounded(256),
+            layout_arena: TinyWebLayoutArena.bounded(256),
+            paint_arena: TinyWebPaintArena.bounded(512),
             present: TinyMemoryPresent.create(width, height, 8),
             scroll: TinyScrollState(offset_y: 0, viewport_height: height, content_height: height),
             root_content_id: 1,
@@ -111,6 +132,32 @@ class TinyBrowser:
             current_path: "",
         )
 
+    fn arena_receipt() -> TinyBrowserArenaReceipt:
+        var status = TinyStatus.ok()
+        if self.token_arena.token_count > self.token_arena.capacity:
+            status = TinyStatus.error(TINY_ERR_INVALID, self.token_arena.token_count)
+        if self.parse_arena.node_count > self.parse_arena.max_nodes:
+            status = TinyStatus.error(TINY_ERR_INVALID, self.parse_arena.node_count)
+        if self.css_arena.declaration_count > self.css_arena.capacity:
+            status = TinyStatus.error(TINY_ERR_INVALID, self.css_arena.declaration_count)
+        if self.layout_arena.node_count > self.layout_arena.capacity:
+            status = TinyStatus.error(TINY_ERR_INVALID, self.layout_arena.node_count)
+        if self.paint_arena.record_count > self.paint_arena.capacity:
+            status = TinyStatus.error(TINY_ERR_INVALID, self.paint_arena.record_count)
+        if self.gui.node_count > self.gui.max_nodes or self.gui.pane_count > self.gui.max_nodes:
+            status = TinyStatus.error(TINY_ERR_INVALID, self.gui.node_count)
+        TinyBrowserArenaReceipt(
+            status: status,
+            allocation_count: self.token_arena.allocation_count + self.parse_arena.allocation_count + self.css_arena.allocation_count + self.layout_arena.allocation_count + self.paint_arena.allocation_count + self.gui.allocation_count,
+            reuse_count: self.token_arena.reuse_count + self.parse_arena.reuse_count + self.css_arena.reuse_count + self.layout_arena.reuse_count + self.paint_arena.reuse_count + self.gui.reuse_count,
+            token_count: self.token_arena.token_count,
+            node_count: self.parse_arena.node_count,
+            declaration_count: self.css_arena.declaration_count,
+            style_count: self.layout_arena.style_count,
+            pane_count: self.gui.pane_count,
+            paint_count: self.paint_arena.record_count,
+        )
+
     me render_html(source: text) -> TinyBrowserReceipt:
         val receipt = self.render_document(source, false)
         if receipt.status.is_ok():
@@ -119,53 +166,55 @@ class TinyBrowser:
         receipt
 
     me render_document(source: text, preserve_controls: bool) -> TinyBrowserReceipt:
-        val document = tiny_web_parse(source, self.max_nodes, 32, 16384)
+        val token_result = self.token_arena.tokenize(source, 16384)
+        val document = self.parse_arena.parse_tokens(token_result, 16384, self.max_nodes, 32)
         if not document.status.is_ok() and document.unsupported_count == 0:
-            return self.failed_receipt(document.status, document.nodes.len(), document.unsupported_count)
+            return self.failed_receipt(document.status, document.node_count, document.unsupported_count)
         val viewport = TinyRect(x: 0, y: -self.scroll.offset_y, width: self.width, height: self.height)
-        val layout = tiny_web_layout(document, viewport, 16, self.max_nodes)
+        val css = self.css_arena.parse(document.style_source, self.max_nodes)
+        val layout = self.layout_arena.layout(document, css, viewport, 16)
         var css_unsupported_count = 0
         if layout.css_status.code == TINY_ERR_UNSUPPORTED:
             css_unsupported_count = layout.css_status.detail_id
         if not layout.status.is_ok():
             return self.failed_receipt_with_css(
-                layout.status, document.nodes.len(), document.unsupported_count,
+                layout.status, document.node_count, document.unsupported_count,
                 layout.css_status, css_unsupported_count, 0,
             )
         val controls = self.install_controls_from_layout_preserving(layout, preserve_controls)
         if not controls.is_ok():
             return self.failed_receipt_with_css(
-                controls, document.nodes.len(), document.unsupported_count,
+                controls, document.node_count, document.unsupported_count,
                 layout.css_status, css_unsupported_count, self.last_control_unsupported_count,
             )
         self.scroll = TinyScrollState(offset_y: self.scroll.offset_y, viewport_height: self.height, content_height: layout.content_height)
-        val paint = tiny_web_paint(layout, self.max_nodes * 2)
+        val paint = self.paint_arena.paint(layout)
         if not paint.status.is_ok():
-            return self.failed_receipt_with_css(paint.status, document.nodes.len(), document.unsupported_count, layout.css_status, css_unsupported_count, 0)
+            return self.failed_receipt_with_css(paint.status, document.node_count, document.unsupported_count, layout.css_status, css_unsupported_count, 0)
         val draw = tiny_web_paint_to_draw(paint, self.max_draw_words)
         if not draw.status.is_ok():
-            return self.failed_receipt_with_css(draw.status, document.nodes.len(), document.unsupported_count, layout.css_status, css_unsupported_count, 0)
+            return self.failed_receipt_with_css(draw.status, document.node_count, document.unsupported_count, layout.css_status, css_unsupported_count, 0)
         val envelope = TinyDrawStreamV1.create_counted(draw.stream, draw.word_count, TINY_2D_CAP_DRAW_STREAM_V1)
         val rendered = self.renderer.execute(envelope)
         if not rendered.is_ok():
-            return self.failed_receipt_with_css(rendered, document.nodes.len(), document.unsupported_count, layout.css_status, css_unsupported_count, 0)
+            return self.failed_receipt_with_css(rendered, document.node_count, document.unsupported_count, layout.css_status, css_unsupported_count, 0)
         val overlay = self.execute_gui_overlay(-1)
         if not overlay.is_ok():
-            return self.failed_receipt_with_css(overlay, document.nodes.len(), document.unsupported_count, layout.css_status, css_unsupported_count, 0)
+            return self.failed_receipt_with_css(overlay, document.node_count, document.unsupported_count, layout.css_status, css_unsupported_count, 0)
         val rooted = self.wm.set_root(self.root_content_id)
         if not rooted.is_ok():
-            return self.failed_receipt_with_css(rooted, document.nodes.len(), document.unsupported_count, layout.css_status, css_unsupported_count, 0)
+            return self.failed_receipt_with_css(rooted, document.node_count, document.unsupported_count, layout.css_status, css_unsupported_count, 0)
         val frame = self.wm.frame_receipt()
         val begun = self.present.begin_frame(frame.damage, frame.damage_count)
         if not begun.is_ok():
-            return self.failed_receipt_with_css(begun, document.nodes.len(), document.unsupported_count, layout.css_status, css_unsupported_count, 0)
+            return self.failed_receipt_with_css(begun, document.node_count, document.unsupported_count, layout.css_status, css_unsupported_count, 0)
         val surface = self.renderer.rendered_surface()
         val presented = self.present.present(surface)
         if not presented.is_ok():
-            return self.failed_receipt_with_css(presented, document.nodes.len(), document.unsupported_count, layout.css_status, css_unsupported_count, 0)
+            return self.failed_receipt_with_css(presented, document.node_count, document.unsupported_count, layout.css_status, css_unsupported_count, 0)
         TinyBrowserReceipt(
-            status: TinyStatus.ok(), checksum: self.renderer.checksum(), parsed_nodes: document.nodes.len(),
-            paint_records: paint.records.len(), draw_words: draw.word_count,
+            status: TinyStatus.ok(), checksum: self.renderer.checksum(), parsed_nodes: document.node_count,
+            paint_records: paint.record_count, draw_words: draw.word_count,
             unsupported_count: document.unsupported_count + css_unsupported_count,
             frame: frame, surface_id: surface.surface_id, frame_id: surface.frame_id,
             presented_checksum: self.present.last_surface.checksum,
@@ -237,7 +286,7 @@ class TinyBrowser:
         receipt
 
     me install_controls() -> TinyStatus:
-        self.gui = TinyGuiState.bounded(32)
+        self.gui.reset()
         val parent = TinyHandle.invalid()
         var status = self.gui.add(parent, TINY_COMPONENT_TEXT_INPUT, TinyRect(x: 8, y: 24, width: 120, height: 20), "")
         if not status.is_ok(): return status
@@ -252,14 +301,14 @@ class TinyBrowser:
         self.install_controls_from_layout_preserving(layout, false)
 
     me install_controls_from_layout_preserving(layout: TinyWebLayoutResult, preserve_controls: bool) -> TinyStatus:
-        val previous = self.gui.nodes
-        self.gui = TinyGuiState.bounded(32)
+        val previous_count = self.gui.node_count
+        self.gui.reset()
         self.last_control_unsupported_count = 0
-        if layout.rendered.len() != layout.nodes.len():
-            return TinyStatus.error(TINY_ERR_INVALID, layout.rendered.len())
+        if layout.rendered_count != layout.node_count:
+            return TinyStatus.error(TINY_ERR_INVALID, layout.rendered_count)
         val parent = TinyHandle.invalid()
         var web_index = 0
-        while web_index < layout.nodes.len():
+        while web_index < layout.node_count:
             val node = layout.nodes[web_index]
             if not layout.rendered[web_index]:
                 web_index = web_index + 1
@@ -277,12 +326,15 @@ class TinyBrowser:
                     self.last_control_unsupported_count = self.last_control_unsupported_count + 1
                     return TinyStatus.error(TINY_ERR_UNSUPPORTED, web_index)
             if class_id != 0:
+                val index = self.gui.node_count
+                var previous = TinyGuiNode.empty()
+                if preserve_controls and index < previous_count:
+                    previous = self.gui.nodes[index]
                 var initial_text = node.text_value
                 if class_id == TINY_COMPONENT_CHECKBOX:
                     initial_text = node.value_attribute
                 val status = self.gui.add(parent, class_id, node.bounds, initial_text)
                 if not status.is_ok(): return status
-                val index = self.gui.nodes.len() - 1
                 var installed = self.gui.nodes[index]
                 var max_length = -1
                 if class_id == TINY_COMPONENT_TEXT_INPUT:
@@ -297,9 +349,9 @@ class TinyBrowser:
                     installed.flags = installed.flags | ((max_length + 1) << TINY_BROWSER_CONTROL_MAX_LENGTH_SHIFT)
                 if class_id == TINY_COMPONENT_CHECKBOX and node.checked:
                     installed.value = 1
-                if preserve_controls and index < previous.len() and previous[index].class_id == class_id:
-                    installed.text_value = previous[index].text_value
-                    installed.value = previous[index].value
+                if preserve_controls and index < previous_count and previous.class_id == class_id:
+                    installed.text_value = previous.text_value
+                    installed.value = previous.value
                 if max_length >= 0 and installed.text_value.len() > max_length:
                     installed.text_value = installed.text_value.slice(0, max_length)
                 self.gui.nodes[index] = installed
@@ -320,13 +372,10 @@ class TinyBrowser:
         parsed
 
     fn control_is_disabled(index: i32) -> bool:
-        index >= 0 and index < self.gui.nodes.len() and (self.gui.nodes[index].flags & TINY_BROWSER_CONTROL_DISABLED) != 0
-
-    fn control_disabled_in(state: TinyGuiState, index: i32) -> bool:
-        index >= 0 and index < state.nodes.len() and (state.nodes[index].flags & TINY_BROWSER_CONTROL_DISABLED) != 0
+        index >= 0 and index < self.gui.node_count and (self.gui.nodes[index].flags & TINY_BROWSER_CONTROL_DISABLED) != 0
 
     fn control_max_length(index: i32) -> i32:
-        if index < 0 or index >= self.gui.nodes.len(): return -1
+        if index < 0 or index >= self.gui.node_count: return -1
         val encoded = self.gui.nodes[index].flags >> TINY_BROWSER_CONTROL_MAX_LENGTH_SHIFT
         if encoded <= 0: return -1
         encoded - 1
@@ -361,7 +410,7 @@ class TinyBrowser:
                         routed_content_id, checksum_before,
                     )
                 return TinyBrowserEventReceipt(
-                    status: TinyStatus.ok(), state: self.gui, target_index: self.gui.focused_index,
+                    status: TinyStatus.ok(), target_index: self.gui.focused_index,
                     action_id: 0, changed: true, routed_content_id: routed_content_id,
                     damage_count: rendered.frame.damage_count, presented: true,
                     frame_id: rendered.frame_id, checksum_before: checksum_before,
@@ -384,34 +433,33 @@ class TinyBrowser:
                         TinyStatus.error(TINY_ERR_UNSUPPORTED, focused_index), focused_index, 0,
                         false, routed_content_id, checksum_before,
                     )
-        val gui_before = self.gui
-        var receipt = tiny_gui_dispatch(self.gui, event)
+        val focused_before = self.gui.focused_index
+        var receipt = self.gui.dispatch(event)
         if event.kind == TINY_EVENT_KEY and event.code == TINY_KEY_TAB:
             var attempts = 0
-            while receipt.target_index >= 0 and self.control_disabled_in(receipt.state, receipt.target_index) and attempts < self.gui.nodes.len():
-                receipt = tiny_gui_dispatch(receipt.state, event)
+            while receipt.target_index >= 0 and self.control_is_disabled(receipt.target_index) and attempts < self.gui.node_count:
+                receipt = self.gui.dispatch(event)
                 attempts = attempts + 1
-            if receipt.target_index >= 0 and self.control_disabled_in(receipt.state, receipt.target_index):
+            if receipt.target_index >= 0 and self.control_is_disabled(receipt.target_index):
+                self.gui.focused_index = focused_before
                 receipt = TinyGuiDispatchReceipt(
                     status: TinyStatus.error(TINY_ERR_UNSUPPORTED, receipt.target_index),
-                    state: gui_before, target_index: receipt.target_index,
-                    action_id: 0, changed: false,
+                    target_index: receipt.target_index, action_id: 0, changed: false,
                 )
-        else if receipt.target_index >= 0 and self.control_disabled_in(receipt.state, receipt.target_index):
+        else if receipt.target_index >= 0 and self.control_is_disabled(receipt.target_index):
+            self.gui.focused_index = focused_before
             receipt = TinyGuiDispatchReceipt(
                 status: TinyStatus.error(TINY_ERR_UNSUPPORTED, receipt.target_index),
-                state: gui_before, target_index: receipt.target_index,
-                action_id: 0, changed: false,
+                target_index: receipt.target_index, action_id: 0, changed: false,
             )
-        self.gui = receipt.state
         var active_target = -1
         if event.kind == TINY_EVENT_POINTER_DOWN and receipt.target_index >= 0:
             self.last_gui_target_index = receipt.target_index
             active_target = receipt.target_index
         if event.kind == TINY_EVENT_POINTER_UP and self.last_gui_target_index >= 0:
             receipt = TinyGuiDispatchReceipt(
-                status: TinyStatus.ok(), state: self.gui,
-                target_index: self.last_gui_target_index, action_id: 0, changed: true,
+                status: TinyStatus.ok(), target_index: self.last_gui_target_index,
+                action_id: 0, changed: true,
             )
             self.last_gui_target_index = -1
         if not receipt.changed:
@@ -452,7 +500,7 @@ class TinyBrowser:
                 routed_content_id, checksum_before,
             )
         TinyBrowserEventReceipt(
-            status: TinyStatus.ok(), state: self.gui, target_index: target_index,
+            status: TinyStatus.ok(), target_index: target_index,
             action_id: action_id, changed: changed, routed_content_id: routed_content_id,
             damage_count: frame.damage_count, presented: true, frame_id: surface.frame_id,
             checksum_before: checksum_before, checksum_after: surface.checksum,
@@ -460,7 +508,7 @@ class TinyBrowser:
 
     fn event_without_frame(status: TinyStatus, target_index: i32, action_id: i32, changed: bool, routed_content_id: i32, checksum_before: i64) -> TinyBrowserEventReceipt:
         TinyBrowserEventReceipt(
-            status: status, state: self.gui, target_index: target_index,
+            status: status, target_index: target_index,
             action_id: action_id, changed: changed, routed_content_id: routed_content_id,
             damage_count: 0, presented: false, frame_id: self.renderer.frame_id,
             checksum_before: checksum_before, checksum_after: self.renderer.checksum(),
@@ -469,7 +517,7 @@ class TinyBrowser:
     me execute_gui_overlay(active_target: i32) -> TinyStatus:
         var writer = TinyDrawWriter.create(self.max_draw_words)
         var index = 0
-        while index < self.gui.nodes.len():
+        while index < self.gui.node_count:
             val node = self.gui.nodes[index]
             if node.bounds.width > 0 and node.bounds.height > 0:
                 var background = -15790321

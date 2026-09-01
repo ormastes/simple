@@ -150,10 +150,7 @@ impl SpecOutcome {
     /// `false` for the UNVERIFIED classes, whose partial tallies must not be
     /// counted as failures or drops.
     fn is_verified(self) -> bool {
-        matches!(
-            self,
-            SpecOutcome::Ok | SpecOutcome::Error | SpecOutcome::Crashed
-        )
+        matches!(self, SpecOutcome::Ok | SpecOutcome::Error | SpecOutcome::Crashed)
     }
 
     /// Whether `executed < declared` is meaningful as a *silent drop* for this
@@ -533,13 +530,6 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
             }
         }
     }));
-    // Engine receipt, emitted on EVERY terminal path of `run` including the
-    // crash path -- a run that died is exactly the run whose engine you most
-    // want named. Off by default (`SIMPLE_ENGINE_RECEIPT=1`), and costs one
-    // environment lookup when off. The engine field it prints was stamped from
-    // inside the engine that actually executed; see
-    // `simple_common::engine_receipt`.
-    simple_common::engine_receipt::emit(&path_for_panic.display().to_string());
     match result {
         Ok(code) => code,
         Err(panic_info) => {
@@ -838,11 +828,7 @@ mod tests {
 
     /// Write `source` to a uniquely-named temp `.spl` file and return its path.
     fn spec_fixture(tag: &str, source: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "simple_dropcheck_{}_{}.spl",
-            tag,
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_dropcheck_{}_{}.spl", tag, std::process::id()));
         std::fs::write(&path, source).expect("write fixture");
         path
     }

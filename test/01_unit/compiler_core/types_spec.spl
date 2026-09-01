@@ -1,3 +1,11 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-COMP-CORE-TYPES-001
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+# @req: REQ-COMP-CORE-TYPES-001 — stable requirement identity for this spec.
 """
 ## Purpose and audience
 Purpose: Prove that Types.
@@ -5,46 +13,51 @@ Audience: COMP-CORE maintainers who read this spec to confirm the behavior still
 """
 
 use std.io_runtime.{file_read}
-use compiler.core.types.{
-    union_type_register, intersection_type_register, refinement_type_register,
-    tuple_type_register, dict_type_register, result_type_register,
-    array_generic_type_register, union_type_get_members, intersection_type_get_members,
-    refinement_type_base, refinement_type_predicate, tuple_type_get_elems,
-    dict_type_get_key, dict_type_get_value, result_type_get_ok, result_type_get_err,
-    array_generic_type_get_elem, reset_all_pools
-}
 
-use std.spec.step
 describe "Types":
     fn types_source() -> text:
-        file_read("src/compiler/10.frontend/core/types.spl") ?? ""
+        rt_file_read_text("src/compiler/10.frontend/core/types.spl") ?? ""
 
     it "keeps core string span token and symbol helpers available":
+        # @req REQ-SSPEC-COMPILER_CORE
         # @req: REQ-COMP-CORE-TYPES-001
-        step("Verify: keeps core string span token and symbol helpers available")
-        # @req: REQ-COMP-CORE-TYPES-001
-        val source = types_source()
-
-        expect(source).to_contain("fn str_concat(a: text, b: text) -> text")
-        expect(source).to_contain("fn str_len(s: text) -> i64:\n    rt_string_len(s)")
-        expect(source).to_contain("fn str_contains(s: text, needle: text) -> bool")
-        expect(source).to_contain("fn span_start(span_id: i64) -> i64")
-        expect(source).to_contain("fn token_new(kind: i64, span_id: i64, value: text) -> i64")
-        expect(source).to_contain("fn symbol_new(name: text, sym_type: i64, depth: i64, decl_id: i64, is_mut: i64) -> i64")
-        expect(source).to_contain("fn scope_push() -> i64")
+        step("exercise string, span, token and symbol helpers")
+        expect(str_concat("ab", "cd")).to_equal("abcd")
+        expect(str_len("hello")).to_equal(5)
+        val sid = flat_span_new(1, 5, 2, 3)
+        expect(span_start(sid)).to_equal(1)
+        expect(span_end(sid)).to_equal(5)
+        expect(span_line(sid)).to_equal(2)
+        expect(span_col(sid)).to_equal(3)
+        expect(span_start(span_dummy())).to_equal(0)
+        val tid = token_new(123, sid, "tok")
+        expect(token_kind(tid)).to_equal(123)
+        expect(token_span(tid)).to_equal(sid)
+        expect(token_text(tid)).to_equal("tok")
+        val sym = symbol_new("x", 0, 0, 10, 1)
+        expect(symbol_name(sym)).to_equal("x")
+        expect(symbol_is_mutable(sym)).to_equal(true)
+        expect(scope_push()).to_equal(scope_depth())
+        step("pop the scope again")
+        val _ = scope_pop()
 
     it "keeps type tags and type name conversion available":
-        step("Verify: keeps type tags and type name conversion available")
-        val source = types_source()
-
-        expect(source).to_contain("val TYPE_VOID = 0")
-        expect(source).to_contain("val TYPE_BOOL = 1")
-        expect(source).to_contain("val TYPE_I64 = 2")
-        expect(source).to_contain("val TYPE_OPTION = 14")
-        expect(source).to_contain("val TYPE_RESULT = 19")
-        expect(source).to_contain("val TYPE_FUTURE = 20")
-        expect(source).to_contain("fn type_tag_name(tag: i64) -> text")
-        expect(source).to_contain("fn type_tag_to_c(tag: i64) -> text")
+        # @req REQ-SSPEC-COMPILER_CORE
+        step("map core type tags to names and C types")
+        expect(type_tag_name(0)).to_equal("void")
+        expect(type_tag_name(1)).to_equal("bool")
+        expect(type_tag_name(2)).to_equal("i64")
+        expect(type_tag_name(3)).to_equal("f64")
+        expect(type_tag_name(4)).to_equal("text")
+        expect(type_tag_name(12)).to_equal("any")
+        expect(type_tag_name(13)).to_equal("nil")
+        expect(type_tag_name(14)).to_equal("Option")
+        expect(type_tag_name(19)).to_equal("Result")
+        expect(type_tag_name(20)).to_equal("Future")
+        expect(type_tag_to_c(0)).to_equal("void")
+        expect(type_tag_to_c(2)).to_equal("int64_t")
+        expect(type_tag_to_c(4)).to_equal("const char*")
+        expect(type_tag_to_c(12)).to_equal("SplValue")
 
     it "keeps named type and function signature registries available":
         step("Verify: keeps named type and function signature registries available")
@@ -58,21 +71,30 @@ describe "Types":
         expect(source).to_contain("fn reset_all_pools()")
 
     it "keeps Dict and Result specialization ranges bounded and resettable":
-        step("Verify: keeps Dict and Result specialization ranges bounded and resettable")
-        val source = types_source()
-
-        expect(source).to_contain("val TYPE_DICT_BASE = 1000")
-        expect(source).to_contain("val TYPE_RESULT_BASE = 2000")
-        expect(source).to_contain("val TYPE_RESULT_LIMIT = 3000")
-        expect(source).to_contain("val TYPE_NAMED_BASE = 10000")
-        expect(source).to_contain("if idx >= TYPE_RESULT_BASE - TYPE_DICT_BASE:")
-        expect(source).to_contain("if idx >= TYPE_RESULT_LIMIT - TYPE_RESULT_BASE:")
-        expect(source).to_contain("result_type_ok = []")
-        expect(source).to_contain("result_type_err = []")
-        expect(source.contains("fn clear_i64_pool")).to_equal(false)
+        # @req REQ-SSPEC-COMPILER_CORE
+        step("fill the dict specialization range and confirm overflow refuses new ids")
+        reset_all_pools()
+        # oracle: dict ids live in [1000, 2000), result ids in [2000, 3000)
+        var last_dict = dict_type_register(10001, 4)
+        var n = 1
+        while last_dict < 1999:
+            n = n + 1
+            last_dict = dict_type_register(10000 + n, 4)
+        expect(last_dict).to_equal(1999)
+        expect(dict_type_register(10000, 4)).to_equal(-1)
+        var last_result = result_type_register(20001, 4)
+        var m = 1
+        while last_result < 2999:
+            m = m + 1
+            last_result = result_type_register(20000 + m, 4)
+        expect(last_result).to_equal(2999)
+        expect(result_type_register(20000, 4)).to_equal(-1)
+        step("reset restores fresh ids")
+        reset_all_pools()
+        expect(dict_type_register(2, 4)).to_equal(1000)
+        expect(result_type_register(2, 4)).to_equal(2000)
 
     it "interns and bounds every encoded composite type registry":
-        step("Verify: interns and bounds every encoded composite type registry")
         # Local raw tags keep this native-runnable through bootstrap compilers
         # whose cross-module imported `val` representation is not yet stable.
         val i64_tag = 2

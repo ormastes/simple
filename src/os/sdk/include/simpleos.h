@@ -28,18 +28,18 @@ extern "C" {
 #define SIMPLEOS_VERSION_MINOR 1
 #define SIMPLEOS_VERSION_PATCH 0
 
-/* ===== Reserved server-data ABI (not callable) =====
+/* ===== Server startup and reserved server-data ABI =====
  *
- * These ordinals are frozen for ABI parity only.  No dispatcher, SDK wrapper,
- * or readiness claim exists in Phase A.  Applications must not issue them.
+ * 116 consumes loader/scheduler-issued evidence for the current execution.
+ * It accepts no task identity or executable claims.  117-119 remain reserved.
  */
-#define SIMPLEOS_SYS_SERVER_DATA_ACQUIRE_RESERVED_V1       116u
+#define SIMPLEOS_SYS_SERVER_STARTUP_EVIDENCE_CONSUME_V1    116u
 #define SIMPLEOS_SYS_SERVER_DATA_REVOKE_RESERVED_V1        117u
 #define SIMPLEOS_SYS_SERVER_DATA_STATUS_SYNC_RESERVED_V1   118u
 #define SIMPLEOS_SYS_SERVER_DATA_ATOMIC_REPLACE_RESERVED_V1 119u
 
-/* Fixed-width layout declarations for offline ABI tooling.  Their presence
- * does not make the reserved syscalls callable or ready. */
+/* Fixed-width layout declarations for offline ABI tooling. Their presence
+ * does not make reserved syscalls 117-119 callable or ready. */
 typedef struct simpleos_server_data_namespace_id_v1 {
     uint64_t value;
 } simpleos_server_data_namespace_id_v1;

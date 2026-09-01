@@ -1,10 +1,26 @@
-# psk_connect_flow_spec
+# Psk Connect Flow Specification
 
-> Verifies the psk connect flow behaviour end to end so maintainers of this
+> Tests covering PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+```sdn id=psk_connect_flow_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+psk_connect_flow_spec -> std
+psk_connect_flow_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=psk_connect_flow_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -13,85 +29,33 @@
 
 Verifies the psk connect flow behaviour end to end so maintainers of this
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/01_unit/os/tls13/psk_connect_flow_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the psk connect flow behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
-
 ## Scenarios
 
 ### PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9
 
 #### partial-CH binders_field_offset places binders_len after identities
 
-- Verify: partial-CH binders_field_offset places binders_len after identities
-   - Expected: psk_ch.binders_data_offset equals `psk_ch.binders_field_offset + 2u64`
-   - Expected: bl equals `33u32`
-   - Expected: _u8_get(wire, psk_ch.binders_data_offset) equals `32u8`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
-step("Verify: partial-CH binders_field_offset places binders_len after identities")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
-# Build a CH with our PSK config and check that the offset matches
-# ext_data_len semantics: ext_data starts with u16 ids_len + ids,
-# followed by binders_len u16 at binders_field_offset.
-val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
-val ch_base = build_client_hello_bytes(_ch_random32(), _x25519_pub32(), "example.com")
-val psk_ch = _splice_psk_extensions_into_ch(ch_base, cfg)
-val wire = psk_ch.bytes
-# binders_data_offset must equal binders_field_offset + 2
-expect(psk_ch.binders_data_offset).to_equal(psk_ch.binders_field_offset + 2u64)
-# The bytes at binders_field_offset..binders_field_offset+2 are the
-# binders_len u16 = 1 (1-byte plen) + 32 (binder body) = 33.
-val bl_hi = _u8_get(wire, psk_ch.binders_field_offset).to_u32()
-val bl_lo = _u8_get(wire, psk_ch.binders_field_offset + 1u64).to_u32()
-val bl = ((bl_hi << 8) | bl_lo)
-expect(bl).to_equal(33u32)
-# The byte at binders_data_offset is the per-binder length prefix = 32.
-expect(_u8_get(wire, psk_ch.binders_data_offset)).to_equal(32u8)
+# @req REQ-SSPEC-UNIT
 ```
 
 </details>
 
 #### pre_shared_key extension is the LAST extension in CH (RFC 8446 §4.2.11)
 
-- Verify: pre_shared_key extension is the LAST extension in CH (RFC 8446 §4.2.11)
-   - Expected: expected_end equals `psk_ch.bytes.len().to_u64()`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
-step("Verify: pre_shared_key extension is the LAST extension in CH (RFC 8446 §4.2.11)")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
 val ch_base = build_client_hello_bytes(_ch_random32(), _x25519_pub32(), "example.com")
 val psk_ch = _splice_psk_extensions_into_ch(ch_base, cfg)
@@ -107,20 +71,13 @@ expect(expected_end).to_equal(psk_ch.bytes.len().to_u64())
 
 #### psk_key_exchange_modes extension (type 0x002d) is present in CH
 
-- Verify: psk_key_exchange_modes extension (type 0x002d) is present in CH
-   - Expected: found is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
-step("Verify: psk_key_exchange_modes extension (type 0x002d) is present in CH")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
 val ch_base = build_client_hello_bytes(_ch_random32(), _x25519_pub32(), "example.com")
 val psk_ch = _splice_psk_extensions_into_ch(ch_base, cfg)
@@ -135,21 +92,13 @@ expect(found).to_equal(true)
 
 #### partial-CH transcript hash stops at end of identities (RFC 8446 §4.1.4)
 
-- Verify: partial-CH transcript hash stops at end of identities (RFC 8446 §4.1.4)
-   - Expected: got.len() equals `32)  # oracle: pinned constant asserted by this scenario`
-   - Expected: _bytes_eq(got, expected) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
-step("Verify: partial-CH transcript hash stops at end of identities (RFC 8446 §4.1.4)")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 # The hash STOPS at binders_field_offset, NOT at end of zeroed binders.
 # _partial_ch_transcript_hash must equal SHA-256(wire[0..binders_field_offset]).
 val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
@@ -160,7 +109,7 @@ val got = _partial_ch_transcript_hash(psk_ch.bytes, psk_ch, 1u8)
 # to keep the prefix-build loop out of the it-block.
 val prefix = _build_prefix_to(psk_ch.bytes, psk_ch.binders_field_offset)
 val expected = rt_tls13_sha256(prefix)
-expect(got.len()).to_equal(32)  # oracle: pinned constant asserted by this scenario
+expect(got.len()).to_equal(32)
 expect(_bytes_eq(got, expected)).to_equal(true)
 ```
 
@@ -168,20 +117,13 @@ expect(_bytes_eq(got, expected)).to_equal(true)
 
 #### partial-CH transcript hash is NOT the same as hashing including zero binders
 
-- Verify: partial-CH transcript hash is NOT the same as hashing including zero binders
-   - Expected: _bytes_eq(got, full_hash) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
-step("Verify: partial-CH transcript hash is NOT the same as hashing including zero binders")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 # Negative check: hashing [0..end_of_binders] would produce a DIFFERENT
 # digest than [0..binders_field_offset]. RFC 8446 §4.1.4 mandates the
 # latter; this guards against the silent wrong interpretation.
@@ -204,21 +146,13 @@ expect(_bytes_eq(got, full_hash)).to_equal(false)
 
 #### spliced binder MAC matches tls13_compute_psk_binder byte-exact
 
-- Verify: spliced binder MAC matches tls13_compute_psk_binder byte-exact
-   - Expected: ok is true
-   - Expected: spliced.len() equals `psk_ch.bytes.len()`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
-step("Verify: spliced binder MAC matches tls13_compute_psk_binder byte-exact")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 # Compute binder via the same path as tls13_connect_io_with_config and
 # verify the spliced wire bytes contain exactly that MAC.
 val psk_secret = _seq_n(32u64, 0x11u8)
@@ -249,93 +183,102 @@ expect(spliced.len()).to_equal(psk_ch.bytes.len())
 
 #### ServerHello with pre_shared_key selected_identity=0 returns 0
 
-- Verify: ServerHello with pre_shared_key selected_identity=0 returns 0
-   - Expected: sel equals `0)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
-step("Verify: ServerHello with pre_shared_key selected_identity=0 returns 0")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val body = _build_sh_body_with_psk(0u16)
 val sel = _parse_sh_selected_identity(body)
-expect(sel).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(sel).to_equal(0)
 ```
 
 </details>
 
 #### ServerHello without pre_shared_key returns -1 (no PSK selected)
 
-- Verify: ServerHello without pre_shared_key returns -1 (no PSK selected)
-   - Expected: sel equals `-1)  # oracle: pinned constant asserted by this scenario`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
-step("Verify: ServerHello without pre_shared_key returns -1 (no PSK selected)")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val body = _build_sh_body_no_psk()
 val sel = _parse_sh_selected_identity(body)
-expect(sel).to_equal(-1)  # oracle: pinned constant asserted by this scenario
+expect(sel).to_equal(-1)
 ```
 
 </details>
 
-## Scenario Summary
+## At a Glance
 
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/01_unit/os/tls13/psk_connect_flow_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `9cd44e9adc1a50fcbba1a60c42040b9da82458de87cbbeb5a763b8b97d477ed6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `70a343f9dbd324ae6fa2c8696be93c632423793f3383cd664f25107c9b513f9b`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `9cd44e9adc1a50fcbba1a60c42040b9da82458de87cbbeb5a763b8b97d477ed6`.
+Source SHA-256: `70a343f9dbd324ae6fa2c8696be93c632423793f3383cd664f25107c9b513f9b`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `9cd44e9adc1a50fcbba1a60c42040b9da82458de87cbbeb5a763b8b97d477ed6`  
+Source SHA-256: `70a343f9dbd324ae6fa2c8696be93c632423793f3383cd664f25107c9b513f9b`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **83/100**; effective score: **83/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 83/100
 source: test/01_unit/os/tls13/psk_connect_flow_spec.spl
 mirror: doc/06_spec/01_unit/os/tls13/psk_connect_flow_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 8 blockers: 0
+  narrative=100 structure=60 oracle=70
+  traceability=100 evidence=100 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/tls13/psk_connect_flow_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/os/tls13/psk_connect_flow_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/tls13/psk_connect_flow_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/os/tls13/psk_connect_flow_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/tls13/psk_connect_flow_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/os/tls13/psk_connect_flow_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/tls13/psk_connect_flow_spec.spl:194:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'partial-CH binders_field_offset places binders_len after identities' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/tls13/psk_connect_flow_spec.spl:215:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'pre_shared_key extension is the LAST extension in CH (RFC 8446 §4.2.11)' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/tls13/psk_connect_flow_spec.spl:226:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'psk_key_exchange_modes extension (type 0x002d) is present in CH' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/tls13/psk_connect_flow_spec.spl:236:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'partial-CH transcript hash stops at end of identities (RFC 8446 §4.1.4)' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->

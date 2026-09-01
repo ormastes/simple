@@ -1,0 +1,99 @@
+"""Warm CUDA DB filter timing by IR, transfer, kernel, readback, and oracle lane."""
+
+# @req: NFR-GPU-DYN-001, NFR-GPU-DYN-004, NFR-GPU-DYN-005, NFR-GPU-DYN-008
+
+use std.spec.*
+use std.common.processing.db_filter_u32_ir.{
+    processing_ir_db_filter_u32,
+    processing_db_filter_u32_cpu_mask,
+    processing_db_filter_u32_row_ids
+}
+use std.gc_async_mut.processing.cuda_db_filter_u32.{
+    ProcessingDbCudaExecutor,
+    processing_db_filter_u32_execute_cuda_with_executor
+}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+val WARMUPS: i64 = 3
+val SAMPLES: i64 = 31
+val ROWS: i64 = 262144
+
+fn patterned_values(count: i64) -> [u32]:
+    var values: [u32] = []
+    var index: i64 = 0
+    while index < count:
+        values.push((index % 1024).to_u32())
+        index = index + 1
+    values
+
+fn percentile(samples: [i64], numerator: i64) -> i64:
+    var ordered = samples
+    ordered.sort()
+    val index = ((ordered.len().to_i64() * numerator + 99) / 100) - 1
+    ordered[index]
+
+describe "CUDA DB filter warm lane profile":
+    it "should report exact thirty-one-sample p50 and p95 evidence":
+        val ir = processing_ir_db_filter_u32(
+            patterned_values(ROWS), 256u32, 767u32)
+        var executor = ProcessingDbCudaExecutor.create()
+        var warmup: i64 = 0
+        while warmup < WARMUPS:
+            val result = processing_db_filter_u32_execute_cuda_with_executor(
+                executor, ir)
+            expect(result.completed).to_be(true)
+            warmup = warmup + 1
+
+        val stable_input = executor.device_input
+        val stable_output = executor.device_output
+        var prepare: [i64] = []
+        var staging: [i64] = []
+        var upload: [i64] = []
+        var kernel: [i64] = []
+        var readback: [i64] = []
+        var oracle: [i64] = []
+        var total: [i64] = []
+        var cpu: [i64] = []
+        var sample: i64 = 0
+        while sample < SAMPLES:
+            val result = processing_db_filter_u32_execute_cuda_with_executor(
+                executor, ir)
+            expect(result.completed).to_be(true)
+            expect(result.receipt.mismatch_count).to_equal(0)
+            expect(result.row_ids.len()).to_equal(ROWS / 2)
+            expect(executor.device_input).to_equal(stable_input)
+            expect(executor.device_output).to_equal(stable_output)
+            prepare.push(result.ir_prepare_us)
+            staging.push(result.input_stage_us)
+            upload.push(result.upload_us)
+            kernel.push(result.kernel_us)
+            readback.push(result.readback_us)
+            oracle.push(result.oracle_us)
+            total.push(result.total_us)
+            val cpu_started = time_now_nanos()
+            val cpu_mask = processing_db_filter_u32_cpu_mask(ir)
+            val cpu_rows = processing_db_filter_u32_row_ids(ir, cpu_mask)
+            val cpu_finished = time_now_nanos()
+            expect(cpu_rows).to_equal(result.row_ids)
+            cpu.push(if cpu_finished > cpu_started:
+                (cpu_finished - cpu_started + 999) / 1000 else: 0)
+            sample = sample + 1
+
+        val host_overhead_p95 = percentile(prepare, 95)
+        val gpu_p50 = percentile(total, 50)
+        val gpu_p95 = percentile(total, 95)
+        val cpu_p50 = percentile(cpu, 50)
+        val cpu_p95 = percentile(cpu, 95)
+        print("cuda_db_filter_profile rows={ROWS} warmups={WARMUPS} samples={SAMPLES} " +
+            "prepare_p50_us={percentile(prepare, 50)} prepare_p95_us={host_overhead_p95} " +
+            "staging_p50_us={percentile(staging, 50)} staging_p95_us={percentile(staging, 95)} " +
+            "upload_p50_us={percentile(upload, 50)} upload_p95_us={percentile(upload, 95)} " +
+            "kernel_p50_us={percentile(kernel, 50)} kernel_p95_us={percentile(kernel, 95)} " +
+            "readback_p50_us={percentile(readback, 50)} readback_p95_us={percentile(readback, 95)} " +
+            "oracle_p50_us={percentile(oracle, 50)} oracle_p95_us={percentile(oracle, 95)} " +
+            "gpu_p50_us={gpu_p50} gpu_p95_us={gpu_p95} " +
+            "cpu_p50_us={cpu_p50} cpu_p95_us={cpu_p95}")
+        expect(host_overhead_p95).to_be_less_than(50)
+        expect(gpu_p50 * 100).to_be_less_than(cpu_p50 * 67 + 1)
+        expect(gpu_p95 * 100).to_be_less_than(cpu_p95 * 67 + 1)
+        executor.shutdown()

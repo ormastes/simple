@@ -1,0 +1,187 @@
+#!/bin/sh
+# check-erased-receiver-family-not-suffix-bound.shs
+#
+# Pins the fix for the self-hosting blocker recorded in
+# doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
+#
+# MECHANISM BEING PINNED
+# ----------------------
+# `compile_method_call_static` (src/compiler_rust/compiler/src/codegen/instr/
+# closures_structs.rs) resolves a bare method name against `func_ids` by NAME
+# SUFFIX, without checking the receiver type. `func_ids` is PER-MODULE, so in a
+# module that merely USES `.unwrap()` the only `*_dot_unwrap` symbol in scope is
+# whichever library defined one -- in the self-host closure that is
+# `nogc_async_mut/async/poll.spl`'s `Poll.unwrap`. That leaves exactly ONE
+# candidate, so the guard that refuses Option/Result-family names fired only in
+# its `candidates.len() > 1` form and MISSED the single-candidate tail, which
+# silently emitted
+#     call <lib__nogc_async_mut__async__poll__Poll_dot_unwrap>
+# for an erased optional receiver. Poll.unwrap tests Poll::Ready/Poll::Pending,
+# matches neither `Some` tag, falls through and returns 0. 0 is < 4096, so
+# rt_heap_ref_wellformed reports the payload malformed while the field still
+# holds a real enum -> E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED, Stage 2 SEGV on
+# hello world, Stage 3 SEGV at aot:lower_to_mir.
+#
+# The fix changes that guard from `candidates.len() > 1` to `!candidates.is_empty()`.
+# Returning None is a ROUTE, not a refusal: the cross-module branch already
+# excludes this same name family from its bare import_map fallback, so
+# resolution reaches try_compile_builtin_method_call, which maps `unwrap` to the
+# runtime builtin `rt_unwrap_or_trap`. No raw name survives to become a
+# link-time import, so this cannot regress into a NULL GOT.
+#
+# WHY A SOURCE-SHAPE GATE AND NOT A FIXTURE
+# -----------------------------------------
+# A standalone fixture CANNOT reproduce this: func_ids is per-module, so the
+# decoy (Poll.unwrap) and the victim (a module using .unwrap() on an erased
+# optional) never co-occur in a small single-module build. Reproducing it needs
+# a full self-host closure compile (~40 min). This gate therefore pins the
+# SOURCE INVARIANT that the fix established, which is cheap and exact, and is
+# explicitly NOT a claim that Stage 2 is green -- that is measured separately by
+# check-stage2-option-unwrap-not-stolen.shs.
+#
+# VERDICT (last line of stdout, always):
+#   PASS  -- <n> invariant(s) checked, ...            exit 0   (n > 0 always)
+#   FAIL  -- ...                                      exit 1
+#   ERROR -- nothing was checked (<reason>)           exit 2
+#   A run that checked 0 invariants is ERROR, never a pass.
+set -u
+
+ROOT=${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+TARGET="$ROOT/src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs"
+SELFTEST_ONLY=0
+[ "${1:-}" = "--selftest" ] && SELFTEST_ONLY=1
+
+# ---------------------------------------------------------------------------
+# The single source of truth for the check, run against an arbitrary file.
+# Echoes one of: OK | MISSING_GUARD | GUARD_IS_GT1 | NO_FILE
+# ---------------------------------------------------------------------------
+classify_file() {
+    _f=$1
+    [ -f "$_f" ] || { echo NO_FILE; return; }
+    # The guard block: the family match arm plus the condition that admits it.
+    # Look for the family list, then read the condition line above it.
+    _fam='"unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"'
+    grep -qF "$_fam" "$_f" || { echo MISSING_GUARD; return; }
+    # Find the guard that is preceded by a candidates-count condition.
+    # `!candidates.is_empty()` = fixed; `candidates.len() > 1` = the defect.
+    _ctx=$(grep -n -B4 -F "$_fam" "$_f" | grep -c 'candidates\.len() > 1')
+    _fix=$(grep -n -B4 -F "$_fam" "$_f" | grep -c '!candidates\.is_empty()')
+    if [ "$_fix" -ge 1 ]; then echo OK; return; fi
+    if [ "$_ctx" -ge 1 ]; then echo GUARD_IS_GT1; return; fi
+    echo MISSING_GUARD
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST -- runs before every scan and is FATAL. Mutation-tested BOTH ways.
+# ---------------------------------------------------------------------------
+run_selftest() {
+    _tmp=$(mktemp -d "${TMPDIR:-/tmp}/erased-family-gate-selftest.XXXXXX") ||
+        { echo "ERROR -- nothing was checked (cannot mktemp)"; exit 2; }
+    trap 'rm -rf "$_tmp"' EXIT HUP INT TERM
+    _fails=0
+    _n=0
+
+    _fam='"unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"'
+
+    # fixture 1: FIXED shape must classify OK
+    cat > "$_tmp/fixed.rs" <<EOF
+            if type_qualifier.is_none()
+                && !candidates.is_empty()
+                && matches!(
+                    method_part,
+                    $_fam
+                )
+            {
+                return None;
+            }
+EOF
+    _n=$((_n+1))
+    _r=$(classify_file "$_tmp/fixed.rs")
+    [ "$_r" = "OK" ] || { echo "selftest FAIL: fixed fixture -> $_r (want OK)"; _fails=$((_fails+1)); }
+
+    # fixture 2: DEFECT shape (the real pre-fix source) must classify GUARD_IS_GT1
+    cat > "$_tmp/defect.rs" <<EOF
+            if type_qualifier.is_none()
+                && candidates.len() > 1
+                && matches!(
+                    method_part,
+                    $_fam
+                )
+            {
+                return None;
+            }
+EOF
+    _n=$((_n+1))
+    _r=$(classify_file "$_tmp/defect.rs")
+    [ "$_r" = "GUARD_IS_GT1" ] || { echo "selftest FAIL: defect fixture -> $_r (want GUARD_IS_GT1)"; _fails=$((_fails+1)); }
+
+    # fixture 3: guard deleted entirely must classify MISSING_GUARD
+    printf 'let picked = candidates.iter().min_by_key(|(k, _)| k.len());\n' > "$_tmp/gone.rs"
+    _n=$((_n+1))
+    _r=$(classify_file "$_tmp/gone.rs")
+    [ "$_r" = "MISSING_GUARD" ] || { echo "selftest FAIL: removed-guard fixture -> $_r (want MISSING_GUARD)"; _fails=$((_fails+1)); }
+
+    # fixture 4: absent file must classify NO_FILE (drives ERROR, never a pass)
+    _n=$((_n+1))
+    _r=$(classify_file "$_tmp/does-not-exist.rs")
+    [ "$_r" = "NO_FILE" ] || { echo "selftest FAIL: missing file -> $_r (want NO_FILE)"; _fails=$((_fails+1)); }
+
+    # fixture 5: family list present but WITHOUT any candidates condition
+    # (e.g. the cross-module bare-fallback exclusion) must not be read as fixed.
+    cat > "$_tmp/other.rs" <<EOF
+        if resolved_name.is_none()
+            && !matches!(
+                lookup_name,
+                $_fam
+            )
+        {
+            resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
+        }
+EOF
+    _n=$((_n+1))
+    _r=$(classify_file "$_tmp/other.rs")
+    [ "$_r" = "MISSING_GUARD" ] || { echo "selftest FAIL: unrelated-family-use fixture -> $_r (want MISSING_GUARD)"; _fails=$((_fails+1)); }
+
+    rm -rf "$_tmp"
+    if [ "$_n" -eq 0 ]; then
+        echo "ERROR -- nothing was checked (selftest executed 0 fixtures)"; exit 2
+    fi
+    if [ "$_fails" -ne 0 ]; then
+        echo "ERROR -- nothing was checked (selftest failed $_fails/$_n fixtures; the gate itself is broken)"
+        exit 2
+    fi
+    SELFTEST_N=$_n
+}
+
+run_selftest
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS -- $SELFTEST_N invariant(s) checked, selftest only (no tree scanned)"
+    exit 0
+fi
+
+VERDICT=$(classify_file "$TARGET")
+CHECKED=1
+
+case "$VERDICT" in
+    OK)
+        echo "PASS -- $((CHECKED + SELFTEST_N)) invariant(s) checked ($SELFTEST_N selftest + $CHECKED source), Option/Result-family names are refused at EVERY candidate count in the erased-receiver suffix binder; resolution routes on to the runtime builtin"
+        exit 0
+        ;;
+    GUARD_IS_GT1)
+        echo "FAIL -- $((CHECKED + SELFTEST_N)) invariant(s) checked, the erased-receiver family guard is back to 'candidates.len() > 1': func_ids is per-module so the theft leaves exactly ONE candidate and this guard cannot see it (Poll.unwrap steals .unwrap(), Stage 2/3 SEGV)"
+        exit 1
+        ;;
+    MISSING_GUARD)
+        echo "FAIL -- $((CHECKED + SELFTEST_N)) invariant(s) checked, the Option/Result-family guard is absent from $TARGET"
+        exit 1
+        ;;
+    NO_FILE)
+        echo "ERROR -- nothing was checked (target not found: $TARGET)"
+        exit 2
+        ;;
+    *)
+        echo "ERROR -- nothing was checked (unclassifiable result '$VERDICT')"
+        exit 2
+        ;;
+esac

@@ -1,3 +1,9 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
 # @cover src/app/startup/startup_planner.spl 80%
 """
 # Startup Planner Specification (WP-15s)
@@ -13,6 +19,9 @@ resolve failures) are explicit — never a silent fallback.
 
 **Plan:** doc/03_plan/agent_tasks/startup_perf_parallel_plan_2026-08-17.md (WP-15s)
 """
+use std.spec.step
+
+use std.spec.step
 
 use std.spec.{describe, it, assert_true, assert_false, assert_eq}
 use std.common.structural.component.descriptor.{
@@ -22,6 +31,7 @@ use std.common.structural.component.descriptor.{
     component_descriptor_v1
 }
 use app.startup.startup_planner.{
+
     PlannerRequest,
     StartupLoadPlan,
     planner_request_default,
@@ -50,7 +60,10 @@ fn spec_catalog() -> [ComponentDescriptorV1]:
     cat
 
 describe "startup planner reproduces the expected plan":
+    # @manual scenario evidence
     it "plans requested set plus startup components plus transitive deps, dependency-first":
+        # @req REQ-SSPEC-UNIT
+        step("plans requested set plus startup components plus transitive deps, dependency-first")
         var req = planner_request_default("compile")
         req.requested = ["optimizer.vector"]
         val plan = plan_startup(req, spec_catalog())
@@ -71,6 +84,8 @@ describe "startup planner reproduces the expected plan":
         assert_eq(plan.steps[2].dynload_setting, "presence=auto,placement=dynamic,activation=command")
 
     it "presence=off resolves absent explicitly, never silently dropped":
+        # @req REQ-SSPEC-UNIT
+        step("presence=off resolves absent explicitly, never silently dropped")
         var req = planner_request_default("debug")
         req.requested = ["gui.debug"]
         val plan = plan_startup(req, spec_catalog())
@@ -81,6 +96,8 @@ describe "startup planner reproduces the expected plan":
         assert_eq(plan.steps[1].mode, "absent")
 
     it "is deterministic: identical inputs render the identical plan":
+        # @req REQ-SSPEC-UNIT
+        step("is deterministic: identical inputs render the identical plan")
         var req = planner_request_default("compile")
         req.requested = ["optimizer.vector"]
         val a = plan_render(plan_startup(req, spec_catalog()))
@@ -88,6 +105,8 @@ describe "startup planner reproduces the expected plan":
         assert_eq(a, b)
 
     it "fails closed on an unknown requested component":
+        # @req REQ-SSPEC-UNIT
+        step("fails closed on an unknown requested component")
         var req = planner_request_default("compile")
         req.requested = ["no.such.component"]
         val plan = plan_startup(req, spec_catalog())
@@ -96,6 +115,8 @@ describe "startup planner reproduces the expected plan":
         assert_eq(plan.steps.len(), 0)
 
     it "fails closed on a dependency cycle":
+        # @req REQ-SSPEC-UNIT
+        step("fails closed on a dependency cycle")
         val dep_b: [text] = ["b"]
         val dep_a: [text] = ["a"]
         var cat: [ComponentDescriptorV1] = []
@@ -108,6 +129,8 @@ describe "startup planner reproduces the expected plan":
         assert_eq(plan.reason, "dependency_cycle")
 
     it "placement=auto folds static only on a verified digest match":
+        # @req REQ-SSPEC-UNIT
+        step("placement=auto folds static only on a verified digest match")
         val none: [text] = []
         var cat: [ComponentDescriptorV1] = []
         cat.push(desc("auto.comp", "auto", "auto", "command", none))
@@ -130,3 +153,31 @@ describe "startup planner reproduces the expected plan":
         val missing = plan_startup(req, cat)
         assert_false(missing.ok)
         assert_eq(missing.reason, "missing_impl_digest:auto.comp")
+
+    it "uses authoritative static-table absence without fabricated digests":
+        val none: [text] = []
+        var cat: [ComponentDescriptorV1] = []
+        cat.push(desc("auto.comp", "auto", "auto", "startup", none))
+        var req = planner_request_default("app-root")
+        req.static_table_known = true
+        req.static_ids = []
+        val dynamic = plan_startup(req, cat)
+        assert_true(dynamic.ok)
+        assert_eq(dynamic.steps.len(), 1)
+        assert_eq(dynamic.steps[0].mode, "dynamic")
+
+        cat = []
+        cat.push(desc("static.comp", "on", "static", "startup", none))
+        val missing = plan_startup(req, cat)
+        assert_false(missing.ok)
+        assert_eq(missing.reason, "static_required_missing:static.comp")
+
+    it "rejects malformed parallel digest metadata before resolution":
+        var req = planner_request_default("compile")
+        req.digest_ids = ["compiler.frontend"]
+        req.embedded_hashes = []
+        req.configured_hashes = ["impl-B"]
+        val plan = plan_startup(req, spec_catalog())
+        assert_false(plan.ok)
+        assert_eq(plan.reason, "malformed_digest_table")
+        assert_eq(plan.steps.len(), 0)

@@ -29,7 +29,7 @@ use os.kernel.ipc.syscall.{_handle_exit}
 use os.kernel.ipc.syscall.{_handle_yield}
 use os.kernel.ipc.syscall.{_handle_getpid}
 use os.kernel.ipc.syscall.{_handle_spawn_binary}
-use os.kernel.arch.user_entry_bridge.{dispatch_enter_user_blocking}
+use os.kernel.arch_adapt.user_entry.{dispatch_enter_user_blocking}
 use os.kernel.ipc.syscall.{_handle_wait}
 use os.kernel.ipc.syscall.{_handle_fork}
 use os.kernel.ipc.syscall.{_handle_exec}
@@ -112,6 +112,9 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.replay.hooks.{replay_hook_syscall_enter, replay_hook_syscall_exit}
+use os.kernel.ipc.syscall_server_startup_evidence.{
+    _handle_server_startup_evidence_consume
+}
 
 # Pull in sub-modules so their @export("C") symbols are linked.
 use os.kernel.abi.syscall_shim_process
@@ -137,6 +140,7 @@ extern fn spl_handle_debug_write(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5
 var g_shim_scheduler: Scheduler = Scheduler.new_bootstrap()
 var g_shim_ipc: IpcManager = IpcManager.new()
 var g_shim_klog: KernelLog = KernelLog.new(256)
+var g_shim_server_startup_runtime_owner_available_v1: bool = false
 
 # ---------------------------------------------------------------------------
 # DCE keepalive: force the compiler to retain all spl_handle_* functions
@@ -239,6 +243,7 @@ fn _shim_keepalive() -> u64:
     total = total + (spl_handle_schedctl as u64)
     total = total + (spl_handle_fs_pread_registered_v1 as u64)
     total = total + (spl_handle_fs_pwrite_registered_v1 as u64)
+    total = total + (spl_handle_server_startup_evidence_consume_v1 as u64)
     total
 
 @export("C", name: "shim_init")
@@ -252,8 +257,22 @@ fn shim_init(sched: Scheduler, ipc: IpcManager, klog: KernelLog):
     # the assignment's RHS as used even if we ignore the result.
     val _keepalive = _shim_keepalive()
 
+pub(package) fn shim_server_startup_runtime_owner_enable_v1():
+    g_shim_server_startup_runtime_owner_available_v1 = true
+
+pub(package) fn shim_server_startup_runtime_owner_disable_v1():
+    g_shim_server_startup_runtime_owner_available_v1 = false
+
 # ---------------------------------------------------------------------------
 # Helper: pack six u64 values into a SyscallArgs with a known syscall id.
 # ---------------------------------------------------------------------------
 fn _make_args(id: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> SyscallArgs:
     SyscallArgs(id: id, arg0: a0, arg1: a1, arg2: a2, arg3: a3, arg4: a4, arg5: a5)
+
+@export("C", name: "spl_handle_server_startup_evidence_consume_v1")
+fn spl_handle_server_startup_evidence_consume_v1(
+    a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64
+) -> i64:
+    """Consume ABI 116 only while the authenticated scheduler owner is live."""
+    if not g_shim_server_startup_runtime_owner_available_v1: return -38
+    _handle_server_startup_evidence_consume(g_shim_scheduler).value

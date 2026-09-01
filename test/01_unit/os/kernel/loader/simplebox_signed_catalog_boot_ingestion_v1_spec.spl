@@ -1,0 +1,102 @@
+use std.spec
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestResourceLimits, ManifestTarget, SimpleArtifactManifest
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    encode_simple_artifact_manifest_v1_signing_bytes
+}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SimpleboxSafeArtifactBindingReceiptV1,
+    SimpleboxSignedCatalogExternalCandidateV1,
+    SimpleboxSignedCatalogProvisionErrorV1,
+    SimpleboxSignedCatalogProvisionResultV1,
+    simplebox_signed_catalog_candidate_plan_v1,
+    simplebox_signed_catalog_record_encode_v1
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootRecordV1
+}
+use os.kernel.loader.simplebox_signed_catalog_boot_ingestion_v1.{
+    simplebox_signed_catalog_boot_ingestion_shape_valid_v1
+}
+use os.tools.simplebox.simplebox_artifact_contract.{
+    SIMPLEBOX_CANONICAL_PATH_V1, simplebox_canonical_aliases_v1
+}
+
+fn ingestion_target() -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos")
+
+fn ingestion_provisioned() -> SimpleboxSignedCatalogProvisionResultV1:
+    val payload = [1u8, 3u8, 5u8, 7u8]
+    val digest = sha256_u8_hex(payload)
+    val manifest = SimpleArtifactManifest(
+        format_version: 1, artifact_kind: "native-executable",
+        target: ingestion_target(), entrypoint: SIMPLEBOX_CANONICAL_PATH_V1,
+        required_abi_features: [], required_services: [],
+        required_capabilities: 0u32,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: 1048576, max_open_handles: 16,
+            max_threads: 1, cpu_budget_us: 0),
+        namespace_template: "simplebox-primary-tools",
+        native_libraries: [], smf_libraries: [], interpreter: "",
+        argument_schema: [], startup_preloads: [], content_hashes: [digest],
+        signature: "ed25519:image-key:" + "11" * 64,
+        debug_identity: "simplebox")
+    val sam1 = encode_simple_artifact_manifest_v1_signing_bytes(manifest, digest)
+    val candidate = SimpleboxSignedCatalogExternalCandidateV1(
+        sam1_identity_sha256: sha256_u8_hex(sam1.bytes),
+        record: InstalledArtifactBootRecordV1(
+            canonical_path: SIMPLEBOX_CANONICAL_PATH_V1,
+            aliases: simplebox_canonical_aliases_v1(),
+            content_sha256: digest, detached_signature: manifest.signature,
+            expected_trust_root_sha256: "22" * 32, manifest: manifest))
+    val encoded = simplebox_signed_catalog_record_encode_v1(candidate).unwrap()
+    val roots = [ExecutableManifestTrustedSignerV1(
+        key_id: "image-key", public_key: [7u8] * 32)]
+    val planned = simplebox_signed_catalog_candidate_plan_v1(
+        ingestion_target(), roots, candidate, encoded, payload)
+    SimpleboxSignedCatalogProvisionResultV1(
+        ok: planned.ok, error: planned.error,
+        receipt: SimpleboxSafeArtifactBindingReceiptV1(
+            artifact_relative_path: "bin/simplebox",
+            artifact_sha256: planned.receipt.artifact_sha256,
+            artifact_byte_count: planned.receipt.artifact_byte_count,
+            signed_record_relative_path: "catalog/simplebox.scr1",
+            signed_record_sha256: planned.receipt.signed_record_sha256,
+            sam1_identity_sha256: planned.receipt.sam1_identity_sha256),
+        plan: planned.plan)
+
+describe "Simplebox signed catalog boot ingestion boundary":
+    it "accepts only a complete provision receipt bound to the signed bundle":
+        expect(simplebox_signed_catalog_boot_ingestion_shape_valid_v1(
+            ingestion_provisioned())).to_be(true)
+
+    it "rejects a substituted artifact receipt before catalog mutation":
+        var provisioned = ingestion_provisioned()
+        provisioned.receipt.artifact_sha256 = "33" * 32
+        expect(simplebox_signed_catalog_boot_ingestion_shape_valid_v1(
+            provisioned)).to_be(false)
+
+    it "rejects missing safe-root path evidence before catalog mutation":
+        var provisioned = ingestion_provisioned()
+        provisioned.receipt.signed_record_relative_path = ""
+        expect(simplebox_signed_catalog_boot_ingestion_shape_valid_v1(
+            provisioned)).to_be(false)
+
+    it "uses the canonical safe-root path rules":
+        for unsafe_path in ["..", ".", "../bin/simplebox", "./bin/simplebox",
+                            "\\bin\\simplebox", "bin/simplebox/"]:
+            var provisioned = ingestion_provisioned()
+            provisioned.receipt.artifact_relative_path = unsafe_path
+            expect(simplebox_signed_catalog_boot_ingestion_shape_valid_v1(
+                provisioned)).to_be(false)
+
+    it "rejects a forged success flag when provisioning reported failure":
+        var provisioned = ingestion_provisioned()
+        provisioned.error = SimpleboxSignedCatalogProvisionErrorV1.InvalidInput
+        expect(simplebox_signed_catalog_boot_ingestion_shape_valid_v1(
+            provisioned)).to_be(false)

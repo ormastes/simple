@@ -1,84 +1,91 @@
 # HTML Numeric Character References
 
-> WHATWG numeric character-reference normalization from tokenizer semantics
-> through canonical BeDOM, Draw IR, and Engine2D.
+> This executable specification proves WHATWG numeric character-reference normalization across tokenizer text and attribute contexts, canonical BeDOM semantics, Web-to-Draw-IR lowering, and Engine2D pixels.
 
-| Scenarios | Active | Skipped | Pending |
-|-----------|--------|---------|---------|
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
+# HTML Numeric Character References
+
+This executable specification proves WHATWG numeric character-reference normalization across tokenizer text and attribute contexts, canonical BeDOM semantics, Web-to-Draw-IR lowering, and Engine2D pixels.
+
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Status | Runnable; runtime not executed for this artifact update |
-| Requirements | REQ-WEB-BROWSER-002, REQ-WEB-BROWSER-003, REQ-WEB-BROWSER-004 |
+| Category | Other |
+| Status | Active |
 | Source | `test/03_system/feature/web_platform/html/html_numeric_character_references_spec.spl` |
-| Source lines | 232 |
-| Source SHA-256 | `a76f26ef14411c31c8683d0ab71dc8ad2be02997cd669ecfb9ede76599581c6d` |
-| Scenario count | 1 |
-| Visible step count | 4 |
-| Direct assertion sites | 18 |
-| Folded executable lines | 114 |
-| Updated | 2026-07-31 |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-The scenario verifies every numeric reference from `0x80` through `0x9F` in
-decimal and hexadecimal. The 27 defined Windows-1252 compatibility values map
-to their WHATWG Unicode replacements. Undefined C1 values `0x81`, `0x8D`,
-`0x8F`, `0x90`, and `0x9D` remain identity controls.
+This executable specification proves WHATWG numeric character-reference
+normalization across tokenizer text and attribute contexts, canonical BeDOM
+semantics, Web-to-Draw-IR lowering, and Engine2D pixels.
 
-Missing semicolons decode in text and attributes even before ASCII letters or
-`=`, unlike the named-reference attribute ambiguity rule. Zero, surrogates,
-out-of-range scalars, and overflowing digit runs become `U+FFFD`; valid
-controls and noncharacters retain their scalar values.
+The C1 table includes every value from `0x80` through `0x9F`. Defined legacy
+Windows-1252 replacements map to their Unicode scalars; the five undefined C1
+controls remain identity values.
 
-The final step compares three equal-sized frames:
+## Requirement Traceability
 
-- the numeric entity `L&#128;R`;
-- the literal Unicode text `L€R`;
-- the negative-control glyph text `LXR`.
+- `REQ-WEB-BROWSER-002` requires deterministic canonical HTML semantics.
+- `REQ-WEB-BROWSER-003` requires bounded parser behavior for hostile input.
+- `REQ-WEB-BROWSER-004` requires Web output to lower through Draw IR and
+  Engine2D.
 
-The entity and literal-Euro frames must be identical. The negative-control
-frame must differ by at least one pixel, preventing an all-background or
-renderer-no-op result from satisfying the parity assertion.
+## Claim Boundary
 
-## Evidence
+Parse errors are not exposed by the current tokenizer API. This scenario
+therefore verifies emitted characters and bounded consumption, not parse-error
+reporting.
 
-| Step | Evidence |
-|------|----------|
-| Decode the C1 table | 32 decimal and 32 hexadecimal direct equality checks, plus exact table counts |
-| Preserve context rules | Exact text and quoted-attribute values, including missing semicolons, no-digit references, undefined C1 identity, and named-reference ambiguity |
-| Bound invalid input | Exact replacement/identity scalars, delimiter retention, saturation of a 64-digit overflow, and token-limit truncation |
-| Render canonical output | Exact BeDOM title/text, exact Draw IR text parity, exact entity/literal pixel parity, positive negative-control pixel difference, and a known background pixel |
+## Scenarios
 
-The manual records static source parity only. It does not claim that the
-scenario was executed or passed.
+### WHATWG numeric character references
 
-## Scenario
+#### should normalize the complete C1 table through Web rendering
 
-### should normalize the complete C1 table through Web rendering
+- should normalize the complete C1 table through Web rendering
+   - HTML capture: after_step
+- Decode every C1 value in decimal and hexadecimal
+   - HTML capture: after_step
+   - Evidence: HTML text verified by 2 expected checks
+   - Expected: C1_HEX.len() equals `32`
+   - Expected: C1_EXPECTED.len() equals `32`
+- Preserve numeric missing-semicolon rules in text and attributes
+   - HTML capture: after_step
+   - Evidence: HTML text verified by 1 expected check
+   - Expected: text_result equals `expected_missing`
+- Replace invalid scalars while retaining delimiters and quotas
+   - HTML capture: after_step
+   - Evidence: HTML text verified by 3 expected checks
+   - Expected: limited.truncated is true
+   - Expected: limited.tokens.len() equals `3`
+   - Expected: limited.tokens[1].data equals `replacement`
+- Match literal Unicode through BeDOM, Draw IR, and Engine2D
+   - HTML capture: after_step
+   - Evidence: HTML text verified by 3 expected checks
+   - Expected: be_dom_get_attr(entity_node, "title") equals `A€B`
+   - Expected: be_dom_get_text_content(entity_node) equals `L€R`
+   - Expected: entity_pixels equals `literal_pixels`
 
-1. Decode every C1 value in decimal and hexadecimal.
-2. Preserve numeric missing-semicolon rules in text and attributes.
-3. Replace invalid scalars while retaining delimiters and quotas.
-4. Match literal Unicode through BeDOM, Draw IR, and Engine2D.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Scenario body: 114 lines folded for review.
-
-Parity: this block is exactly source lines 119–232 with only the common
-eight-space scenario-body indent removed. It uses the imports, constants, and
-helpers in the source file above; it is not a standalone file. The source path,
-total line count, and SHA-256 are recorded above.
+Runnable source: 116 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should normalize the complete C1 table through Web rendering")
 step("Decode every C1 value in decimal and hexadecimal")
 expect(C1_HEX.len()).to_equal(32)
 expect(C1_EXPECTED.len()).to_equal(32)
@@ -197,21 +204,70 @@ expect(entity_pixels).to_contain(0xFFE0F2FEu32)
 
 </details>
 
-## Failure Interpretation
+## Scenario Summary
 
-- A table mismatch is a numeric-reference normalization defect.
-- A text/attribute mismatch is a tokenizer context defect.
-- A delimiter or quota mismatch is a bounded-consumption defect.
-- A BeDOM mismatch is a canonical tree semantic defect.
-- A Draw IR mismatch is a Web lowering defect.
-- Equal Euro/control frames indicate a nondiscriminating Engine2D oracle.
-- Different entity/literal-Euro frames indicate normalization did not reach
-  canonical pixels.
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
 
 </details>
 
-## Artifact Integrity
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-The folded executable is tied to the source path, 232-line count, 114-line
-scenario-body count, and SHA-256 above. Any source edit requires refreshing all
-four values and the folded block together.
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-002`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c5735db28b20e8d133ba64a2c9f4a8937e6e2695d8c6e0668ec11020ea717741`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c5735db28b20e8d133ba64a2c9f4a8937e6e2695d8c6e0668ec11020ea717741`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c5735db28b20e8d133ba64a2c9f4a8937e6e2695d8c6e0668ec11020ea717741`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/html/html_numeric_character_references_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/html/html_numeric_character_references_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=95 oracle=70
+  traceability=60 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/html/html_numeric_character_references_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/html/html_numeric_character_references_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/html/html_numeric_character_references_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/html/html_numeric_character_references_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/feature/web_platform/html/html_numeric_character_references_spec.spl:127:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should normalize the complete C1 table through Web rendering' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/html_numeric_character_references_spec.spl:127:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should normalize the complete C1 table through Web rendering' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

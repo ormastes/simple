@@ -4,8 +4,14 @@
 # Protocol: Python wrapper sends JSON-lines on stdin, kernel replies on stdout
 # Message format: {"channel":"shell","msg_type":"...","msg_id":"...","session":"...","content":{...}}
 
-extern fn input() -> text
-extern fn stdout_write(s: text)
+@unsafe(reason: "canonical runtime stdin ABI", capabilities: [ffi])
+extern fn rt_stdin_read_line_text() -> text
+@unsafe(reason: "canonical runtime stdout ABI", capabilities: [ffi])
+extern fn rt_stdout_write(value: i64) -> i64
+
+fn _kernel_stdout_write(value: text):
+    unsafe(capabilities: [ffi]):
+        val _written = rt_stdout_write(value)
 extern fn stdout_flush()
 use std.io_runtime.{get_args}
 
@@ -198,7 +204,7 @@ fn send_message(channel: text, msg_type: text, parent_msg_id: text, content: tex
         jp("parent_msg_id", js(parent_msg_id)),
         jp("content", content)
     )
-    stdout_write(msg + "\n")
+    _kernel_stdout_write(msg + "\n")
     stdout_flush()
 
 fn send_status(parent_msg_id: text, state: text):
@@ -453,7 +459,7 @@ fn handle_comm_msg(raw_msg: text):
 fn kernel_main():
     session_init()
     while KERNEL_RUNNING:
-        val line = input() ?? ""
+        val line = unsafe(capabilities: [ffi]): rt_stdin_read_line_text() ?? ""
         if line == "":
             KERNEL_RUNNING = false
             continue

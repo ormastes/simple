@@ -1,0 +1,106 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl"
+alias_owner="$root/src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl"
+
+declarations=$(grep -c '^extern fn ' "$owner")
+if [ "$declarations" -ne 59 ]; then
+    echo "Engine2D Vulkan extern inventory changed without contract review" >&2
+    exit 1
+fi
+tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ { previous_is_ffi = 1; next }
+    /^extern fn / { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every Engine2D Vulkan declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /^[[:space:]]*@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ {
+        next_function_unsafe = 1
+        next
+    }
+    /^[[:space:]]*(static fn|fn|me) / {
+        function_indent = indent($0)
+        function_unsafe = next_function_unsafe
+        next_function_unsafe = 0
+        inside_function = 1
+        next
+    }
+    inside_function && NF && indent($0) <= function_indent {
+        function_unsafe = 0
+        inside_function = 0
+    }
+    /unsafe\(capabilities: \[.*ffi.*\]\):[[:space:]]*$/ {
+        unsafe_indent = indent($0)
+        inside_unsafe = 1
+        next
+    }
+    inside_unsafe && NF && indent($0) <= unsafe_indent { inside_unsafe = 0 }
+    /(rt_vulkan_[A-Za-z0-9_]+|rt_byte_array_new_len|spl_str_ptr)\(/ &&
+        !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / &&
+        !inside_unsafe && !function_unsafe {
+        print "unscoped Engine2D Vulkan call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$owner"
+
+if [ "$(grep -c '^[[:space:]]*@unsafe(.*capabilities: \[.*ffi' "$alias_owner")" -ne 48 ]; then
+    echo "Engine2D Vulkan alias authority inventory changed without review" >&2
+    exit 1
+fi
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /^[[:space:]]*@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ {
+        next_function_unsafe = 1
+        next
+    }
+    /^[[:space:]]*(static fn|fn|me) / {
+        function_indent = indent($0)
+        function_unsafe = next_function_unsafe
+        next_function_unsafe = 0
+        inside_function = 1
+        next
+    }
+    inside_function && NF && indent($0) <= function_indent {
+        function_unsafe = 0
+        inside_function = 0
+    }
+    /rt_vulkan_[A-Za-z0-9_]+\(/ && !/^[[:space:]]*#/ && !function_unsafe {
+        print "unscoped Engine2D Vulkan alias call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$alias_owner"
+
+grep -q 'row_count > 268435456 / row_bytes' "$owner"
+grep -q 'region_bytes > 268435456 - total_bytes' "$owner"
+grep -q 'regions.len() > 4096' "$owner"
+if [ "$(grep -c '\.call0("vkEnumerateInstanceVersion")' "$owner")" -ne 1 ] ||
+   grep -Eq 'self[.]_dyn_lib[.]call[1-9]\(' "$owner"; then
+    echo "Vulkan dynamic mode must remain a loader-only probe, not generic hot-path dispatch" >&2
+    exit 1
+fi
+if [ "$(grep -c '[.]sym("vkEnumerateInstanceVersion")' "$alias_owner")" -ne 1 ] ||
+   grep -Eq 'self[.]_dyn_lib[.]call[0-9]\(' "$alias_owner"; then
+    echo "Vulkan alias dynamic mode must resolve-only and reject operational dispatch" >&2
+    exit 1
+fi
+
+echo "Engine2D Vulkan SFFI authority audit: PASS (59 declarations; canonical and alias raw facades explicitly unsafe; bounded copies retained)"

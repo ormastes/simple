@@ -56,9 +56,33 @@ int64_t   rt_mlkem_modq_avx2_selfcheck(void);
 #endif
 
 /* x86_64 AVX2 — runtime-detected via cpuid */
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !(defined(__clang__) && defined(_MSC_VER))
 #  define SIMD_CAN_AVX2 1
 #else
+/* clang-cl (__clang__ AND _MSC_VER) is excluded deliberately.
+ *
+ * The AVX2 routines rely on per-function `__attribute__((target("avx2")))` so
+ * the rest of the translation unit stays at the baseline ISA and
+ * `simd_detect_avx2()` chooses at runtime. Under -fms-compatibility clang-cl
+ * does not honour that attribute for enabling intrinsics, so the AVX2 bodies
+ * fail to compile: `use of undeclared identifier '__m256i'`
+ * (runtime_simd_utf8.c) and `unknown type name '__m256i'`
+ * (runtime_simd_dispatch.c).
+ *
+ * `/arch:AVX2` would fix the compile and is NOT used: it licenses the compiler
+ * to emit AVX2 anywhere in the TU, including the scalar fallbacks that exist
+ * precisely for CPUs without AVX2, converting a clean runtime-dispatch design
+ * into a crash on pre-Haswell hardware.
+ *
+ * Real MSVC cl.exe is NOT excluded -- it permits AVX2 intrinsics irrespective
+ * of /arch -- and neither is the GNU-driver clang, which honours the attribute.
+ * Only the clang-cl combination is affected.
+ *
+ * Cost: Windows MSVC-lane builds take the scalar UTF-8 paths
+ * (scalar_utf8_count_codepoints / _validate / _find_invalid). Correct, slower.
+ * Recorded rather than silently accepted:
+ * doc/08_tracking/bug/windows_clang_cl_avx2_target_attribute_2026-08-31.md
+ */
 #  define SIMD_CAN_AVX2 0
 #endif
 

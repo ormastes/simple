@@ -1,0 +1,122 @@
+# Test-only external-provider setup and exact differential harness. Compiler
+# paths and hashes are explicit inputs; PATH lookup and shell execution are
+# deliberately absent. Pure Simple supplies every canonical receipt.
+
+use std.cli.cli_util.{get_cli_args}
+use std.common.env_access.model.*
+use std.common.rt_hal.model.{RtHalOperationKind}
+use app.io.mod.{file_hash_sha256}
+use app.io.env_access_host.{execute_host_env_access_plan}
+use app.io.rt_hal_isolated_host.{rt_hal_install_isolated_exact_host_from_plan}
+use std.nogc_sync_mut.rt_hal.exact_boundary.{
+    RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt
+}
+use std.nogc_sync_mut.rt_hal.process_task_arena.{
+    rt_hal_process_controller_claim, rt_hal_process_arena_shutdown
+}
+use std.nogc_sync_mut.rt_hal.tagged.{RtHalTagPolicy, rt_hal_execute_registered_exact}
+use test.fixtures.rt_hal_external.fixture_plan.{
+    RtHalExternalFixtureConfig, rt_hal_external_build_plan,
+    rt_hal_external_provider_plan, rt_hal_external_expected_receipt
+}
+
+fn argument(args: [text], name: text) -> text:
+    val prefix = "--" + name + "="
+    for item in args:
+        if item.starts_with(prefix): return item.substring(prefix.len())
+    ""
+
+fn config_from_args(args: [text]) -> RtHalExternalFixtureConfig:
+    RtHalExternalFixtureConfig(
+        repo: argument(args, "repo"), cc: argument(args, "cc"),
+        cc_hash: argument(args, "cc-sha256"), rustc: argument(args, "rustc"),
+        rustc_hash: argument(args, "rustc-sha256"),
+        c_output: argument(args, "c-output"),
+        rust_output: argument(args, "rust-output")
+    )
+
+fn build_blocker(plan: EnvAccessPlan) -> text:
+    val receipts = match execute_host_env_access_plan(plan):
+        case Ok(value): value
+        case Err(problem): return "typed build execution failed: " + problem
+    if receipts.len() != 2: return "typed build did not return both compiler receipts"
+    if receipts[0].status != EnvAccessStatus.Executed or receipts[0].exit_code != 0:
+        return "C toolchain cannot produce the required static non-PIE closure"
+    if receipts[1].status != EnvAccessStatus.Executed or receipts[1].exit_code != 0:
+        return "Rust toolchain cannot produce the required static non-PIE closure"
+    ""
+
+fn emit_static_closure_blocked(reason: text):
+    val blocked = env_scenario_skip(
+        "rt-hal-external-static-closure", reason,
+        "rt-hal-fixture-owner", "REQ-009",
+        "provide C and Rust toolchains with a complete static non-PIE ELF target",
+        ["test/fixtures/rt_hal_external/README.md"],
+        "rerun the RT/HAL external fixture with pinned static toolchain identities")
+    val problem = env_scenario_selection_error(blocked)
+    if problem != "": panic(problem)
+    print "RTHAL-FIXTURE-BLOCKED-v1 scenario={blocked.scenario_id} reason={blocked.reason} owner={blocked.owner} tracking={blocked.tracking_id} prerequisite={blocked.prerequisite}"
+
+fn digest(base: i64) -> RtHalDigest256:
+    RtHalDigest256(word0: base, word1: base + 1,
+        word2: base + 2, word3: base + 3)
+
+fn exact_requests() -> [RtHalExactRequest]:
+    [
+        RtHalExactRequest(case_id: 101, operation: RtHalOperationKind.Query,
+            operation_digest: digest(10), input_digest: digest(20)),
+        RtHalExactRequest(case_id: 102, operation: RtHalOperationKind.Effectful,
+            operation_digest: digest(30), input_digest: digest(40))
+    ]
+
+fn pure_receipts() -> [RtHalCanonicalReceipt]:
+    val requests = exact_requests()
+    [
+        rt_hal_external_expected_receipt(requests[0], digest(0)),
+        rt_hal_external_expected_receipt(requests[1], digest(100))
+    ]
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val config = config_from_args(args)
+    val plan = rt_hal_external_build_plan(config)
+    val plan_problem = env_access_plan_error(plan)
+    if plan_problem != "": panic(plan_problem)
+    val build_problem = build_blocker(plan)
+    if build_problem != "":
+        emit_static_closure_blocked(build_problem)
+        return 2
+
+    # Provider descriptor pinning and launch belong exclusively to the typed
+    # host owner. The leaf records the post-build file identities it supplies
+    # to that owner; the owner re-hashes each pinned descriptor before use.
+    val c_hash = file_hash_sha256(config.c_output)
+    val rust_hash = file_hash_sha256(config.rust_output)
+    val providers = rt_hal_external_provider_plan(config, c_hash, rust_hash)
+    val install_problem = rt_hal_install_isolated_exact_host_from_plan(
+        providers, true, true, "rthal-c-v1", "rthal-rust-v1",
+        2, 4, 5000, 4096, 2)
+    # V2 intentionally cannot claim a Ready catalog: it has no complete V3
+    # operation mapping or compiler-owned exit-schema/controller seal. This
+    # legacy fixture remains an executable quarantine witness rather than
+    # silently treating an unready host as a successful differential run.
+    if install_problem == "RTHAL-E-LEGACY-V2-QUARANTINED":
+        print "RTHAL-FIXTURE-v1 status=quarantined reason={install_problem}"
+        return 0
+    if install_problem != "": panic(install_problem)
+    val controller_problem = rt_hal_process_controller_claim()
+    if controller_problem != "": panic(controller_problem)
+    val policy = RtHalTagPolicy(
+        compare_c: true, compare_rust: true,
+        worker_count: 2, queue_capacity: 4,
+        timeout_ticks: 5000, max_output_bytes: 4096,
+        require_all: true)
+    val report = rt_hal_execute_registered_exact(
+        policy, exact_requests(), pure_receipts())
+    val shutdown_problem = rt_hal_process_arena_shutdown()
+    if report.error != "": panic(report.error)
+    if report.results.len() != 4 or report.completed_tasks != 4 or not report.actual_parallel:
+        panic("RTHAL-FIXTURE-E-DIFFERENTIAL")
+    if shutdown_problem != "": panic(shutdown_problem)
+    print "RTHAL-FIXTURE-v1 c=sha256:{c_hash} rust=sha256:{rust_hash} cases=2 comparisons=4 status=ok"
+    0

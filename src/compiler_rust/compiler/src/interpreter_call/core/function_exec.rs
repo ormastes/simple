@@ -6,8 +6,8 @@ use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
-    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, owned_global, owned_globals_snapshot,
-    owner_bindings, owner_has_globals, seed_owner_globals, set_owned_global, visit_pattern_binding_names,
+    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, owned_global, owned_globals_snapshot, owner_bindings,
+    owner_has_globals, seed_owner_globals, set_owned_global, visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -55,9 +55,7 @@ fn sffi_return_contract(return_type: Option<&Type>) -> SffiReturnContract {
         // `return` in a `-> unit` fn yield Value::Nil under a NonOptional
         // contract, faulting with "nil is forbidden by the non-optional
         // return contract".
-        Some(Type::Simple(name)) if name == "()" || name == "unit" || name == "void" => {
-            SffiReturnContract::Unit
-        }
+        Some(Type::Simple(name)) if name == "()" || name == "unit" || name == "void" => SffiReturnContract::Unit,
         Some(Type::Optional(_)) => SffiReturnContract::Optional,
         // Explicit generic spelling `Option<T>` / `Optional<T>` is equivalent
         // to the `T?` sugar (which parses to `Type::Optional`) and must be
@@ -764,7 +762,21 @@ pub(crate) fn execute_function_body(
     // Auto-wrap return value in Some() when the declared return type is T? (Optional)
     // and the actual return value is not already an Option enum.
     // This handles `fn f() -> i32?: return 42` without explicit `return Some(42)`.
-    let result = if matches!(func.return_type, Some(Type::Optional(_))) {
+    //
+    // EXCEPTION: `-> any?`. For a dynamically-typed optional return there is no
+    // static call-site unwrap (the `any` erases the type info that drives the
+    // Some-unwrap for concrete `T?`), so wrapping delivers a raw Option enum to
+    // the caller ("cannot convert enum to float", `as i64` == 0). For `any?`,
+    // nil itself is the none sentinel: pass values and nil through untouched.
+    // Bugs: doc/08_tracking/bug/free_fn_optional_wrap_2026-06-26.md,
+    // doc/08_tracking/bug/llm_caret_json_parse_nil_contract_and_any_option_wrap_2026-08-25.md
+    let optional_inner_is_any = matches!(
+        &func.return_type,
+        Some(Type::Optional(inner)) if matches!(inner.as_ref(), Type::Simple(name) if name == "any")
+    );
+    let result = if optional_inner_is_any {
+        result
+    } else if matches!(func.return_type, Some(Type::Optional(_))) {
         match &result {
             Value::Enum { enum_name, .. } if enum_name == "Option" => result,
             Value::Nil => Value::Enum {
@@ -777,9 +789,7 @@ pub(crate) fn execute_function_body(
                 // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the implicit
                 // `T -> Option<T>` wrap on a function return, the exact shape
                 // behind `emit_call() -> LocalId?`.
-                crate::interpreter::note_enum_payload_function(
-                    "fn-return-some-wrap", "Option", "Some", 0, &result,
-                );
+                crate::interpreter::note_enum_payload_function("fn-return-some-wrap", "Option", "Some", 0, &result);
                 Value::Enum {
                     enum_name: "Option".to_string(),
                     variant: "Some".to_string(),
@@ -818,12 +828,7 @@ pub(crate) fn execute_function_body(
     };
 
     // Validate the full return contract (total, not unit-only).
-    let result = validate_sffi_return_contract(
-        &func.name,
-        func.return_type.as_ref(),
-        return_origin,
-        Some(result),
-    )?;
+    let result = validate_sffi_return_contract(&func.name, func.return_type.as_ref(), return_origin, Some(result))?;
 
     // Wrap in Promise if async and requested
     let result = if wrap_async && is_async_function(func) {
@@ -975,7 +980,7 @@ pub(crate) fn exec_function_with_values_and_self(
         )?;
 
         outer_env.release_scope();
-    let result = execute_function_body(
+        let result = execute_function_body(
             func,
             bound,
             &mut local_env,
@@ -1022,7 +1027,7 @@ pub(crate) fn exec_function_with_captured_env(
 
         let parked = park_written_back_arguments(func, args, outer_env, classes, self_mode);
         outer_env.release_scope();
-    let result = execute_function_body(
+        let result = execute_function_body(
             func,
             bound_args,
             &mut local_env,
@@ -1104,8 +1109,14 @@ fn is_value_type_struct(v: &Value, classes: &HashMap<String, Arc<ClassDef>>) -> 
 /// callee's new container; writing back a value-equal one is observably a
 /// no-op, so identity is the right — and O(1) — test.
 fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) -> bool {
-    let (Value::Object { fields: caller_fields, .. }, Value::Object { fields: callee_fields, .. }) =
-        (&mut *caller_val, callee_val)
+    let (
+        Value::Object {
+            fields: caller_fields, ..
+        },
+        Value::Object {
+            fields: callee_fields, ..
+        },
+    ) = (&mut *caller_val, callee_val)
     else {
         return false;
     };
@@ -1289,26 +1300,6 @@ fn restore_parked_arguments(parked: &[ParkedArg], outer_env: &mut Env, local_env
     }
 }
 
-/// Mirror an argument write-back into `MODULE_GLOBALS`.
-///
-/// For a module-level binding, `env` is not authoritative on read: identifier
-/// evaluation prefers `MODULE_GLOBALS` for non-local names
-/// (`interpreter/expr/literals.rs`), and the generic assignment path keeps the
-/// two in sync (`interpreter/place.rs::sync_module_global`). Writing only
-/// `outer_env` here left the caller reading the pre-call value, so a
-/// module-level `let out = []` never saw `f(out)`'s `out.push(42)` — the
-/// subsequent `out[0]` failed with "index is 0 but length is 0".
-pub(crate) fn sync_module_global_writeback(name: &str, value: &Value) {
-    crate::interpreter::MODULE_GLOBALS.with(|cell| {
-        // Peek before taking the write borrow: borrow_mut() on this
-        // generation-tracked cell invalidates owned-env templates.
-        if !cell.borrow().contains_key(name) {
-            return;
-        }
-        cell.borrow_mut().insert(name.to_string(), value.clone());
-    });
-}
-
 // Bug #19 fix: write back mutable-container parameters to caller's bindings.
 //
 // When a function is called with a simple identifier argument (e.g., `f(a)`)
@@ -1465,7 +1456,6 @@ fn write_back_mutable_arguments(
                         if param_is_mut {
                             mut_written.insert(caller_name.clone());
                         }
-                        sync_module_global_writeback(&caller_name, &new_val);
                         outer_env.insert(caller_name, new_val);
                     } else if is_value_type_struct(callee_val, classes) {
                         // Value-type struct: fields stay value-copied, but its
@@ -1482,9 +1472,7 @@ fn write_back_mutable_arguments(
                         // no-change path restores it exactly.
                         let taken = outer_env.take_frame_owned(&caller_name);
                         let took = taken.is_some();
-                        if let Some(mut caller_val) =
-                            taken.or_else(|| outer_env.get(&caller_name).cloned())
-                        {
+                        if let Some(mut caller_val) = taken.or_else(|| outer_env.get(&caller_name).cloned()) {
                             if merge_shared_collection_fields(&mut caller_val, callee_val) {
                                 outer_env.insert(caller_name, caller_val);
                             } else if took {
@@ -1522,10 +1510,7 @@ fn write_back_mutable_arguments(
                             match obj_val {
                                 Value::Object { class, mut fields } => {
                                     if crate::perf_counters::enabled() {
-                                        crate::perf_counters::bump(
-                                            &crate::perf_counters::FIELD_WRITEBACK_CALLS,
-                                            1,
-                                        );
+                                        crate::perf_counters::bump(&crate::perf_counters::FIELD_WRITEBACK_CALLS, 1);
                                         if Arc::strong_count(&fields) > 1 {
                                             crate::perf_counters::bump(
                                                 &crate::perf_counters::FIELD_WRITEBACK_MAP_CLONES,
@@ -1534,9 +1519,7 @@ fn write_back_mutable_arguments(
                                         }
                                     }
                                     Arc::make_mut(&mut fields).insert(field_name, callee_val);
-                                    let updated = Value::Object { class, fields };
-                                    sync_module_global_writeback(&obj_name, &updated);
-                                    outer_env.insert(obj_name, updated);
+                                    outer_env.insert(obj_name, Value::Object { class, fields });
                                 }
                                 other => {
                                     if took {

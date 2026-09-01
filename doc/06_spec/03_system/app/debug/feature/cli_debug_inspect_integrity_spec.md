@@ -1,6 +1,6 @@
 # CLI evidence inspection integrity
 
-> Verifies the cli debug inspect integrity behaviour end to end so maintainers of this
+> The operator-facing `simple debug inspect <bundle>` command must reject a
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # CLI evidence inspection integrity
 
-Verifies the cli debug inspect integrity behaviour end to end so maintainers of this
+The operator-facing `simple debug inspect <bundle>` command must reject a
 
 ## At a Glance
 
@@ -20,18 +20,12 @@ Verifies the cli debug inspect integrity behaviour end to end so maintainers of 
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/debug/feature/cli_debug_inspect_integrity_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the cli debug inspect integrity behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+The operator-facing `simple debug inspect <bundle>` command must reject a
+retained artifact whose bytes no longer match the exact digest in the bundle
+manifest. A parsed manifest is not sufficient evidence integrity.
 
 ## Scenarios
 
@@ -39,20 +33,23 @@ unrelated sibling features are out of scope.
 
 #### rejects a tampered retained artifact at the operator CLI boundary
 
-- Verify: rejects a tampered retained artifact at the operator CLI boundary
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- rejects a tampered retained artifact at the operator CLI boundary
    - Expected: exit_code != 0 is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-008 REQ-009 REQ-014
-step("Verify: rejects a tampered retained artifact at the operator CLI boundary")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("rejects a tampered retained artifact at the operator CLI boundary")
 val root = "build/test-cli-debug-inspect-integrity-system"
 tampered_bundle(root)
 val (stdout, stderr, exit_code) = process_run(
@@ -76,36 +73,51 @@ expect(stdout + stderr).to_contain("artifact digest mismatch")
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-008`
+- `REQ-009`
+- `REQ-014`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `fd53f6baeb5dcc66422e200805cb089a8203c4cf2628bb6e29710d7f6fd7d5da`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `a412f32420faec72760fd019f799f99a94748b7fe827c1ec0d18c93e4c0e42f2`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `fd53f6baeb5dcc66422e200805cb089a8203c4cf2628bb6e29710d7f6fd7d5da`.
+Source SHA-256: `a412f32420faec72760fd019f799f99a94748b7fe827c1ec0d18c93e4c0e42f2`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `fd53f6baeb5dcc66422e200805cb089a8203c4cf2628bb6e29710d7f6fd7d5da`  
+Source SHA-256: `a412f32420faec72760fd019f799f99a94748b7fe827c1ec0d18c93e4c0e42f2`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **89/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/03_system/app/debug/feature/cli_debug_inspect_integrity_spec.spl
 mirror: doc/06_spec/03_system/app/debug/feature/cli_debug_inspect_integrity_spec.md (current)
-findings: 3 blockers: 0
+findings: 4 blockers: 1
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=90 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/debug/feature/cli_debug_inspect_integrity_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=89; blocker cap makes effective=49
 doc/06_spec/03_system/app/debug/feature/cli_debug_inspect_integrity_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/debug/feature/cli_debug_inspect_integrity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/debug/feature/cli_debug_inspect_integrity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/debug/feature/cli_debug_inspect_integrity_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/debug/feature/cli_debug_inspect_integrity_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects a tampered retained artifact at the operator CLI boundary' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

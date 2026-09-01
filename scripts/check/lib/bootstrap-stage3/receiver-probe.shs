@@ -1,0 +1,64 @@
+# Stage-2 receiver evidence verification.  These receipts are replayed from
+# the frozen evidence artifacts rather than accepted as bare PASS strings.
+bootstrap_stage3_verify_receiver_smoke_evidence() {
+    bootstrap_receiver_receipt=$1
+    bootstrap_receiver_compiler=$2
+    bootstrap_receiver_runtime_archive=$3
+    [ -f "$bootstrap_receiver_receipt" ] && [ ! -L "$bootstrap_receiver_receipt" ] || return 1
+    for bootstrap_receiver_key in schema status compiler_sha256 runtime_archive_sha256 stdout_path stdout_sha256; do
+        bootstrap_stage3_manifest_value "$bootstrap_receiver_key" "$bootstrap_receiver_receipt" >/dev/null || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_receiver_receipt")" = simple-bootstrap-stage2-receiver-smoke-evidence-v1 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value status "$bootstrap_receiver_receipt")" = pass ] || return 1
+    [ "$(bootstrap_stage3_manifest_value compiler_sha256 "$bootstrap_receiver_receipt")" = "$(bootstrap_stage3_hash_file "$bootstrap_receiver_compiler")" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value runtime_archive_sha256 "$bootstrap_receiver_receipt")" = "$(bootstrap_stage3_hash_file "$bootstrap_receiver_runtime_archive")" ] || return 1
+    bootstrap_receiver_stdout=$(bootstrap_stage3_manifest_value stdout_path "$bootstrap_receiver_receipt") || return 1
+    [ -f "$bootstrap_receiver_stdout" ] && [ ! -L "$bootstrap_receiver_stdout" ] || return 1
+    [ "$(bootstrap_stage3_canonical_file "$bootstrap_receiver_stdout")" = "$bootstrap_receiver_stdout" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value stdout_sha256 "$bootstrap_receiver_receipt")" = "$(bootstrap_stage3_hash_file "$bootstrap_receiver_stdout")" ] || return 1
+    grep -Fxq 'bootstrap_stage2_struct_receiver=PASS' "$bootstrap_receiver_stdout"
+}
+
+bootstrap_stage3_verify_llvm_receiver_evidence() {
+    bootstrap_receiver_evidence=$1
+    bootstrap_receiver_compiler=$2
+    bootstrap_receiver_runtime=$3
+    bootstrap_receiver_root=$4
+    bootstrap_receiver_archive=$5
+    bootstrap_receiver_receipt="$bootstrap_receiver_evidence/receipt.env"
+    [ -d "$bootstrap_receiver_evidence" ] && [ ! -L "$bootstrap_receiver_evidence" ] || return 1
+    [ "$(bootstrap_stage3_canonical_path "$bootstrap_receiver_evidence")" = "$bootstrap_receiver_evidence" ] || return 1
+    [ -f "$bootstrap_receiver_receipt" ] && [ ! -L "$bootstrap_receiver_receipt" ] || return 1
+    for bootstrap_receiver_key in schema status backend entry_closure compiler_path compiler_sha256 runtime_path runtime_archive_path runtime_archive_sha256 entry_path entry_sha256 ir_path ir_sha256 ir_import ir_call object_path object_sha256 object_import executable_path executable_sha256 executable_provider stdout_path stdout_sha256 executable_run; do
+        bootstrap_stage3_manifest_value "$bootstrap_receiver_key" "$bootstrap_receiver_receipt" >/dev/null || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_receiver_receipt")" = simple-bootstrap-stage2-llvm-receiver-evidence-v1 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value status "$bootstrap_receiver_receipt")" = pass ] || return 1
+    [ "$(bootstrap_stage3_manifest_value backend "$bootstrap_receiver_receipt")" = llvm ] || return 1
+    [ "$(bootstrap_stage3_manifest_value entry_closure "$bootstrap_receiver_receipt")" = 1 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value compiler_path "$bootstrap_receiver_receipt")" = "$bootstrap_receiver_compiler" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value compiler_sha256 "$bootstrap_receiver_receipt")" = "$(bootstrap_stage3_hash_file "$bootstrap_receiver_compiler")" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value runtime_path "$bootstrap_receiver_receipt")" = "$bootstrap_receiver_runtime" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value runtime_archive_path "$bootstrap_receiver_receipt")" = "$bootstrap_receiver_archive" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value runtime_archive_sha256 "$bootstrap_receiver_receipt")" = "$(bootstrap_stage3_hash_file "$bootstrap_receiver_archive")" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value entry_path "$bootstrap_receiver_receipt")" = "$bootstrap_receiver_root/test/04_smoke/bootstrap_llvm_struct_receiver_guard.spl" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value entry_sha256 "$bootstrap_receiver_receipt")" = "$(bootstrap_stage3_hash_file "$bootstrap_receiver_root/test/04_smoke/bootstrap_llvm_struct_receiver_guard.spl")" ] || return 1
+    for bootstrap_receiver_file_key in ir_path object_path executable_path stdout_path; do
+        bootstrap_receiver_path=$(bootstrap_stage3_manifest_value "$bootstrap_receiver_file_key" "$bootstrap_receiver_receipt") || return 1
+        case "$bootstrap_receiver_path" in "$bootstrap_receiver_evidence"/*) ;; *) return 1 ;; esac
+        [ -f "$bootstrap_receiver_path" ] && [ ! -L "$bootstrap_receiver_path" ] || return 1
+        [ "$(bootstrap_stage3_canonical_file "$bootstrap_receiver_path")" = "$bootstrap_receiver_path" ] || return 1
+    done
+    for bootstrap_receiver_pair in ir_path:ir_sha256 object_path:object_sha256 executable_path:executable_sha256 stdout_path:stdout_sha256; do
+        bootstrap_receiver_path_key=${bootstrap_receiver_pair%%:*}
+        bootstrap_receiver_sha_key=${bootstrap_receiver_pair#*:}
+        bootstrap_receiver_path=$(bootstrap_stage3_manifest_value "$bootstrap_receiver_path_key" "$bootstrap_receiver_receipt") || return 1
+        [ "$(bootstrap_stage3_manifest_value "$bootstrap_receiver_sha_key" "$bootstrap_receiver_receipt")" = "$(bootstrap_stage3_hash_file "$bootstrap_receiver_path")" ] || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value ir_import "$bootstrap_receiver_receipt")" = pass ] && [ "$(bootstrap_stage3_manifest_value ir_call "$bootstrap_receiver_receipt")" = pass ] && [ "$(bootstrap_stage3_manifest_value object_import "$bootstrap_receiver_receipt")" = pass ] && [ "$(bootstrap_stage3_manifest_value executable_provider "$bootstrap_receiver_receipt")" = pass ] && [ "$(bootstrap_stage3_manifest_value executable_run "$bootstrap_receiver_receipt")" = pass ] || return 1
+    bootstrap_receiver_ir=$(bootstrap_stage3_manifest_value ir_path "$bootstrap_receiver_receipt") || return 1
+    bootstrap_receiver_object=$(bootstrap_stage3_manifest_value object_path "$bootstrap_receiver_receipt") || return 1
+    bootstrap_receiver_executable=$(bootstrap_stage3_manifest_value executable_path "$bootstrap_receiver_receipt") || return 1
+    bootstrap_receiver_stdout=$(bootstrap_stage3_manifest_value stdout_path "$bootstrap_receiver_receipt") || return 1
+    grep -Fq 'declare i8 @rt_struct_receiver_valid(i64, i64, i64)' "$bootstrap_receiver_ir" && grep -Eq 'call i8 @rt_struct_receiver_valid\(i64 ' "$bootstrap_receiver_ir" && nm -u "$bootstrap_receiver_object" 2>/dev/null | grep -Eq '[[:space:]]rt_struct_receiver_valid$' && nm -g --defined-only "$bootstrap_receiver_executable" 2>/dev/null | grep -Eq '[[:space:]]rt_struct_receiver_valid$' && [ "$(cat "$bootstrap_receiver_stdout")" = "bootstrap llvm struct receiver guard" ]
+}

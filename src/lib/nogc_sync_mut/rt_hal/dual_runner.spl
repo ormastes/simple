@@ -1,0 +1,494 @@
+# dual_runner.spl — DualRunner: the full dual-run contract (design
+# doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md Part B; plan
+# doc/03_plan/os/hal/asm_to_simple_migration_plan.md 1.8).
+#
+#   caller ──► DualRunner
+#                ├── shadow_alloc()   : ShadowSet (copies of every out target)
+#                ├── run_ref(args, shadow.ref)
+#                ├── run_cand(args, shadow.cand)
+#                ├── compare(ref, cand, comparator) : DualReceipt
+#                ├── commit(chosen copy → real target)  ONLY on match
+#                └── on_mismatch(policy): Trap | UseRef | UseCandLog
+#
+# Modes (B.3): value | shadow-buffer | shadow-state | record-compare | replay.
+# Arguments are transported by value in-process (B.4) as a typed DualArgs
+# vector — this is what replaces "canonical argument transport is
+# unavailable" in the compiler's validate_rt_hal_tags.
+#
+# Fail-closed: a mismatch under Trap commits NOTHING (real buffer / state /
+# hardware untouched), marks the receipt `trapped`, and the receipt + ledger
+# row name BOTH values. UseRef commits the reference and still records the
+# mismatch. UseCandLog is refused unless the runner is explicitly flipped
+# (`set_commit_from("cand")`) — a pair may only flip after the soak bar.
+#
+# Value semantics: DualRunner and ShadowSet are classes (single owner, mutated
+# in place); providers receive a COPY of the shadow target and return the
+# written copy — the runner never lets a provider touch `real`.
+
+use std.common.spec.dual_run.{dual_check_f64}
+use std.nogc_sync_mut.rt_hal.virtual_device.*
+use std.nogc_sync_mut.rt_hal.dual_run_ledger.*
+
+# --- (1) typed argument transport -------------------------------------------
+
+pub struct DualArg:
+    kind: text      # i64 | f64 | bool | text | bytes
+    i: i64
+    f: f64
+    t: text
+    b: [u8]
+
+pub struct DualArgs:
+    items: [DualArg]
+
+fn _arg(kind: text, i: i64, f: f64, t: text, b: [u8]) -> DualArg:
+    DualArg(kind: kind, i: i, f: f, t: t, b: b)
+
+pub fn arg_i64(v: i64) -> DualArg: _arg("i64", v, 0.0, "", [])
+pub fn arg_f64(v: f64) -> DualArg: _arg("f64", 0, v, "", [])
+pub fn arg_bool(v: bool) -> DualArg: _arg("bool", if v: 1 else: 0, 0.0, "", [])
+pub fn arg_text(v: text) -> DualArg: _arg("text", 0, 0.0, v, [])
+pub fn arg_bytes(v: [u8]) -> DualArg: _arg("bytes", 0, 0.0, "", v)
+
+pub fn dual_args(items: [DualArg]) -> DualArgs:
+    DualArgs(items: items)
+
+fn _has(a: DualArgs, idx: i64, kind: text) -> bool:
+    idx >= 0 and idx < a.items.len() and a.items[idx].kind == kind
+
+pub fn args_i64(a: DualArgs, idx: i64) -> i64:
+    if _has(a, idx, "i64") or _has(a, idx, "bool"): a.items[idx].i else: 0
+
+pub fn args_f64(a: DualArgs, idx: i64) -> f64:
+    if _has(a, idx, "f64"): a.items[idx].f else: 0.0
+
+pub fn args_bool(a: DualArgs, idx: i64) -> bool:
+    _has(a, idx, "bool") and a.items[idx].i != 0
+
+pub fn args_text(a: DualArgs, idx: i64) -> text:
+    if _has(a, idx, "text"): a.items[idx].t else: ""
+
+pub fn args_bytes(a: DualArgs, idx: i64) -> [u8]:
+    if _has(a, idx, "bytes"): a.items[idx].b else: []
+
+pub fn dual_args_repr(a: DualArgs) -> text:
+    var out = ""
+    var i = 0
+    while i < a.items.len():
+        val x = a.items[i]
+        if i > 0:
+            out = out + ","
+        if x.kind == "i64":
+            out = out + "i64:{x.i}"
+        elif x.kind == "bool":
+            out = out + "bool:{x.i != 0}"
+        elif x.kind == "f64":
+            out = out + "f64:{x.f}"
+        elif x.kind == "text":
+            out = out + "text:{x.t}"
+        else:
+            out = out + "bytes[{x.b.len()}]:{bytes_repr(x.b)}"
+        i = i + 1
+    out
+
+# --- (3) typed comparators --------------------------------------------------
+
+pub struct CompareResult:
+    agree: bool
+    first_diff_index: i64
+    a_repr: text
+    b_repr: text
+    detail: text
+
+fn _hex2(v: i64) -> text:
+    val h = (v & 0xFF).to_hex()
+    if h.len() < 2: "0{h}" else: h
+
+pub fn bytes_repr(b: [u8]) -> text:
+    var out = ""
+    var i = 0
+    val n = if b.len() < 32: b.len() else: 32
+    while i < n:
+        out = out + _hex2(b[i] as i64)
+        i = i + 1
+    if b.len() > 32:
+        out = out + "..({b.len()} bytes)"
+    out
+
+pub fn compare_bytes(a: [u8], b: [u8]) -> CompareResult:
+    var i = 0
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    var first = -1
+    while i < n and first < 0:
+        if a[i] != b[i]:
+            first = i
+        i = i + 1
+    if first < 0 and a.len() != b.len():
+        first = n
+    var detail = ""
+    if first >= 0:
+        if first < a.len() and first < b.len():
+            detail = "byte {first}: ref=0x{_hex2(a[first] as i64)} cand=0x{_hex2(b[first] as i64)}"
+        else:
+            detail = "length: ref={a.len()} cand={b.len()}"
+    CompareResult(agree: first < 0, first_diff_index: first, a_repr: bytes_repr(a), b_repr: bytes_repr(b), detail: detail)
+
+# Struct/state comparator: a snapshot is an ordered (name, value-repr) list so
+# any struct can be compared field-wise with a per-field ignore policy
+# (design B.4 `@compare(ignore)` for padding / timestamps).
+pub struct StateSnapshot:
+    names: [text]
+    values: [text]
+
+pub fn snapshot_set(s: StateSnapshot, name: text, value: text) -> StateSnapshot:
+    var out = s
+    var i = 0
+    while i < out.names.len():
+        if out.names[i] == name:
+            out.values[i] = value
+            return out
+        i = i + 1
+    out.names.push(name)
+    out.values.push(value)
+    out
+
+pub fn snapshot_get(s: StateSnapshot, name: text) -> text:
+    var i = 0
+    while i < s.names.len():
+        if s.names[i] == name:
+            return s.values[i]
+        i = i + 1
+    ""
+
+fn _to_i64(t: text) -> i64:
+    var acc: i64 = 0
+    var i = 0
+    var neg = false
+    if t.starts_with("-"):
+        neg = true
+        i = 1
+    while i < t.len():
+        val d = "0123456789".index_of(t.substring(i, i + 1))
+        if d < 0:
+            break
+        acc = acc * 10 + d
+        i = i + 1
+    if neg: 0 - acc else: acc
+
+pub fn snapshot_get_i64(s: StateSnapshot, name: text) -> i64:
+    _to_i64(snapshot_get(s, name))
+
+pub fn snapshot_repr(s: StateSnapshot) -> text:
+    var out = ""
+    var i = 0
+    while i < s.names.len():
+        if i > 0:
+            out = out + " "
+        out = out + "{s.names[i]}={s.values[i]}"
+        i = i + 1
+    out
+
+fn _ignored(ignore: [text], name: text) -> bool:
+    for x in ignore:
+        if x == name:
+            return true
+    false
+
+pub fn compare_struct(a: StateSnapshot, b: StateSnapshot, ignore: [text]) -> CompareResult:
+    var i = 0
+    var first = -1
+    var detail = ""
+    while i < a.names.len() and first < 0:
+        val name = a.names[i]
+        if not _ignored(ignore, name):
+            val bv = snapshot_get(b, name)
+            if bv != a.values[i]:
+                first = i
+                detail = "field {name}: ref={a.values[i]} cand={bv}"
+        i = i + 1
+    if first < 0:
+        i = 0
+        while i < b.names.len() and first < 0:
+            if not _ignored(ignore, b.names[i]) and snapshot_get(a, b.names[i]) == "" and b.values[i] != "":
+                first = a.names.len() + i
+                detail = "field {b.names[i]}: ref=<absent> cand={b.values[i]}"
+            i = i + 1
+    CompareResult(agree: first < 0, first_diff_index: first, a_repr: snapshot_repr(a), b_repr: snapshot_repr(b), detail: detail)
+
+# --- receipts, policy, runner -----------------------------------------------
+
+pub enum MismatchPolicy:
+    Trap
+    UseRef
+    UseCandLog
+
+pub fn mismatch_policy_name(p: MismatchPolicy) -> text:
+    match p:
+        case MismatchPolicy.Trap: "trap"
+        case MismatchPolicy.UseRef: "use-ref"
+        case MismatchPolicy.UseCandLog: "use-cand+log"
+
+pub struct DualReceipt:
+    pair: text
+    mode: text
+    args_repr: text
+    agree: bool
+    ref_repr: text
+    cand_repr: text
+    committed: bool
+    committed_from: text   # "ref" | "cand" | ""
+    trapped: bool
+    policy: text
+    message: text
+
+pub class DualRunner:
+    pair: text
+    mode: text
+    policy: MismatchPolicy
+    commit_from: text
+    ledger_path: text
+    run_id: text
+    binary_identity: text
+    cases: i64
+    mismatches: i64
+    first_mismatch_repr: text
+    commit_count: i64
+    hardware_apply_count: i64
+
+impl DualRunner:
+    static fn create(pair: text, mode: text, policy: MismatchPolicy) -> DualRunner:
+        DualRunner(pair: pair, mode: mode, policy: policy, commit_from: "ref",
+                   ledger_path: dual_ledger_default_path(), run_id: dual_run_run_id(),
+                   binary_identity: dual_run_binary_identity(),
+                   cases: 0, mismatches: 0, first_mismatch_repr: "",
+                   commit_count: 0, hardware_apply_count: 0)
+
+    me set_ledger(path: text):
+        self.ledger_path = path
+
+    # Flip which provider's copy is committed on match ("ref" default).
+    # DESIGN B.7 SAYS: "UseCand is never allowed until the pair has passed the
+    # stability bar". THAT IS NOT ENFORCED HERE — this setter consults no
+    # ledger. Safe today only because nothing in-tree calls it. OWED: gate on
+    # dual_ledger_soak(dual_ledger_load(self.ledger_path), self.pair).stable
+    # before honouring "cand".
+    me set_commit_from(side: text):
+        self.commit_from = if side == "cand": "cand" else: "ref"
+
+    # Decide + count. Returns the receipt with committed/trapped/message set.
+    me decide(args_repr: text, agree: bool, ref_repr: text, cand_repr: text, detail: text) -> DualReceipt:
+        self.cases = self.cases + 1
+        var committed = false
+        var from = ""
+        var trapped = false
+        var message = ""
+        if agree:
+            committed = true
+            from = self.commit_from
+            message = "OK {self.pair}: ref={ref_repr} cand={cand_repr}"
+        else:
+            self.mismatches = self.mismatches + 1
+            val why = if detail != "": " ({detail})" else: ""
+            message = "MISMATCH {self.pair} mode={self.mode} args=[{args_repr}] ref={ref_repr} cand={cand_repr}{why}"
+            if self.first_mismatch_repr == "":
+                self.first_mismatch_repr = "ref={ref_repr} cand={cand_repr}{why}"
+            match self.policy:
+                case MismatchPolicy.Trap:
+                    trapped = true
+                case MismatchPolicy.UseRef:
+                    committed = true
+                    from = "ref"
+                case MismatchPolicy.UseCandLog:
+                    if self.commit_from == "cand":
+                        committed = true
+                        from = "cand"
+                    else:
+                        # never allowed before the flip — fail closed
+                        trapped = true
+        DualReceipt(pair: self.pair, mode: self.mode, args_repr: args_repr, agree: agree,
+                    ref_repr: ref_repr, cand_repr: cand_repr, committed: committed,
+                    committed_from: from, trapped: trapped,
+                    policy: mismatch_policy_name(self.policy), message: message)
+
+    me note_commit():
+        self.commit_count = self.commit_count + 1
+
+    me note_hardware_apply():
+        self.hardware_apply_count = self.hardware_apply_count + 1
+
+    fn ledger_row() -> LedgerRow:
+        LedgerRow(pair: self.pair, mode: self.mode, run_id: self.run_id, cases: self.cases,
+                  mismatches: self.mismatches, first_mismatch_repr: self.first_mismatch_repr,
+                  binary_identity: self.binary_identity)
+
+    me flush_ledger() -> bool:
+        if self.cases == 0:
+            return false
+        dual_ledger_append(self.ledger_path, self.ledger_row())
+
+# --- (5) value mode ---------------------------------------------------------
+
+pub struct DualI64:
+    receipt: DualReceipt
+    value: i64
+
+pub struct DualF64:
+    receipt: DualReceipt
+    value: f64
+
+pub struct DualText:
+    receipt: DualReceipt
+    value: text
+
+fn _pick_i64(r: DualReceipt, ref_v: i64, cand_v: i64) -> i64:
+    if not r.committed: 0 elif r.committed_from == "cand": cand_v else: ref_v
+
+pub fn dual_run_i64(runner: DualRunner, args: DualArgs, ref_fn: fn(DualArgs) -> i64, cand_fn: fn(DualArgs) -> i64) -> DualI64:
+    val ref_v = ref_fn(args)
+    val cand_v = cand_fn(args)
+    val receipt = runner.decide(dual_args_repr(args), ref_v == cand_v, "{ref_v}", "{cand_v}", "")
+    if receipt.committed:
+        runner.note_commit()
+    DualI64(receipt: receipt, value: _pick_i64(receipt, ref_v, cand_v))
+
+pub fn dual_run_f64(runner: DualRunner, args: DualArgs, ref_fn: fn(DualArgs) -> f64, cand_fn: fn(DualArgs) -> f64, bit_exact: bool) -> DualF64:
+    val ref_v = ref_fn(args)
+    val cand_v = cand_fn(args)
+    val v = dual_check_f64(runner.pair, cand_v, ref_v, bit_exact)
+    val receipt = runner.decide(dual_args_repr(args), v.agree, v.oracle_repr, v.simple_repr, "")
+    if receipt.committed:
+        runner.note_commit()
+    val chosen = if not receipt.committed: 0.0 elif receipt.committed_from == "cand": cand_v else: ref_v
+    DualF64(receipt: receipt, value: chosen)
+
+pub fn dual_run_text(runner: DualRunner, args: DualArgs, ref_fn: fn(DualArgs) -> text, cand_fn: fn(DualArgs) -> text) -> DualText:
+    val ref_v = ref_fn(args)
+    val cand_v = cand_fn(args)
+    val receipt = runner.decide(dual_args_repr(args), ref_v == cand_v, ref_v, cand_v, "")
+    if receipt.committed:
+        runner.note_commit()
+    val chosen = if not receipt.committed: "" elif receipt.committed_from == "cand": cand_v else: ref_v
+    DualText(receipt: receipt, value: chosen)
+
+# --- (2) shadow-buffer mode -------------------------------------------------
+
+pub class ShadowSet:
+    name: text
+    real: [u8]
+    ref_copy: [u8]
+    cand_copy: [u8]
+    commit_count: i64
+
+impl ShadowSet:
+    # Two copies initialised from the real target so read-modify-write ops
+    # see the same starting bytes (design B.4).
+    static fn from_real(name: text, real: [u8]) -> ShadowSet:
+        ShadowSet(name: name, real: real, ref_copy: real, cand_copy: real, commit_count: 0)
+
+    # Commit = one copy of the chosen shadow into the real target.
+    me commit(side: text):
+        if side == "cand":
+            self.real = self.cand_copy
+        else:
+            self.real = self.ref_copy
+        self.commit_count = self.commit_count + 1
+
+pub fn dual_run_shadow_buffer(runner: DualRunner, args: DualArgs, shadow: ShadowSet, ref_fn: fn(DualArgs, [u8]) -> [u8], cand_fn: fn(DualArgs, [u8]) -> [u8]) -> DualReceipt:
+    val args_before = dual_args_repr(args)
+    shadow.ref_copy = ref_fn(args, shadow.ref_copy)
+    shadow.cand_copy = cand_fn(args, shadow.cand_copy)
+    var c = compare_bytes(shadow.ref_copy, shadow.cand_copy)
+    var detail = c.detail
+    var agree = c.agree
+    # Belt-and-braces input guard. NOTE: under value semantics the provider
+    # receives a COPY of `args`, so this can never fire today — it is NOT an
+    # enforcement mechanism, only a tripwire if transport ever goes by
+    # reference. Do not cite it as the design B.4 input post-hash.
+    if dual_args_repr(args) != args_before:
+        agree = false
+        detail = "input mutated by a provider"
+    val receipt = runner.decide(args_before, agree, c.a_repr, c.b_repr, detail)
+    if receipt.committed:
+        shadow.commit(receipt.committed_from)
+        runner.note_commit()
+    receipt
+
+# --- (5) shadow-state mode --------------------------------------------------
+
+pub struct DualState:
+    receipt: DualReceipt
+    state: StateSnapshot
+
+pub fn dual_run_shadow_state(runner: DualRunner, args: DualArgs, state: StateSnapshot, ref_fn: fn(DualArgs, StateSnapshot) -> StateSnapshot, cand_fn: fn(DualArgs, StateSnapshot) -> StateSnapshot, ignore: [text]) -> DualState:
+    # snapshot; run ref; snapshot; restore; run cand; snapshot; compare; keep one
+    val ref_state = ref_fn(args, state)
+    val cand_state = cand_fn(args, state)
+    val c = compare_struct(ref_state, cand_state, ignore)
+    val receipt = runner.decide(dual_args_repr(args), c.agree, c.a_repr, c.b_repr, c.detail)
+    var kept = state
+    if receipt.committed:
+        kept = if receipt.committed_from == "cand": cand_state else: ref_state
+        runner.note_commit()
+    DualState(receipt: receipt, state: kept)
+
+# --- (5) device-effect modes: record-compare / replay ------------------------
+
+pub struct DualDevice:
+    receipt: DualReceipt
+    agreed: [EffectRecord]
+    commit_writes: i64
+    hardware_applied: bool
+
+fn _device_decide(runner: DualRunner, args: DualArgs, ref_log: [EffectRecord], cand_log: [EffectRecord], poll_collapse: bool, apply_hw: bool, is_replay: bool) -> DualDevice:
+    val c = effect_logs_compare(ref_log, cand_log, poll_collapse)
+    var detail = ""
+    if not c.agree:
+        detail = "effect {c.first_diff_index}: ref_len={c.ref_len} cand_len={c.cand_len}"
+    val receipt = runner.decide(dual_args_repr(args), c.agree, c.ref_repr, c.cand_repr, detail)
+    var agreed: [EffectRecord] = []
+    var commit_writes = 0
+    var applied = false
+    # replay commits nothing new: the reference's real run IS the commit
+    if receipt.committed and not is_replay:
+        agreed = if receipt.committed_from == "cand": cand_log else: ref_log
+        commit_writes = effect_log_writes(agreed).len()
+        runner.note_commit()
+        if apply_hw:
+            dual_apply_effects_mmio(agreed)
+            runner.note_hardware_apply()
+            applied = true
+    DualDevice(receipt: receipt, agreed: agreed, commit_writes: commit_writes, hardware_applied: applied)
+
+# record-compare: BOTH providers run against the façade with the same read
+# script; the agreed log is replayed to hardware once (apply_hw).
+pub fn dual_run_record_compare(runner: DualRunner, args: DualArgs, ref_fn: fn(DualArgs, VirtualDevice), cand_fn: fn(DualArgs, VirtualDevice), read_script: [i64], poll_collapse: bool, apply_hw: bool) -> DualDevice:
+    var ref_dev = VirtualDevice.create(read_script)
+    ref_fn(args, ref_dev)
+    var cand_dev = VirtualDevice.create(read_script)
+    cand_fn(args, cand_dev)
+    _device_decide(runner, args, ref_dev.log(), cand_dev.log(), poll_collapse, apply_hw, false)
+
+# record-compare against a RECORDED reference trace (the C/asm twin ran under
+# QEMU / on the board, or its trace was derived from source): only the
+# candidate runs here, against the façade.
+pub fn dual_run_record_compare_trace(runner: DualRunner, args: DualArgs, ref_trace: [EffectRecord], cand_fn: fn(DualArgs, VirtualDevice), read_script: [i64], poll_collapse: bool, apply_hw: bool) -> DualDevice:
+    var cand_dev = VirtualDevice.create(read_script)
+    cand_fn(args, cand_dev)
+    _device_decide(runner, args, ref_trace, cand_dev.log(), poll_collapse, apply_hw, false)
+
+# replay: the reference already ran for real (its trace is `recorded`); the
+# candidate runs against the recording — reads answered from the trace,
+# writes compared in order — and NEVER touches hardware.
+pub fn dual_run_replay(runner: DualRunner, args: DualArgs, recorded: [EffectRecord], cand_fn: fn(DualArgs, VirtualDevice), poll_collapse: bool) -> DualDevice:
+    var cand_dev = VirtualDevice.create(effect_log_read_script(recorded))
+    cand_fn(args, cand_dev)
+    _device_decide(runner, args, recorded, cand_dev.log(), poll_collapse, false, true)
+
+export DualArg, DualArgs, arg_i64, arg_f64, arg_bool, arg_text, arg_bytes, dual_args
+export args_i64, args_f64, args_bool, args_text, args_bytes, dual_args_repr
+export CompareResult, bytes_repr, compare_bytes
+export StateSnapshot, snapshot_set, snapshot_get, snapshot_get_i64, snapshot_repr, compare_struct
+export MismatchPolicy, mismatch_policy_name, DualReceipt, DualRunner
+export DualI64, DualF64, DualText, dual_run_i64, dual_run_f64, dual_run_text
+export ShadowSet, dual_run_shadow_buffer, DualState, dual_run_shadow_state
+export DualDevice, dual_run_record_compare, dual_run_record_compare_trace, dual_run_replay

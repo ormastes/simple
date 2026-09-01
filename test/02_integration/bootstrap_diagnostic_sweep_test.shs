@@ -13,6 +13,9 @@ printf '%s\n' 'fn timeout_one() -> i64: 1' > "$work/timeout-input/01_timeout.spl
 printf '%s\n' 'fn timeout_failure(:' > "$work/timeout-input/02_failure.spl"
 printf '%s\n' 'fn timeout_two() -> i64: 1' > "$work/timeout-input/03_timeout.spl"
 printf '%s\n' 'fn timeout_success() -> i64: 1' > "$work/timeout-input/04_success.spl"
+printf '%s\n' 'fn exit_139() -> i64: 1' > "$work/signal-input/04_exit_139.spl"
+printf '%s\n' 'fn crash() -> i64: 1' > "$work/signal-input/05_segv.spl"
+printf '%s\n' 'fn after_crash() -> i64: 1' > "$work/signal-input/06_after_crash.spl"
 printf '%s\n' 'fn parent_exit() -> i64: 1' > "$work/parent-input/parent_exit.spl"
 printf '%s\n' 'fn explicit_good() -> i64: 1' > "$work/explicit-input/explicit_good.spl"
 
@@ -84,7 +87,8 @@ output="$work/output.txt"
 set +e
 (cd "$work/repo" && FAKE_INVOCATIONS="$work/invocations" \
   sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
-  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" \
+  --evidence-dir="$work/evidence" --jobs=2) \
   >"$output" 2>&1
 status=$?
 set -e
@@ -135,7 +139,7 @@ grep -Fq 'error: diagnostic timeout after 1s:'" $work/timeout-input/01_timeout.s
 grep -Fq 'diagnostic failure:'" $work/timeout-input/02_failure.spl" "$timeout_output"
 grep -Fq 'error[E300]: timeout-adjacent failure' "$timeout_output"
 grep -Fq 'diagnostic timeout:'" $work/timeout-input/03_timeout.spl" "$timeout_output"
-grep -Fq 'bootstrap diagnostic summary: checked=4 passed=1 failed=3 timed_out=2' "$timeout_output"
+grep -Fq 'bootstrap diagnostic summary: checked=4 passed=1 failed=3 signaled=0 timed_out=2 complete=true' "$timeout_output"
 first_timeout_line=$(grep -nF 'diagnostic timeout:'" $work/timeout-input/01_timeout.spl" "$timeout_output" | cut -d: -f1)
 failure_line=$(grep -nF 'diagnostic failure:'" $work/timeout-input/02_failure.spl" "$timeout_output" | cut -d: -f1)
 second_timeout_line=$(grep -nF 'diagnostic timeout:'" $work/timeout-input/03_timeout.spl" "$timeout_output" | cut -d: -f1)
@@ -150,6 +154,31 @@ while IFS= read -r descendant_pid; do
     exit 1
   fi
 done < "$work/timeout-descendants"
+
+# A crashed compiler is one terminal manifest outcome, not a sweep crash. Its
+# raw signal exit is retained and lexically later inputs still run.
+signal_output="$work/signal-output.txt"
+set +e
+(cd "$work/repo" && FAKE_INVOCATIONS="$work/signal-invocations" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/signal-input" \
+  --cache-dir="$work/signal-cache" --evidence-dir="$work/signal-evidence" \
+  --jobs=1) >"$signal_output" 2>&1
+signal_status=$?
+set -e
+[ "$signal_status" -eq 1 ] || { echo "signal did not count as aggregate failure" >&2; exit 1; }
+[ "$(wc -l < "$work/signal-invocations" | tr -d ' ')" -eq 4 ] || {
+  echo "sweep stopped before the post-crash source" >&2
+  exit 1
+}
+grep -Fq 'diagnostic crash (exit 139):'" $work/signal-input/05_segv.spl" "$signal_output"
+grep -Fq 'diagnostic failure:'" $work/signal-input/04_exit_139.spl" "$signal_output"
+grep -Fq 'bootstrap diagnostic summary: checked=3 passed=1 failed=2 signaled=1 timed_out=0 complete=true' "$signal_output"
+grep -F "	139	failure	139	0	$work/signal-input/04_exit_139.spl" "$work/signal-evidence/results.tsv" >/dev/null
+grep -F "	139	signal	139	11	$work/signal-input/05_segv.spl" "$work/signal-evidence/results.tsv" >/dev/null
+grep -Fxq 'complete=true' "$work/signal-evidence/summary.env"
+grep -Fxq 'terminal_count=3' "$work/signal-evidence/summary.env"
+grep -Fxq 'remaining=0' "$work/signal-evidence/summary.env"
 
 # Parent termination must tear down every owned compiler process group rather
 # than leaving delegated pure-Simple descendants alive without a sweep owner.

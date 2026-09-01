@@ -27,3 +27,10 @@ Status: recovered design draft.
 
 No placeholder passes. No `expect(true).to_equal(true)`. GPU specs must assert
 both CPU fallback and GPU-hit states.
+# Device receipt gate
+
+- Prove an exact device-origin receipt passes.
+- Prove missing/synthetic handles, upload-only evidence, CPU mirrors, incomplete
+  work, and checksum mismatches fail with typed reasons.
+- Prove positive timing and admission cannot promote an invalid receipt.
+- Retain physical backend execution as a separate native evidence row.

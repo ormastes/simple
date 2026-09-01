@@ -16,22 +16,29 @@ textual SDN ledger.
   fingerprint, status, command, time, evidence path/hash, owner, and unblock
   condition. Stale, malformed, unowned, vacuous, or tampered state fails closed.
   A TODO receipt may earn its first PASS only through an explicit producer
-  command and a committed `simple.must-check-gate-receipt/v1` bound to the gate,
-  fingerprint, final PASS verdict, and a separate committed artifact hash; that
-  PASS remains durable while the same committed blob and hash remain present.
+  command bound to a committed evidence blob; that PASS remains durable while
+  the same committed blob and hash remain present.
 - REQ-MCT-004: A successful bootstrap-produced ledger must be consumable by the
-  next committed-ref push check without rerunning expensive work. Before the
-  first successful promotion, the canonical all-TODO `unrecorded` ledger must
-  remain visible but must not suppress bounded structural push gates or force a
-  whole-hook bypass. Promotion is monotonic: a ref descending from real PASS
-  evidence may never reset to the unrecorded baseline.
+  next committed-ref push check without rerunning expensive work.
 - REQ-MCT-005: Unfinished sdoctest, Caret, server/GPU, SimpleOS/SBC/QEMU,
   RISC-V/VHDL, size, startup, and benchmark outcomes remain visible bootstrap
-  TODO/blocked rows and never count as PASS. Deleting a required ID from both
-  registry and ledger must fail; two mutable files cannot collude to erase debt.
+  TODO/blocked rows and never count as PASS.
 - REQ-MCT-006: Unix and Windows setup scripts must install the dispatcher while
   preserving unrelated local hooks. An exact legacy canonical copy or symlink
   may be replaced without destroying its already-preserved payload.
+- REQ-MCT-007: Stage 4 compiler admission and the 49-row CLI/MCP/LSP tooling
+  matrix are separate obligations. The compiler row cannot promote the tooling
+  row; the latter requires a committed receipt with no required FAIL/BLOCKED
+  result bound to the admitted candidate and its journals.
+- REQ-MCT-008: Fixture-backed Caret messaging, injected provider commands, and
+  batch adapters must not be labeled as installed-provider, production agent
+  runtime, sustained multi-manager, Slang inference, or smux evidence. Each
+  production behavior remains a distinct TODO until its own lifecycle receipt.
+- REQ-MCT-009: Web and database server evidence must separately prove ownership
+  of configurable real listener ports before GPU/performance promotion. GPU
+  rows require identical CPU/device outputs and real device-hit evidence; the
+  comparison corpus must name nginx for web and both PostgreSQL and MySQL for
+  database workloads.
 
 ## Exclusion
 

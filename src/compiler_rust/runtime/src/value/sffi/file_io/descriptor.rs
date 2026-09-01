@@ -62,10 +62,13 @@ pub unsafe extern "C" fn rt_file_open(
     }
 }
 
-/// Get file size from file descriptor
-/// Returns 0 on error
+/// Get file size from file descriptor.
+/// Returns -1 on an invalid descriptor, metadata failure, or overflow.
 #[no_mangle]
-pub extern "C" fn rt_file_get_size(fd: i32) -> u64 {
+pub extern "C" fn rt_file_get_size(fd: i32) -> i64 {
+    if fd < 0 {
+        return -1;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::io::FromRawFd;
@@ -73,7 +76,11 @@ pub extern "C" fn rt_file_get_size(fd: i32) -> u64 {
         unsafe {
             // Temporarily wrap fd in File to get metadata
             let file = std::fs::File::from_raw_fd(fd);
-            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let size = file
+                .metadata()
+                .ok()
+                .and_then(|metadata| i64::try_from(metadata.len()).ok())
+                .unwrap_or(-1);
             // Don't drop the file, just forget to avoid closing fd
             std::mem::forget(file);
             size
@@ -86,7 +93,11 @@ pub extern "C" fn rt_file_get_size(fd: i32) -> u64 {
 
         unsafe {
             let file = std::fs::File::from_raw_handle(fd as *mut _);
-            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let size = file
+                .metadata()
+                .ok()
+                .and_then(|metadata| i64::try_from(metadata.len()).ok())
+                .unwrap_or(-1);
             std::mem::forget(file);
             size
         }
@@ -174,10 +185,23 @@ mod tests {
             assert!(fd >= 0);
 
             let size = rt_file_get_size(fd);
-            assert_eq!(size, content.len() as u64);
+            assert_eq!(size, content.len() as i64);
 
             rt_file_close(fd);
         }
+
+        let empty_path = temp_dir.path().join("empty.txt");
+        fs::write(&empty_path, []).unwrap();
+        let empty_path_str = empty_path.to_str().unwrap();
+        let (empty_ptr, empty_len) = str_to_ptr(empty_path_str);
+        unsafe {
+            let empty_fd = rt_file_open(empty_ptr, empty_len, 0);
+            assert!(empty_fd >= 0);
+            assert_eq!(rt_file_get_size(empty_fd), 0);
+            rt_file_close(empty_fd);
+        }
+
+        assert_eq!(rt_file_get_size(-1), -1);
     }
 
     #[test]

@@ -74,6 +74,8 @@
 set -u
 
 SELF=check-no-conflict-tree-push
+MAX_PUSH_COMMITS=64
+FALLBACK_TIPS=""
 
 # --- the no-silent-exit invariant -------------------------------------------
 # See the same block in check-tree-size-push.shs. Before 2026-08-10 this guard
@@ -118,6 +120,13 @@ die() {
     exit "$code"
 }
 
+if [ "${1:-}" = --test-max-commits ]; then
+    case "${2:-}" in ''|*[!0-9]*) die 2 "--test-max-commits requires an integer" ;; esac
+    [ "$2" -ge 1 ] && [ "$2" -le 64 ] || die 2 "--test-max-commits may only lower the production limit of 64"
+    MAX_PUSH_COMMITS=$2
+    shift 2
+fi
+
 range="${1:-}"
 explicit=0
 rawmode=0
@@ -128,6 +137,17 @@ case "$range" in
         shift
         [ "$#" -gt 0 ] || { VERDICT_EMITTED=1; echo "$SELF: ERROR — --rev-list-args needs arguments" >&2
                             echo "$SELF: ERROR — nothing was checked (exit 2)"; exit 2; }
+        ;;
+    --rev-list-args-or-tips)
+        rawmode=1
+        shift
+        while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+            FALLBACK_TIPS="$FALLBACK_TIPS $1"
+            shift
+        done
+        [ "${1:-}" = -- ] || die 2 "--rev-list-args-or-tips requires a -- separator"
+        shift
+        [ -n "$FALLBACK_TIPS" ] && [ "$#" -gt 0 ] || die 2 "--rev-list-args-or-tips requires tips and rev-list arguments"
         ;;
     --*)
         VERDICT_EMITTED=1
@@ -199,15 +219,28 @@ fi
 # --- 5. enumerate the range, checking git's exit status --------------------
 if [ "$rawmode" -eq 1 ]; then
     range="rev-list-args: $*"
-    revs=$(git rev-list "$@" 2>/dev/null)
+    revs=$(git rev-list --max-count=$((MAX_PUSH_COMMITS + 1)) "$@" 2>/dev/null)
 else
-    revs=$(git rev-list "$range" 2>/dev/null)
+    revs=$(git rev-list --max-count=$((MAX_PUSH_COMMITS + 1)) "$range" 2>/dev/null)
 fi
 rl=$?
 [ "$rl" -eq 0 ] || die 2 "git rev-list '$range' failed with status $rl"
 
+if [ -z "$revs" ] && [ -n "$FALLBACK_TIPS" ]; then
+    peeled_fallback_tips=""
+    for fallback_tip in $FALLBACK_TIPS; do
+        peeled_fallback=$(git rev-parse --verify --quiet "$fallback_tip^{commit}" 2>/dev/null) ||
+            die 2 "fallback destination tip '$fallback_tip' is not a commit"
+        peeled_fallback_tips="$peeled_fallback_tips $peeled_fallback"
+    done
+    revs=$(printf '%s\n' $peeled_fallback_tips | awk 'NF && !seen[$0]++')
+fi
+
 n=0
 for rev in $revs; do n=$((n + 1)); done
+
+[ "$n" -le "$MAX_PUSH_COMMITS" ] || die 2 "range exceeds the bounded limit of $MAX_PUSH_COMMITS commits.
+  Split the push into smaller ranges; no over-limit history is accepted unchecked."
 
 if [ "$n" -eq 0 ]; then
     if [ "$explicit" -eq 1 ]; then
@@ -222,13 +255,27 @@ if [ "$n" -eq 0 ]; then
 fi
 
 # --- 6. the actual check ---------------------------------------------------
+# Resolve commit trees in one Git process, deduplicate identical trees, then
+# inspect each unique tree once. Rebases and metadata-only histories commonly
+# contain repeated trees; per-commit `git ls-tree` made their cost needlessly
+# linear in commit count even inside the hard safety bound.
+tree_pairs=$(git show -s --format='%H %T' $revs 2>/dev/null)
+tp_rc=$?
+[ "$tp_rc" -eq 0 ] || die 2 "cannot resolve tree identities for outgoing commits"
+trees=$(printf '%s\n' "$tree_pairs" | awk 'NF == 2 && !seen[$2]++ {print $2}')
+[ -n "$trees" ] || die 2 "outgoing commits yielded no tree identities"
 found=0
-for rev in $revs; do
-    entries=$(git ls-tree --name-only "$rev" 2>/dev/null)
+checked_trees=0
+for tree in $trees; do
+    checked_trees=$((checked_trees + 1))
+    entries=$(git ls-tree --name-only "$tree" 2>/dev/null)
     lt=$?
-    [ "$lt" -eq 0 ] || die 2 "git ls-tree failed (status $lt) on $rev — cannot verify this commit"
+    [ "$lt" -eq 0 ] || die 2 "git ls-tree failed (status $lt) on tree $tree — cannot verify this commit tree"
     if printf '%s\n' "$entries" | "$GREP" -q '^\.jjconflict'; then
-        echo "CONFLICT COMMIT: $rev $(git log -1 --format=%s "$rev" 2>/dev/null)" >&2
+        conflict_revs=$(printf '%s\n' "$tree_pairs" | awk -v tree="$tree" '$2 == tree {print $1}')
+        for rev in $conflict_revs; do
+            echo "CONFLICT COMMIT: $rev $(git log -1 --format=%s "$rev" 2>/dev/null)" >&2
+        done
         found=1
     fi
 done
@@ -248,5 +295,5 @@ EOF
 fi
 
 VERDICT_EMITTED=1
-echo "$SELF: PASS — $n commit(s) checked in $range, 0 conflict trees (repo $toplevel)"
+echo "$SELF: PASS — $n commit(s), $checked_trees unique tree(s) checked in $range, 0 conflict trees (repo $toplevel)"
 exit 0

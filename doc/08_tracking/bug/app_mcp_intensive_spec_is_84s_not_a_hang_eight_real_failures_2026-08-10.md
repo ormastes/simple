@@ -143,3 +143,20 @@ before printing its header and, read through a pipe, launders as exit 0 with no
 `Results:` line — indistinguishable from a silent green. Only an explicit
 `Results:` line settles this row, and rc must be assigned on the line after the
 command, never read through a pipe.
+
+## 2026-08-27: pre-existing RED in test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl
+
+Verified at HEAD (in-place `git show HEAD:<spec>` restore) and after the
+SSDOC-TRC-003 traceability fix (score 49 -> 87): identical
+`Results: 5 total, 3 passed, 2 failed`. Failures are environmental, not
+assertion edits:
+- "should exercise MCP and LSP protocol functions through production wrappers"
+  (check-mcp-native-smoke.shs): mcp_tools_json_valid=false,
+  mcp_framing_valid=false, mcp_stale_stamp_reprobe_ok=false,
+  mcp_main_feature_call_valid=false.
+- "should keep warm MCP and LSP startup latency request p95 and RSS bounded"
+  (check-mcp-lsp-nfr-evidence.shs): lsp_request_timeout:lsp-request-9, so
+  mcp_lsp_nfr_status=pass never appears.
+Left RED per testing rules. Dual check performed: injected
+`expect(result.exit_code).to_equal(3)` -> `Results: 5 total, 2 passed, 3 failed`,
+reverted byte-exact, back to 3/2.

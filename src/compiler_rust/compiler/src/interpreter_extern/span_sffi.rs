@@ -14,13 +14,23 @@ thread_local! {
     static NEXT_SPAN_HANDLE: RefCell<i64> = const { RefCell::new(1) };
 }
 
-fn next_handle() -> i64 {
+fn next_handle() -> Result<i64, CompileError> {
     NEXT_SPAN_HANDLE.with(|h| {
         let mut handle = h.borrow_mut();
         let id = *handle;
-        *handle += 1;
-        id
+        *handle = id
+            .checked_add(1)
+            .ok_or_else(|| CompileError::runtime("rt_span_create: handle space exhausted"))?;
+        Ok(id)
     })
+}
+
+#[inline(always)]
+fn require_arity(args: &[Value], expected: usize, name: &str) -> Result<(), CompileError> {
+    if args.len() != expected {
+        return Err(CompileError::runtime(format!("{name}: expected {expected} arguments")));
+    }
+    Ok(())
 }
 
 fn get_i64(args: &[Value], idx: usize, name: &str) -> Result<i64, CompileError> {
@@ -35,13 +45,21 @@ fn get_i64(args: &[Value], idx: usize, name: &str) -> Result<i64, CompileError> 
 
 /// rt_span_create(start, end, line, column) -> handle
 pub fn rt_span_create(args: &[Value]) -> Result<Value, CompileError> {
-    let start = get_i64(args, 0, "rt_span_create")? as usize;
-    let end = get_i64(args, 1, "rt_span_create")? as usize;
-    let line = get_i64(args, 2, "rt_span_create")? as usize;
-    let column = get_i64(args, 3, "rt_span_create")? as usize;
+    require_arity(args, 4, "rt_span_create")?;
+    let start = usize::try_from(get_i64(args, 0, "rt_span_create")?)
+        .map_err(|_| CompileError::runtime("rt_span_create: start is outside usize range"))?;
+    let end = usize::try_from(get_i64(args, 1, "rt_span_create")?)
+        .map_err(|_| CompileError::runtime("rt_span_create: end is outside usize range"))?;
+    let line = usize::try_from(get_i64(args, 2, "rt_span_create")?)
+        .map_err(|_| CompileError::runtime("rt_span_create: line is outside usize range"))?;
+    let column = usize::try_from(get_i64(args, 3, "rt_span_create")?)
+        .map_err(|_| CompileError::runtime("rt_span_create: column is outside usize range"))?;
+    if end < start {
+        return Err(CompileError::runtime("rt_span_create: end must not precede start"));
+    }
 
     let span = simple_parser::token::Span::new(start, end, line, column);
-    let handle = next_handle();
+    let handle = next_handle()?;
 
     SPAN_REGISTRY.with(|r| r.borrow_mut().insert(handle, span));
     Ok(Value::Int(handle))
@@ -49,6 +67,7 @@ pub fn rt_span_create(args: &[Value]) -> Result<Value, CompileError> {
 
 /// rt_span_start(handle) -> i64
 pub fn rt_span_start(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_span_start")?;
     let handle = get_i64(args, 0, "rt_span_start")?;
     SPAN_REGISTRY.with(|r| {
         let reg = r.borrow();
@@ -61,6 +80,7 @@ pub fn rt_span_start(args: &[Value]) -> Result<Value, CompileError> {
 
 /// rt_span_end(handle) -> i64
 pub fn rt_span_end(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_span_end")?;
     let handle = get_i64(args, 0, "rt_span_end")?;
     SPAN_REGISTRY.with(|r| {
         let reg = r.borrow();
@@ -73,6 +93,7 @@ pub fn rt_span_end(args: &[Value]) -> Result<Value, CompileError> {
 
 /// rt_span_line(handle) -> i64
 pub fn rt_span_line(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_span_line")?;
     let handle = get_i64(args, 0, "rt_span_line")?;
     SPAN_REGISTRY.with(|r| {
         let reg = r.borrow();
@@ -85,6 +106,7 @@ pub fn rt_span_line(args: &[Value]) -> Result<Value, CompileError> {
 
 /// rt_span_column(handle) -> i64
 pub fn rt_span_column(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_span_column")?;
     let handle = get_i64(args, 0, "rt_span_column")?;
     SPAN_REGISTRY.with(|r| {
         let reg = r.borrow();
@@ -102,7 +124,32 @@ pub fn clear_span_sffi_registry() {
 
 /// rt_span_free(handle)
 pub fn rt_span_free(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_span_free")?;
     let handle = get_i64(args, 0, "rt_span_free")?;
-    SPAN_REGISTRY.with(|r| r.borrow_mut().remove(&handle));
+    let removed = SPAN_REGISTRY.with(|r| r.borrow_mut().remove(&handle));
+    if removed.is_none() {
+        return Err(CompileError::runtime(format!(
+            "rt_span_free: invalid or already freed handle {handle}"
+        )));
+    }
     Ok(Value::Nil)
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn span_transport_rejects_invalid_ranges_and_double_free() {
+        clear_span_sffi_registry();
+        assert!(rt_span_create(&[Value::Int(-1), Value::Int(1), Value::Int(1), Value::Int(1),]).is_err());
+        assert!(rt_span_create(&[Value::Int(2), Value::Int(1), Value::Int(1), Value::Int(1),]).is_err());
+        let handle = rt_span_create(&[Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)])
+            .unwrap()
+            .as_int()
+            .unwrap();
+        assert!(rt_span_start(&[Value::Int(handle), Value::Int(0)]).is_err());
+        assert!(rt_span_free(&[Value::Int(handle)]).is_ok());
+        assert!(rt_span_free(&[Value::Int(handle)]).is_err());
+    }
 }

@@ -1,0 +1,89 @@
+# @cover src/lib/common/ui/render_opt/damage_transfer.spl 90%
+# @tag: unit, ui, render_opt, vulkan, damage_transfer, 8k
+
+use std.spec
+use common.ui.render_opt.damage_plan.{
+    DamageFramePlan, DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL,
+    DAMAGE_FALLBACK_NONE
+}
+use common.ui.render_opt.damage_transfer.build_damage_transfer_plan
+
+fn frame_plan(mode: i64, rects: [i64], pixels: i64) -> DamageFramePlan:
+    DamageFramePlan(
+        rects: rects, mode: mode, source_tile_count: 0,
+        output_rect_count: rects.len() / 4, merged_tile_count: 0,
+        dirty_pixels: pixels, planned_pixels: pixels, tiles_examined: 0,
+        full_fallback_count: 0, fallback_reason: DAMAGE_FALLBACK_NONE)
+
+describe "checked damage-to-strided-transfer planning":
+    it "maps a local rectangle to one packed strided transfer":
+        val transfer = build_damage_transfer_plan(
+            frame_plan(DAMAGE_PLAN_LOCAL, [2, 1, 3, 2], 6), 8, 4)
+        expect(transfer.valid).to_equal(true)
+        expect(transfer.source_offsets).to_equal([40])
+        expect(transfer.row_bytes).to_equal([12])
+        expect(transfer.row_counts).to_equal([2])
+        expect(transfer.source_strides).to_equal([32])
+        expect(transfer.packed_bytes).to_equal([24])
+        expect(transfer.total_bytes).to_equal(24)
+
+    it "maps the ragged 8K bottom-right tile without prefix transfer":
+        val transfer = build_damage_transfer_plan(
+            frame_plan(DAMAGE_PLAN_LOCAL, [7616, 4288, 64, 32], 2048),
+            7680, 4320)
+        expect(transfer.valid).to_equal(true)
+        expect(transfer.source_offsets).to_equal([131757824])
+        expect(transfer.row_bytes).to_equal([256])
+        expect(transfer.row_counts).to_equal([32])
+        expect(transfer.source_strides).to_equal([30720])
+        expect(transfer.total_bytes).to_equal(8192)
+        expect(transfer.full_frame_bytes).to_equal(132710400)
+
+    it "maps a two-axis ragged 8K-class edge with exact stride and bytes":
+        # 7681x4321 makes both terminal tile axes partial. This remains a
+        # scalar receipt only: it allocates no framebuffer or transfer payload.
+        val transfer = build_damage_transfer_plan(
+            frame_plan(DAMAGE_PLAN_LOCAL, [7680, 4288, 1, 33], 33),
+            7681, 4321)
+        expect(transfer.valid).to_equal(true)
+        expect(transfer.source_offsets).to_equal([131775232])
+        expect(transfer.row_bytes).to_equal([4])
+        expect(transfer.row_counts).to_equal([33])
+        expect(transfer.source_strides).to_equal([30724])
+        expect(transfer.packed_bytes).to_equal([132])
+        expect(transfer.total_bytes).to_equal(132)
+        expect(transfer.full_frame_bytes).to_equal(132758404)
+
+    it "preserves disjoint rectangles as two exact transfer receipts":
+        val transfer = build_damage_transfer_plan(
+            frame_plan(DAMAGE_PLAN_LOCAL, [0, 0, 2, 1, 6, 3, 2, 1], 4), 8, 4)
+        expect(transfer.source_offsets).to_equal([0, 120])
+        expect(transfer.packed_bytes).to_equal([8, 8])
+        expect(transfer.total_bytes).to_equal(16)
+
+    it "represents an idle retained frame with zero transfer":
+        val transfer = build_damage_transfer_plan(
+            frame_plan(DAMAGE_PLAN_NONE, [], 0), 7680, 4320)
+        expect(transfer.valid).to_equal(true)
+        expect(transfer.rect_count).to_equal(0)
+        expect(transfer.total_bytes).to_equal(0)
+
+    it "requires a full plan to be exactly the viewport":
+        val valid = build_damage_transfer_plan(
+            frame_plan(DAMAGE_PLAN_FULL, [0, 0, 8, 4], 32), 8, 4)
+        expect(valid.valid).to_equal(true)
+        expect(valid.total_bytes).to_equal(128)
+        val invalid = build_damage_transfer_plan(
+            frame_plan(DAMAGE_PLAN_FULL, [0, 0, 4, 4], 16), 8, 4)
+        expect(invalid.valid).to_equal(false)
+        expect(invalid.reason).to_equal("invalid-full-frame")
+
+    it "rejects out-of-bounds and inconsistent byte receipts":
+        val bounds = build_damage_transfer_plan(
+            frame_plan(DAMAGE_PLAN_LOCAL, [7, 3, 2, 1], 2), 8, 4)
+        expect(bounds.valid).to_equal(false)
+        expect(bounds.reason).to_equal("rectangle-out-of-bounds")
+        val mismatch = build_damage_transfer_plan(
+            frame_plan(DAMAGE_PLAN_LOCAL, [0, 0, 2, 2], 3), 8, 4)
+        expect(mismatch.valid).to_equal(false)
+        expect(mismatch.reason).to_equal("receipt-byte-mismatch")

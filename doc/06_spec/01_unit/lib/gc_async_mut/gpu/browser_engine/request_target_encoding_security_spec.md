@@ -1,6 +1,6 @@
 # request_target_encoding_security_spec
 
-> One parsed URL must produce the same ASCII request target for HTTP/1.1,
+> Browser request-target encoding security.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # request_target_encoding_security_spec
 
-One parsed URL must produce the same ASCII request target for HTTP/1.1,
+Browser request-target encoding security.
 
 ## At a Glance
 
@@ -20,13 +20,10 @@ One parsed URL must produce the same ASCII request target for HTTP/1.1,
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-## Operator workflow
-## Compatibility and limitations
-
+Browser request-target encoding security.
 
 One parsed URL must produce the same ASCII request target for HTTP/1.1,
 HTTP/2, and WebSocket handshakes. Raw UTF-8 and control bytes never reach a
@@ -39,7 +36,11 @@ authority, and user information stay outside the target.
 
 #### should serialize one safe target across HTTP and WebSocket transports
 
-- Verify: should serialize one safe target across HTTP and WebSocket transports
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should serialize one safe target across HTTP and WebSocket transports
 - Resolve redirect references and build producer controls
    - Expected: next.path equals `/dir/next`
    - Expected: next.query equals `q=1`
@@ -71,13 +72,12 @@ authority, and user information stay outside the target.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 104 lines folded for reproduction.
+Runnable source: 103 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-011
-step("Verify: should serialize one safe target across HTTP and WebSocket transports")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("should serialize one safe target across HTTP and WebSocket transports")
 step("Resolve redirect references and build producer controls")
 val base = Url.parse_or_opaque(
     "https://safe.test/dir/page?old=1#old"
@@ -196,39 +196,54 @@ expect(build_upgrade_request(
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-WEB-BROWSER-010`
+- `REQ-WEB-BROWSER-011`
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `702fa3a68c6e1c400b4921031bb63b715f03fa0f74ec6637ffa28be745730bad`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `f824b02630ebb4dce5e63a1e88a66f1c73ed2f78acdb9b9f044ac7324466143c`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `702fa3a68c6e1c400b4921031bb63b715f03fa0f74ec6637ffa28be745730bad`.
+Source SHA-256: `f824b02630ebb4dce5e63a1e88a66f1c73ed2f78acdb9b9f044ac7324466143c`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `702fa3a68c6e1c400b4921031bb63b715f03fa0f74ec6637ffa28be745730bad`  
+Source SHA-256: `f824b02630ebb4dce5e63a1e88a66f1c73ed2f78acdb9b9f044ac7324466143c`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **88/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.spl
 mirror: doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.md (current)
-findings: 4 blockers: 0
+findings: 5 blockers: 1
   narrative=100 structure=95 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=90 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=88; blocker cap makes effective=49
 doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.spl:37:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should serialize one safe target across HTTP and WebSocket transports' describes the test rather than its outcome
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.spl:35:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should serialize one safe target across HTTP and WebSocket transports' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/request_target_encoding_security_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should serialize one safe target across HTTP and WebSocket transports' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

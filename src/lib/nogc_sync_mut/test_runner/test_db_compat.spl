@@ -11,9 +11,11 @@ use std.database.test_extended.{
     load_test_database_extended,
     load_with_migration,
     RunRecord,
-    TestInfo
+    TestInfo,
+    TimingSummary
 }
 use std.test_runner.test_db_types.{TestStatus, status_to_str}
+use std.common.perf.execution_metrics.{ResourceUsage, resource_evidence_quality_name, termination_cause_name}
 use std.test_runner.test_db_core.{parse_rfc3339_to_micros}
 use std.io.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
 
@@ -55,7 +57,8 @@ class RunnerTestDb:
         suite_name: text,
         category: text,            # Ignored in unified implementation (derived from path)
         status: TestStatus,
-        duration_ms: f64
+        duration_ms: f64,
+        cohort_id: text = ""
     ):
         # Convert TestStatus enum to string
         val status_str = status_to_str(status)
@@ -70,7 +73,8 @@ class RunnerTestDb:
             test_name: test_name,
             status: status_str,
             duration_ms: duration_ms,
-            run_id: self.current_run_id
+            run_id: self.current_run_id,
+            cohort_id: cohort_id
         )
 
     # Start run tracking
@@ -82,6 +86,27 @@ class RunnerTestDb:
     # Complete run
     me complete_run(run_id: text, test_count: i64, passed: i64, failed: i64, timed_out: i64):
         self.db.complete_run(run_id: run_id, test_count: test_count, passed: passed, failed: failed, timed_out: timed_out)
+
+    me record_resource_run(
+        run_id: text,
+        test_path: text,
+        resource_class: text,
+        cohort_id: text,
+        compile_ms: i64,
+        execution_ms: i64,
+        usage: ResourceUsage,
+        budget_status: text,
+        anomaly_status: text
+    ):
+        self.db.record_resource_run(
+            run_id, test_path, resource_class, cohort_id, compile_ms, execution_ms,
+            usage.wall_ms, usage.user_cpu_ms, usage.system_cpu_ms,
+            usage.peak_tree_charge_bytes, usage.peak_direct_child_rss_bytes,
+            usage.io_read_bytes, usage.io_write_bytes, usage.pids_peak,
+            resource_evidence_quality_name(usage.evidence_quality),
+            termination_cause_name(usage.termination), usage.signal,
+            usage.exit_code, budget_status, anomaly_status
+        )
 
     # Cleanup stale runs
     me cleanup_stale_runs(max_age_hours: i64):
@@ -106,6 +131,29 @@ class RunnerTestDb:
     # Get all test information
     fn all_test_info() -> [TestInfo]:
         self.db.all_test_info()
+
+    fn timing_summary_for_test(test_path: text) -> TimingSummary?:
+        match self.db.get_test_id(test_path, "spec", test_path):
+            case Some(test_id): self.db.get_timing_summary(test_id)
+            case nil: nil
+
+    me promote_timing_baseline(test_path: text, cohort_id: text) -> bool:
+        match self.db.get_test_id(test_path, "spec", test_path):
+            case Some(test_id): self.db.promote_timing_baseline(test_id, cohort_id)
+            case nil: false
+
+    fn prior_anomaly_warning(test_path: text, cohort_id: text) -> bool:
+        self.db.prior_anomaly_warning(test_path, cohort_id)
+
+    me record_timing_observation(test_path: text, cohort_id: text, duration_ms: f64) -> bool:
+        val test_id = match self.db.get_test_id(test_path, "spec", test_path):
+            case Some(value): value
+            case nil: return false
+        val run_id = self.start_run()
+        self.db.add_timing_run(test_id, duration_ms, run_id, cohort_id)
+        self.db.update_timing(test_id, duration_ms)
+        self.complete_run(run_id, 0, 0, 0, 0)
+        true
 
     # Get tests by status
     fn tests_by_status(status: text) -> [TestInfo]:

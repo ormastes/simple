@@ -7,31 +7,35 @@ use crate::value::Value;
 use simple_runtime::value::diagram_sffi;
 
 /// Enable diagram recording
-pub fn rt_diagram_enable(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_diagram_enable(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 0, "rt_diagram_enable")?;
     diagram_sffi::enable_diagrams();
     Ok(Value::Nil)
 }
 
 /// Disable diagram recording
-pub fn rt_diagram_disable(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_diagram_disable(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 0, "rt_diagram_disable")?;
     diagram_sffi::disable_diagrams();
     Ok(Value::Nil)
 }
 
 /// Clear all recorded events
-pub fn rt_diagram_clear(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_diagram_clear(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 0, "rt_diagram_clear")?;
     diagram_sffi::clear_diagram_data();
     Ok(Value::Nil)
 }
 
 /// Check if diagram recording is enabled
-pub fn rt_diagram_is_enabled(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_diagram_is_enabled(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 0, "rt_diagram_is_enabled")?;
     Ok(Value::Bool(diagram_sffi::is_diagram_enabled()))
 }
 
 /// Trace a method call
 pub fn rt_diagram_trace_method(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CompileError::semantic(
             "rt_diagram_trace_method requires 2 arguments: class_name, method_name",
         ));
@@ -53,7 +57,7 @@ pub fn rt_diagram_trace_method(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Trace a method call with arguments
 pub fn rt_diagram_trace_method_with_args(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
+    if args.len() != 3 {
         return Err(CompileError::semantic(
             "rt_diagram_trace_method_with_args requires 3 arguments: class_name, method_name, args",
         ));
@@ -69,17 +73,10 @@ pub fn rt_diagram_trace_method_with_args(args: &[Value]) -> Result<Value, Compil
         _ => return Err(CompileError::semantic("method_name must be a string")),
     };
 
-    // Parse args as comma-separated string or array
+    // The declared Simple ABI carries one comma-separated text argument.
     let arguments: Vec<String> = match &args[2] {
         Value::Str(s) => s.split(',').map(|a| a.trim().to_string()).collect(),
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|v| match v {
-                Value::Str(s) => Some(s.as_ref().clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => vec![],
+        _ => return Err(CompileError::semantic("args must be a string")),
     };
 
     diagram_sffi::trace_method_with_args(&class_name, &method_name, &arguments);
@@ -88,23 +85,19 @@ pub fn rt_diagram_trace_method_with_args(args: &[Value]) -> Result<Value, Compil
 
 /// Trace a return value
 pub fn rt_diagram_trace_return(args: &[Value]) -> Result<Value, CompileError> {
-    let value = if args.is_empty() {
-        None
-    } else {
-        match &args[0] {
-            Value::Str(s) => Some(s.as_str()),
-            Value::Nil => None,
-            _ => None,
-        }
+    require_arity(args, 1, "rt_diagram_trace_return")?;
+    let value = match &args[0] {
+        Value::Str(s) => s.as_str(),
+        _ => return Err(CompileError::semantic("return value must be a string")),
     };
 
-    diagram_sffi::trace_return(value);
+    diagram_sffi::trace_return(Some(value));
     Ok(Value::Nil)
 }
 
 /// Mark an entity as architectural
 pub fn rt_diagram_mark_architectural(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
+    if args.len() != 1 {
         return Err(CompileError::semantic(
             "rt_diagram_mark_architectural requires 1 argument: entity",
         ));
@@ -120,21 +113,24 @@ pub fn rt_diagram_mark_architectural(args: &[Value]) -> Result<Value, CompileErr
 }
 
 /// Generate sequence diagram as mermaid string
-pub fn rt_diagram_generate_sequence(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_diagram_generate_sequence(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 0, "rt_diagram_generate_sequence")?;
     let events = diagram_sffi::get_recorded_events();
     let mermaid = generate_sequence_mermaid(&events);
     Ok(Value::text(mermaid))
 }
 
 /// Generate class diagram as mermaid string
-pub fn rt_diagram_generate_class(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_diagram_generate_class(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 0, "rt_diagram_generate_class")?;
     let events = diagram_sffi::get_recorded_events();
     let mermaid = generate_class_mermaid(&events);
     Ok(Value::text(mermaid))
 }
 
 /// Generate architecture diagram as mermaid string
-pub fn rt_diagram_generate_arch(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_diagram_generate_arch(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 0, "rt_diagram_generate_arch")?;
     let events = diagram_sffi::get_recorded_events();
     let arch_entities = diagram_sffi::get_architectural_entities();
     let mermaid = generate_arch_mermaid(&events, &arch_entities);
@@ -142,7 +138,11 @@ pub fn rt_diagram_generate_arch(_args: &[Value]) -> Result<Value, CompileError> 
 }
 
 /// Free a string (no-op in interpreter, for SFFI compatibility)
-pub fn rt_diagram_free_string(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_diagram_free_string(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_diagram_free_string")?;
+    let Value::Int(_handle) = args[0] else {
+        return Err(CompileError::runtime("rt_diagram_free_string requires an i64 handle"));
+    };
     // No-op in interpreter - memory is managed by Rust
     Ok(Value::Nil)
 }
@@ -150,6 +150,14 @@ pub fn rt_diagram_free_string(_args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 // Helper functions for diagram generation
 // ============================================================================
+
+#[inline(always)]
+fn require_arity(args: &[Value], expected: usize, name: &str) -> Result<(), CompileError> {
+    if args.len() != expected {
+        return Err(CompileError::semantic(format!("{name} requires {expected} arguments")));
+    }
+    Ok(())
+}
 
 fn generate_sequence_mermaid(events: &[diagram_sffi::CallEvent]) -> String {
     let mut output = String::from("sequenceDiagram\n");
@@ -307,4 +315,28 @@ fn generate_arch_mermaid(events: &[diagram_sffi::CallEvent], arch_entities: &[St
     }
 
     output
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn diagram_handlers_reject_values_outside_declared_transport() {
+        let extra = [Value::Int(1)];
+        assert!(rt_diagram_enable(&extra).is_err());
+        assert!(rt_diagram_generate_sequence(&extra).is_err());
+        assert!(
+            rt_diagram_trace_method(&[Value::text("Class"), Value::text("method"), Value::text("extra"),]).is_err()
+        );
+        assert!(rt_diagram_trace_method_with_args(&[
+            Value::text("Class"),
+            Value::text("method"),
+            Value::Array(std::sync::Arc::new(Vec::new())),
+        ])
+        .is_err());
+        assert!(rt_diagram_trace_return(&[Value::Nil]).is_err());
+        assert!(rt_diagram_free_string(&[]).is_err());
+        assert!(rt_diagram_free_string(&[Value::Bool(false)]).is_err());
+    }
 }

@@ -1,0 +1,90 @@
+"""Static behavioral coverage for the unwired DBD cleanup provider."""
+
+use std.spec.*
+use os.kernel.scheduler.dbd_cleanup_provider_adapter_v1.*
+
+describe "DBD persistence cleanup provider v1":
+    it "authenticates identity and deduplicates exact journal results":
+        val owner = dbd_cleanup_provider_register_persistence_owner_v1(
+            8201u64, 1u64).unwrap()
+        val handle = dbd_cleanup_provider_issue_v1(
+            owner, 9201u64, 71u64, 9301u64, 3u64).unwrap()
+        val sync = dbd_cleanup_provider_dispatch_v1(handle).unwrap()
+        expect(sync.action).to_equal(DbdCleanupActionV1.JournalSync)
+        expect(sync.target.task_id).to_equal(9201u64)
+        expect(sync.target.lifecycle_generation).to_equal(71u64)
+        expect(sync.persistence_owner.owner_id).to_equal(8201u64)
+        val first = dbd_cleanup_provider_commit_result_v1(
+            sync, true, "journal-sync:9201:71:9301:3:1").unwrap()
+        val replay = dbd_cleanup_provider_commit_result_v1(
+            sync, true, "journal-sync:9201:71:9301:3:1").unwrap()
+        expect(first.journal_synced).to_be(true)
+        expect(replay.journal_synced).to_be(true)
+        expect(dbd_cleanup_provider_commit_result_v1(
+            sync, false, "conflict").is_err()).to_be(true)
+
+        val close = dbd_cleanup_provider_dispatch_v1(handle).unwrap()
+        expect(close.action).to_equal(DbdCleanupActionV1.QuarantineClose)
+        val done = dbd_cleanup_provider_commit_result_v1(
+            close, true, "quarantine-close:9201:71:9301:3:1").unwrap()
+        expect(done.terminal).to_be(true)
+        expect(done.quarantine_closed).to_be(true)
+        expect(dbd_cleanup_provider_consume_terminal_v1(handle)).to_be(true)
+
+    it "retains successful journal sync across acknowledged cancellation retry":
+        val owner = dbd_cleanup_provider_register_persistence_owner_v1(
+            8202u64, 1u64).unwrap()
+        val handle = dbd_cleanup_provider_issue_v1(
+            owner, 9202u64, 72u64, 9302u64, 4u64).unwrap()
+        val sync = dbd_cleanup_provider_dispatch_v1(handle).unwrap()
+        val partial = dbd_cleanup_provider_commit_result_v1(
+            sync, true, "journal-sync:9202:72:9302:4:1").unwrap()
+        expect(partial.journal_synced).to_be(true)
+        expect(partial.retryable).to_be(true)
+        expect(dbd_cleanup_provider_request_cancel_v1(handle).unwrap()).to_be(true)
+        val cancelled = dbd_cleanup_provider_ack_cancelled_v1(
+            handle, "dbd-worker-quiescent:9202:72:9302:4:1").unwrap()
+        expect(cancelled.cancelled).to_be(true)
+        val retried = dbd_cleanup_provider_retry_cancelled_v1(handle).unwrap()
+        expect(retried.attempt_ordinal).to_equal(2u64)
+        expect(retried.journal_synced).to_be(true)
+        expect(dbd_cleanup_provider_commit_result_v1(
+            sync, true, "journal-sync:9202:72:9302:4:1").is_err()).to_be(true)
+        val close = dbd_cleanup_provider_dispatch_v1(handle).unwrap()
+        expect(close.action).to_equal(DbdCleanupActionV1.QuarantineClose)
+        expect(close.target.attempt_ordinal).to_equal(2u64)
+        val done = dbd_cleanup_provider_commit_result_v1(
+            close, true, "quarantine-close:9202:72:9302:4:2").unwrap()
+        expect(done.terminal).to_be(true)
+        expect(dbd_cleanup_provider_consume_terminal_v1(handle)).to_be(true)
+
+    it "retains failed substeps and rejects duplicate live identity":
+        val owner = dbd_cleanup_provider_register_persistence_owner_v1(
+            8203u64, 1u64).unwrap()
+        val handle = dbd_cleanup_provider_issue_v1(
+            owner, 9203u64, 73u64, 9303u64, 5u64).unwrap()
+        expect(dbd_cleanup_provider_issue_v1(
+            owner, 9203u64, 73u64, 9303u64, 5u64).is_err()).to_be(true)
+        val sync = dbd_cleanup_provider_dispatch_v1(handle).unwrap()
+        val failed = dbd_cleanup_provider_commit_result_v1(
+            sync, false, "journal-sync-retryable").unwrap()
+        expect(failed.retryable).to_be(true)
+        expect(failed.journal_synced).to_be(false)
+        val retry = dbd_cleanup_provider_dispatch_v1(handle).unwrap()
+        expect(retry.action).to_equal(DbdCleanupActionV1.JournalSync)
+
+    it "requires an inactive command before provider quiescence ACK":
+        val owner = dbd_cleanup_provider_register_persistence_owner_v1(
+            8204u64, 1u64).unwrap()
+        val handle = dbd_cleanup_provider_issue_v1(
+            owner, 9204u64, 74u64, 9304u64, 6u64).unwrap()
+        val command = dbd_cleanup_provider_dispatch_v1(handle).unwrap()
+        expect(dbd_cleanup_provider_request_cancel_v1(handle).unwrap()).to_be(true)
+        expect(dbd_cleanup_provider_ack_cancelled_v1(
+            handle, "premature-quiescence").is_err()).to_be(true)
+        val partial = dbd_cleanup_provider_commit_result_v1(
+            command, false, "cancelled-worker-returned").unwrap()
+        expect(partial.retryable).to_be(true)
+        val ack = dbd_cleanup_provider_ack_cancelled_v1(
+            handle, "dbd-worker-quiescent:9204:74:9304:6:1").unwrap()
+        expect(ack.cancelled).to_be(true)

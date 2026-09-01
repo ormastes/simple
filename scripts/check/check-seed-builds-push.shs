@@ -83,22 +83,59 @@
 #    what is actually being pushed (see .claude/rules/vcs.md "Land only your
 #    paths" and the shared-WC trap family in MEMORY.md).
 # SCOPE, as of 2026-08-17 (read this before trusting a PASS)
-#   Three legs, and the verdict line says which:
+#   Four legs, and the verdict line says which:
 #     GATING  `cargo check --release --bin simple`   (the original leg)
 #     GATING  `cargo check --release --tests`        (added 2026-08-17)
+#     GATING  `cargo build --release --bin simple`   (LINK leg, added 2026-08-28)
 #     ADVISORY `cargo check --release --all-targets` (examples/benches)
-#   A PASS therefore means: the bin target and the test targets COMPILE.
-#   It does NOT mean the tree LINKS, and it does not mean the tests pass.
+#   A PASS therefore means: the bin target and the test targets COMPILE, AND
+#   the bin target LINKS. It does not mean the tests pass (that is `cargo
+#   test`, a different, heavier proof not gated here).
 #   Why the --tests leg exists: `--bin simple` compiles no `#[cfg(test)]`
 #   module, no `tests/*.rs`, and no `examples/*.rs`, so at origin sha
 #   2fb45ea1960954447acf12f769935ac83277397e this guard said "seed builds
 #   cleanly" while `cargo test --release` produced NO test binary at all
 #   (TEST_RC=101, zero `test result:` lines). Fully written up in
 #   doc/08_tracking/bug/seed_build_guard_checks_only_bin_target_no_link_2026-08-17.md
-#   That row also records two further blind spots this script does NOT close:
-#   the missing LINK step (four duplicate rt_* symbols across the Rust and C
-#   runtimes are invisible to `check`), and deployed-binary staleness in the
-#   guards that native-build with bin/simple.
+#   That row also recorded two further blind spots this script did NOT close
+#   at the time: the missing LINK step, and deployed-binary staleness in the
+#   guards that native-build with bin/simple. The LINK step is now closed
+#   (see "THE 2026-08-28 UNLINKABLE-TIP GAP" below) -- deployed-binary
+#   staleness remains open; this guard proves buildability of a fresh
+#   worktree, not that a previously-deployed bin/simple is current.
+#
+# ---------------------------------------------------------------------------
+# THE 2026-08-28 UNLINKABLE-TIP GAP (second incident of this class)
+# ---------------------------------------------------------------------------
+# origin/main sat UNLINKABLE -- an `extern "C"` declaration
+# (rt_time_now_seconds) with no definition anywhere in the linked graph --
+# while this guard reported PASS, because every gating leg used `cargo
+# check`, and `check` never invokes the linker. This is the SECOND
+# unlinkable-tip incident of this exact class (the first is the
+# 2026-08-17 scope-gap row cited above, which named the missing link step as
+# a known, then-unclosed gap). `cargo check` catches E0432/E0599-class
+# resolve/type errors, which is real and worth keeping (it is much cheaper
+# than a full build), but a symbol that resolves at the Rust-item level and
+# is merely UNDEFINED at the object/link level is invisible to it by
+# construction -- an `extern "C"` block only promises the compiler a
+# signature, and nothing about `check` demands that anything backs it.
+#
+# FIX: a fourth GATING leg runs `cargo build --release --bin simple` -- a
+# real link, not just a frontend pass. Cost: measured warm (this guard's
+# existing CARGO_TARGET_DIR, i.e. legs 1-3 already primed the incremental
+# cache) at ~35-70s additional over the `--bin` check leg's ~1-2s marginal
+# cost on this host, because check and build now share almost all frontend
+# work and build only pays for codegen+link on top; cold is close to a full
+# `cargo build --release` (minutes). This is paid ONLY on a seed-content
+# cache miss, exactly like legs 1-3 -- a tip whose seed content already has a
+# recorded green marker skips ALL FOUR legs, unchanged from before.
+#
+# MARKER FORMAT: bumped from `seed/v2+vulkan` to `seed/v3+link` (see
+# seed_content_digest below). This is required, not cosmetic: an old
+# `seed/v2+vulkan` marker only proves the content passed check-only legs, and
+# without the bump every tree already marked green under v2 would silently
+# skip the new link leg forever -- the exact fail-open shape this leg exists
+# to close, just moved into the cache instead of the scan logic.
 #
 # 4. Run `cargo check --release --bin simple` (NOT a full `cargo build`)
 #    inside that worktree's src/compiler_rust, with a dedicated
@@ -143,6 +180,8 @@
 #
 # Exit 0 = safe to push, 1 = seed does not build, 2 = could not determine.
 
+# Recursion guard: refuse to run at SIMPLE_SHS_DEPTH >= SIMPLE_SHS_MAX_DEPTH (exit 3).
+case "$0" in */*) . "${0%/*}/../lib/recursion_guard.shs" ;; *) . ./scripts/lib/recursion_guard.shs ;; esac
 set -u
 
 SELF=check-seed-builds-push
@@ -246,7 +285,7 @@ seed_content_digest() {
     # would skip the new leg forever and the fast path would launder exactly
     # the fail-open this leg exists to close. Bump the tag whenever a leg is
     # added or its selector changes.
-    printf 'seed/v2+vulkan %s %s %s\n' "$sd_ct" "$sd_rt" "$sd_lk" \
+    printf 'seed/v3+link %s %s %s\n' "$sd_ct" "$sd_rt" "$sd_lk" \
         | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-40
     return 0
 }
@@ -325,12 +364,32 @@ run_cargo_check() {
     return $?
 }
 
+# ---------------------------------------------------------------------------
+# run_cargo_build_link <worktree_dir> <target_selector> <out_basename>
+#   Runs `cargo build --release <target_selector>` -- a REAL link, unlike
+#   run_cargo_check above. Added 2026-08-28 to close the unlinkable-tip gap:
+#   `cargo check` never invokes the linker, so an `extern "C"` symbol with no
+#   definition anywhere in the linked graph is invisible to every leg above.
+#   Same rc-capture discipline: read directly on the line after the
+#   invocation, never through a pipe.
+# ---------------------------------------------------------------------------
+run_cargo_build_link() {
+    rb_dir="$1/src/compiler_rust"
+    rb_sel="$2"
+    rb_out="$TMPROOT/$3"
+    [ -d "$rb_dir" ] || { echo "RB_ERR: $rb_dir does not exist in this worktree" >"$rb_out"; return 2; }
+    mkdir -p "$CARGO_TARGET_ROOT" 2>/dev/null
+    ( cd "$rb_dir" && CARGO_TARGET_DIR="$CARGO_TARGET_ROOT" cargo build --release $rb_sel ) \
+        >"$rb_out" 2>&1
+    return $?
+}
+
 # ===========================================================================
 # SELFTEST — proves cargo check catches the real incident's error classes
 # (E0432 unresolved import, E0599 missing enum variant / no method) and
 # that a clean fixture passes. Fatal if it does not pass.
 # ===========================================================================
-SELFTEST_EXPECTED=6
+SELFTEST_EXPECTED=7
 
 selftest() {
     st_dir="$TMPROOT/selftest-crate"
@@ -636,12 +695,65 @@ EOF
         st_fail=1
     fi
 
+    # --- Fixture G: REPLAY OF THE 2026-08-28 UNLINKABLE-TIP INCIDENT -------
+    # A crate that declares an `extern "C"` function with no definition
+    # anywhere in the linked graph. `cargo check` must PASS (it never links --
+    # this is exactly why the old guard reported PASS on the real incident);
+    # `cargo build --release` must FAIL at the link stage with an
+    # undefined-symbol/undefined-reference error. If `check` also failed, the
+    # fixture would not be proving anything -- the whole point of this leg is
+    # to catch what `check` structurally cannot.
+    st_dir_g="$TMPROOT/selftest-crate-link"
+    rm -rf "$st_dir_g"
+    mkdir -p "$st_dir_g/src" || return 1
+    cat >"$st_dir_g/Cargo.toml" <<'EOF'
+[package]
+name = "seed-build-guard-selftest-link"
+version = "0.0.0"
+edition = "2021"
+
+[[bin]]
+name = "selftest_link_bin"
+path = "src/main.rs"
+EOF
+    cat >"$st_dir_g/src/main.rs" <<'EOF'
+// The incident's exact shape: an extern "C" symbol (rt_time_now_seconds at
+// origin/main) declared but defined nowhere in the linked graph. `cargo
+// check` never links, so it cannot see this; only a real link can.
+extern "C" {
+    fn seed_guard_selftest_undefined_native_symbol() -> i64;
+}
+
+fn main() {
+    let v = unsafe { seed_guard_selftest_undefined_native_symbol() };
+    println!("{}", v);
+}
+EOF
+    st_ran=$((st_ran + 1))
+    ( cd "$st_dir_g" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-g" cargo check --release 2>&1 ) >"$TMPROOT/st_g_check.out"
+    st_got_g_check=$?
+    ( cd "$st_dir_g" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-g" cargo build --release 2>&1 ) >"$TMPROOT/st_g_build.out"
+    st_got_g_build=$?
+    if [ "$st_got_g_check" -ne 0 ]; then
+        echo "SELFTEST FAIL: link fixture's cargo check was expected to PASS (that is what makes the link gap a gap), it failed" >&2
+        cat "$TMPROOT/st_g_check.out" >&2
+        st_fail=1
+    fi
+    if [ "$st_got_g_build" -eq 0 ]; then
+        echo "SELFTEST FAIL: link fixture's cargo build --release was expected to FAIL at link, it exited 0 -- the link leg is vacuous" >&2
+        st_fail=1
+    elif ! $GREP -qiE 'undefined (symbol|reference)|undefined_native_symbol|linking with|link.*error|ld returned' "$TMPROOT/st_g_build.out"; then
+        echo "SELFTEST FAIL: link fixture's cargo build failed but not with an undefined-symbol/link-error shape" >&2
+        cat "$TMPROOT/st_g_build.out" >&2
+        st_fail=1
+    fi
+
     if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
         echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran" >&2
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, 2026-08-18 incident replay: docs-only range over a broken untouched seed must compile and FAIL, vacuous-range contract, cfg-gap: default-features PASS + --features FAIL with E0252)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, 2026-08-18 incident replay: docs-only range over a broken untouched seed must compile and FAIL, vacuous-range contract, cfg-gap: default-features PASS + --features FAIL with E0252, 2026-08-28 link-gap: extern \"C\" undefined symbol passes check but FAILs cargo build --release at link)"
     return 0
 }
 
@@ -832,6 +944,41 @@ EOF
     exit 1
 fi
 
+# --- GATING LEG 4: the LINK step (`cargo build --release --bin simple`) ----
+# Legs 1-3 all use `cargo check`, which never invokes the linker. On
+# 2026-08-28 origin/main was UNLINKABLE (extern "C" rt_time_now_seconds had
+# no definition anywhere in the linked graph) while every check-only leg
+# above reported PASS -- the second unlinkable-tip incident of this exact
+# shape. This leg is a real link: a symbol that merely resolves as a Rust
+# item but is undefined at the object/link level is invisible to `check` by
+# construction, since an `extern "C"` block only promises the compiler a
+# signature. Warm cost is small on top of legs 1-3 (they already primed
+# CARGO_TARGET_DIR's incremental cache; build only pays for codegen+link),
+# measured ~35-70s marginal on this host; cold is close to a full release
+# build. Paid only on a seed-content cache miss, exactly like the legs above.
+run_cargo_build_link "$WORKTREE" "--bin simple" cargo_link.out
+cl_st=$?
+
+if [ "$cl_st" -ne 0 ]; then
+    cat >&2 <<EOF
+
+DO NOT PUSH. src/compiler_rust compiles (cargo check passes) but does NOT
+LINK at $tip (cargo build --release --bin simple failed). This is the exact
+shape of the 2026-08-28 incident: an extern "C" symbol with no definition
+anywhere in the linked graph, invisible to every check-only leg above.
+
+$(tail -n 40 "$TMPROOT/cargo_link.out")
+
+Fix the missing definition/link error before pushing. Re-run standalone to
+iterate:
+  cd $WORKTREE/src/compiler_rust && CARGO_TARGET_DIR=$CARGO_TARGET_ROOT cargo build --release --bin simple
+EOF
+    VERDICT_EMITTED=1
+    err1=$($GREP -m1 -iE 'undefined (symbol|reference)|error' "$TMPROOT/cargo_link.out" 2>/dev/null)
+    echo "$SELF: FAIL — cargo build --release --bin simple failed to link in $tip: ${err1:-see stderr above}"
+    exit 1
+fi
+
 # --- ADVISORY LEG: every remaining target (examples, benches) ---------------
 # Reported, never fatal. Kept separate from leg 2 so that a breakage in a probe
 # fixture is visible without turning a genuine product-code PASS into a FAIL
@@ -849,5 +996,5 @@ fi
 record_green_marker "$seed_digest"
 
 VERDICT_EMITTED=1
-echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test + vulkan-feature targets compile cleanly at $tip (seed content $seed_digest recorded green; link NOT verified: cargo check does not link)$advisory"
+echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test + vulkan-feature targets compile cleanly AND the bin target LINKS at $tip (seed content $seed_digest recorded green)$advisory"
 exit 0

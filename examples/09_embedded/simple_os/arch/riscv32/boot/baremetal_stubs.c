@@ -63,55 +63,6 @@ extern char _stack_top[];
  * rt_qemu_exit_success, rt_native_eq/neq, rt_riscv_nvfs_probe). */
 #include "../../common/riscv_common.h"
 
-static size_t riscv32_collector_nonce_line_length(const unsigned char *slot,
-                                                   size_t slot_len)
-{
-    static const char prefix[] = "SOSIX_COLLECTOR_RUN_NONCE=";
-    const size_t prefix_len = sizeof(prefix) - 1U;
-    if (!slot || slot_len <= prefix_len || slot_len > 118U) return 0U;
-    for (size_t i = 0; i < prefix_len; i++) {
-        if (slot[i] != (unsigned char)prefix[i]) return 0U;
-    }
-
-    size_t i = prefix_len;
-    const size_t nonce_begin = i;
-    while (i < slot_len && slot[i] != '\n') {
-        const unsigned char c = slot[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '.' || c == '_' ||
-              c == ':' || c == '-')) return 0U;
-        i++;
-    }
-    if (i == nonce_begin || i >= slot_len || slot[i] != '\n') return 0U;
-
-    const size_t line_len = i + 1U;
-    for (i = line_len; i < slot_len; i++) {
-        if (slot[i] != 0U) return 0U;
-    }
-    return line_len;
-}
-
-/* Canonical evidence nonce: distinct from every workload nonce. */
-RuntimeValue rt_sosix_collector_nonce_echo(void)
-{
-    Fat32Probe fat;
-    unsigned char nonce_file[118];
-    uint32_t file_size = 0U;
-    if (!fat32_probe_bpb(&fat)) return 0;
-    const uint32_t cluster = fat32_find_entry_cluster(
-        &fat, fat.root_cluster, "SOSIXNONTXT", 0U, &file_size);
-    if (cluster < 2U || file_size == 0U || file_size > sizeof(nonce_file)) return 0;
-    const uint32_t bytes_read = fat32_read_file_into(
-        &fat, cluster, file_size, nonce_file, sizeof(nonce_file));
-    if (bytes_read != file_size) return 0;
-
-    const size_t line_len = riscv32_collector_nonce_line_length(
-        nonce_file, bytes_read);
-    if (line_len == 0U) return 0;
-    for (size_t i = 0; i < line_len; i++) uart_putc((char)nonce_file[i]);
-    return 1;
-}
-
 static void uart_put_u32(uint32_t v)
 {
     char buf[10];
@@ -123,128 +74,6 @@ static void uart_put_u32(uint32_t v)
     while (pos > 0U) {
         uart_putc(buf[--pos]);
     }
-}
-
-/* ---------------------------------------------------------------------------
- * TINY (BRAM-only) build: stack high-water measurement.
- *
- * The tiny linker script (../linker_tiny.ld) shrinks .stack from the default
- * 8 MB down to something that fits in on-chip block RAM. That number has to be
- * MEASURED, not guessed, so this paints the whole stack span with a sentinel
- * before jumping into spl_start and reports the deepest word actually
- * clobbered once the marker chain has run.
- *
- * Self-configuring rather than -D gated: the probe keys off the linker's own
- * _stack_bottom/_stack_top and does nothing at all unless the reserved stack
- * is small enough to be a BRAM configuration. The default 8 MB QEMU images
- * take the early-out on both halves, so their observable behaviour (and the
- * marker chain) is unchanged; painting 8 MB would also be pointlessly slow in
- * simulation.
- * ------------------------------------------------------------------------ */
-#define TINY_STACK_PAINT 0xADDECA5EU
-/* Leave the topmost slots alone: sp already points there and this function's
- * own frame lives in them, so painting them would corrupt our return path.
- * tiny_stack_paint() is a small leaf (frame well under 64 B) called from the
- * naked _start with sp == _stack_top, so 64 B of headroom is enough and keeps
- * the measurement resolution at +-64 B instead of +-512 B. */
-#define TINY_STACK_PAINT_SKIP_TOP 64U
-/* Only BRAM-sized stacks get probed. */
-#define TINY_STACK_PROBE_MAX_BYTES (1024U * 1024U)
-
-extern char _stack_bottom[];
-
-static uint32_t tiny_stack_span(void)
-{
-    return (uint32_t)((uintptr_t)_stack_top - (uintptr_t)_stack_bottom);
-}
-
-/* Called from _start's inline asm before spl_start. Non-static + used so the
- * reference from the naked entry stub is never garbage-collected. */
-__attribute__((used, noinline)) void tiny_stack_paint(void)
-{
-    if (tiny_stack_span() > TINY_STACK_PROBE_MAX_BYTES) return;
-    volatile uint32_t *lo = (volatile uint32_t *)_stack_bottom;
-    volatile uint32_t *hi = (volatile uint32_t *)(_stack_top - TINY_STACK_PAINT_SKIP_TOP);
-    while (lo < hi) {
-        *lo++ = TINY_STACK_PAINT;
-    }
-}
-
-static void uart_put_hex32(uint32_t v)
-{
-    static const char digits[] = "0123456789abcdef";
-    uart_putc('0');
-    uart_putc('x');
-    for (int shift = 28; shift >= 0; shift -= 4) {
-        uart_putc(digits[(v >> shift) & 0xFU]);
-    }
-}
-
-/* Scan upward from _stack_bottom PAST the surviving sentinels: the first
- * NON-painted word above the surviving run marks the deepest stack touch, so
- * used = _stack_top - that address.
- *
- * (The original probe scanned for the first SURVIVING sentinel — which is
- * _stack_bottom itself whenever the stack did NOT overflow — so it reported
- * exactly 100% used on every healthy boot, at 64 KB and 256 KB alike. The
- * inverted condition was the whole bug; the paint itself survives intact.
- * Measured 2026-07-26 in GHDL with the corrected scan: 344 bytes of 262144.)
- *
- * Diagnostics kept from the investigation:
- *   first_surv  = address of first surviving sentinel scanning UP from bottom
- *                 (== _stack_bottom on a healthy boot)
- *   surv_words  = surviving sentinel count in [bottom, top-skip) — 0 means the
- *                 whole span was overwritten after tiny_stack_paint()
- *   high_water  = _stack_top - (address of highest surviving PAINTED word,
- *                 scanning DOWN from top-skip) = true stack depth from the top
- *   bottom_val  = word at _stack_bottom (0x00000000 => memset-zero wiper,
- *                 ELF-looking bytes => loader, frame-like => real stack). */
-static void tiny_stack_report(void)
-{
-    if (tiny_stack_span() > TINY_STACK_PROBE_MAX_BYTES) return;
-    const volatile uint32_t *bottom = (const volatile uint32_t *)_stack_bottom;
-    const volatile uint32_t *top = (const volatile uint32_t *)_stack_top;
-    const volatile uint32_t *paint_hi =
-        (const volatile uint32_t *)(_stack_top - TINY_STACK_PAINT_SKIP_TOP);
-    const volatile uint32_t *first_surv = bottom;
-    while (first_surv < top && *first_surv != TINY_STACK_PAINT) {
-        first_surv++;
-    }
-    /* Deepest touch: first word ABOVE the contiguous surviving run. */
-    const volatile uint32_t *lo = first_surv;
-    while (lo < paint_hi && *lo == TINY_STACK_PAINT) {
-        lo++;
-    }
-    uint32_t surviving = 0;
-    for (const volatile uint32_t *p = bottom; p < paint_hi; p++) {
-        if (*p == TINY_STACK_PAINT) surviving++;
-    }
-    /* Scan DOWN from just below the unpainted top skip for the first
-     * still-painted word: everything above it was genuinely touched. */
-    const volatile uint32_t *dp = paint_hi;
-    while (dp > bottom) {
-        dp--;
-        if (*dp == TINY_STACK_PAINT) break;
-    }
-    uint32_t high_water;
-    if (*dp == TINY_STACK_PAINT) {
-        high_water = (uint32_t)((uintptr_t)top - (uintptr_t)dp) - 4U;
-    } else {
-        high_water = tiny_stack_span(); /* nothing painted survives */
-    }
-    uart_puts("[tiny] stack_used=");
-    uart_put_u32((uint32_t)((uintptr_t)top - (uintptr_t)lo));
-    uart_puts(" of=");
-    uart_put_u32(tiny_stack_span());
-    uart_puts("\n[tiny] probe first_surv=");
-    uart_put_hex32((uint32_t)(uintptr_t)first_surv);
-    uart_puts(" surv_words=");
-    uart_put_u32(surviving);
-    uart_puts(" high_water=");
-    uart_put_u32(high_water);
-    uart_puts(" bottom_val=");
-    uart_put_hex32(*bottom);
-    uart_puts("\n");
 }
 
 static uint32_t riscv32_harden_mix32(uint32_t value)
@@ -295,14 +124,6 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     }
     s->data[len] = 0;
     return ENCODE_PTR(s);
-}
-
-/* Interned string-literal constructor. The hosted runtime interns by literal
- * address for perf; the freestanding kernel has no intern table, so forward to
- * rt_string_new — functionally identical (a fresh heap string per call). */
-RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
-{
-    return rt_string_new(data, len_val);
 }
 
 RuntimeValue rt_rv32_probe_store32(RuntimeValue addr, RuntimeValue value)
@@ -433,11 +254,6 @@ RuntimeValue rt_riscv_native_gui_process_render(void)
         i++;
     }
     g_riscv_gui_surface[i] = 0;
-    /* Last C call on the marker chain (SMF_WM_GUI_LAUNCH_OK) — by here the
-     * deepest boot frames have all been and gone, so this is the right place
-     * to publish the measured stack high-water mark. No-ops on the default
-     * (8 MB stack) images. */
-    tiny_stack_report();
     return bytes_contains((const unsigned char *)g_riscv_gui_surface, sizeof(g_riscv_gui_surface), "pid=1002") ? 1 : 0;
 }
 
@@ -445,28 +261,8 @@ __attribute__((naked, section(".text.entry"))) void _start(void)
 {
     __asm__ volatile(
         "la sp, _stack_top\n"
-        /* Zero .bss BEFORE any C code runs. Real DDR powers up as garbage;
-         * un-zeroed .bss => g_heap_off trash => every alloc fails => only the
-         * canary prints (proven on KV260 silicon 2026-07-26). The kernel must
-         * not depend on loader cooperation (board-runnable rule); the bringup
-         * script's dow-zeroing stays as belt-and-suspenders. _sbss/_ebss come
-         * from linker_riscv_common.ld and _ebss is ALIGN(8), so a word loop
-         * terminates exactly. Handles empty .bss (_sbss == _ebss). */
-        "la t0, _sbss\n"
-        "la t1, _ebss\n"
-        "1: bgeu t0, t1, 2f\n"
-        "sw zero, 0(t0)\n"
-        "addi t0, t0, 4\n"
-        "j 1b\n"
-        "2:\n"
-        /* Paint the stack before any Simple code runs, so the high-water mark
-         * reported at the end of the marker chain covers the whole boot.
-         * No-ops unless the linker reserved a BRAM-sized stack. */
-        "call tiny_stack_paint\n"
         "call spl_start\n"
-        "3: wfi\n"
-        "j 3b\n"
+        "1: wfi\n"
+        "j 1b\n"
     );
 }
-
-#include "../../common/boot/text_codepoint_runtime.h"

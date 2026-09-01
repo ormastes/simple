@@ -1,0 +1,100 @@
+# @cover src/lib/nogc_async_mut/fs_driver/mount_table.spl 80%
+"""DBFS root mount seal ownership and stale-generation coverage."""
+
+use std.spipe.*
+use std.fs_driver.mount_table.{MountTable, DbfsRootMountSealV1}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{MountOptions, Path, OpenFlags}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.ramfs.{RamFsDriver}
+
+fn durable_dbfs_driver() -> DbFsDriver:
+    DbFsDriver.open_on_device(MemBlockDevice.new(512u64, 512u32), 0i64, 512i64).unwrap()
+
+describe "MountTable DBFS root mount seal":
+    it "rejects a caller-selected backend and a volatile DBFS root":
+        var ram_table = MountTable.new()
+        ram_table.mount("/", DriverInstance.RamFs(RamFsDriver.new()), MountOptions.default()).unwrap()
+        expect(ram_table.acquire_dbfs_root_mount_seal().is_err()).to_be(true)
+
+        var hosted_table = MountTable.new()
+        hosted_table.mount("/", DriverInstance.DbFs(DbFsDriver.new_hosted()), MountOptions.default()).unwrap()
+        expect(hosted_table.acquire_dbfs_root_mount_seal().is_err()).to_be(true)
+
+    it "seals owner identity and generations then closes exactly once":
+        val driver = durable_dbfs_driver()
+        var table = MountTable.new()
+        val mount_id = table.mount("/", DriverInstance.DbFs(driver), MountOptions.default()).unwrap()
+        val seal = table.acquire_dbfs_root_mount_seal().unwrap()
+        val info = table.revalidate_dbfs_root_mount_seal(seal).unwrap()
+        expect(info.mount_id.id).to_equal(mount_id.id)
+        expect(info.mount_generation).to_equal(1u64)
+        expect(info.namespace_generation).to_equal(1u64)
+        expect(info.content_generation).to_equal(1u64)
+        expect(info.dbfs_instance_identity > 0).to_be(true)
+        expect(info.owner_nonce > 0u64).to_be(true)
+        expect(info.dbfs_mutation_epoch > 0u64).to_be(true)
+        expect(table.close_dbfs_root_mount_seal(seal).is_ok()).to_be(true)
+        expect(table.revalidate_dbfs_root_mount_seal(seal).is_err()).to_be(true)
+        expect(table.close_dbfs_root_mount_seal(seal).is_err()).to_be(true)
+
+    it "invalidates on namespace change and retires a stale close":
+        val driver = durable_dbfs_driver()
+        var table = MountTable.new()
+        val mount_id = table.mount("/", DriverInstance.DbFs(driver), MountOptions.default()).unwrap()
+        val seal = table.acquire_dbfs_root_mount_seal().unwrap()
+        table.bump_namespace_generation(mount_id).unwrap()
+        expect(table.revalidate_dbfs_root_mount_seal(seal).is_err()).to_be(true)
+        expect(table.close_dbfs_root_mount_seal(seal).is_err()).to_be(true)
+        val replacement = table.acquire_dbfs_root_mount_seal().unwrap()
+        expect(replacement.id != seal.id).to_be(true)
+        expect(table.close_dbfs_root_mount_seal(replacement).is_ok()).to_be(true)
+
+    it "invalidates when another value copy mutates the same DBFS owner":
+        val driver = durable_dbfs_driver()
+        var table = MountTable.new()
+        table.mount("/", DriverInstance.DbFs(driver), MountOptions.default()).unwrap()
+        val seal = table.acquire_dbfs_root_mount_seal().unwrap()
+        val direct = driver.open_path(Path(raw: "/outside-owner"), OpenFlags.create_write()).unwrap()
+        driver.write_handle(direct, "changed").unwrap()
+        expect(table.revalidate_dbfs_root_mount_seal(seal).is_err()).to_be(true)
+        expect(table.close_dbfs_root_mount_seal(seal).is_err()).to_be(true)
+
+    it "does not let an old lease alias after table reset":
+        val driver = durable_dbfs_driver()
+        var before = MountTable.new()
+        before.mount("/", DriverInstance.DbFs(driver), MountOptions.default()).unwrap()
+        val old_seal = before.acquire_dbfs_root_mount_seal().unwrap()
+
+        var after = MountTable.new()
+        after.mount("/", DriverInstance.DbFs(driver), MountOptions.default()).unwrap()
+        val new_seal = after.acquire_dbfs_root_mount_seal().unwrap()
+        expect(old_seal.id).to_equal(new_seal.id)
+        expect(old_seal.owner_nonce != new_seal.owner_nonce).to_be(true)
+        expect(after.revalidate_dbfs_root_mount_seal(old_seal).is_err()).to_be(true)
+        expect(after.revalidate_dbfs_root_mount_seal(new_seal).is_ok()).to_be(true)
+
+    it "fails closed after unmount without pinning the namespace":
+        val driver = durable_dbfs_driver()
+        var table = MountTable.new()
+        table.mount("/", DriverInstance.DbFs(driver), MountOptions.default()).unwrap()
+        val seal = table.acquire_dbfs_root_mount_seal().unwrap()
+        expect(table.unmount("/").is_ok()).to_be(true)
+        expect(table.revalidate_dbfs_root_mount_seal(seal).is_err()).to_be(true)
+        expect(table.close_dbfs_root_mount_seal(seal).is_err()).to_be(true)
+
+    it "bounds simultaneous seal state and recovers a closed slot":
+        val driver = durable_dbfs_driver()
+        var table = MountTable.new()
+        table.mount("/", DriverInstance.DbFs(driver), MountOptions.default()).unwrap()
+        var seals: [DbfsRootMountSealV1] = []
+        var i: i64 = 0
+        while i < 64:
+            seals.push(table.acquire_dbfs_root_mount_seal().unwrap())
+            i = i + 1
+        expect(table.acquire_dbfs_root_mount_seal().is_err()).to_be(true)
+        val retired = seals[17]
+        expect(table.close_dbfs_root_mount_seal(retired).is_ok()).to_be(true)
+        val replacement = table.acquire_dbfs_root_mount_seal().unwrap()
+        expect(replacement.id != retired.id).to_be(true)

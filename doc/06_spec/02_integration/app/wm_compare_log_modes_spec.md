@@ -27,7 +27,7 @@ wm_compare_log_modes_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -121,22 +121,6 @@ expect(out).to_contain("\"error\":\"missing scene\"")
 
 </details>
 
-#### rejects window mode on SimpleOS before capture
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val (out, err, code) = _run_wm_compare(["--host-os=simpleos", "--wm-mode=window"])
-expect(code).to_equal(1)
-expect(out).to_contain("wm mode 'window' is not available on host 'simpleos'")
-```
-
-</details>
-
 ## At a Glance
 
 | Field | Value |
@@ -144,7 +128,7 @@ expect(out).to_contain("wm mode 'window' is not available on host 'simpleos'")
 | Category | Application |
 | Status | Active |
 | Source | `test/02_integration/app/wm_compare_log_modes_spec.spl` |
-| Updated | 2026-06-29 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -156,8 +140,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

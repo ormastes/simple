@@ -1,7 +1,6 @@
 # Class-instance args passed to free functions lose mutations in compiled library modules
 
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** PARTIALLY-RESOLVED (2026-07-17)
 - **Discovered:** 2026-06-30
 - **Area:** compiler backend (codegen / JIT) — value vs reference semantics for class-instance arguments
 - **Severity:** High (silent data loss; corrupts any builder/visitor pattern that mutates an argument or accumulator)
@@ -84,82 +83,8 @@ backend must propagate writes back) consistently between the interpreter and the
 compiled/JIT path. Until then, library code must not rely on mutating a
 class-instance argument and expecting the caller to observe it.
 
-## Resolution (2026-07-17)
-
-The compiler-side prerequisite landed 2026-07-14: `36aff72f4b1` (thread a
-`mut`-param marker from the parser through HIR to `src/compiler/50.mir/_MirLowering/function_lowering.spl`,
-which now binds `is_named_struct and (is_me_receiver or is_mut_param)`
-parameters directly to the caller's incoming arg local instead of taking the
-Bug #167 defensive value-copy). Per that lowering code's own inline note,
-`is_named_struct` (`self.struct_field_order.has(type_name)`) is satisfied by
-`class` declarations too today ("a `class` declaration currently lands in
-`module.structs` too ... this copy therefore applies uniformly to every
-`Named` aggregate param ... class included, until the upstream class/struct
-conflation is fixed separately") — so marking a free-fn's class-typed param
-`mut` is exactly the adoption vector for this bug.
-
-Adopted in `dom_accessors.spl`: `be_dom_add_child`, `be_dom_remove_child`,
-`be_dom_insert_before`, `be_dom_set_attr`, `be_dom_set_style`,
-`be_dom_set_text_content` all now take `mut node`/`mut parent`. (Read-only
-accessors and `be_dom_set_children`, which already returns a new node
-functionally, were left unchanged.) The same latent pattern was found and
-fixed in sibling script API files: `timer_api.spl`, `event_api.spl`,
-`worker_api.spl`, `clipboard_api.spl`, `location_api.spl` — see the
-companion bug doc `browser_script_crossmodule_mutation_breaks_timer_event_2026-07-11.md`
-for the full file list and per-file spec results.
-
-**Verification caveat:** reproduced the exact documented symptom with the
-seed oracle (`env -u SIMPLE_BOOTSTRAP bin/simple run <probe>`):
-`be_dom_set_attr(node, "k", "v")` followed by `be_dom_get_attr(node, "k")`
-returns `""` both before and after adding `mut`. Root-caused this to an
-environment limit, not a defect in the adopted fix: the deployed
-`bin/simple` (`bin/release/x86_64-unknown-linux-gnu/simple`, 2026-07-11) is
-confirmed (startup banner + `src/compiler_rust/driver/src/seed_warning.rs`
-provenance) to be the Rust bootstrap seed, which predates and does not
-contain the 2026-07-14 self-hosted-compiler fix (that logic lives only in
-`src/compiler/*.spl`, compiled by `bin/simple build bootstrap`, which this
-lane is forbidden from running). An isolated experiment confirms the split:
-a `class`+`mut`-param mutation across two files compiled by the seed still
-copies (unfixed, seed-only, previously undocumented limitation, independent
-of `mut`), while the identical code in a single file works correctly under
-the same seed (`mut` alone is honored intra-module). Adding `mut` does
-remove the W1006-triggered whole-module interpreter fallback under the seed
-(one real, observable improvement — the more severe of the two documented
-failure modes), with zero regressions in `dom_accessors_spec.spl` (2/2
-still pass) or any touched sibling spec. Full end-to-end proof requires a
-self-hosted-compiled `bin/simple`, out of scope for this lane; filed as
-follow-up, not blocking.
-
 ## Related
 
 - `src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl` — free-fn mutators.
 - Memory note: "Cross-module mutation loss — free fn(self: Class) across modules
   loses field mutation".
-
-
-## Re-measurement 2026-08-17 (P0-core silent-wrong lane) — hosted shape NOT reproduced
-
-```
-class Box:
-    var n: i64
-fn mutate(b: Box):
-    b.n = 42
-fn main():
-    val b = Box(n: 0)
-    mutate(b)
-    print b.n        # -> 42 on interpreter AND jit
-```
-
-Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
-2026-08-16 22:59:37 UTC (Rust seed). A class instance passed to a free function
-keeps reference semantics and the mutation is visible to the caller on both
-engines.
-
-**This is a WEAK close and must not be read as resolving the doc.** The doc's
-title condition is "in compiled library modules" — the failure was specific to a
-mutation crossing a compiled-module boundary, and the measurement above is a
-single hosted file with no module boundary at all. It disproves only the
-simplest shape. The cross-module and compiled-library shapes were NOT
-constructed, and the sibling `cross_module_imported_fn_mutation_not_propagating_2026-07-12.md`
-covers exactly the case this probe did not reach. Treat the doc as still open on
-its stated scope.

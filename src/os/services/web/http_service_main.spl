@@ -1,0 +1,299 @@
+# Native SimpleOS HTTP service payload.
+#
+# This is deliberately a small event-driven HTTP/1.1 responder over the
+# owned-record netstack protocol. It does not use hosted sockets or
+# std.http_server: the only external authority is IpcConnect("net") plus the
+# catalogue-issued NetListen(80) consumed by the kernel at NET_BIND.
+
+use os.userlib.ipc_endpoint.{
+    ipc_create_named_port, ipc_connect_named_port, ipc_send_owned_v1,
+    ipc_recv_owned_v1_into, IPC_OWNED_V1_HEADER_BYTES,
+    IPC_OWNED_V1_MAX_PAYLOAD_BYTES, IPC_OWNED_V1_REPLY_HEADER_FLAG
+}
+use os.userlib.syscall_raw.{syscall}
+
+val SYS_YIELD: u64 = 1u64
+val NET_SOCKET: u32 = 1u32
+val NET_BIND: u32 = 2u32
+val NET_LISTEN: u32 = 3u32
+val NET_ACCEPT: u32 = 5u32
+val NET_SEND: u32 = 6u32
+val NET_RECV: u32 = 7u32
+val NET_CLOSE: u32 = 8u32
+
+val HTTP_STATE_SOCKET: u32 = 1u32
+val HTTP_STATE_BIND: u32 = 2u32
+val HTTP_STATE_LISTEN: u32 = 3u32
+val HTTP_STATE_ACCEPT: u32 = 4u32
+val HTTP_STATE_READ: u32 = 5u32
+val HTTP_STATE_SEND: u32 = 6u32
+val HTTP_STATE_CLOSE: u32 = 7u32
+
+# A provider crash removes its owned `net` endpoint.  There is deliberately no
+# ambient provider identity or raw socket fallback here: HTTP keeps only its
+# own `http` endpoint and re-resolves the same capability-checked name after a
+# bounded missing-reply interval.  The deadline also handles the silent case
+# where the provider dies after accepting a copied request but before replying.
+val HTTP_NET_REPLY_DEADLINE_YIELDS: u64 = 32u64
+val HTTP_NET_RECONNECT_MAX_BACKOFF_YIELDS: u64 = 64u64
+
+fn _http_recv_buffer() -> [u8]:
+    var bytes: [u8] = []
+    var i: u64 = 0u64
+    while i < IPC_OWNED_V1_HEADER_BYTES + IPC_OWNED_V1_MAX_PAYLOAD_BYTES:
+        bytes.push(0u8)
+        i = i + 1u64
+    bytes
+
+fn _http_push_u32(bytes: [u8], value: u32):
+    bytes.push((value & 0xFFu32).to_u8())
+    bytes.push(((value >> 8u32) & 0xFFu32).to_u8())
+    bytes.push(((value >> 16u32) & 0xFFu32).to_u8())
+    bytes.push(((value >> 24u32) & 0xFFu32).to_u8())
+
+fn _http_i32(bytes: [u8], offset: u64) -> i32:
+    if offset + 4u64 > bytes.len().to_u64():
+        return -1i32
+    val raw = bytes[offset].to_u32() |
+        (bytes[offset + 1u64].to_u32() << 8u32) |
+        (bytes[offset + 2u64].to_u32() << 16u32) |
+        (bytes[offset + 3u64].to_u32() << 24u32)
+    raw.to_i32()
+
+fn _http_u64(bytes: [u8], offset: u64) -> u64:
+    if offset + 8u64 > bytes.len().to_u64():
+        return 0u64
+    var value = 0u64
+    var shift = 0u64
+    while shift < 8u64:
+        value = value | (bytes[offset + shift].to_u64() << (shift * 8u64))
+        shift = shift + 1u64
+    value
+
+class NativeHttpService:
+    port_id: u64
+    net_port_id: u64
+    state: u32
+    listener_fd: i32
+    client_fd: i32
+    receive_buffer: [u8]
+    net_reply_deadline_yields: u64
+    net_reconnect_backoff_yields: u64
+    net_reconnect_attempt: u64
+
+impl NativeHttpService:
+    static fn new() -> NativeHttpService:
+        NativeHttpService(
+            port_id: 0u64, net_port_id: 0u64, state: HTTP_STATE_SOCKET,
+            listener_fd: -1i32, client_fd: -1i32,
+            receive_buffer: _http_recv_buffer(),
+            net_reply_deadline_yields: 0u64,
+            net_reconnect_backoff_yields: 0u64,
+            net_reconnect_attempt: 0u64
+        )
+
+    me start() -> bool:
+        val port = ipc_create_named_port("http")
+        if port.is_err():
+            return false
+        self.port_id = port.unwrap()
+        # PID1 normally starts HTTP only after `net` readiness, but keeping
+        # endpoint publication independent means a transient provider restart
+        # cannot make HTTP disappear or cause PID1 to misread its readiness.
+        # `_reconnect_net_if_needed` still performs the exact IpcConnect("net")
+        # capability check; no cached ID is trusted across a provider death.
+        self._reconnect_net_if_needed()
+        true
+
+    me note_net_peer_loss():
+        """Discard all provider-owned state after send failure or timeout.
+
+        File/socket descriptors belong to the departed net service, so they
+        must never be replayed to its replacement.  HTTP's own named endpoint
+        remains live; the next connection is obtained from the kernel's named
+        capability lookup and begins again with NET_SOCKET.
+        """
+        self.net_port_id = 0u64
+        self.listener_fd = -1i32
+        self.client_fd = -1i32
+        self.state = HTTP_STATE_SOCKET
+        self.net_reply_deadline_yields = 0u64
+        self.net_reconnect_backoff_yields = 0u64
+        self.net_reconnect_attempt = 0u64
+
+    me _next_reconnect_backoff() -> u64:
+        var delay = 1u64
+        var remaining = self.net_reconnect_attempt
+        while remaining > 0u64 and delay < HTTP_NET_RECONNECT_MAX_BACKOFF_YIELDS:
+            delay = delay * 2u64
+            remaining = remaining - 1u64
+        if delay > HTTP_NET_RECONNECT_MAX_BACKOFF_YIELDS:
+            return HTTP_NET_RECONNECT_MAX_BACKOFF_YIELDS
+        delay
+
+    me _reconnect_net_if_needed():
+        if self.net_port_id != 0u64:
+            return
+        if self.net_reconnect_backoff_yields > 0u64:
+            self.net_reconnect_backoff_yields = self.net_reconnect_backoff_yields - 1u64
+            return
+        val net = ipc_connect_named_port("net")
+        if net.is_err():
+            if self.net_reconnect_attempt < 6u64:
+                self.net_reconnect_attempt = self.net_reconnect_attempt + 1u64
+            self.net_reconnect_backoff_yields = self._next_reconnect_backoff()
+            return
+        self.net_port_id = net.unwrap()
+        self.net_reconnect_attempt = 0u64
+        self.net_reconnect_backoff_yields = 0u64
+        # Every provider instance receives fresh grants and a fresh endpoint;
+        # establish a new listener rather than retaining stale descriptor IDs.
+        self._request_socket()
+
+    me _send_net(method: u32, payload: [u8]) -> bool:
+        if self.port_id == 0u64 or self.net_port_id == 0u64:
+            return false
+        val sent = ipc_send_owned_v1(self.net_port_id, method, payload, self.port_id)
+        if sent.is_err():
+            # A net task exit removes the old port and invalidates reply
+            # permits. Treat any failed request as a lost session rather than
+            # falling back to a raw socket or retaining a stale endpoint ID.
+            self.note_net_peer_loss()
+            return false
+        self.net_reply_deadline_yields = HTTP_NET_REPLY_DEADLINE_YIELDS
+        true
+
+    me _request_socket():
+        if self._send_net(NET_SOCKET, [1u8]):
+            self.state = HTTP_STATE_SOCKET
+
+    me _request_bind():
+        var payload: [u8] = []
+        _http_push_u32(payload, self.listener_fd.to_u32())
+        _http_push_u32(payload, 0u32) # INADDR_ANY
+        payload.push(80u8)
+        payload.push(0u8)
+        if self._send_net(NET_BIND, payload):
+            self.state = HTTP_STATE_BIND
+
+    me _request_listen():
+        var payload: [u8] = []
+        _http_push_u32(payload, self.listener_fd.to_u32())
+        _http_push_u32(payload, 8u32)
+        # The owned net broker requires the exact bound local port at both
+        # NET_BIND and NET_LISTEN; it checks the source endpoint's live
+        # NetListen(80) capability before delivery.
+        payload.push(80u8)
+        payload.push(0u8)
+        if self._send_net(NET_LISTEN, payload):
+            self.state = HTTP_STATE_LISTEN
+
+    me _request_accept():
+        var payload: [u8] = []
+        _http_push_u32(payload, self.listener_fd.to_u32())
+        if self._send_net(NET_ACCEPT, payload):
+            self.state = HTTP_STATE_ACCEPT
+
+    me _request_read():
+        var payload: [u8] = []
+        _http_push_u32(payload, self.client_fd.to_u32())
+        _http_push_u32(payload, 2048u32)
+        if self._send_net(NET_RECV, payload):
+            self.state = HTTP_STATE_READ
+
+    me _request_response():
+        var payload: [u8] = []
+        _http_push_u32(payload, self.client_fd.to_u32())
+        for byte in "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nOK\n".bytes():
+            payload.push(byte)
+        if self._send_net(NET_SEND, payload):
+            self.state = HTTP_STATE_SEND
+
+    me _request_close():
+        var payload: [u8] = []
+        _http_push_u32(payload, self.client_fd.to_u32())
+        if self._send_net(NET_CLOSE, payload):
+            self.state = HTTP_STATE_CLOSE
+
+    me _on_net_reply(bytes: [u8], received_len: u64):
+        if received_len < IPC_OWNED_V1_HEADER_BYTES + 4u64:
+            return
+        # A response queued just before the old provider exited can still be
+        # present on HTTP's endpoint. Match both endpoint IDs so a stale reply
+        # cannot seed the replacement session with an old provider's socket
+        # descriptor, even though reply permits already prevent arbitrary
+        # third-party delivery.
+        if _http_u64(bytes, 0u64) != self.net_port_id or
+                _http_u64(bytes, 8u64) != self.port_id:
+            return
+        if _http_i32(bytes, 20u64).to_u32() != IPC_OWNED_V1_REPLY_HEADER_FLAG:
+            return
+        self.net_reply_deadline_yields = 0u64
+        val status = _http_i32(bytes, IPC_OWNED_V1_HEADER_BYTES)
+        if status != 0i32:
+            if self.state == HTTP_STATE_ACCEPT:
+                self._request_accept()
+            else if self.client_fd >= 0i32:
+                self._request_close()
+            return
+        match self.state:
+            HTTP_STATE_SOCKET:
+                if received_len < IPC_OWNED_V1_HEADER_BYTES + 8u64:
+                    return
+                self.listener_fd = _http_i32(bytes, IPC_OWNED_V1_HEADER_BYTES + 4u64)
+                if self.listener_fd >= 0i32:
+                    self._request_bind()
+            HTTP_STATE_BIND:
+                self._request_listen()
+            HTTP_STATE_LISTEN:
+                self._request_accept()
+            HTTP_STATE_ACCEPT:
+                if received_len < IPC_OWNED_V1_HEADER_BYTES + 8u64:
+                    self._request_accept()
+                    return
+                self.client_fd = _http_i32(bytes, IPC_OWNED_V1_HEADER_BYTES + 4u64)
+                if self.client_fd >= 0i32:
+                    self._request_read()
+                else:
+                    self._request_accept()
+            HTTP_STATE_READ:
+                if received_len > IPC_OWNED_V1_HEADER_BYTES + 4u64:
+                    self._request_response()
+                else:
+                    self._request_read()
+            HTTP_STATE_SEND:
+                self._request_close()
+            HTTP_STATE_CLOSE:
+                self.client_fd = -1i32
+                self._request_accept()
+            _:
+                pass
+
+    me poll_once():
+        val received = ipc_recv_owned_v1_into(self.port_id, self.receive_buffer)
+        if received.is_ok():
+            self._on_net_reply(self.receive_buffer, received.unwrap())
+        else if self.net_port_id != 0u64 and self.net_reply_deadline_yields > 0u64:
+            self.net_reply_deadline_yields = self.net_reply_deadline_yields - 1u64
+            if self.net_reply_deadline_yields == 0u64:
+                # Copied IPC cannot manufacture a peer-death event for a
+                # different endpoint. A bounded outstanding-request deadline
+                # turns that silent failure into the same fresh-capability
+                # reconnect path used for a direct send error.
+                self.note_net_peer_loss()
+        self._reconnect_net_if_needed()
+
+    me run_loop():
+        while true:
+            self.poll_once()
+            syscall(SYS_YIELD, 0u64, 0u64, 0u64, 0u64, 0u64)
+
+fn http_service_main() -> i32:
+    var service = NativeHttpService.new()
+    if not service.start():
+        return 1
+    service.run_loop()
+    0
+
+fn main(argv: [text]) -> i32:
+    http_service_main()

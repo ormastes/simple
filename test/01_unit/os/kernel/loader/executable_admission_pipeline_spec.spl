@@ -1,21 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that authenticated filesystem executable admission pipeline.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-OS-KERNEL-001
-doc/01_research/local/REQ-OS-KERNEL-001.md
-doc/03_plan/sys_test/REQ-OS-KERNEL-001.md
-doc/04_architecture/REQ-OS-KERNEL-001.md
-doc/05_design/REQ-OS-KERNEL-001.md
-"""
-# @req: REQ-OS-KERNEL-001
-
 use std.spec.{describe, it, expect, fail}
 use std.fs_driver.mount_table.{MountTable, MountId, ExecuteOpenBinding}
 use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust, FileHandle}
@@ -154,9 +136,8 @@ fn open_program(table: mut MountTable) -> ExecuteOpenBinding:
             fail("fixture execute-open failed")
             ExecuteOpenBinding(
                 mount_id: MountId.null(),
+                _owner_nonce: 0u64,
                 backend_name: "",
-                backend_kind: "",
-                canonical_source_path: "",
                 file_handle: FileHandle(id: 0u64),
                 mount_generation: 0u64,
                 namespace_generation: 0u64,
@@ -180,12 +161,8 @@ fn authority_owner(slot_limit: i64, nonce_seed: u64) -> ExecutableAuthorityRegis
         fail("serialized authority owner unavailable")
     result.unwrap()
 
-use std.spec.step
-
 describe "authenticated filesystem executable admission pipeline":
-    it "rejects a caller-asserted signature without a valid signed envelope":
-        # @req: REQ-OS-KERNEL-001
-        step("Verify: rejects a caller-asserted signature without a valid signed envelope")
+    it "fails closed after structural checks when cryptographic verification is unavailable":
         var table = table_with_program()
         val binding = open_program(table)
         val result = executable_loader_admit_open_binding(
@@ -193,13 +170,11 @@ describe "authenticated filesystem executable admission pipeline":
         match result:
             case Err(error):
                 expect(error).to_equal(
-                    ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
+                    ExecutableLoaderAdmissionErrorV1.CryptographicVerifierUnavailable)
             case Ok(_): fail("caller-provided verification booleans minted authority")
         unmount_root(table)
 
     it "rejects diagnostic signature, trust, target, and format failures earlier":
-        # @req: REQ-OS-KERNEL-001
-        step("Verify: rejects diagnostic signature, trust, target, and format failures earlier")
         var signature_table = table_with_program()
         var signature_inputs = valid_inputs()
         signature_inputs.signature_verified = false
@@ -253,8 +228,6 @@ describe "authenticated filesystem executable admission pipeline":
         unmount_root(format_table)
 
     it "rejects W^X ranges, stale bindings, and identity substitution":
-        # @req: REQ-OS-KERNEL-001
-        step("Verify: rejects W^X ranges, stale bindings, and identity substitution")
         var range_table = table_with_program()
         var range_inputs = valid_inputs()
         range_inputs.verified_load_ranges = [wx_range()]
@@ -293,8 +266,6 @@ describe "authenticated filesystem executable admission pipeline":
         unmount_root(identity_table)
 
     it "rejects invalid owner bounds before allocating serialized state":
-        # @req: REQ-OS-KERNEL-001
-        step("Verify: rejects invalid owner bounds before allocating serialized state")
         match executable_loader_authority_owner_initialize(0, 0u64):
             case Err(error): expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidRegistry)
             case Ok(_): fail("invalid owner configuration initialized")
@@ -305,8 +276,6 @@ describe "authenticated filesystem executable admission pipeline":
             case Ok(_): fail("oversized owner initialized")
 
     it "reopens one exact owner configuration and rejects conflicts":
-        # @req: REQ-OS-KERNEL-001
-        step("Verify: reopens one exact owner configuration and rejects conflicts")
         val owner = authority_owner(1, 0xA17u64)
         val owner_copy = owner
         match executable_loader_authority_owner_initialize(1, 0xA17u64):
@@ -320,13 +289,11 @@ describe "authenticated filesystem executable admission pipeline":
             case Ok(_): fail("conflicting singleton capacity replaced the owner")
         if not executable_authority_owner_valid(owner_copy):
             fail("copied owner lost the loader singleton")
-        expect(executable_authority_capacity(owner_copy)).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(executable_authority_slot_count(owner)).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(executable_authority_active_count(owner_copy)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(executable_authority_capacity(owner_copy)).to_equal(1)
+        expect(executable_authority_slot_count(owner)).to_equal(0)
+        expect(executable_authority_active_count(owner_copy)).to_equal(0)
 
     it "rejects forged tokens without mutating the empty registry":
-        # @req: REQ-OS-KERNEL-001
-        step("Verify: rejects forged tokens without mutating the empty registry")
         val owner = authority_owner(1, 0xA17u64)
         val owner_copy = owner
         val forged = ExecutableAuthorityTokenV1(
@@ -343,5 +310,5 @@ describe "authenticated filesystem executable admission pipeline":
         match executable_authority_snapshot(owner, forged):
             case Err(error): expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidToken)
             case Ok(_): fail("forged token observed slot state")
-        expect(executable_authority_slot_count(owner_copy)).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(executable_authority_active_count(owner)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(executable_authority_slot_count(owner_copy)).to_equal(0)
+        expect(executable_authority_active_count(owner)).to_equal(0)

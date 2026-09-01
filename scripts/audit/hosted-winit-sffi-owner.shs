@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+canonical="$root/src/lib/nogc_sync_mut/io/window_winit.spl"
+hosted="$root/src/os/hosted/hosted_entry.spl"
+
+canonical_declarations=$(grep -c '^[[:space:]]*extern fn rt_winit_' "$canonical")
+if [ "$canonical_declarations" -ne 35 ]; then
+    echo "canonical Winit declaration inventory changed without contract review" >&2
+    exit 1
+fi
+canonical_tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_winit_/ {
+        if (previous_is_ffi) tagged++
+    }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$canonical")
+if [ "$canonical_tagged" -ne "$canonical_declarations" ]; then
+    echo "every canonical Winit declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+if grep -n '^[[:space:]]*extern fn rt_winit_' "$hosted"; then
+    echo "hosted entry must import Winit from the canonical owner" >&2
+    exit 1
+fi
+if [ "$(grep -c '^[[:space:]]*extern fn ' "$hosted")" -ne 4 ]; then
+    echo "hosted entry irreducible declaration inventory changed" >&2
+    exit 1
+fi
+if grep -n -E 'rt_winit_window_is_fullscreen\([^)]*\)[[:space:]]*>|rt_winit_window_set_fullscreen\([^)]*,[[:space:]]*if ' "$hosted"; then
+    echo "hosted entry must preserve canonical boolean Winit contracts" >&2
+    exit 1
+fi
+
+echo "hosted Winit SFFI owner audit: PASS"

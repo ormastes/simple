@@ -1154,9 +1154,7 @@ fn flush_coverage_before_exit() -> i32 {
     // path the caller asked for.
     if let Some(path) = simple_compiler::get_coverage_output_path() {
         if !std::path::Path::new(&path).exists() {
-            eprintln!(
-                "error: SIMPLE_COVERAGE was set but no coverage artifact exists at {path} after writing"
-            );
+            eprintln!("error: SIMPLE_COVERAGE was set but no coverage artifact exists at {path} after writing");
             return 1;
         }
     }

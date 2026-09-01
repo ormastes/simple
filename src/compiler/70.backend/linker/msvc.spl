@@ -4,11 +4,8 @@
 # Auto-detects Visual Studio installation via vswhere.exe.
 
 use std.platform (is_windows, normalize_path, join_path)
+use std.io_runtime.{process_run, file_exists, env_get_opt}
 use compiler.backend.linker.link (LinkConfig, LinkError, LinkErrorKind, Linker)
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_env_get(key: text) -> text
 
 struct MsvcShellResult:
     stdout: text
@@ -23,7 +20,7 @@ struct MsvcShellResult:
 # `extern fn shell` declared here to shadow ANY same-named local function
 # in ANY module, anywhere in the program (see msvc_shell_naming bug).
 fn msvc_shell(cmd: text) -> MsvcShellResult:
-    val (stdout, stderr, code) = rt_process_run("cmd", ["/C", cmd])
+    val (stdout, stderr, code) = process_run("cmd", ["/C", cmd])
     MsvcShellResult(stdout: stdout, stderr: stderr, exit_code: code)
 
 # ===========================================================================
@@ -186,16 +183,13 @@ impl MsvcLinker:
 # Find Visual Studio installation using vswhere.exe
 fn find_visual_studio() -> text?:
     # vswhere.exe location
-    val vswhere_paths = [
-        "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe",
-        "{rt_env_get('ProgramFiles(x86)')}\\Microsoft Visual Studio\\Installer\\vswhere.exe"
-    ]
-
-    var vswhere = ""
-    for path in vswhere_paths:
-        if rt_file_exists(path):
-            vswhere = path
-            break
+    val fixed_vswhere = "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+    var vswhere = if file_exists(fixed_vswhere): fixed_vswhere else: ""
+    if vswhere == "":
+        if val program_files = env_get_opt("ProgramFiles(x86)"):
+            val derived_vswhere = "{program_files}\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+            if file_exists(derived_vswhere):
+                vswhere = derived_vswhere
 
     if vswhere == "":
         return nil
@@ -223,7 +217,7 @@ fn find_link_exe() -> text?:
                 val lines = result.stdout.split("\n")
                 for line in lines:
                     val trimmed = line.trim()
-                    if trimmed.ends_with("link.exe") and rt_file_exists(trimmed):
+                    if trimmed.ends_with("link.exe") and file_exists(trimmed):
                         return Some(trimmed)
 
         case nil:
@@ -233,7 +227,7 @@ fn find_link_exe() -> text?:
     val path_result = msvc_shell("where link.exe 2>nul")
     if path_result.exit_code == 0:
         val link_path = path_result.stdout.trim()
-        if link_path != "" and rt_file_exists(link_path):
+        if link_path != "" and file_exists(link_path):
             return Some(link_path)
 
     nil
@@ -259,7 +253,7 @@ fn find_msvc_crt_paths() -> [text]:
                     val ver = versions[versions.len() - 1].trim()
                     if ver != "":
                         val lib_dir = "{msvc_base}\\{ver}\\lib\\x64"
-                        if rt_file_exists(lib_dir):
+                        if file_exists(lib_dir):
                             paths.push(lib_dir)
         case nil:
             pass
@@ -273,10 +267,10 @@ fn find_msvc_crt_paths() -> [text]:
             val sdk_ver = sdk_versions[sdk_versions.len() - 1].trim()
             if sdk_ver != "":
                 val ucrt_dir = "{sdk_base}\\{sdk_ver}\\ucrt\\x64"
-                if rt_file_exists(ucrt_dir):
+                if file_exists(ucrt_dir):
                     paths.push(ucrt_dir)
                 val um_dir = "{sdk_base}\\{sdk_ver}\\um\\x64"
-                if rt_file_exists(um_dir):
+                if file_exists(um_dir):
                     paths.push(um_dir)
 
     paths

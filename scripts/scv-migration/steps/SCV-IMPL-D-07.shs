@@ -1,0 +1,42 @@
+#!/bin/sh
+# SCV-IMPL-D-07 — typed conflict objects v2 (kinds, entity ids, node sides, parser identity, attempted algorithms, diagnostics)
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Committed UNSIGNED.
+set -u
+LIB="src/lib/scv/conflict_v2.spl"
+MERGE="src/lib/scv/merge.spl"
+SPEC="test/integration/app/scv_conflict_v2_spec.spl"
+TWIN="test/02_integration/app/scv_conflict_v2_spec.spl"
+[ -f "$LIB" ] && [ -f "$MERGE" ] && [ -f "$SPEC" ] && [ -f "$TWIN" ] || { echo "ERROR — nothing was checked (missing files)"; exit 2; }
+checked=0
+bad=""
+
+grep -q "scv_conflict_v2_write" "$MERGE" || bad="$bad merge(v2-emission)"
+checked=$((checked + 1))
+grep -q "entity_identity_ambiguous" "$LIB" || bad="$bad lib(ambiguous-kind)"
+checked=$((checked + 1))
+grep -q "parser_disagreement" "$LIB" || bad="$bad lib(parser-disagreement-kind)"
+checked=$((checked + 1))
+grep -q "^export conflict_v2\.\*" src/lib/scv/__init__.spl || bad="$bad init(export)"
+checked=$((checked + 1))
+cmp -s "$SPEC" "$TWIN" || bad="$bad spec-twins-differ"
+checked=$((checked + 1))
+OUT="${TMPDIR:-/tmp}/SCV-IMPL-D-07.$$.log"
+SIMPLE_TIMEOUT_SECONDS=900 bin/simple test "$SPEC" > "$OUT" 2>&1
+rc=$?
+checked=$((checked + 1))
+RESULTS=$(grep 'Results:' "$OUT" | tail -1)
+rm -f "$OUT"
+[ "$rc" -eq 0 ] || bad="$bad spec-rc($rc)"
+case "$RESULTS" in
+  *", 0 failed"*) : ;;
+  "") bad="$bad spec(no-results-line)" ;;
+  *) bad="$bad spec($RESULTS)" ;;
+esac
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$bad" ]; then
+  echo "PASS — $checked check(s): typed conflict objects v2 (kinds, entity ids, node sides, parser identity, attempted algorithms, diagnostics) wired, $RESULTS"
+  exit 0
+fi
+echo "FAIL — $checked check(s), unmet:$bad"
+exit 1

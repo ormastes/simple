@@ -92,27 +92,6 @@ record deterministic failed evidence rows until the wrapper or another compiler
 worker materializes them. Plain app-root startup remains quiet; use
 `--dynsmf-status` when operator or test evidence is needed.
 
-Each successful background compile writes three sidecars next to the artifact:
-`<id>.smf.srchash` (whole-source hash), `<id>.smf.ifacehash` (heuristic hash of
-exported-signature lines only), and `<id>.smf.abi` (the manifest `abi_version`).
-Artifact status is fail-closed on all three: a missing or mismatched `.abi`
-sidecar reports `abi_mismatch` and the artifact is never loaded; a srchash
-mismatch is split by the interface hash into `stale_impl` (exported interface
-unchanged — recompiling the module alone is sufficient) versus
-`stale_interface` (exported interface changed — dependents need a rebuild too);
-a legacy artifact without an `.ifacehash` sidecar falls back to the generic
-`stale_source`. Before any sidecar is consulted, artifact status also runs an
-export-witness check (`smf_artifact_has_export` in `smf_dynlib.spl`): it scans
-the artifact's own bytes for each name in the manifest entry's `exports` list
-as a null-terminated ASCII run — the same convention the real SMF string
-table uses — and unconditionally requires the payload to exceed the known
-219-byte hollow-stub size, since a bare name match alone is not sufficient
-(the stub already contains a literal `main` symbol). A hollow artifact (e.g.
-the stub described in
-`doc/08_tracking/bug/seed_compile_smf_stub_fail_open_2026-07-17.md`) reports
-`stub_artifact` and is never loaded regardless of how fresh its sidecars are.
-`--dynsmf-status` prints one `id:reason:ready=` line per entry.
-
 ## Current Limitations
 
 - **Libraries must be pre-registered**: `dylib_async_open` calls
@@ -132,6 +111,37 @@ the stub described in
   `src/lib/nogc_sync_mut/sffi/dynamic.spl` wraps `spl_dlopen`, `spl_dlsym`, and
   `spl_wffi_call_i64` for `.so`/`.dylib` host libraries. That proves host dynlib
   calls, not SMF dynlib acceptance.
+
+## GPU provider registry
+
+Hosted native products compile `src/runtime/runtime_dynload.c` as the canonical
+owner of the optional GPU provider registry. A compatible first-party provider
+is selected before process start with `SIMPLE_CUDA_PROVIDER_PATH`,
+`SIMPLE_VULKAN_PROVIDER_PATH`, or `SIMPLE_METAL_PROVIDER_PATH`. The host opens
+the library with local symbol visibility, requires ABI version 1, verifies the
+declared backend bit and every required operation, and only then publishes the
+handle. Missing libraries, wrong ABI versions, backend mismatches, and partial
+surfaces remain unavailable.
+
+The provider is not a static link dependency. `rt_gpu_provider_unload` closes
+one owned handle and clears its cached path/metadata so a later lookup can load
+a replacement library through the same unchanged host executable. Callers must
+quiesce provider-owned sessions and resources before unload; the registry does
+not invalidate live backend objects on their behalf. Concurrent registry lookup
+is serialized, while resolved provider operations run outside the registry lock.
+
+The host-independent acceptance commands are:
+
+```sh
+sh scripts/check/check-gpu-provider-dynload-registry.shs
+sh scripts/check/check-metal-provider-dynload-registry.shs
+```
+
+They prove ABI and required-symbol rejection, Vulkan/CUDA operation dispatch,
+bounded concurrent lookup, unload/reload replacement without rebuilding the
+host, Metal length-delimited byte conversion, and absence of a provider link
+edge. They do not prove physical CUDA, Vulkan, or Metal device execution; use
+the backend-specific native readback gates for that claim.
 - **Legacy runtime SMF file helpers are not the GUI release lane**:
   `rt_file_wrap_smf_dynlib` and `rt_file_extract_smf_dynlib` still exist as
   generic runtime helpers, but they are not accepted GUI release-lane evidence.

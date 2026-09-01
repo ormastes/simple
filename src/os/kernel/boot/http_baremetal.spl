@@ -45,16 +45,25 @@ use std.nogc_sync_mut.http_server.parser.{content_length_from_text}
 use os.tls13.server.{tls13_accept, Tls13ServerConfig, Tls13AcceptResult, Tls13ServerContext}
 use os.tls13.record13.{RecordKey, record13_encrypt_for_suite, record13_decrypt_for_suite, RecordResult}
 use std.common.string_core.{text_to_bytes}
+use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.net.rt_net_socket_facade.{
+    rt_net_socket, rt_net_bind, rt_net_listen, rt_net_accept,
+    rt_net_send_bytes, rt_net_recv_bytes, rt_net_close
+}
 
-extern fn log_raw_println(msg: text)
-extern fn rt_net_socket(proto: i64) -> i64
-extern fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64
-extern fn rt_net_listen(sock_fd: i64, backlog: i64) -> i64
-extern fn rt_net_accept(sock_fd: i64) -> i64
-extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
-extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
-extern fn rt_net_close(sock_fd: i64) -> i64
+@unsafe(reason: "raw runtime byte-array to text lift; callers reject non-empty input becoming empty text", capabilities: [ffi])
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
+
+@always_inline
+fn _http_text_from_bytes(data: [u8]) -> Result<text, text>:
+    if data.len() == 0u64:
+        return Ok("")
+    var lifted = ""
+    unsafe(capabilities: [ffi]):
+        lifted = rt_string_from_byte_array(data)
+    if lifted.len() == 0u64:
+        return Err("invalid text")
+    Ok(lifted)
 
 val HTTP_STATUS_BODY: text = "{\"status\":\"ok\",\"server\":\"SimpleOS\"}\n"
 val HTTP_ROOT_BODY: text = "<html><body>SimpleOS ready</body></html>"
@@ -96,7 +105,11 @@ fn _http_serve_file(file_path: text) -> [u8]:
     if bytes.len() == 0:
         return _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR file not found\n"))
     val content_type = mime_from_path(file_path)
-    _http_encode(HttpResponse(status: HttpStatus.Ok, headers: [("Content-Type", content_type)], body: rt_string_from_byte_array(bytes)))
+    match _http_text_from_bytes(bytes):
+        case Ok(body):
+            _http_encode(HttpResponse(status: HttpStatus.Ok, headers: [("Content-Type", content_type)], body: body))
+        case Err(_):
+            _http_encode(HttpResponse(status: HttpStatus.InternalError, headers: [], body: "ERR invalid file text\n"))
 
 fn _http_route(request: text) -> [u8]:
     if simple_db_http_request(request):
@@ -132,10 +145,12 @@ pub fn http_bind_baremetal() -> i64:
     val bind_rc = _http_decode_i64(rt_net_bind(sock_fd, HTTP_PORT))
     if bind_rc < 0:
         log_raw_println("[http_baremetal] ERROR: bind failed")
+        val _ = rt_net_close(sock_fd)
         return bind_rc
     val listen_rc = _http_decode_i64(rt_net_listen(sock_fd, 8))
     if listen_rc < 0:
         log_raw_println("[http_baremetal] ERROR: listen failed")
+        val _ = rt_net_close(sock_fd)
         return listen_rc
     sock_fd
 
@@ -227,8 +242,11 @@ fn _http_recv_request(client: i64) -> (text, text):
             if state.buffer == "":
                 return ("", "closed")
             break
-        val chunk = rt_string_from_byte_array(chunk_bytes)
-        state = http_recv_accum_feed(state, chunk, HTTP_MAX_REQUEST_BYTES)
+        match _http_text_from_bytes(chunk_bytes):
+            case Ok(chunk):
+                state = http_recv_accum_feed(state, chunk, HTTP_MAX_REQUEST_BYTES)
+            case Err(reason):
+                return (state.buffer, reason)
         iterations = iterations + 1
     if state.complete:
         return (state.buffer, "")
@@ -275,7 +293,9 @@ pub fn http_accept_and_handle_once(listener: i64) -> bool:
         val recv_error = recv_result.1
         if recv_error != "" or request == "":
             break
-        rt_net_send_bytes(client, _http_route(request))
+        val send_rc = rt_net_send_bytes(client, _http_route(request))
+        if send_rc < 0:
+            break
         handled = handled + 1
         if _http_request_wants_close(request):
             break
@@ -443,8 +463,11 @@ fn _http_tls_recv_request(client: i64, session: HttpTlsSession) -> (text, text, 
         # Only application_data (0x17 = 23) carries HTTP; skip post-handshake
         # messages (tickets/key_update) that share the same wire content type.
         if dec.content_type == 23:
-            val chunk = rt_string_from_byte_array(dec.data)
-            st = http_recv_accum_feed(st, chunk, HTTP_MAX_REQUEST_BYTES)
+            match _http_text_from_bytes(dec.data):
+                case Ok(chunk):
+                    st = http_recv_accum_feed(st, chunk, HTTP_MAX_REQUEST_BYTES)
+                case Err(reason):
+                    return (st.buffer, reason, sess)
         iterations = iterations + 1
     if st.complete:
         return (st.buffer, "", sess)
@@ -467,7 +490,9 @@ fn _http_tls_serve_connection(client: i64, ctx: Tls13ServerContext):
             break
         val send = http_tls_encrypt_app_record(session, _http_route(request))
         session = send.session
-        rt_net_send_bytes(client, send.record)
+        val send_rc = rt_net_send_bytes(client, send.record)
+        if send_rc < 0:
+            break
         handled = handled + 1
         if _http_request_wants_close(request):
             break

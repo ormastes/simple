@@ -1,7 +1,6 @@
 # Bug: Interpreter conflates fn-typed field access with method calls
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Status: **RESOLVED** — Rust-side `evaluate_method_call_with_self_update` falls back to
 
 **Date:** 2026-05-27
 **Severity:** Medium
@@ -42,7 +41,7 @@ Any class storing function-typed fields (callbacks, handlers, strategies) cannot
 
 **RESOLVED** — Rust-side `evaluate_method_call_with_self_update` falls back to
 callable object fields (`Lambda` and `Function`) before reporting an unknown
-method. Pure-Simple-side `eval_method_call` in `_EvalOps/call_method_eval.spl` now also
+method. Pure-Simple-side `eval_method_call` in `eval_ops_part1.spl` now also
 falls back to `val_struct_get_field` + `val_is_function` before the error path.
 Added `test/01_unit/compiler/interpreter/fn_field_call_spec.spl` to cover
 `route.handler(41)` on a function-typed field.

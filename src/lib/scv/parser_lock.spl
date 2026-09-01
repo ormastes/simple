@@ -1,0 +1,177 @@
+# SCV parser trust/lock hardening — SCV-IMPL-P-04.
+#
+# v2 registry: every entry pins grammar id, source, artifact sha256, TS ABI,
+# protocol, runtime kind, and signature.  Policy: NO IMPLICIT DOWNLOADS —
+# install only accepts a locally present artifact, and resolving a parser
+# that is not locked is an error, never a fetch.  Upgrades (version or
+# artifact change for an already-locked language+grammar) open a NEW
+# parser-index generation; an identical reinstall does not.
+#
+# Lock line format (10 fields):
+#   parser2|language|grammar_id|source|version|runtime_kind|ts_abi|protocol|sha256|signature
+# The artifact always lives at {parsers_dir}/{sha256}.wasm — the path is
+# derived, never stored, so it cannot be redirected.
+#
+# NOTE on signature: presence + stability is pinned here; cryptographic
+# verification is out of scope for P-04 and is NOT claimed.
+
+use app.io.mod (file_exists, file_read, dir_create)
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.scv.core.{scv_meta_dir, scv_parsers_dir}
+use std.scv.core.{scv_line_set_contains}
+use std.scv.store.{scv_repo_exists, scv_content_id_for_file, scv_write_text}
+use std.scv.parser_registry.{scv_wasm_magic_ok, scv_parser_field_safe}
+
+fn scv_parser_lock2_path(root: text) -> text:
+    "{scv_meta_dir(root)}/parser_lock2.sdn"
+
+fn scv_parser_index_generation_path(root: text) -> text:
+    "{scv_meta_dir(root)}/parser_index_generation.sdn"
+
+# Current parser-index generation. 1 when none has been recorded yet.
+fn scv_parser_index_generation(root: text) -> i64:
+    val path = scv_parser_index_generation_path(root)
+    if not file_exists(path):
+        return 1
+    val raw = file_read(path).trim()
+    val parsed = raw.to_int() ?? 1
+    if parsed < 1:
+        1
+    else:
+        parsed
+
+# Generation-suffixed parser index path: an upgrade never reuses the index
+# entries built under the previous parser pins.
+fn scv_parser_index_gen_path(root: text) -> text:
+    "{scv_meta_dir(root)}/parser_index.gen{scv_parser_index_generation(root)}.sdn"
+
+fn scv_parser_lock2_artifact_path(root: text, hash: text) -> text:
+    "{scv_parsers_dir(root)}/{hash}.wasm"
+
+fn scv_parser_lock2_fields_safe(parts: [text]) -> bool:
+    var i = 1
+    while i < parts.len():
+        if not scv_parser_field_safe(parts[i]):
+            return false
+        i = i + 1
+    true
+
+# Validate one lock line against its pinned artifact. "" when clean.
+fn scv_parser_lock2_entry_error(root: text, trimmed: text) -> text:
+    val parts = trimmed.split("|")
+    if parts.len() != 10 or parts[0] != "parser2":
+        return "ERROR bad parser lock entry"
+    if not scv_parser_lock2_fields_safe(parts):
+        return "ERROR unsafe parser lock metadata"
+    if parts[5] != "wasm":
+        return "ERROR unsupported parser runtime: {parts[5]}"
+    val artifact = scv_parser_lock2_artifact_path(root, parts[8])
+    if not file_exists(artifact):
+        return "ERROR missing parser artifact: {parts[1]} {parts[2]} (no implicit downloads)"
+    val raw = file_read_bytes(artifact) ?? []
+    if not scv_wasm_magic_ok(raw):
+        return "ERROR parser artifact is not wasm: {parts[1]} {parts[2]}"
+    if scv_content_id_for_file(artifact) != parts[8]:
+        return "ERROR parser artifact hash mismatch: {parts[1]} {parts[2]}"
+    ""
+
+fn scv_parser_lock2_find(root: text, language: text, grammar: text) -> text:
+    val lock_path = scv_parser_lock2_path(root)
+    if not file_exists(lock_path):
+        return ""
+    for line in file_read(lock_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() == 10 and parts[0] == "parser2" and parts[1] == language and parts[2] == grammar:
+            return trimmed
+    ""
+
+# Resolve a locked parser entry. A miss is an ERROR — never a fetch.
+fn scv_parser_lock2_resolve(root: text, language: text, grammar: text) -> text:
+    val found = scv_parser_lock2_find(root, language, grammar)
+    if found == "":
+        return "ERROR parser not locked: {language} {grammar} (no implicit downloads)\n"
+    val error = scv_parser_lock2_entry_error(root, found)
+    if error != "":
+        return "{error}\n"
+    "{found}\n"
+
+fn scv_parser_index_generation_bump(root: text) -> i64:
+    val next = scv_parser_index_generation(root) + 1
+    scv_write_text(scv_parser_index_generation_path(root), "{next}\n")
+    next
+
+fn scv_parser_lock2_install(root: text, language: text, grammar: text, source: text, version: text, runtime: text, ts_abi: text, protocol: text, artifact_path: text, signature: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    if (not scv_parser_field_safe(language) or not scv_parser_field_safe(grammar) or
+        not scv_parser_field_safe(source) or not scv_parser_field_safe(version) or
+        not scv_parser_field_safe(runtime) or not scv_parser_field_safe(ts_abi) or
+        not scv_parser_field_safe(protocol)):
+        return "ERROR unsafe parser lock metadata\n"
+    if signature == "" or not scv_parser_field_safe(signature):
+        return "ERROR missing parser signature\n"
+    if runtime != "wasm":
+        return "ERROR unsupported parser runtime: {runtime}\n"
+    # NO IMPLICIT DOWNLOADS: the artifact must already exist locally; the
+    # source field is provenance metadata only and is never dereferenced.
+    if not file_exists(artifact_path):
+        return "ERROR missing local parser artifact: {artifact_path} (no implicit downloads)\n"
+    val raw = file_read_bytes(artifact_path) ?? []
+    if not scv_wasm_magic_ok(raw):
+        return "ERROR parser artifact is not wasm\n"
+    val hash = scv_content_id_for_file(artifact_path)
+    val existing = scv_parser_lock2_find(root, language, grammar)
+    val line = "parser2|{language}|{grammar}|{source}|{version}|{runtime}|{ts_abi}|{protocol}|{hash}|{signature}\n"
+    dir_create(scv_parsers_dir(root), true)
+    file_write_bytes(scv_parser_lock2_artifact_path(root, hash), raw)
+    # Rewrite the lock, replacing any entry for this language+grammar.
+    val lock_path = scv_parser_lock2_path(root)
+    val current = if file_exists(lock_path): file_read(lock_path) else: ""
+    var next = ""
+    var replaced = false
+    for old in current.split("\n"):
+        val trimmed = old.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() == 10 and parts[0] == "parser2" and parts[1] == language and parts[2] == grammar:
+            if not replaced:
+                next = next + line
+                replaced = true
+        else:
+            next = next + trimmed + "\n"
+    if not replaced:
+        next = next + line
+    scv_write_text(lock_path, next)
+    # An UPGRADE (pinned entry changed) opens a new index generation; a
+    # first install or an identical reinstall does not.
+    var generation = scv_parser_index_generation(root)
+    if existing != "" and existing != line.trim():
+        generation = scv_parser_index_generation_bump(root)
+    "parser-lock2 {language} {grammar} {version} runtime={runtime} abi={ts_abi} protocol={protocol} sha256={hash} signature={signature} generation={generation}\n"
+
+fn scv_parser_lock2_verify(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val lock_path = scv_parser_lock2_path(root)
+    if not file_exists(lock_path):
+        return "ERROR missing parser lockfile (no implicit downloads)\n"
+    var checked = 0
+    var seen = ""
+    for line in file_read(lock_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val error = scv_parser_lock2_entry_error(root, trimmed)
+        if error != "":
+            return "{error}\n"
+        val parts = trimmed.split("|")
+        val key = "{parts[1]}|{parts[2]}"
+        if scv_line_set_contains(seen, key):
+            return "ERROR duplicate parser lock entry: {parts[1]} {parts[2]}\n"
+        seen = seen + key + "\n"
+        checked = checked + 1
+    "parser-lock2-verify checked={checked} generation={scv_parser_index_generation(root)}\n"

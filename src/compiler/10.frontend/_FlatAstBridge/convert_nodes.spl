@@ -1,5 +1,6 @@
 # Flat AST Bridge: flat expr/stmt/type/decl conversion helpers.
 use compiler.frontend.flat_ast_bridge.*
+use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 # Flat AST Bridge
 #
 # Converts the core parser's flat, index-based AST into the richer frontend
@@ -14,7 +15,7 @@ use compiler.frontend.core.string_interpolation_expand.{
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
 use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
-use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel}
+use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel, decl_get_rt_hal_flags, decl_get_asm_placement}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
 use compiler.core.ast.{decl_get_is_hardware, decl_get_clocked_args, decl_get_vhdl_generic_args, decl_get_flatten_struct_output}
@@ -45,6 +46,7 @@ use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
 use compiler.blocks.blocks.value.{BlockValue}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 
 # Iteration 17 probe plumbing (UNGATED, Trap D): trace ExprKind discs at
 # construction time to find where the stage4 flat-bridge Expr goes bad.
@@ -52,21 +54,13 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-# `rt_env_get` returns nil for an UNSET variable, so its return type must be
-# declared optional. Declaring it `-> text` made the wrapper below propagate
-# that nil out of a non-optional return, which the SFFI return-contract
-# validator (wired 2026-08-21) correctly rejects with
-# `nil is forbidden by the non-optional return contract of 'flat_bridge_env_get'`
-# — every parse that consulted an unset env var then died. The wrapper stays
-# total by collapsing an unset variable to the empty string, which is exactly
-# what all of its `?? ""` call sites already assumed.
-extern fn rt_env_get(key: text) -> text?
-
+# Keep the bridge's historical total, empty-for-unset contract while routing
+# the nullable runtime transport through its canonical one-call facade.
 fn flat_bridge_env_get(key: text) -> text:
-    rt_env_get(key) ?? ""
+    env_get_nullable(key) ?? ""
 
 fn flat_bridge_trace_enabled() -> bool:
-    (flat_bridge_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    frontend_compiler_trace_enabled()
 
 fn flat_is_bootstrap_entry_path(path: text) -> bool:
     # Match the bootstrap entry regardless of how the path is spelled by the
@@ -244,18 +238,7 @@ fn flat_empty_module(path: text) -> ParserModule:
         arch_rules: [],
         mock_decls: [],
         tagged_layer: "",
-        layer_dag_edges: "",
-        # Passed EXPLICITLY, never left to the trailing defaults declared on
-        # parser_module_new. The native trailing-default pad
-        # (50.mir/_MirLoweringExpr/switch_operators_calls.spl
-        # pad_trailing_default_args) did NOT fire for this cross-module callee
-        # in the stage-2 self-hosted compiler, so both slots arrived as nil
-        # instead of []. That nil reached module_surface_promote, whose
-        # rt_transient_heap_promote(nil) returns false, and Stage 3 aborted at
-        # driver_source_pipeline_parsing.spl on the very first source file.
-        # See doc/08_tracking/bug/stage3_module_surface_promote_nil_authority_arrays_2026-08-23.md
-        friends: [],
-        internal_exports: []
+        layer_dag_edges: ""
     )
 
 fn convert_decl_visibility(idx: i64) -> Visibility:
@@ -759,7 +742,7 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
     # like CSS/JSON).
     var interps: [Interpolation] = []
     var depth = 0
-    var inner = ""
+    var inner_parts: [text] = []
     var i = 0
     val n = value.len()
     while i < n:
@@ -779,14 +762,14 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
             i = i + 1
         elif depth == 0 and ch == "{":
             depth = 1
-            inner = ""
+            inner_parts = []
         elif depth > 0 and ch == "{":
             depth = depth + 1
-            inner = inner + ch
+            inner_parts.push(ch)
         elif depth > 0 and ch == "}":
             depth = depth - 1
             if depth == 0:
-                val part_idx = parse_interpolation_fragment(inner)
+                val part_idx = parse_interpolation_fragment(inner_parts.join(""))
                 if part_idx < 0:
                     return []
                 interps.push(Interpolation(
@@ -796,9 +779,9 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
                     span: span
                 ))
             else:
-                inner = inner + ch
+                inner_parts.push(ch)
         elif depth > 0:
-            inner = inner + ch
+            inner_parts.push(ch)
         i = i + 1
     if depth != 0:
         return []
@@ -821,22 +804,30 @@ fn flat_bridge_decode_brace_escapes(value: text) -> text:
     as an empty/false `.?` check), so signaling through the interps field
     silently degrades an intended `Some([])` into `nil`.
     """
-    var result = ""
+    var parts: [text] = []
     var i = 0
+    var run_start = 0
     val n = value.len()
     while i < n:
         val ch = value[i:i + 1]
         val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
         if ch == "{" and ch_next == "{":
-            result = result + "{"
+            if run_start < i:
+                parts.push(value[run_start:i])
+            parts.push("{")
             i = i + 2
+            run_start = i
         elif ch == "}" and ch_next == "}":
-            result = result + "}"
+            if run_start < i:
+                parts.push(value[run_start:i])
+            parts.push("}")
             i = i + 2
+            run_start = i
         else:
-            result = result + ch
             i = i + 1
-    result
+    if run_start < n:
+        parts.push(value[run_start:n])
+    parts.join("")
 
 fn convert_flat_expr(idx: i64) -> Expr:
     if idx < 0:
@@ -854,6 +845,10 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val str_val = expr_get_str(idx)
         if expr_get_int(idx) != 0:
             return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
+        # Ordinary literals dominate this path. Avoid interpolation parsing and
+        # brace-decoder allocation when no brace can affect either operation.
+        if not str_val.contains("{") and not str_val.contains("}"):
+            return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
         val str_interps = flat_bridge_build_string_interps(str_val, span)
         if str_interps.len() > 0:
             return Expr(kind: ExprKind.StringLit(str_val, str_interps), span: span)
@@ -861,6 +856,8 @@ fn convert_flat_expr(idx: i64) -> Expr:
             # No real `{expr}` placeholder (str_interps is empty). Decode any
             # `{{`/`}}` escapes directly since nothing downstream will (see
             # flat_bridge_decode_brace_escapes).
+            if not str_val.contains("{{") and not str_val.contains("}}"):
+                return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
             return Expr(kind: ExprKind.StringLit(flat_bridge_decode_brace_escapes(str_val), nil), span: span)
     if tag == EXPR_BOOL_LIT:
         return Expr(kind: ExprKind.BoolLit(expr_get_int(idx) != 0), span: span)
@@ -1764,7 +1761,34 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         val init_idx = stmt_get_expr(idx)
         val type_ = convert_flat_type(type_idx)
         val init_expr = convert_flat_expr(init_idx)
-        return Stmt(kind: StmtKind.Val(name, type_, init_expr), span: span)
+        # `if val x = opt:` / `elif val` / `while val` are parser-desugared into
+        # a plain val decl plus an `x != nil` check (parser_stmts.spl), and the
+        # ONLY thing that distinguishes them from a hand-written `val x = opt`
+        # + `if x != nil:` is the IF_VAL provenance marker recorded by
+        # `stmt_if_val_decl`. The interpreter reads that marker directly
+        # (eval_stmts.spl `eval_option_binding_value`); everything downstream of
+        # this bridge consumes `StmtKind`, which has no marker field, so the
+        # provenance died here and the NATIVE lane bound the Option HANDLE
+        # instead of its payload -- `p.tag` read the enum header, and the
+        # garbage propagated onward as a `T?`.
+        #
+        # Carry the provenance forward as SEMANTICS rather than as a new flag:
+        # `ExistsCheck` ("`.?` -- value if present, nil if absent") is exactly
+        # `eval_option_binding_value`'s contract and is already lowered on every
+        # lane, so the desugared `x != nil` test stays correct for a boxed
+        # `None` too. Deliberately NOT a blanket unwrap at the MIR seam: there
+        # `if val v = e:` and a hand-written `if v != nil:` are indistinguishable.
+        # See doc/08_tracking/bug/native_if_val_binds_option_handle_not_payload_2026-08-24.md
+        val bound_expr = if stmt_is_if_val_decl(idx):
+            match init_expr.kind:
+                # Already `opt.?` in the source -- do not double-wrap.
+                case ExprKind.ExistsCheck(_):
+                    init_expr
+                case _:
+                    Expr(kind: ExprKind.ExistsCheck(init_expr), span: span)
+        else:
+            init_expr
+        return Stmt(kind: StmtKind.Val(name, type_, bound_expr), span: span)
     elif tag == STMT_VAR_DECL:
         val name = stmt_get_name(idx)
         val type_idx = stmt_get_type(idx)
@@ -1959,7 +1983,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
     if flat_bridge_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
         eprint("[simpleos-flat-ret] name={name} tag={ret}")
     val body = decl_get_body(idx)
-    val trace_reset = (rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1"
+    val trace_reset = (env_get_nullable("SIMPLE_TRACE_AST_RESET") ?? "") == "1"
     if trace_reset and body.len() > 0 and body[body.len() - 1] >= stmt_count():
         print "[convert_decl_fn] STALE-BODY-SUSPECT name={name} body_len={body.len()} body_first={body[0]} body_last={body[body.len() - 1]} live_stmt_count={stmt_count()} reset_seq={ast_reset_seq_get()}"
     var stmts: [Stmt] = []
@@ -2121,6 +2145,44 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         proof_uses: contract_proof_uses
     )
     var fn_attributes: [Attribute] = []
+    # Asm-embedding contract (design A.2): rebuild the placement attributes
+    # the parser recorded as raw spellings ("naked|section(.text.boot)|align(16)|global").
+    val asm_placement = decl_get_asm_placement(idx)
+    if asm_placement != "":
+        for spelling in asm_placement.split("|"):
+            if spelling == "":
+                continue
+            val paren = spelling.index_of("(")
+            if paren < 0:
+                fn_attributes.push(Attribute(name: spelling, args: [], span: span))
+                continue
+            val attr_name = spelling[0:paren]
+            val raw_arg = spelling[paren + 1:spelling.len() - 1]
+            if attr_name == "align":
+                var n: i64 = 0
+                var digit_i = 0
+                var all_digits = raw_arg.len() > 0
+                while digit_i < raw_arg.len():
+                    val b = raw_arg.byte_at(digit_i)
+                    if b < 48 or b > 57:
+                        all_digits = false
+                        break
+                    n = n * 10 + (b - 48)
+                    digit_i = digit_i + 1
+                val align_arg = if all_digits: Expr(kind: ExprKind.IntLit(n), span: span) else: Expr(kind: ExprKind.Ident(raw_arg), span: span)
+                fn_attributes.push(Attribute(name: attr_name, args: [align_arg], span: span))
+            else:
+                fn_attributes.push(Attribute(name: attr_name, args: [Expr(kind: ExprKind.StringLit(raw_arg, nil), span: span)], span: span))
+    val rt_hal_flags = decl_get_rt_hal_flags(idx)
+    if (rt_hal_flags & 1) != 0:
+        var rt_args: [Expr] = [Expr(kind: ExprKind.Ident("hal"), span: span)]
+        if (rt_hal_flags & 2) != 0:
+            rt_args.push(Expr(kind: ExprKind.Ident("c"), span: span))
+        if (rt_hal_flags & 4) != 0:
+            rt_args.push(Expr(kind: ExprKind.Ident("rust"), span: span))
+        if (rt_hal_flags & 8) != 0:
+            rt_args.push(Expr(kind: ExprKind.Ident("invalid-provider"), span: span))
+        fn_attributes.push(Attribute(name: "rt", args: rt_args, span: span))
     if decl_get_is_gpu_kernel(idx) != 0:
         var gpu_args: [Expr] = []
         val gpu_target = decl_get_gpu_target_text(idx)

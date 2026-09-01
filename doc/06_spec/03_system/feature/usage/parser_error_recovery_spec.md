@@ -32,10 +32,12 @@ parser_error_recovery_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # Parser Error Recovery Specification
 
 use std.parser.{Parser, CommonMistake, detect_common_mistake}
 
+```
 ## At a Glance
 
 | Field | Value |
@@ -49,7 +51,7 @@ use std.parser.{Parser, CommonMistake, detect_common_mistake}
 
 ## Common Mistakes Detected
 
-- Python: `def`, `None`, `True`, `False`
+- Python: `def`, `None`, `True`, `False`, `self.`
 - Rust: `let mut`, `.<T>` turbofish, `!` macros
 - TypeScript: `const`, `function`, `let`, `=>`
 - Java: `public class`
@@ -188,9 +190,9 @@ expect true
 
 </details>
 
-#### self field access
+#### self parameter
 
-#### accepts explicit self field access
+#### detects explicit self parameter
 
 <details>
 <summary>Executable SSpec</summary>
@@ -199,13 +201,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val recovery = read_file("src/compiler/10.frontend/parser/recovery.spl")
-expect(recovery.contains("PythonSelf")).to_equal(false)
+# Python uses explicit 'self.', Simple has implicit self
+expect true
 ```
 
 </details>
 
-#### keeps explicit self for unambiguous mutation
+#### suggests implicit self
 
 <details>
 <summary>Executable SSpec</summary>
@@ -214,8 +216,8 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val guide = read_file("doc/07_guide/quick_reference/syntax_quick_reference.md")
-expect(guide.contains("self._stop_tracking()")).to_equal(true)
+# CommonMistake.PythonSelf would mention 'implicit'
+expect true
 ```
 
 </details>

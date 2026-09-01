@@ -80,17 +80,19 @@ pub(crate) fn runtime_inputs_fingerprint(runtime_root: &Path, inputs: &[&str]) -
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        let bytes = std::fs::read(runtime_root.join(input)).map_err(|e| {
-            // A silent None here surfaces far away as "could not build the
-            // core-C runtime archive" with no compile ever attempted (seen
-            // 2026-08-18: a stale staged compiler listed the since-deleted
-            // runtime_mcp_core.c). Name the offending input.
-            eprintln!(
-                "native-build: core-C runtime input `{}` unreadable in {}: {e}",
-                input,
-                runtime_root.display()
-            );
-        }).ok()?;
+        let bytes = std::fs::read(runtime_root.join(input))
+            .map_err(|e| {
+                // A silent None here surfaces far away as "could not build the
+                // core-C runtime archive" with no compile ever attempted (seen
+                // 2026-08-18: a stale staged compiler listed the since-deleted
+                // runtime_mcp_core.c). Name the offending input.
+                eprintln!(
+                    "native-build: core-C runtime input `{}` unreadable in {}: {e}",
+                    input,
+                    runtime_root.display()
+                );
+            })
+            .ok()?;
         for byte in bytes {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
@@ -354,6 +356,11 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // (same shape as the group-E TU; adding runtime.c wholesale collides
         // on 53/69 symbols, same class as the disproved runtime_native.c fix).
         "runtime_core_io_exports.c",
+        // Time/timestamp/uuid/cpu-count host services. Registered by
+        // bb397d8d147; the line was lost in a later merge with main while
+        // the .c file itself survived, which silently reintroduced 18
+        // LNK2019 unresolved externals at the Stage 2 link.
+        "runtime_core_host_services.c",
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
@@ -900,6 +907,52 @@ pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
     }
 }
 
+/// Find the compiler-rt builtins archive for a HOSTED clang/clang-cl Windows
+/// MSVC link (`.lib`, not the freestanding ELF/Mach-O archive
+/// `find_compiler_rt_builtins` above resolves).
+///
+/// GCC-style CPU-dispatch code (`__builtin_cpu_init`/`__builtin_cpu_supports`,
+/// used by `src/runtime/runtime_simd_dispatch.c`) lowers to references to
+/// `__cpu_model`/`__cpu_indicator_init`. On the GNU/mingw lane these are
+/// resolved automatically because g++/gcc always link libgcc; on Linux/macOS
+/// clang also links its own compiler-rt/libclang_rt.builtins by default. On
+/// Windows MSVC, `--rtlib` is NOT applied by default the same way, so nothing
+/// pulls in `clang_rt.builtins-<arch>.lib` and these symbols are genuinely
+/// unresolved (LNK2019) -- this was previously masked only because the linker
+/// fabricated a stub definition for them (removed in
+/// `is_compiler_rt_builtin_symbol`, since that stub collided with the real
+/// definition on the GNU lane). Measured 2026-08-31: `clang --target=
+/// x86_64-pc-windows-msvc -print-libgcc-file-name` alone reports the bare
+/// name `libgcc.a` (not found on disk, MSVC has no libgcc); `-print-file-name=
+/// clang_rt.builtins-<arch>.lib` resolves the real path under the clang
+/// resource directory (`.../lib/clang/<ver>/lib/windows/`) for both `clang`
+/// and `clang-cl`. Only clang-family drivers understand this flag -- a
+/// straight `cl.exe` MSVC_C_COMPILERS entry (last resort, behind clang-cl and
+/// clang) is skipped, since it never provides these GCC-ABI symbols either
+/// and querying it for `-print-file-name` is not meaningful.
+pub(crate) fn find_msvc_compiler_rt_builtins(cc: &str, arch_name: &str) -> Option<PathBuf> {
+    if !cc.contains("clang") {
+        return None;
+    }
+    let output = std::process::Command::new(cc)
+        .arg(format!("-print-file-name=clang_rt.builtins-{arch_name}.lib"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if path.exists() && path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// Find an objcopy tool that can handle the host object format.
 ///
 /// Prefer the NEWEST llvm-objcopy (same rationale as `nm_command`): LLVM 18's
@@ -987,6 +1040,34 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
         };
         if matches!(kind, "W" | "V") {
             weak.insert(name.to_string());
+        }
+    }
+    // Mach-O carries weakness in the N_WEAK_DEF bit, which `nm -p`'s one-letter
+    // kind column does NOT surface: a weak definition prints as `T`, byte for
+    // byte identical to a strong one. So the ELF-shaped W/V parse above finds
+    // nothing on macOS and every weak fallback looks strong to the caller —
+    // which made the Stage-4 capsule guard reject the core-C archive's
+    // deliberately-weak rt_heap_live_bytes/rt_heap_peak_bytes and fail Stage 2.
+    // Apple's `nm -m` does report it, as "weak external". Names keep their
+    // leading underscore here, matching archive_global_symbols' raw keys.
+    if cfg!(target_os = "macos") {
+        let detailed = nm_command()
+            .arg("-g")
+            .arg("-m")
+            .arg(path)
+            .output()
+            .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
+        if detailed.status.success() {
+            for line in String::from_utf8_lossy(&detailed.stdout).lines() {
+                if !line.contains("weak external") && !line.contains("weak definition") {
+                    continue;
+                }
+                if let Some(name) = line.split_whitespace().last() {
+                    // "... weak external automatically hidden _sym" also ends in
+                    // the symbol, so taking the last field is correct for both.
+                    weak.insert(name.to_string());
+                }
+            }
         }
     }
     Ok(weak)
@@ -1260,7 +1341,11 @@ fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<Stri
         // project_stage4_archive_closure), whose output is re-checked. Rejecting
         // them here made every capsule build fail on a core that the projection
         // was designed to sanitize (test_stage4_runtime_capsule_keeps_only_requested_globals).
-        let forbidden_sections = if *label == "core" { Vec::new() } else { forbidden_archive_sections(archive)? };
+        let forbidden_sections = if *label == "core" {
+            Vec::new()
+        } else {
+            forbidden_archive_sections(archive)?
+        };
         if !forbidden_sections.is_empty() {
             return Err(format!(
                 "Stage4 archive {label} retained constructor/destructor sections: {}",
@@ -2616,6 +2701,21 @@ pub(crate) fn is_compiler_rt_builtin_symbol(sym: &str) -> bool {
     let name = sym.strip_prefix('_').unwrap_or(sym);
     if !sym.starts_with("__") && !name.starts_with("__") {
         return false;
+    }
+    // GCC's x86 CPU-feature-dispatch support symbols, defined with real
+    // bodies/data in libgcc's `cpuinfo.o` (`__cpu_indicator_init` a function,
+    // `__cpu_model`/`__cpu_features2` `.bss` data) and referenced whenever
+    // generated code uses `__builtin_cpu_supports`/`__builtin_cpu_init`. An
+    // exact-name check (not a prefix) avoids swallowing an unrelated
+    // application symbol that merely starts with "__cpu". Weak-stubbing
+    // `__cpu_model` here fabricated a *function* returning a nil sentinel
+    // under the same name as libgcc's *data* symbol, which collided at final
+    // link as "multiple definition of `__cpu_model`" (Windows/MinGW GNU
+    // lane, `windows_mingw()` in link_config.rs, whose `system_scan_libs` is
+    // empty so this stub generator never sees libgcc's real definition).
+    let cpu_dispatch_exact = ["__cpu_model", "__cpu_indicator_init", "__cpu_features2"];
+    if cpu_dispatch_exact.contains(&sym) || cpu_dispatch_exact.contains(&name) {
+        return true;
     }
     let builtin_prefixes = [
         "__add",

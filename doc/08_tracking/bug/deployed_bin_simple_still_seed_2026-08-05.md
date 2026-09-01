@@ -152,3 +152,14 @@ is not self-hostedness.
 (`--full-bootstrap --deploy`), which this lane is explicitly forbidden to
 perform (a bootstrap is live and owns the box). Status stays OPEN (P2) as a
 deployment-state item, not a source defect.
+
+## Update 2026-08-24 — optimizer verification remains blocked
+
+The SFFI hardening lane invoked the documented optimizer entrypoint through
+`bin/simple`. The release symlink resolved to
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
+a 60,650,360-byte executable that again printed the Rust bootstrap-seed warning.
+The three attempted optimizer processes measured 8.48 s / 270,628 KiB, 5.67 s /
+280,312 KiB, and 5.34 s / 279,484 KiB, respectively, but those findings are
+diagnostic-only and cannot be accepted as pure-Simple verification. No retry or
+seed substitution was performed.

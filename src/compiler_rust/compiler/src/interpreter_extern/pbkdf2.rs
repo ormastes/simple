@@ -155,13 +155,9 @@ mod tests {
     #[test]
     fn rejects_missing_or_wrong_typed_arguments() {
         assert!(rt_pbkdf2_hmac_sha256(&[]).is_err());
-        assert!(rt_pbkdf2_hmac_sha256(&[
-            Value::Int(0),
-            arr_of_bytes(b"salt"),
-            Value::Int(1),
-            Value::Int(32),
-        ])
-        .is_err());
+        assert!(
+            rt_pbkdf2_hmac_sha256(&[Value::Int(0), arr_of_bytes(b"salt"), Value::Int(1), Value::Int(32),]).is_err()
+        );
         assert!(rt_pbkdf2_hmac_sha256(&[
             arr_of_bytes(b"password"),
             arr_of_bytes(b"salt"),

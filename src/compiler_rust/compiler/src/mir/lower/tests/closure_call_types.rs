@@ -54,6 +54,18 @@ fn indirect_call_carries_the_lambda_result_type() {
     );
 }
 
+/// A declared function-valued parameter owns the indirect-call ABI. Keep its
+/// argument and result types when lowering a predicate call; otherwise the
+/// backend builds a closure-only signature while the call supplies the
+/// closure and predicate argument.
+#[test]
+fn typed_predicate_parameter_carries_its_declared_signature() {
+    assert_eq!(
+        indirect_call_types("fn apply(pred: fn(i64) -> bool) -> bool:\n    return pred(1)\n",),
+        vec![(vec![TypeId::I64], TypeId::BOOL)]
+    );
+}
+
 /// The outlined body is compiled with the lambda's parameter types, so a call
 /// site that passes something ELSE must not be given a typed boundary — the
 /// backend would reinterpret the argument's bits. The commonest case is an
@@ -78,9 +90,8 @@ fn a_call_site_that_disagrees_with_the_lambda_is_poisoned_to_any() {
 /// the caller's own argument type, which is what the call site really passes.)
 #[test]
 fn conflicting_closures_in_one_local_propagate_nothing() {
-    let types = indirect_call_types(
-        "fn test() -> i64:\n    var f = \\x: x * 10\n    f = \\x: x > 1\n    return f(32)\n",
-    );
+    let types =
+        indirect_call_types("fn test() -> i64:\n    var f = \\x: x * 10\n    f = \\x: x > 1\n    return f(32)\n");
     assert_eq!(types, vec![(vec![TypeId::I64], TypeId::ANY)]);
 }
 

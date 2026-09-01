@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """Vulkan per-process instance/device reuse — leak regression gate
 
 @tag: rendering, engine2d, vulkan, leak, strict
@@ -14,11 +18,10 @@ and every buffer / shader module / compute pipeline / descriptor pool /
 command buffer recorded in that state were orphaned without a single
 `vkDestroy*` call.
 
-Nothing on the `.spl` side compensates: `VulkanSession._cleanup()` destroys the
-shaders and pipelines it owns by handle and then merely ZEROES `instance`,
-`device`, `command_pool`, `pipeline_cache` and `allocator` — it never calls
-`vulkan_sffi_shutdown()`. So one whole device was stranded per
-`VulkanBackend.create() + init() + shutdown()` cycle.
+The ownership boundary is now explicit: `VulkanSession` holds a runtime lease
+after init and releases it only after its shaders and pipelines are destroyed.
+Other owners (for example daemon discovery and ProcessingIR) retain their own
+leases, so one surface shutdown cannot invalidate a live shared device.
 
 MEASURED, not estimated: on this host (TITAN RTX + RTX A6000) the loop failed
 at create #63 — the 64th device — with `init()` returning false and
@@ -36,11 +39,10 @@ creates, so specs were already brushing the ceiling, and any example past it
 failed for a reason unrelated to what it tested — a false red that reads like a
 rendering defect.
 
-THE FIX is not a cap and not a retry: `rt_vulkan_init_fn` no longer ACQUIRES a
-duplicate. It returns the live singleton, matching the compiled runtime's
-`rt_vulkan_init` (vulkan_graphics_runtime_core.rs), which has always
-short-circuited on `state.device.is_some()`. The interpreter extern was the
-divergent sibling.
+THE FIX is not a cap and not a retry: each successful `rt_vulkan_init` is a
+runtime lease. The final matching shutdown performs device teardown; nested
+owners only release their own lease. This preserves a discovery admission while
+render and ProcessingIR work completes.
 
 WHAT THIS SPEC CANNOT PROVE: it cannot observe VkInstance handles directly —
 the runtime exposes no instance-count accessor. It proves the OBSERVABLE
@@ -51,6 +53,8 @@ count assertion goes red. On a host with no Vulkan at all every create fails at
 than passing vacuously — read the printed [vk-reuse] line before trusting a
 green.
 """
+
+use std.spec.step
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
@@ -114,10 +118,13 @@ fn _disclose_unavailable(label: text):
 # ============================================================================
 
 describe "Vulkan per-process instance reuse":
+    # @manual scenario evidence
 
     context "repeated create/init/shutdown":
 
         it "runs well past the pre-fix ceiling of 63 creates":
+            # @req REQ-SSPEC-INTEGRATION
+            step("runs well past the pre-fix ceiling of 63 creates")
             if not vulkan_host_ready():
                 _disclose_unavailable("repeated create")
             else:
@@ -129,6 +136,8 @@ describe "Vulkan per-process instance reuse":
     context "probe-then-create pairs":
 
         it "pairs do not cost a device each":
+            # @req REQ-SSPEC-INTEGRATION
+            step("pairs do not cost a device each")
             # Each pair used to strand TWO devices, so 40 pairs is 80 devices —
             # comfortably past the old 64 ceiling.
             if not vulkan_host_ready():
@@ -141,6 +150,8 @@ describe "Vulkan per-process instance reuse":
     context "honest failure is preserved":
 
         it "an unknown backend still fails rather than reusing vulkan":
+            # @req REQ-SSPEC-INTEGRATION
+            step("an unknown backend still fails rather than reusing vulkan")
             # Reuse must not make unrelated creates succeed. A backend name the
             # factory does not serve stays a failure.
             val probe = Engine2D.probe_backend(8, 8, "no_such_backend")
@@ -148,6 +159,8 @@ describe "Vulkan per-process instance reuse":
             expect(probe.reason).to_not_equal("")
 
         it "a rejected surface size still fails":
+            # @req REQ-SSPEC-INTEGRATION
+            step("a rejected surface size still fails")
             # init() validates dimensions before touching the session, so this
             # stays false on every host, with or without a live device.
             var b = VulkanBackend.create()

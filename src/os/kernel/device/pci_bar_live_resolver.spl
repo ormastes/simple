@@ -1,0 +1,83 @@
+"""Serialized, quiesced live PCI BAR aperture resolver."""
+
+use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_bar,
+    pci_write_config}
+use os.drivers.pci.pci_bar64.{pci_bar64_decode}
+use os.kernel.device.pci_bar_window_resolver.{KernelPciBarWindow,
+    KernelPciFunctionWindows, PciBarWindowRequest, PciBarWindowResolution,
+    resolve_pci_bar_window}
+
+var _pci_bar_probe_busy: bool = false
+
+fn probe_pci_bar_window(bdf: u64, bar_index: u8, byte_offset: u64,
+        byte_len: u64) -> PciBarWindowResolution:
+    """Serialize and quiesce one live BAR probe, restoring config state."""
+    val bus = ((bdf >> 16) & 0xFFu64).to_u8()
+    val dev = ((bdf >> 8) & 0xFFu64).to_u8()
+    val func = (bdf & 0xFFu64).to_u8()
+    var bars: [KernelPciBarWindow] = []
+    var present = pci_read_vendor(bus, dev, func) != 0xFFFFu16
+    if present and not _pci_bar_probe_busy:
+        _pci_bar_probe_busy = true
+        val command = pci_read_config(bus, dev, func, 0x04u8) & 0xFFFFu32
+        pci_write_config(bus, dev, func, 0x04u8, command & 0xFFFFFFF8u32)
+        var scan: u8 = 0u8
+        while scan < 6u8 and bars.len() == 0:
+            val raw_low = pci_read_bar(bus, dev, func, scan)
+            val is_memory = (raw_low & 1u32) == 0u32
+            val is_64 = is_memory and ((raw_low >> 1) & 3u32) == 2u32
+            if is_64 and scan == 5u8:
+                if bar_index == scan:
+                    bars.push(KernelPciBarWindow(index: bar_index,
+                        physical_base: 0u64, byte_len: 0u64, memory: true,
+                        upper_half: false))
+                scan = scan + 1u8
+            elif is_64 and scan < 5u8:
+                if bar_index == scan + 1u8:
+                    bars.push(KernelPciBarWindow(index: bar_index,
+                        physical_base: 0u64, byte_len: 0u64, memory: true,
+                        upper_half: true))
+                elif bar_index == scan:
+                    val raw_high = pci_read_bar(bus, dev, func, scan + 1u8)
+                    val low_offset = (0x10u32 + scan.to_u32() * 4u32).to_u8()
+                    val high_offset = (0x10u32 +
+                        (scan + 1u8).to_u32() * 4u32).to_u8()
+                    pci_write_config(bus, dev, func, low_offset, 0xFFFFFFFFu32)
+                    pci_write_config(bus, dev, func, high_offset, 0xFFFFFFFFu32)
+                    val probe_low = pci_read_bar(bus, dev, func, scan)
+                    val probe_high = pci_read_bar(bus, dev, func, scan + 1u8)
+                    pci_write_config(bus, dev, func, high_offset, raw_high)
+                    pci_write_config(bus, dev, func, low_offset, raw_low)
+                    val info = pci_bar64_decode(raw_low, raw_high,
+                        probe_low, probe_high)
+                    bars.push(KernelPciBarWindow(index: bar_index,
+                        physical_base: info.base, byte_len: info.size,
+                        memory: true, upper_half: false))
+                scan = scan + 2u8
+            else:
+                if bar_index == scan:
+                    val offset = (0x10u32 + scan.to_u32() * 4u32).to_u8()
+                    pci_write_config(bus, dev, func, offset, 0xFFFFFFFFu32)
+                    val probe = pci_read_bar(bus, dev, func, scan)
+                    pci_write_config(bus, dev, func, offset, raw_low)
+                    val address_mask: u32 = if is_memory: 0xFFFFFFF0u32 else:
+                        0xFFFFFFFCu32
+                    val masked = probe & address_mask
+                    val size = if masked == 0u32 or probe == 0xFFFFFFFFu32:
+                        0u64
+                    else:
+                        ((~masked) + 1u32).to_u64()
+                    bars.push(KernelPciBarWindow(index: bar_index,
+                        physical_base: (raw_low & address_mask).to_u64(),
+                        byte_len: size, memory: is_memory, upper_half: false))
+                scan = scan + 1u8
+        pci_write_config(bus, dev, func, 0x04u8, command)
+        _pci_bar_probe_busy = false
+    elif _pci_bar_probe_busy:
+        present = false
+    val function = KernelPciFunctionWindows(bdf: bdf, present: present,
+        bars: bars)
+    resolve_pci_bar_window([function], PciBarWindowRequest(bdf: bdf,
+        bar_index: bar_index, byte_offset: byte_offset, byte_len: byte_len))
+
+export probe_pci_bar_window

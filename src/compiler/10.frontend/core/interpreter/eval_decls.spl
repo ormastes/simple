@@ -11,10 +11,8 @@
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
 use compiler.common.assurance.policy_names.normalize_profile_name
-use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
-    warning_phase_env_var_name}
-
-extern fn rt_env_get(key: text) -> text
+use compiler.core.interpreter.eval_tables.{decl_owner_file_get, decl_owner_file_set}
+use std.io_runtime.{env_get_opt}
 
 # ===== Declaration Evaluation =====
 
@@ -35,6 +33,7 @@ fn eval_decl(did: i64) -> i64:
         val name = d_node.name
         val ret_type = d_node.ret_type
         func_table_register(name, did)
+        func_table_register_owned(module_get_path(), name, did)
         func_register_return_type(name, ret_type)
         # coverage owner-attribution (entry-script equivalent of seed RC2):
         # module_get_path() is correct here since eval_decl runs as part of
@@ -51,6 +50,7 @@ fn eval_decl(did: i64) -> i64:
         for method_id in d_node.body_stmts:
             val method = decl_get(method_id)
             func_table_register(method.name, method_id)
+            func_table_register_owned(module_get_path(), method.name, method_id)
             func_register_return_type(method.name, method.ret_type)
             # coverage owner-attribution — impl-block methods declared
             # directly in the entry script (RC1 equivalent).
@@ -125,7 +125,12 @@ fn eval_decl(did: i64) -> i64:
         # Load module and register its exports
         val module_path = d_node.name
         val imported_names = d_node.imports
-        val current_file = module_get_path()
+        # Append-mode parsing shares one declaration arena across the entry
+        # file and every imported module.  module_get_path() remains the entry
+        # path, so import resolution must use the immutable owner recorded when
+        # this declaration was appended.
+        val declared_owner = decl_owner_file_get(did)
+        val current_file = if declared_owner != "": declared_owner else: module_get_path()
 
         # Check if this is a lazy import — defer loading
         val is_lazy = decl_get_is_lazy(did)
@@ -138,6 +143,17 @@ fn eval_decl(did: i64) -> i64:
         var load_result: i64 = 0
         if imported_names.len() == 0:
             load_result = load_module(module_path, current_file)
+            # Compact single-symbol imports (`use a.b.member`) are represented
+            # by the core AST as a dotted path with no explicit import list.
+            # If no module exists at that full path, retry its parent module
+            # selectively instead of rejecting valid source such as
+            # `use std.spec.step`.
+            if load_result == 0:
+                val last_dot = module_path.last_index_of(".")
+                if last_dot > 0 and last_dot + 1 < module_path.len():
+                    val owner_path = module_path[0:last_dot]
+                    val member_name = module_path[last_dot + 1:module_path.len()]
+                    load_result = load_module_selective(owner_path, [member_name], current_file)
         else:
             load_result = load_module_selective(module_path, imported_names, current_file)
 
@@ -214,6 +230,12 @@ fn eval_decl(did: i64) -> i64:
 
 fn eval_module() -> i64:
     val decls = module_get_decls()
+    val entry_path = module_get_path()
+
+    # Establish provenance before evaluating any use declaration. Recursive
+    # module loads append more declarations to this same arena.
+    for did in decls:
+        decl_owner_file_set(did, entry_path)
 
     # Phase 1: Register all functions and structs
     for did in decls:
@@ -315,41 +337,8 @@ fn match_fallthrough_profile_is_deny(raw: text) -> bool:
 # var so an unconfigured session behaves exactly as before, but the env read is
 # now only the DEFAULT, not the sole authority.
 pub fn eval_apply_assurance_profile(profile_name: text):
-    eval_apply_assurance_profile_phased(profile_name,
-        warning_phase_enabled_for_value(rt_env_get(warning_phase_env_var_name()) ?? ""))
-
-# WARNING PHASE (2026-08-23) — the interpreter's projection of the one-level
-# severity downgrade, and the one place where the three projections genuinely
-# differ in what they CAN express. Stated plainly rather than papered over:
-#
-#   * The interpreter's projection is a BOOL, not a level. A bool can encode
-#     exactly one step of the ladder — Deny -> Warn — and nothing below it. It
-#     cannot express Warn -> Advisory, and `false` therefore clamps.
-#
-#   * Only flags with a real warn path may be downgraded. Of the three flags
-#     fanned out here, only `match_fallthrough_set_abort` qualifies: `false`
-#     leaves the warn-only fall-through diagnostic still being emitted.
-#
-#   * `match_wildcard_catch_set_enabled` is a VISIBILITY flag, not a severity —
-#     `false` stops the wildcard diagnostic being emitted at all. Downgrading it
-#     would make critical-under-warning-phase report LESS than critical, which
-#     is precisely what this feature forbids. It stays keyed to the raw profile.
-#
-#   * `import_admission_set_deny` is an ADMISSION gate, not a severity —
-#     `false` silently ADMITS the built-in-fallback import
-#     (`module_loader_core.spl:499`) with no diagnostic of any kind. It has no
-#     warn rung to fall to, so it also stays keyed to the raw profile.
-#     TODO [interp][P2][warning-phase]: give import admission a warn rung
-#     (emit the diagnostic, admit the import) so it can participate in the
-#     downgrade instead of being excluded from it.
-#
-# Net effect: under warning phase a `critical` interpreter session stops
-# ABORTING on match fall-through while still reporting it, and reports strictly
-# no less than it did without the phase.
-fn eval_apply_assurance_profile_phased(profile_name: text, warning_phase: bool):
     val deny = match_fallthrough_profile_is_deny(profile_name)
-    val abort = deny and not warning_phase
-    match_fallthrough_set_abort(abort)
+    match_fallthrough_set_abort(deny)
     # Same follow-up: surface the wildcard/bare-binder-catch diagnostic under
     # Deny severity too. Warn-only for now (no abort variant) -- "wild card
     # use even warning later error for compatibility" per the user request;
@@ -370,7 +359,7 @@ fn eval_init():
     # assurance profile resolves to Deny severity. The env var is the DEFAULT
     # seed only (subprocess serialization, WP-3); a caller with a resolved
     # policy re-applies it via eval_apply_assurance_profile at any time.
-    eval_apply_assurance_profile(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+    eval_apply_assurance_profile(env_get_opt("SIMPLE_SAFETY_PROFILE") ?? "")
 
 # ===== Async/Await Expressions (Basic Stubs) =====
 # TODO [interp][P2]: Full state machine support requires desugaring to state machines

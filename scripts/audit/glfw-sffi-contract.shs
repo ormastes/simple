@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+facade="$root/src/lib/nogc_sync_mut/io/simple_glfw.spl"
+c_provider="$root/src/runtime/runtime_glfw.c"
+rust_bridge="$root/src/compiler_rust/compiler/src/interpreter_extern/glfw.rs"
+
+if [ "$(grep -c '^extern fn ' "$facade")" -ne 40 ] ||
+   [ "$(grep -c '^@unsafe(.*capabilities:' "$facade")" -ne 40 ]; then
+    echo "GLFW declaration authority inventory changed" >&2
+    exit 1
+fi
+if [ "$(grep -c 'unsafe(capabilities:' "$facade")" -ne 24 ]; then
+    echo "GLFW lexical authority scope inventory changed" >&2
+    exit 1
+fi
+
+calls=$(awk '
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / {
+        line = $0
+        while (match(line, /(rt_glfw_[A-Za-z0-9_]+|spl_str_ptr)[(]/)) {
+            calls += 1
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    END { print calls + 0 }
+' "$facade")
+if [ "$calls" -ne 41 ]; then
+    echo "GLFW raw-call inventory changed" >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    NF && unsafe_indent >= 0 &&
+    $0 !~ /unsafe\(capabilities: \[[^]]*ffi[^]]*\]\):$/ && indent($0) <= unsafe_indent {
+        unsafe_indent = -1
+    }
+    /unsafe\(capabilities: \[[^]]*ffi[^]]*\]\):$/ {
+        unsafe_indent = indent($0)
+        next
+    }
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / &&
+    /(rt_glfw_[A-Za-z0-9_]+|spl_str_ptr)[(]/ {
+        if (unsafe_indent < 0 || indent($0) <= unsafe_indent) {
+            print "GLFW raw call lacks lexical FFI authority: " NR ":" $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    BEGIN { unsafe_indent = -1 }
+    END { if (failed) exit 1 }
+' "$facade"
+
+grep -q 'capabilities: \[ffi, raw_ptr\]' "$facade"
+grep -q 'fn present_argb_words_raw' "$facade"
+grep -q 'extern fn rt_glfw_clipboard_get(handle: i64) -> text?' "$facade"
+grep -q 'case _: panic("invalid GLFW boolean discriminant")' "$facade"
+if grep -q 'rt_glfw_.* != 0' "$facade"; then
+    echo "GLFW boolean facade accepts invalid nonzero discriminants" >&2
+    exit 1
+fi
+
+grep -q '#define RT_GLFW_MAX_DIMENSION 8192' "$c_provider"
+grep -q '#define RT_GLFW_MAX_PIXEL_BYTES UINT64_C(268435456)' "$c_provider"
+grep -q 'width > RT_GLFW_MAX_DIMENSION' "$c_provider"
+grep -q 'expected > RT_GLFW_MAX_PIXEL_BYTES / sizeof(uint32_t)' "$c_provider"
+grep -q 'return slot ? p_glfwWindowShouldClose(slot->window) : -1;' "$c_provider"
+grep -q 'if (!slot || !p_glfwGetClipboardString) return NULL;' "$c_provider"
+
+grep -q '("rt_glfw_clipboard_get", Ret::NT, "i")' "$rust_bridge"
+grep -q 'static SYMBOLS: \[AtomicUsize; GLFW_FNS.len()\]' "$rust_bridge"
+grep -q 'let cached = SYMBOLS\[index\].load(Ordering::Acquire);' "$rust_bridge"
+grep -q 'SYMBOLS\[index\].compare_exchange' "$rust_bridge"
+grep -q 'Value::Nil' "$rust_bridge"
+
+# Dynamic-library search and symbol resolution are allowed only in the cached
+# Rust admission bridge, never in the Simple per-window/event facade.
+if grep -E '(dlsym|dlopen|signature|sha256|registry_lookup|mutex)' "$facade" >/dev/null; then
+    echo "GLFW event/window hot path gained admission or lookup work" >&2
+    exit 1
+fi
+
+echo "GLFW SFFI contract audit: PASS (40 declarations; 41 calls in 24 minimal scopes; 256 MiB/8192 frame bounds; nullable clipboard; cached symbols; raw pointer API remains unsafe)"

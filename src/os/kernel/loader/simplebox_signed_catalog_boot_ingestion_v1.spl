@@ -1,0 +1,128 @@
+"""Loader-owned ingestion of externally provisioned Simplebox catalog data.
+
+The installer-side provisioner may read and bind external bytes, but its result
+is not authority.  This adapter revalidates the bounded receipt and exact
+Simplebox bundle, then delegates to the loader boot owner.  The boot owner
+performs Ed25519 verification against its one-time trust-root capsule before it
+opens the irreversible catalog session.
+"""
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    encode_simple_artifact_manifest_v1_signing_bytes
+}
+use os.installer.hosted_safe_artifact_io_v1.{
+    HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1,
+    hosted_safe_artifact_relative_path_valid_v1
+}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SimpleboxSignedCatalogProvisionErrorV1,
+    SimpleboxSignedCatalogProvisionResultV1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootPopulationErrorV1
+}
+use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{
+    ClangSysrootCatalogBundleV1
+}
+use os.kernel.loader.installed_artifact_boot_composition_v1.{
+    installed_artifact_boot_compose_and_populate_v1
+}
+use os.kernel.loader.simplebox_primary_tool_catalog_bundle_v1.{
+    SIMPLEBOX_PRIMARY_TOOL_PAYLOAD_RECORDS_V1,
+    simplebox_primary_tool_catalog_bundle_plan_valid_v1
+}
+
+pub enum SimpleboxSignedCatalogBootIngestionErrorV1:
+    None
+    ProvisionRejected
+    ReceiptRejected
+    BundleRejected
+    PopulationRejected
+
+pub struct SimpleboxSignedCatalogBootIngestionResultV1:
+    ok: bool
+    error: SimpleboxSignedCatalogBootIngestionErrorV1
+    population_error: InstalledArtifactBootPopulationErrorV1
+    accepted_records: i64
+    artifact_sha256: text
+    signed_record_sha256: text
+
+fn _ingestion_lower_sha256_v1(value: text) -> bool:
+    if value.len() != 64 or value == "0" * 64: return false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
+            return false
+    true
+
+fn _ingestion_fail_v1(
+    error: SimpleboxSignedCatalogBootIngestionErrorV1,
+    population_error: InstalledArtifactBootPopulationErrorV1 =
+        InstalledArtifactBootPopulationErrorV1.None,
+) -> SimpleboxSignedCatalogBootIngestionResultV1:
+    SimpleboxSignedCatalogBootIngestionResultV1(
+        ok: false, error: error, population_error: population_error,
+        accepted_records: 0, artifact_sha256: "", signed_record_sha256: "")
+
+fn _ingestion_receipt_valid_v1(
+    provisioned: SimpleboxSignedCatalogProvisionResultV1,
+) -> bool:
+    val receipt = provisioned.receipt
+    if not hosted_safe_artifact_relative_path_valid_v1(
+            receipt.artifact_relative_path) or
+        not hosted_safe_artifact_relative_path_valid_v1(
+            receipt.signed_record_relative_path) or
+        receipt.artifact_relative_path == receipt.signed_record_relative_path or
+        receipt.artifact_byte_count <= 0 or
+        receipt.artifact_byte_count > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        not _ingestion_lower_sha256_v1(receipt.artifact_sha256) or
+        not _ingestion_lower_sha256_v1(receipt.signed_record_sha256) or
+        not _ingestion_lower_sha256_v1(receipt.sam1_identity_sha256):
+        return false
+    if provisioned.plan.records.len() !=
+        SIMPLEBOX_PRIMARY_TOOL_PAYLOAD_RECORDS_V1:
+        return false
+    val record = provisioned.plan.records[0]
+    if record.content_sha256 != receipt.artifact_sha256:
+        return false
+    val sam1 = encode_simple_artifact_manifest_v1_signing_bytes(
+        record.manifest, record.content_sha256)
+    sam1.ok and sha256_u8_hex(sam1.bytes) == receipt.sam1_identity_sha256
+
+pub fn simplebox_signed_catalog_boot_ingestion_shape_valid_v1(
+    provisioned: SimpleboxSignedCatalogProvisionResultV1,
+) -> bool:
+    """Validate a provisioned value without granting catalog authority."""
+    provisioned.ok and
+        provisioned.error == SimpleboxSignedCatalogProvisionErrorV1.None and
+        _ingestion_receipt_valid_v1(provisioned) and
+        simplebox_primary_tool_catalog_bundle_plan_valid_v1(provisioned.plan)
+
+pub(package) fn simplebox_signed_catalog_boot_ingest_composed_v1(
+    provisioned: SimpleboxSignedCatalogProvisionResultV1,
+    clang: ClangSysrootCatalogBundleV1?
+) -> SimpleboxSignedCatalogBootIngestionResultV1:
+    """Authenticate and atomically ingest one externally provisioned bundle."""
+    if not provisioned.ok or
+        provisioned.error != SimpleboxSignedCatalogProvisionErrorV1.None:
+        return _ingestion_fail_v1(
+            SimpleboxSignedCatalogBootIngestionErrorV1.ProvisionRejected)
+    if not _ingestion_receipt_valid_v1(provisioned):
+        return _ingestion_fail_v1(
+            SimpleboxSignedCatalogBootIngestionErrorV1.ReceiptRejected)
+    if not simplebox_primary_tool_catalog_bundle_plan_valid_v1(
+        provisioned.plan):
+        return _ingestion_fail_v1(
+            SimpleboxSignedCatalogBootIngestionErrorV1.BundleRejected)
+    val populated = installed_artifact_boot_compose_and_populate_v1(
+        Some(provisioned), clang)
+    if not populated.ok:
+        return _ingestion_fail_v1(
+            SimpleboxSignedCatalogBootIngestionErrorV1.PopulationRejected,
+            populated.population_error)
+    SimpleboxSignedCatalogBootIngestionResultV1(
+        ok: true, error: SimpleboxSignedCatalogBootIngestionErrorV1.None,
+        population_error: InstalledArtifactBootPopulationErrorV1.None,
+        accepted_records: populated.accepted_records,
+        artifact_sha256: provisioned.receipt.artifact_sha256,
+        signed_record_sha256: provisioned.receipt.signed_record_sha256)

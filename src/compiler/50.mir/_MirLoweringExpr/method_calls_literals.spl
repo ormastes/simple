@@ -21,47 +21,37 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.mir.mir_lowering_stmts.{mir_expr_kind_is_place}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.mir_instruction_support.{GpuBarrierScope, GpuMemoryScope}
-use compiler.mir.mir_types.{LocalId, mir_type_probe_text}  # explicit: a glob is not an import-origin for surface projection
+use std.io_runtime.{env_get_opt}
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
-extern fn rt_dict_contains(dict: i64, key: Any) -> bool
-@unsafe(reason: "raw debug-environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw tagged HIR type discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
+# Formation probe: true only for a well-formed heap object. Screens a ZEROED
+# slot (raw 0), which `== nil` cannot -- the nil sentinel here is raw 3.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
+
+@always_inline
+fn _sffi_method_hir_type_discriminant(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
 
 # Cached MIR method-call trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_mc_trace_state: i64 = -1
-
-# Cached `SIMPLE_TRACE_DICT_ELEM` gate (-1 unknown, 0 off, 1 on). Default OFF.
-# Prints the element type recovered for `Dict.keys()`/`.values()` results; the
-# other half is printed by `lower_for_iterator` in mir_lowering_stmts.spl under
-# the same env var. Retained per the log-retention policy: do not delete, it is
-# the only visibility into the dict-projection element-type dataflow.
 var mir_dict_elem_trace_state: i64 = -1
-var mir_log_conv_trace_state: i64 = -1
+var mir_conv_log_state: i64 = -1
 
+@always_inline
 fn mir_dict_elem_trace_on() -> bool:
     if mir_dict_elem_trace_state < 0:
-        var configured: text = ""
-        unsafe(capabilities: [ffi]):
-            configured = rt_env_get("SIMPLE_TRACE_DICT_ELEM")
-        if configured == "1":
-            mir_dict_elem_trace_state = 1
-        else:
-            mir_dict_elem_trace_state = 0
+        mir_dict_elem_trace_state = if env_get_opt("SIMPLE_TRACE_DICT_ELEM") == Some("1"): 1 else: 0
     mir_dict_elem_trace_state == 1
 
-fn mir_log_conv_trace_on() -> bool:
-    if mir_log_conv_trace_state < 0:
-        var configured: text = ""
-        unsafe(capabilities: [ffi]):
-            configured = rt_env_get("SIMPLE_MIR_LOG_CONV")
-        if configured == "1":
-            mir_log_conv_trace_state = 1
-        else:
-            mir_log_conv_trace_state = 0
-    mir_log_conv_trace_state == 1
+@always_inline
+fn mir_conv_log_on() -> bool:
+    if mir_conv_log_state < 0:
+        mir_conv_log_state = if env_get_opt("SIMPLE_MIR_LOG_CONV") == Some("1"): 1 else: 0
+    mir_conv_log_state == 1
 
 # ============================================================================
 # Expression Lowering
@@ -153,7 +143,7 @@ impl MirLowering:
                 return ets_new_local
         ets_raw
 
-    me lower_text_split_lines(receiver: HirExpr) -> LocalId:
+    me lower_text_split_lines(sl_recv_raw: LocalId, receiver_span: Span) -> LocalId:
         """Lower `text.split_lines()` (bug: pure_simple_text_split_lines_missing).
 
         Semantics (matches Rust's str::lines(), per the bug doc): split on
@@ -184,7 +174,6 @@ impl MirLowering:
         and trimming at most one trailing separator before the single
         split() call reuses 100% pre-existing call shapes.
         """
-        val sl_recv_raw = self.lower_expr(receiver)
         val ts_recv = self.ensure_tagged_str(sl_recv_raw)
 
         val str_ty = MirType(kind: MirTypeKind.Opaque("str"))
@@ -323,8 +312,8 @@ impl MirLowering:
         b_lines_done.switch_to_block(lines_done_block)
         self.builder = b_lines_done
         self.runtime_array_locals[lines_local.id] = true
-        val line_hir_type = HirType(kind: HirTypeKind.Str, span: receiver.span)
-        self.remember_local_hir_type(lines_local.id, HirType(kind: HirTypeKind.Array(line_hir_type, nil), span: receiver.span), 2, 0)
+        val line_hir_type = HirType(kind: HirTypeKind.Str, span: receiver_span)
+        self.remember_local_hir_type(lines_local.id, HirType(kind: HirTypeKind.Array(line_hir_type, nil), span: receiver_span), 2, 0)
         lines_local
 
     me result_ok_hir_type(receiver: HirExpr) -> HirType?:
@@ -985,58 +974,50 @@ impl MirLowering:
         per-element box/unbox. See
         doc/08_tracking/bug/mir_unresolved_method_call_merge_2026-08-22.md."""
         val mg_other = self.lower_expr(mg_src)
-
-        # SCALAR GUARD (bug: scalar_accumulator_desugared_to_array_merge_2026-08-23).
-        # `collection_desugar.spl` Pattern B rewrites `x = x + other` into
-        # `x.merge(other)` at the AST level, BEFORE type-checking, so it has no
-        # type oracle: its `is_definite_scalar_addend` gate can only suppress
-        # addend SHAPES that are provably scalar (literals, unary, binary), and
-        # its own comment records that it still fires for identifier /
-        # field-access / index / call-result addends. `var s = 0; s = s + x`
-        # with `x` an identifier is exactly that shape, so it arrived here and
-        # was lowered to `rt_array_extend_i64(s, x, -1)` -- measured in the
-        # disassembly, with `s` passed as its still-zero initial value and the
-        # program printing 0 where the interpreter prints the right sum.
-        #
-        # Before `merge` had a MIR lowering (2026-08-22) this shape died LOUDLY
-        # at build time with `unresolved method call: merge`; giving `merge` a
-        # lowering turned a build failure into a SILENT WRONG ANSWER, which is
-        # strictly worse. The AST pass cannot be made type-aware, but the
-        # receiver's type IS known here, so the guard belongs at this end: when
-        # the receiver is provably a scalar or a string, lower the node as the
-        # `x = x + y` it was desugared from. Restoring the loud build error is
-        # NOT an option -- real byte-array concatenation (`a = a + d1`) depends
-        # on the rewrite firing.
-        var mg_recv_is_scalar = self.local_hir_type_is_int(mg_recv)
-        var mg_recv_is_float = false
-        if val mg_recv_mt = self.local_mir_type_of(mg_recv):
-            match mg_recv_mt.kind:
-                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
-                    mg_recv_is_scalar = true
-                case MirTypeKind.F32 | MirTypeKind.F64:
-                    # A float receiver never reached a correct lowering: it fell
-                    # through to rt_array_extend_i64 and died at build time with
-                    # `unsupported LLVM value conversion from double to ptr`.
-                    # Loud rather than silent, but still wrong, and the same
-                    # root cause -- so it is fixed by the same guard.
-                    mg_recv_is_scalar = true
-                    mg_recv_is_float = true
-                case _: ()
-        if mg_recv_is_scalar and not self.runtime_array_locals.contains(mg_recv.id):
-            val sc_ty = if mg_recv_is_float: MirType(kind: MirTypeKind.F64) else: MirType.i64()
-            var b_sc = self.builder
-            val sc_sum = b_sc.emit_binop(MirBinOp.Add, mir_operand_copy(mg_recv), mir_operand_copy(mg_other), sc_ty)
-            b_sc.emit_copy(mg_recv, sc_sum)
-            self.builder = b_sc
-            self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, mg_recv)
+        # TEXT RECEIVER -> string concat, not array extend.
+        # `collection_desugar.spl` rewrites `x = x + y` into `x.merge(y)` in the
+        # FRONTEND, where no type information exists. Its
+        # `is_definite_scalar_addend` gate can only recognise literal shapes, so
+        # `p = p + "X"` is correctly left alone, while `q = q + s` (identifier)
+        # and `t = t + s.char_at(i)` (method call) are rewritten to `.merge()`.
+        # Measured on the Stage-2 native lane: those lowered to
+        # `call i8 @rt_array_extend_i64(...)` on a TEXT receiver, the runtime
+        # reported "rejected invalid array handle before dereference", and the
+        # result was "" -- silently emptying every char-accumulation loop, which
+        # is what made module_logical_name_from_path return "" and failed the
+        # Stage-2 positional route.
+        # MIR is the first layer that knows the receiver's type, so the repair
+        # belongs here rather than in the desugar. rt_strcat_tagged is the same
+        # helper the binop str-concat path uses for `p + "X"`, which is verified
+        # working, so this routes the rewritten form back to the correct one.
+        if self.local_is_str(mg_recv) or self.local_hir_type_is_str(mg_recv):
+            val mg_cat_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_strcat_tagged"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.i64(), MirType.i64()],
+                    return_type: MirType.i64(),
+                    is_variadic: false
+                )))
+            ))
+            var b_mg_cat = self.builder
+            val mg_cat_res = b_mg_cat.emit_call(mg_cat_op, [mir_operand_copy(mg_recv), mir_operand_copy(mg_other)], MirType(kind: MirTypeKind.Opaque("str")))
+            self.builder = b_mg_cat
+            if val mg_cat_local = mg_cat_res:
+                # COPY BACK into the receiver local. This arm is reached from a
+                # desugared `x = x + y` that was rewritten into a BARE
+                # `x.merge(y)` statement whose result is discarded -- exactly
+                # the hazard this function's docstring names ("returning a fresh
+                # rt_array_concat would be silently dropped"). Array merge is
+                # in-place through a stable handle, so it needs no copy; string
+                # concat returns a NEW value, so without this the emitted IR
+                # computed rt_strcat_tagged into a fresh local and then went on
+                # printing the ORIGINAL receiver, leaving the string empty.
+                var b_mg_back = self.builder
+                b_mg_back.emit_copy(mg_recv, mg_cat_local)
+                self.builder = b_mg_back
+                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, mg_recv)
+                return mg_recv
             return mg_recv
-        # DELIBERATELY NOT HANDLED HERE: a `text` receiver. `txt = txt + more`
-        # with an identifier addend is the same Pattern-B shape and is also
-        # wrong, but an `emit_raw_strcat` + copy-back arm was tried here and
-        # measured producing "a" instead of "abc" -- so text is left on
-        # EXACTLY the path it was on before this change rather than swapped
-        # for a different wrong answer. Tracked in the bug record.
-
         val mg_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_array_extend_i64"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(
@@ -1227,42 +1208,8 @@ impl MirLowering:
         # starts_with/ends_with/contains keeps normal custom-method precedence.
         var predicate_has_custom_owner = false
         var predicate_receiver_is_text = false
-        # Bug (selfhost_struct_method_hijacked_by_string_arm_2026-08-23): this
-        # shape used to list ONLY starts_with/ends_with/contains, but
-        # `predicate_has_custom_owner` -- the flag this block computes -- is
-        # consumed as a veto by EVERY string-only fallback arm below:
-        # starts_with (:1962), ends_with (:2059), contains/find/rfind (:2300),
-        # index_of (:2339), and the 11-name text-special arm (:2382, which maps
-        # trim/strip/lower/to_lower/to_upper/split/replace/rfind/find/contains/
-        # parse_f64 onto rt_string_* symbols). For every name outside the old
-        # three-name shape the veto therefore consulted a flag that was
-        # STRUCTURALLY always false: the guard was written, but the evidence
-        # feeding it was never computed. A user struct/class method with one of
-        # those names was silently hijacked into a rt_string_* call with the
-        # struct handle passed as a string pointer.
-        #
-        # This miscompiled the compiler itself. `FrozenNativeModuleCapsuleBatchV1
-        # .find(module_name: text) -> FrozenNativeModuleCapsuleV1`
-        # (src/compiler/80.driver/driver_types.spl:97), called at
-        # driver_aot_native_output.spl:1099 as `batch.find(name)`, lowered to
-        # `rt_string_find`, which returns a plain i64 -1 for not-found. Codegen
-        # then untagged that -1 as a tagged pointer (`and $~7,%r14; mov (%r14)`)
-        # to read the returned struct's enum tag, faulting on 0xfffffffffffffff8
-        # -- the AOT-codegen SEGV that blocked bootstrap phase 3.
-        #
-        # The fix is to compute the owner evidence for the SAME name/arity set
-        # the arms below can claim, so a genuine custom method keeps normal
-        # custom-method precedence (the stated intent of this block) instead of
-        # losing to a text fallback. Arities mirror each arm's own gate.
         val predicate_method_shape =
-            ((method == "starts_with" or method == "ends_with" or method == "contains"
-                or method == "find" or method == "rfind") and args.len() == 1)
-            or (method == "index_of" and args.len() == 2)
-            or (method == "replace" and args.len() == 2)
-            or (method == "split" and (args.len() == 1 or args.len() == 2))
-            or ((method == "trim" or method == "strip" or method == "lower"
-                or method == "to_lower" or method == "to_upper"
-                or method == "parse_f64") and args.len() == 0)
+            (method == "starts_with" or method == "ends_with" or method == "contains") and args.len() == 1
         # Only unresolved calls and resolved instance methods can carry the
         # stale aggregate-owner shape seen in the freestanding CSS failure.
         # Trait/UFCS/free-function methods keep their explicit resolution, and
@@ -1287,32 +1234,43 @@ impl MirLowering:
                 if not predicate_receiver_is_text and resolution_is_unresolved:
                     val predicate_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if predicate_owner != nil and predicate_owner != "":
-                        # Bug (selfhost_struct_method_hijacked_by_string_arm_cross_module_2026-08-23):
-                        # this used to require the method to be listed in
-                        # `struct_method_syms`, but that map is module.impls-derived
-                        # and RESET PER MODULE (module_lowering.spl:1063), so a class
-                        # declared in ANOTHER module never has an entry here. The veto
-                        # therefore stayed false for exactly the shape that miscompiles
-                        # the compiler: `FrozenNativeModuleCapsuleBatchV1` lives in
-                        # driver_types.spl and `batch.find(name)` is called from
-                        # driver_aot_native_output.spl:1099.
-                        #
-                        # Having a custom OWNER at all is already the decisive evidence:
-                        # `predicate_owner` comes from `struct_value_syms`, i.e. the
-                        # receiver is a user-defined struct/class handle, and a
-                        # struct/class handle passed to a `rt_string_*` symbol is never
-                        # correct — the raw i64 -1 not-found sentinel gets untagged as a
-                        # tagged pointer and faults. Text receivers can never reach here:
-                        # `predicate_receiver_is_text` is checked above precisely so a
-                        # stale aggregate-owner hint cannot steal `text.starts_with`.
-                        # Keeping the module-local hit as a fast path documents that the
-                        # widening is only about CROSS-MODULE owners.
-                        predicate_has_custom_owner = true
-                        if not self.struct_method_syms.contains("{predicate_owner}::{method}"):
-                            if mir_mc_trace_state == 1:
-                                eprint("[mir-method-call] cross-module custom owner '{predicate_owner}' for method={method}; vetoing string-only fallback\n")
+                        predicate_has_custom_owner = self.struct_method_syms.contains("{predicate_owner}::{method}")
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] predicate-owner method={method}\n")
+
+        # Primitive text methods can arrive with an explicit stdlib-method
+        # resolution when the receiver retains its declared `text` type.
+        # Those calls still belong to the runtime ABI: emitting the resolved
+        # symbol verbatim produces uncapped linker names such as `str.strip`
+        # and `str.lines`, while the same methods on erased receivers already
+        # lower to `rt_string_trim` / `rt_string_lines` below. Keep custom
+        # owners untouched by accepting only a declared primitive Str.
+        var declared_text_receiver = false
+        if val declared_text_type = receiver.type_:
+            match declared_text_type.kind:
+                case HirTypeKind.Str: declared_text_receiver = true
+                case _: ()
+        val primitive_text_method_shape =
+            method == "trim" or method == "strip" or method == "lower" or
+            method == "to_lower" or method == "to_upper" or method == "split" or
+            method == "replace" or method == "rfind" or method == "find" or
+            method == "contains" or method == "parse_f64" or
+            method == "split_lines" or method == "lines"
+        # A custom nominal/static receiver must keep its selected owner even
+        # when its method leaf collides with a primitive text builtin.
+        var primitive_text_receiver = declared_text_receiver
+        # Entry-closure lowering may not populate `receiver.type_` even when
+        # resolution selected a stdlib method. Prove primitive provenance from
+        # the lowered local as the canonical fallback. StaticMethod receivers
+        # name a type and must never be evaluated as values.
+        if primitive_text_method_shape and not resolution_is_static_method and not primitive_text_receiver:
+            if not has_prelowered_method_receiver:
+                prelowered_method_receiver = self.lower_expr(receiver)
+                has_prelowered_method_receiver = true
+            primitive_text_receiver = self.local_is_str(prelowered_method_receiver)
+            if not primitive_text_receiver:
+                primitive_text_receiver = self.local_hir_type_is_str(prelowered_method_receiver)
+        val text_builtin_resolution_allowed = primitive_text_receiver
 
         # Integer chr/to_char is a language builtin, but an unresolved custom
         # struct method with the same name still owns its receiver. Resolve
@@ -1329,8 +1287,8 @@ impl MirLowering:
                 val chr_receiver_type = self.receiver_declared_type(receiver)
                 if chr_receiver_type != nil:
                     val found_chr_receiver_type = chr_receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
-                    val named_disc = rt_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
-                    if rt_enum_discriminant(found_chr_receiver_type.kind) == named_disc:
+                    val named_disc = _sffi_method_hir_type_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
+                    if _sffi_method_hir_type_discriminant(found_chr_receiver_type.kind) == named_disc:
                         match found_chr_receiver_type.kind:
                             case HirTypeKind.Named(chr_owner_symbol, _):
                                 val chr_owner_definition = self.symbols.get_symbol_raw(chr_owner_symbol.id)
@@ -1431,7 +1389,37 @@ impl MirLowering:
         val maybe_receiver_type_for_call = receiver.type_
         if maybe_receiver_type_for_call != nil:
             val found_receiver_type = maybe_receiver_type_for_call
-            if found_receiver_type != nil:
+            # `!= nil` CANNOT screen this slot, and the doubled guard above is a
+            # tell that the hazard was already suspected here. The nil sentinel
+            # in this runtime is raw 3, so a ZEROED `receiver.type_` -- raw 0 --
+            # passes both nil tests and reaches lower_type as a dead object.
+            # Measured on the Stage-2 self-hosted lane (SIMPLE_MIRB_TRACE=1):
+            # `[mir-method-call] gpu-owner` -> `[mir-lower-type-probe] seq=6
+            # disc=-1 kindzero=true kindnil=false` -> `[mir-method-call]
+            # receiver-type`, raising "E-MIR-TYPE-Unknown: unreachable
+            # HirTypeKind disc=-1: 0". kindzero=true with kindnil=false is the
+            # signature of a raw-0 slot, not of a nil one.
+            # rt_heap_ref_wellformed is the formation probe for exactly this
+            # raw-0-vs-sentinel class; it reads only the object header, never a
+            # field of the suspect object. An untyped receiver simply keeps the
+            # MirType.i64() default already initialised above -- the same
+            # outcome the nil path takes.
+            # The screen must test the KIND FIELD, not the object. Measured:
+            # rt_heap_ref_wellformed(found_receiver_type) returns TRUE here in
+            # 10/10 failing runs -- the HirType is a well-formed heap object; it
+            # is `.kind` that is raw 0. A header-only formation probe therefore
+            # cannot screen this, and `!= nil` cannot either (nil is raw 3).
+            # `kind == 0` is exactly what the in-tree [mir-lower-type-probe]
+            # measures as `kindzero`, and kindzero=true is the signature that
+            # accompanies every disc=-1 raise here.
+            # A receiver whose kind was never populated is effectively untyped,
+            # so it keeps the MirType.i64() default initialised above -- the same
+            # outcome the nil path already takes.
+            # NOTE: this is a CONSUMER screen. It stops the raise, but the
+            # producer that hands out a HirType with an unwritten kind is a
+            # separate defect and is still open; see
+            # doc/08_tracking/bug/self_hosted_symbol_table_hirtype_garbage_at_rest_2026-08-31.md
+            if found_receiver_type.kind != 0:
                 receiver_type = self.lower_type(found_receiver_type)
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] receiver-type method={method}\n")
@@ -1610,6 +1598,22 @@ impl MirLowering:
             # result, so the for-loop (and any other Array-typed consumer)
             # decodes each element correctly.
             var dict_keys_elem_type = MirType.i64()
+            # Bug (native_dict_values_loop_field_offset_collapse_2026-08-24):
+            # stamping only an Array(elem_type, 0) MIR type is NOT enough when
+            # the element is a STRUCT. `lower_for_array_indexed`
+            # (mir_lowering_stmts.spl) binds the loop variable's
+            # `struct_value_syms` entry from `array_element_struct_syms` keyed
+            # on the COLLECTION local -- and only `lower_array_lit`
+            # (literals.spl:97) and the param-array path ever populated that
+            # map. A `.values()` result never did, so `for f in d.values()`
+            # left the loop var with no struct name, `resolve_field_index`
+            # (function_lowering.spl:1305) hit its "type unknown" fallback and
+            # returned index 0 with MirType.i64() for EVERY field read: `p.b`
+            # read `p.a`, and in Stage 2 `func.name` read `func.symbol` as a
+            # raw integer while `func.signature` came back nil, so
+            # build_signature dereferenced nil -> SIGSEGV on any input.
+            # Mirror literals.spl's registration here.
+            var dict_keys_elem_struct_name = ""
             val dict_keys_recv_type = self.local_mir_type_of(receiver_local)
             # Probe (SIMPLE_TRACE_DICT_ELEM=1) for bug
             # stage2_cranelift_direct_segv_nil_struct_fields_2026-08-24: reads out
@@ -1654,9 +1658,25 @@ impl MirLowering:
                             MirType(kind: MirTypeKind.Opaque("str"))
                         else:
                             picked_type
+                        # Recover the element's STRUCT NAME (see the comment on
+                        # dict_keys_elem_struct_name above). Two shapes reach
+                        # here: `Struct(symbol)` when the dict's value type came
+                        # from lower_type(HirType), and `Opaque(name)` when it
+                        # came from a already-decoded struct-valued local.
+                        # `Opaque("str")` is a string, not a struct -- exclude
+                        # it explicitly so a Dict<_,text> is not mistaken for a
+                        # struct array (which would tag its elements and corrupt
+                        # them, the mirror of the int-array corruption noted in
+                        # lower_for_array_indexed).
+                        if not self.mir_type_is_str(picked_type):
+                            match picked_type.kind:
+                                case Struct(struct_elem_sym):
+                                    dict_keys_elem_struct_name = self.mir_struct_symbol_name(struct_elem_sym)
+                                case Opaque(opaque_elem_name):
+                                    if opaque_elem_name != "" and opaque_elem_name != "str" and opaque_elem_name != "__runtime_array__":
+                                        dict_keys_elem_struct_name = opaque_elem_name
+                                case _: ()
                     case _: ()
-            if mir_dict_elem_trace_on():
-                eprint("[dict-elem] method={method} recv_mir_type={mir_type_probe_text(dict_keys_recv_type)} stamped_elem_type={mir_type_probe_text(dict_keys_elem_type)}\n")
             var b_dict = self.builder
             val result = b_dict.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
             self.builder = b_dict
@@ -1670,6 +1690,10 @@ impl MirLowering:
                 self.builder = b_dict_typed
                 self.runtime_array_locals[dict_keys_typed.id] = true
                 self.mark_runtime_value_local(dict_keys_typed.id)
+                if dict_keys_elem_struct_name != "":
+                    self.array_element_struct_syms[dict_keys_typed.id] = dict_keys_elem_struct_name
+                    if mir_dict_elem_trace_on():
+                        eprint("[dict-elem-probe] elem struct name={dict_keys_elem_struct_name} for method={method}")
                 return dict_keys_typed
             return receiver_local
 
@@ -1971,7 +1995,7 @@ impl MirLowering:
             case Unresolved: join_is_unresolved = true
             case _: ()
         if method == "join" and args.len() == 1 and join_is_unresolved:
-            if mir_log_conv_trace_on():
+            if mir_conv_log_on():
                 eprint("[conv-lower] join arm hit\n")
             match receiver.kind:
                 case ArrayLit(jn_elements, _):
@@ -2434,7 +2458,10 @@ impl MirLowering:
         # probe as `contains` above so a (nonexistent) two-arg array
         # index_of still fails LOUDLY on the ordinary Unresolved path
         # instead of silently returning -1 from a string search.
-        if method == "index_of" and args.len() == 2 and resolution_is_unresolved and not predicate_has_custom_owner:
+        # `find` / `find_str` are aliases of index_of and take the same start
+        # offset; they previously fell through to the two-arg rt_string_find
+        # route, which DROPPED the offset and searched from position 0.
+        if (method == "index_of" or method == "find" or method == "find_str") and args.len() == 2 and resolution_is_unresolved and not predicate_has_custom_owner:
             var tf_recv_is_array = false
             if val tf_recv_ty = receiver.type_:
                 match tf_recv_ty.kind:
@@ -2477,7 +2504,7 @@ impl MirLowering:
         # be independently declared per backend. to_upper is safe on BOTH:
         # rt_string_to_upper and rt_string_to_float use the shared tagged-value
         # ABI on both LLVM and Cranelift.
-        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains" or method == "parse_f64") and (resolution_is_unresolved or (method == "contains" and predicate_receiver_is_text)) and not contains_recv_is_array and not predicate_has_custom_owner:
+        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains" or method == "parse_f64") and (text_builtin_resolution_allowed or (method == "contains" and predicate_receiver_is_text)) and not contains_recv_is_array and not predicate_has_custom_owner:
             if mir_mc_trace_state == 1:
                 eprint("[mir-method-call] text-special-enter method={method}\n")
             val ts_arity_ok = match method:
@@ -2515,13 +2542,6 @@ impl MirLowering:
                 # variable cases this arm has to serve.
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] text-special-receiver-before method={method}\n")
-                # Reuse the already-lowered receiver whenever the owner probe
-                # above produced one. This used to key off `method == "contains"`
-                # because only the three predicate names were ever pre-lowered;
-                # now that the probe covers this whole arm's name set, keying off
-                # the method name would lower the receiver a SECOND time and
-                # duplicate its side effects. Same `has_prelowered_method_receiver`
-                # pattern already used by the array probe above.
                 val ts_recv_raw = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] text-special-receiver-after method={method}\n")
@@ -2614,7 +2634,7 @@ impl MirLowering:
         # get silently treated as a string pointer instead of loud-failing.
         var split_lines_recv_is_array = false
         val is_lines_method = method == "split_lines" or method == "lines"
-        if is_lines_method:
+        if is_lines_method and resolution_is_unresolved:
             if val slr_ty = receiver.type_:
                 match slr_ty.kind:
                     case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
@@ -2627,15 +2647,17 @@ impl MirLowering:
                         if self.local_is_runtime_array(slr_probe):
                             split_lines_recv_is_array = true
                     case _: ()
-        if is_lines_method and args.len() == 0 and resolution_is_unresolved and not split_lines_recv_is_array:
-            return self.lower_text_split_lines(receiver)
+        if is_lines_method and args.len() == 0 and text_builtin_resolution_allowed and not split_lines_recv_is_array:
+            val lines_receiver = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
+            return self.lower_text_split_lines(lines_receiver, receiver.span)
 
         if (method == "substring" or method == "slice"):
-            val maybe_receiver_type = receiver.type_
-            match maybe_receiver_type:
-                case nil:
-                    ()
-                case Some(found_receiver_type):
+            # HirExpr.type_ is declared FLAT `HirType` with `has_type_` as the
+            # authoritative presence bit (hir_definitions.spl:529), so the
+            # `case Some` arm this replaces could never match and the whole
+            # substring/slice fast path below was unreachable.
+            if receiver.has_type_:
+                    val found_receiver_type = receiver.type_
                     if found_receiver_type != nil:
                         match found_receiver_type.kind:
                             case HirTypeKind.Str:
@@ -3229,7 +3251,7 @@ impl MirLowering:
                         conv_narrow = MirType(kind: MirTypeKind.I32)
                         conv_is_int = true
                     if conv_is_int:
-                        if mir_log_conv_trace_on():
+                        if mir_conv_log_on():
                             eprint("[conv-lower] narrowing conversion arm hit method={method}\n")
                         var b_conv_n = self.builder
                         val conv_narrowed = b_conv_n.emit_cast(mir_operand_copy(unresolved_receiver_local), conv_narrow)
@@ -3239,13 +3261,13 @@ impl MirLowering:
                     # `to_i64` on an already-i64 receiver is the identity; the
                     # receiver local is already lowered and i64-typed.
                     if method == "to_i64":
-                        if mir_log_conv_trace_on():
+                        if mir_conv_log_on():
                             eprint("[conv-lower] identity conversion arm hit method={method}\n")
                         return unresolved_receiver_local
                     # Float conversions genuinely change representation, so they
                     # are a single Cast with no widen-back (the result IS f64).
                     if method == "to_f64" or method == "to_f32":
-                        if mir_log_conv_trace_on():
+                        if mir_conv_log_on():
                             eprint("[conv-lower] float conversion arm hit method={method}\n")
                         var conv_float_ty = MirType.f64()
                         if method == "to_f32":
@@ -3427,7 +3449,7 @@ impl MirLowering:
                 # native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md.
                 val poly_recv_is_handle = self.local_is_runtime_array(unresolved_receiver_local)
                 if poly_recv_is_handle and args.len() == 1 and method == "contains":
-                    if mir_log_conv_trace_on():
+                    if mir_conv_log_on():
                         eprint("[conv-lower] polymorphic accessor arm hit method={method}\n")
                     val poly_symbol = "rt_contains"
                     val poly_arg_local = self.lower_expr(args[0].value)
@@ -3723,9 +3745,18 @@ impl MirLowering:
         # Look up function name from symbol table for direct calls
         val sym = self.symbols.get_symbol_raw(symbol.id)
         var name = self.bootstrap_symbol_name(symbol)
+        var builtin_method_tag = BUILTIN_METHOD_NONE
         if sym != nil:
             name = sym.name
+            builtin_method_tag = sym.builtin_method_tag
         name = name.replace("::", ".")
+        # MethodResolution transports the resolved SymbolId; HirSymbol carries
+        # the owner-qualified builtin tag. Native lowering branches only on the
+        # scalar tag, never on transported text or a runtime equality extern.
+        if builtin_method_tag == BUILTIN_METHOD_STR_STRIP:
+            name = "rt_string_trim"
+        elif builtin_method_tag == BUILTIN_METHOD_STR_LINES:
+            name = "rt_string_lines"
         if name == "":
             name = "unknown_{self.symbol_id_value(symbol)}"
         var signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)

@@ -10,7 +10,6 @@ use compiler.dependency.graph.{
     ImportGraph, ImportEdge, ImportKind, CyclicDependencyError,
     importgraph_new, importgraph_add_edge, importgraph_find_cycles
 }
-use app.io.mod.{env_get}
 
 use std.io_runtime.{file_exists}
 use std.io_runtime.{read_file_text}
@@ -22,7 +21,7 @@ fn _deps_str_eq(a: text, b: text) -> bool:
     a.len() == b.len() and a.starts_with(b)
 
 fn _deps_path_parent(path: text) -> text:
-    val slash = path.last_index_of("/")
+    val slash = path.last_index_of("/") ?? -1
     if slash <= 0:
         return "."
     path.substring(0, slash)
@@ -44,9 +43,9 @@ fn _deps_module_to_relpath(module_name: text) -> text:
 
 # Find a numbered directory: looks in parent for entries matching "NN.segment"
 fn _find_numbered_dir(parent: text, segment: text) -> text:
-    val entries = dir_list(parent) ?? []
+    val entries = rt_dir_list(parent) ?? []
     for entry in entries:
-        val dot_idx = entry.index_of(".")
+        val dot_idx = entry.index_of(".") ?? -1
         if dot_idx > 0:
             val suffix = entry.substring(dot_idx + 1)
             if _deps_str_eq(suffix, segment):
@@ -58,7 +57,7 @@ fn _resolve_numbered(base: text, parts: [text]) -> text:
     var current = base
     for part in parts:
         val direct = _deps_path_join(current, part)
-        if file_exists(direct):
+        if rt_file_exists(direct):
             current = direct
         else:
             val numbered = _find_numbered_dir(current, part)
@@ -70,7 +69,7 @@ fn _resolve_numbered(base: text, parts: [text]) -> text:
     current
 
 fn _deps_try_exists(path: text) -> text:
-    if file_exists(path):
+    if rt_file_exists(path):
         return path
     ""
 
@@ -119,7 +118,7 @@ fn _deps_resolve_module(module_name: text, current_file: text) -> text:
         return r2
 
     # 2. SIMPLE_LIB environment variable
-    val simple_lib = env_get("SIMPLE_LIB")
+    val simple_lib = rt_env_get("SIMPLE_LIB")
     val simple_lib_ok = simple_lib != ""
     if simple_lib_ok:
         val lib_spl = _deps_path_join(simple_lib, relpath + ".spl")
@@ -201,16 +200,16 @@ fn _parse_use_line(line: text) -> [text]:
     var rest_raw = trimmed.substring(4)
     var rest = rest_raw.trim()
     # Remove trailing comment (avoid chained calls - use intermediate vars)
-    val hash_idx = rest.index_of("#")
+    val hash_idx = rest.index_of("#") ?? -1
     var no_comment = rest
     if hash_idx >= 0:
         var before_hash = rest.substring(0, hash_idx)
         no_comment = before_hash.trim()
 
     # Determine module prefix (before { or ( or * or end)
-    val brace_idx = no_comment.index_of("{")
-    val paren_idx = no_comment.index_of("(")
-    val star_idx  = no_comment.index_of(".*")
+    val brace_idx = no_comment.index_of("{") ?? -1
+    val paren_idx = no_comment.index_of("(") ?? -1
+    val star_idx  = no_comment.index_of(".*") ?? -1
 
     var module_part = ""
     if brace_idx >= 0:
@@ -241,7 +240,7 @@ fn _scan_file_recursive(file_path: text, visited: {text: bool}) -> {text: bool}:
     if visited.has(file_path):
         return visited
     visited[file_path] = true
-    val content = read_file_text(file_path)
+    val content = rt_file_read_text(file_path) ?? ""
     if content == "":
         print "WARN: could not read {file_path}"
         return visited
@@ -260,7 +259,7 @@ fn _scan_file_recursive(file_path: text, visited: {text: bool}) -> {text: bool}:
 
 # Collect only the direct (first-level) imports of a file
 fn _direct_imports(file_path: text) -> [text]:
-    val content = read_file_text(file_path)
+    val content = rt_file_read_text(file_path) ?? ""
     if content == "":
         return []
     val lines = content.split("\n")
@@ -336,14 +335,14 @@ fn find_cycles_in_file(entry_file: text) -> [[text]]:
     val g = _build_import_graph(entry_file)
     val cycle_errors = importgraph_find_cycles(g)
     var result: [[text]] = []
-    for cycle_error in cycle_errors:
-        result.push(cycle_error.cycle)
+    for ce in cycle_errors:
+        result.push(ce.cycle)
     result
 
 # ===== Main report generators =====
 
 fn _run_fast(entry_file: text) -> i64:
-    if not file_exists(entry_file):
+    if not rt_file_exists(entry_file):
         print "ERROR: file not found: {entry_file}"
         return 1
     val directs = _direct_imports(entry_file)
@@ -372,7 +371,7 @@ fn _run_fast(entry_file: text) -> i64:
     0
 
 fn _run_normal(entry_file: text) -> i64:
-    if not file_exists(entry_file):
+    if not rt_file_exists(entry_file):
         print "ERROR: file not found: {entry_file}"
         return 1
     val directs = _direct_imports(entry_file)

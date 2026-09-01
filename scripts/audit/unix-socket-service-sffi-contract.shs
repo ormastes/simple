@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+
+decl=src/lib/nogc_sync_mut/service/extern.spl
+provider=src/compiler_rust/compiler/src/interpreter_extern/qmp_socket.rs
+native=src/compiler_rust/runtime/src/value/net_uds.rs
+registration=src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+qmp=src/lib/nogc_sync_mut/qemu/qmp_client.spl
+spm=src/app/simple_process_manager/transport/spm_transport_host.spl
+
+test "$(rg -c '^@unsafe\(' "$decl")" -eq 6
+test "$(rg -c '^extern fn rt_unix_socket_' "$decl")" -eq 6
+rg -q '^extern fn rt_unix_socket_close\(fd: i64\) -> i32$' "$decl"
+rg -q '^extern fn rt_unix_socket_listen\(path: text, backlog: i32\) -> i64$' "$decl"
+! rg -q '^extern fn rt_unix_socket_close.*-> bool$' "$decl"
+
+for spec in listen:2 accept:1 send:2 recv:2 close:1; do
+    name=${spec%%:*}
+    arity=${spec##*:}
+    body="$(sed -n "/^pub fn rt_unix_socket_${name}/,/^}/p" "$provider")"
+    printf '%s\n' "$body" | rg -q "if args.len\(\) != ${arity}"
+    printf '%s\n' "$body" | rg -q 'return Err\(CompileError::runtime'
+    rg -q "insert_simple!\(\"rt_unix_socket_${name}\"" "$registration"
+done
+
+listen_body="$(sed -n '/^pub fn rt_unix_socket_listen/,/^}/p' "$provider")"
+printf '%s\n' "$listen_body" | rg -q 'backlog < i32::MIN as i64 || backlog > i32::MAX as i64'
+
+recv_body="$(sed -n '/^pub fn rt_unix_socket_recv/,/^}/p' "$provider")"
+printf '%s\n' "$recv_body" | rg -q 'if max_len < 0'
+! printf '%s\n' "$recv_body" | rg -q '_ => 65536'
+! printf '%s\n' "$recv_body" | rg -q 'return Ok\(Value::text\(String::new\(\)\)\)'
+! printf '%s\n' "$recv_body" | rg -q 'from_utf8_lossy'
+printf '%s\n' "$recv_body" | rg -q 'String::from_utf8\(buf\)\.map_err'
+
+rg -q '^pub extern "C" fn rt_unix_socket_close\(fd: i64\) -> i32' "$native"
+rg -q '^pub unsafe extern "C" fn rt_unix_socket_recv\(fd: i64, max_len: i64, out_len: \*mut i64\) -> i64' "$native"
+
+# Client/QMP provider transport is strict as well; its Simple declarations are
+# intentionally left for the next unsafe-confinement slice.
+for spec in unix_socket_connect:1 fd_write:3 fd_read_until:3 fd_close:1; do
+    name=${spec%%:*}
+    arity=${spec##*:}
+    body="$(sed -n "/^pub fn rt_${name}/,/^}/p" "$provider")"
+    printf '%s\n' "$body" | rg -q "if args.len\(\) != ${arity}"
+    printf '%s\n' "$body" | rg -q 'return Err\(CompileError::runtime'
+    rg -q "insert_simple!\(\"rt_${name}\"" "$registration"
+done
+
+write_body="$(sed -n '/^pub fn rt_fd_write/,/^}/p' "$provider")"
+printf '%s\n' "$write_body" | rg -q 'usize::try_from\(args\[2\]\.as_int\(\)\?\)'
+printf '%s\n' "$write_body" | rg -q 'if len > data.len\(\)'
+! printf '%s\n' "$write_body" | rg -q 'len.min\(data.len\(\)\)'
+
+read_body="$(sed -n '/^pub fn rt_fd_read_until/,/^}/p' "$provider")"
+printf '%s\n' "$read_body" | rg -q 'usize::try_from\(args\[2\]\.as_int\(\)\?\)'
+printf '%s\n' "$read_body" | rg -q 'Vec::with_capacity\(max.min\(256\)\)'
+printf '%s\n' "$read_body" | rg -q 'String::from_utf8\(buf\).map_err'
+! printf '%s\n' "$read_body" | rg -q 'from_utf8_lossy|_ => 65536'
+
+for module in "$qmp" "$spm"; do
+    test "$(rg -c '^@unsafe\(' "$module")" -eq 4
+    test "$(rg -c '^@always_inline$' "$module")" -eq 4
+    test "$(rg -c 'unsafe\(capabilities: \[ffi\]\):' "$module")" -eq 4
+    for raw in rt_unix_socket_connect rt_fd_write rt_fd_read_until rt_fd_close; do
+        test "$(rg -c "^extern fn ${raw}\\(" "$module")" -eq 1
+        test "$(rg -c "^[[:space:]]+${raw}\\(" "$module")" -eq 1
+    done
+done
+
+for spec in _qmp_sffi_connect:2 _qmp_sffi_write:2 \
+    _qmp_sffi_read_until:2 _qmp_sffi_close:4; do
+    owner=${spec%%:*}
+    count=${spec##*:}
+    test "$(rg -c "${owner}\\(" "$qmp")" -eq "$count"
+done
+for spec in _spm_sffi_connect:2 _spm_sffi_write:2 \
+    _spm_sffi_read_until:2 _spm_sffi_close:3; do
+    owner=${spec%%:*}
+    count=${spec##*:}
+    test "$(rg -c "${owner}\\(" "$spm")" -eq "$count"
+done
+
+echo "Unix-socket SFFI contract audit: PASS (server/client transport strict; raw QMP/SPM calls confined to direct-inline unsafe owners; native receive lifting unverified)"

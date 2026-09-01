@@ -40,7 +40,7 @@ fn cache_size_report_interval() -> usize {
 }
 
 fn rss_kb() -> u64 {
-    crate::read_trace::rts(file!(), line!(), "/proc/self/statm")
+    std::fs::read_to_string("/proc/self/statm")
         .ok()
         .and_then(|s| s.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()))
         .map(|pages| pages * 4)
@@ -48,56 +48,39 @@ fn rss_kb() -> u64 {
 }
 
 thread_local! {
-    /// Process-local memo of file CONTENT used by the import-resolution probes
-    /// (`sibling_might_define_requested_names`, `file_plausibly_provides_names`).
-    ///
-    /// Those probes are pure functions of a file's bytes, but were re-reading the
-    /// same sibling from disk once per importing module: a trivial `lint` run
-    /// issued 3,819 successful `openat` calls over 423 unique `.spl` files
-    /// (`core/ast.spl` 866 times; 67.7 MB read for 5.1 MB of distinct content).
-    /// Memoizing the read collapses that to one read per path per process.
-    ///
-    /// `None` records "not eligible" (over the size cap, or unreadable), which is
-    /// exactly what the probes previously recomputed on every visit.
-    ///
-    /// Per-PROCESS only: a `src/lib/**` edit is still picked up by the next run,
-    /// so the "edit stdlib, no build needed" property is unchanged.
-    static PROBE_SOURCE_CACHE: RefCell<HashMap<PathBuf, Option<Arc<String>>>> =
+    /// Process-local memo for import-resolution probe source.
+    static PROBE_SOURCE_CACHE: RefCell<HashMap<(PathBuf, u64), Option<Arc<String>>>> =
         RefCell::new(HashMap::new());
 }
 
-/// Read `path` for an import-resolution probe, memoized per process.
-///
-/// Returns `None` when the file is larger than `max_check_bytes` or unreadable —
-/// identical to the pre-memo behaviour of both probe call sites.
 pub fn probe_source_cached(path: &Path, max_check_bytes: u64) -> Option<Arc<String>> {
-    if let Some(hit) = PROBE_SOURCE_CACHE.with(|c| c.borrow().get(path).cloned()) {
+    let key = (path.to_path_buf(), max_check_bytes);
+    if let Some(hit) = PROBE_SOURCE_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
         crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_HITS, 1);
         return hit;
     }
     crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_READS, 1);
     let value = match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > max_check_bytes => None,
+        Ok(metadata) if metadata.len() > max_check_bytes => None,
         _ => crate::read_trace::rts(file!(), line!(), path).ok().map(Arc::new),
     };
-    PROBE_SOURCE_CACHE.with(|c| c.borrow_mut().insert(path.to_path_buf(), value.clone()));
+    PROBE_SOURCE_CACHE.with(|cache| cache.borrow_mut().insert(key, value.clone()));
     value
 }
 
-/// Drop the probe content memo (used by the cache-clearing entry points).
 pub fn clear_probe_source_cache() {
-    PROBE_SOURCE_CACHE.with(|c| c.borrow_mut().clear());
+    PROBE_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 /// Print a one-line breakdown of every never-evicted loader cache.
 pub fn report_cache_sizes(tag: &str) {
     let exports = MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
-    let (cls_m, cls_e) = MODULE_CLASSES_CACHE
-        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
-    let (fn_m, fn_e) = MODULE_FUNCTIONS_CACHE
-        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
-    let (en_m, en_e) = MODULE_ENUMS_CACHE
-        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (cls_m, cls_e) =
+        MODULE_CLASSES_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (fn_m, fn_e) =
+        MODULE_FUNCTIONS_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (en_m, en_e) =
+        MODULE_ENUMS_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
     let partial = PARTIAL_MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
     let (env_m, env_e) =
         MODULE_ENV_BY_OWNER.with(|c| (c.borrow().len(), c.borrow().values().map(|e| e.len()).sum::<usize>()));
@@ -188,7 +171,7 @@ pub fn clear_module_cache() {
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
     clear_probe_source_cache();
-    crate::hir::lower::import_loader::clear_imported_module_ast_cache();
+    crate::hir::lower::clear_imported_module_ast_cache();
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
     crate::mem_trace::report("clear_module_cache");
@@ -201,6 +184,8 @@ pub fn clear_module_cache() {
     super::interpreter_module::reset_resolve_stats();
     // And the compile-pipeline directory-listing cache
     crate::pipeline::module_loader::clear_pipeline_dir_listing_cache();
+    // And the module-resolver numbered-directory memos
+    crate::module_resolver::clear_numbered_dir_cache();
 }
 
 /// Clear module cache selectively — preserve stdlib modules (src/lib/) between tests.
@@ -251,6 +236,10 @@ pub fn clear_module_cache_selective() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     // Drop memoised filtered dicts whose source no one else holds any more.
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().retain(|_, (src, _)| Arc::strong_count(src) > 1));
+    // Source-derived probe/AST memos must not survive a selective boundary:
+    // test and IDE callers may edit, delete, or recreate files between runs.
+    clear_probe_source_cache();
+    crate::hir::lower::clear_imported_module_ast_cache();
     // Reset module counter but don't clear PATH_KEY_CACHE (path normalization is stable)
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     // Keep path resolution cache (stable across tests)
@@ -688,7 +677,9 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
             // with every other loader cache in `clear_module_cache`.
             let key = Arc::as_ptr(dict) as usize;
             if let Some(hit) = FILTERED_DICT_CACHE.with(|c| {
-                c.borrow().get(&key).and_then(|(src, out)| Arc::ptr_eq(src, dict).then(|| Arc::clone(out)))
+                c.borrow()
+                    .get(&key)
+                    .and_then(|(src, out)| Arc::ptr_eq(src, dict).then(|| Arc::clone(out)))
             }) {
                 crate::perf_counters::bump(&crate::perf_counters::FILTERED_DICT_HITS, 1);
                 return Value::Dict(hit);
@@ -711,7 +702,47 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{reserve_module_load, reset_total_modules, total_modules_loaded};
+    use super::{
+        clear_probe_source_cache, probe_source_cached, reserve_module_load, reset_total_modules, total_modules_loaded,
+    };
+
+    #[test]
+    fn probe_source_memo_respects_the_size_limit() {
+        clear_probe_source_cache();
+        let path = std::env::temp_dir().join(format!("probe-source-memo-{}", std::process::id()));
+        std::fs::write(&path, "pub fn probe(): 1\n").expect("write probe source");
+
+        assert!(probe_source_cached(&path, 1).is_none());
+        let source = probe_source_cached(&path, u64::MAX).expect("larger limit reads source");
+        let cached = probe_source_cached(&path, u64::MAX).expect("same limit hits memo");
+        assert_eq!(source.as_str(), "pub fn probe(): 1\n");
+        assert!(std::sync::Arc::ptr_eq(&source, &cached));
+
+        std::fs::write(&path, "pub fn changed(): 2\n").expect("mutate probe source");
+        super::clear_module_cache_selective();
+        assert_eq!(
+            probe_source_cached(&path, u64::MAX)
+                .expect("edited source is visible")
+                .as_str(),
+            "pub fn changed(): 2\n"
+        );
+
+        std::fs::remove_file(&path).expect("delete probe source");
+        super::clear_module_cache_selective();
+        assert!(probe_source_cached(&path, u64::MAX).is_none());
+
+        std::fs::write(&path, "pub fn recreated(): 3\n").expect("recreate probe source");
+        super::clear_module_cache_selective();
+        assert_eq!(
+            probe_source_cached(&path, u64::MAX)
+                .expect("recreated source is visible")
+                .as_str(),
+            "pub fn recreated(): 3\n"
+        );
+
+        let _ = std::fs::remove_file(path);
+        clear_probe_source_cache();
+    }
 
     #[test]
     fn module_load_reservation_commits_only_successful_loads() {

@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/sffi/cli.spl"
+
+calls=$(awk '
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / {
+        line = $0
+        while (match(line, /(sys_get_args|rt_[A-Za-z0-9_]+)\(/)) {
+            calls += 1
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    END { print calls + 0 }
+' "$owner")
+if [ "$calls" -ne 50 ]; then
+    echo "synchronous CLI raw-call inventory changed without review" >&2
+    exit 1
+fi
+
+scopes=$(grep -c 'unsafe(capabilities: \[ffi\]):$' "$owner")
+if [ "$scopes" -ne 50 ]; then
+    echo "synchronous CLI lexical FFI authority inventory changed without review" >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / &&
+    /(sys_get_args|rt_[A-Za-z0-9_]+)\(/ {
+        if (previous !~ /unsafe\(capabilities: \[ffi\]\):$/ ||
+            indent($0) != indent(previous) + 4) {
+            print "raw CLI call lacks immediate lexical FFI authority: " NR ":" $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    { previous = $0 }
+    END { if (failed) exit 1 }
+' "$owner"
+
+# This facade must remain a direct O(1) delegation layer: adding discovery,
+# hashing, signing, locking, or generic dispatch here would be a hot-path bug.
+if grep -E '(sha256|signature|dlsym|mutex|lock\(|registry.*lookup)' "$owner" >/dev/null; then
+    echo "synchronous CLI facade gained per-call admission or lookup work" >&2
+    exit 1
+fi
+
+echo "synchronous CLI SFFI authority audit: PASS (50 raw calls in 50 minimal lexical scopes; direct O(1) delegation preserved)"

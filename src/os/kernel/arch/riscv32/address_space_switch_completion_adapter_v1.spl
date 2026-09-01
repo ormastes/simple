@@ -1,0 +1,33 @@
+# Trusted RV32 Sv32 SATP write/fence/readback adapter.
+
+use os.kernel.arch.riscv32.cpu.{Rv32Cpu}
+use os.kernel.scheduler.architecture_switch_completion_owner_v1.{
+    ArchitectureSwitchTicketV1, ArchitectureSwitchReadbackReceiptV1,
+    architecture_switch_mark_write_started_v1,
+    architecture_switch_riscv_satp_receipt_v1
+}
+
+pub(package) fn riscv32_switch_root_with_receipt_v1(
+    ticket: ArchitectureSwitchTicketV1,
+    root_phys: u64
+) -> ArchitectureSwitchReadbackReceiptV1:
+    val expected_satp = (0x80000000u64 | (root_phys >> 12)) as u32
+    val preflight = architecture_switch_riscv_satp_receipt_v1(
+        ticket, root_phys, expected_satp as u64, 32u64, true)
+    if not preflight.readback_matches: return preflight
+    var cpu = Rv32Cpu()
+    if cpu.cpu_id() != ticket.cpu_id:
+        return architecture_switch_riscv_satp_receipt_v1(
+            ticket, root_phys, 0u64, 32u64, false)
+    cpu.cpu_disable_interrupts()
+    if cpu.cpu_id() != ticket.cpu_id:
+        return architecture_switch_riscv_satp_receipt_v1(
+            ticket, root_phys, 0u64, 32u64, false)
+    if not architecture_switch_mark_write_started_v1(ticket):
+        return architecture_switch_riscv_satp_receipt_v1(
+            ticket, root_phys, 0u64, 32u64, false)
+    val satp = expected_satp
+    cpu.cpu_write_satp(satp)
+    val observed = cpu.cpu_read_satp() as u64
+    architecture_switch_riscv_satp_receipt_v1(
+        ticket, root_phys, observed, 32u64, true)

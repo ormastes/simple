@@ -1,85 +1,35 @@
-# @req: REQ-LIB-DBFS_ENGINE-001 — core language semantics hold under execution. 
-"""
-## Purpose and audience
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
-reading this spec to confirm the behavior still holds.
 
-## Operator workflow
+# Test: nvme arena probe
+# Feature: DBFS-RAW-NVME-ARENA - granule, device I/O, and append behavior
+# @cover lib/nogc_sync_mut/db/dbfs_engine/raw_nvme_arena.spl
 
-1. Run `bin/simple test test/01_unit/lib/nogc_sync_mut/db/dbfs_engine/zz_probe2_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the
-   behavior under test.
-
-## Compatibility and limitations
-
-Covers the interpreter and native lanes for the constructs
-asserted here; platform-specific behavior is out of scope.
-"""
+use std.spec.step
 
 use std.spec
+use std.nogc_sync_mut.db.dbfs_engine.raw_nvme_arena.{RawNvmeArena, nvme_arena_registered_count}
+use std.nogc_sync_mut.fs_driver.mem_block_device.{MemBlockDevice}
+use std.storage.durability.{DurabilityClass}
 
-# doc-path: doc/01_research/local/zz_probe2.md
-# doc-path: doc/03_plan/sys_test/zz_probe2.md
-# doc-path: doc/04_architecture/zz_probe2.md
-# doc-path: doc/05_design/zz_probe2.md
-
-# @manual: primary
-
-describe "Executed behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
-
-    it "array construction and access":
-        step("Verify: array construction and access")
-        # @req: REQ-LIB-DBFS_ENGINE-001
-        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
-        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
-        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
-
-    it "for-range iterates the half-open span":
-        step("Verify: for-range iterates the half-open span")
-        # @req: REQ-LIB-DBFS_ENGINE-001
-        var seen = 0
-        for i in 0..4:
-            seen = seen + 1
-        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
-
-    it "nil option falls to else arm":
-        step("Verify: nil option falls to else arm")
-        # @req: REQ-LIB-DBFS_ENGINE-001
-        val opt = nil
-        var chosen = 1
-        match opt:
-            Some(x): chosen = x
-            nil: chosen = -1
-        expect(chosen).to_equal(-1)  # oracle: nil arm taken
-
-describe "Additional behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
-
-    it "function calls and closure values":
-        step("Verify: function calls and closure values")
-        # @req: REQ-LIB-DBFS_ENGINE-001
-        fn add(a: i64, b: i64) -> i64: a + b
-        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
-        val f = fn(x: i64) -> i64: x * x
-        expect(f(4)).to_equal(16)  # oracle: 4 squared
-
-    it "bitwise operators":
-        step("Verify: bitwise operators")
-        # @req: REQ-LIB-DBFS_ENGINE-001
-        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
-        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
-        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
-        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
-        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
-
-    it "dict literal access":
-        step("Verify: dict literal access")
-        # @req: REQ-LIB-DBFS_ENGINE-001
-        val d = {"k": "v"}
-        expect(d["k"]).to_equal("v")
+describe "nvme probe":
+    # @manual scenario evidence
+    it "granule and device":
+        # @req REQ-SSPEC-LIB
+        step("build arena over MemBlockDevice, assert granule, I/O, append")
+        val dev = MemBlockDevice.new(1024u64, 512u32)
+        expect(dev.sector_size() as i64).to_equal(512)
+        val arena = RawNvmeArena.new(dev, 2, 8)
+        val h = arena.arena_handle()
+        expect(arena.arena_preferred_granule(h)).to_equal(512)
+        val before = nvme_arena_registered_count()
+        expect(before).to_be_greater_than(0)
+        val ws = dev.write_sector(3u64, [1u8, 2u8])
+        expect(ws.is_ok()).to_equal(true)
+        val rs = dev.read_sector(3u64)
+        expect(rs.is_ok()).to_equal(true)
+        val r = arena.arena_append(h, [1u8, 2u8], DurabilityClass.BestEffort)
+        expect(r.bytes_written).to_equal(2)
+        expect(r.generation).to_be_greater_than(-1)

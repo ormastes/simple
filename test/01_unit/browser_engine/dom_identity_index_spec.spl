@@ -1,31 +1,21 @@
-"""
-## Purpose and audience
-Purpose: Verify Generation-qualified DOM identity index.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-Troubleshooting: a red scenario here means the pinned contract changed —
-check verification guidance in the linked design docs before editing oracles.
-# @manual: primary
-REQ-GEN-BROWSERENGIN-001
-doc/01_research/local/REQ-GEN-BROWSERENGIN-001.md
-doc/03_plan/sys_test/REQ-GEN-BROWSERENGIN-001.md
-doc/04_architecture/REQ-GEN-BROWSERENGIN-001.md
-doc/05_design/REQ-GEN-BROWSERENGIN-001.md
-"""
-# @req: REQ-GEN-BROWSERENGIN-001
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
 
 # codex-system-test
-# @req REQ-WEB-BROWSER-004
+# @req REQ-SSPEC-BROWSER_ENGINE
 """# Generation-qualified DOM identity index
 
 The document identity owner builds stable typed routes, resolves DOM
 associations without recursive lookup, and rejects routes captured from a
 replaced document generation.
 """
+
+use std.spec.step
 
 use std.spec.*
 
@@ -56,9 +46,6 @@ class DomIdentityReplacementReceipt:
     index: DomIdentityIndex
     replacement_route: DomNodeRoute
 
-fn fail(message: text):
-    fail_assertion(message)
-
 fn _generation(value: i64) -> DomDocumentGeneration:
     match DomDocumentGeneration.create(value):
         Ok(generation): generation
@@ -69,6 +56,23 @@ fn _route(index: DomIdentityIndex, author_id: text) -> DomNodeRoute:
         Some(route): route
         nil: fail("Expected route for #{author_id}")
 
+# Route comparisons go through canonical route text: class instances compare
+# by reference under the test interpreter, so structural to_equal on
+# DomNodeRoute (or Some/Ok wrappers of it) is unusable in expectations.
+fn expect_route_some(actual: DomNodeRoute?, expected: DomNodeRoute):
+    match actual:
+        Some(route): expect(dom_node_route_text(route)).to_equal(
+            dom_node_route_text(expected)
+        )
+        nil: fail("Expected a route, got nil")
+
+fn expect_route_ok(actual: Result<DomNodeRoute, text>, expected: DomNodeRoute):
+    match actual:
+        Ok(route): expect(dom_node_route_text(route)).to_equal(
+            dom_node_route_text(expected)
+        )
+        Err(reason): fail("Expected a route, got Err: {reason}")
+
 fn _index(html: text, generation: i64) -> DomIdentityIndex:
     val root = html_tree_builder_build(html)
     match dom_identity_index_build(root, _generation(generation)):
@@ -77,7 +81,7 @@ fn _index(html: text, generation: i64) -> DomIdentityIndex:
 
 fn _dom_identity_fixture_html() -> text:
     "<html><head><title>identity</title></head><body>text" +
-        "<style>.hidden{{display:none}}</style>" +
+        "<style>.hidden{display:none}</style>" +
         "<input id='external' form='later' type='radio' name='team'>" +
         "<label id='explicit-label' for='external'>External</label>" +
         "<label id='nested-label'>Nested<input id='nested'></label>" +
@@ -112,53 +116,37 @@ fn _over_depth_layout_key() -> text:
     key
 
 fn _depth_overflow_dom() -> BeDomNode:
-    # Build bottom-up: `.push` copies, so children attached after a node is
-    # pushed into its parent would be lost.
-    var chain = BeDomNode.element_with_id(HTML_MAX_TREE_DEPTH.to_i64() + 1, "div")
-    var remaining = HTML_MAX_TREE_DEPTH - 1
-    while remaining > 0:
-        var parent = BeDomNode.element_with_id(remaining.to_i64() + 1, "div")
-        parent.children.push(chain)
-        chain = parent
-        remaining = remaining - 1
     var root = BeDomNode.element_with_id(1, "html")
-    root.children.push(chain)
+    var cursor = root
+    var depth = 0
+    while depth < HTML_MAX_TREE_DEPTH:
+        val child = BeDomNode.element_with_id(depth.to_i64() + 2, "div")
+        cursor.children.push(child)
+        cursor = child
+        depth = depth + 1
     root
 
 fn _node_overflow_dom() -> BeDomNode:
-    # Batched subtrees keep every child array small: interpreter `.push`
-    # clones the whole array, so one flat 65k-child list is quadratic and
-    # times out. 257 branches x 256 leaves = 66,306 nodes > HTML_MAX_NODES.
     var root = BeDomNode.element_with_id(1, "html")
-    var next_id: i64 = 2
-    var branch_count = 0
-    while branch_count < 257:
-        var branch = BeDomNode.element_with_id(next_id, "section")
-        next_id = next_id + 1
-        var leaf_count = 0
-        while leaf_count < 256:
-            branch.children.push(BeDomNode.element_with_id(next_id, "div"))
-            next_id = next_id + 1
-            leaf_count = leaf_count + 1
-        root.children.push(branch)
-        branch_count = branch_count + 1
+    var node_id: i64 = 2
+    while node_id <= HTML_MAX_NODES + 1:
+        root.children.push(BeDomNode.element_with_id(node_id, "div"))
+        node_id = node_id + 1
     root
 
 fn _check_deep_layout_inverse():
-    # Build bottom-up: `.push` copies, so children attached after a node is
-    # pushed into its parent would be lost.
-    val node_id: i64 = HTML_MAX_TREE_DEPTH.to_i64() + 1
-    var chain = BeDomNode.element_with_id(node_id - 1, "div")
-    var chain_id = node_id - 2
-    while chain_id >= 3:
-        var parent = BeDomNode.element_with_id(chain_id, "div")
-        parent.children.push(chain)
-        chain = parent
-        chain_id = chain_id - 1
-    var body = BeDomNode.element_with_id(2, "body")
-    body.children.push(chain)
     var root = BeDomNode.element_with_id(1, "html")
+    var body = BeDomNode.element_with_id(2, "body")
     root.children.push(body)
+    var cursor = body
+    var node_id: i64 = 3
+    var remaining = HTML_MAX_TREE_DEPTH - 2
+    while remaining > 0:
+        val child = BeDomNode.element_with_id(node_id, "div")
+        cursor.children.push(child)
+        cursor = child
+        node_id = node_id + 1
+        remaining = remaining - 1
     val index = match dom_identity_index_build(root, _generation(1)):
         Ok(value): value
         Err(reason): fail("Expected bounded deep layout index: {reason}")
@@ -171,7 +159,7 @@ fn _check_deep_layout_inverse():
     expect(target_key.slice(5, target_key.len()).split("/").len()).to_equal(
         HTML_MAX_TREE_DEPTH - 2
     )
-    expect(index.route_for_layout_target_key(target_key)).to_equal(Ok(deepest))
+    expect_route_ok(index.route_for_layout_target_key(target_key), deepest)
 
 fn _check_layout_and_admission_bounds():
     var two_body_root = BeDomNode.element_with_id(1, "html")
@@ -192,8 +180,9 @@ fn _check_layout_and_admission_bounds():
     val later_child_route = DomNodeRoute(
         generation: _generation(1), node_id: 5
     )
-    expect(two_body_index.route_for_layout_target_key("path:0")).to_equal(
-        Ok(first_child_route)
+    expect_route_ok(
+        two_body_index.route_for_layout_target_key("path:0"),
+        first_child_route
     )
     expect(two_body_index.layout_target_key_for_route(
         later_child_route
@@ -212,17 +201,14 @@ fn check_dom_identity_index_built(fixture: DomIdentityGenerationFixture):
     expect(index.counters.build_visit_count).to_equal(
         index.counters.node_count * 2
     )
-    expect(index.counters.duplicate_author_id_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
-    expect(index.counters.layout_relation_count).to_equal(11)  # oracle: 11 — named expected value from the requirement
-    expect(index.form_owner_for_route(fixture.external_route)).to_equal(
-        Some(fixture.later_form_route)
-    )
-    expect(index.control_for_label_route(
-        fixture.explicit_label_route
-    )).to_equal(Some(fixture.external_route))
-    expect(index.control_for_label_route(
-        fixture.nested_label_route
-    )).to_equal(Some(fixture.nested_control_route))
+    expect(index.counters.duplicate_author_id_count).to_equal(1)
+    expect(index.counters.layout_relation_count).to_equal(11)
+    expect_route_some(index.form_owner_for_route(fixture.external_route),
+        fixture.later_form_route)
+    expect_route_some(index.control_for_label_route(
+        fixture.explicit_label_route), fixture.external_route)
+    expect_route_some(index.control_for_label_route(
+        fixture.nested_label_route), fixture.nested_control_route)
 
     val owned_group = match index.radio_group_for_route(fixture.external_route):
         Some(group): group
@@ -230,14 +216,13 @@ fn check_dom_identity_index_built(fixture: DomIdentityGenerationFixture):
     val free_group = match index.radio_group_for_route(fixture.free_radio_route):
         Some(group): group
         nil: fail("Expected ownerless radio group")
-    expect(owned_group.form_owner).to_equal(Some(fixture.later_form_route))
-    expect(index.radio_members(owned_group).len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+    expect_route_some(owned_group.form_owner, fixture.later_form_route)
+    expect(index.radio_members(owned_group).len()).to_equal(2)
     expect(free_group.form_owner).to_be_nil()
     expect(index.radio_members(free_group).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
-    expect(index.route_for_layout_target_key("id:duplicate")).to_equal(
-        Ok(fixture.first_duplicate_route)
-    )
+    expect_route_ok(index.route_for_layout_target_key("id:duplicate"),
+        fixture.first_duplicate_route)
     expect(index.author_id_for_route(fixture.deep_route)).to_equal(
         Some("deep")
     )
@@ -245,9 +230,8 @@ fn check_dom_identity_index_built(fixture: DomIdentityGenerationFixture):
         Ok(route): route
         Err(reason): fail("Expected body layout route: {reason}")
     expect(index.author_id_for_route(body_route)).to_be_nil()
-    expect(index.route_for_layout_target_key("path:7/0")).to_equal(
-        Ok(fixture.deep_route)
-    )
+    expect_route_ok(index.route_for_layout_target_key("path:7/0"),
+        fixture.deep_route)
     expect(index.layout_target_key_for_route(fixture.deep_route)).to_equal(
         Some("path:7/0")
     )
@@ -277,15 +261,23 @@ fn check_dom_identity_index_built(fixture: DomIdentityGenerationFixture):
 
 fn check_stable_route_dispatch(fixture: DomIdentityGenerationFixture):
     val route_text = dom_node_route_text(fixture.deep_route)
-    expect(dom_node_route_parse(route_text)).to_equal(Ok(fixture.deep_route))
+    # Route text is a canonical injective encoding, so text equality of the
+    # re-encoded parse result is equivalent to structural route equality
+    # (class instances compare by reference under the test interpreter).
+    val reparsed = match dom_node_route_parse(route_text):
+        Ok(value): value
+        Err(reason): fail("Expected round-trip parse: {reason}")
+    expect(dom_node_route_text(reparsed)).to_equal(route_text)
     expect(fixture.index.contains_route(fixture.deep_route)).to_be(true)
     val path = match fixture.index.path_for_route(fixture.deep_route):
         Some(value): value
         nil: fail("Expected structural path for captured route")
     expect(path.len()).to_equal(4)  # oracle: 4 — named expected value from the requirement
     val event_path = fixture.index.event_path_for_route(fixture.deep_route)
-    expect(event_path.len()).to_equal(5)  # oracle: 5 — named expected value from the requirement
-    expect(event_path[event_path.len() - 1]).to_equal(fixture.deep_route)
+    expect(event_path.len()).to_equal(5)
+    expect(dom_node_route_text(event_path[event_path.len() - 1])).to_equal(
+        route_text
+    )
 
 fn check_document_replacement_during_handler(
     captured_route: DomNodeRoute
@@ -306,11 +298,13 @@ fn check_stale_routes_and_index_release(
 ):
     expect(captured_index.contains_route(captured_route)).to_be(true)
     expect(replacement.index.contains_route(captured_route)).to_be(false)
-    expect(replacement.index.path_for_route(captured_route)).to_be_nil()
-    expect(replacement.index.layout_target_key_for_route(
+    val _stale_path = replacement.index.path_for_route(captured_route)
+    expect(_stale_path).to_be_nil()
+    val _stale_key = replacement.index.layout_target_key_for_route(
         captured_route
-    )).to_be_nil()
-    expect(replacement.replacement_route.generation.value).to_equal(2)  # oracle: 2 — named expected value from the requirement
+    )
+    expect(_stale_key).to_be_nil()
+    expect(replacement.replacement_route.generation.value).to_equal(2)
     var pinned: DomIdentityIndex? = Some(captured_index)
     match pinned:
         Some(index): expect(index.generation.value).to_equal(1)  # oracle: 1 — named expected value from the requirement
@@ -319,11 +313,12 @@ fn check_stale_routes_and_index_release(
     expect(pinned).to_be_nil()
 
 describe "Generation-qualified DOM identity index":
+    # @manual scenario evidence
 
-    # @req REQ-WEB-BROWSER-004
+        # @req REQ-SSPEC-BROWSER_ENGINE
     it "keeps routes stable only for the committed document generation":
-        # @req: REQ-WEB-BROWSER-004
-        step("Verify: keeps routes stable only for the committed document generation")
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("keeps routes stable only for the committed document generation")
         step("Build the document identity index")
         val fixture = setup_dom_identity_generation_fixture()
         check_dom_identity_index_built(fixture)
@@ -341,10 +336,10 @@ describe "Generation-qualified DOM identity index":
             fixture.index, fixture.deep_route, replacement
         )
 
-    # @req REQ-WEB-BROWSER-004
+        # @req REQ-SSPEC-BROWSER_ENGINE
     it "admits only canonical positive generation values":
-        # @req: REQ-GEN-BROWSERENGIN-001
-        step("Verify: admits only canonical positive generation values")
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("admits only canonical positive generation values")
         expect(DomDocumentGeneration.create(0)).to_equal(
             Err("invalid_generation")
         )
@@ -371,10 +366,10 @@ describe "Generation-qualified DOM identity index":
             root, DomDocumentGeneration(value: -3)
         )).to_equal(Err("invalid_generation"))
 
-    # @req REQ-WEB-BROWSER-004
+        # @req REQ-SSPEC-BROWSER_ENGINE
     it "round-trips route text and rejects every non-canonical form":
-        # @req: REQ-WEB-BROWSER-004
-        step("Verify: round-trips route text and rejects every non-canonical form")
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("round-trips route text and rejects every non-canonical form")
         val route = DomNodeRoute(generation: _generation(1), node_id: 7)
         expect(dom_node_route_text(route)).to_equal("dom-route-v1:1:7")
         expect(dom_node_route_parse("dom-route-v1:1:7")).to_equal(Ok(route))
@@ -398,10 +393,10 @@ describe "Generation-qualified DOM identity index":
             Err("invalid_route")
         )
 
-    # @req REQ-WEB-BROWSER-004
+        # @req REQ-SSPEC-BROWSER_ENGINE
     it "separates malformed layout targets from targets that are absent":
-        # @req: REQ-GEN-BROWSERENGIN-001
-        step("Verify: separates malformed layout targets from targets that are absent")
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("separates malformed layout targets from targets that are absent")
         val index = _index(
             "<body><div id='a'><input id='i' type='hidden'></div>" +
             "<form id='f'><input id='r' type='radio' name='n'></form>" +
@@ -434,10 +429,10 @@ describe "Generation-qualified DOM identity index":
         expect(index.route_for_author_id("")).to_be_nil()
         expect(index.route_for_author_id("zzz")).to_be_nil()
 
-    # @req REQ-WEB-BROWSER-004
+        # @req REQ-SSPEC-BROWSER_ENGINE
     it "refuses every association lookup made with a foreign generation":
-        # @req: REQ-WEB-BROWSER-004
-        step("Verify: refuses every association lookup made with a foreign generation")
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("refuses every association lookup made with a foreign generation")
         val index = _index(
             "<body><div id='a'><input id='i' type='hidden'></div>" +
             "<form id='f'><input id='r' type='radio' name='n'></form>" +
@@ -460,10 +455,10 @@ describe "Generation-qualified DOM identity index":
         expect(index.path_for_route(foreign)).to_be_nil()
         expect(index.event_path_for_route(foreign).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
-    # @req REQ-WEB-BROWSER-004
+        # @req REQ-SSPEC-BROWSER_ENGINE
     it "counts exactly one visit per node in each of the two build passes":
-        # @req: REQ-GEN-BROWSERENGIN-001
-        step("Verify: counts exactly one visit per node in each of the two build passes")
+        # @req REQ-SSPEC-BROWSER_ENGINE
+        step("counts exactly one visit per node in each of the two build passes")
         val index = _index(
             "<body><div id='a'><input id='i' type='hidden'></div>" +
             "<form id='f'><input id='r' type='radio' name='n'></form>" +

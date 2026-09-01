@@ -20,9 +20,21 @@ fast reject must both be present, with the reject ahead of the comment scan.
 (A wall-clock budget is deliberately NOT used — see check_fast_reject_is_wired.)
 """
 
-use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths}
+use compiler.driver.driver_source_loading.{
+    _driver_entry_import_module_paths,
+    _driver_cached_entry_source_scan,
+    _driver_collect_sources,
+    driver_entry_scan_cache_reset,
+    driver_entry_scan_cache_read_count,
+    driver_entry_scan_cache_scan_count,
+    driver_entry_scan_cache_hit_count
+}
+use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
 
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_env_set(key: text, value: text) -> bool
 
 fn _fixture_source() -> text:
     var lines: [text] = [
@@ -69,7 +81,7 @@ fn check_fast_reject_is_wired() -> text:
     it, in the same idiom entry_closure_physical_source_dedup_spec.spl uses for
     the bucket set: the whole-content early-out, and a trimmed-line fast reject
     that returns BEFORE the comment scan on every non-import line."""
-    val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+    val loading = read_file_text("src/compiler/80.driver/driver_source_loading.spl")
     if loading == "":
         return "could not read driver_source_loading.spl"
     if not loading.contains("if not content.contains(\"use \") and not content.contains(\"import \"):"):
@@ -89,9 +101,75 @@ fn _spec_index_of(haystack: text, needle: text) -> i64:
         return -1
     haystack.split(needle)[0].len()
 
+fn _path_cache_probe_path() -> text:
+    "build/test_tmp/closure_scan_memo/source.spl"
+
 describe "entry-closure import scan":
     it "collects exactly the real imports":
         expect(check_scan_behaviour()).to_equal("")
 
     it "rejects non-import lines before doing per-line comment work":
         expect(check_fast_reject_is_wired()).to_equal("")
+
+    it "memoizes repeated physical source scans by normalized path":
+        val _ = rt_dir_create("build/test_tmp/closure_scan_memo", true)
+        val _ = rt_file_write_text(_path_cache_probe_path(), "use std.first\nmod local\n")
+        driver_entry_scan_cache_reset()
+        val first_path = "./" + _path_cache_probe_path()
+        val alias_path = "build/test_tmp/closure_scan_memo/../closure_scan_memo/source.spl"
+
+        val (first_content, first_imports, first_siblings, first_hit) =
+            _driver_cached_entry_source_scan(first_path)
+        val (second_content, second_imports, second_siblings, second_hit) =
+            _driver_cached_entry_source_scan(alias_path)
+
+        expect(first_content).to_equal(second_content)
+        expect(first_hit).to_equal(false)
+        expect(second_hit).to_equal(true)
+        expect(first_imports).to_equal(["std.first"])
+        expect(second_imports).to_equal(["std.first"])
+        expect(first_siblings).to_equal([".local"])
+        expect(second_siblings).to_equal([".local"])
+        expect(driver_entry_scan_cache_read_count()).to_equal(1)
+        expect(driver_entry_scan_cache_scan_count()).to_equal(1)
+        expect(driver_entry_scan_cache_hit_count()).to_equal(1)
+
+    it "shares the build-local scan cache across CLI and driver walkers":
+        val dir = "build/test_tmp/closure_scan_memo_cross"
+        val entry = dir + "/entry.spl"
+        val dep = dir + "/dep.spl"
+        val _ = rt_dir_create(dir, true)
+        val _ = rt_file_write_text(entry, "use dep\nfn main() -> i64:\n    1\n")
+        val _ = rt_file_write_text(dep, "fn dep_value() -> i64:\n    2\n")
+        driver_entry_scan_cache_reset()
+        val _ = rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)
+
+        val closure = _native_build_entry_closure(entry, [dir])
+        expect(closure).to_equal([entry, dep])
+        expect(driver_entry_scan_cache_read_count()).to_equal(2)
+        expect(driver_entry_scan_cache_scan_count()).to_equal(2)
+        expect(driver_entry_scan_cache_hit_count()).to_equal(0)
+
+        expect(_driver_collect_sources(entry).len()).to_be_greater_than(0)
+        expect(_driver_collect_sources(dep).len()).to_be_greater_than(0)
+        expect(driver_entry_scan_cache_read_count()).to_equal(2)
+        expect(driver_entry_scan_cache_scan_count()).to_equal(2)
+        expect(driver_entry_scan_cache_hit_count()).to_equal(2)
+        val _reset_env = rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", "")
+
+    it "wires the shared build-local scan cache into both closure BFS walkers":
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
+        val native_build = rt_file_read_text("src/app/io/_CliCompile/native_build_closure.spl") ?? ""
+        val compile_targets = rt_file_read_text("src/app/io/_CliCompile/compile_targets.spl") ?? ""
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+
+        expect(_native_build_entry_closure("", []).len()).to_equal(1)
+        expect(driver).to_contain("val (_, closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)")
+        expect(driver).to_not_contain("val closure_imports = _driver_entry_import_module_paths(closure_src.content)")
+        expect(native_build).to_contain("val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)")
+        expect(native_build).to_not_contain("var import_scan_cache: Dict<text, [text]> = {}")
+        expect(native_build).to_not_contain("var sibling_scan_cache: Dict<text, [text]> = {}")
+        expect(native_build).to_not_contain("var module_paths = _driver_entry_import_module_paths(content)")
+        expect(compile_targets).to_contain("driver_entry_scan_cache_reset()")
+        expect(loading).to_contain("native_entry = rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY\")")
+        expect(loading).to_contain("val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)")

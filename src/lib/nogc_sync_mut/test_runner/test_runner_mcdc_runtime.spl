@@ -1,0 +1,181 @@
+# Runtime-only MC/DC evidence producer for generated test wrappers.
+# Deliberately imports no compiler module: instrumented children must not link
+# the compiler/report gate merely to drain owner-local recorder rows.
+
+use std.common.convert.{try_parse_int}
+use std.common.mcdc.model.{McdcEvaluation, McdcExclusion, McdcMode, McdcPolicy}
+use std.nogc_sync_mut.mcdc.static_probe.{mcdc_static_probe_configure, mcdc_static_probe_owner_ids, mcdc_static_probe_owner_recorded_count, mcdc_static_probe_owner_evaluation_at, mcdc_static_probe_owner_dropped_count, mcdc_static_probe_owner_overwritten_count}
+use std.nogc_sync_mut.mcdc.dynamic_probe.{mcdc_dynamic_probe_configure, mcdc_dynamic_probe_owner_ids, mcdc_dynamic_probe_owner_recorded_count, mcdc_dynamic_probe_owner_evaluation_at, mcdc_dynamic_probe_owner_dropped_count, mcdc_dynamic_probe_owner_overwritten_count}
+use std.nogc_sync_mut.test_runner.test_runner_mcdc_formal_context.{
+    runner_mcdc_context_evidence_wire, runner_mcdc_context_wire,
+    runner_mcdc_derive_context_evidence, runner_mcdc_parse_contexts
+}
+
+struct RunnerMcdcObligation:
+    runtime_id: i64
+    semantic_id: text
+    identity_version: text
+    condition_ordinal: i64
+    projection0: i64
+    projection1: i64
+    projection2: i64
+    projection3: i64
+    strong_coupling: bool
+    policy_reason: text
+
+pub fn test_runner_prepare_mcdc_recording(mode: McdcMode, policy: McdcPolicy) -> bool:
+    if policy.mode != mode: return false
+    match mode:
+        McdcMode.StaticOff: true
+        McdcMode.StaticOn: mcdc_static_probe_configure(policy)
+        McdcMode.DynamicAspect:
+            # Production-main lowering invokes the public load controller
+            # separately. Configuration must retain a dormant nil capsule.
+            mcdc_dynamic_probe_configure(policy.global_bytes, policy.owner_bytes)
+
+pub struct RunnerMcdcRecorderSnapshot:
+    evaluations: [McdcEvaluation]
+    dropped_count: i64
+    overwritten_count: i64
+
+fn mcdc_saturating_add(left: i64, right: i64) -> i64:
+    if right <= 0: return left
+    if left >= 0x7fffffffffffffff - right: return 0x7fffffffffffffff
+    left + right
+
+pub fn runner_mcdc_collect(mode: McdcMode) -> RunnerMcdcRecorderSnapshot:
+    var evaluations: [McdcEvaluation] = []
+    var dropped = 0
+    var overwritten = 0
+    val owners = if mode == McdcMode.DynamicAspect:
+        mcdc_dynamic_probe_owner_ids()
+    else:
+        mcdc_static_probe_owner_ids()
+    for owner in owners:
+        val count = if mode == McdcMode.DynamicAspect:
+            mcdc_dynamic_probe_owner_recorded_count(owner)
+        else:
+            mcdc_static_probe_owner_recorded_count(owner)
+        val owner_dropped = if mode == McdcMode.DynamicAspect:
+            mcdc_dynamic_probe_owner_dropped_count(owner)
+        else:
+            mcdc_static_probe_owner_dropped_count(owner)
+        val owner_overwritten = if mode == McdcMode.DynamicAspect:
+            mcdc_dynamic_probe_owner_overwritten_count(owner)
+        else:
+            mcdc_static_probe_owner_overwritten_count(owner)
+        dropped = mcdc_saturating_add(dropped, owner_dropped)
+        overwritten = mcdc_saturating_add(overwritten, owner_overwritten)
+        var index = 0
+        while index < count:
+            val evaluation = if mode == McdcMode.DynamicAspect:
+                mcdc_dynamic_probe_owner_evaluation_at(owner, index)
+            else:
+                mcdc_static_probe_owner_evaluation_at(owner, index)
+            evaluations.push(evaluation)
+            index = index + 1
+    RunnerMcdcRecorderSnapshot(
+        evaluations: evaluations, dropped_count: dropped,
+        overwritten_count: overwritten)
+
+fn runner_mcdc_obligations(manifest: text) -> [RunnerMcdcObligation]?:
+    if manifest.len() > 67108864: return nil
+    var obligations: [RunnerMcdcObligation] = []
+    var schema = false
+    for raw in manifest.split("\n"):
+        val line = raw.trim()
+        if line == "schema: simple-mcdc-obligations-v1":
+            schema = true
+        elif line.starts_with("condition|"):
+            val fields = line.split("|")
+            if fields.len() != 11: return nil
+            val runtime_id = try_parse_int(fields[1])
+            val ordinal = try_parse_int(fields[4])
+            val p0 = try_parse_int(fields[5]); val p1 = try_parse_int(fields[6])
+            val p2 = try_parse_int(fields[7]); val p3 = try_parse_int(fields[8])
+            if runtime_id == nil or ordinal == nil or p0 == nil or p1 == nil or p2 == nil or p3 == nil: return nil
+            if fields[9] != "true" and fields[9] != "false": return nil
+            if (fields[2].trim() == "" or fields[3].trim() == "" or
+                    fields[10].trim() == "" or fields[10].contains("\n") or
+                    fields[10].contains("\r") or fields[10].len() > 2048 or
+                    ordinal.unwrap() < 0 or ordinal.unwrap() > 255): return nil
+            obligations.push(RunnerMcdcObligation(
+                runtime_id: runtime_id.unwrap(), semantic_id: fields[2],
+                identity_version: fields[3], condition_ordinal: ordinal.unwrap(),
+                projection0: p0.unwrap(), projection1: p1.unwrap(), projection2: p2.unwrap(), projection3: p3.unwrap(),
+                strong_coupling: fields[9] == "true", policy_reason: fields[10]
+            ))
+    if not schema or obligations.len() == 0: return nil
+    Some(obligations)
+
+pub fn test_runner_produce_mcdc_evidence_v1(
+    mode: McdcMode, manifest: text, exclusions: [McdcExclusion]
+) -> text:
+    val parsed = runner_mcdc_obligations(manifest)
+    if parsed == nil: return "MCDC-EVIDENCE-invalid"
+    val obligations = parsed.unwrap()
+    val snapshot = runner_mcdc_collect(mode)
+    val evaluations = snapshot.evaluations
+    var lines: [text] = [
+        "MCDC-EVIDENCE-v1",
+        "counters|{snapshot.dropped_count}|{snapshot.overwritten_count}"
+    ]
+    var emitted_rows = 2
+    var emitted_bytes = 64
+    var admitted_runtime_ids: Dict<i64, bool> = {}
+    for obligation in obligations:
+        admitted_runtime_ids[obligation.runtime_id] = true
+        val wire =
+            "obligation|{obligation.runtime_id}|{obligation.semantic_id}|" +
+            "{obligation.identity_version}|{obligation.condition_ordinal}|" +
+            "{obligation.projection0}|{obligation.projection1}|{obligation.projection2}|{obligation.projection3}|" +
+            (if obligation.strong_coupling: "true" else: "false") + "|{obligation.policy_reason}"
+        emitted_rows = emitted_rows + 1
+        emitted_bytes = emitted_bytes + wire.len() + 1
+        if emitted_rows > 1000000 or emitted_bytes > 67108864:
+            return "MCDC-EVIDENCE-invalid"
+        lines.push(wire)
+    for row in evaluations:
+        if not admitted_runtime_ids.contains_key(row.decision_id):
+            continue
+        val outcome = if row.outcome: "true" else: "false"
+        val wire =
+            "evaluation|{row.decision_id}|{row.owner_id}|{row.sequence}|{outcome}|" +
+            "{row.evaluated_mask0}|{row.evaluated_mask1}|{row.evaluated_mask2}|{row.evaluated_mask3}|" +
+            "{row.true_mask0}|{row.true_mask1}|{row.true_mask2}|{row.true_mask3}|" +
+            "{row.masked_mask0}|{row.masked_mask1}|{row.masked_mask2}|{row.masked_mask3}"
+        emitted_rows = emitted_rows + 1
+        emitted_bytes = emitted_bytes + wire.len() + 1
+        if emitted_rows > 1000000 or emitted_bytes > 67108864:
+            return "MCDC-EVIDENCE-invalid"
+        lines.push(wire)
+    val context_plans = runner_mcdc_parse_contexts(manifest)
+    if context_plans == nil: return "MCDC-EVIDENCE-invalid"
+    val plans = context_plans.unwrap()
+    for plan in plans:
+        val wire = runner_mcdc_context_wire(plan.context)
+        emitted_rows = emitted_rows + 1
+        emitted_bytes = emitted_bytes + wire.len() + 1
+        if emitted_rows > 1000000 or emitted_bytes > 67108864:
+            return "MCDC-EVIDENCE-invalid"
+        lines.push(wire)
+    val context_evidence = runner_mcdc_derive_context_evidence(
+        plans, evaluations)
+    for evidence in context_evidence:
+        val wire = runner_mcdc_context_evidence_wire(evidence)
+        emitted_rows = emitted_rows + 1
+        emitted_bytes = emitted_bytes + wire.len() + 1
+        if emitted_rows > 1000000 or emitted_bytes > 67108864:
+            return "MCDC-EVIDENCE-invalid"
+        lines.push(wire)
+    for exclusion in exclusions:
+        val wire =
+            "exclusion|{exclusion.semantic_id}|{exclusion.condition_ordinal}|" +
+            "{exclusion.reason}|{exclusion.reviewer}|{exclusion.review_id}|" +
+            exclusion.expires_or_version
+        emitted_rows = emitted_rows + 1
+        emitted_bytes = emitted_bytes + wire.len() + 1
+        if emitted_rows > 1000000 or emitted_bytes > 67108864:
+            return "MCDC-EVIDENCE-invalid"
+        lines.push(wire)
+    lines.join("\n")

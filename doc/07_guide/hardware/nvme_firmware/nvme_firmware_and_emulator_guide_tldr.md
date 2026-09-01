@@ -1,16 +1,16 @@
 # NVMe Firmware + Emulator Guide (TL;DR)
 
-Two main pure-Simple host deliverables plus one rv32 direct-smoke image live under
-`examples/09_embedded/simpleos_nvme_fw/`:
+Two pure-Simple, **simulation-only** deliverables under `examples/09_embedded/simpleos_nvme_fw/`,
+gated by `bin/simple run` (not `check`):
 
 - **`fw/`** — layered NVMe SSD firmware: HIL/FTL/FIL + NVMe controller front end (admin,
   multi IO queue, round-robin, live thermal/SMART composite-temperature model (P7), and RAIN
   XOR-parity channel protection (P8) — both now WIRED into the live controller/FTL, not shelf)
   over an ONFI NAND device. Gates:
-  `run fw/test_fw.spl` -> `ALL FIRMWARE SELF-TESTS PASS` (1174 asserts);
+  `run fw/test_fw.spl` → `ALL FIRMWARE SELF-TESTS PASS` (526 asserts);
   `run fw/sim_main.spl` → `ALL END-TO-END CHECKS PASS`;
-  `run fw/nvme_main.spl` → `ALL NVME CONTROLLER E2E CHECKS PASS` (invalid namespace rejection
-  plus SMART composite temperature from the live thermal model);
+  `run fw/nvme_main.spl` → `ALL NVME CONTROLLER E2E CHECKS PASS` (also asserts the SMART
+  composite temperature equals the live thermal model);
   `run fw/rain_ftl_check.spl` → `RAIN-FTL OK` (256 LBAs survive a whole-channel uncorrectable
   failure; gated in the system spec).
 - **`emu/`** — host-interface ↔ device-interface emulator over a **settable memcpy seam on both
@@ -20,18 +20,16 @@ Two main pure-Simple host deliverables plus one rv32 direct-smoke image live und
 
 Honest caveats: **newtypes are NOT enforced** on this binary (bug filed); the **Lean proofs are
 standalone hand-transcribed algorithm models with no mechanical link to executed bytes**; the
-rv32 direct-smoke path needs `build/nvme_fw_rv32.elf` before it can prove a QEMU boot, and the
-full no-alloc firmware port remains open.
+Simple firmware was **NOT booted on rv32** — the rv32 LLVM native-build is currently broken in
+this environment (exits 255, no diagnostic; the proven full-OS recipe also fails; the bootable
+ELF is stale; boot NOT observed). See
+`doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 
 P9 artifacts: `fw_rv32/entry.spl` is the scalar/array-free reference, and default
 `fw_rv32/build.shs` is the fast direct rv32 smoke ELF recipe; QEMU boot evidence exists only
 after `build/nvme_fw_rv32.elf` is produced and prints `ALL RV32 NVME FW CHECKS PASS` /
 `RESULT: PASS`; the serial begins with `RV32 NVME FW BEGIN`. The rv32 smoke uses
 bounded no-alloc counter caps; host simulation owns full-width counter stress.
-The resident-service parity gate is
-`sh scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs`; it drives Create CQ/SQ,
-Identify, Write, Flush, recovery Read, and prevention Reads through guest RAM.
-Its `transport=qemu-gdb-mailbox` marker is firmware evidence, not AXI/IRQ proof.
 
 <!-- sdn-diagram:id=nvme_fw_emu_tldr -->
 ```

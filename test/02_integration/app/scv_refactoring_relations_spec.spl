@@ -1,0 +1,113 @@
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-I-04 — refactoring relations inferred
+as many-to-many lineage edges over symbol declarations: rename / move /
+move_rename / extract / inline / split / merge / pull_up / push_down /
+signature_change.  The matcher is anchors -> bounded GumTree-style pairing
+over indexed candidates -> RefactoringMiner-style rules; its bounds are
+named constants and a tie between candidates is reported `ambiguous`, never
+accepted.
+Audience: Maintainers of the SCV identity layer and the D-03/D-04 lanes.
+"""
+# @req: REQ-SCV-REFACTORING-RELATIONS-001
+use std.spec.{describe, it, expect, step}
+use std.scv.refactoring_relations.{RefactorFileInput, scv_refactor_infer, scv_refactor_rows_of_kind, scv_refactor_units, SCV_REFACTOR_MAX_PAIRS, SCV_REFACTOR_CANDIDATES_PER_UNIT, SCV_REFACTOR_AMBIGUITY_MARGIN_MILLI}
+
+fn _one(rel: text, old_text: text, new_text: text) -> [RefactorFileInput]:
+    [RefactorFileInput(rel: rel, old_text: old_text, new_text: new_text)]
+
+fn _field(row: text, i: i64) -> text:
+    row.split("|")[i]
+
+describe "scv refactoring relations (I-04)":
+    it "reports a same-file rename with an identical body as an accepted edge":
+        val rows = scv_refactor_infer(_one("a.spl", "fn alpha():\n    x = 1\n    y = 2\n", "fn beta():\n    x = 1\n    y = 2\n"))
+        val renames = scv_refactor_rows_of_kind(rows, "rename")
+        expect(renames.len()).to_equal(1)
+        expect(_field(renames[0], 1)).to_equal("a.spl:fn:alpha")
+        expect(_field(renames[0], 2)).to_equal("a.spl:fn:beta")
+        expect(_field(renames[0], 5)).to_equal("accepted")
+
+    it "distinguishes move from move_rename across files":
+        step("same name in another file -> move")
+        var files = _one("a.spl", "fn alpha():\n    x = 1\n    y = 2\nfn keep():\n    pass\n", "fn keep():\n    pass\n")
+        files.push(RefactorFileInput(rel: "b.spl", old_text: "", new_text: "fn alpha():\n    x = 1\n    y = 2\n"))
+        val moves = scv_refactor_rows_of_kind(scv_refactor_infer(files), "move")
+        expect(moves.len()).to_equal(1)
+        expect(_field(moves[0], 1)).to_equal("a.spl:fn:alpha")
+        expect(_field(moves[0], 2)).to_equal("b.spl:fn:alpha")
+        step("new name in another file -> move_rename")
+        var files2 = _one("a.spl", "fn alpha():\n    x = 1\n    y = 2\n", "")
+        files2.push(RefactorFileInput(rel: "b.spl", old_text: "", new_text: "fn gamma():\n    x = 1\n    y = 2\n"))
+        val mr = scv_refactor_rows_of_kind(scv_refactor_infer(files2), "move_rename")
+        expect(mr.len()).to_equal(1)
+        expect(_field(mr[0], 2)).to_equal("b.spl:fn:gamma")
+
+    it "infers extract and inline from lines that reappear in another unit":
+        step("extract: removed lines of an anchored fn reappear in a new fn")
+        val ext = scv_refactor_rows_of_kind(scv_refactor_infer(_one("a.spl", "fn big():\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n", "fn big():\n    a = 1\n    b = 2\n    helper()\nfn helper():\n    c = 3\n    d = 4\n")), "extract")
+        expect(ext.len()).to_equal(1)
+        expect(_field(ext[0], 1)).to_equal("a.spl:fn:big")
+        expect(_field(ext[0], 2)).to_equal("a.spl:fn:big,a.spl:fn:helper")
+        step("inline: a deleted fn's lines reappear inside the grown fn")
+        val inl = scv_refactor_rows_of_kind(scv_refactor_infer(_one("a.spl", "fn big():\n    a = 1\n    b = 2\n    helper()\nfn helper():\n    c = 3\n    d = 4\n", "fn big():\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n")), "inline")
+        expect(inl.len()).to_equal(1)
+        expect(_field(inl[0], 1)).to_equal("a.spl:fn:helper,a.spl:fn:big")
+        expect(_field(inl[0], 2)).to_equal("a.spl:fn:big")
+
+    it "infers split and merge as many-to-many edges, not as renames":
+        step("split: one deleted fn -> two added fns holding its lines")
+        val rows = scv_refactor_infer(_one("a.spl", "fn big():\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n", "fn p1():\n    a = 1\n    b = 2\nfn p2():\n    c = 3\n    d = 4\n"))
+        val split = scv_refactor_rows_of_kind(rows, "split")
+        expect(split.len()).to_equal(1)
+        expect(_field(split[0], 1)).to_equal("a.spl:fn:big")
+        expect(_field(split[0], 2)).to_equal("a.spl:fn:p1,a.spl:fn:p2")
+        expect(scv_refactor_rows_of_kind(rows, "rename").len()).to_equal(0)
+        step("merge: two deleted fns -> one added fn holding both bodies")
+        val rows2 = scv_refactor_infer(_one("a.spl", "fn p1():\n    a = 1\n    b = 2\nfn p2():\n    c = 3\n    d = 4\n", "fn big():\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n"))
+        val merge = scv_refactor_rows_of_kind(rows2, "merge")
+        expect(merge.len()).to_equal(1)
+        expect(_field(merge[0], 1)).to_equal("a.spl:fn:p1,a.spl:fn:p2")
+        expect(_field(merge[0], 2)).to_equal("a.spl:fn:big")
+
+    it "classifies member moves between a type and a trait as pull_up / push_down":
+        val type_first = "class Foo:\n    me run():\n        a = 1\n        b = 2\ntrait Bar:\n    me idle():\n        pass\n"
+        val trait_first = "class Foo:\n    me other():\n        pass\ntrait Bar:\n    me run():\n        a = 1\n        b = 2\n"
+        step("type -> trait is pull_up")
+        val up = scv_refactor_rows_of_kind(scv_refactor_infer(_one("a.spl", type_first, trait_first)), "pull_up")
+        expect(up.len()).to_equal(1)
+        expect(_field(up[0], 1)).to_equal("a.spl:fn:Foo.run")
+        expect(_field(up[0], 2)).to_equal("a.spl:fn:Bar.run")
+        step("trait -> type is push_down")
+        val down = scv_refactor_rows_of_kind(scv_refactor_infer(_one("a.spl", trait_first, type_first)), "push_down")
+        expect(down.len()).to_equal(1)
+        expect(_field(down[0], 1)).to_equal("a.spl:fn:Bar.run")
+
+    it "reports a signature change on an anchored fn as accepted":
+        val rows = scv_refactor_infer(_one("a.spl", "fn alpha(x: i64):\n    y = x\n", "fn alpha(x: i64, z: i64):\n    y = x\n"))
+        val sig = scv_refactor_rows_of_kind(rows, "signature_change")
+        expect(sig.len()).to_equal(1)
+        expect(_field(sig[0], 5)).to_equal("accepted")
+        expect(scv_refactor_rows_of_kind(rows, "rename").len()).to_equal(0)
+
+    it "never silently accepts an ambiguous match and records its bounds":
+        step("two identical candidates tie -> one ambiguous row listing both, no accepted edge")
+        val rows = scv_refactor_infer(_one("a.spl", "fn alpha():\n    x = 1\n    y = 2\n", "fn beta():\n    x = 1\n    y = 2\nfn gamma():\n    x = 1\n    y = 2\n"))
+        val renames = scv_refactor_rows_of_kind(rows, "rename")
+        expect(renames.len()).to_equal(1)
+        expect(_field(renames[0], 5)).to_equal("ambiguous")
+        expect(_field(renames[0], 2).contains("a.spl:fn:beta")).to_be(true)
+        expect(_field(renames[0], 2).contains("a.spl:fn:gamma")).to_be(true)
+        var accepted = 0
+        for row in rows:
+            if _field(row, 5) == "accepted":
+                accepted = accepted + 1
+        expect(accepted).to_equal(0)
+        step("the matcher bound is a named, exported constant")
+        expect(SCV_REFACTOR_MAX_PAIRS).to_equal(512)
+        expect(SCV_REFACTOR_CANDIDATES_PER_UNIT > 0).to_be(true)
+        expect(SCV_REFACTOR_AMBIGUITY_MARGIN_MILLI > 0).to_be(true)
+        step("declaration units carry the body lines the matcher scores")
+        val units = scv_refactor_units("a.spl", "fn alpha():\n    x = 1\n\n    y = 2\n")
+        expect(units.len()).to_equal(1)
+        expect(units[0].body.len()).to_equal(2)

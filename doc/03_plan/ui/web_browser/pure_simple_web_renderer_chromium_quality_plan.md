@@ -275,57 +275,6 @@ timing counters.
 - Existing dirty worktree state can make GitHub sync unsafe without isolating
   this plan doc from unrelated changes.
 
-## Bounded HTML progress (2026-07-29)
-
-- Plain `hidden` now enters the canonical cascade as a lowest-priority
-  `display:none` presentational default. The shared style result suppresses the
-  element and subtree in both software paint and Draw IR; later author
-  `display` declarations can override it.
-- Exact attribute detection excludes `data-hidden`, `hiddenx`, and quoted text.
-- `hidden="until-found"` remains unsupported because reveal-until-found needs
-  find-in-page lifecycle and `beforematch` behavior; this slice does not claim
-  it or full HTML compatibility.
-
-## Ordered HTML/CSS compatibility matrix (2026-07-29)
-
-| Priority | Surface | Current state | Next canonical owner |
-|---|---|---|---|
-| P0 | HTML tree construction and recovery | partial: common table and implicit-close contexts exist; full WHATWG/WPT parity is unproven | shared HTML tree builder |
-| P0 | CSS cascade, inheritance, selectors | partial: specificity and common selectors exist; complete cascade layers/scoping are unproven | shared CSS cascade |
-| P0 | inline formatting | partial: text wrapping exists; `<br>` forced-line semantics are this bounded slice; inline-block/bidi parity remain | shared layout |
-| P0 | block sizing and overflow | partial; overflow/z-index evidence is owned by the DrawIR lane | shared layout/Draw IR |
-| P1 | flex layout | partial row/column/wrap support; full flex sizing parity unproven | shared layout |
-| P1 | grid and table layout | fixed direct and row-grouped tables are bounded-supported; grid, auto table layout, rowspan, and border collapse remain unsupported | shared layout |
-| P1 | replaced elements, backgrounds, fonts | partial; fixed single-image background is covered, local/multiple layers remain unsupported | canonical resource/layout/paint owners |
-| P1 | transitions and animations | supported bounded path; preserve the single canonical animation clock | style/layout/paint invalidation |
-| P2 | interactive HTML semantics | partial; details/dialog/forms and complete accessibility semantics remain unproven | DOM/event/accessibility owners |
-| Gate | Chromium/WPT equality | not claimed until pinned corpus receipts and production runtime evidence exist | conformance runner |
-
-This matrix orders compatibility work; it is not a full-browser claim. Each
-row advances only with semantic/computed-style/Draw IR evidence before pixels.
-
-## Forced inline line-break progress (2026-07-29)
-
-- `<br>` is assigned its HTML inline default and canonical inline-flow layout
-  forces one line-height advance with zero width.
-- The system oracle requires ordered text/break/text Draw IR, exact 20 px
-  geometry, then software pixel divergence from a single-line control.
-- `inline-block`, bidi line breaking, grid, table formatting, and full WPT
-  parity remain explicitly outside this bounded slice.
-
-## Fixed CSS background progress (2026-07-29)
-
-- Resolved single-image `background-attachment: fixed` now uses the viewport as
-  its positioning area while retaining the element background clip in the
-  canonical web semantic/layout to Draw IR lowering.
-- The system oracle covers absolute Draw IR geometry, fixed-versus-scroll
-  repeat phase, stable viewport tile origin while document scroll moves the
-  element shape, the no-repeat edge outside the viewport-anchored tile, and
-  Engine2D software readback.
-- `background-attachment: local` remains unsupported because canonical layout
-  does not yet carry an element scrollport offset; the unsupported ledger now
-  names only that remaining behavior.
-
 ## GitHub Sync Plan
 
 Do not sync this document together with unrelated worktree changes. The current
@@ -342,34 +291,3 @@ safe sync sequence is:
 The existing graphical equality plan records a prior sync failure:
 `git@github.com: Permission denied (publickey)`. Treat that as unresolved until
 `jj git fetch` and a non-mutating remote check succeed.
-
-## IR and GPU-offload alignment (2026-07-31)
-
-This plan's CPU renderer remains the authoritative correctness oracle. Two new
-documents change what sits around it, additively:
-
-- `doc/04_architecture/compiler/mdsoc/mdsoc_plus_tagged_structural_compute_architecture.md`
-  — canonical SoA DOM/CSS arenas, CSS selectors compiled to QueryIR, DOM/CSSOM
-  mutation as MutationIR transactions, and exact selector-feature invalidation
-  (`DirtyMask` + `StyleDifference`) replacing the broad "DOM changed → rerun
-  parse/style/layout/paint" behavior. Incremental results must equal this plan's
-  full-recompute path for the same snapshot.
-- `doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md` — experimental
-  GPU-resident WebScene lane and the packed, no-reallocation **DrawIR v3**
-  (typed tables, no strings in render-hot structures). DrawIR v2 and this
-  renderer are unchanged; v2/v3 compatibility adapters and semantic checksums
-  are owned by that plan's Program 2.
-
-Consequences for this plan:
-
-1. New corpus fixtures should also record DrawIR v3 semantic checksums once the
-   v3 contract lands, so the Chromium-parity corpus doubles as the GPU-lane
-   parity corpus.
-2. The comparison harness gains a shadow mode: CPU render authoritative, GPU
-   WebScene compared by receipt/IR/pixel — never the reverse until that plan's
-   promotion gates pass.
-3. Style/layout invalidation work in this plan should target the
-   selector-feature model rather than extending the current whole-pipeline
-   dirty flag; full recomputation stays as the test oracle.
-
-Per-lane parallel plans: `doc/03_plan/platform/structural_compute/`.

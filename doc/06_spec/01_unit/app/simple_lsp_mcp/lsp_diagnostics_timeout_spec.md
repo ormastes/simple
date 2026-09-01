@@ -1,4 +1,4 @@
-# Lsp Diagnostics Timeout Specification
+# @manual: primary
 
 > <details>
 
@@ -32,7 +32,7 @@ lsp_diagnostics_timeout_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Lsp Diagnostics Timeout Specification
+# @manual: primary
 
 ## Scenarios
 
@@ -88,7 +88,25 @@ expect(tools_source).to_contain("parse_nonnegative_int_or_minus_one(line_str)")
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
+Purpose: Verify simple_lsp_mcp diagnostics command execution is bounded at
+runtime — every spawned diagnostics subprocess is capped by a timeout and an
+output-capture limit, and client-supplied positions parse through the safe
+digit parser.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-SIMPLELSPMCP-001
+doc/01_research/local/REQ-APP-SIMPLELSPMCP-001.md
+doc/03_plan/sys_test/REQ-APP-SIMPLELSPMCP-001.md
+doc/04_architecture/REQ-APP-SIMPLELSPMCP-001.md
+doc/05_design/REQ-APP-SIMPLELSPMCP-001.md
 
 Tests covering:
 - simple_lsp_mcp diagnostics timeout guard

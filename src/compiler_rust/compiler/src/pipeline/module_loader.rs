@@ -15,9 +15,8 @@ use simple_parser::Parser;
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner,
-    FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
-    FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+    flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
 };
 use crate::stdlib_variant::stdlib_root_candidates;
 use crate::CompileError as _;
@@ -326,6 +325,47 @@ fn is_project_stdlib_import(parts: &[String]) -> bool {
         .unwrap_or(false)
 }
 
+/// Nearest ancestor of `path` (inclusive) that looks like a project root:
+/// it holds a `src/` directory or a `Cargo.toml`. Same rule as
+/// `pipeline::execution::find_project_root_hint` and the interpreter's
+/// `interpreter_module::path_resolution::find_project_root`.
+fn project_root_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut current = path.to_path_buf();
+    loop {
+        if p_is_dir(&current.join("src")) || p_is_file(&current.join("Cargo.toml")) {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// Last-resort resolution of a NON-stdlib import against an explicit project
+/// root (its `src/` first, then the root itself), for an importer that has no
+/// project root of its own. Stdlib imports are never resolved here — they have
+/// their own project-rooted search (see `is_project_stdlib_import`).
+fn resolve_parts_from_project_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
+    if is_project_stdlib_import(parts) {
+        return None;
+    }
+    let src = root.join("src");
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if p_is_dir(&src) {
+        candidates.push(src);
+    }
+    candidates.push(root.to_path_buf());
+    for candidate in &candidates {
+        if let Some(resolved) = resolve_parts_from_root(candidate, parts, use_stmt) {
+            return Some(resolved);
+        }
+        if let Some(resolved) = resolve_numbered_parts_from_root(candidate, parts, use_stmt) {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
 fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
     // Stdlib imports never resolve relative to the importing file — see
     // is_project_stdlib_import. The caller falls through to the project-rooted
@@ -439,11 +479,16 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             continue;
         }
 
-        let stdlib_parts: Vec<String> = if !parts.is_empty() && (parts[0] == "std" || parts[0] == "std_lib") {
-            parts[1..].to_vec()
-        } else {
-            parts.to_vec()
-        };
+        // `lib.x` is the same stdlib root as `std.x` (module_resolver/resolution.rs
+        // and the interpreter's path_resolution.rs both strip it); without this
+        // the 109 `use lib.common...` sites resolve to a non-existent
+        // `src/lib/lib/...` under `compile` and surface as undefined identifiers.
+        let stdlib_parts: Vec<String> =
+            if !parts.is_empty() && (parts[0] == "std" || parts[0] == "std_lib" || parts[0] == "lib") {
+                parts[1..].to_vec()
+            } else {
+                parts.to_vec()
+            };
 
         if stdlib_parts.is_empty() {
             continue;
@@ -529,6 +574,31 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
     None
 }
 
+/// Resolve the last-resort stdlib search without letting the worktree that
+/// built the seed override the worktree invoking it. The source file walk is
+/// still authoritative; this helper is reached only for sources outside a
+/// repository (for example generated doctest composites).
+fn resolve_from_stdlib_fallbacks(
+    runtime_root: PathBuf,
+    manifest_root: &Path,
+    parts: &[String],
+    use_stmt: &UseStmt,
+) -> Option<PathBuf> {
+    let repo_root = manifest_root.join("..").join("..").join("..");
+    for fallback_root in [
+        runtime_root,
+        repo_root,
+        manifest_root.join("..").join(".."),
+        manifest_root.join(".."),
+        manifest_root.to_path_buf(),
+    ] {
+        if let Some(resolved) = resolve_from_stdlib_root(&fallback_root, parts, use_stmt) {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
 /// Splices `module`'s items into the caller's flat item list for the
 /// `bin/simple run`/`-c` interpreted entry path. This is also the point where
 /// each retained free function is tagged with its true owning-module path via a
@@ -602,6 +672,7 @@ fn append_flattened_import_binding_markers(
             ty: None,
             value: Expr::Nil,
             visibility: Visibility::Private,
+            attributes: vec![],
         }));
     };
     match &use_stmt.target {
@@ -658,12 +729,7 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         is_type_only: false,
                         is_lazy: false,
                     };
-                    append_flattened_import_binding_markers(
-                        &mut items,
-                        &reexport_as_use,
-                        module_path,
-                        &owner_name,
-                    );
+                    append_flattened_import_binding_markers(&mut items, &reexport_as_use, module_path, &owner_name);
                 }
                 next_global_already_tagged = false;
             }
@@ -701,6 +767,7 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         ty: None,
                         value: Expr::Nil,
                         visibility: Visibility::Private,
+                        attributes: vec![],
                     }));
                 }
                 items.push(declaration);
@@ -1318,19 +1385,23 @@ pub fn load_module_with_imports(path: &Path, visited: &mut HashSet<PathBuf>) -> 
 /// populated. Only names with two or more DISTINCT layouts are kept, matching
 /// native_project's `record_struct_fields` semantics (identical re-imports of
 /// the same layout are not collisions).
-pub fn collect_duplicate_struct_defs(
-    module: &Module,
-) -> HashMap<String, Vec<Vec<(String, Type)>>> {
+pub fn collect_duplicate_struct_defs(module: &Module) -> HashMap<String, Vec<Vec<(String, Type)>>> {
     let mut by_name: HashMap<String, Vec<Vec<(String, Type)>>> = HashMap::new();
     for item in &module.items {
         let (name, fields) = match item {
             Node::Struct(s) if !s.fields.is_empty() => (
                 &s.name,
-                s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect::<Vec<_>>(),
+                s.fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect::<Vec<_>>(),
             ),
             Node::Class(c) if !c.fields.is_empty() => (
                 &c.name,
-                c.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect::<Vec<_>>(),
+                c.fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect::<Vec<_>>(),
             ),
             _ => continue,
         };
@@ -1341,7 +1412,6 @@ pub fn collect_duplicate_struct_defs(
     }
     by_name.into_iter().filter(|(_, v)| v.len() > 1).collect()
 }
-
 
 pub fn load_module_with_imports_for_target(
     path: &Path,
@@ -1580,11 +1650,7 @@ fn warn_duplicate_private_signatures(module: &Module) {
                 // pass stamps every method via `tag_node_function_owners`), so the
                 // first method's owner attributes the class. A method-less class
                 // falls back to "<entry file>".
-                let owner = c
-                    .methods
-                    .first()
-                    .map(function_owner_module)
-                    .unwrap_or("<entry file>");
+                let owner = c.methods.first().map(function_owner_module).unwrap_or("<entry file>");
                 classes_by_name.entry(c.name.as_str()).or_default().push(owner);
             }
             _ => {}
@@ -2526,20 +2592,26 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             current = parent.to_path_buf();
         }
 
-        let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo_root = manifest_root.join("..").join("..").join("..");
-        for fallback_root in [
-            repo_root,
-            manifest_root.join("..").join(".."),
-            manifest_root.join(".."),
-            manifest_root.to_path_buf(),
+        if let Some(resolved) = resolve_from_stdlib_fallbacks(
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        ] {
-            if let Some(resolved) = resolve_from_stdlib_root(&fallback_root, parts, use_stmt) {
-                return Some(resolved);
-            }
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            parts,
+            use_stmt,
+        ) {
+            return Some(resolved);
         }
 
+        // Importer outside any project tree (a test-runner wrapper written to
+        // $TMPDIR is the live case): every strategy above is importer-relative
+        // or stdlib-only, so a project import such as `compiler.x.y` had no
+        // root to resolve against at all. The interpreter already falls back to
+        // the cwd's project root for exactly this (interpreter_module/
+        // path_resolution.rs); mirror it so `compile` and `run` agree.
+        if project_root_ancestor(base).is_none() {
+            if let Some(cwd_root) = std::env::current_dir().ok().and_then(|cwd| project_root_ancestor(&cwd)) {
+                return resolve_parts_from_project_root(&cwd_root, parts, use_stmt);
+            }
+        }
         None
     };
 
@@ -2784,6 +2856,107 @@ mod tests {
             is_type_only: false,
             is_lazy: false,
         }
+    }
+
+    /// Replays the MC/DC test lane: the runner writes a wrapped spec to $TMPDIR
+    /// (no `src/` ancestor) whose `use compiler.common.diagnostics.span.{Span}`
+    /// must resolve against the cwd project, including a numbered layer dir.
+    #[test]
+    fn project_import_from_importer_outside_any_project_resolves_via_cwd_project_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("proj");
+        let span_file = project.join("src/compiler/00.common/diagnostics/span.spl");
+        fs::create_dir_all(span_file.parent().unwrap()).unwrap();
+        fs::write(&span_file, "struct Span:\n    line: i64\n").unwrap();
+        let scratch = temp.path().join("scratch/tmp");
+        fs::create_dir_all(&scratch).unwrap();
+
+        // The importer's own tree has no project root at all.
+        assert_eq!(project_root_ancestor(&scratch), None);
+        assert_eq!(
+            project_root_ancestor(&project.join("src/compiler")),
+            Some(project.clone())
+        );
+
+        let parts: Vec<String> = ["compiler", "common", "diagnostics", "span"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let import = use_stmt(
+            &["compiler", "common", "diagnostics", "span"],
+            ImportTarget::Group(vec![ImportTarget::Single("Span".to_string())]),
+        );
+        assert_eq!(
+            resolve_parts_from_project_root(&project, &parts, &import),
+            Some(span_file)
+        );
+
+        // Stdlib imports keep their own project-rooted search; never served here.
+        let std_parts: Vec<String> = ["std", "io"].iter().map(|s| s.to_string()).collect();
+        let std_import = use_stmt(&["std", "io"], ImportTarget::Glob);
+        fs::create_dir_all(project.join("src/std")).unwrap();
+        fs::write(project.join("src/std/io.spl"), "fn x():\n    1\n").unwrap();
+        assert_eq!(resolve_parts_from_project_root(&project, &std_parts, &std_import), None);
+    }
+
+    /// `use lib.common.env_access.model.{...}` (109 sites in src/) names the
+    /// same stdlib root as `std.`; the loader used to keep the `lib` segment
+    /// and probe `src/lib/lib/common/...`, so the import silently vanished.
+    #[test]
+    fn lib_prefixed_import_resolves_from_stdlib_root_like_std() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("proj");
+        let model = root.join("src/lib/common/env_access/model.spl");
+        fs::create_dir_all(model.parent().unwrap()).unwrap();
+        fs::write(&model, "fn env_scenario_selection_error() -> i64:\n    1\n").unwrap();
+
+        let lib_parts: Vec<String> = ["lib", "common", "env_access", "model"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let lib_import = use_stmt(
+            &["lib", "common", "env_access", "model"],
+            ImportTarget::Group(vec![ImportTarget::Single("env_scenario_selection_error".to_string())]),
+        );
+        assert_eq!(
+            resolve_from_stdlib_root(&root, &lib_parts, &lib_import),
+            Some(model.clone())
+        );
+
+        let std_parts: Vec<String> = ["std", "common", "env_access", "model"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let std_import = use_stmt(&["std", "common", "env_access", "model"], ImportTarget::Glob);
+        assert_eq!(resolve_from_stdlib_root(&root, &std_parts, &std_import), Some(model));
+    }
+
+    #[test]
+    fn stdlib_fallback_prefers_runtime_worktree_over_seed_build_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("runtime-worktree");
+        let seed_manifest = temp.path().join("seed-worktree/src/compiler_rust/compiler");
+        let seed_root = temp.path().join("seed-worktree");
+        let relative_module = Path::new("src/lib/common/probe.spl");
+        let runtime_module = runtime_root.join(relative_module);
+        let seed_module = seed_root.join(relative_module);
+        fs::create_dir_all(runtime_module.parent().unwrap()).unwrap();
+        fs::create_dir_all(seed_module.parent().unwrap()).unwrap();
+        fs::create_dir_all(&seed_manifest).unwrap();
+        fs::write(&runtime_module, "# runtime worktree\n").unwrap();
+        fs::write(&seed_module, "# seed build worktree\n").unwrap();
+
+        let parts = ["std".to_string(), "probe".to_string()];
+        let import = use_stmt(&["std", "probe"], ImportTarget::Glob);
+        assert_eq!(
+            resolve_from_stdlib_root(&runtime_root, &parts, &import),
+            Some(runtime_module.clone())
+        );
+        assert_eq!(resolve_from_stdlib_root(&seed_root, &parts, &import), Some(seed_module));
+
+        let resolved = resolve_from_stdlib_fallbacks(runtime_root, &seed_manifest, &parts, &import).unwrap();
+
+        assert_eq!(resolved, runtime_module);
     }
 
     #[test]

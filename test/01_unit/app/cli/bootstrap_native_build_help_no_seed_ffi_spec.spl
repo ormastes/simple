@@ -1,86 +1,60 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """
 ## Purpose and audience
-Purpose: Verify bootstrap native-build help.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-Troubleshooting: a red scenario here means the pinned contract changed —
-check verification guidance in the linked design docs before editing oracles.
-# @manual: primary
-REQ-APP-CLI-001
-doc/01_research/local/REQ-APP-CLI-001.md
-doc/03_plan/sys_test/REQ-APP-CLI-001.md
-doc/04_architecture/REQ-APP-CLI-001.md
-doc/05_design/REQ-APP-CLI-001.md
+Purpose: the `native-build --help` / bare `native-build` entry points must be
+answered in-process by the real bootstrap dispatch function, never forwarded to
+the seed FFI stub that segfaults (exit 139) in the pure-Simple capsule.
+Audience: compiler and tooling engineers who maintain the bootstrap CLI.
 """
-# @req: REQ-APP-CLI-001
 
-extern fn rt_file_read_text(path: text) -> text
+use std.spec.step
+
 use std.spec.{describe, it, expect}
 
 # Reproduce-first regression cover for:
 #   doc/08_tracking/bug/bootstrap_native_build_help_segfaults_pure_simple_2026-08-18.md
 #
-# Observed on the deployed pure-Simple capsule bootstrap/stage3/simple
-# (sha256 905ce036...):
+# Observed on the deployed pure-Simple capsule bootstrap/stage3/simple:
 #   $ bootstrap/stage3/simple native-build --help   -> Segmentation fault (139)
 #   $ bootstrap/stage3/simple native-build          -> Segmentation fault (139)
 # because both shapes fell through to `run_rt_native_build`, whose only body is
-# the Rust seed extern `rt_native_build`. That extern is a backfilled STUB in
-# the pure-Simple capsule, so the call jumps into nothing.
+# the Rust seed extern `rt_native_build` -- a backfilled STUB in the pure-Simple
+# capsule, so the call jumps into nothing.
 #
-# This is a SOURCE contract, deliberately: rebuilding the stage3 capsule needs a
-# full bootstrap, so the compiled binary cannot be asserted on in a unit lane.
-# What it pins is the routing decision -- the only thing the fix changed.
-#
-# FALSIFIED BY: an edit that re-routes `--help`/`-h`/no-arg `native-build` back
-# through run_rt_native_build (or any seed extern) in bootstrap_main.spl.
+# Oracle: call the REAL dispatch function, `run_native_build_bootstrap`, with the
+# exact argv shapes from the incident and assert on its return codes. The fix
+# routes `--help`/`-h` to an in-process usage printer (return 0) and a bare
+# `native-build` to the missing-source error (return 1) -- neither touches the
+# seed extern. A regression that re-routes them into run_rt_native_build makes
+# this process either crash or return the stub's sentinel, failing the spec.
 
-fn bootstrap_main_source() -> text:
-    rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? ""
-
-use std.spec.step
+use app.cli.bootstrap_main.{run_native_build_bootstrap}
 
 describe "bootstrap native-build help":
-    it "answers --help in-process instead of calling the seed extern":
-        # @req: REQ-APP-CLI-001
-        step("Verify: answers --help in-process instead of calling the seed extern")
-        val source = bootstrap_main_source()
+    # @manual scenario evidence
+    it "answers --help in-process with exit code 0":
+        # @req REQ-SSPEC-APP
+        step("Verify: run_native_build_bootstrap answers --help in-process")
+        val rc = run_native_build_bootstrap(["simple", "native-build", "--help"])
+        expect(rc).to_equal(0)  # oracle: usage must be answered locally, exit 0
 
-        expect(source).to_contain("if removed_bundle == \"--help\" or removed_bundle == \"-h\":")
-        expect(source).to_contain("print \"Usage: simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]\"")
-        # The pre-fix line bundled --help with --list-optimizations and sent all
-        # three into the seed FFI. It must be gone.
-        expect(source.contains("if removed_bundle == \"--help\" or removed_bundle == \"-h\" or removed_bundle == \"--list-optimizations\":")).to_equal(false)
+    it "answers -h identically with exit code 0":
+        # @req REQ-SSPEC-APP
+        step("Verify: run_native_build_bootstrap answers -h in-process")
+        val rc = run_native_build_bootstrap(["simple", "native-build", "-h"])
+        expect(rc).to_equal(0)  # oracle: -h is the same in-process route
 
     it "rejects a bare native-build with no source instead of crashing":
-        # @req: REQ-APP-CLI-001
-        step("Verify: rejects a bare native-build with no source instead of crashing")
-        val source = bootstrap_main_source()
+        # @req REQ-SSPEC-APP
+        step("Verify: run_native_build_bootstrap rejects a bare native-build")
+        val rc = run_native_build_bootstrap(["simple", "native-build"])
+        expect(rc).to_equal(1)  # oracle: missing-source error path returns 1, not a crash
 
-        expect(source).to_contain("if args.len() < 3:")
-        expect(source).to_contain("print \"error: missing source file\"")
-
-    it "keeps the seed extern reachable only for the real build lanes":
-        # @req: REQ-APP-CLI-001
-        step("Verify: keeps the seed extern reachable only for the real build lanes")
-        val source = bootstrap_main_source()
-
-        # --list-optimizations still needs the seed's optimization registry; it
-        # is knowingly left on the FFI route (tracked in the bug record).
-        expect(source).to_contain("if removed_bundle == \"--list-optimizations\":")
-        expect(source).to_contain("extern fn rt_native_build(args: [text]) -> i64")
-
-    it "documents why native_build_help cannot hold the text":
-        # @req: REQ-APP-CLI-001
-        step("Verify: documents why native_build_help cannot hold the text")
-        val source = bootstrap_main_source()
-        val lowering = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
-
-        # native_build_help()'s BODY is hardcoded in bootstrap MIR lowering, so
-        # editing its .spl source would be silently ignored in the capsule.
-        expect(lowering).to_contain("if name == \"native_build_help\":")
-        expect(source).to_contain("hardcoded")
+    it "rejects a removed runtime bundle by name with exit code 1":
+        # @req REQ-SSPEC-APP
+        step("Verify: run_native_build_bootstrap rejects a removed runtime bundle")
+        val rc = run_native_build_bootstrap(["simple", "native-build", "x.spl", "--runtime-bundle", "hosted"])
+        expect(rc).to_equal(1)  # oracle: removed-bundle guard fires before any build lane

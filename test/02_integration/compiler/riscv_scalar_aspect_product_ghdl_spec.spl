@@ -1,0 +1,61 @@
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId}
+use compiler.mir.hwir.aspects.{HwAspectApplication, HwAspectManifest,
+    HwAspectPlan, HwRetireObservation, hwir_aspect_lock_for_plan}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_product_composition.{
+    hwir_scalar_commit_retire_node_id, strict_riscv_scalar_product_composition}
+use compiler.backend.backend.riscv_scalar_product_to_vhdl.{
+    compile_strict_riscv_scalar_product_with_retire_observations}
+
+fn observation_plan(node_id: HwNodeId) -> HwAspectPlan:
+    val manifest = HwAspectManifest(id: "rvfi.scalar.retire", version: "1.0.0",
+        content_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        stage: "Architecture", advice_kind: "observe", effect_class: "observational",
+        required: true, required_capabilities: [], provided_capabilities: ["rvfi.observe"],
+        conflicts_with: [], join_point_selectors: ["commit.retire"],
+        added_port_count: 2, added_state_count: 0, latency_contract: "transparent",
+        proof_obligations: ["architectural_noninterference"])
+    HwAspectPlan(manifests: [manifest], applications: [
+        HwAspectApplication(aspect_id: manifest.id, matched_node_ids: [node_id],
+            woven_node_count: 2)])
+
+describe "locked scalar retirement observation VHDL":
+    slow_it "analyzes and elaborates the typed observed ADD product when GHDL exists":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val lsu = LsuConfig.rv32_product_default()
+        val base = strict_riscv_scalar_product_composition(
+            "scalar_aspect_ghdl", config, 0x002081B3, lsu)
+        expect(base.is_ok()).to_equal(true)
+        if base.is_ok():
+            val node_id = hwir_scalar_commit_retire_node_id(base.ok().unwrap())
+            val plan = observation_plan(node_id)
+            val lock = hwir_aspect_lock_for_plan(plan)
+            expect(lock.is_ok()).to_equal(true)
+            if lock.is_ok():
+                val observations = [
+                    HwRetireObservation(aspect_id: "rvfi.scalar.retire",
+                        target_node_id: node_id, receipt_value: "retire_valid",
+                        output_port: "observed_retire_valid", bit_width: 1),
+                    HwRetireObservation(aspect_id: "rvfi.scalar.retire",
+                        target_node_id: node_id, receipt_value: "retire_order",
+                        output_port: "observed_retire_order", bit_width: 64)]
+                val emitted = compile_strict_riscv_scalar_product_with_retire_observations(
+                    "scalar_aspect_ghdl", config, 0x002081B3, lsu,
+                    plan, lock.ok().unwrap(), observations)
+                expect(emitted.is_success()).to_equal(true)
+                if emitted.is_success():
+                    expect(emitted.vhdl).to_contain("-- simple-hwir aspect-lock=")
+                    expect(emitted.vhdl).to_contain("-- simple-hwir aspect-weave=")
+                    expect(emitted.vhdl).to_contain(
+                        "observed_retire_valid <= source_retirement_owner_retire_valid")
+                    expect(emitted.vhdl).to_contain(
+                        "observed_retire_order <= source_retirement_owner_retire_order")
+                    val path = "/tmp/scalar_aspect_ghdl.vhd"
+                    expect(vhdl_write_file(path, emitted.vhdl)).to_equal(true)
+                    expect(ghdl_analyze(path).success).to_equal(true)
+                    expect(ghdl_elaborate("scalar_aspect_ghdl").success).to_equal(true)

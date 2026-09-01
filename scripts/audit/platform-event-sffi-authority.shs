@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_async_mut/io/platform_event.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 20 ]
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 21 ]
+[ "$(grep -c '^    @unsafe(reason:' "$module" || true)" -eq 0 ]
+[ "$(grep -Fc '        unsafe(capabilities: [ffi, raw_ptr]):' "$module")" -eq 7 ]
+[ "$(grep -c '^@always_inline$' "$module" || true)" -eq 0 ]
+
+call_count=$(perl -0ne '
+    s/""".*?"""//sg;
+    s/#.*//mg;
+    s/^extern fn .*\n//mg;
+    while (/\brt_(?:event_loop|kqueue|iocp|event_ports)_[a-z_]+\s*\(/g) { $count++ }
+    END { print $count + 0 }
+' "$module")
+[ "$call_count" -eq 28 ]
+
+symbols=$(awk '/^extern fn /{name=$3; sub(/\(.*/, "", name); print name}' "$module")
+both=0
+one=0
+none=0
+for symbol in $symbols; do
+    providers=0
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry" && providers=$((providers + 1))
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" && providers=$((providers + 1))
+    case "$providers" in
+        2) both=$((both + 1)) ;;
+        1) one=$((one + 1)) ;;
+        0) none=$((none + 1)) ;;
+    esac
+done
+[ "$both" -eq 1 ]
+[ "$one" -eq 11 ]
+[ "$none" -eq 8 ]
+
+grep -q '^    fn register(handle: i64, fd: i64, mode: EventMode) -> bool:' "$module"
+grep -q '^    fn register_edge(handle: i64, fd: i64, mode: EventMode) -> bool:' "$module"
+grep -q '^    fn close(handle: i64) -> bool:' "$module"
+grep -q 'if handle < 0 or max <= 0:' "$module"
+
+echo "Platform event SFFI authority audit: PASS (28 calls/20 symbols; 20 unsafe declarations + class contract + 7 lexical raw-call scopes; 1 both/11 one/8 no-provider; Stage-2-compatible class grammar, semantic bool and O(1) backend dispatch retained; no forced inlining)"

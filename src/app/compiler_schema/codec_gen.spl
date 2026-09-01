@@ -48,7 +48,8 @@ fn codec_decl_sources() -> [text]:
         "src/compiler/00.common/dynamic_identity/closure.spl",
         "src/compiler/00.common/_Attributes/decl_attrs.spl",
         "src/compiler/30.types/_TypeLayout/layout_core.spl",
-        "src/compiler/10.frontend/parser_types_expr.spl"
+        "src/compiler/10.frontend/parser_types_expr.spl",
+        "src/lib/common/facet_abi.spl"
     ]
 
 fn codec_opaque_types() -> [text]:
@@ -58,11 +59,6 @@ fn codec_opaque_types() -> [text]:
 fn codec_use_lines() -> text:
     var out = "use compiler.hir.hir_definitions.*\n"
     out = out + "use compiler.hir.hir_types.*\n"
-    # This explicit import was hand-added to the GENERATED file and was
-    # therefore silently dropped by every regeneration. Emitting it here keeps
-    # it. The glob above does not subsume it: a glob is not an import-origin
-    # for surface projection, so HirModule must be named explicitly.
-    out = out + "use compiler.hir.hir_types.{{HirModule}}  # explicit: a glob is not an import-origin for surface projection\n"
     out = out + "use compiler.hir.hir_operators.{{HirBinOp, HirUnaryOp, HirAssignOp}}\n"
     out = out + "use compiler.common.diagnostics.span.{{Span}}\n"
     out = out + "use compiler.common.dependency.visibility.{{Visibility}}\n"
@@ -71,6 +67,7 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.types.type_layout.{{LayoutAttr, TypeLayoutKind}}\n"
     out = out + "use compiler.common.attributes.{{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}}\n"
     out = out + "use compiler.frontend.parser_types_expr.{{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}}\n"
+    out = out + "use common.facet_abi.*\n"
     out = out + "use compiler.frontend.core.flat_pool_codec.{{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}}\n"
     out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64}}\n"
     out
@@ -155,7 +152,9 @@ class CodecUniverse:
             val path = repo_root + "/" + rel
             if not file_exists(path):
                 _codec_fail("hir codec generator: declaration source missing: {rel}")
-            val body = read_file_text(path)
+            # Normalize public ABI declaration introducers for the same
+            # strict line scanner used by compiler-internal schema sources.
+            val body = read_file_text(path).replace("pub struct ", "struct ").replace("pub enum ", "enum ")
             texts.push(body)
             names.push(rel)
             for line in body.split("\n"):
@@ -465,22 +464,7 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         return indent + "val " + target + " = hc_read_f64(r)\n"
     if s.cat == "node" or s.cat == "opaque":
         val callee = if s.cat == "node": dec_fn_name(s.name) else: "hc_dec_opaque_" + _codec_snake(s.name)
-        # Bug (selfhost_hir_cache_encode_hir_type_segv_2026-08-22): the
-        # if-EXPRESSION form unifies both arms at `T?`, so the taken arm is
-        # boxed as an inline `Some` enum word (hash("Some")<<32 | 1). Stored
-        # into a NON-optional field -- HirType.span is declared `span: Span`
-        # (src/compiler/20.hir/hir_types.spl:489-492) -- that enum word is then
-        # deep-copied as a tagged `Span` pointer by the next callee's
-        # value-semantics copy-in prologue, faulting on 0xf198715900000000 in
-        # hc_enc_hir_type. Same defect class the scalar note above records as
-        # already hit once and fixed by inlining; the node/opaque case was left
-        # unmitigated. The statement form assigns the bare value without
-        # boxing -- which is exactly why the `opt` branch below must write
-        # `Some(...)` explicitly. Wire format is unchanged.
-        var out = indent + "var " + target + ": " + decl_type + "? = nil\n"
-        out = out + indent + "if r.next_i64() == 1:\n"
-        out = out + indent + "    " + target + " = " + callee + "(r)\n"
-        return out
+        return indent + "val " + target + " = if r.next_i64() == 1: " + callee + "(r) else: nil\n"
     val k = c.next()
     if s.cat == "opt":
         var out = indent + "var " + target + ": " + decl_type + " = nil\n"

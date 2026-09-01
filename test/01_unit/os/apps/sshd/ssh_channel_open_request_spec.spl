@@ -1,0 +1,98 @@
+use os.apps.sshd.ssh_channel_open_request.*
+use os.apps.sshd.ssh_channel.{SSH_MSG_CHANNEL_OPEN_FAILURE, SSH_OPEN_UNKNOWN_CHANNEL_TYPE, SSH_OPEN_RESOURCE_SHORTAGE}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _push_u32_be(out: [u8], value: u32) -> [u8]:
+    var bytes = out
+    bytes.push(((value >> 24) & 255u32).to_u8())
+    bytes.push(((value >> 16) & 255u32).to_u8())
+    bytes.push(((value >> 8) & 255u32).to_u8())
+    bytes.push((value & 255u32).to_u8())
+    bytes
+
+fn _open_packet(kind: [u8], sender: u32, tail: [u8]) -> [u8]:
+    var packet: [u8] = [90u8]
+    packet = _push_u32_be(packet, kind.len().to_u32())
+    for byte in kind:
+        packet.push(byte)
+    packet = _push_u32_be(packet, sender)
+    packet = _push_u32_be(packet, 4096u32)
+    packet = _push_u32_be(packet, 1024u32)
+    for byte in tail:
+        packet.push(byte)
+    packet
+
+describe "bounded SSH channel-open classification":
+    it "routes live admission through bounded classification before allocation":
+        val source = rt_file_read_text("src/os/apps/sshd/ssh_session_channel.spl")
+        expect(source).to_contain("val request = ssh_channel_open_request_classify_v1(payload)")
+        expect(source).to_contain("if ssh_channel_open_transport_must_close_v1(request):")
+        expect(source).to_contain("if request.kind != SshChannelOpenRequestKindV1.Session:")
+        expect(source).to_contain("val rejected = ssh_channel_open_rejection_payload_v1(request)")
+        expect(source).to_contain("self.channels.session_channel_open_response(\n            request.sender_channel, request.initial_window, request.maximum_packet)")
+        expect(source.contains("_is_live_channel_open_session")).to_be(false)
+
+    it "admits an exact session request without retaining its type":
+        val request = ssh_channel_open_request_classify_v1(
+            _open_packet([0x73u8, 0x65u8, 0x73u8, 0x73u8, 0x69u8, 0x6Fu8, 0x6Eu8], 17u32, [])
+        )
+        expect(request.kind).to_equal(SshChannelOpenRequestKindV1.Session)
+        expect(request.sender_channel).to_equal(17u32)
+        expect(request.maximum_packet).to_equal(1024u32)
+
+    it "preserves the sender needed for an unsupported-type failure reply":
+        val request = ssh_channel_open_request_classify_v1(
+            _open_packet([0x64u8, 0x69u8, 0x72u8, 0x65u8, 0x63u8, 0x74u8], 23u32, [1u8, 2u8])
+        )
+        expect(request.kind).to_equal(SshChannelOpenRequestKindV1.Unsupported)
+        expect(request.sender_channel).to_equal(23u32)
+        val reply = ssh_channel_open_rejection_payload_v1(request)
+        expect(reply[0]).to_equal(SSH_MSG_CHANNEL_OPEN_FAILURE)
+        expect(reply[1]).to_equal(0u8)
+        expect(reply[4]).to_equal(23u8)
+        expect(reply[8]).to_equal(SSH_OPEN_UNKNOWN_CHANNEL_TYPE.to_u8())
+
+    it "rejects a zero peer packet limit without classifying wire corruption":
+        val request = ssh_channel_open_request_classify_v1(
+            _open_packet([0x73u8, 0x65u8, 0x73u8, 0x73u8, 0x69u8, 0x6Fu8, 0x6Eu8], 31u32, [])
+        )
+        # Replace the final uint32 with zero while preserving packet shape.
+        var zero_limit = _open_packet(
+            [0x73u8, 0x65u8, 0x73u8, 0x73u8, 0x69u8, 0x6Fu8, 0x6Eu8], 31u32, []
+        )
+        zero_limit[20u64] = 0u8
+        zero_limit[21u64] = 0u8
+        zero_limit[22u64] = 0u8
+        zero_limit[23u64] = 0u8
+        val rejected = ssh_channel_open_request_classify_v1(zero_limit)
+        expect(request.kind).to_equal(SshChannelOpenRequestKindV1.Session)
+        expect(rejected.kind).to_equal(SshChannelOpenRequestKindV1.RejectedSessionParameters)
+        val reply = ssh_channel_open_rejection_payload_v1(rejected)
+        expect(reply[0]).to_equal(SSH_MSG_CHANNEL_OPEN_FAILURE)
+        expect(reply[4]).to_equal(31u8)
+        expect(reply[8]).to_equal(SSH_OPEN_RESOURCE_SHORTAGE.to_u8())
+
+    it "rejects truncated fixed fields":
+        val request = ssh_channel_open_request_classify_v1([90u8, 0u8, 0u8, 0u8, 7u8])
+        expect(request.kind).to_equal(SshChannelOpenRequestKindV1.Malformed)
+        expect(ssh_channel_open_transport_must_close_v1(request)).to_be(true)
+        expect(ssh_channel_open_rejection_payload_v1(request)).to_equal([])
+
+    it "rejects trailing session-specific bytes":
+        val request = ssh_channel_open_request_classify_v1(
+            _open_packet([0x73u8, 0x65u8, 0x73u8, 0x73u8, 0x69u8, 0x6Fu8, 0x6Eu8], 4u32, [0u8])
+        )
+        expect(request.kind).to_equal(SshChannelOpenRequestKindV1.Malformed)
+
+    it "skips a long unsupported type without retaining or scanning it":
+        var packet: [u8] = [90u8]
+        packet = _push_u32_be(packet, 65u32)
+        while packet.len() < 70u64:
+            packet.push(0x61u8)
+        packet = _push_u32_be(packet, 9u32)
+        packet = _push_u32_be(packet, 4096u32)
+        packet = _push_u32_be(packet, 1024u32)
+        val request = ssh_channel_open_request_classify_v1(packet)
+        expect(request.kind).to_equal(SshChannelOpenRequestKindV1.Unsupported)
+        expect(request.sender_channel).to_equal(9u32)

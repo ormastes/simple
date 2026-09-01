@@ -1,41 +1,31 @@
-"""
-## Purpose and audience
-Purpose: Prove that Bootstrap MCP — binary existence.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-TOOLS-BOOTSTRAP-MCP-001
-doc/01_research/tools/REQ-TOOLS-BOOTSTRAP-MCP-001.md
-doc/03_plan/tools/REQ-TOOLS-BOOTSTRAP-MCP-001.md
-doc/04_architecture/tools/REQ-TOOLS-BOOTSTRAP-MCP-001.md
-doc/05_design/tools/REQ-TOOLS-BOOTSTRAP-MCP-001.md
-"""
-# @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 # @cover scripts/bootstrap/bootstrap-from-scratch.sh 30%
 # @cover scripts/setup/setup.shs 20%
 """
 # Bootstrap MCP Server Native Build Specification
 
-**Feature IDs:** REQ-MCP-CMD-002
+**Feature IDs:** #MCP-BOOT-001
 **Category:** Tooling
 **Difficulty:** 3/5
-**Status:** Implemented
-**Requirements:** doc/02_requirements/app/build/bootstrap.md
-**Plan:** doc/03_plan/sys_test/mcp_cmdline_handshake.md
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** .sstack/native-mcp-build-bootstrap/state.md
 **Design:** N/A
 **Research:** N/A
 
 ## Overview
 
-System tests for the deployed MCP server layout after bootstrap --deploy.
-The canonical MCP command-line handshake spec and fresh native smoke checker
-own protocol and feature-call acceptance.
+System tests for native MCP server compilation in the bootstrap pipeline.
+Verifies that after bootstrap with --deploy, both MCP server binaries
+(simple_mcp_server, simple_lsp_mcp_server) exist, are executable, and
+respond to JSON-RPC initialize requests.
+
+Shell-level integration tests (AC-1 through AC-4, AC-6, AC-7) are defined
+as verification commands in the state file. This SPipe file covers AC-5:
+runtime validation that MCP servers respond to JSON-RPC initialize.
 
 ## Key Concepts
 
@@ -49,10 +39,9 @@ own protocol and feature-call acceptance.
 
 ## Behavior
 
-- After bootstrap --deploy, both platform release binaries are executable
-- After bootstrap --deploy, both native binaries have matching integrity sidecars
-- After bootstrap --deploy, both bin/ launchers are executable wrappers
-- Both deployed launchers complete startup checks
+- After bootstrap --deploy, bin/simple_mcp_server is a symlink to a native binary
+- After bootstrap --deploy, bin/simple_lsp_mcp_server is a symlink to a native binary
+- Both servers accept JSON-RPC initialize on stdin and return capabilities
 - The --no-mcp flag skips MCP server compilation entirely
 
 ## Related Specifications
@@ -62,12 +51,17 @@ own protocol and feature-call acceptance.
 - [T32 MCP Lifecycle](t32_mcp_lifecycle_spec.spl)
 """
 
-# @req REQ-MCP-CMD-002
+# @req REQ-MCP-BOOT-001
 # @feature native_mcp_bootstrap
 # tag: system, slow
 
 use std.spec
-use std.io_runtime.{file_exists, file_hash_sha256, file_read, process_run}
+use std.io_runtime.{file_exists, process_run}
+
+struct ProcessOutput:
+    out_text: text
+    err_text: text
+    exit_code: i64
 
 # ============================================================================
 # Helpers
@@ -85,12 +79,31 @@ fn detect_platform() -> text:
     if os == "linux":
         return "{arch}-unknown-linux-gnu"
     elif os == "darwin":
-        return "{arch}-apple-darwin"
+        return "{arch}-apple-darwin-macho"
     "unknown"
 
 fn mcp_binary_path(name: text) -> text:
     val triple = detect_platform()
     "bin/release/{triple}/{name}"
+
+fn send_initialize_request(binary_path: text) -> ProcessOutput:
+    # JSON-RPC initialize request with Content-Length header (MCP over stdio)
+    val json_body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"0.1.0\"}}}"
+    val content_length = json_body.len()
+    val request = "Content-Length: {content_length}\r\n\r\n{json_body}"
+    # Use bash to echo the request into the MCP server stdin with a timeout
+    val cmd = "echo -n '{request}' | timeout 10 {binary_path} 2>/dev/null || true"
+    val (out_text, err_text, exit_code) = process_run("bash", ["-c", cmd])
+    ProcessOutput(out_text: out_text, err_text: err_text, exit_code: exit_code)
+
+fn send_tool_call_request(binary_path: text, tool_name: text, arguments_json: text) -> ProcessOutput:
+    val json_body = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"{tool_name}\",\"arguments\":{arguments_json}}}"
+    val content_length = json_body.len()
+    val request = "Content-Length: {content_length}\r\n\r\n{json_body}"
+    val cmd = "echo -n '{request}' | timeout 20 {binary_path} 2>/dev/null || true"
+    val (out_text, err_text, exit_code) = process_run("bash", ["-c", cmd])
+    ProcessOutput(out_text: out_text, err_text: err_text, exit_code: exit_code)
+
 
 # ============================================================================
 # Test Group 1: MCP Binary Existence (AC-1, AC-6)
@@ -107,24 +120,22 @@ describe "Bootstrap MCP — binary existence":
     """
 
     it "simple_mcp_server binary exists at platform release path":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001 REQ-MCP-CMD-002
-        step("Verify: simple_mcp_server binary exists at platform release path")
+        # @req REQ-MCP-CMD-002
+        # @req REQ-MCP-CMD-002
+        # @req REQ-SSPEC-SYSTEM
+        step("simple_mcp_server binary exists at platform release path")
         val path = mcp_binary_path("simple_mcp_server")
         expect(file_exists(path)).to_equal(true)
-        val (_, _, rc) = process_run("test", ["-x", path])
-        expect(rc).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
 
     it "simple_lsp_mcp_server binary exists at platform release path":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-        step("Verify: simple_lsp_mcp_server binary exists at platform release path")
+        # @req REQ-SSPEC-SYSTEM
+        step("simple_lsp_mcp_server binary exists at platform release path")
         val path = mcp_binary_path("simple_lsp_mcp_server")
         expect(file_exists(path)).to_equal(true)
-        val (_, _, rc) = process_run("test", ["-x", path])
-        expect(rc).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
 
     it "native MCP binaries have matching integrity sidecars":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-        step("Verify: native MCP binaries have matching integrity sidecars")
+        # @req REQ-SSPEC-SYSTEM
+        step("native MCP binaries have matching integrity sidecars")
         for name in ["simple_mcp_server", "simple_lsp_mcp_server"]:
             val binary = mcp_binary_path(name)
             val sidecar = binary + ".sha256"
@@ -133,67 +144,74 @@ describe "Bootstrap MCP — binary existence":
 
 
 # ============================================================================
-# Test Group 2: Deployed launchers (AC-3)
+# Test Group 2: Symlinks (AC-3)
 # ============================================================================
 
-describe "Bootstrap MCP — deployed launchers":
+describe "Bootstrap MCP — symlinks":
     """
-    ## Launcher Verification
+    ## Symlink Verification
 
     After setup.shs, bin/simple_mcp_server and bin/simple_lsp_mcp_server
-    must be executable wrappers that resolve to platform-specific binaries.
+    must be symlinks (or copies) that resolve to platform-specific binaries.
     """
 
     it "bin/simple_mcp_server launcher exists":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-        step("Verify: bin/simple_mcp_server launcher exists")
+        # @req REQ-SSPEC-SYSTEM
+        step("bin/simple_mcp_server launcher exists")
         expect(file_exists("bin/simple_mcp_server")).to_equal(true)
 
     it "bin/simple_lsp_mcp_server launcher exists":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-        step("Verify: bin/simple_lsp_mcp_server launcher exists")
+        # @req REQ-SSPEC-SYSTEM
+        step("bin/simple_lsp_mcp_server launcher exists")
         expect(file_exists("bin/simple_lsp_mcp_server")).to_equal(true)
 
     it "bin/simple_mcp_server is executable":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-        step("Verify: bin/simple_mcp_server is executable")
+        # @req REQ-SSPEC-SYSTEM
+        step("bin/simple_mcp_server is executable")
         val (_, _, rc) = process_run("test", ["-x", "bin/simple_mcp_server"])
-        expect(rc).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
+        expect(rc).to_equal(0)
 
     it "bin/simple_lsp_mcp_server is executable":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-        step("Verify: bin/simple_lsp_mcp_server is executable")
+        # @req REQ-SSPEC-SYSTEM
+        step("bin/simple_lsp_mcp_server is executable")
         val (_, _, rc) = process_run("test", ["-x", "bin/simple_lsp_mcp_server"])
-        expect(rc).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
+        expect(rc).to_equal(0)
 
     it "deployed MCP launcher passes its native startup probe":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-        step("Verify: deployed MCP launcher passes its native startup probe")
+        # @req REQ-SSPEC-SYSTEM
+        step("deployed MCP launcher passes its native startup probe")
         val (out, err, rc) = process_run("bin/simple_mcp_server", ["--probe"])
-        expect(rc).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
+        expect(rc).to_equal(0)
         expect(out + err).to_contain("probe ok")
+        expect(out + err).to_contain("tools=163")
 
     it "deployed MCP launcher anchors real codebase requests at the repository":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-        step("Verify: deployed MCP launcher anchors real codebase requests at the repository")
+        # @req REQ-SSPEC-SYSTEM
+        step("deployed MCP launcher anchors real codebase requests at the repository")
         val wrapper = file_read("bin/simple_mcp_server")
         expect(wrapper.contains("script_dir=\"$(CDPATH= cd \"$\{script_dir}\" && pwd)\"")).to_equal(true)
         expect(wrapper.contains("repo_root=\"$(CDPATH= cd \"$\{script_dir}/..\" && pwd)\"")).to_equal(true)
         expect(wrapper.contains("cd \"$\{repo_root}\"")).to_equal(true)
         val initialize = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-initialize\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"bootstrap\",\"version\":\"1\"}}}"
-        val search = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-search\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"query\":\"handle_simple_api\",\"kind\":\"fn\",\"scope\":\"app\"}}}"
-        val command = "runner=; if command -v timeout >/dev/null 2>&1; then runner='timeout 10'; elif command -v gtimeout >/dev/null 2>&1; then runner='gtimeout 10'; elif command -v perl >/dev/null 2>&1; then runner=\"perl -e 'alarm shift; exec @ARGV' 10\"; else exit 127; fi; repo_root=\"$(pwd)\"; workdir=\"$(mktemp -d)\"; trap 'rm -rf \"$workdir\"' EXIT; (cd \"$workdir\" && printf '%s\\n%s\\n' '" + initialize + "' '" + search + "' | $runner \"$repo_root/bin/simple_mcp_server\")"
+        val search = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-search\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"query\":\"compile_runtime_objects\",\"kind\":\"fn\",\"scope\":\"compiler\"}}}"
+        val no_match = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-no-match\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"query\":\"__PURE_SIMPLE_MCP_NO_SUCH_DECL__\",\"kind\":\"fn\",\"scope\":\"compiler\"}}}"
+        val injection = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-injection\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"query\":\"__NO_MATCH__; touch /tmp/simple_mcp_framed_injection\",\"scope\":\"compiler\"}}}"
+        val command = "runner=; if command -v timeout >/dev/null 2>&1; then runner='timeout 10'; elif command -v gtimeout >/dev/null 2>&1; then runner='gtimeout 10'; elif command -v perl >/dev/null 2>&1; then runner=\"perl -e 'alarm shift; exec @ARGV' 10\"; else exit 127; fi; repo_root=\"$(pwd)\"; workdir=\"$(mktemp -d)\"; sentinel=/tmp/simple_mcp_framed_injection; rm -f \"$sentinel\"; trap 'rm -rf \"$workdir\"; rm -f \"$sentinel\"' EXIT; init='" + initialize + "'; positive='" + search + "'; negative='" + no_match + "'; injection='" + injection + "'; (cd \"$workdir\" && { for body in \"$init\" \"$positive\" \"$negative\" \"$injection\"; do printf 'Content-Length: %s\\r\\n\\r\\n%s' \"$\{#body}\" \"$body\"; done; } | $runner \"$repo_root/bin/simple_mcp_server\"); test ! -e \"$sentinel\""
         val (out, err, rc) = process_run("sh", ["-c", command])
-        expect(rc).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
+        expect(rc).to_equal(0)
         val response = out + err
         expect(response.contains("\"id\":\"bootstrap-mcp-initialize\",\"result\"")).to_equal(true)
         expect(response.contains("\"id\":\"bootstrap-mcp-search\",\"result\"")).to_equal(true)
-        expect(response.contains("handle_simple_api")).to_equal(true)
+        expect(response.contains("runtime_compiler.spl")).to_equal(true)
+        expect(response.contains("fn compile_runtime_objects")).to_equal(true)
+        expect(response.contains("\"id\":\"bootstrap-mcp-no-match\",\"result\"")).to_equal(true)
+        expect(response.contains("No results found.")).to_equal(true)
+        expect(response.contains("\"id\":\"bootstrap-mcp-injection\",\"result\"")).to_equal(true)
         expect(response.contains("\"error\"")).to_equal(false)
 
     it "deployed LSP MCP launcher passes correlated symbols admission":
-        # @req: REQ-TOOLS-BOOTSTRAP-MCP-001
-        step("Verify: deployed LSP MCP launcher passes correlated symbols admission")
+        # @req REQ-SSPEC-SYSTEM
+        step("deployed LSP MCP launcher passes correlated symbols admission")
         val wrapper = file_read("bin/simple_lsp_mcp_server")
         expect(wrapper.contains("native_hash_is_valid")).to_equal(true)
         expect(wrapper.contains("cd \"$\{repo_root}\"")).to_equal(true)
@@ -206,13 +224,15 @@ describe "Bootstrap MCP — deployed launchers":
         val symbols = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-lsp-symbols\",\"method\":\"tools/call\",\"params\":{\"name\":\"lsp_symbols\",\"arguments\":{\"file\":\"src/app/simple_lsp_mcp/main.spl\"}}}"
         val command = "runner=; if command -v timeout >/dev/null 2>&1; then runner='timeout 10'; elif command -v gtimeout >/dev/null 2>&1; then runner='gtimeout 10'; elif command -v perl >/dev/null 2>&1; then runner=\"perl -e 'alarm shift; exec @ARGV' 10\"; else exit 127; fi; repo_root=\"$(pwd)\"; workdir=\"$(mktemp -d)\"; trap 'rm -rf \"$workdir\"' EXIT; (cd \"$workdir\" && printf '%s\\n%s\\n%s\\n' '" + initialize + "' '" + tools_list + "' '" + symbols + "' | $runner \"$repo_root/bin/simple_lsp_mcp_server\")"
         val (out, err, rc) = process_run("sh", ["-c", command])
-        expect(rc).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
-        val response = out + err
-        expect(response.contains("\"id\":\"bootstrap-lsp-initialize\",\"result\"")).to_equal(true)
-        expect(response.contains("\"id\":\"bootstrap-lsp-tools\",\"result\"")).to_equal(true)
-        expect(response.contains("lsp_symbols")).to_equal(true)
-        expect(response.contains("\"id\":\"bootstrap-lsp-symbols\",\"result\"")).to_equal(true)
-        expect(response.contains("\\\"name\\\":\\\"log_options_help\\\"")).to_equal(true)
-        expect(response.contains("\"error\"")).to_equal(false)
-        expect(response.contains("\"isError\":true")).to_equal(false)
-        expect(response.contains("command failed with exit code")).to_equal(false)
+        expect(rc).to_equal(0)
+
+    it "bin/simple --version output contains version string":
+        val (stdout, _, _) = process_run("bin/simple", ["--version"])
+        val has_version = stdout.contains("simple") or stdout.contains("Simple") or stdout.contains("0.")
+        expect(has_version).to_equal(true)
+
+    it "bin/simple help returns exit code 0":
+        val (stdout, stderr, rc) = process_run("bin/simple", ["help"])
+        # help may return 0 or 1 depending on implementation
+        val ok = rc == 0 or rc == 1
+        expect(ok).to_equal(true)

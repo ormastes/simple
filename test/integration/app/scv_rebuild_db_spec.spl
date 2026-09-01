@@ -1,0 +1,98 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves `scv rebuild-db` (MIG-11, v2 final report §16.1):
+derived indexes/meta are a materialized view — after deleting the status index
+and object index, `rebuild-db` reconstructs them from the immutable objects +
+journal, `scv doctor` is PASS, and `scv fsck` output is unchanged from before
+the deletion. Verdict is the last line, PASS/FAIL/ERROR convention.
+Audience: Maintainers of the SCV storage layer.
+"""
+# @req: REQ-SSPEC-INTEGRATION
+use std.spec.step
+
+use std.spec.{describe, it, expect, step, assert_false}
+use app.io.mod (process_run)
+
+
+fn _harness() -> [text]:
+    [
+        "set -eu",
+        "REPO=$(pwd)",
+        "TMP=$(mktemp -d /tmp/scv-rebuild.XXXXXX)",
+        "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+        "cd \"$TMP\"",
+        "printf 'base\\n' > a.txt",
+        "printf 'other\\n' > b.txt",
+        "scv init >/dev/null",
+        "scv snapshot >/dev/null"
+    ]
+
+fn _run(lines: [text]) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", lines.join("\n") + "\n"])
+    val combined = "{out}{err}\nexit={code}\n"
+    assert_false(out == "" and err == "")
+    combined
+
+describe "scv rebuild-db":
+    # @manual scenario evidence
+    it "rebuilds deleted derived indexes from immutable objects, doctor PASS and fsck unchanged":
+        # @req REQ-SSPEC-INTEGRATION
+        step("rebuilds deleted derived indexes from immutable objects, doctor PASS and fsck unchanged")
+        step("Snapshot, record fsck, delete derived files, rebuild, re-verify")
+        var lines = _harness()
+        lines.push("FSCK_BEFORE=$(scv fsck || true)")
+        lines.push("INDEX_BEFORE=$(cat .scv/meta/status_index.sdn)")
+        lines.push("rm -f .scv/meta/status_index.sdn .scv/meta/object_index.sdn")
+        lines.push("scv rebuild-db")
+        lines.push("printf 'rebuild_code=%s\\n' \"$?\"")
+        lines.push("INDEX_AFTER=$(cat .scv/meta/status_index.sdn)")
+        lines.push("test \"$INDEX_BEFORE\" = \"$INDEX_AFTER\" && printf 'index=identical\\n'")
+        lines.push("test -f .scv/meta/object_index.sdn && printf 'object_index=present\\n'")
+        lines.push("scv doctor")
+        lines.push("FSCK_AFTER=$(scv fsck || true)")
+        lines.push("test \"$FSCK_BEFORE\" = \"$FSCK_AFTER\" && printf 'fsck=unchanged\\n'")
+        val out = _run(lines)
+        expect(out).to_contain("rebuild_code=0")
+        expect(out).to_contain("index=identical")
+        expect(out).to_contain("object_index=present")
+        expect(out).to_contain("fsck=unchanged")
+        expect(out).to_contain("PASS — derived state rebuilt")
+        expect(out).to_contain("exit=0")
+
+    it "keeps the working copy usable after a rebuild":
+        # @req REQ-SSPEC-INTEGRATION
+        step("keeps the working copy usable after a rebuild")
+        step("Rebuild, then status stays clean and a new snapshot lands")
+        var lines = _harness()
+        lines.push("rm -f .scv/meta/status_index.sdn .scv/meta/object_index.sdn")
+        lines.push("scv rebuild-db >/dev/null")
+        lines.push("scv status")
+        lines.push("printf 'edit\\n' > a.txt")
+        lines.push("scv snapshot | grep -c '^snapshot commit_'")
+        lines.push("printf 'usable=ok\\n'")
+        val out = _run(lines)
+        expect(out).to_contain("clean")
+        expect(out).to_contain("usable=ok")
+        expect(out).to_contain("exit=0")
+
+    it "refuses with ERROR outside an initialized repository":
+        # @req REQ-SSPEC-INTEGRATION
+        step("refuses with ERROR outside an initialized repository")
+        step("Run rebuild-db in an empty directory, expect fail-closed ERROR")
+        val lines = [
+            "set -eu",
+            "REPO=$(pwd)",
+            "TMP=$(mktemp -d /tmp/scv-rebuild-empty.XXXXXX)",
+            "scv() { SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" \"$@\"; }",
+            "cd \"$TMP\"",
+            "set +e",
+            "scv rebuild-db",
+            "printf 'code=%s\\n' \"$?\""
+        ]
+        val out = _run(lines)
+        expect(out).to_contain("ERROR — nothing was checked")
+        expect(out).to_contain("code=2")

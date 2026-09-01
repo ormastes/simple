@@ -1,0 +1,449 @@
+# Two-phase, per-CPU address-space switch completion ownership.
+#
+# This capsule retains the outgoing residency coordinate until a trusted
+# architecture adapter reports the installed register value.  It never frees
+# page tables and never publishes task readiness; those remain scheduler and
+# mapping-owner responsibilities after a successful completion receipt.
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+pub enum ArchitectureSwitchKindV1:
+    X86Cr3
+    ArmTtbr0
+    RiscvSatp
+
+pub enum ArchitectureSwitchPhaseV1:
+    Empty
+    Current
+    Prepared
+    Installing
+    Completed
+    Released
+    Quarantined
+
+pub enum ArchitectureSwitchErrorV1:
+    None
+    InvalidIdentity
+    CpuOutOfRange
+    SerializationUnavailable
+    CurrentMismatch
+    AlreadyPrepared
+    OwnerExhausted
+    InvalidTicket
+    InvalidArchitectureReceipt
+    HardwareReadbackMismatch
+
+pub struct ArchitectureResidencyIdentityV1:
+    mapping_id: u64
+    mapping_generation: u64
+    root_phys: u64
+
+pub struct ArchitectureSwitchTicketV1:
+    cpu_id: u64
+    switch_generation: u64
+    nonce: u64
+    kind: ArchitectureSwitchKindV1
+
+pub struct ArchitectureSwitchReadbackReceiptV1:
+    cpu_id: u64
+    switch_generation: u64
+    nonce: u64
+    kind: ArchitectureSwitchKindV1
+    root_phys: u64
+    register_width_bits: u64
+    expected_register: u64
+    observed_register: u64
+    barriers_complete: bool
+    readback_matches: bool
+
+pub struct ArchitectureSwitchCompletionReceiptV1:
+    ok: bool
+    error: ArchitectureSwitchErrorV1
+    cpu_id: u64
+    switch_generation: u64
+    incoming: ArchitectureResidencyIdentityV1
+    release_pending: bool
+    readiness_permitted: bool
+    destruction_permitted: bool
+
+pub struct ArchitectureOutgoingReleaseReceiptV1:
+    ok: bool
+    cpu_id: u64
+    switch_generation: u64
+    outgoing: ArchitectureResidencyIdentityV1
+
+struct ArchitectureSwitchCpuSlotV1:
+    phase: ArchitectureSwitchPhaseV1
+    generation: u64
+    nonce: u64
+    kind: ArchitectureSwitchKindV1
+    current: ArchitectureResidencyIdentityV1
+    outgoing: ArchitectureResidencyIdentityV1
+    incoming: ArchitectureResidencyIdentityV1
+
+val ARCHITECTURE_SWITCH_MAX_CPUS_V1: u64 = 64u64
+val _architecture_switch_mutex_v1: i64 = mutex_raw_create()
+var _architecture_switch_slots_v1: [ArchitectureSwitchCpuSlotV1] = []
+var _architecture_switch_next_generation_v1: u64 = 1u64
+var _architecture_switch_quarantined_v1: bool = false
+
+fn _empty_residency_v1() -> ArchitectureResidencyIdentityV1:
+    ArchitectureResidencyIdentityV1(
+        mapping_id: 0u64, mapping_generation: 0u64, root_phys: 0u64)
+
+fn _residency_valid_v1(identity: ArchitectureResidencyIdentityV1) -> bool:
+    identity.mapping_id != 0u64 and identity.mapping_generation != 0u64 and
+        identity.root_phys != 0u64 and identity.root_phys % 4096u64 == 0u64
+
+fn _residency_same_v1(
+    left: ArchitectureResidencyIdentityV1,
+    right: ArchitectureResidencyIdentityV1
+) -> bool:
+    left.mapping_id == right.mapping_id and
+        left.mapping_generation == right.mapping_generation and
+        left.root_phys == right.root_phys
+
+fn _architecture_switch_lock_v1() -> bool:
+    not _architecture_switch_quarantined_v1 and
+        _architecture_switch_mutex_v1 > 0 and
+        mutex_raw_lock(_architecture_switch_mutex_v1)
+
+fn _architecture_switch_unlock_v1() -> bool:
+    if mutex_raw_unlock(_architecture_switch_mutex_v1): return true
+    _architecture_switch_quarantined_v1 = true
+    false
+
+fn _slot_for_cpu_v1(cpu_id: u64) -> ArchitectureSwitchCpuSlotV1:
+    _architecture_switch_slots_v1[cpu_id as i64]
+
+fn _ensure_cpu_slot_v1(cpu_id: u64) -> bool:
+    if cpu_id >= ARCHITECTURE_SWITCH_MAX_CPUS_V1: return false
+    while _architecture_switch_slots_v1.len() <= cpu_id as i64:
+        val empty = _empty_residency_v1()
+        _architecture_switch_slots_v1.push(ArchitectureSwitchCpuSlotV1(
+            phase: ArchitectureSwitchPhaseV1.Empty,
+            generation: 0u64, nonce: 0u64,
+            kind: ArchitectureSwitchKindV1.X86Cr3,
+            current: empty, outgoing: empty, incoming: empty))
+    true
+
+fn _completion_reject_v1(
+    error: ArchitectureSwitchErrorV1,
+    ticket: ArchitectureSwitchTicketV1
+) -> ArchitectureSwitchCompletionReceiptV1:
+    val empty = _empty_residency_v1()
+    ArchitectureSwitchCompletionReceiptV1(
+        ok: false, error: error, cpu_id: ticket.cpu_id,
+        switch_generation: ticket.switch_generation,
+        incoming: empty, release_pending: false,
+        readiness_permitted: false, destruction_permitted: false)
+
+pub(package) fn architecture_switch_register_current_v1(
+    cpu_id: u64,
+    current: ArchitectureResidencyIdentityV1
+) -> bool:
+    """Install initial residency only while the CPU slot is empty."""
+    if not _residency_valid_v1(current) or not _architecture_switch_lock_v1():
+        return false
+    var ok = false
+    if _ensure_cpu_slot_v1(cpu_id):
+        var slot = _slot_for_cpu_v1(cpu_id)
+        if slot.phase == ArchitectureSwitchPhaseV1.Empty:
+            slot.phase = ArchitectureSwitchPhaseV1.Current
+            slot.current = current
+            _architecture_switch_slots_v1[cpu_id as i64] = slot
+            ok = true
+    if not _architecture_switch_unlock_v1(): return false
+    ok
+
+pub(package) fn architecture_switch_prepare_v1(
+    cpu_id: u64,
+    kind: ArchitectureSwitchKindV1,
+    outgoing: ArchitectureResidencyIdentityV1,
+    incoming: ArchitectureResidencyIdentityV1
+) -> Result<ArchitectureSwitchTicketV1, ArchitectureSwitchErrorV1>:
+    """Retain outgoing and reserve incoming before a privileged root write."""
+    if cpu_id >= ARCHITECTURE_SWITCH_MAX_CPUS_V1:
+        return Err(ArchitectureSwitchErrorV1.CpuOutOfRange)
+    if (not _residency_valid_v1(outgoing) or
+        not _residency_valid_v1(incoming) or
+        _residency_same_v1(outgoing, incoming)):
+        return Err(ArchitectureSwitchErrorV1.InvalidIdentity)
+    if not _architecture_switch_lock_v1():
+        return Err(ArchitectureSwitchErrorV1.SerializationUnavailable)
+    var answer: Result<ArchitectureSwitchTicketV1, ArchitectureSwitchErrorV1> =
+        Err(ArchitectureSwitchErrorV1.CurrentMismatch)
+    if _ensure_cpu_slot_v1(cpu_id):
+        var slot = _slot_for_cpu_v1(cpu_id)
+        if slot.phase == ArchitectureSwitchPhaseV1.Prepared:
+            answer = Err(ArchitectureSwitchErrorV1.AlreadyPrepared)
+        elif (slot.phase == ArchitectureSwitchPhaseV1.Current or
+            slot.phase == ArchitectureSwitchPhaseV1.Released) and
+            _residency_same_v1(slot.current, outgoing):
+            val generation = _architecture_switch_next_generation_v1
+            if generation == 0u64 or generation == 18446744073709551615u64:
+                answer = Err(ArchitectureSwitchErrorV1.OwnerExhausted)
+            else:
+                _architecture_switch_next_generation_v1 = generation + 1u64
+                var nonce = generation ^ cpu_id ^ incoming.mapping_id ^
+                    incoming.mapping_generation ^ incoming.root_phys ^
+                    0x4153574954434831u64
+                if nonce == 0u64: nonce = generation ^ 0x5357495443485631u64
+                slot.phase = ArchitectureSwitchPhaseV1.Prepared
+                slot.generation = generation
+                slot.nonce = nonce
+                slot.kind = kind
+                slot.outgoing = outgoing
+                slot.incoming = incoming
+                _architecture_switch_slots_v1[cpu_id as i64] = slot
+                answer = Ok(ArchitectureSwitchTicketV1(
+                    cpu_id: cpu_id, switch_generation: generation,
+                    nonce: nonce, kind: kind))
+    if not _architecture_switch_unlock_v1():
+        return Err(ArchitectureSwitchErrorV1.SerializationUnavailable)
+    answer
+
+pub(package) fn architecture_switch_cancel_before_write_v1(
+    ticket: ArchitectureSwitchTicketV1
+) -> bool:
+    """Cancel only before any architecture switch receipt has been issued."""
+    if not _architecture_switch_lock_v1(): return false
+    var ok = false
+    if ticket.cpu_id < _architecture_switch_slots_v1.len() as u64:
+        var slot = _slot_for_cpu_v1(ticket.cpu_id)
+        if (slot.phase == ArchitectureSwitchPhaseV1.Prepared and
+            slot.generation == ticket.switch_generation and
+            slot.nonce == ticket.nonce and slot.kind == ticket.kind):
+            slot.phase = ArchitectureSwitchPhaseV1.Current
+            slot.outgoing = _empty_residency_v1()
+            slot.incoming = _empty_residency_v1()
+            _architecture_switch_slots_v1[ticket.cpu_id as i64] = slot
+            ok = true
+    if not _architecture_switch_unlock_v1(): return false
+    ok
+
+pub(package) fn architecture_switch_mark_write_started_v1(
+    ticket: ArchitectureSwitchTicketV1
+) -> bool:
+    """Consume cancellation authority immediately before the privileged write."""
+    if not _architecture_switch_lock_v1(): return false
+    var ok = false
+    if ticket.cpu_id < _architecture_switch_slots_v1.len() as u64:
+        var slot = _slot_for_cpu_v1(ticket.cpu_id)
+        if (slot.phase == ArchitectureSwitchPhaseV1.Prepared and
+            slot.generation == ticket.switch_generation and
+            slot.nonce == ticket.nonce and slot.kind == ticket.kind):
+            slot.phase = ArchitectureSwitchPhaseV1.Installing
+            _architecture_switch_slots_v1[ticket.cpu_id as i64] = slot
+            ok = true
+    if not _architecture_switch_unlock_v1(): return false
+    ok
+
+fn _readback_semantics_valid_v1(
+    arch: ArchitectureSwitchReadbackReceiptV1
+) -> bool:
+    if not arch.barriers_complete: return false
+    match arch.kind:
+        case ArchitectureSwitchKindV1.X86Cr3:
+            val width_ok = arch.register_width_bits == 32u64 or
+                arch.register_width_bits == 64u64
+            val mask = if arch.register_width_bits == 32u64:
+                0x00000000FFFFF000u64
+            else:
+                0x000FFFFFFFFFF000u64
+            width_ok and arch.root_phys != 0u64 and
+                arch.root_phys % 4096u64 == 0u64 and
+                (arch.root_phys & ~mask) == 0u64 and
+                arch.expected_register == arch.root_phys and
+                arch.observed_register == arch.expected_register
+        case ArchitectureSwitchKindV1.ArmTtbr0:
+            val width_ok = arch.register_width_bits == 32u64 or
+                arch.register_width_bits == 64u64
+            val mask = if arch.register_width_bits == 32u64:
+                0x00000000FFFFC000u64
+            else:
+                0x0000FFFFFFFFF000u64
+            val alignment = if arch.register_width_bits == 32u64:
+                16384u64
+            else:
+                4096u64
+            width_ok and arch.root_phys != 0u64 and
+                arch.root_phys % alignment == 0u64 and
+                (arch.root_phys & ~mask) == 0u64 and
+                arch.expected_register == arch.root_phys and
+                arch.observed_register == arch.expected_register
+        case ArchitectureSwitchKindV1.RiscvSatp:
+            val width_ok = arch.register_width_bits == 32u64 or
+                arch.register_width_bits == 64u64
+            val root_mask = if arch.register_width_bits == 32u64:
+                0x00000003FFFFF000u64
+            else:
+                0x00FFFFFFFFFFF000u64
+            val expected = if arch.register_width_bits == 32u64:
+                0x80000000u64 | (arch.root_phys >> 12)
+            else:
+                0x9000000000000000u64 | (arch.root_phys >> 12)
+            width_ok and arch.root_phys != 0u64 and
+                arch.root_phys % 4096u64 == 0u64 and
+                (arch.root_phys & ~root_mask) == 0u64 and
+                arch.expected_register == expected and
+                arch.observed_register == expected
+
+pub(package) fn architecture_switch_complete_v1(
+    ticket: ArchitectureSwitchTicketV1,
+    arch: ArchitectureSwitchReadbackReceiptV1
+) -> ArchitectureSwitchCompletionReceiptV1:
+    """Commit incoming residency only after exact barrier/readback evidence."""
+    if not _architecture_switch_lock_v1():
+        return _completion_reject_v1(
+            ArchitectureSwitchErrorV1.SerializationUnavailable, ticket)
+    var answer = _completion_reject_v1(
+        ArchitectureSwitchErrorV1.InvalidTicket, ticket)
+    if ticket.cpu_id < _architecture_switch_slots_v1.len() as u64:
+        var slot = _slot_for_cpu_v1(ticket.cpu_id)
+        if (slot.phase == ArchitectureSwitchPhaseV1.Installing and
+            slot.generation == ticket.switch_generation and
+            slot.nonce == ticket.nonce and slot.kind == ticket.kind):
+            if (arch.cpu_id != ticket.cpu_id or
+                arch.switch_generation != ticket.switch_generation or
+                arch.nonce != ticket.nonce or arch.kind != ticket.kind or
+                arch.root_phys != slot.incoming.root_phys):
+                slot.phase = ArchitectureSwitchPhaseV1.Quarantined
+                _architecture_switch_slots_v1[ticket.cpu_id as i64] = slot
+                answer = _completion_reject_v1(
+                    ArchitectureSwitchErrorV1.InvalidArchitectureReceipt, ticket)
+            elif not _readback_semantics_valid_v1(arch) or
+                not arch.readback_matches:
+                # Hardware may already be using an unknown root. Preserve both
+                # residency coordinates and quarantine this CPU slot.
+                slot.phase = ArchitectureSwitchPhaseV1.Quarantined
+                _architecture_switch_slots_v1[ticket.cpu_id as i64] = slot
+                answer = _completion_reject_v1(
+                    ArchitectureSwitchErrorV1.HardwareReadbackMismatch, ticket)
+            else:
+                val incoming = slot.incoming
+                slot.phase = ArchitectureSwitchPhaseV1.Completed
+                slot.current = incoming
+                # Keep both coordinates until the serialized completion call
+                # returns. If unlock becomes indeterminate, quarantine retains
+                # enough identity for owner-directed recovery rather than
+                # silently losing the outgoing residency coordinate.
+                _architecture_switch_slots_v1[ticket.cpu_id as i64] = slot
+                answer = ArchitectureSwitchCompletionReceiptV1(
+                    ok: true, error: ArchitectureSwitchErrorV1.None,
+                    cpu_id: ticket.cpu_id,
+                    switch_generation: ticket.switch_generation,
+                    incoming: incoming, release_pending: true,
+                    readiness_permitted: false,
+                    destruction_permitted: false)
+    if not _architecture_switch_unlock_v1():
+        return _completion_reject_v1(
+            ArchitectureSwitchErrorV1.SerializationUnavailable, ticket)
+    answer
+
+pub(package) fn architecture_switch_redeem_outgoing_release_v1(
+    ticket: ArchitectureSwitchTicketV1
+) -> ArchitectureOutgoingReleaseReceiptV1:
+    """Return the outgoing coordinate once after a completed switch."""
+    val rejected = ArchitectureOutgoingReleaseReceiptV1(
+        ok: false, cpu_id: ticket.cpu_id,
+        switch_generation: ticket.switch_generation,
+        outgoing: _empty_residency_v1())
+    if not _architecture_switch_lock_v1(): return rejected
+    var answer = rejected
+    if ticket.cpu_id < _architecture_switch_slots_v1.len() as u64:
+        var slot = _slot_for_cpu_v1(ticket.cpu_id)
+        if (slot.phase == ArchitectureSwitchPhaseV1.Completed and
+            slot.generation == ticket.switch_generation and
+            slot.nonce == ticket.nonce and slot.kind == ticket.kind):
+            val outgoing = slot.outgoing
+            slot.phase = ArchitectureSwitchPhaseV1.Released
+            # Retain recovery coordinates even after one-shot issuance. Phase
+            # prevents replay; retained identity prevents an unlock failure
+            # from erasing the only leak-recovery evidence.
+            _architecture_switch_slots_v1[ticket.cpu_id as i64] = slot
+            answer = ArchitectureOutgoingReleaseReceiptV1(
+                ok: true, cpu_id: ticket.cpu_id,
+                switch_generation: ticket.switch_generation,
+                outgoing: outgoing)
+    if not _architecture_switch_unlock_v1(): return rejected
+    answer
+
+fn _arch_receipt_v1(
+    ticket: ArchitectureSwitchTicketV1,
+    root_phys: u64,
+    width: u64,
+    expected: u64,
+    observed: u64,
+    barriers_complete: bool,
+    matches: bool
+) -> ArchitectureSwitchReadbackReceiptV1:
+    ArchitectureSwitchReadbackReceiptV1(
+        cpu_id: ticket.cpu_id,
+        switch_generation: ticket.switch_generation,
+        nonce: ticket.nonce, kind: ticket.kind,
+        root_phys: root_phys,
+        register_width_bits: width,
+        expected_register: expected, observed_register: observed,
+        barriers_complete: barriers_complete,
+        readback_matches: barriers_complete and matches)
+
+pub(package) fn architecture_switch_x86_cr3_receipt_v1(
+    ticket: ArchitectureSwitchTicketV1,
+    root_phys: u64,
+    observed_cr3: u64,
+    width_bits: u64,
+    barriers_complete: bool
+) -> ArchitectureSwitchReadbackReceiptV1:
+    val width_ok = width_bits == 32u64 or width_bits == 64u64
+    val address_mask = if width_bits == 32u64: 0x00000000FFFFF000u64
+        else: 0x000FFFFFFFFFF000u64
+    val expected = root_phys
+    _arch_receipt_v1(ticket, root_phys, width_bits, expected, observed_cr3,
+        barriers_complete,
+        ticket.kind == ArchitectureSwitchKindV1.X86Cr3 and width_ok and
+            root_phys != 0u64 and root_phys % 4096u64 == 0u64 and
+            (root_phys & ~address_mask) == 0u64 and
+            observed_cr3 == expected)
+
+pub(package) fn architecture_switch_arm_ttbr0_receipt_v1(
+    ticket: ArchitectureSwitchTicketV1,
+    root_phys: u64,
+    observed_ttbr0: u64,
+    width_bits: u64,
+    barriers_complete: bool
+) -> ArchitectureSwitchReadbackReceiptV1:
+    val width_ok = width_bits == 32u64 or width_bits == 64u64
+    val address_mask = if width_bits == 32u64: 0x00000000FFFFC000u64
+        else: 0x0000FFFFFFFFF000u64
+    val alignment = if width_bits == 32u64: 16384u64 else: 4096u64
+    val expected = root_phys
+    _arch_receipt_v1(ticket, root_phys, width_bits, expected, observed_ttbr0,
+        barriers_complete,
+        ticket.kind == ArchitectureSwitchKindV1.ArmTtbr0 and width_ok and
+            root_phys != 0u64 and root_phys % alignment == 0u64 and
+            (root_phys & ~address_mask) == 0u64 and
+            observed_ttbr0 == expected)
+
+pub(package) fn architecture_switch_riscv_satp_receipt_v1(
+    ticket: ArchitectureSwitchTicketV1,
+    root_phys: u64,
+    observed_satp: u64,
+    width_bits: u64,
+    barriers_complete: bool
+) -> ArchitectureSwitchReadbackReceiptV1:
+    val width_ok = width_bits == 32u64 or width_bits == 64u64
+    val expected = if width_bits == 32u64:
+        0x80000000u64 | (root_phys >> 12)
+    else:
+        0x9000000000000000u64 | (root_phys >> 12)
+    val register_mask = if width_bits == 32u64: 0x00000000FFFFFFFFu64
+        else: 0xFFFFFFFFFFFFFFFFu64
+    val root_mask = if width_bits == 32u64: 0x00000003FFFFF000u64
+        else: 0x00FFFFFFFFFFF000u64
+    _arch_receipt_v1(ticket, root_phys, width_bits, expected, observed_satp,
+        barriers_complete,
+        ticket.kind == ArchitectureSwitchKindV1.RiscvSatp and width_ok and
+            root_phys != 0u64 and root_phys % 4096u64 == 0u64 and
+            (root_phys & ~root_mask) == 0u64 and
+            (observed_satp & register_mask) == (expected & register_mask))

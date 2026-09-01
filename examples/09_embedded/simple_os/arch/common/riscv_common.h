@@ -133,49 +133,8 @@ static int virtio_blk_init(void)
     return 1;
 }
 
-/* Base of the optional memory-backed ramdisk. On the FPGA/GHDL rv32 soft-core
- * the FAT32 filesystem image is preloaded into a RAM bank here (see
- * rv32_exec_core_flat.vhd); on silicon this is a region of PS DDR. Overridable
- * at build time, but detection is at RUNTIME so ONE kernel binary serves both
- * the QEMU virtio-blk lane and the ramdisk lane. */
-#ifndef RISCV_RAMDISK_BASE
-#define RISCV_RAMDISK_BASE 0x88000000u
-#endif
-
-/* Auto-detect a memory-backed ramdisk: true only when a valid FAT boot sector
- * (0xEB/0xE9 jump + 0x55AA signature) is present at RISCV_RAMDISK_BASE. In QEMU
- * that window is plain zeroed RAM (256 MiB guest), so the probe fails and the
- * driver uses virtio-blk; in the GHDL soft-core the bank holds the image, so the
- * probe succeeds and sector reads become a plain RAM memcpy. Result is cached. */
-static int ramdisk_fs_present(void)
-{
-    static int cached = -1;
-    if (cached < 0) {
-        const volatile unsigned char *r =
-            (const volatile unsigned char *)(uintptr_t)(RISCV_RAMDISK_BASE);
-        if ((r[0] == 0xEBU || r[0] == 0xE9U) && r[510] == 0x55U && r[511] == 0xAAU) {
-            cached = 1;
-        } else {
-            cached = 0;
-        }
-    }
-    return cached;
-}
-
 static int virtio_blk_read_sector(uint32_t lba)
 {
-    if (ramdisk_fs_present()) {
-        /* Memory-backed ramdisk path: the FAT32 image lives at
-         * RISCV_RAMDISK_BASE, so a sector read is a 512-byte memcpy into the
-         * sector buffer (g_dma + 16 == sector_data()). No virtio doorbell/DMA.
-         * All fat32/nvfs/smf callers stay device-agnostic via sector_data(). */
-        const unsigned char *src =
-            (const unsigned char *)(uintptr_t)(RISCV_RAMDISK_BASE) +
-            ((uintptr_t)lba * 512U);
-        unsigned char *dst = g_dma + 16U;
-        for (uint32_t i = 0; i < 512U; i++) dst[i] = src[i];
-        return 1;
-    }
     if (!g_blk_mmio && !virtio_blk_init()) return 0;
     rv_memzero(g_dma, sizeof(g_dma));
     uintptr_t dma = (uintptr_t)g_dma;
@@ -338,6 +297,62 @@ static uint32_t fat32_find_sys_apps_file(const Fat32Probe *fat, const char *name
     return fat32_find_entry_cluster(fat, apps_cluster, name11, 0, size_out);
 }
 
+static void fat32_serial_name83(const unsigned char *entry)
+{
+    uint32_t base_end = 8U;
+    uint32_t ext_end = 11U;
+    while (base_end > 0U && entry[base_end - 1U] == ' ') base_end--;
+    while (ext_end > 8U && entry[ext_end - 1U] == ' ') ext_end--;
+    for (uint32_t i = 0; i < base_end; ++i) uart_putc((char)entry[i]);
+    if (ext_end > 8U) {
+        uart_putc('.');
+        for (uint32_t i = 8U; i < ext_end; ++i) uart_putc((char)entry[i]);
+    }
+}
+
+RuntimeValue rt_riscv_fs_ls_sys_apps(void)
+{
+    Fat32Probe fat;
+    if (!fat32_probe_bpb(&fat)) return 0;
+    uint32_t sys = fat32_find_entry_cluster(
+        &fat, fat.root_cluster, "SYS        ", 1, 0);
+    if (sys < 2U) return 0;
+    uint32_t apps = fat32_find_entry_cluster(&fat, sys, "APPS       ", 1, 0);
+    if (apps < 2U) return 0;
+
+    const char begin[] = "FS_LS_BEGIN path=/SYS/APPS\n";
+    for (uint32_t i = 0; begin[i]; ++i) uart_putc(begin[i]);
+    uint32_t cluster = apps;
+    uint32_t entries = 0;
+    uint32_t cluster_budget = 128U;
+    while (cluster >= 2U && cluster < 0x0ffffff8U && cluster_budget-- > 0U) {
+        uint32_t first = fat_cluster_sector(&fat, cluster);
+        for (uint32_t sec = 0; sec < fat.spc; ++sec) {
+            if (!virtio_blk_read_sector(first + sec)) return 0;
+            const unsigned char *data = sector_data();
+            for (uint32_t off = 0; off < 512U; off += 32U) {
+                const unsigned char *e = data + off;
+                if (e[0] == 0x00U) goto listing_complete;
+                if (e[0] == 0xe5U || e[11] == 0x0fU ||
+                    (e[11] & 0x08U) != 0U || e[0] == '.') continue;
+                const char prefix[] = "FS_LS_ENTRY name=";
+                for (uint32_t i = 0; prefix[i]; ++i) uart_putc(prefix[i]);
+                fat32_serial_name83(e);
+                uart_putc('\n');
+                entries++;
+                if (entries >= 256U) goto listing_complete;
+            }
+        }
+        cluster = fat32_next_cluster(&fat, cluster);
+    }
+    if (cluster_budget == 0U && cluster < 0x0ffffff8U) return 0;
+listing_complete:
+    if (entries == 0U) return 0;
+    const char end[] = "FS_LS_END status=pass\n";
+    for (uint32_t i = 0; end[i]; ++i) uart_putc(end[i]);
+    return 1;
+}
+
 static uint32_t fat32_read_file_into(const Fat32Probe *fat, uint32_t cluster, uint32_t file_size, unsigned char *out, uint32_t cap)
 {
     if (cluster < 2U || file_size == 0 || file_size > cap) return 0;
@@ -356,6 +371,46 @@ static uint32_t fat32_read_file_into(const Fat32Probe *fat, uint32_t cluster, ui
         cur = fat32_next_cluster(fat, cur);
     }
     return copied;
+}
+
+RuntimeValue rt_qemu_nonce_echo(void)
+{
+    static const char name11[] = "QEMUNONCTXT";
+    static const char prefix[] = "SIMPLEOS_QEMU_NONCE=";
+    Fat32Probe fat;
+    unsigned char nonce_bytes[128];
+    uint32_t file_size = 0;
+    uint32_t line_size = 0;
+    if (!fat32_probe_bpb(&fat)) return 0;
+    uint32_t cluster = fat32_find_entry_cluster(
+        &fat, fat.root_cluster, name11, 0, &file_size);
+    if (cluster < 2U || file_size <= sizeof(prefix) - 1U || file_size > 118U)
+        return 0;
+    if (fat32_read_file_into(&fat, cluster, file_size,
+                             nonce_bytes, sizeof(nonce_bytes)) != file_size)
+        return 0;
+    for (uint32_t i = 0; i < sizeof(prefix) - 1U; ++i)
+        if (nonce_bytes[i] != (unsigned char)prefix[i]) return 0;
+    /* QEMUNONC.TXT is a fixed 118-byte FAT slot.  The per-run writer replaces
+     * its first line and deliberately leaves the remainder NUL padded, so the
+     * logical record ends at the first newline rather than at file_size. */
+    for (uint32_t i = sizeof(prefix) - 1U; i < file_size; ++i) {
+        if (nonce_bytes[i] == '\n') {
+            line_size = i + 1U;
+            break;
+        }
+    }
+    if (line_size == 0U) return 0;
+    for (uint32_t i = sizeof(prefix) - 1U; i + 1U < line_size; ++i) {
+        unsigned char c = nonce_bytes[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+              c == ':' || c == '-')) return 0;
+    }
+    for (uint32_t i = line_size; i < file_size; ++i)
+        if (nonce_bytes[i] != 0U) return 0;
+    for (uint32_t i = 0; i < line_size; ++i) uart_putc((char)nonce_bytes[i]);
+    return 1;
 }
 
 /* --------------------------------------------------------------------------

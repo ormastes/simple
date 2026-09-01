@@ -9,15 +9,11 @@
 
 
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_rename(src: text, dst: text) -> bool
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_hash_text(s: text) -> i64
-extern fn rt_env_get(key: text) -> text
-
 use compiler.driver.cache.action_key.{interface_digest_of_source}
-use std.io_runtime.{dir_create_all}
+use std.file_system.{file_write_text}
+use std.io_runtime.{dir_create_all, time_now_unix_micros, hash_text, file_exists}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
 # ============================================================================
 # Types
@@ -53,7 +49,7 @@ fn smf_manifest_new() -> SmfManifest:
     SmfManifest(
         version: 3,
         entries: {},
-        updated_at: rt_time_now_unix_micros()
+        updated_at: time_now_unix_micros()
     )
 
 fn smf_manifest_entry_new(
@@ -87,7 +83,7 @@ fn smf_manifest_entry_new_with_iface(
         source_path: source_path,
         smf_path: smf_path,
         source_hash: source_hash,
-        compiled_at: rt_time_now_unix_micros(),
+        compiled_at: time_now_unix_micros(),
         backend: backend,
         opt_level: opt_level,
         release: release,
@@ -109,7 +105,7 @@ fn smf_manifest_update(manifest: SmfManifest, entry: SmfManifestEntry) -> SmfMan
     SmfManifest(
         version: manifest.version,
         entries: entries,
-        updated_at: rt_time_now_unix_micros()
+        updated_at: time_now_unix_micros()
     )
 
 fn smf_manifest_remove(manifest: SmfManifest, source_path: text) -> SmfManifest:
@@ -120,7 +116,7 @@ fn smf_manifest_remove(manifest: SmfManifest, source_path: text) -> SmfManifest:
     SmfManifest(
         version: manifest.version,
         entries: entries,
-        updated_at: rt_time_now_unix_micros()
+        updated_at: time_now_unix_micros()
     )
 
 fn smf_manifest_find(manifest: SmfManifest, source_path: text) -> SmfManifestEntry?:
@@ -152,7 +148,7 @@ fn smf_manifest_entry_matches_source(entry: SmfManifestEntry, source_text: text)
         return false
     if source_text == "":
         return false
-    entry.source_hash == rt_hash_text(source_text)
+    entry.source_hash == hash_text(source_text)
 
 # Typed verdict for interface-digest verification at load time.
 enum IfaceDigestVerdict:
@@ -182,14 +178,14 @@ fn smf_manifest_entry_iface_verdict(entry: SmfManifestEntry, source_text: text) 
 # Level-gated diagnostic (default OFF): set SIMPLE_IFACE_DIGEST_LOG=1 to log
 # the verdict on every manifest-backed cache load.
 fn smf_manifest_iface_diagnostic(entry: SmfManifestEntry, source_text: text):
-    if (rt_env_get("SIMPLE_IFACE_DIGEST_LOG") ?? "") != "1":
+    if (env_get_opt("SIMPLE_IFACE_DIGEST_LOG") ?? "") != "1":
         return
     val verdict = smf_manifest_entry_iface_verdict(entry, source_text)
     print "[iface-digest] {entry.source_path}: {iface_digest_verdict_text(verdict)}"
 
 fn smf_manifest_entry_verifies(entry: SmfManifestEntry) -> bool:
     """Read `entry.source_path` and verify the recorded hash against it."""
-    if not rt_file_exists(entry.source_path):
+    if not file_exists(entry.source_path):
         return false
     smf_manifest_entry_matches_source(entry, rt_file_read_text(entry.source_path) ?? "")
 
@@ -305,7 +301,7 @@ val SMF_MANIFEST_DEFAULT_PATH: text = "build/smf/manifest.sdn"
 
 fn load_smf_manifest(path: text) -> SmfManifest:
     """Load manifest from file. Returns empty manifest if file doesn't exist."""
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return smf_manifest_new()
     val content = rt_file_read_text(path) ?? ""
     if content == "":
@@ -320,7 +316,7 @@ fn save_smf_manifest(manifest: SmfManifest, path: text) -> bool:
     val sdn = smf_manifest_to_sdn(manifest)
     val tmp_path = "{path}.tmp"
 
-    if not rt_file_write_text(tmp_path, sdn):
+    if not file_write_text(tmp_path, sdn):
         return false
     rt_file_rename(tmp_path, path)
 
@@ -354,7 +350,7 @@ fn update_smf_manifest_entry(
     var manifest = load_smf_manifest(manifest_path)
     # RECORD the canonical interface digest alongside the whole-source hash.
     # First real caller of action_key.interface_digest_of (2026-08-18).
-    val src_text = if rt_file_exists(source_path): rt_file_read_text(source_path) ?? "" else: ""
+    val src_text = if file_exists(source_path): rt_file_read_text(source_path) ?? "" else: ""
     val iface = if src_text == "": "" else: interface_digest_of_source(src_text)
     val entry = smf_manifest_entry_new_with_iface(
         source_path,

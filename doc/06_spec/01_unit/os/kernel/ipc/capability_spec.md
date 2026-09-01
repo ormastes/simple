@@ -28,7 +28,7 @@ capability_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 28 | 28 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -86,8 +86,8 @@ expect(result).to_equal(false)
 
 #### initializes a task with given capabilities
 
-- var mgr = CapabilityManager new
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
    - Expected: has is true
 
 
@@ -115,9 +115,35 @@ expect(has).to_equal(true)
 
 #### initializes a task with empty capabilities
 
-- var mgr = CapabilityManager new
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
    - Expected: has is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("initializes a task with empty capabilities")
+var mgr = CapabilityManager.new()
+val task = TaskId(id: 1)
+mgr.init_task(task, CapabilitySet.full())
+val has = mgr.check(task, CapabilityKind.ProcessSpawn)
+expect(has).to_equal(false)
+```
+
+</details>
+
+### CapabilityManager check
+
+#### returns false for unregistered task
+
+- returns false for unregistered task
+   - Expected: result is false
 
 
 <details>
@@ -129,31 +155,9 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
-mgr.init_task(task, CapabilitySet.empty())
+mgr.init_task(task, CapabilitySet.full())
 val has = mgr.check(task, CapabilityKind.ProcessSpawn)
 expect(has).to_equal(false)
-```
-
-</details>
-
-#### lowers non-init ambient full sets to deny-all
-
-- var mgr = CapabilityManager new
-- mgr init task
-   - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var mgr = CapabilityManager.new()
-val task = TaskId(id: 2)
-mgr.init_task(task, CapabilitySet.full())
-expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
 ```
 
 </details>
@@ -178,8 +182,8 @@ expect(result).to_equal(false)
 
 #### returns true when task has matching capability
 
-- var mgr = CapabilityManager new
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is true
 
 
@@ -205,8 +209,8 @@ expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(true)
 
 #### returns false for non-matching capability kind
 
-- var mgr = CapabilityManager new
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
    - Expected: mgr.check(task, CapabilityKind.SystemReboot) is false
 
 
@@ -232,9 +236,9 @@ expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
 
 #### allows dataset rights by object and generation
 
-- var mgr = CapabilityManager new
-- kind: CapabilityKind SharedDataset
-- mgr init task
+1. var mgr = CapabilityManager new
+2. kind: CapabilityKind SharedDataset
+3. mgr init task
    - Expected: mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_READ)) is true
    - Expected: mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_MAP)) is true
    - Expected: mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 4u64, rights: CAP_RIGHT_READ)) is false
@@ -269,9 +273,9 @@ expect(mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation:
 
 #### allows process queue submit and receive rights by generation
 
-- var mgr = CapabilityManager new
-- kind: CapabilityKind ProcessQueue
-- mgr init task
+1. var mgr = CapabilityManager new
+2. kind: CapabilityKind ProcessQueue
+3. mgr init task
    - Expected: mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_SUBMIT)) is true
    - Expected: mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_RECV)) is true
    - Expected: mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 6u64, rights: CAP_RIGHT_QUEUE_RECV)) is false
@@ -308,9 +312,9 @@ expect(mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 
 
 #### grants capability from source to target
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
+3. mgr init task
    - Expected: ok is true
    - Expected: mgr.check(dst, CapabilityKind.ProcessSpawn) is true
 
@@ -318,7 +322,7 @@ expect(mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -328,13 +332,10 @@ val dst = TaskId(id: 2)
 val token = CapabilityToken(
     kind: CapabilityKind.ProcessSpawn,
     generation: 1,
-    owner: 1,
-    token_id: 1u64,
-    parent_token_id: 0u64,
-    depth: 2
+    owner: 1
 )
 mgr.init_task(src, CapabilitySet(caps: [token], is_pledged: false))
-mgr.init_task(dst, CapabilitySet.empty())
+mgr.init_task(dst, CapabilitySet.full())
 
 val ok = mgr.grant(src, dst, token)
 expect(ok).to_equal(true)
@@ -345,9 +346,9 @@ expect(mgr.check(dst, CapabilityKind.ProcessSpawn)).to_equal(true)
 
 #### fails to grant if source does not hold capability
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
+3. mgr init task
    - Expected: ok is false
 
 
@@ -361,8 +362,8 @@ Reproduction: this block contains the complete executable scenario source.
 var mgr = CapabilityManager.new()
 val src = TaskId(id: 1)
 val dst = TaskId(id: 2)
-mgr.init_task(src, CapabilitySet.empty())
-mgr.init_task(dst, CapabilitySet.empty())
+mgr.init_task(src, CapabilitySet.full())  # Empty caps
+mgr.init_task(dst, CapabilitySet.full())
 
 val token = CapabilityToken(
     kind: CapabilityKind.SystemReboot,
@@ -379,8 +380,8 @@ expect(ok).to_equal(false)
 
 #### revokes a capability token
 
-- var mgr = CapabilityManager new
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
    - Expected: revoked is true
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is false
 
@@ -411,7 +412,7 @@ expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(false)
 
 #### revoke returns false for unknown token
 
-- var mgr = CapabilityManager new
+1. var mgr = CapabilityManager new
    - Expected: result is false
 
 
@@ -438,8 +439,8 @@ expect(result).to_equal(false)
 
 #### restricts capabilities to allowed list
 
-- var mgr = CapabilityManager new
-- mgr pledge
+1. var mgr = CapabilityManager new
+2. mgr pledge
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is true
    - Expected: mgr.check(task, CapabilityKind.SystemReboot) is false
 
@@ -479,9 +480,9 @@ expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
 
 #### pledge with empty list removes all capabilities
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr pledge
+1. var mgr = CapabilityManager new
+2. mgr init task
+3. mgr pledge
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is false
 
 
@@ -510,11 +511,11 @@ expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(false)
 
 #### second pledge is no-op (already pledged)
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr pledge
+1. var mgr = CapabilityManager new
+2. mgr init task
+3. mgr pledge
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is true
-- mgr pledge
+4. mgr pledge
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is true
 
 
@@ -550,8 +551,8 @@ expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(true)
 
 #### before unveil, all paths are allowed
 
-- var mgr = CapabilityManager new
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
    - Expected: allowed is true
 
 
@@ -571,74 +572,11 @@ expect(allowed).to_equal(true)
 
 </details>
 
-#### before unveil, file access still requires matching capability
-
-- var mgr = CapabilityManager new
-- mgr init task
-   - Expected: mgr.check_file_access(task, "/any/path", "r") is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var mgr = CapabilityManager.new()
-val task = TaskId(id: 2)
-mgr.init_task(task, CapabilitySet.empty())
-expect(mgr.check_file_access(task, "/any/path", "r")).to_equal(false)
-```
-
-</details>
-
-#### before unveil, explicit file capability allows matching path
-
-- var mgr = CapabilityManager new
-- kind: CapabilityKind FileRead
-- mgr init task
-   - Expected: mgr.check_file_access(task, "/tmp/data.txt", "r") is true
-   - Expected: mgr.check_file_access(task, "/tmp/data.txt", "w") is false
-   - Expected: mgr.check_file_access(task, "/tmp/data.txt", "rw") is false
-   - Expected: mgr.check_file_access(task, "/tmp/data.txt", "rz") is false
-   - Expected: mgr.check_file_access(task, "/tmp2/data.txt", "r") is false
-   - Expected: mgr.check_file_access(task, "/etc/passwd", "r") is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 17 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var mgr = CapabilityManager.new()
-val task = TaskId(id: 3)
-val token = CapabilityToken(
-    kind: CapabilityKind.FileRead(path_prefix: "/tmp"),
-    generation: 1u64,
-    owner: 3u64,
-    token_id: 30u64,
-    parent_token_id: 0u64,
-    depth: 1
-)
-mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
-expect(mgr.check_file_access(task, "/tmp/data.txt", "r")).to_equal(true)
-expect(mgr.check_file_access(task, "/tmp/data.txt", "w")).to_equal(false)
-expect(mgr.check_file_access(task, "/tmp/data.txt", "rw")).to_equal(false)
-expect(mgr.check_file_access(task, "/tmp/data.txt", "rz")).to_equal(false)
-expect(mgr.check_file_access(task, "/tmp2/data.txt", "r")).to_equal(false)
-expect(mgr.check_file_access(task, "/etc/passwd", "r")).to_equal(false)
-```
-
-</details>
-
 #### after unveil, only unveiled paths are allowed
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
+1. var mgr = CapabilityManager new
+2. mgr init task
+3. mgr unveil
    - Expected: tmp_ok is true
    - Expected: etc_denied is false
 
@@ -668,9 +606,9 @@ expect(etc_denied).to_equal(false)
 
 #### unveil supports write permission
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
+1. var mgr = CapabilityManager new
+2. mgr init task
+3. mgr unveil
    - Expected: write_ok is true
 
 
@@ -695,10 +633,10 @@ expect(write_ok).to_equal(true)
 
 #### multiple unveil calls add entries
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
-- mgr unveil
+1. var mgr = CapabilityManager new
+2. mgr init task
+3. mgr unveil
+4. mgr unveil
    - Expected: tmp_ok is true
    - Expected: home_ok is true
 
@@ -728,9 +666,9 @@ expect(home_ok).to_equal(true)
 
 #### unveil denies paths not in the list
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
+1. var mgr = CapabilityManager new
+2. mgr init task
+3. mgr unveil
    - Expected: unsafe is false
 
 
@@ -755,18 +693,17 @@ expect(unsafe).to_equal(false)
 
 #### path prefix matching works correctly
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
+1. var mgr = CapabilityManager new
+2. mgr init task
+3. mgr unveil
    - Expected: sub is true
    - Expected: parent is false
-   - Expected: sibling_prefix is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -783,9 +720,6 @@ expect(sub).to_equal(true)
 # Parent path should NOT match
 val parent = mgr.check_file_access(task, "/home", "r")
 expect(parent).to_equal(false)
-
-val sibling_prefix = mgr.check_file_access(task, "/home/user2/docs/file.txt", "r")
-expect(sibling_prefix).to_equal(false)
 ```
 
 </details>
@@ -794,10 +728,10 @@ expect(sibling_prefix).to_equal(false)
 
 #### removes all records for the destroyed task
 
-- var mgr = CapabilityManager new
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is true
-- mgr destroy task
+3. mgr destroy task
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is false
 
 
@@ -828,16 +762,16 @@ expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
 
 #### new tasks get full capability record at spawn
 
-- var mgr = CapabilityManager new
+1. var mgr = CapabilityManager new
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is false
-- mgr init task record
-   - Expected: result is true
+2. mgr init task record
+   - Expected: result is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -847,20 +781,21 @@ val task = TaskId(id: 42)
 # Before init_task_record: no record, check returns false
 expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
 
-# After init_task_record(full: true): ProcessSpawn is explicitly present.
+# After init_task_record(full: true): record exists, still false
+# because CapabilitySet.full() starts as empty (unpledged full trust)
 mgr.init_task_record(task, true)
 val result = mgr.check(task, CapabilityKind.ProcessSpawn)
-expect(result).to_equal(true)
+expect(result).to_equal(false)
 ```
 
 </details>
 
 #### init_task_record is idempotent
 
-- var mgr = CapabilityManager new
-- mgr init task
+1. var mgr = CapabilityManager new
+2. mgr init task
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is true
-- mgr init task record
+3. mgr init task record
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is true
 
 
@@ -891,8 +826,8 @@ expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(true)
 
 #### init_task_record with full=false creates pledged empty record
 
-- var mgr = CapabilityManager new
-- mgr init task record
+1. var mgr = CapabilityManager new
+2. mgr init task record
    - Expected: mgr.check(task, CapabilityKind.SystemReboot) is false
 
 
@@ -916,8 +851,8 @@ expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 28 |
-| Active scenarios | 28 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

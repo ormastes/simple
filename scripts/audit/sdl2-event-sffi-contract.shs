@@ -4,6 +4,8 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 binding="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
 provider="$root/src/runtime/runtime_sdl2.c"
+web_consumer="$root/src/lib/nogc_sync_mut/web_ui/input.spl"
+compositor_consumer="$root/src/os/compositor/hosted_input_sdl2.spl"
 failed=0
 
 event_declarations=$(sed -n '/^# --- Event Polling ---/,/^# --- Keyboard State/p' "$binding")
@@ -30,6 +32,38 @@ done
 detail_wrappers=$(sed -n '/^fn event_parse_type/,/^# --- Keyboard Events ---/p' "$binding")
 if [ "$(printf '%s\n' "$detail_wrappers" | grep -c 'unsafe(capabilities: \[ffi\]):' || true)" -ne 9 ]; then
     echo "SDL2 event detail wrappers must retain nine minimal FFI scopes" >&2
+    failed=1
+fi
+
+for consumer in "$web_consumer" "$compositor_consumer"; do
+    if ! awk '
+        function indent(line, copy) {
+            copy = line
+            sub(/[^ ].*$/, "", copy)
+            return length(copy)
+        }
+        /unsafe\(capabilities: \[.*ffi.*\]\):[[:space:]]*$/ {
+            unsafe_indent = indent($0)
+            inside_unsafe = 1
+            next
+        }
+        inside_unsafe && NF && indent($0) <= unsafe_indent { inside_unsafe = 0 }
+        /rt_sdl2_[A-Za-z0-9_]+\(/ && !inside_unsafe {
+            print "unscoped SDL2 consumer call at line " FNR ": " $0 > "/dev/stderr"
+            failed = 1
+        }
+        END { if (failed) exit 1 }
+    ' "$consumer"; then
+        failed=1
+    fi
+done
+
+if [ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$web_consumer" || true)" -ne 11 ]; then
+    echo "web UI SDL2 input must retain eleven minimal polling/detail scopes" >&2
+    failed=1
+fi
+if [ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$compositor_consumer" || true)" -ne 7 ]; then
+    echo "host compositor SDL2 input must retain seven minimal polling/detail scopes" >&2
     failed=1
 fi
 

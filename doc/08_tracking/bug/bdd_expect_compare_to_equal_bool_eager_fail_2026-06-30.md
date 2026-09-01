@@ -1,8 +1,5 @@
 # Bug: `expect(a == b).to_equal(false)` false-fails when a != b
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 **Date:** 2026-06-30
 **Severity:** Medium — false-RED on specs that assert inequality via the
 `expect(<comparison>).to_equal(<bool>)` idiom (library/code is correct).
@@ -50,14 +47,3 @@ Use the idiomatic matchers: `expect(a).to_not_equal(b)` (asserts inequality) or
 `expect(a).to_equal(b)` — both already correct. Same family as
 `harness_word_infix_expect_not_preprocessed_2026-06-29` (BDD eager-marking vs
 trailing matcher).
-
-## 2026-07-20 update: same defect, now fixed
-
-This is the same defect as
-`doc/08_tracking/bug/bdd_expect_eq_comparison_hard_fail_ignores_chained_matcher_2026-07-20.md`,
-independently root-caused three weeks later, and it is now **fixed** by commit
-`494d77c9ecc` (flips the Eq/NotEq arm of the BDD `expect` intrinsic from a hard
-fail to a provisional one, matching the sibling ordered-comparison arm). The
-fix is Rust-side (`interpreter_call/bdd.rs`), so it only takes effect after a
-seed rebuild — specs run against a pre-rebuild deployed seed will still show
-this doc's symptom.

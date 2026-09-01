@@ -421,6 +421,7 @@ impl MethodResolver:
 
     me resolve_expr(expr: HirExpr) -> HirExpr:
         """Resolve method calls in an expression."""
+        var resolved_has_type = expr.has_type_
         var resolved_type = expr.type_
         val kind = match expr.kind:
             # Method calls - the main target
@@ -529,7 +530,38 @@ impl MethodResolver:
                     case StaticMethod(_, method_id): method_id.id
                     case Unresolved: nil
 
-                resolved_type = self.resolve_call_result_type_raw(resolved_method_raw_id, expr.type_)
+                var fallback_type: HirType? = nil
+                # `!= nil` cannot screen this slot: the nil sentinel is raw 3,
+                # while an aggregate that lost its field stores is a well-formed
+                # heap block whose fields are all raw 0. Require a populated
+                # `kind` before treating the annotation as present.
+                if expr.has_type_ and expr.type_ != nil and expr.type_.kind != 0:
+                    fallback_type = Some(expr.type_)
+                val maybe_resolved_type = self.resolve_call_result_type_raw(resolved_method_raw_id, fallback_type)
+                match maybe_resolved_type:
+                    case Some(found_type):
+                        # PRODUCER GUARD (2026-08-31). This arm used to set
+                        # `resolved_has_type = true` unconditionally, which is how a
+                        # HirType with an UNWRITTEN `kind` reached MIR lowering and
+                        # raised "E-MIR-TYPE-Unknown: unreachable HirTypeKind
+                        # disc=-1: 0" -- measured signature `kindzero=true
+                        # kindnil=false`, i.e. a well-formed heap object whose kind
+                        # field is raw 0 (every aggregate is a fresh rt_alloc'd
+                        # ZEROED block plus per-field stores; a dropped store leaves
+                        # exactly this). `found_type` crosses the admitted Stage-2
+                        # native ABI as an aggregate return AND an Option arm
+                        # binding, both documented corruption paths, so it must be
+                        # validated here rather than trusted.
+                        # Claiming has_type_=true while type_ is unpopulated is the
+                        # defect: an unresolved result type is correctly expressed
+                        # by has_type_=false, which callers already handle.
+                        if found_type != nil and found_type.kind != 0:
+                            resolved_type = found_type
+                            resolved_has_type = true
+                        else:
+                            resolved_has_type = false
+                    case nil:
+                        resolved_has_type = false
                 HirExprKind.MethodCall(resolved_receiver, method, resolved_args, new_resolution)
 
             # Regular function calls - resolve arguments, then fill omitted
@@ -800,7 +832,7 @@ impl MethodResolver:
             # Error
             case Error: expr.kind
 
-        HirExpr(kind: kind, has_type_: expr.has_type_, type_: resolved_type, span: expr.span)
+        HirExpr(kind: kind, has_type_: resolved_has_type, type_: resolved_type, span: expr.span)
 
     # ========================================================================
     # Method Resolution Logic (UFCS)

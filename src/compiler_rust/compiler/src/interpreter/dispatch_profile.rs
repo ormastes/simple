@@ -44,20 +44,12 @@ fn init() -> bool {
         .unwrap_or(false);
     if on {
         *COUNTS.lock().unwrap() = Some(BTreeMap::new());
-        // `libc` is a [target.'cfg(unix)'.dependencies] entry, so the at-exit
-        // hook has to be cfg-gated for the crate to build on Windows. Say so
-        // out loud instead of collecting counts that would never be printed --
-        // this path only runs when SIMPLE_INTERP_PROFILE was explicitly set,
-        // and a profiler that silently produces nothing is worse than one that
-        // reports it is unavailable.
-        #[cfg(unix)]
         unsafe {
-            libc::atexit(dump_at_exit);
+            unsafe extern "C" {
+                fn atexit(callback: extern "C" fn()) -> i32;
+            }
+            let _ = atexit(dump_at_exit);
         }
-        #[cfg(not(unix))]
-        eprintln!(
-            "[simple] SIMPLE_INTERP_PROFILE ignored: the at-exit dispatch dump is not wired on this platform"
-        );
     }
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on
@@ -105,7 +97,11 @@ pub fn render() -> String {
     let mut out = String::from("interp-dispatch-profile:\n");
     out.push_str(&format!("  total_dispatches: {}\n", total));
     for (k, v) in &rows {
-        let pct = if total == 0 { 0.0 } else { (*v as f64) * 100.0 / (total as f64) };
+        let pct = if total == 0 {
+            0.0
+        } else {
+            (*v as f64) * 100.0 / (total as f64)
+        };
         out.push_str(&format!("  {:<20} {:>12}  {:>6.2}%\n", k, v, pct));
     }
     out.push_str(&format!(
@@ -117,7 +113,7 @@ pub fn render() -> String {
     out
 }
 
-pub(crate) fn expr_kind(expr: &Expr) -> &'static str {
+fn expr_kind(expr: &Expr) -> &'static str {
     match expr {
         Expr::Identifier(_) => "Identifier",
         Expr::Integer(_) | Expr::TypedInteger(_, _) => "Integer",
@@ -136,7 +132,7 @@ pub(crate) fn expr_kind(expr: &Expr) -> &'static str {
         Expr::If { .. } => "If",
         Expr::Match { .. } => "Match",
         Expr::DoBlock(_) => "DoBlock",
-        Expr::UnsafeBlock(_) => "UnsafeBlock",
+        Expr::UnsafeBlock(_, _) => "UnsafeBlock",
         Expr::Call { .. } => "Call",
         Expr::MethodCall { .. } => "MethodCall",
         Expr::FieldAccess { .. } => "FieldAccess",
@@ -153,6 +149,7 @@ pub(crate) fn expr_kind(expr: &Expr) -> &'static str {
         Expr::DictComprehension { .. } => "DictComprehension",
         Expr::Slice { .. } => "Slice",
         Expr::Spread(_) | Expr::DictSpread(_) => "Spread",
+        Expr::StructSpread(_) => "StructSpread",
         Expr::MacroInvocation { .. } => "MacroInvocation",
         Expr::Await(_) => "Await",
         Expr::Spawn(_) => "Spawn",

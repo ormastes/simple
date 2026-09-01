@@ -1,0 +1,132 @@
+use std.spec.*
+use std.nogc_async_mut.gpu.store.{GpuCasStore}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_append, file_delete, file_read, file_write, file_write_bytes}
+
+fn _fresh_root(name: text) -> text:
+    val root = "/tmp/simple_gpu_mmu_store_{name}"
+    dir_remove_all(root)
+    root
+
+fn _expect_open_error(root: text):
+    match GpuCasStore.open(root):
+        case Ok(_): fail("corrupt store was opened")
+        case Err(message): expect(message).to_start_with("gpu_cas:")
+
+describe "GPU MMU immutable CAS store":
+    it "deduplicates immutable blobs and recovers journaled manifests":
+        step("Write one immutable artifact twice")
+        val root = _fresh_root("roundtrip")
+        var store = match GpuCasStore.create(root):
+            case Ok(value): value
+            case Err(message): fail(message)
+        val bytes: [u8] = [97u8, 114u8, 101u8, 110u8, 97u8]
+        val first = match store.put_blob(bytes):
+            case Ok(value): value
+            case Err(message): fail(message)
+        val duplicate = match store.put_blob(bytes):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect(duplicate.digest).to_equal(first.digest)
+        expect(duplicate.byte_len).to_equal(5)
+        expect(store.bind("scene/main", first).is_ok()).to_be(true)
+
+        step("Recover the journaled manifest and verify bytes")
+        val reopened = match GpuCasStore.open(root):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect(reopened.recovery.replayed_entries).to_equal(1)
+        match reopened.resolve("scene/main"):
+            case Some(id):
+                expect(id.digest).to_equal(first.digest)
+                val loaded = match reopened.get_blob(id):
+                    case Ok(value): value
+                    case Err(message): fail(message)
+                expect(loaded.len()).to_equal(5)
+                expect(loaded[0]).to_equal(97u8)
+                expect(loaded[4]).to_equal(97u8)
+            case nil: fail("manifest binding was not recovered")
+        dir_remove_all(root)
+
+    it "persists a clean checkpoint and resets journal replay":
+        step("Checkpoint one bound artifact")
+        val root = _fresh_root("checkpoint")
+        var store = match GpuCasStore.create(root):
+            case Ok(value): value
+            case Err(message): fail(message)
+        val id = match store.put_blob([1u8, 2u8, 3u8]):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect(store.bind("weights", id).is_ok()).to_be(true)
+        expect(store.checkpoint().is_ok()).to_be(true)
+        step("Reopen from the clean checkpoint")
+        val reopened = match GpuCasStore.open(root):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect(reopened.recovery.checkpoint_entries).to_equal(1)
+        expect(reopened.recovery.replayed_entries).to_equal(0)
+        expect(reopened.recovery.last_sequence).to_equal(1)
+        dir_remove_all(root)
+
+describe "GPU MMU CAS fail-closed recovery":
+    it "rejects a partial journal record":
+        step("Interrupt a journal tail after one complete record")
+        val root = _fresh_root("partial_journal")
+        var store = match GpuCasStore.create(root):
+            case Ok(value): value
+            case Err(message): fail(message)
+        val id = match store.put_blob([1u8]):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect(store.bind("complete", id).is_ok()).to_be(true)
+        expect(file_append("{root}/journal", "2|BIND|partial|{id.digest}")).to_be(true)
+        step("Reject recovery of the partial journal")
+        _expect_open_error(root)
+        dir_remove_all(root)
+
+    it "rejects a complete journal record with a bad checksum":
+        step("Append a complete but unauthenticated journal record")
+        val root = _fresh_root("journal_checksum")
+        expect(GpuCasStore.create(root).is_ok()).to_be(true)
+        val digest = "0000000000000000000000000000000000000000000000000000000000000000"
+        expect(file_append("{root}/journal", "1|BIND|scene|{digest}|0|bad\n")).to_be(true)
+        _expect_open_error(root)
+        dir_remove_all(root)
+
+    it "rejects a checkpoint with a bad checksum":
+        step("Tamper with the checksummed checkpoint")
+        val root = _fresh_root("checkpoint_checksum")
+        expect(GpuCasStore.create(root).is_ok()).to_be(true)
+        val checkpoint = file_read("{root}/checkpoint")
+        expect(file_write("{root}/checkpoint", checkpoint + "tamper")).to_be(true)
+        _expect_open_error(root)
+        dir_remove_all(root)
+
+    it "rejects a corrupted referenced blob":
+        step("Corrupt a blob after journaling its manifest binding")
+        val root = _fresh_root("corrupt_blob")
+        var store = match GpuCasStore.create(root):
+            case Ok(value): value
+            case Err(message): fail(message)
+        val id = match store.put_blob([9u8, 8u8, 7u8, 6u8]):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect(store.bind("graph", id).is_ok()).to_be(true)
+        expect(file_write_bytes("{root}/blobs/{id.digest}", [0u8, 0u8, 0u8, 0u8])).to_be(true)
+        step("Reject recovery of the corrupt content identity")
+        _expect_open_error(root)
+        dir_remove_all(root)
+
+    it "rejects a missing referenced blob":
+        step("Remove a blob after journaling its manifest binding")
+        val root = _fresh_root("missing_blob")
+        var store = match GpuCasStore.create(root):
+            case Ok(value): value
+            case Err(message): fail(message)
+        val id = match store.put_blob([4u8, 5u8, 6u8]):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect(store.bind("missing", id).is_ok()).to_be(true)
+        expect(file_delete("{root}/blobs/{id.digest}")).to_be(true)
+        _expect_open_error(root)
+        dir_remove_all(root)

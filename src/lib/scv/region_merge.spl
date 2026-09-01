@@ -1,0 +1,264 @@
+# SCV-IMPL-D-05 — semistructured region merge (MergirafSemi-style).
+#
+# A file is split into CST regions: a PREAMBLE (everything before the first
+# named declaration, whose `use` lines form a COMMUTATIVE import list) and one
+# region per named top-level block (the P-05 text-block scanner in
+# structural_match.spl is the region source — same interim CST scope as
+# SCV-IMPL-D-01/I-03). Regions merge three-way at region granularity:
+#   - one side changed a region        -> take that side
+#   - both changed identically         -> take it
+#   - both changed differently         -> REFUSE ("" — region-conflict)
+#   - deleted one side, unchanged other-> drop the region
+#   - deleted one side, edited other   -> REFUSE (delete-edit-conflict)
+#   - added on a side                  -> include (top-level declaration list
+#                                         is commutative: left order first,
+#                                         right-only additions appended)
+# Every accepted result must pass the LINE-BALANCE check: paired delimiters
+# ((), [], {}) balance across the file and never go negative, so a merge that
+# stitched half a region cannot be claimed clean. The merge NEVER invents
+# content; any ambiguity returns "" and the caller keeps the conflict.
+
+use std.scv.structural_match.{scv_text_block_names, scv_text_block_content, scv_normalize_block}
+use std.scv.core.{scv_line_set_contains}
+
+fn scv_region_merge_version() -> text:
+    "scv/region-merge/v1"
+
+# --- preamble ---------------------------------------------------------------
+
+fn scv_region_preamble(content: text) -> text:
+    val names = scv_text_block_names(content)
+    if names.len() == 0:
+        return content
+    val first = scv_text_block_content(content, names[0])
+    val first_line = first.split("\n")[0]
+    var rows: [text] = []
+    for line in content.split("\n"):
+        if line == first_line:
+            break
+        rows.push(line)
+    rows.join("\n")
+
+fn scv_region_use_lines(content: text) -> [text]:
+    var out: [text] = []
+    for line in scv_region_preamble(content).split("\n"):
+        val t = line.trim()
+        if t.starts_with("use "):
+            out.push(t)
+    out
+
+fn scv_region_non_use_preamble(content: text) -> text:
+    var rows: [text] = []
+    for line in scv_region_preamble(content).split("\n"):
+        if not line.trim().starts_with("use "):
+            rows.push(line)
+    scv_normalize_block(rows.join("\n"))
+
+fn scv_region_list_has(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+# Commutative use-list union: base order first (minus one-side removals),
+# then left-only additions, then right-only additions.
+# Returns (lines, strategy) with strategy "" on refusal (never refuses today:
+# a use-list union is always well-defined for line-granular imports).
+fn scv_region_merge_use_lines(base: [text], left: [text], right: [text]) -> [text]:
+    var out: [text] = []
+    for u in base:
+        if scv_region_list_has(left, u) and scv_region_list_has(right, u):
+            out.push(u)
+    for u in left:
+        if not scv_region_list_has(base, u) and not scv_region_list_has(out, u):
+            out.push(u)
+    for u in right:
+        if not scv_region_list_has(base, u) and not scv_region_list_has(out, u):
+            out.push(u)
+    out
+
+# --- line balance -----------------------------------------------------------
+
+# True when (), [], {} are balanced across the text, never dipping negative,
+# ignoring characters inside quoted strings and after a `#` comment start.
+fn scv_region_line_balance_ok(content: text) -> bool:
+    var paren = 0
+    var bracket = 0
+    var brace = 0
+    for line in content.split("\n"):
+        var in_str = false
+        var quote = ""
+        var i = 0
+        while i < line.len():
+            val c = line[i:i+1]
+            if in_str:
+                if c == quote:
+                    in_str = false
+            elif c == "\"" or c == "'":
+                in_str = true
+                quote = c
+            elif c == "#":
+                break
+            elif c == "(":
+                paren = paren + 1
+            elif c == ")":
+                paren = paren - 1
+            elif c == "[":
+                bracket = bracket + 1
+            elif c == "]":
+                bracket = bracket - 1
+            elif c == "{":
+                brace = brace + 1
+            elif c == "}":
+                brace = brace - 1
+            if paren < 0 or bracket < 0 or brace < 0:
+                return false
+            i = i + 1
+    paren == 0 and bracket == 0 and brace == 0
+
+# --- region merge -----------------------------------------------------------
+
+# Per-region strategy rows "name: strategy". Strategies:
+#   preamble: same | left | right | use-union | preamble-conflict
+#   <block>:  same | left | right | left-add | right-add | left-delete |
+#             right-delete | region-conflict | delete-edit-conflict
+fn scv_region_merge_report(base_text: text, left_text: text, right_text: text) -> text:
+    val (_, report) = scv_region_merge_with_report(base_text, left_text, right_text)
+    report
+
+fn scv_region_merge_text(base_text: text, left_text: text, right_text: text) -> text:
+    val (merged, _) = scv_region_merge_with_report(base_text, left_text, right_text)
+    merged
+
+fn scv_region_merge_with_report(base_text: text, left_text: text, right_text: text) -> (text, text):
+    val base_names = scv_text_block_names(base_text)
+    val left_names = scv_text_block_names(left_text)
+    val right_names = scv_text_block_names(right_text)
+    if base_names.len() == 0 and left_names.len() == 0 and right_names.len() == 0:
+        return ("", "no-regions\n")
+    var report = ""
+    var failed = false
+    # preamble: non-use part must be resolvable one-sided; use lines union.
+    val bp = scv_region_non_use_preamble(base_text)
+    val lp = scv_region_non_use_preamble(left_text)
+    val rp = scv_region_non_use_preamble(right_text)
+    var preamble_body = bp
+    var preamble_strategy = "same"
+    if lp != bp and rp != bp and lp != rp:
+        report = report + "preamble: preamble-conflict\n"
+        failed = true
+    elif lp != bp:
+        preamble_body = lp
+        preamble_strategy = "left"
+    elif rp != bp:
+        preamble_body = rp
+        preamble_strategy = "right"
+    val bu = scv_region_use_lines(base_text)
+    val lu = scv_region_use_lines(left_text)
+    val ru = scv_region_use_lines(right_text)
+    var merged_uses = scv_region_merge_use_lines(bu, lu, ru)
+    var uses_changed = merged_uses.len() != bu.len()
+    if not uses_changed:
+        var i = 0
+        while i < bu.len():
+            if merged_uses[i] != bu[i]:
+                uses_changed = true
+            i = i + 1
+    if uses_changed:
+        preamble_strategy = "use-union"
+    if not failed:
+        report = report + "preamble: {preamble_strategy}\n"
+    # regions
+    var blocks: [text] = []
+    var seen = ""
+    var all_names: [text] = []
+    for n in left_names:
+        all_names.push(n)
+    for n in base_names:
+        if not scv_region_list_has(all_names, n):
+            all_names.push(n)
+    for n in right_names:
+        if not scv_region_list_has(all_names, n):
+            all_names.push(n)
+    for name in all_names:
+        if scv_line_set_contains(seen, name):
+            continue
+        seen = seen + name + "\n"
+        val in_base = scv_region_list_has(base_names, name)
+        val in_left = scv_region_list_has(left_names, name)
+        val in_right = scv_region_list_has(right_names, name)
+        val bc = if in_base: scv_normalize_block(scv_text_block_content(base_text, name)) else: ""
+        val lc = if in_left: scv_normalize_block(scv_text_block_content(left_text, name)) else: ""
+        val rc = if in_right: scv_normalize_block(scv_text_block_content(right_text, name)) else: ""
+        if in_base and in_left and in_right:
+            if lc == bc and rc == bc:
+                blocks.push(bc)
+                report = report + "{name}: same\n"
+            elif lc != bc and rc != bc and lc != rc:
+                report = report + "{name}: region-conflict\n"
+                failed = true
+            elif lc != bc and rc != bc:
+                blocks.push(lc)
+                report = report + "{name}: same\n"
+            elif lc != bc:
+                blocks.push(lc)
+                report = report + "{name}: left\n"
+            else:
+                blocks.push(rc)
+                report = report + "{name}: right\n"
+        elif in_base and not in_left and in_right:
+            if rc == bc:
+                report = report + "{name}: left-delete\n"
+            else:
+                report = report + "{name}: delete-edit-conflict\n"
+                failed = true
+        elif in_base and in_left and not in_right:
+            if lc == bc:
+                report = report + "{name}: right-delete\n"
+            else:
+                report = report + "{name}: delete-edit-conflict\n"
+                failed = true
+        elif in_base:
+            # deleted on both sides
+            report = report + "{name}: both-delete\n"
+        elif in_left and in_right:
+            if lc == rc:
+                blocks.push(lc)
+                report = report + "{name}: same-add\n"
+            else:
+                report = report + "{name}: region-conflict\n"
+                failed = true
+        elif in_left:
+            blocks.push(lc)
+            report = report + "{name}: left-add\n"
+        else:
+            blocks.push(rc)
+            report = report + "{name}: right-add\n"
+    if failed:
+        return ("", report)
+    var head_rows: [text] = []
+    for u in merged_uses:
+        head_rows.push(u)
+    if preamble_body != "":
+        var body_rows: [text] = []
+        for line in preamble_body.split("\n"):
+            if not line.trim().starts_with("use "):
+                body_rows.push(line)
+        val body = body_rows.join("\n")
+        if body != "":
+            head_rows.push(body)
+    var parts: [text] = []
+    if head_rows.len() > 0:
+        parts.push(head_rows.join("\n"))
+    for b in blocks:
+        parts.push(b)
+    val merged = parts.join("\n\n")
+    if merged == "":
+        return ("", report)
+    if not scv_region_line_balance_ok(merged):
+        return ("", report + "line-balance: rejected\n")
+    (merged + "\n", report + "line-balance: ok\n")
+
+export scv_region_merge_version, scv_region_preamble, scv_region_use_lines
+export scv_region_merge_use_lines, scv_region_line_balance_ok
+export scv_region_merge_text, scv_region_merge_report, scv_region_merge_with_report

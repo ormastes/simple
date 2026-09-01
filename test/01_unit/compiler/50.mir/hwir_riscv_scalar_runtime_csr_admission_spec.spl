@@ -1,0 +1,120 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_csr_admission.{
+    RiscvScalarRuntimeCsrAdmissionContract, strict_riscv_scalar_runtime_csr_admission,
+    evaluate_riscv_scalar_runtime_csr_admission}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+describe "dynamic runtime Zicsr admission contract":
+    it "freezes all six exact Zicsr rows for standalone and canonical combined XLEN products":
+        for product in [(CoreConfig.rv32_zicsr_zifencei(), "rv32i_zicsr_zifencei"),
+                (CoreConfig.rv64_zicsr_zifencei(), "rv64i_zicsr_zifencei"),
+                (CoreConfig.rv32_zmmul_zicsr_zifencei(), "rv32i_zmmul_zicsr_zifencei"),
+                (CoreConfig.rv64_zmmul_zicsr_zifencei(), "rv64i_zmmul_zicsr_zifencei")]:
+            val contract = strict_riscv_scalar_runtime_csr_admission(product[0],
+                riscv_scalar_decoder_plan(product[1]).unwrap()).unwrap()
+            expect(contract.diagnostic()).to_equal("")
+            expect(contract.rows.len()).to_equal(6)
+            expect(contract.provider_tag).to_equal(3)
+            expect(contract.execution_class).to_equal(6)
+            expect(contract.memory_effect).to_equal(3)
+            expect(contract.rows.any(_.id == "rv.zicsr.csrrw" and _.form_code == 0 and _.semantic_opcode == 14)).to_be(true)
+            expect(contract.rows.any(_.id == "rv.zicsr.csrrci" and _.form_code == 5 and _.semantic_opcode == 11)).to_be(true)
+            expect(contract.structural_sha256().len()).to_equal(64)
+
+    it "evaluates register and immediate source semantics with exact read and write intent":
+        val contract = strict_riscv_scalar_runtime_csr_admission(CoreConfig.rv64_zicsr_zifencei(),
+            riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()).unwrap()
+        val write = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrw", 0x300092F3, 3, 5, true, 0x12).unwrap()
+        expect(write.csr_address).to_equal(0x300)
+        expect(write.source_value).to_equal(5)
+        expect(write.source_is_immediate).to_be(false)
+        expect(write.write_requested).to_be(true)
+        expect(write.write_value).to_equal(5)
+        expect(write.read_requested).to_be(true)
+        val x0_source = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrw", 0x300012F3, 3, 99, true, 0x12).unwrap()
+        expect(x0_source.source_value).to_equal(0)
+        val rv32 = strict_riscv_scalar_runtime_csr_admission(CoreConfig.rv32_zicsr_zifencei(),
+            riscv_scalar_decoder_plan("rv32i_zicsr_zifencei").unwrap()).unwrap()
+        val narrowed = evaluate_riscv_scalar_runtime_csr_admission(rv32,
+            "rv.zicsr.csrrw", 0x300092F3, 3, 0x100000001, true, 0x100000012).unwrap()
+        expect(narrowed.source_value).to_equal(1)
+        expect(narrowed.write_value).to_equal(1)
+        val no_read = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrw", 0x30009073, 3, 5, true, 0x12).unwrap()
+        expect(no_read.read_requested).to_be(false)
+        expect(no_read.write_value).to_equal(5)
+        val set_zero = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrs", 0x300022F3, 3, 0, true, 0x12).unwrap()
+        expect(set_zero.write_requested).to_be(false)
+        expect(set_zero.read_requested).to_be(true)
+        expect(set_zero.write_value).to_equal(0x12)
+        val immediate = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrsi", 0x3001E2F3, 3, 99, true, 0x12).unwrap()
+        expect(immediate.source_is_immediate).to_be(true)
+        expect(immediate.source_value).to_equal(3)
+        expect(immediate.write_requested).to_be(true)
+        expect(immediate.write_value).to_equal(0x13)
+        val clear = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrc", 0x300032F3, 3, 5, true, 0x1F).unwrap()
+        expect(clear.form_code).to_equal(2)
+        expect(clear.write_requested).to_be(true)
+        expect(clear.write_value).to_equal(0x1A)
+        val write_immediate = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrwi", 0x3001D2F3, 3, 99, true, 0x12).unwrap()
+        expect(write_immediate.form_code).to_equal(3)
+        expect(write_immediate.write_requested).to_be(true)
+        expect(write_immediate.write_value).to_equal(3)
+        val write_immediate_no_read = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrwi", 0x3001D073, 3, 99, true, 0x12).unwrap()
+        expect(write_immediate_no_read.read_requested).to_be(false)
+        val clear_immediate_zero = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrci", 0x300072F3, 3, 99, true, 0x12).unwrap()
+        expect(clear_immediate_zero.form_code).to_equal(5)
+        expect(clear_immediate_zero.write_requested).to_be(false)
+        expect(clear_immediate_zero.read_requested).to_be(true)
+        expect(clear_immediate_zero.write_value).to_equal(0x12)
+        val clear_immediate = evaluate_riscv_scalar_runtime_csr_admission(contract,
+            "rv.zicsr.csrrci", 0x3001F2F3, 3, 99, true, 0x1F).unwrap()
+        expect(clear_immediate.form_code).to_equal(5)
+        expect(clear_immediate.source_value).to_equal(3)
+        expect(clear_immediate.write_requested).to_be(true)
+        expect(clear_immediate.write_value).to_equal(0x1C)
+
+    it "returns only execute cause two for absent privilege or read-only write policy failures":
+        val contract = strict_riscv_scalar_runtime_csr_admission(CoreConfig.rv32_zicsr_zifencei(),
+            riscv_scalar_decoder_plan("rv32i_zicsr_zifencei").unwrap()).unwrap()
+        for case in [("rv.zicsr.csrrw", 0x300092F3, 3, false),
+                ("rv.zicsr.csrrw", 0x100092F3, 0, true),
+                ("rv.zicsr.csrrw", 0xF11092F3, 3, true)]:
+            val result = evaluate_riscv_scalar_runtime_csr_admission(contract,
+                case[0], case[1], case[2], 7, case[3], 0x12).unwrap()
+            expect(result.execute_trap_valid).to_be(true)
+            expect(result.execute_trap_cause).to_equal(2)
+            expect(result.access_allowed).to_be(false)
+
+    it "rejects tampered form bindings and non-Zicsr or IM products before a provider can consume them":
+        val contract = strict_riscv_scalar_runtime_csr_admission(CoreConfig.rv64_zicsr_zifencei(),
+            riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()).unwrap()
+        var forged_rows = contract.rows
+        forged_rows[0].encoding_value = forged_rows[0].encoding_value + 0x1000
+        val forged = RiscvScalarRuntimeCsrAdmissionContract(isa_profile: contract.isa_profile,
+            plan_sha256: contract.plan_sha256, xlen: contract.xlen, decoded_row_width: contract.decoded_row_width,
+            provider_tag: contract.provider_tag, execution_class: contract.execution_class,
+            memory_effect: contract.memory_effect, rows: forged_rows,
+            required_metadata_checks: contract.required_metadata_checks, trap_policy: contract.trap_policy)
+        expect(forged.diagnostic()).to_contain("ROW")
+        val forged_route = RiscvScalarRuntimeCsrAdmissionContract(isa_profile: contract.isa_profile,
+            plan_sha256: contract.plan_sha256, xlen: contract.xlen, decoded_row_width: contract.decoded_row_width,
+            provider_tag: contract.provider_tag, execution_class: 3,
+            memory_effect: 0, rows: contract.rows,
+            required_metadata_checks: contract.required_metadata_checks, trap_policy: contract.trap_policy)
+        expect(forged_route.diagnostic()).to_contain("PROTOCOL")
+        expect(strict_riscv_scalar_runtime_csr_admission(CoreConfig.rv64(),
+            riscv_scalar_decoder_plan("rv64i").unwrap()).is_err()).to_be(true)
+        val rv64im = CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+            profile: "rv64im", isa_profile: "rv64im", compressed_decode_profile: "none")
+        expect(strict_riscv_scalar_runtime_csr_admission(rv64im,
+            riscv_scalar_decoder_plan("rv64im").unwrap()).is_err()).to_be(true)

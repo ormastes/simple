@@ -30,22 +30,16 @@
 # one.
 
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason, hir_module_decode, hir_codec_header}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
 use compiler.frontend.core.flat_pool_codec.{flat_pool_escape, flat_pool_unescape}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
-use compiler.frontend.cache_dir_evict.{cache_dir_evict_due, cache_dir_evict_to_cap, cache_dir_max_bytes}
 use std.common.crypto.sha256.{sha256_text}
-use std.io.{file_exists, file_write}
-# Direct owner import: `std.io` re-exports `file_lock`/`file_unlock` from BOTH
-# io/file_ops.spl and sffi/io.spl, so the barrel name is ambiguous. file_ops is
-# the canonical owner ("File mutation stays owned by file_ops", io/__init__.spl).
-use std.io.file_ops.{file_lock, file_unlock}
+use std.io.{file_lock, file_unlock, file_write}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_hash}
 
 extern fn rt_env_get(key: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
 extern fn rt_dir_create_all(path: text) -> bool
@@ -59,17 +53,6 @@ val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v2"
 var _hir_cache_hits: i64 = 0
 var _hir_cache_misses: i64 = 0
 var _hir_cache_stores: i64 = 0
-# A store the CODEC refused (hir_module_encode returned ""), and the reason the
-# codec gave for the most recent one. Refusals are silent by construction --
-# "a cache that cannot store is a slow build, not a wrong one" -- and that
-# silence is exactly why a cache that stored NOTHING for a 688-module closure
-# looked like a cache with a poor hit rate for weeks. A refusal is now counted
-# and named in the receipt, so zero stores is always attributable.
-var _hir_cache_store_refusals: i64 = 0
-var _hir_cache_last_refusal: text = ""
-# Stores that failed for an I/O reason (write or rename), which is a different
-# defect from a codec refusal and must not be conflated with one.
-var _hir_cache_store_io_failures: i64 = 0
 # Recovered (warning-level) lowering diagnostics of the last loaded entry, so
 # a hit replays exactly what the in-process lowering would have reported.
 var _hir_cache_last_warnings: [text] = []
@@ -112,7 +95,7 @@ fn _hir_cache_env_switches() -> text:
     out
 
 fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> text:
-    if closure_digest == "" or not rt_file_exists(source_path):
+    if closure_digest == "" or not file_exists(source_path):
         return ""
     val source_digest = rt_file_hash_sha256(source_path)
     if source_digest.len() != 64:
@@ -127,7 +110,7 @@ fn hir_cache_header() -> text:
     HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + frontend_parse_cache_scope()
 
 fn hir_cache_has(key: text) -> bool:
-    key != "" and hir_cache_enabled() and rt_file_exists(hir_cache_path(key))
+    key != "" and hir_cache_enabled() and file_exists(hir_cache_path(key))
 
 # nil for a miss, a foreign/corrupt entry, or a truncated one: every one of
 # those is "lower it in process", and the caller must not need to tell them
@@ -136,10 +119,10 @@ fn hir_cache_load(key: text) -> HirModule?:
     if key == "" or not hir_cache_enabled():
         return nil
     val path = hir_cache_path(key)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         _hir_cache_misses = _hir_cache_misses + 1
         return nil
-    val raw = rt_file_read_text(path) ?? ""
+    val raw = file_read_nullable(path) ?? ""
     val nl = raw.index_of("\n")
     if raw == "" or nl < 0 or raw.substring(0, nl) != hir_cache_header():
         _hir_cache_misses = _hir_cache_misses + 1
@@ -186,8 +169,6 @@ fn hir_cache_store(key: text, module: HirModule, warnings: [text]) -> bool:
         return false
     val blob = hir_module_encode(module)
     if blob == "":
-        _hir_cache_store_refusals = _hir_cache_store_refusals + 1
-        _hir_cache_last_refusal = hir_module_encode_reason(module)
         return false
     var warning_parts: [text] = ["W\n{warnings.len()}\n"]
     for w in warnings:
@@ -197,14 +178,10 @@ fn hir_cache_store(key: text, module: HirModule, warnings: [text]) -> bool:
     val final_path = hir_cache_path(key)
     val tmp = final_path + ".{rt_getpid()}.tmp"
     if not rt_file_write_text(tmp, hir_cache_header() + "\n" + warning_parts.join("") + blob):
-        _hir_cache_store_io_failures = _hir_cache_store_io_failures + 1
         return false
     if rt_file_move(tmp, final_path):
         _hir_cache_stores = _hir_cache_stores + 1
-        if cache_dir_evict_due(_hir_cache_stores):
-            val _evicted = cache_dir_evict_to_cap(dir, ".hir", cache_dir_max_bytes())
         return true
-    _hir_cache_store_io_failures = _hir_cache_store_io_failures + 1
     val _cleaned = rt_file_delete(tmp)
     false
 
@@ -217,34 +194,8 @@ fn hir_cache_misses() -> i64:
 fn hir_cache_stores() -> i64:
     _hir_cache_stores
 
-fn hir_cache_store_refusals() -> i64:
-    _hir_cache_store_refusals
-
-fn hir_cache_store_io_failures() -> i64:
-    _hir_cache_store_io_failures
-
-fn hir_cache_last_refusal() -> text:
-    _hir_cache_last_refusal
-
-# The receipt is the only externally visible proof that this cache did
-# anything. It names refusals and I/O failures separately, and names the
-# directory, so "no hir/ directory exists" can be diagnosed without a rebuild.
 fn hir_cache_summary() -> text:
-    val refusal = if _hir_cache_last_refusal == "": "-" else: _hir_cache_last_refusal
-    "[hir-cache] hits={_hir_cache_hits} misses={_hir_cache_misses} stores={_hir_cache_stores} refused={_hir_cache_store_refusals} io_failed={_hir_cache_store_io_failures} reason={refusal} dir={hir_cache_dir()}"
-
-# Printed even when the cache is OFF, so a disabled cache is a stated fact
-# rather than an absent line indistinguishable from a cache that ran and did
-# nothing. SIMPLE_HIR_CACHE=0 is the kill switch; frontend scope absence is
-# the other way this reaches "off".
-fn hir_cache_status_line() -> text:
-    if hir_cache_enabled():
-        return hir_cache_summary()
-    val why = if (rt_env_get("SIMPLE_HIR_CACHE") ?? "") == "0":
-        "SIMPLE_HIR_CACHE=0"
-    else:
-        "no SIMPLE_FRONTEND_CACHE_SCOPE published"
-    "[hir-cache] disabled reason={why}"
+    "[hir-cache] hits={_hir_cache_hits} misses={_hir_cache_misses} stores={_hir_cache_stores}"
 
 # ===== HIR sharding ==========================================================
 #
@@ -411,7 +362,5 @@ export HIR_CACHE_ENTRY_VERSION
 export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
 export hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_last_warnings
 export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
-export hir_cache_store_refusals, hir_cache_store_io_failures, hir_cache_last_refusal
-export hir_cache_status_line
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary

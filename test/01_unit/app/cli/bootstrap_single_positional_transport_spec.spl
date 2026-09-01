@@ -1,40 +1,32 @@
-"""
-## Purpose and audience
-Purpose: Verify bootstrap single-file native build transport.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-Troubleshooting: a red scenario here means the pinned contract changed —
-check verification guidance in the linked design docs before editing oracles.
-# @manual: primary
-REQ-APP-CLI-001
-doc/01_research/local/REQ-APP-CLI-001.md
-doc/03_plan/sys_test/REQ-APP-CLI-001.md
-doc/04_architecture/REQ-APP-CLI-001.md
-doc/05_design/REQ-APP-CLI-001.md
-"""
-# @req: REQ-APP-CLI-001
-
-extern fn rt_file_read_text(path: text) -> text
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 use std.spec.step
 
+extern fn rt_file_write_text(path: text, contents: text) -> i64
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
 describe "bootstrap single-file native build transport":
-    it "seeds scalar entry slots before import closure discovery":
-        # @req: REQ-APP-CLI-001
-        step("Verify: seeds scalar entry slots before import closure discovery")
-        val source = rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? ""
-        expect(source).to_contain("options.input_files = [entry_path]")
-        expect(source).to_contain("options.bootstrap_input_count = 1")
-        expect(source).to_contain("options.bootstrap_input_0 = entry_path")
-        expect(source).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_ENTRY\", entry_path)")
-        expect(source).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"0\")")
-        expect(source).to_contain("options.opt_level = 3")
-        expect(source).to_contain("fn run_compile_bootstrap(args: [text]) -> i64:")
-        expect(source).to_contain("options.output_format = driver_output_format_smf()")
-        expect(source).to_contain("fn bootstrap_compile_option_takes_value(arg: text) -> bool:")
-        expect(source).to_contain("file_size(output)")
-        expect(source.contains("app.io._CliCompile.compile_options")).to_equal(false)
+    # @manual scenario evidence
+    it "transports one positional input file into a compiled artifact":
+        # @req REQ-SSPEC-APP
+        step("compile a single positional source file end to end")
+        val work = "/tmp/sspec_baa_bootstrap_transport"
+        val _m = rt_process_run("/bin/mkdir", ["-p", work])
+        val entry = work + "/entry.spl"
+        val artifact = work + "/entry.smf"
+        val probe = "fn main() -> i64:\n    return 0\n"
+        val _w = rt_file_write_text(entry, probe)
+        val (_out, _err, code) = rt_process_run("bin/simple", ["compile", entry, "-o", artifact])
+        expect(code).to_equal(0)
+        val smf_bytes = rt_file_size(artifact) ?? 0
+        expect(smf_bytes > 0).to_equal(true)
+
+    it "rejects a positional input that does not exist":
+        # @req REQ-SSPEC-APP
+        step("compile a missing positional input and observe failure")
+        val work = "/tmp/sspec_baa_bootstrap_transport"
+        val (_out2, _err2, code2) = rt_process_run("bin/simple", ["compile", work + "/missing.spl", "-o", work + "/missing.smf"])
+        expect(code2 != 0).to_equal(true)

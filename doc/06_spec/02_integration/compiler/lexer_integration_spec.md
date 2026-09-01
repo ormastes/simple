@@ -1,6 +1,6 @@
-# lexer_integration_spec
+# Lexer Integration Specification
 
-> Verifies the lexer integration behaviour end to end so maintainers of this
+> Tests covering Lexer Tokenization Integration, Lexer Symbol Recognition Integration, Lexer Error Handling Integration, Lexer Unicode Integration, Lexer Whitespace Integration, Lexer Number Literals Integration, Lexer String Literals Integration, Lexer Operator Recognition Integration, Lexer Performance Integration.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# lexer_integration_spec
-
-Verifies the lexer integration behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/02_integration/compiler/lexer_integration_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the lexer integration behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Lexer Integration Specification
 
 ## Scenarios
 
@@ -39,19 +17,22 @@ unrelated sibling features are out of scope.
 
 #### tokenizes empty string
 
-- Verify: tokenizes empty string
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- tokenizes empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: tokenizes empty string")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes empty string")
 
 val input = ""
 check(input.len() == 0)
@@ -61,19 +42,18 @@ check(input.len() == 0)
 
 #### tokenizes identifier
 
-- Verify: tokenizes identifier
+- tokenizes identifier
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: tokenizes identifier")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes identifier")
 
 val input = "foo"
 check(input.len() == 3)
@@ -83,19 +63,18 @@ check(input.len() == 3)
 
 #### tokenizes number
 
-- Verify: tokenizes number
+- tokenizes number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: tokenizes number")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes number")
 
 val input = "42"
 check(input == "42")
@@ -105,19 +84,18 @@ check(input == "42")
 
 #### tokenizes string literal
 
-- Verify: tokenizes string literal
+- tokenizes string literal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: tokenizes string literal")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes string literal")
 
 val input = "\"hello\""
 check(input.contains("hello"))
@@ -127,19 +105,18 @@ check(input.contains("hello"))
 
 #### tokenizes keywords
 
-- Verify: tokenizes keywords
+- tokenizes keywords
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: tokenizes keywords")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes keywords")
 
 val keywords = ["fn", "class", "if", "else", "match", "for", "while"]
 for kw in keywords:
@@ -150,19 +127,18 @@ for kw in keywords:
 
 #### tokenizes operators
 
-- Verify: tokenizes operators
+- tokenizes operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: tokenizes operators")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes operators")
 
 val operators = ["+", "-", "*", "/", "==", "!=", "<=", ">="]
 for op in operators:
@@ -173,19 +149,18 @@ for op in operators:
 
 #### tokenizes punctuation
 
-- Verify: tokenizes punctuation
+- tokenizes punctuation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: tokenizes punctuation")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes punctuation")
 
 val puncts = ["(", ")", "[", "]", "{", "}", ",", ":", "."]
 for punct in puncts:
@@ -198,19 +173,18 @@ for punct in puncts:
 
 #### recognizes function definition
 
-- Verify: recognizes function definition
+- recognizes function definition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes function definition")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes function definition")
 
 val code = "fn add(x, y): x + y"
 check(code.contains("fn"))
@@ -221,19 +195,18 @@ check(code.contains("add"))
 
 #### recognizes class definition
 
-- Verify: recognizes class definition
+- recognizes class definition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes class definition")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes class definition")
 
 val code = "class Point:\n    x: i64\n    y: i64"
 check(code.contains("class"))
@@ -244,19 +217,18 @@ check(code.contains("Point"))
 
 #### recognizes variable declaration
 
-- Verify: recognizes variable declaration
+- recognizes variable declaration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes variable declaration")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes variable declaration")
 
 val code = "val name = \"Alice\""
 check(code.contains("val"))
@@ -266,19 +238,18 @@ check(code.contains("val"))
 
 #### recognizes import statement
 
-- Verify: recognizes import statement
+- recognizes import statement
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes import statement")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes import statement")
 
 val code = "use std.spec"
 check(code.contains("use"))
@@ -288,19 +259,18 @@ check(code.contains("use"))
 
 #### recognizes control flow
 
-- Verify: recognizes control flow
+- recognizes control flow
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes control flow")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes control flow")
 
 val control = ["if", "elif", "else", "match", "for", "while"]
 for keyword in control:
@@ -313,19 +283,18 @@ for keyword in control:
 
 #### handles unterminated string
 
-- Verify: handles unterminated string
+- handles unterminated string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles unterminated string")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles unterminated string")
 
 val invalid = "\"unclosed string"
 check(invalid.starts_with("\""))
@@ -335,19 +304,18 @@ check(invalid.starts_with("\""))
 
 #### handles invalid characters
 
-- Verify: handles invalid characters
+- handles invalid characters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles invalid characters")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles invalid characters")
 
 val invalid = "@#$"
 check(invalid.len() == 3)
@@ -357,19 +325,18 @@ check(invalid.len() == 3)
 
 #### handles malformed numbers
 
-- Verify: handles malformed numbers
+- handles malformed numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles malformed numbers")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles malformed numbers")
 
 val invalid = "123abc"
 check(invalid.contains("123"))
@@ -379,19 +346,18 @@ check(invalid.contains("123"))
 
 #### continues after error
 
-- Verify: continues after error
+- continues after error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: continues after error")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("continues after error")
 
 val code = "valid @invalid valid"
 check(code.contains("valid"))
@@ -403,19 +369,18 @@ check(code.contains("valid"))
 
 #### handles unicode identifiers
 
-- Verify: handles unicode identifiers
+- handles unicode identifiers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles unicode identifiers")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles unicode identifiers")
 
 val id = "変数"
 check(id.len() > 0)
@@ -425,19 +390,18 @@ check(id.len() > 0)
 
 #### handles unicode strings
 
-- Verify: handles unicode strings
+- handles unicode strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles unicode strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles unicode strings")
 
 val str = "\"Hello 世界\""
 check(str.contains("世界"))
@@ -447,19 +411,18 @@ check(str.contains("世界"))
 
 #### handles emoji
 
-- Verify: handles emoji
+- handles emoji
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles emoji")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles emoji")
 
 val emoji = "\"🚀🎉\""
 check(emoji.contains("🚀"))
@@ -469,19 +432,18 @@ check(emoji.contains("🚀"))
 
 #### handles RTL text
 
-- Verify: handles RTL text
+- handles RTL text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles RTL text")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles RTL text")
 
 val rtl = "\"שלום\""
 check(rtl.len() > 0)
@@ -493,19 +455,18 @@ check(rtl.len() > 0)
 
 #### ignores spaces
 
-- Verify: ignores spaces
+- ignores spaces
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: ignores spaces")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("ignores spaces")
 
 val code = "val   x   =   42"
 check(code.contains("val"))
@@ -515,19 +476,18 @@ check(code.contains("val"))
 
 #### handles tabs
 
-- Verify: handles tabs
+- handles tabs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles tabs")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles tabs")
 
 val code = "val\tx\t=\t42"
 check(code.contains("val"))
@@ -537,19 +497,18 @@ check(code.contains("val"))
 
 #### handles newlines
 
-- Verify: handles newlines
+- handles newlines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles newlines")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles newlines")
 
 val code = "val x = 42\nval y = 43"
 check(code.contains("\n"))
@@ -559,19 +518,18 @@ check(code.contains("\n"))
 
 #### ignores line comments
 
-- Verify: ignores line comments
+- ignores line comments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: ignores line comments")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("ignores line comments")
 
 val code = "val x = 42  # comment"
 check(code.contains("#"))
@@ -581,19 +539,18 @@ check(code.contains("#"))
 
 #### handles multi-line code
 
-- Verify: handles multi-line code
+- handles multi-line code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles multi-line code")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles multi-line code")
 
 val code = "fn foo():\n    pass"
 check(code.contains("\n"))
@@ -605,19 +562,18 @@ check(code.contains("\n"))
 
 #### parses integers
 
-- Verify: parses integers
+- parses integers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: parses integers")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses integers")
 
 val nums = ["0", "42", "1000", "99999"]
 for num in nums:
@@ -628,19 +584,18 @@ for num in nums:
 
 #### parses negative numbers
 
-- Verify: parses negative numbers
+- parses negative numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: parses negative numbers")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses negative numbers")
 
 val nums = ["-1", "-42", "-1000"]
 for num in nums:
@@ -651,19 +606,18 @@ for num in nums:
 
 #### parses hex numbers
 
-- Verify: parses hex numbers
+- parses hex numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: parses hex numbers")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses hex numbers")
 
 val nums = ["0x10", "0xFF", "0xABCD"]
 for num in nums:
@@ -674,19 +628,18 @@ for num in nums:
 
 #### parses binary numbers
 
-- Verify: parses binary numbers
+- parses binary numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: parses binary numbers")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses binary numbers")
 
 val nums = ["0b101", "0b1111"]
 for num in nums:
@@ -699,19 +652,18 @@ for num in nums:
 
 #### parses simple strings
 
-- Verify: parses simple strings
+- parses simple strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: parses simple strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses simple strings")
 
 val strs = ["\"hello\"", "\"world\"", "\"test\""]
 for str in strs:
@@ -723,19 +675,18 @@ for str in strs:
 
 #### parses strings with escapes
 
-- Verify: parses strings with escapes
+- parses strings with escapes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: parses strings with escapes")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses strings with escapes")
 
 val str = "\"line1\\nline2\""
 check(str.contains("\\n"))
@@ -745,19 +696,18 @@ check(str.contains("\\n"))
 
 #### parses raw strings
 
-- Verify: parses raw strings
+- parses raw strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: parses raw strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses raw strings")
 
 val str = "r\"no\\escape\""
 check(str.starts_with("r\""))
@@ -767,19 +717,18 @@ check(str.starts_with("r\""))
 
 #### parses multiline strings
 
-- Verify: parses multiline strings
+- parses multiline strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: parses multiline strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("parses multiline strings")
 
 val str = "\"\"\"multi\nline\"\"\""
 check(str.contains("\n"))
@@ -789,19 +738,18 @@ check(str.contains("\n"))
 
 #### handles string interpolation
 
-- Verify: handles string interpolation
+- handles string interpolation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles string interpolation")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles string interpolation")
 
 val name = "world"
 val str = "Hello {name}"
@@ -814,19 +762,18 @@ check(str.contains("world"))
 
 #### recognizes arithmetic operators
 
-- Verify: recognizes arithmetic operators
+- recognizes arithmetic operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes arithmetic operators")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes arithmetic operators")
 
 val ops = ["+", "-", "*", "/", "%", "**"]
 for op in ops:
@@ -837,19 +784,18 @@ for op in ops:
 
 #### recognizes comparison operators
 
-- Verify: recognizes comparison operators
+- recognizes comparison operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes comparison operators")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes comparison operators")
 
 val ops = ["==", "!=", "<", ">", "<=", ">="]
 for op in ops:
@@ -860,19 +806,18 @@ for op in ops:
 
 #### recognizes logical operators
 
-- Verify: recognizes logical operators
+- recognizes logical operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes logical operators")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes logical operators")
 
 val ops = ["and", "or", "not"]
 for op in ops:
@@ -883,19 +828,18 @@ for op in ops:
 
 #### recognizes special operators
 
-- Verify: recognizes special operators
+- recognizes special operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes special operators")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes special operators")
 
 val ops = ["|>", ">>", "?."]
 for op in ops:
@@ -906,19 +850,18 @@ for op in ops:
 
 #### recognizes assignment operators
 
-- Verify: recognizes assignment operators
+- recognizes assignment operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: recognizes assignment operators")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes assignment operators")
 
 val ops = ["=", "+=", "-=", "*="]
 for op in ops:
@@ -931,19 +874,18 @@ for op in ops:
 
 #### tokenizes 100 identifiers
 
-- Verify: tokenizes 100 identifiers
+- tokenizes 100 identifiers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: tokenizes 100 identifiers")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes 100 identifiers")
 
 var parts: [text] = []
 for i in 0..100:
@@ -957,19 +899,18 @@ check(code.len() > 400)
 
 #### tokenizes 50 function definitions
 
-- Verify: tokenizes 50 function definitions
+- tokenizes 50 function definitions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: tokenizes 50 function definitions")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes 50 function definitions")
 
 var parts: [text] = []
 for i in 0..50:
@@ -983,19 +924,18 @@ check(code.contains("fn"))
 
 #### handles deeply nested expressions
 
-- Verify: handles deeply nested expressions
+- handles deeply nested expressions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-COMPILER-COMPILER_LEXER_INTEGRATION-001
-step("Verify: handles deeply nested expressions")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-INTEGRATION
+step("handles deeply nested expressions")
 
 val code = "((((1 + 2) * 3) - 4) / 5)"
 val depth = code.count("(")
@@ -1017,36 +957,50 @@ check(depth == 4)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `38e41f7df64beb42615aae57a9b62478355e76c58387578a1c4bed4d1da92336`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `b2ee203b9aa1d41308ea08bb01d5c7dfdc36992fd1f318c6c4c047e9be1a19ad`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `38e41f7df64beb42615aae57a9b62478355e76c58387578a1c4bed4d1da92336`.
+Source SHA-256: `b2ee203b9aa1d41308ea08bb01d5c7dfdc36992fd1f318c6c4c047e9be1a19ad`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `38e41f7df64beb42615aae57a9b62478355e76c58387578a1c4bed4d1da92336`  
+Source SHA-256: `b2ee203b9aa1d41308ea08bb01d5c7dfdc36992fd1f318c6c4c047e9be1a19ad`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/02_integration/compiler/lexer_integration_spec.spl
 mirror: doc/06_spec/02_integration/compiler/lexer_integration_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/compiler/lexer_integration_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/02_integration/compiler/lexer_integration_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/compiler/lexer_integration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/02_integration/compiler/lexer_integration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/compiler/lexer_integration_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes empty string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/lexer_integration_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes identifier' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/lexer_integration_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes number' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

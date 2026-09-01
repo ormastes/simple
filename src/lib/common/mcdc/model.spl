@@ -1,0 +1,167 @@
+# codex-impl
+# Frozen allocation-free MC/DC policy and evidence vocabulary.
+
+use std.common.hash.djb2.{djb2_hash_text}
+
+pub fn mcdc_authored_path_v1(path: text) -> text:
+    if path == "": return "source.spl"
+    # Preserve the complete authored identity. Basename-only normalization
+    # aliases independent `foo/main.spl` and `bar/main.spl` decisions.
+    var canonical = path.replace("\\", "/")
+    while canonical.contains("//"): canonical = canonical.replace("//", "/")
+    canonical
+
+pub fn mcdc_runtime_decision_id_v1(authored_path: text, source_start: i64) -> i64:
+    val canonical_path = mcdc_authored_path_v1(authored_path)
+    val signed = djb2_hash_text("{canonical_path}|{source_start}")
+    val positive = signed & 2147483647
+    if positive == 0: 1 else: positive
+
+pub fn mcdc_semantic_decision_id_v1(authored_path: text, source_start: i64) -> text:
+    val canonical_path = mcdc_authored_path_v1(authored_path)
+    "{canonical_path.len()}:{canonical_path}:{source_start}"
+
+fn mcdc_path_matches_csv(path: text, csv: text) -> bool:
+    for raw in csv.split(","):
+        val pattern = raw.trim()
+        if pattern != "" and path.contains(pattern): return true
+    false
+
+pub fn mcdc_path_in_instrumentation_scope(
+    authored_path: text, include_csv: text = "", exclude_csv: text = ""
+) -> bool:
+    val path = mcdc_authored_path_v1(authored_path)
+    if exclude_csv != "" and mcdc_path_matches_csv(path, exclude_csv): return false
+    if include_csv != "": return mcdc_path_matches_csv(path, include_csv)
+    # Production default excludes only compiler/runtime infrastructure and
+    # generated artifacts. Authored `src/lib` packages remain eligible when
+    # they are part of the compiled target/entry closure.
+    not (path.starts_with("src/compiler/") or path.contains("/src/compiler/") or
+        path.starts_with("src/runtime/") or path.contains("/src/runtime/") or
+        path.starts_with("src/lib/common/mcdc/") or path.contains("/src/lib/common/mcdc/") or
+        path.starts_with("src/lib/nogc_sync_mut/mcdc/") or path.contains("/src/lib/nogc_sync_mut/mcdc/") or
+        path.starts_with("src/lib/nogc_sync_mut/test_runner/") or path.contains("/src/lib/nogc_sync_mut/test_runner/") or
+        path.contains("/.sspec_wrapped_entry_") or path.contains("/simple_cov_") or
+        path.starts_with("target/") or path.contains("/target/") or
+        path.starts_with("build/") or path.contains("/build/"))
+
+pub enum McdcMode:
+    StaticOff
+    StaticOn
+    DynamicAspect
+
+pub fn mcdc_mode_name(mode: McdcMode) -> text:
+    match mode:
+        McdcMode.StaticOff => "off"
+        McdcMode.StaticOn => "on"
+        McdcMode.DynamicAspect => "dynamic"
+
+pub fn mcdc_mode_from_text(raw: text) -> McdcMode?:
+    match raw.trim().to_lower():
+        "off" | "static-off" | "disabled" | "0" => Some(McdcMode.StaticOff)
+        "on" | "static" | "static-on" | "enabled" | "1" => Some(McdcMode.StaticOn)
+        "dynamic" | "dynamic-aspect" | "aspect" | "dynload" => Some(McdcMode.DynamicAspect)
+        _ => nil
+
+pub enum McdcOverflowPolicy:
+    DropNewest
+    OverwriteOldest
+
+pub enum McdcPairKind:
+    UniqueCause
+    Masking
+
+pub struct McdcDecisionId:
+    semantic_id: text
+    runtime_id: i64
+
+pub struct McdcPolicy:
+    mode: McdcMode
+    retain_unique_cause: bool
+    max_conditions: i64
+    max_nesting: i64
+    owner_bytes: i64
+    global_bytes: i64
+    overflow: McdcOverflowPolicy
+
+pub struct McdcEvaluation:
+    decision_id: i64
+    owner_id: i64
+    sequence: i64
+    outcome: bool
+    # Inline words cover 256 occurrences without allocating mask arrays on the
+    # decision hot path.
+    evaluated_mask0: i64
+    evaluated_mask1: i64
+    evaluated_mask2: i64
+    evaluated_mask3: i64
+    true_mask0: i64
+    true_mask1: i64
+    true_mask2: i64
+    true_mask3: i64
+    # A differing non-target occurrence is admissible for masking MC/DC only
+    # when it is marked masked in both evaluations. The compiler derives these
+    # words from the decision CFG; the analyzer never guesses from outcomes.
+    masked_mask0: i64
+    masked_mask1: i64
+    masked_mask2: i64
+    masked_mask3: i64
+
+pub struct McdcExclusion:
+    semantic_id: text
+    condition_ordinal: i64
+    whole_decision: bool
+    reason: text
+    reviewer: text
+    review_id: text
+    expires_or_version: text
+
+pub struct McdcPairEvidence:
+    condition_ordinal: i64
+    owner_a: i64
+    left_sequence: i64
+    owner_b: i64
+    right_sequence: i64
+    kind: McdcPairKind
+
+pub fn mcdc_default_policy(mode: McdcMode) -> McdcPolicy:
+    McdcPolicy(
+        mode: mode,
+        retain_unique_cause: true,
+        max_conditions: 256,
+        max_nesting: 64,
+        owner_bytes: 1048576,
+        global_bytes: 67108864,
+        overflow: McdcOverflowPolicy.DropNewest
+    )
+
+pub fn mcdc_policy_error(policy: McdcPolicy) -> text:
+    if policy.max_conditions <= 0 or policy.max_conditions > 256:
+        return "MCDC-E-CONDITION-CAP"
+    if policy.max_nesting <= 0:
+        return "MCDC-E-NESTING-CAP"
+    if policy.owner_bytes <= 0 or policy.global_bytes < policy.owner_bytes:
+        return "MCDC-E-BUFFER-CAP"
+    ""
+
+pub fn mcdc_exclusion_error(exclusion: McdcExclusion) -> text:
+    if exclusion.semantic_id.trim() == "":
+        return "MCDC-E-EXCLUSION-STALE"
+    if exclusion.reason.trim() == "" or exclusion.reviewer.trim() == "" or exclusion.review_id.trim() == "":
+        return "MCDC-E-EXCLUSION-REASON"
+    if exclusion.expires_or_version.trim() == "":
+        return "MCDC-E-EXCLUSION-STALE"
+    if not exclusion.whole_decision and exclusion.condition_ordinal < 0:
+        return "MCDC-E-EXCLUSION-SCOPE"
+    ""
+
+pub fn mcdc_is_exact_complete(covered: i64, required: i64) -> bool:
+    required >= 0 and covered == required
+
+pub fn mcdc_record_capacity(policy: McdcPolicy) -> i64:
+    # Conservative fixed accounting includes payload, publication state, and
+    # alignment instead of depending on an unstable ABI sizeof result.
+    val capacity = policy.owner_bytes / 160
+    if capacity < 1:
+        return 1
+    capacity

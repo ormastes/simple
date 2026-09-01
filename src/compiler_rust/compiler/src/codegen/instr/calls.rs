@@ -2502,9 +2502,10 @@ fn compile_known_enum_constructor_call<M: Module>(
     let mut hasher = DefaultHasher::new();
     variant_name.hash(&mut hasher);
     let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
-    let enum_id_val = builder
-        .ins()
-        .iconst(types::I32, i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
+    let enum_id_val = builder.ins().iconst(
+        types::I32,
+        i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
+    );
     let disc_val = builder.ins().iconst(types::I32, disc);
     let payload_val = match args {
         [] => builder.ins().iconst(types::I64, 3),
@@ -2650,6 +2651,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_is_char_device"
         | "rt_file_canonicalize"
         | "rt_file_read_text"
+        | "rt_file_read_regular_no_follow_bounded"
         | "rt_file_size"
         | "rt_file_hash_sha256"
         | "rt_file_fsync"
@@ -2661,7 +2663,13 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_read_bytes"
         | "rt_file_mmap_read_text"
         | "rt_file_mmap_len"
-        | "rt_file_mmap_read_bytes" => Some(&[0]),
+        | "rt_file_mmap_read_bytes"
+        // rt_file_lock is (path_ptr, path_len, timeout_secs) — file_ops.rs:679.
+        // Missing here meant the `text` path argument was never split into
+        // (ptr, len) before the call, misaligning the (ptr, len, timeout)
+        // ABI. Mirrors the LLVM backend fix in
+        // codegen/llvm/functions/calls.rs.
+        | "rt_file_lock" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
         // rt_file_write_text / rt_file_append_text take (ptr,len) PAIRS
         // (see runtime file_ops.rs); they were wrongly in text_cstr_arg_indices,
@@ -2674,7 +2682,17 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_wrap_smf_dynlib"
         | "rt_file_extract_smf_dynlib"
         | "rt_file_create_excl" => Some(&[0, 1]),
+        // Stage-3 memory-evidence sink (runtime.c rt_mem_snapshot_*): the C
+        // ABI is (path_ptr, path_len) / (fd, seq, event_ptr, event_len,
+        // phase_ptr, phase_len, source_index, path_ptr, path_len, ...).
+        // Missing here => single-word collapse, path_len=0, open returns -1
+        // and native stage2 fails HIR with "SIMPLE_MEM_SNAPSHOT_FILE could
+        // not be established safely".
+        "rt_mem_snapshot_open" => Some(&[0]),
+        "rt_mem_snapshot_record" => Some(&[2, 3, 5]),
         "rt_file_write_bytes" => Some(&[0]),
+        "rt_hosted_safe_artifact_bundle_begin_v1" => Some(&[0, 1, 2, 3, 4]),
+        "rt_hosted_safe_artifact_bundle_stage_scr1_v1" => Some(&[1]),
         // rt_file_open is (path_ptr, path_len, mode: i32) — descriptor.rs:19.
         "rt_file_open" => Some(&[0]),
         // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.
@@ -2883,9 +2901,15 @@ fn box_text_args<M: Module>(
     arg_vals: &[Value],
     text_indices: &[usize],
 ) -> Vec<Value> {
-    let string_data_ref = ctx.module.declare_func_in_func(ctx.runtime_funcs["rt_string_data"], builder.func);
-    let string_len_ref = ctx.module.declare_func_in_func(ctx.runtime_funcs["rt_string_len"], builder.func);
-    let string_new_ref = ctx.module.declare_func_in_func(ctx.runtime_funcs["rt_string_new"], builder.func);
+    let string_data_ref = ctx
+        .module
+        .declare_func_in_func(ctx.runtime_funcs["rt_string_data"], builder.func);
+    let string_len_ref = ctx
+        .module
+        .declare_func_in_func(ctx.runtime_funcs["rt_string_len"], builder.func);
+    let string_new_ref = ctx
+        .module
+        .declare_func_in_func(ctx.runtime_funcs["rt_string_new"], builder.func);
     arg_vals
         .iter()
         .enumerate()
@@ -3095,7 +3119,7 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "len" | "length" => Some("rt_len"),
         "to_text" | "to_string" | "str" => Some("rt_to_string"),
         "to_int" | "to_i64" => Some("rt_string_to_int"),
-                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
+        "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
         "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
         _ => None,
     }
@@ -3147,16 +3171,26 @@ pub fn compile_call<M: Module>(
     // `ctx.func_ids.get(func_name)` user-function branch. Process-control
     // names in PRELUDE_UNSHADOWABLE keep builtin precedence.
     // See doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md
-    let sffi_name: &str = sffi_alias_target_shadowed(func_name_for_sffi, ctx.func_ids.contains_key(func_name_raw))
-        .unwrap_or(func_name_for_sffi);
+    //
+    // The shadow test must be "is there a locally DEFINED function body of this
+    // name", not merely "is this name in func_ids": an `extern fn rt_x(...)`
+    // declaration is also registered in `func_ids`, with `Linkage::Import`. A
+    // user re-declaring a runtime symbol is not overriding it, so counting the
+    // declaration as a shadow suppressed the alias and emitted a direct call to
+    // the raw symbol under the SFFI calling convention — e.g.
+    // `extern fn rt_file_write_bytes(path: text, data: [u8])` lowered to a
+    // 3-argument call (path_ptr, path_len, array) against the 4-argument C ABI
+    // `rt_file_write_bytes(path_ptr, path_len, data_ptr, data_len)`, so the
+    // length came from a stale register and the file got garbage bytes.
+    let sffi_name: &str =
+        sffi_alias_target_shadowed(func_name_for_sffi, has_defined_local_function(ctx, func_name_raw))
+            .unwrap_or(func_name_for_sffi);
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
     // but mapped SFFI name for runtime_funcs and builtin I/O checks
     let func_name: &str = func_name_raw;
     // Handle only the true Result/Option constructors. A custom enum may use
     // the same variant leaves and must retain its qualified custom type ID.
-    let split_variant = func_name
-        .rsplit_once("::")
-        .or_else(|| func_name.rsplit_once('.'));
+    let split_variant = func_name.rsplit_once("::").or_else(|| func_name.rsplit_once('.'));
     let (enum_owner, variant_name) = split_variant
         .map(|(owner, variant)| (Some(owner), variant))
         .unwrap_or((None, func_name));

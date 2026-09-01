@@ -54,15 +54,18 @@ pub fn place_base_equals(a: PlaceBase, b: PlaceBase) -> bool:
         case Local(a_id):
             match b:
                 case Local(b_id): a_id == b_id
-                case _: false
+                case Static(_): false
+                case Promoted(_): false
         case Static(a_name):
             match b:
                 case Static(b_name): a_name == b_name
-                case _: false
+                case Local(_): false
+                case Promoted(_): false
         case Promoted(a_id):
             match b:
                 case Promoted(b_id): a_id == b_id
-                case _: false
+                case Local(_): false
+                case Static(_): false
 
 pub fn place_elem_equals(a: PlaceElem, b: PlaceElem) -> bool:
     """Check if two place projection elements are equal."""
@@ -70,23 +73,38 @@ pub fn place_elem_equals(a: PlaceElem, b: PlaceElem) -> bool:
         case Deref:
             match b:
                 case Deref: true
-                case _: false
+                case Field(_): false
+                case Index(_): false
+                case ConstantIndex(_): false
+                case Downcast(_): false
         case Field(a_idx):
             match b:
                 case Field(b_idx): a_idx == b_idx
-                case _: false
+                case Deref: false
+                case Index(_): false
+                case ConstantIndex(_): false
+                case Downcast(_): false
         case Index(a_local):
             match b:
                 case Index(b_local): a_local == b_local
-                case _: false
+                case Deref: false
+                case Field(_): false
+                case ConstantIndex(_): false
+                case Downcast(_): false
         case ConstantIndex(a_idx):
             match b:
                 case ConstantIndex(b_idx): a_idx == b_idx
-                case _: false
+                case Deref: false
+                case Field(_): false
+                case Index(_): false
+                case Downcast(_): false
         case Downcast(a_v):
             match b:
                 case Downcast(b_v): a_v == b_v
-                case _: false
+                case Deref: false
+                case Field(_): false
+                case Index(_): false
+                case ConstantIndex(_): false
 
 pub fn place_elem_may_overlap(a: PlaceElem, b: PlaceElem) -> bool:
     """Conservative projection overlap.
@@ -100,25 +118,38 @@ pub fn place_elem_may_overlap(a: PlaceElem, b: PlaceElem) -> bool:
         case Field(a_idx):
             match b:
                 case Field(b_idx): a_idx == b_idx
-                case _: false
+                case Deref: false
+                case Index(_): false
+                case ConstantIndex(_): false
+                case Downcast(_): false
         case ConstantIndex(a_idx):
             match b:
                 case ConstantIndex(b_idx): a_idx == b_idx
                 case Index(_): true
-                case _: false
+                case Deref: false
+                case Field(_): false
+                case Downcast(_): false
         case Index(_):
             match b:
                 case Index(_): true
                 case ConstantIndex(_): true
-                case _: false
+                case Deref: false
+                case Field(_): false
+                case Downcast(_): false
         case Downcast(a_v):
             match b:
                 case Downcast(b_v): a_v == b_v
-                case _: false
+                case Deref: false
+                case Field(_): false
+                case Index(_): false
+                case ConstantIndex(_): false
         case Deref:
             match b:
                 case Deref: true
-                case _: false
+                case Field(_): false
+                case Index(_): false
+                case ConstantIndex(_): false
+                case Downcast(_): false
 
 pub fn place_conflicts_with(a: Place, b: Place) -> bool:
     """Check if two places conflict (one is a prefix of the other).
@@ -200,8 +231,10 @@ pub fn kind_conflicts_with(a: BorrowKind, b: BorrowKind) -> bool:
         case Shared:
             match b:
                 case Shared: false
-                case _: true
-        case _: true
+                case Mutable: true
+                case Unique: true
+        case Mutable: true
+        case Unique: true
 
 pub fn kind_is_mutable(kind: BorrowKind) -> bool:
     """Check if a borrow kind is mutable."""
@@ -481,6 +514,18 @@ pub class BorrowGraph:
     point_borrows: Dict<i64, BorrowSet>
     next_borrow_id: i64
 
+    # Reference local a borrow was materialized INTO (borrow_id -> dest local).
+    # `MirInstKind.Ref(dest, kind, place)` names both the borrowed place and the
+    # reference temp that receives it; only `place` was ever recorded, so the
+    # checker could not tell whether a borrow's REFERENCE outlives the function.
+    # See `returned_locals` below for what this is used for.
+    borrow_dest: Dict<i64, i64>
+
+    # Locals named by a `Ret` terminator's operand anywhere in this function.
+    # A borrow can only be "still active at return" if its REFERENCE escapes,
+    # and the only escape route a Ref temp has in MIR is being returned.
+    returned_locals: [i64]
+
     # Places that have been moved AT a given point (per-point gen record)
     moved_places: Dict<i64, [Place]>
 
@@ -511,6 +556,8 @@ pub class BorrowGraph:
         BorrowGraph(
             point_borrows: {},
             next_borrow_id: 0,
+            borrow_dest: {},
+            returned_locals: [],
             moved_places: {},
             moved_now: [],
             errors: [],
@@ -638,6 +685,39 @@ pub class BorrowGraph:
                     conflicting: nil,
                     point: point
                 ))
+
+    me note_borrow_dest(borrow_id: i64, dest_local: i64):
+        """Record the reference temp a borrow was materialized into."""
+        self.borrow_dest[borrow_id] = dest_local
+
+    me note_returned_local(local_id: i64):
+        """Record that `local_id` is named by a `Ret` operand in this function."""
+        if not self.returned_locals.contains(local_id):
+            self.returned_locals.push(local_id)
+
+    fn borrow_reference_escapes(borrow_id: i64) -> bool:
+        """Does this borrow's REFERENCE outlive the function via the return value?
+
+        A `Ref` temp is only reachable outside the function body if it is
+        returned, so a borrow whose dest is never named by a `Ret` operand
+        cannot still be active at a return.
+
+        Accepted under-approximation, stated rather than hidden (same spirit as
+        the `Drop`/`Move` over-approximation notes in mod.spl): escape through a
+        GLOBAL or a field store is not modelled, and neither is copy-propagation
+        (`val r = ref_temp` then `return r` names a different local). Both make
+        this UNDER-report. That is deliberate: the previous behaviour was to
+        report unconditionally, which fired on every function containing any
+        `Ref` at all and therefore discriminated nothing -- an out-parameter
+        borrow like `f(pid, &mut status)`, whose reference is consumed by the
+        call and never escapes, was rejected at every `return` in the function.
+        doc/08_tracking/bug/io_runtime_import_borrow_local13_native_build_2026-08-24.md
+        """
+        if not self.borrow_dest.contains_key(borrow_id):
+            # No dest recorded: the borrow did not come from a `Ref`
+            # instruction, so there is no reference temp to escape.
+            return false
+        return self.returned_locals.contains(self.borrow_dest[borrow_id])
 
     me end_borrow(point: i64, borrow_id: i64):
         """End a borrow at a program point."""

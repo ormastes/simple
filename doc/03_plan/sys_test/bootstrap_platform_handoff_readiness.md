@@ -20,9 +20,16 @@ mirrored in
 | Readiness ID | Scenario | Executable assertion | Manual flow |
 |---|---|---|---|
 | BPHR-001 | Checker self-test claim boundary | Runs `--self-test` and requires exit code `0` plus `bootstrap_handoff_self_test=pass` | Scenario BPHR-001/BPHR-002, steps 1-3 |
-| BPHR-002 | Checker self-test claim boundary | Requires `platform_acceptance_claimed=false` in self-test output | Scenario BPHR-001/BPHR-002, step 4 |
+| BPHR-002 | Checker self-test claim boundary | Requires `platform_acceptance_claimed=false` in self-test output | Scenario BPHR-001/BPHR-002/BPHR-005--011, step 11 |
 | BPHR-003 | Default blocked handoff | Runs the checker with no mode flag and requires fail-closed exit code `1` plus `bootstrap_handoff_readiness_status=blocked` | Scenario BPHR-003/BPHR-004, steps 1-3 |
 | BPHR-004 | Default blocked handoff | Requires a `stage3_candidate:` reason, remaining-gate count, and `platform_acceptance_claimed=false` | Scenario BPHR-003/BPHR-004, steps 4-5 |
+| BPHR-005 | Current identity guard | Self-test rejects changed source/runtime identity receipts | Scenario BPHR-001/BPHR-002/BPHR-005--011, step 4 |
+| BPHR-006 | Stage 2/3 provenance guard | Self-test validates admitted Stage 2 and Stage 3 receipt lineage | Scenario BPHR-001/BPHR-002/BPHR-005--011, step 5 |
+| BPHR-007 | No-seed/no-stub guard | Self-test rejects seed substitution and invalid sanity evidence | Scenario BPHR-001/BPHR-002/BPHR-005--011, step 6 |
+| BPHR-008 | Atomic rollback guard | Self-test rejects deploy/rollback path and hash swaps that are not exact inverses | Scenario BPHR-001/BPHR-002/BPHR-005--011, step 7 |
+| BPHR-009 | Stage 4 executable smoke guard | Self-test rejects a smoke receipt not bound to the exact executable candidate | Scenario BPHR-001/BPHR-002/BPHR-005--011, step 8 |
+| BPHR-010 | Current tree freshness guard | Self-test rejects a fully rehashed receipt chain whose dirty-patch fingerprint is stale | Scenario BPHR-001/BPHR-002/BPHR-005--011, step 9 |
+| BPHR-011 | Current worktree guard | Self-test rejects a fully rehashed receipt chain naming a different repository root | Scenario BPHR-001/BPHR-002/BPHR-005--011, step 10 |
 
 ## Execution order
 
@@ -55,4 +62,5 @@ No capture artifact is required because the checker emits text evidence.
 The checker self-test may pass while every target platform remains unverified.
 The blocked default is therefore intentional and release-blocking for the
 platform handoff. This SPipe lane does not validate host prerequisites,
-cross-platform artifacts, provenance hashes, or live bootstrap behavior.
+cross-platform artifacts or live bootstrap behavior. It validates synthetic
+provenance and receipt fixtures only; it does not manufacture real evidence.

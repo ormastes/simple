@@ -1,30 +1,8 @@
 # simple-mcp broken in Claude Code + bootstrap stage4 produces broken full CLI (2026-06-16)
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Status: OPEN (bootstrap defect C and portability defect D remain)
 Severity: P1 (self-hosted bootstrap deploy); native simple-mcp path resolved 2026-07-15
 Owned-code scope: src/app/mcp, src/lib/nogc_sync_mut/mcp_sdk, seed/cranelift codegen, scripts/bootstrap
-
-## 2026-07-15 MCP resolution update
-
-The historical A/B evidence below is preserved, but it no longer describes the
-current production MCP path:
-
-- A fresh pure-Simple Stage 2 strictly native-builds
-  `src/app/mcp/main.spl` to
-  `build/bootstrap/mcp-package/simple_mcp_server` without stub fallback.
-- The exact artifact now passes `initialize`, `notifications/initialized`, and
-  `tools/list`, then serves argument-taking `simple_pipe` and `simple_search`
-  calls in the pure-Simple system SSpec (3 examples, 0 failures).
-- POSIX setup, MCP installers, and the Windows launcher now default to the
-  cached native artifact. Exact overrides fail closed. Raw-source execution is
-  explicit debugging only and may use only a deployed pure-Simple runtime.
-- Defect A is resolved for current sources/artifacts. Defect B's old interpreter
-  reproduction is not production mitigation and remains historical/unverified;
-  native nested argument extraction is covered by the new feature-call cases.
-
-Bootstrap defect C and LLVM detection defect D remain open and keep this issue
-open.
 
 ## Summary
 
@@ -116,11 +94,11 @@ regardless of backend. Worth fixing separately (probe `llvm-config-18 --prefix` 
 `/usr/lib/llvm-18` on Linux).
 
 ## Impact
-- The former simple-mcp native tool-call impact is resolved by the 2026-07-15
-  pure-Stage2 artifact and system-test evidence above.
+- simple-mcp is unusable for tool calls in Claude Code (native) regardless of which built
+  binary `.mcp.json` selects.
 - `--deploy` cannot produce a working self-hosted CLI on this host via the current path.
 
-## Historical mitigations applied in the original session
+## Mitigations applied this session (not fixes)
 - Restored the prior working `bin/release/<triple>/simple` (461 MB) after `--deploy` left
   the broken 248 binary live. `bin/simple -c 'print(1+1)'` → 2 again.
 - `bin/simple_mcp_server`: added a source-mode memory floor (100 MB tripped the RSS
@@ -150,39 +128,13 @@ low-value change in isolation without the seed rebuild path to prove it
 against. Left OPEN; no code changed this pass.
 
 ## Suggested fix order
-1. Fix the bootstrap smoke-test `set -e` gap so a failing stage4 binary triggers the
+1. Root-cause the full-program native/cranelift codegen crash (A + C are likely the same
+   family). A minimal repro is the full `main.spl` via seed+cranelift.
+2. Fix the interpreter nested-arg extraction (B) so source mode is a viable fallback.
+3. Fix the bootstrap smoke-test `set -e` gap so a failing stage4 binary triggers the
    restore path instead of aborting the script before it.
 2. Root-cause the remaining full-program Stage 4/cranelift failure (C).
 3. Fix Linux LLVM-18 detection (D).
 4. Keep the exact native MCP build/handshake/feature SSpec as the regression gate;
    investigate the historical interpreter-only nested-argument repro separately
    if source debugging becomes a supported production lane.
-
-## 2026-08-17 triage (wave W3) — FAMILY: no source-matched self-hosted binary deployed
-
-This row is one member of a single family, not an independent defect. On this
-host `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple` is the **Rust
-seed**, so every remaining blocker in this row requires building and deploying a
-source-matched self-hosted CLI. The rows sharing that blocker are:
-
-- `host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17`
-- `stage4_full_cli_source_check_blank_exit8_2026-07-23`
-- `self_hosted_cli_native_build_silent_no_artifact_2026-08-14`
-- `self_hosted_simpleos_target_native_build_crash_2026-07-11`
-- `native_selfhosted_run_segfault_startup_normalize_2026-07-24`
-- `bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17`
-- `mcp_full_program_native_codegen_and_arg_extract_2026-06-16`
-- `no_self_hosted_binary_deployed_blocks_bootstrap_gate_2026-08-09` (the family
-  statement itself: an ENVIRONMENT fact on this machine, not a code defect)
-
-W3 was explicitly barred from rebuilding or redeploying `bin/simple` /
-`bin/release/**` (~16 concurrent lanes share them), so **no execution evidence
-for this row was produced or is claimed**. Status is unchanged: OPEN, blocked on
-deploy. What W3 did instead was pin, by source spec, the fail-closed checks these
-rows depend on, so they cannot be silently lost again while the deploy blocker
-persists: `test/01_unit/app/cli/silent_success_fail_closed_source_spec.spl`
-(native-build worker exit 0 without an artifact; driver Success without a fresh
-staged artifact; argv read through `rt_cli_get_args` rather than a same-named
-import). Ablation-verified: neutralising the native_build_main.spl guard takes
-that spec from `Results: 3 total, 3 passed` to `3 total, 2 passed, 1 failed`.
-

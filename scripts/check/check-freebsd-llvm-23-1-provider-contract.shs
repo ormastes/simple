@@ -1,0 +1,104 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+helper="$repo_root/scripts/check/lib/clang-23-1-toolchain.shs"
+freebsd_qemu="$repo_root/scripts/check/check-freebsd-bootstrap-qemu.shs"
+authority="$repo_root/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+[ -f "$helper" ] || fail "missing LLVM 23.1 toolchain helper"
+[ -f "$freebsd_qemu" ] || fail "missing FreeBSD QEMU bootstrap runner"
+[ -f "$authority" ] || fail "missing bootstrap C compiler authority helper"
+sh -n "$helper" || fail "toolchain helper is not valid POSIX shell"
+sh -n "$freebsd_qemu" || fail "FreeBSD QEMU runner is not valid POSIX shell"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-freebsd-llvm23.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/provider/bin"
+
+for tool in clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
+    case "$tool" in
+        clang) version='clang version 23.1.0' ;;
+        ld.lld) version='LLD 23.1.0' ;;
+        llvm-config) version='23.1.0' ;;
+        *) version='LLVM version 23.1.0' ;;
+    esac
+    printf '#!/bin/sh\nprintf "%%s\\n" %s\n' "'$version'" > "$tmp/provider/bin/$tool"
+    chmod +x "$tmp/provider/bin/$tool"
+done
+
+if ! sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$tmp/provider"; then
+    fail "complete explicit LLVM 23.1 provider was rejected"
+fi
+
+mkdir -p "$tmp/external"
+printf '#!/bin/sh\nprintf "%%s\\n" "LLVM version 23.1.0"\n' > "$tmp/external/llc"
+chmod +x "$tmp/external/llc"
+rm -f "$tmp/provider/bin/llc"
+ln -s "$tmp/external/llc" "$tmp/provider/bin/llc"
+if sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$tmp/provider" >/dev/null 2>&1; then
+    fail "LLVM 23.1 llc escaping the provider prefix was accepted"
+fi
+
+printf '#!/bin/sh\nprintf "%%s\\n" "LLVM version 18.1.0"\n' > "$tmp/provider/bin/llc"
+chmod +x "$tmp/provider/bin/llc"
+if sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$tmp/provider" >/dev/null 2>&1; then
+    fail "LLVM 18 llc was accepted by the explicit provider gate"
+fi
+
+printf '#!/bin/sh\nexit 0\n' > "$tmp/provider/bin/explicit-cc"
+chmod +x "$tmp/provider/bin/explicit-cc"
+selected_cc=$(sh -c '. "$1"; CC="$2"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' sh "$authority" "$tmp/provider/bin/explicit-cc")
+[ "$selected_cc" = "$tmp/provider/bin/explicit-cc" ] \
+    || fail "bootstrap authority ignored explicit CC provider"
+
+grep -Fq 'require_freebsd_llvm_23_1_provider' "$freebsd_qemu" \
+    || fail "FreeBSD runner lacks provider admission"
+grep -Fq 'FREEBSD_LLVM_23_1_PREFIX is required' "$freebsd_qemu" \
+    || fail "FreeBSD runner permits an implicit provider"
+grep -Fq 'clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not require all LLVM native-build tools"
+grep -Fq 'FREEBSD_LLVM_23_1_ENV' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not bind the admitted provider to guest commands"
+grep -Fq 'provision_freebsd_llvm_23_1_provider' "$freebsd_qemu" \
+    || fail "FreeBSD full bootstrap does not provision its provider"
+grep -Fq 'llvm-release-tobias-hieta.asc' "$freebsd_qemu" \
+    || fail "FreeBSD provider provisioning has no pinned signing key"
+grep -Fq 'build-llvm-23-1-provider.shs --clone' "$freebsd_qemu" \
+    || fail "FreeBSD provider provisioning does not build in the guest"
+grep -Fq 'realpath \$provider_prefix/bin/\$provider_tool' "$freebsd_qemu" \
+    || fail "FreeBSD provider paths can escape their explicit prefix"
+grep -Fq 'LLVM_LLC_SHA256' "$freebsd_qemu" \
+    || fail "FreeBSD provider receipt does not bind llc"
+grep -Fq 'gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT}' "$freebsd_qemu" \
+    || fail "FreeBSD provider build has no bounded timeout"
+grep -Fq -- '--targets X86' "$freebsd_qemu" \
+    || fail "FreeBSD provider build is not constrained to X86"
+grep -Fq 'LLVM_TAG_COMMIT=561093d94eb7156dea780c1c71a779824ef90e5b' "$freebsd_qemu" \
+    || fail "FreeBSD provider receipt does not pin the peeled tag commit"
+grep -Fq 'reverify_freebsd_llvm_23_1_provider()' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not reverify the provider after native checks"
+grep -Fq 'cmp -s "$FREEBSD_PROVIDER_HOST_MANIFEST" "$FREEBSD_PROVIDER_HOST_POST_MANIFEST"' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not compare complete pre/post provider receipts"
+grep -Fq 'llvm-23.1-provider-post-verify.log' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not retain post-native provider verification evidence"
+for compiler_gate in \
+    'bootstrap-from-scratch.sh' \
+    'cargo test -p simple-compiler' \
+    'check-stage4-hosted-dynload-provider-archive.shs' \
+    'NATIVE_SMOKE_BACKEND=llvm' \
+    'NATIVE_PARITY_BACKEND=${PARITY_BACKEND}'; do
+    gate_line=$(grep -F "$compiler_gate" "$freebsd_qemu" | head -n 1 || true)
+    printf '%s\n' "$gate_line" | grep -Fq 'FREEBSD_LLVM_23_1_ENV' \
+        || fail "FreeBSD compiler gate is not bound to the admitted provider: $compiler_gate"
+done
+if grep -F 'pkg install -y' "$freebsd_qemu" | grep -Eq '[[:space:]]llvm([[:space:]]|$)'; then
+    fail "FreeBSD runner still installs generic LLVM as a fallback"
+fi
+
+printf 'PASS: FreeBSD QEMU bootstrap requires one complete explicit LLVM 23.1 provider\n'

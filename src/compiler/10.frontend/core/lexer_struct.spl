@@ -29,8 +29,10 @@ fn core_token_text_intern_reset():
 # NOTE: intentionally NOT a free function taking `chars: [text]`. Under the seed
 # interpreter every array argument is scanned element-by-element at bind time
 # (value-type copy check), so passing the whole `source_chars` array here cost
-# O(file) per TOKEN -- quadratic per file, ~9e9 element visits on a 224 KB
-# source. As a method it reads `self.source_chars` in place: O(span).
+# O(file) per TOKEN -- quadratic per file. As a method `CoreLexer.chars_match`
+# reads `self.source_chars` in place: O(span). Restored 2026-08-28; pinned by
+# test/01_unit/compiler/frontend/lexer_source_chars_not_passed_per_token_spec.spl
+# and check-perf-regression-tests.shs ("lexer source_chars not an argument").
 # doc/08_tracking/bug/lexer_source_chars_arg_scan_per_token_2026-08-22.md
 
 # Digit-value helpers for string escape decoding (\NNN octal, \xNN hex,
@@ -80,10 +82,15 @@ fn core_token_env_save_enabled() -> bool:
 # truncation) — proven by rt_env_set panics on "\033" files (see scan_string
 # below).
 fn env_value_nul_free(value: text) -> bool:
+    # PERF (2026-08-28): scan raw bytes. A NUL codepoint is exactly a NUL byte
+    # in UTF-8, so `byte_at` (O(1) buffer read) is equivalent to the old
+    # `char_code(value[i:i + 1])`, which allocated and registered one
+    # single-byte heap string PER SOURCE BYTE on every lex_init_with_path
+    # (13 M allocations across the 717-file bootstrap closure).
     var i: i64 = 0
     val n: i64 = value.len()
     while i < n:
-        if char_code(value[i:i + 1]) == 0:
+        if (value.byte_at(i) as i64) == 0:
             return false
         i = i + 1
     true
@@ -346,6 +353,26 @@ impl CoreLexer:
 
     # Token-text extraction over a [start,end) char range: O(span) via indexed
     # collection + one join, replacing `source[start:end]` which was O(N) per call.
+    # In-place token-span compare: does source_chars[start:end] spell `value`?
+    # Reads self.source_chars directly (never passed as an argument: under the
+    # tree-walk interpreter an array argument is deep-copied per call, which
+    # made this O(source) per token). PERF (2026-08-28): byte compare instead
+    # of allocating a one-byte slice of `value` per character; same outcome --
+    # a multi-byte codepoint never equals a one-byte slice, and a one-byte
+    # codepoint equals it exactly when the bytes match.
+    fn chars_match(start: i64, end: i64, value: text) -> bool:
+        if value.len() != end - start:
+            return false
+        var i = start
+        while i < end:
+            val ch = self.source_chars[i]
+            if ch.len() != 1:
+                return false
+            if (ch.byte_at(0) as i64) != (value.byte_at(i - start) as i64):
+                return false
+            i = i + 1
+        true
+
     fn char_slice(start: i64, end: i64) -> text:
         var s: i64 = start
         if s < 0:
@@ -436,12 +463,16 @@ impl CoreLexer:
         self.cur_line = start_line
         self.cur_col = start_col
         core_token_capture(tok_text, start_line, start_col)
-        val nul = char_from_code(0)
-        if tok_text.contains(nul):
-            core_token_text_save("")
-        else:
-            core_token_text_save(tok_text)
+        # PERF (2026-08-28): the env mirror is the only consumer of the NUL
+        # check, and core_token_text_save is a no-op unless env-save is on,
+        # so the per-token `char_from_code(0)` + `contains` scan is hoisted
+        # behind the same gate. Behaviour with env-save on is unchanged.
         if core_token_env_save_enabled():
+            val nul = char_from_code(0)
+            if tok_text.contains(nul):
+                core_token_text_save("")
+            else:
+                core_token_text_save(tok_text)
             rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_LINE", "{start_line}")
             rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_COL", "{start_col}")
 

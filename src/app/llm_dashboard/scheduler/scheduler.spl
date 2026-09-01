@@ -8,13 +8,12 @@
 
 use app.llm_dashboard.data.types.{ManagedTask, TaskKind, TaskState, task_kind_name}
 use app.llm_dashboard.scheduler.cron.{cron_matches, cron_next_time, interval_next_time}
-use app.io.mod.{process_spawn_async, process_is_running}
+use app.io.mod.{process_spawn_async, process_is_running, dir_create}
 use std.common.encoding.utf8.{text_truncate_bytes}
 
 use std.io_runtime.{file_exists}
-extern fn rt_file_read_text(path: text) -> text
+use std.io_runtime.{read_file_text_result}
 use std.io_runtime.{file_write}
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
 use std.io_runtime.{dir_list}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
@@ -52,7 +51,9 @@ fn scheduler_create_schedule(prompt: text, cron_expr: text) -> ManagedTask:
 
 fn scheduler_cancel(task_id: text):
     """Cancel a task by ID."""
-    val tasks = scheduler_list_tasks()
+    val tasks = match scheduler_list_tasks():
+        case Ok(value): value
+        case Err(_): return
     for task in tasks:
         if task.id == task_id:
             var t = task
@@ -60,26 +61,30 @@ fn scheduler_cancel(task_id: text):
             _save_task(t)
             return
 
-fn scheduler_list_tasks() -> [ManagedTask]:
+fn scheduler_list_tasks() -> Result<[ManagedTask], text>:
     """List all persisted tasks."""
     val tasks: [ManagedTask] = []
     if not file_exists(SCHED_DIR):
-        return tasks
+        return Ok(tasks)
     val files = dir_list(SCHED_DIR)
     var result: [ManagedTask] = []
     for fname in files:
         if fname.ends_with(".task"):
             val path = "{SCHED_DIR}/{fname}"
-            val content = rt_file_read_text(path)
+            val content = match read_file_text_result(path):
+                case Ok(value): value
+                case Err(error): return Err("could not read scheduled task {path}: {error}")
             val task = _load_task(content)
             if task.id != "":
                 result.push(task)
-    return result
+    return Ok(result)
 
 fn scheduler_tick():
     """Check all active tasks and run any that are due. Call from main loop."""
     val now_ms = time_now_unix_micros() / 1000
-    val tasks = scheduler_list_tasks()
+    val tasks = match scheduler_list_tasks():
+        case Ok(value): value
+        case Err(_): return
     for task in tasks:
         if task.state != TaskState.Active:
             continue
@@ -100,7 +105,7 @@ fn _is_due(task: ManagedTask, now_ms: i64) -> bool:
 
 fn _run_task(task: ManagedTask, now_ms: i64):
     """Execute a task and update its state."""
-    rt_dir_create(RESULTS_DIR, true)
+    dir_create(RESULTS_DIR, true)
     val result_file = "{RESULTS_DIR}/{task.id}.out"
     val cmd = "claude --print \"{task.command}\" > {result_file} 2>&1"
     val pid = process_spawn_async("/bin/sh", ["-c", cmd])
@@ -117,7 +122,7 @@ fn _run_task(task: ManagedTask, now_ms: i64):
 
 fn _save_task(task: ManagedTask):
     """Persist a task to disk."""
-    rt_dir_create(SCHED_DIR, true)
+    dir_create(SCHED_DIR, true)
     val path = "{SCHED_DIR}/{task.id}.task"
     val content = _serialize_task(task)
     file_write(path, content)

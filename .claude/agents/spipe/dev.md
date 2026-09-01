@@ -48,6 +48,17 @@ This agent CREATES the initial state file. All subsequent agents read and append
      `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
      `.claude/agents/spipe/`, `.claude/commands/`, and `.gemini/commands/`,
      and require that generated SSpec docs read as operator manuals.
+   - If protected PR self-review is in scope, require the guide/log to say that
+     GitHub forbids author `APPROVED` reviews and that
+     `SPipe Self Review Admission` is a required status check, not
+     provider/independent approval.
+     Require default ordinary code/text eligibility absent external
+     deny/constrain, all five scopes (`code`, `text`, `file`, immediate
+     `directory_files`, recursive `directory_recursive`), and reason-specific
+     remediation: fresh exact-head review+dispatch for drift/expiry,
+     policy-owner/independent route for deny, smaller diff/new constraint for
+     scope rejection, and removal/credential rotation for unsafe material.
+     Never accept a stale check or weaker candidate/release authority.
    - If the request asks to close a coding phase with unavailable external
      evidence, distinguish an implementation handoff from feature completion:
      require an open Todo DB row and resume plan for every blocked criterion.

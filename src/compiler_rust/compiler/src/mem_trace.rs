@@ -95,7 +95,11 @@ fn big_alloc_threshold() -> Option<usize> {
                 return Some(n * 1024 * 1024);
             }
         }
-        if enabled() { Some(BIG_ALLOC_FLOOR) } else { None }
+        if enabled() {
+            Some(BIG_ALLOC_FLOOR)
+        } else {
+            None
+        }
     })
 }
 
@@ -125,12 +129,7 @@ fn report_big_alloc(size: usize, kind: &str) {
             let _ = INTERP_STACK.try_with(|s| {
                 let s = s.borrow();
                 if !s.is_empty() {
-                    let tail: Vec<&str> = s
-                        .iter()
-                        .rev()
-                        .take(25)
-                        .map(|n| n.as_str())
-                        .collect();
+                    let tail: Vec<&str> = s.iter().rev().take(25).map(|n| n.as_str()).collect();
                     eprintln!(
                         "[mem][BIG] interp stack (innermost first, depth {}): {}",
                         s.len(),
@@ -138,10 +137,7 @@ fn report_big_alloc(size: usize, kind: &str) {
                     );
                 }
             });
-            eprintln!(
-                "[mem][BIG] backtrace:\n{}",
-                std::backtrace::Backtrace::force_capture()
-            );
+            eprintln!("[mem][BIG] backtrace:\n{}", std::backtrace::Backtrace::force_capture());
         }
     }
     IN_BIG_REPORT.with(|c| c.set(false));

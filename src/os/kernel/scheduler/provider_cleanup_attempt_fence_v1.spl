@@ -1,0 +1,607 @@
+"""Bounded provider-owned attempt fence for eventual exit cleanup.
+
+This capsule is a generic prerequisite and is not wired to Scheduler or Zombie
+publication.  A registered provider issues opaque attempts for one immutable
+task-lifecycle transaction.  Cancellation is only a request until that same
+provider attests that the old execution domain is quiescent.  Retry then
+rotates the slot generation atomically, making every copied old permit stale.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+pub val PROVIDER_CLEANUP_PROVIDER_LIMIT_V1: i64 = 16
+pub val PROVIDER_CLEANUP_ATTEMPT_LIMIT_V1: i64 = 128
+pub val PROVIDER_CLEANUP_EVIDENCE_LIMIT_V1: i64 = 128
+
+pub enum ProviderCleanupAttemptStateV1:
+    Free
+    Issued
+    Started
+    CancelRequested
+    Completed
+    Cancelled
+    Retired
+
+pub(package) struct ProviderCleanupAuthorityV1:
+    _provider_slot: i64
+    _provider_generation: u64
+    _provider_nonce: u64
+
+pub(package) struct ProviderCleanupAttemptV1:
+    _slot: i64
+    _generation: u64
+    _nonce: u64
+    _provider_slot: i64
+    _transaction_id: u64
+    _transaction_generation: u64
+    _attempt_ordinal: u64
+
+pub struct ProviderCleanupTargetViewV1:
+    task_id: u64
+    lifecycle_generation: u64
+    transaction_id: u64
+    transaction_generation: u64
+    attempt_ordinal: u64
+
+pub(package) struct ProviderCleanupSideEffectStartV1:
+    _attempt: ProviderCleanupAttemptV1
+    target: ProviderCleanupTargetViewV1
+
+pub(package) struct ProviderCleanupCancelRequestV1:
+    _attempt: ProviderCleanupAttemptV1
+    _cancel_generation: u64
+
+pub(package) struct ProviderCleanupCancelAckV1:
+    _attempt: ProviderCleanupAttemptV1
+    _cancel_generation: u64
+    _quiescence_digest: text
+
+pub(package) struct ProviderCleanupCompletionReceiptV1:
+    _attempt: ProviderCleanupAttemptV1
+    target: ProviderCleanupTargetViewV1
+    outcome_code: i32
+    evidence_digest: text
+
+pub struct ProviderCleanupFenceStatusV1:
+    registered_providers: i64
+    free_attempts: i64
+    issued_attempts: i64
+    started_attempts: i64
+    cancel_requested_attempts: i64
+    completed_attempts: i64
+    cancelled_attempts: i64
+    retired_attempts: i64
+    quarantined: bool
+
+struct ProviderCleanupProviderSlotV1:
+    occupied: bool
+    generation: u64
+    nonce: u64
+    name: text
+
+struct ProviderCleanupAttemptSlotV1:
+    state: ProviderCleanupAttemptStateV1
+    generation: u64
+    nonce: u64
+    provider_slot: i64
+    provider_generation: u64
+    provider_nonce: u64
+    task_id: u64
+    lifecycle_generation: u64
+    transaction_id: u64
+    transaction_generation: u64
+    attempt_ordinal: u64
+    cancel_generation: u64
+    outcome_code: i32
+    evidence_digest: text
+    quiescence_digest: text
+
+struct ProviderCleanupFenceOwnerV1:
+    initialized: bool
+    quarantined: bool
+    next_nonce: u64
+    providers: [ProviderCleanupProviderSlotV1]
+    attempts: [ProviderCleanupAttemptSlotV1]
+
+fn _provider_cleanup_empty_provider_v1() -> ProviderCleanupProviderSlotV1:
+    ProviderCleanupProviderSlotV1(
+        occupied: false, generation: 1u64, nonce: 0u64, name: "")
+
+fn _provider_cleanup_empty_attempt_v1(
+    generation: u64
+) -> ProviderCleanupAttemptSlotV1:
+    ProviderCleanupAttemptSlotV1(
+        state: ProviderCleanupAttemptStateV1.Free,
+        generation: generation, nonce: 0u64,
+        provider_slot: -1, provider_generation: 0u64, provider_nonce: 0u64,
+        task_id: 0u64, lifecycle_generation: 0u64,
+        transaction_id: 0u64, transaction_generation: 0u64,
+        attempt_ordinal: 0u64, cancel_generation: 0u64,
+        outcome_code: 0, evidence_digest: "", quiescence_digest: "")
+
+val _provider_cleanup_mutex_v1: i64 = mutex_raw_create()
+var _provider_cleanup_owner_v1 = ProviderCleanupFenceOwnerV1(
+    initialized: false, quarantined: false,
+    next_nonce: 0x50434146454e4345u64, providers: [], attempts: [])
+
+fn _provider_cleanup_initialize_locked_v1():
+    if _provider_cleanup_owner_v1.initialized: return
+    var provider_index = 0
+    while provider_index < PROVIDER_CLEANUP_PROVIDER_LIMIT_V1:
+        _provider_cleanup_owner_v1.providers.push(
+            _provider_cleanup_empty_provider_v1())
+        provider_index = provider_index + 1
+    var attempt_index = 0
+    while attempt_index < PROVIDER_CLEANUP_ATTEMPT_LIMIT_V1:
+        _provider_cleanup_owner_v1.attempts.push(
+            _provider_cleanup_empty_attempt_v1(1u64))
+        attempt_index = attempt_index + 1
+    _provider_cleanup_owner_v1.initialized = true
+
+fn _provider_cleanup_lock_v1() -> bool:
+    if _provider_cleanup_mutex_v1 <= 0 or
+        _provider_cleanup_owner_v1.quarantined:
+        return false
+    if not mutex_raw_lock(_provider_cleanup_mutex_v1): return false
+    _provider_cleanup_initialize_locked_v1()
+    if _provider_cleanup_owner_v1.quarantined:
+        _ = mutex_raw_unlock(_provider_cleanup_mutex_v1)
+        return false
+    true
+
+fn _provider_cleanup_unlock_v1() -> bool:
+    if mutex_raw_unlock(_provider_cleanup_mutex_v1): return true
+    _provider_cleanup_owner_v1.quarantined = true
+    false
+
+fn _provider_cleanup_next_nonce_locked_v1() -> u64:
+    if _provider_cleanup_owner_v1.next_nonce == 0xffffffffffffffffu64:
+        return 0u64
+    _provider_cleanup_owner_v1.next_nonce =
+        _provider_cleanup_owner_v1.next_nonce + 1u64
+    _provider_cleanup_owner_v1.next_nonce
+
+fn _provider_cleanup_evidence_valid_v1(value: text) -> bool:
+    value.len() > 0 and value.len() <= PROVIDER_CLEANUP_EVIDENCE_LIMIT_V1
+
+fn _provider_cleanup_authority_index_locked_v1(
+    authority: ProviderCleanupAuthorityV1
+) -> i64:
+    if authority._provider_slot < 0 or
+        authority._provider_slot >= _provider_cleanup_owner_v1.providers.len() or
+        authority._provider_generation == 0u64 or authority._provider_nonce == 0u64:
+        return -1
+    val provider = _provider_cleanup_owner_v1.providers[authority._provider_slot]
+    if not provider.occupied or provider.generation != authority._provider_generation or
+        provider.nonce != authority._provider_nonce:
+        return -1
+    authority._provider_slot
+
+fn _provider_cleanup_attempt_index_locked_v1(
+    attempt: ProviderCleanupAttemptV1
+) -> i64:
+    if attempt._slot < 0 or
+        attempt._slot >= _provider_cleanup_owner_v1.attempts.len() or
+        attempt._generation == 0u64 or attempt._nonce == 0u64 or
+        attempt._provider_slot < 0 or attempt._transaction_id == 0u64 or
+        attempt._transaction_generation == 0u64 or attempt._attempt_ordinal == 0u64:
+        return -1
+    val slot = _provider_cleanup_owner_v1.attempts[attempt._slot]
+    if slot.state == ProviderCleanupAttemptStateV1.Free or
+        slot.state == ProviderCleanupAttemptStateV1.Retired or
+        slot.generation != attempt._generation or slot.nonce != attempt._nonce or
+        slot.provider_slot != attempt._provider_slot or
+        slot.transaction_id != attempt._transaction_id or
+        slot.transaction_generation != attempt._transaction_generation or
+        slot.attempt_ordinal != attempt._attempt_ordinal:
+        return -1
+    attempt._slot
+
+fn _provider_cleanup_authority_matches_slot_locked_v1(
+    authority: ProviderCleanupAuthorityV1,
+    slot: ProviderCleanupAttemptSlotV1
+) -> bool:
+    val provider_index = _provider_cleanup_authority_index_locked_v1(authority)
+    provider_index >= 0 and provider_index == slot.provider_slot and
+        authority._provider_generation == slot.provider_generation and
+        authority._provider_nonce == slot.provider_nonce
+
+fn _provider_cleanup_attempt_from_slot_v1(
+    index: i64, slot: ProviderCleanupAttemptSlotV1
+) -> ProviderCleanupAttemptV1:
+    ProviderCleanupAttemptV1(
+        _slot: index, _generation: slot.generation, _nonce: slot.nonce,
+        _provider_slot: slot.provider_slot,
+        _transaction_id: slot.transaction_id,
+        _transaction_generation: slot.transaction_generation,
+        _attempt_ordinal: slot.attempt_ordinal)
+
+fn _provider_cleanup_target_from_slot_v1(
+    slot: ProviderCleanupAttemptSlotV1
+) -> ProviderCleanupTargetViewV1:
+    ProviderCleanupTargetViewV1(
+        task_id: slot.task_id,
+        lifecycle_generation: slot.lifecycle_generation,
+        transaction_id: slot.transaction_id,
+        transaction_generation: slot.transaction_generation,
+        attempt_ordinal: slot.attempt_ordinal)
+
+fn _provider_cleanup_target_matches_slot_v1(
+    target: ProviderCleanupTargetViewV1,
+    slot: ProviderCleanupAttemptSlotV1
+) -> bool:
+    target.task_id == slot.task_id and
+        target.lifecycle_generation == slot.lifecycle_generation and
+        target.transaction_id == slot.transaction_id and
+        target.transaction_generation == slot.transaction_generation and
+        target.attempt_ordinal == slot.attempt_ordinal
+
+fn _provider_cleanup_transaction_live_locked_v1(
+    provider_slot: i64, transaction_id: u64, transaction_generation: u64
+) -> bool:
+    for slot in _provider_cleanup_owner_v1.attempts:
+        if slot.state != ProviderCleanupAttemptStateV1.Free and
+            slot.state != ProviderCleanupAttemptStateV1.Retired and
+            slot.provider_slot == provider_slot and
+            slot.transaction_id == transaction_id and
+            slot.transaction_generation == transaction_generation:
+            return true
+    false
+
+pub(package) fn provider_cleanup_register_v1(
+    name: text
+) -> Result<ProviderCleanupAuthorityV1, text>:
+    if name.len() == 0 or name.len() > 64: return Err("invalid provider name")
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    var free_index = -1
+    var i = 0
+    while i < _provider_cleanup_owner_v1.providers.len():
+        val provider = _provider_cleanup_owner_v1.providers[i]
+        if provider.occupied and provider.name == name:
+            _ = _provider_cleanup_unlock_v1()
+            return Err("provider already registered")
+        if not provider.occupied and free_index < 0: free_index = i
+        i = i + 1
+    if free_index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("provider registry full")
+    val nonce = _provider_cleanup_next_nonce_locked_v1()
+    if nonce == 0u64:
+        _provider_cleanup_owner_v1.quarantined = true
+        _ = _provider_cleanup_unlock_v1()
+        return Err("provider nonce exhausted")
+    val generation = _provider_cleanup_owner_v1.providers[free_index].generation
+    _provider_cleanup_owner_v1.providers[free_index] = ProviderCleanupProviderSlotV1(
+        occupied: true, generation: generation, nonce: nonce, name: name)
+    val authority = ProviderCleanupAuthorityV1(
+        _provider_slot: free_index, _provider_generation: generation,
+        _provider_nonce: nonce)
+    if not _provider_cleanup_unlock_v1(): return Err("provider registration indeterminate")
+    Ok(authority)
+
+pub(package) fn provider_cleanup_issue_attempt_v1(
+    authority: ProviderCleanupAuthorityV1,
+    task_id: u64,
+    lifecycle_generation: u64,
+    transaction_id: u64,
+    transaction_generation: u64
+) -> Result<ProviderCleanupAttemptV1, text>:
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        transaction_id == 0u64 or transaction_generation == 0u64:
+        return Err("invalid cleanup transaction identity")
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    val provider_index = _provider_cleanup_authority_index_locked_v1(authority)
+    if provider_index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("provider authority rejected")
+    if _provider_cleanup_transaction_live_locked_v1(
+        provider_index, transaction_id, transaction_generation):
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cleanup transaction already fenced")
+    var free_index = -1
+    var i = 0
+    while i < _provider_cleanup_owner_v1.attempts.len():
+        if _provider_cleanup_owner_v1.attempts[i].state == ProviderCleanupAttemptStateV1.Free:
+            free_index = i
+            break
+        i = i + 1
+    if free_index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cleanup attempt fence full")
+    val nonce = _provider_cleanup_next_nonce_locked_v1()
+    if nonce == 0u64:
+        _provider_cleanup_owner_v1.quarantined = true
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cleanup attempt nonce exhausted")
+    val generation = _provider_cleanup_owner_v1.attempts[free_index].generation
+    _provider_cleanup_owner_v1.attempts[free_index] = ProviderCleanupAttemptSlotV1(
+        state: ProviderCleanupAttemptStateV1.Issued,
+        generation: generation, nonce: nonce,
+        provider_slot: provider_index,
+        provider_generation: authority._provider_generation,
+        provider_nonce: authority._provider_nonce,
+        task_id: task_id, lifecycle_generation: lifecycle_generation,
+        transaction_id: transaction_id,
+        transaction_generation: transaction_generation,
+        attempt_ordinal: 1u64, cancel_generation: 0u64,
+        outcome_code: 0, evidence_digest: "", quiescence_digest: "")
+    val attempt = _provider_cleanup_attempt_from_slot_v1(
+        free_index, _provider_cleanup_owner_v1.attempts[free_index])
+    if not _provider_cleanup_unlock_v1(): return Err("attempt issue indeterminate")
+    Ok(attempt)
+
+pub(package) fn provider_cleanup_start_side_effect_v1(
+    authority: ProviderCleanupAuthorityV1,
+    attempt: ProviderCleanupAttemptV1
+) -> Result<ProviderCleanupSideEffectStartV1, text>:
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    val index = _provider_cleanup_attempt_index_locked_v1(attempt)
+    if index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("stale cleanup attempt")
+    val slot = _provider_cleanup_owner_v1.attempts[index]
+    if not _provider_cleanup_authority_matches_slot_locked_v1(authority, slot):
+        _ = _provider_cleanup_unlock_v1()
+        return Err("provider authority rejected")
+    if slot.state == ProviderCleanupAttemptStateV1.Issued:
+        _provider_cleanup_owner_v1.attempts[index].state =
+            ProviderCleanupAttemptStateV1.Started
+    else:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cleanup side effect already started or unavailable")
+    val permit = ProviderCleanupSideEffectStartV1(
+        _attempt: attempt,
+        target: _provider_cleanup_target_from_slot_v1(
+            _provider_cleanup_owner_v1.attempts[index]))
+    if not _provider_cleanup_unlock_v1(): return Err("side-effect start indeterminate")
+    Ok(permit)
+
+pub(package) fn provider_cleanup_complete_v1(
+    authority: ProviderCleanupAuthorityV1,
+    permit: ProviderCleanupSideEffectStartV1,
+    outcome_code: i32,
+    evidence_digest: text
+) -> Result<ProviderCleanupCompletionReceiptV1, text>:
+    if not _provider_cleanup_evidence_valid_v1(evidence_digest):
+        return Err("invalid completion evidence")
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    val index = _provider_cleanup_attempt_index_locked_v1(permit._attempt)
+    if index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("late or stale cleanup completion")
+    val slot = _provider_cleanup_owner_v1.attempts[index]
+    if not _provider_cleanup_authority_matches_slot_locked_v1(authority, slot):
+        _ = _provider_cleanup_unlock_v1()
+        return Err("provider authority rejected")
+    if not _provider_cleanup_target_matches_slot_v1(permit.target, slot):
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cleanup permit target rejected")
+    if slot.state == ProviderCleanupAttemptStateV1.Completed:
+        if slot.outcome_code != outcome_code or slot.evidence_digest != evidence_digest:
+            _ = _provider_cleanup_unlock_v1()
+            return Err("conflicting cleanup completion")
+    elif (slot.state == ProviderCleanupAttemptStateV1.Started or
+          slot.state == ProviderCleanupAttemptStateV1.CancelRequested):
+        _provider_cleanup_owner_v1.attempts[index].state =
+            ProviderCleanupAttemptStateV1.Completed
+        _provider_cleanup_owner_v1.attempts[index].outcome_code = outcome_code
+        _provider_cleanup_owner_v1.attempts[index].evidence_digest = evidence_digest
+    else:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("late or unstarted cleanup completion")
+    val receipt = ProviderCleanupCompletionReceiptV1(
+        _attempt: permit._attempt,
+        target: _provider_cleanup_target_from_slot_v1(
+            _provider_cleanup_owner_v1.attempts[index]),
+        outcome_code: outcome_code,
+        evidence_digest: evidence_digest)
+    if not _provider_cleanup_unlock_v1(): return Err("completion indeterminate")
+    Ok(receipt)
+
+pub(package) fn provider_cleanup_request_cancel_v1(
+    attempt: ProviderCleanupAttemptV1
+) -> Result<ProviderCleanupCancelRequestV1, text>:
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    val index = _provider_cleanup_attempt_index_locked_v1(attempt)
+    if index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("stale cleanup attempt")
+    val state = _provider_cleanup_owner_v1.attempts[index].state
+    if (state == ProviderCleanupAttemptStateV1.Issued or
+        state == ProviderCleanupAttemptStateV1.Started):
+        if _provider_cleanup_owner_v1.attempts[index].cancel_generation ==
+            0xffffffffffffffffu64:
+            _provider_cleanup_owner_v1.attempts[index].state =
+                ProviderCleanupAttemptStateV1.Retired
+            _ = _provider_cleanup_unlock_v1()
+            return Err("cancel generation exhausted")
+        _provider_cleanup_owner_v1.attempts[index].cancel_generation =
+            _provider_cleanup_owner_v1.attempts[index].cancel_generation + 1u64
+        _provider_cleanup_owner_v1.attempts[index].state =
+            ProviderCleanupAttemptStateV1.CancelRequested
+    elif state != ProviderCleanupAttemptStateV1.CancelRequested:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cleanup attempt is terminal")
+    val request = ProviderCleanupCancelRequestV1(
+        _attempt: attempt,
+        _cancel_generation: _provider_cleanup_owner_v1.attempts[index].cancel_generation)
+    if not _provider_cleanup_unlock_v1(): return Err("cancel request indeterminate")
+    Ok(request)
+
+pub(package) fn provider_cleanup_ack_cancelled_v1(
+    authority: ProviderCleanupAuthorityV1,
+    request: ProviderCleanupCancelRequestV1,
+    quiescence_digest: text
+) -> Result<ProviderCleanupCancelAckV1, text>:
+    if not _provider_cleanup_evidence_valid_v1(quiescence_digest):
+        return Err("invalid quiescence evidence")
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    val index = _provider_cleanup_attempt_index_locked_v1(request._attempt)
+    if index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("stale cancellation request")
+    val slot = _provider_cleanup_owner_v1.attempts[index]
+    if not _provider_cleanup_authority_matches_slot_locked_v1(authority, slot):
+        _ = _provider_cleanup_unlock_v1()
+        return Err("provider authority rejected")
+    if slot.cancel_generation != request._cancel_generation:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("stale cancellation generation")
+    if slot.state == ProviderCleanupAttemptStateV1.Cancelled:
+        if slot.quiescence_digest != quiescence_digest:
+            _ = _provider_cleanup_unlock_v1()
+            return Err("conflicting cancellation acknowledgment")
+    elif slot.state == ProviderCleanupAttemptStateV1.CancelRequested:
+        _provider_cleanup_owner_v1.attempts[index].state =
+            ProviderCleanupAttemptStateV1.Cancelled
+        _provider_cleanup_owner_v1.attempts[index].quiescence_digest =
+            quiescence_digest
+    else:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cancellation acknowledgment rejected")
+    val ack = ProviderCleanupCancelAckV1(
+        _attempt: request._attempt,
+        _cancel_generation: request._cancel_generation,
+        _quiescence_digest: quiescence_digest)
+    if not _provider_cleanup_unlock_v1(): return Err("cancel acknowledgment indeterminate")
+    Ok(ack)
+
+pub(package) fn provider_cleanup_retry_after_cancel_v1(
+    authority: ProviderCleanupAuthorityV1,
+    ack: ProviderCleanupCancelAckV1
+) -> Result<ProviderCleanupAttemptV1, text>:
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    val index = _provider_cleanup_attempt_index_locked_v1(ack._attempt)
+    if index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("stale cancellation acknowledgment")
+    val slot = _provider_cleanup_owner_v1.attempts[index]
+    if not _provider_cleanup_authority_matches_slot_locked_v1(authority, slot) or
+        slot.state != ProviderCleanupAttemptStateV1.Cancelled or
+        slot.cancel_generation != ack._cancel_generation or
+        slot.quiescence_digest != ack._quiescence_digest:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("unauthenticated cancellation acknowledgment")
+    if slot.generation == 0xffffffffffffffffu64 or
+        slot.attempt_ordinal == 0xffffffffffffffffu64:
+        _provider_cleanup_owner_v1.attempts[index].state =
+            ProviderCleanupAttemptStateV1.Retired
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cleanup attempt identity exhausted")
+    val nonce = _provider_cleanup_next_nonce_locked_v1()
+    if nonce == 0u64:
+        _provider_cleanup_owner_v1.quarantined = true
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cleanup attempt nonce exhausted")
+    val next_generation = slot.generation + 1u64
+    val next_ordinal = slot.attempt_ordinal + 1u64
+    _provider_cleanup_owner_v1.attempts[index] = ProviderCleanupAttemptSlotV1(
+        state: ProviderCleanupAttemptStateV1.Issued,
+        generation: next_generation, nonce: nonce,
+        provider_slot: slot.provider_slot,
+        provider_generation: slot.provider_generation,
+        provider_nonce: slot.provider_nonce,
+        task_id: slot.task_id, lifecycle_generation: slot.lifecycle_generation,
+        transaction_id: slot.transaction_id,
+        transaction_generation: slot.transaction_generation,
+        attempt_ordinal: next_ordinal, cancel_generation: 0u64,
+        outcome_code: 0, evidence_digest: "", quiescence_digest: "")
+    val next = _provider_cleanup_attempt_from_slot_v1(
+        index, _provider_cleanup_owner_v1.attempts[index])
+    if not _provider_cleanup_unlock_v1(): return Err("cleanup retry indeterminate")
+    Ok(next)
+
+pub(package) fn provider_cleanup_finish_v1(
+    authority: ProviderCleanupAuthorityV1,
+    receipt: ProviderCleanupCompletionReceiptV1
+) -> Result<bool, text>:
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    val index = _provider_cleanup_attempt_index_locked_v1(receipt._attempt)
+    if index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("stale completion receipt")
+    val slot = _provider_cleanup_owner_v1.attempts[index]
+    if not _provider_cleanup_authority_matches_slot_locked_v1(authority, slot) or
+        slot.state != ProviderCleanupAttemptStateV1.Completed or
+        slot.outcome_code != receipt.outcome_code or
+        slot.evidence_digest != receipt.evidence_digest or
+        not _provider_cleanup_target_matches_slot_v1(receipt.target, slot):
+        _ = _provider_cleanup_unlock_v1()
+        return Err("completion receipt rejected")
+    if slot.generation == 0xffffffffffffffffu64:
+        _provider_cleanup_owner_v1.attempts[index].state =
+            ProviderCleanupAttemptStateV1.Retired
+    else:
+        _provider_cleanup_owner_v1.attempts[index] =
+            _provider_cleanup_empty_attempt_v1(slot.generation + 1u64)
+    if not _provider_cleanup_unlock_v1(): return Err("completion release indeterminate")
+    Ok(true)
+
+pub(package) fn provider_cleanup_finish_cancelled_v1(
+    authority: ProviderCleanupAuthorityV1,
+    ack: ProviderCleanupCancelAckV1
+) -> Result<bool, text>:
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    val index = _provider_cleanup_attempt_index_locked_v1(ack._attempt)
+    if index < 0:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("stale cancellation acknowledgment")
+    val slot = _provider_cleanup_owner_v1.attempts[index]
+    if not _provider_cleanup_authority_matches_slot_locked_v1(authority, slot) or
+        slot.state != ProviderCleanupAttemptStateV1.Cancelled or
+        slot.cancel_generation != ack._cancel_generation or
+        slot.quiescence_digest != ack._quiescence_digest:
+        _ = _provider_cleanup_unlock_v1()
+        return Err("cancellation acknowledgment rejected")
+    if slot.generation == 0xffffffffffffffffu64:
+        _provider_cleanup_owner_v1.attempts[index].state =
+            ProviderCleanupAttemptStateV1.Retired
+    else:
+        _provider_cleanup_owner_v1.attempts[index] =
+            _provider_cleanup_empty_attempt_v1(slot.generation + 1u64)
+    if not _provider_cleanup_unlock_v1(): return Err("cancel release indeterminate")
+    Ok(true)
+
+pub fn provider_cleanup_fence_status_v1() -> Result<ProviderCleanupFenceStatusV1, text>:
+    if not _provider_cleanup_lock_v1(): return Err("provider fence unavailable")
+    var registered = 0
+    for provider in _provider_cleanup_owner_v1.providers:
+        if provider.occupied: registered = registered + 1
+    var free_count = 0
+    var issued = 0
+    var started = 0
+    var cancel_requested = 0
+    var completed = 0
+    var cancelled = 0
+    var retired = 0
+    for slot in _provider_cleanup_owner_v1.attempts:
+        match slot.state:
+            case ProviderCleanupAttemptStateV1.Free: free_count = free_count + 1
+            case ProviderCleanupAttemptStateV1.Issued: issued = issued + 1
+            case ProviderCleanupAttemptStateV1.Started: started = started + 1
+            case ProviderCleanupAttemptStateV1.CancelRequested:
+                cancel_requested = cancel_requested + 1
+            case ProviderCleanupAttemptStateV1.Completed: completed = completed + 1
+            case ProviderCleanupAttemptStateV1.Cancelled: cancelled = cancelled + 1
+            case ProviderCleanupAttemptStateV1.Retired: retired = retired + 1
+    val status = ProviderCleanupFenceStatusV1(
+        registered_providers: registered, free_attempts: free_count,
+        issued_attempts: issued, started_attempts: started,
+        cancel_requested_attempts: cancel_requested,
+        completed_attempts: completed, cancelled_attempts: cancelled,
+        retired_attempts: retired,
+        quarantined: _provider_cleanup_owner_v1.quarantined)
+    if not _provider_cleanup_unlock_v1(): return Err("status read indeterminate")
+    Ok(status)
+
+pub fn provider_cleanup_attempt_survives_fork_v1() -> bool: false
+
+export ProviderCleanupAuthorityV1, ProviderCleanupAttemptV1
+export ProviderCleanupTargetViewV1
+export ProviderCleanupSideEffectStartV1, ProviderCleanupCancelRequestV1
+export ProviderCleanupCancelAckV1, ProviderCleanupCompletionReceiptV1
+export provider_cleanup_register_v1, provider_cleanup_issue_attempt_v1
+export provider_cleanup_start_side_effect_v1, provider_cleanup_complete_v1
+export provider_cleanup_request_cancel_v1, provider_cleanup_ack_cancelled_v1
+export provider_cleanup_retry_after_cancel_v1, provider_cleanup_finish_v1
+export provider_cleanup_finish_cancelled_v1

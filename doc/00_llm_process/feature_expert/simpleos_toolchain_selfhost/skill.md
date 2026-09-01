@@ -4,22 +4,10 @@
 > historical unless a current receipt revalidates it. The canonical current
 > plan is `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`;
 > Stage 2 is bootstrap-only, while Stage 3/4, payload, guest-static lld, image,
-> SSpec execution and live receipts remain BLOCKED/WARN. The combined wrapper's
-> canonical Stage-4 admission, preflight, and shared receipt contract are
-> source-complete and self-tested; live mode correctly blocks on the missing
-> canonical same-run desktop/SSHD hook.
+> wrapper, SSpec/manual and live receipts remain BLOCKED/WARN.
 > The current x86_64 compiler repair keeps local `HirType` aggregates inside
 > their owning MIR metadata arrays and copies them by scalar local IDs. Its
 > focused native regression is green; Stage 3/4 admission is still pending.
-> The canonical SSpec surface now distinguishes source contracts, host-wrapper
-> fixtures, image-admission checks, and the sole live deployment/desktop scenario.
-> Source inventories, compatibility duplicates, and Rust-seed presence are not
-> guest or release evidence.
-> The live umbrella SSpec additionally exposes step-based positive receipt,
-> extra-argument edge, and missing-runtime error coverage with real assertions.
-> Runtime/docgen/maintenance status is `TEST_BLOCKED` until a current-source
-> CLI passes canonical Stage-4 provenance admission; the mirrored manual is not
-> runtime evidence.
 
 ## Role
 
@@ -480,17 +468,6 @@ staging result being read as a self-host result, and a stale status line on this
 page is worse than none.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
-
-## Guest target authority update (2026-08-22)
-
-`src/app/simpleos_tool/guest_target.spl` is the immutable architecture/triple,
-codegen, sysroot, and compiler authority for the filesystem guest tool. The
-pipeline validates it at both interpret and compile entrypoints and the linker
-rejects mutable-environment split brain. AArch64/RV64 link through explicit
-installed userland CRT/runtime/libc/script branches, never the kernel linkers;
-RV64 binds `rv64gc/lp64d`. Builder stamps bind non-seed admission identity.
-This is implementation/static evidence only: do not promote self-host or QEMU
-hello-world rows until the admitted Stage-4 runtime executes them.
 
 ## Restart12 Stage 4 prerequisite (2026-08-14)
 

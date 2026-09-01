@@ -25,7 +25,6 @@
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
 use app.io.mod.{env_get}
-use std.spec.in_development.{source_is_in_development, in_development_explicit_line}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 # Single source of truth for the six-class outcome contract
 # (OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN) frozen in
@@ -41,12 +40,14 @@ use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage
 use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
 
 use std.io_runtime.{file_exists}
+@unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{env_set}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
+@unsafe(reason: "raw procfs path-resolution ABI", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
 
 # --- Legacy word-infix matcher preprocessing (self-contained; this file is kept
@@ -86,7 +87,7 @@ fn _single_last_slash(s: text) -> i64:
 fn preprocess_infix_for_child(file_path: text) -> text:
     if not file_path.ends_with("_spec.spl"):
         return file_path
-    val content = rt_file_read_text(file_path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
     if content == "":
         return file_path
     val lines = content.split("\n")
@@ -120,6 +121,78 @@ struct ChildRun:
     valid: bool
     error: text
 
+fn _single_option_takes_value(arg: text) -> bool:
+    """Whether a forwarded test option owns the following argv token.
+
+    Keep this explicit: treating every option as value-taking would let a
+    boolean flag hide a real second path, while treating every option as a
+    switch misclassifies values such as `json` or a QEMU socket as paths. The
+    list mirrors the value-taking test options plus adapter-only values that
+    can reach this direct child lane."""
+    (
+        arg == "--max-mem" or arg == "--execution-mode" or
+        arg == "--cpu-threshold" or arg == "--mem-threshold" or
+        arg == "--resource-limit" or arg == "--max-workers" or
+        arg == "--parallel-timeout" or arg == "--fuzz-time" or
+        arg == "--fuzz-corpus" or arg == "--chaos-trials" or
+        arg == "--chaos-fault-rate" or arg == "--deploy-platform" or
+        arg == "--batch-size" or arg == "--session-kind" or
+        arg == "--max-sessions" or arg == "--session-reset" or
+        arg == "--sdoctest-env" or arg == "--tag" or
+        arg == "--format" or arg == "--mode" or arg == "--timeout" or
+        arg == "--seed" or arg == "--profile" or arg == "--qemu-socket"
+    )
+
+fn _single_option_is_integer(arg: text) -> bool:
+    (
+        arg == "--max-mem" or arg == "--resource-limit" or
+        arg == "--max-workers" or arg == "--parallel-timeout" or
+        arg == "--fuzz-time" or arg == "--chaos-trials" or
+        arg == "--chaos-fault-rate" or arg == "--batch-size" or
+        arg == "--max-sessions" or arg == "--timeout" or arg == "--seed"
+    )
+
+fn _single_option_is_decimal(arg: text) -> bool:
+    arg == "--cpu-threshold" or arg == "--mem-threshold"
+
+fn _single_numeric_value_valid(value: text, decimal: bool) -> bool:
+    if value == "":
+        return false
+    var i = 0
+    if value.starts_with("-"):
+        i = 1
+    if i >= value.len():
+        return false
+    var digits = 0
+    var dots = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code >= 48 and code <= 57:
+            digits = digits + 1
+        elif decimal and code == 46 and dots == 0:
+            dots = dots + 1
+        else:
+            return false
+        i = i + 1
+    digits > 0
+
+fn _single_option_value_error(arg: text, value: text) -> text:
+    if value == "":
+        return "missing value for " + arg
+    # A following option is never the value of this option. In particular,
+    # `--format --list` must not swallow `--list` and continue with a false
+    # interpretation of the remaining positionals. Signed numeric values are
+    # checked by their full domain below.
+    if value.starts_with("-") and not _single_option_is_integer(arg) and not _single_option_is_decimal(arg):
+        return "missing value for " + arg
+    if arg == "--format" and value != "text" and value != "json" and value != "doc":
+        return "invalid value for --format: " + value
+    if _single_option_is_integer(arg) and not _single_numeric_value_valid(value, false):
+        return "invalid value for " + arg + ": " + value
+    if _single_option_is_decimal(arg) and not _single_numeric_value_valid(value, true):
+        return "invalid value for " + arg + ": " + value
+    ""
+
 fn clean_args() -> [text]:
     val raw = cli_get_args()
     var args: [text] = []
@@ -140,24 +213,54 @@ fn parse_child_run(args: [text]) -> ChildRun:
     var path = ""
     var timeout_secs = 120
     var list_only = false
+    var extra_paths: [text] = []
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg == "--timeout" and i + 1 < args.len():
-            timeout_secs = args[i + 1].to_i64() ?? 0
+        if _single_option_takes_value(arg):
+            if i + 1 >= args.len():
+                return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "missing value for " + arg)
+            val value = args[i + 1]
+            val value_error = _single_option_value_error(arg, value)
+            if value_error != "":
+                return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: value_error)
+            if arg == "--timeout":
+                timeout_secs = value.to_i64() ?? 0
             i = i + 2
             continue
-        if arg.starts_with("--timeout="):
-            timeout_secs = arg[10:].to_i64() ?? 0
-            i = i + 1
-            continue
+        val equals_at = arg.index_of("=")
+        if equals_at > 0:
+            val option_name = arg[0:equals_at]
+            if _single_option_takes_value(option_name):
+                val value = arg[equals_at + 1:]
+                val value_error = _single_option_value_error(option_name, value)
+                if value_error != "":
+                    return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: value_error)
+                if option_name == "--timeout":
+                    timeout_secs = value.to_i64() ?? 0
+                i = i + 1
+                continue
         if arg == "--list":
             list_only = true
             i = i + 1
             continue
-        if not arg.starts_with("-") and path == "":
-            path = arg
+        if not arg.starts_with("-"):
+            if path == "":
+                path = arg
+            else:
+                # BUG FIX (test_runner_single_lane_drops_extra_paths): this lane
+                # is single-file BY DESIGN, but it used to keep only the FIRST
+                # positional path and DISCARD the rest in silence. `bin/simple
+                # test --no-session-daemon a_spec.spl b_spec.spl` therefore ran
+                # only `a`, printed only `a`'s verdict, and exited 0 even when
+                # `b` was a genuinely FAILING spec (or did not exist at all) —
+                # a silent false green for every file after the first. Fail
+                # closed instead: a run that cannot execute everything it was
+                # asked to execute must never report success.
+                extra_paths.push(arg)
         i = i + 1
+    if extra_paths.len() > 0:
+        return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "single-file lane accepts exactly one test file; refusing to silently drop " + extra_paths.len().to_string() + " more (" + extra_paths.join(", ") + ") — drop --no-session-daemon to run multiple files")
     if path == "":
         return ChildRun(path: "", timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "missing test file")
     if not path.ends_with(".spl"):
@@ -177,7 +280,7 @@ fn find_simple_binary() -> text:
     # SUBCOMMAND ("test"), not argv0, so without this step the resolver always
     # fell through to a possibly-stale bin/simple — see
     # doc/08_tracking/bug/test_runner_child_binary_ignores_invoking_binary_2026-07-27.md.
-    val self_path = rt_path_absolute("/proc/self/exe") ?? ""
+    val self_path = unsafe(capabilities: [ffi]): rt_path_absolute("/proc/self/exe") ?? ""
     if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
         return self_path
     val raw = cli_get_args()
@@ -196,7 +299,7 @@ fn file_has_di_test_tag(file_path: text) -> bool:
     Mirrors std.test_runner.test_runner_files.file_has_di_test_tag. Duplicated
     here (rather than imported) so this child runner stays independent of
     std.test_runner.* per the file-level design note above."""
-    val content = rt_file_read_text(file_path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
     content.contains("# @di_test")
 
 fn spec_exec_limit_directive(file_path: text) -> i64:
@@ -206,7 +309,7 @@ fn spec_exec_limit_directive(file_path: text) -> i64:
     10M-operation cap declare the cap they need; run_spec forwards it into
     the child env (raise-only) because the driver reads
     SIMPLE_EXECUTION_LIMIT once at startup and in-process arming is inert."""
-    val content = rt_file_read_text(file_path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
     val idx = find_raw(content, "# @exec_limit ")
     if idx < 0:
         return 0
@@ -235,7 +338,7 @@ fn spec_timeout_secs_directive(file_path: text) -> i64:
     outer runner printed "Process timed out" with NO verdict line at all — a
     fail-open hole, because a spec that cannot report a verdict can never
     report a failure either. Raise-only, same shape as @exec_limit."""
-    val content = rt_file_read_text(file_path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
     val idx = find_raw(content, "# @timeout_secs ")
     if idx < 0:
         return 0
@@ -523,7 +626,7 @@ fn parse_child_example_summary(output: text) -> (i64, i64, i64):
 fn read_test_result_evidence(path: text) -> (i64, i64, i64):
     if path == "" or not file_exists(path):
         return (0, 0, 0)
-    val content = rt_file_read_text(path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
     val parts = content.split("\n")
     if parts.len() < 3 or parts[0] != "simple-bdd-v1":
         return (0, 0, 0)
@@ -635,7 +738,7 @@ fn _cov_instrument_for_coverage(current: text, original: text) -> text:
     """Append a coverage-dump epilogue to the child spec copy. When `current`
     is already a temp copy (infix preprocessing), append in place; otherwise
     create a fresh temp copy next to the original so imports still resolve."""
-    val content = rt_file_read_text(current)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(current)
     if content == "":
         return current
     var epilogue = "\n\n# --- coverage epilogue injected by test_runner_single (SIMPLE_COVERAGE) ---\n"
@@ -806,7 +909,7 @@ fn _cov_recorded_file_for_target(path: text, files: [text]) -> text:
 
 fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, bool>,
                         files: [text]) -> text:
-    val content = rt_file_read_text(path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
     if content == "":
         return "coverage: {path} 0% (0/0 lines)"
     # Resolve which recorded module path denotes this target once, up front; a
@@ -940,7 +1043,7 @@ fn _cov_print_report(spec_path: text, sdn: text):
                 if not seen_dec_files.contains_key(f):
                     seen_dec_files[f] = true
                     dec_files.push(f)
-    val spec_src = rt_file_read_text(spec_path)
+    val spec_src = unsafe(capabilities: [ffi]): rt_file_read_text(spec_path)
     if spec_src == "":
         return
     val targets = _cov_targets(spec_src)
@@ -976,7 +1079,7 @@ fn main() -> i64:
     if run.list_only:
         print run.path
         return 0
-    if rt_file_read_text(run.path).contains("slow_it ") and run.timeout_secs < 600:
+    if unsafe(capabilities: [ffi]): rt_file_read_text(run.path).contains("slow_it ") and run.timeout_secs < 600:
         run.timeout_secs = 600
     val declared_timeout = spec_timeout_secs_directive(run.path)
     if declared_timeout > run.timeout_secs:
@@ -1013,6 +1116,11 @@ fn main() -> i64:
         env_set("SIMPLE_DI_TEST", "0")
 
     val binary = find_simple_binary()
+    # Nested contract probes must exercise the same admitted binary that runs
+    # this spec. Preserve an explicit caller override; otherwise publish the
+    # resolved child authority instead of making specs guess `bin/simple`.
+    if (env_get("SIMPLE_TEST_BINARY") ?? "") == "":
+        env_set("SIMPLE_TEST_BINARY", binary)
     # Evidence must be self-describing: name the binary that executes the spec.
     print "child binary: {binary}"
     # ...and name it LOUDLY when it is not the binary the caller is running.
@@ -1104,7 +1212,7 @@ fn main() -> i64:
             # test run on a malformed pre-existing artifact.
             val new_cov = parse_coverage_sdn(cov_sdn)
             val to_write = if file_exists(cov_output_path):
-                val existing_raw = rt_file_read_text(cov_output_path)
+                val existing_raw = unsafe(capabilities: [ffi]): rt_file_read_text(cov_output_path)
                 if existing_raw.trim().starts_with("# Coverage Report"):
                     render_coverage_sdn(merge_coverage(parse_coverage_sdn(existing_raw), new_cov))
                 else:
@@ -1310,15 +1418,6 @@ fn main() -> i64:
     # why every spec on this path reported `skipped=0` even when it had plainly
     # printed a skip marker -- see count_real_skips()'s docstring.
     val (real_skipped, real_pending) = count_real_skips(combined)
-    # In-development advisory. This runner IS the explicit-path surface --
-    # it is handed one named file -- so the verdict below stays HONEST: a
-    # `# @tag:in-development` spec run this way fails red and exits nonzero,
-    # exactly so a developer can work on it. The line only explains why the
-    # same file is neutralised (but counted) in a sweep. Neutralisation
-    # itself lives in test_runner_main.in_development_adjust; duplicating it
-    # here would make an explicit run unable to show its own failure.
-    if source_is_in_development(rt_file_read_text(run.path)):
-        print in_development_explicit_line(run.path)
     print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms, if failed == 0: unverified_error else: "")
     if cov_on and cov_sdn != "":
         _cov_print_report(run.path, cov_sdn)

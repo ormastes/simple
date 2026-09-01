@@ -1,0 +1,51 @@
+"""Boot-published hardware-to-logical CPU identity access.
+
+The BSP publishes one already-sealed topology snapshot before secondary CPUs
+or interrupt consumers become reachable.  Readers supply the identity read
+from the current CPU's architecture register and receive the dense logical ID
+owned by that snapshot.  Publication is deliberately one-shot; runtime CPU
+identity never falls back to an invented CPU zero.
+"""
+
+use os.kernel.smp.cpu_topology_identity_owner_v1.{
+    CpuHardwareIdentityKindV1,
+    CpuTopologyIdentitySnapshotV1,
+}
+
+pub val CPU_ID_UNRESOLVED_V1: u64 = 0xffffffffffffffffu64
+
+var _cpu_identity_snapshot_v1: CpuTopologyIdentitySnapshotV1? = nil
+
+pub fn cpu_identity_runtime_is_published_v1() -> bool:
+    _cpu_identity_snapshot_v1 != nil
+
+pub fn cpu_identity_runtime_publish_v1(
+    snapshot: CpuTopologyIdentitySnapshotV1
+) -> bool:
+    """Publish the sole sealed boot snapshot; reject replacement and empties."""
+    if _cpu_identity_snapshot_v1 != nil:
+        return false
+    if not snapshot.is_sealed() or snapshot.cpu_count() == 0u32:
+        return false
+    _cpu_identity_snapshot_v1 = Some(snapshot)
+    true
+
+pub fn cpu_identity_runtime_resolve_v1(
+    kind: CpuHardwareIdentityKindV1, observed_hardware_id: u64
+) -> u64?:
+    """Resolve an exact current-CPU hardware identity without allocation."""
+    if val snapshot = _cpu_identity_snapshot_v1:
+        if snapshot.architecture_kind() != kind:
+            return nil
+        if val logical = snapshot.logical_cpu_for_hardware_id(observed_hardware_id):
+            return Some(logical as u64)
+    nil
+
+pub fn cpu_identity_runtime_resolve_or_unresolved_v1(
+    kind: CpuHardwareIdentityKindV1, observed_hardware_id: u64
+) -> u64:
+    """HAL-compatible resolution which cannot alias failure to a real CPU."""
+    if val logical = cpu_identity_runtime_resolve_v1(kind, observed_hardware_id):
+        return logical
+    CPU_ID_UNRESOLVED_V1
+

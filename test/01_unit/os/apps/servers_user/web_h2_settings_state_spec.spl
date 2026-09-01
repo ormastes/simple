@@ -1,0 +1,74 @@
+use std.spec.*
+use os.apps.servers_user.web_h2_control_owner_v1.{
+    WebH2ControlOwnerV1, WebH2ControlFeedStatusV1,
+    WebH2ControlSendKindV1, WEB_H2_CONTROL_MAX_SETTINGS_ACK_DEBTS_V1
+}
+use std.http.h2.h2_frame.{H2Frame, H2SettingsFrame, H2_FLAG_ACK}
+use std.http.h2.h2_writer.{h2_write_frame}
+use std.http.h2.h2_preface.{h2_connection_preface_bytes}
+
+fn _settings(flags: i64) -> [u8]:
+    h2_write_frame(H2Frame.Settings(H2SettingsFrame(
+        flags: flags, settings: [])))
+
+fn _ready_control_owner() -> WebH2ControlOwnerV1:
+    var owner = WebH2ControlOwnerV1.create()
+    val admitted = owner.feed_authenticated_plaintext(
+        h2_connection_preface_bytes() + _settings(0), true)
+    expect(admitted.status).to_equal(WebH2ControlFeedStatusV1.Accepted)
+    owner
+
+describe "H2 SETTINGS ACK lifecycle":
+    it "rejects peer ACK before server settings reach the transport":
+        var owner = _ready_control_owner()
+        val prepared = owner.prepare_server_settings()
+        expect(prepared.kind).to_equal(WebH2ControlSendKindV1.ServerSettings)
+        val premature = owner.feed_authenticated_plaintext(
+            _settings(H2_FLAG_ACK), true)
+        expect(premature.status).to_equal(
+            WebH2ControlFeedStatusV1.ProtocolError)
+        expect(premature.blocker).to_equal("unexpected-server-settings-ack")
+        expect(owner.server_settings_ack_pending()).to_be(false)
+
+    it "accepts exactly one peer ACK for committed server settings":
+        var owner = _ready_control_owner()
+        val outbound = owner.prepare_server_settings()
+        expect(outbound.kind).to_equal(WebH2ControlSendKindV1.ServerSettings)
+        expect(owner.commit_control(outbound.token)).to_be(true)
+        expect(owner.server_settings_ack_pending()).to_be(true)
+
+        val first = owner.feed_authenticated_plaintext(
+            _settings(H2_FLAG_ACK), true)
+        expect(first.status).to_equal(WebH2ControlFeedStatusV1.Accepted)
+        expect(owner.server_settings_ack_pending()).to_be(false)
+
+        val duplicate = owner.feed_authenticated_plaintext(
+            _settings(H2_FLAG_ACK), true)
+        expect(duplicate.status).to_equal(
+            WebH2ControlFeedStatusV1.ProtocolError)
+        expect(duplicate.blocker).to_equal("unexpected-server-settings-ack")
+
+    it "bounds accumulated local SETTINGS ACK debt across feeds":
+        var owner = _ready_control_owner()
+        var accepted: i64 = 1
+        while accepted < WEB_H2_CONTROL_MAX_SETTINGS_ACK_DEBTS_V1:
+            val result = owner.feed_authenticated_plaintext(_settings(0), true)
+            expect(result.status).to_equal(WebH2ControlFeedStatusV1.Accepted)
+            accepted = accepted + 1
+        expect(owner.settings_ack_debt_count()).to_equal(
+            WEB_H2_CONTROL_MAX_SETTINGS_ACK_DEBTS_V1)
+
+        val overflow = owner.feed_authenticated_plaintext(_settings(0), true)
+        expect(overflow.status).to_equal(WebH2ControlFeedStatusV1.Overflow)
+        expect(overflow.blocker).to_equal("settings-ack-debt-overflow")
+
+    it "retains ACK debt across abort and consumes it only on commit":
+        var owner = _ready_control_owner()
+        expect(owner.settings_ack_debt_count()).to_equal(1i64)
+        val first = owner.prepare_settings_ack()
+        expect(owner.abort_control(first.token)).to_be(true)
+        expect(owner.settings_ack_debt_count()).to_equal(1i64)
+        val replay = owner.prepare_settings_ack()
+        expect(replay.wire_bytes).to_equal(first.wire_bytes)
+        expect(owner.commit_control(replay.token)).to_be(true)
+        expect(owner.settings_ack_debt_count()).to_equal(0i64)

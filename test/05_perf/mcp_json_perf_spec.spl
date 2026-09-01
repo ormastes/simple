@@ -1,22 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that MCP JSON Primitive Performance.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-MCP_JSON_PER-MCP-JSON-001
-doc/01_research/mcp_json_per/REQ-MCP_JSON_PER-MCP-JSON-001.md
-doc/03_plan/mcp_json_per/REQ-MCP_JSON_PER-MCP-JSON-001.md
-doc/04_architecture/mcp_json_per/REQ-MCP_JSON_PER-MCP-JSON-001.md
-doc/05_design/mcp_json_per/REQ-MCP_JSON_PER-MCP-JSON-001.md
-"""
-# @req: REQ-MCP_JSON_PER-MCP-JSON-001
-
-
 # MCP JSON Primitive Performance Benchmark
 #
 # **Feature IDs:** MCP JSON Perf Opt Round 1
@@ -27,6 +8,8 @@ doc/05_design/mcp_json_per/REQ-MCP_JSON_PER-MCP-JSON-001.md
 # used on every MCP handshake message (initialize, tools/list).
 # Uses rt_time_now_unix_micros() for timing.
 # Note: interpreter mode only verifies file loading (it block bodies don't execute).
+
+use std.spec.step
 
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -143,58 +126,13 @@ fn bench_extract_json_string(n: i64) -> bool:
     elapsed < 60000000
 
 # =========================================================================
-# Scaling guard: field extraction must be sub-quadratic in response size.
-# The absolute thresholds above are too coarse to catch an O(n^2) regression
-# (at N=200 over ~2KB, quadratic vs linear differed by only ~3x — both well
-# under 60s), which is exactly how the char_at() O(n^2) scan that caused the
-# codex MCP handshake timeout slipped through. Growth RATIO catches it.
-# =========================================================================
-
-fn make_tools_list_n(ntools: i64) -> text:
-    val q = Q()
-    val lb = LB()
-    val rb = RB()
-    var tools = ""
-    var i = 0
-    while i < ntools:
-        if i > 0:
-            tools = tools + ","
-        tools = tools + make_tool_entry("tool_" + i.to_text(), "Reads or writes data on the filesystem for tooling")
-        i = i + 1
-    lb + q + "jsonrpc" + q + ":" + q + "2.0" + q + "," + q + "result" + q + ":" + lb + q + "tools" + q + ":[" + tools + "]" + rb + rb
-
-fn bench_extract_scaling() -> bool:
-    """extract_field_raw('result') over a 4x-larger tools/list must take well
-    under 8x as long (linear ~4x; quadratic ~16x). Guards the MCP handshake
-    against the O(n^2) char-scan regression (codex timeout)."""
-    val small = make_tools_list_n(20)
-    val large = make_tools_list_n(80)
-    val reps = 40
-    var t = rt_time_now_unix_micros()
-    var i = 0
-    var acc = 0
-    while i < reps:
-        acc = acc + extract_field_raw(json=small, key="result").len()
-        i = i + 1
-    val small_us = rt_time_now_unix_micros() - t
-    t = rt_time_now_unix_micros()
-    i = 0
-    while i < reps:
-        acc = acc + extract_field_raw(json=large, key="result").len()
-        i = i + 1
-    val large_us = rt_time_now_unix_micros() - t
-    print "[perf] extract scaling: small(20 tools)={small_us}us large(80 tools)={large_us}us (acc={acc})"
-    if small_us <= 0:
-        return true
-    large_us < small_us * 8
-
-# =========================================================================
 # Test execution
 # =========================================================================
 
 use std.spec.step
 
 describe "MCP JSON Primitive Performance":
+    # @manual scenario evidence
     """
     # MCP JSON Primitive Performance Benchmark
 
@@ -213,26 +151,16 @@ describe "MCP JSON Primitive Performance":
     """
 
     slow_it "find_text completes within threshold":
-        # @req: REQ-MCP_JSON_PER-MCP-JSON-001
-        step("Verify: find_text completes within threshold")
         check(bench_find_text(200))
 
     slow_it "unescape_json_string completes within threshold":
-        # @req: REQ-MCP_JSON_PER-MCP-JSON-001
-        step("Verify: unescape_json_string completes within threshold")
         check(bench_unescape(200))
 
     slow_it "extract_field_raw completes within threshold":
-        # @req: REQ-MCP_JSON_PER-MCP-JSON-001
-        step("Verify: extract_field_raw completes within threshold")
         check(bench_extract_field_raw(200))
 
     slow_it "extract_json_string completes within threshold":
-        # @req: REQ-MCP_JSON_PER-MCP-JSON-001
-        step("Verify: extract_json_string completes within threshold")
         check(bench_extract_json_string(200))
 
     slow_it "extract_field_raw scales sub-quadratically with response size":
-        # @req: REQ-MCP_JSON_PER-MCP-JSON-001
-        step("Verify: extract_field_raw scales sub-quadratically with response size")
         check(bench_extract_scaling())

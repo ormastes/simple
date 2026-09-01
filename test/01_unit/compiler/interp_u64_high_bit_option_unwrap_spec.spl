@@ -1,0 +1,44 @@
+use std.spec.*
+
+# Exact regression for interp_u64_high_bit_option_unwrap_corruption.  Keep the
+# mutable Option assignment: it forces the tree-walking interpreter path that
+# used to erase u64 signedness when the value crossed a struct/Option boundary.
+struct HighBitFrame:
+    id: text
+    checksum: u64
+
+fn find_high_bit_frame(frames: [HighBitFrame], target_id: text) -> HighBitFrame?:
+    var found: HighBitFrame? = nil
+    var matching_count = 0
+    for frame in frames:
+        if frame.id == target_id:
+            matching_count = matching_count + 1
+            if frame.checksum > 0u64:
+                found = frame
+    if matching_count == 1:
+        return found
+    nil
+
+describe "interpreter u64 high-bit Option unwrap":
+    it "preserves the exact 2^63 transition through array, struct, call, and Option":
+        val below = [HighBitFrame(id: "below", checksum: 9223372036854775807u64)]
+        val at = [HighBitFrame(id: "at", checksum: 9223372036854775808u64)]
+
+        if val frame = find_high_bit_frame(below, "below"):
+            expect(frame.checksum).to_equal(9223372036854775807u64)
+        else:
+            expect(false).to_equal(true)
+
+        if val frame = find_high_bit_frame(at, "at"):
+            expect(frame.checksum).to_equal(9223372036854775808u64)
+        else:
+            expect(false).to_equal(true)
+
+    it "preserves u64 max in the adjacent high-bit boundary shape":
+        val maximum = [HighBitFrame(id: "max", checksum: 18446744073709551615u64)]
+        if val frame = find_high_bit_frame(maximum, "max"):
+            expect(frame.checksum).to_equal(18446744073709551615u64)
+            expect(frame.checksum > 9223372036854775808u64).to_equal(true)
+            expect(frame.checksum >> 63).to_equal(1u64)
+        else:
+            expect(false).to_equal(true)

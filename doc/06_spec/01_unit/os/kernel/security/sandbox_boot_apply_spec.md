@@ -47,6 +47,7 @@ expect(embedded_sandbox_section_text_valid(lowering)).to_equal(true)
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 expect(embedded_sandbox_section_text_valid(lowering)).to_equal(true)
         expect(embedded_sandbox_lowering_sdn_from_section(4096, 8192, lowering)).to_equal(lowering)
 
@@ -61,6 +62,7 @@ expect(embedded_sandbox_section_text_valid(lowering)).to_equal(true)
 sandbox_lowering:
   pmp_region|2147483648|4096|rw|locked
 
+```
 ## Scenarios
 
 ### sandbox boot apply metadata and ARM MPU planning

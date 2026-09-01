@@ -42,8 +42,6 @@ fn runtime_value_module() -> ModuleSpec:
         .add_fn(fn_rt_value_int())
         .add_fn(fn_rt_value_float())
         .add_fn(fn_rt_value_string())
-        .add_fn(fn_rt_value_array_new())
-        .add_fn(fn_rt_value_dict_new())
 
     # Type checking functions
     builder = builder
@@ -52,16 +50,12 @@ fn runtime_value_module() -> ModuleSpec:
         .add_fn(fn_rt_value_is_bool())
         .add_fn(fn_rt_value_is_int())
         .add_fn(fn_rt_value_is_float())
-        .add_fn(fn_rt_value_is_string())
-        .add_fn(fn_rt_value_is_array())
-        .add_fn(fn_rt_value_is_dict())
 
     # Conversion functions
     builder = builder
         .add_fn(fn_rt_value_as_bool())
         .add_fn(fn_rt_value_as_int())
         .add_fn(fn_rt_value_as_float())
-        .add_fn(fn_rt_value_as_string())
 
     # Arithmetic functions
     builder = builder
@@ -83,7 +77,6 @@ fn runtime_value_module() -> ModuleSpec:
     # Memory management functions
     builder = builder
         .add_fn(fn_rt_value_free())
-        .add_fn(fn_rt_value_clone())
 
     # Tests
     builder = builder
@@ -206,16 +199,6 @@ fn fn_rt_value_string() -> FFIFnSpec:
         "Box::into_raw(Box::new(RuntimeValue::String(Arc::new(s))))"
     )
 
-fn fn_rt_value_array_new() -> FFIFnSpec:
-    FFIFnSpec.extern_c("rt_value_array_new", [], "*mut RuntimeValue",
-        "Box::into_raw(Box::new(RuntimeValue::Array(Arc::new(Vec::new()))))"
-    )
-
-fn fn_rt_value_dict_new() -> FFIFnSpec:
-    FFIFnSpec.extern_c("rt_value_dict_new", [], "*mut RuntimeValue",
-        "Box::into_raw(Box::new(RuntimeValue::Dict(Arc::new(HashMap::new()))))"
-    )
-
 # ============================================================================
 # Type Checking Functions
 # ============================================================================
@@ -256,27 +239,6 @@ fn fn_rt_value_is_float() -> FFIFnSpec:
         [FFIParamSpec.simple("value", "*const RuntimeValue")],
         "bool",
         "!value.is_null() && matches!(*value, RuntimeValue::Float(_))"
-    )
-
-fn fn_rt_value_is_string() -> FFIFnSpec:
-    FFIFnSpec.unsafe_extern_c("rt_value_is_string",
-        [FFIParamSpec.simple("value", "*const RuntimeValue")],
-        "bool",
-        "!value.is_null() && matches!(*value, RuntimeValue::String(_))"
-    )
-
-fn fn_rt_value_is_array() -> FFIFnSpec:
-    FFIFnSpec.unsafe_extern_c("rt_value_is_array",
-        [FFIParamSpec.simple("value", "*const RuntimeValue")],
-        "bool",
-        "!value.is_null() && matches!(*value, RuntimeValue::Array(_))"
-    )
-
-fn fn_rt_value_is_dict() -> FFIFnSpec:
-    FFIFnSpec.unsafe_extern_c("rt_value_is_dict",
-        [FFIParamSpec.simple("value", "*const RuntimeValue")],
-        "bool",
-        "!value.is_null() && matches!(*value, RuntimeValue::Dict(_))"
     )
 
 # ============================================================================
@@ -326,34 +288,6 @@ fn fn_rt_value_as_float() -> FFIFnSpec:
         "    _ => 0.0,\n" +
         "}"
     )
-
-fn fn_rt_value_as_string() -> FFIFnSpec:
-    var spec = FFIFnSpec.unsafe_extern_c("rt_value_as_string",
-        [
-            FFIParamSpec.simple("value", "*const RuntimeValue"),
-            FFIParamSpec.simple("out_len", "*mut usize")
-        ],
-        "*const c_char",
-        "if value.is_null() || out_len.is_null() {\n" +
-        "    if !out_len.is_null() {\n" +
-        "        *out_len = 0;\n" +
-        "    }\n" +
-        "    return std::ptr::null();\n" +
-        "}\n" +
-        "\n" +
-        "match &*value {\n" +
-        "    RuntimeValue::String(s) => {\n" +
-        "        *out_len = s.len();\n" +
-        "        s.as_ptr() as *const c_char\n" +
-        "    }\n" +
-        "    _ => {\n" +
-        "        *out_len = 0;\n" +
-        "        std::ptr::null()\n" +
-        "    }\n" +
-        "}"
-    )
-    spec.doc = "Get string from value (returns ptr and length)\nCaller must NOT free the returned pointer - it's owned by the value"
-    spec
 
 # ============================================================================
 # Arithmetic Functions
@@ -544,29 +478,6 @@ fn fn_rt_value_free() -> FFIFnSpec:
         "}"
     )
 
-fn fn_rt_value_clone() -> FFIFnSpec:
-    FFIFnSpec.unsafe_extern_c("rt_value_clone",
-        [FFIParamSpec.simple("value", "*const RuntimeValue")],
-        "*mut RuntimeValue",
-        "if value.is_null() {\n" +
-        "    return rt_value_nil();\n" +
-        "}\n" +
-        "\n" +
-        "let cloned = match &*value {\n" +
-        "    RuntimeValue::Nil => RuntimeValue::Nil,\n" +
-        "    RuntimeValue::Bool(b) => RuntimeValue::Bool(*b),\n" +
-        "    RuntimeValue::Int(i) => RuntimeValue::Int(*i),\n" +
-        "    RuntimeValue::Float(f) => RuntimeValue::Float(*f),\n" +
-        "    RuntimeValue::String(s) => RuntimeValue::String(Arc::clone(s)),\n" +
-        "    RuntimeValue::Array(a) => RuntimeValue::Array(Arc::clone(a)),\n" +
-        "    RuntimeValue::Dict(d) => RuntimeValue::Dict(Arc::clone(d)),\n" +
-        "    RuntimeValue::Object(o) => RuntimeValue::Object(Arc::clone(o)),\n" +
-        "    RuntimeValue::Function(f) => RuntimeValue::Function(*f),\n" +
-        "};\n" +
-        "\n" +
-        "Box::into_raw(Box::new(cloned))"
-    )
-
 # ============================================================================
 # Test Specifications
 # ============================================================================
@@ -599,13 +510,6 @@ fn test_value_string() -> TestSpec:
         "    let s = CString::new(\"hello\").unwrap();\n" +
         "    let val = rt_value_string(s.as_ptr(), s.as_bytes().len());\n" +
         "    assert!(!val.is_null());\n" +
-        "    assert!(rt_value_is_string(val));\n" +
-        "\n" +
-        "    let mut len = 0;\n" +
-        "    let ptr = rt_value_as_string(val, &mut len);\n" +
-        "    assert!(!ptr.is_null());\n" +
-        "    assert_eq!(len, 5);\n" +
-        "\n" +
         "    rt_value_free(val);\n" +
         "}"
     )

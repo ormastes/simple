@@ -11,7 +11,7 @@ modes, compared against bun, python, go, erlang, java, and C.
 - **Result interpretation:** [Reading the Results](#reading-the-results)
 - **Simple optimization:** [Optimizing Simple Code](#optimizing-simple-code)
 - **Loader and packed bytes:** [Compiler-loader packed-byte lane](#compiler-loader-packed-byte-lane)
-- **Native capsule ordering:** [Native-capsule symbol-sort lane](#native-capsule-symbol-sort-lane)
+- **Minimal native compile:** [Minimal native-compile lane](#minimal-native-compile-lane)
 
 ## Compiler-loader packed-byte lane
 
@@ -45,40 +45,25 @@ The facade counter measures failed existence probes, not kernel syscalls. Live
 performance claims require admitted executable identity, exact semantic
 receipts, a retained report, and the p95/RSS budgets in the plan.
 
-## Native-capsule symbol-sort lane
+## Minimal native-compile lane
 
-Frozen native-capsule identity generation sorts `SymbolId` dictionary keys
-before serializing MIR functions, constants, statics, and types. The production
-owner is `src/compiler/80.driver/driver_types.spl`. Compiler performance lane B
-replaced the prior quadratic selection scan with a typed bottom-up mergesort,
-preserving ascending `SymbolId.id` order and value semantics while changing the
-comparison bound from `O(n^2)` to `O(n log n)` with `O(n)` auxiliary storage.
+The disjoint minimal-compile lane is specified by
+`doc/03_plan/sys_test/compiler_minimal_native_compile_perf.md`. It measures
+exactly five cache-disabled native builds of a one-function fixture, executes
+and hashes every emitted artifact, and gates p50/p95 time at 120% plus maximum
+RSS at 110% of an admitted equivalent baseline.
 
-The retained microbenchmark and provenance are in
-`doc/09_report/perf/compiler_native_capsule_symbol_sort_microbenchmark_2026-08-16.md`.
-Its final seven-sample median is 19,639 µs for five sorts of 4,096 reverse IDs;
-the single retained baseline sample is 11,607,363 µs. Keep the report's
-single-baseline-sample caveat visible and do not invent baseline percentiles.
+Use only the environment and receipt schema in the lane's mirrored manual:
+`doc/06_spec/03_system/app/compiler/feature/compiler_minimal_native_compile_perf_spec.md`.
+Then run its one focused SSpec command once. Missing admission or baseline data
+is a failure, not a skip. A Rust seed, Stage2 compile-only probe, stale release
+wrapper, or unreceipted binary cannot provide a row.
 
-Modern behavioral coverage is
-`test/03_system/app/compiler/feature/native_capsule_symbol_sort_spec.spl`, with
-the operator manual at
-`doc/06_spec/03_system/app/compiler/feature/native_capsule_symbol_sort_spec.md`
-and traceability plan at
-`doc/03_plan/sys_test/compiler_native_capsule_symbol_sort.md`. The spec uses
-visible `step("...")` flows and covers reverse/ordered/mixed input, empty and
-singleton boundaries, a 4,097-element partial merge tail, exact weighted
-checksums, missing results, and interior corruption that endpoint-only checks
-would miss.
-
-Current SSpec/docgen status is **TEST_BLOCKED**: this lane has no admitted
-pure-Simple Stage 4/5 full CLI. The admitted Stage 2 compiler used for focused
-native benchmark construction supports only `compile` and `native-build`; it
-cannot certify `test`, `spipe-docgen`, or `sspec-maintain`. Do not substitute
-the Rust seed or an unadmitted deployed wrapper. Once a current-source full CLI
-passes admission and bounded identity/ABI probes, execute the four commands in
-the system-test plan exactly once and require nine examples, zero failures,
-docgen `0 stubs`, a current mirror, and no blocker-capped `SSDOC-*` findings.
+Current status (2026-08-16): implementation and future-executable coverage are
+present; live execution and measured baseline are **TEST_BLOCKED** because no
+admitted pure-Simple full CLI is available. The admitted Stage2 diagnostic
+candidate fails before output at `str.clear`; see
+`doc/08_tracking/bug/admitted_stage2_minimal_native_compile_str_clear_2026-08-16.md`.
 
 ## Execution Modes
 
@@ -115,7 +100,7 @@ bin/simple test path/to/spec.spl --compile            # native
 ```bash
 bin/simple build bootstrap          # 3-stage self-compilation (stage1→stage2→stage3 must match)
 bin/simple build check              # lint + fmt --check + full test suite
-bin/simple lint <changed .spl files> # pure-Simple source linter
+bin/simple build lint               # linter for the bootstrap implementation
 bin/simple build fmt --check        # format check
 ```
 
@@ -358,7 +343,7 @@ Interpreter → SMF Loader → Native
 
 ```bash
 # Lint for perf anti-patterns
-bin/simple lint <changed .spl files>             # source lint
+bin/simple build lint                            # includes mcp_perf_lint
 
 # Micro-benchmark with the stdlib
 bin/simple test test/bench/my_bench_spec.spl     # BenchSuite in std.testing.benchmark
@@ -397,13 +382,8 @@ Measures: binary size only (Qt minimal widget vs Simple web artifact).
 
 ### Known GUI perf gaps
 
-- **Sustained FPS coverage** — Electron Engine2D proof emits a conservative
-  FPS floor from measured frame latency, but broader sustained-FPS coverage
-  across GUI backends is still incomplete
-- **User interaction latency** — WM browser event-routing, Electron MDI, and
-  Tauri mobile MDI proofs now record positive input-to-paint samples after
-  dispatched UI events; broader latency coverage across every GUI backend is
-  still incomplete
+- **FPS measurement** — not yet implemented; scripts measure frame latency (us/iteration) not sustained FPS
+- **User interaction latency** — scripts test static scenes only, not event-driven UI response time
 
 ### Benchmark template (pure Simple)
 

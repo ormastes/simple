@@ -2,6 +2,7 @@
 
 use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
 use std.fs_driver.types.{ExecuteTrust}
+use os.services.vfs.executable_read_v1.{vfs_open_authenticated_executable_v1}
 use os.kernel.loader.authenticated_media_reader.{authenticated_media_read_text_v1}
 use os.kernel.loader.authenticated_media_parser.{
     authenticated_media_field_v1, authenticated_media_u64_field_v1,
@@ -23,7 +24,9 @@ use os.kernel.loader.executable_crypto_authority.{
 }
 use os.kernel.loader.executable_load_plan_v1.{executable_load_consumer_new_v1}
 use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn_authenticated_v1}
-use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_AUTHENTICATED_SERVER}
+use os.kernel.loader.spawn_recipes.{
+    SPAWN_RECIPE_AUTHENTICATED_SERVER, spawn_recipe_seed_parent_caps
+}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.loader.arm64_authenticated_media_policy.{arm64_authenticated_media_root_matches_pin_v1}
 use arm64_auth_trust_config.{
@@ -37,7 +40,8 @@ pub fn arm64_authenticated_media_execute_server_v1(
 ) -> i64:
     """Execute `/SERVERS.ELF` only from one authenticated execute-open snapshot."""
     var owner = table
-    val opened = owner.open_for_execute("/SERVERS.ELF", ExecuteTrust.Trusted)
+    val opened = vfs_open_authenticated_executable_v1(
+        owner, "/SERVERS.ELF", ExecuteTrust.Trusted)
     if opened.is_err(): return -13
     val binding: ExecuteOpenBinding = opened.unwrap()
     val manifest_record = authenticated_media_read_text_v1(owner, "/SERVER.MAN", 8192)
@@ -127,7 +131,9 @@ pub fn arm64_authenticated_media_execute_server_v1(
     arm64_fs_exec_spawn_authenticated_v1(
         scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
         executable_load_consumer_new_v1("simpleos", "aarch64", "simpleos"),
-        admitted.unwrap().entry_point, 0, "/SERVERS.ELF",
+        admitted.unwrap().entry_point, 0,
+        spawn_recipe_seed_parent_caps(SPAWN_RECIPE_AUTHENTICATED_SERVER, 0u64),
+        "/SERVERS.ELF",
         SPAWN_RECIPE_AUTHENTICATED_SERVER)
 
 export arm64_authenticated_media_execute_server_v1

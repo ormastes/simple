@@ -10,6 +10,33 @@ typedef unsigned int spl_u32;
 typedef unsigned short spl_u16;
 typedef unsigned char spl_u8;
 
+/* Stateful boot-TCP port selection is pure Simple.  These helpers consume the
+ * boxed text/scalar ABI while C retains transport, UART, MMIO and session state. */
+spl_i64 rt_riscv64_boot_tcp_select_port(spl_i64 addr);
+spl_i64 rt_riscv64_boot_tcp_select_explicit_port(spl_i64 port);
+
+/* Stateful PMM policy is pure Simple. C drivers retain this ABI declaration
+ * because their DMA/virtqueue setup consumes pages allocated by that owner. */
+spl_u64 rt_riscv_noalloc_alloc_page(void);
+
+/* Byte order, checksum, and VirtIO identity decisions are pure Simple. C
+ * retains raw buffer/MMIO ownership and calls these exact historical ABIs. */
+spl_u16 rt_be16(const spl_u8 *p);
+spl_u32 rt_be32(const spl_u8 *p);
+void rt_put_be16(spl_u8 *p, spl_u16 v);
+void rt_put_be32(spl_u8 *p, spl_u32 v);
+spl_u32 rt_checksum_add(spl_u32 sum, const spl_u8 *data, spl_u64 len);
+spl_u16 rt_checksum_finish(spl_u32 sum);
+spl_i64 rt_pci_is_virtio_net(spl_i64 cls, spl_i64 sub, spl_i64 vendor,
+                             spl_i64 device_id);
+spl_i64 rt_pci_is_virtio_gpu(spl_i64 cls, spl_i64 sub, spl_i64 vendor,
+                             spl_i64 device_id);
+spl_i64 rt_pci_is_virtio_blk(spl_i64 vendor, spl_i64 device_id);
+spl_i64 rt_pci_is_virtio_input(spl_i64 vendor, spl_i64 device_id);
+void rt_put_le32(spl_u8 *p, spl_u32 v);
+void rt_put_le64(spl_u8 *p, spl_u64 v);
+spl_u32 rt_get_le32(const spl_u8 *p);
+
 spl_i64 rt_riscv64_syscall(spl_u64 id, spl_u64 arg0, spl_u64 arg1,
                            spl_u64 arg2, spl_u64 arg3, spl_u64 arg4)
 {
@@ -24,97 +51,6 @@ spl_i64 rt_riscv64_syscall(spl_u64 id, spl_u64 arg0, spl_u64 arg1,
                      : "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a7)
                      : "memory");
     return (spl_i64)a0;
-}
-
-#define RV64_CSR_READ_CASE(number, name) \
-    case number: __asm__ volatile("csrr %0, " #name : "=r"(value)); break
-
-spl_u64 rt_riscv64_csr_read(spl_u32 csr)
-{
-    spl_u64 value = 0;
-    switch (csr) {
-    RV64_CSR_READ_CASE(0x100U, sstatus);
-    RV64_CSR_READ_CASE(0x104U, sie);
-    RV64_CSR_READ_CASE(0x105U, stvec);
-    RV64_CSR_READ_CASE(0x140U, sscratch);
-    RV64_CSR_READ_CASE(0x141U, sepc);
-    RV64_CSR_READ_CASE(0x142U, scause);
-    RV64_CSR_READ_CASE(0x143U, stval);
-    RV64_CSR_READ_CASE(0x144U, sip);
-    RV64_CSR_READ_CASE(0x180U, satp);
-    RV64_CSR_READ_CASE(0xC00U, cycle);
-    RV64_CSR_READ_CASE(0xC01U, time);
-    RV64_CSR_READ_CASE(0xC02U, instret);
-    default: break;
-    }
-    return value;
-}
-
-void rt_riscv64_csr_write(spl_u32 csr, spl_u64 value)
-{
-    switch (csr) {
-    case 0x100U: __asm__ volatile("csrw sstatus, %0" :: "r"(value) : "memory"); break;
-    case 0x104U: __asm__ volatile("csrw sie, %0" :: "r"(value) : "memory"); break;
-    case 0x105U: __asm__ volatile("csrw stvec, %0" :: "r"(value) : "memory"); break;
-    case 0x140U: __asm__ volatile("csrw sscratch, %0" :: "r"(value) : "memory"); break;
-    case 0x141U: __asm__ volatile("csrw sepc, %0" :: "r"(value) : "memory"); break;
-    case 0x180U: __asm__ volatile("csrw satp, %0" :: "r"(value) : "memory"); break;
-    default: break;
-    }
-}
-
-void rt_riscv64_csr_set(spl_u32 csr, spl_u64 bits)
-{
-    switch (csr) {
-    case 0x100U: __asm__ volatile("csrs sstatus, %0" :: "r"(bits) : "memory"); break;
-    case 0x104U: __asm__ volatile("csrs sie, %0" :: "r"(bits) : "memory"); break;
-    default: break;
-    }
-}
-
-void rt_riscv64_csr_clear(spl_u32 csr, spl_u64 bits)
-{
-    switch (csr) {
-    case 0x100U: __asm__ volatile("csrc sstatus, %0" :: "r"(bits) : "memory"); break;
-    case 0x104U: __asm__ volatile("csrc sie, %0" :: "r"(bits) : "memory"); break;
-    default: break;
-    }
-}
-
-void rt_riscv64_sfence_vma_addr(spl_u64 vaddr)
-{
-    __asm__ volatile("sfence.vma %0, zero" :: "r"(vaddr) : "memory");
-}
-
-void rt_riscv64_sfence_vma_asid(spl_u64 asid)
-{
-    __asm__ volatile("sfence.vma zero, %0" :: "r"(asid) : "memory");
-}
-
-spl_u64 rt_riscv64_read_tp(void)
-{
-    spl_u64 value;
-    __asm__ volatile("mv %0, tp" : "=r"(value));
-    return value;
-}
-
-void rt_riscv64_write_tp(spl_u64 value)
-{
-    __asm__ volatile("mv tp, %0" :: "r"(value) : "memory");
-}
-
-spl_u64 rt_riscv64_read_sp(void)
-{
-    spl_u64 value;
-    __asm__ volatile("mv %0, sp" : "=r"(value));
-    return value;
-}
-
-spl_u64 rt_riscv64_read_gp(void)
-{
-    spl_u64 value;
-    __asm__ volatile("mv %0, gp" : "=r"(value));
-    return value;
 }
 
 void rt_riscv64_fence_i(void) { __asm__ volatile("fence.i" ::: "memory"); }
@@ -165,6 +101,17 @@ RtRiscv64SbiRet rt_riscv64_sbi_call(spl_u64 ext, spl_u64 fid,
 #define RT_HEAP_ARRAY 0x02U
 #define RT_HEAP_TUPLE 0x04U
 #define RT_HEAP_ENUM 0x07U
+/* Mapped RAM window for the riscv (rv32/rv64) freestanding boot image: the
+ * kernel is loaded at 0x80000000 and the value-heap arena lives below
+ * 0x88000000 (see g_freestanding_heap_*). A real heap object -- runtime-
+ * allocated or an rt_extern_heap-wrapped C static -- is always inside this
+ * window. Any candidate header outside it is a misclassified integer, so
+ * rt_as_heap must reject it BEFORE dereferencing header->object_type,
+ * otherwise the load faults (no trap vector during early boot -> silent hang).
+ * The seed compiler routes scalar i64 ==/!= through rt_native_eq, feeding raw
+ * integer operands here; without this bound those faulted mid-selftest. */
+#define RT_RAM_WINDOW_BASE 0x80000000ULL
+#define RT_RAM_WINDOW_END 0x88000000ULL
 
 typedef struct RtHeapHeader {
     spl_u8 object_type;
@@ -200,19 +147,16 @@ typedef struct RtEnum {
     spl_i64 payload;
 } RtEnum;
 
-#ifndef SIMPLE_FREESTANDING_RUNTIME_NO_ENTRY
 __asm__(
     ".section .text.entry,\"ax\",@progbits\n"
     ".globl _start\n"
     "_start:\n"
-    "la sp, _stack_top\n"
     "j __simple_entry_start\n"
 );
-#endif
 
 static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
-/* Top of physical RAM, not 0x90000000: rt_riscv_qemu_ram_base() (0x80000000)
- * + rt_riscv_qemu_ram_size() (128 MiB) == 0x88000000. The previous
+/* Top of physical RAM, not 0x90000000: RISCV_QEMU_RAM_BASE (0x80000000)
+ * + RISCV_QEMU_RAM_SIZE (128 MiB) == 0x88000000. The previous
  * 0x90000000 limit reached 128 MiB past the end of QEMU virt's actual RAM,
  * so the bounds check below silently permitted allocations into memory that
  * does not exist (data lost or, worse, MMIO-region corruption on other
@@ -229,14 +173,16 @@ static spl_u64 rt_align8(spl_u64 value) {
 void *rt_alloc(spl_i64 size) {
     spl_u64 next;
     spl_u64 bytes;
+    void *boot_alloc;
     if (size <= 0) {
         return (void *)0;
     }
-    /* Bypass the riscv_noalloc_heap allocator: its pool is too small / overlaps
-     * for repeated multi-KB sector buffers, corrupting later reads. The bump
-     * heap (g_freestanding_heap_next..limit, enlarged) is correct for the
-     * self-contained shell ls test. (ponytail: noalloc restored when its pool
-     * is sized for FS-sector churn.) */
+    if (kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc) {
+        boot_alloc = (void *)(spl_u64)kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(size);
+        if (boot_alloc) {
+            return boot_alloc;
+        }
+    }
     bytes = rt_align8((spl_u64)size);
     next = rt_align8(g_freestanding_heap_next);
     if (next + bytes > g_freestanding_heap_limit) {
@@ -296,13 +242,14 @@ static spl_i64 rt_heap(void *ptr) {
     return (spl_i64)(((spl_u64)ptr) | RT_VALUE_TAG_HEAP);
 }
 
-spl_i64 rt_array_new(spl_i64 capacity_value);
-spl_i64 rt_array_push(spl_i64 array_value, spl_i64 value);
-
 static RtHeapHeader *rt_as_heap(spl_i64 value, spl_u8 kind) {
     spl_u64 raw = (spl_u64)value;
     RtHeapHeader *header;
-    if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) {
+    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
+        header = (RtHeapHeader *)(raw & ~RT_VALUE_TAG_MASK);
+    } else if ((raw & RT_VALUE_TAG_MASK) == 0ULL && raw >= 0x10000ULL) {
+        header = (RtHeapHeader *)raw;
+    } else {
         return (RtHeapHeader *)0;
     }
     header = (RtHeapHeader *)(raw & ~RT_VALUE_TAG_MASK);
@@ -445,185 +392,6 @@ spl_i64 rt_string_concat(spl_i64 left, spl_i64 right) {
     return rt_heap(out);
 }
 
-spl_i64 rt_string_bytes(spl_i64 value) {
-    RtString *s = rt_as_string(value);
-    spl_i64 out = rt_array_new(s ? (spl_i64)s->len : 0);
-    if (!s) {
-        return out;
-    }
-    for (spl_u64 i = 0; i < s->len; i = i + 1) {
-        rt_array_push(out, rt_int((spl_i64)(spl_u8)s->data[i]));
-    }
-    return out;
-}
-
-spl_i64 rt_string_chars(spl_i64 value) {
-    RtString *s = rt_as_string(value);
-    spl_i64 out = rt_array_new(s ? (spl_i64)s->len : 0);
-    if (!s) {
-        return out;
-    }
-    for (spl_u64 i = 0; i < s->len;) {
-        spl_u8 lead = (spl_u8)s->data[i];
-        spl_u64 width = 1;
-        if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
-        else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
-        else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
-        rt_array_push(out, rt_string_new((spl_i64)(spl_u64)(s->data + i), (spl_i64)width));
-        i += width;
-    }
-    return out;
-}
-
-typedef struct RtStringBuilder {
-    spl_u64 len;
-    spl_u64 capacity;
-    char *data;
-} RtStringBuilder;
-
-spl_i64 rt_string_builder_new(void) {
-    RtStringBuilder *builder = (RtStringBuilder *)rt_alloc((spl_i64)sizeof(RtStringBuilder));
-    if (!builder) {
-        return 0;
-    }
-    builder->len = 0;
-    builder->capacity = 0;
-    builder->data = (char *)0;
-    return (spl_i64)(spl_u64)builder;
-}
-
-spl_i64 rt_string_builder_push(spl_i64 handle, spl_i64 value) {
-    RtStringBuilder *builder = (RtStringBuilder *)(spl_u64)handle;
-    RtString *s = rt_as_string(value);
-    spl_u64 required;
-    char *new_data;
-    spl_u64 new_capacity;
-    if (!builder || !s) {
-        return 0;
-    }
-    if (s->len == 0) {
-        return 1;
-    }
-    required = builder->len + s->len;
-    if (required > builder->capacity) {
-        new_capacity = builder->capacity == 0 ? 32 : builder->capacity;
-        while (new_capacity < required) {
-            new_capacity = new_capacity * 2;
-        }
-        new_data = (char *)rt_alloc((spl_i64)(new_capacity + 1));
-        if (!new_data) {
-            return 0;
-        }
-        for (spl_u64 i = 0; i < builder->len; i = i + 1) {
-            new_data[i] = builder->data ? builder->data[i] : 0;
-        }
-        builder->data = new_data;
-        builder->capacity = new_capacity;
-    }
-    for (spl_u64 i = 0; i < s->len; i = i + 1) {
-        builder->data[builder->len + i] = s->data[i];
-    }
-    builder->len = required;
-    builder->data[builder->len] = 0;
-    return 1;
-}
-
-spl_i64 rt_string_builder_finish(spl_i64 handle) {
-    RtStringBuilder *builder = (RtStringBuilder *)(spl_u64)handle;
-    if (!builder || !builder->data) {
-        return rt_string_new((spl_i64)(spl_u64)"", 0);
-    }
-    return rt_string_new((spl_i64)(spl_u64)builder->data, (spl_i64)builder->len);
-}
-
-spl_i64 rt_string_builder_len(spl_i64 handle) {
-    RtStringBuilder *builder = (RtStringBuilder *)(spl_u64)handle;
-    return builder ? (spl_i64)builder->len : -1;
-}
-
-void rt_string_builder_free(spl_i64 handle) {
-    (void)handle;
-}
-
-spl_i64 rt_hash_text(spl_i64 value) {
-    RtString *s = rt_as_string(value);
-    spl_u64 hash = 1469598103934665603ULL;
-    if (!s) {
-        return 0;
-    }
-    for (spl_u64 i = 0; i < s->len; i = i + 1) {
-        hash ^= (spl_u64)(spl_u8)s->data[i];
-        hash *= 1099511628211ULL;
-    }
-    return (spl_i64)hash;
-}
-
-void rt_print_str(spl_i64 value, spl_i64 len) {
-    (void)value;
-    (void)len;
-}
-
-void rt_println_str(spl_i64 value, spl_i64 len) {
-    (void)value;
-    (void)len;
-}
-
-void rt_eprint_str(spl_i64 value, spl_i64 len) {
-    (void)value;
-    (void)len;
-}
-
-void rt_eprintln_str(spl_i64 value, spl_i64 len) {
-    (void)value;
-    (void)len;
-}
-
-void rt_print_value(spl_i64 value) {
-    (void)value;
-}
-
-void rt_println_value(spl_i64 value) {
-    (void)value;
-}
-
-void rt_eprint_value(spl_i64 value) {
-    (void)value;
-}
-
-void rt_eprintln_value(spl_i64 value) {
-    (void)value;
-}
-
-spl_i64 rt_interp_call(spl_i64 a, spl_i64 b, spl_i64 c, spl_i64 d, spl_i64 e, spl_i64 f, spl_i64 g, spl_i64 h) {
-    (void)a;
-    (void)b;
-    (void)c;
-    (void)d;
-    (void)e;
-    (void)f;
-    (void)g;
-    (void)h;
-    return rt_nil();
-}
-
-spl_i64 rt_function_not_found(spl_i64 name_ptr, spl_i64 name_len) {
-    (void)name_ptr;
-    (void)name_len;
-    return rt_nil();
-}
-
-double rt_math_pow(double base, double exponent) {
-    spl_i64 n = (spl_i64)exponent;
-    double out = 1.0;
-    if (exponent < 0.0 || (double)n != exponent) {
-        return 0.0;
-    }
-    for (spl_i64 i = 0; i < n; i = i + 1) {
-        out = out * base;
-    }
-    return out;
-}
-
 spl_i64 rt_len(spl_i64 value) {
     RtString *s = rt_as_string(value);
     RtArray *a;
@@ -667,25 +435,6 @@ spl_i64 rt_array_new(spl_i64 capacity_value) {
 spl_i64 rt_array_len(spl_i64 array_value) {
     RtArray *array = rt_as_array(array_value);
     return array ? (spl_i64)array->len : -1;
-}
-
-/* Preserve Simple array value semantics in the freestanding runtime. MIR
- * emits this helper for mutable copies used by the shared filesystem core. */
-spl_i64 rt_array_copy(spl_i64 array_value) {
-    RtArray *source = rt_as_array(array_value);
-    if (!source) {
-        return array_value;
-    }
-    spl_i64 result = rt_array_new((spl_i64)source->len);
-    RtArray *destination = rt_as_array(result);
-    if (!destination) {
-        return rt_nil();
-    }
-    for (spl_u64 i = 0; i < source->len; i = i + 1) {
-        destination->data[i] = source->data[i];
-    }
-    destination->len = source->len;
-    return result;
 }
 
 spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value) {
@@ -1047,75 +796,17 @@ spl_i64 rt_string_eq(spl_i64 lhs, spl_i64 rhs) {
 
 spl_i64 rt_string_char_code_at(spl_i64 value, spl_i64 index_value) {
     RtString *string = rt_as_string(value);
-    const spl_u8 *data;
-    spl_u64 len;
-    spl_i64 index = index_value;
-    spl_u64 byte_index = 0;
-    spl_u64 char_index = 0;
-    if (index < 0) return 0;
-    if (string) {
-        data = (const spl_u8 *)string->data;
-        len = string->len;
-    } else {
-        data = (const spl_u8 *)(spl_u64)value;
-        if (!data) return 0;
-        len = 0;
-        while (data[len] != 0) len = len + 1;
+    spl_i64 index = rt_index_arg(index_value);
+    if (!string) {
+        return -1;
     }
-    while (byte_index < len) {
-        spl_u8 b0 = data[byte_index];
-        spl_u64 width = 1;
-        spl_i64 code = (spl_i64)b0;
-        if (b0 >= 194 && b0 <= 223 && byte_index + 1 < len) {
-            width = 2;
-            code = ((spl_i64)(b0 & 31) << 6) | (data[byte_index + 1] & 63);
-        } else if (b0 >= 224 && b0 <= 239 && byte_index + 2 < len) {
-            width = 3;
-            code = ((spl_i64)(b0 & 15) << 12) | ((spl_i64)(data[byte_index + 1] & 63) << 6) | (data[byte_index + 2] & 63);
-        } else if (b0 >= 240 && b0 <= 244 && byte_index + 3 < len) {
-            width = 4;
-            code = ((spl_i64)(b0 & 7) << 18) | ((spl_i64)(data[byte_index + 1] & 63) << 12) | ((spl_i64)(data[byte_index + 2] & 63) << 6) | (data[byte_index + 3] & 63);
-        }
-        if (char_index == (spl_u64)index) return code;
-        byte_index = byte_index + width;
-        char_index = char_index + 1;
+    if (index < 0) {
+        index = (spl_i64)string->len + index;
     }
-    return 0;
-}
-
-spl_i64 __simple_rt_string_char_code_at(spl_i64 value, spl_i64 index_value) {
-    return rt_string_char_code_at(value, index_value);
-}
-
-/* Return the raw BYTE at BYTE index `index`, or 0 if out of range.
- *
- * Deliberately NOT rt_string_char_code_at: that one is CHARACTER-indexed and
- * the two disagree on any non-ASCII text ("café,".byte_at(3) is 195, the
- * 0xC3 lead byte, while char_code_at(3) is 233 for 'é'). Byte-framing callers
- * (e.g. dtb_parser.spl / fd_io.spl scanning raw bytes) index the raw UTF-8
- * buffer directly, so a character index would desync at the first
- * multi-byte codepoint. O(1): straight buffer read, no codepoint walk. */
-spl_i64 rt_string_byte_at(spl_i64 value, spl_i64 index_value) {
-    RtString *string = rt_as_string(value);
-    const spl_u8 *data;
-    spl_u64 len;
-    spl_i64 index = index_value;
-    if (index < 0) return 0;
-    if (string) {
-        data = (const spl_u8 *)string->data;
-        len = string->len;
-    } else {
-        data = (const spl_u8 *)(spl_u64)value;
-        if (!data) return 0;
-        len = 0;
-        while (data[len] != 0) len = len + 1;
+    if (index < 0 || (spl_u64)index >= string->len) {
+        return -1;
     }
-    if ((spl_u64)index >= len) return 0;
-    return data[index];
-}
-
-spl_i64 __simple_rt_string_byte_at(spl_i64 value, spl_i64 index_value) {
-    return rt_string_byte_at(value, index_value);
+    return (spl_i64)(spl_u8)string->data[index];
 }
 
 spl_i64 rt_string_starts_with(spl_i64 value, spl_i64 prefix_value) {
@@ -1439,6 +1130,11 @@ spl_i64 rt_value_as_int(spl_i64 value) {
 spl_i64 rt_volatile_read_u8(spl_i64 addr) {
     return rt_mmio_read_u8(addr);
 }
+spl_i64 rt_hosted_volatile_admitted(void) { return 0; }
+spl_i64 rt_hosted_volatile_u8_admit(void) { return 0; }
+spl_i64 rt_hosted_volatile_u8_owned(void) { return 0; }
+spl_i64 rt_hosted_volatile_u16_admit(void) { return 0; }
+spl_i64 rt_hosted_volatile_u16_owned(void) { return 0; }
 void rt_volatile_write_u8(spl_i64 addr, spl_i64 value) {
     rt_mmio_write_u8(addr, value);
 }
@@ -1668,20 +1364,6 @@ spl_i64 rt_string_join(spl_i64 array_value, spl_i64 separator_value) {
 void unsafe(void) {
 }
 
-static spl_u64 g_riscv_pmm_base = 0;
-static spl_u64 g_riscv_pmm_limit = 0;
-static spl_u64 g_riscv_pmm_next = 0;
-static spl_u64 g_riscv_pmm_free_pages = 0;
-static spl_u64 g_riscv_pmm_total_pages = 0;
-static spl_i64 g_riscv_pmm_ready = 0;
-
-static spl_u64 rt_normalize_phys32(spl_u64 value) {
-    if ((value >> 32) == 0xffffffffULL) {
-        return value & 0xffffffffULL;
-    }
-    return value;
-}
-
 static void uart_line(const char *text) {
     spl_u64 len = 0;
     while (text[len]) {
@@ -1692,115 +1374,10 @@ static void uart_line(const char *text) {
     uart_put_byte(10);
 }
 
-spl_i64 rt_riscv_noalloc_pmm_init(
-    spl_u64 ram_base,
-    spl_u64 ram_size,
-    spl_u64 reserved_end,
-    spl_u64 heap_start
-) {
-    const spl_u64 page_size = 4096ULL;
-    spl_u64 ram_end;
-    spl_u64 alloc_base;
-    spl_u64 alloc_limit;
-    ram_base = rt_normalize_phys32(ram_base);
-    reserved_end = rt_normalize_phys32(reserved_end);
-    heap_start = rt_normalize_phys32(heap_start);
-    if (ram_size <= page_size || reserved_end <= ram_base || heap_start <= reserved_end) {
-        uart_line("PMM FAIL");
-        return rt_special(RT_VALUE_SPECIAL_FALSE);
-    }
-    ram_end = ram_base + ram_size;
-    if (ram_end <= ram_base || heap_start > ram_end) {
-        uart_line("PMM FAIL");
-        return rt_special(RT_VALUE_SPECIAL_FALSE);
-    }
-    alloc_base = (reserved_end + page_size - 1ULL) & ~(page_size - 1ULL);
-    alloc_limit = heap_start;
-    if (alloc_base >= alloc_limit) {
-        uart_line("PMM FAIL");
-        return rt_special(RT_VALUE_SPECIAL_FALSE);
-    }
-    g_riscv_pmm_base = alloc_base;
-    g_riscv_pmm_limit = alloc_limit;
-    g_riscv_pmm_next = alloc_base;
-    g_riscv_pmm_total_pages = (alloc_limit - alloc_base) / page_size;
-    g_riscv_pmm_free_pages = g_riscv_pmm_total_pages;
-    g_riscv_pmm_ready = 1;
-    uart_line("PMM OK");
-    return rt_special(RT_VALUE_SPECIAL_TRUE);
-}
-
-spl_i64 rt_riscv_noalloc_pmm_init_default(void) {
-    return rt_riscv_noalloc_pmm_init(
-        0x80000000ULL,
-        128ULL * 1024ULL * 1024ULL,
-        0x80400000ULL,
-        0x87000000ULL
-    );
-}
-
-spl_u64 rt_riscv_noalloc_alloc_page(void) {
-    const spl_u64 page_size = 4096ULL;
-    spl_u64 page;
-    if (!g_riscv_pmm_ready || g_riscv_pmm_next >= g_riscv_pmm_limit) {
-        return 0;
-    }
-    page = g_riscv_pmm_next;
-    g_riscv_pmm_next = g_riscv_pmm_next + page_size;
-    if (g_riscv_pmm_free_pages > 0) {
-        g_riscv_pmm_free_pages = g_riscv_pmm_free_pages - 1;
-    }
-    return page;
-}
-
-spl_i64 rt_riscv_noalloc_pmm_is_ready(void) {
-    return g_riscv_pmm_ready ? rt_special(RT_VALUE_SPECIAL_TRUE) : rt_special(RT_VALUE_SPECIAL_FALSE);
-}
-
-spl_u64 rt_riscv_noalloc_pmm_free_pages(void) {
-    return g_riscv_pmm_free_pages;
-}
-
-spl_u64 rt_riscv_noalloc_pmm_total_pages(void) {
-    return g_riscv_pmm_total_pages;
-}
-
-spl_u64 rt_riscv_qemu_ram_base(void) {
-    return 0x80000000ULL;
-}
-
-spl_u64 rt_riscv_qemu_ram_size(void) {
-    return 128ULL * 1024ULL * 1024ULL;
-}
-
-spl_u64 rt_riscv_qemu_reserved_end(void) {
-    return 0x80400000ULL;
-}
-
-spl_u64 rt_riscv_qemu_heap_start(void) {
-    return 0x87000000ULL;
-}
-
-spl_u64 rt_riscv_qemu_heap_size(void) {
-    return 16ULL * 1024ULL * 1024ULL;
-}
-
 spl_i64 rt_time_now_unix_micros(void) {
     spl_u64 cycles;
     __asm__ volatile("rdtime %0" : "=r"(cycles));
     return (spl_i64)(cycles / 10ULL);
-}
-
-/* Monotonic nanoseconds from the same `time` CSR the micros owner above uses.
- * QEMU virt (and the FPGA CLINT platform) run the timebase at 10 MHz -- see
- * TIMER_FREQ_HZ in src/os/kernel/arch/riscv64/timer.spl -- so one tick is
- * exactly 100 ns. Declared by src/lib/nogc_sync_mut/io/time_ops.spl and
- * src/lib/common/time_utils.spl; without an owner here the RV64 freestanding
- * link leaves it undefined. */
-spl_i64 rt_time_now_nanos(void) {
-    spl_u64 ticks;
-    __asm__ volatile("rdtime %0" : "=r"(ticks));
-    return (spl_i64)(ticks * 100ULL);
 }
 
 void rt_thread_sleep(spl_i64 millis) {
@@ -1859,8 +1436,6 @@ typedef struct RtPciDevice {
 #define RT_PCI_LEGACY_NET_IO_PORT 0x1000ULL
 #define RT_PCI_LEGACY_GPU_IO_PORT 0x2000ULL
 #define RT_PCI_LEGACY_BLK_IO_PORT 0x3000ULL
-#define RT_PCI_LEGACY_INPUT_IO_PORT 0x4000ULL
-#define RT_PCI_LEGACY_INPUT_IO_STRIDE 0x1000ULL
 #define RT_PCI_CMD_IO 0x1U
 #define RT_PCI_CMD_MEM 0x2U
 #define RT_PCI_CMD_BUS_MASTER 0x4U
@@ -1872,8 +1447,6 @@ typedef struct RtPciDevice {
 #define RT_VIRTIO_BLK_MODERN_DEVICE_ID 0x1042
 #define RT_VIRTIO_GPU_LEGACY_DEVICE_ID 0x1010
 #define RT_VIRTIO_GPU_MODERN_DEVICE_ID 0x1050
-#define RT_VIRTIO_INPUT_LEGACY_DEVICE_ID 0x1012
-#define RT_VIRTIO_INPUT_MODERN_DEVICE_ID 0x1052
 #define RT_VIRTIO_PCI_HOST_FEATURES 0x00ULL
 #define RT_VIRTIO_PCI_GUEST_FEATURES 0x04ULL
 #define RT_VIRTIO_PCI_QUEUE_PFN 0x08ULL
@@ -1881,13 +1454,10 @@ typedef struct RtPciDevice {
 #define RT_VIRTIO_PCI_QUEUE_SEL 0x0eULL
 #define RT_VIRTIO_PCI_QUEUE_NOTIFY 0x10ULL
 #define RT_VIRTIO_PCI_STATUS 0x12ULL
-#define RT_VIRTIO_PCI_ISR_STATUS 0x13ULL
 #define RT_VIRTIO_NET_MAC_OFFSET 0x14ULL
 #define RT_PCI_CAP_ID_VENDOR_SPECIFIC 0x09U
 #define RT_VIRTIO_PCI_CAP_COMMON_CFG 1U
 #define RT_VIRTIO_PCI_CAP_NOTIFY_CFG 2U
-#define RT_VIRTIO_PCI_CAP_ISR_CFG 3U
-#define RT_VIRTIO_PCI_CAP_DEVICE_CFG 4U
 #define RT_VIRTIO_MODERN_DEVICE_FEATURE_SELECT 0x00ULL
 #define RT_VIRTIO_MODERN_DEVICE_FEATURE 0x04ULL
 #define RT_VIRTIO_MODERN_DRIVER_FEATURE_SELECT 0x08ULL
@@ -1915,7 +1485,7 @@ typedef struct RtPciDevice {
 #define RT_VIRTIO_NET_F_MAC (1U << 5)
 #define RT_VIRTQ_DESC_F_NEXT 1U
 #define RT_VIRTQ_DESC_F_WRITE 2U
-#define RT_NET_QUEUE_CAP 1024U
+#define RT_NET_QUEUE_CAP 256U
 #define RT_NET_RX_POST_COUNT 8U
 #define RT_NET_BUFFER_SIZE 2048U
 #define RT_VIRTIO_BLK_QUEUE 0U
@@ -1923,16 +1493,6 @@ typedef struct RtPciDevice {
 #define VIRTIO_BLK_T_OUT 1U
 #define RT_VIRTIO_BLK_CONFIG_CAPACITY 0x14ULL
 #define RT_VIRTIO_BLK_SECTOR_SIZE 512U
-#define RT_VIRTIO_INPUT_QUEUE 0U
-#define RT_VIRTIO_INPUT_QUEUE_CAP 32U
-#define RT_VIRTIO_INPUT_CONFIG 0x14ULL
-#define RT_VIRTIO_INPUT_CFG_EV_BITS 0x11U
-#define RT_EV_KEY 0x01U
-#define RT_EV_REL 0x02U
-#define RT_REL_X 0x00U
-#define RT_REL_Y 0x01U
-#define RT_KEY_A 30U
-#define RT_BTN_LEFT 0x110U
 #define RT_NVFS_MAGIC 0x4e564653U
 #define RT_NVFS_VERSION 2U
 #define RT_GPU_QUEUE_CAP 64U
@@ -1955,8 +1515,6 @@ static spl_i64 g_rt_net_ready = 0;
 static spl_i64 g_rt_net_tx_ready = 0;
 static spl_i64 g_rt_net_rx_ready = 0;
 static spl_i64 g_rt_net_tx_probe_code = -1;
-static spl_i64 g_rt_net_debug_stage = 0;
-static spl_i64 g_rt_net_debug_queue_max = 0;
 static spl_u64 g_rt_net_bar0 = 0;
 static spl_u64 g_rt_rx_desc = 0;
 static spl_u64 g_rt_rx_avail = 0;
@@ -1984,7 +1542,6 @@ static spl_u64 g_rt_blk_capacity = 0;
 static spl_i64 g_rt_blk_nvfs_ready = 0;
 static spl_i64 g_rt_blk_nvfs_arena_ready = 0;
 static spl_i64 g_rt_display_ready = 0;
-static spl_i64 g_rt_display_generation = 0;
 static spl_i64 g_rt_gpu_modern = 0;
 static spl_u64 g_rt_gpu_bar0 = 0;
 static spl_u64 g_rt_gpu_common = 0;
@@ -1999,41 +1556,6 @@ static spl_u16 g_rt_gpu_last_used = 0;
 static spl_u64 g_rt_gpu_cmd = 0;
 static spl_u64 g_rt_gpu_resp = 0;
 static spl_u64 g_rt_gpu_fb = 0;
-
-typedef struct RtVirtioInputDevice {
-    spl_u64 bar0;
-    spl_u64 common;
-    spl_u64 notify;
-    spl_u64 isr;
-    spl_u64 device_cfg;
-    spl_u32 notify_multiplier;
-    spl_u16 notify_off;
-    spl_u64 desc;
-    spl_u64 avail;
-    spl_u64 used;
-    spl_u64 events;
-    spl_u16 qsize;
-    spl_u16 last_used;
-    spl_u8 kind;
-    spl_u8 ready;
-    spl_u8 modern;
-} RtVirtioInputDevice;
-
-typedef struct RtVirtioModernCaps {
-    spl_u64 common;
-    spl_u64 notify;
-    spl_u64 isr;
-    spl_u64 device_cfg;
-    spl_u32 notify_multiplier;
-} RtVirtioModernCaps;
-
-static RtVirtioInputDevice g_rt_input_devices[2];
-static spl_u32 g_rt_input_ready_mask = 0;
-static spl_u16 g_rt_input_event_type = 0;
-static spl_u16 g_rt_input_event_code = 0;
-static spl_u32 g_rt_input_event_value = 0;
-static spl_u32 g_rt_input_event_device_kind = 0;
-static spl_u32 g_rt_input_event_irq_status = 0;
 
 static spl_u32 rt_pci_read_config32(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
     spl_u64 addr = RT_PCI_ECAM_BASE
@@ -2178,7 +1700,6 @@ static spl_i64 rt_setup_virtqueue(spl_u64 bar0, spl_u16 queue, spl_u64 *desc, sp
     spl_u64 desc_avail;
     rt_io_write16(bar0, RT_VIRTIO_PCI_QUEUE_SEL, queue);
     max_size = rt_io_read16(bar0, RT_VIRTIO_PCI_QUEUE_SIZE);
-    g_rt_net_debug_queue_max = (spl_i64)max_size;
     if (max_size == 0) {
         return -1;
     }
@@ -2291,7 +1812,6 @@ static spl_i64 g_boot_tcp_bound = 0;
 static spl_i64 g_boot_tcp_client_ready = 0;
 static spl_i64 g_boot_tcp_client_open = 0;
 static spl_i64 g_boot_tcp_client_announced = 0;
-static spl_i64 g_boot_tcp_fin_sent = 0;
 static spl_u16 g_boot_tcp_listen_port = 8080U;
 static spl_u8 g_boot_tcp_peer_mac[6];
 static spl_u32 g_boot_tcp_peer_ip = 0;
@@ -2302,6 +1822,11 @@ static spl_i64 g_boot_tcp_response_kind = 0;
 static spl_u8 g_boot_tcp_rx_buf[4096];
 static spl_u64 g_boot_tcp_rx_len = 0;
 static spl_u64 g_boot_tcp_rx_off = 0;
+
+/* RFC 4253: the complete SSH identification line, including LF, is at most
+ * 255 wire bytes. Keep this at the raw C owner so an unauthenticated peer
+ * cannot make the Simple boundary allocate or copy an unbounded line. */
+#define RT_BOOT_TCP_SSH_IDENT_MAX_WIRE_BYTES 255ULL
 
 spl_i64 rt_boot_tcp_bind_port(spl_i64 port);
 
@@ -2331,45 +1856,6 @@ static spl_u16 rt_boot_tcp_rx_window(void) {
         free_bytes = 4096ULL;
     }
     return (spl_u16)free_bytes;
-}
-
-static spl_u16 rt_be16(const spl_u8 *p) {
-    return (spl_u16)(((spl_u16)p[0] << 8) | (spl_u16)p[1]);
-}
-
-static spl_u32 rt_be32(const spl_u8 *p) {
-    return ((spl_u32)p[0] << 24) | ((spl_u32)p[1] << 16) | ((spl_u32)p[2] << 8) | (spl_u32)p[3];
-}
-
-static void rt_put_be16(spl_u8 *p, spl_u16 v) {
-    p[0] = (spl_u8)(v >> 8);
-    p[1] = (spl_u8)v;
-}
-
-static void rt_put_be32(spl_u8 *p, spl_u32 v) {
-    p[0] = (spl_u8)(v >> 24);
-    p[1] = (spl_u8)(v >> 16);
-    p[2] = (spl_u8)(v >> 8);
-    p[3] = (spl_u8)v;
-}
-
-static spl_u32 rt_checksum_add(spl_u32 sum, const spl_u8 *data, spl_u64 len) {
-    spl_u64 i = 0;
-    while (i + 1ULL < len) {
-        sum = sum + (((spl_u32)data[i] << 8) | (spl_u32)data[i + 1ULL]);
-        i = i + 2ULL;
-    }
-    if (i < len) {
-        sum = sum + ((spl_u32)data[i] << 8);
-    }
-    return sum;
-}
-
-static spl_u16 rt_checksum_finish(spl_u32 sum) {
-    while (sum >> 16) {
-        sum = (sum & 0xffffU) + (sum >> 16);
-    }
-    return (spl_u16)(~sum);
 }
 
 static spl_i64 rt_send_frame(const spl_u8 *frame, spl_u64 frame_len) {
@@ -2476,14 +1962,6 @@ static void rt_send_tcp_packet(spl_u8 flags, const spl_u8 *payload, spl_u16 payl
     }
 }
 
-static void rt_boot_tcp_send_fin_once(void) {
-    if (!g_boot_tcp_client_open || g_boot_tcp_fin_sent) {
-        return;
-    }
-    rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
-    g_boot_tcp_fin_sent = 1;
-}
-
 static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     const spl_u8 *ip = frame + 14;
     spl_u16 ip_total;
@@ -2532,7 +2010,6 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
         g_boot_tcp_recv_next = seq + 1U;
         g_boot_tcp_client_open = 1;
         g_boot_tcp_client_announced = 0;
-        g_boot_tcp_fin_sent = 0;
         rt_send_tcp_packet(0x12U, (const spl_u8 *)0, 0);
         return;
     }
@@ -2700,12 +2177,6 @@ static spl_i64 rt_pci_is_virtio_blk(spl_i64 vendor, spl_i64 device_id) {
     return 0;
 }
 
-static spl_i64 rt_pci_is_virtio_input(spl_i64 vendor, spl_i64 device_id) {
-    return vendor == RT_VIRTIO_VENDOR_ID &&
-        (device_id == RT_VIRTIO_INPUT_LEGACY_DEVICE_ID ||
-         device_id == RT_VIRTIO_INPUT_MODERN_DEVICE_ID);
-}
-
 static void rt_put_le32(spl_u8 *p, spl_u32 v);
 static void rt_put_le64(spl_u8 *p, spl_u64 v);
 static spl_u32 rt_get_le32(const spl_u8 *p);
@@ -2738,492 +2209,8 @@ spl_i64 rt_pci_get_field(spl_i64 index, spl_i64 field) {
     return -1;
 }
 
-static spl_i64 rt_virtio_find_modern_caps(
-    RtPciDevice *dev, RtVirtioModernCaps *out
-) {
-    spl_u8 cap = rt_pci_read_config8(
-        (spl_u64)dev->bus, (spl_u64)dev->device,
-        (spl_u64)dev->function, 0x34
-    ) & 0xfcU;
-    spl_u64 bar_base[6];
-    rt_memzero(out, sizeof(*out));
-    for (spl_u64 i = 0; i < 6; i = i + 1) {
-        bar_base[i] = 0;
-    }
-    bar_base[1] = RT_PCI_MMIO_BASE +
-        ((spl_u64)dev->device * 0x100000ULL);
-    bar_base[4] = bar_base[1] + 0x10000ULL;
-    rt_pci_write_config32(
-        (spl_u64)dev->bus, (spl_u64)dev->device,
-        (spl_u64)dev->function, 0x14, (spl_u32)bar_base[1]
-    );
-    rt_pci_write_config32(
-        (spl_u64)dev->bus, (spl_u64)dev->device,
-        (spl_u64)dev->function, 0x20, (spl_u32)bar_base[4]
-    );
-    rt_pci_write_config32(
-        (spl_u64)dev->bus, (spl_u64)dev->device,
-        (spl_u64)dev->function, 0x24, 0
-    );
-    rt_pci_write_config32(
-        (spl_u64)dev->bus, (spl_u64)dev->device,
-        (spl_u64)dev->function, 0x04,
-        RT_PCI_CMD_MEM | RT_PCI_CMD_BUS_MASTER
-    );
-    while (cap >= 0x40U && cap != 0xffU) {
-        spl_u8 cap_id = rt_pci_read_config8(
-            (spl_u64)dev->bus, (spl_u64)dev->device,
-            (spl_u64)dev->function, cap
-        );
-        spl_u8 next = rt_pci_read_config8(
-            (spl_u64)dev->bus, (spl_u64)dev->device,
-            (spl_u64)dev->function, cap + 1U
-        ) & 0xfcU;
-        if (cap_id == RT_PCI_CAP_ID_VENDOR_SPECIFIC) {
-            spl_u8 cfg_type = rt_pci_read_config8(
-                (spl_u64)dev->bus, (spl_u64)dev->device,
-                (spl_u64)dev->function, cap + 3U
-            );
-            spl_u8 bar = rt_pci_read_config8(
-                (spl_u64)dev->bus, (spl_u64)dev->device,
-                (spl_u64)dev->function, cap + 4U
-            );
-            spl_u32 offset = rt_pci_read_config32(
-                (spl_u64)dev->bus, (spl_u64)dev->device,
-                (spl_u64)dev->function, cap + 8U
-            );
-            if (bar < 6U && bar_base[bar] != 0) {
-                spl_u64 address = bar_base[bar] + offset;
-                if (cfg_type == RT_VIRTIO_PCI_CAP_COMMON_CFG) {
-                    out->common = address;
-                } else if (cfg_type == RT_VIRTIO_PCI_CAP_NOTIFY_CFG) {
-                    out->notify = address;
-                    out->notify_multiplier = rt_pci_read_config32(
-                        (spl_u64)dev->bus, (spl_u64)dev->device,
-                        (spl_u64)dev->function, cap + 16U
-                    );
-                } else if (cfg_type == RT_VIRTIO_PCI_CAP_ISR_CFG) {
-                    out->isr = address;
-                } else if (cfg_type == RT_VIRTIO_PCI_CAP_DEVICE_CFG) {
-                    out->device_cfg = address;
-                }
-            }
-        }
-        if (next == 0 || next == cap) {
-            break;
-        }
-        cap = next;
-    }
-    return out->common != 0 && out->notify != 0 &&
-        out->notify_multiplier != 0 ? 0 : -1;
-}
-
-static spl_i64 rt_riscv64_virtio_input_has_bit(
-    spl_u64 bar0, spl_u8 event_type, spl_u16 bit
-) {
-    spl_u32 byte_index = (spl_u32)bit / 8U;
-    rt_io_write8(bar0, RT_VIRTIO_INPUT_CONFIG, RT_VIRTIO_INPUT_CFG_EV_BITS);
-    rt_io_write8(bar0, RT_VIRTIO_INPUT_CONFIG + 1ULL, event_type);
-    __sync_synchronize();
-    spl_u8 bytes = rt_io_read8(bar0, RT_VIRTIO_INPUT_CONFIG + 2ULL);
-    if (bytes == 0U || byte_index >= bytes || byte_index >= 128U) {
-        return 0;
-    }
-    return (rt_io_read8(
-        bar0, RT_VIRTIO_INPUT_CONFIG + 8ULL + byte_index
-    ) & (spl_u8)(1U << ((spl_u32)bit & 7U))) != 0U;
-}
-
-static spl_u8 rt_riscv64_virtio_input_kind(spl_u64 bar0) {
-    if (rt_riscv64_virtio_input_has_bit(bar0, RT_EV_REL, RT_REL_X) &&
-        rt_riscv64_virtio_input_has_bit(bar0, RT_EV_REL, RT_REL_Y) &&
-        rt_riscv64_virtio_input_has_bit(bar0, RT_EV_KEY, RT_BTN_LEFT)) {
-        return 2U;
-    }
-    if (rt_riscv64_virtio_input_has_bit(bar0, RT_EV_KEY, RT_KEY_A)) {
-        return 1U;
-    }
-    return 0U;
-}
-
-static spl_i64 rt_riscv64_virtio_input_has_bit_modern(
-    spl_u64 cfg, spl_u8 event_type, spl_u16 bit
-) {
-    spl_u32 byte_index = (spl_u32)bit / 8U;
-    rt_mmio_write8_raw(cfg, RT_VIRTIO_INPUT_CFG_EV_BITS);
-    rt_mmio_write8_raw(cfg + 1ULL, event_type);
-    __sync_synchronize();
-    spl_u8 bytes = rt_mmio_read8_raw(cfg + 2ULL);
-    if (bytes == 0U || byte_index >= bytes || byte_index >= 128U) {
-        return 0;
-    }
-    return (rt_mmio_read8_raw(cfg + 8ULL + byte_index) &
-        (spl_u8)(1U << ((spl_u32)bit & 7U))) != 0U;
-}
-
-static spl_u8 rt_riscv64_virtio_input_kind_modern(spl_u64 cfg) {
-    if (rt_riscv64_virtio_input_has_bit_modern(cfg, RT_EV_REL, RT_REL_X) &&
-        rt_riscv64_virtio_input_has_bit_modern(cfg, RT_EV_REL, RT_REL_Y) &&
-        rt_riscv64_virtio_input_has_bit_modern(cfg, RT_EV_KEY, RT_BTN_LEFT)) {
-        return 2U;
-    }
-    if (rt_riscv64_virtio_input_has_bit_modern(cfg, RT_EV_KEY, RT_KEY_A)) {
-        return 1U;
-    }
-    return 0U;
-}
-
-static void rt_riscv64_virtio_input_fail(RtVirtioInputDevice *dev) {
-    if (dev->modern && dev->common != 0) {
-        spl_u8 status = rt_mmio_read8_raw(
-            dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS
-        );
-        rt_mmio_write8_raw(
-            dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS,
-            status | RT_VIRTIO_STATUS_FAILED
-        );
-    } else if (dev->bar0 != 0) {
-        spl_u8 status = rt_io_read8(dev->bar0, RT_VIRTIO_PCI_STATUS);
-        rt_io_write8(
-            dev->bar0, RT_VIRTIO_PCI_STATUS,
-            status | RT_VIRTIO_STATUS_FAILED
-        );
-    }
-    dev->ready = 0U;
-}
-
-static spl_i64 rt_riscv64_virtio_input_start_legacy(
-    RtVirtioInputDevice *dev, spl_u64 bar0, spl_u8 kind
-) {
-    dev->bar0 = bar0;
-    rt_io_write8(bar0, RT_VIRTIO_PCI_STATUS, 0U);
-    rt_io_write8(
-        bar0, RT_VIRTIO_PCI_STATUS,
-        RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER
-    );
-    rt_io_write32(bar0, RT_VIRTIO_PCI_GUEST_FEATURES, 0U);
-    if (rt_setup_virtqueue(
-            bar0, RT_VIRTIO_INPUT_QUEUE,
-            &dev->desc, &dev->avail, &dev->used, &dev->qsize) < 0) {
-        rt_riscv64_virtio_input_fail(dev);
-        return -1;
-    }
-    dev->events = rt_riscv_noalloc_alloc_page();
-    if (dev->events == 0) {
-        rt_riscv64_virtio_input_fail(dev);
-        return -2;
-    }
-    rt_memzero((void *)dev->events, 4096ULL);
-    for (spl_u16 i = 0; i < dev->qsize; i = i + 1U) {
-        rt_desc_write(
-            dev->desc, i, dev->events + (spl_u64)i * 8ULL, 8U,
-            RT_VIRTQ_DESC_F_WRITE, 0
-        );
-        rt_avail_push(dev->avail, dev->qsize, i);
-    }
-    __sync_synchronize();
-    rt_io_write16(
-        bar0, RT_VIRTIO_PCI_QUEUE_NOTIFY, RT_VIRTIO_INPUT_QUEUE
-    );
-    rt_io_write8(
-        bar0, RT_VIRTIO_PCI_STATUS,
-        RT_VIRTIO_STATUS_ACKNOWLEDGE |
-            RT_VIRTIO_STATUS_DRIVER |
-            RT_VIRTIO_STATUS_DRIVER_OK
-    );
-    dev->kind = kind;
-    dev->ready = 1U;
-    return 0;
-}
-
-static spl_i64 rt_riscv64_virtio_input_start_modern(
-    RtVirtioInputDevice *dev, RtVirtioModernCaps *caps, spl_u8 kind
-) {
-    spl_u16 max_size;
-    spl_u64 total;
-    spl_u64 pages;
-    spl_u64 ring;
-    spl_u64 desc_avail;
-    dev->modern = 1U;
-    dev->common = caps->common;
-    dev->notify = caps->notify;
-    dev->isr = caps->isr;
-    dev->device_cfg = caps->device_cfg;
-    dev->notify_multiplier = caps->notify_multiplier;
-    if (dev->common == 0 || dev->notify == 0 || dev->isr == 0 ||
-        dev->device_cfg == 0 || dev->notify_multiplier == 0) {
-        rt_riscv64_virtio_input_fail(dev);
-        return -1;
-    }
-    rt_mmio_write8_raw(
-        dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS, 0U
-    );
-    rt_mmio_write8_raw(
-        dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS,
-        RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_DEVICE_FEATURE_SELECT, 1U
-    );
-    if ((*(volatile spl_u32 *)(
-            dev->common + RT_VIRTIO_MODERN_DEVICE_FEATURE
-        ) & 1U) == 0) {
-        rt_riscv64_virtio_input_fail(dev);
-        return -2;
-    }
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_DRIVER_FEATURE_SELECT, 0U
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_DRIVER_FEATURE, 0U
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_DRIVER_FEATURE_SELECT, 1U
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_DRIVER_FEATURE, 1U
-    );
-    rt_mmio_write8_raw(
-        dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS,
-        RT_VIRTIO_STATUS_ACKNOWLEDGE |
-            RT_VIRTIO_STATUS_DRIVER |
-            RT_VIRTIO_STATUS_FEATURES_OK
-    );
-    if ((rt_mmio_read8_raw(
-            dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS
-        ) & RT_VIRTIO_STATUS_FEATURES_OK) == 0) {
-        rt_riscv64_virtio_input_fail(dev);
-        return -3;
-    }
-    rt_mmio_write16_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_SELECT,
-        RT_VIRTIO_INPUT_QUEUE
-    );
-    if (rt_mmio_read16_raw(
-            dev->common + RT_VIRTIO_MODERN_NUM_QUEUES
-        ) == 0) {
-        rt_riscv64_virtio_input_fail(dev);
-        return -4;
-    }
-    max_size = rt_mmio_read16_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_SIZE
-    );
-    if (max_size == 0) {
-        rt_riscv64_virtio_input_fail(dev);
-        return -5;
-    }
-    dev->qsize = max_size > RT_VIRTIO_INPUT_QUEUE_CAP ?
-        RT_VIRTIO_INPUT_QUEUE_CAP : max_size;
-    total = rt_virtqueue_total_size(dev->qsize);
-    pages = (total + 4095ULL) / 4096ULL;
-    ring = rt_alloc_contiguous_pages(pages);
-    if (ring == 0) {
-        rt_riscv64_virtio_input_fail(dev);
-        return -6;
-    }
-    rt_memzero((void *)ring, pages * 4096ULL);
-    desc_avail = rt_virtqueue_desc_size(dev->qsize) +
-        rt_virtqueue_avail_size(dev->qsize);
-    dev->desc = ring;
-    dev->avail = ring + rt_virtqueue_desc_size(dev->qsize);
-    dev->used = ring + ((desc_avail + 4095ULL) & ~4095ULL);
-    dev->events = rt_riscv_noalloc_alloc_page();
-    if (dev->events == 0) {
-        rt_riscv64_virtio_input_fail(dev);
-        return -7;
-    }
-    rt_memzero((void *)dev->events, 4096ULL);
-    for (spl_u16 i = 0; i < dev->qsize; i = i + 1U) {
-        rt_desc_write(
-            dev->desc, i, dev->events + (spl_u64)i * 8ULL, 8U,
-            RT_VIRTQ_DESC_F_WRITE, 0
-        );
-        rt_avail_push(dev->avail, dev->qsize, i);
-    }
-    rt_mmio_write16_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_SIZE, dev->qsize
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_DESC_LO,
-        (spl_u32)(dev->desc & 0xffffffffULL)
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_DESC_HI,
-        (spl_u32)(dev->desc >> 32)
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_DRIVER_LO,
-        (spl_u32)(dev->avail & 0xffffffffULL)
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_DRIVER_HI,
-        (spl_u32)(dev->avail >> 32)
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_DEVICE_LO,
-        (spl_u32)(dev->used & 0xffffffffULL)
-    );
-    rt_mmio_write32_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_DEVICE_HI,
-        (spl_u32)(dev->used >> 32)
-    );
-    dev->notify_off = rt_mmio_read16_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_NOTIFY_OFF
-    );
-    __sync_synchronize();
-    rt_mmio_write16_raw(
-        dev->common + RT_VIRTIO_MODERN_QUEUE_ENABLE, 1U
-    );
-    rt_mmio_write8_raw(
-        dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS,
-        RT_VIRTIO_STATUS_ACKNOWLEDGE |
-            RT_VIRTIO_STATUS_DRIVER |
-            RT_VIRTIO_STATUS_FEATURES_OK |
-            RT_VIRTIO_STATUS_DRIVER_OK
-    );
-    rt_mmio_write16_raw(
-        dev->notify +
-            (spl_u64)dev->notify_off * dev->notify_multiplier,
-        RT_VIRTIO_INPUT_QUEUE
-    );
-    dev->kind = kind;
-    dev->ready = 1U;
-    return 0;
-}
-
-spl_i64 rt_riscv64_virtio_input_init(void) {
-    spl_i64 count = rt_pci_device_count();
-    spl_u32 input_slot = 0;
-    rt_memzero(g_rt_input_devices, sizeof(g_rt_input_devices));
-    g_rt_input_ready_mask = 0U;
-    for (spl_i64 i = 0; i < count && input_slot < 2U; i = i + 1) {
-        spl_i64 vendor = rt_pci_get_field(i, 5);
-        spl_i64 device_id = rt_pci_get_field(i, 6);
-        if (!rt_pci_is_virtio_input(vendor, device_id)) {
-            continue;
-        }
-        RtPciDevice *pci = &g_rt_pci_devices[i];
-        input_slot = input_slot + 1U;
-        spl_u64 bar0 = 0;
-        spl_u8 kind = 0U;
-        RtVirtioModernCaps caps;
-        rt_memzero(&caps, sizeof(caps));
-        if (device_id == RT_VIRTIO_INPUT_MODERN_DEVICE_ID) {
-            if (rt_virtio_find_modern_caps(pci, &caps) < 0 ||
-                caps.device_cfg == 0 || caps.isr == 0) {
-                continue;
-            }
-            kind = rt_riscv64_virtio_input_kind_modern(caps.device_cfg);
-        } else {
-            spl_u64 io_port = RT_PCI_LEGACY_INPUT_IO_PORT +
-                (spl_u64)(input_slot - 1U) *
-                    RT_PCI_LEGACY_INPUT_IO_STRIDE;
-            bar0 = RT_PCI_IO_BASE + io_port;
-            rt_pci_write_config32(
-                (spl_u64)pci->bus, (spl_u64)pci->device,
-                (spl_u64)pci->function, 0x10,
-                (spl_u32)(io_port | 1ULL)
-            );
-            rt_pci_write_config32(
-                (spl_u64)pci->bus, (spl_u64)pci->device,
-                (spl_u64)pci->function, 0x04,
-                RT_PCI_CMD_IO | RT_PCI_CMD_MEM | RT_PCI_CMD_BUS_MASTER
-            );
-            kind = rt_riscv64_virtio_input_kind(bar0);
-        }
-        spl_u32 mask = kind == 1U ? 1U : (kind == 2U ? 2U : 0U);
-        if (mask == 0U || (g_rt_input_ready_mask & mask) != 0U) {
-            continue;
-        }
-        RtVirtioInputDevice *dev = &g_rt_input_devices[kind - 1U];
-        spl_i64 start_result =
-            device_id == RT_VIRTIO_INPUT_MODERN_DEVICE_ID ?
-                rt_riscv64_virtio_input_start_modern(dev, &caps, kind) :
-                rt_riscv64_virtio_input_start_legacy(dev, bar0, kind);
-        if (start_result == 0) {
-            g_rt_input_ready_mask |= mask;
-        }
-    }
-    return (spl_i64)g_rt_input_ready_mask;
-}
-
-static spl_i64 rt_riscv64_virtio_input_poll_device(
-    RtVirtioInputDevice *dev
-) {
-    if (!dev->ready || dev->qsize == 0) {
-        return 0;
-    }
-    volatile spl_u16 *used_idx = (volatile spl_u16 *)(dev->used + 2ULL);
-    if (*used_idx == dev->last_used) {
-        return 0;
-    }
-    __sync_synchronize();
-    spl_u64 used_entry = dev->used + 4ULL +
-        (spl_u64)(dev->last_used % dev->qsize) * 8ULL;
-    spl_u32 desc_id = *(volatile spl_u32 *)used_entry;
-    spl_u32 used_len = *(volatile spl_u32 *)(used_entry + 4ULL);
-    dev->last_used = dev->last_used + 1U;
-    if (desc_id >= dev->qsize || used_len != 8U) {
-        rt_riscv64_virtio_input_fail(dev);
-        return 0;
-    }
-    spl_u64 event = dev->events + (spl_u64)desc_id * 8ULL;
-    g_rt_input_event_type = *(volatile spl_u16 *)event;
-    g_rt_input_event_code = *(volatile spl_u16 *)(event + 2ULL);
-    g_rt_input_event_value = *(volatile spl_u32 *)(event + 4ULL);
-    g_rt_input_event_device_kind = dev->kind;
-    rt_avail_push(dev->avail, dev->qsize, (spl_u16)desc_id);
-    __sync_synchronize();
-    if (dev->modern) {
-        rt_mmio_write16_raw(
-            dev->notify +
-                (spl_u64)dev->notify_off * dev->notify_multiplier,
-            RT_VIRTIO_INPUT_QUEUE
-        );
-        g_rt_input_event_irq_status = rt_mmio_read8_raw(dev->isr);
-    } else {
-        rt_io_write16(
-            dev->bar0, RT_VIRTIO_PCI_QUEUE_NOTIFY, RT_VIRTIO_INPUT_QUEUE
-        );
-        g_rt_input_event_irq_status =
-            rt_io_read8(dev->bar0, RT_VIRTIO_PCI_ISR_STATUS);
-    }
-    return 1;
-}
-
-spl_i64 rt_riscv64_virtio_input_poll(void) {
-    if (rt_riscv64_virtio_input_poll_device(&g_rt_input_devices[0])) {
-        return 1;
-    }
-    if (rt_riscv64_virtio_input_poll_device(&g_rt_input_devices[1])) {
-        return 1;
-    }
-    return 0;
-}
-
-spl_i64 rt_riscv64_virtio_input_event_type(void) {
-    return (spl_i64)g_rt_input_event_type;
-}
-
-spl_i64 rt_riscv64_virtio_input_event_code(void) {
-    return (spl_i64)g_rt_input_event_code;
-}
-
-spl_i64 rt_riscv64_virtio_input_event_value(void) {
-    return (spl_i64)g_rt_input_event_value;
-}
-
-spl_i64 rt_riscv64_virtio_input_event_device_kind(void) {
-    return (spl_i64)g_rt_input_event_device_kind;
-}
-
-spl_i64 rt_riscv64_virtio_input_event_irq_status(void) {
-    return (spl_i64)g_rt_input_event_irq_status;
-}
-
 spl_i64 rt_net_init(void) {
     spl_i64 count = rt_pci_device_count();
-    g_rt_net_debug_stage = 10;
     for (spl_i64 i = 0; i < count; i = i + 1) {
         spl_i64 cls = rt_pci_get_field(i, 3);
         spl_i64 sub = rt_pci_get_field(i, 4);
@@ -3231,13 +2218,10 @@ spl_i64 rt_net_init(void) {
         spl_i64 device_id = rt_pci_get_field(i, 6);
         if (rt_pci_is_virtio_net(cls, sub, vendor, device_id)) {
             RtPciDevice *dev = &g_rt_pci_devices[i];
-            g_rt_net_debug_stage = 20;
             if (device_id != RT_VIRTIO_NET_LEGACY_DEVICE_ID) {
                 g_rt_net_ready = 0;
-                g_rt_net_debug_stage = 21;
                 return -2;
             }
-            g_rt_net_debug_stage = 30;
             rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x10, (spl_u32)(RT_PCI_LEGACY_NET_IO_PORT | 1ULL));
             rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x04, RT_PCI_CMD_IO | RT_PCI_CMD_MEM | RT_PCI_CMD_BUS_MASTER);
             g_rt_net_bar0 = RT_PCI_IO_BASE + RT_PCI_LEGACY_NET_IO_PORT;
@@ -3249,25 +2233,19 @@ spl_i64 rt_net_init(void) {
                 RT_VIRTIO_PCI_GUEST_FEATURES,
                 rt_io_read32(g_rt_net_bar0, RT_VIRTIO_PCI_HOST_FEATURES) & RT_VIRTIO_NET_F_MAC
             );
-            g_rt_net_debug_stage = 40;
             if (rt_setup_virtqueue(g_rt_net_bar0, RT_VIRTIO_NET_RX_QUEUE, &g_rt_rx_desc, &g_rt_rx_avail, &g_rt_rx_used, &g_rt_rx_qsize) < 0) {
                 rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_FAILED);
                 g_rt_net_ready = 0;
-                g_rt_net_debug_stage = 41;
                 return -4;
             }
-            g_rt_net_debug_stage = 50;
             if (rt_setup_virtqueue(g_rt_net_bar0, RT_VIRTIO_NET_TX_QUEUE, &g_rt_tx_desc, &g_rt_tx_avail, &g_rt_tx_used, &g_rt_tx_qsize) < 0) {
                 rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_FAILED);
                 g_rt_net_ready = 0;
-                g_rt_net_debug_stage = 51;
                 return -5;
             }
-            g_rt_net_debug_stage = 60;
             if (rt_prepost_rx(g_rt_net_bar0) < 0) {
                 rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_FAILED);
                 g_rt_net_ready = 0;
-                g_rt_net_debug_stage = 61;
                 return -6;
             }
             rt_io_write8(
@@ -3289,21 +2267,11 @@ spl_i64 rt_net_init(void) {
             g_rt_net_tx_ready = 1;
             g_rt_net_rx_ready = 1;
             g_rt_net_ready = 1;
-            g_rt_net_debug_stage = 100;
             return 0;
         }
     }
     g_rt_net_ready = 0;
-    g_rt_net_debug_stage = 11;
     return -1;
-}
-
-spl_i64 rt_net_debug_stage(void) {
-    return g_rt_net_debug_stage;
-}
-
-spl_i64 rt_net_debug_queue_max(void) {
-    return g_rt_net_debug_queue_max;
 }
 
 spl_i64 rt_net_tx_test(void) {
@@ -3412,10 +2380,7 @@ static spl_i64 rt_storage_probe_nvfs_arena_payload(void) {
     return rt_storage_sector_has_nvfs_arena_payload() ? 0 : -3;
 }
 
-static spl_i64 rt_storage_init_virtio_blk(spl_i64 require_nvfs) {
-    if (g_rt_storage_ready) {
-        return 0;
-    }
+spl_i64 rt_storage_init(void) {
     spl_i64 count = rt_pci_device_count();
     for (spl_i64 i = 0; i < count; i = i + 1) {
         spl_i64 vendor = rt_pci_get_field(i, 5);
@@ -3460,9 +2425,6 @@ static spl_i64 rt_storage_init_virtio_blk(spl_i64 require_nvfs) {
                 RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER | RT_VIRTIO_STATUS_FEATURES_OK | RT_VIRTIO_STATUS_DRIVER_OK
             );
             g_rt_storage_ready = 1;
-            if (!require_nvfs) {
-                return 0;
-            }
             {
                 spl_i64 read_rc = rt_storage_probe_nvfs_superblock();
                 g_rt_storage_probe_ready = read_rc == 0 ? 1 : 0;
@@ -3479,32 +2441,6 @@ static spl_i64 rt_storage_init_virtio_blk(spl_i64 require_nvfs) {
     g_rt_storage_ready = 0;
     g_rt_storage_probe_ready = 0;
     return -1;
-}
-
-spl_i64 rt_storage_init(void) {
-    return rt_storage_init_virtio_blk(1);
-}
-
-/* RV64 desktop FAT32 uses the established legacy PCI VirtIO-BLK queue but
- * deliberately does not require the unrelated NVFS superblock contract. */
-spl_i64 rt_riscv64_virtio_blk_fat32_init(void) {
-    return rt_storage_init_virtio_blk(0);
-}
-
-spl_i64 rt_riscv64_virtio_blk_fat32_capacity_sectors(void) {
-    return g_rt_storage_ready ? (spl_i64)g_rt_blk_capacity : 0;
-}
-
-spl_i64 rt_riscv64_virtio_blk_fat32_read_sector_bytes(spl_u64 lba) {
-    spl_i64 out;
-    if (rt_riscv64_virtio_blk_fat32_init() < 0 || rt_storage_read_sector(lba) < 0) {
-        return rt_array_new(0);
-    }
-    out = rt_array_new((spl_i64)RT_VIRTIO_BLK_SECTOR_SIZE);
-    for (spl_u64 i = 0; i < RT_VIRTIO_BLK_SECTOR_SIZE; i = i + 1) {
-        rt_array_push(out, rt_int((spl_i64)((spl_u8 *)g_rt_blk_data)[i]));
-    }
-    return out;
 }
 
 spl_i64 rt_storage_read_probe(void) {
@@ -3543,53 +2479,27 @@ spl_i64 rt_entropy_hardware_ready(void) {
 }
 
 spl_i64 rt_boot_tcp_bind(spl_i64 addr) {
-    RtString *text = rt_as_string(addr);
+    spl_i64 selected;
     uart_line("BTCP BIND ENTER");
-    g_boot_tcp_listen_port = 8080U;
-    if (text && text->len > 0) {
-        spl_u64 i = text->len;
-        spl_u64 mul = 1ULL;
-        spl_u64 parsed = 0ULL;
-        spl_i64 saw_digit = 0;
-        while (i > 0) {
-            char ch = text->data[i - 1ULL];
-            if (ch >= '0' && ch <= '9') {
-                parsed = parsed + (spl_u64)(ch - '0') * mul;
-                mul = mul * 10ULL;
-                saw_digit = 1;
-                i = i - 1ULL;
-                continue;
-            }
-            if (ch == ':' && saw_digit) {
-                if (parsed > 0ULL && parsed <= 65535ULL) {
-                    g_boot_tcp_listen_port = (spl_u16)parsed;
-                }
-                break;
-            }
-            if (saw_digit) {
-                break;
-            }
-            i = i - 1ULL;
-        }
-    }
+    selected = rt_riscv64_boot_tcp_select_port(addr);
+    g_boot_tcp_listen_port = (spl_u16)selected;
     uart_line("BTCP BIND CALL");
     return rt_boot_tcp_bind_port((spl_i64)g_boot_tcp_listen_port);
 }
 
 spl_i64 rt_boot_tcp_bind_port(spl_i64 port) {
+    spl_i64 selected;
     uart_line("BTCP PORT ENTER");
     if (!g_rt_net_ready || !g_rt_net_rx_ready || !g_rt_net_tx_ready) {
         uart_line("BTCP PORT NOTREADY");
         return -1;
     }
-    if (port > 0 && port <= 65535) {
-        g_boot_tcp_listen_port = (spl_u16)port;
-    }
+    selected = rt_riscv64_boot_tcp_select_explicit_port(port);
+    g_boot_tcp_listen_port = (spl_u16)selected;
     g_boot_tcp_bound = 1;
     g_boot_tcp_client_ready = 0;
     g_boot_tcp_client_open = 0;
     g_boot_tcp_client_announced = 0;
-    g_boot_tcp_fin_sent = 0;
     g_boot_tcp_send_next = 0x10203040U;
     g_boot_tcp_rx_len = 0;
     g_boot_tcp_rx_off = 0;
@@ -3645,16 +2555,16 @@ spl_i64 rt_boot_tcp_write_text(spl_i64 fd, spl_i64 data) {
     text = rt_as_string(data);
     if (text) {
         rt_send_tcp_packet(0x18U, (const spl_u8 *)text->data, (spl_u16)text->len);
-        rt_boot_tcp_send_fin_once();
+        rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
         return (spl_i64)text->len;
     }
     if (g_boot_tcp_response_kind == 2) {
         rt_send_tcp_packet(0x18U, fallback_html_response, (spl_u16)(sizeof(fallback_html_response) - 1ULL));
-        rt_boot_tcp_send_fin_once();
+        rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
         return (spl_i64)(sizeof(fallback_html_response) - 1ULL);
     }
     rt_send_tcp_packet(0x18U, fallback_json_response, (spl_u16)(sizeof(fallback_json_response) - 1ULL));
-    rt_boot_tcp_send_fin_once();
+    rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
     return (spl_i64)(sizeof(fallback_json_response) - 1ULL);
 }
 
@@ -3890,7 +2800,6 @@ spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
 
 spl_i64 rt_boot_tcp_close(spl_i64 fd) {
     if (fd == 200) {
-        rt_boot_tcp_send_fin_once();
         g_boot_tcp_client_open = 0;
         g_boot_tcp_client_announced = 0;
         g_boot_tcp_rx_len = 0;
@@ -4071,6 +2980,108 @@ spl_i64 rt_boot_tcp_read_bytes_for_fd(spl_i64 fd, spl_i64 max_len) {
     return rt_boot_tcp_read_bytes(max_len);
 }
 
+/* Opaque-registry API.  These entry points intentionally do not delegate to
+ * the legacy accept/read helpers: those helpers poll in a tight loop, whereas
+ * a registry call performs at most one receive poll and reports timeout as -1
+ * (accept) or an empty byte array (read). */
+spl_i64 rt_boot_tcp_registry_bind(spl_i64 addr) {
+    spl_i64 legacy_fd;
+    if (!rt_boot_tcp_registry_can_allocate() || rt_boot_tcp_registry_has_active() ||
+        g_boot_tcp_bound || g_boot_tcp_client_open) {
+        return -1;
+    }
+    legacy_fd = rt_boot_tcp_bind(addr);
+    if (legacy_fd != 100) {
+        return -1;
+    }
+    return rt_boot_tcp_registry_allocate(RT_BOOT_TCP_REGISTRY_LISTENER, 0ULL, 0ULL);
+}
+
+spl_i64 rt_boot_tcp_registry_bind_port(spl_i64 port) {
+    spl_i64 legacy_fd;
+    if (port < 1 || port > 65535 || !rt_boot_tcp_registry_can_allocate() || rt_boot_tcp_registry_has_active() ||
+        g_boot_tcp_bound || g_boot_tcp_client_open) {
+        return -1;
+    }
+    legacy_fd = rt_boot_tcp_bind_port(port);
+    if (legacy_fd != 100) {
+        return -1;
+    }
+    return rt_boot_tcp_registry_allocate(RT_BOOT_TCP_REGISTRY_LISTENER, 0ULL, 0ULL);
+}
+
+spl_i64 rt_boot_tcp_registry_accept_timeout(spl_i64 listener_fd, spl_i64 ms) {
+    spl_u64 listener_slot;
+    RtBootTcpRegistryEntry *listener = rt_boot_tcp_registry_lookup(listener_fd, &listener_slot);
+    spl_i64 client_fd;
+    if (ms < 0 || !rt_boot_tcp_registry_can_allocate() || !listener || listener->kind != RT_BOOT_TCP_REGISTRY_LISTENER ||
+        rt_boot_tcp_registry_has_child(listener_slot, listener->generation) || !g_boot_tcp_bound) {
+        return -1;
+    }
+    /* A single poll makes timeout cooperative: callers choose when to retry,
+       and no timeout value can trigger an unbounded busy wait at boot. */
+    rt_poll_rx_once();
+    if (!g_boot_tcp_client_open) {
+        return -1;
+    }
+    client_fd = rt_boot_tcp_registry_allocate(RT_BOOT_TCP_REGISTRY_CLIENT, listener_slot, listener->generation);
+    if (client_fd < 0) {
+        return -1;
+    }
+    g_boot_tcp_client_ready = 0;
+    g_boot_tcp_client_announced = 1;
+    g_boot_tcp_response_kind = 0;
+    return client_fd;
+}
+
+spl_i64 rt_boot_tcp_registry_write_bytes(spl_i64 client_fd, spl_i64 data_value) {
+    RtBootTcpRegistryEntry *client = rt_boot_tcp_registry_lookup(client_fd, 0);
+    if (!client || client->kind != RT_BOOT_TCP_REGISTRY_CLIENT || !g_boot_tcp_client_open) {
+        return -1;
+    }
+    return rt_boot_tcp_write_bytes(200, data_value);
+}
+
+spl_i64 rt_boot_tcp_registry_read_bytes(spl_i64 client_fd, spl_i64 max_len) {
+    RtBootTcpRegistryEntry *client = rt_boot_tcp_registry_lookup(client_fd, 0);
+    spl_u64 want = max_len <= 0 ? 0ULL : (spl_u64)max_len;
+    spl_u64 available;
+    spl_i64 out;
+    if (!client || client->kind != RT_BOOT_TCP_REGISTRY_CLIENT || !g_boot_tcp_client_open || want == 0ULL) {
+        return rt_array_new(0);
+    }
+    if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        rt_poll_rx_once();
+    }
+    if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        return rt_array_new(0);
+    }
+    available = g_boot_tcp_rx_len - g_boot_tcp_rx_off;
+    if (want > available) {
+        want = available;
+    }
+    out = rt_array_new((spl_i64)want);
+    for (spl_u64 i = 0ULL; i < want; i = i + 1ULL) {
+        rt_array_push(out, rt_int((spl_i64)g_boot_tcp_rx_buf[g_boot_tcp_rx_off + i]));
+    }
+    g_boot_tcp_rx_off = g_boot_tcp_rx_off + want;
+    if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        g_boot_tcp_rx_len = 0ULL;
+        g_boot_tcp_rx_off = 0ULL;
+    }
+    return out;
+}
+
+spl_i64 rt_boot_tcp_registry_close(spl_i64 fd) {
+    spl_u64 slot;
+    RtBootTcpRegistryEntry *entry = rt_boot_tcp_registry_lookup(fd, &slot);
+    spl_i64 legacy_fd;
+    if (!entry) {
+        return -1;
+    }
+    return rt_boot_tcp_read_bytes(max_len);
+}
+
 __attribute__((weak)) spl_i64 rt_io_tcp_bind(spl_i64 addr) {
     return rt_boot_tcp_bind(addr);
 }
@@ -4085,26 +3096,6 @@ __attribute__((weak)) spl_i64 rt_io_tcp_write_text(spl_i64 fd, spl_i64 data) {
 
 __attribute__((weak)) spl_i64 rt_io_tcp_close(spl_i64 fd) {
     return rt_boot_tcp_close(fd) == 0 ? 11 : 19;
-}
-
-static void rt_put_le32(spl_u8 *p, spl_u32 v) {
-    p[0] = (spl_u8)v;
-    p[1] = (spl_u8)(v >> 8);
-    p[2] = (spl_u8)(v >> 16);
-    p[3] = (spl_u8)(v >> 24);
-}
-
-static void rt_put_le64(spl_u8 *p, spl_u64 v) {
-    for (spl_u64 i = 0; i < 8; i = i + 1) {
-        p[i] = (spl_u8)(v >> (i * 8ULL));
-    }
-}
-
-static spl_u32 rt_get_le32(const spl_u8 *p) {
-    return ((spl_u32)p[0]) |
-        ((spl_u32)p[1] << 8) |
-        ((spl_u32)p[2] << 16) |
-        ((spl_u32)p[3] << 24);
 }
 
 static void rt_gpu_ctrl_hdr(spl_u8 *p, spl_u32 cmd) {
@@ -4142,13 +3133,41 @@ static spl_i64 rt_gpu_send_command(spl_u32 cmd, spl_u32 req_len, spl_u32 resp_le
 }
 
 static spl_i64 rt_gpu_find_modern_caps(RtPciDevice *dev) {
-    RtVirtioModernCaps caps;
-    if (rt_virtio_find_modern_caps(dev, &caps) < 0) {
+    spl_u8 cap = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x34) & 0xfcU;
+    spl_u64 bar_base[6];
+    for (spl_u64 i = 0; i < 6; i = i + 1) {
+        bar_base[i] = 0;
+    }
+    bar_base[1] = RT_PCI_MMIO_BASE + ((spl_u64)dev->device * 0x100000ULL);
+    bar_base[4] = RT_PCI_MMIO_BASE + ((spl_u64)dev->device * 0x100000ULL) + 0x10000ULL;
+    rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x14, (spl_u32)bar_base[1]);
+    rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x20, (spl_u32)bar_base[4]);
+    rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x24, 0);
+    rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x04, RT_PCI_CMD_MEM | RT_PCI_CMD_BUS_MASTER);
+    while (cap >= 0x40U && cap != 0xffU) {
+        spl_u8 cap_id = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap);
+        spl_u8 next = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 1U) & 0xfcU;
+        if (cap_id == RT_PCI_CAP_ID_VENDOR_SPECIFIC) {
+            spl_u8 cfg_type = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 3U);
+            spl_u8 bar = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 4U);
+            spl_u32 offset = rt_pci_read_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 8U);
+            if (bar < 6U && bar_base[bar] != 0) {
+                if (cfg_type == RT_VIRTIO_PCI_CAP_COMMON_CFG) {
+                    g_rt_gpu_common = bar_base[bar] + offset;
+                } else if (cfg_type == RT_VIRTIO_PCI_CAP_NOTIFY_CFG) {
+                    g_rt_gpu_notify = bar_base[bar] + offset;
+                    g_rt_gpu_notify_multiplier = rt_pci_read_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 16U);
+                }
+            }
+        }
+        if (next == 0 || next == cap) {
+            break;
+        }
+        cap = next;
+    }
+    if (g_rt_gpu_common == 0 || g_rt_gpu_notify == 0 || g_rt_gpu_notify_multiplier == 0) {
         return -1;
     }
-    g_rt_gpu_common = caps.common;
-    g_rt_gpu_notify = caps.notify;
-    g_rt_gpu_notify_multiplier = caps.notify_multiplier;
     return 0;
 }
 
@@ -4285,35 +3304,28 @@ static spl_i64 rt_gpu_cmd_transfer_flush(void) {
 
 static void rt_gpu_fill_rect(spl_u32 x, spl_u32 y, spl_u32 w, spl_u32 h, spl_u32 color) {
     volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
-    spl_u32 y_end = y + h;
-    spl_u32 x_end = x + w;
-    if (x >= RT_GPU_WIDTH || y >= RT_GPU_HEIGHT) {
-        return;
+    spl_u32 max_x = x + w;
+    spl_u32 max_y = y + h;
+    if (max_x > RT_GPU_WIDTH) {
+        max_x = RT_GPU_WIDTH;
     }
-    if (x_end > RT_GPU_WIDTH) {
-        x_end = RT_GPU_WIDTH;
+    if (max_y > RT_GPU_HEIGHT) {
+        max_y = RT_GPU_HEIGHT;
     }
-    if (y_end > RT_GPU_HEIGHT) {
-        y_end = RT_GPU_HEIGHT;
-    }
-    for (spl_u32 py = y; py < y_end; py = py + 1U) {
-        for (spl_u32 px = x; px < x_end; px = px + 1U) {
+    for (spl_u32 py = y; py < max_y; py = py + 1U) {
+        for (spl_u32 px = x; px < max_x; px = px + 1U) {
             fb[(spl_u64)py * RT_GPU_WIDTH + px] = color;
         }
     }
 }
 
-spl_u64 rt_gui_fill4(spl_u64 xy, spl_u64 wh, spl_u64 color, spl_u64 unused) {
-    spl_u32 x = (spl_u32)(xy >> 32);
-    spl_u32 y = (spl_u32)(xy & 0xffffffffULL);
-    spl_u32 w = (spl_u32)(wh >> 32);
-    spl_u32 h = (spl_u32)(wh & 0xffffffffULL);
-    (void)unused;
-    if (!g_rt_display_ready || !g_rt_gpu_fb) {
-        return 0ULL;
-    }
-    rt_gpu_fill_rect(x, y, w, h, (spl_u32)color);
-    return 1ULL;
+static void rt_gpu_fill_wm_anchor_scene(void) {
+    rt_gpu_fill_rect(0U, 0U, RT_GPU_WIDTH, RT_GPU_HEIGHT, 0xff101418U);
+    rt_gpu_fill_rect(0U, 0U, RT_GPU_WIDTH, 24U, 0xff1f2937U);
+    rt_gpu_fill_rect(24U, 36U, 128U, 20U, 0xff4f46e5U);
+    rt_gpu_fill_rect(24U, 56U, 128U, 72U, 0xfff8fafcU);
+    rt_gpu_fill_rect(168U, 48U, 112U, 88U, 0xff0f766eU);
+    rt_gpu_fill_rect(0U, 212U, RT_GPU_WIDTH, 28U, 0xff22c55eU);
 }
 
 /* The RISC-V virtio scanout does not expose the generic direct-LFB array ABI
@@ -4339,37 +3351,15 @@ static void rt_gpu_fill_wm_scene(void) {
     volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
     for (spl_u32 y = 0; y < RT_GPU_HEIGHT; y = y + 1U) {
         for (spl_u32 x = 0; x < RT_GPU_WIDTH; x = x + 1U) {
-            fb[(spl_u64)y * RT_GPU_WIDTH + x] = 0xff0a2540U;
+            spl_u8 r = (spl_u8)(x & 0xffU);
+            spl_u8 g = (spl_u8)(y & 0xffU);
+            spl_u8 b = (spl_u8)((x ^ y) & 0xffU);
+            fb[(spl_u64)y * RT_GPU_WIDTH + x] = 0xff000000U | ((spl_u32)r << 16) | ((spl_u32)g << 8) | (spl_u32)b;
         }
     }
-
-    rt_gpu_fill_rect(0U, 0U, RT_GPU_WIDTH, 44U, 0xff101820U);
-    rt_gpu_fill_rect(0U, 42U, RT_GPU_WIDTH, 2U, 0xff3498dbU);
-    rt_gpu_fill_rect(0U, RT_GPU_HEIGHT - 56U, RT_GPU_WIDTH, 56U, 0xff101820U);
-    rt_gpu_fill_rect(0U, RT_GPU_HEIGHT - 56U, RT_GPU_WIDTH, 2U, 0xff3498dbU);
-
-    rt_gpu_fill_rect(24U, 72U, 272U, 112U, 0x66000000U);
-    rt_gpu_fill_rect(18U, 66U, 272U, 112U, 0xff1e293bU);
-    rt_gpu_fill_rect(18U, 66U, 272U, 28U, 0xff2050a0U);
-    rt_gpu_fill_rect(30U, 75U, 10U, 10U, 0xffe74c3cU);
-    rt_gpu_fill_rect(48U, 75U, 10U, 10U, 0xfff1c40fU);
-    rt_gpu_fill_rect(66U, 75U, 10U, 10U, 0xff27ae60U);
-    rt_gpu_fill_rect(266U, 66U, 24U, 28U, 0xffcc3333U);
-
-    rt_gpu_fill_rect(26U, 102U, 256U, 68U, 0xff182230U);
-    rt_gpu_fill_rect(36U, 114U, 96U, 10U, 0xff22c55eU);
-    rt_gpu_fill_rect(36U, 134U, 154U, 10U, 0xff60a5faU);
-    rt_gpu_fill_rect(36U, 154U, 126U, 10U, 0xfff59e0bU);
-    rt_gpu_fill_rect(196U, 114U, 64U, 50U, 0xff243447U);
-
-    rt_gpu_fill_rect(16U, RT_GPU_HEIGHT - 42U, 72U, 28U, 0xff1e293bU);
-    rt_gpu_fill_rect(96U, RT_GPU_HEIGHT - 42U, 72U, 28U, 0xff243447U);
-    rt_gpu_fill_rect(176U, RT_GPU_HEIGHT - 42U, 72U, 28U, 0xff243447U);
-    rt_gpu_fill_rect(256U, RT_GPU_HEIGHT - 35U, 42U, 14U, 0xff3498dbU);
 }
 
 spl_i64 rt_display_init(void) {
-    g_rt_display_generation = 0;
     spl_i64 count = rt_pci_device_count();
     for (spl_i64 i = 0; i < count; i = i + 1) {
         spl_i64 cls = rt_pci_get_field(i, 3);
@@ -4446,7 +3436,7 @@ spl_i64 rt_display_flush_test(void) {
     if (!g_rt_display_ready || !g_rt_gpu_fb) {
         return -1;
     }
-    rt_gpu_fill_wm_scene();
+    rt_gpu_fill_test_pattern();
     return rt_gpu_cmd_transfer_flush();
 }
 
@@ -4456,30 +3446,6 @@ spl_i64 rt_display_width(void) {
 
 spl_i64 rt_display_height(void) {
     return g_rt_display_ready ? RT_GPU_HEIGHT : 0;
-}
-
-spl_u64 rt_display_framebuffer_address(void) {
-    return g_rt_display_ready ? g_rt_gpu_fb : 0;
-}
-
-spl_i64 rt_display_pitch(void) {
-    return g_rt_display_ready ? (spl_i64)(RT_GPU_WIDTH * sizeof(spl_u32)) : 0;
-}
-
-spl_i64 rt_display_bpp(void) {
-    return g_rt_display_ready ? (spl_i64)(sizeof(spl_u32) * 8U) : 0;
-}
-
-spl_i64 rt_display_generation(void) {
-    return g_rt_display_ready ? g_rt_display_generation : 0;
-}
-
-spl_i64 rt_display_present(void) {
-    spl_i64 result = rt_gui_flush();
-    if (result == 0) {
-        g_rt_display_generation = g_rt_display_generation + 1;
-    }
-    return result;
 }
 
 /* ========================================================================
@@ -4542,107 +3508,6 @@ spl_i64 rt_bytes_alloc(spl_i64 len_value) {
     return out;
 }
 
-/* ---- Baked FAT32 image for the self-contained rv64 shell ls test. ----
- * The real build/os/fat32-riscv64.img is incbin'd into the kernel so a
- * BlockDevice can serve its sectors without the virtio/NVMe driver (which the
- * minimal freestanding boot does not initialize). boot_fs_mount_from_device
- * then probes + mounts the REAL FAT32 image and g_vfs_readdir lists the real
- * files (clang/llvm, pure-Simple tools) — a real ls, not a stub. */
-__asm__(".pushsection .rodata");
-__asm__(".global __fat32_img_start");
-__asm__("__fat32_img_start:");
-__asm__(".incbin \"build/os/fat32-riscv64.img\"");
-__asm__(".global __fat32_img_end");
-__asm__("__fat32_img_end:");
-__asm__(".popsection");
-extern const unsigned char __fat32_img_start[];
-extern const unsigned char __fat32_img_end[];
-
-/* Build AND fill a Simple [u8] of sector `lba` from the baked FAT32 image,
- * entirely in C (rt_array_new + direct data[] writes + len). Returns the [u8]
- * handle. Avoids the .spl rt_bytes_alloc/fill split that left later sectors
- * partially filled. Each byte stored as a tagged int (byte << 3). */
-spl_i64 rt_baked_fs_sector_as_array(spl_i64 lba) {
-    spl_u64 off = ((spl_u64)lba) * 512;
-    spl_u64 img_size = (spl_u64)(__fat32_img_end - __fat32_img_start);
-    spl_i64 arr_val = rt_array_new(512);
-    RtArray *arr = rt_as_array(arr_val);
-    if (!arr) {
-        return rt_nil();
-    }
-    if (off + 512 <= img_size) {
-        spl_u64 i = 0;
-        while (i < 512) {
-            spl_u8 b = (spl_u8)__fat32_img_start[off + i];
-            arr->data[i] = rt_int((spl_i64)b);
-            i = i + 1;
-        }
-    }
-    arr->len = 512;
-    return arr_val;
-}
-
-spl_i64 rt_baked_fs_sector_count(void) {
-    spl_u64 img_size = (spl_u64)(__fat32_img_end - __fat32_img_start);
-    return (spl_i64)(img_size / 512);
-}
-
-/* Return one raw byte from the baked FAT32 image at (lba * 512 + off), as a
- * raw i64 (0..255). Bypasses the Simple [u8] array entirely — its freestanding
- * indexing degrades past index ~64, so the ls walk reads bytes directly. */
-spl_i64 rt_baked_fs_byte(spl_i64 lba, spl_i64 off) {
-    spl_u64 idx = ((spl_u64)lba) * 512 + (spl_u64)off;
-    spl_u64 img_size = (spl_u64)(__fat32_img_end - __fat32_img_start);
-    if (idx >= img_size) {
-        return 0;
-    }
-    return (spl_i64)(spl_u64)__fat32_img_start[idx];
-}
-
-/* Constant-time string equality vs a literal (no early return). */
-static int rt_streq_ct(RtString *s, const char *lit, spl_u64 litlen) {
-    if (!s) {
-        return 0;
-    }
-    int match = (s->len == litlen) ? 1 : 0;
-    spl_u64 n = s->len > litlen ? s->len : litlen;
-    for (spl_u64 i = 0; i < n; i = i + 1) {
-        spl_u8 a = (i < s->len) ? (spl_u8)s->data[i] : 0;
-        spl_u8 b = (i < litlen) ? (spl_u8)lit[i] : 0;
-        if (a != b) {
-            match = 0;
-        }
-    }
-    return match;
-}
-
-/* Real serial-login credential check against the default SshUserDb credentials
- * (root/simpleos + user/password). Split into two single-text-arg calls because
- * the freestanding extern ABI mishandles a 2-text-arg signature. Each returns a
- * role id (1=root/simpleos, 2=user/password, 0=unknown); a login is valid when
- * the user role equals the password role and both are non-zero. Constant-time. */
-spl_i64 rt_check_user(spl_i64 user_val) {
-    RtString *u = rt_as_string(user_val);
-    if (rt_streq_ct(u, "root", 4)) {
-        return 1;
-    }
-    if (rt_streq_ct(u, "user", 4)) {
-        return 2;
-    }
-    return 0;
-}
-
-spl_i64 rt_check_pw(spl_i64 pw_val) {
-    RtString *p = rt_as_string(pw_val);
-    if (rt_streq_ct(p, "simpleos", 8)) {
-        return 1;
-    }
-    if (rt_streq_ct(p, "password", 8)) {
-        return 2;
-    }
-    return 0;
-}
-
 /* rt_bytes_to_text(bytes) -> text: convert a freestanding byte array handle
  * into a string handle. Identical contract to rt_string_from_byte_array. */
 spl_i64 rt_bytes_to_text(spl_i64 array_value) {
@@ -4669,27 +3534,4 @@ spl_i64 rt_string_to_upper(spl_i64 value) {
         }
     }
     return out_value;
-}
-
-/* Full memory barrier. The portable MMIO/DMA layers
- * (os.kernel.boot.mmio_hardware, os.drivers.virtio.virtio_gpu,
- * std.io.volatile_ops) call rt_memory_barrier around device-visible reads and
- * writes. `fence rw,rw` is the RISC-V equivalent of the arm64 owner's `dsb sy`
- * (examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c). Without
- * an owner here the RV64 freestanding link leaves it undefined. */
-void rt_memory_barrier(void) {
-    __asm__ volatile("fence rw,rw" ::: "memory");
-}
-
-/* TLB invalidation. The portable kernel MMIO layer (os.kernel.boot.mmio)
- * calls rt_invlpg to drop a stale translation after remapping. RISC-V has no
- * single-page invlpg; sfence.vma with no operands flushes the whole TLB, which
- * is a correct (conservative) superset of invalidating the one address. */
-void rt_invlpg(spl_u64 addr) {
-    (void)addr;
-    __asm__ volatile("sfence.vma" ::: "memory");
-}
-
-spl_i64 rt_check_user_noop(spl_i64 user_val) {
-    return user_val;
 }

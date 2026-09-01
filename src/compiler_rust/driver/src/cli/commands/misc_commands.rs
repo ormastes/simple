@@ -366,7 +366,9 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // Deploying the verified stage over a shared path while another lane is
     // using it is unsafe; --no-deploy (or SIMPLE_BOOTSTRAP_NO_DEPLOY=1) makes
     // the run verification-only.
-    let mut no_deploy = std::env::var("SIMPLE_BOOTSTRAP_NO_DEPLOY").map(|v| v != "0").unwrap_or(false);
+    let mut no_deploy = std::env::var("SIMPLE_BOOTSTRAP_NO_DEPLOY")
+        .map(|v| v != "0")
+        .unwrap_or(false);
     for arg in args {
         if *arg == "--no-deploy" {
             no_deploy = true;
@@ -492,14 +494,15 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     println!();
     let inputs_after = bootstrap_closure_fingerprint(&workdir.join("src"));
     if inputs_before.is_empty() {
-        println!("ERROR — nothing was checked (no source files found under {}/src)", workdir.display());
+        println!(
+            "ERROR — nothing was checked (no source files found under {}/src)",
+            workdir.display()
+        );
         return 2;
     }
     if bootstrap_closure_digest(&inputs_after) != inputs_digest {
-        let before: std::collections::BTreeMap<&String, &String> =
-            inputs_before.iter().map(|(p, h)| (p, h)).collect();
-        let after: std::collections::BTreeMap<&String, &String> =
-            inputs_after.iter().map(|(p, h)| (p, h)).collect();
+        let before: std::collections::BTreeMap<&String, &String> = inputs_before.iter().map(|(p, h)| (p, h)).collect();
+        let after: std::collections::BTreeMap<&String, &String> = inputs_after.iter().map(|(p, h)| (p, h)).collect();
         let mut changed: Vec<String> = Vec::new();
         for (p, h) in &after {
             match before.get(p) {
@@ -523,7 +526,11 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     }
 
     // Verify
-    println!("Inputs stable: {} source file(s), tree={}", inputs_before.len(), inputs_digest);
+    println!(
+        "Inputs stable: {} source file(s), tree={}",
+        inputs_before.len(),
+        inputs_digest
+    );
     println!();
     match classify_bootstrap_verdict(&stage1.hash, &stage2.hash, &stage3.hash) {
         BootstrapVerdict::Verified => {
@@ -640,11 +647,7 @@ fn bootstrap_closure_fingerprint(root: &Path) -> Vec<(String, String)> {
                 .unwrap_or(false)
             {
                 if let Ok(h) = sha256_file(&path.to_string_lossy()) {
-                    let rel = path
-                        .strip_prefix(root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .to_string();
+                    let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
                     out.push((rel, h));
                 }
             }
@@ -753,15 +756,69 @@ fn copy_pinned_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 fn bootstrap_stage_output_path(output_dir: &str, name: &str) -> String {
-    let mut path = PathBuf::from(output_dir).join(name);
+    // ALWAYS triple-scope stage outputs (incident 2026-08-31, deploy clobber:
+    // stage1/2/3 used to write to the BARE `bootstrap/stageN/simple` paths
+    // regardless of host, so a macOS bootstrap run wrote Mach-O blobs at the
+    // unscoped paths shared with every other platform via git. A build can now
+    // only ever write inside its own `<stage>/<host-triple>/` subdirectory;
+    // the bare paths are legacy and are never written by this tool again. See
+    // doc/08_tracking/bug/darwin_stage_binaries_clobber_bare_paths_2026-08-31.md).
+    let (stage, base) = match name.split_once('/') {
+        Some((s, b)) => (s, b),
+        None => ("", name),
+    };
+    let mut path = if stage.is_empty() {
+        PathBuf::from(output_dir).join(bootstrap_host_triple()).join(base)
+    } else {
+        PathBuf::from(output_dir).join(stage).join(bootstrap_host_triple()).join(base)
+    };
     if cfg!(target_os = "windows") && path.extension().is_none() {
         path.set_extension("exe");
     }
-    // `name` may include a per-stage subdir (e.g. "stage1/simple"); ensure it exists.
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     path.to_string_lossy().to_string()
+}
+
+/// The triple directory name this host's stage artifacts are scoped under.
+fn bootstrap_host_triple() -> &'static str {
+    if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        "aarch64-apple-darwin-macho"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
+        "x86_64-apple-darwin-macho"
+    } else if cfg!(target_os = "freebsd") && cfg!(target_arch = "x86_64") {
+        "x86_64-unknown-freebsd"
+    } else {
+        "unknown-host"
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_stage_path_tests {
+    use super::{bootstrap_host_triple, bootstrap_stage_output_path};
+
+    /// Reproduce for the 2026-08-31 deploy clobber: stage outputs must be
+    /// triple-scoped, never the bare `stageN/simple` path. FAILED before the
+    /// fix (path was `<out>/stage1/simple`).
+    #[test]
+    fn stage_outputs_are_triple_scoped_never_bare() {
+        let tmp = std::env::temp_dir().join("stage_path_scope_test");
+        let out = tmp.to_string_lossy().to_string();
+        for stage in ["stage1", "stage2", "stage3"] {
+            let p = bootstrap_stage_output_path(&out, &format!("{stage}/simple"));
+            let expect = format!("{stage}/{}/", bootstrap_host_triple());
+            assert!(
+                p.contains(&expect),
+                "stage output {p} is not triple-scoped (expected .../{expect}simple)"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 struct StageResult {
@@ -879,7 +936,9 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
                 if seed_supports_llvm(compiler) {
                     "llvm-lib"
                 } else {
-                    println!("  Backend auto: seed cannot use llvm (built without the 'llvm' feature) — using cranelift");
+                    println!(
+                        "  Backend auto: seed cannot use llvm (built without the 'llvm' feature) — using cranelift"
+                    );
                     "cranelift"
                 }
             }
@@ -942,8 +1001,17 @@ fn deploy_verified_bootstrap_stage(stage3_path: &str, output_dir: &str) -> Resul
     if let Some(parent) = deploy_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    std::fs::copy(stage3_path, &deploy_path)
-        .map_err(|e| format!("copy {stage3_path} -> {}: {e}", deploy_path.display()))?;
+    // Stage 3 now already builds at the triple-scoped path; a self-copy would
+    // truncate the artifact (fs::copy opens dst with create+truncate first).
+    let same = std::fs::canonicalize(stage3_path)
+        .ok()
+        .zip(std::fs::canonicalize(&deploy_path).ok())
+        .map(|(a, b)| a == b)
+        .unwrap_or(false);
+    if !same {
+        std::fs::copy(stage3_path, &deploy_path)
+            .map_err(|e| format!("copy {stage3_path} -> {}: {e}", deploy_path.display()))?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -958,20 +1026,10 @@ fn deploy_verified_bootstrap_stage(stage3_path: &str, output_dir: &str) -> Resul
 }
 
 fn bootstrap_stage3_deploy_path(output_dir: &str) -> PathBuf {
-    let triple = if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
-        "x86_64-unknown-linux-gnu"
-    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
-        "aarch64-unknown-linux-gnu"
-    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-        "aarch64-apple-darwin-macho"
-    } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
-        "x86_64-apple-darwin-macho"
-    } else if cfg!(target_os = "freebsd") && cfg!(target_arch = "x86_64") {
-        "x86_64-unknown-freebsd"
-    } else {
-        "unknown-host"
-    };
-    let mut path = PathBuf::from(output_dir).join("stage3").join(triple).join("simple");
+    let mut path = PathBuf::from(output_dir)
+        .join("stage3")
+        .join(bootstrap_host_triple())
+        .join("simple");
     if cfg!(target_os = "windows") {
         path.set_extension("exe");
     }
@@ -1122,8 +1180,7 @@ fn seed_supports_llvm(compiler: &str) -> bool {
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr)
                 );
-                !text.contains("'llvm' feature not enabled")
-                    && !text.contains("without the 'llvm' cargo feature")
+                !text.contains("'llvm' feature not enabled") && !text.contains("without the 'llvm' cargo feature")
             }
             // Could not run the probe: don't silently downgrade the backend.
             Err(_) => true,
@@ -1330,10 +1387,7 @@ mod bootstrap_determinism_tests {
         // empty closure. A fingerprint that quietly returned a stable digest
         // for an empty tree would make that branch unreachable and let a
         // bootstrap over zero source files report VERIFIED.
-        let dir = std::env::temp_dir().join(format!(
-            "bootstrap-determinism-empty-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("bootstrap-determinism-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(

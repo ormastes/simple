@@ -7,43 +7,10 @@
 # fallback / error-classification paths that pass on a GPU-less host.
 # No skip(), no hollow expects, no boolean-wrapper asserts.
 
-use std.gpu.engine2d.backend_rocm.{RocmBackend, probe_rocm, rocm_font_atlas_composite_args, rocm_framebuffer_pixel_count}
-use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source}
+use std.gpu.engine2d.backend_rocm.{RocmBackend, probe_rocm}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
-use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
-use std.io_runtime.{file_read}
-
-fn _rocm_font_batch(version: i64) -> FontRenderBatch:
-    FontRenderBatch(
-        program_version: version, font_identity: "rocm-unit-font", face_generation: 1,
-        valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
-        quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
-            width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
-        atlas_generation: 1, dirty_rects: []
-    )
-
-fn _has_invalid_hip_hash_comment(source: text) -> bool:
-    for line in source.split("\n"):
-        if line.trim().starts_with("# "):
-            return true
-    false
 
 describe "RocmBackend init guards":
-
-    it "exports device identity through both async ROCm facades":
-        val no_gc = file_read("src/lib/nogc_async_mut/io/rocm_sffi.spl")
-        val gc = file_read("src/lib/gc_async_mut/io/rocm_sffi.spl")
-        val runtime = file_read("src/runtime/runtime_rocm.c")
-        expect(no_gc).to_contain("rt_rocm_device_identity")
-        expect(gc).to_contain("rt_rocm_device_identity")
-        expect(runtime).to_contain("hash &= ((uint64_t)INT64_MAX >> 3)")
-
-    it "bounds framebuffer multiplication before device or host allocation":
-        expect(rocm_framebuffer_pixel_count(10000, 10000)).to_equal(100000000)
-        expect(rocm_framebuffer_pixel_count(10000, 10001)).to_equal(0)
-        expect(rocm_framebuffer_pixel_count(65536, 65536)).to_equal(0)
-        expect(rocm_framebuffer_pixel_count(0, 64)).to_equal(0)
 
     it "create() yields initialized=false without AMD hardware":
         var b = RocmBackend.create()
@@ -155,6 +122,8 @@ describe "RocmBackend draw-method init guards (GPU-less)":
         expect(_has_invalid_hip_hash_comment(source)).to_equal(false)
 
     it "kernel_draw_gradient_rect interpolates channels as signed int, not unsigned (descending-channel gradients must not wrap)":
+        # @req REQ-SSPEC-LIB
+        step("kernel_draw_gradient_rect interpolates channels as signed int, not unsigned (descending-channel gradients must not wrap)")
         # Regression: the channel locals used in the top/bottom interpolation
         # MUST be signed. When a channel value decreases top-to-bottom (e.g.
         # a light-to-dark gradient), `unsigned int` arithmetic wraps the

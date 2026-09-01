@@ -1,0 +1,153 @@
+use std.spec.{describe, expect, it}
+use app.test_audit.current_manifest.{
+    CURRENT_TEST_MANIFEST_SCHEMA,
+    TestAuditIdentity,
+    test_audit_identity,
+    test_audit_row,
+    test_audit_reconcile_row,
+    test_audit_deduplicate,
+    test_audit_render_manifest
+}
+use app.test_audit.aspect_dynload_plan.{
+    ASPECT_DYNLOAD_CURRENT_MANIFEST_PATH, aspect_dynload_plan_manifest}
+use app.io.mod.{file_read}
+
+val CURRENT_SHA = "c" * 64
+val OLD_SHA = "a" * 64
+
+fn current_identity() -> TestAuditIdentity:
+    test_audit_identity(
+        "/compiler/simple", CURRENT_SHA, "stage4", "interpreter",
+        "x86_64-unknown-linux-gnu", "build/receipts/current.sdn", "2026-08-19")
+
+fn declaration(path: text, case_id: text):
+    test_audit_row(
+        path, case_id, "", "executable",
+        test_audit_identity(
+            "/compiler/simple", CURRENT_SHA, "stage4", "interpreter",
+            "x86_64-unknown-linux-gnu", "", ""),
+        1, 0, 0, 0, 0, "declared in current source")
+
+fn current_result(path: text, case_id: text, failed: i64):
+    val passed = if failed == 0: 1 else: 0
+    test_audit_row(
+        path, case_id, "", "executable", current_identity(),
+        1, 1, passed, failed, 0, "bounded current receipt")
+
+fn historical_failure(path: text, case_id: text):
+    test_audit_row(
+        path, case_id, "", "executable",
+        test_audit_identity(
+            "/compiler/simple", OLD_SHA, "stage3", "interpreter",
+            "x86_64-unknown-linux-gnu", "doc/old-receipt.md", "2026-08-18"),
+        1, 1, 0, 1, 0, "old positive-control failure")
+
+fn rendered(rows) -> text:
+    match test_audit_render_manifest(rows, current_identity()):
+        case Ok(value): value
+        case Err(error): "ERROR:" + error
+
+describe "current test manifest receipt discrimination":
+    it "allows pass/fail only for an exact current compiler, mode, host, and receipt identity":
+        val current = test_audit_reconcile_row(
+            current_result("test/a_spec.spl", "case-a", 1), current_identity())
+        val old = test_audit_reconcile_row(
+            historical_failure("test/a_spec.spl", "case-a"), current_identity())
+        expect(current.current_status).to_equal("fail")
+        expect(old.current_status).to_equal("historical_only")
+
+    it "does not promote an executed row with no receipt":
+        val no_receipt = test_audit_row(
+            "test/a_spec.spl", "case-a", "", "executable",
+            test_audit_identity(
+                "/compiler/simple", CURRENT_SHA, "stage4", "interpreter",
+                "x86_64-unknown-linux-gnu", "", ""),
+            1, 1, 1, 0, 0, "unreceipted claim")
+        val reconciled = test_audit_reconcile_row(no_receipt, current_identity())
+        expect(reconciled.current_status).to_equal("historical_only")
+
+describe "current test manifest deterministic deduplication":
+    it "keeps the matching current receipt over its source-only declaration":
+        val source = declaration("test/a_spec.spl", "case-a")
+        val receipt = current_result("test/a_spec.spl", "case-a", 0)
+        val rows = test_audit_deduplicate([source, receipt], current_identity())
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].current_status).to_equal("pass")
+        expect(rows[0].receipt_path).to_equal("build/receipts/current.sdn")
+
+    it "retains historical evidence under its different compiler identity":
+        val rows = test_audit_deduplicate([
+            current_result("test/a_spec.spl", "case-a", 0),
+            historical_failure("test/a_spec.spl", "case-a")
+        ], current_identity())
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].compiler_sha256).to_equal(OLD_SHA)
+        expect(rows[0].current_status).to_equal("historical_only")
+        expect(rows[1].compiler_sha256).to_equal(CURRENT_SHA)
+        expect(rows[1].current_status).to_equal("pass")
+
+    it "emits byte-identical sorted output for reversed input":
+        val a = declaration("test/z_spec.spl", "z")
+        val b = declaration("test/a_spec.spl", "a")
+        expect(rendered([a, b])).to_equal(rendered([b, a]))
+
+    it "labels every rendered input explicitly bounded and reports case totals":
+        val text = rendered([current_result("test/a_spec.spl", "case-a", 0)])
+        expect(text).to_contain("audit_scope: bounded-input-only")
+        expect(text).to_contain("repo_wide: false")
+        expect(text).to_contain("overall_status: pass")
+        expect(text).to_contain("current_executed_cases: 1")
+        expect(text).to_contain("current_passed_cases: 1")
+        expect(text).to_contain("current_failed_cases: 0")
+
+describe "current test manifest row kinds":
+    it "distinguishes mirrors, pending, ignored, unavailable, comments, and fixtures":
+        val base = test_audit_identity(
+            "/compiler/simple", CURRENT_SHA, "stage4", "interpreter",
+            "x86_64-unknown-linux-gnu", "", "")
+        val rows = [
+            test_audit_row("test/unit/a_spec.spl", "@spec", "test/01_unit/a_spec.spl", "mirror", base, 1, 0, 0, 0, 1, "legacy mirror"),
+            test_audit_row("test/pending_spec.spl", "p", "", "pending", base, 1, 0, 0, 0, 0, "named blocker"),
+            test_audit_row("test/ignored_spec.spl", "i", "", "ignored", base, 1, 0, 0, 0, 1, "ignored by policy"),
+            test_audit_row("test/host_spec.spl", "u", "", "unavailable", base, 1, 0, 0, 0, 0, "host unavailable"),
+            test_audit_row("doc/plan.md", "c", "", "comment", base, 0, 0, 0, 0, 0, "prose only"),
+            test_audit_row("test/fixtures/a.spl", "f", "", "fixture", base, 0, 0, 0, 0, 0, "support code")
+        ]
+        val text = rendered(rows)
+        expect(text).to_contain("schema: " + CURRENT_TEST_MANIFEST_SCHEMA)
+        expect(text).to_contain("kind_mirror: 1")
+        expect(text).to_contain("kind_pending: 1")
+        expect(text).to_contain("kind_ignored: 1")
+        expect(text).to_contain("kind_unavailable: 1")
+        expect(text).to_contain("kind_comment: 1")
+        expect(text).to_contain("kind_fixture: 1")
+        expect(text).to_contain("current_status: dropped")
+        expect(text).to_contain("overall_status: fail")
+        expect(text).to_contain("blocker_rows: 2")
+
+describe "aspect/dynload checked-in current manifest":
+    it "is byte-identical to the deterministic audit output":
+        match aspect_dynload_plan_manifest():
+            case Err(error):
+                expect("ERROR:" + error).to_equal("no audit error")
+            case Ok(actual):
+                expect(actual).to_equal(file_read(ASPECT_DYNLOAD_CURRENT_MANIFEST_PATH))
+
+    it "keeps historical rows and reconciles all exact focused receipts":
+        val text = file_read(ASPECT_DYNLOAD_CURRENT_MANIFEST_PATH)
+        expect(text).to_contain("audit_scope: bounded-input-only")
+        expect(text).to_contain("repo_wide: false")
+        expect(text).to_contain("overall_status: fail")
+        expect(text).to_contain("blocker_rows: 10")
+        expect(text).to_contain("row_count: 53")
+        expect(text).to_contain("status_pass: 22")
+        expect(text).to_contain("status_fail: 2")
+        expect(text).to_contain("status_not_run: 22")
+        expect(text).to_contain("status_historical_only: 7")
+        expect(text).to_contain("current_executed_cases: 151")
+        expect(text).to_contain("current_passed_cases: 147")
+        expect(text).to_contain("current_failed_cases: 4")
+        expect(text).to_contain("final focused receipt 12/13")
+        expect(text).to_contain("final executed receipt before reset patch was 2/5")
+        expect(text).to_contain("full I/O parity benchmark blocked")
+        expect(text).to_contain("historical expected 33 got 0")

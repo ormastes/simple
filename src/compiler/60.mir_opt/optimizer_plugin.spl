@@ -9,6 +9,11 @@ use compiler.mir_opt.mir_opt.mod.{
 }
 use compiler.mir.mir_instructions.{MirFunction, MirModule}
 use compiler.mir_opt.optimizer_manifest.{DynamicPassDescriptor}
+use std.crypto.sha256.{sha256_text}
+use compiler.mir_opt.optimizer_kernel_contract.{
+    OptimizerPluginIdentityV1, OptimizerKernelSelectionV1,
+    optimizer_kernel_select
+}
 
 
 # ============================================================================
@@ -267,6 +272,13 @@ struct OptimizerPluginRegistry:
 fn optimizer_plugin_registry_new() -> OptimizerPluginRegistry:
     OptimizerPluginRegistry(plugins: [])
 
+fn optimizer_plugin_builtin_registry(level: OptLevel) -> OptimizerPluginRegistry:
+    var registry = optimizer_plugin_registry_new()
+    for descriptor in mir_pass_descriptor_registry():
+        registry = optimizer_plugin_registry_register(
+            registry, optimizer_plugin_from_mir_descriptor(descriptor, ApplyMode.Static, level))
+    registry
+
 fn optimizer_plugin_registry_register(registry: OptimizerPluginRegistry, plugin: OptimizerPluginDescriptor) -> OptimizerPluginRegistry:
     var plugins = registry.plugins
     plugins.push(plugin)
@@ -318,6 +330,65 @@ fn optimizer_plugin_registry_names(registry: OptimizerPluginRegistry) -> [text]:
 
 fn optimizer_plugin_registry_count(registry: OptimizerPluginRegistry) -> i64:
     registry.plugins.len()
+
+fn optimizer_plugin_identity_v1(plugin: OptimizerPluginDescriptor) -> OptimizerPluginIdentityV1:
+    val interface_text = "scope={plugin_scope_name(plugin.plugin_scope)};mode={apply_mode_name(plugin.apply_mode)};cost={plugin.cost_class}"
+    var implementation_text = "name={plugin.name};aliases={plugin.aliases.join(",")};patterns={plugin.source_patterns.join(",")};interface={interface_text}"
+    match plugin.mir_pass_kind:
+        Some(kind): implementation_text = implementation_text + ";mir-kind={kind}"
+        nil: implementation_text = implementation_text + ";mir-kind=none"
+    OptimizerPluginIdentityV1(
+        name: plugin.name,
+        version: "builtin-v1",
+        interface_digest: sha256_text("simple/optimizer-plugin-interface/v1;" + interface_text),
+        implementation_digest: sha256_text("simple/optimizer-plugin-implementation/v1;" + implementation_text),
+    )
+
+fn optimizer_plugin_registry_kernel_identities(registry: OptimizerPluginRegistry) -> [OptimizerPluginIdentityV1]:
+    var identities: [OptimizerPluginIdentityV1] = []
+    for plugin in registry.plugins:
+        identities.push(optimizer_plugin_identity_v1(plugin))
+    identities
+
+fn optimizer_plugin_registry_select_kernel(
+    registry: OptimizerPluginRegistry,
+    requested_name: text,
+    allow_legacy_fallback: bool,
+    legacy_name: text,
+) -> Result<OptimizerKernelSelectionV1, text>:
+    match optimizer_plugin_registry_lookup(registry, requested_name):
+        Some(requested_plugin):
+            optimizer_kernel_select(
+                optimizer_plugin_registry_kernel_identities(registry), requested_name,
+                false, optimizer_plugin_identity_v1(requested_plugin))
+        nil:
+            if not allow_legacy_fallback:
+                return Err("optimizer plugin unavailable: " + requested_name)
+            match optimizer_plugin_registry_lookup(registry, legacy_name):
+                Some(legacy_plugin):
+                    optimizer_kernel_select(
+                        optimizer_plugin_registry_kernel_identities(registry), requested_name,
+                        true, optimizer_plugin_identity_v1(legacy_plugin))
+                nil:
+                    Err("legacy optimizer plugin unavailable: " + legacy_name)
+
+fn optimizer_plugin_registry_run_selected_on_function(
+    registry: OptimizerPluginRegistry,
+    selection: OptimizerKernelSelectionV1,
+    func: MirFunction,
+) -> Result<MirFunction, text>:
+    match optimizer_plugin_registry_lookup(registry, selection.identity.name):
+        Some(plugin): optimizer_plugin_run_on_function(plugin, func)
+        nil: Err("selected optimizer plugin unavailable at execution: " + selection.identity.name)
+
+fn optimizer_plugin_registry_run_selected_on_module(
+    registry: OptimizerPluginRegistry,
+    selection: OptimizerKernelSelectionV1,
+    module: MirModule,
+) -> Result<MirModule, text>:
+    match optimizer_plugin_registry_lookup(registry, selection.identity.name):
+        Some(plugin): optimizer_plugin_run_on_module(plugin, module)
+        nil: Err("selected optimizer plugin unavailable at execution: " + selection.identity.name)
 
 
 # ============================================================================

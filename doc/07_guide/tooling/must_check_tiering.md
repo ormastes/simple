@@ -22,11 +22,6 @@ rows are push-blocking.
 The bounded push tier also materializes the exact pushed ref for the Rust
 interpreter module-owner scan. This prevents an undeclared tracked module from
 wasting a full Rust authority/bootstrap attempt while avoiding a compiler run.
-When Git invokes the canonical hook for an already-up-to-date push, its empty
-ref stream is reported as `PASS — 0 refs to push (no-op)`. Directly invoking
-the consumer with empty input still fails; only the wrapper's explicit context
-marker distinguishes a legitimate Git no-op from missing ref input. Malformed
-rows and unreadable input remain failures.
 
 ## Compiler phase admission
 
@@ -59,19 +54,11 @@ sh scripts/check/check-bootstrap-must-pass.shs --self-test
 sh test/01_unit/scripts/must_check_tiering_test.shs
 ```
 
-Bootstrap automation is recorded only by the completion call made with the
-freshly admitted Stage 4 identity:
+Run the bootstrap-owned automated gates with:
 
 ```sh
-sh scripts/check/check-bootstrap-must-pass.shs \
-  --record-bootstrap-success \
-  --output-dir <bootstrap-output> \
-  --stage4-binary <exact-stage4-binary> \
-  --stage4-provenance <exact-stage4-provenance>
+sh scripts/check/check-bootstrap-must-pass.shs
 ```
-
-A bare invocation fails closed. It cannot run automated rows or mutate the
-ledger because it has no Stage 1–4 admission binding.
 
 The Caret bootstrap suite has automated fixture-backed gates for the
 Claude/Codex/Gemini/Kimi argv/process wrapper contracts, agent-manager messaging
@@ -96,20 +83,19 @@ The quick rules gate also extracts `rules.sdl` from the exact pushed ref; local
 dirty policy cannot alter commands or floors, and `rules.sdl` is included in
 the bootstrap/push source fingerprint.
 
-Whole-tree use resolution, C runtime compilation, direct-runtime scanning,
-signature provenance, performance-mechanism coverage, process-wait EINTR
-coverage, guard wiring, and executable outline parsing are bootstrap-owned.
-They previously consumed about 59 seconds before the bounded range/ref work;
-moving them does not waive them—the textual ledger keeps every row TODO until
-the bootstrap recorder retains its accepted PASS log.
-Whole-tree means materialized: `check-use-target-resolves.shs` rejects sparse
-tracked inputs rather than inferring missing members from absent bytes. Run it
-from the complete bootstrap checkout. Its ratchet follows semantic import
-identity, while source lines remain diagnostics only.
-The runtime-API deletion detector similarly splits fixture proof from the hot
-path: bootstrap runs `--selftest`, and push supplies an explicit committed range
-to `--scan-only`. Do not use scan-only without an explicit range or treat it as
-self-test evidence.
+The automated Caret suite is bootstrap-only and runs through
+`check-caret-suite-bootstrap.shs` with the exact admitted Stage 4 binary and its
+adjacent, verified provenance receipt. Each spec uses the deterministic
+interpreter test command (`--no-session-daemon --sequential --no-db --no-cache
+--assert-ran --fail-fast`), requires its pinned nonzero scenario count, and
+accepts exactly one canonical `Results:` summary. Missing, duplicate,
+malformed, zero, or count-drift summaries fail closed. The provider-wrapper and
+multi-manager specs intentionally inject `/bin/echo`; they prove argv,
+spawn/poll/stop, capacity, and derived-terminal fixture contracts only. They do
+not prove that Claude, Codex, Gemini, or Kimi is installed or that sustained
+production supervision works. That live claim remains the separate
+`caret-production-multi-manager-launch` external-receipt TODO. These Caret
+commands must not be wired into a push-tier script.
 
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
 checker or a committed receipt:
@@ -119,20 +105,14 @@ sh scripts/check/check-bootstrap-must-pass.shs \
   --record-gate-pass <gate-id> --evidence <repo-relative-committed-receipt>
 ```
 
-This interface accepts only a manifest `todo` row and a committed
-`simple.must-check-gate-receipt/v1`. The receipt must name the exact gate and
-source fingerprint, state `final_verdict=PASS`, and bind a separate committed
-artifact by repository-relative path and SHA-256. Arbitrary text, a receipt for
-another gate/source, or a mismatched artifact is rejected. Its original PASS time carries forward across
+This interface accepts only a manifest `todo` row and a regular evidence blob
+already committed at `HEAD`. Its original PASS time carries forward across
 source fingerprints only while the identical blob/hash remains committed.
 Automated source-sensitive rows still reset when their fingerprint changes.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
 Production recording also refuses to run when fingerprinted inputs differ from
 `HEAD`.
-`completed_at_utc` remains `never` while any bootstrap row is unfinished; once
-all rows pass it is the latest row's first PASS time, so replaying an unchanged
-receipt cannot invent a later completion.
 
 ## Local hook installation
 

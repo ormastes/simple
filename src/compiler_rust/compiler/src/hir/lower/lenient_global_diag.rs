@@ -445,7 +445,10 @@ foo.obj : error LNK2019: unresolved external symbol _widget_id referenced in fun
         // Option<String> and stops at the first hit, which would attribute only
         // one of a multi-symbol failure.
         let output = "undefined symbol: alpha\nundefined symbol: beta\nundefined symbol: gamma\n";
-        assert_eq!(undefined_symbols_in_linker_output(output), vec!["alpha", "beta", "gamma"]);
+        assert_eq!(
+            undefined_symbols_in_linker_output(output),
+            vec!["alpha", "beta", "gamma"]
+        );
     }
 
     #[test]

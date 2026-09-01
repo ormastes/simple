@@ -1,0 +1,364 @@
+# codex-impl
+# Observe-only parser/checker for the unified protected-ref policy.
+
+use std.common.crypto.sha256.{sha256_text}
+
+struct ProtectedRefPolicy:
+    ref_pattern: text
+    mutator: text
+    update: text
+    force: text
+    gate_profile: text
+    server_enforcement_required: bool
+
+struct LifecycleVcsPolicy:
+    schema: text
+    digest: text
+    refs: [ProtectedRefPolicy]
+    valid: bool
+    error: text
+
+struct ReviewAdmissionPolicy:
+    preference: text
+    status_context: text
+    independent_schema: text
+    verifier_class: text
+    minimum_effort: text
+    fallback_schema: text
+    fallback_reason: text
+    authority_id: text
+    max_ttl_seconds: text
+    exact_binding: bool
+    valid: bool
+    error: text
+
+fn _policy_value(line: text) -> text:
+    val idx = line.index_of(":")
+    if idx < 0:
+        return ""
+    line[idx + 1:].trim().replace("\"", "")
+
+fn _policy_indent(line: text) -> i64:
+    var count = 0
+    while count < line.len() and line.char_code_at(count) == 32:
+        count = count + 1
+    count
+
+fn _review_policy_result(
+    preference: text,
+    status_context: text,
+    independent_schema: text,
+    verifier_class: text,
+    minimum_effort: text,
+    fallback_schema: text,
+    fallback_reason: text,
+    authority_id: text,
+    max_ttl_seconds: text,
+    exact_binding: bool,
+    error: text
+) -> ReviewAdmissionPolicy:
+    ReviewAdmissionPolicy(
+        preference: preference,
+        status_context: status_context,
+        independent_schema: independent_schema,
+        verifier_class: verifier_class,
+        minimum_effort: minimum_effort,
+        fallback_schema: fallback_schema,
+        fallback_reason: fallback_reason,
+        authority_id: authority_id,
+        max_ttl_seconds: max_ttl_seconds,
+        exact_binding: exact_binding,
+        valid: error == "",
+        error: error
+    )
+
+fn parse_review_admission_policy(payload: text) -> ReviewAdmissionPolicy:
+    var in_live_policy = false
+    var in_review_admission = false
+    var area = ""
+    var nested = ""
+    var preference = ""
+    var status_context = ""
+    var independent_schema = ""
+    var verifier_class = ""
+    var minimum_effort = ""
+    var independent_verdict = ""
+    var fallback_schema = ""
+    var fallback_only_when = ""
+    var fallback_reason = ""
+    var authority_type = ""
+    var authority_id = ""
+    var attestor_type = ""
+    var attestor_id = ""
+    var max_ttl_seconds = ""
+    var independent_exact_pr = false
+    var independent_exact_session = false
+    var independent_exact_head = false
+    var independent_exact_checks = false
+    var fallback_exact_pr = false
+    var fallback_exact_session = false
+    var fallback_exact_head = false
+    var fallback_exact_checks = false
+    var independent_time = false
+    var independent_expiry = false
+    var independent_audit = false
+    var fallback_time = false
+    var fallback_expiry = false
+    var fallback_audit = false
+    var fallback_unavailable_receipt = false
+    var server_head = false
+    var caller_head_denied = false
+    var later_push_invalidates = false
+    var audit_artifact = false
+    var admin_bypass_denied = false
+    var provider_projection = false
+    var live_apply_blocked = false
+    for raw in payload.split("\n"):
+        val line = raw.trim()
+        val indent = _policy_indent(raw)
+        if indent == 2:
+            in_live_policy = line == "live_policy:"
+            in_review_admission = false
+            area = ""
+            nested = ""
+        elif in_live_policy and indent == 4:
+            in_review_admission = line == "review_admission:"
+            area = ""
+            nested = ""
+        elif in_review_admission and indent == 6:
+            nested = ""
+            if line == "independent_receipt:": area = "independent"
+            elif line == "owner_attested_fallback:": area = "fallback"
+            elif line == "status_authority:": area = "status_authority"
+            elif line.starts_with("schema:"):
+                independent_schema = _policy_value(line)
+                fallback_schema = independent_schema
+            elif line.starts_with("preference:"): preference = _policy_value(line)
+            elif line.starts_with("status_context:"): status_context = _policy_value(line)
+            elif line == "caller_supplied_head_sha: deny": caller_head_denied = true
+            elif line == "server_resolve_current_pr_head: required": server_head = true
+            elif line == "later_push_invalidates: required": later_push_invalidates = true
+            elif line == "audit_artifact: required": audit_artifact = true
+            elif line == "admin_bypass: deny": admin_bypass_denied = true
+            elif line == "live_apply: unsupported_until_external_signed_broker": live_apply_blocked = true
+        elif in_review_admission and indent == 8:
+            nested = ""
+            if area == "independent":
+                if line.starts_with("verifier_class:"): verifier_class = _policy_value(line)
+                elif line.starts_with("minimum_effort:"): minimum_effort = _policy_value(line)
+                elif line.starts_with("verdict:"): independent_verdict = _policy_value(line)
+                elif line == "pr_number: exact": independent_exact_pr = true
+                elif line == "session_id: exact": independent_exact_session = true
+                elif line == "head_sha: exact": independent_exact_head = true
+                elif line == "required_checks: exact": independent_exact_checks = true
+                elif line == "issued_at: required": independent_time = true
+                elif line == "expires_at: required": independent_expiry = true
+                elif line.starts_with("max_ttl_seconds:"): max_ttl_seconds = _policy_value(line)
+                elif line == "audit_receipt_sha256: required": independent_audit = true
+            elif area == "fallback":
+                if line.starts_with("only_when:"): fallback_only_when = _policy_value(line)
+                elif line.starts_with("reason:"): fallback_reason = _policy_value(line)
+                elif line == "attestor:": nested = "attestor"
+                elif line == "pr_number: exact": fallback_exact_pr = true
+                elif line == "session_id: exact": fallback_exact_session = true
+                elif line == "head_sha: exact": fallback_exact_head = true
+                elif line == "required_checks: exact": fallback_exact_checks = true
+                elif line == "attested_at: required": fallback_time = true
+                elif line == "expires_at: required": fallback_expiry = true
+                elif line.starts_with("max_ttl_seconds:") and max_ttl_seconds != _policy_value(line): max_ttl_seconds = ""
+                elif line == "audit_receipt_sha256: required": fallback_audit = true
+                elif line == "unavailable_verifier_receipt_sha256: required": fallback_unavailable_receipt = true
+            elif area == "status_authority":
+                if line.starts_with("type:"): authority_type = _policy_value(line)
+                elif line.starts_with("integration_id:"): authority_id = _policy_value(line)
+                elif line == "provider_projection: .github/review-admission-broker.json": provider_projection = true
+        elif in_review_admission and indent == 10 and area == "fallback" and nested == "attestor":
+            if line.starts_with("type:"): attestor_type = _policy_value(line)
+            elif line.starts_with("id:"): attestor_id = _policy_value(line)
+    val exact_binding = independent_exact_pr and independent_exact_session and independent_exact_head and independent_exact_checks and fallback_exact_pr and fallback_exact_session and fallback_exact_head and fallback_exact_checks
+    if preference != "independent_high_capability_model":
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "independent high-capability review is not preferred")
+    if independent_schema != "spipe-review-admission/1" or verifier_class != "high_capability_model" or minimum_effort != "high" or independent_verdict != "pass":
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "independent review receipt contract is incomplete")
+    if fallback_schema != "spipe-review-admission/1" or fallback_only_when != "independent_verifier_unavailable" or fallback_reason != "no eligible independent reviewer" or not fallback_unavailable_receipt:
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "owner-attested fallback contract is incomplete")
+    if authority_type != "GitHubApp" or authority_id != "provider_config_required" or not provider_projection or attestor_type != "User" or attestor_id != "2378857":
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "review admission authority is incomplete")
+    if not exact_binding or not independent_time or not independent_expiry or not independent_audit or not fallback_time or not fallback_expiry or not fallback_audit:
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "review admission binding is incomplete")
+    if status_context != "SPipe Review Admission" or max_ttl_seconds != "86400" or not server_head or not caller_head_denied or not later_push_invalidates or not audit_artifact or not admin_bypass_denied or not live_apply_blocked:
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "review admission provider boundary is incomplete")
+    _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "")
+
+fn _canonical_clause_error(payload: text) -> text:
+    var section = ""
+    var subsection = ""
+    var jj_workspace = false
+    var remote_branch = false
+    var unique_workspace = false
+    var unique_branch = false
+    var branch_pattern = false
+    var main_worktree = false
+    var direct_update = false
+    var raw_default = false
+    var authority = false
+    var reason = false
+    var audit = false
+    var expiry = false
+    for raw in payload.split("\n"):
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        val indent = _policy_indent(raw)
+        if indent == 2:
+            section = ""
+            subsection = ""
+            if line == "authoring:": section = "authoring"
+            elif line == "raw_mutation:": section = "raw_mutation"
+        elif indent == 4:
+            subsection = ""
+            if section == "authoring" and line == "ordinary_change:": subsection = "ordinary_change"
+            elif section == "raw_mutation" and line == "break_glass:": subsection = "break_glass"
+            elif section == "raw_mutation" and line == "default: deny": raw_default = true
+        elif indent == 6 and section == "authoring" and subsection == "ordinary_change":
+            if line == "jj_workspace: preferred": jj_workspace = true
+            elif line == "remote_branch: not_required": remote_branch = true
+            elif line == "unique_workspace: required": unique_workspace = true
+            elif line == "unique_branch: required": unique_branch = true
+            elif line == "branch_pattern: work/*": branch_pattern = true
+            elif line == "main_worktree: read_only": main_worktree = true
+            elif line == "direct_protected_ref_update: deny": direct_update = true
+        elif indent == 6 and section == "raw_mutation" and subsection == "break_glass":
+            if line == "authority: maintainer": authority = true
+            elif line == "reason: required": reason = true
+            elif line == "audit: required": audit = true
+            elif line == "expiry: required": expiry = true
+    val legacy_authoring = jj_workspace and remote_branch
+    val isolated_authoring = unique_workspace and unique_branch and branch_pattern and main_worktree
+    if not legacy_authoring and not isolated_authoring: return "required isolated authoring clauses are missing"
+    if not direct_update: return "required authoring clause is missing: direct_protected_ref_update: deny"
+    if not raw_default: return "required raw-mutation clause is missing: default: deny"
+    if not authority: return "required break-glass clause is missing: authority: maintainer"
+    if not reason: return "required break-glass clause is missing: reason: required"
+    if not audit: return "required break-glass clause is missing: audit: required"
+    if not expiry: return "required break-glass clause is missing: expiry: required"
+    ""
+
+fn parse_lifecycle_vcs_policy(payload: text) -> LifecycleVcsPolicy:
+    val digest = sha256_text(payload)
+    var schema = ""
+    var refs: [ProtectedRefPolicy] = []
+    var ref_pattern = ""
+    var mutator = ""
+    var update = ""
+    var force = ""
+    var gate_profile = ""
+    var server_enforcement_required = false
+    for raw in payload.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("schema:"):
+            schema = _policy_value(line)
+        elif line.starts_with("- ref:") or line.starts_with("- ref_pattern:"):
+            if ref_pattern != "":
+                refs.push(ProtectedRefPolicy(ref_pattern: ref_pattern, mutator: mutator, update: update, force: force, gate_profile: gate_profile, server_enforcement_required: server_enforcement_required))
+            ref_pattern = _policy_value(line)
+            mutator = ""
+            update = ""
+            force = ""
+            gate_profile = ""
+            server_enforcement_required = false
+        elif line.starts_with("mutator:"):
+            mutator = _policy_value(line)
+        elif line.starts_with("update:"):
+            update = _policy_value(line)
+        elif line.starts_with("force:"):
+            force = _policy_value(line)
+        elif line.starts_with("required_profile:"):
+            gate_profile = _policy_value(line)
+        elif line.starts_with("server_enforcement_required:"):
+            server_enforcement_required = _policy_value(line) == "true"
+    if ref_pattern != "":
+        refs.push(ProtectedRefPolicy(ref_pattern: ref_pattern, mutator: mutator, update: update, force: force, gate_profile: gate_profile, server_enforcement_required: server_enforcement_required))
+    if schema != "spipe-vcs/2" and schema != "spipe-vcs/3":
+        return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "unsupported or missing schema")
+    if refs.len() == 0:
+        return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "no protected refs declared")
+    var seen: [text] = []
+    for ref_policy in refs:
+        if ref_policy.ref_pattern == "" or ref_policy.mutator == "" or ref_policy.update == "" or ref_policy.force == "" or ref_policy.gate_profile == "":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref policy is incomplete")
+        if seen.contains(ref_policy.ref_pattern):
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref policy is contradictory or duplicated")
+        seen.push(ref_policy.ref_pattern)
+        if not ref_policy.mutator.starts_with("sj."):
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref mutator is not owned by SJ")
+        if ref_policy.force != "deny" and not (ref_policy.ref_pattern == "review/*" and ref_policy.force == "lease_only"):
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref force policy must deny")
+        if ref_policy.ref_pattern == "integration/main" and ref_policy.update != "compare_and_swap":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "local integration ref must use compare-and-swap")
+        if ref_policy.ref_pattern.starts_with("refs/tags/") and ref_policy.update != "immutable_annotated_signed":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "release tags must be immutable, annotated, and signed")
+        if ref_policy.ref_pattern == "review/*" and ref_policy.update != "compare_and_swap":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "review refs must use compare-and-swap")
+        if ref_policy.ref_pattern == "candidate/*" and ((schema == "spipe-vcs/2" and ref_policy.update != "compare_and_swap") or (schema == "spipe-vcs/3" and ref_policy.update != "create_once")):
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "candidate ref update policy does not match its schema")
+        if ref_policy.ref_pattern == "recovery/*" and ref_policy.update != "append_only":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "recovery refs must be append-only")
+        if not ref_policy.server_enforcement_required:
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref does not require independent server enforcement")
+    LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: true, error: "")
+
+fn lifecycle_policy_ref(policy: LifecycleVcsPolicy, target_ref: text) -> ProtectedRefPolicy?:
+    for ref_policy in policy.refs:
+        if ref_policy.ref_pattern == target_ref:
+            return ref_policy
+        if ref_policy.ref_pattern.ends_with("/*") and target_ref.starts_with(ref_policy.ref_pattern[0:ref_policy.ref_pattern.len() - 1]):
+            return ref_policy
+        if ref_policy.ref_pattern.ends_with("*") and target_ref.starts_with(ref_policy.ref_pattern[0:ref_policy.ref_pattern.len() - 1]):
+            return ref_policy
+    nil
+
+fn parse_canonical_lifecycle_vcs_policy(payload: text) -> LifecycleVcsPolicy:
+    val policy = parse_lifecycle_vcs_policy(payload)
+    if not policy.valid:
+        return policy
+    val required_refs = ["main", "integration/main", "release/*", "refs/tags/v*", "review/*", "candidate/*", "recovery/*"]
+    for required_ref in required_refs:
+        var found = false
+        for ref_policy in policy.refs:
+            if ref_policy.ref_pattern == required_ref:
+                found = true
+        if not found:
+            return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "required protected ref class is missing: " + required_ref)
+    val main = lifecycle_policy_ref(policy, "main").?
+    val integration = lifecycle_policy_ref(policy, "integration/main").?
+    val release = lifecycle_policy_ref(policy, "release/1.0").?
+    val tag = lifecycle_policy_ref(policy, "refs/tags/v1.0.0").?
+    val review = lifecycle_policy_ref(policy, "review/CHG-1").?
+    val candidate = lifecycle_policy_ref(policy, "candidate/1.0.0/RC-1").?
+    val recovery = lifecycle_policy_ref(policy, "recovery/INC-1/20260825").?
+    if main.mutator != "sj.integrate" or main.update != "fast_forward_or_merge_queue" or main.force != "deny" or main.gate_profile != "standard":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "public main policy does not match the canonical protected contract")
+    if integration.mutator != "sj.integrate" or integration.update != "compare_and_swap" or integration.force != "deny" or integration.gate_profile != "standard":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "local integration policy does not match the canonical protected contract")
+    if release.mutator != "sj.integrate_release" or release.update != "fast_forward" or release.force != "deny" or release.gate_profile != "release_line":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "release-line policy does not match the canonical protected contract")
+    if tag.mutator != "sj.create_release_tag" or tag.update != "immutable_annotated_signed" or tag.force != "deny" or tag.gate_profile != "release":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "release-tag policy does not match the canonical protected contract")
+    if review.mutator != "sj.publish_review_ref" or review.update != "compare_and_swap" or review.force != "lease_only" or review.gate_profile != "review_projection":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "review-ref policy does not match the canonical protected contract")
+    val expected_candidate_update = if policy.schema == "spipe-vcs/3": "create_once" else: "compare_and_swap"
+    if candidate.mutator != "sj.stage_release_candidate" or candidate.update != expected_candidate_update or candidate.force != "deny" or candidate.gate_profile != "release":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "candidate-ref policy does not match the canonical protected contract")
+    if recovery.mutator != "sj.recover" or recovery.update != "append_only" or recovery.force != "deny" or recovery.gate_profile != "recovery":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "recovery-ref policy does not match the canonical protected contract")
+    val clause_error = _canonical_clause_error(payload)
+    if clause_error != "":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: clause_error)
+    if policy.schema == "spipe-vcs/3":
+        val review_policy = parse_review_admission_policy(payload)
+        if not review_policy.valid:
+            return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: review_policy.error)
+    policy
+
+export ProtectedRefPolicy, LifecycleVcsPolicy, ReviewAdmissionPolicy, parse_lifecycle_vcs_policy, parse_canonical_lifecycle_vcs_policy, parse_review_admission_policy, lifecycle_policy_ref

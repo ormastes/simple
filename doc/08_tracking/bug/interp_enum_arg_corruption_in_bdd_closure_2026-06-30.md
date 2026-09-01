@@ -3,8 +3,7 @@
 - Date: 2026-06-30
 - Component: interpreter / test runner (BDD it-block closure evaluation)
 - Severity: medium (breaks otherwise-correct specs; not a library defect)
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- Status: RESOLVED 2026-06-30 — seed fix landed (`block_execution.rs` closure
   `Node::If` handler now walks `elif_branches`).
 
 > NOTE: the original title/hypothesis below ("enum value corrupted when passed

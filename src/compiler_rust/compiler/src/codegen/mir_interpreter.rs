@@ -116,7 +116,15 @@ impl CodegenEmitter for MirInterpreterEmitter {
         self.set(dest, self.get(src));
         Ok(())
     }
-    fn emit_aggregate_copy(&mut self, dest: VReg, src: VReg, _byte_size: u32, _deep_fields: &[crate::mir::AggregateFieldCopy]) -> Result<(), Self::Error> {
+    fn emit_aggregate_copy(
+        &mut self,
+        dest: VReg,
+        src: VReg,
+        _byte_size: u32,
+        _type_name: Option<&str>,
+        _owner_has_vtable: Option<bool>,
+        _deep_fields: &[crate::mir::AggregateFieldCopy],
+    ) -> Result<(), Self::Error> {
         // The MIR interpreter models registers as plain i64 with no heap, so
         // there is no storage to duplicate. Aliasing here is the ONLY
         // faithful answer available; it is not a claim that the copy happened.

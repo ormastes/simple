@@ -1,7 +1,6 @@
 ---
 id: ecs_entity_generation_not_bumped_on_reuse_2026-07-27
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+status: FIXED
 fixed: 2026-07-27
 fixed_by: lane ECSGEN
 severity: high

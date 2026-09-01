@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+# Source-only CUDA owner gate. This proves declaration authority, exact
+# pointer-write return shape, and registry presence; it does not claim that a
+# provider artifact is signed or semantically verified.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_sync_mut/io/cuda_sffi.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+provider="$root/src/compiler_rust/runtime/src/cuda_runtime.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 25 ]
+[ "$(grep -c '^@unsafe(' "$module")" -eq 25 ]
+
+awk '
+    /^@unsafe\(.*capabilities: \[[^]]*ffi/ { tagged = 1; next }
+    /^extern fn / {
+        declarations++
+        if (tagged) safe_authority++
+    }
+    { tagged = 0 }
+    END { exit !(declarations == 25 && safe_authority == declarations) }
+' "$module"
+
+grep -q '^extern fn rt_ptr_write_i64(ptr: i64, offset: i64, value: i64)$' "$module"
+grep -q '^extern fn rt_ptr_write_u8(ptr: i64, offset: i64, value: i64)$' "$module"
+
+for raw in $(sed -n 's/^extern fn \([A-Za-z0-9_]*\).*/\1/p' "$module"); do
+    # Accept formatted multi-line registration macros by matching the quoted
+    # identity, rather than requiring the symbol on the macro-opening line.
+    grep -q "\"$raw\"" "$registry"
+    grep -q "\"$raw\"" "$interpreter"
+done
+
+# Error text is borrowed static storage: no per-call CString allocation/leak.
+grep -q 'pub extern "C" fn rt_cuda_get_error_string' "$provider"
+! sed -n '/pub extern "C" fn rt_cuda_get_error_string/,/^}/p' "$provider" \
+    | grep -q 'CString::new\|into_raw'
+grep -q 'c"CUDA_ERROR_UNKNOWN"\.as_ptr()' "$provider"
+grep -q 'static CUDA_DEVICE_NAMES: OnceLock<Mutex<HashMap<i64, CString>>>' "$provider"
+! sed -n '/pub extern "C" fn rt_cuda_device_name(device:/,/^}/p' "$provider" \
+    | grep -q 'into_raw'
+grep -q 'names\.entry(device)\.or_insert(name)\.as_ptr()' "$provider"
+
+echo "I/O CUDA SFFI authority: PASS (25/25 unsafe contracts; both-lane identities; exact void writes; cached/static text)"

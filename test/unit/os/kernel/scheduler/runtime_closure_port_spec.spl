@@ -1,0 +1,40 @@
+"""Model-only tests for the bounded scheduler closure lifecycle port.
+
+This is not hardware or userspace-thread evidence.  It verifies handle
+generation, bounded admission, step completion/fault, one-shot join, and
+detach invalidation before a stack/trampoline adapter is attached.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.scheduler.runtime_closure_port.{RuntimeClosurePortV1, RuntimeClosureEntry, RuntimeClosureResult, RUNTIME_CLOSURE_SLOT_CAP}
+
+fn _handle(result: RuntimeClosureResult) -> i64:
+    case result:
+        RuntimeClosureResult.Accepted(handle): handle
+        _: -1
+
+describe "runtime closure port v1 model":
+    it "runs add and consumes its handle exactly once":
+        var port = RuntimeClosurePortV1.new()
+        val accepted = port.spawn(RuntimeClosureEntry.Add, 2, 3)
+        expect accepted is RuntimeClosureResult.Accepted(_handle(accepted))
+        val handle = _handle(accepted)
+        expect port.step() == 1
+        expect port.join(handle) == RuntimeClosureResult.Joined(5)
+        expect port.join(handle) == RuntimeClosureResult.Invalid
+
+    it "rejects forged handles and faults explicitly":
+        var port = RuntimeClosurePortV1.new()
+        val accepted = port.spawn(RuntimeClosureEntry.Fault, 1, 0)
+        val handle = _handle(accepted)
+        expect port.join(handle) == RuntimeClosureResult.NotReady
+        expect port.step() == 1
+        expect port.join(handle) == RuntimeClosureResult.Faulted(-1)
+        expect port.join(handle + RUNTIME_CLOSURE_SLOT_CAP) == RuntimeClosureResult.Invalid
+
+    it "detaches and rejects the retired generation":
+        var port = RuntimeClosurePortV1.new()
+        val accepted = port.spawn(RuntimeClosureEntry.Noop, 0, 0)
+        val handle = _handle(accepted)
+        expect port.detach(handle)
+        expect port.join(handle) == RuntimeClosureResult.Invalid

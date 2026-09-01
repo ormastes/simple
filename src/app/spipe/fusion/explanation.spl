@@ -1,0 +1,47 @@
+# Builds the frozen `FusionExplanationV1` (design §3.5, frozen §5.5) from a
+# fused row plus its applied adjustments. Never applies arithmetic itself —
+# it records what `rrf.spl`/`adjustments.spl` already computed, in the exact
+# source order requested, so a reader can recompute `raw_sum_scaled` and
+# `adjusted_sum_scaled` independently (the same "recompute, don't trust"
+# convention P3 uses for BM25 term contributions).
+
+use lib.common.search.fusion_types.{RRF_FIXED_V1_ID, FusionExplanationV1}
+use app.spipe.fusion.rrf.{RawFusionRow, RRF_SCALE}
+use app.spipe.fusion.adjustments.{AdjustmentResultV1}
+
+# `source_names` fixes the rendering order (design §3.5: "source order affects
+# only explanation rendering, never the sum") — default `["lexical", "graph",
+# "semantic"]`. `source_ranks[i] == -1` encodes "source absent for this
+# document" (frozen §5.5).
+fn build_fusion_explanation(row: RawFusionRow, source_names: [text], k: i64, source_k: i64,
+                             adjustment_result: AdjustmentResultV1) -> FusionExplanationV1:
+    var source_ranks: [i64] = []
+    var source_contributions: [i64] = []
+    var i = 0
+    while i < source_names.len():
+        val name = source_names[i]
+        if row.source_ranks.has(name):
+            val rank = row.source_ranks[name]
+            source_ranks.push(rank)
+            source_contributions.push(_rrf_contribution(k, rank))
+        else:
+            source_ranks.push(-1)
+            source_contributions.push(0)
+        i = i + 1
+
+    FusionExplanationV1(
+        contract: RRF_FIXED_V1_ID,
+        k: k,
+        source_k: source_k,
+        source_names: source_names,
+        source_ranks: source_ranks,
+        source_contributions_scaled: source_contributions,
+        adjustments: adjustment_result.applied_names,
+        adjustment_caps_scaled: [adjustment_result.boost_cap_scaled],
+        raw_sum_scaled: row.raw_scaled,
+        adjusted_sum_scaled: adjustment_result.adjusted_scaled,
+        tie_break_document_id: row.document_id,
+    )
+
+fn _rrf_contribution(k: i64, source_rank: i64) -> i64:
+    RRF_SCALE / (k + source_rank)

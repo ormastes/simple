@@ -130,5 +130,9 @@ fn caller_write_to_own_module_global_is_visible_to_other_module_during_frame() {
     interpreter::set_current_file(Some(main_path.to_path_buf()));
     let result = interpreter::evaluate_module(&module.items).map_err(|e| format!("{e:?}"));
     interpreter::set_current_file(None);
-    assert_eq!(result, Ok(0), "the other module must see the caller's append (1, then 2 elements)");
+    assert_eq!(
+        result,
+        Ok(0),
+        "the other module must see the caller's append (1, then 2 elements)"
+    );
 }

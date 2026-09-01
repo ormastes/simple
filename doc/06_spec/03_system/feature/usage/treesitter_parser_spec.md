@@ -32,10 +32,12 @@ treesitter_parser_spec -> compiler
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # TreeSitter Parser Specification
 
 use compiler.treesitter.*
 
+```
 ## At a Glance
 
 | Field | Value |

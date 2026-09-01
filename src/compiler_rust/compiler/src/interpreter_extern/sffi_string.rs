@@ -156,10 +156,7 @@ pub fn rt_string_rfind_fn(args: &[Value]) -> Result<Value, CompileError> {
     if needle.is_empty() {
         return Ok(Value::Int(s.len() as i64));
     }
-    let found = s
-        .as_bytes()
-        .windows(needle.len())
-        .rposition(|w| w == needle.as_bytes());
+    let found = s.as_bytes().windows(needle.len()).rposition(|w| w == needle.as_bytes());
     Ok(Value::Int(found.map_or(-1, |i| i as i64)))
 }
 
@@ -193,8 +190,7 @@ fn extern_string_pair(args: &[Value], who: &str) -> Result<(String, String), Com
                 }
                 // SAFETY: `ptr`/`len` come from the runtime string registry for
                 // a handle it just validated; the bytes outlive this copy.
-                let bytes =
-                    unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+                let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
                 Ok(String::from_utf8_lossy(bytes).into_owned())
             }
         }
@@ -418,18 +414,42 @@ pub fn rt_string_builder_finish_fn(args: &[Value]) -> Result<Value, CompileError
         .as_int()?;
 
     let rv = unsafe { rt_string_builder_finish(handle) };
+    if rv.is_nil() {
+        return Err(CompileError::runtime(
+            "E-SFFI-009: invalid string-builder finish handle",
+        ));
+    }
     // rv is a RuntimeValue string; read its bytes out into an owned Rust String
     // so the interpreter returns a proper text value (not a raw pointer int).
     let len = rt_string_len(rv);
-    if len <= 0 {
+    if len < 0 {
+        return Err(CompileError::runtime(
+            "E-SFFI-009: string-builder finish returned a non-string value",
+        ));
+    }
+    if len == 0 {
+        rt_string_free(rv);
         return Ok(Value::text(String::new()));
     }
     let data = rt_string_data(rv);
     if data.is_null() {
-        return Ok(Value::text(String::new()));
+        rt_string_free(rv);
+        return Err(CompileError::runtime(
+            "E-SFFI-009: string-builder finish returned null data with positive length",
+        ));
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
-    Ok(Value::text(String::from_utf8_lossy(bytes).into_owned()))
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_owned(),
+        Err(_) => {
+            rt_string_free(rv);
+            return Err(CompileError::runtime(
+                "E-SFFI-011: string-builder finish returned invalid UTF-8",
+            ));
+        }
+    };
+    rt_string_free(rv);
+    Ok(Value::text(text))
 }
 
 /// Return the current accumulated length of the builder (i64).
@@ -469,6 +489,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invalid_builder_finish_is_a_contract_error() {
+        assert!(rt_string_builder_finish_fn(&[Value::Int(0)]).is_err());
+    }
+
+    #[test]
+    fn empty_builder_finish_remains_valid_empty_text() {
+        let handle = rt_string_builder_new_fn(&[]).unwrap();
+        assert_eq!(
+            rt_string_builder_finish_fn(&[handle]).unwrap(),
+            Value::text(String::new()),
+        );
+    }
+
+    #[test]
     fn string_pointer_and_length_accept_temporary_interpreter_text() {
         let ptr = match rt_string_data_fn(&[Value::text("mcp".to_string())]).unwrap() {
             Value::Int(ptr) => ptr,
@@ -496,9 +530,7 @@ mod tests {
 
     #[test]
     fn string_eq_preserves_comparison_semantics() {
-        let eq = |a: &str, b: &str| {
-            rt_string_eq_fn(&[Value::text(a.to_string()), Value::text(b.to_string())]).unwrap()
-        };
+        let eq = |a: &str, b: &str| rt_string_eq_fn(&[Value::text(a.to_string()), Value::text(b.to_string())]).unwrap();
         assert_eq!(eq("alpha", "alpha"), Value::Bool(true));
         assert_eq!(eq("alpha", "alphb"), Value::Bool(false));
         assert_eq!(eq("alpha", "alph"), Value::Bool(false));

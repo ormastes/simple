@@ -42,10 +42,13 @@ extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
 extern fn rt_io_file_read(fd: i64, size: i64) -> [u8]
 @unsafe(reason: "raw file descriptor provider boundary", capabilities: [ffi])
 extern fn rt_io_file_close(fd: i64) -> bool
+@unsafe(reason: "raw borrowed file mapping and pointer result", capabilities: [ffi, raw_ptr])
 extern fn rt_mmap_raw(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
+@unsafe(reason: "raw mapped-pointer extent release", capabilities: [ffi, raw_ptr])
 extern fn rt_munmap_raw(addr: i64, length: i64) -> i64
 @unsafe(reason: "nonnull raw read; aspect-pack allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+@unsafe(reason: "raw path metadata query with negative failure sentinel", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
 
 val APKIO_MODE_READ: i64 = 0
@@ -106,10 +109,12 @@ fn pack_window_map(path: text, want_offset: i64, want_length: i64) -> PackWindow
     if want_length > APKIO_MAX_RANGE_BYTES:
         return _apkio_window_error("APKIO_RANGE_TOO_LARGE",
             "declared range of {want_length} bytes exceeds the {APKIO_MAX_RANGE_BYTES}-byte mapping limit; refusing to map")
-    val fsize = rt_file_size(path)
+    var fsize: i64 = -1
+    unsafe(capabilities: [ffi]):
+        fsize = rt_file_size(path)
     if fsize <= 0:
         return _apkio_window_error("APKIO_NO_FILE", "pack file missing or empty: {path}")
-    if want_offset + want_length > fsize:
+    if want_length > fsize or want_offset > fsize - want_length:
         return _apkio_window_error("APKIO_RANGE_PAST_EOF",
             "range [{want_offset}, +{want_length}) runs past the {fsize}-byte file")
 
@@ -123,11 +128,16 @@ fn pack_window_map(path: text, want_offset: i64, want_length: i64) -> PackWindow
     val remaining = fsize - aligned_base
     val map_length = if rounded > remaining: remaining else: rounded
 
-    val fd = rt_io_file_open(path, APKIO_MODE_READ)
+    var fd: i64 = -1
+    unsafe(capabilities: [ffi]):
+        fd = rt_io_file_open(path, APKIO_MODE_READ)
     if fd < 0:
         return _apkio_window_error("APKIO_OPEN_FAILED", "cannot open {path}")
-    val addr = rt_mmap_raw(0, map_length, APKIO_PROT_READ, APKIO_MAP_PRIVATE, fd, aligned_base)
-    _ = rt_io_file_close(fd)
+    var addr: i64 = APKIO_MAP_FAILED
+    unsafe(capabilities: [ffi, raw_ptr]):
+        addr = rt_mmap_raw(0, map_length, APKIO_PROT_READ, APKIO_MAP_PRIVATE, fd, aligned_base)
+    unsafe(capabilities: [ffi]):
+        _ = rt_io_file_close(fd)
     if addr == APKIO_MAP_FAILED or addr == 0:
         return _apkio_window_error("APKIO_MMAP_FAILED",
             "mmap of {map_length} bytes at aligned offset {aligned_base} failed")
@@ -142,14 +152,18 @@ fn pack_window_bytes(w: PackWindow) -> [u8]:
     var out: [u8] = []
     var i = 0
     while i < w.want_length:
-        out.push((rt_ptr_read_u8(w.address, w.data_offset + i) & 0xFF).to_u8())
+        var byte: i64 = 0
+        unsafe(capabilities: [ffi, raw_ptr]):
+            byte = rt_ptr_read_u8(w.address, w.data_offset + i)
+        out.push((byte & 0xFF).to_u8())
         i = i + 1
     out
 
 fn pack_window_unmap(w: PackWindow) -> bool:
     if w.address == 0 or w.map_length <= 0:
         return false
-    rt_munmap_raw(w.address, w.map_length) == 0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_munmap_raw(w.address, w.map_length) == 0
 
 # WILLNEED IS DELIBERATELY ABSENT. §15 says "Issue WILLNEED only for explicit
 # startup/preload closures", and there is no such closure to serve yet -- the
@@ -175,17 +189,27 @@ fn pack_read_range(path: text, offset: i64, length: i64) -> [u8]:
         return []
     if length > APKIO_MAX_RANGE_BYTES:
         return []
-    val fsize = rt_file_size(path)
-    if fsize <= 0 or offset + length > fsize:
+    var fsize: i64 = -1
+    unsafe(capabilities: [ffi]):
+        fsize = rt_file_size(path)
+    if fsize <= 0 or length > fsize or offset > fsize - length:
         return []
-    val fd = rt_io_file_open(path, APKIO_MODE_READ)
+    var fd: i64 = -1
+    unsafe(capabilities: [ffi]):
+        fd = rt_io_file_open(path, APKIO_MODE_READ)
     if fd < 0:
         return []
-    if rt_io_file_seek(fd, offset, APKIO_SEEK_SET) != offset:
-        _ = rt_io_file_close(fd)
+    var positioned: i64 = -1
+    unsafe(capabilities: [ffi]):
+        positioned = rt_io_file_seek(fd, offset, APKIO_SEEK_SET)
+    if positioned != offset:
+        unsafe(capabilities: [ffi]):
+            _ = rt_io_file_close(fd)
         return []
-    val bytes = rt_io_file_read(fd, length)
-    _ = rt_io_file_close(fd)
+    var bytes: [u8] = []
+    unsafe(capabilities: [ffi]):
+        bytes = rt_io_file_read(fd, length)
+        _ = rt_io_file_close(fd)
     if bytes.len() != length:
         return []
     bytes
@@ -194,10 +218,13 @@ fn pack_read_trailer(path: text, trailer_size: i64) -> [u8]:
     """Read the fixed trailer without knowing the pack layout (§15 step 1)."""
     if trailer_size <= 0:
         return []
-    val fsize = rt_file_size(path)
+    var fsize: i64 = -1
+    unsafe(capabilities: [ffi]):
+        fsize = rt_file_size(path)
     if fsize < trailer_size:
         return []
     pack_read_range(path, fsize - trailer_size, trailer_size)
 
 fn pack_file_size(path: text) -> i64:
-    rt_file_size(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_size(path)

@@ -1,0 +1,140 @@
+# Unit specs for the UI target resolver + UIE diagnostics, including the four
+# negative fixtures (misspelled, duplicate, ambiguous, unsupported action).
+# Contract: doc/04_architecture/ui/testing/typed_ui_interface_arch.md §Identity
+use std.spec.{describe, it, expect}
+use std.common.spec.ui_target.{ui_target_symbol, ui_target_qualified, ui_target_pattern, ui_target_focused, ui_target_runtime, ui_target_name}
+use std.common.spec.ui_target_resolver.{parse_ui_manifest, resolve, resolve_action, check_duplicate_ids, did_you_mean, edit_distance}
+
+# Fixture manifest (Agent C generates the real one in parallel; this fixture
+# pins the agreed node shape: id, kind, actions, source_file, source_line).
+fn fixture_manifest_text() -> text:
+    var s = "app_id: calc\n"
+    s = s + "nodes:\n"
+    s = s + "  - id: toolbar.save\n"
+    s = s + "    kind: button\n"
+    s = s + "    actions: click, focus\n"
+    s = s + "    source_file: src/app/office/sheets/toolbar.spl\n"
+    s = s + "    source_line: 12\n"
+    s = s + "  - id: formula_input\n"
+    s = s + "    kind: text_input\n"
+    s = s + "    actions: type, focus, clear\n"
+    s = s + "    source_file: src/app/office/sheets/sheets_app.spl\n"
+    s = s + "    source_line: 48\n"
+    s = s + "  - id: sheet.cell_A1\n"
+    s = s + "    kind: cell\n"
+    s = s + "    actions: click, type\n"
+    s = s + "    source_file: src/app/office/sheets/sheets_app.spl\n"
+    s = s + "    source_line: 90\n"
+    s = s + "  - id: dialog.save\n"
+    s = s + "    kind: button\n"
+    s = s + "    actions: click\n"
+    s = s + "    source_file: src/app/office/sheets/dialogs.spl\n"
+    s = s + "    source_line: 33\n"
+    s
+
+fn duplicate_manifest_text() -> text:
+    var s = "app_id: calc\n"
+    s = s + "nodes:\n"
+    s = s + "  - id: toolbar.save\n"
+    s = s + "    kind: button\n"
+    s = s + "    actions: click\n"
+    s = s + "    source_file: src/app/office/sheets/toolbar.spl\n"
+    s = s + "    source_line: 12\n"
+    s = s + "  - id: toolbar.save\n"
+    s = s + "    kind: button\n"
+    s = s + "    actions: click\n"
+    s = s + "    source_file: src/app/office/sheets/menu.spl\n"
+    s = s + "    source_line: 77\n"
+    s
+
+describe "manifest parsing (defensive)":
+    it "parses app id and all nodes with their fields":
+        val m = parse_ui_manifest(fixture_manifest_text())
+        expect(m.app_id).to_equal("calc")
+        expect(m.nodes.len()).to_equal(4)
+        expect(m.nodes[0].id).to_equal("toolbar.save")
+        expect(m.nodes[0].kind).to_equal("button")
+        expect(m.nodes[0].actions.len()).to_equal(2)
+        expect(m.nodes[0].source_file).to_equal("src/app/office/sheets/toolbar.spl")
+        expect(m.nodes[0].source_line).to_equal(12)
+
+    it "ignores unknown lines instead of failing":
+        val m = parse_ui_manifest("schema_version: 1\n" + fixture_manifest_text() + "future_field: x\n")
+        expect(m.nodes.len()).to_equal(4)
+
+describe "positive resolution (exactly-one)":
+    val m = parse_ui_manifest(fixture_manifest_text())
+
+    it "resolves a unique bare symbol":
+        val r = resolve(ui_target_symbol("formula_input"), m)
+        assert_true(r.ok)
+        expect(m.nodes[r.node_index].id).to_equal("formula_input")
+
+    it "resolves a qualified id":
+        val r = resolve(ui_target_qualified("toolbar.save"), m)
+        assert_true(r.ok)
+        expect(m.nodes[r.node_index].kind).to_equal("button")
+
+    it "resolves a typed pattern to exactly one node":
+        val r = resolve(ui_target_pattern("sheet.cell_" + "{" + "CellRef}"), m)
+        assert_true(r.ok)
+        expect(m.nodes[r.node_index].id).to_equal("sheet.cell_A1")
+
+    it "defers focused / runtime / name targets to the driver":
+        assert_true(resolve(ui_target_focused(), m).deferred)
+        assert_true(resolve(ui_target_runtime("expr"), m).deferred)
+        assert_true(resolve(ui_target_name("Save document"), m).deferred)
+
+    it "accepts a supported action on the resolved node":
+        val r = resolve_action(ui_target_symbol("formula_input"), "type", m)
+        assert_true(r.ok)
+
+describe "negative fixture: misspelled id (UIE1001)":
+    val m = parse_ui_manifest(fixture_manifest_text())
+
+    it "fails with UIE1001 and a did-you-mean suggestion":
+        val r = resolve(ui_target_symbol("formula_inpt"), m)
+        assert_false(r.ok)
+        expect(r.code).to_equal("UIE1001")
+        assert_true(r.message.contains("did you mean"))
+        assert_true(r.message.contains("formula_input"))
+
+    it "did_you_mean only offers ids within edit distance 2":
+        expect(edit_distance("formula_inpt", "formula_input")).to_equal(1)
+        val hits = did_you_mean("zzzzzz", m)
+        expect(hits.len()).to_equal(0)
+
+describe "negative fixture: duplicate local id (UIE1002)":
+    val m = parse_ui_manifest(duplicate_manifest_text())
+
+    it "reports the duplicate with BOTH source locations":
+        val dups = check_duplicate_ids(m)
+        expect(dups.len()).to_equal(1)
+        assert_true(dups[0].contains("UIE1002"))
+        assert_true(dups[0].contains("toolbar.spl:12"))
+        assert_true(dups[0].contains("menu.spl:77"))
+
+    it "refuses to resolve against a manifest with duplicates":
+        val r = resolve(ui_target_qualified("toolbar.save"), m)
+        assert_false(r.ok)
+        expect(r.code).to_equal("UIE1002")
+
+describe "negative fixture: ambiguous short id (UIE1004)":
+    val m = parse_ui_manifest(fixture_manifest_text())
+
+    it "fails with UIE1004 listing all qualified candidates, never first-match":
+        val r = resolve(ui_target_symbol("save"), m)
+        assert_false(r.ok)
+        expect(r.code).to_equal("UIE1004")
+        assert_true(r.message.contains("dialog.save"))
+        assert_true(r.message.contains("toolbar.save"))
+
+describe "negative fixture: unsupported action (UIE1003)":
+    val m = parse_ui_manifest(fixture_manifest_text())
+
+    it "fails with UIE1003 naming the node, kind, and supported actions":
+        val r = resolve_action(ui_target_qualified("toolbar.save"), "type", m)
+        assert_false(r.ok)
+        expect(r.code).to_equal("UIE1003")
+        assert_true(r.message.contains("toolbar.save"))
+        assert_true(r.message.contains("click"))

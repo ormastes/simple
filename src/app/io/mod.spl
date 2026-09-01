@@ -13,10 +13,11 @@
 # ============================================================================
 
 # File operations
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_is_regular_no_follow, file_read, file_write, file_copy, file_delete, file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_read, file_write, file_copy, file_delete, file_atomic_write}
 use std.nogc_sync_mut.io.file_ops.{file_append, file_modified_time, file_stat, file_remove, file_hash_sha256, file_read_lines}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_size, file_size_raw}
 use std.nogc_sync_mut.io.file_ops.{file_read_text, file_read_bytes, file_read_bytes_i64, file_write_bytes, file_mmap_read_text, file_mmap_read_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_fsync, directory_fsync}
 use std.nogc_sync_mut.io_runtime.{file_rename}
 
 # Directory operations
@@ -36,7 +37,7 @@ use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default, shell_ou
 use std.nogc_sync_mut.io.process_ops.{eprint}
 # shell_output (1-arg) has no equivalent in the new split io.process_ops module —
 # it is only defined (pub) in the pre-migration io_runtime.spl monolith.
-use std.nogc_sync_mut.io_runtime.{shell_output}
+use std.nogc_sync_mut.io_runtime.{shell_output, read_file_text_result, env_get_opt}
 use app.io.process_env_ops.{process_spawn_async_env, process_is_alive}
 
 # Process limit enforcer
@@ -50,7 +51,7 @@ use std.nogc_sync_mut.io.env_ops.{env_get, env_set, cwd, home, env_vars}
 use std.nogc_sync_mut.io.env_ops.{host_arch, host_os}
 
 # Time operations
-use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros, current_time_unix, current_time_ms}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros, time_now_micros, current_time_unix, current_time_ms}
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day}
 use std.nogc_sync_mut.io.time_ops.{timestamp_hour, timestamp_minute, timestamp_second}
 use std.nogc_sync_mut.io.time_ops.{timestamp_now, sleep_ms}
@@ -108,54 +109,65 @@ use app.io.cli_ops.{fault_set_timeout, fault_set_execution_limit}
 # ============================================================================
 
 # Platform detection
-extern fn rt_env_get(key: text) -> text
-
 fn is_windows_platform() -> bool:
-    val os_env = env_get("OS")
+    val os_env = env_get_opt("OS")
     if os_env == nil:
         false
     else:
         os_env.lower().contains("windows")
 
 # Random number generation
+@unsafe(reason: "raw scalar random provider ABI", capabilities: [ffi])
 extern fn rt_random_uniform(min: f64, max: f64) -> f64
+@unsafe(reason: "raw scalar random provider ABI", capabilities: [ffi])
 extern fn rt_random_randint(min: i64, max: i64) -> i64
 
 fn random_uniform(min: f64, max: f64) -> f64:
-    rt_random_uniform(min, max)
+    unsafe(capabilities: [ffi]): rt_random_uniform(min, max)
 
 fn random_randint(min: i64, max: i64) -> i64:
-    rt_random_randint(min, max)
+    unsafe(capabilities: [ffi]): rt_random_randint(min, max)
 
 # Logging
+@unsafe(reason: "raw log ABI borrows caller-owned pointer/length ranges", capabilities: [ffi, raw_ptr])
 extern fn rt_log_emit(level: i64, scope_ptr: i64, scope_len: i64, msg_ptr: i64, msg_len: i64)
+@unsafe(reason: "raw logging configuration ABI", capabilities: [ffi])
 extern fn rt_log_get_global_level() -> i64
+@unsafe(reason: "raw logging configuration ABI", capabilities: [ffi])
 extern fn rt_log_set_global_level(level: i64)
+@unsafe(reason: "raw log ABI borrows caller-owned pointer/length ranges", capabilities: [ffi, raw_ptr])
 extern fn rt_log_get_scope_level(scope_ptr: i64, scope_len: i64) -> i64
+@unsafe(reason: "raw log ABI borrows caller-owned pointer/length ranges", capabilities: [ffi, raw_ptr])
 extern fn rt_log_set_scope_level(scope_ptr: i64, scope_len: i64, level: i64)
+@unsafe(reason: "raw log ABI borrows caller-owned pointer/length ranges", capabilities: [ffi, raw_ptr])
 extern fn rt_log_is_enabled(level: i64, scope_ptr: i64, scope_len: i64) -> i64
+@unsafe(reason: "raw logging configuration ABI", capabilities: [ffi])
 extern fn rt_log_clear_scope_levels()
 
+@unsafe(reason: "passes caller-owned raw pointer/length ranges to the log provider", capabilities: [ffi, raw_ptr])
 fn log_emit(level: i64, scope_ptr: i64, scope_len: i64, msg_ptr: i64, msg_len: i64):
-    rt_log_emit(level, scope_ptr, scope_len, msg_ptr, msg_len)
+    unsafe(capabilities: [ffi, raw_ptr]): rt_log_emit(level, scope_ptr, scope_len, msg_ptr, msg_len)
 
 fn log_get_global_level() -> i64:
-    rt_log_get_global_level()
+    unsafe(capabilities: [ffi]): rt_log_get_global_level()
 
 fn log_set_global_level(level: i64):
-    rt_log_set_global_level(level)
+    unsafe(capabilities: [ffi]): rt_log_set_global_level(level)
 
+@unsafe(reason: "passes caller-owned raw pointer/length range to the log provider", capabilities: [ffi, raw_ptr])
 fn log_get_scope_level(scope_ptr: i64, scope_len: i64) -> i64:
-    rt_log_get_scope_level(scope_ptr, scope_len)
+    unsafe(capabilities: [ffi, raw_ptr]): rt_log_get_scope_level(scope_ptr, scope_len)
 
+@unsafe(reason: "passes caller-owned raw pointer/length range to the log provider", capabilities: [ffi, raw_ptr])
 fn log_set_scope_level(scope_ptr: i64, scope_len: i64, level: i64):
-    rt_log_set_scope_level(scope_ptr, scope_len, level)
+    unsafe(capabilities: [ffi, raw_ptr]): rt_log_set_scope_level(scope_ptr, scope_len, level)
 
+@unsafe(reason: "passes caller-owned raw pointer/length range to the log provider", capabilities: [ffi, raw_ptr])
 fn log_is_enabled(level: i64, scope_ptr: i64, scope_len: i64) -> i64:
-    rt_log_is_enabled(level, scope_ptr, scope_len)
+    unsafe(capabilities: [ffi, raw_ptr]): rt_log_is_enabled(level, scope_ptr, scope_len)
 
 fn log_clear_scope_levels():
-    rt_log_clear_scope_levels()
+    unsafe(capabilities: [ffi]): rt_log_clear_scope_levels()
 
 # Thread sleep alias
 fn thread_sleep(millis: i64):
@@ -165,7 +177,7 @@ fn thread_sleep(millis: i64):
 # Keep `shell(...)` object-returning; use `shell_tuple(...)` when the legacy
 # `(stdout, stderr, exit_code)` shape is required.
 fn shell_tuple(command: text) -> (text, text, i64):
-    val os_env = env_get("OS")
+    val os_env = env_get_opt("OS")
     val is_windows = if os_env == nil:
         false
     else:
@@ -180,7 +192,14 @@ fn shell_tuple(command: text) -> (text, text, i64):
 fn shell_bc_calc(bc_expr: text, default: f64) -> f64:
     val result = shell("echo '{bc_expr}' | bc -l")
     if result.exit_code == 0:
-        result.stdout.trim().to_float_or(default)
+        # `.to_float()` fails open to 0.0, which would silently replace a
+        # non-zero caller default. bc only emits a number on exit 0, so the
+        # one divergent case is empty output; guard it explicitly.
+        val out = result.stdout.trim()
+        if out.len() == 0:
+            default
+        else:
+            out.to_float()
     else:
         default
 
@@ -216,24 +235,30 @@ fn math_random() -> f64:
         0.5
 
 # Volatile memory access
+@unsafe(reason: "raw volatile read dereferences caller-supplied address", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_read_u64(addr: i64) -> i64
+@unsafe(reason: "raw volatile write dereferences caller-supplied address", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_write_u64(addr: i64, value: i64)
 
+@unsafe(reason: "caller must supply a live aligned volatile u64 address", capabilities: [ffi, raw_ptr])
 fn read_volatile(addr: i64) -> i64:
-    rt_volatile_read_u64(addr)
+    unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_read_u64(addr)
 
+@unsafe(reason: "caller must supply a live aligned writable volatile u64 address", capabilities: [ffi, raw_ptr])
 fn write_volatile(addr: i64, value: i64):
-    rt_volatile_write_u64(addr, value)
+    unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_write_u64(addr, value)
 
 # ============================================================================
 # All re-exports (backward compatibility)
 # ============================================================================
 
 # File operations
-export file_exists, file_is_regular_no_follow, file_read, file_write, file_copy, file_delete, file_atomic_write
+export file_exists, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_read, file_write, file_copy, file_delete, file_atomic_write
 export file_append, file_modified_time, file_stat, file_remove, file_hash_sha256, file_read_lines
 export file_lock, file_unlock, file_size, file_size_raw
 export file_read_text, file_read_bytes, file_read_bytes_i64, file_write_bytes, file_mmap_read_text, file_mmap_read_bytes
+export file_fsync, directory_fsync
+export read_file_text_result
 export file_rename
 
 # Directory operations
@@ -262,7 +287,7 @@ export env_get, env_set, cwd, home, env_vars
 export host_arch, host_os
 
 # Time operations
-export time_now_unix_micros, current_time_unix, current_time_ms
+export time_now_unix_micros, time_now_micros, current_time_unix, current_time_ms
 export timestamp_year, timestamp_month, timestamp_day
 export timestamp_hour, timestamp_minute, timestamp_second
 export timestamp_now, sleep_ms

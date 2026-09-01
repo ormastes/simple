@@ -28,12 +28,8 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 8: Implementation in `src/**/<feature>.spl`
 9-10: Unit + IT Tests (80%+ coverage) + Doctest
 11-13: Bug Reports + Duplication Check + Refactoring
-14: Full Test Suite (`bin/simple test test --whole --mode=interpreter` + `bin/simple lint <changed .spl files>`)
+14: Full Test Suite (`bin/simple test && bin/simple build lint`)
 15: Run $verify + final smoke checks + VCS Sync
-
-For compiler backend changes, add focused lint/spec coverage for invalid target
-text such as `call nil`, `phi nil`, `getelementptr nil`, and raw LLVM result
-type metadata. `LLVM001` must stay clean in LLVM emitter files.
 
 ## Rules
 
@@ -46,16 +42,7 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
 
 - All code in `.spl` — no Python, no Bash
 - Stub Prevention: no `pass_todo` in final code, STUB001 = hard fail
-- Shared-font work follows `.codex/skills/sp_dev/SKILL.md` “Shared multilingual
-  font work”: preserve `FontRenderer`, transient `FontRenderBatch`, `WebIR`,
-  `DrawIrComposition`, and the plan-defined frozen SSpec vocabulary; keep
-  secondary detail steps folded.
 - 80%+ branch coverage target
-- Bug fixes must claim their tracking record, reproduce the exact failure
-  before editing, and fix the pure-Simple owner before Rust/runtime. A
-  Rust/runtime fix requires evidence that the pure layer delegates correctly
-  and the defect is below that boundary. Cover the exact reproducer plus at
-  least one similar/adjacent root-cause shape; document why if none exists.
 - For scenario-oriented specs, run the generated-manual review loop before
   claiming completion:
   `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`, read the
@@ -86,14 +73,10 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, and `.gemini/commands/` instructions before `$verify`; stale process docs are
   implementation work, not release cleanup.
-- Do not mark implementation complete when workflow/tooling tests pass but the
-  matching guide, skill, SPipe-agent, command, or generated/manual spec docs are
-  stale. Documentation freshness is part of completion.
 - For `simple_context` or context-mode changes, keep the MCP/tooling guide and
   mirrored generated manuals current. SQL-backed context paths must document the
-  `--sql`/`--db`/`--source-filter` CLI flags, MCP `source_filter`, the
-  file-optional `sql=true` plus non-empty `query` contract, embedded SQLite
-  facade boundary, explicit absence statuses, and public-absence guard.
+  `--sql`/`--db` CLI flags, embedded SQLite facade boundary, explicit absence
+  statuses, and public-absence guard.
 - Executable specs must stay under `test/`; generated/manual docs mirror that
   path under `doc/06_spec` after stripping the leading `test/` segment and must
   be `.md` only. Require
@@ -108,6 +91,11 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
   `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: build
   the smallest named target/provider/SCI projection, retain its compatibility
   receipt, and never infer full bootstrap from a compiler path.
+- If compatibility evidence selects full bootstrap, use the canonical
+  `bootstrap-from-scratch.sh --strategy=normal|full` scheduler path and require
+  its unchanged generation lease plus qualified lineage receipt. A
+  `failure-manifest.env` or any recursive invalidation forbids descendant
+  deployment. See `doc/07_guide/tooling/bootstrap_speculative_scheduler.md`.
 - Focused compiler/interpreter/loader work may use an admitted Stage 2 or 3
   binary per that guide. Record path/hash/stage/provenance/commands, isolate
   output/cache, fail closed, and label evidence by stage; never promote it to
@@ -121,3 +109,31 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
   - If publish/package flow changed:
   - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server`
   - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server`
+
+## Compiler/backend stage split
+
+Keep the legacy pipeline canonical until one admitted end-to-end receipt.
+Afterward use Stage 1 Rust seed, the unchanged existing canonical pure-Simple
+builds for admitted Stage 2 and Stage 3, and Stage 4
+tools-only linking exact versioned Stage-3 archives/interfaces. Stage 4 records
+zero `src/compiler/**` units and rejects source, interface, archive, runtime-
+ABI, producer, or receipt mismatch before tool compilation. Acceptance needs a
+real runner, independent sabotage, exact-fresh-CLI essential tools, and audit-
+full behavior equivalence. Static checks and Rust fallback are not acceptance.
+Label bounded Rust-seed execution diagnostic-only. Tool acceptance resolves the
+exact admitted Stage-3 compiler identity, builds and executes the tool,
+validates `ToolingLinkReceiptV1`, and rejects Rust-seed, fake, or stale compiler
+identities.
+Runtime authority is complete only when an exact required-symbol manifest is
+hash-bound to the admitted archive and Stage-3 identity. A missing symbol,
+hosted provider, generated stub, or fallback marker fails before link. Run the
+built tool's bounded `--help`/`--version` only after link success and validated
+`ToolingLinkReceiptV1`.
+
+## Implementation Language Policy
+
+Pure Simple first — never implement in C what pure Simple can do; bootstrap C
+keeps a pure-Simple twin (`scripts/check/check-dual-run-shadow.shs`); HAL code
+minimizes asm (typed register views > optimization-restraining tags >
+intrinsics > inline asm for irreplaceable ops only). Full policy:
+`doc/07_guide/os/hal/pure_simple_hal.md`.

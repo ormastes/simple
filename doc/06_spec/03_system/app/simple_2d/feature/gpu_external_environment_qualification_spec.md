@@ -1,6 +1,6 @@
 # gpu_external_environment_qualification_spec
 
-> Verifies the gpu external environment qualification behaviour end to end so maintainers of this
+> Aggregate external-dependency qualification for GPU processing/rendering.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # gpu_external_environment_qualification_spec
 
-Verifies the gpu external environment qualification behaviour end to end so maintainers of this
+Aggregate external-dependency qualification for GPU processing/rendering.
 
 ## At a Glance
 
@@ -20,18 +20,14 @@ Verifies the gpu external environment qualification behaviour end to end so main
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the gpu external environment qualification behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+Aggregate external-dependency qualification for GPU processing/rendering.
+
+Presence and loadability never satisfy this spec. Physical rows require retained
+execution/readback parity. Emulator rows remain typed as emulator. Missing
+macOS Metal or Windows DirectX evidence deliberately keeps the aggregate red.
 
 ## Scenarios
 
@@ -39,20 +35,23 @@ unrelated sibling features are out of scope.
 
 #### should define fail-closed external environment evidence in the glossary
 
-- Verify: should define fail-closed external environment evidence in the glossary
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should define fail-closed external environment evidence in the glossary
 - Probe backend environment and wrapper ownership
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-013 REQ-014 REQ-015
-step("Verify: should define fail-closed external environment evidence in the glossary")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should define fail-closed external environment evidence in the glossary")
 step("Probe backend environment and wrapper ownership")
 val glossary = file_read("doc/glossary.md")
 expect(glossary).to_contain("## Environment Test")
@@ -68,7 +67,7 @@ expect(glossary).to_contain("CPU/GPU Communication Qualification")
 
 #### should qualify physical Vulkan through its HAL and exact readback receipts
 
-- Verify: should qualify physical Vulkan through its HAL and exact readback receipts
+- should qualify physical Vulkan through its HAL and exact readback receipts
 - Upload CPU input through the HAL
 - Dispatch offloaded GPU rendering logic
 
@@ -76,13 +75,12 @@ expect(glossary).to_contain("CPU/GPU Communication Qualification")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-013 REQ-014 REQ-015
-step("Verify: should qualify physical Vulkan through its HAL and exact readback receipts")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should qualify physical Vulkan through its HAL and exact readback receipts")
 step("Upload CPU input through the HAL")
 val environment = file_read(VULKAN_ENV)
 val communication = file_read(VULKAN_COMM)
@@ -124,20 +122,19 @@ expect(events).to_contain("\"checksum\":248204808491526")
 
 #### should qualify physical CUDA upload dispatch download and invalid transfers
 
-- Verify: should qualify physical CUDA upload dispatch download and invalid transfers
+- should qualify physical CUDA upload dispatch download and invalid transfers
 - Download GPU output through the HAL
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-013 REQ-014 REQ-015
-step("Verify: should qualify physical CUDA upload dispatch download and invalid transfers")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should qualify physical CUDA upload dispatch download and invalid transfers")
 step("Download GPU output through the HAL")
 val receipt = file_read(CUDA_RECEIPT)
 expect(receipt).to_contain("PROCESSING_CUDA_HAL_HAPPY status=pass")
@@ -157,20 +154,19 @@ expect(receipt).to_contain("cpu_fallback=false")
 
 #### should retain the external environment classification matrix contract
 
-- Verify: should retain the external environment classification matrix contract
+- should retain the external environment classification matrix contract
 - Classify physical emulated and blocked evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-013 REQ-014 REQ-015
-step("Verify: should retain the external environment classification matrix contract")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should retain the external environment classification matrix contract")
 step("Classify physical emulated and blocked evidence")
 val matrix = "linux-vulkan=physical-device\nlinux-cuda=physical-device\nmetal-emulator=emulator\nmacos-metal=blocked\nwindows-directx=blocked\n"
 expect(matrix).to_contain("linux-vulkan=physical-device")
@@ -187,20 +183,19 @@ expect(matrix).to_contain("windows-directx=blocked")
 
 #### should classify Metal emulation without promoting it to physical execution
 
-- Verify: should classify Metal emulation without promoting it to physical execution
+- should classify Metal emulation without promoting it to physical execution
 - Classify physical emulated and blocked evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-013 REQ-014 REQ-015
-step("Verify: should classify Metal emulation without promoting it to physical execution")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should classify Metal emulation without promoting it to physical execution")
 step("Classify physical emulated and blocked evidence")
 val receipt = file_read(METAL_EMULATOR)
 expect(receipt).to_contain("evidence_class=emulator")
@@ -217,20 +212,19 @@ expect(receipt).to_contain("reason=ok")
 
 #### should keep the external matrix incomplete until native Metal and DirectX pass
 
-- Verify: should keep the external matrix incomplete until native Metal and DirectX pass
+- should keep the external matrix incomplete until native Metal and DirectX pass
 - Verify communication and rendering parity
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-013 REQ-014 REQ-015
-step("Verify: should keep the external matrix incomplete until native Metal and DirectX pass")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should keep the external matrix incomplete until native Metal and DirectX pass")
 step("Verify communication and rendering parity")
 val todos = file_read("doc/08_tracking/todo/todo_db.sdn")
 expect(todos).to_contain("652, TODO, gpu, P1")
@@ -258,54 +252,75 @@ fail_test("BLOCKED external environment matrix: native macOS Metal and Windows D
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-013`
+- `REQ-014`
+- `REQ-015`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `f75e46282d693de6e1c90e2794ee330fa40966595bb5fe8724fdd27f879fd430`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `a5a356f589d691d57133a56c5fed92ea44c7cabbfe171d8c3a0ab27528dee0b1`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `f75e46282d693de6e1c90e2794ee330fa40966595bb5fe8724fdd27f879fd430`.
+Source SHA-256: `a5a356f589d691d57133a56c5fed92ea44c7cabbfe171d8c3a0ab27528dee0b1`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `f75e46282d693de6e1c90e2794ee330fa40966595bb5fe8724fdd27f879fd430`  
+Source SHA-256: `a5a356f589d691d57133a56c5fed92ea44c7cabbfe171d8c3a0ab27528dee0b1`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 90/100
+SSpec documentization score: 49/100
 source: test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl
 mirror: doc/06_spec/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.md (current)
-findings: 9 blockers: 0
+findings: 12 blockers: 1
   narrative=100 structure=70 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=82; blocker cap makes effective=49
 doc/06_spec/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:41:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should define fail-closed external environment evidence in the glossary' describes the test rather than its outcome
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:31:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should define fail-closed external environment evidence in the glossary' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:55:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should qualify physical Vulkan through its HAL and exact readback receipts' describes the test rather than its outcome
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should define fail-closed external environment evidence in the glossary' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:44:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should qualify physical Vulkan through its HAL and exact readback receipts' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:95:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should qualify physical CUDA upload dispatch download and invalid transfers' describes the test rather than its outcome
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should qualify physical Vulkan through its HAL and exact readback receipts' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:83:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should qualify physical CUDA upload dispatch download and invalid transfers' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:110:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain the external environment classification matrix contract' describes the test rather than its outcome
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:83:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should qualify physical CUDA upload dispatch download and invalid transfers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:97:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain the external environment classification matrix contract' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:122:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify Metal emulation without promoting it to physical execution' describes the test rather than its outcome
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:108:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify Metal emulation without promoting it to physical execution' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:134:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep the external matrix incomplete until native Metal and DirectX pass' describes the test rather than its outcome
+test/03_system/app/simple_2d/feature/gpu_external_environment_qualification_spec.spl:119:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep the external matrix incomplete until native Metal and DirectX pass' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

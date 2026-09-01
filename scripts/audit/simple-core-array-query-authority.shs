@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/runtime/simple_core/core_array_query.spl"
+provider="$root/src/runtime/simple_core/core_array.spl"
+ops="$root/src/runtime/simple_core/core_array_ops.spl"
+cranelift="$root/src/compiler_rust/compiler/src/codegen/instr/calls.rs"
+llvm="$root/src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+for raw in spl_load_i64 spl_store_i64 array_items array_len_value \
+    array_is_valid rt_array_new rt_array_push rt_array_copy rt_array_reverse \
+    rt_string_join; do
+    if [ "$(grep -Ec "(^|[^A-Za-z0-9_])${raw}\\(" "$module")" -ne 2 ]; then
+        echo "simple-core array query call escaped its mandatory-inline owner: $raw" >&2
+        exit 1
+    fi
+done
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 10 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 10 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi, raw_ptr\]):' "$module")" -eq 3 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 7 ]
+for expected in _sffi_load_i64:24 _sffi_store_i64:3 \
+    _sffi_array_items:17 _sffi_array_len_value:18 \
+    _sffi_array_is_valid:19 _sffi_rt_array_new:7 _sffi_rt_array_push:10 \
+    _sffi_rt_array_copy:2 _sffi_rt_array_reverse:2 _sffi_rt_string_join:2; do
+    owner=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+if grep -q 'if _sffi_load_i64(items, i \* 8)' "$module"; then
+    echo "array query hot loop regained duplicate slot loads" >&2
+    exit 1
+fi
+for intrinsic in spl_load_i64 spl_store_i64; do
+    grep -q "\"$intrinsic\"" "$cranelift"
+    grep -q "\"$intrinsic\"" "$llvm"
+done
+for helper in array_items array_len_value array_is_valid rt_array_new rt_array_push; do
+    grep -Eq "^pub fn ${helper}\\(" "$provider"
+done
+for helper in rt_array_copy rt_array_reverse; do
+    grep -Eq "^pub fn ${helper}\\(" "$ops"
+done
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "simple-core array-query authority audit: PASS (all raw calls confined; three hot loops perform one slot load per iteration)"

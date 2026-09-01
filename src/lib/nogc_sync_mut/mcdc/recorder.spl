@@ -1,0 +1,94 @@
+# codex-impl
+# Owner-local bounded MC/DC recorder. Allocation occurs only in create().
+
+use std.common.mcdc.model.{McdcEvaluation, McdcOverflowPolicy, McdcPolicy, mcdc_record_capacity}
+
+pub class McdcRecorder:
+    owner_id: i64
+    capacity: i64
+    write_index: i64
+    count: i64
+    next_sequence: i64
+    dropped: i64
+    overwritten: i64
+    overflow: McdcOverflowPolicy
+    slots: [McdcEvaluation]
+
+impl McdcRecorder:
+    static fn create(owner_id: i64, policy: McdcPolicy) -> McdcRecorder:
+        val capacity = mcdc_record_capacity(policy)
+        val empty = McdcEvaluation(
+            decision_id: -1, owner_id: owner_id, sequence: 0, outcome: false,
+            evaluated_mask0: 0, evaluated_mask1: 0,
+            evaluated_mask2: 0, evaluated_mask3: 0,
+            true_mask0: 0, true_mask1: 0,
+            true_mask2: 0, true_mask3: 0,
+            masked_mask0: 0, masked_mask1: 0,
+            masked_mask2: 0, masked_mask3: 0
+        )
+        var slots: [McdcEvaluation] = []
+        var i = 0
+        while i < capacity:
+            slots.push(empty)
+            i = i + 1
+        McdcRecorder(
+            owner_id: owner_id, capacity: capacity, write_index: 0, count: 0,
+            next_sequence: 1, dropped: 0, overwritten: 0,
+            overflow: policy.overflow, slots: slots
+        )
+
+    # O(1), allocation-free after create(). Only the owning execution domain
+    # may call this mutable method.
+    me record(
+        decision_id: i64, outcome: bool,
+        evaluated_mask0: i64, evaluated_mask1: i64,
+        evaluated_mask2: i64, evaluated_mask3: i64,
+        true_mask0: i64, true_mask1: i64,
+        true_mask2: i64, true_mask3: i64,
+        masked_mask0: i64, masked_mask1: i64,
+        masked_mask2: i64, masked_mask3: i64
+    ) -> bool:
+        if self.count >= self.capacity and self.overflow == McdcOverflowPolicy.DropNewest:
+            if self.dropped < 0x7fffffffffffffff:
+                self.dropped = self.dropped + 1
+            return false
+        if self.count >= self.capacity and self.overwritten < 0x7fffffffffffffff:
+            self.overwritten = self.overwritten + 1
+        self.slots[self.write_index] = McdcEvaluation(
+            decision_id: decision_id, owner_id: self.owner_id,
+            sequence: self.next_sequence, outcome: outcome,
+            evaluated_mask0: evaluated_mask0, evaluated_mask1: evaluated_mask1,
+            evaluated_mask2: evaluated_mask2, evaluated_mask3: evaluated_mask3,
+            true_mask0: true_mask0, true_mask1: true_mask1,
+            true_mask2: true_mask2, true_mask3: true_mask3,
+            masked_mask0: masked_mask0, masked_mask1: masked_mask1,
+            masked_mask2: masked_mask2, masked_mask3: masked_mask3
+        )
+        self.write_index = self.write_index + 1
+        if self.write_index >= self.capacity:
+            self.write_index = 0
+        if self.count < self.capacity:
+            self.count = self.count + 1
+        if self.next_sequence < 0x7fffffffffffffff:
+            self.next_sequence = self.next_sequence + 1
+        true
+
+    fn saturated() -> bool:
+        self.dropped > 0 or self.overwritten > 0
+
+    fn dropped_count() -> i64:
+        self.dropped
+
+    fn overwritten_count() -> i64:
+        self.overwritten
+
+    fn oldest_index() -> i64:
+        if self.count < self.capacity:
+            return 0
+        self.write_index
+
+    fn evaluation_at(ordered_index: i64) -> McdcEvaluation:
+        var slot_index = self.oldest_index() + ordered_index
+        if slot_index >= self.capacity:
+            slot_index = slot_index - self.capacity
+        self.slots[slot_index]

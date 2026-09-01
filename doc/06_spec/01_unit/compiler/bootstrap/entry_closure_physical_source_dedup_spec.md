@@ -1,0 +1,678 @@
+# Entry Closure Physical Source Dedup Specification
+
+> Tests covering entry-closure physical source deduplication.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 15 | 15 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Entry Closure Physical Source Dedup Specification
+
+## Scenarios
+
+### entry-closure physical source deduplication
+
+#### normalizes aliases to one physical parse source
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- normalizes aliases to one physical parse source
+   - Expected: _driver_canonical_source_path(sources[0].path) equals `src/lib/common/shared.spl`
+   - Expected: _driver_unique_physical_sources(sources).len() equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("normalizes aliases to one physical parse source")
+val content = "fn shared() -> i64: 1\n"
+val sources = [
+    SourceFile(path: "./src/lib/common/../common/shared.spl", content: content, module_name: "std.shared"),
+    SourceFile(path: "src/lib/common/shared.spl", content: content, module_name: "lib.common.shared")
+]
+
+expect(_driver_canonical_source_path(sources[0].path)).to_equal("src/lib/common/shared.spl")
+expect(_driver_unique_physical_sources(sources).len()).to_equal(1)
+```
+
+</details>
+
+#### keeps absolute workspace punctuation out of native module symbols
+
+- keeps absolute workspace punctuation out of native module symbols
+   - Expected: _driver_module_name_from_path("/private/tmp/simple-main-bootstrap/src/compiler/80.driver/driver.spl") equals `compiler.80.driver.driver`
+   - Expected: _driver_module_name_from_path("/private/tmp/simple-main-bootstrap/examples/10_tooling/trace32_tools/t32_cli/cli_shell.spl") equals `examples.10_tooling.trace32_tools.t32_cli.cli_shell`
+   - Expected: _driver_module_name_from_path("plugins/my-tool/main.spl") equals `plugins.my_tool.main`
+   - Expected: _driver_module_name_from_path("plugins/tool+kit/naïve@entry.spl") equals `plugins.tool_kit.na_ve_entry`
+   - Expected: module_name_normalizer_body(bootstrap_mir) equals `canonical_body`
+   - Expected: module_name_normalizer_body(hir) equals `canonical_body`
+   - Expected: module_name_normalizer_body(llvm) equals `canonical_body`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("keeps absolute workspace punctuation out of native module symbols")
+val driver = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+val bootstrap_mir = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl") ?? ""
+val hir = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+val llvm = rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
+expect(_driver_module_name_from_path("/private/tmp/simple-main-bootstrap/src/compiler/80.driver/driver.spl")).to_equal("compiler.80.driver.driver")
+expect(_driver_module_name_from_path("/private/tmp/simple-main-bootstrap/examples/10_tooling/trace32_tools/t32_cli/cli_shell.spl")).to_equal("examples.10_tooling.trace32_tools.t32_cli.cli_shell")
+expect(_driver_module_name_from_path("plugins/my-tool/main.spl")).to_equal("plugins.my_tool.main")
+expect(_driver_module_name_from_path("plugins/tool+kit/naïve@entry.spl")).to_equal("plugins.tool_kit.na_ve_entry")
+val canonical_body = module_name_normalizer_body(driver)
+expect(canonical_body == "").to_be(false)
+expect(module_name_normalizer_body(bootstrap_mir)).to_equal(canonical_body)
+expect(module_name_normalizer_body(hir)).to_equal(canonical_body)
+expect(module_name_normalizer_body(llvm)).to_equal(canonical_body)
+```
+
+</details>
+
+#### rejects distinct physical files with one sanitized module name
+
+- rejects distinct physical files with one sanitized module name
+   - Expected: _driver_module_name_collision([dashed, same_file]) equals ``
+   - Expected: _driver_module_name_collision([dashed, absolute_same_file]) equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("rejects distinct physical files with one sanitized module name")
+val dashed = SourceFile(path: "plugins/my-tool/main.spl", content: "", module_name: _driver_module_name_from_path("plugins/my-tool/main.spl"))
+val underscored = SourceFile(path: "plugins/my_tool/main.spl", content: "", module_name: _driver_module_name_from_path("plugins/my_tool/main.spl"))
+val same_file = SourceFile(path: "plugins/my-tool/../my-tool/main.spl", content: "", module_name: dashed.module_name)
+val absolute_same_file = SourceFile(path: rt_path_absolute(dashed.path), content: "", module_name: dashed.module_name)
+
+expect(_driver_module_name_collision([dashed, underscored])).to_contain("both map to 'plugins.my_tool.main'")
+expect(_driver_module_name_collision([dashed, same_file])).to_equal("")
+expect(_driver_module_name_collision([dashed, absolute_same_file])).to_equal("")
+```
+
+</details>
+
+#### keeps colliding bucket keys exact and persistent
+
+- keeps colliding bucket keys exact and persistent
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("keeps colliding bucket keys exact and persistent")
+var buckets = _driver_text_bucket_set_new(1)
+buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
+buckets = _driver_text_bucket_set_add(buckets, "std.alphabet")
+buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
+val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+
+expect(_driver_text_bucket_set_has(buckets, "std.alpha")).to_be(true)
+expect(_driver_text_bucket_set_has(buckets, "std.alphabet")).to_be(true)
+expect(_driver_text_bucket_set_has(buckets, "std.alph")).to_be(false)
+expect(loading).to_contain(r"use compiler.core.interpreter.hashmap.{hm_hash_text}")
+expect(loading).to_contain("val raw = hm_hash_text(key) % bucket_count")
+expect(loading).to_not_contain("extern fn rt_hash_text")
+# UPDATED 2026-08-21 (doc/08_tracking/bug/
+# native_build_per_file_driver_overhead_2026-08-21.md): the set was
+# `[text]` buckets holding newline-delimited keys, so membership ran
+# `bucket.starts_with(marker) or bucket.contains("\n" + marker)` — O(bucket
+# length) on both add and lookup, measured at 7644 ms / 3997 ms for 4000
+# keys. It is now exact Dict membership (84 ms / 26 ms). The three
+# behavioural expectations above are unchanged and are what actually
+# guards the collision semantics; these source assertions pin the
+# mechanism so the O(length) encoding cannot come back unnoticed.
+expect(loading).to_contain("buckets.contains_key(key)")
+expect(loading).to_not_contain("bucket.starts_with(marker)")
+expect(loading).to_not_contain("for existing in bucket.split(\"\\n\")")
+```
+
+</details>
+
+#### hashes every UTF-8 byte without indexed text ord lowering
+
+- hashes every UTF-8 byte without indexed text ord lowering
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("hashes every UTF-8 byte without indexed text ord lowering")
+val hashmap = rt_file_read_text("src/compiler/10.frontend/core/interpreter/hashmap.spl") ?? ""
+
+expect(hm_hash_text("a") == hm_hash_text("g")).to_be(false)
+expect(hashmap).to_contain("val bytes = s.bytes()")
+expect(hashmap).to_contain("h = h xor (bytes[i] as i64)")
+expect(hashmap).to_not_contain("s[i].ord()")
+```
+
+</details>
+
+#### registers every logical alias from one cached module result
+
+- registers every logical alias from one cached module result
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 61 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("registers every logical alias from one cached module result")
+val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_parsing.spl") ?? ""
+
+# The call is wrapped across two lines; assert the head only.
+expect(driver).to_contain("val unique_entry_sources = _driver_unique_physical_sources(")
+# UPDATED 2026-08-01: the physical-key -> parsed-index lookup was a
+# `[text]` list plus a `_driver_text_list_index` linear scan, i.e.
+# O(entry_sources x unique_entry_sources) (~8.9e7 path compares on a
+# whole-tree closure). A staged-native Dict<i64> read then selected the
+# wrong module index, so the O(n) replacement is an open-addressed pair
+# of scalar arrays. Every alias still resolves to the ONE cached parse
+# result for its physical file.
+# Raw string: a bare `{}` in an ordinary string literal is parsed as an
+# empty interpolation and kills the whole spec file at parse time
+# (observed: runner exits 255 with no example output). Same reason
+# line 148 below concatenates `"{"` by hand.
+expect(driver).to_contain("var parsed_entry_index_keys: [text] = []")
+expect(driver).to_contain("var parsed_entry_index_values: [i64] = []")
+expect(driver).to_contain("parsed_entry_index_keys[parsed_slot] = physical_key")
+expect(driver).to_contain("parsed_entry_index_values[parsed_slot] = parsed_entry_modules.len()")
+expect(driver).to_contain("ParsedEntryModuleBox.new(entry_module)")
+expect(driver).to_contain("parsed_idx = parsed_entry_index_values[parsed_slot]")
+expect(driver).to_not_contain("_driver_text_list_index(")
+# INVERTED 2026-07-30 — deliberately. This spec used to require the
+# fluent `entry_modules = entry_modules.set(k, v)` and forbid bracket
+# assignment. That is backwards: `.set()` on a builtin Dict SILENTLY
+# FAILED to insert under native codegen (keys().len() and
+# contains_key(k) both read back empty immediately after), so the driver
+# switched to bracket assignment on purpose. See the NOTE above the
+# `entry_modules[...]` line in driver_source_pipeline_parsing.spl and
+# doc/07_guide/language/dict_native_pitfalls.md. Satisfying the OLD
+# assertion would have reintroduced a silent native-codegen bug, so the
+# guard now points the other way and must not be flipped back.
+expect(driver).to_contain("entry_modules[source.module_name] = parsed_box.value")
+# Match the real call shape, not the NOTE above line 192 which cites
+# `entry_modules.set(k, v)` while explaining why it is NOT used.
+expect(driver).to_not_contain("entry_modules = entry_modules.set(source.module_name")
+expect(driver).to_contain("entry_ctx.sources = unique_entry_sources")
+# Parser modules are retained once per physical source, while every
+# resolver spelling remains available through the compact surface map.
+expect(driver).to_contain("var entry_surface_builder = ModuleSurfaceBuilder.new()")
+expect(driver).to_contain("for source in unique_entry_sources:")
+expect(driver).to_contain("for alias_source in entry_sources:")
+expect(driver).to_contain("if alias_is_poisoned:")
+expect(driver).to_contain("A poisoned\n                    # physical source intentionally has no surface to alias")
+expect(driver).to_contain("entry_surface_builder.add_alias(alias_source)")
+expect(driver).to_contain("entry_surface_builder.resolve_export_origins()")
+expect(driver).to_contain("entry_ctx.module_surfaces = Some(entry_surfaces_result.unwrap())")
+val origins_at = driver.find("entry_surface_builder.resolve_export_origins()") ?? -1
+val finish_at = driver.find("entry_surface_builder.finish()") ?? -1
+expect(origins_at).to_be_greater_than(-1)
+expect(finish_at).to_be_greater_than(origins_at)
+val hir_driver = rt_file_read_text("src/compiler/80.driver/driver_hir_pipeline_lowering.spl") ?? ""
+expect(hir_driver).to_contain("if self.ctx.module_surfaces != nil:")
+expect(hir_driver).to_contain("self.ctx.module_surfaces.unwrap()")
+val retained_at = hir_driver.find("if self.ctx.module_surfaces != nil:") ?? -1
+val fallback_at = hir_driver.find("elif self.ctx.sources.len() > 0:") ?? -1
+expect(retained_at).to_be_greater_than(-1)
+expect(fallback_at).to_be_greater_than(retained_at)
+expect(driver).to_contain(r"phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
+```
+
+</details>
+
+#### uses bucket sets for every phase-one closure membership role
+
+- uses bucket sets for every phase-one closure membership role
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("uses bucket sets for every phase-one closure membership role")
+val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
+val native_build = rt_file_read_text("src/app/io/_CliCompile/compile_targets.spl") ?? ""
+
+expect(native_build).to_contain("var discovered = _driver_text_bucket_set_new(512)")
+expect(driver).to_contain("var seen_sources = _driver_text_bucket_set_new(512)")
+expect(driver).to_contain("var closure_loaded_mods = _driver_text_bucket_set_new(512)")
+expect(driver).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(512)")
+expect(driver).to_contain("var closure_scan_sources = _driver_unique_physical_sources(all_sources)")
+expect(driver).to_contain("var closure_queued_paths = _driver_text_bucket_set_new(512)")
+expect(driver).to_contain("while closure_idx < closure_scan_sources.len():")
+expect(driver).to_not_contain("while closure_idx < all_sources.len():")
+expect(driver).to_not_contain("var closure_seen_mods: [text]")
+```
+
+</details>
+
+#### scans imports through native text operations
+
+- scans imports through native text operations
+   - Expected: imports equals `["std.real", "public.owner", "app.live", "third.party", "app.module.Func"]`
+   - Expected: long_imports equals `["std.tail"]`
+   - Expected: ordinary_imports equals `["app.final"]`
+   - Expected: unicode_imports equals `["std.unicode"]`
+   - Expected: comment_imports equals `["std.comment", "std.after_inline"]`
+   - Expected: doc_comment_close equals `["std.after_doc"]`
+   - Expected: siblings equals `[".real", ".sibling.deep"]`
+   - Expected: loading does not contain `path_text.bytes()`
+   - Expected: loading does not contain `.find(`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("scans imports through native text operations")
+val imports = _driver_entry_import_module_paths("use std.real\n\"\"\"\nuse fake.block\n\"\"\"\n\"\"\"use fake.inline\"\"\"\npub use public.owner." + "{" + "Thing}\nexport use app.live.*\nimport third.party\nuse app.module.Func\n")
+val long_imports = _driver_entry_import_module_paths(("# filler\n").repeat(8192) + "use std.tail." + "{" + "Thing}\n")
+val ordinary_imports = _driver_entry_import_module_paths("val x = 1\n".repeat(4096) + "\timport app.final\n")
+val unicode_imports = _driver_entry_import_module_paths("é\n# 文\n\tuse std.unicode\n")
+val comment_imports = _driver_entry_import_module_paths("# docs mention \"\"\"\nuse std.comment\nval x = 1 # \"\"\"\nimport std.after_inline\n")
+val doc_comment_close = _driver_entry_import_module_paths("\"\"\"\n# \"\"\"\nuse std.after_doc\n")
+val siblings = _driver_entry_sibling_module_paths("mod pkg.real\n\"\"\"\nmod pkg.fake\nexport fake.deep.*\n\"\"\"\n# mod pkg.comment\nexport sibling.deep.*\nexport A, B\nexport use app.live.*\n")
+val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+
+expect(imports).to_equal(["std.real", "public.owner", "app.live", "third.party", "app.module.Func"])
+expect(long_imports).to_equal(["std.tail"])
+expect(ordinary_imports).to_equal(["app.final"])
+expect(unicode_imports).to_equal(["std.unicode"])
+expect(comment_imports).to_equal(["std.comment", "std.after_inline"])
+expect(doc_comment_close).to_equal(["std.after_doc"])
+expect(siblings).to_equal([".real", ".sibling.deep"])
+expect(loading).to_contain('for raw_line in content.split("\n"):')
+expect(loading).to_contain("_driver_import_path_is_valid(module_path)")
+expect(loading).to_contain("_driver_entry_import_module_paths_text_fallback")
+expect(loading).to_contain('var tail: text = ""')
+expect(loading).to_contain("var cut: i64 = rt_string_len(tail)")
+expect(loading).to_contain('val comment_at = _driver_text_index_of(scan_line, "#")')
+expect(loading).to_contain("val delimiter_at = _driver_text_index_of(tail, delimiter)")
+expect(loading).to_contain("val byte = path_text.char_code_at(i)")
+expect(loading.contains("path_text.bytes()")).to_equal(false)
+expect(loading.contains(".find(")).to_equal(false)
+```
+
+</details>
+
+#### keeps command-only tools out of the ordinary CLI entry closure
+
+- keeps command-only tools out of the ordinary CLI entry closure
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("keeps command-only tools out of the ordinary CLI entry closure")
+val cli_entry = rt_file_read_text("src/app/cli/_CliMain/main_and_help.spl") ?? ""
+val json_wrapper = rt_file_read_text("src/app/test_runner_new/json_wrapper.spl") ?? ""
+val imports = _driver_entry_import_module_paths(cli_entry)
+
+expect(imports).to_not_contain("app.test_runner_new.test_runner_main")
+expect(imports).to_not_contain("app.test_runner_new.json_wrapper")
+expect(imports).to_not_contain("compiler.tools.leak_check.main")
+expect(cli_entry).to_contain(r"use lazy app.test_runner_new.test_runner_main.{run_test_cli}")
+expect(cli_entry).to_contain("use lazy app.test_runner_new.json_wrapper.{run_test_json_wrapper, test_json_requested, test_json_worker_requested}")
+expect(cli_entry).to_contain(r"use lazy compiler.tools.leak_check.main.{run_leak_check}")
+expect(cli_entry).to_contain("return run_test_cli()")
+expect(cli_entry).to_contain("elif str_eq(first, \"leak-check\"):\n        return run_leak_check()")
+expect(json_wrapper).to_contain("return [\"run\", \"src/app/test_runner_new/main.spl\", TEST_JSON_WORKER_ARG] + test_args")
+expect(json_wrapper).to_not_contain("return [\"run\", arg, \"test\", TEST_JSON_WORKER_ARG]")
+```
+
+</details>
+
+#### uses the HIR call type arguments already bound by inference
+
+- uses the HIR call type arguments already bound by inference
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("uses the HIR call type arguments already bound by inference")
+val inference = rt_file_read_text("src/compiler/30.types/type_infer/inference_expr.spl") ?? ""
+
+expect(inference).to_contain("case Call(callee, args, type_args):")
+expect(inference).to_contain("self.generate_obligations_for_function_call(func_symbol, type_args, span)")
+expect(inference).to_not_contain("call_type_args")
+```
+
+</details>
+
+#### keeps every explicit entry walk out of whole-workspace loading
+
+- keeps every explicit entry walk out of whole-workspace loading
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("keeps every explicit entry walk out of whole-workspace loading")
+val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
+
+# Was the rationale comment "# An explicit-entry walk is a closure even
+# when import resolution ...". Anchored to the env read that gates the
+# whole-workspace bulk load, alongside the existing set-side anchor.
+expect(driver).to_contain("val nb_entry_closure = (rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\") ?? \"\") == \"1\"")
+expect(driver).to_contain("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")")
+expect(driver).to_contain("if nb_entry_env != \"\" and not nb_entry_closure_pre:")
+expect(driver).to_not_contain("not nb_entry_closure_pre and self.ctx.options.mode == CompileMode.Aot")
+expect(driver).to_not_contain("if self.ctx.errors.len() == 0:\n                # A successful explicit-entry walk is a closure")
+expect(driver).to_contain("if has_project_source and self.ctx.options.mode != CompileMode.Check and not nb_entry_closure:")
+expect(driver).to_not_contain("closure_added")
+```
+
+</details>
+
+#### fails required closure load parse and HIR errors before later phases
+
+- fails required closure load parse and HIR errors before later phases
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 72 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("fails required closure load parse and HIR errors before later phases")
+# driver.spl was split into a ~128-line facade. compile() orchestration
+# stays in driver_orchestration.spl, but the phase bodies it calls now
+# live in separate files: load_sources_impl in
+# driver_source_pipeline_loading.spl, parse_all_impl in
+# driver_source_pipeline_parsing.spl, lower_and_check_impl in
+# driver_hir_pipeline_lowering.spl. Assert the SAME fail-fast-per-phase
+# invariant against the current layout: (1) compile() calls the phases
+# in order and returns early on each failure, and (2) each phase's own
+# file still fails fast internally before committing its result.
+val driver = rt_file_read_text("src/compiler/80.driver/driver_orchestration.spl") ?? ""
+val compile_start = driver.find("    me compile() -> CompileResult:")
+val compile_end = driver.find("    me compile_vhdl_only() -> CompileResult:")
+expect(compile_start).to_be_greater_than(-1)
+expect(compile_end).to_be_greater_than(compile_start)
+val compile_body = driver.substring(compile_start, compile_end)
+
+val load_call = compile_body.index_of("self.load_sources_impl()")
+val load_fail = compile_body.index_of("if not load_ok:\n            log_error(\"phase 1 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
+val parse_call = compile_body.index_of("self.parse_all_committing_impl()")
+val parse_fail = compile_body.index_of("if not parse_ok:\n            log_error(\"phase 2 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
+val hir_call = compile_body.index_of("self.lower_and_check_impl()")
+val type_error_return = compile_body.index_of("return CompileResult.TypeError(self.ctx.errors)")
+val phase4_start = compile_body.index_of("phase4:monomorphize:start")
+val mono_call = compile_body.index_of("self.monomorphize_impl()")
+expect(load_call).to_be_greater_than(-1)
+expect(load_fail).to_be_greater_than(load_call)
+expect(parse_call).to_be_greater_than(load_fail)
+expect(parse_fail).to_be_greater_than(parse_call)
+expect(hir_call).to_be_greater_than(parse_fail)
+expect(type_error_return).to_be_greater_than(hir_call)
+expect(phase4_start).to_be_greater_than(type_error_return)
+expect(mono_call).to_be_greater_than(phase4_start)
+
+# Phase 1's own fail-fast ordering (driver_source_pipeline_loading.spl):
+# an unresolved-import error is raised before an empty-import error,
+# both precede committing `all_sources` onto the returned context, and
+# the phase's returned bool is derived from the post-commit error count.
+val loading = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
+val unresolved_error = loading.index_of("self.ctx.add_error(\"unresolved import '")
+val empty_import_error = loading.index_of("self.ctx.add_error(\"import '")
+val sources_commit = loading.index_of("loaded_ctx.sources = all_sources")
+expect(unresolved_error).to_be_greater_than(-1)
+expect(empty_import_error).to_be_greater_than(unresolved_error)
+expect(sources_commit).to_be_greater_than(empty_import_error)
+expect(loading.substring(sources_commit)).to_contain("loaded_ctx.errors.len() == 0")
+
+# Phase 2's fail-fast (driver_source_pipeline_parsing.spl): a parse
+# error returns immediately instead of continuing to the next source.
+val parsing = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_parsing.spl") ?? ""
+expect(parsing).to_contain("                if par_had_error_get():\n                    self.ctx.errors.push(\n                        \"parse error in " + "{" + "source.path} (see [parser_error] output above)\")\n                    return (self.ctx, false)")
+
+# Phase 3's HIR error collection (driver_hir_pipeline_lowering.spl):
+# each module's lowering errors are folded into ctx.errors inside the
+# per-source loop before the loop advances to the next source, and the
+# phase's returned status is derived from ctx.errors AFTER the loop
+# completes — not decided early per-module.
+val hir = rt_file_read_text("src/compiler/80.driver/driver_hir_pipeline_lowering.spl") ?? ""
+val hir_impl_start = hir.find("    me lower_and_check_impl() -> (CompileContext, bool):")
+val hir_impl_end = hir.find("    fn lower_to_hir_impl() -> (CompileContext, bool):")
+expect(hir_impl_start).to_be_greater_than(-1)
+expect(hir_impl_end).to_be_greater_than(hir_impl_start)
+val hir_body = hir.substring(hir_impl_start, hir_impl_end)
+val hir_loop_start = hir_body.index_of("var source_idx = 0")
+val hir_error_collect = hir_body.index_of("self.ctx.add_error(module_error_message)")
+val hir_loop_advance = hir_body.index_of("source_idx = source_idx + 1")
+val hir_final_status = hir_body.index_of("(phase_ctx, phase_ctx.errors.len() == 0)")
+expect(hir_loop_start).to_be_greater_than(-1)
+expect(hir_error_collect).to_be_greater_than(hir_loop_start)
+expect(hir_loop_advance).to_be_greater_than(hir_error_collect)
+expect(hir_final_status).to_be_greater_than(hir_loop_advance)
+```
+
+</details>
+
+#### collects only the source roots supplied by its caller
+
+- collects only the source roots supplied by its caller
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("collects only the source roots supplied by its caller")
+val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+val helpers = rt_file_read_text("src/compiler/80.driver/driver_helpers.spl") ?? ""
+
+expect(loading).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
+expect(loading).to_not_contain("find src/app src/lib src/compiler src/runtime")
+expect(helpers).to_not_contain("find src/app src/lib src/compiler src/runtime")
+# driver_helpers.spl no longer carries a second, co-compiled collector.
+# Collapsed 2026-08-11; see
+# driver_collect_sources_single_definition_spec.spl.
+expect(helpers).to_not_contain("fn _driver_collect_sources(")
+expect(helpers).to_not_contain("fn _driver_collect_sources_via_find(")
+```
+
+</details>
+
+#### uses the canonical numbered-layer MIR module in legacy optimization passes
+
+- uses the canonical numbered-layer MIR module in legacy optimization passes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("uses the canonical numbered-layer MIR module in legacy optimization passes")
+val engine = rt_file_read_text("src/compiler/60.mir_opt/_OptimizationPasses/engine.spl") ?? ""
+val io_passes = rt_file_read_text("src/compiler/60.mir_opt/_OptimizationPasses/io_passes.spl") ?? ""
+val legacy_spec = rt_file_read_text("src/compiler/60.mir_opt/optimization_passes.spipe") ?? ""
+expect(engine).to_contain("use compiler.mir.mir_data.*")
+expect(io_passes).to_contain("use compiler.mir.mir_data.*")
+expect(legacy_spec).to_contain("use compiler.mir.mir_data.*")
+expect(engine).to_not_contain("use mir_data.*")
+expect(io_passes).to_not_contain("use mir_data.*")
+expect(legacy_spec).to_not_contain("use mir_data.*")
+```
+
+</details>
+
+#### does not scan a sibling root omitted by its caller
+
+- does not scan a sibling root omitted by its caller
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
+step("does not scan a sibling root omitted by its caller")
+val fixture = "/tmp/simple-entry-closure-source-roots"
+val included = fixture + "/included"
+val omitted = fixture + "/omitted"
+expect(rt_dir_create(included, true)).to_be(true)
+expect(rt_dir_create(omitted, true)).to_be(true)
+expect(rt_file_write_text(included + "/main.spl", "fn main() -> i64: 0\n")).to_be(true)
+expect(rt_file_write_text(omitted + "/database.spl", "fn unrelated() -> i64: 1\n")).to_be(true)
+
+val sources = _driver_collect_sources_via_find([included])
+expect(sources.len()).to_be_greater_than(0)
+for source in sources:
+    expect(source.path).to_start_with(included)
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering entry-closure physical source deduplication.
+- entry-closure physical source deduplication
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 15 |
+| Active scenarios | 15 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-COMPILER`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b2008ea03b130f78f710f2a7574d7091a642400f5ad4456619b37e7896b68037`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b2008ea03b130f78f710f2a7574d7091a642400f5ad4456619b37e7896b68037`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b2008ea03b130f78f710f2a7574d7091a642400f5ad4456619b37e7896b68037`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl
+mirror: doc/06_spec/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes aliases to one physical parse source' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps absolute workspace punctuation out of native module symbols' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl:93:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects distinct physical files with one sanitized module name' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

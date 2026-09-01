@@ -1,6 +1,6 @@
 # Fail-Closed Evidence Receipt
 
-> Verifies the evidence receipt behaviour end to end so maintainers of this
+> Unit spec for `std.spec.evidence_receipt`: the shared SDN evidence-receipt struct + fail-closed verification rules used by release-gate specs. Every oracle here is absolute (a full honest receipt must PASS; each of the five documented violations must FAIL with its own distinct reason) so the module can be trusted as the single owner other gates migrate onto.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Fail-Closed Evidence Receipt
 
-Verifies the evidence receipt behaviour end to end so maintainers of this
+Unit spec for `std.spec.evidence_receipt`: the shared SDN evidence-receipt struct + fail-closed verification rules used by release-gate specs. Every oracle here is absolute (a full honest receipt must PASS; each of the five documented violations must FAIL with its own distinct reason) so the module can be trusted as the single owner other gates migrate onto.
 
 ## At a Glance
 
@@ -21,18 +21,16 @@ Verifies the evidence receipt behaviour end to end so maintainers of this
 | Status | Implemented |
 | Requirements | doc/01_research/domain/simpleos_production_host_master_plan.md §21.4 |
 | Source | `test/01_unit/lib/spec/evidence_receipt_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the evidence receipt behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+## Overview
+
+Unit spec for `std.spec.evidence_receipt`: the shared SDN evidence-receipt
+struct + fail-closed verification rules used by release-gate specs. Every
+oracle here is absolute (a full honest receipt must PASS; each of the five
+documented violations must FAIL with its own distinct reason) so the module
+can be trusted as the single owner other gates migrate onto.
 
 ## Scenarios
 
@@ -40,7 +38,11 @@ unrelated sibling features are out of scope.
 
 #### passes every fail-closed rule
 
-- Verify: passes every fail-closed rule
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- passes every fail-closed rule
 - Build a complete, fresh, honest receipt
 - Verify artifact presence, freshness, honesty, and arch support all pass
    - Expected: outcome.passed is true
@@ -50,13 +52,12 @@ unrelated sibling features are out of scope.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-A11-EVD
-step("Verify: passes every fail-closed rule")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("passes every fail-closed rule")
 step("Build a complete, fresh, honest receipt")
 val r = honest_receipt()
 
@@ -70,20 +71,19 @@ expect(outcome.reason).to_equal("ok")
 
 #### serializes to SDN without corrupting brace-sensitive content
 
-- Verify: serializes to SDN without corrupting brace-sensitive content
+- serializes to SDN without corrupting brace-sensitive content
 - Serialize the honest receipt to SDN text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-A11-EVD
-step("Verify: serializes to SDN without corrupting brace-sensitive content")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("serializes to SDN without corrupting brace-sensitive content")
 step("Serialize the honest receipt to SDN text")
 val sdn = receipt_to_sdn(honest_receipt())
 expect(sdn).to_contain("evidence_receipt:")
@@ -97,7 +97,7 @@ expect(sdn).to_contain("result: PASS")
 
 #### fails with a distinct missing_artifact reason when the file is absent
 
-- Verify: fails with a distinct missing_artifact reason when the file is absent
+- fails with a distinct missing_artifact reason when the file is absent
 - Verify a receipt whose declared artifact does not exist on disk
    - Expected: outcome.passed is false
    - Expected: outcome.rule equals `artifact_present`
@@ -106,13 +106,12 @@ expect(sdn).to_contain("result: PASS")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-A11-EVD
-step("Verify: fails with a distinct missing_artifact reason when the file is absent")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("fails with a distinct missing_artifact reason when the file is absent")
 step("Verify a receipt whose declared artifact does not exist on disk")
 val r = honest_receipt()
 val outcome = receipt_verify(r, false, 1500, 1000)
@@ -125,7 +124,7 @@ expect(outcome.reason).to_contain("missing_artifact")
 
 #### fails when no artifact is declared at all
 
-- Verify: fails when no artifact is declared at all
+- fails when no artifact is declared at all
 - Verify a receipt that declares no artifact
    - Expected: rule_outcome.passed is false
 
@@ -133,13 +132,12 @@ expect(outcome.reason).to_contain("missing_artifact")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-A11-EVD
-step("Verify: fails when no artifact is declared at all")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("fails when no artifact is declared at all")
 step("Verify a receipt that declares no artifact")
 val base = honest_receipt()
 val r = EvidenceReceipt(
@@ -162,7 +160,7 @@ expect(rule_outcome.reason).to_contain("missing_artifact")
 
 #### fails with a distinct stale_artifact reason when the artifact predates the run
 
-- Verify: fails with a distinct stale_artifact reason when the artifact predates the run
+- fails with a distinct stale_artifact reason when the artifact predates the run
 - Verify a receipt whose artifact mtime is before the run's start_time
    - Expected: outcome.passed is false
    - Expected: outcome.rule equals `artifact_fresh`
@@ -171,13 +169,12 @@ expect(rule_outcome.reason).to_contain("missing_artifact")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-A11-EVD
-step("Verify: fails with a distinct stale_artifact reason when the artifact predates the run")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("fails with a distinct stale_artifact reason when the artifact predates the run")
 step("Verify a receipt whose artifact mtime is before the run's start_time")
 val r = honest_receipt()
 val outcome = receipt_verify(r, true, 500, 1000)
@@ -192,7 +189,7 @@ expect(outcome.reason).to_contain("stale_artifact")
 
 #### fails with a distinct hosted_fallback reason
 
-- Verify: fails with a distinct hosted_fallback reason
+- fails with a distinct hosted_fallback reason
 - Verify a bare_metal-target receipt that recorded a hosted fallback
    - Expected: outcome.passed is false
    - Expected: outcome.rule equals `execution_honest`
@@ -201,13 +198,12 @@ expect(outcome.reason).to_contain("stale_artifact")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-A11-EVD
-step("Verify: fails with a distinct hosted_fallback reason")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("fails with a distinct hosted_fallback reason")
 step("Verify a bare_metal-target receipt that recorded a hosted fallback")
 val base = honest_receipt()
 val r = EvidenceReceipt(
@@ -231,7 +227,7 @@ expect(outcome.reason).to_contain("hosted_fallback_in_baremetal")
 
 #### fails with a distinct interpreter_fallback reason
 
-- Verify: fails with a distinct interpreter_fallback reason
+- fails with a distinct interpreter_fallback reason
 - Verify a native_perf-target receipt that recorded an interpreter fallback
    - Expected: outcome.passed is false
    - Expected: outcome.rule equals `execution_honest`
@@ -240,13 +236,12 @@ expect(outcome.reason).to_contain("hosted_fallback_in_baremetal")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-A11-EVD
-step("Verify: fails with a distinct interpreter_fallback reason")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("fails with a distinct interpreter_fallback reason")
 step("Verify a native_perf-target receipt that recorded an interpreter fallback")
 val base = honest_receipt()
 val r = EvidenceReceipt(
@@ -270,7 +265,7 @@ expect(outcome.reason).to_contain("interpreter_fallback_in_native_perf")
 
 #### fails with a distinct unsupported_arch reason when result claims PASS
 
-- Verify: fails with a distinct unsupported_arch reason when result claims PASS
+- fails with a distinct unsupported_arch reason when result claims PASS
 - Verify a receipt for an unsupported architecture that claims PASS
    - Expected: outcome.passed is false
    - Expected: outcome.rule equals `arch_supported`
@@ -279,13 +274,12 @@ expect(outcome.reason).to_contain("interpreter_fallback_in_native_perf")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-A11-EVD
-step("Verify: fails with a distinct unsupported_arch reason when result claims PASS")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("fails with a distinct unsupported_arch reason when result claims PASS")
 step("Verify a receipt for an unsupported architecture that claims PASS")
 val base = honest_receipt()
 val r = EvidenceReceipt(
@@ -307,7 +301,7 @@ expect(outcome.reason).to_contain("unsupported_arch_claims_pass")
 
 #### passes when the same architecture correctly reports unsupported (not PASS)
 
-- Verify: passes when the same architecture correctly reports unsupported (not PASS)
+- passes when the same architecture correctly reports unsupported (not PASS)
 - Verify an unsupported-arch receipt that honestly reports 'unsupported'
    - Expected: outcome.passed is true
 
@@ -315,13 +309,12 @@ expect(outcome.reason).to_contain("unsupported_arch_claims_pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SIMPLEOS-HARDEN-A11-EVD
-step("Verify: passes when the same architecture correctly reports unsupported (not PASS)")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-LIB
+step("passes when the same architecture correctly reports unsupported (not PASS)")
 step("Verify an unsupported-arch receipt that honestly reports 'unsupported'")
 val base = honest_receipt()
 val r = EvidenceReceipt(
@@ -357,36 +350,56 @@ expect(outcome.passed).to_equal(true)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-SIMPLEOS-HARDEN-A11-EVD`
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `9c9168dd8065ac7fa7d52fbf95040a05c8f29dba616b3cdc21dc902ee6709746`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `fb5665b8752ce05468d01b7cce91960e1bf7a281eb6ced6f8635bf3b83b80609`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `9c9168dd8065ac7fa7d52fbf95040a05c8f29dba616b3cdc21dc902ee6709746`.
+Source SHA-256: `fb5665b8752ce05468d01b7cce91960e1bf7a281eb6ced6f8635bf3b83b80609`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `9c9168dd8065ac7fa7d52fbf95040a05c8f29dba616b3cdc21dc902ee6709746`  
+Source SHA-256: `fb5665b8752ce05468d01b7cce91960e1bf7a281eb6ced6f8635bf3b83b80609`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **86/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/01_unit/lib/spec/evidence_receipt_spec.spl
 mirror: doc/06_spec/01_unit/lib/spec/evidence_receipt_spec.md (current)
-findings: 3 blockers: 0
+findings: 6 blockers: 1
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/spec/evidence_receipt_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=86; blocker cap makes effective=49
 doc/06_spec/01_unit/lib/spec/evidence_receipt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/spec/evidence_receipt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, recovery/troubleshooting
+doc/06_spec/01_unit/lib/spec/evidence_receipt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/spec/evidence_receipt_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/lib/spec/evidence_receipt_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'passes every fail-closed rule' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/spec/evidence_receipt_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'serializes to SDN without corrupting brace-sensitive content' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/spec/evidence_receipt_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails with a distinct missing_artifact reason when the file is absent' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

@@ -8,7 +8,6 @@ use os.tls13.record13.*
 use os.tls13.handshake13.*
 use os.tls13.psk.*
 use os.tls13.cert_verify.*
-use os.tls13.downgrade.*
 use os.tls13.new_session_ticket.{stored_psk_from_new_session_ticket}
 use os.crypto.curve25519.*
 use os.crypto.ecdh_p256.*
@@ -88,7 +87,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     }
     transcript = transcript_add(transcript, ch_transcript_bytes)
     if fd_mode:
-        fd_transcript = _rec13_append_bytes(fd_transcript, ch_transcript_bytes)
+        fd_transcript = _append_bytes(fd_transcript, ch_transcript_bytes)
     _tls_debug("after transcript_add clienthello")
 
     # ------------------------------------------------------------------
@@ -108,11 +107,6 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     var sh_parsed = parse_handshake_header(sh_hs_bytes)
     var sh_body_bytes: [u8] = _copy_range(sh_hs_bytes, 4, sh_pay_len - 4)
     var sh: ServerHello13 = parse_server_hello(sh_body_bytes)
-
-    # RFC 8446 §4.1.3: reject a server that signalled a version downgrade.
-    val dg1 = tls13_downgrade_reason(sh.random)
-    if dg1 != "":
-        return Tls13ConnectResult.Failed(reason: dg1)
 
     # HRR detection. The current connect flow advertises X25519 in CH1 only
     # (no P-256 ephemeral generated up front), so the only valid HRR pick
@@ -189,11 +183,6 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
             sh_parsed = parse_handshake_header(sh_hs_bytes)
             sh_body_bytes = _copy_range(sh_hs_bytes, 4, sh_pay_len - 4)
             sh = parse_server_hello(sh_body_bytes)
-            # RFC 8446 §4.1.3 again on ServerHello2 — the post-HRR ServerHello
-            # is a fresh message with a fresh random and must carry no sentinel.
-            val dg2 = tls13_downgrade_reason(sh.random)
-            if dg2 != "":
-                return Tls13ConnectResult.Failed(reason: dg2)
             # §4.1.4: a second HRR is illegal.
             if is_hello_retry_request(sh):
                 return Tls13ConnectResult.Failed(reason: "unexpected_message: second HRR in connection")
@@ -210,7 +199,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     # Add full ServerHello handshake bytes (including 4-byte header) to transcript
     transcript = transcript_add_with_len(transcript, sh_hs_bytes, sh_pay_len)
     if fd_mode:
-        fd_transcript = _rec13_append_bytes(fd_transcript, _copy_range(sh_hs_bytes, 0, sh_pay_len))
+        fd_transcript = _append_bytes(fd_transcript, _copy_range(sh_hs_bytes, 0, sh_pay_len))
     _tls_debug("after transcript_add serverhello")
 
     # ------------------------------------------------------------------
@@ -592,19 +581,12 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     if val CertVerifyResult.Err(cv_err) = cv_result:
         return Tls13ConnectResult.Failed(reason: cv_err)
 
-    # Peer verification is UNCONDITIONAL. It is no longer gated on a non-empty
-    # root_store: an empty store is a refusal, not a bypass. The only way past
-    # this is config.insecure_disable_certificate_verification, checked inside
-    # verify_peer_certificate so there is exactly one opt-out site in the tree.
-    val peer_result = verify_peer_certificate(
-        cert_chain,
-        config.root_store,
-        hostname,
-        tls13_verification_time(config),
-        config.insecure_disable_certificate_verification
-    )
-    if val CertVerifyResult.Err(peer_err) = peer_result:
-        return Tls13ConnectResult.Failed(reason: peer_err)
+    if config.root_store.len() > 0:
+        if cert_chain.len() == 0:
+            return Tls13ConnectResult.Failed(reason: "server certificate chain is empty")
+        val chain_result = verify_cert_chain(cert_chain, config.root_store)
+        if val CertChainResult.Err(chain_err) = chain_result:
+            return Tls13ConnectResult.Failed(reason: chain_err)
     _tls_debug("after cert-verify root_store_len={config.root_store.len()}")
 
     # ------------------------------------------------------------------
@@ -726,12 +708,9 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         if should_send_cert_verify:
             val client_cv_hash = transcript_hash(transcript)
             val client_cv_content = _build_client_cert_verify_content(client_cv_hash)
-            val client_cv_sign_result = ed25519_sign_pkcs8_checked(
-                config.client_pkcs8, client_cv_content)
-            if client_cv_sign_result.is_err():
-                return Tls13ConnectResult.Failed(
-                    reason: "client CertificateVerify signing failed: {client_cv_sign_result.unwrap_err()}")
-            val client_cv_sig = client_cv_sign_result.unwrap()
+            val client_cv_sig = ed25519_sign_pkcs8(config.client_pkcs8, client_cv_content)
+            if client_cv_sig.len() == 0:
+                return Tls13ConnectResult.Failed(reason: "client CertificateVerify signing failed")
             val client_cv_msg = build_certificate_verify_bytes(config.client_sig_scheme, client_cv_sig)
             transcript = transcript_add(transcript, client_cv_msg)
             val client_cv_record = record13_encrypt(client_hs_rk, client_hs_seq, 0x16, client_cv_msg)
@@ -789,3 +768,4 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         tickets: [],
     )
     Tls13ConnectResult.Connected(ctx: ctx)
+

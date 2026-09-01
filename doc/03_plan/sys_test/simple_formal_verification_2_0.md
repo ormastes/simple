@@ -1,70 +1,100 @@
-# Simple Formal Verification 2.0 — System Test Plan
+<!-- codex-design -->
+# Simple Formal Verification 2.0 System Test Plan
 
-**Status:** Implemented modern SSpec and manual mirrors; focused RVFI readiness
-coverage prepared as `TEST_BLOCKED` pending an admitted Stage-4 CLI
-**Date:** 2026-08-16
-**Independent high-review:** **PASS (cycle 3, final)** for interface consistency,
-status truthfulness, ownership, executable command closure, and Lean links.
+**Status:** Implemented modern SSpec and manual mirror; runtime execution blocked
+**Date:** 2026-08-14
+**Recovery review:** **Source audit complete; overall acceptance WARN/blocked**
+pending the canonical runtime, fresh reviewer reconciliation, and external
+RV64 receipt execution.
 
-## Canonical paths
+Executable SPipe scenarios will live under `test/03_system/compiler/formal_verification_2_0_spec.spl`; the generated manual will mirror to `doc/06_spec/03_system/compiler/formal_verification_2_0_spec.md`. Scenario implementation begins with FV-0 and remains fail-fast until its oracle is real.
 
-- Executable: `test/03_system/compiler/formal_verification_2_0_spec.spl`
-- Generated manual: `doc/06_spec/03_system/compiler/formal_verification_2_0_spec.md`
-- Focused RVFI readiness executable:
-  `test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`
-- Focused blocked manual mirror:
-  `doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`
-- Focused feature-expert and LLM lookup:
-  `doc/00_llm_process/feature_expert/formal_verification/skill.md` and
-  `doc/00_llm_process/llm_wiki.md#fv2-risc-v-dual-track-verification`
-- Focused implemented foundation:
-  `test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl`
+| Requirement | Scenario/oracle |
+|---|---|
+| REQ-FV2-001, REQ-FV2-002, REQ-FV2-019 | Status/profile matrix proves model-only, stale, timeout, unknown, missing-tool, and unsupported cases cannot produce verified release. |
+| REQ-FV2-003, REQ-FV2-011 | Macro/aspect mutation changes exact weave manifest, semantic hash, closure, and cache result; proof and compiled VIR identities match. |
+| REQ-FV2-004, REQ-FV2-008 | Deliberately wrong function body fails despite satisfiable postcondition; normal/error/frame/invariant/termination paths have real witnesses. |
+| REQ-FV2-005, REQ-FV2-006, REQ-FV2-007 | Construct coverage matrix validates exact bit-vector overflow/shift/signed cases and rejects fallback/unknown Lean IR nodes. |
+| REQ-FV2-009, REQ-FV2-010, REQ-FV2-016 | Hidden transitive axiom, `sorry`, native trust, forged receipt, stale artifact, and non-equivalent mutations turn the gate red. |
+| REQ-FV2-012 | Aliased, indirect, method, generated, and renamed effectful calls remain visible in transitive typed effects. |
+| REQ-FV2-013 | Sound compiler rewrite yields checked certificate; intentionally unsound rewrite yields mapped counterexample/failure. |
+| REQ-FV2-014 | Kernel vertical slice preserves capability, lifecycle, IPC, mapping, and recovery invariants across adversarial interleavings/crashes. |
+| REQ-FV2-015 | One RV32I family retires through generated RVFI, agrees with Sail, passes covers/mutations, and remains equivalent after accepted lowering. |
+| REQ-FV2-017, REQ-FV2-018, REQ-FV2-020 | Plugin receipt/profile mismatch blocks composition; existing proof channels remain sufficient; delivery gates reject premature advancement. |
 
-The system spec must use built-in matchers and the frozen scenario flow:
+Only built-in matchers are used. No `pass_todo`, constant-true assertion, empty scenario, or comment-only oracle may satisfy a requirement. Captures use `artifact`, `log`, and `protocol` evidence for receipts, Lean/checker audits, counterexamples, RVFI traces, and equivalence reports.
 
-1. `step("Audit the formal claim boundary")`
-2. `step("Construct canonical verification evidence")`
-3. `step("Reject stale or unsupported evidence")`
-4. `step("Replay the shipped artifact independently")`
+## Open tooling performance blocker
 
-Frozen helpers are `setup_fv2_fixture`, `check_fv2_gate`, and
-`check_fv2_replay`. An incomplete helper calls `fail(...)` and cannot silently
-pass. Proof logs and receipts use `artifact`, `log`, `protocol`, or `exec`
-captures.
+`bin/simple check src/compiler/50.mir/verification_contract_bridge.spl` exceeded
+both the default 60-second CPU guard and an explicit 120-second wall-clock
+guard on 2026-08-12 without producing a source diagnostic. The available
+binary also identifies itself as the Rust bootstrap seed, so this is not
+release evidence. Acceptance: the pure-Simple self-hosted checker must complete
+this focused file in at most 30 seconds warm, report max RSS, and return a
+truthful nonzero status on timeout or compilation failure.
+The same bounded diagnostic against
+`src/compiler/90.tools/verify/replay_runner.spl` exited 124 after 35 seconds on
+2026-08-12 without a source diagnostic; it is bootstrap-only evidence and was
+not retried.
+
+Only these four flow anchors are frozen. Scenario-local `step(...)` labels may
+describe individual checks and are not additional frozen interface names.
+
+Only these four flow anchors are frozen. Scenario-local `step(...)` labels may
+describe individual checks and are not additional frozen interface names.
 
 ## Scenario matrix
 
 | Scenario | Requirements | Oracle | Current state |
 |---|---|---|---|
 | Truthful claim boundary | REQ-FV2-001, REQ-FV2-002, REQ-FV2-019, REQ-FV2-020; NFR-FV2-002 | model/source/backend/artifact statuses remain distinct; missing tool, timeout, unknown, and unsupported reject | Implemented; runtime blocked |
-| Canonical evidence construction | REQ-FV2-003, REQ-FV2-005, REQ-FV2-010, REQ-FV2-011, REQ-FV2-012; NFR-FV2-001, NFR-FV2-005, NFR-FV2-008 | frozen identities bind expanded/woven source, typed VIR/MIR, effects, tools, and cache key deterministically | MIR JSON foundation only |
+| Canonical evidence construction | REQ-FV2-003, REQ-FV2-005, REQ-FV2-010, REQ-FV2-011, REQ-FV2-012; NFR-FV2-001, NFR-FV2-005, NFR-FV2-008 | frozen identities bind expanded/woven source, typed VIR/MIR, effects, tools, and cache key deterministically | VIR closure is hardened; Gate 3 deliberately fails until the compiler owns weave-manifest production |
 | Execution-linked exact proof | REQ-FV2-004, REQ-FV2-006, REQ-FV2-007, REQ-FV2-008, REQ-FV2-018; NFR-FV2-007 | deliberately wrong body, width/overflow/shift mismatch, unsupported node, vacuity, and disconnected result reject | Implemented; runtime blocked |
-| Trust and compiler refinement | REQ-FV2-009, REQ-FV2-013, REQ-FV2-016, REQ-FV2-017; NFR-FV2-003, NFR-FV2-004 | hidden axiom, forged/stale receipt, unsound transform, mutation, and incompatible dynamic receipt reject | Implemented; external replay blocked |
-| Incremental performance | REQ-FV2-010; NFR-FV2-006, NFR-FV2-010 | warm SymbolId/SCC checks retain timing, cache, scheduler, and max-RSS evidence without repeated full-tree scans | Blocked by unavailable self-hosted CLI |
-| SimpleOS vertical slice | REQ-FV2-014, REQ-FV2-020; NFR-FV2-009, NFR-FV2-010 | stable manual Lean roots plus product-linked receipts survive adversarial lifecycle/interleaving/crash cases | Blocked; no current-main accepted slice |
-| RISC-V dual track | REQ-FV2-015, REQ-FV2-019, REQ-FV2-020; NFR-FV2-002, NFR-FV2-009 | focused checker accepts exactly 21 canonical RVFI ports; missing extended ports/core reject; aggregate Lean/BYL and strict SBY gates both pass | Focused source/manual prepared; `TEST_BLOCKED`; readiness is not proof |
-| Independent release replay | REQ-FV2-001, REQ-FV2-009, REQ-FV2-010, REQ-FV2-016, REQ-FV2-019, REQ-FV2-020; NFR-FV2-001, NFR-FV2-003, NFR-FV2-009 | fresh Lean and independent checker replay exact shipped bytes with closed trust | Blocked by all predecessors |
+| Trust and compiler refinement | REQ-FV2-009, REQ-FV2-013, REQ-FV2-016, REQ-FV2-017; NFR-FV2-003, NFR-FV2-004 | hidden axiom, forged/stale receipt, unsound transform, mutation, and incompatible dynamic receipt reject | Hash-only VC replay promotion is disabled; approved replay authority/execution remains blocked |
+| Incremental performance | REQ-FV2-010; NFR-FV2-006, NFR-FV2-010 | warm SymbolId/SCC checks retain timing, cache, scheduler, and max-RSS evidence without repeated full-tree scans | Recursive work identities and measured-envelope validation implemented; scalar execution remains fail-closed until the task facade supplies real metrics |
+| SimpleOS vertical slice | REQ-FV2-014, REQ-FV2-020; NFR-FV2-009, NFR-FV2-010 | stable manual Lean roots plus product-linked receipts survive adversarial lifecycle/interleaving/crash cases | Explicitly excluded from this delivery; its scenarios are regression-only and cannot prove Wave 4 closure |
+| RISC-V dual track | REQ-FV2-015, REQ-FV2-020; NFR-FV2-009 | exact RVFI/SBY proof, independent ISA oracle, refinement/equivalence, and artifact identities agree | RV32 aggregation/RVFI/SBY and RV64 fail-closed authority runner present; canonical wrappers and exact proof/netlist/Linux/oracle inputs remain blocked |
+| Independent release replay | REQ-FV2-001, REQ-FV2-009, REQ-FV2-010, REQ-FV2-016, REQ-FV2-019, REQ-FV2-020; NFR-FV2-001, NFR-FV2-003, NFR-FV2-009 | fresh Lean and independent checker replay exact shipped bytes with closed trust | Caller assembly is fail-closed; no accepting finalizer exists until runner-owned checker, gate-producer, and signer-policy authority is available |
 
-Every selected REQ must have a happy path, boundary case, and rejection path
-before PASS. Current zero-case rows are failures, not exclusions.
+| Requirement | Executable cases | Coverage |
+|---|---:|---|
+| REQ-FV2-001 | 3 | Foundation full |
+| REQ-FV2-002 | 3 | Foundation full |
+| REQ-FV2-003 | 0 | Missing: canonical macro-to-VIR production path |
+| REQ-FV2-004 | 4 | Source contract retention, actual-call/non-vacuity roots, proof/source identity, typed authorities, direct-recursion termination, pure invariant/frame emission, and actual-function pre/post/frame proofs for the homogeneous straight-line global-state subset; explicit state-bound invariants, heap, and general CFG remain pending |
+| REQ-FV2-005 | 0 | Partial unit coverage only; broader construct/source-map/call closure remains incomplete |
+| REQ-FV2-006 | 6 | VIR and canonical MIR-to-Lean paths use exact BitVec widths and preserve Result payload/variant identity; float, pointer, signedness-ambiguous division/shift, checked arithmetic, heap, cast, and undeclared aggregate semantics fail closed |
+| REQ-FV2-007 | 3 | Typed Lean IR foundation |
+| REQ-FV2-008 | 3 | Canonical MIR foundation: deterministic thirteen-kind DAG, exact function authorities, acyclic-CFG termination, pure-leaf module-call composition, and an all-thirteen replay-bound discharge validator capped at `model_proven`. `ResolvedDirectCallManifestV1`/`ResolvedCanonicalModuleClosureV2` now bind legacy textual direct-call sites to exact resolver SymbolIds/signature/body/module snapshots without trusting name lookup. Cyclic loop measures, transitive/effectful SCC composition, canonical resolver production, and executed proof discharge remain missing. |
+| REQ-FV2-009 | 4 | Trust parser/generator foundation, exact-root collision rejection, pinned independent exporter/checker provisioning, and one executed exact-root independent replay; six Gate 4 roots remain rejected at the closed nanoda Nat-literal boundary |
+| REQ-FV2-010 | 6 | Receipt/cache/trust identity plus SymbolId/SCC scheduling and reverse-dependency invalidation |
+| REQ-FV2-011 | 3 | Weave identity/certificate foundation; macro production bridge missing |
+| REQ-FV2-012 | 5 | Typed transitive closure plus canonical MIR-derived global manifests, deterministic module-VIR closure identity, caller-effect mismatch rejection, generated-helper propagation, and unresolved pointer/indirect/external gates. V2 effect closure consumes `ResolvedDirectCallManifestV1` bindings rather than text-name-to-SymbolId lookup; missing/stale call bindings fail. Heap regions, canonical resolver production, and indirect dispatch remain pending. |
+| REQ-FV2-013 | 4 | Proved straight-line DCE validator plus Result logical/tagged-ABI observation certificates bound to runtime artifact/proof/audit identities; full MIR and backend edges remain missing |
+| REQ-FV2-014 | 22 | Seven implementation-linked slices have typed proof/replay-bound source-promotion paths. The green-channel close/drain root passed executed independent replay; capability, scheduler, memory, lifecycle, process-queue, and DBFS roots remain replay-rejected on closed nanoda `#ELN` support. Raw audit inputs remain `model_proven`; no partial matrix can promote Gate 4. Orphan adoption, general map/unmap, multi-record recovery, and concurrent interleavings also remain pending. |
+| REQ-FV2-015 | 4 | Typed ADD provider/trap/retirement composition emits strict VHDL, captures dispatch source evidence, derives hashed RVFI, and rejects the disabled LSU. Constructed job receipts remain `specified`; exact executed SBY proof/cover/killed-mutant evidence can become `model_proven`. The GHDL/Yosys equivalence runner binds module, RTL, synthesized JSON netlist, proof log, tools, and synthesis policy and caps combined evidence at `backend_refined`. The pinned Sail runner compiles exact ADD opcode `002081b3`, requires the RV32 model to produce x3=12, binds all oracle/probe/trace identities, and caps the bounded witness at `model_proven`; it currently reports blocked because the pinned simulator/config are absent. The pure-Simple end-to-end gate also rejects the current Rust seed, so production ADD jobs/equivalence have not executed. Final artifact closure remains missing. |
+| REQ-FV2-016 | 0 | Missing: complete semantic mutation/cover suite |
+| REQ-FV2-017 | 3 | Signed receipt/interface/profile/compiler-lineage/composition gate and explicit bounded-TCB classification |
+| REQ-FV2-018 | 1 | Partial: retained `proof uses` expands deterministically over all thirteen canonical VC identities, and unit evidence requires each generated receipt to include its exact external theorem dependency. Executed Lean emission/audit/replay remains missing. |
+| REQ-FV2-019 | 3 | Typed/system fail-closed reducer plus a one-bundle CLI with repository-pinned signer policy, SHA-256 evidence identities, signed-bundle binding, pure-Simple Ed25519 verification, strict SDN parsing, and fixed-root receipt materialization. Unit cases cover admission, unknown-field injection, duplicate signer identity, payload drift, tampered signatures, wrong-key policy, missing receipt files, and changed receipt content. Executed self-hosted test evidence remains pending. |
+| REQ-FV2-020 | 7 | Frozen eight-gate state machine accepts honest partial progress, rejects skipped predecessors, and requires the verified-release decision only after all gates pass. CLI admission recomputes the canonical gate-manifest hash bound into signed evidence, including each receipt/status/diagnostic. Gates 0–7 have typed collectors; executed external/product evidence and final self-hosted verification remain pending. |
+| REQ-FV2-001, REQ-FV2-003 | unit | Typed Gate 0 collector accepts unique roots only when exact SHA-256 proof receipts bind a closed transitive axiom audit and accepted fresh/independent replay of the same artifact; weak hashes, `sorryAx`, replay drift, and duplicate roots fail without passing receipt material. |
+| REQ-FV2-005, REQ-FV2-006 | unit | Typed Gate 1 collector recomputes canonical VIR function/module SHA-256 identities, accepts exact reachable types only, and requires five ordered executed check receipts bound to the same VIR. Forged provenance, unsupported/abstract types, stale/reordered/missing checks, retained-output absence, and failed outcomes block the gate. |
+| REQ-FV2-008, REQ-FV2-010 | unit | Typed Gate 2 collector binds executed woven→VIR construction and a gap-free sequence of independently checked compiler certificates ending at the exact artifact. Woven drift, chain gaps/reordering, validator substitution, timeout/output absence, and wrong final artifact fail closed. |
+| REQ-FV2-009 | unit | Typed Gate 3 collector binds exact macro/weave provenance, pointcut SymbolIds, introduced-symbol closure, advice certificates, materialized Gate 0 proof dependencies, and the post-proof transformation lock. Missing symbols/certificates/proofs, behavior-changing advice, provenance drift, or unlock attempts fail. |
+| REQ-FV2-014, REQ-FV2-020 | unit | Typed Gate 4 collector requires seven ordered `source_refined` SimpleOS subsystem receipts and independently rechecks their exact SHA-256 source/model identity, proof/cache/trust/audit/replay closure. Missing, reordered, model-only, stale, artifact-drifted, or duplicate evidence fails closed. |
+| REQ-FV2-015, REQ-FV2-020 | unit | Typed Gate 5 collector composes exact generated RV32 ADD SBY proof/cover/mutation, an independently checked HWIR-to-RTL certificate, RTL-netlist equivalence, and pinned Sail witness evidence. Status substitution, scope gaps, product drift, wrong compiler edges, weak/missing material, or netlist absence fails closed. |
+| REQ-FV2-015, REQ-FV2-020 | unit | Typed Gate 6 collector binds shared-XLEN, privilege/CSR, MMU, precise trap/interrupt, synthesis-equivalence, Linux-boot, and ACT checks to one RV64 HWIR/RTL/netlist/image/platform/assumption identity. Formal proof, refinement certificate, and executed-validation classes cannot substitute for one another. |
+| REQ-FV2-019, REQ-FV2-020 | unit | Typed Gate 7 collector seals a unique materialized `artifact_verified` proof/compiler/trust/replay/mutation/non-vacuity closure before manifest signing. The CLI rehashes the fixed-root deployed artifact bytes and compares them with both signed artifact identities before signer or receipt admission. |
 
-## Per-ID executable traceability
+Zero-case rows are release failures, not exclusions or implied coverage.
 
-In the trace table, `FV2SYS` labels
-`test/03_system/compiler/formal_verification_2_0_spec.spl`; it is not a literal
-shell command. `RVFIREADY` labels
-`test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`.
-Every eventual system-test invocation uses the exact path shown
-in the one-pass ledger below. Scenario names are
-frozen acceptance names for its implementation. Unless a row names a narrower
-reviewer, the reviewer is the independent highest-capability FV2 reviewer.
-The blocker column records missing executable evidence, not missing source:
-the capsule and scenarios are present, but no row is admitted until its named
-runtime/tool command succeeds on the unchanged tree.
+## Execution and evidence commands
 
 | ID | Implementation artifact | Exact happy / boundary / rejection oracle or test | Blocker | Prerequisite / executable resume command | Expected marker or artifact | Owner / reviewer |
 |---|---|---|---|---|---|---|
-| REQ-FV2-001 | `src/compiler/00.common/assurance/`; formal reports | FV2SYS `reports the four formal statuses`; `keeps backend_refined qualified`; `rejects model-only artifact_verified` | FV2SYS missing | Create the frozen system spec, then run its exact ledger command below | four distinct status rows; `artifact_verified=false` negative | assurance / independent FV2 |
+| REQ-FV2-001 | `src/compiler/00.common/assurance/`; formal reports | FV2SYS `reports the four formal statuses`; `keeps backend_refined qualified`; `rejects model-only artifact_verified` | executable system spec present; canonical runtime missing | Run its exact ledger command below | four distinct status rows; `artifact_verified=false` negative | assurance / independent FV2 |
 | REQ-FV2-002 | assurance profile resolver/config | FV2SYS `resolves verified above critical`; `maps verified conservatively for V1`; `rejects unknown verified policy` | reviewed design accepted; implementation unconfirmed | `bin/simple check src/compiler/00.common/assurance`; then run the exact system-spec ledger command | versioned verified policy ID, no fifth V1 case | assurance / interface reviewer |
 | REQ-FV2-003 | frontend expansion/weave and VIR producer | FV2SYS `binds one canonical program`; `changes hash for ordered advice`; `rejects proof/compiler hash drift` | canonical producer missing | `bin/simple check src/compiler/20.hir`; then run the exact system-spec ledger command | equal proof/compile semantic hash | VIR / independent FV2 |
 | REQ-FV2-004 | execution-contract/obligation layer | FV2SYS `proves actual return transition`; `covers error result`; `rejects satisfiable postcondition disconnected from body` | execution-linked chain missing | `bin/simple test test/00_formal_verification/compiler/lean_workflow_spec.spl --mode=interpreter`; then run the exact system-spec ledger command | body-bound obligation hash; disconnected negative | contracts / Lean reviewer |
@@ -88,12 +118,12 @@ runtime/tool command succeeds on the unchanged tree.
 | NFR-FV2-002 | fail-closed reducers and wrappers | FV2SYS `accepts valid evidence`; `classifies supported blocker`; `rejects stale/contradictory/timeout/missing/unknown` | system matrix missing | Run the focused MIR command followed by the exact system-spec ledger command | nonzero rejection and retained diagnostic | every lane / merge owner |
 | NFR-FV2-003 | `TrustManifest v1` | FV2SYS `lists closed trust`; `lists approved assumption boundary`; `rejects unnamed/unversioned/unattributed trust` | transitive trust audit incomplete | `bin/simple verify check` | complete trust manifest, zero hidden roots | trust / security reviewer |
 | NFR-FV2-004 | SymbolId/SCC cache | FV2SYS `reuses unaffected SCC`; `invalidates changed dependency`; `rejects stale reverse-dependency result` | scheduler/cache integration missing | Run the exact system-spec ledger command with performance evidence enabled | cache hit/miss/invalidation receipt | cache / compiler reviewer |
-| NFR-FV2-005 | all canonical emitters | FV2SYS `emits byte-stable evidence`; `handles stable empty sets`; `rejects ordering/nondeterministic drift` | only MIR JSON foundation present | run identical generation twice | byte-equal VIR/Lean/weave/receipt artifacts | producer owners / independent FV2 |
+| NFR-FV2-005 | all canonical emitters | FV2SYS `emits byte-stable evidence`; `handles stable empty sets`; `rejects ordering/nondeterministic drift` | producers present; unchanged-tree repeat evidence blocked | run identical generation twice | byte-equal VIR/Lean/weave/receipt artifacts | producer owners / independent FV2 |
 | NFR-FV2-006 | proof scheduler/tool runners | FV2SYS `meets warm budget`; `records zero-work warm case`; `fails on timeout/full-tree/per-obligation process regression` | canonical self-hosted CLI unavailable | Time the exact system-spec path from the ledger; do not substitute the label | elapsed/cache metrics and max RSS log | performance / performance reviewer |
 | NFR-FV2-007 | diagnostic mappers | FV2SYS `maps counterexample to source/SymbolId`; `maps boundary value/effect/signal`; `rejects unmapped generic success/failure` | complete mapper absent | Run the exact system-spec ledger command and retain rejection diagnostics | typed diagnostic with source/effect/signal identity | diagnostics / independent FV2 |
-| NFR-FV2-008 | ten frozen V1 schemas | FV2SYS `reads current V1`; `migrates explicit next version`; `rejects incompatible unversioned and stale-cache entry` | migration tests missing | Run the exact system-spec ledger command after migration scenarios exist | version/migration receipt and invalidation marker | interface / interface reviewer |
+| NFR-FV2-008 | frozen Policy V1→V2 boundary plus ten frozen V1 schemas | focused migration spec + FV2SYS `reads current V1`; `migrates explicit next version`; `rejects incompatible unversioned and stale-cache entry` | typed migration receipt/spec implemented; runtime blocked | Run the focused migration spec and exact system-spec ledger command | version/migration receipt and invalidation marker | interface / interface reviewer |
 | NFR-FV2-009 | fresh Lean, independent checker, ISA oracle | FV2SYS `replays exact artifact independently`; `checks bounded supported oracle case`; `rejects checker/oracle/tool/artifact identity substitution` | independent tools/product evidence absent | stable `lake build`, dual-track, strict SBY | distinct checker/oracle hashes and accepted replay | replay/hardware / independent FV2 |
-| NFR-FV2-010 | DAG scheduler | FV2SYS `runs independent SCCs in parallel`; `handles one-node DAG`; `rejects dependency-order violation, unbounded fanout, or lost result` | scheduler implementation/evidence missing | Run the exact system-spec ledger command with scheduler metrics enabled | bounded worker/DAG metrics with deterministic commit order | scheduler / concurrency reviewer |
+| NFR-FV2-010 | DAG scheduler | focused proof-DAG/performance specs + FV2SYS `runs independent SCCs in parallel`; `handles one-node DAG`; `rejects dependency-order violation, unbounded fanout, or lost result` | bounded work planning, recursive dependency identity, and deterministic measured-result commit validation implemented; scalar worker execution blocked | Run the focused specs and exact system-spec ledger command with scheduler metrics enabled | bounded worker/DAG metrics with deterministic commit order | scheduler / concurrency reviewer |
 
 ## Existing focused MIR evidence
 
@@ -118,8 +148,13 @@ Focused and system evidence:
 
 ```sh
 bin/simple test test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl --mode=interpreter
+bin/simple test test/01_unit/compiler/assurance/schema_migration_spec.spl --mode=interpreter
+bin/simple test test/01_unit/compiler/assurance/proof_dag_spec.spl --mode=interpreter
+bin/simple test test/01_unit/compiler/assurance/proof_performance_evidence_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/verify/fv2_wave6_orchestrator_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/verify/riscv_add_formal_bundle_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/verify/rv64_product_evidence_runner_spec.spl --mode=interpreter
 bin/simple test test/03_system/compiler/formal_verification_2_0_spec.spl --mode=interpreter
-bin/simple test test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl --mode=interpreter --clean --timeout 900 --sequential
 bin/simple spipe-docgen test/03_system/compiler/formal_verification_2_0_spec.spl --output doc/06_spec --no-index
 bin/simple sspec-maintain scan test/03_system/compiler/formal_verification_2_0_spec.spl
 bin/simple lint test/03_system/compiler/formal_verification_2_0_spec.spl
@@ -127,83 +162,32 @@ bin/simple spipe-docgen test/03_system/compiler/fv2_riscv_dual_track_readiness_s
 bin/simple sspec-maintain scan test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl
 bin/simple lint test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl
 sh scripts/check/check-duplication.shs
+sh scripts/rtl/check-fv2-rv32-add-end-to-end.shs
+sh scripts/rtl/run-riscv-scalar-runtime-pipeline-v9-formal.shs --self-test
 ```
 
-Whole interpreter suite and compiler/library/tool-server checks:
+Lean/RISC-V product acceptance remains separate:
 
 ```sh
-bin/simple test --mode=interpreter
-bin/simple check src/compiler
-bin/simple check src/lib
-bin/simple check src/app/mcp
-bin/simple check src/app/simple_lsp_mcp
-SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
-```
-
-MCP/LSP native artifact smokes required because compiler language/backend
-surfaces changed:
-
-```sh
-bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
-bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
-sh scripts/check/check-bootstrap-essential-tools-smoke.shs bin/simple
-```
-
-Lean/formal and product gates:
-
-```sh
-bin/simple gen-lean verify
-bin/simple verify check
-sh scripts/check/check-lean-proofs.shs
+(cd src/verification/kernel_capabilities && lake build)
 sh scripts/check/check-riscv-formal-dual-track.shs
 sh scripts/check/check-riscv-rtl-sby-proof.shs
-sh scripts/check/check-simpleos-critical-formal-proofs.shs
 sh scripts/check/check-simpleos-mission-critical-release.shs
 ```
 
-If the mission-critical gate reports a host prerequisite blocker, record it and
-run these diagnostics; they do not convert the release failure into PASS:
+The capability-rights Lean build must report
+`KernelCapabilities.rights_allow9_sound` with only `propext` and `Quot.sound`
+(and may report `Classical.choice` for other roots). Any generated
+`_native.bv_decide.ax_*`, `Lean.trustCompiler`, `sorryAx`, or project axiom
+keeps the source-refinement receipt failed.
 
-```sh
-sh scripts/check/check-simpleos-mission-critical-prereqs.shs
-sh scripts/setup/setup-simpleos-formal-env.shs --print-install
-```
+A missing tool, timeout, readiness-only result, or placeholder-rejected result
+is retained blocker evidence, never a substitute PASS.
 
-Working/staged audits, stub/layout checks, and final verification:
+## Manual rendering policy
 
-```sh
-sh scripts/audit/direct-env-runtime-guard.shs --working
-sh scripts/audit/direct-env-runtime-guard.shs --staged
-sh scripts/audit/numbered-artifact-guard.shs --working
-sh scripts/audit/numbered-artifact-guard.shs --staged
-test "$(find doc/06_spec -name '*_spec.spl' | wc -l)" -eq 0
-! rg -n 'pass_todo|expect\(true\)\.to_equal\(true\)|assert\(true\)|# TODO|# FIXME' test/03_system/compiler/formal_verification_2_0_spec.spl src/compiler
-```
-
-After every required gate reports PASS, integration closure is executable as
-one serialized transaction (with the detached worktree preserved):
-
-```sh
-flock /tmp/simple-main-restart12-push.lock sh -c 'set -eu; git add .spipe/simple_formal_verification_2_0/state.md doc/00_llm_process/feature_expert/formal_verification/skill.md doc/00_llm_process/layer_expert/formal_verification/skill.md doc/01_research/local/simple_formal_verification_2_0.md doc/01_research/domain/simple_formal_verification_2_0.md doc/02_requirements/feature/simple_formal_verification_2_0.md doc/02_requirements/nfr/simple_formal_verification_2_0.md doc/03_plan/agent_tasks/simple_formal_verification_2_0.md doc/03_plan/sys_test/simple_formal_verification_2_0.md doc/04_architecture/simple_formal_verification_2_0.md doc/04_architecture/simple_formal_verification_2_0_tldr.md doc/05_design/simple_formal_verification_2_0.md doc/05_design/simple_formal_verification_2_0_tldr.md doc/07_guide/compiler/lean_verification_workflow.md; git commit -m "docs: complete formal verification 2.0 plan"; env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main; git rebase origin/main; env -u GH_TOKEN -u GITHUB_TOKEN git push origin HEAD:main; env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main; git merge-base --is-ancestor HEAD origin/main; test -z "$(git status --porcelain)"; printf "%s PASS\n" "$(git rev-parse HEAD)" > /tmp/restart12-formal.done'
-```
-
-Expected terminal evidence is: focused/system PASS, docgen `0 stubs`, all seven
-`sspec-maintain` component scores accepted, compiler/lib/MCP/LSP/native/bootstrap
-gates exit 0, Lean has zero `sorry`/`admit`/untrusted project axioms,
-dual-track and strict SBY print `STATUS: PASS`, mission-critical reports
-`release_blockers=none`, audits are clean, and `$verify` reports `STATUS: PASS`.
-Any missing tool, readiness-only result, timeout, stale mirror, nonzero exit, or
-absent retained artifact remains a blocker.
-
-## Manual-quality gate
-
-The main manual must show the four frozen steps before folded implementation detail,
-name both generated artifacts and durable proof entry points, expose every
-named helper, contain zero placeholders, and remain readable without opening
-the source. The focused RVFI manual must show its readiness, mutation,
-missing-artifact, aggregate, and strict-proof steps while stating
-`TEST_BLOCKED` until admitted docgen replaces the hand-maintained mirror.
-`doc/06_spec` must contain zero executable `.spl` files. The merge
-owner reviews all seven `sspec-maintain` component scores; the independent
-final reviewer accepts traceability, exclusions, blocker truthfulness, and done
-marks.
+Foundation scenarios are visible. Helper construction functions and complete
+executable source may be folded. Proof logs, receipts, counterexamples, RVFI
+traces, and equivalence reports use linked `log`, `artifact`, or `protocol`
+evidence rather than screenshots. The current manual mirror is explicitly
+provisional until zero-stub doc generation runs on the pure-Simple toolchain.

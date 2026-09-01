@@ -53,7 +53,8 @@ Serial symlinks show the Xilinx ML Carrier card on `/dev/ttyUSB2`, `/dev/ttyUSB4
 | x86_32 | Multiboot SimpleOS arch lane | QEMU | Source-present in `src/os/kernel/arch/x86_32`; not run here. |
 | ARM Cortex-M33 | QEMU MPS2-AN505 | QEMU serial console | Verified here. `scripts/os/run_simpleos_cortex_m33_qemu.shs` boots to `simpleos>` shell, reports MPU enabled and in-memory FS. |
 | ARM Cortex-M4 | Arduino UNO R4 WiFi / RA4M1 | CMSIS-DAP SWD through OpenOCD | Build-verified here with `scripts/os/run_simpleos_ra4m1.shs --build-only`. Board is connected. Flash was not executed. |
-| ARM Cortex-M33 | STM32U585 / Arduino UNO Q lane | ST-Link/OpenOCD/stm32prog SWD | Build-verified here with `scripts/os/run_simpleos_stm32u585.shs --build-only`. No matching ST-Link/UNO Q identity was confirmed in USB inventory. |
+| UNO Q hosted guest | QRB2210 Debian host, x86_64 SimpleOS guest | QEMU TCG + OVMF/GRUB on physical UNO Q | Boot-verified three times on 2026-07-27; evidence is retained in `doc/03_plan/agent_tasks/simpleos_production_master_plan_completion_status.md` and was reconfirmed by the user on 2026-08-04. This is an on-board hosted guest boot, not native QRB2210 SimpleOS. |
+| ARM Cortex-M33 | STM32U585 / Arduino UNO Q MCU lane | ST-Link/OpenOCD/stm32prog SWD | Build-verified here with `scripts/os/run_simpleos_stm32u585.shs --build-only`. No retained physical MCU boot evidence is recorded, and current USB inventory has no matching UNO Q target. |
 | ARM32 | QEMU and STM32 remote lanes | OpenOCD/ST-Link/TRACE32 depending on board | Source-present in `src/os/kernel/arch/arm32` and remote board docs; not run here. |
 | ARM64 | QEMU `virt`/AArch64 lane | QEMU, GDB stub | Source-present in `src/os/kernel/arch/arm64`; not run here. **Update 2026-08-06:** the EFI-stub real-firmware boot gap for this arch is closed — a vendored Limine `BOOTAA64.EFI` (v10.8.5, `vendor/limine/`) plus a ported Limine boot protocol now boots a minimal ELF probe kernel under AAVMF pflash to serial output (commit `c922fdef5d7`). The full SimpleOS aarch64 kernel has not yet been wired through this boot path — see `doc/00_llm_process/feature_expert/simpleos_toolchain_selfhost/skill.md`. |
 | RISC-V 32 | QEMU/GHDL/remote lanes | QEMU GDB, GHDL, hardware-specific debug | Source-present with many specs. QEMU tool exists; RV32 baremetal GCC is missing locally. |
@@ -71,45 +72,6 @@ Serial symlinks show the Xilinx ML Carrier card on `/dev/ttyUSB2`, `/dev/ttyUSB4
 | Shell | Verified here for Cortex-M33 QEMU boot to `simpleos>` shell. Full SimpleOS shell source exists under `src/os/apps/shell/`; Cortex-M33 has `shell_lite.spl`. |
 | Filesystem boot | Source-present in `src/os/kernel/boot/boot_fs*.spl`, VFS boot init, FS exec spawn modules, and `scripts/os/run_simpleos_qemu.shs` FAT32 disk image path. Not run here. |
 | Bootloader/OS download | Source-present and partially locally checkable. K26 uses FT4232H/JTAG and Vivado/OpenOCD/openFPGALoader. RA4M1 uses CMSIS-DAP/OpenOCD SWD. STM32U585 uses ST-Link/OpenOCD/stm32prog. |
-
-## Simple Compiler Install-Image Contract
-
-SimpleOS compiler support is a filesystem deployment contract, not QEMU magic.
-The target-native Simple payload must be embedded in the SimpleOS install image
-and launched from the SimpleOS filesystem on QEMU or a physical board.
-
-Required filesystem roles:
-
-- `/usr/bin/simple` and `/usr/bin/simple.smf` for shell/PATH execution.
-- `/bin/simple` and `/bin/simple.smf` for early boot and minimal shell paths.
-- `/sys/apps/simple` and `/sys/apps/simple.smf` for app registry launch.
-- `/sys/apps/simple_compiler(.smf)`, `/sys/apps/simple_interpreter(.smf)`, and
-  `/sys/apps/simple_loader(.smf)` for desktop/toolchain role resolution.
-- `/SYS/SIMPLETOOL.SDN` describing the payload and role paths.
-
-Payload rules:
-
-- Use a SimpleOS-target ELF or SMF payload, supplied explicitly by
-  `SIMPLEOS_SIMPLE_BINARY` or produced as `build/bootstrap/stage3/simple_simpleos`.
-- Do not embed host `bin/simple` unless it is actually built for the SimpleOS
-  target. A macOS/Linux host compiler in the image is a packaging bug.
-- Placeholder marker apps prove catalog placement only; they do not prove the
-  Simple compiler runs.
-
-Completion evidence:
-
-1. Build the install image and prove the staged filesystem or FAT image contains
-   every required role path plus `/SYS/SIMPLETOOL.SDN`.
-2. Boot QEMU or a physical board from that image.
-3. From inside SimpleOS, run `/usr/bin/simple --version`.
-4. From inside SimpleOS, compile and run a small `hello world` source from the
-   mounted filesystem.
-
-Fixed SSH command responses, host-side compilation, or a QEMU-only hardcoded
-`simple --check` response are not enough. For board claims, record the board,
-download/boot path, serial or SSH transcript, and the exact in-guest
-`/usr/bin/simple` commands. If no board is attached, keep the status at
-**Source-present** or **QEMU-verified**, not **Verified here**.
 
 ## Commands Used
 
@@ -166,29 +128,18 @@ This audit built `build/os/simpleos_ra4m1.elf` but did not flash it.
 
 ### STM32U585 / Arduino UNO Q lane
 
+The physical UNO Q has already hosted a verified x86_64 SimpleOS guest boot:
+QEMU TCG on its QRB2210 Debian system booted SimpleOS through OVMF/GRUB three
+times on 2026-07-27. See
+`doc/03_plan/agent_tasks/simpleos_production_master_plan_completion_status.md`.
+That result verifies the board-hosted QEMU lane; it does not verify native
+QRB2210 SimpleOS or the STM32U585 firmware lane described below.
+
 1. Build with `sh scripts/os/run_simpleos_stm32u585.shs --build-only`.
 2. Select `FLASHER=st-flash`, `FLASHER=openocd`, or `FLASHER=stm32prog`.
 3. Flash only after confirming an STM32U585-compatible probe and target are attached.
 
 This audit built `build/os/simpleos_stm32u585.elf`; no matching ST-Link or STM32U585 USB identity was confirmed.
-
-The STM32U585 lane is the UNO Q real-time MCU, not its QRB2210 Linux MPU or
-Adreno 702 GPU. Do not promote this build as UNO Q GPU evidence.
-
-### Native GPU board extension
-
-UNO Q/QRB2210, VisionFive 2/JH7110, and UP Squared N4200 are planned through
-one shared Engine2D artifact/receipt and board-adapter contract:
-
-`doc/03_plan/agent_tasks/simpleos_cross_host_qemu_board_gpu_2d_parity.md`.
-
-The three open requests are in
-`doc/08_tracking/feature/simpleos_cross_host_board_gpu_requests_2026-07-26.md`.
-Vendor Linux/Windows GPU utilities are readiness only. A SimpleOS-native pass
-requires the physical board identity, boot/download transcript, exact GPU and
-firmware identity, submission/fence/resource correlation, device-origin
-readback, and zero-mismatch CPU SIMD parity. VisionFive 2 remains blocked while
-the exact BXE-4-32 support contract is unavailable in current upstream Mesa.
 
 ### Cortex-M33 QEMU / MPS2-AN505
 
@@ -199,6 +150,15 @@ sh scripts/os/run_simpleos_cortex_m33_qemu.shs
 ```
 
 Expected boot evidence includes `SimpleOS Lite v0.5`, MPU enabled, in-memory filesystem initialized, and a `simpleos>` shell prompt.
+
+The AN505, STM32U585, and RA4M1 build wrappers now compile
+`src/os/kernel/arch/cortex_m33/access_policy.spl` as a target-native object and
+link it beside `cm33_shim.c`. Pure Simple owns the shell peek/poke alignment and
+readable/writable-region policy; C retains address-text acquisition, volatile
+MMIO, UART, startup/vector, weak-handler, and assembly bridges. Run
+`sh scripts/check/check-cm33-access-policy-parity.shs` for the host C-vs-Simple
+oracle and the instrumented 10/10 bounded branch receipt. This host receipt is
+not physical-board evidence.
 
 ## Baremetal SimpleOS Checklist
 

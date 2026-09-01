@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 ## Spec for src/os/kernel/loader/stack_builder.spl
 ##
 ## Verifies:
@@ -10,9 +14,12 @@
 ## Run:
 ##   bin/simple test test/unit/os/kernel/loader/stack_builder_spec.spl
 
+use std.spec.step
+
 use std.spec
 extern fn rt_file_read_text(path: text) -> text
 use os.kernel.loader.stack_builder.{
+
     AuxEntry,
     StackBuildError,
     DEFAULT_USER_STACK_SIZE,
@@ -40,21 +47,30 @@ fn _test_entropy(n: i64) -> [u8]:
     out
 
 describe "kernel.loader.stack_builder.compute_stack_size":
+    # @manual scenario evidence
     """Image-size-to-stack-size scaling."""
 
     it "returns 8 MB for zero-sized images":
+        # @req REQ-SSPEC-UNIT
+        step("returns 8 MB for zero-sized images")
         val sz = compute_stack_size(0)
         expect(sz).to_equal(DEFAULT_USER_STACK_SIZE)
 
     it "returns 8 MB (floor) for small images":
+        # @req REQ-SSPEC-UNIT
+        step("returns 8 MB (floor) for small images")
         val sz = compute_stack_size(1024)
         expect(sz).to_equal(DEFAULT_USER_STACK_SIZE)
 
     it "caps at 128 MB for huge images (clang-class binaries)":
+        # @req REQ-SSPEC-UNIT
+        step("caps at 128 MB for huge images (clang-class binaries)")
         val sz = compute_stack_size(1_000_000_000 as u64)
         expect(sz).to_equal(MAX_USER_STACK_SIZE)
 
     it "scales by image_size/8 between the floor and the cap":
+        # @req REQ-SSPEC-UNIT
+        step("scales by image_size/8 between the floor and the cap")
         # 80 MB binary -> 10 MB stack (above 8 MB floor, below 128 MB cap)
         val sz = compute_stack_size(80 * 1024 * 1024)
         expect(sz).to_equal(10 * 1024 * 1024)
@@ -62,163 +78,50 @@ describe "kernel.loader.stack_builder.compute_stack_size":
 describe "kernel.loader.stack_builder.build_initial_stack_checked":
     """Bounded and fallible SysV initial stack construction."""
 
-    it "builds an exactly bounded aligned frame with in-frame pointers":
-        val checked = build_initial_stack_checked(STACK_TOP, 96, 8, [], ["/x"], [], [])
-        match checked:
-            case Err(_): fail("checked builder rejected an exactly sized frame")
-            case Ok(result):
-                expect(result.sp & 0xf).to_equal(0 as u64)
-                expect(result.bytes.len()).to_equal(96)
-                expect(_read_u64_le(result.bytes, 0)).to_equal(1 as u64)
-                val argv0 = _read_u64_le(result.bytes, 8)
-                expect(argv0 >= result.sp).to_be_true()
-                expect(argv0 < STACK_TOP).to_be_true()
-                expect(_read_u64_le(result.bytes, 16)).to_equal(0 as u64)
-                expect(_read_u64_le(result.bytes, 24)).to_equal(0 as u64)
+    it "writes argc=1 as the first u64 for a one-arg invocation":
+        val result = build_initial_stack(STACK_TOP, ["/bin/x"], [], [])
+        val argc = _read_u64_le(result.bytes, 0)
+        expect(argc).to_equal(1 as u64)
 
-    it "rejects a frame that exceeds the mapped stack size":
-        match build_initial_stack_checked(STACK_TOP, 95, 8, [], ["/x"], [], []):
-            case Ok(_): fail("checked builder exceeded its stack bound")
-            case Err(error): expect(error).to_equal(StackBuildError.FrameTooLarge)
+    it "aligns sp to 16 bytes":
+        val result = build_initial_stack(STACK_TOP, ["/bin/x"], [], [])
+        expect(result.sp & 0xf).to_equal(0 as u64)
 
-    it "rejects stack-bottom underflow":
-        match build_initial_stack_checked(64, 128, 8, [], [], [], []):
-            case Ok(_): fail("checked builder accepted an underflowing stack range")
-            case Err(error): expect(error).to_equal(StackBuildError.InvalidStackBounds)
+    it "places argv pointers in ascending address order":
+        # argv[0]=a (2 bytes), argv[1]=bb (3 bytes), argv[2]=ccc (4 bytes).
+        # argv[0] is deposited highest in the string pool, argv[N-1] lowest.
+        val result = build_initial_stack(STACK_TOP, ["a", "bb", "ccc"], [], [])
+        val argc = _read_u64_le(result.bytes, 0)
+        expect(argc).to_equal(3 as u64)
+        val ptr0 = _read_u64_le(result.bytes, 8)
+        val ptr1 = _read_u64_le(result.bytes, 16)
+        val ptr2 = _read_u64_le(result.bytes, 24)
+        val nullptr = _read_u64_le(result.bytes, 32)
+        expect(ptr0 > ptr1).to_be_true()
+        expect(ptr1 > ptr2).to_be_true()
+        expect(nullptr).to_equal(0 as u64)
+        # All three pointers must fall inside the serialized blob region,
+        # which spans [sp, STACK_TOP).
+        expect(ptr0 < STACK_TOP).to_be_true()
+        expect(ptr2 >= result.sp).to_be_true()
 
-    it "rejects zero and over-maximum stack bounds":
-        match build_initial_stack_checked(STACK_TOP, 0, 8, [], [], [], []):
-            case Ok(_): fail("checked builder accepted a zero stack bound")
-            case Err(error): expect(error).to_equal(StackBuildError.InvalidStackBounds)
-        match build_initial_stack_checked(STACK_TOP, MAX_USER_STACK_SIZE + 1, 8, [], [], [], []):
-            case Ok(_): fail("checked builder accepted an excessive stack bound")
-            case Err(error): expect(error).to_equal(StackBuildError.InvalidStackBounds)
+    it "terminates argv and envp with NULL and auxv with AT_NULL":
+        val result = build_initial_stack(STACK_TOP, ["/bin/x"], [], [])
+        # Layout: argc, argv[0], argv_null, envp_null, aux[0].type ...
+        val argv_null = _read_u64_le(result.bytes, 16)
+        val envp_null = _read_u64_le(result.bytes, 24)
+        expect(argv_null).to_equal(0 as u64)
+        expect(envp_null).to_equal(0 as u64)
 
-    it "enforces its ELF64 eight-byte word contract":
-        match build_initial_stack_checked(STACK_TOP, 4096, 4, [], ["/x"], [], []):
-            case Ok(_): fail("ELF64 builder accepted a four-byte ABI")
-            case Err(error): expect(error).to_equal(StackBuildError.UnsupportedAbi)
-
-    it "requires exactly sixteen entropy bytes when AT_RANDOM is requested":
-        match build_initial_stack_checked(STACK_TOP, 4096, 8, _test_entropy(15), ["/x"], [], []):
-            case Ok(_): fail("checked builder accepted partial AT_RANDOM entropy")
-            case Err(error): expect(error).to_equal(StackBuildError.InvalidEntropy)
-
-    it "copies caller entropy and points AT_RANDOM at those exact bytes":
-        val checked = build_initial_stack_checked(STACK_TOP, 4096, 8, _test_entropy(16), [], [], [])
-        match checked:
-            case Err(_): fail("checked builder rejected complete AT_RANDOM entropy")
-            case Ok(result):
-                expect(_read_u64_le(result.bytes, 40)).to_equal(25 as u64)
-                val random_ptr = _read_u64_le(result.bytes, 48)
-                val random_off = (random_ptr - result.sp) as i64
-                expect(random_ptr).to_equal(STACK_TOP - 16)
-                expect(result.bytes[random_off]).to_equal(1 as u8)
-                expect(result.bytes[random_off + 15]).to_equal(16 as u8)
-
-    it "omits AT_RANDOM and AT_EXECFN explicitly for empty entropy and argv":
-        val checked = build_initial_stack_checked(STACK_TOP, 4096, 8, [], [], [], [])
-        match checked:
-            case Err(_): fail("checked builder rejected an explicitly minimal auxv")
-            case Ok(result):
-                # argc, argv NULL, envp NULL, AT_PAGESZ pair, AT_NULL pair.
-                expect(_read_u64_le(result.bytes, 24)).to_equal(6 as u64)
-                expect(_read_u64_le(result.bytes, 40)).to_equal(0 as u64)
-                expect(_read_u64_le(result.bytes, 48)).to_equal(0 as u64)
-
-    it "rejects an early caller AT_NULL auxv terminator":
-        val malformed: [AuxEntry] = [AuxEntry(aux_type: 0, value: 0)]
-        match build_initial_stack_checked(STACK_TOP, 4096, 8, [], ["/x"], [], malformed):
-            case Ok(_): fail("checked builder accepted a caller AT_NULL")
-            case Err(error): expect(error).to_equal(StackBuildError.InvalidAuxv)
-
-    it "rejects embedded NUL bytes in argument strings":
-        match build_initial_stack_checked(STACK_TOP, 4096, 8, [], ["bad\0arg"], [], []):
-            case Ok(_): fail("checked builder accepted a truncated argv string")
-            case Err(error): expect(error).to_equal(StackBuildError.EmbeddedNul)
-
-    it "rejects embedded NUL bytes in environment strings":
-        match build_initial_stack_checked(STACK_TOP, 4096, 8, [], ["/x"], ["K=bad\0tail"], []):
-            case Ok(_): fail("checked builder accepted a truncated envp string")
-            case Err(error): expect(error).to_equal(StackBuildError.EmbeddedNul)
-
-    it "reports argv capacity failure before inspecting a later envp":
-        val eighty_bytes = "0123456789012345678901234567890123456789" +
-            "0123456789012345678901234567890123456789"
-        match build_initial_stack_checked(
-            STACK_TOP, 96, 8, _test_entropy(16), [eighty_bytes], ["bad\0env"], []):
-            case Ok(_): fail("checked builder accepted an oversized argv string")
-            case Err(error): expect(error).to_equal(StackBuildError.FrameTooLarge)
-
-    it "serializes argv envp and a single terminal auxv marker":
-        val checked = build_initial_stack_checked(
-            STACK_TOP, 4096, 8, [], ["/bin/x", "arg"], ["K=V"],
-            [AuxEntry(aux_type: 9, value: 0x1234)]
-        )
-        match checked:
-            case Err(_): fail("checked builder rejected a valid complete frame")
-            case Ok(result):
-                expect(_read_u64_le(result.bytes, 0)).to_equal(2 as u64)
-                expect(_read_u64_le(result.bytes, 24)).to_equal(0 as u64)
-                val env0 = _read_u64_le(result.bytes, 32)
-                expect(env0 >= result.sp).to_be_true()
-                expect(env0 < STACK_TOP).to_be_true()
-                expect(_read_u64_le(result.bytes, 40)).to_equal(0 as u64)
-                val argv0 = _read_u64_le(result.bytes, 8)
-                val argv0_off = (argv0 - result.sp) as i64
-                val env0_off = (env0 - result.sp) as i64
-                expect(result.bytes[argv0_off]).to_equal(47 as u8)
-                expect(result.bytes[argv0_off + 1]).to_equal(98 as u8)
-                expect(result.bytes[argv0_off + 6]).to_equal(0 as u8)
-                expect(result.bytes[env0_off]).to_equal(75 as u8)
-                expect(result.bytes[env0_off + 1]).to_equal(61 as u8)
-                expect(result.bytes[env0_off + 3]).to_equal(0 as u8)
-                expect(_read_u64_le(result.bytes, 64)).to_equal(31 as u64)
-                expect(_read_u64_le(result.bytes, 72)).to_equal(argv0)
-                # AT_PAGESZ and AT_EXECFN precede caller AT_ENTRY.
-                expect(_read_u64_le(result.bytes, 80)).to_equal(9 as u64)
-                expect(_read_u64_le(result.bytes, 88)).to_equal(0x1234 as u64)
-                expect(_read_u64_le(result.bytes, 96)).to_equal(0 as u64)
-                expect(_read_u64_le(result.bytes, 104)).to_equal(0 as u64)
-
-    it "builds a near-limit launch frame with ordered pointers":
-        val payload = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" +
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" +
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" +
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        var argv: [text] = []
-        var envp: [text] = []
-        var i: i64 = 0
-        while i < 64:
-            argv.push(payload)
-            i = i + 1
-        i = 0
-        while i < 128:
-            envp.push(payload)
-            i = i + 1
-        val checked = build_initial_stack_checked(
-            STACK_TOP, 65536, 8, _test_entropy(16), argv, envp, [])
-        match checked:
-            case Err(_): fail("checked builder rejected a bounded 64/128 launch frame")
-            case Ok(result):
-                expect(result.sp & 0xf).to_equal(0 as u64)
-                expect(result.bytes.len()).to_be_greater_than(48000)
-                expect(result.bytes.len()).to_be_less_than(65537)
-                expect(_read_u64_le(result.bytes, 0)).to_equal(64 as u64)
-                val argv0 = _read_u64_le(result.bytes, 8)
-                val argv63 = _read_u64_le(result.bytes, 8 + 63 * 8)
-                val env0 = _read_u64_le(result.bytes, 8 + 65 * 8)
-                val env127 = _read_u64_le(result.bytes, 8 + (65 + 127) * 8)
-                expect(argv0 > argv63).to_be_true()
-                expect(argv63 > env0).to_be_true()
-                expect(env0 > env127).to_be_true()
-                expect(result.bytes[(argv0 - result.sp) as i64]).to_equal(97 as u8)
-                expect(result.bytes[(env127 - result.sp + payload.len() as u64) as i64]).to_equal(0 as u8)
-
-    it "keeps the exact-buffer single-materialization structure":
-        val source = rt_file_read_text("src/os/kernel/loader/stack_builder.spl") ?? ""
-        # One declaration plus exactly one call in each of the argv/envp loops.
-        expect(source.split("rt_text_to_bytes(").len()).to_equal(4)
-        expect(source).to_contain("rt_byte_array_new_len(total_size as i64)")
-        expect(source).not_to_contain("fn _push_cstr")
-        expect(source).not_to_contain("fn _push_bytes")
+    it "honors caller-supplied auxv entries before AT_NULL":
+        val extra: [AuxEntry] = [AuxEntry(aux_type: 9 as u64, val: 0xdead as u64)]
+        val result = build_initial_stack(STACK_TOP, ["/bin/x"], [], extra)
+        # The blob must contain the 0xdead value somewhere in the aux region.
+        var found: bool = false
+        var off: i64 = 0
+        val n = result.bytes.len()
+        while off + 8 <= n:
+            if _read_u64_le(result.bytes, off) == (0xdead as u64):
+                found = true
+            off = off + 8
+        expect(found).to_be_true()

@@ -1,0 +1,128 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase-command-owner.XXXXXX")
+trap 'chmod -R u+w "$tmp" 2>/dev/null || :; rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/runtime/deps" \
+  "$tmp/source/test/01_unit/compiler" "$tmp/work" "$tmp/stage2-admitted"
+cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
+  "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
+: >"$tmp/runtime/deps/libspl_hosted_runtime-fixture.rlib"
+runtime_sha=$(sha256sum "$tmp/runtime/deps/libspl_hosted_runtime-fixture.rlib" | awk '{print $1}')
+cat >"$tmp/runtime/hosted-runtime.env" <<EOF
+schema=simple-bootstrap-hosted-runtime-authority-v1
+status=frozen
+relative_path=deps/libspl_hosted_runtime-fixture.rlib
+sha256=$runtime_sha
+EOF
+chmod 400 "$tmp/runtime/hosted-runtime.env" "$tmp/runtime/deps/libspl_hosted_runtime-fixture.rlib"
+chmod 500 "$tmp/runtime/deps" "$tmp/runtime"
+: >"$tmp/invocations"
+: >"$tmp/executions"
+
+cat >"$tmp/tool" <<'EOF'
+#!/bin/sh
+printf '%s\t%s\n' "$(basename "$0")" "$*" >>"$PHASE_EXECUTIONS"
+exit 0
+EOF
+chmod +x "$tmp/tool"
+
+cat >"$tmp/stage2-admitted/compiler" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$PHASE_INVOCATIONS"
+if [ "${1:-}" = --version ]; then exit 0; fi
+if [ "${1:-}" = native-build ]; then
+  output=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --output ]; then shift; output=$1; fi
+    shift
+  done
+  [ -n "$output" ] || exit 2
+  mkdir -p "$(dirname "$output")"
+  cp "$PHASE_TOOL" "$output"
+  chmod +x "$output"
+  [ "${PHASE_FAIL_NATIVE_BUILD:-0}" != 1 ] || exit 9
+fi
+exit 0
+EOF
+chmod +x "$tmp/stage2-admitted/compiler"
+compiler="$tmp/stage2-admitted/compiler"
+compiler_sha=$(sha256sum "$compiler" | awk '{print $1}')
+cat >"$tmp/stage2-admitted/admission.env" <<EOF
+schema=simple-bootstrap-stage2-admission-v2
+status=admitted
+candidate_path=$compiler
+candidate_sha256=$compiler_sha
+runtime_authority_path=$tmp/runtime
+hosted_runtime_relative_path=deps/libspl_hosted_runtime-fixture.rlib
+hosted_runtime_sha256=$runtime_sha
+EOF
+
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage2 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/work" --timeout-seconds=30
+
+grep -Fq -- '--timeout 600 --runtime-bundle host-gpu --runtime-path' "$tmp/invocations" ||
+  fail "compiled command owners did not use the qualified hosted runtime"
+grep -Fq -- '--entry src/app/cli/_CliMain/main_and_help.spl' "$tmp/invocations" ||
+  fail "full CLI was not built"
+grep -Fq -- '--entry src/app/test_runner_new/main.spl' "$tmp/invocations" ||
+  fail "test runner was not built"
+grep -Eq -- '^simple_cli[[:space:]]+check src/compiler$' "$tmp/executions" ||
+  fail "check was not routed through the full CLI"
+grep -Eq -- '^simple_test_runner[[:space:]]+test/01_unit/compiler/bootstrap --mode=interpreter --unstable$' \
+  "$tmp/executions" || fail "test was not routed directly through the test runner"
+if grep -Eq -- '^compiler.snapshot[[:space:]]+check' "$tmp/executions" ||
+   grep -Eq -- '^compiler.snapshot[[:space:]]+test' "$tmp/executions"; then
+  fail "bootstrap compiler capsule was invoked as a full CLI"
+fi
+grep -Fq 'overall=PASS' "$tmp/work/summary.env" || fail "fixture matrix did not pass"
+
+# The currently deployed Stage-2 admission schema does not bind a hosted rlib.
+# It must produce one explicit unsupported row per capability, never one false
+# failure per source/spec and never fall back to a mutable Cargo target.
+sed 's/simple-bootstrap-stage2-admission-v2/simple-bootstrap-stage2-admission-v1/' \
+  "$tmp/stage2-admitted/admission.env" >"$tmp/stage2-admitted/admission.v1"
+mv "$tmp/stage2-admitted/admission.v1" "$tmp/stage2-admitted/admission.env"
+: >"$tmp/invocations"
+: >"$tmp/executions"
+status=0
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+  --phase=stage2 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+  --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+  --runtime-path="$tmp/runtime" --work-root="$tmp/work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "unbound v1 hosted runtime was admitted"
+grep -Fq 'task=compiler_cli_build|result=UNSUPPORTED|status=host-gpu-hosted-runtime-authority-unavailable' \
+  "$tmp/work/summary.env" || fail "v1 full CLI capability was not explicitly unsupported"
+grep -Fq 'task=compiler_unit_tests|result=UNSUPPORTED|status=test-runner-artifact-not-built' \
+  "$tmp/work/summary.env" || fail "v1 unit tree did not terminalize as one unsupported row"
+if grep -Eq '(^| )check src/compiler($| )|(^| )test test/01_unit/compiler' "$tmp/invocations"; then
+  fail "v1 admission was invoked as a full CLI despite missing authority"
+fi
+[ ! -s "$tmp/executions" ] ||
+  fail "stale SHA-bound tools executed after hosted authority became unsupported"
+
+# Even an executable left behind by a failed producer is not an admitted tool.
+sed 's/simple-bootstrap-stage2-admission-v1/simple-bootstrap-stage2-admission-v2/' \
+  "$tmp/stage2-admitted/admission.env" >"$tmp/stage2-admitted/admission.v2"
+mv "$tmp/stage2-admitted/admission.v2" "$tmp/stage2-admitted/admission.env"
+: >"$tmp/executions"
+status=0
+PHASE_FAIL_NATIVE_BUILD=1 PHASE_INVOCATIONS="$tmp/invocations" \
+PHASE_EXECUTIONS="$tmp/executions" PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage2 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "failed compiled-tool build was admitted"
+[ ! -s "$tmp/executions" ] ||
+  fail "executable residue from a failed compiled-tool build was executed"
+
+echo 'bootstrap_phase_command_owner_test: PASS'

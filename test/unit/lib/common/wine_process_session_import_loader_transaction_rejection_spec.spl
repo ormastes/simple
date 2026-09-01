@@ -1,23 +1,26 @@
 """
 ## Purpose and audience
-Purpose: Verify Wine process import-loader transaction rejection.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-Troubleshooting: a red scenario here means the pinned contract changed —
-check verification guidance in the linked design docs before editing oracles.
-# @manual: primary
-REQ-LIB-COMMON-001
-doc/01_research/local/REQ-LIB-COMMON-001.md
-doc/03_plan/sys_test/REQ-LIB-COMMON-001.md
-doc/04_architecture/REQ-LIB-COMMON-001.md
-doc/05_design/REQ-LIB-COMMON-001.md
-"""
-# @req: REQ-LIB-COMMON-001
 
+This specification is maintained for compiler and library engineers reviewing UNIT-LIB behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/unit/lib/common/wine_process_session_import_loader_transaction_rejection_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
+"""
+# @manual: primary
+# REQ-UNIT-LIB-001
+# doc-path: doc/01_research/app/
+# doc-path: doc/03_plan/app/
+# doc-path: doc/04_architecture/app/
+# doc-path: doc/05_design/app/
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
 use common.wine_process_session.{
     wine_process_apply_import_loader_transaction_in_vma,
@@ -27,6 +30,7 @@ use common.wine_process_session.{
 }
 use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
 use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
+use std.spec.{step}
 
 fn _commit_fixed(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineVmSpace:
     val reserved = wine_vm_reserve_fixed(space, base, size)
@@ -58,30 +62,32 @@ fn _full_gates() -> text:
 fn _expect_transaction_rejection_without_image(result):
     expect(result.ok).to_equal(false)
     expect(result.error).to_equal("invalid-import-descriptor-limit")
-    expect(result.patched_image.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
-    expect(result.mapped_base).to_equal(0)  # oracle: 0 — named expected value from the requirement
-    expect(result.mapped_size).to_equal(0)  # oracle: 0 — named expected value from the requirement
-    expect(result.patched_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+    expect(result.patched_image.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+    expect(result.mapped_base).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+    expect(result.mapped_size).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+    expect(result.patched_count).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
     expect(result.evidence).to_contain("import-loader-vma-transaction-aborted")
     expect(result.evidence).to_contain("no-vma-thunk-written")
     expect(result.evidence).to_contain("no-real-dll-loaded")
     expect(result.evidence).to_contain("no-arbitrary-execution")
     expect(result.status).to_equal("blocked")
 
-use std.spec.step
-
 describe "Wine process import-loader transaction rejection":
     it "blocks import-loader transaction without patched image when loader planning rejects":
-        # @req: REQ-LIB-COMMON-001
+        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
+        # @req: REQ-UNIT-LIB-001
         step("Verify: blocks import-loader transaction without patched image when loader planning rejects")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
         val result = wine_process_apply_import_loader_transaction_in_vma(plan, wine_known_hello_exe_fixture_bytes(), 0, 8)
 
         _expect_transaction_rejection_without_image(result)
 
     it "blocks VM-gated import-loader transaction without patched image when loader planning rejects":
-        # @req: REQ-LIB-COMMON-001
+        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
+        # @req: REQ-UNIT-LIB-002
         step("Verify: blocks VM-gated import-loader transaction without patched image when loader planning rejects")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
         val result = wine_process_apply_import_loader_transaction_in_vma_with_peb_teb_vm_writes(plan, wine_known_hello_exe_fixture_bytes(), 0x400000, 0x400000, "native-module-open tls-callback", 0, 8, _ready_vm_writes())
 

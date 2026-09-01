@@ -9,6 +9,7 @@
 # -- Error codes ---------------------------------------------------------------
 
 use os.kernel.fs.fat32_atomic_replace.{Fat32ReplaceError, Fat32ReplaceState, Fat32ReplaceImage, Fat32ReplaceRecord, ReplaceReceipt, fat32_replace_image, fat32_atomic_replace_path_allowed, fat32_atomic_replace_route_allowed, fat32_atomic_replace_commit_device, fat32_atomic_replace_recover_device, fat32_atomic_replace_publish_caps}
+use std.common.encoding.utf8.{text_codepoints, text_from_codepoints}
 
 val EINVAL: i32 = -22   # bad signature
 val EIO: i32    = -5    # wrong FS type
@@ -55,6 +56,7 @@ struct Fat32Bpb:
     sectors_per_cluster: u8
     reserved_sectors: u16
     num_fats: u8
+    ext_flags: u16
     total_sectors_32: u32
     fat_size_32: u32
     root_cluster: u32
@@ -94,6 +96,7 @@ fn parse_bpb(sector0: [u8]) -> Result<Fat32Bpb, i32>:
         sectors_per_cluster: sector0[13],
         reserved_sectors:   (sector0[15].to_u16() << 8) | sector0[14].to_u16(),
         num_fats:           sector0[16],
+        ext_flags:          (sector0[41].to_u16() << 8) | sector0[40].to_u16(),
         total_sectors_32:   ((sector0[35].to_u32() << 24) | (sector0[34].to_u32() << 16) | (sector0[33].to_u32() << 8) | sector0[32].to_u32()),
         fat_size_32:        ((sector0[39].to_u32() << 24) | (sector0[38].to_u32() << 16) | (sector0[37].to_u32() << 8) | sector0[36].to_u32()),
         root_cluster:       ((sector0[47].to_u32() << 24) | (sector0[46].to_u32() << 16) | (sector0[45].to_u32() << 8) | sector0[44].to_u32()),
@@ -181,6 +184,223 @@ fn fat32_parse_lfn_slot(entry_data: [u8], offset: i32) -> text:
         name = name + c13
     name
 
+# A FAT32 directory can hold at most ceil(255 / 13) LFN slots.  The raw
+# validator below never grows state from attacker-controlled ordinal values.
+val FAT32_LFN_MAX_SLOTS: i32 = 20
+val FAT32_LFN_MAX_UNITS: i32 = 255
+
+struct Fat32ValidatedDirName:
+    valid: bool
+    has_lfn: bool
+    name: text
+    short_name: text
+
+fn fat32_short_name_checksum_raw(dir_data: [u8], short_off: i32) -> u8:
+    var sum = 0u8
+    var i = 0
+    while i < 11:
+        sum = (((sum.to_u32() & 1u32) << 7u32) +
+               (sum.to_u32() >> 1u32) + dir_data[short_off + i].to_u32()).to_u8()
+        i = i + 1
+    sum
+
+fn fat32_short_field_char_valid(byte: u8) -> bool:
+    val c = byte.to_u32().to_i32()
+    if c < 0x21:
+        return false
+    # Preserve legal OEM byte identity; the mount's presentation policy owns
+    # locale-specific glyph and case interpretation.
+    if c > 0x7E:
+        return true
+    not (c == 0x22 or c == 0x2A or c == 0x2B or c == 0x2C or
+         c == 0x2E or c == 0x2F or c == 0x3A or c == 0x3B or
+         c == 0x3C or c == 0x3D or c == 0x3E or c == 0x3F or
+         c == 0x5B or c == 0x5C or c == 0x5D or c == 0x7C)
+
+fn fat32_decode_canonical_short_name(dir_data: [u8], off: i32) -> Fat32ValidatedDirName:
+    if off < 0 or off + 32 > dir_data.len():
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+    val attr = dir_data[off + 11]
+    if attr == 0x0Fu8 or (attr.to_u32() & 0x08u32) != 0u32 or
+       (attr.to_u32() & 0xC0u32) != 0u32:
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+    val ntres = dir_data[off + 12]
+    if (ntres.to_u32() & 0xE7u32) != 0u32:
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+    if dir_data[off] == 0x2Eu8:
+        if ntres != 0u8 or attr != 0x10u8 or
+           dir_data[off + 28] != 0u8 or dir_data[off + 29] != 0u8 or
+           dir_data[off + 30] != 0u8 or dir_data[off + 31] != 0u8:
+            return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+        var dot_name = "."
+        var expected_padding = 1
+        if dir_data[off + 1] == 0x2Eu8:
+            dot_name = ".."
+            expected_padding = 2
+        var di = expected_padding
+        while di < 11:
+            if dir_data[off + di] != 0x20u8:
+                return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+            di = di + 1
+        return Fat32ValidatedDirName(valid: true, has_lfn: false, name: dot_name, short_name: dot_name)
+    var base = ""
+    var base_padding = false
+    var i = 0
+    while i < 8:
+        var b = dir_data[off + i]
+        if i == 0 and b == 0x05u8:
+            b = 0xE5u8
+        if b == 0x20u8:
+            base_padding = true
+        else:
+            if base_padding or not fat32_short_field_char_valid(b):
+                return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+            if (ntres.to_u32() & 0x08u32) != 0u32 and b >= 0x41u8 and b <= 0x5Au8:
+                b = (b.to_u32() + 0x20u32).to_u8()
+            base = base + b.chr()
+        i = i + 1
+    if base.len() == 0:
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+    var ext = ""
+    var ext_padding = false
+    i = 0
+    while i < 3:
+        var b = dir_data[off + 8 + i]
+        if b == 0x20u8:
+            ext_padding = true
+        else:
+            if ext_padding or not fat32_short_field_char_valid(b):
+                return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+            if (ntres.to_u32() & 0x10u32) != 0u32 and b >= 0x41u8 and b <= 0x5Au8:
+                b = (b.to_u32() + 0x20u32).to_u8()
+            ext = ext + b.chr()
+        i = i + 1
+    var decoded = base
+    if ext.len() > 0:
+        decoded = decoded + "." + ext
+    Fat32ValidatedDirName(valid: true, has_lfn: false, name: decoded, short_name: decoded)
+
+fn fat32_lfn_unit_at(dir_data: [u8], slot_off: i32, unit_index: i32) -> i64:
+    var byte_off = slot_off + 1 + unit_index * 2
+    if unit_index >= 5 and unit_index < 11:
+        byte_off = slot_off + 14 + (unit_index - 5) * 2
+    elif unit_index >= 11:
+        byte_off = slot_off + 28 + (unit_index - 11) * 2
+    dir_data[byte_off].to_i64() | (dir_data[byte_off + 1].to_i64() << 8)
+
+fn fat32_lfn_codepoint_allowed(cp: i64) -> bool:
+    if cp < 0x20 or cp == 0x7F:
+        return false
+    not (cp == 0x22 or cp == 0x2A or cp == 0x2F or cp == 0x3A or
+         cp == 0x3C or cp == 0x3E or cp == 0x3F or cp == 0x5C or cp == 0x7C)
+
+fn fat32_short_name_ascii_equal(left: text, right: text) -> bool:
+    """Case-insensitive only for ASCII a-z; opaque OEM bytes never fold."""
+    val left_cps = text_codepoints(left)
+    val right_cps = text_codepoints(right)
+    if left_cps.len() != right_cps.len():
+        return false
+    var i = 0
+    while i < left_cps.len():
+        var lc = left_cps[i]
+        var rc = right_cps[i]
+        if lc >= 0x61 and lc <= 0x7A:
+            lc = lc - 0x20
+        if rc >= 0x61 and rc <= 0x7A:
+            rc = rc - 0x20
+        if lc != rc:
+            return false
+        i = i + 1
+    true
+
+fn fat32_validate_lfn_association(dir_data: [u8], chain_start: i32, short_off: i32) -> Fat32ValidatedDirName:
+    """Validate and decode one raw VFAT LFN chain and its following 8.3 entry.
+
+    Invalid metadata invalidates the association *and* the following alias for
+    this scan.  This prevents a corrupt/spoofed LFN from making an executable
+    reachable through the otherwise plausible short entry that follows it.
+    """
+    val short_result = fat32_decode_canonical_short_name(dir_data, short_off)
+    if not short_result.valid or chain_start < 0 or chain_start >= short_off or chain_start % 32 != 0 or short_off % 32 != 0:
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+    val first_order = dir_data[chain_start]
+    if (first_order.to_u32() & 0x40u32) == 0u32 or (first_order.to_u32() & 0xA0u32) != 0u32:
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+    val slot_count = (first_order.to_u32() & 0x1Fu32).to_i32()
+    if slot_count < 1 or slot_count > FAT32_LFN_MAX_SLOTS or chain_start + slot_count * 32 != short_off:
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+    val expected_checksum = fat32_short_name_checksum_raw(dir_data, short_off)
+    var physical = 0
+    while physical < slot_count:
+        val off = chain_start + physical * 32
+        val order = dir_data[off]
+        val expected_order = slot_count - physical
+        if (order.to_u32() & 0x1Fu32).to_i32() != expected_order:
+            return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+        if physical == 0:
+            if (order.to_u32() & 0x40u32) == 0u32:
+                return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+        elif (order.to_u32() & 0x40u32) != 0u32:
+            return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+        if (order.to_u32() & 0xA0u32) != 0u32 or dir_data[off + 11] != 0x0Fu8 or
+           dir_data[off + 12] != 0u8 or dir_data[off + 13] != expected_checksum or
+           dir_data[off + 26] != 0u8 or dir_data[off + 27] != 0u8:
+            return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+        physical = physical + 1
+
+    var units: [i64] = []
+    var terminated = false
+    var logical = 0
+    while logical < slot_count:
+        val slot_off = short_off - (logical + 1) * 32
+        var ui = 0
+        while ui < 13:
+            val unit = fat32_lfn_unit_at(dir_data, slot_off, ui)
+            if terminated:
+                if unit != 0xFFFF:
+                    return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+            elif unit == 0:
+                terminated = true
+            elif unit == 0xFFFF:
+                return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+            else:
+                if units.len() >= FAT32_LFN_MAX_UNITS:
+                    return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+                units.push(unit)
+            ui = ui + 1
+        logical = logical + 1
+    if units.len() == 0:
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+
+    var cps: [i64] = []
+    var u = 0
+    while u < units.len():
+        val first = units[u]
+        if first >= 0xD800 and first <= 0xDBFF:
+            if u + 1 >= units.len():
+                return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+            val second = units[u + 1]
+            if second < 0xDC00 or second > 0xDFFF:
+                return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+            cps.push(0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00))
+            u = u + 2
+        else:
+            if first >= 0xDC00 and first <= 0xDFFF:
+                return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+            cps.push(first)
+            u = u + 1
+    var ci = 0
+    while ci < cps.len():
+        if not fat32_lfn_codepoint_allowed(cps[ci]):
+            return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+        ci = ci + 1
+    if cps[cps.len() - 1] == 0x20 or cps[cps.len() - 1] == 0x2E:
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+    val decoded = text_from_codepoints(cps)
+    if decoded == "." or decoded == "..":
+        return Fat32ValidatedDirName(valid: false, has_lfn: false, name: "", short_name: "")
+    Fat32ValidatedDirName(valid: true, has_lfn: true, name: decoded, short_name: short_result.short_name)
+
 # -- Directory-entry attribute bits --------------------------------------------
 
 val FAT32_ATTR_DIRECTORY: u32 = 0x10
@@ -244,46 +464,35 @@ fn fat32_dir_find_entry(dir_data: [u8], name: text) -> i32:
     val upper = name.upper()
     val total_entries = dir_data.len() / 32
     var idx = 0
-    var lfn_name = ""
+    var lfn_start = -1
     while idx < total_entries:
         val off = idx * 32
         val first_byte = dir_data[off]
         if first_byte == 0x00u8:
             return -1                   # end of directory — not found
         if first_byte == 0xE5u8:
-            lfn_name = ""               # orphan any pending LFN
+            if lfn_start >= 0:
+                return -1
+            lfn_start = -1               # orphan any pending LFN
             idx = idx + 1
             continue                    # deleted entry
         val attr = dir_data[off + 11]
         if attr == 0x0Fu8:
-            # Walk highest-seq → lowest-seq: prepend each fragment.
-            val fragment = fat32_parse_lfn_slot(dir_data, off)
-            lfn_name = fragment + lfn_name
+            if lfn_start < 0:
+                lfn_start = off
             idx = idx + 1
             continue
-        # 8.3 entry. Match accumulated LFN first (the long name),
-        # then fall back to the 8.3 short name.
-        if lfn_name.len() > 0 and lfn_name.upper() == upper:
-            return off
-        var entry_name = ""
-        var ni = 0
-        while ni < 8:
-            val ch = dir_data[off + ni]
-            if ch != 0x20u8 and ch != 0x00u8:
-                entry_name = entry_name + ch.chr()
-            ni = ni + 1
-        var ext = ""
-        var ei = 0
-        while ei < 3:
-            val ch = dir_data[off + 8 + ei]
-            if ch != 0x20u8 and ch != 0x00u8:
-                ext = ext + ch.chr()
-            ei = ei + 1
-        if ext.len() > 0:
-            entry_name = entry_name + "." + ext
-        if entry_name.upper() == upper:
-            return off
-        lfn_name = ""
+        var validated = fat32_decode_canonical_short_name(dir_data, off)
+        if lfn_start >= 0:
+            validated = fat32_validate_lfn_association(dir_data, lfn_start, off)
+            if not validated.valid:
+                return -1
+        if validated.valid:
+            if validated.has_lfn and validated.name.upper() == upper:
+                return off
+            if fat32_short_name_ascii_equal(validated.short_name, name):
+                return off
+        lfn_start = -1
         idx = idx + 1
     -1
 
@@ -296,45 +505,32 @@ fn fat32_dir_list_entries(dir_data: [u8]) -> [text]:
     var names: [text] = []
     val total_entries = dir_data.len() / 32
     var idx = 0
-    var lfn_name = ""
+    var lfn_start = -1
     while idx < total_entries:
         val off = idx * 32
         val first_byte = dir_data[off]
         if first_byte == 0x00u8:
             return names          # end of directory
         if first_byte == 0xE5u8:
-            lfn_name = ""         # orphan any pending LFN
+            if lfn_start >= 0:
+                return names
+            lfn_start = -1         # orphan any pending LFN
             idx = idx + 1
             continue
         val attr = dir_data[off + 11]
         if attr == 0x0Fu8:
-            val fragment = fat32_parse_lfn_slot(dir_data, off)
-            lfn_name = fragment + lfn_name
+            if lfn_start < 0:
+                lfn_start = off
             idx = idx + 1
             continue
-        var name = ""
-        if lfn_name.len() > 0:
-            name = lfn_name
-        else:
-            var entry_name = ""
-            var ni = 0
-            while ni < 8:
-                val ch = dir_data[off + ni]
-                if ch != 0x20u8 and ch != 0x00u8:
-                    entry_name = entry_name + ch.chr()
-                ni = ni + 1
-            var ext = ""
-            var ei = 0
-            while ei < 3:
-                val ch = dir_data[off + 8 + ei]
-                if ch != 0x20u8 and ch != 0x00u8:
-                    ext = ext + ch.chr()
-                ei = ei + 1
-            if ext.len() > 0:
-                entry_name = entry_name + "." + ext
-            name = entry_name
-        names.push(name)
-        lfn_name = ""
+        var validated = fat32_decode_canonical_short_name(dir_data, off)
+        if lfn_start >= 0:
+            validated = fat32_validate_lfn_association(dir_data, lfn_start, off)
+            if not validated.valid:
+                return names
+        if validated.valid:
+            names.push(validated.name)
+        lfn_start = -1
         idx = idx + 1
     names
 
@@ -646,4 +842,3 @@ fn fat32_make_dirent(field: [u8], attr: u8, cluster: u32, size: u32) -> [u8]:
     e
 
 # -- Driver state --------------------------------------------------------------
-

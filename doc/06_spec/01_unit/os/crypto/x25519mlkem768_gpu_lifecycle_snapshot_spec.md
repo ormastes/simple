@@ -17,16 +17,23 @@
 
 #### accepts finite nonnegative snapshots and rejects every negative field
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- accepts finite nonnegative snapshots and rejects every negative field
 - Validate each typed counter independently before subtraction
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("accepts finite nonnegative snapshots and rejects every negative field")
 step("Validate each typed counter independently before subtraction")
 expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
     _snapshot(0, 1, 2, 3, 4))).to_equal("")
@@ -51,16 +58,19 @@ expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
 
 #### accepts every representable terminal counter without arithmetic overflow
 
+- accepts every representable terminal counter without arithmetic overflow
 - Retain i64 maximum as a final snapshot while rejecting later work
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("accepts every representable terminal counter without arithmetic overflow")
 step("Retain i64 maximum as a final snapshot while rejecting later work")
 val maximum: i64 = 9223372036854775807
 expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
@@ -79,8 +89,8 @@ expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
 
 #### computes one positive equal delta bound to the kernel delta
 
+- computes one positive equal delta bound to the kernel delta
 - Subtract a monotonic before/after pair without device access
--  snapshot
    - Expected: delta.transfer_count equals `3`
    - Expected: delta.launch_count equals `3`
    - Expected: delta.synchronization_count equals `3`
@@ -91,10 +101,12 @@ expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("computes one positive equal delta bound to the kernel delta")
 step("Subtract a monotonic before/after pair without device access")
 val checked = x25519_mlkem768_gpu_lifecycle_delta(
     _snapshot(7, 7, 7, 7, 7), _snapshot(10, 10, 10, 10, 10))
@@ -114,16 +126,19 @@ match checked:
 
 #### rejects every independently future baseline field
 
+- rejects every independently future baseline field
 - Prove monotonicity across all five counters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects every independently future baseline field")
 step("Prove monotonicity across all five counters")
 val current = _snapshot(4, 4, 4, 4, 4)
 expect(_delta_reason(_snapshot(5, 4, 4, 4, 4), current)).to_equal(
@@ -142,16 +157,19 @@ expect(_delta_reason(_snapshot(4, 4, 4, 4, 5), current)).to_equal(
 
 #### rejects zero work and every lifecycle-to-kernel mismatch
 
+- rejects zero work and every lifecycle-to-kernel mismatch
 - Bind transfer, launch, synchronization, and readback to kernels
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects zero work and every lifecycle-to-kernel mismatch")
 step("Bind transfer, launch, synchronization, and readback to kernels")
 val baseline = _snapshot(10, 10, 10, 10, 10)
 expect(_delta_reason(baseline, baseline)).to_equal(
@@ -174,16 +192,19 @@ expect(_delta_reason(baseline,
 
 #### rejects invalid baseline and current snapshots before delta math
 
+- rejects invalid baseline and current snapshots before delta math
 - Preserve which side supplied malformed or wrapped evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects invalid baseline and current snapshots before delta math")
 step("Preserve which side supplied malformed or wrapped evidence")
 expect(_delta_reason(_snapshot(-1, 0, 0, 0, 0),
     _snapshot(1, 1, 1, 1, 1))).to_equal(
@@ -197,16 +218,19 @@ expect(_delta_reason(_snapshot(0, 0, 0, 0, 0),
 
 #### keeps the standalone delta predicate fail closed on every field
 
+- keeps the standalone delta predicate fail closed on every field
 - Exercise predicate branches independently of checked subtraction
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps the standalone delta predicate fail closed on every field")
 step("Exercise predicate branches independently of checked subtraction")
 expect(x25519_mlkem768_gpu_lifecycle_delta_valid(
     X25519MlKem768GpuLifecycleDelta(
@@ -239,6 +263,7 @@ expect(x25519_mlkem768_gpu_lifecycle_delta_valid(
 
 #### projects typed snapshots read-only from all three executors
 
+- projects typed snapshots read-only from all three executors
 - Read CUDA, Vulkan, and Metal counters through one stable API
    - Expected: cuda_snapshot.transfer_count equals `1`
    - Expected: cuda_snapshot.kernel_count equals `5`
@@ -246,18 +271,17 @@ expect(x25519_mlkem768_gpu_lifecycle_delta_valid(
    - Expected: vulkan_snapshot.kernel_count equals `10`
    - Expected: metal_snapshot.readback_count equals `14`
    - Expected: metal_snapshot.kernel_count equals `15`
-- cuda shutdown
-- vulkan shutdown
-- metal shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("projects typed snapshots read-only from all three executors")
 step("Read CUDA, Vulkan, and Metal counters through one stable API")
 var cuda = X25519MlKem768CudaNttExecutor.create_binary(
     "missing.cubin", "0" * 64)
@@ -304,7 +328,7 @@ metal.shutdown()
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/crypto/x25519mlkem768_gpu_lifecycle_snapshot_spec.spl` |
-| Updated | 2026-08-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -324,3 +348,54 @@ Tests covering X25519MLKEM768 typed GPU lifecycle snapshots.
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1b2d270b0de6eb3c624067dd6d2b6d450735dcfa71a72c01fff6963b795dfb6b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1b2d270b0de6eb3c624067dd6d2b6d450735dcfa71a72c01fff6963b795dfb6b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1b2d270b0de6eb3c624067dd6d2b6d450735dcfa71a72c01fff6963b795dfb6b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/os/crypto/x25519mlkem768_gpu_lifecycle_snapshot_spec.spl
+mirror: doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_lifecycle_snapshot_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_lifecycle_snapshot_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_gpu_lifecycle_snapshot_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/crypto/x25519mlkem768_gpu_lifecycle_snapshot_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 11 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/crypto/x25519mlkem768_gpu_lifecycle_snapshot_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts finite nonnegative snapshots and rejects every negative field' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_gpu_lifecycle_snapshot_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts every representable terminal counter without arithmetic overflow' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_gpu_lifecycle_snapshot_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'computes one positive equal delta bound to the kernel delta' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

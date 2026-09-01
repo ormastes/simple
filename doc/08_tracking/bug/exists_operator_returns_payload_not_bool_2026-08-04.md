@@ -1,8 +1,7 @@
 # `.?` evaluates to the payload, not a bool — 158 compiler-suite examples red
 
 - **ID:** `exists_operator_returns_payload_not_bool_2026-08-04`
-- Status: CLOSED (not reproducible)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN
 - **Found:** 2026-08-04
 - **Severity:** high (158 failing examples across
   `test/01_unit/compiler_core/branch_coverage_*_spec.spl` and

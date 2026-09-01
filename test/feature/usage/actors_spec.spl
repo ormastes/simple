@@ -1,22 +1,10 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-FEATURE
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """
 ## Purpose and audience
-Purpose: Prove that Actors.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-FEATURE-ACTORS-001
-doc/01_research/feature/REQ-FEATURE-ACTORS-001.md
-doc/03_plan/feature/REQ-FEATURE-ACTORS-001.md
-doc/04_architecture/feature/REQ-FEATURE-ACTORS-001.md
-doc/05_design/feature/REQ-FEATURE-ACTORS-001.md
-"""
 
-
-"""
 # Actor Model Concurrency
 
 **Feature ID:** #RUNTIME-010
@@ -48,55 +36,66 @@ val result = counter.ask(GetCount())
 | Message Passing | Communication via asynchronous send/ask rather than shared memory |
 | Mailbox | A queue of incoming messages processed sequentially by the actor |
 | Spawn | Creating a new actor instance that runs concurrently |
+
+This specification is maintained for compiler and library engineers reviewing FEATURE-USAGE behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/feature/usage/actors_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
 """
 
 
 use std.spec.step
 
-use std.spec.step
-use std.concurrent.green_thread.{green_spawn, green_run_all}
-
-var SPAWN_SEEN = 0
-
-actor MailboxActor:
-    val depth: i64
-
-    fn doubled() -> i64:
-        self.depth * 2
-
-fn spawn_body() -> i64:
-    SPAWN_SEEN = SPAWN_SEEN + 1
-    1
+use std.nogc_async_mut.actor.{ActorMailbox, ActorMessage}
 
 describe "Actors":
-    # Actors are module-level isolated entities; these oracles pin the
-    # runtime-observable guarantees: construction, state encapsulation,
-    # methods, and coexistence with the green-thread scheduler.
-    it "constructs an actor with encapsulated state":
-        # @req: REQ-FEATURE-ACTORS-001
-        step("Verify: an actor instance carries its constructed state")
-        val a = MailboxActor(depth: 4)
-        expect(a.depth).to_equal(4)
+    # @manual scenario evidence
+    # Tests for actor model implementation and concurrent message passing,
+    # exercising the real ActorMailbox admission and FIFO drain contract.
 
-    it "runs actor methods against the actor's own state":
-        # @req: REQ-FEATURE-ACTORS-001
-        step("Verify: the method reads the actor's field and computes on it")
-        val a = MailboxActor(depth: 21)
-        expect(a.doubled()).to_equal(42)
+    it "delivers messages in FIFO order through the mailbox":
+        # @req REQ-SSPEC-FEATURE
+        step("create a mailbox and enqueue two fire-and-forget messages")
+        val mb = ActorMailbox.new(8)
+        expect(mb.enqueue(ActorMessage.fire_and_forget("first", []))).to_equal(true)
+        expect(mb.enqueue(ActorMessage.fire_and_forget("second", []))).to_equal(true)
+        step("drain the mailbox")
+        val first = mb.dequeue()
+        val second = mb.dequeue()
+        # oracle: actor mailboxes must preserve send order (sequential processing)
+        expect(first?.method).to_equal("first")
+        expect(second?.method).to_equal("second")
+        expect(mb.len()).to_equal(0)
 
-    it "keeps two actor instances independently isolated":
-        # @req: REQ-FEATURE-ACTORS-001
-        step("Verify: sibling instances do not share state")
-        val a = MailboxActor(depth: 1)
-        val b = MailboxActor(depth: 2)
-        expect(a.doubled() + b.doubled()).to_equal(6)
+    it "rejects messages beyond the finite mailbox capacity":
+        # @req REQ-SSPEC-FEATURE
+        step("create a one-slot mailbox and fill it")
+        val mb = ActorMailbox.new(1)
+        expect(mb.enqueue(ActorMessage.fire_and_forget("only", []))).to_equal(true)
+        step("attempt to exceed capacity")
+        # oracle: admission must be bounded — the overflow send is refused, not queued
+        expect(mb.enqueue(ActorMessage.fire_and_forget("overflow", []))).to_equal(false)
+        expect(mb.len()).to_equal(1)
+        expect(mb.is_full()).to_equal(true)
 
-    it "runs a spawned task alongside module-level actor declarations":
-        # @req: REQ-FEATURE-ACTORS-001
-        step("Verify: green_spawn executes the task body exactly once at run-all")
-        SPAWN_SEEN = 0
-        val handle = green_spawn(spawn_body)
-        val before = SPAWN_SEEN
-        green_run_all()
-        expect(before).to_equal(0)
-        expect(SPAWN_SEEN).to_equal(1)
+    it "marks reply-expecting messages and closes admission on demand":
+        # @req REQ-SSPEC-FEATURE
+        step("enqueue a reply-expecting message")
+        val mb = ActorMailbox.default()
+        expect(mb.enqueue(ActorMessage.with_reply("ask", ["1"], 7))).to_equal(true)
+        val msg = mb.dequeue()
+        expect(msg?.expects_reply()).to_equal(true)
+        step("close the mailbox and confirm further sends are refused")
+        mb.close()
+        # oracle: a closed mailbox preserves accepted work but admits nothing new
+        expect(mb.is_closed()).to_equal(true)
+        expect(mb.enqueue(ActorMessage.fire_and_forget("late", []))).to_equal(false)

@@ -9,9 +9,109 @@ use crate::mir::blocks::Terminator;
 use crate::mir::effects::CallTarget;
 use crate::mir::effects::LocalKind;
 use crate::mir::function::MirLocal;
-use crate::mir::instructions::{MirInst, UnitOverflowBehavior};
+use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
+
+pub(super) const MAX_ARRAY_DESTRUCTURING_DEPTH: usize = 64;
 
 impl<'a> MirLowerer<'a> {
+    /// Assign a runtime array value into an array-shaped lvalue pattern.
+    ///
+    /// Pure-Simple HIR represents `[a, [b, c]] = value` with `Array` expression
+    /// nodes on the left-hand side.  Those nodes are patterns, not addressable
+    /// array literals, so recursively extract their elements before lowering
+    /// the leaf lvalues.  Keep malformed/generated HIR from exhausting the Rust
+    /// stack by enforcing the same finite-owner expectation explicitly.
+    pub(super) fn lower_array_destructuring_assign(
+        &mut self,
+        elements: &[HirExpr],
+        value_reg: VReg,
+        depth: usize,
+    ) -> MirLowerResult<()> {
+        if depth > MAX_ARRAY_DESTRUCTURING_DEPTH {
+            return Err(super::lowering_core::MirLowerError::Unsupported(format!(
+                "array destructuring nesting exceeds {MAX_ARRAY_DESTRUCTURING_DEPTH} levels"
+            )));
+        }
+
+        for (index, target) in elements.iter().enumerate() {
+            let index_reg = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block)
+                    .unwrap()
+                    .instructions
+                    .push(MirInst::ConstInt {
+                        dest,
+                        value: index as i64,
+                    });
+                dest
+            })?;
+            let raw_element = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name("rt_array_get"),
+                    args: vec![value_reg, index_reg],
+                });
+                dest
+            })?;
+
+            if let HirExprKind::Array(nested) = &target.kind {
+                self.lower_array_destructuring_assign(nested, raw_element, depth + 1)?;
+                continue;
+            }
+
+            // rt_array_get crosses the RuntimeValue boundary. Decode scalar
+            // leaves exactly as ordinary typed array indexing does; aggregate
+            // and erased leaves already have their storage representation.
+            let element_reg = match target.ty {
+                TypeId::U64 => self.unbox_u64_runtime_value(raw_element)?,
+                TypeId::F32 | TypeId::F64 => self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    func.block_mut(current_block)
+                        .unwrap()
+                        .instructions
+                        .push(MirInst::UnboxFloat {
+                            dest,
+                            value: raw_element,
+                        });
+                    dest
+                })?,
+                TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::BOOL => self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    func.block_mut(current_block)
+                        .unwrap()
+                        .instructions
+                        .push(MirInst::UnboxInt {
+                            dest,
+                            value: raw_element,
+                        });
+                    dest
+                })?,
+                _ => raw_element,
+            };
+            let addr_reg = self.lower_lvalue(target)?;
+            self.with_func(|func, current_block| {
+                func.block_mut(current_block)
+                    .unwrap()
+                    .instructions
+                    .push(MirInst::Store {
+                        addr: addr_reg,
+                        value: element_reg,
+                        ty: target.ty,
+                    });
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// True when a HIR expression is a PLACE read -- it evaluates to the SAME
     /// memory an existing binding already owns (a plain local/global variable
     /// read, a field projection, an index projection) rather than a
@@ -672,8 +772,7 @@ impl<'a> MirLowerer<'a> {
                                             | TypeId::U64
                                     );
                                 let needs_float_boxing = !elem_is_heap && matches!(value.ty, TypeId::F32 | TypeId::F64);
-                                let needs_bool_boxing =
-                                    !elem_is_heap && value.ty == TypeId::BOOL;
+                                let needs_bool_boxing = !elem_is_heap && value.ty == TypeId::BOOL;
                                 if value.ty == TypeId::U64 && !elem_is_heap {
                                     self.box_u64_runtime_value(val_reg)?
                                 } else if needs_int_boxing {
@@ -755,6 +854,12 @@ impl<'a> MirLowerer<'a> {
                         })?;
                     }
 
+                    // Array destructuring: [a, [b, c]] = expr. Array-shaped
+                    // HIR lvalues are patterns, not addressable literals.
+                    HirExprKind::Array(elements) => {
+                        self.lower_array_destructuring_assign(elements, val_reg, 0)?;
+                    }
+
                     // Tuple destructuring: (a, b, c) = expr
                     HirExprKind::Tuple(elements) => {
                         // val_reg holds the tuple value; extract each element and assign
@@ -777,7 +882,12 @@ impl<'a> MirLowerer<'a> {
                                 });
                                 dest
                             })?;
-                            // Store to the lvalue element
+                            // A nested array is itself a destructuring pattern;
+                            // all other tuple leaves retain the existing path.
+                            if let HirExprKind::Array(nested) = &elem.kind {
+                                self.lower_array_destructuring_assign(nested, elem_reg, 1)?;
+                                continue;
+                            }
                             let addr_reg = self.lower_lvalue(elem)?;
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
@@ -1052,7 +1162,22 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 let vreg = self.lower_expr(expr)?;
-                // Track the last expression value for implicit returns
+                // Track the last expression value for implicit returns.
+                //
+                // An expression statement in tail position IS the return value
+                // (`lowering_core.rs` turns `last_expr_value` straight into
+                // `Terminator::Return`), so it needs exactly the same tagged-slot
+                // coercion `HirStmt::Return` performs. Without it,
+                // `fn f() -> i64?: 42` returned the RAW word 42 into a tagged
+                // return slot: the caller decoded it through the wrong tag and
+                // printed a denormal f64, `f64?` came back as `bits >> 3`, and
+                // `bool?` came back as `nil` — silently, with `??` unable to
+                // rescue it. `return 42` was already correct, which is what
+                // pinned the defect to this path.
+                // See doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
+                let ret_ty = self.with_func(|func, _| func.return_type)?;
+                let vreg = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, vreg)?;
+                let vreg = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, vreg)?;
                 self.last_expr_value = Some(vreg);
                 Ok(())
             }
@@ -1936,14 +2061,96 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::InlineAsm { instructions, volatile } => {
+            HirStmt::InlineAsm {
+                instructions,
+                volatile,
+                operands,
+                clobbers,
+            } => {
+                use crate::hir::HirAsmOperandKind;
+                use crate::mir::asm_operands::{asm_constraint_for, escape_raw_asm_dollars, rewrite_asm_placeholders};
+
+                // Outputs first (LLVM numbers outputs before inputs), then
+                // inputs. An `inout` operand contributes one output slot and
+                // one input slot tied to it with a numeric constraint.
+                let mut constraint_parts: Vec<String> = Vec::new();
+                let mut placeholder_index: Vec<(Option<String>, usize)> = Vec::new();
+                let mut outputs: Vec<(VReg, TypeId)> = Vec::new();
+                let mut output_places: Vec<(VReg, &HirExpr)> = Vec::new();
+                for op in operands {
+                    if matches!(op.kind, HirAsmOperandKind::Out | HirAsmOperandKind::InOut) {
+                        let out_vreg = self.with_func(|func, _| func.new_vreg())?;
+                        placeholder_index.push((op.name.clone(), constraint_parts.len()));
+                        constraint_parts.push(format!("={}", asm_constraint_for(&op.reg)));
+                        outputs.push((out_vreg, op.expr.ty));
+                        output_places.push((out_vreg, &op.expr));
+                    }
+                }
+                let mut inputs: Vec<VReg> = Vec::new();
+                let mut out_slot = 0usize;
+                for op in operands {
+                    match op.kind {
+                        HirAsmOperandKind::In => {
+                            let v = self.lower_expr(&op.expr)?;
+                            placeholder_index.push((op.name.clone(), constraint_parts.len()));
+                            constraint_parts.push(asm_constraint_for(&op.reg));
+                            inputs.push(v);
+                        }
+                        HirAsmOperandKind::InOut => {
+                            let v = self.lower_expr(&op.expr)?;
+                            constraint_parts.push(out_slot.to_string());
+                            inputs.push(v);
+                            out_slot += 1;
+                        }
+                        HirAsmOperandKind::Out => out_slot += 1,
+                    }
+                }
+                // Every asm block is a compiler barrier for memory: a fence
+                // intrinsic without `~{memory}` could be reordered against
+                // ordinary loads/stores, which defeats its purpose.
+                for c in clobbers {
+                    if c != "memory" {
+                        constraint_parts.push(format!("~{{{}}}", c));
+                    }
+                }
+                if *volatile || !operands.is_empty() || !clobbers.is_empty() {
+                    constraint_parts.push("~{memory}".to_string());
+                }
+                let constraints = constraint_parts.join(",");
+                // Design A.3.1: the author's raw text is opaque — every `$`
+                // must reach LLVM as a literal `$$`. This MUST run BEFORE the
+                // `{name}` -> `$N` rewriter below, otherwise the placeholders
+                // the rewriter inserts would themselves be escaped to `$$N`.
+                let escaped: Vec<String> = instructions.iter().map(|line| escape_raw_asm_dollars(line)).collect();
+                let rewritten: Vec<String> = escaped
+                    .iter()
+                    .map(|line| rewrite_asm_placeholders(line, &placeholder_index))
+                    .collect();
+
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::InlineAsm {
-                        instructions: instructions.clone(),
+                        instructions: rewritten,
                         volatile: *volatile,
+                        constraints,
+                        inputs,
+                        outputs,
                     });
                 })?;
+                // Write each output back to its place (same address+store
+                // pattern as local assignment).
+                for (out_vreg, place) in output_places {
+                    let addr_reg = self.lower_lvalue(place)?;
+                    let ty = place.ty;
+                    self.with_func(|func, current_block| {
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Store {
+                            addr: addr_reg,
+                            value: out_vreg,
+                            ty,
+                        });
+                    })?;
+                }
                 Ok(())
             }
 

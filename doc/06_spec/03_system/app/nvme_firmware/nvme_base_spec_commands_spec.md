@@ -1,6 +1,6 @@
 # nvme_base_spec_commands_spec
 
-> Verifies the nvme base spec commands behaviour end to end so maintainers of this
+> Runs the host controller lifecycle and rv32-compatible scalar firmware command floor through the selected self-hosted Simple runtime. This is command-semantic evidence, not RV32 ELF boot or physical OpenSSD evidence.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # nvme_base_spec_commands_spec
 
-Verifies the nvme base spec commands behaviour end to end so maintainers of this
+Runs the host controller lifecycle and rv32-compatible scalar firmware command floor through the selected self-hosted Simple runtime. This is command-semantic evidence, not RV32 ELF boot or physical OpenSSD evidence.
 
 ## At a Glance
 
@@ -24,18 +24,34 @@ Verifies the nvme base spec commands behaviour end to end so maintainers of this
 | Design | N/A |
 | Research | doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the nvme base spec commands behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+## Overview
+
+Runs the host controller lifecycle and rv32-compatible scalar firmware command
+floor through the selected self-hosted Simple runtime. This is command-semantic
+evidence, not RV32 ELF boot or physical OpenSSD evidence.
+
+The scenarios cover the required controller and namespace Identify data, legal
+and illegal queue lifecycle transitions, NVM command families, admin command
+guards, reserved fields, Abort, and backpressure. A separate scenario proves a
+missing runtime cannot produce passing evidence.
+
+## Syntax
+
+Set `NVME_RV32_SIMPLE_BIN` to the self-hosted Simple executable, then run this
+file through `simple test --mode=interpreter`.
+
+## Examples
+
+`NVME_RV32_SIMPLE_BIN=build/bootstrap/full/x86_64-unknown-linux-gnu/simple simple test test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl --mode=interpreter`
+
+## Claim Boundary
+
+Passing proves the host model and scalar firmware command floor. It does not
+prove a freshly linked RV32 ELF, QEMU boot, OpenSSD ARM/Zynq execution, NAND
+media behavior, PCIe interoperability, or power-loss durability.
 
 ## Scenarios
 
@@ -43,26 +59,30 @@ unrelated sibling features are out of scope.
 
 #### should identify the controller and enforce IO queue lifecycle rules
 
-- Verify: should identify the controller and enforce IO queue lifecycle rules
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should identify the controller and enforce IO queue lifecycle rules
 - Run the host-facing controller lifecycle demo
-   - Expected: code equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: code equals `0`
 - Verify Identify Controller and Identify Namespace results
 - Verify legal queue order and invalid binding rejection
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005
-step("Verify: should identify the controller and enforce IO queue lifecycle rules")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should identify the controller and enforce IO queue lifecycle rules")
 step("Run the host-facing controller lifecycle demo")
 val (out, err, code) = _run_simple(FW + "/nvme_main.spl")
-expect(code).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(code).to_equal(0)
 
 step("Verify Identify Controller and Identify Namespace results")
 expect(out).to_contain("identify controller ok")
@@ -83,26 +103,26 @@ _expect_no_fail_marker(out, "host controller lifecycle")
 
 #### should pass the rv32-compatible admin and NVM command floor
 
-- Verify: should pass the rv32-compatible admin and NVM command floor
+- should pass the rv32-compatible admin and NVM command floor
 - Run the scalar firmware command checker
-   - Expected: code equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: code equals `0`
 - Verify admin, queue, opcode, and NVM command families
 - Verify reserved-field, namespace, Abort, and backpressure guards
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005
-step("Verify: should pass the rv32-compatible admin and NVM command floor")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should pass the rv32-compatible admin and NVM command floor")
 step("Run the scalar firmware command checker")
 val (out, err, code) = _run_simple(RV32 + "/base_spec_check.spl")
-expect(code).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(code).to_equal(0)
 
 step("Verify admin, queue, opcode, and NVM command families")
 expect(out).to_contain("NVME-ADMIN-IDENTIFY-FEATURES-LOG-FORMAT-FW PASS")
@@ -123,7 +143,7 @@ _expect_no_fail_marker(out, "rv32 command floor")
 
 #### should fail closed when the selected Simple runtime is missing
 
-- Verify: should fail closed when the selected Simple runtime is missing
+- should fail closed when the selected Simple runtime is missing
 - Select a runtime path that cannot exist
 - Verify the missing runtime cannot produce passing evidence
 
@@ -131,13 +151,12 @@ _expect_no_fail_marker(out, "rv32 command floor")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005
-step("Verify: should fail closed when the selected Simple runtime is missing")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed when the selected Simple runtime is missing")
 step("Select a runtime path that cannot exist")
 val (out, err, code) = _run("NVME_RV32_SIMPLE_BIN=/definitely/missing/simple; \"$NVME_RV32_SIMPLE_BIN\" run " + RV32 + "/base_spec_check.spl")
 
@@ -167,45 +186,71 @@ expect(code).to_be_greater_than(0)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-001`
+- `REQ-002`
+- `REQ-003`
+- `REQ-004`
+- `REQ-005`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `06fb7bfad2fec2cfddc6e85e99c65edda9c83a23d7d712d9ac37e96c4cfdcc2c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `dbcd847be3ccb7f745e4881e37e751b75a6e73a45e09a5e2c777939598270ba6`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `06fb7bfad2fec2cfddc6e85e99c65edda9c83a23d7d712d9ac37e96c4cfdcc2c`.
+Source SHA-256: `dbcd847be3ccb7f745e4881e37e751b75a6e73a45e09a5e2c777939598270ba6`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `06fb7bfad2fec2cfddc6e85e99c65edda9c83a23d7d712d9ac37e96c4cfdcc2c`  
+Source SHA-256: `dbcd847be3ccb7f745e4881e37e751b75a6e73a45e09a5e2c777939598270ba6`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 92/100
+SSpec documentization score: 49/100
 source: test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl
 mirror: doc/06_spec/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=85 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 10 blockers: 1
+  narrative=100 structure=85 oracle=80
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=80; blocker cap makes effective=49
 doc/06_spec/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, recovery/troubleshooting
+doc/06_spec/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:72:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should identify the controller and enforce IO queue lifecycle rules' describes the test rather than its outcome
+test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 5 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:62:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should identify the controller and enforce IO queue lifecycle rules' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:94:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should pass the rv32-compatible admin and NVM command floor' describes the test rather than its outcome
+test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should identify the controller and enforce IO queue lifecycle rules' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:83:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should pass the rv32-compatible admin and NVM command floor' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:116:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed when the selected Simple runtime is missing' describes the test rather than its outcome
+test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:83:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should pass the rv32-compatible admin and NVM command floor' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:104:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed when the selected Simple runtime is missing' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
+test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should fail closed when the selected Simple runtime is missing' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

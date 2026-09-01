@@ -20,6 +20,7 @@ mod casts;
 mod collections;
 mod consts;
 mod memory;
+mod inline_asm;
 mod objects;
 
 /// Type alias for vreg map
@@ -436,6 +437,105 @@ impl LlvmBackend {
             .into_float_value())
     }
 
+    /// Emit one raw `asm { }` block as an LLVM inline-asm call
+    /// (design A.3 text contract + A.4 clobber lowering, see `raw_asm.rs`).
+    #[cfg(feature = "llvm")]
+    fn emit_raw_asm_block(
+        &self,
+        instructions: &[String],
+        constraints: &str,
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<(), CompileError> {
+        let fn_type = self.context_ref().void_type().fn_type(&[], false);
+        let asm = self.context_ref().create_inline_asm(
+            fn_type,
+            super::raw_asm::raw_asm_template(instructions),
+            constraints.to_string(),
+            true,
+            false,
+            Some(InlineAsmDialect::ATT),
+            false,
+        );
+        builder
+            .build_indirect_call(fn_type, asm, &[], "")
+            .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
+        Ok(())
+    }
+
+    /// Design A.2 `@naked`: the body MUST be exactly one raw `asm { }` block.
+    /// Nothing else is materialised — no vreg/local allocas, no parameter
+    /// spills, no `ret`; the block is followed by `unreachable` so LLVM
+    /// synthesises no epilogue (the survey measured a trailing `c3` + `int3`
+    /// padding with the plain path, fatal for stubs ending in jmp/iret/mret).
+    #[cfg(feature = "llvm")]
+    fn compile_naked_function(
+        &self,
+        func: &MirFunction,
+        function: inkwell::values::FunctionValue<'static>,
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<(), CompileError> {
+        let entry = self.context_ref().append_basic_block(function, "naked_entry");
+        builder.position_at_end(entry);
+        let mut asm_blocks = 0usize;
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    crate::mir::MirInst::InlineAsm {
+                        instructions,
+                        constraints,
+                        inputs,
+                        outputs,
+                        ..
+                    } => {
+                        // A `@naked` body owns the whole register file, so it
+                        // must not bind operands or declare clobbers. Under
+                        // the landed MIR shape the clobber list has already
+                        // been folded into the constraint string, so anything
+                        // beyond the implicit `~{memory}` is a violation.
+                        let declared: Vec<&str> = constraints
+                            .split(',')
+                            .filter(|c| !c.is_empty() && *c != "~{memory}")
+                            .collect();
+                        if !declared.is_empty() || !inputs.is_empty() || !outputs.is_empty() {
+                            return Err(CompileError::Codegen(format!(
+                                "E-NAKED-CLOBBER: `{}` is @naked; its raw asm block must not carry clobbers(...) \
+                                 or bound operands (the whole register file belongs to the author), found `{}`",
+                                func.name, constraints
+                            )));
+                        }
+                        self.emit_raw_asm_block(instructions, "~{memory}", builder)?;
+                        asm_blocks += 1;
+                    }
+                    other => {
+                        return Err(CompileError::Codegen(format!(
+                            "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {:?}",
+                            func.name, other
+                        )));
+                    }
+                }
+            }
+            match &block.terminator {
+                crate::mir::Terminator::Return(None) | crate::mir::Terminator::Unreachable => {}
+                other => {
+                    return Err(CompileError::Codegen(format!(
+                        "E-NAKED-BODY: `{}` is @naked; control flow other than fall-through is not allowed, found {:?}",
+                        func.name, other
+                    )));
+                }
+            }
+        }
+        if asm_blocks != 1 {
+            return Err(CompileError::Codegen(format!(
+                "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {asm_blocks}",
+                func.name
+            )));
+        }
+        builder
+            .build_unreachable()
+            .map_err(|e| crate::error::factory::llvm_build_failed("naked_unreachable", &e))?;
+        Ok(())
+    }
+
     /// Compile a MIR function to LLVM IR (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn compile_function(&self, func: &MirFunction) -> Result<(), CompileError> {
@@ -449,6 +549,11 @@ impl LlvmBackend {
                 .as_deref()
                 .map(|needle| func.name.contains(needle))
                 .unwrap_or_else(|| func.name.contains("native_build"));
+
+        // `@volatile` / `@no_reorder` memory-order mode for this function
+        // (read by compile_load / compile_store / compile_inline_asm).
+        self.mem_order_mode
+            .set(inline_asm::mem_order_mode_for(&func.attributes));
 
         // Debug: dump MIR for selected functions when SIMPLE_DUMP_IR is set.
         if should_dump {
@@ -504,6 +609,11 @@ impl LlvmBackend {
             module.add_function(resolved_name, fn_type, None)
         });
 
+        // Design A.2 `@naked`: no allocas, no prologue, no epilogue, no `ret`.
+        if func.attributes.iter().any(|attr| attr == "naked") {
+            return self.compile_naked_function(func, function, builder);
+        }
+
         // Create basic blocks for each MIR block
         let mut llvm_blocks = HashMap::new();
         for block in &func.blocks {
@@ -533,7 +643,7 @@ impl LlvmBackend {
         }
         for block in &func.blocks {
             for inst in &block.instructions {
-                if let Some(d) = inst.dest() {
+                for d in inst.defs() {
                     all_vregs.insert(d);
                 }
                 for u in inst.uses() {
@@ -722,7 +832,7 @@ impl LlvmBackend {
                             live_in.insert(u);
                         }
                     }
-                    if let Some(d) = inst.dest() {
+                    for d in inst.defs() {
                         seen_defs.insert(d);
                     }
                 }
@@ -778,7 +888,7 @@ impl LlvmBackend {
                 self.compile_instruction(inst, &mut vreg_map, &local_allocas, &vreg_types, builder, module)?;
 
                 // Store any newly defined vreg to its alloca (for cross-block access)
-                if let Some(d) = inst.dest() {
+                for d in inst.defs() {
                     if let (Some(&alloca), Some(&val)) = (vreg_allocas.get(&d), vreg_map.get(&d)) {
                         let rv_type = self.runtime_int_type();
                         let i64_val = self
@@ -883,8 +993,29 @@ impl LlvmBackend {
                     vreg_map.insert(*dest, default_val.into());
                 }
             }
-            MirInst::AggregateCopy { dest, src, byte_size, deep_fields, .. } => {
-                self.compile_aggregate_copy(*dest, *src, *byte_size, deep_fields, vreg_map, builder)?;
+            MirInst::AggregateCopy {
+                dest,
+                src,
+                byte_size,
+                owner_has_vtable,
+                deep_fields,
+                ..
+            } => {
+                // FIXED (was sj-segv-2026-08-27 TODO): `owner_has_vtable` is
+                // now resolved by `qualify_native_struct_layouts` from
+                // `type_name`, exactly like `FieldGet`/`FieldSet` already do —
+                // no separate name->vtable lookup needed in this scope. See
+                // doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
+                // and doc/08_tracking/bug/windows_msvc_stage2_compilerconfig_by_value_return_corruption_2026-08-31.md
+                self.compile_aggregate_copy(
+                    *dest,
+                    *src,
+                    *byte_size,
+                    *owner_has_vtable,
+                    deep_fields,
+                    vreg_map,
+                    builder,
+                )?;
             }
             MirInst::BinOp { dest, op, left, right } => {
                 let left_val = self.get_vreg(left, vreg_map)?;
@@ -980,20 +1111,15 @@ impl LlvmBackend {
             MirInst::Call { dest, target, args } => {
                 self.compile_call(*dest, target, args, vreg_map, vreg_types, builder, module)?;
             }
-            MirInst::InlineAsm { instructions, .. } => {
-                let fn_type = self.context_ref().void_type().fn_type(&[], false);
-                let asm = self.context_ref().create_inline_asm(
-                    fn_type,
-                    instructions.join("\n"),
-                    String::new(),
-                    true,
-                    false,
-                    Some(InlineAsmDialect::ATT),
-                    false,
-                );
-                builder
-                    .build_indirect_call(fn_type, asm, &[], "")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
+            MirInst::InlineAsm {
+                instructions,
+                volatile,
+                constraints,
+                inputs,
+                outputs,
+            } => {
+                self.compile_inline_asm(instructions, *volatile, constraints, inputs, outputs, vreg_map, builder)?;
+                self.emit_no_reorder_fence(builder)?;
             }
             MirInst::IndirectCall {
                 dest,
@@ -2324,6 +2450,72 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                // Builtin-receiver methods that today resolve ONLY through the
+                // qualifier-discarding fallback in `resolve_name_variants`
+                // (pipeline/native_project/imports.rs). That fallback matches on
+                // the bare method name, so `Array.is_empty` could bind to any
+                // user `is_empty` in the entry closure -- measured doing exactly
+                // that, which silently emptied every MIR body
+                // (bootstrap_stage2_empty_mir_bodies_2026-07-05). The fallback
+                // cannot be tightened until these have real lowerings, because
+                // the Stage-2 link depends on them resolving to something.
+                //
+                // All targets are existing `&[I64] -> &[I64]` runtime entries; no
+                // new ABI surface is introduced, deliberately -- codegen-emitted
+                // names the runtime never defines are a recurring defect class.
+                //
+                // Placed AFTER the `direct_func` block above, so a genuine user
+                // method always wins and never reaches here.
+                if args.is_empty() {
+                    let recv_type = func_name.split('.').next().unwrap_or("");
+                    let seq = matches!(recv_type, "Array" | "Slice" | "List" | "Tuple");
+                    let txt = matches!(recv_type, "text" | "String" | "str");
+                    let builtin_recv = seq || txt || matches!(recv_type, "Dict" | "Map" | "Set" | "Range");
+                    // (runtime entry, needs `== 0` on the result)
+                    let lowering: Option<(&str, bool)> = if !builtin_recv {
+                        None
+                    } else {
+                        match method {
+                            "is_empty" => Some(("rt_len", true)),
+                            "ptr" if seq => Some(("rt_array_data_ptr", false)),
+                            "ptr" if txt => Some(("rt_string_data", false)),
+                            "to_bytes" if txt => Some(("rt_string_bytes", false)),
+                            _ => None,
+                        }
+                    };
+                    if let Some((rt_name, compare_zero)) = lowering {
+                        let recv_val = self.get_vreg(receiver, vreg_map)?;
+                        let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
+                        let rt_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                        let rt_func = module
+                            .get_function(rt_name)
+                            .unwrap_or_else(|| module.add_function(rt_name, rt_fn_type, None));
+                        let rt_call = builder
+                            .build_call(rt_func, &[recv_casted.into()], "builtin_method")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("builtin method redirect", &e))?;
+                        let mut result = rt_call
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        if compare_zero {
+                            let as_int = self
+                                .coerce_value_to_type(result, Some(i64_type.into()), builder)?
+                                .into_int_value();
+                            let cmp = builder
+                                .build_int_compare(inkwell::IntPredicate::EQ, as_int, i64_type.const_zero(), "is_empty")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("is_empty compare", &e))?;
+                            result = builder
+                                .build_int_z_extend(cmp, i64_type, "is_empty_i64")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("is_empty zext", &e))?
+                                .into();
+                        }
+                        if let Some(d) = dest {
+                            vreg_map.insert(*d, result);
+                        }
+                        return Ok(());
+                    }
+                }
+
                 // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
                 if method == "substring" && args.len() == 1 {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
@@ -2549,11 +2741,36 @@ impl LlvmBackend {
                     "split" => Some("rt_string_split"),
                     "bytes" => Some("rt_string_bytes"),
                     "chars" => Some("rt_string_chars"),
+                    // Text methods below mirror the Cranelift table in
+                    // codegen/instr/calls.rs (same alias groups, same runtime
+                    // entry points). They were missing HERE — text method
+                    // calls arrive as MethodCallStatic, which never consults
+                    // the qualified_rt_redirect table in functions/calls.rs —
+                    // so `report.lines()` etc. fell through to the fail-closed
+                    // suffix scan and surfaced as undefined `str.lines` /
+                    // `str.partition` / `str.is_*` symbols at the Stage 2 link
+                    // (Windows was merely the first lane to link this way; the
+                    // gap is backend-wide, not platform-specific).
+                    "lines" | "split_lines" => Some("rt_string_lines"),
+                    // TEXT-ONLY by contract, loud on any other receiver —
+                    // matches the Cranelift comment: the array `partition`
+                    // takes a predicate and has a different shape.
+                    "partition" => Some("rt_string_partition"),
+                    "rpartition" => Some("rt_string_rpartition"),
+                    // Character-class predicates: seven spellings, four
+                    // runtime entry points, exactly as in the interpreter
+                    // (interpreter_method/string.rs) and Cranelift. All return
+                    // i64 0/1 — deliberately NOT in `returns_bool` below,
+                    // same as `starts_with`.
+                    "is_digit" | "is_numeric" => Some("rt_string_is_digit"),
+                    "is_alpha" | "is_alphabetic" => Some("rt_string_is_alpha"),
+                    "is_alphanumeric" | "is_alnum" => Some("rt_string_is_alnum"),
+                    "is_whitespace" => Some("rt_string_is_whitespace"),
                     "replace" => Some("rt_string_replace"),
                     "to_upper" | "upper" => Some("rt_string_to_upper"),
                     "to_lower" | "lower" => Some("rt_string_to_lower"),
                     "to_int" | "to_i64" => Some("rt_string_to_int"),
-                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
+                    "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
                     "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
                         Some("rt_string_to_float")
                     }
@@ -2874,14 +3091,39 @@ impl LlvmBackend {
                         .map(|(indices, _)| indices)
                         .or_else(|| crate::codegen::instr::calls::text_arg_indices(runtime_name));
                     if let Some(boxed_indices) = boxed_indices {
-                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| module.add_function("rt_string_data", i64_type.fn_type(&[i64_type.into()], false), None));
-                        let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None));
-                        let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| module.add_function("rt_string_new", i64_type.fn_type(&[i64_type.into(), i64_type.into()], false), None));
+                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
+                            module.add_function("rt_string_data", i64_type.fn_type(&[i64_type.into()], false), None)
+                        });
+                        let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
+                            module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None)
+                        });
+                        let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
+                            module.add_function(
+                                "rt_string_new",
+                                i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+                                None,
+                            )
+                        });
                         for (i, val) in raw_arg_vals.iter().enumerate() {
                             if boxed_indices.contains(&i) {
-                                let ptr = builder.build_call(rt_string_data, &[(*val).into()], "sffi_boxed_text_ptr").map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?.try_as_basic_value().left().unwrap();
-                                let len = builder.build_call(rt_string_len, &[(*val).into()], "sffi_boxed_text_len").map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?.try_as_basic_value().left().unwrap();
-                                let boxed = builder.build_call(rt_string_new, &[ptr.into(), len.into()], "sffi_boxed_text_value").map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?.try_as_basic_value().left().unwrap();
+                                let ptr = builder
+                                    .build_call(rt_string_data, &[(*val).into()], "sffi_boxed_text_ptr")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
+                                    .try_as_basic_value()
+                                    .left()
+                                    .unwrap();
+                                let len = builder
+                                    .build_call(rt_string_len, &[(*val).into()], "sffi_boxed_text_len")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
+                                    .try_as_basic_value()
+                                    .left()
+                                    .unwrap();
+                                let boxed = builder
+                                    .build_call(rt_string_new, &[ptr.into(), len.into()], "sffi_boxed_text_value")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?
+                                    .try_as_basic_value()
+                                    .left()
+                                    .unwrap();
                                 arg_vals.push(boxed.into());
                             } else {
                                 arg_vals.push((*val).into());
@@ -3427,6 +3669,82 @@ mod tests {
         backend.verify().unwrap();
     }
 
+    /// Regression test for
+    /// doc/08_tracking/bug/windows_msvc_stage2_compilerconfig_by_value_return_corruption_2026-08-31.md
+    /// (and the sj-segv-2026-08-27 TODO it closed): copying a vtable-bearing
+    /// value type by value (`var x = y` where `y`'s type implements a trait)
+    /// must allocate and copy `byte_size + 8` bytes — the MIR `byte_size` is
+    /// the UNSHIFTED field-only size, and the extra 8 bytes is the vtable
+    /// header `StructInit` already prepends at offset 0. Without the
+    /// `owner_has_vtable` shift this fixed, the copy under-allocates by one
+    /// word, so the header pointer overwrites field 0 and the last field
+    /// lands outside the allocation entirely.
+    #[test]
+    fn aggregate_copy_of_vtable_bearing_struct_shifts_for_header() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let mut backend = LlvmBackend::new(target).unwrap();
+        let symbol = "__vtable__Owner__for__Trait";
+
+        let mut caller = MirFunction::new(
+            "copy_owner".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 10,
+        });
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(1),
+            value: 20,
+        });
+        // Two i64 fields -> byte_size = 2 * 8 = 16, matching
+        // `copy_if_value_type`'s `(fields.len() as u32) * 8` at lowering.
+        caller.blocks[0].instructions.push(MirInst::StructInit {
+            dest: VReg(2),
+            type_id: crate::hir::TypeId::I64,
+            struct_name: Some("Owner".to_string()),
+            vtable_symbol: Some(symbol.to_string()),
+            struct_size: 16,
+            field_offsets: vec![0, 8],
+            field_types: vec![crate::hir::TypeId::I64, crate::hir::TypeId::I64],
+            field_values: vec![VReg(0), VReg(1)],
+        });
+        caller.blocks[0].instructions.push(MirInst::AggregateCopy {
+            dest: VReg(3),
+            src: VReg(2),
+            byte_size: 16,
+            type_name: Some("Owner".to_string()),
+            owner_has_vtable: Some(true),
+            deep_fields: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+
+        let mut mir = crate::mir::MirModule::new();
+        mir.name = Some("aggregate_copy_vtable".to_string());
+        mir.functions = vec![caller];
+        mir.vtable_impls.push((
+            crate::hir::TypeId::I64,
+            "Owner".to_string(),
+            symbol.to_string(),
+            vec![Some("Owner.method".to_string())],
+            true,
+        ));
+
+        backend.compile(&mir).unwrap();
+        let ir = backend.get_ir().unwrap();
+        // words = (16 + 8) / 8 = 3 -> alloc_bytes = 24. A pre-fix build
+        // (byte_size never shifted for the header) allocates only 16 here,
+        // losing the header shift entirely.
+        let alloc_line = ir
+            .lines()
+            .find(|l| l.contains("aggcopy_alloc") && l.contains("call"))
+            .unwrap_or_else(|| panic!("no aggcopy_alloc rt_alloc call in IR:\n{ir}"));
+        assert!(alloc_line.contains("i64 24"), "{alloc_line}\nfull ir:\n{ir}");
+        assert!(!alloc_line.contains("i64 16"), "{alloc_line}\nfull ir:\n{ir}");
+        backend.verify().unwrap();
+    }
+
     #[test]
     fn method_call_static_arity_mismatch_uses_typed_indirect_call() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
@@ -3829,8 +4147,14 @@ mod tests {
         );
         // Negative artifacts: these two symbols do not exist in ANY runtime.
         // Emitting them is what this test previously asserted.
-        assert!(!ir.contains("rt_box_float"), "rt_box_float does not exist in any runtime");
-        assert!(!ir.contains("rt_unbox_float"), "rt_unbox_float does not exist in any runtime");
+        assert!(
+            !ir.contains("rt_box_float"),
+            "rt_box_float does not exist in any runtime"
+        );
+        assert!(
+            !ir.contains("rt_unbox_float"),
+            "rt_unbox_float does not exist in any runtime"
+        );
         assert!(!ir.contains("bitcast i32"));
         backend.verify().unwrap();
     }
@@ -3893,7 +4217,9 @@ mod tests {
         // Search the backend code only, never this test module, or the
         // assertions would match their own text and prove nothing.
         let src = include_str!("functions.rs");
-        let split = src.find("#[cfg(all(test, feature = \"llvm\"))]").expect("test module marker");
+        let split = src
+            .find("#[cfg(all(test, feature = \"llvm\"))]")
+            .expect("test module marker");
         let code = &src[..split];
 
         assert!(

@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+subject="$repo_root/scripts/check/cert/soundness-diff.shs"
+
+check_source() {
+    file=$1
+    if grep -q '/home/ormastes/dev/pub/simple' "$file"; then
+        return 1
+    fi
+    grep -Fq 'SIMPLE_BIN="${SIMPLE_BIN:-$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple}"' "$file" || return 1
+}
+
+run_relocated() {
+    file=$1
+    root=$2
+    corpus=$3
+    mkdir -p "$root/scripts/check/cert" "$root/bin/release/x86_64-unknown-linux-gnu"
+    cp "$file" "$root/scripts/check/cert/soundness-diff.shs"
+    cat > "$root/bin/release/x86_64-unknown-linux-gnu/simple" <<'FAKE_BIN'
+#!/bin/sh
+printf '42\n'
+FAKE_BIN
+    chmod 755 "$root/bin/release/x86_64-unknown-linux-gnu/simple"
+    output=$(env -u SIMPLE_BIN sh "$root/scripts/check/cert/soundness-diff.shs" "$corpus")
+    printf '%s\n' "$output" | grep -Fq "binary : $root/bin/release/x86_64-unknown-linux-gnu/simple"
+    printf '%s\n' "$output" | grep -Fq 'RESULT: PASS'
+}
+
+check_source "$subject"
+
+fixture_root=$(mktemp -d)
+trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+relocated="$fixture_root/repo with owner's space"
+corpus="$fixture_root/probe.spl"
+cat > "$corpus" <<'FIXTURE'
+# expected stdout:
+# 42
+fn main():
+    print 42
+FIXTURE
+run_relocated "$subject" "$relocated" "$corpus"
+
+legacy_mutant="$fixture_root/legacy.shs"
+sed 's|$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple|/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple|' "$subject" > "$legacy_mutant"
+if check_source "$legacy_mutant"; then
+    echo 'error: accepted legacy-root mutant' >&2
+    exit 1
+fi
+
+echo 'soundness differential default-path contract: PASS'

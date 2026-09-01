@@ -1,0 +1,47 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-010 REQ-012 REQ-013 REQ-014
+
+use std.spec.*
+use compiler.common.hal.rt_hal_contract.*
+
+describe "compiler rt(hal) contract":
+    it "uses no-config Critical all-provider bounded defaults":
+        val contract = parse_rt_hal_contract_v1("hal,operation.io.v1")
+        expect(contract.valid).to_be(true)
+        expect(contract.assurance_rank).to_equal(3)
+        expect(contract.providers_mask).to_equal(7)
+        expect(contract.preferred_provider).to_equal(0)
+        expect(contract.trace_bytes).to_equal(4096)
+        expect(rt_hal_contract_requires_sealed_archive(contract)).to_be(true)
+        expect(rt_hal_contract_canonical_v1(contract)).to_start_with("rt-hal-v1|")
+
+    it "accepts explicit Pure C Rust compare metadata and capacities":
+        val contract = parse_rt_hal_contract_v1(
+            "hal,operation:io.read.v1,assurance:verified,providers:pure+c+rust,capabilities:9,comparator:11,normalizer:12,effects:plan_then_commit,request_bytes:256,result_bytes:512,trace_operations:8,trace_bytes:1024,diff_rows:4,report_bytes:512,log_bytes:256,deadline_ticks:99,error_schema:13,environment_schema:14,preferred:rust")
+        expect(contract.valid).to_be(true)
+        expect(contract.assurance_rank).to_equal(4)
+        expect(contract.providers_mask).to_equal(7)
+        expect(contract.preferred_provider).to_equal(2)
+        expect(contract.capabilities_mask).to_equal(9)
+
+    it "rejects lower assurance without a reason and unknown policy keys":
+        val lower = parse_rt_hal_contract_v1(
+            "hal,operation:io.read.v1,assurance:strict")
+        val unknown = parse_rt_hal_contract_v1(
+            "hal,operation:io.read.v1,ambient_config:true")
+        expect(lower.valid).to_be(false)
+        expect(lower.diagnostic).to_contain("rationale")
+        expect(unknown.valid).to_be(false)
+        expect(unknown.diagnostic).to_contain("unknown")
+
+    it "allows a reasoned lower declaration but never promotes it to sealed Critical":
+        val lower = parse_rt_hal_contract_v1(
+            "hal,operation:host.preview.v1,assurance:strict,rationale:host-only-fixture")
+        expect(lower.valid).to_be(true)
+        expect(rt_hal_contract_requires_sealed_archive(lower)).to_be(false)
+
+    it "fails closed above every static memory bound":
+        val oversized = parse_rt_hal_contract_v1(
+            "hal,operation:io.read.v1,trace_bytes:4194305")
+        expect(oversized.valid).to_be(false)
+        expect(oversized.diagnostic).to_contain("capacities")

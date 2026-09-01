@@ -73,41 +73,19 @@ struct JitCacheRecord:
     address: i64
     owner: text
 
-var _g_symbols: [text] = []
-var _g_owners: [text] = []
-var _g_addresses: [i64] = []
+var _g_records: Dict<text, MappedRecord> = {}
 
 fn _global_set(symbol: text, owner_id: text, address: i64):
-    var idx = -1
-    for i in 0.._g_symbols.len():
-        if _g_symbols[i] == symbol:
-            idx = i
-    if idx >= 0:
-        _g_owners[idx] = owner_id
-        _g_addresses[idx] = address
-    else:
-        _g_symbols.push(symbol)
-        _g_owners.push(owner_id)
-        _g_addresses.push(address)
+    _g_records[symbol] = MappedRecord(owner_id: owner_id, address: address)
 
 fn _global_get(symbol: text) -> MappedRecord?:
-    for i in 0.._g_symbols.len():
-        if _g_symbols[i] == symbol:
-            return Some(MappedRecord(owner_id: _g_owners[i], address: _g_addresses[i]))
+    if _g_records.has(symbol):
+        return Some(_g_records[symbol])
     nil
 
 fn _global_remove(symbol: text):
-    var keep_s: [text] = []
-    var keep_o: [text] = []
-    var keep_a: [i64] = []
-    for i in 0.._g_symbols.len():
-        if _g_symbols[i] != symbol:
-            keep_s.push(_g_symbols[i])
-            keep_o.push(_g_owners[i])
-            keep_a.push(_g_addresses[i])
-    _g_symbols = keep_s
-    _g_owners = keep_o
-    _g_addresses = keep_a
+    if _g_records.has(symbol):
+        _g_records = _g_records.remove(symbol)
 
 fn _jit_key_list_contains(keys: [text], key: text) -> bool:
     for item in keys:
@@ -140,11 +118,17 @@ class JitExecMapper:
         val g = _global_get(symbol)
         if g.?:
             return g
+
+        # After a process-global miss, `set_record` keeps `records` in lockstep
+        # with the compatibility arrays. Consult the dictionary before those
+        # arrays so this local fallback remains expected O(1). Process-global
+        # steady-state hits already return above; keep the arrays only for
+        # legacy manually-constructed mappers whose state predates `records`.
+        if self.records.has(symbol):
+            return Some(self.records[symbol])
         for i in 0..self.symbols.len():
             if self.symbols[i] == symbol:
                 return Some(MappedRecord(owner_id: self.owners[i], address: self.addresses[i]))
-        if self.records.has(symbol):
-            return Some(self.records[symbol])
         nil
 
     fn get_record(symbol: text):
@@ -467,11 +451,16 @@ fn _parse_i32(input: text) -> i32:
     input.to_i64() as i32
 
 fn _fake_compile_bytes(entry: PossibleInstantiation) -> [u8]:
+    # Concatenation intentionally normalizes raw literal-backed fields to the
+    # managed text representation before byte_at. Avoid materializing a second
+    # full byte array: stream the normalized buffer directly into the result.
+    val framed = entry.template_name + ":" + entry.type_args + ":" + entry.mangled_name
+    val framed_len = framed.len()
     var out: [u8] = []
-    for ch in (entry.template_name + ":" + entry.type_args + ":" + entry.mangled_name).bytes():
-        out.push(ch)
-    if out.len() == 0:
-        return [195]
+    var index: i64 = 0
+    while index < framed_len:
+        out.push(framed.byte_at(index) as u8)
+        index = index + 1
     out.push(195)
     out
 

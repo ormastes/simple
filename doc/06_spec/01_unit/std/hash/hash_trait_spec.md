@@ -1,6 +1,6 @@
-# hash_trait_spec
+# Hash Trait Specification
 
-> Verifies the hash trait behaviour end to end so maintainers of this
+> Tests covering Hash trait, Text hashing, Integer hashing, Boolean hashing, Collection hashing, Pair hashing, Hash characteristics.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# hash_trait_spec
-
-Verifies the hash trait behaviour end to end so maintainers of this
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/std/hash/hash_trait_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Verifies the hash trait behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+# Hash Trait Specification
 
 ## Scenarios
 
@@ -41,19 +19,18 @@ unrelated sibling features are out of scope.
 
 #### is stable for the same string
 
-- Verify: is stable for the same string
+- is stable for the same string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: is stable for the same string")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("is stable for the same string")
 val h1 = hash_text("hello")
 val h2 = hash_text("hello")
 check(h1 == h2)
@@ -63,173 +40,7 @@ check(h1 == h2)
 
 #### changes for different strings
 
-- Verify: changes for different strings
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: changes for different strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-check(hash_text("hello") != hash_text("world"))
-```
-
-</details>
-
-#### handles empty string
-
-- Verify: handles empty string
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: handles empty string")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-check(hash_text("") == 17)
-```
-
-</details>
-
-#### treats unicode input as distinct
-
-- Verify: treats unicode input as distinct
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: treats unicode input as distinct")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-check(hash_text("hello") != hash_text("héllo"))
-```
-
-</details>
-
-### Integer hashing
-
-#### is stable for the same integer
-
-- Verify: is stable for the same integer
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: is stable for the same integer")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-check(hash_int(42) == hash_int(42))
-```
-
-</details>
-
-#### changes across adjacent integers
-
-- Verify: changes across adjacent integers
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: changes across adjacent integers")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-check(hash_int(42) != hash_int(43))
-```
-
-</details>
-
-#### handles negative values
-
-- Verify: handles negative values
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: handles negative values")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-check(hash_int(-1) != hash_int(0))
-```
-
-</details>
-
-### Boolean hashing
-
-#### maps true and false to different hashes
-
-- Verify: maps true and false to different hashes
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: maps true and false to different hashes")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-check(hash_bool(true) != hash_bool(false))
-```
-
-</details>
-
-#### maps false to zero
-
-- Verify: maps false to zero
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: maps false to zero")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-check(hash_bool(false) == 0)
-```
-
-</details>
-
-### Collection hashing
-
-#### combines array element hashes
-
-- Verify: combines array element hashes
+- changes for different strings
 
 
 <details>
@@ -239,9 +50,166 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: combines array element hashes")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("changes for different strings")
+check(hash_text("hello") != hash_text("world"))
+```
+
+</details>
+
+#### handles empty string
+
+- handles empty string
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("handles empty string")
+check(hash_text("") == 17)
+```
+
+</details>
+
+#### treats unicode input as distinct
+
+- treats unicode input as distinct
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("treats unicode input as distinct")
+check(hash_text("hello") != hash_text("héllo"))
+```
+
+</details>
+
+### Integer hashing
+
+#### is stable for the same integer
+
+- is stable for the same integer
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("is stable for the same integer")
+check(hash_int(42) == hash_int(42))
+```
+
+</details>
+
+#### changes across adjacent integers
+
+- changes across adjacent integers
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("changes across adjacent integers")
+check(hash_int(42) != hash_int(43))
+```
+
+</details>
+
+#### handles negative values
+
+- handles negative values
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("handles negative values")
+check(hash_int(-1) != hash_int(0))
+```
+
+</details>
+
+### Boolean hashing
+
+#### maps true and false to different hashes
+
+- maps true and false to different hashes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("maps true and false to different hashes")
+check(hash_bool(true) != hash_bool(false))
+```
+
+</details>
+
+#### maps false to zero
+
+- maps false to zero
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("maps false to zero")
+check(hash_bool(false) == 0)
+```
+
+</details>
+
+### Collection hashing
+
+#### combines array element hashes
+
+- combines array element hashes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("combines array element hashes")
 val a = hash_array([1, 2, 3])
 val b = hash_array([1, 2, 4])
 check(a != b)
@@ -251,19 +219,18 @@ check(a != b)
 
 #### is order sensitive
 
-- Verify: is order sensitive
+- is order sensitive
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: is order sensitive")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("is order sensitive")
 check(hash_array([1, 2, 3]) != hash_array([3, 2, 1]))
 ```
 
@@ -271,19 +238,18 @@ check(hash_array([1, 2, 3]) != hash_array([3, 2, 1]))
 
 #### preserves uniqueness across a small sample
 
-- Verify: preserves uniqueness across a small sample
+- preserves uniqueness across a small sample
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: preserves uniqueness across a small sample")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("preserves uniqueness across a small sample")
 val hashes = [
     hash_text("a"),
     hash_text("hi"),
@@ -303,19 +269,18 @@ check(unique_count(hashes) == hashes.len())
 
 #### combines tuple-like values
 
-- Verify: combines tuple-like values
+- combines tuple-like values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: combines tuple-like values")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("combines tuple-like values")
 check(hash_pair(42, 7) != hash_pair(42, 8))
 ```
 
@@ -323,19 +288,18 @@ check(hash_pair(42, 7) != hash_pair(42, 8))
 
 #### is order sensitive
 
-- Verify: is order sensitive
+- is order sensitive
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: is order sensitive")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("is order sensitive")
 check(hash_pair(1, 2) != hash_pair(2, 1))
 ```
 
@@ -345,19 +309,18 @@ check(hash_pair(1, 2) != hash_pair(2, 1))
 
 #### changes when one character changes
 
-- Verify: changes when one character changes
+- changes when one character changes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: changes when one character changes")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("changes when one character changes")
 val h1 = hash_text("test")
 val h2 = hash_text("tesa")
 check(h1 != h2)
@@ -367,27 +330,7 @@ check(h1 != h2)
 
 #### remains non-zero for non-empty input
 
-- Verify: remains non-zero for non-empty input
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: remains non-zero for non-empty input")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
-check(hash_text("sample") != 0)
-```
-
-</details>
-
-#### keeps repeated hashing consistent
-
-- Verify: keeps repeated hashing consistent
+- remains non-zero for non-empty input
 
 
 <details>
@@ -397,15 +340,54 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-TEST-HASH_HASH_TRAIT-001
-step("Verify: keeps repeated hashing consistent")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+# @req REQ-SSPEC-UNIT
+step("remains non-zero for non-empty input")
+check(hash_text("sample") != 0)
+```
+
+</details>
+
+#### keeps repeated hashing consistent
+
+- keeps repeated hashing consistent
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("keeps repeated hashing consistent")
 val first = hash_array([hash_int(1), hash_int(2), hash_int(3)])
 val second = hash_array([hash_int(1), hash_int(2), hash_int(3)])
 check(first == second)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/std/hash/hash_trait_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Hash trait, Text hashing, Integer hashing, Boolean hashing, Collection hashing, Pair hashing, Hash characteristics.
+- Hash trait
+- Text hashing
+- Integer hashing
+- Boolean hashing
+- Collection hashing
+- Pair hashing
+- Hash characteristics
 
 ## Scenario Summary
 
@@ -420,36 +402,50 @@ check(first == second)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `9e902e6b3a5c568ced521067c2ee013d0ab9a175ad488d7d3616e8434e597d86`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `a5d7d045b3832d9058feac5b34cae0320899b0206011e749177f5775f82f28db`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `9e902e6b3a5c568ced521067c2ee013d0ab9a175ad488d7d3616e8434e597d86`.
+Source SHA-256: `a5d7d045b3832d9058feac5b34cae0320899b0206011e749177f5775f82f28db`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `9e902e6b3a5c568ced521067c2ee013d0ab9a175ad488d7d3616e8434e597d86`  
+Source SHA-256: `a5d7d045b3832d9058feac5b34cae0320899b0206011e749177f5775f82f28db`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 92/100
 source: test/01_unit/std/hash/hash_trait_spec.spl
 mirror: doc/06_spec/01_unit/std/hash/hash_trait_spec.md (current)
-findings: 3 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/std/hash/hash_trait_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/std/hash/hash_trait_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/std/hash/hash_trait_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/01_unit/std/hash/hash_trait_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/hash/hash_trait_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is stable for the same string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/hash/hash_trait_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'changes for different strings' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/hash/hash_trait_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles empty string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

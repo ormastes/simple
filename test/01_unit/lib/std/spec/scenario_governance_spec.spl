@@ -1,0 +1,113 @@
+use std.spec.{describe, it, expect}
+use lib.common.env_access.model.{env_scenario_execute, env_scenario_exclude, env_scenario_skip}
+use std.spec.skip_governance.SkipRecord
+use std.spec.scenario_governance.{
+    ScenarioOmissionStatus, scenario_omission_status_name,
+    validate_scenario_omission_record,
+    scenario_governance_collect_mcdc_exclusion,
+    scenario_governance_mcdc_exclusions_capacity,
+    scenario_governance_mcdc_exclusions_reset,
+    scenario_governance_mcdc_exclusions_snapshot
+}
+
+fn tracked_record(category: text = "environment") -> SkipRecord:
+    SkipRecord(
+        id: "MC-ENV-001",
+        category: category,
+        reason: "physical fault injection rig is unavailable on this host",
+        owner: "runtime-assurance",
+        requirement: "REQ-MC-ENV-001",
+        alternative_evidence: "recorded hardware receipt",
+        venue: "qualified integration rig",
+        expiry: "2099-12-31",
+        issue: "BUG-MC-ENV-001"
+    )
+
+describe "typed environment scenario governance":
+    it "starts and resets with a bounded empty exclusion snapshot":
+        scenario_governance_mcdc_exclusions_reset()
+        expect(scenario_governance_mcdc_exclusions_capacity()).to_equal(1024)
+        expect(scenario_governance_mcdc_exclusions_snapshot().len()).to_equal(0)
+
+    it "does not collect an exclusion whose canonical review is absent":
+        scenario_governance_mcdc_exclusions_reset()
+        val selection = env_scenario_exclude(
+            "missing-reviewed-decision",
+            "physical fault injection rig is unavailable on this host",
+            "runtime-assurance", "MISSING-MC-REVIEW", "2099-12-31")
+        val problem = scenario_governance_collect_mcdc_exclusion(
+            selection, "10:sample.spl:42", 0, "source-v1")
+        expect(problem.len()).to_be_greater_than(0)
+        expect(scenario_governance_mcdc_exclusions_snapshot().len()).to_equal(0)
+
+    it "rejects broad identity and whole-decision ordinal before collection":
+        scenario_governance_mcdc_exclusions_reset()
+        val selection = env_scenario_exclude(
+            "missing-reviewed-decision",
+            "physical fault injection rig is unavailable on this host",
+            "runtime-assurance", "MISSING-MC-REVIEW", "2099-12-31")
+        val broad = scenario_governance_collect_mcdc_exclusion(
+            selection, "scenario-label", 0, "source-v1")
+        expect(broad).to_equal("MCDC-E-IDENTITY")
+        val whole = scenario_governance_collect_mcdc_exclusion(
+            selection, "10:sample.spl:42", -1, "source-v1")
+        expect(whole).to_equal("MCDC-E-EXCLUSION-SCOPE")
+        expect(scenario_governance_mcdc_exclusions_snapshot().len()).to_equal(0)
+
+    it "keeps blocked and unsupported outcomes distinct from pass":
+        expect(scenario_omission_status_name(ScenarioOmissionStatus.Blocked)).to_equal("BLOCKED")
+        expect(scenario_omission_status_name(ScenarioOmissionStatus.Unsupported)).to_equal("UNSUPPORTED")
+
+    it "accepts a reasoned owner-tracked unavailable scenario":
+        val selection = env_scenario_skip(
+            "hardware-fault", "physical fault injection rig is unavailable on this host",
+            "runtime-assurance", "MC-ENV-001", "qualified fault-injection rig",
+            ["artifacts/hal/rig-receipt.sdn"], "simple test --tag=hal-rig")
+        val result = validate_scenario_omission_record(
+            selection, ScenarioOmissionStatus.Blocked, tracked_record())
+        expect(result.ok).to_equal(true)
+
+    it "rejects unavailable execution and owner drift":
+        val execute_result = validate_scenario_omission_record(
+            env_scenario_execute("hardware-fault"), ScenarioOmissionStatus.Blocked,
+            tracked_record())
+        expect(execute_result.ok).to_equal(false)
+        val selection = env_scenario_skip(
+            "hardware-fault", "physical fault injection rig is unavailable on this host",
+            "different-owner", "MC-ENV-001", "qualified fault-injection rig",
+            ["artifacts/hal/rig-receipt.sdn"], "simple test --tag=hal-rig")
+        val owner_result = validate_scenario_omission_record(
+            selection, ScenarioOmissionStatus.Unsupported, tracked_record())
+        expect(owner_result.message).to_equal("ENV-E-OMISSION-OWNER-MISMATCH")
+
+    it "accepts only narrow reviewed versioned MC/DC exclusions":
+        val selection = env_scenario_exclude(
+            "unproducible-hardware-state",
+            "physical fault injection rig is unavailable on this host",
+            "runtime-assurance", "MC-ENV-001", "2099-12-31")
+        val accepted = validate_scenario_omission_record(
+            selection, ScenarioOmissionStatus.Excluded,
+            tracked_record("mcdc-exclusion"))
+        expect(accepted.ok).to_equal(true)
+        val wrong_category = validate_scenario_omission_record(
+            selection, ScenarioOmissionStatus.Excluded, tracked_record())
+        expect(wrong_category.message).to_equal("ENV-E-EXCLUSION-CATEGORY")
+
+    it "rejects exclusion version drift":
+        val selection = env_scenario_exclude(
+            "unproducible-hardware-state",
+            "physical fault injection rig is unavailable on this host",
+            "runtime-assurance", "MC-ENV-001", "v2")
+        val result = validate_scenario_omission_record(
+            selection, ScenarioOmissionStatus.Excluded,
+            tracked_record("mcdc-exclusion"))
+        expect(result.message).to_equal("ENV-E-EXCLUSION-VERSION")
+
+    it "rejects wildcard exclusion scope":
+        val selection = env_scenario_exclude(
+            "all*", "physical fault injection rig is unavailable on this host",
+            "runtime-assurance", "MC-ENV-001", "2099-12-31")
+        val result = validate_scenario_omission_record(
+            selection, ScenarioOmissionStatus.Excluded,
+            tracked_record("mcdc-exclusion"))
+        expect(result.message).to_equal("ENV-E-EXCLUSION-SCOPE")

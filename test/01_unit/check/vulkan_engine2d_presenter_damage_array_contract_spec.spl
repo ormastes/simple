@@ -1,0 +1,63 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+describe "Vulkan Engine2D presenter damage array ABI":
+    it "keeps managed array validation at the native presenter boundary":
+        val facade = file_read(
+            "src/lib/nogc_sync_mut/gpu/engine2d/vulkan_presenter.spl")
+        expect(facade).to_contain(
+            "rt_vk_engine2d_presenter_present_damage_array")
+        expect(facade).to_contain(
+            "damage_rects: [i64]) -> i32")
+        expect(facade).to_contain(
+            "rt_vk_engine2d_presenter_present_damage_array(")
+        expect(facade.contains(
+            "rt_vk_engine2d_presenter_present_damage(presenter_handle")).to_equal(false)
+
+    it "validates registered tuple arrays before the canonical runtime records GPU work":
+        val runtime = file_read(
+            "src/compiler_rust/runtime/src/vulkan_graphics_runtime_presenter.rs")
+        expect(runtime).to_contain("decode_presenter_damage_array")
+        expect(runtime).to_contain("with_typed_ptr::<RuntimeArray")
+        expect(runtime.contains("present_damage_raw")).to_equal(false)
+        expect(runtime).to_contain("PRESENTER_DAMAGE_MAX_I64_CELLS")
+        expect(runtime).to_contain("damage_rects_are_exact")
+        expect(runtime).to_contain("presenter.buffer_owned(&buffer)")
+        expect(runtime).to_contain("submit_graphics_command_after")
+        expect(runtime).to_contain("self._swapchain.present(image_index, &[])")
+        expect(runtime).to_contain("self.image_revisions[image_slot] = frame_revision")
+
+    it "registers the array ABI for native code generation and retains it in the archive":
+        val codegen = file_read(
+            "src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        val archive = file_read("src/compiler_rust/native_all/src/lib.rs")
+        expect(codegen).to_contain(
+            "rt_vk_engine2d_presenter_present_damage_array")
+        expect(codegen).to_contain("&[I64, I64, I64, I64, I64]")
+        expect(codegen.contains("present_damage_raw")).to_equal(false)
+        expect(archive).to_contain("presenter_runtime_provider!")
+        expect(archive).to_contain(
+            "RT_VK_ENGINE2D_PRESENTER_PRESENT_DAMAGE_ARRAY_PROVIDER")
+
+    it "validates managed interpreter tuples and poisons failed acquired images":
+        val presenter = file_read(
+            "src/compiler_rust/compiler/src/interpreter_extern/vulkan_presenter.rs")
+        val dispatch = file_read(
+            "src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
+        val runtime = file_read(
+            "src/compiler_rust/runtime/src/vulkan_graphics_runtime_presenter.rs")
+        expect(presenter).to_contain("fn interpreter_damage_array")
+        expect(dispatch).to_contain(
+            "rt_vk_engine2d_presenter_present_damage_array")
+        expect(dispatch).to_contain(
+            "rt_vk_engine2d_presenter_present_damage_array")
+        expect(runtime).to_contain("PresenterAcquiredQuarantine")
+        expect(runtime).to_contain("quarantine_after_acquire")
+        expect(runtime).to_contain("abandoned_acquire")
+        expect(runtime).to_contain("wsi_completion_unknown")
+        expect(runtime).to_contain("device.wait_idle()")
+        expect(runtime).to_contain(
+            "submit_graphics_command_after(command, acquire.handle(), &fence)")
+        expect(runtime.contains(
+            "present(image_index, &[&acquire])")).to_equal(false)
+        expect(runtime).to_contain("self.poisoned")

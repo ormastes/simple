@@ -1,0 +1,368 @@
+# codex-impl
+# Dynamic MC/DC aspect adapter. All loader/readiness work is confined to the
+# cold activation boundary; decision probes never consult the aspect catalog.
+
+use std.common.mcdc.model.{McdcMode, McdcPolicy, mcdc_policy_error}
+use std.common.aspect_readiness.{READINESS_FULL, readiness_admits}
+use std.common.facet_registry.{catalog_aspect_loaded, catalog_load_aspect, catalog_unload_aspect}
+use std.nogc_sync_mut.mcdc.recorder.{McdcRecorder}
+
+pub val MCDC_ASPECT_ABI_V1 = 1
+pub val MCDC_ASPECT_SCHEMA_V1 = 1
+
+fn mcdc_dynamic_zero_slots(count: i64) -> [i64]:
+    var slots: [i64] = []
+    var index = 0
+    while index < count:
+        slots.push(0)
+        index = index + 1
+    slots
+
+pub fn mcdc_dynamic_storage_error(policy: McdcPolicy) -> text:
+    val base = mcdc_policy_error(policy)
+    if base != "": return base
+    # Thirteen fixed i64 nesting columns plus conservative alignment/header
+    # accounting. Leave room for at least one 160-byte recorder entry.
+    if policy.max_nesting > 256: return "MCDC-E-NESTING-CAP"
+    if policy.max_nesting * 112 + 160 > policy.owner_bytes:
+        return "MCDC-E-BUFFER-CAP"
+    ""
+
+fn mcdc_dynamic_recorder_policy(policy: McdcPolicy) -> McdcPolicy:
+    McdcPolicy(
+        mode: policy.mode,
+        retain_unique_cause: policy.retain_unique_cause,
+        max_conditions: policy.max_conditions,
+        max_nesting: policy.max_nesting,
+        owner_bytes: policy.owner_bytes - policy.max_nesting * 112,
+        global_bytes: policy.global_bytes,
+        overflow: policy.overflow
+    )
+
+pub class McdcDynamicAspect:
+    owner_id: i64
+    catalog: i64
+    aspect_name: text
+    module_name: text
+    abi_version: i64
+    schema_version: i64
+    generation: i64
+    barrier_generation: i64
+    active_regions: i64
+    enabled: bool
+    valid: bool
+    last_error: text
+    policy: McdcPolicy
+    recorder: McdcRecorder?
+    eval_decision_ids: [i64]
+    eval_evaluated0: [i64]
+    eval_evaluated1: [i64]
+    eval_evaluated2: [i64]
+    eval_evaluated3: [i64]
+    eval_true0: [i64]
+    eval_true1: [i64]
+    eval_true2: [i64]
+    eval_true3: [i64]
+    eval_masked0: [i64]
+    eval_masked1: [i64]
+    eval_masked2: [i64]
+    eval_masked3: [i64]
+
+impl McdcDynamicAspect:
+    static fn create(
+        catalog: i64, aspect_name: text, module_name: text,
+        abi_version: i64, schema_version: i64,
+        owner_id: i64, policy: McdcPolicy
+    ) -> McdcDynamicAspect:
+        val policy_error = mcdc_dynamic_storage_error(policy)
+        val valid = policy.mode == McdcMode.DynamicAspect and policy_error == ""
+        var error = policy_error
+        if policy.mode != McdcMode.DynamicAspect:
+            error = "MCDC-E-DYNAMIC-MODE"
+        val slot_count = if policy_error == "": policy.max_nesting else: 0
+        val recorder_policy = if policy_error == "":
+            mcdc_dynamic_recorder_policy(policy)
+        else:
+            policy
+        McdcDynamicAspect(
+            owner_id: owner_id, catalog: catalog,
+            aspect_name: aspect_name, module_name: module_name,
+            abi_version: abi_version, schema_version: schema_version,
+            generation: 0, barrier_generation: 0,
+            active_regions: 0, enabled: false,
+            valid: valid, last_error: error,
+            policy: recorder_policy, recorder: nil,
+            eval_decision_ids: mcdc_dynamic_zero_slots(slot_count),
+            eval_evaluated0: mcdc_dynamic_zero_slots(slot_count),
+            eval_evaluated1: mcdc_dynamic_zero_slots(slot_count),
+            eval_evaluated2: mcdc_dynamic_zero_slots(slot_count),
+            eval_evaluated3: mcdc_dynamic_zero_slots(slot_count),
+            eval_true0: mcdc_dynamic_zero_slots(slot_count),
+            eval_true1: mcdc_dynamic_zero_slots(slot_count),
+            eval_true2: mcdc_dynamic_zero_slots(slot_count),
+            eval_true3: mcdc_dynamic_zero_slots(slot_count),
+            eval_masked0: mcdc_dynamic_zero_slots(slot_count),
+            eval_masked1: mcdc_dynamic_zero_slots(slot_count),
+            eval_masked2: mcdc_dynamic_zero_slots(slot_count),
+            eval_masked3: mcdc_dynamic_zero_slots(slot_count)
+        )
+
+    static fn create_direct_static(owner_id: i64, policy: McdcPolicy) -> McdcDynamicAspect:
+        var aspect = McdcDynamicAspect.create(
+            0, "mcdc-static", "std.nogc_sync_mut.mcdc.dynamic_aspect",
+            MCDC_ASPECT_ABI_V1, MCDC_ASPECT_SCHEMA_V1, owner_id, policy
+        )
+        aspect.valid = policy.mode == McdcMode.StaticOn and mcdc_dynamic_storage_error(policy) == ""
+        aspect.enabled = aspect.valid
+        if aspect.valid:
+            aspect.recorder = Some(McdcRecorder.create(owner_id, aspect.policy))
+            aspect.generation = 1
+            aspect.last_error = ""
+        aspect
+
+    # Cold path, invoked by the owning execution domain only. A multi-owner
+    # coordinator must first stop every owner at a barrier, then deliver the
+    # same monotonically increasing barrier_generation to each owner-local
+    # capsule. Capsules are never shared or mutated by the coordinator. A
+    # partial admission is rolled back owner-locally with a newer generation.
+    me activate(owner_id: i64, barrier_generation: i64) -> bool:
+        # A wrong owner must not mutate even diagnostic state.
+        if owner_id != self.owner_id:
+            return false
+        if not self.valid:
+            return false
+        if barrier_generation <= self.barrier_generation:
+            self.last_error = "MCDC-E-DYNAMIC-BARRIER"
+            return false
+        if self.active_regions != 0:
+            self.last_error = "MCDC-E-DYNAMIC-NOT-QUIESCENT"
+            return false
+        if self.abi_version != MCDC_ASPECT_ABI_V1:
+            self.last_error = "MCDC-E-DYNAMIC-ABI"
+            return false
+        if self.schema_version != MCDC_ASPECT_SCHEMA_V1:
+            self.last_error = "MCDC-E-DYNAMIC-SCHEMA"
+            return false
+        if not readiness_admits(self.module_name, READINESS_FULL):
+            self.last_error = "MCDC-E-DYNAMIC-UNSUPPORTED"
+            return false
+        if not catalog_aspect_loaded(self.catalog, self.aspect_name):
+            if not catalog_load_aspect(self.catalog, self.aspect_name):
+                self.last_error = "MCDC-E-DYNAMIC-LOAD"
+                return false
+        if not self.enabled:
+            # The only full recorder allocation is deliberately cold and
+            # happens after every admission check succeeds.
+            self.recorder = Some(McdcRecorder.create(self.owner_id, self.policy))
+            if self.generation >= 0x7fffffffffffffff:
+                self.generation = 1
+            else:
+                self.generation = self.generation + 1
+            self.enabled = true
+        self.barrier_generation = barrier_generation
+        self.last_error = ""
+        true
+
+    # Cold path. A generation cannot be withdrawn while a decision evaluation
+    # holds a pin, so short-circuit evaluation cannot be split across aspects.
+    me deactivate(owner_id: i64, barrier_generation: i64) -> bool:
+        if owner_id != self.owner_id:
+            return false
+        if barrier_generation <= self.barrier_generation:
+            self.last_error = "MCDC-E-DYNAMIC-BARRIER"
+            return false
+        if self.active_regions != 0:
+            self.last_error = "MCDC-E-DYNAMIC-NOT-QUIESCENT"
+            return false
+        if not self.enabled:
+            self.barrier_generation = barrier_generation
+            self.last_error = ""
+            return true
+        if not catalog_unload_aspect(self.catalog, self.aspect_name):
+            self.last_error = "MCDC-E-DYNAMIC-UNLOAD"
+            return false
+        self.enabled = false
+        # Return the bounded recording storage when the aspect becomes
+        # dormant. Reactivation reserves a fresh ring on its cold path.
+        self.recorder = nil
+        self.barrier_generation = barrier_generation
+        self.last_error = ""
+        true
+
+    # Multi-owner controller path after the shared catalog has been unloaded
+    # once. Called owner-locally at the same global quiescent barrier.
+    me withdraw_after_catalog_unload(owner_id: i64, barrier_generation: i64) -> bool:
+        if owner_id != self.owner_id: return false
+        if barrier_generation <= self.barrier_generation:
+            self.last_error = "MCDC-E-DYNAMIC-BARRIER"
+            return false
+        if self.active_regions != 0:
+            self.last_error = "MCDC-E-DYNAMIC-NOT-QUIESCENT"
+            return false
+        self.enabled = false
+        self.recorder = nil
+        self.barrier_generation = barrier_generation
+        self.last_error = ""
+        true
+
+    # Hot path. Dormant execution is one predicted branch, with no mutation,
+    # allocation, formatting, loader lookup, synchronization, or provider
+    # dispatch. The owner comparison prevents cross-domain mutation.
+    me enter_decision(owner_id: i64) -> i64:
+        if owner_id != self.owner_id:
+            return 0
+        if not self.enabled:
+            return 0
+        self.active_regions = self.active_regions + 1
+        self.generation
+
+    # Compiler patchpoint protocol. The returned token pins both generation
+    # and bounded nesting slot, so nested instrumented calls cannot overwrite
+    # their caller's partially evaluated masks.
+    me begin_evaluation(owner_id: i64, decision_id: i64) -> i64:
+        if self.active_regions >= self.policy.max_nesting:
+            self.last_error = "MCDC-E-DYNAMIC-NESTING"
+            return 0
+        val generation = self.enter_decision(owner_id)
+        if generation == 0: return 0
+        val slot = self.active_regions - 1
+        self.eval_decision_ids[slot] = decision_id
+        self.eval_evaluated0[slot] = 0
+        self.eval_evaluated1[slot] = 0
+        self.eval_evaluated2[slot] = 0
+        self.eval_evaluated3[slot] = 0
+        self.eval_true0[slot] = 0
+        self.eval_true1[slot] = 0
+        self.eval_true2[slot] = 0
+        self.eval_true3[slot] = 0
+        self.eval_masked0[slot] = 0
+        self.eval_masked1[slot] = 0
+        self.eval_masked2[slot] = 0
+        self.eval_masked3[slot] = 0
+        generation * (self.policy.max_nesting + 1) + slot + 1
+
+    me observe_condition(owner_id: i64, token: i64, ordinal: i64, result: bool) -> bool:
+        if owner_id != self.owner_id or token == 0: return token == 0
+        if ordinal < 0 or ordinal >= self.policy.max_conditions: return false
+        val stride = self.policy.max_nesting + 1
+        val slot = (token % stride) - 1
+        val token_generation = token / stride
+        if slot < 0 or slot >= self.active_regions or token_generation != self.generation:
+            self.last_error = "MCDC-E-DYNAMIC-GENERATION"
+            return false
+        val word = ordinal / 64
+        val bit = 1 << (ordinal % 64)
+        if word == 0:
+            self.eval_evaluated0[slot] = self.eval_evaluated0[slot] | bit
+            if result: self.eval_true0[slot] = self.eval_true0[slot] | bit
+        elif word == 1:
+            self.eval_evaluated1[slot] = self.eval_evaluated1[slot] | bit
+            if result: self.eval_true1[slot] = self.eval_true1[slot] | bit
+        elif word == 2:
+            self.eval_evaluated2[slot] = self.eval_evaluated2[slot] | bit
+            if result: self.eval_true2[slot] = self.eval_true2[slot] | bit
+        else:
+            self.eval_evaluated3[slot] = self.eval_evaluated3[slot] | bit
+            if result: self.eval_true3[slot] = self.eval_true3[slot] | bit
+        true
+
+    me mark_masked_range(owner_id: i64, token: i64, start: i64, end: i64, enabled: bool) -> bool:
+        if not enabled: return true
+        if owner_id != self.owner_id or token == 0: return token == 0
+        val stride = self.policy.max_nesting + 1
+        val slot = (token % stride) - 1
+        if slot < 0 or slot >= self.active_regions or token / stride != self.generation:
+            return false
+        var ordinal = start
+        while ordinal < end and ordinal < self.policy.max_conditions:
+            val bit = 1 << (ordinal % 64)
+            match ordinal / 64:
+                0: self.eval_masked0[slot] = self.eval_masked0[slot] | bit
+                1: self.eval_masked1[slot] = self.eval_masked1[slot] | bit
+                2: self.eval_masked2[slot] = self.eval_masked2[slot] | bit
+                _: self.eval_masked3[slot] = self.eval_masked3[slot] | bit
+            ordinal = ordinal + 1
+        true
+
+    me finish_evaluation(owner_id: i64, token: i64, outcome: bool) -> bool:
+        if owner_id != self.owner_id: return false
+        if token == 0: return true
+        val stride = self.policy.max_nesting + 1
+        val slot = (token % stride) - 1
+        val token_generation = token / stride
+        if slot < 0 or slot != self.active_regions - 1 or token_generation != self.generation:
+            self.last_error = "MCDC-E-DYNAMIC-PIN"
+            return false
+        self.finish_decision(
+            owner_id, token_generation, self.eval_decision_ids[slot], outcome,
+            self.eval_evaluated0[slot], self.eval_evaluated1[slot],
+            self.eval_evaluated2[slot], self.eval_evaluated3[slot],
+            self.eval_true0[slot], self.eval_true1[slot],
+            self.eval_true2[slot], self.eval_true3[slot],
+            self.eval_masked0[slot], self.eval_masked1[slot],
+            self.eval_masked2[slot], self.eval_masked3[slot]
+        )
+
+    # Exception/early-exit path: release the generation pin without inventing
+    # a decision outcome.
+    me abort_decision(owner_id: i64, token: i64) -> bool:
+        if owner_id != self.owner_id:
+            return false
+        if token == 0:
+            return true
+        if self.active_regions <= 0:
+            self.last_error = "MCDC-E-DYNAMIC-PIN"
+            return false
+        self.active_regions = self.active_regions - 1
+        if token != self.generation:
+            self.last_error = "MCDC-E-DYNAMIC-GENERATION"
+            return false
+        self.last_error = ""
+        true
+
+    # Hot enabled path. Recorder storage was fixed during cold activation; this
+    # call is O(1) and performs no loader work or capacity growth.
+    me finish_decision(
+        owner_id: i64, token: i64, decision_id: i64, outcome: bool,
+        evaluated_mask0: i64, evaluated_mask1: i64,
+        evaluated_mask2: i64, evaluated_mask3: i64,
+        true_mask0: i64, true_mask1: i64,
+        true_mask2: i64, true_mask3: i64,
+        masked_mask0: i64, masked_mask1: i64,
+        masked_mask2: i64, masked_mask3: i64
+    ) -> bool:
+        if owner_id != self.owner_id:
+            return false
+        if token == 0:
+            return true
+        if self.active_regions <= 0:
+            self.last_error = "MCDC-E-DYNAMIC-PIN"
+            return false
+        self.active_regions = self.active_regions - 1
+        if not self.enabled or token != self.generation:
+            self.last_error = "MCDC-E-DYNAMIC-GENERATION"
+            return false
+        if self.recorder == nil:
+            self.last_error = "MCDC-E-DYNAMIC-RECORDER"
+            return false
+        self.recorder.?.record(
+            decision_id, outcome,
+            evaluated_mask0, evaluated_mask1, evaluated_mask2, evaluated_mask3,
+            true_mask0, true_mask1, true_mask2, true_mask3,
+            masked_mask0, masked_mask1, masked_mask2, masked_mask3)
+
+    fn recorded_count() -> i64:
+        if self.recorder == nil:
+            return 0
+        self.recorder.?.count
+
+    fn dropped_count() -> i64:
+        if self.recorder == nil: return 0
+        self.recorder.?.dropped
+
+    fn overwritten_count() -> i64:
+        if self.recorder == nil: return 0
+        self.recorder.?.overwritten
+
+    fn has_recorder_storage() -> bool:
+        self.recorder != nil

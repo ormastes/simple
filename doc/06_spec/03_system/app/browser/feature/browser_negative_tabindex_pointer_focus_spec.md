@@ -1,6 +1,6 @@
 # Hosted negative-tabindex pointer focus
 
-> Verifies the browser negative tabindex pointer focus behaviour end to end so maintainers of this
+> A negative tabindex keeps a control pointer-focusable while excluding it from
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Hosted negative-tabindex pointer focus
 
-Verifies the browser negative tabindex pointer focus behaviour end to end so maintainers of this
+A negative tabindex keeps a control pointer-focusable while excluding it from
 
 ## At a Glance
 
@@ -20,18 +20,12 @@ Verifies the browser negative tabindex pointer focus behaviour end to end so mai
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the browser negative tabindex pointer focus behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+A negative tabindex keeps a control pointer-focusable while excluding it from
+sequential Tab navigation. The scenario follows the production hosted pointer,
+DOM event, Draw IR, and Engine2D routes.
 
 ## Scenarios
 
@@ -43,7 +37,7 @@ unrelated sibling features are out of scope.
 - invalid capture metadata value: draw_ir (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Verify: should pointer-focus a negative tabindex control and skip it on Tab
+- should pointer-focus a negative tabindex control and skip it on Tab
    - HTML capture: after_step
 - Open a pointer-focusable control outside sequential Tab order
    - HTML capture: after_step
@@ -56,7 +50,7 @@ unrelated sibling features are out of scope.
    - HTML capture: after_step
    - Evidence: HTML text verified by 2 expected checks
    - Expected: focus_color equals `0xFF2563EBu32`
-   - Expected: rendered.skipped_command_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: rendered.skipped_command_count equals `0`
 - Release the pointer and move sequential focus with Tab
    - HTML capture: after_step
    - Evidence: HTML text verified by 5 expected checks
@@ -70,13 +64,12 @@ unrelated sibling features are out of scope.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 90 lines folded for reproduction.
+Runnable source: 89 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
-step("Verify: should pointer-focus a negative tabindex control and skip it on Tab")
-# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req REQ-SSPEC-SYSTEM
+step("should pointer-focus a negative tabindex control and skip it on Tab")
 step("Open a pointer-focusable control outside sequential Tab order")
 val html = (
     "<style>body{{margin:0}}input,button{display:block;margin:0;" +
@@ -131,7 +124,7 @@ val engine = Engine2dCompositorBackend.create_named(
 val rendered = engine.render_draw_ir_composition_resources(
     composition, session.browser.image_resources
 )
-expect(rendered.skipped_command_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(rendered.skipped_command_count).to_equal(0)
 expect(negative_tabindex_color_count(
     rendered.pixels, 0xFF2563EBu32
 )).to_be_greater_than(0)
@@ -181,39 +174,57 @@ session.close()
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-005`
+- `REQ-WEB-BROWSER-007`
+- `REQ-WEB-BROWSER-008`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `6dbc831d2c18088b679011ff7bd233eaa419cabe52b449e44e2c1de59203d217`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `9fc3d162f3fcb220180a2e3e758d518bca1bdf974ce6eb041ccb88a6d8485465`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `6dbc831d2c18088b679011ff7bd233eaa419cabe52b449e44e2c1de59203d217`.
+Source SHA-256: `9fc3d162f3fcb220180a2e3e758d518bca1bdf974ce6eb041ccb88a6d8485465`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `6dbc831d2c18088b679011ff7bd233eaa419cabe52b449e44e2c1de59203d217`  
+Source SHA-256: `9fc3d162f3fcb220180a2e3e758d518bca1bdf974ce6eb041ccb88a6d8485465`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+Raw score: **86/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 94/100
+SSpec documentization score: 49/100
 source: test/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.spl
 mirror: doc/06_spec/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=95 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
+findings: 6 blockers: 1
+  narrative=100 structure=95 oracle=90
+  traceability=60 evidence=90 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=86; blocker cap makes effective=49
 doc/06_spec/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.spl:47:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should pointer-focus a negative tabindex control and skip it on Tab' describes the test rather than its outcome
+test/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.spl:37:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should pointer-focus a negative tabindex control and skip it on Tab' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/browser_negative_tabindex_pointer_focus_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should pointer-focus a negative tabindex control and skip it on Tab' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

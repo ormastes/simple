@@ -1,0 +1,25 @@
+#!/bin/sh
+# QEMU argv-compatible container launcher for the WM QMP capture target.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+image=${HEADLESS_QEMU_VIRGL_IMAGE:-simple-qemu-virgl-headless:8.2.2-ubuntu24.04}
+render_node=${HEADLESS_QEMU_RENDER_NODE:-/dev/dri/renderD128}
+host_uid=$(id -u)
+host_gid=$(id -g)
+kvm_gid=$(stat -c %g /dev/kvm 2>/dev/null || echo "$host_gid")
+render_gid=$(stat -c %g "$render_node" 2>/dev/null || echo "$host_gid")
+
+[ -c /dev/kvm ] || { echo 'qemu-container-error: /dev/kvm missing' >&2; exit 1; }
+[ -c "$render_node" ] || { echo "qemu-container-error: render node missing: $render_node" >&2; exit 1; }
+docker image inspect "$image" >/dev/null 2>&1 || { echo "qemu-container-error: image missing: $image" >&2; exit 1; }
+
+exec docker run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+    --user "$host_uid:$host_gid" --group-add "$kvm_gid" --group-add "$render_gid" \
+    --device /dev/kvm --device "$render_node" \
+    --mount "type=bind,src=$root,dst=$root" --workdir "$root" \
+    --entrypoint /usr/bin/env "$image" \
+    LD_PRELOAD=/usr/lib/x86_64-linux-gnu/qemu/ui-opengl.so \
+    MESA_SHADER_CACHE_DISABLE=true \
+    /usr/bin/qemu-system-x86_64 "$@"

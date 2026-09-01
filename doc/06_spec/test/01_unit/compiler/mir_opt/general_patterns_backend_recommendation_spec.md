@@ -445,7 +445,7 @@ expect(found_llvm_skip).to_equal(true)
 #### gates Simple predicate promotion on candidate and safety facts
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

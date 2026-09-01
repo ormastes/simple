@@ -24,29 +24,25 @@ Multi-architecture support for bare-metal development including:
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
-## Overview
+**Audience:** compiler and bare-metal runtime engineers who rely on
+`std.common.target.TargetArch` for per-architecture layout decisions.
 
-Multi-architecture support for bare-metal development including:
-- 8-bit architectures (AVR, MCS51)
-- 16-bit architectures (MSP430)
-- 32-bit architectures (x86, ARM, RISC-V 32)
-- 64-bit architectures (x86_64, AArch64, RISC-V 64)
+Executable coverage of the host-callable target-architecture introspection
+API: native word width, pointer size, stack alignment, atomic width, Harvard
+classification, endianness, and bare-metal triple strings are all asserted
+against the real `TargetArch` implementation rather than restated constants.
 
-## Key Concepts
+## Evidence
 
-| Concept | Description |
-|---------|-------------|
-| bits() | Native word size: 8, 16, 32, or 64 |
-| pointer_bytes() | Pointer size in bytes (2/4/8) |
-| stack_align() | Stack alignment requirement |
-| is_harvard() | Harvard vs von Neumann architecture |
-| endianness() | Little or Big endian |
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-## Implementation Notes
+### Artifacts
 
-- 8-bit architectures use 16-bit pointers for >256 byte addressing
-- Stack alignment varies by architecture (1/2/4/16 bytes)
-- Harvard architectures have separate code/data memory
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/target_arch/result.json` |
 
 ## Evidence
 

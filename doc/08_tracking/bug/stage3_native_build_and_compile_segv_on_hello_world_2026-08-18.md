@@ -1,12 +1,56 @@
 # bootstrap/stage3/simple SEGVs on both of its two commands (hello world)
 
-## Status
-PARTIALLY RESOLVED — c4b84dc9aaf defines rt_unwrap_or_trap in the C runtime (the SEGV cause) and 1d9cbaa2c2b makes the linker fail closed instead of fabricating weak stubs. OPEN: the tracked stage binaries (bootstrap/stage1..3/simple) are untracked as of d1b71d63732, so check-stage-binaries-runnable.shs now reports ERROR/nothing-tracked rather than a green PASS — re-deploy and re-verify the guard once stage binaries are re-tracked.
-
+> **2026-08-31:** The rc=139 SEGV documented here no longer reproduces anywhere;
+> the bare stage paths now hold darwin Mach-O blobs (a deploy clobber, rc=2 exec
+> failure — a DIFFERENT defect class). Root cause + fix:
+> `doc/08_tracking/bug/darwin_stage_binaries_clobber_bare_paths_2026-08-31.md`.
+> Residual real failure: `bootstrap/stage3/x86_64-unknown-linux-gnu/simple`
+> fails `native-build` with rc=1.
 
 - **Filed:** 2026-08-18
 - **Severity:** HIGH — the tracked stage3 artifact is non-functional
 - **Status:** OPEN (found while verifying an unrelated documented claim)
+
+> **STATUS UPDATE 2026-08-31 (re-measured at `origin/main` @ `28ca075c2c7`,
+> linux-x86_64 host) — the SEGV itself is GONE; the gate is still RED for two
+> DIFFERENT reasons.** No tracked stage binary returns rc=139 any more. Probing
+> every ELF blob with the standard three-line hello world:
+> `bootstrap/simple_stage1|2|3` and
+> `bootstrap/stage3/x86_64-unknown-linux-gnu/simple` all answer
+> `--version` rc=0 and `compile` rc=0. Root cause was closed by the
+> fail-closed link work in
+> `c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md` (all 84
+> symbols implemented or NAMED-trapped;
+> `check-no-unresolved-runtime-symbols.shs` now reads
+> `PASS — 196 symbol(s) checked across 0 binary(ies) + archive, 0 unresolved`
+> on the main tree, and a probe extern to a nonexistent `rt_*` symbol makes
+> hosted `native-build` FAIL at link — `ld.lld: error: undefined symbol` plus
+> the frontend's `declared but not implemented anywhere` — with no binary
+> produced, while a clean hello world links and runs rc=0; that PASS was
+> measured 2026-08-31 against the `/mnt/data/worktrees/simple-main` working
+> tree, which currently tracks no bootstrap binaries — hence
+> `0 binary(ies)` vs the `4 binary(ies)` quoted in that record). The absence
+> of SEGVs is CONSISTENT WITH that fix; note the original 3,464,072-byte
+> SEGVing stage3 blob was replaced, not proven fixed in place. What keeps
+> `check-stage-binaries-runnable.shs` at
+> `FAIL — 15 invocation(s) executed across 5 binary(ies), 13 crashed/failed`
+> (`--rev origin/main`, 2026-08-31) is:
+> 1. Two distinct sub-classes, do not conflate them:
+>    (a) `bootstrap/stage1/simple`, `stage2/simple`, `stage3/simple` are now
+>    **Mach-O arm64 darwin** blobs committed at the bare (historically
+>    Linux) stage paths — they cannot exec on this host at all (rc=2 on
+>    every command, `--version` included; exec failure, not a crash).
+>    Either the Linux artifacts were clobbered by a darwin session's deploy
+>    or the bare stage paths need per-triple scoping like `stage3/<triple>/`.
+>    (b) `stage3/aarch64-apple-darwin-macho/simple` is a Mach-O blob at its
+>    CORRECT darwin-triple-scoped path; its failure is a gate limitation —
+>    the gate executes foreign-triple artifacts on a Linux host instead of
+>    skipping/cross-probing them.
+> 2. `stage3/x86_64-unknown-linux-gnu/simple` `native-build` exits 1 with the
+>    deliberate `bootstrap_main cannot emit a seed-wrapper fallback` refusal —
+>    it was built without real Simple lowering/codegen and needs the (separately
+>    blocked) bootstrap redeploy; `compile` is rc=0.
+> The historical SEGV text below is kept for context only.
 - **Artifact:** `bootstrap/stage3/simple`, 3,464,072 bytes, mtime 2026-08-11 22:10:05 UTC
 - **Tracked in git:** yes (`git ls-files bootstrap/stage3` lists it)
 
@@ -272,284 +316,3 @@ Anything else means the deploy did not fix the defect — revert the four
 blobs (`git checkout -- bootstrap/`) rather than committing. Promote the
 guard from ADVISORY to MANDATORY in `.claude/rules/vcs.md` only after that
 PASS is observed.
-
-## ROOT CAUSE FOUND 2026-08-21 — `rt_unwrap_or_trap` missing from the C runtime
-
-Reproduced on the freshly built pinned snapshot `build/bootstrap-pinned/stage3/simple`
-(9,432,408 B; stage1/2/3 byte-identical).
-
-**Crash site.** Running a NEW process under gdb works even with `ptrace_scope=1`
-(`gdb -batch -ex run -ex bt --args <bin> compile hello.spl --format=smf -o x.smf`).
-Against an unstripped rebuild of the same entry the backtrace is exact:
-
-```
-Program received signal SIGSEGV
-#0  0x0000000000000000 in ?? ()                <- rip = 0
-#1  compiler__driver__driver_source_pipeline_parsing__CompilerDriver_dot_parse_all_impl
-#2  ... CompilerDriver_dot_parse_all_committing_impl
-#3  compiler__driver__driver_orchestration__CompilerDriver_dot_compile
-#4  compiler.driver.driver.compiler_driver_run_compile
-#5  cli.bootstrap_main.run_compile_bootstrap
-```
-
-`rip = 0` — an indirect call through a NULL pointer, not a bad data deref:
-
-```
-mov 0xa38bd(%rip),%r10   # .got slot, contents zero
-mov %r14,%rdi
-call *%r10               <- jumps to 0
-```
-
-**The symbol: `rt_unwrap_or_trap`.** `nm` on the unstripped binary shows it as
-the only meaningful `U` (undefined) entry. The source line is
-`src/compiler/80.driver/driver_source_pipeline_parsing.spl:558`:
-
-```
-entry_ctx.module_surfaces = Some(entry_surfaces_result.unwrap())
-```
-
-which the disassembly matches instruction for instruction (the two preceding
-stores are `entry_ctx.modules` at +0x70 and `entry_ctx.sources` at +0x38, the
-call result is fed to the `Some` construction). It is the FIRST bare
-`.unwrap()` reached on the hello-world compile path — immediately after the
-`surface_freeze ... complete` log line, exactly where the crash was observed.
-
-**Why it is null.** The codegen lowers a bare `.unwrap()` to a call to
-`rt_unwrap_or_trap` (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:1849`,
-`"unwrap" => "rt_unwrap_or_trap"`). That symbol is defined in the **Rust**
-runtime (`src/compiler_rust/runtime/src/value/objects.rs:353`) and in the pure
-Simple core (`src/runtime/simple_core/core_values.spl:78`) — but **not in the C
-runtime**, which is what the bootstrap/native lane actually links.
-`src/runtime/runtime_native.c` defined `rt_unwrap_or_self` and
-`rt_unwrap_or_value` and merely *mentioned* `rt_unwrap_or_trap` in a comment;
-`nm build/simple-core/libsimple_runtime.a | grep rt_unwrap_or` returns only
-`rt_unwrap_or_self` and `rt_unwrap_or_value`. The link is done with unresolved
-symbols tolerated, so the GOT slot stayed zero and the call went to address 0.
-
-This is the same defect class as
-`doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`, except the
-consequence is a hard SIGSEGV rather than a silent nil.
-
-**Fix (product code, pure C runtime — no seed change).** Define
-`rt_unwrap_or_trap` in `src/runtime/runtime_native.c` next to
-`rt_unwrap_or_value`, mirroring the Rust semantics exactly (Option `Some` /
-Result `Ok` -> payload, `None` / `Err` -> diagnostic + `abort()`, non-enum ->
-value unchanged, arbitrary user enum -> return self), and declare it in
-`src/runtime/runtime.h`.
-
-**Second, independent defect found on the way (also fixed).**
-`src/compiler/20.hir/hir_lowering/module_surface_registry.spl` was **truncated
-mid-function at line 244**, ending inside `module_surfaces_from_modules` at
-`if alias_result.is_err():` and losing 7 lines: that function's tail
-(`resolve_export_origins()` / `builder.finish()`) and the whole
-`module_surface_promote` definition. The `export use` in `module_surface.spl:5`
-and the call site at `driver_source_pipeline_parsing.spl:156` survived, so
-every pinned bootstrap build reported it unresolved
-(`Unresolved symbol preview: ..., module_surface_promote, ...`) and stubbed it.
-It is not the hello-world crash — that call site is on the Stage-4 streaming
-path, which this run does not take — but it is a live NULL/stub waiting on that
-path. Two fossils prove truncation rather than deliberate removal: the file
-still declares `extern fn rt_transient_heap_promote(value: Any) -> bool` with
-no remaining user, and the complete text survives byte-identical in
-`.claude/worktrees.pre_migrate_backup/agent-a328c4bbafdd94e7d/.../module_surface.spl:1799-1805`.
-Likely collateral of the `6f86ff32a7d` wipe / `ae55a746719` restore this record
-already blames for the four identical stage blobs. Restored.
-
-**Regression coverage (both verified to fail pre-fix).**
-- `test/01_unit/runtime/c_runtime_unwrap_entrypoints_spec.spl` — asserts the C
-  runtime defines `rt_unwrap_or_trap` alongside its siblings and declares it in
-  `runtime.h`.
-- `test/01_unit/compiler/bootstrap/module_surface_promote_definition_spec.spl` —
-  asserts the `module_surface_promote` definition exists, the re-export and
-  driver call site stay backed, and `module_surfaces_from_modules` is not
-  truncated. With the file truncated back to 244 lines it reports
-  `3 examples, 2 failures`; after the fix, 3 passed.
-
-**Note for the guard family:** none of the eight pre-push guards could have
-caught this. `check-c-runtime-compiles-push.shs` runs `clang -fsyntax-only`,
-which does not link — and its own header already records this limit: *"a
-declared-but-never-defined symbol still gets through"*. Here the symbol was not
-even declared; it was only *called*, from generated code. The guard that would
-have caught it is `check-stage-binaries-runnable.shs`, which is exactly the one
-still marked ADVISORY.
-
-### Post-fix verification (2026-08-21)
-
-Rebuilt the same entry with the fix in place
-(`native-build --source src/app --entry-closure --entry src/app/cli/bootstrap_main.spl`,
-cranelift, unstripped, 10,851,384 B). `nm` now shows `T rt_unwrap_or_trap` —
-defined, not `U`.
-
-| command | before | after |
-|---|---|---|
-| `compile hello.spl --format=smf -o x.smf` | **rc=139** (SIGSEGV, `rip=0`, no output past `surface_freeze … complete`) | **rc=1** |
-| `native-build hello.spl -o hb` | **rc=139** (SIGSEGV) | **rc=1** |
-
-The SEGV is gone: both commands now run past the `.unwrap()` and exit with a
-normal diagnostic instead of faulting. The remaining rc=1 is a **different,
-pre-existing defect in the current working tree**, not a residue of this one —
-it is a reported parse failure, `[expr_get_tag] OOB idx=9 arena_len=10
-arena_gen=1 -> -1` / `[flat-bridge] missing expr tag idx=9 tag=-1` followed by
-`phase 2 FAILED`, i.e. the flat-AST arena defect class already described in the
-`driver_end_transient_parse_scope` comment block and in
-`doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md`. It
-is reached only because the binary no longer dies before phase 2. Tracking that
-separately is the correct next step; it is out of scope for this record.
-
-### Follow-on defect: phase 2 FAILED with an EMPTY error list (2026-08-21)
-
-The rc=1 left by the SEGV fix is now root-caused. It is **not** the flat-AST
-arena defect the previous note guessed at: on the current tree the
-`[expr_get_tag] OOB idx=9 arena_len=10` / `[flat-bridge] missing expr tag`
-lines no longer appear at all. What remains is
-`[ERROR] phase 2 FAILED` and nothing else — no `[parser_error]`, no recorded
-diagnostic.
-
-**Native-only, proven by an interpreter A/B.** The identical pure-Simple
-frontend and driver, run under the seed interpreter
-(`bin/release/x86_64-unknown-linux-gnu/simple run src/app/cli/bootstrap_main.spl
-compile hello.spl --format=smf -o /tmp/x.smf`), completes end to end: phase 2
-green, HIR/MIR green, `[cranelift-direct] emit …`, **rc=0**. Only the natively
-built bootstrap binary fails. So the source logic — including the
-`elif_arena_clear` / `enum_table_reset` reset-path additions — is correct; the
-defect is in native lowering.
-
-**Root cause: `src/compiler/80.driver/driver_source_pipeline_parsing.spl:556-563`
-(pre-fix).** The entry-closure branch of `parse_all_impl` staged its commit into
-a copy —
-
-```
-var entry_ctx: CompileContext = self.ctx
-entry_ctx.modules = entry_modules
-...
-return (entry_ctx, not entry_ctx.has_errors())
-```
-
-— and derived the phase verdict from a `fn`-receiver (immutable-receiver)
-method call on that freshly reassigned struct local. Under pure-Simple native
-codegen that call reads a **stale snapshot** of the struct's scalar fields, so
-`has_errors()` answered true while `error_count_value` was 0 and `errors` was
-empty. Phase 2 therefore returned false with nothing to report.
-
-This is a known, already-documented defect class in this exact file — the
-streaming sibling `parse_all_streaming_surfaces_in_place_impl` carries the
-comment *"Read the authoritative scalar field directly. Avoid both a receiver
-method call and a phase-local boolean: the current native backend has
-independently mis-lowered each form in this large mutable method"*, and
-`driver_types.spl:1004-1017` records the same shape for `errors[i]`. The
-entry-closure branch was simply never converted.
-
-**Fix.** Commit in place on `self.ctx` and compare the authoritative scalar
-directly: `return (self.ctx, self.ctx.error_count_value == 0)`. The two
-remaining verdicts in the same file with the identical staged-local shape
-(`bootstrap_parse_ctx`, `parsed_all_ctx`) were converted with it — they sit on
-the `SIMPLE_BOOTSTRAP` and plain-loop paths, are not reached by hello world, and
-were latent repeats of the same bug.
-
-**Diagnosability fix (second, independent).** `driver_orchestration.spl:125`
-printed a bare `phase 2 FAILED`, which cannot distinguish a real parse error
-from a false verdict with an empty error list — that ambiguity is what made this
-look like an arena bug for a whole session. It now reports the recorded error
-count and enumerates the messages via `error_message_at`.
-
-**Regression coverage (both verified to fail pre-fix).**
-- `test/01_unit/compiler/driver/phase2_verdict_from_scalar_field_spec.spl` —
-  3 examples, **3 failures** with the fix reverted, 3 passed after.
-- `test/01_unit/compiler/driver/ctx_verdict_stale_receiver_call_sweep_spec.spl`
-  — defect-class sweep pinning that no parse-pipeline verdict returns to the
-  staged-local shape, with a positive control so an absence check cannot pass
-  vacuously.
-
----
-
-## 2026-08-23 — B3 "83 codegen-emitted names undefined in the archive" re-measured: **0**, and the link no longer tolerates the class
-
-Phase-2 blocker B3 (`doc/03_plan/compiler/bootstrap/phase2_gate_and_blockers_2026-08-23.md`)
-ranked "83 codegen-emitted runtime symbol names are undefined in
-`build/simple-core/libsimple_runtime.a`" as the most likely concrete cause of
-"links but does not run". **That number is stale.** Re-measured at
-`dec27456176` by BUILDING a fresh core-C runtime capsule rather than reading a
-months-old artifact:
-
-```
-sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs --output /mnt/fast/rtcapsule
-  core_c_runtime_capsule_selfcheck=pass, checks_executed=33
-  archive sha256 0da6442d4d7cec746ddb5c710a3700ab25adbfa5afb865dadcb3f53b56f014d9
-```
-
-- codegen-emitted runtime entry names (the guard's narrow, emitter-anchored
-  extraction): **196**
-- symbols defined in the fresh archive (`nm`, types `TWtiIRD`): **1219**
-- emitted names with no definition: **0**
-
-The same comparison against the *old* `build/simple-core/libsimple_runtime.a`
-(2026-08-21 12:44, 1118 defined symbols) is also 0. So the 83 were closed by
-landings between the 2026-08-18 incident and now, not by anything in this pass.
-**Why the number looked alive:** the guard could never report it, because it
-hard-exited `ERROR — nothing was checked (no tracked bootstrap stage binary
-found)` *before* running the archive half — see the guard fix below — and the
-`--archive-only` path ERRORs on the stale archive in the shared worktree. Both
-paths produce an ERROR that is easy to read as "still broken".
-
-### The deeper fix (item 3) was already landed, and is not this lane's
-
-`267db6eb0ca` made the native link **fail closed** on undefined runtime-prefixed
-symbols: `pipeline/native_project/stubs.rs` collects `undefined - defined`,
-filters to runtime-prefixed names that are not optional/compiler-provided/
-linker-provided/system, and returns an `Err` that NAMES every symbol and states
-the fix paths. Verified present at `dec27456176`. Opt-out
-`SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1` downgrades it to a warning; bootstrap lanes
-(`SIMPLE_BOOTSTRAP=1` / `SIMPLE_STUB_MISSING_RT=1`) are exempt because they
-deliberately weak-stub the gap so the binary can LOAD. That opt-out **is**
-warranted, on the same reasoning as `SIMPLE_ALLOW_UNLOWERED_MIR=1`: bringing up
-a runtime by definition passes through states where a symbol is not yet
-implemented, and a lane with no way to say so would be routed around with
-`--no-verify` instead. Unit reproduce:
-`pipeline/native_project/tests.rs` (`rt_fixture_missing`, asserts the verdict
-names the symbol *and* states the escape hatch).
-
-### Guard honesty defect fixed here — `54e12925034`
-
-`git ls-files bootstrap` returns **0 rows**: the stage blobs are no longer
-tracked. `check-no-unresolved-runtime-symbols.shs` treated that as a fatal
-`ERROR — nothing was checked` and exited *before* the archive half ran. A guard
-whose only possible verdict is a permanently uninformative ERROR is
-indistinguishable from one nobody wired up — fail-open wearing fail-closed's
-clothes. Zero binaries is now a reported **status** (`binaries=none(...)`), not
-a verdict; fail-closed is preserved by the pre-existing non-vacuity rule (0
-artifacts **in total** is still ERROR, fixture (d) still proves it).
-
-New fatal selftest fixture **(f)**, with a negative control: a repo with no
-tracked stage binary but a satisfied archive must PASS and must print
-`binaries=none`; appending a codegen-emitted name the archive does not define
-must still FAIL naming it. **Verified failing pre-fix** — run against the
-unmodified script it reports
-`FAILED (rc=2) ERROR — nothing was checked (no tracked bootstrap stage binary found)`.
-
-### Post-fix verdict (measured, not read)
-
-```
-binaries=none(no tracked bootstrap stage binary)
-archive=checked(196 codegen-emitted names)
-PASS — 196 symbol(s) checked across 0 binary(ies) + archive, 0 unresolved
-```
-
-No baseline or ratchet was needed: the archive half is genuinely at zero.
-
-### What remains open (stated, not papered over)
-
-1. **The binary half has no artifact to judge.** It is not red, it is *empty* —
-   the stage blobs are untracked, and the ones that were tracked were stripped
-   (no symbol table), which fixture (e) already pins as ERROR rather than PASS.
-   The half only becomes evidence again once a redeploy produces an unstripped
-   stage binary the guard can point at with `--bin`.
-2. **The archive half is a lower bound, by construction.** Its extraction is
-   anchored to emitters (`call_runtime(`, `get_rt*(`, `=> "rt_..."`) and cannot
-   see a name built by concatenation. A broad sweep of every
-   `"rt_|spl_|simple_*"` literal under `codegen/` yields 1508 strings of which
-   970 are undefined in the archive — but that set is dominated by prefix
-   fragments (`rt_actor_`, `rt_array_`, `rt_async_`), table keys, and names owned
-   by other lanes (Rust runtime, `native_all`), so it is noise, not a backlog.
-   The correct authority for "was this name actually emitted" is the **link**,
-   which is exactly what `267db6eb0ca` now enforces per-program with the name in
-   the message. A static regex cannot decide emission; the linker can.

@@ -263,6 +263,26 @@ pub struct MirLowerer<'a> {
     pub(super) refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     pub(super) type_registry: Option<&'a crate::hir::TypeRegistry>,
+    /// Locals whose DECLARED type is type-erased (unnamed / `Any`) but whose
+    /// single reaching definition is a named CLASS type, recomputed per
+    /// function by `compute_single_assignment_class_types`.
+    ///
+    /// Exists for one narrow purpose: a BARE method call on such a local whose
+    /// name collides with codegen's builtin-collection set
+    /// (`is_bare_builtin_collection_method` — `find`, `get`, `has`, `remove`,
+    /// `slice`, ...) is claimed by a tag-dispatching runtime helper BEFORE any
+    /// user-method resolution runs. Those helpers untag the receiver and read a
+    /// 32-bit type header that class instances DO NOT CARRY (`compile_struct_init`
+    /// tags with the plain heap tag and writes fields from offset 0). On
+    /// riscv64/freestanding that misread TRAPS; on x86_64/aarch64 it silently
+    /// answers the helper's `-1` miss sentinel instead of running the user's
+    /// method. Recovering the class here lets the call lower QUALIFIED so it
+    /// never reaches that heuristic.
+    ///
+    /// Only SINGLE-assignment locals are recorded, so a genuinely polymorphic
+    /// `Any` local is never statically pinned to one class.
+    /// See doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
+    pub(super) erased_local_class_types: HashMap<usize, TypeId>,
     /// F1/S5 — declaration kind per type name, carried from HIR by S3.
     /// `Some(true)` = declared `struct` (value semantics), `Some(false)` =
     /// declared `class`/`actor` (identity semantics), absent = UNKNOWN.
@@ -358,6 +378,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode: ContractMode::All,
             refined_types: None,
             type_registry: None,
+            erased_local_class_types: HashMap::new(),
             type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
@@ -400,6 +421,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode,
             refined_types: None,
             type_registry: None,
+            erased_local_class_types: HashMap::new(),
             type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
@@ -949,6 +971,9 @@ impl<'a> MirLowerer<'a> {
                 src,
                 byte_size,
                 type_name: Some(name),
+                // Resolved later by `qualify_native_struct_layouts` once the
+                // whole-project vtable owner set is known.
+                owner_has_vtable: None,
                 deep_fields,
             });
             dest
@@ -992,12 +1017,15 @@ impl<'a> MirLowerer<'a> {
             if inner.is_empty() {
                 continue;
             }
-            path.push(fname_ty);
+            path.push(fname_ty.clone());
             let nested = Self::struct_deep_fields(registry, type_value_kinds, inner, path);
             path.pop();
             out.push(crate::mir::AggregateFieldCopy {
                 word_index: i as u32,
                 byte_size: (inner.len() as u32) * 8,
+                type_name: Some(fname_ty),
+                // Resolved later by `qualify_native_struct_layouts`.
+                owner_has_vtable: None,
                 nested,
             });
         }
@@ -1107,6 +1135,7 @@ impl<'a> MirLowerer<'a> {
         &self,
         method_name: &str,
         receiver_type_name: Option<&str>,
+        explicit_arg_count: usize,
     ) -> Option<(u32, Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
         let infos = self.trait_infos?;
         let duck_dbg = std::env::var("SIMPLE_DEBUG_DUCK").is_ok();
@@ -1159,6 +1188,13 @@ impl<'a> MirLowerer<'a> {
             let mut best: Option<(&String, &crate::hir::HirMethodSignature)> = None;
             for (trait_name, info) in infos {
                 if let Some(sig) = info.get_method(method_name) {
+                    // Rust trait metadata excludes the implicit receiver, so
+                    // its parameter count must equal the explicit call arity.
+                    // This mirrors resolve_strategies.spl's +1 check on symbol
+                    // signatures, which include the receiver at slot zero.
+                    if sig.param_types.len() != explicit_arg_count {
+                        continue;
+                    }
                     let replace = match best {
                         None => true,
                         Some((best_name, _)) => {
@@ -1190,6 +1226,9 @@ impl<'a> MirLowerer<'a> {
         // Receiver statically typed as the trait itself → virtual through it.
         if let Some(info) = infos.get(recv) {
             if let Some(sig) = info.get_method(method_name) {
+                if sig.param_types.len() != explicit_arg_count {
+                    return None;
+                }
                 if duck_dbg {
                     eprintln!(
                         "[DUCK] path2 recv-is-trait recv={} slot={} implemented={}",
@@ -1223,6 +1262,9 @@ impl<'a> MirLowerer<'a> {
         // project-wide trait_impls into dependency_graph).
         for (trait_name, info) in infos {
             if let Some(sig) = info.get_method(method_name) {
+                if sig.param_types.len() != explicit_arg_count {
+                    continue;
+                }
                 let implements = self
                     .local_trait_impls
                     .get(trait_name)
@@ -1344,13 +1386,23 @@ impl<'a> MirLowerer<'a> {
     /// no valid tag at all, printing `<value:0x7>`. Neither `!` nor `??` could
     /// see the corruption because the word was non-nil.
     /// Bug: `doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md`.
+    ///
+    /// `Any?` (`Pointer { inner: ANY }`) is the same case one level out: the
+    /// slot must hold either tagged nil or a tagged `RuntimeValue`, so a raw
+    /// scalar stored into it needs boxing exactly as for plain `ANY`. Before
+    /// this arm accepted `inner == ANY`, `fn g() -> Any?: 7` returned the RAW
+    /// word 7 and printed `<value:0x7>`, while the non-optional `-> Any` was
+    /// correct. Only `Pointer{ANY}` is added; `Text?`, `list?` and other
+    /// already-tagged inners are unaffected, and no double-boxing is possible
+    /// because boxing only fires when the VALUE's static type is a raw scalar.
     pub(super) fn slot_holds_tagged_value(&self, ty: TypeId) -> bool {
         if ty == TypeId::ANY {
             return true;
         }
         matches!(
             self.type_registry.and_then(|tr| tr.get(ty)),
-            Some(crate::hir::HirType::Pointer { inner, .. }) if Self::is_raw_scalar_type(*inner)
+            Some(crate::hir::HirType::Pointer { inner, .. })
+                if Self::is_raw_scalar_type(*inner) || *inner == TypeId::ANY
         )
     }
 
@@ -1570,7 +1622,7 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower HIR module to MIR module (main entry point)
     pub fn lower_module(mut self, hir: &'a HirModule) -> MirLowerResult<MirModule> {
-        if crate::hir::analysis::unsafe_ffi_deny_enabled() {
+        if crate::hir::analysis::unsafe_ffi_deny_enabled() && !hir.extern_fn_names.is_empty() {
             if let Some(violation) = crate::hir::analysis::check_unsafe_ffi(hir).first() {
                 return Err(MirLowerError::Unsupported(format!(
                     "E-SFFI-002: raw extern call '{}' in '{}' requires lexical unsafe(ffi)",
@@ -1653,7 +1705,16 @@ impl<'a> MirLowerer<'a> {
             let mut sigs_by_name: HashMap<&str, Vec<Vec<TypeId>>> = HashMap::new();
             let mut order: Vec<&str> = Vec::new();
             for func in &hir.functions {
-                if !func.name.starts_with('_') || func.name.contains('.') {
+                // Free functions only — methods are `Type.method`-qualified and
+                // cannot collide this way. Both `_`-prefixed private helpers AND
+                // public functions are considered: the previous `_`-only gate
+                // left every colliding PUBLIC name with no `$dupN` variants at
+                // all, so its call sites fell through to plain last-write-wins.
+                // That is a live silent wrong-dispatch — see
+                // test/01_unit/compiler/driver/public_dup_signature_dispatch_spec.spl,
+                // where a caller that selectively imports `m1.pick(i64)` and
+                // passes an i64 executes `m2.pick(bool)`'s body instead.
+                if func.name.contains('.') {
                     continue;
                 }
                 let sig: Vec<TypeId> = func.params.iter().filter(|p| p.name != "self").map(|p| p.ty).collect();
@@ -1670,10 +1731,29 @@ impl<'a> MirLowerer<'a> {
                     // observably equivalent — leave the name alone.
                     continue;
                 }
+                // For PUBLIC names the LAST definition deliberately keeps the
+                // bare name. Only the direct-call branch of MIR lowering
+                // consults `private_dup_overloads`; indirect calls (function
+                // taken as a value), extern imports and any by-name symbol
+                // lookup still resolve the bare name, so mangling every
+                // definition would leave those references undefined. Keeping the
+                // last one bare makes every such reference resolve exactly as it
+                // does today (last-write-wins) while exact-signature direct
+                // calls now reach the right body. `_`-prefixed helpers keep
+                // their existing all-mangled scheme unchanged.
+                let keep_last_bare = !name.starts_with('_');
+                let last_idx = sigs.len() - 1;
                 let candidates = sigs
                     .iter()
                     .enumerate()
-                    .map(|(k, sig)| (sig.clone(), format!("{name}$dup{k}")))
+                    .map(|(k, sig)| {
+                        let mangled = if keep_last_bare && k == last_idx {
+                            name.to_string()
+                        } else {
+                            format!("{name}$dup{k}")
+                        };
+                        (sig.clone(), mangled)
+                    })
                     .collect();
                 self.private_dup_overloads.insert(name.to_string(), candidates);
             }
@@ -1690,6 +1770,7 @@ impl<'a> MirLowerer<'a> {
         module.global_init_values = hir.global_init_values.clone();
         module.global_init_strings = hir.global_init_strings.clone();
         module.global_init_arrays = hir.global_init_arrays.clone();
+        module.raw_data_items = hir.raw_data_items.clone();
         module.global_init_structs = hir.global_init_structs.clone();
         module.global_init_functions = hir.global_init_functions.clone();
         module.dynamic_init_globals = hir.dynamic_init_globals.clone();
@@ -1928,6 +2009,11 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower a single HIR function to MIR function
     pub(super) fn lower_function(&mut self, func: &HirFunction) -> MirLowerResult<MirFunction> {
+        // Per-function: local indices are function-scoped, so this MUST be
+        // recomputed (not accumulated) or one function's locals would be read
+        // as another's.
+        self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
+
         let mut mir_func = MirFunction::new(func.name.clone(), func.return_type, func.visibility);
 
         // Populate metadata for AOP join point matching
@@ -2076,4 +2162,111 @@ impl<'a> Default for MirLowerer<'a> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Collect every write to a local in `stmts`, as `(local_index, assigned type)`.
+///
+/// `HirStmt::Let` with an initializer and `HirStmt::Assign` to a bare
+/// `HirExprKind::Local` are the two write forms. Every nested block is walked,
+/// so a write inside a loop or branch still counts — that is what makes the
+/// caller's "exactly one write" test a sound single-assignment check rather
+/// than a peephole.
+///
+/// A `For` loop's `pattern_local` is recorded as a write with the ITERABLE's
+/// type, which is deliberately not the element type: it only has to be a write
+/// so the loop variable can never look single-assigned to a class.
+fn collect_local_writes(stmts: &[HirStmt], out: &mut Vec<(usize, TypeId)>) {
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Let {
+                local_index,
+                value: Some(value),
+                ..
+            } => out.push((*local_index, value.ty)),
+            HirStmt::Assign { target, value } => {
+                if let HirExprKind::Local(idx) = &target.kind {
+                    out.push((*idx, value.ty));
+                }
+            }
+            HirStmt::If {
+                then_block, else_block, ..
+            } => {
+                collect_local_writes(then_block, out);
+                if let Some(else_block) = else_block {
+                    collect_local_writes(else_block, out);
+                }
+            }
+            HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
+                collect_local_writes(body, out)
+            }
+            HirStmt::For {
+                pattern_local,
+                iterable,
+                body,
+                ..
+            } => {
+                if let Some(idx) = pattern_local {
+                    out.push((*idx, iterable.ty));
+                }
+                collect_local_writes(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Locals whose DECLARED type is type-erased but whose SINGLE reaching
+/// definition is a named class/struct type.
+///
+/// Conservative by construction — an entry is produced only when all of:
+/// * the local is written exactly once anywhere in the function body, so a
+///   genuinely polymorphic `Any` local (reassigned with a second type, or
+///   assigned in a loop) is never pinned;
+/// * the local's own declared type does NOT already resolve to a name, so this
+///   only ever ADDS information and can never override a real annotation;
+/// * the assigned type resolves to a named `HirType::Struct`. Arrays, dicts and
+///   tuples are excluded on purpose: they share the same TypeId range as
+///   classes (measured: array `TypeId(18)`, dict `TypeId(19)`, class
+///   `TypeId(16)`), and they are exactly the receivers the builtin-collection
+///   routing exists to serve, so pinning one would regress bug #62.
+fn compute_single_assignment_class_types(
+    func: &HirFunction,
+    registry: Option<&crate::hir::TypeRegistry>,
+) -> HashMap<usize, TypeId> {
+    let Some(registry) = registry else {
+        return HashMap::new();
+    };
+
+    let mut writes: Vec<(usize, TypeId)> = Vec::new();
+    collect_local_writes(&func.body, &mut writes);
+
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    for (idx, _) in &writes {
+        *counts.entry(*idx).or_insert(0) += 1;
+    }
+
+    let nparams = func.params.len();
+    let mut out = HashMap::new();
+    for (idx, ty) in writes {
+        if counts.get(&idx).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        // A parameter is bound by the caller, not by this body; its declared
+        // type is authoritative and must not be second-guessed.
+        if idx < nparams {
+            continue;
+        }
+        // Never override a local that already carries a resolvable name.
+        let declared = func.locals.get(idx - nparams).map(|l| l.ty);
+        if declared.is_some_and(|d| registry.get_type_name(d).is_some()) {
+            continue;
+        }
+        if registry.get_type_name(ty).is_none() {
+            continue;
+        }
+        if matches!(registry.get(ty), Some(crate::hir::HirType::Struct { .. })) {
+            out.insert(idx, ty);
+        }
+    }
+    out
 }

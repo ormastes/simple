@@ -1,0 +1,116 @@
+#!/bin/sh
+# install-scv-migration-timer.shs — install/inspect/remove the hourly SCV-migration
+# checker timer. Prefers a systemd --user timer+service; falls back to a crontab
+# entry (merged, marker comment) when systemd --user is unavailable.
+#
+# The unit runs, from the repo root:
+#   sh scripts/check/check-scv-migration-todo.shs >> .spipe/scv-migration/runs.log 2>&1
+#
+# Usage: sh scripts/setup/install-scv-migration-timer.shs --check|--apply|--remove
+#          [--interval 1h] [--root DIR]
+#
+# --check prints installed/not-installed plus the effective interval and exits
+# 0/1 accordingly. --apply is for the human operator — agents run --check only.
+set -u
+
+SCRIPT_PATH="$0"
+case "$SCRIPT_PATH" in /*) ;; *) SCRIPT_PATH="$(pwd)/$SCRIPT_PATH" ;; esac
+ROOT="$(cd "$(dirname "$SCRIPT_PATH")/../.." && pwd)"
+MODE=""
+INTERVAL="1h"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check|--apply|--remove) MODE="${1#--}" ;;
+    --interval) shift; INTERVAL="${1:-1h}" ;;
+    --root) shift; ROOT="${1:-}" ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+  shift
+done
+[ -n "$MODE" ] || { echo "ERROR — one of --check|--apply|--remove is required"; exit 2; }
+
+UNIT="scv-migration-check"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+CRON_MARK="# scv-migration-timer (installed by scripts/setup/install-scv-migration-timer.shs)"
+CMD="cd $ROOT && sh scripts/check/check-scv-migration-todo.shs >> .spipe/scv-migration/runs.log 2>&1"
+
+have_systemd_user() { systemctl --user show-environment >/dev/null 2>&1; }
+
+cron_interval_minutes() {
+  case "$INTERVAL" in
+    *h) echo $(( ${INTERVAL%h} * 60 )) ;;
+    *m) echo "${INTERVAL%m}" ;;
+    *) echo 60 ;;
+  esac
+}
+
+case "$MODE" in
+check)
+  if have_systemd_user && systemctl --user is-enabled "$UNIT.timer" >/dev/null 2>&1; then
+    iv="$(systemctl --user show "$UNIT.timer" -p TimersCalendar -p TimersMonotonic 2>/dev/null | grep -o 'OnUnitActiveSec=[^ ;]*' | head -n 1)"
+    echo "PASS — installed (systemd --user timer $UNIT.timer, ${iv:-interval unknown})"
+    exit 0
+  fi
+  if crontab -l 2>/dev/null | grep -qF "$CRON_MARK"; then
+    line="$(crontab -l 2>/dev/null | grep -A0 -F "$CRON_MARK" >/dev/null; crontab -l 2>/dev/null | grep -F 'check-scv-migration-todo.shs' | head -n 1)"
+    echo "PASS — installed (crontab entry: ${line:-present})"
+    exit 0
+  fi
+  echo "FAIL — not installed (no systemd --user timer $UNIT.timer, no crontab marker; requested interval $INTERVAL)"
+  exit 1
+  ;;
+apply)
+  if have_systemd_user; then
+    mkdir -p "$UNIT_DIR"
+    cat > "$UNIT_DIR/$UNIT.service" <<EOF
+[Unit]
+Description=SCV migration ledger checker (fail-closed, signature-gated)
+
+[Service]
+Type=oneshot
+WorkingDirectory=$ROOT
+ExecStart=/bin/sh -c 'sh scripts/check/check-scv-migration-todo.shs >> .spipe/scv-migration/runs.log 2>&1'
+EOF
+    cat > "$UNIT_DIR/$UNIT.timer" <<EOF
+[Unit]
+Description=Hourly SCV migration ledger check
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=$INTERVAL
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$UNIT.timer"
+    echo "PASS — installed (systemd --user timer $UNIT.timer, OnUnitActiveSec=$INTERVAL)"
+    exit 0
+  fi
+  mins="$(cron_interval_minutes)"
+  if [ "$mins" -ge 60 ]; then sched="0 * * * *"; else sched="*/$mins * * * *"; fi
+  { crontab -l 2>/dev/null | grep -vF "$CRON_MARK" | grep -vF 'check-scv-migration-todo.shs'
+    echo "$CRON_MARK"
+    echo "$sched $CMD"
+  } | crontab -
+  echo "PASS — installed (crontab: $sched)"
+  exit 0
+  ;;
+remove)
+  removed=0
+  if have_systemd_user && [ -f "$UNIT_DIR/$UNIT.timer" ]; then
+    systemctl --user disable --now "$UNIT.timer" >/dev/null 2>&1
+    rm -f "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT.service"
+    systemctl --user daemon-reload
+    removed=1
+  fi
+  if crontab -l 2>/dev/null | grep -qF "$CRON_MARK"; then
+    crontab -l 2>/dev/null | grep -vF "$CRON_MARK" | grep -vF 'check-scv-migration-todo.shs' | crontab -
+    removed=1
+  fi
+  [ "$removed" -eq 1 ] && { echo "PASS — removed"; exit 0; }
+  echo "PASS — nothing to remove"
+  exit 0
+  ;;
+esac

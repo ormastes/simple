@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+git init -q "$tmp/repo"
+git -C "$tmp/repo" config user.email bootstrap-test@example.invalid
+git -C "$tmp/repo" config user.name bootstrap-test
+printf 'one\n' >"$tmp/repo/source.spl"
+git -C "$tmp/repo" add source.spl
+git -C "$tmp/repo" commit -qm initial
+
+real_git=$(command -v git)
+mkdir "$tmp/bin"
+cat >"$tmp/bin/git" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = diff ]; then
+    printf '%s\n' "$*" >>"$BOOTSTRAP_STAGE3_GIT_ARGS"
+fi
+exec "$BOOTSTRAP_STAGE3_REAL_GIT" "$@"
+EOF
+chmod +x "$tmp/bin/git"
+
+BOOTSTRAP_STAGE3_REAL_GIT="$real_git" \
+BOOTSTRAP_STAGE3_GIT_ARGS="$tmp/git-args" \
+PATH="$tmp/bin:$PATH" \
+  bootstrap_stage3_git_state "$tmp/repo" "$tmp/state-clean"
+
+clean_fingerprint=$(sed -n 's/^dirty_fingerprint=//p' "$tmp/state-clean")
+grep -Eq '^dirty_fingerprint=[0-9a-f]{64}$' "$tmp/state-clean"
+grep -Fqx 'diff --binary --full-index --no-ext-diff --no-textconv --no-renames HEAD --' \
+  "$tmp/git-args"
+
+printf 'two\n' >"$tmp/repo/source.spl"
+BOOTSTRAP_STAGE3_REAL_GIT="$real_git" \
+BOOTSTRAP_STAGE3_GIT_ARGS="$tmp/git-args" \
+PATH="$tmp/bin:$PATH" \
+  bootstrap_stage3_git_state "$tmp/repo" "$tmp/state-dirty"
+
+dirty_fingerprint=$(sed -n 's/^dirty_fingerprint=//p' "$tmp/state-dirty")
+grep -Eq '^dirty_fingerprint=[0-9a-f]{64}$' "$tmp/state-dirty"
+[ "$clean_fingerprint" != "$dirty_fingerprint" ]
+
+echo "bootstrap_stage3_git_state=true"

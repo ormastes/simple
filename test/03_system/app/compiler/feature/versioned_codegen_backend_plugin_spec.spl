@@ -1,0 +1,181 @@
+# codex-system-test
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 REQ-010 NFR-003 NFR-004 NFR-005 NFR-007
+"""# Versioned Codegen Backend Plugin
+
+This source-contract specification admits the versioned backend boundary only
+when the common model, admission gate, deterministic registry, retained
+session, checked loader, and provenance receipt remain present together.
+
+The fixture fails closed while an implementation lane is incomplete. It does
+not substitute a mock provider or turn an unavailable provider into a pass.
+"""
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+val MODEL_PATH = "src/compiler/00.common/backend_plugin/model.spl"
+val RECEIPT_PATH = "src/compiler/00.common/backend_plugin/receipt.spl"
+val ADMISSION_PATH = "src/compiler/70.backend/backend_plugin/admission.spl"
+val REGISTRY_PATH = "src/compiler/70.backend/backend_plugin/registry.spl"
+val SESSION_PATH = "src/compiler/70.backend/backend_plugin/session.spl"
+val LOADER_PATH = "src/compiler/70.backend/backend_plugin/loader.spl"
+val ABI_PATH = "src/compiler/70.backend/backend_plugin/abi/simple_backend_plugin_v1.h"
+val BRIDGE_PATH = "src/runtime/runtime_backend_plugin.c"
+val TRANSPORT_PATH = "src/compiler/70.backend/backend_plugin/transport.spl"
+val CLI_PATH = "src/app/cli/bootstrap_main.spl"
+val WARM_RECEIPT_PATH = "src/app/cli/native_build_warm_receipt.spl"
+
+class BackendPluginFixture:
+    model_source: text
+    receipt_source: text
+    admission_source: text
+    registry_source: text
+    session_source: text
+    loader_source: text
+
+fn require_backend_plugin_source(path: text) -> text:
+    val source = rt_file_read_text(path) ?? ""
+    if source.trim() == "":
+        fail("backend provider fixture unavailable")
+    source
+
+fn prepare_backend_plugin_fixture() -> BackendPluginFixture:
+    BackendPluginFixture(
+        model_source: require_backend_plugin_source(MODEL_PATH),
+        receipt_source: require_backend_plugin_source(RECEIPT_PATH),
+        admission_source: require_backend_plugin_source(ADMISSION_PATH),
+        registry_source: require_backend_plugin_source(REGISTRY_PATH),
+        session_source: require_backend_plugin_source(SESSION_PATH),
+        loader_source: require_backend_plugin_source(LOADER_PATH)
+    )
+
+fn contains_every(source: text, terms: [text]) -> bool:
+    for term in terms:
+        if not source.contains(term):
+            return false
+    true
+
+fn check_admission_receipt(fixture: BackendPluginFixture):
+    expect(contains_every(fixture.model_source, [
+        "BackendPluginRequestV1",
+        "BackendPluginDescriptorV1",
+        "BackendPluginVTableV1",
+        "BackendRole",
+        "required_capabilities",
+        "mir_abi_digest"
+    ])).to_be(true)
+    val admission_contract = fixture.admission_source + "\n" + fixture.receipt_source
+    expect(contains_every(admission_contract, [
+        "admit_backend_plugin",
+        "admit_backend_plugin_descriptor",
+        "descriptor_size",
+        "abi_version",
+        "provider_version",
+        "mir_abi_digest",
+        "supported_roles",
+        "supported_targets",
+        "capabilities"
+    ])).to_be(true)
+    expect(contains_every(fixture.receipt_source, [
+        "backend_plugin_receipt",
+        "provider_identity",
+        "provider_version",
+        "build_id",
+        "abi_version",
+        "mir_abi_digest",
+        "target",
+        "features",
+        "role",
+        "optimization"
+    ])).to_be(true)
+
+fn check_selected_provider(fixture: BackendPluginFixture):
+    expect(contains_every(fixture.registry_source, [
+        "default_backend_name",
+        "resolve_builtin_backend",
+        "InterpreterJit",
+        "CompilerAot"
+    ])).to_be(true)
+    expect(contains_every(fixture.registry_source, [
+        "InterpreterJit",
+        "\"cranelift\"",
+        "CompilerAot",
+        "\"llvm\""
+    ])).to_be(true)
+    expect(contains_every(fixture.loader_source, [
+        "load_backend",
+        "resolve_builtin_backend",
+        "admit_backend_plugin"
+    ])).to_be(true)
+
+fn check_no_backend_substitution(fixture: BackendPluginFixture):
+    expect(fixture.loader_source.split("resolve_builtin_backend(").len()).to_equal(2)
+    expect(fixture.loader_source.split("admit_backend_plugin(").len()).to_equal(2)
+    expect(fixture.loader_source.contains("\"llvm\"")).to_be(false)
+    expect(fixture.loader_source.contains("\"cranelift\"")).to_be(false)
+    expect(fixture.loader_source.contains("fallback_backend")).to_be(false)
+    expect(fixture.loader_source.contains("simple_backend_plugin_v1")).to_be(true)
+    expect(contains_every(fixture.loader_source, [
+        "BackendPluginError",
+        "return Err"
+    ])).to_be(true)
+
+describe "versioned codegen backend plugin":
+    # covers: REQ-002 REQ-006 REQ-008 REQ-009 NFR-004 NFR-005
+    it "retains native lifecycle and cache identity across the typed boundary":
+        step("verify native bridge lifecycle and provider identity inputs")
+        val fixture = prepare_backend_plugin_fixture()
+        val abi = require_backend_plugin_source(ABI_PATH)
+        val bridge = require_backend_plugin_source(BRIDGE_PATH)
+        val transport = require_backend_plugin_source(TRANSPORT_PATH)
+        val cli = require_backend_plugin_source(CLI_PATH)
+        val warm = require_backend_plugin_source(WARM_RECEIPT_PATH)
+        expect(contains_every(abi, ["SIMPLE_BACKEND_BRIDGE_MAGIC_V1",
+            "spl_backend_plugin_run_v1", "payload_len", "diagnostic_len"])).to_be(true)
+        expect(contains_every(bridge, ["open_session", "compile_module",
+            "finalize_object", "diagnostics", "release_buffer",
+            "close_session", "dlclose"])).to_be(true)
+        expect(contains_every(transport, ["serialize_mir_module",
+            "backend_plugin_request_encode_v1", "backend_plugin_envelope_decode_v1"])).to_be(true)
+        expect(contains_every(cli, ["--backend-plugin", "backend_plugin_path"])).to_be(true)
+        expect(warm).to_contain("paths.push(backend_plugin)")
+        expect(fixture.receipt_source).to_contain("plugin_path_policy")
+
+    # covers: REQ-003 REQ-004 REQ-005 NFR-007
+    it "selects role defaults through the centralized registry":
+        step("select backend for execution role")
+        val fixture = prepare_backend_plugin_fixture()
+        check_selected_provider(fixture)
+
+    # covers: REQ-002 REQ-006 REQ-009 NFR-005 NFR-007
+    it "admits only a compatible descriptor and records its identity":
+        step("admit versioned provider")
+        val fixture = prepare_backend_plugin_fixture()
+        check_admission_receipt(fixture)
+
+    # covers: REQ-001 REQ-008 REQ-010 NFR-004
+    it "retains backend operations behind one admitted session":
+        step("compile through backend session")
+        val fixture = prepare_backend_plugin_fixture()
+        expect(contains_every(fixture.model_source, [
+            "supports_compile_module",
+            "supports_finalize_object",
+            "supports_execute"
+        ])).to_be(true)
+        expect(contains_every(fixture.session_source, [
+            "BackendSession",
+            "descriptor",
+            "handle",
+            "receipt",
+            "close",
+            "closed"
+        ])).to_be(true)
+        expect(fixture.session_source.contains("CodegenFactory")).to_be(false)
+        expect(fixture.session_source.contains("rt_cranelift_")).to_be(false)
+
+    # covers: REQ-005 REQ-006 REQ-007 NFR-003 NFR-005
+    it "rejects an unavailable or incompatible selection without substitution":
+        step("reject incompatible provider without fallback")
+        val fixture = prepare_backend_plugin_fixture()
+        check_no_backend_substitution(fixture)

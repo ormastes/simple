@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=141
+ROW_FLOOR=147
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -129,7 +129,10 @@ must_contain "match-expr write-back: spec twin" \
     "$ROOT/test/01_unit/compiler/interpreter/match_expr_post_statement_cost_spec.spl" "floor * 3"
 
 MEPUSH="$ROOT/src/compiler_rust/compiler/tests/interpreter_me_method_field_push_in_place.rs"
-must_contain "me-method receiver released: counter pin"   "$MEPUSH" "assert_eq!(clones, 0"
+# Pin is the ASSERTED VALUE, not the call formatting: rustfmt reflowed this
+# assert_eq! across lines in 2fc656b8a97 (pure formatting, verified by
+# `git log -L`), which silently unpinned the old one-line needle.
+must_contain "me-method receiver released: counter pin"   "$MEPUSH" "clones, 0,"
 must_contain "me-method receiver released: linear pin"    "$MEPUSH" "ratio < 9.0"
 must_contain "me-method receiver moved (f8681a7afa6): args evaluated before the move" \
     "$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs" "evaluate_call_args(args, env, functions, classes, enums, impl_methods)"
@@ -178,14 +181,17 @@ must_contain "a865dced154 HIR registry memo spec" "$HIRSPEC" "describe"
 RTCOMP="$ROOT/src/compiler/70.backend/backend/runtime_compiler.spl"
 must_contain     "linkperf runtime object cache dir helper" \
     "$RTCOMP" "fn _runtime_object_cache_dir("
+# 8a7eb80da8c scoped the probe inside `unsafe(capabilities: [ffi])`, which split
+# the old single-line condition in two. The consult itself is unchanged: the
+# probe result still gates the cp-from-cache that sets cache_hit.
 must_contain     "linkperf cache consulted in compile loop" \
-    "$RTCOMP" "if cache_obj != \"\" and rt_file_exists(cache_obj):"
+    "$RTCOMP" "cache_obj_exists = file_exists(cache_obj)"
 must_contain     "linkperf clang skipped on cache hit" \
     "$RTCOMP" "if not cache_hit:"
 must_contain     "linkperf cache published atomically" \
     "$RTCOMP" "val stage = cache_obj + \".tmp.\" + \"{compile_pid}\""
 must_contain     "linkperf cache key covers runtime sources" \
-    "$RTCOMP" "-printf '%p %s %T@"
+    "$RTCOMP" "xargs -r sha256sum"
 must_contain     "linkperf mechanism check script exists" \
     "$ROOT/scripts/check/check-runtime-object-cache.shs" "warm build ran"
 
@@ -234,6 +240,29 @@ must_contain     "seed: decision coverage checks enabled first"   "$ROOT/src/com
 must_not_contain "seed: no eager coverage file per decision"      "$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs" 'record_decision_coverage_sffi(&current_coverage_file(),'
 must_contain     "seed: CowEnv frame maps on ahash"               "$ROOT/src/compiler_rust/compiler/src/value.rs" 'pub(crate) type FrameMap<K, V> = HashMap<K, V, ahash::RandomState>;'
 must_contain     "seed: shadow capture tests prior value first"   "$ROOT/src/compiler_rust/compiler/src/interpreter/block_exec.rs" 'if let Some(value) = prior_value.as_ref() {'
+
+# --- DEPTAIL (2026-08-24, 8th session of the same record): the explicit- and
+# declared-dependency SWEEPS were already one-per-phase facts
+# (`explicit_dep_target_memo`), but the TAIL that ran after a memo HIT -- a
+# register_imported_symbol, a lookup_or_invalid and two bind_qualified_type
+# calls -- still ran on every repeat. The real 662-module closure's entry
+# module issued 2,670 explicit-dependency calls against only 280 real sweeps,
+# so ~2,390 re-ran a tail that had already written exactly those bindings;
+# explicit_dep was the largest EXCLUSIVE slot (14,065 ms of 38,500 ms of
+# imports) and declared_dep was second (7,893 ms). A per-importer memo skips
+# the repeat. It is deliberately NOT phase-invariant (the tail writes into the
+# importing module's table, which begin_module wipes) and records a key only
+# after the bind actually happened, so an unresolved tail stays retryable and
+# the ambiguity/unresolved diagnostics keep their per-call multiplicity.
+# Record: doc/08_tracking/bug/phase3_hir_import_materialization_time_rss_2026-08-22.md
+DEPTAILF="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl"
+must_contain     "DEPTAIL per-importer tail memo helper"          "$DEPTAILF" "me dep_tail_already_bound(tail_key: text) -> bool:"
+must_contain     "DEPTAIL explicit route consults the memo"       "$DEPTAILF" "if self.dep_tail_already_bound(explicit_tail_key):"
+must_contain     "DEPTAIL declared route consults the memo"       "$DEPTAILF" "if self.dep_tail_already_bound(declared_tail_key):"
+must_contain     "DEPTAIL recorded only after a valid bind"       "$DEPTAILF" "self.dep_tail_memo[explicit_tail_key] = true"
+must_contain     "DEPTAIL memo dropped per importer"              "$ROOT/src/compiler/20.hir/hir_lowering/context_helpers.spl" "self.dep_tail_memo_owner = filename"
+must_contain     "DEPTAIL skip count pinned by the cost spec"     "$ROOT/test/01_unit/compiler/hir/hir_import_registration_cost_spec.spl" "expect(lowering.dep_tail_skip_count).to_equal(2)"
+must_contain     "DEPTAIL unresolved tail stays retryable"        "$ROOT/test/01_unit/compiler/hir/hir_import_registration_cost_spec.spl" "never memoizes an UNRESOLVED tail"
 
 # --- pure-Simple core interpreter: collection writes through the owner, not a
 # temp alias (`var v = val_arrays[x]; v.push(e); val_arrays[x] = v` deep-copies
@@ -586,6 +615,24 @@ must_contain     "SHARDCLAMP spec pins per-phase asymmetry"        "$ROOT/test/0
 # spec provably would not, and did not.
 must_contain     "NBLIVENESS end-to-end gate exists"               "$ROOT/scripts/check/check-native-build-not-crashing.shs" "native-build"
 must_contain     "NBLIVENESS treats a signal death as a crash"     "$ROOT/scripts/check/check-native-build-not-crashing.shs" "_rc\" -ge 128"
+
+# --- loader/lexer constant-factor fixes (2026-08-28) ------------------------
+# $SCRATCHPAD/perf_loader_REPORT.md (perf agent, release/2026-08-27 lane).
+# char_code() used to allocate a [u8] array per call via rt_text_to_bytes and
+# the lexer calls it 2-4x per SOURCE CHARACTER; env_value_nul_free sliced one
+# heap string per byte of every parsed file; core_token_text_matches sliced one
+# per token character; make_token scanned every token for NUL even with the
+# env mirror off; driver_native_sources_fingerprint re-extracted the interface
+# text of every symlink alias (1012 rows for 717 files).
+STRCORE="$ROOT/src/lib/common/string_core.spl"
+LEXSTRUCT="$ROOT/src/compiler/10.frontend/core/lexer_struct.spl"
+AOTOUT="$ROOT/src/compiler/80.driver/driver_aot_native_output.spl"
+must_contain     "LOADER28 char_code_inline reads byte_at(0)"      "$STRCORE" "val code = c.byte_at(0) as i64"
+must_not_contain "LOADER28 char_code_inline must not allocate"     "$STRCORE" "val bytes = rt_text_to_bytes(c)"
+must_contain     "LOADER28 env_value_nul_free scans bytes"         "$LEXSTRUCT" "if (value.byte_at(i) as i64) == 0:"
+must_not_contain "LOADER28 env_value_nul_free must not slice"      "$LEXSTRUCT" "if char_code(value[i:i + 1]) == 0:"
+must_not_contain "LOADER28 token match must not slice per char"    "$LEXSTRUCT" "if chars[i] != value[i - start:i - start + 1]:"
+must_contain     "LOADER28 fingerprint memo per (len, path)"       "$AOTOUT" "var iface_memo: Dict<text, text> = {}"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

@@ -88,30 +88,3 @@ artifact set exists under `build/os/llvm/cross-x86_64-unknown-simpleos/bin` and
 is static `ET_EXEC` without `PT_INTERP`, `DT_NEEDED`, or unresolved symbols.
 That structural result is not a guest compile/link/run PASS; ARM64/RV64 LLVM
 artifacts and every live hello-world row remain separately gated.
-
-## Compiler/filesystem guest evidence owner (2026-08-22)
-
-The six-ISA matrix now has one architecture-neutral validation boundary before
-any serial PASS can be emitted. Architecture adapters collect actual VFS reads
-and process results; `compiler_filesystem_guest_workflow_v2` validates the
-ordered 13-role alias set, byte identity, image/nonce binding, exact interpreter
-and native-compile commands, artifact reread, and exact hello output. Only then
-does `compiler_filesystem_guest_protocol_v2` render the host parser's protocol.
-
-The workflow buffers all records and returns zero lines on any mismatch. It
-does not turn existing ARM/RISC-V VFS-presence probes into execution evidence.
-Those architectures remain blocked until their adapters supply real observed
-process results and authenticated fw_cfg metadata. The role catalog is
-function-local because freestanding images do not execute module initializers.
-
-QEMU metadata transport is now target-local: x86_64 reads fw_cfg through the
-0x510/0x511 I/O ports, while ARM64 and RV64 use their virt-machine MMIO
-windows. All three readers delegate untrusted directory parsing to one bounded
-owner, then adapt the four raw values into the port-neutral
-`compiler_filesystem_metadata_v2` collector. That collector enforces the same
-nonce/path grammar as the host command builder, strict UTF-8, lowercase image
-SHA-256, and the exact `cfsexecns1` drive binding. Concrete hardware backends
-are never runtime-dispatched from one common module because doing so would pull
-incompatible PIO/MMIO symbols into every target closure. This establishes the
-metadata boundary only; the production boot/process caller remains a required
-blocked row and no live receipt is inferred from these sources or unit specs.

@@ -13,9 +13,6 @@ use os.crypto.gcm_gf128.{gcm_gf128_mul, gcm_ghash_block, gcm_pad_to_16, gcm_ghas
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 
-fn _u8_at(buf: [u8], idx: u64) -> u8:
-    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
-
 # ============================================================================
 # Result Type for Decryption
 # ============================================================================
@@ -226,7 +223,7 @@ fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
 # GHASH
 # ============================================================================
 
-fn _aes128_gcm_ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
+fn _ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
     """Process one 16-byte block for GHASH: Y_i = (Y_{i-1} XOR X_i) * H."""
     gcm_ghash_block(h, y, x_block)
 
@@ -234,6 +231,7 @@ fn _aes128_gcm_pad_to_16(data: [u8]) -> [u8]:
     """Pad data to a multiple of 16 bytes with zeros."""
     gcm_pad_to_16(data)
 
+@unsafe(reason: "copies through unchecked foreign byte access", capabilities: [ffi])
 fn _a128gcm_append_bytes(a: [u8], b: [u8]) -> [u8]:
     """Append two byte arrays without relying on array concatenation."""
     var out: [u8] = rt_array_new_with_cap((a.len() + b.len()).to_i64())
@@ -302,7 +300,7 @@ fn gctr(round_keys: [u8], icb: [u8], input: [u8]) -> [u8]:
         while j < 16:
             output.push(_u8_at(input, offset + j) ^ _u8_at(enc_cb, j))
             j = j + 1
-        cb = _aes128_gcm_inc32(cb)
+        cb = _inc32(cb)
         i = i + 1
 
     # Process partial last block
@@ -361,10 +359,10 @@ fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
     val h = aes128_encrypt_block(zero_block, round_keys)
 
     # Construct J0 from nonce
-    val j0 = _aes128_gcm_make_j0(nonce)
+    val j0 = _make_j0(nonce)
 
     # Encrypt plaintext: C = GCTR_K(inc32(J0), P)
-    val icb = _aes128_gcm_inc32(j0)
+    val icb = _inc32(j0)
     val ciphertext = gctr(round_keys, icb, plaintext)
 
     # Compute GHASH over AAD and ciphertext
@@ -404,7 +402,7 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     val h = aes128_encrypt_block(zero_block, round_keys)
 
     # Construct J0 from nonce
-    val j0 = _aes128_gcm_make_j0(nonce)
+    val j0 = _make_j0(nonce)
 
     # Compute GHASH over AAD and ciphertext
     val s = ghash(h, aad, ciphertext)
@@ -423,7 +421,7 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
         return Aes128GcmResult.Err("authentication tag mismatch")
 
     # Decrypt: P = GCTR_K(inc32(J0), C)
-    val icb = _aes128_gcm_inc32(j0)
+    val icb = _inc32(j0)
     val plaintext = gctr(round_keys, icb, ciphertext)
 
     Aes128GcmResult.Ok(data: plaintext)

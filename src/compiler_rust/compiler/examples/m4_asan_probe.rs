@@ -44,8 +44,7 @@ fn main() {
     // This is the same well-known ASan-vs-optimizer interaction that is why
     // upstream clang recommends `-O0`/`-O1` for sanitizer builds, not a bug
     // in this lane's wiring — see the M4 lane report.
-    let backend =
-        LlvmBackend::new_with_opt_level(target, NativeOptimizationLevel::None).expect("create LlvmBackend");
+    let backend = LlvmBackend::new_with_opt_level(target, NativeOptimizationLevel::None).expect("create LlvmBackend");
     backend
         .build_m4_asan_probe_function("oob_store")
         .expect("build M4 asan probe function");

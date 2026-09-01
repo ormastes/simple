@@ -5,7 +5,21 @@ capsule. It is architecture preparation only. A passing contract check does
 not prove source reproducibility, Stage-4 admission, deployment, rollback, or
 platform acceptance.
 
-## Canonical interfaces
+## Toolchain prerequisite
+
+The first capsule authority must bind a Clang/LLVM 23.1 toolchain identity.
+Its manifest records the exact `llvm-config`, `clang`, `llvm-as`, `opt`, and
+`llc` versions and hashes. LLVM 18/20 artifacts are incompatible historical
+diagnostics, not a valid capsule seed. The Rust seed's Inkwell/llvm-sys
+binding must migrate before this prerequisite can be met.
+
+Current staging evidence is deliberately weaker: a local LLVM 23.1.0-rc2
+provider can expose all five tools and headers, and `aya-llvm-sys 231` links
+against it under strict versioning. It is disposable host evidence only until
+the provider is pinned into the capsule and Inkwell exposes a reviewed
+`llvm23-1` feature.
+
+## Goal
 
 The capsule has exactly four shared interfaces:
 
@@ -79,6 +93,7 @@ build, runtime, and retained-evidence gates after Stage-4 admission.
 
 ## Post-bootstrap acceptance interface
 
-`scripts/check/check-post-bootstrap-stage4-sspec.shs BINARY PROVENANCE` is the
-read-only acceptance bridge. It verifies adjacent v1 provenance, rejects
-noncanonical or symlinked inputs, and proves retained smoke stayed unchanged.
+`scripts/check/check-post-bootstrap-stage4-sspec.shs BINARY BINARY_SHA256
+PROVENANCE PROVENANCE_SHA256` is the read-only acceptance bridge. It binds both
+exact input hashes, verifies adjacent v1 provenance, rejects noncanonical or
+symlinked inputs, and proves retained smoke stayed unchanged.

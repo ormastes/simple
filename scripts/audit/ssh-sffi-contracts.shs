@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/io/ssh_sffi.spl"
+
+declarations=$(grep -Ec '^[[:space:]]*extern fn rt_(ssh|sftp)_' "$owner")
+if [ "$declarations" -ne 23 ]; then
+    echo "SSH/SFTP extern inventory changed without contract review" >&2
+    exit 1
+fi
+
+tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn rt_(ssh|sftp)_/ { if (previous_is_ffi) tagged++ }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$owner")
+if [ "$tagged" -ne "$declarations" ]; then
+    echo "every SSH/SFTP declaration must be explicitly unsafe(ffi)" >&2
+    exit 1
+fi
+
+if rg -l --glob '!vendor/**' --glob '!**/vendor/**' --glob '*.{c,cc,cpp,h,rs}' \
+    '(pub )?(unsafe )?extern "C" fn rt_(ssh_(connect|disconnect|auth_|exec|shell|channel_|get_banner|set_timeout|is_authenticated)|sftp_)' \
+    "$root/src/runtime" "$root/src/compiler_rust" | grep -q .; then
+    echo "SSH/SFTP provider appeared; review transport, credentials, ABI, ownership, and bounds" >&2
+    exit 1
+fi
+
+echo "SSH/SFTP SFFI contract audit: PASS (23 unsafe declarations; provider still required)"

@@ -1,8 +1,7 @@
 # Bug: out-of-bounds array read SIGSEGVs in cranelift binaries (interpreter returns 0)
 
 - **Date:** 2026-06-11
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** fixed — committed in adc8dcad379 (fix(parser): M9, bundled with parser work)
 - **Severity:** high — semantics diverge between interpreter and compiled code
 
 ## Symptom
@@ -21,7 +20,7 @@ fn main():
 ## Impact found
 
 `decl_is_async[idx]` in `convert_decl_method_fn`
-(src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl) raw-indexed a module-level
+(src/compiler/10.frontend/flat_ast_bridge_part1.spl) raw-indexed a module-level
 array that the lean-parser flow never populates (decl_fn only writes the
 ASYNC value to the env transport). In the stage4 self-hosted binary this was
 one of the two crashes behind the 12th-site cluster. Fixed by routing through
@@ -70,7 +69,7 @@ interpreter strictness difference, not addressed here.
 
 ## decl_is_async guards (Impact found)
 
-The guards added in `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl` and
+The guards added in `src/compiler/10.frontend/flat_ast_bridge_part1.spl` and
 `src/compiler/10.frontend/core/ast_part1.spl` remain. They are defense-in-depth
 at the Simple-layer level and are not made redundant by this codegen fix (the
 guards protect against the pure-Simple crash path; the codegen fix protects

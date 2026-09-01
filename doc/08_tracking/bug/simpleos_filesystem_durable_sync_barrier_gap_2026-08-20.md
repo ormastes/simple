@@ -3,8 +3,8 @@
 - Severity: P1 release blocker (REQ-4, REQ-5)
 - Owner: block-device/VFS durability owner
 - Final reviewer: SimpleOS hardening merge owner
-- Status: PARTIAL — portable FAT32/NVFS recovery and mounted device-backed
-  NVFS/NVFS-POSIX delegation implemented; admitted hardware evidence remains open
+- Status: PARTIAL — portable FAT32/NVFS recovery slice implemented; mounted
+  NVFS/NVFS-POSIX and admitted hardware evidence remain open
 
 ## Evidence
 
@@ -75,22 +75,10 @@ the bounded 64-entry compact checkpoint.
   `test/02_integration/storage/fs_recovery_conformance_spec.spl`, with FAT32,
   NVFS, and NVFS-POSIX success/failure rows and no source-text oracle.
 
-## 2026-08-21 mounted NVFS delegation update
-
-- The stdlib `NvfsDriver` and `NvfsPosixDriver` now delegate `fsync` and
-  `fdatasync` to their device-backed DBFS commit owner. Hosted instances still
-  return `FsError.Unsupported`.
-- Both wrappers advertise `DurableSync` only when that inner owner passes its
-  durability serialization and acknowledged-flush admission check.
-- NVFS disk-superblock arbitration now binds replica IDs to physical slots,
-  rejects cross-volume and equal-generation split-brain pairs, and offers an
-  explicit bounded repair that rewrites exactly one invalid slot from its
-  checksum-valid peer behind a flush barrier.
-- Positioned byte I/O has focused coverage for exact overwrite, sparse growth,
-  negative offsets, overflow, and handle-based size reporting.
-
-Admitted self-hosted/QEMU or physical power-cut execution remains the release
-blocker; this source lane does not claim hardware evidence.
+This does not promote the mounted stdlib `NvfsDriver` or `NvfsPosixDriver` to
+`DurableSync`: their file namespace/write paths are not yet bound to the
+recoverable arena commit owner. That wiring and admitted self-hosted/QEMU or
+physical power-cut execution remain the release blocker.
 
 ## Residual evidence blockers
 
@@ -103,3 +91,23 @@ blocker; this source lane does not claim hardware evidence.
 - The compact driver's module stores are a single serialized VFS execution
   domain. Concurrent cross-thread filesystem entry remains unsupported until a
   canonical synchronized command ingress owns these arrays.
+
+## 2026-08-26 materializer-foundation update (unverified)
+
+Source work now provides a Pure Simple host `FileBlockDevice`, a bounded staged
+tree admission planner, and DBFS v4 multi-sector namespace checkpoints. DBFS v4
+uses two payload/root slots, orders payload flush before root publication, caps
+each payload at one MiB/2,048 sectors and 1,024 entries, and rejects ambiguous
+equal-generation roots. Its uniqueness check is expected O(n) through bounded
+hash sets instead of the former O(n^2) scan. Legacy v2/v3 checkpoints remain
+readable with their original capacity/layout; small arenas continue to use the
+legacy writer.
+
+This does not close the bug. The hosted source tree still lacks the concrete
+descriptor-relative, retained-directory/no-follow provider required to produce
+the planner snapshot without pathname races. ImageBuilder also lacks the single
+transaction that consumes retained file tokens and materializes the admitted
+tree through real FAT32, DBFS, and NVFS sinks on `FileBlockDevice`. Until those
+owners exist and the required admitted-runtime and reset/remount campaigns pass,
+durability and cross-backend image construction remain unproved. No manual
+verification was run for this update.

@@ -1,0 +1,98 @@
+#!/bin/sh
+# Regression gate for AOT (`native-build`) field reads inside a
+# `for x in <dict>.values()` / `.keys()` loop.
+#
+# WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk interpreter
+# and has no AOT mode, so a spec can only ever prove the interpreter lane --
+# and this defect was INVISIBLE there (the interpreter was always correct).
+# Only a script that actually drives `native-build` can fence it.
+#
+# DEFECT: `lower_for_array_indexed` (src/compiler/50.mir/mir_lowering_stmts.spl)
+# binds the loop variable's `struct_value_syms` entry from
+# `array_element_struct_syms`, keyed on the collection local. Only array
+# literals and array params ever populated that map; a `.values()` result never
+# did. So `resolve_field_index` (50.mir/_MirLowering/function_lowering.spl) hit
+# its "type unknown" fallback and returned field index 0 with MirType.i64() for
+# EVERY field read of the loop variable. In Stage 2 that made `func.name` read
+# `func.symbol` as a raw integer and `func.signature` come back nil, so
+# build_signature dereferenced nil -> SIGSEGV on any input, hello world included.
+# Bug: doc/08_tracking/bug/native_dict_values_loop_field_offset_collapse_2026-08-24.md
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> probe(s) checked, 0 mismatches   exit 0
+#   FAIL — ...                                   exit 1
+#   ERROR — nothing was checked                  exit 2
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-dict-values-struct-fields.$$}"
+FIXTURE="test/fixtures/native_dict_values_struct/main.spl"
+
+if [ ! -x "$SIMPLE_BINARY" ]; then
+    echo "ERROR — nothing was checked (no runnable compiler at $SIMPLE_BINARY)"
+    exit 2
+fi
+if [ ! -f "$FIXTURE" ]; then
+    echo "ERROR — nothing was checked (fixture missing: $FIXTURE)"
+    exit 2
+fi
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+binary="$WORK_DIR/dict-values-struct"
+log="$WORK_DIR/build.log"
+
+# Exit status is read DIRECTLY into a variable on the line AFTER the command --
+# never through a pipe. A pipeline's $? is the LAST command's status and has
+# produced false greens in this repo.
+env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" native-build "$FIXTURE" -o "$binary" >"$log" 2>&1
+build_rc=$?
+if [ "$build_rc" -ne 0 ] || [ ! -f "$binary" ]; then
+    echo "ERROR — nothing was checked (native-build failed rc=$build_rc; log $log)"
+    tail -20 "$log" >&2 || true
+    exit 2
+fi
+
+out="$WORK_DIR/native.out"
+timeout 60 "$binary" >"$out" 2>&1
+run_rc=$?
+if [ "$run_rc" -ne 0 ]; then
+    echo "FAIL — the fixture binary exited rc=$run_rc (>=128 is a crash; 124 is a timeout)"
+    exit 1
+fi
+
+# Expected values, all trivially derivable from the fixture source.
+# The last two are CONTROLS that were correct even before the fix.
+probes="values_a=7 values_b=hi values_c=11 hoisted_b=hi hoisted_c=11 keys_k=kx textkey_b=zz direct_b=hi array_b=hi"
+
+checked=0
+failed=0
+for probe in $probes; do
+    key="${probe%%=*}"
+    want="${probe#*=}"
+    # The AOT lane emits `print` without a trailing newline, so the whole run
+    # arrives as ONE line. Parse the explicit <<key=value>> markers instead of
+    # anchoring on line starts -- an empty capture would otherwise read as a
+    # mismatch on every probe including the always-correct controls.
+    got="$(tr -d '\n' < "$out" | sed -n "s/.*<<${key}=\\([^>]*\\)>>.*/\\1/p")"
+    checked=$((checked + 1))
+    if [ "$got" != "$want" ]; then
+        failed=$((failed + 1))
+        echo "  mismatch ${key}: expected [$want] actual [$got]"
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no probes evaluated)"
+    exit 2
+fi
+if [ "$failed" -ne 0 ]; then
+    echo "FAIL — $checked probe(s) checked, $failed mismatch(es) under native-build"
+    echo "  full output: $(tr '\n' '|' < "$out")"
+    exit 1
+fi
+echo "PASS — $checked probe(s) checked, 0 mismatches"
+exit 0

@@ -1,7 +1,6 @@
 # Interpreter: branch-scoped `val` const-poisons a later same-named `var` in the same function
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** FIXED (seed interpreter, `interpreter_helpers/patterns.rs`)
 - **Date:** 2026-07-03
 - **Severity:** high — aborted the whole chromed WM scene render lane
 - **Component:** `src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs` (`bind_let_pattern_element`)

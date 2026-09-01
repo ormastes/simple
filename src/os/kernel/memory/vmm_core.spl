@@ -34,7 +34,7 @@ use os.kernel.types.vmspace_types.{
     VmArea, ProcessVmSpace,
 }
 use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read64, mmio_write64, mmio_test_mode_enabled, mmio_invalidate_tlb}
-use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page_raw}
+use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page, pmm_free_page, pmm_alloc_page_raw, pmm_free_page_raw, pmm_ref_page, pmm_unref_page}
 
 # ============================================================================
 # Constants
@@ -65,11 +65,6 @@ val VMM_MAX_VMAS: u64 = 256
 val VMM_VMA_ANON: u32 = 0
 val VMM_VMA_FILE: u32 = 1
 val VMM_VMA_SHARED: u32 = 2
-# Writable shared FILE mapping (mmap MAP_SHARED with a real backing handle).
-# Distinct from VMM_VMA_SHARED (=2, shared anonymous) because the pages are
-# owned by a shared page-cache object in `vmm_shared.spl` rather than by the
-# faulting address space. See `vmm_handle_shared_file_fault`.
-val VMM_VMA_SHARED_FILE: u32 = 3
 val VMM_VMA_EXEC: u32 = 4
 val VMM_VMA_COW: u32 = 8
 
@@ -335,10 +330,6 @@ fn vmm_activate() -> bool:
     _load_cr3(_vmm_pml4_phys)
     _read_cr3() == _vmm_pml4_phys
 
-fn vmm_active_root() -> u64:
-    """Return the physical root currently loaded in CR3."""
-    _read_cr3() & PTE_ADDR_MASK
-
 fn vmm_init_sparse_for_test(pmm_manager: PhysMemManager, hhdm_offset: u64) -> bool:
     """Initialize only the root page table for deterministic host tests."""
     val _manager = pmm_manager
@@ -349,7 +340,6 @@ fn vmm_init_sparse_for_test(pmm_manager: PhysMemManager, hhdm_offset: u64) -> bo
     if pml4_phys == 0:
         return false
     _vmm_pml4_phys = pml4_phys
-    _load_cr3(pml4_phys)
     g_vmm_initialized = 1
     true
 
@@ -386,10 +376,8 @@ fn _identity_map_4gb():
 
 fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     """Map a single 4KB virtual page to a physical frame."""
-    if mmio_test_mode_enabled() and _vmm_test_fail_map_after >= 0:
-        if _vmm_test_map_attempts >= _vmm_test_fail_map_after:
-            return false
-        _vmm_test_map_attempts = _vmm_test_map_attempts + 1
+    if not vmm_map_attempt_allowed():
+        return false
     val vaddr = virt_addr_value(virt)
     val paddr = phys_addr_value(phys)
 
@@ -418,32 +406,6 @@ fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 
     _vmm_invalidate_tlb(vaddr)
 
-    true
-
-fn vmm_map_page_pte_bits(vaddr: u64, paddr: u64, requested_bits: u64) -> bool:
-    """Map a page from scalar values at early freestanding boundaries.
-
-    Callers must pass architecture PTE bits, not VmFlags bits.  This entrypoint
-    exists for boot owners that run before aggregate field metadata is ready.
-    It preserves the normal W^X rule and page-table ownership here."""
-    var pte_bits = requested_bits
-    if (pte_bits & PTE_WRITABLE) != 0 and (pte_bits & PTE_NO_EXECUTE) == 0:
-        pte_bits = pte_bits | PTE_NO_EXECUTE
-
-    val pml4_virt = _phys_to_virt(_vmm_pml4_phys)
-    val pdpt_virt = _ensure_table_entry(pml4_virt, _pml4_index(vaddr))
-    if pdpt_virt == 0:
-        return false
-    val pd_virt = _ensure_table_entry(pdpt_virt, _pdpt_index(vaddr))
-    if pd_virt == 0:
-        return false
-    val pt_virt = _ensure_table_entry(pd_virt, _pd_index(vaddr))
-    if pt_virt == 0:
-        return false
-
-    val entry = (paddr & PTE_ADDR_MASK) | pte_bits
-    _write_pte(pt_virt, _pt_index(vaddr), entry)
-    _vmm_invalidate_tlb(vaddr)
     true
 
 fn vmm_set_map_failure_after_for_test(successful_maps: i64):
@@ -555,12 +517,11 @@ fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
 # CPU Primitives (inline assembly)
 # ============================================================================
 
-extern fn rt_read_cr3_raw() -> u64
-extern fn rt_write_cr3_raw(value: u64)
+use os.kernel.arch.x86_64.runtime_hal.{hal_x86_64_read_cr3_raw, hal_x86_64_write_cr3_raw}
 
 var _vmm_fallback_cr3: u64 = 0
-fn rt_read_cr3__fallback() -> u64: _vmm_fallback_cr3
-fn rt_write_cr3__fallback(value: u64):
+fn rt_read_cr3_raw__fallback() -> u64: _vmm_fallback_cr3
+fn rt_write_cr3_raw__fallback(value: u64):
     _vmm_fallback_cr3 = value
 
 fn _vmm_invalidate_tlb(vaddr: u64):
@@ -572,10 +533,10 @@ fn _load_cr3(pml4_phys: u64):
     if mmio_test_mode_enabled():
         _vmm_fallback_cr3 = pml4_phys
         return
-    rt_write_cr3_raw(pml4_phys)
+    hal_x86_64_write_cr3_raw(pml4_phys)
 
 fn _read_cr3() -> u64:
     """Read current CR3 register value."""
     if mmio_test_mode_enabled():
         return _vmm_fallback_cr3
-    rt_read_cr3_raw()
+    hal_x86_64_read_cr3_raw()

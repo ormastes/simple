@@ -43,7 +43,7 @@ log-lib-drivers Phase 4 spec — back-compat for existing log call sites.
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/log_facade_back_compat_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 log-lib-drivers Phase 4 spec — back-compat for existing log call sites.
@@ -51,8 +51,11 @@ log-lib-drivers Phase 4 spec — back-compat for existing log call sites.
 Covers AC-4 (back-compat: existing `log.info(...)` / `log.warn(...)`
 call sites must keep working).
 
-Status: RED PHASE. Phase 5 has not rerouted `nogc_sync_mut/log.spl`
-through the new facade yet.
+Status: Implemented. `std.log` owns registration, filtering, and dispatch;
+`nogc_sync_mut/log.spl` uses a one-way compatibility adapter into that owner.
+Legacy thresholds retain OFF=0..TRACE=6, VERBOSE=7, and ALL=10 while ring
+records use canonical TRACE=0..FATAL=5 levels. Exact arbitrary string-scope
+overrides remain isolated in the legacy adapter before canonical dispatch.
 
 Phase 3 contract (locked, §F):
   - `use std.log.{error, warn, info, debug, fatal}` resolves; signatures
@@ -61,9 +64,8 @@ Phase 3 contract (locked, §F):
     `log_dispatch_text(canonical_level, subsys_from_scope(scope), bytes)`.
   - `subsys_from_scope("pkg")` -> SUBSYS_PKG, "cli" -> SUBSYS_CLI,
     "test" -> SUBSYS_TEST. Unknown scope -> SUBSYS_USER_BASE.
-  - The duplicate `src/lib/nogc_sync_mut/src/log.spl` keeps working
-    (marked DEPRECATED — Phase 6 deletes; this spec must NOT block on
-    that decision).
+  - The obsolete duplicate owner is gone. `std.log` does not import the
+    compatibility module, so dispatch remains one-way and cycle-free.
 
 ## Scenarios
 

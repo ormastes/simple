@@ -20,42 +20,6 @@ Before submitting, the client verifies that the daemon answers a status ping.
 If the PID exists but the daemon does not answer, the client restarts it and
 pings again.
 
-The intended production CLI surface exposes the same lifecycle directly:
-
-```bash
-bin/simple test-daemon status
-bin/simple test-daemon run test/01_unit/example_spec.spl
-bin/simple test-daemon clean test/01_unit/example_spec.spl
-bin/simple test-daemon stop
-```
-
-Current-source qualification note (2026-07-19): the self-hosted CLI lifecycle
-handler still reports this surface unavailable, while the light runner and the
-daemon-SDK session client use different owners/protocols. Treat the commands
-above as the target contract, not current PASS evidence, until the owners are
-reconciled and the bounded lifecycle gate passes.
-
-The current light runner request is versioned and carries an absolute expiry,
-not a fresh duration. Queue delay therefore consumes the caller's budget. The
-daemon rejects expired requests before spawning and gives live work only the
-remaining time through `process_run_bounded`; untagged legacy requests retain
-the former 600-second default. A short client grace covers bounded child cleanup
-and atomic response publication, not extra execution time.
-
-`run` may reuse a dependency-fresh result and reports
-`test_daemon_cache=hit` or `test_daemon_cache=miss`. `clean` always executes,
-refreshes the entry, and reports `test_daemon_cache=clean`. Source or imported
-dependency changes invalidate the entry through the shared incremental-state
-owner. A daemon-owned child sets `SIMPLE_TEST_DAEMON_CHILD=1`; nested test
-commands detect it and bypass the same serial daemon.
-
-The daemon launches only the current production `simple` runtime. It does not
-fall back to `src/compiler_rust/target/{bootstrap,debug}`.
-
-A Stage 4 full-CLI candidate is not qualified by the runner alone. Bootstrap
-must run the shared [Stage 4 essential-tools gate](../../tooling/pure_simple_tooling.md#stage-4-essential-tools-gate)
-once against the exact fresh binary; it covers test, lint, and duplicate-check.
-
 ## Resource Safety
 
 The daemon checks current host CPU and memory before starting work. Requests are
@@ -91,18 +55,6 @@ interval. While work is active, it switches to the shorter busy poll interval.
 - `qemu_effective_limit`
 
 Use these fields when diagnosing queued QEMU or test requests.
-
-## Stable test outcomes
-
-The top-level runner publishes `Outcome:` and exits with: pass `0`, assertion
-or child failure `1`, usage error `2`, internal error `3`, empty discovery `4`,
-and timeout/resource failure `124`. A nonzero child exit and an
-authored/executed example-count mismatch always fail closed.
-
-For large suites, `--batch-size=N` re-executes bounded worker batches through
-the normal result wrapper and aggregates the full typed results. Each boundary
-prints worker/parent PID and parent peak RSS evidence. The production 1,000
-example qualification is `sh scripts/check/check-test-runner-rss-batch.shs`.
 
 ## Session Debug TUI
 

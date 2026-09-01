@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+canonical="$root/src/os/crypto/aes128_gcm.spl"
+nvfs="$root/src/os/services/nvfs/core/crypto/aes128_gcm.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$canonical")" -eq 2 ]
+[ "$(grep -c '^@unsafe(reason:' "$canonical")" -eq 15 ]
+[ "$(grep -c '^extern fn ' "$nvfs")" -eq 3 ]
+[ "$(grep -c '^@unsafe(reason:' "$nvfs")" -eq 15 ]
+
+canonical_calls=$(perl -0ne '
+    s/""".*?"""//sg; s/#.*//mg; s/^\s*extern fn .*\n//mg;
+    while (/\brt_(?:bytes_u8_at|array_new_with_cap)\s*\(/g) { $n++ }
+    END { print $n + 0 }
+' "$canonical")
+[ "$canonical_calls" -eq 2 ]
+
+nvfs_calls=$(perl -0ne '
+    s/""".*?"""//sg; s/#.*//mg; s/^\s*extern fn .*\n//mg;
+    while (/\brt_(?:bytes_u8_at|array_new_with_cap|aes128_encrypt_block_pure)\s*\(/g) { $n++ }
+    END { print $n + 0 }
+' "$nvfs")
+[ "$nvfs_calls" -eq 3 ]
+
+# Capacity hints remain at every allocation site through one mandatory-inline
+# owner.  This ratchets against replacing them with empty-array allocations.
+[ "$(grep -c '^@always_inline$' "$canonical")" -eq 1 ]
+[ "$(grep -c '_a128gcm_new_u8(' "$canonical")" -eq 12 ]
+[ "$(grep -c '^@always_inline$' "$nvfs")" -eq 1 ]
+[ "$(grep -c '_nvfs_a128gcm_new_u8(' "$nvfs")" -eq 17 ]
+
+# Fixed-width inputs are rejected before entering either unsafe validated core.
+for module in "$canonical" "$nvfs"; do
+    [ "$(grep -c 'if key.len() != 16:' "$module")" -eq 2 ]
+    [ "$(grep -c 'if nonce.len() != 12:' "$module")" -eq 2 ]
+    [ "$(grep -c 'if tag.len() != 16:' "$module")" -eq 1 ]
+    [ "$(grep -c 'diff = diff |' "$module")" -eq 1 ]
+done
+
+# Never revive the interpreter-incompatible out-parameter provider or latent
+# key/plaintext byte dump surface.
+! grep -q 'rt_aes128_encrypt_block_into' "$nvfs"
+! grep -q 'rt_aes_sbox\|rt_aes_rcon\|aes128_key_expansion' "$nvfs"
+! grep -q 'serial_println\|_debug_bytes\|_gcm_debug' "$nvfs"
+grep -q 'if output.len() != 16:' "$nvfs"
+grep -q 'if key.len() != 16 or plaintext.len() != 16:' "$nvfs"
+
+for provider in "$registry" "$interpreter"; do
+    grep -q 'rt_aes128_encrypt_block_pure' "$provider"
+done
+
+echo "AES-128-GCM SFFI authority audit: PASS (canonical 2 calls/2 symbols; NVFS 3 calls/3 symbols; exact key/nonce/tag/block guards; constant-time tag accumulation retained; capacity hints retained; redundant NVFS schedule/output allocations removed)"

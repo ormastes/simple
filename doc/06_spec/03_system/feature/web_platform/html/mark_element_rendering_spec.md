@@ -1,74 +1,31 @@
-# Mark Element Rendering
+# mark_element_rendering_spec
 
-Status: **DRAFT / EVIDENCE-BLOCKED**
+> Selected `<mark>` UA highlighting through Web semantics, Draw IR, and Engine2D.
 
-Handwritten mirror of
-`test/03_system/feature/web_platform/html/mark_element_rendering_spec.spl`.
-It is a complete source reproduction, but has not been generated or validated
-by SPipe docgen and does not claim qualified runtime execution.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-| Metadata | Value |
-|---|---|
-| Tests | 1 |
-| Active | 1 |
-| Stubs | 0 (static source audit) |
-| Manual provenance | Handwritten complete mirror; docgen pending |
-| Runtime provenance | Pending admitted pure-Simple runner |
+<details>
+<summary>Full Scenario Manual</summary>
 
-## Requirement mapping
+# mark_element_rendering_spec
 
-| Requirement | Executable scenario | Coverage |
-|---|---|---|
-| REQ-WEB-BROWSER-002 | `should lower the mark UA highlight through Draw IR to pixels` | HTML semantic tag and parentage |
-| REQ-WEB-BROWSER-003 | same | Selected UA style and later author override |
-| REQ-WEB-BROWSER-004 | same | Web layout → `DrawIrComposition` → Engine2D |
-| REQ-WEB-BROWSER-021 | same | Modern executable SSpec and complete mirror |
+Selected `<mark>` UA highlighting through Web semantics, Draw IR, and Engine2D.
 
-## Scope
+## At a Glance
 
-The selected user-agent profile renders `mark` as inline text with an opaque
-yellow background and black foreground. Author declarations remain later in
-the existing cascade and can replace all three defaults.
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/feature/web_platform/html/mark_element_rendering_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-The production path is the canonical HTML tree → Web semantic/style/layout →
-`DrawIrComposition` → `Engine2dCompositorBackend` path. No private painter,
-parallel IR, or font cache is introduced.
-
-## Scenario
-
-The fixture is a marginless 128 × 40 white page with 8 px top padding and
-`LEFT<mark>MID</mark>RIGHT`. A styled inline `span` is the positive oracle.
-Styled block and transparent inline spans are negative controls.
-
-1. **Parse mark with the row as its immediate parent** — the tag is `mark`
-   and its guarded immediate parent is the fixture row.
-2. **Apply inline yellow and black mark defaults before author CSS** —
-   computed values are `inline`, `0xFFFFFF00`, and `0xFF000000`; a mark with
-   authored block/blue/white declarations retains the authored winners.
-3. **Lower mark and following text to exact inline Draw IR geometry** —
-   term and `MID` are `[32,8,24,16]`; `RIGHT` is `[56,8,40,16]`; all geometry
-   and advances equal the styled-span oracle and differ from the block control.
-4. **Rasterize the exact mark highlight and discriminating controls** — the
-   complete pixel buffer equals the styled-span oracle and differs from both
-   block and transparent controls. Pixel `(55,23)` is exactly yellow and the
-   nonzero yellow count equals the oracle count.
-
-## Boundary
-
-This is bounded selected-profile evidence for `mark`. It does not claim
-system-color theming, print color adjustment, full HTML/CSS conformance,
-qualified runtime execution, or generated-doc admission.
-
-## Complete executable reproduction
-
-```simple
-# codex-system-test
-# @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003
-# @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
-"""Selected `<mark>` UA highlighting through Web semantics, Draw IR, and Engine2D.
+Selected `<mark>` UA highlighting through Web semantics, Draw IR, and Engine2D.
 
 Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
-"""
 
 use std.spec.*
 use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
@@ -86,101 +43,124 @@ use test.system.browser_dom_identity_helpers.{
     system_dom_identity_index, system_dom_route
 }
 
-val WIDTH: i32 = 128
-val HEIGHT: i32 = 40
-val YELLOW: u32 = 0xFFFFFF00u32
-val BLACK: u32 = 0xFF000000u32
+### Production mark element rendering
 
-fn _mark_node_index(nodes: [HNode], component_id: text) -> i32:
-    var index = 0
-    for node in nodes:
-        if node.id_attr == component_id:
-            return index
-        index = index + 1
-    fail("missing mark Web semantic node: {component_id}")
-    -1
+#### should lower the mark UA highlight through Draw IR to pixels
 
-fn _mark_command(
-    composition: DrawIrComposition, component_id: text
-) -> DrawIrCommand:
-    for batch in composition.batches:
-        for command in batch.commands:
-            if command.component_id == component_id:
-                return command
-    fail("missing mark Draw IR command: {component_id}")
-    composition.batches[0].commands[0]
+- should lower the mark UA highlight through Draw IR to pixels
+   - GUI capture: after_step (HTML preferred when available)
+- Parse mark with the row as its immediate parent
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 1 expected check
+   - Expected: be_dom_get_tag(mark_path[mark_path.len() - 1]) equals `mark`
+- Apply inline yellow and black mark defaults before author CSS
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 3 expected checks
+   - Expected: mark.hit_index.styles[mark_index].display equals `inline`
+   - Expected: mark.hit_index.styles[mark_index].bg equals `YELLOW`
+   - Expected: mark.hit_index.styles[mark_index].fg equals `BLACK`
+- Lower mark and following text to exact inline Draw IR geometry
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 6 expected checks
+   - Expected: _mark_geometry(mark_term) equals `[32, 8, 24, 16]`
+   - Expected: _mark_geometry(mark_mid) equals `[32, 8, 24, 16]`
+   - Expected: _mark_geometry(mark_right) equals `[56, 8, 40, 16]`
+   - Expected: _mark_geometry(mark_mid) equals `_mark_geometry(span_mid)`
+   - Expected: mark_mid.advance_widths equals `span_mid.advance_widths`
+   - Expected: _mark_style(mark_term, "display") equals `inline`
+- Rasterize the exact mark highlight and discriminating controls
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 3 expected checks
+   - Expected: mark_pixels.len() equals `WIDTH * HEIGHT`
+   - Expected: mark_pixels equals `span_pixels`
+   - Expected: mark_pixels[23 * WIDTH + 55] equals `YELLOW`
 
-fn _mark_text_command(
-    composition: DrawIrComposition, value: text
-) -> DrawIrCommand:
-    for batch in composition.batches:
-        for command in batch.commands:
-            if command.kind == "text" and command.text_value == value:
-                return command
-    fail("missing mark Draw IR text command: {value}")
-    composition.batches[0].commands[0]
 
-fn _mark_style(command: DrawIrCommand, key: text) -> text:
-    for property in command.computed_style:
-        if property.key == key:
-            return property.value
-    fail("missing mark Draw IR computed style: {key}")
-    ""
+<details>
+<summary>Executable SSpec</summary>
 
-fn _mark_geometry(command: DrawIrCommand) -> [i32]:
-    [command.x, command.y, command.width, command.height]
+Runnable source: 128 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-fn _mark_pixels(composition: DrawIrComposition) -> [u32]:
-    val raster = Engine2dCompositorBackend.create_named(
-        WIDTH, HEIGHT, "software"
-    )
-    val frame = raster.render_draw_ir_composition(composition, [])
-    raster.shutdown()
-    expect(frame.skipped_command_count).to_equal(0)
-    frame.pixels
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should lower the mark UA highlight through Draw IR to pixels")
+val common = (
+    "<style>html,body{margin:0;padding:0;background:#fff}" +
+    "body{padding-top:8px}#row{font-size:16px;color:#111827}" +
+    "</style><body id='body'><div id='row'>"
+)
+val suffix = "</div></body>"
+val mark_html = (
+    common + "LEFT<mark id='term'>MID</mark>RIGHT" + suffix
+)
+val styled_span_html = (
+    common + "LEFT<span id='term' style='" +
+    "display:inline;background:#ffff00;color:#000'>MID</span>" +
+    "RIGHT" + suffix
+)
+val block_html = (
+    common + "LEFT<span id='term' style='" +
+    "display:block;background:#ffff00;color:#000'>MID</span>" +
+    "RIGHT" + suffix
+)
+val transparent_html = (
+    common + "LEFT<span id='term'>MID</span>RIGHT" + suffix
+)
+val override_html = (
+    common + "LEFT<mark id='term' style='" +
+    "display:block;background:#2563eb;color:#fff'>MID</mark>" +
+    "RIGHT" + suffix
+)
 
-fn _mark_color_count(pixels: [u32], color: u32) -> i32:
-    var count = 0
-    for pixel in pixels:
-        if pixel == color:
-            count = count + 1
-    count
+step("Parse mark with the row as its immediate parent")
+val root = html_tree_builder_build(mark_html)
+val identity_index = system_dom_identity_index(root)
+val row_path = be_dom_path_for_route(
+    root, identity_index, system_dom_route(identity_index, "row")
+)
+val mark_path = be_dom_path_for_route(
+    root, identity_index, system_dom_route(identity_index, "term")
+)
+expect(mark_path.len()).to_be_greater_than(1)
+expect(row_path.len()).to_be_greater_than(0)
+expect(be_dom_get_tag(mark_path[mark_path.len() - 1])).to_equal("mark")
+expect(mark_path[mark_path.len() - 2].node_id).to_equal(
+    row_path[row_path.len() - 1].node_id
+)
 
-describe "Production mark element rendering":
-    # @manual: show
-    # @capture(html)
-    # @capture(protocol)
-    # @capture(gui)
-    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003
-    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
-    it "should lower the mark UA highlight through Draw IR to pixels":
-        val common = (
-            "<style>html,body{margin:0;padding:0;background:#fff}" +
-            "body{padding-top:8px}#row{font-size:16px;color:#111827}" +
-            "</style><body id='body'><div id='row'>"
-        )
-        val suffix = "</div></body>"
-        val mark_html = (
-            common + "LEFT<mark id='term'>MID</mark>RIGHT" + suffix
-        )
-        val styled_span_html = (
-            common + "LEFT<span id='term' style='" +
-            "display:inline;background:#ffff00;color:#000'>MID</span>" +
-            "RIGHT" + suffix
-        )
-        val block_html = (
-            common + "LEFT<span id='term' style='" +
-            "display:block;background:#ffff00;color:#000'>MID</span>" +
-            "RIGHT" + suffix
-        )
-        val transparent_html = (
-            common + "LEFT<span id='term'>MID</span>RIGHT" + suffix
-        )
-        val override_html = (
-            common + "LEFT<mark id='term' style='" +
-            "display:block;background:#2563eb;color:#fff'>MID</mark>" +
-            "RIGHT" + suffix
-        )
+step("Apply inline yellow and black mark defaults before author CSS")
+val mark = simple_web_layout_render_html_draw_ir_result(
+    mark_html, WIDTH, HEIGHT
+)
+val styled_span = simple_web_layout_render_html_draw_ir_result(
+    styled_span_html, WIDTH, HEIGHT
+)
+val block = simple_web_layout_render_html_draw_ir_result(
+    block_html, WIDTH, HEIGHT
+)
+val transparent = simple_web_layout_render_html_draw_ir_result(
+    transparent_html, WIDTH, HEIGHT
+)
+val override = simple_web_layout_render_html_draw_ir_result(
+    override_html, WIDTH, HEIGHT
+)
+val mark_index = _mark_node_index(mark.hit_index.nodes, "term")
+val override_index = _mark_node_index(
+    override.hit_index.nodes, "term"
+)
+expect(mark.hit_index.styles[mark_index].display).to_equal("inline")
+expect(mark.hit_index.styles[mark_index].bg).to_equal(YELLOW)
+expect(mark.hit_index.styles[mark_index].fg).to_equal(BLACK)
+expect(override.hit_index.styles[override_index].display).to_equal(
+    "block"
+)
+expect(override.hit_index.styles[override_index].bg).to_equal(
+    0xFF2563EBu32
+)
+expect(override.hit_index.styles[override_index].fg).to_equal(
+    0xFFFFFFFFu32
+)
 
         step("Parse mark with the row as its immediate parent")
         val root = html_tree_builder_build(mark_html)
@@ -198,86 +178,79 @@ describe "Production mark element rendering":
             row_path[row_path.len() - 1].node_id
         )
 
-        step("Apply inline yellow and black mark defaults before author CSS")
-        val mark = simple_web_layout_render_html_draw_ir_result(
-            mark_html, WIDTH, HEIGHT
-        )
-        val styled_span = simple_web_layout_render_html_draw_ir_result(
-            styled_span_html, WIDTH, HEIGHT
-        )
-        val block = simple_web_layout_render_html_draw_ir_result(
-            block_html, WIDTH, HEIGHT
-        )
-        val transparent = simple_web_layout_render_html_draw_ir_result(
-            transparent_html, WIDTH, HEIGHT
-        )
-        val override = simple_web_layout_render_html_draw_ir_result(
-            override_html, WIDTH, HEIGHT
-        )
-        val mark_index = _mark_node_index(mark.hit_index.nodes, "term")
-        val override_index = _mark_node_index(
-            override.hit_index.nodes, "term"
-        )
-        expect(mark.hit_index.styles[mark_index].display).to_equal("inline")
-        expect(mark.hit_index.styles[mark_index].bg).to_equal(YELLOW)
-        expect(mark.hit_index.styles[mark_index].fg).to_equal(BLACK)
-        expect(override.hit_index.styles[override_index].display).to_equal(
-            "block"
-        )
-        expect(override.hit_index.styles[override_index].bg).to_equal(
-            0xFF2563EBu32
-        )
-        expect(override.hit_index.styles[override_index].fg).to_equal(
-            0xFFFFFFFFu32
-        )
-
-        step("Lower mark and following text to exact inline Draw IR geometry")
-        val mark_term = _mark_command(mark.composition, "term")
-        val span_term = _mark_command(styled_span.composition, "term")
-        val block_term = _mark_command(block.composition, "term")
-        val mark_mid = _mark_text_command(mark.composition, "MID")
-        val span_mid = _mark_text_command(styled_span.composition, "MID")
-        val mark_right = _mark_text_command(mark.composition, "RIGHT")
-        val span_right = _mark_text_command(styled_span.composition, "RIGHT")
-        val block_right = _mark_text_command(block.composition, "RIGHT")
-        expect(_mark_geometry(mark_term)).to_equal([32, 8, 24, 16])
-        expect(_mark_geometry(mark_mid)).to_equal([32, 8, 24, 16])
-        expect(_mark_geometry(mark_right)).to_equal([56, 8, 40, 16])
-        expect(_mark_geometry(mark_term)).to_equal(
-            _mark_geometry(span_term)
-        )
-        expect(_mark_geometry(mark_mid)).to_equal(_mark_geometry(span_mid))
-        expect(_mark_geometry(mark_right)).to_equal(
-            _mark_geometry(span_right)
-        )
-        expect(mark_mid.advance_widths).to_equal(span_mid.advance_widths)
-        expect(mark_right.advance_widths).to_equal(
-            span_right.advance_widths
-        )
-        expect(_mark_geometry(mark_term)).not.to_equal(
-            _mark_geometry(block_term)
-        )
-        expect(_mark_geometry(mark_right)).not.to_equal(
-            _mark_geometry(block_right)
-        )
-        expect(_mark_style(mark_term, "display")).to_equal("inline")
-        expect(_mark_style(mark_term, "background-color")).to_equal(
-            "{YELLOW}"
-        )
-
-        step("Rasterize the exact mark highlight and discriminating controls")
-        val mark_pixels = _mark_pixels(mark.composition)
-        val span_pixels = _mark_pixels(styled_span.composition)
-        val block_pixels = _mark_pixels(block.composition)
-        val transparent_pixels = _mark_pixels(transparent.composition)
-        expect(mark_pixels.len()).to_equal(WIDTH * HEIGHT)
-        expect(mark_pixels).to_equal(span_pixels)
-        expect(mark_pixels).not.to_equal(block_pixels)
-        expect(mark_pixels).not.to_equal(transparent_pixels)
-        expect(mark_pixels[23 * WIDTH + 55]).to_equal(YELLOW)
-        val yellow_count = _mark_color_count(mark_pixels, YELLOW)
-        expect(yellow_count).to_be_greater_than(0)
-        expect(yellow_count).to_equal(
-            _mark_color_count(span_pixels, YELLOW)
-        )
+step("Rasterize the exact mark highlight and discriminating controls")
+val mark_pixels = _mark_pixels(mark.composition)
+val span_pixels = _mark_pixels(styled_span.composition)
+val block_pixels = _mark_pixels(block.composition)
+val transparent_pixels = _mark_pixels(transparent.composition)
+expect(mark_pixels.len()).to_equal(WIDTH * HEIGHT)
+expect(mark_pixels).to_equal(span_pixels)
+expect(mark_pixels).not.to_equal(block_pixels)
+expect(mark_pixels).not.to_equal(transparent_pixels)
+expect(mark_pixels[23 * WIDTH + 55]).to_equal(YELLOW)
+val yellow_count = _mark_color_count(mark_pixels, YELLOW)
+expect(yellow_count).to_be_greater_than(0)
+expect(yellow_count).to_equal(
+    _mark_color_count(span_pixels, YELLOW)
+)
 ```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `592ea31560567138a5c4b6999764c1fc1fb6812a157bf172fab8048b4badd5e8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `592ea31560567138a5c4b6999764c1fc1fb6812a157bf172fab8048b4badd5e8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `592ea31560567138a5c4b6999764c1fc1fb6812a157bf172fab8048b4badd5e8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/03_system/feature/web_platform/html/mark_element_rendering_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/html/mark_element_rendering_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=95 oracle=100
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/web_platform/html/mark_element_rendering_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/html/mark_element_rendering_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/html/mark_element_rendering_spec.spl:98:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should lower the mark UA highlight through Draw IR to pixels' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/mark_element_rendering_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should lower the mark UA highlight through Draw IR to pixels' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

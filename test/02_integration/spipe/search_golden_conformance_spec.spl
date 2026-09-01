@@ -1,0 +1,119 @@
+# P11 — golden conformance: one checked-in corpus (§10.1) drives the common
+# index engine and field-stats aggregation. What IS asserted here: the golden
+# corpus fixture parses to the frozen schema, its exact document set
+# round-trips through `IndexEngine` (P2) with deterministic rebuild parity,
+# and per-field corpus statistics computed from the SAME corpus content match
+# `field_stats.spl` (P3) arithmetic exactly.
+#
+# Exact score_milli/matched_fields/source_rank/explanation_hash parity
+# against golden_results.json is asserted separately, end to end through the
+# assembled query orchestrator (`query_exec.spl`'s `run_query_v1`), in
+# test/02_integration/spipe/search_golden_query_parity_spec.spl — this closes
+# doc/08_tracking/bug/golden_query_scoring_pipeline_unassembled_2026-08-31.md.
+use std.spec.{describe, it, expect}
+use std.fs.{read_file}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.search.document.{ScopedSearchDocumentV1, ScopedFieldV1}
+use std.common.search.index_engine.{IndexEngine}
+use lib.common.search.field_stats.{build_field_stats}
+
+val FIXTURE_DIR: text = "examples/05_stdlib/spipe/test/fixture/wave4_search/"
+
+fn scoped_doc(id: text, identifier: text, title: text, heading: text,
+              classification: text, body: text) -> ScopedSearchDocumentV1:
+    ScopedSearchDocumentV1.of(id, "r1", [
+        ScopedFieldV1.of("identifier", identifier),
+        ScopedFieldV1.of("title", title),
+        ScopedFieldV1.of("heading", heading),
+        ScopedFieldV1.of("classification", classification),
+        ScopedFieldV1.of("body", body),
+    ], [], "public", "sha256:" + id, "sha256:" + "0" * 64)
+
+# Exact transcription of golden_corpus.json's four documents (fixture_id
+# spipe-wave4-search-golden-v1). Kept in sync with the checked-in file; the
+# first assertion below proves the file itself still matches this shape.
+fn golden_documents() -> [ScopedSearchDocumentV1]:
+    [
+        scoped_doc("A-ascii", "REQ-SPKC-011", "Alpha Search",
+            "Alpha combining é", "search", "alpha alpha and beta"),
+        scoped_doc("A-é", "REQ-SPKC-012", "Alpha Search",
+            "Alpha combining é", "search", "beta alpha"),
+        scoped_doc("A-private", "REQ-PRIVATE-001", "Private Search",
+            "", "private", "private alpha secret-needle"),
+        scoped_doc("A-empty", "ID-EMPTY", "", "", "empty", ""),
+    ]
+
+describe "SPipe golden corpus drives the common index engine":
+    it "parses the checked-in golden corpus and result fixtures to their frozen schema":
+        val corpus_text = read_file(FIXTURE_DIR + "golden_corpus.json")
+        val corpus_parsed = json_parse_with_error(corpus_text)
+        expect(corpus_parsed.1).to_equal("")
+        expect(corpus_text).to_contain("\"schema\":\"spipe-search-golden-corpus-v1\"")
+        expect(corpus_text).to_contain("\"fixture_id\":\"spipe-wave4-search-golden-v1\"")
+        expect(corpus_text).to_contain("\"id\":\"A-ascii\"")
+        expect(corpus_text).to_contain("\"id\":\"A-private\"")
+
+        val results_text = read_file(FIXTURE_DIR + "golden_results.json")
+        val results_parsed = json_parse_with_error(results_text)
+        expect(results_parsed.1).to_equal("")
+        expect(results_text).to_contain("\"schema\": \"spipe-search-golden-results-v1\"")
+        expect(results_text).to_contain("\"document_count\":3")
+
+    it "builds a deterministic index over the exact golden document set":
+        val docs = golden_documents()
+        val engine = IndexEngine.of_documents(docs)
+        expect(engine.document_count()).to_equal(4)
+        expect(engine.contains("A-ascii")).to_equal(true)
+        expect(engine.contains("A-é")).to_equal(true)
+        expect(engine.contains("A-private")).to_equal(true)
+        expect(engine.contains("A-empty")).to_equal(true)
+        expect(engine.contains("A-nonexistent")).to_equal(false)
+
+        val found = engine.find("A-ascii")
+        expect(found != nil).to_equal(true)
+        expect(found.unwrap().document_id).to_equal("A-ascii")
+
+    it "clean rebuild over the golden corpus is idempotent (logical_root parity)":
+        val docs = golden_documents()
+        val first = IndexEngine.of_documents(docs)
+        val second = IndexEngine.of_documents(docs)
+        expect(first.logical_root()).to_equal(second.logical_root())
+        expect(first.logical_root()).to_be_truthy()
+
+        # Rebuild from a differently-ordered but equal document set must still
+        # match, since Segment.build derives its root from content, not
+        # caller-supplied order (§10.2 "clean rebuild equals every valid delta
+        # sequence").
+        val reordered = [docs[3], docs[1], docs[0], docs[2]]
+        val third = IndexEngine.of_documents(reordered)
+        expect(third.logical_root()).to_equal(first.logical_root())
+
+    it "per-field corpus statistics computed from the golden corpus content match field_stats.spl exactly":
+        # Live document lengths (byte length of the field value) for every
+        # public+private document that carries a nonempty `identifier` field,
+        # taken directly from golden_documents() above — same corpus, no
+        # separately-invented numbers.
+        val docs = golden_documents()
+        var lengths: [i64] = []
+        var i = 0
+        while i < docs.len():
+            val ident = docs[i].fields[0]
+            lengths.push(ident.value.len())
+            i = i + 1
+        val stats = build_field_stats("identifier", lengths)
+        expect(stats.is_ok()).to_equal(true)
+        val unwrapped = stats.unwrap()
+        var expected_total: i64 = 0
+        var j = 0
+        while j < lengths.len():
+            expected_total = expected_total + lengths[j]
+            j = j + 1
+        expect(unwrapped.num_docs).to_equal(4)
+        expect(unwrapped.total_length).to_equal(expected_total)
+        expect(unwrapped.field).to_equal("identifier")
+
+    it "rejects an unknown field name (closed BM25_FIELD_NAMES contract)":
+        val rejected = build_field_stats("nonexistent_field", [1, 2])
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal("unknown_field")
+    return ()

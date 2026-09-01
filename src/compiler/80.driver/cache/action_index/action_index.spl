@@ -18,14 +18,10 @@
 # reported, never silently overwritten (see design §14, §18.7 crash safety —
 # an index entry is written via the same atomic-rename protocol as cas_store).
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_move(old_path: text, new_path: text) -> bool
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
+use std.io_runtime.{
+    file_read_result, file_write_exact, file_exists, file_delete,
+    file_move_cross_device, dir_create_all, getpid, time_now_unix_micros
+}
 
 val ACTION_INDEX_HEADER: text = "simple-action-index-v1"
 
@@ -71,17 +67,30 @@ fn action_index_parent_dir(path: text) -> text:
 # never be served).
 fn action_index_read_raw(root: text, ns: CacheNamespace, action_digest: text) -> text?:
     val path = action_index_path(root, ns, action_digest)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return nil
-    val content = rt_file_read_text(path) ?? ""
-    val lines = content.split("\n")
-    if lines.len() < 3:
+    val content = match file_read_result(path):
+        case Ok(value): value
+        case Err(_): return nil
+    # Decode only the three fields that the index format owns.  Splitting the
+    # complete file allocated one text value for every trailing line even
+    # though legacy readers have always ignored fields after the digest.
+    val header_end = content.index_of("\n")
+    if header_end < 0:
         return nil
-    if lines[0] != ACTION_INDEX_HEADER:
+    if content.substring(0, header_end) != ACTION_INDEX_HEADER:
         return nil
-    if lines[1] != action_digest:
+    val action_start = header_end + 1
+    val action_end = content.index_of("\n", action_start)
+    if action_end < 0:
         return nil
-    lines[2]
+    if content.substring(action_start, action_end) != action_digest:
+        return nil
+    val result_start = action_end + 1
+    val result_end = content.index_of("\n", result_start)
+    if result_end < 0:
+        return content.substring(result_start, content.len())
+    content.substring(result_start, result_end)
 
 fn action_index_serialize(action_digest: text, result_manifest_digest: text) -> text:
     "{ACTION_INDEX_HEADER}\n{action_digest}\n{result_manifest_digest}"
@@ -109,14 +118,14 @@ fn action_index_put(root: text, ns: CacheNamespace, action_digest: text, result_
             pass_do_nothing
 
     val path = action_index_path(root, ns, action_digest)
-    rt_dir_create_all(action_index_parent_dir(path))
+    dir_create_all(action_index_parent_dir(path))
     val tmp_dir = "{root}/tmp"
-    rt_dir_create_all(tmp_dir)
-    val tmp = "{tmp_dir}/index-{action_digest}.{rt_getpid()}.{rt_time_now_unix_micros()}.tmp"
-    if not rt_file_write_text(tmp, action_index_serialize(action_digest, result_manifest_digest)):
+    dir_create_all(tmp_dir)
+    val tmp = "{tmp_dir}/index-{action_digest}.{getpid()}.{time_now_unix_micros()}.tmp"
+    if not file_write_exact(tmp, action_index_serialize(action_digest, result_manifest_digest)):
         return IndexPutResult.Conflict("", result_manifest_digest)
-    if not rt_file_move(tmp, path):
-        rt_file_delete(tmp)
+    if not file_move_cross_device(tmp, path):
+        file_delete(tmp)
         # Lost race: re-check what landed. Identical bytes is success; a
         # different value under a lost race is still a conflict.
         match action_index_read_raw(root, ns, action_digest):

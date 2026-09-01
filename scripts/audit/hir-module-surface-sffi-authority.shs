@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+for raw in rt_hash_text rt_transient_heap_promote; do
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+done
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 2 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 2 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 2 ]
+[ "$(grep -o '_sffi_hash_text(' "$module" | wc -l)" -eq 2 ]
+[ "$(grep -o '_sffi_transient_heap_promote(' "$module" | wc -l)" -eq 63 ]
+
+# Every promotion status remains consumed by a guard or returned as the final
+# expression; no successful default may replace a failed ownership transition.
+if grep -Eq '^[[:space:]]+_sffi_transient_heap_promote\([^)]*\)[[:space:]]*$' "$module"; then
+    final_count=$(grep -Ec '^[[:space:]]{4}_sffi_transient_heap_promote\((surface|registry)\)[[:space:]]*$' "$module")
+    [ "$final_count" -eq 2 ]
+fi
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "HIR module-surface SFFI authority audit: PASS (all raw calls confined; promotion order/count unchanged)"
