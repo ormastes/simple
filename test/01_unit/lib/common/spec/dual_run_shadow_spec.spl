@@ -317,3 +317,162 @@ describe "dual_run shadow harness — C oracle vs Simple, 4 migrated pairs":
             checked = checked + 1
             i = i + 1
         assert_equal(checked, 11)
+
+# ---------------------------------------------------------------------------
+# Tranche 2 (2026-09-01) — 7 further pairs, selected mechanically rather than
+# by intuition. The selection rule was:
+#
+#   coverable = (rt_* registered in the interpreter's extern dispatch table)
+#             ∩ (a Simple twin that ACTUALLY EXISTS in src/lib)
+#             − (pairs already covered above)
+#
+# The dispatch-table term is load-bearing: rt_str_hash was deferred from
+# tranche 1 for exactly this reason, and a pair chosen by traffic alone can
+# turn out not to be callable from a spec at all.
+#
+# The "twin actually exists" term is the one that shrank this tranche. The C
+# migration inventory's `replacement:` field mixes LANDED migrations with
+# PLANNED ones, and grepping src/lib for each named function found five that
+# do not exist yet: str_ends_with, str_last_index_of, char_from_code,
+# is_nan_f64, is_inf_f64. Those five are deliberately LEFT UNCOVERED. Writing
+# a placeholder twin for them would make this harness certify agreement
+# between the runtime and a function invented to agree with it, which is
+# worse than no coverage — so they are recorded in the paydown plan instead.
+#
+# Each case below builds a list of DualVerdict and asserts on dual_summarize,
+# rather than hand-rolling a while/assert block per pair.
+#
+# @dual_pair: to_upper_ascii_vs_rt_text_to_upper_ascii mode=value-legacy ref=rt_text_to_upper_ascii cand=std.common.text_ascii.to_upper_ascii
+# @dual_pair: is_ascii_text_vs_rt_text_is_ascii mode=value-legacy ref=rt_text_is_ascii cand=std.common.ascii_pure.is_ascii_text
+# @dual_pair: sqrt_f64_vs_rt_math_sqrt mode=value-legacy ref=rt_math_sqrt cand=std.math.special.sqrt_f64
+# @dual_pair: cbrt_f64_vs_rt_math_cbrt mode=value-legacy ref=rt_math_cbrt cand=std.math.cbrt.cbrt_f64
+# @dual_pair: path_basename_vs_rt_path_basename mode=value-legacy ref=rt_path_basename cand=std.common.path_pure.path_basename
+# @dual_pair: path_dirname_vs_rt_path_dirname mode=value-legacy ref=rt_path_dirname cand=std.common.path_pure.path_dirname
+# @dual_pair: path_ext_vs_rt_path_ext mode=value-legacy ref=rt_path_ext cand=std.common.path_pure.path_ext
+
+use std.common.spec.dual_run.{dual_check_bool, dual_summarize}
+use std.common.text_ascii.{to_upper_ascii}
+use std.common.ascii_pure.{is_ascii_text}
+use std.math.special.{sqrt_f64}
+use std.math.cbrt.{cbrt_f64}
+use std.common.path_pure.{path_basename, path_dirname, path_ext}
+
+extern fn rt_text_to_upper_ascii(s: text) -> text
+extern fn rt_text_is_ascii(s: text) -> bool
+extern fn rt_math_sqrt(x: f64) -> f64
+extern fn rt_math_cbrt(x: f64) -> f64
+extern fn rt_path_basename(p: text) -> text
+extern fn rt_path_dirname(p: text) -> text
+extern fn rt_path_ext(p: text) -> text
+
+describe "dual_run shadow harness — tranche 2, 7 further C/Rust-vs-Simple pairs":
+    # @manual scenario evidence
+    it "to_upper_ascii vs rt_text_to_upper_ascii agrees, incl. non-ASCII left untouched":
+        # @req REQ-SSPEC-LIB
+        step("to_upper_ascii vs rt_text_to_upper_ascii agrees, incl. non-ASCII left untouched")
+        # Non-ASCII vectors matter: "ASCII uppercase" must leave every
+        # multi-byte codepoint byte-for-byte alone. A twin that naively
+        # subtracted 32 from every high byte would pass on pure ASCII and
+        # corrupt these, so they are the discriminating cases, not decoration.
+        val xs = ["", "a", "abc", "ABC", "aBc123", "hello world", "héllo", "日本語abc", "_-+=~", "zZ"]
+        var vs: [DualVerdict] = []
+        var i = 0
+        while i < xs.len():
+            vs.push(dual_check_text("to_upper_ascii", to_upper_ascii(xs[i]), rt_text_to_upper_ascii(xs[i])))
+            i = i + 1
+        val summary = dual_summarize(vs)
+        assert_equal(summary.divergent, 0)
+        assert_equal(summary.total, 10)
+
+    it "is_ascii_text vs rt_text_is_ascii agrees on the ASCII/non-ASCII boundary":
+        # @req REQ-SSPEC-LIB
+        step("is_ascii_text vs rt_text_is_ascii agrees on the ASCII/non-ASCII boundary")
+        val xs = ["", "a", "hello world", "\t\n", "héllo", "日本語", "mixed é ascii", "~", "👍"]
+        var vs: [DualVerdict] = []
+        var i = 0
+        while i < xs.len():
+            vs.push(dual_check_bool("is_ascii_text", is_ascii_text(xs[i]), rt_text_is_ascii(xs[i])))
+            i = i + 1
+        val summary = dual_summarize(vs)
+        assert_equal(summary.divergent, 0)
+        assert_equal(summary.total, 9)
+
+    it "sqrt_f64 vs rt_math_sqrt: exact on exact squares, 3 documented ULP divergences elsewhere":
+        # @req REQ-SSPEC-LIB
+        step("sqrt_f64 vs rt_math_sqrt: exact on exact squares, 3 documented ULP divergences elsewhere")
+        # REAL DIVERGENCE FOUND BY THIS HARNESS — recorded, not papered over.
+        # IEEE-754 REQUIRES sqrt to be correctly rounded, so the two sides must
+        # agree to the last bit. They do not. Measured on this seed:
+        #   sqrt(2.0)    simple 1.414213562373095   oracle 1.4142135623730951
+        #   sqrt(1.0e-10) simple 0.000009999999999999999 oracle 0.00001
+        #   sqrt(2.5)    simple 1.5811388300841895  oracle 1.5811388300841898
+        # rt_math_sqrt is correctly rounded; std.math.special.sqrt_f64 (a
+        # Newton-Raphson refinement) is not, so the SIMPLE side is the defective
+        # one. Filed as doc/08_tracking/bug/sqrt_f64_not_correctly_rounded_2026-09-01.md.
+        #
+        # Rather than relax this pair to a tolerance — which would hide exactly
+        # the drift this harness exists to catch — the divergence is asserted as
+        # a SENTINEL, following the precedent set by the parse_i64 pair above.
+        # Two consequences, both deliberate: agreement is still enforced on the
+        # exactly-representable inputs, and if sqrt_f64 is ever fixed the
+        # sentinel count goes to 0 and THIS TEST TURNS RED, forcing the spec to
+        # be updated rather than silently rotting into a permanent excuse.
+        val exact = [0.0, -0.0, 1.0, 4.0, 9.0, 0.25, 1.0e10]
+        var vs: [DualVerdict] = []
+        var i = 0
+        while i < exact.len():
+            vs.push(dual_check_f64("sqrt_f64", sqrt_f64(exact[i]), rt_math_sqrt(exact[i]), true))
+            i = i + 1
+        val summary = dual_summarize(vs)
+        assert_equal(summary.divergent, 0)
+        assert_equal(summary.total, 7)
+
+        val known_divergent = [2.0, 1.0e-10, 2.5]
+        var sentinels: [DualVerdict] = []
+        var j = 0
+        while j < known_divergent.len():
+            sentinels.push(dual_check_f64("sqrt_f64_sentinel", sqrt_f64(known_divergent[j]),
+                rt_math_sqrt(known_divergent[j]), true))
+            j = j + 1
+        assert_equal(dual_summarize(sentinels).divergent, 3)
+
+    it "cbrt_f64 vs rt_math_cbrt agrees on positive, negative and zero inputs":
+        # @req REQ-SSPEC-LIB
+        step("cbrt_f64 vs rt_math_cbrt agrees on positive, negative and zero inputs")
+        # Negatives are the discriminating cases: cbrt is defined for them
+        # (unlike sqrt), and an implementation routing through pow(x, 1/3)
+        # returns NaN there. bit_exact: false because cbrt is not required to
+        # be correctly rounded, so a last-bit difference would be a legitimate
+        # implementation choice rather than the divergence class of interest.
+        val xs = [0.0, 1.0, 8.0, 27.0, -1.0, -8.0, -27.0, 0.125, 1.0e9]
+        var vs: [DualVerdict] = []
+        var i = 0
+        while i < xs.len():
+            vs.push(dual_check_f64("cbrt_f64", cbrt_f64(xs[i]), rt_math_cbrt(xs[i]), false))
+            i = i + 1
+        val summary = dual_summarize(vs)
+        assert_equal(summary.divergent, 0)
+        assert_equal(summary.total, 9)
+
+    it "path_basename/path_dirname/path_ext agree with their rt_path_* oracles":
+        # @req REQ-SSPEC-LIB
+        step("path_basename/path_dirname/path_ext agree with their rt_path_* oracles")
+        # Three pairs share one case list on purpose: path splitting is where
+        # the three functions must stay mutually consistent, and the awkward
+        # inputs are the same for all three — a trailing slash, a bare
+        # basename with no directory, a dotfile (leading dot is NOT an
+        # extension), a name with several dots, and root.
+        val xs = ["/a/b/c.txt", "c.txt", "/a/b/", "/", "a/b/.hidden", "x.tar.gz", "", "relative/path", "/no_ext"]
+        var base: [DualVerdict] = []
+        var dir: [DualVerdict] = []
+        var ext: [DualVerdict] = []
+        var i = 0
+        while i < xs.len():
+            base.push(dual_check_text("path_basename", path_basename(xs[i]), rt_path_basename(xs[i])))
+            dir.push(dual_check_text("path_dirname", path_dirname(xs[i]), rt_path_dirname(xs[i])))
+            ext.push(dual_check_text("path_ext", path_ext(xs[i]), rt_path_ext(xs[i])))
+            i = i + 1
+        assert_equal(dual_summarize(base).divergent, 0)
+        assert_equal(dual_summarize(dir).divergent, 0)
+        assert_equal(dual_summarize(ext).divergent, 0)
+        assert_equal(dual_summarize(base).total, 9)
