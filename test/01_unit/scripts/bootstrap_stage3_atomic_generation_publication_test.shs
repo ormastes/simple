@@ -18,7 +18,8 @@ printf 'runtime\n' >"$tmp/source/deps/libsimple_runtime.a"
 printf 'hosted\n' >"$tmp/source/deps/libspl_hosted_runtime-test.rlib"
 fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 prepare() {
-    generation_root=$1 nonce=$2
+    control_root=$1 nonce=$2
+    generation_root=$control_root/generations
     mkdir -p "$generation_root"
     bootstrap_stage3_prepare_seed_generation "$tmp/source" "$generation_root" \
         "$fingerprint" simple libsimple_native_all.a \
@@ -28,49 +29,53 @@ prepare() {
     hash=$BOOTSTRAP_STAGE3_PREPARED_HASH
 }
 publish() {
-    bootstrap_stage3_publish_seed_generation "$stage" "$final" "$1" \
-        "$fingerprint" "$hash" "$fingerprint" "$2"
+    bootstrap_stage3_publish_seed_generation "$stage" "$final" \
+        "$control_root/current.env" "$fingerprint" "$hash" "$fingerprint" \
+        "$control_root/bootstrap"
 }
 prepare "$tmp/success" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-publish "$tmp/success.current" "$tmp/success.compat"
-[ -d "$final" ] && [ -f "$tmp/success.current" ]
+publish
+[ -d "$final" ] && [ -f "$tmp/success/current.env" ]
 [ "$(stat -f %Lp "$final" 2>/dev/null || stat -c %a "$final")" = 500 ]
 
 prepare "$tmp/cross-a" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 cross_stage=$stage
-mkdir -p "$tmp/cross-b"
-final=$tmp/cross-b/$(basename -- "$final")
-if publish "$tmp/cross.current" "$tmp/cross.compat"; then exit 1; fi
-[ -d "$cross_stage" ] && [ ! -e "$tmp/cross.current" ]
+mkdir -p "$tmp/cross-a/other-generations"
+final=$tmp/cross-a/other-generations/$(basename -- "$final")
+if publish; then exit 1; fi
+[ -d "$cross_stage" ] && [ ! -e "$tmp/cross-a/current.env" ]
 
-prepare "$tmp/alias-real" cccccccccccccccccccccccccccccccc
-ln -s "$tmp/alias-real" "$tmp/alias"
-stage=$tmp/alias/$(basename -- "$stage")
-final=$tmp/alias/$(basename -- "$final")
-if publish "$tmp/alias.current" "$tmp/alias.compat"; then exit 1; fi
-[ ! -e "$tmp/alias.current" ]
+prepare "$tmp/alias" cccccccccccccccccccccccccccccccc
+mv "$tmp/alias/generations" "$tmp/alias/real-generations"
+ln -s real-generations "$tmp/alias/generations"
+stage=$tmp/alias/generations/$(basename -- "$stage")
+final=$tmp/alias/generations/$(basename -- "$final")
+if publish; then exit 1; fi
+[ ! -e "$tmp/alias/current.env" ]
 
 prepare "$tmp/denied" dddddddddddddddddddddddddddddddd
-chmod 500 "$tmp/denied"
-if publish "$tmp/denied.current" "$tmp/denied.compat"; then exit 1; fi
-chmod 700 "$tmp/denied"
-[ -d "$stage" ] && [ ! -e "$final" ] && [ ! -e "$tmp/denied.current" ]
+chmod 500 "$tmp/denied/generations"
+if publish; then exit 1; fi
+chmod 700 "$tmp/denied/generations"
+[ -d "$stage" ] && [ ! -e "$final" ] && [ ! -e "$tmp/denied/current.env" ]
 
 prepare "$tmp/freeze" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_FAIL_FREEZE=1
 export SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_FAIL_FREEZE
-if publish "$tmp/freeze.current" "$tmp/freeze.compat"; then exit 1; fi
+if publish; then exit 1; fi
 unset SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_FAIL_FREEZE
-[ ! -e "$final" ] && [ ! -e "$tmp/freeze.current" ]
-set -- "$tmp/freeze"/.rejected.*
+[ ! -e "$final" ] && [ ! -e "$tmp/freeze/current.env" ]
+set -- "$tmp/freeze/generations"/.rejected.*
 [ "$#" -eq 1 ] && [ -d "$1" ]
 
-prepare "$tmp/swap" ffffffffffffffffffffffffffffffff
-SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_SWAP_PARENT=1
-export SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_SWAP_PARENT
-if publish "$tmp/swap.current" "$tmp/swap.compat"; then exit 1; fi
-unset SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_SWAP_PARENT
-[ ! -e "$final" ] && [ ! -e "$tmp/swap.current" ]
-set -- "$tmp/swap.swapped."*/.rejected.*
+prepare "$tmp/race" ffffffffffffffffffffffffffffffff
+SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_RACE_AFTER_FREEZE=1
+export SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_RACE_AFTER_FREEZE
+if publish; then exit 1; fi
+unset SIMPLE_BOOTSTRAP_TEST_AUTHORITY_PUBLISH_RACE_AFTER_FREEZE
+[ ! -e "$tmp/race/current.env" ] && [ ! -e "$tmp/race/bootstrap" ]
+set -- "$tmp/race.swapped."*/generations/.rejected.*
 [ "$#" -eq 1 ] && [ -d "$1" ]
+swapped_control=$(dirname -- "$(dirname -- "$1")")
+[ ! -e "$swapped_control/current.env" ] && [ ! -e "$swapped_control/bootstrap" ]
 echo 'BOOTSTRAP_STAGE3_ATOMIC_GENERATION_PUBLICATION_PASS'
