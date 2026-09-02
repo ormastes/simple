@@ -1,0 +1,35 @@
+#!/bin/sh
+
+kernel_phase7_hash_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else return 1
+  fi
+}
+
+kernel_phase7_manifest_value() {
+  awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; found=1 } END { if (!found) exit 1 }' "$2"
+}
+
+kernel_phase7_admit_runtime() (
+  runtime=$1 provenance=$2 cache_receipt=$3 root=$4
+  [ -x "$runtime" ] && [ -f "$provenance" ] && [ -f "$cache_receipt" ] || return 1
+  for tool in ${KERNEL_PHASE7_REQUIRED_TOOLS:-cc ar nm}; do
+    command -v "$tool" >/dev/null 2>&1 || return 1
+  done
+  verifier=stage4_verify_candidate_provenance
+  if [ -n "${KERNEL_PHASE7_PROVENANCE_VERIFY_FN:-}" ]; then
+    [ "${KERNEL_PHASE7_TEST_MODE:-0}" = 1 ] || return 1
+    verifier=$KERNEL_PHASE7_PROVENANCE_VERIFY_FN
+  fi
+  "$verifier" "$provenance" "$runtime" "$root" || return 1
+  version=$($runtime --version 2>&1) || return 1
+  case "$version" in *'bootstrap seed only'*|*'Rust-built'*) return 1 ;; esac
+  [ "$(kernel_phase7_manifest_value artifact_kind "$provenance")" = pure-simple-full-cli ] || return 1
+  [ "$(kernel_phase7_manifest_value schema "$cache_receipt")" = simple-kernel-phase7-runtime-cache-v1 ] || return 1
+  [ "$(kernel_phase7_manifest_value status "$cache_receipt")" = pass ] || return 1
+  [ "$(kernel_phase7_manifest_value ttl_days "$cache_receipt")" = 1 ] || return 1
+  [ "$(kernel_phase7_manifest_value runtime_sha256 "$cache_receipt")" = "$(kernel_phase7_hash_file "$runtime")" ] || return 1
+  [ "$(kernel_phase7_manifest_value provenance_sha256 "$cache_receipt")" = "$(kernel_phase7_hash_file "$provenance")" ] || return 1
+  [ "$(kernel_phase7_manifest_value source_revision "$cache_receipt")" = "$(kernel_phase7_manifest_value source_revision "$provenance")" ] || return 1
+)

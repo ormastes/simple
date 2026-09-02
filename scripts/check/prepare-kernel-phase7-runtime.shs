@@ -4,6 +4,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
 output=${1:-$root/build/check/kernel-phase7/runtime-bootstrap}
 receipt=${2:-$root/build/check/kernel-phase7/runtime.env}
+cache_receipt=${receipt%.env}-cache.env
 
 case "$output" in /*) ;; *) output=$root/$output ;; esac
 case "$receipt" in /*) ;; *) receipt=$root/$receipt ;; esac
@@ -42,7 +43,18 @@ STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenan
 export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 . "$STAGE4_PROVENANCE_HELPER_PATH"
-stage4_verify_candidate_provenance "$provenance" "$runtime" "$root" || {
+. "$root/scripts/check/lib/kernel-phase7-runtime-admission.shs"
+cache_tmp=$cache_receipt.tmp.$$
+{
+  echo schema=simple-kernel-phase7-runtime-cache-v1
+  echo status=pass
+  echo ttl_days=1
+  echo runtime_sha256="$(kernel_phase7_hash_file "$runtime")"
+  echo provenance_sha256="$(kernel_phase7_hash_file "$provenance")"
+  echo source_revision="$(kernel_phase7_manifest_value source_revision "$provenance")"
+} >"$cache_tmp"
+mv "$cache_tmp" "$cache_receipt"
+kernel_phase7_admit_runtime "$runtime" "$provenance" "$cache_receipt" "$root" || {
   echo "error: Phase7 prerequisite rejected non-admitted Stage4 runtime" >&2
   exit 1
 }
@@ -63,6 +75,8 @@ trap 'rm -f "$tmp"' EXIT HUP INT TERM
   echo runtime_sha256="$(hash_file "$runtime")"
   echo provenance_path="$provenance"
   echo provenance_sha256="$(hash_file "$provenance")"
+  echo cache_receipt_path="$cache_receipt"
+  echo cache_receipt_sha256="$(hash_file "$cache_receipt")"
   echo producer_path=scripts/check/prepare-kernel-phase7-runtime.shs
   echo producer_sha256="$(hash_file "$root/scripts/check/prepare-kernel-phase7-runtime.shs")"
   echo cache_policy=isolated-output-plus-bootstrap-ttl-1-day
@@ -72,4 +86,5 @@ trap - EXIT HUP INT TERM
 
 printf 'SIMPLE_PHASE7_RUNTIME=%s\n' "$runtime"
 printf 'SIMPLE_PHASE7_RUNTIME_PROVENANCE=%s\n' "$provenance"
+printf 'SIMPLE_PHASE7_RUNTIME_CACHE_RECEIPT=%s\n' "$cache_receipt"
 printf 'SIMPLE_PHASE7_RUNTIME_RECEIPT=%s\n' "$receipt"
