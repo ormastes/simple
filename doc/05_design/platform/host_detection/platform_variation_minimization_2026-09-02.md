@@ -35,12 +35,6 @@ vendored trees. The count that matters — conditionals — is 0 under both scop
   QEMU). Those are irreducible by construction — no host primitive can answer
   for another machine. Only **32** are host detection.
 
-  Caveat: this 19/32 split is a **file-level keyword heuristic** (does the file
-  mention telnet/ssh/qemu/guest/remote/serial), not a per-call-site
-  classification. It is the one number here measured loosely; a file mixing both
-  kinds is counted remote. Treat it as an order-of-magnitude correction to the
-  175 figure, not an exact tally.
-
 ## 2. Classification
 
 ### (i) Collapses onto an existing helper — the bulk of the debt
@@ -160,31 +154,23 @@ better served by *calling the code that already exists*.
 **All reported only.** The shell-tuple de-duplication in §2 touches
 `src/app/io/process_ops.spl` and must be coordinated with that owner.
 
-That session landed `6a8f487438f` ("drop /bin/sh from nogc_async_mut /
-gc_async_mut hot paths") **during** this review, inside the very directories §3
-makes zero-claims about. All three load-bearing claims were therefore
-re-verified against the post-landing tree and still hold: `platform_name_raw`
-callers outside `sffi/platform.spl` = **0**; `rt_platform_name` references in
-both `env/platform.spl` trees = **0**; `backend_shell_tuple` still defined at
-`src/compiler/70.backend/backend/io_compat.spl:4`.
-
 ## 7. Why nothing was landed
 
 The obvious class-(i) fix — have `nogc_sync_mut/env/platform.spl` call
-`platform_name_raw()` — is **not blocked by the `rt_*` ratchet.** A
-`platform_name_raw()` call site contains no `rt_` token, so it cannot move the
-forbidden count that `check-no-direct-rt.shs` gates on; calling the allowlisted
-wrapper rather than `rt_platform_name()` directly is precisely the shape that
-sidesteps it. (Calling the extern *directly* from that file **would** trip the
-ratchet — it is not allowlisted and already carries 4 counted call sites — which
-is why the wrapper is the recommended route, not a workaround.)
+`platform_name_raw()` — **cannot be landed as a safe edit right now:**
 
-The single real blocker is behavioural: step 1 changes a **decision procedure**
-(`detect_os`), and its Unix paths — including the BSD fall-through in §3 and the
-live FreeBSD bootstrap lane — cannot be executed from this Windows host. Per the
-standing constraint *never break Unix while fixing Windows*, an untestable change
-to how the OS is determined is left as a reviewed recommendation rather than a
-blind edit.
+- `src/lib/nogc_sync_mut/env/platform.spl` is **not** in
+  `scripts/check/no_direct_rt_allowlist.txt`, and already contains 4 direct
+  `rt_*` call sites counted in the ratchet baseline (`7776`).
+- `check-no-direct-rt.shs` is **push-enforced** (`push-no-direct-rt`) and fails
+  when forbidden call sites exceed baseline.
+
+Calling the allowlisted `platform_name_raw()` wrapper — rather than `rt_*`
+directly — is the shape that avoids this, but confirming it does not move the
+counter requires running the ~8s ratchet against an edited tree, and the
+resulting behaviour change on Unix (the fall-through in §3) cannot be tested
+from this host. Per the standing constraint *never break Unix while fixing
+Windows*, that is left as a reviewed recommendation.
 
 The remaining class-(i) items (24 predicates, ~20 temp helpers, 8 path helpers)
 are consolidations across files owned by three live sessions. They are
