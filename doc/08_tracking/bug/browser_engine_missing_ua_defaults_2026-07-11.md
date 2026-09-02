@@ -1,8 +1,28 @@
 # browser_engine: missing UA defaults (h4/h5/h6, blockquote, pre, form/fieldset/dl/etc.)
 
-- Status: open
-- Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+- Status: RESOLVED (re-verified 2026-09-02, bugdb batch triage)
+- Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl`
+  (the module was split since this bug was filed; `tag_defaults` now lives here)
 - Found: 2026-07-11 (senior code review)
+
+## Resolution (2026-09-02)
+Re-read `tag_defaults` in the current tree (source inspection only, on the
+`fix/bugdb-batch-h` worktree at `origin/main` tip `1b76db1d6c3`): `h4`/`h5`/`h6`
+each have explicit branches (`:1149-1163`, font-size 16/13/11px, `bold_v =
+true`, symmetric top/bottom margins), `blockquote`/`figure` has 40px
+left/right margins plus 16px top/bottom (`:1211-1215`), `pre` has
+`font_family_v = "monospace"` and `white_space_nowrap_v = true` (`:1217-1220`),
+and `fieldset`/`legend`/`caption`/`thead`/`tbody`/`tfoot`/`summary`/`details`/
+`article`/`header`/`footer`/`nav`/`section`/`li`/`center`/`dl`/`dd` all have
+branches (`:1227-1300`). `form` still has no explicit branch, but per the real
+HTML UA stylesheet `form` needs nothing beyond `display:block` (already the
+generic-tag default noted as sufficient in the original report), so that is
+not a residual gap. All of this was already fixed before this triage pass —
+no code change was needed. Regression coverage:
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_ua_defaults_spec.spl`
+(pixel-render assertions for blockquote and pre; h4-h6/fieldset/etc. verified
+here by direct source reading only, since the spec DSL could not be executed
+in this session — see PR body for the environment blocker).
 
 ## Summary
 `tag_defaults` provides UA (user-agent) stylesheet defaults for h1–h3, p, body,

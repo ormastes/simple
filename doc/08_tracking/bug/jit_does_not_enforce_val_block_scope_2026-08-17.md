@@ -1,6 +1,27 @@
 # JIT does not enforce `val` block scope; the interpreter does
 
-**Status:** OPEN (P1)
+**Status:** RESOLVED 2026-09-02 — the leak is gone; both engines now reject.
+
+Differential probe (a `val` bound in one `if` body, read in a SIBLING `if`
+body, on aarch64-apple-darwin):
+
+| binary | result |
+|---|---|
+| deployed seed of 2026-07-25 (pre-fix) | `rc=0`, prints **7** — the binding leaked, reproducing this record exactly |
+| seed built from `origin/main` `1b76db1d6c3` | `rc=1`, ``error: semantic: variable `idx3` not found`` |
+
+The fresh seed's Cranelift path is the thing that now refuses it — it reports
+`GlobalLoad: unresolved identifier 'idx3'` from codegen before the semantic
+error surfaces — so this is not merely the interpreter arm being consulted.
+That said, the verifying host's local build cannot complete a JIT module at
+all (unresolved `rt_struct_alloc` drops every module to the interpreter), so
+what is proven is that the JIT no longer SILENTLY ACCEPTS the out-of-scope
+read; a full JIT-executed run of the same probe was not obtainable here.
+Guarded by `scripts/check/check-named-ctor-and-val-scope.shs`, which FAILs
+naming `val_leaked_across_sibling_if(printed 7)` on the old binary and PASSes
+on the fixed one.
+
+**Previous status:** OPEN (P1)
 **Filed:** 2026-08-17
 **Component:** JIT scope handling
 **Class:** engine divergence — the same source is an error in one engine and silently succeeds in the other

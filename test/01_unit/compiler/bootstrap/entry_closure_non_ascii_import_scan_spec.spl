@@ -1,0 +1,72 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+use compiler.driver.driver_source_loading.{
+    _driver_entry_import_module_paths, _driver_entry_sibling_module_paths
+}
+
+describe "entry-closure import scan over non-ASCII sources":
+    """`text.len()` and `text[a:b]` are BYTE-indexed while `char_code_at` is
+    CHAR-indexed. The closure line cursor scanned with one and sliced with the
+    other, so it desynced at the FIRST multi-byte character in a file and every
+    later line was mis-sliced. Measured on
+    src/lib/gc_async_mut/gpu/engine2d/engine.spl (em-dash on line 2): 1 of 39
+    `use` declarations were found, dropping 28 modules from the native-build
+    source closure and surfacing 772 bogus `unresolved type` errors against
+    innocent importing modules.
+
+    The pre-existing unicode case in
+    entry_closure_physical_source_dedup_spec.spl did not catch this: it has a
+    single `use` immediately after the non-ASCII text, so the small cursor
+    drift still landed inside the keyword. The defect only becomes visible with
+    SEVERAL imports after the multi-byte character, which is what these steps
+    pin."""
+
+    it "finds every import that follows a multi-byte character":
+        # One em-dash on line 1, then eight ordinary imports. Pre-fix this
+        # returned only the first; the cursor drift grew with each line.
+        val content = "# 2D Engine — Engine Facade\n" +
+            "use std.a.one\n" +
+            "use std.a.two\n" +
+            "use std.a.three\n" +
+            "use std.a.four\n" +
+            "use std.a.five\n" +
+            "use std.a.six\n" +
+            "use std.a.seven\n" +
+            "use std.a.eight\n"
+        val imports = _driver_entry_import_module_paths(content)
+        expect(imports).to_equal([
+            "std.a.one", "std.a.two", "std.a.three", "std.a.four",
+            "std.a.five", "std.a.six", "std.a.seven", "std.a.eight"])
+
+    it "is unaffected by how wide the multi-byte characters are":
+        # 2-, 3- and 4-byte code points each drift the cursor differently.
+        val two = _driver_entry_import_module_paths("# é\nuse std.b.one\nuse std.b.two\n")
+        val three = _driver_entry_import_module_paths("# 文\nuse std.b.one\nuse std.b.two\n")
+        val four = _driver_entry_import_module_paths("# 𝄞\nuse std.b.one\nuse std.b.two\n")
+        expect(two).to_equal(["std.b.one", "std.b.two"])
+        expect(three).to_equal(["std.b.one", "std.b.two"])
+        expect(four).to_equal(["std.b.one", "std.b.two"])
+
+    it "keeps the docstring toggle correct across non-ASCII lines":
+        # A mis-sliced line can also flip `in_doc`, silently swallowing every
+        # import after it. Imports inside the docstring must stay excluded and
+        # the one after it must still be found.
+        val content = "\"\"\"\nprose — with an em-dash\nuse fake.inside\n\"\"\"\n" +
+            "use std.c.real\nuse std.c.also\n"
+        expect(_driver_entry_import_module_paths(content)).to_equal(
+            ["std.c.real", "std.c.also"])
+
+    it "scans sibling declarations past a multi-byte character too":
+        # The sibling scanner shares the same line cursor and had the same bug.
+        val content = "# héader\nmod alpha\nmod beta\n"
+        expect(_driver_entry_sibling_module_paths(content)).to_equal([".alpha", ".beta"])
+
+    it "still resolves a pure-ASCII source unchanged":
+        # Control: the fix must not perturb the common path.
+        val content = "# plain\nuse std.d.one\nuse std.d.two\n"
+        expect(_driver_entry_import_module_paths(content)).to_equal(
+            ["std.d.one", "std.d.two"])

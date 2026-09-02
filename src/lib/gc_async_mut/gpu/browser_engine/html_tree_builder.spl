@@ -200,7 +200,7 @@ fn _token_would_create_node(
         val tag = tok.tag_name
         if tag == "html" or tag == "head" or tag == "body":
             return false
-        return tag != "style" and tag != "noscript"
+        return tag != "noscript"
     if tok.token_kind == HtmlTokenKind.EndTag:
         return tok.tag_name == "script" and in_script
     if tok.token_kind == HtmlTokenKind.Character:
@@ -326,6 +326,8 @@ pub fn html_tree_builder_build_with_parse_limits(
     var script_in_template = false
     var script_content = ""
     var script_src = ""
+    var in_style = false
+    var style_content = ""
     var skipped_raw_text_tag = ""
     var truncated = tokenized.truncated
 
@@ -414,7 +416,20 @@ pub fn html_tree_builder_build_with_parse_limits(
                 val script_node = _apply_attrs(script_el, tok.attrs)
                 stack.push_open(script_node)
 
-            elif t == "style" or t == "noscript":
+            elif t == "style":
+                # be_dom_event_path_family_arity_and_style_serialize_2026-08-19:
+                # <style> used to be entirely dropped (skipped_raw_text_tag),
+                # so it never became a DOM node and be_dom_serialize_html could
+                # not possibly emit it. Give it a real element node with its
+                # raw text content as a child, mirroring <script>/<title>.
+                val style_el_raw = BeDomNode.element_with_id(next_node_id, t)
+                next_node_id = next_node_id + 1
+                val style_node = _apply_attrs(style_el_raw, tok.attrs)
+                stack.push_open(style_node)
+                in_style = true
+                style_content = ""
+
+            elif t == "noscript":
                 skipped_raw_text_tag = t
 
             else:
@@ -503,6 +518,18 @@ pub fn html_tree_builder_build_with_parse_limits(
                 script_content = ""
                 script_src = ""
                 script_in_template = false
+            elif et == "style" and in_style:
+                # Store content as a real DOM text child, same shape as script.
+                var style_top = stack.top()
+                style_top.children = [
+                    BeDomNode.text_node(next_node_id, style_content)
+                ]
+                next_node_id = next_node_id + 1
+                stack.replace_top(style_top)
+                if stack.find_tag("style") >= 0:
+                    stack.close_top()
+                in_style = false
+                style_content = ""
             elif et == skipped_raw_text_tag:
                 skipped_raw_text_tag = ""
             elif et == "html" or et == "body" or et == "head":
@@ -515,6 +542,8 @@ pub fn html_tree_builder_build_with_parse_limits(
             # M15: Accumulate text inside <script> tags
             if in_script:
                 script_content = "{script_content}{data}"
+            elif in_style:
+                style_content = "{style_content}{data}"
             elif skipped_raw_text_tag != "":
                 pass_dn
             elif be_dom_get_tag(stack.top()) == "title":
