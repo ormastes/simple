@@ -383,6 +383,18 @@ pub fn runtime_symbols_for_baremetal(is_baremetal: bool) -> Vec<&'static str> {
 /// These are the extern "C" functions exported by the runtime library
 /// that can be called from compiled Simple code.
 pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
+    // Core-required symbols that used to live ONLY in
+    // CORE_REQUIRED_RUNTIME_SYMBOLS: without entries here the generated
+    // runtime-symbol table never contained them, so the seed JIT's static
+    // provider could not resolve rt_struct_alloc and dropped every module to
+    // the interpreter (~100-1000x slowdown on every `run`).
+    "__simple_runtime_init",
+    "__simple_runtime_shutdown",
+    "rt_struct_alloc",
+    "rt_realloc",
+    "print_raw",
+    "rt_time_now_unix",
+    "rt_entropy_hardware_ready",
     // AOP runtime operations
     "rt_aop_invoke_around",
     "rt_aop_proceed",
