@@ -9,7 +9,12 @@ use app.build.targets.artifact_receipt.{
     target_cache_namespace_v1, target_action_key_v1
 }
 use std.common.crypto.sha256.{sha256_text}
-use app.io.mod.{file_exists, file_read, file_hash_sha256}
+use app.io.mod.{file_exists, file_read, file_hash_sha256, file_atomic_write, dir_create_all}
+use compiler.common.cache.darwin_runtime_provider_manifest.{
+    darwin_runtime_artifact_error_v1,
+    darwin_runtime_provider_manifest_content_identity_v1
+}
+use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 
 val NATIVE_ACTION_INPUT_SCHEMA_V1 = "simple-native-action-input-v1"
 val NATIVE_ACTION_INPUT_PRODUCER_V1 = "simple-compiler-action-evidence-v1"
@@ -28,12 +33,133 @@ struct NativeActionInputIdentityV1:
     profile: text
     dependency_manifest_digest: text
     imported_closure_digest: text
+    target_triple: text = ""
+    architecture: text = ""
+    cpu_features: text = ""
+    deployment_target: text = ""
+    sdk_identity: text = ""
+    backend: text = ""
+    optimization: text = ""
+    object_format: text = ""
+    linker_policy: text = ""
+    linker_tool_identity: text = ""
+    runtime_provider_receipt: text = ""
+    runtime_artifact_digest: text = ""
     action_key: text
     errors: [text]
 
 fn _empty_native_action_input_v1(error: text) -> NativeActionInputIdentityV1:
     NativeActionInputIdentityV1(
-        "", "", "", "", "", "", "", "", "", "", "", "", "", [error]
+        producer: "", target: "", action: "", entry: "", tool_path: "",
+        tool_artifact_digest: "", tool_behavior_digest: "",
+        producer_abi_digest: "", target_identity_digest: "", profile: "",
+        dependency_manifest_digest: "", imported_closure_digest: "",
+        target_triple: "", architecture: "", cpu_features: "", deployment_target: "",
+        sdk_identity: "", backend: "", optimization: "", object_format: "",
+        linker_policy: "", linker_tool_identity: "", runtime_provider_receipt: "",
+        runtime_artifact_digest: "", action_key: "",
+        errors: [error]
+    )
+
+fn native_identity_value_valid_v1(value: text) -> bool:
+    value.trim().len() > 0 and not value.contains("\n") and not value.contains("\r")
+
+fn darwin_macho_slice_error_v1(path: text, architecture: text) -> text:
+    val error = darwin_runtime_artifact_error_v1(path, architecture)
+    if error == "": "" else: "target-identity-error: " + error
+
+fn canonical_darwin_target_triple_v1(value: text) -> text:
+    val parts = value.trim().lower().split("-")
+    if parts.len() != 3 or parts[1] != "apple" or parts[2] != "darwin": return ""
+    val architecture = mir_target_context_normalize_arch(parts[0])
+    if architecture != "aarch64" and architecture != "x86_64": return ""
+    architecture + "-apple-darwin"
+
+fn canonical_darwin_deployment_target_v1(value: text) -> text:
+    val parts = value.trim().split(".")
+    if parts.len() == 0 or parts.len() > 3: return ""
+    var numbers: [i64] = []
+    for part in parts:
+        if part == "": return ""
+        val number = part.to_i64() ?? -1
+        if number < 0: return ""
+        numbers.push(number)
+    while numbers.len() < 3:
+        numbers.push(0)
+    numbers[0].to_text() + "." + numbers[1].to_text() + "." + numbers[2].to_text()
+
+fn canonical_darwin_cpu_features_v1(value: text) -> text:
+    val cpu = value.trim().lower()
+    if cpu.contains("\n") or cpu.contains("\r"): return ""
+    "cpu=" + (if cpu == "": "default" else: cpu) + "|features=default"
+
+fn darwin_sdk_identity_v1(sdk_root: text) -> text:
+    var settings_path = sdk_root + "/SDKSettings.json"
+    if not file_exists(settings_path): settings_path = sdk_root + "/SDKSettings.plist"
+    if not file_exists(settings_path): return ""
+    val settings_digest = file_hash_sha256(settings_path)
+    if not digest_is_sha256(settings_digest): return ""
+    sha256_text("simple-apple-sdk-identity-v1|settings=64:" + settings_digest)
+
+fn darwin_link_tool_identity_v1(cache_dir: text) -> text:
+    val path = cache_dir + "/native_link_tool_identity.receipt"
+    if not file_exists(path): return ""
+    val lines = file_read(path).trim().split("\n")
+    if lines.len() != 6 or lines[0] != "simple-darwin-link-tool-identity-v1" or
+            not lines[1].starts_with("path=") or
+            not lines[2].starts_with("artifact=") or
+            not lines[3].starts_with("behavior=") or
+            not lines[4].starts_with("identity=") or
+            lines[5] != "policy=darwin-dead-strip-v1":
+        return ""
+    val tool_path = lines[1][5:]
+    val artifact = lines[2][9:]
+    val behavior = lines[3][9:]
+    val identity = lines[4][9:]
+    if not native_identity_value_valid_v1(tool_path) or
+            not digest_is_sha256(artifact) or not digest_is_sha256(behavior) or
+            not digest_is_sha256(identity) or not file_exists(tool_path) or
+            file_hash_sha256(tool_path) != artifact:
+        return ""
+    val expected_behavior = sha256_text(
+        "simple-darwin-link-tool-behavior-v1|artifact=64:" + artifact +
+        "|policy=darwin-dead-strip-v1"
+    )
+    val expected_identity = sha256_text(
+        "simple-darwin-link-tool-identity-v1|artifact=64:" + artifact +
+        "|behavior=64:" + expected_behavior
+    )
+    if behavior == expected_behavior and identity == expected_identity: identity else: ""
+
+fn darwin_target_identity_digest_v1(
+    target_triple: text, architecture: text, cpu_features: text,
+    deployment_target: text,
+    sdk_identity: text, backend: text, optimization: text, object_format: text,
+    linker_policy: text, linker_tool_identity: text, runtime_provider_receipt: text,
+    runtime_artifact_digest: text = ""
+) -> text:
+    val runtime_identity = if runtime_artifact_digest == "":
+        runtime_provider_receipt
+    else:
+        runtime_artifact_digest
+    val values = [
+        target_triple, architecture, cpu_features, deployment_target, sdk_identity, backend,
+        optimization, object_format, linker_policy, linker_tool_identity,
+        runtime_provider_receipt,
+        runtime_identity
+    ]
+    for value in values:
+        if not native_identity_value_valid_v1(value):
+            return ""
+    sha256_text(
+        "simple-darwin-target-identity-v1|" +
+        sha256_text(target_triple) + sha256_text(architecture) +
+        sha256_text(cpu_features) + sha256_text(deployment_target) +
+        sha256_text(sdk_identity) +
+        sha256_text(backend) + sha256_text(optimization) +
+        sha256_text(object_format) + sha256_text(linker_policy) +
+        sha256_text(linker_tool_identity) +
+        sha256_text(runtime_provider_receipt) + sha256_text(runtime_identity)
     )
 
 fn native_action_input_receipt_text_v1(identity: NativeActionInputIdentityV1) -> text:
@@ -50,6 +176,18 @@ fn native_action_input_receipt_text_v1(identity: NativeActionInputIdentityV1) ->
         "\nprofile=" + identity.profile +
         "\ndependency-manifest=" + identity.dependency_manifest_digest +
         "\nimported-closure=" + identity.imported_closure_digest +
+        "\ntarget-triple=" + identity.target_triple +
+        "\narchitecture=" + identity.architecture +
+        "\ncpu-features=" + identity.cpu_features +
+        "\ndeployment-target=" + identity.deployment_target +
+        "\nsdk-identity=" + identity.sdk_identity +
+        "\nbackend=" + identity.backend +
+        "\noptimization=" + identity.optimization +
+        "\nobject-format=" + identity.object_format +
+        "\nlinker-policy=" + identity.linker_policy +
+        "\nlinker-tool-identity=" + identity.linker_tool_identity +
+        "\nruntime-provider-receipt=" + identity.runtime_provider_receipt +
+        "\nruntime-artifact-digest=" + identity.runtime_artifact_digest +
         "\naction-key=" + identity.action_key + "\n"
 
 fn parse_native_action_input_receipt_v1(value: text) -> NativeActionInputIdentityV1:
@@ -58,9 +196,13 @@ fn parse_native_action_input_receipt_v1(value: text) -> NativeActionInputIdentit
         "producer=", "target=", "action=", "entry=", "tool-path=",
         "tool-artifact=", "tool-behavior=", "producer-abi=",
         "target-identity=", "profile=", "dependency-manifest=",
-        "imported-closure=", "action-key="
+        "imported-closure=", "target-triple=", "architecture=", "cpu-features=",
+        "deployment-target=", "sdk-identity=", "backend=", "optimization=",
+        "object-format=", "linker-policy=", "linker-tool-identity=",
+        "runtime-provider-receipt=",
+        "runtime-artifact-digest=", "action-key="
     ]
-    if lines.len() != 14 or lines[0] != NATIVE_ACTION_INPUT_SCHEMA_V1:
+    if lines.len() != 26 or lines[0] != NATIVE_ACTION_INPUT_SCHEMA_V1:
         return _empty_native_action_input_v1(
             "target-identity-error: malformed-native-action-input-receipt"
         )
@@ -72,9 +214,20 @@ fn parse_native_action_input_receipt_v1(value: text) -> NativeActionInputIdentit
             )
         i = i + 1
     var identity = NativeActionInputIdentityV1(
-        lines[1][9:], lines[2][7:], lines[3][7:], lines[4][6:], lines[5][10:],
-        lines[6][14:], lines[7][14:], lines[8][13:], lines[9][16:],
-        lines[10][8:], lines[11][20:], lines[12][17:], lines[13][11:], []
+        producer: lines[1][9:], target: lines[2][7:], action: lines[3][7:],
+        entry: lines[4][6:], tool_path: lines[5][10:],
+        tool_artifact_digest: lines[6][14:], tool_behavior_digest: lines[7][14:],
+        producer_abi_digest: lines[8][13:], target_identity_digest: lines[9][16:],
+        profile: lines[10][8:], dependency_manifest_digest: lines[11][20:],
+        imported_closure_digest: lines[12][17:], target_triple: lines[13][14:],
+        architecture: lines[14][13:], cpu_features: lines[15][13:],
+        deployment_target: lines[16][18:], sdk_identity: lines[17][13:],
+        backend: lines[18][8:], optimization: lines[19][13:],
+        object_format: lines[20][14:], linker_policy: lines[21][14:],
+        linker_tool_identity: lines[22][21:],
+        runtime_provider_receipt: lines[23][25:],
+        runtime_artifact_digest: lines[24][24:], action_key: lines[25][11:],
+        errors: []
     )
     if value != native_action_input_receipt_text_v1(identity):
         identity.errors.push("target-identity-error: non-canonical-native-action-input-receipt")
@@ -84,7 +237,12 @@ fn native_action_input_error_v1(
     repo_root: text, cache_dir: text, expected_target: text,
     expected_product: text, expected_producer: text,
     expected_entry: text, expected_artifact_kind: text,
-    current_tool_digest: text, identity: NativeActionInputIdentityV1
+    current_tool_digest: text, identity: NativeActionInputIdentityV1,
+    expected_target_triple: text = "", expected_architecture: text = "",
+    expected_deployment_target: text = "", expected_sdk_identity: text = "",
+    expected_runtime_provider_receipt: text = "",
+    expected_runtime_artifact_digest: text = "", expected_sdk_root: text = "",
+    expected_cpu: text = ""
 ) -> text:
     if identity.errors.len() > 0:
         return identity.errors[0]
@@ -101,6 +259,65 @@ fn native_action_input_error_v1(
             not digest_is_sha256(identity.dependency_manifest_digest) or
             not digest_is_sha256(identity.imported_closure_digest):
         return "target-identity-error: invalid-native-action-input-identity"
+    val canonical_expected_darwin_target = canonical_darwin_target_triple_v1(
+        expected_target_triple
+    )
+    if canonical_expected_darwin_target != "" or
+            identity.target_triple.ends_with("-apple-darwin"):
+        val canonical_target = canonical_expected_darwin_target
+        val canonical_architecture = mir_target_context_normalize_arch(expected_architecture)
+        val canonical_deployment = canonical_darwin_deployment_target_v1(
+            expected_deployment_target
+        )
+        val canonical_cpu_features = canonical_darwin_cpu_features_v1(expected_cpu)
+        if canonical_target == "" or identity.target_triple != canonical_target:
+            return "target-identity-error: target-triple-mismatch"
+        if identity.architecture != canonical_architecture:
+            return "target-identity-error: architecture-mismatch"
+        if identity.cpu_features != canonical_cpu_features:
+            return "target-identity-error: cpu-features-mismatch"
+        if identity.deployment_target != canonical_deployment:
+            return "target-identity-error: deployment-target-mismatch"
+        if identity.sdk_identity != expected_sdk_identity:
+            return "target-identity-error: sdk-identity-mismatch"
+        if identity.runtime_provider_receipt != expected_runtime_provider_receipt:
+            return "target-identity-error: runtime-provider-receipt-mismatch"
+        if identity.runtime_artifact_digest != expected_runtime_artifact_digest:
+            return "target-identity-error: runtime-artifact-digest-mismatch"
+        if not digest_is_sha256(identity.sdk_identity) or
+                not digest_is_sha256(identity.linker_tool_identity) or
+                not digest_is_sha256(identity.runtime_provider_receipt) or
+                not digest_is_sha256(identity.runtime_artifact_digest):
+            return "target-identity-error: invalid-darwin-bound-identity"
+        val live_sdk_identity = darwin_sdk_identity_v1(expected_sdk_root)
+        if live_sdk_identity == "" or live_sdk_identity != identity.sdk_identity:
+            return "target-identity-error: current-sdk-identity-mismatch"
+        val live_linker_tool_identity = darwin_link_tool_identity_v1(cache_dir)
+        if live_linker_tool_identity == "" or
+                live_linker_tool_identity != identity.linker_tool_identity:
+            return "target-identity-error: current-linker-tool-identity-mismatch"
+        val live_runtime_identity =
+            darwin_runtime_provider_manifest_content_identity_v1(
+                cache_dir + "/native_runtime_provider_manifest.receipt",
+                identity.architecture
+            )
+        if live_runtime_identity == "" or
+                live_runtime_identity != identity.runtime_artifact_digest:
+            return "target-identity-error: current-runtime-provider-bytes-mismatch"
+        if identity.object_format != "mach-o":
+            return "target-identity-error: object-format-mismatch"
+        if identity.linker_policy != "darwin-dead-strip-v1":
+            return "target-identity-error: linker-policy-mismatch"
+        val target_identity = darwin_target_identity_digest_v1(
+            identity.target_triple, identity.architecture, identity.cpu_features,
+            identity.deployment_target,
+            identity.sdk_identity, identity.backend, identity.optimization,
+            identity.object_format, identity.linker_policy,
+            identity.linker_tool_identity,
+            identity.runtime_provider_receipt, identity.runtime_artifact_digest
+        )
+        if target_identity.len() == 0 or identity.target_identity_digest != target_identity:
+            return "target-identity-error: darwin-target-identity-mismatch"
     val tool_absolute = repo_root + "/" + identity.tool_path
     if not file_exists(tool_absolute) or
             file_hash_sha256(tool_absolute) != identity.tool_artifact_digest or
@@ -156,7 +373,11 @@ fn load_current_native_action_input_v1(
     repo_root: text, cache_dir: text, expected_target: text,
     expected_product: text, expected_producer: text,
     expected_entry: text, expected_artifact_kind: text,
-    current_tool_digest: text
+    current_tool_digest: text, expected_target_triple: text = "",
+    expected_architecture: text = "", expected_deployment_target: text = "",
+    expected_sdk_identity: text = "", expected_runtime_provider_receipt: text = "",
+    expected_runtime_artifact_digest: text = "", expected_sdk_root: text = "",
+    expected_cpu: text = ""
 ) -> NativeActionInputIdentityV1:
     val path = cache_dir + "/inputs/current.receipt"
     if not file_exists(path):
@@ -167,11 +388,26 @@ fn load_current_native_action_input_v1(
     val error = native_action_input_error_v1(
         repo_root, cache_dir, expected_target, expected_product, expected_producer,
         expected_entry,
-        expected_artifact_kind, current_tool_digest, identity
+        expected_artifact_kind, current_tool_digest, identity,
+        expected_target_triple, expected_architecture, expected_deployment_target,
+        expected_sdk_identity, expected_runtime_provider_receipt,
+        expected_runtime_artifact_digest, expected_sdk_root, expected_cpu
     )
     if error.len() > 0:
         identity.errors.push(error)
     identity
+
+fn publish_current_native_action_input_v1(
+    cache_dir: text, identity: NativeActionInputIdentityV1
+) -> text:
+    val body = native_action_input_receipt_text_v1(identity)
+    val parsed = parse_native_action_input_receipt_v1(body)
+    if parsed.errors.len() > 0:
+        return parsed.errors[0]
+    if not dir_create_all(cache_dir + "/inputs") or
+            not file_atomic_write(cache_dir + "/inputs/current.receipt", body):
+        return "target-identity-error: current-native-action-input-write-failed"
+    ""
 
 fn aggregate_action_identity_text_v1(
     target: text, product: text, producer: text,
@@ -188,16 +424,27 @@ fn aggregate_action_identity_digest_v1(
     target: text, product: text, producer: text,
     tool_behavior_digest: text, dependency_manifest_digest: text
 ) -> text:
-    if target.trim().len() == 0 or not digest_is_sha256(tool_behavior_digest) or
+    if target.trim().len() == 0 or product.trim().len() == 0 or
+            producer.trim().len() == 0 or
+            not digest_is_sha256(tool_behavior_digest) or
             not digest_is_sha256(dependency_manifest_digest):
         return ""
-    sha256_text(aggregate_action_identity_text_v1(
-        target, product, producer, tool_behavior_digest, dependency_manifest_digest
-    ))
+    sha256_text(
+        AGGREGATE_ACTION_IDENTITY_SCHEMA_V1 + "|" +
+        target.len().to_text() + ":" + target +
+        "|" + product.len().to_text() + ":" + product +
+        "|" + producer.len().to_text() + ":" + producer +
+        "|64:" + tool_behavior_digest + "|64:" + dependency_manifest_digest
+    )
 
 export NATIVE_ACTION_INPUT_SCHEMA_V1, NATIVE_ACTION_INPUT_PRODUCER_V1
 export AGGREGATE_ACTION_IDENTITY_SCHEMA_V1
 export NativeActionInputIdentityV1
 export native_action_input_receipt_text_v1, parse_native_action_input_receipt_v1
 export native_action_input_error_v1, load_current_native_action_input_v1
+export darwin_target_identity_digest_v1, publish_current_native_action_input_v1
+export darwin_macho_slice_error_v1
+export canonical_darwin_target_triple_v1, canonical_darwin_deployment_target_v1
+export canonical_darwin_cpu_features_v1, darwin_sdk_identity_v1
+export darwin_link_tool_identity_v1
 export aggregate_action_identity_text_v1, aggregate_action_identity_digest_v1

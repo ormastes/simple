@@ -1,0 +1,72 @@
+# @req MBH-REQ-001 MBH-REQ-002 MBH-REQ-003 MBH-REQ-004 MBH-REQ-005 MBH-REQ-006 MBH-REQ-007 MBH-REQ-008 MBH-REQ-009 MBH-NFR-001 MBH-NFR-002 MBH-NFR-003 MBH-NFR-004 MBH-NFR-005 MBH-NFR-006
+use std.spec.*
+use std.io.{file_read}
+use std.io_runtime.{process_run}
+
+fn check_reverse_reference_key_v1_frame() -> text:
+    file_read("src/compiler/00.common/cache/reverse_reference_key.spl") ?? ""
+
+fn check_reverse_reference_projection_receipt() -> text:
+    file_read("src/compiler/80.driver/cache/reverse_reference_receipt.spl") ?? ""
+
+fn check_macos_bootstrap_receipt_v1() -> text:
+    file_read("scripts/check/check-macos-bootstrap-receipt.shs") ?? ""
+
+fn check_phase_compatibility_manifest() -> text:
+    file_read("src/compiler/00.common/cache/phase_compatibility_manifest.spl") ?? ""
+
+fn check_native_macho_slice_receipt() -> text:
+    file_read("scripts/check/check-macos-reverse-reference-m4.shs") ?? ""
+
+fn check_full_cli_test_runner_build_receipt() -> text:
+    file_read("scripts/check/check-macos-reverse-reference-m4.shs") ?? ""
+
+fn check_producer_bound_cache_identity() -> text:
+    file_read("src/app/build/targets/action_identity.spl") ?? ""
+
+fn check_universal_promotion_without_rebuild() -> text:
+    file_read("scripts/release/macos-universal-m5.shs") ?? ""
+
+describe "macOS bootstrap reverse-reference harmonization":
+    it "keeps M0 and M1 structural evidence separate from native admission":
+        step("Build the native thin compiler lane")
+        val (output, errors, status) = process_run(
+            "/bin/sh", ["scripts/check/check-macos-bootstrap-receipt.shs", "--portable"])
+        expect(status).to_equal(0)
+        expect(errors).to_equal("")
+        expect(output).to_contain("STRUCTURAL_ONLY")
+        expect(check_macos_bootstrap_receipt_v1()).to_contain("--portable")
+        expect(check_producer_bound_cache_identity()).to_contain("NativeActionInputIdentityV1")
+
+    it "binds M2 projection receipts to the canonical framed key":
+        step("Publish ReverseReferenceKeyV1 projection receipts")
+        expect(check_reverse_reference_key_v1_frame()).to_contain("ReverseReferenceKeyV1")
+        expect(check_reverse_reference_projection_receipt()).to_contain("ReverseReferenceGenerationReceiptV1")
+        expect(check_reverse_reference_projection_receipt()).to_contain("owner_generation")
+        expect(check_reverse_reference_projection_receipt()).to_contain("root_generation")
+
+    it "keeps M3 compatible reuse fail closed under receipt drift":
+        step("Attempt compatible Phase 2 to Phase 3 reuse")
+        val (output, errors, status) = process_run(
+            "/bin/sh", ["scripts/check/check-m3-phase2-phase3-production.shs"])
+        expect(status).to_equal(0)
+        expect(errors).to_equal("")
+        expect(output).to_contain("M3 production publication, admission, ownership, and materialization wiring")
+        expect(check_phase_compatibility_manifest()).to_contain("reverse_reference_receipt_digest")
+
+    it "keeps M4 and M5 native qualification blocked without retained native evidence":
+        step("Compose and admit the universal candidate")
+        val (m4_output, m4_errors, m4_status) = process_run(
+            "/bin/sh", ["scripts/check/check-macos-reverse-reference-m4.shs", "--self-test"])
+        expect(m4_status).to_equal(0)
+        expect(m4_errors).to_equal("")
+        expect(m4_output).to_contain("M4 structural self-test PASS: 8 fixtures")
+        val (m5_output, m5_errors, m5_status) = process_run(
+            "/bin/sh", ["scripts/check/check-macos-universal-m5.shs"])
+        expect(m5_status).to_equal(0)
+        expect(m5_errors).to_equal("")
+        expect(m5_output).to_contain("M5 portable structural self-test PASS")
+        expect(m5_output).to_contain("M5 native status: BLOCKED")
+        expect(check_native_macho_slice_receipt()).to_contain("require_native_macho")
+        expect(check_full_cli_test_runner_build_receipt()).to_contain("tool-builds.env")
+        expect(check_universal_promotion_without_rebuild()).to_contain("pointer-only")

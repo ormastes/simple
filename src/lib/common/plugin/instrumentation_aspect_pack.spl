@@ -1,0 +1,126 @@
+use common.plugin.aspect_params.{AspectParamsV1}
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1}
+use std.common.string_core.{bytes_to_text}
+use std.common.aspect_pack.{
+    ApkBuildResultV1, ApkCatalogEntryV2, ApkModuleSourceV3,
+    APK_ACT_LAZY_FACET, APK_ACT_STARTUP, APK_ACT_STATIC,
+    APK_CHUNK_CODE, APK_CHUNK_FLAG_STORED, APK_ENTRY_FACET,
+    APK_ENTRY_STARTUP, apk_activate_startup, apk_build_catalog_v2,
+    apk_build_pack_v3, apk_loader_generation, apk_loader_last_error,
+    apk_loader_new, apk_loader_register_pack, apk_loader_set_host_offer_v1,
+    apk_try_facet_binding_v1
+}
+
+pub const INSTRUMENTATION_ASPECT_ABI_V1 = "sha256:simple.instrumentation.aspect.v1"
+pub const COVERAGE_ASPECT_KEY_V1 = "simple.instrumentation/CoverageV1"
+pub const LOGGING_ASPECT_KEY_V1 = "simple.instrumentation/LoggingV1"
+pub const COVERAGE_RUNTIME_COLLECTOR_V1 = "simple.runtime.coverage.collector.v1"
+
+pub enum InstrumentationLaneV1:
+    Bootstrap
+    Test
+
+pub enum InstrumentationActivationModeV1:
+    Static
+    Startup
+    LazyFacet
+
+pub struct InstrumentationAspectBundleV1:
+    pack: ApkBuildResultV1
+    catalog: ApkBuildResultV1
+    coverage_activation: i64
+    logging_activation: i64
+    params: AspectParamsV1
+
+pub struct InstrumentationStartupReceiptV1:
+    ok: bool
+    error: text
+    loader: i64
+    generation: i64
+    activation_count: i64
+    payload_size: i64
+    consumer_mode: text
+
+pub fn instrumentation_activation_v1(lane: InstrumentationLaneV1,
+        startup: bool) -> i64:
+    match lane:
+        case InstrumentationLaneV1.Bootstrap: APK_ACT_STATIC
+        case InstrumentationLaneV1.Test:
+            if startup: APK_ACT_STARTUP else: APK_ACT_LAZY_FACET
+
+pub fn instrumentation_activation_mode_v1(mode: InstrumentationActivationModeV1) -> i64:
+    match mode:
+        case InstrumentationActivationModeV1.Static: APK_ACT_STATIC
+        case InstrumentationActivationModeV1.Startup: APK_ACT_STARTUP
+        case InstrumentationActivationModeV1.LazyFacet: APK_ACT_LAZY_FACET
+
+fn instrumentation_params_payload_v1(params: AspectParamsV1) -> [u8]:
+    val framed = "CoverageConsumerV1\n{COVERAGE_RUNTIME_COLLECTOR_V1}\nAspectParamsV1\n{params.hdr.schema_name}\n{params.hdr.schema_major}\n{params.hdr.schema_minor}\n{params.hdr.present}\n{params.log_calls}\n{params.log_assignments}\n{params.compile_log_level}\n{params.runtime_log_level}\n{params.mcdc_mode}\n{params.mcdc_manifest_sha256}\n"
+    framed.bytes()
+
+pub fn build_instrumentation_aspect_bundle_v1(lane: InstrumentationLaneV1,
+        params: AspectParamsV1) -> InstrumentationAspectBundleV1:
+    val coverage_activation = instrumentation_activation_v1(lane, true)
+    val logging_activation = instrumentation_activation_v1(lane, false)
+    val payload = instrumentation_params_payload_v1(params)
+    val pack = apk_build_pack_v3([
+        ApkModuleSourceV3("coverage.v1", "simple.instrumentation.CoverageV1",
+            INSTRUMENTATION_ASPECT_ABI_V1, "", "", "default", "startup",
+            APK_CHUNK_CODE, APK_CHUNK_FLAG_STORED, 4096, payload),
+        ApkModuleSourceV3("logging.v1", "simple.instrumentation.LoggingV1",
+            INSTRUMENTATION_ASPECT_ABI_V1, "", "", "default", "",
+            APK_CHUNK_CODE, APK_CHUNK_FLAG_STORED, 1, payload)])
+    val catalog = apk_build_catalog_v2([
+        ApkCatalogEntryV2(COVERAGE_ASPECT_KEY_V1, "instrumentation.apk",
+            "coverage.v1", APK_ENTRY_STARTUP, coverage_activation,
+            INSTRUMENTATION_ASPECT_ABI_V1),
+        ApkCatalogEntryV2(LOGGING_ASPECT_KEY_V1, "instrumentation.apk",
+            "logging.v1", APK_ENTRY_FACET, logging_activation,
+            INSTRUMENTATION_ASPECT_ABI_V1)])
+    InstrumentationAspectBundleV1(pack, catalog, coverage_activation,
+        logging_activation, params)
+
+pub fn activate_instrumentation_coverage_startup_v1(
+        params: AspectParamsV1) -> InstrumentationStartupReceiptV1:
+    """Register and activate the APK STARTUP route in the current process.
+
+    Success requires the exact coverage binding to be resident after the
+    transactional activation. Merely building a pack or parsing a catalog is
+    not activation evidence. This receipt does not prove that another process,
+    including a subsequently spawned test child, consumed the binding.
+    """
+    val bundle = build_instrumentation_aspect_bundle_v1(
+        InstrumentationLaneV1.Test, params)
+    if not bundle.pack.ok:
+        return InstrumentationStartupReceiptV1(false, bundle.pack.error_message, -1, 0, 0, 0, "")
+    if not bundle.catalog.ok:
+        return InstrumentationStartupReceiptV1(false, bundle.catalog.error_message, -1, 0, 0, 0, "")
+    val loader = apk_loader_new()
+    apk_loader_set_host_offer_v1(loader, HostOfferV1(
+        ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true,
+        "simple.test-runner.instrumentation.v1",
+        [IfaceId(COVERAGE_ASPECT_KEY_V1, 1, 0,
+            INSTRUMENTATION_ASPECT_ABI_V1)],
+        [INSTRUMENTATION_ASPECT_ABI_V1], [], []))
+    if not apk_loader_register_pack(loader, "instrumentation.apk", bundle.pack.bytes):
+        return InstrumentationStartupReceiptV1(false, apk_loader_last_error(loader), loader, 0, 0, 0, "")
+    val activated = apk_activate_startup(loader, bundle.catalog.bytes)
+    if activated != 1 or apk_loader_last_error(loader) != "":
+        return InstrumentationStartupReceiptV1(false, apk_loader_last_error(loader),
+            loader, apk_loader_generation(loader), activated, 0, "")
+    val binding = apk_try_facet_binding_v1(loader, "simple.instrumentation",
+        "CoverageV1")
+    if not binding.ok or not binding.found or binding.payload.len() == 0:
+        return InstrumentationStartupReceiptV1(false,
+            "coverage STARTUP binding is not resident", loader,
+            apk_loader_generation(loader), activated, binding.payload.len(), "")
+    val payload = bytes_to_text(binding.payload)
+    val consumer_prefix = "CoverageConsumerV1\n{COVERAGE_RUNTIME_COLLECTOR_V1}\n"
+    if not payload.starts_with(consumer_prefix):
+        return InstrumentationStartupReceiptV1(false,
+            "coverage STARTUP binding has no supported runtime consumer", loader,
+            apk_loader_generation(loader), activated, binding.payload.len(), "")
+    InstrumentationStartupReceiptV1(true, "", loader,
+        apk_loader_generation(loader), activated, binding.payload.len(),
+        COVERAGE_RUNTIME_COLLECTOR_V1)

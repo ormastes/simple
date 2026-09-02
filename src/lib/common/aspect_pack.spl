@@ -61,6 +61,8 @@ use std.common.compress.deflate.{deflate_compress, deflate_decompress}
 
 use std.common.crypto.sha256.{sha256_u8_hex}
 use lib.common.crypto.ed25519.{pure_ed25519_verify}
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1, PluginAnswerV1, NegotiateVerdict, negotiate}
 
 val APK_MAGIC_V1: text = "SMFAPK1\0"
 val APK_CATALOG_MAGIC_V1: text = "SMFACAT1"
@@ -1671,6 +1673,7 @@ var _ld_expected_variant_fingerprint: [text] = []
 # two gates above: empty means the deployer stated no expectation, so the gate
 # is SKIPPED rather than silently passed.
 var _ld_expected_core_layout: [text] = []
+var _ld_host_offer: [HostOfferV1?] = []
 # design §9.6: the profile this loader has selected. Empty = single-profile.
 var _ld_profile: [text] = []
 # design §14.7: number of bindings this loader has actually RELEASED.
@@ -1762,6 +1765,7 @@ fn apk_loader_new() -> i64:
     _ld_expected_core_abi = _ld_expected_core_abi.push("")
     _ld_expected_variant_fingerprint = _ld_expected_variant_fingerprint.push("")
     _ld_expected_core_layout = _ld_expected_core_layout.push("")
+    _ld_host_offer = _ld_host_offer.push(nil)
     _ld_profile = _ld_profile.push("")
     _ld_unloads = _ld_unloads.push(0)
     _ld_catalog_invalidations = _ld_catalog_invalidations.push(0)
@@ -1811,6 +1815,25 @@ fn apk_loader_set_expected_core_layout(ld: i64, expected_core_layout_hash: text)
     more than the public surface. Leave unset ("") to SKIP the gate; the
     design itself says this field is "zero when public-only"."""
     _ld_expected_core_layout[ld] = expected_core_layout_hash
+
+fn apk_loader_set_host_offer_v1(ld: i64, offer: HostOfferV1):
+    """Install the mandatory interface-specific host offer before first load."""
+    if _ld_binding_index[ld].keys().len() > 0:
+        _ld_last_error[ld] = "PLUG-E-STATE: host offer cannot change after facet publication"
+        return
+    _ld_host_offer[ld] = Some(offer)
+
+fn apk_negotiate_module_v1(ld: i64, iface_name: text,
+        load: ApkModuleLoadV1) -> NegotiateVerdict:
+    if _ld_host_offer[ld] == nil:
+        return NegotiateVerdict.NameMismatch("host-offer-missing")
+    val answer = PluginAnswerV1(
+        ParamHeader("simple.plugin.PluginAnswerV1", 1, 0, 0),
+        IfaceId(iface_name, 1, 0, load.module_abi_hash), 0, true,
+        [], _apk_module_identity_v1(load.module_id, load.aspect_id,
+            load.module_abi_hash, load.required_core_public_abi_hash,
+            load.required_core_layout_hash, load.variant_fingerprint), [])
+    negotiate(_ld_host_offer[ld].unwrap(), answer)
 
 fn apk_loader_select_profile(ld: i64, profile_id: text):
     """design §9.6: select the deployment profile this process runs. Every
@@ -2192,10 +2215,14 @@ fn _apk_acquire_facet_body_opened(ld: i64, catalog: [u8],
     if route.abi_hash != "" and route.abi_hash != load.module_abi_hash:
         _ld_last_error[ld] = "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"
         return _apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}")
-    # design §17: required_core_public_abi_hash and variant_fingerprint are
-    # carried by every module and are readable above (load.*), but a deployer
-    # must OPT IN with the expected value before either is enforced — with
-    # nothing set the gate is SKIPPED, not silently passed.
+    val plugin_verdict = apk_negotiate_module_v1(ld, route.facet_key, load)
+    if not plugin_verdict.accepted():
+        val code = plugin_verdict.code()
+        _ld_last_error[ld] = "{code}: aspect-pack negotiation refused {facet_key}"
+        return _apk_facet_error(code, _ld_last_error[ld])
+    # Legacy core/layout/variant checks remain additive while callers migrate
+    # their identities into HostOfferV1. Interface negotiation above is never
+    # skipped and always runs before publication or handle return.
     if _ld_expected_core_abi[ld] != "" and _ld_expected_core_abi[ld] != load.required_core_public_abi_hash:
         _ld_last_error[ld] = "core public ABI mismatch for {facet_key}: expected {_ld_expected_core_abi[ld]} vs module {load.required_core_public_abi_hash}"
         return _apk_facet_error("APK_CORE_ABI_MISMATCH", "core public ABI mismatch for {facet_key}: expected {_ld_expected_core_abi[ld]} vs module {load.required_core_public_abi_hash}")

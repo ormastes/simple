@@ -48,9 +48,20 @@ fn _sffi_hir_type_discriminant(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
+val MIR_TYPE_TRANSPORT_RECEIPT_LIMIT: i64 = 16
+
+# Cached two-sided HirType transport probe. Default OFF; the dedicated gate
+# avoids enabling the broad MIR trace that previously generated enough output
+# to make the diagnostic run memory-bound.
+var mir_tag_probe_state: i64 = -1
+
 fn _mir_tag_probe_enabled() -> bool:
-    """Two-sided HirType tag probe, off unless SIMPLE_MIR_TAG_PROBE=1."""
-    (env_get("SIMPLE_MIR_TAG_PROBE") ?? "") == "1"
+    if mir_tag_probe_state < 0:
+        if (env_get("SIMPLE_MIR_TAG_PROBE") ?? "") == "1":
+            mir_tag_probe_state = 1
+        else:
+            mir_tag_probe_state = 0
+    mir_tag_probe_state == 1
 
 # Cached [mir-optional-inner] trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_optional_inner_trace_state: i64 = -1
@@ -188,6 +199,11 @@ impl MirLowering:
     me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""
         self.unsafe_depth = 0
+        self.mir_tag_probe_active_function = fn_.name + ""
+        self.type_transport_owner = fn_.name + ""
+        self.type_transport_context = "signature"
+        self.type_transport_param_index = -1
+        self.type_transport_caller_disc = -2
         val trace_enabled = mir_lower_trace_enabled()
         val bootstrap_trace = trace_enabled and self.ambient_bootstrap_enabled()
         if trace_enabled:
@@ -215,39 +231,21 @@ impl MirLowering:
         var params: [MirType] = []
         var pmi = 0
         while pmi < fn_.params.len():
+            val signature_param = fn_.params[pmi]
+            val signature_param_type = signature_param.type_
+            self.type_transport_context = "signature-param"
+            self.type_transport_param_index = pmi
+            self.type_transport_caller_disc = _sffi_hir_type_discriminant(
+                signature_param_type.kind)
             val lowered_param = if gpu_kernel_target == "vulkan":
-                self.lower_vulkan_kernel_param_type(fn_.params[pmi])
+                self.lower_vulkan_kernel_param_type(signature_param)
             elif gpu_kernel_target == "cuda":
-                self.lower_cuda_kernel_param_type(fn_.params[pmi])
+                self.lower_cuda_kernel_param_type(signature_param)
             else:
-                # TWO-SIDED TAG PROBE (2026-09-02, OFF unless
-                # SIMPLE_MIR_TAG_PROBE=1; zero cost and zero reads when unset).
-                # This is the crossing E-MIR-TYPE-ZeroKind is suspected to be
-                # minted at: a HirType read out of an ARRAY ELEMENT and passed
-                # BY VALUE into a method -- the exact shape
-                # mir_lowering_types.spl:574-580 documents as unsafe under the
-                # admitted Stage 2 native ABI.
-                # Reading the discriminant HERE and comparing with what
-                # lower_type sees separates the two candidate roots that have
-                # opposite fixes:
-                #   caller non-zero, callee 0  -> dead copy MINTED IN FLIGHT
-                #                                 (repair the ABI crossing)
-                #   caller 0 too               -> already dead upstream
-                #                                 (the producer is earlier)
-                # Deliberately reads only the discriminant of the SAME field
-                # lower_type is about to read -- no extra fields, no `.span`.
-                # A previous "diagnostic-only" round that read five extra
-                # fields off `.span` was NOT behaviour-neutral (see :1112), so
-                # this stays minimal and default-off.
-                # SCOPED to the suspect functions. An unscoped probe printed one
-                # line per parameter per function across all 760 modules and drove
-                # RSS to 10 GB in 3 minutes on a host whose swap is already
-                # committed -- it would have OOM-killed the run and taught us
-                # nothing. Only the ZeroKind victims matter here.
-                if _mir_tag_probe_enabled() and fn_.name.contains("compile_specialized_template"):
-                    val probe_disc = _sffi_hir_type_discriminant(fn_.params[pmi].type_)
-                    eprint("[mir-tag-probe] fn={fn_.name} param={pmi} caller_disc={probe_disc}")
-                self.lower_type(fn_.params[pmi].type_)
+                if _mir_tag_probe_enabled():
+                    self.mir_tag_probe_pending_site = "param:{pmi}"
+                    self.mir_tag_probe_pending_caller_disc = self.type_transport_caller_disc
+                self.lower_type(signature_param_type)
             params = params.push(lowered_param)
             pmi = pmi + 1
 
@@ -268,7 +266,15 @@ impl MirLowering:
 
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-start {fn_.name}"
-        val return_type = self.lower_type(fn_.return_type)
+        val signature_return_type = fn_.return_type
+        self.type_transport_context = "return"
+        self.type_transport_param_index = -1
+        self.type_transport_caller_disc = _sffi_hir_type_discriminant(
+            signature_return_type.kind)
+        if _mir_tag_probe_enabled():
+            self.mir_tag_probe_pending_site = "return"
+            self.mir_tag_probe_pending_caller_disc = self.type_transport_caller_disc
+        val return_type = self.lower_type(signature_return_type)
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-done {fn_.name}"
         if bootstrap_trace:
@@ -535,6 +541,9 @@ impl MirLowering:
             print "[mir-lower] lower_function:body-start {fn_.name}"
         if bootstrap_trace:
             print "[mir-lower] real-lower:body {fn_.name}"
+        self.type_transport_context = "body"
+        self.type_transport_param_index = -1
+        self.type_transport_caller_disc = -2
         # Thread the declared return type into the body ONLY for `-> bool`
         # functions, so lower_block_expected can put a bare trailing `.?` in
         # bool position (see its tail_bool_position block). Deliberately not
@@ -699,6 +708,7 @@ impl MirLowering:
             fn_result.vhdl_metadata = fn_.vhdl_metadata
 
         self.unsafe_depth = 0
+        self.mir_tag_probe_active_function = ""
         fn_result
 
     me lower_vulkan_kernel_param_type(param: HirParam) -> MirType:
@@ -857,6 +867,25 @@ impl MirLowering:
         if type_ == nil:
             self.error_fatal("missing HIR type during MIR lowering", nil)
             return MirType(kind: MirTypeKind.I64)
+        val callee_disc = _sffi_hir_type_discriminant(type_.kind)
+        if (_mir_tag_probe_enabled()
+                and self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT):
+            val probe_site = self.mir_tag_probe_pending_site
+            val caller_disc = self.mir_tag_probe_pending_caller_disc
+            self.mir_tag_probe_pending_site = "recursive-or-other"
+            self.mir_tag_probe_pending_caller_disc = -2
+            if type_.kind == 0:
+                eprint("[mir-tag-probe] fn={self.mir_tag_probe_active_function} site={probe_site} caller_disc={caller_disc} callee_disc={callee_disc} kindzero=true\n")
+        if type_.kind == 0:
+            if self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT:
+                self.type_transport_receipts = self.type_transport_receipts + 1
+                eprint("[mir-type-invariant] receipt={self.type_transport_receipts}/{MIR_TYPE_TRANSPORT_RECEIPT_LIMIT} owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} kindzero=true\n")
+                val relation = if self.type_transport_caller_disc > 0:
+                    "changed-at-call-boundary"
+                else:
+                    "already-zero-at-caller"
+                self.error_fatal("E-MIR-TYPE-Transport: raw-zero HirType kind observed at MIR boundary owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} relation={relation}", nil)
+            return MirType.i64()
         # [mir-lower-type-probe] -- DIAGNOSTIC, default OFF, gated by
         # SIMPLE_MIRB_TRACE via mir_trace_enabled().
         #
@@ -1148,7 +1177,9 @@ impl MirLowering:
         # for every fatal raised while that list is installed. Reported as a
         # scope hint only; a session that reads it as the offending function
         # searches the wrong file (this cost two bootstrap runs on 2026-09-02).
-        val fn_ctx = if self.current_function_names.len() > 0:
+        val fn_ctx = if self.mir_tag_probe_active_function != "":
+            "active-function:" + self.mir_tag_probe_active_function
+        elif self.current_function_names.len() > 0:
             "scope-tail:" + self.current_function_names[self.current_function_names.len() - 1]
         else:
             "<no-function-context>"

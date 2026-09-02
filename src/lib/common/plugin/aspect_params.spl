@@ -1,0 +1,76 @@
+use common.plugin.iface_id.{ParamHeader, ParamExt}
+
+pub const ASPECT_PARAM_LOG_CALLS = 0
+pub const ASPECT_PARAM_LOG_ASSIGNMENTS = 1
+pub const ASPECT_PARAM_COMPILE_LOG_LEVEL = 2
+pub const ASPECT_PARAM_RUNTIME_LOG_LEVEL = 3
+pub const ASPECT_PARAM_MCDC_MODE = 4
+pub const ASPECT_PARAM_MCDC_MANIFEST_SHA256 = 5
+pub const ASPECT_CUTOVER_DUAL_EXT_V1 = "simple.instrumentation.cutover/dual"
+pub const ASPECT_CUTOVER_ATOMIC_EXT_V1 = "simple.instrumentation.cutover/atomic"
+pub const ASPECT_CUTOVER_REJECTED_EXT_V1 = "simple.instrumentation.cutover/rejected"
+
+pub struct AspectParamsV1:
+    hdr: ParamHeader
+    log_calls: bool
+    log_assignments: bool
+    compile_log_level: i64
+    runtime_log_level: i64
+    mcdc_mode: i64
+    mcdc_manifest_sha256: text
+    ext: [ParamExt]
+
+impl AspectParamsV1:
+    static fn defaults() -> AspectParamsV1:
+        AspectParamsV1(
+            hdr: ParamHeader("simple.aop.AspectParams", 1, 0, 0),
+            log_calls: false,
+            log_assignments: false,
+            compile_log_level: 1,
+            runtime_log_level: 1,
+            mcdc_mode: 0,
+            mcdc_manifest_sha256: "",
+            ext: [ParamExt(ASPECT_CUTOVER_ATOMIC_EXT_V1, 1, [],
+                "sha256:simple.instrumentation.cutover.atomic.v1")])
+
+    fn has(ordinal: i64) -> bool:
+        ((self.hdr.present >> ordinal) & 1) == 1
+
+pub fn aspect_log_level_from_text(value: text) -> i64:
+    match value.to_lower():
+        case "trace": 0
+        case "debug": 1
+        case "info": 2
+        case "warn" | "warning": 3
+        case "error": 4
+        case "off" | "none": 5
+        case _: 1
+
+pub fn aspect_log_level_to_text(value: i64) -> text:
+    match value:
+        case 0: "trace"
+        case 1: "debug"
+        case 2: "info"
+        case 3: "warn"
+        case 4: "error"
+        case 5: "off"
+        case _: "debug"
+
+pub fn aspect_mcdc_mode_from_text(value: text) -> i64:
+    match value.to_lower():
+        case "on": 1
+        case "dynamic": 2
+        case _: 0
+
+pub fn aspect_coverage_cutover_state_v1(params: AspectParamsV1) -> text:
+    for extension in params.ext:
+        if extension.ext_name == ASPECT_CUTOVER_DUAL_EXT_V1 or
+                extension.ext_name == ASPECT_CUTOVER_REJECTED_EXT_V1:
+            return "rejected"
+    "atomic-apk-only"
+
+pub fn aspect_coverage_cutover_policy_v1(configured: text) -> Result<text, text>:
+    val requested = configured.trim()
+    if requested == "" or requested == "atomic-apk-only":
+        return Ok("atomic-apk-only")
+    Err("PLUG-E-COVERAGE-POLICY: selected coverage policy is atomic APK-only; rejected `" + requested + "`")

@@ -22,8 +22,9 @@
 
 use std.crypto.sha256.{sha256_text}
 use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq}
-use std.io_runtime.{dir_create_all, env_get_opt}
+use std.io_runtime.{dir_create_all}
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use compiler.driver.cache.cache_root.{cache_project_namespace, machine_cache_root}
 
 @unsafe(reason: "raw CAS file write status ABI", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -101,13 +102,7 @@ val RESULT_MANIFEST_HEADER: text = "simple-result-manifest-v2"
 # ============================================================================
 
 fn cas_root() -> text:
-    # Keep the cache root's unset-to-default policy at the runtime facade.
-    # `env_get_opt` preserves the old nullable runtime result before this
-    # module deliberately normalizes it for the total `cas_root` API.
-    val env = env_get_opt("SIMPLE_CACHE") ?? ""
-    if env != "":
-        return env
-    "build/cache_cas"
+    machine_cache_root()
 
 fn cas_version_text() -> text:
     "{CAS_SCHEMA_VERSION}"
@@ -133,6 +128,15 @@ fn cas_parent_dir(path: text) -> text:
 # aside and the store starts empty under the current version.
 fn cas_open(root: text) -> bool:
     dir_create_all(root)
+    val project_path = "{root}/PROJECT"
+    val project_namespace = cache_project_namespace()
+    if cas_file_exists_raw(project_path):
+        val stored_project = file_read_nullable(project_path) ?? ""
+        if stored_project.trim() != project_namespace:
+            return false
+    else:
+        if not cas_file_write_text_raw(project_path, project_namespace):
+            return false
     val vpath = "{root}/VERSION"
     val current = cas_version_text()
     if cas_file_exists_raw(vpath):
@@ -350,7 +354,7 @@ fn result_manifest_get(root: text, action_digest: text) -> ResultManifest?:
             cas_quarantine(root, path)
             return nil
 
-export ActionManifest, ResultManifest
+export ActionManifest, ResultManifest, CAS_MANIFEST_HEADER, RESULT_MANIFEST_HEADER
 export cas_root, cas_open, cas_put, cas_get, cas_has, cas_quarantine
 export cas_blob_path, cas_action_path, cas_parent_dir
 export action_manifest_serialize, action_manifest_parse, action_put, action_get
