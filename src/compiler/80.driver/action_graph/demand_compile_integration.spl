@@ -134,19 +134,22 @@ fn demand_compile_bind_mir_admission_v1(
             admission.dependency_set_digest == ""):
         return false
     execution.mir_admission_digest = admission.dependency_set_digest
-    if execution.backend_plan!.enqueue_llvm_promotion:
-        val identity = execution.backend_identity!
-        val budget = execution.foreground_budget!
+    val plan = execution.backend_plan!
+    val identity = execution.backend_identity!
+    val budget = execution.foreground_budget!
+    if plan.enqueue_llvm_promotion:
         val promotion_started_ns = demand_compile_counter_now_ns_v1()
-        execution.promotion_queue = native_promotion_enqueue_v1(
+        val promotion_queue = native_promotion_enqueue_v1(
             execution.promotion_queue, NativePromotionRequestV1(
-                execution.backend_plan!.promotion_action_digest, identity,
+                plan.promotion_action_digest, identity,
                 demand_backend_identity_digest_v1(identity), execution.build_ordinal,
                 budget.priority - 1, budget.memory_bytes, budget.cancelled))
-        execution.counters.action_scheduled_count =
-            execution.counters.action_scheduled_count + 1
+        var counters = execution.counters
+        counters.action_scheduled_count = counters.action_scheduled_count + 1
         _ = demand_compile_counter_add_phase_v1(
-            &mut execution.counters, "llvm-promotion", promotion_started_ns)
+            &mut counters, "llvm-promotion", promotion_started_ns)
+        execution.promotion_queue = promotion_queue
+        execution.counters = counters
     true
 
 fn demand_compile_complete_action_v1(
@@ -170,20 +173,29 @@ fn demand_compile_complete_action_v1(
             diagnostics, memory_peak_bytes))
     execution.coordinator = Some(coordinator)
     if committed.accepted:
-        execution.counters.action_completed_count =
-            execution.counters.action_completed_count + 1
+        var counters = execution.counters
+        counters.action_completed_count = counters.action_completed_count + 1
+        execution.counters = counters
     committed.accepted
 
 fn demand_compile_source_open_v1(execution: &mut DemandCompileExecutionV1):
-    execution.counters.source_open_count = execution.counters.source_open_count + 1
+    var counters = execution.counters
+    counters.source_open_count = counters.source_open_count + 1
+    execution.counters = counters
 
 fn demand_compile_section_read_v1(execution: &mut DemandCompileExecutionV1):
-    execution.counters.section_read_count = execution.counters.section_read_count + 1
+    var counters = execution.counters
+    counters.section_read_count = counters.section_read_count + 1
+    execution.counters = counters
 
 fn demand_compile_phase_finish_v1(
     execution: &mut DemandCompileExecutionV1, phase: text, started_ns: i64
 ) -> bool:
-    demand_compile_counter_add_phase_v1(&mut execution.counters, phase, started_ns)
+    var counters = execution.counters
+    val accepted = demand_compile_counter_add_phase_v1(
+        &mut counters, phase, started_ns)
+    execution.counters = counters
+    accepted
 
 fn demand_compile_phase_begin_v1() -> i64:
     demand_compile_counter_now_ns_v1()
@@ -204,11 +216,12 @@ fn demand_compile_finalize_baseline_v1(
                 execution, baseline_action_id,
                 "driver-baseline-owner", true, output_identity, [], 0):
             return false
+    var counters = execution.counters
     _ = demand_compile_counter_add_phase_v1(
-        &mut execution.counters, "baseline-backend",
-        baseline_started_ns)
+        &mut counters, "baseline-backend", baseline_started_ns)
     _ = demand_compile_counter_add_phase_v1(
-        &mut execution.counters, "total", total_started_ns)
+        &mut counters, "total", total_started_ns)
+    execution.counters = counters
     execution.baseline_started_ns = 0
     true
 
@@ -251,8 +264,10 @@ fn demand_compile_complete_scc_outputs_v1(
         cache_root, authority, outputs, admission.dependency_set_digest,
         baseline_artifact_identity, baseline_artifact_digest)
     if published.is_ok():
+        var counters = execution.counters
         _ = demand_compile_counter_add_phase_v1(
-            &mut execution.counters, "link", started_ns)
+            &mut counters, "link", started_ns)
+        execution.counters = counters
         return true
     false
 

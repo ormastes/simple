@@ -3,10 +3,8 @@ use simple_parser::Parser;
 use std::fs;
 use std::path::PathBuf;
 
-const FILES: [&str; 8] = [
+const FILES: [&str; 6] = [
     "src/compiler/80.driver/action_graph/demand_compile_integration.spl",
-    "src/compiler/80.driver/demand_mir_evidence_builder.spl",
-    "src/compiler/80.driver/smf/runtime_std_package_set.spl",
     "src/compiler/80.driver/action_graph/artifact_service_bridge.spl",
     "src/compiler/80.driver/driver_aot_native_output.spl",
     "src/compiler/80.driver/driver_aot_smf_output.spl",
