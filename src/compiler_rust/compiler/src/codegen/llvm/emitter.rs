@@ -1529,6 +1529,29 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                     ))
                 }
             };
+            // CARVE-OUT for bare `to_i64` / `to_int` -- identical defect and
+            // identical fix to codegen/llvm/functions.rs. mangle.rs leaves
+            // these bare ONLY when the receiver type was erased, on the
+            // contract that codegen routes them through the redirect table
+            // (`to_int | to_i64 => rt_string_to_int`, this file ~line 348).
+            // This cast block matched first and returned, so that entry was
+            // dead code and `text.to_i64()` yielded the receiver's own tagged
+            // word -- measured as `(value.to_i64() ?? 0) > 0` compiling to
+            // `test %rsi,%rsi; setle`, rejecting `--threads 1` and accepting
+            // `--threads 0`. rt_to_int_dynamic parses a registry-validated
+            // heap string and is the IDENTITY otherwise, so an erased NUMERIC
+            // receiver is bit-for-bit unchanged. Cross-platform correctness
+            // fix, not a Windows workaround.
+            // doc/08_tracking/bug/windows_msvc_stage2_rejected_struct_receiver_route_threads_2026-09-01.md
+            if matches!(method, "to_i64" | "to_int")
+                && value.get_type() == self.backend.runtime_int_type()
+            {
+                let parsed = self.call_runtime("rt_to_int_dynamic", &[value.into()])?;
+                if let Some(d) = dest {
+                    self.set(*d, parsed);
+                }
+                return Ok(());
+            }
             if let Some(d) = dest {
                 self.set(*d, value.into());
             }

@@ -4182,6 +4182,24 @@ pub extern "C" fn rt_string_to_lower(string: RuntimeValue) -> RuntimeValue {
     }
 }
 
+/// Receiver-dispatched `.to_i64()` / `.to_int()` for the native lanes when the
+/// receiver TYPE WAS ERASED. Parses a heap string; IDENTITY for everything
+/// else, so a genuinely-integer receiver is bit-for-bit unchanged.
+///
+/// Twin of `rt_to_int_dynamic` in `src/runtime/runtime_native.c`. Exists
+/// because the LLVM integer-cast block matched bare `to_i64` before the
+/// bare-method redirect table, emitting an identity coercion on a TEXT handle
+/// -- measured as `(value.to_i64() ?? 0) > 0` compiling to `test %rsi,%rsi;
+/// setle`, which rejected `--threads 1` and accepted `--threads 0`. This is a
+/// cross-platform correctness fix, not a Windows workaround.
+#[no_mangle]
+pub extern "C" fn rt_to_int_dynamic(value: RuntimeValue) -> i64 {
+    if matches!(value.heap_type(), Some(HeapObjectType::String)) {
+        return rt_string_to_int(value);
+    }
+    value.to_raw() as i64
+}
+
 /// Convert a string to an integer, returns 0 on failure
 #[no_mangle]
 pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {

@@ -797,6 +797,9 @@ int64_t  rt_string_trim_start(int64_t value);
 int64_t  rt_string_trim_end(int64_t value);
 int64_t  rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_off);
 int64_t  rt_string_to_int(int64_t value);
+/* Receiver-dispatched to_i64/to_int: parses a registry-validated heap string,
+ * IDENTITY for everything else. See runtime_native.c for the full rationale. */
+int64_t  rt_to_int_dynamic(int64_t value);
 int64_t  rt_string_to_int_lenient(int64_t value);
 void     rt_print_str(const uint8_t* ptr, uint64_t len);
 void     rt_println_str(const uint8_t* ptr, uint64_t len);

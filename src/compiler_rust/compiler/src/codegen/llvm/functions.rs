@@ -2576,6 +2576,52 @@ impl LlvmBackend {
                         _ => self.context_ref().i64_type(),
                     };
                     let converted = self.coerce_value_to_type(recv_val, Some(int_type.into()), builder)?;
+                    // CARVE-OUT for bare `to_i64` / `to_int`.
+                    //
+                    // `pipeline/native_project/mangle.rs` leaves these BARE only
+                    // when the receiver TYPE WAS ERASED, on the contract that
+                    // codegen routes bare string builtins through the redirect
+                    // table further below (-> rt_string_to_int). This block
+                    // matched them FIRST and returned, making that table entry
+                    // dead code: `text.to_i64()` compiled to an identity
+                    // coercion and evaluated to the receiver's own tagged word.
+                    // Measured live on the Windows MSVC Stage 2 candidate:
+                    // `(value.to_i64() ?? 0) > 0` compiled to `test %rsi,%rsi;
+                    // setle` with no rt_string_to_int in the object at all, so
+                    // `--threads 1` was rejected as "not a positive integer"
+                    // while `--threads 0` was ACCEPTED.
+                    //
+                    // Routing unconditionally to rt_string_to_int is NOT a fix
+                    // (it returns 0 for a non-string, zeroing every erased
+                    // numeric receiver). rt_to_int_dynamic dispatches on the
+                    // receiver and is the IDENTITY for anything that is not a
+                    // registry-validated heap string, so the genuinely-integer
+                    // case is bit-for-bit unchanged. Cross-platform correctness
+                    // fix; Windows was only the first lane to execute it.
+                    // doc/08_tracking/bug/windows_msvc_stage2_rejected_struct_receiver_route_threads_2026-09-01.md
+                    if matches!(method, "to_i64" | "to_int") {
+                        if let inkwell::values::BasicValueEnum::IntValue(iv) = converted {
+                            if iv.get_type().get_bit_width() == 64 {
+                                let dyn_fn = module.get_function("rt_to_int_dynamic").unwrap_or_else(|| {
+                                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                                    module.add_function("rt_to_int_dynamic", fn_type, None)
+                                });
+                                let call_site = builder
+                                    .build_call(dyn_fn, &[iv.into()], "to_int_dyn")
+                                    .map_err(|e| {
+                                        crate::error::factory::llvm_build_failed("rt_to_int_dynamic", &e)
+                                    })?;
+                                let parsed = call_site
+                                    .try_as_basic_value()
+                                    .left()
+                                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                                if let Some(d) = dest {
+                                    vreg_map.insert(*d, parsed);
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
                     if let Some(d) = dest {
                         vreg_map.insert(*d, converted);
                     }

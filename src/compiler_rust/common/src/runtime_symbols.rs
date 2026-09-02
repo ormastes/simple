@@ -560,6 +560,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_to_lower",
     "rt_string_to_int",
     "rt_string_to_int_lenient",
+    // Receiver-dispatched to_i64/to_int: parses a heap string, identity
+    // otherwise. Twin definitions in src/runtime/runtime_native.c and
+    // runtime/src/value/collections.rs.
+    "rt_to_int_dynamic",
     "rt_string_find",
     "rt_string_rfind",
     "rt_string_index_of",

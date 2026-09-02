@@ -268,28 +268,55 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
                         self.tagged_bool_from_i1(cmp, builder)?
                     }
-                    BinOp::Lt => {
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::SLT, l, r, "lt")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?
-                    }
-                    BinOp::LtEq => {
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::SLE, l, r, "le")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?
-                    }
-                    BinOp::Gt => {
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::SGT, l, r, "gt")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?
-                    }
-                    BinOp::GtEq => {
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::SGE, l, r, "ge")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
+                    // ORDERING. Eq/NotEq above already dispatch dynamically
+                    // through rt_native_eq/rt_native_neq when the operands are
+                    // NOT statically-known native scalars (tag-aware:
+                    // content-compares tagged heap strings, icmp-compares raw
+                    // integers). The four ordering arms had no such fallback
+                    // and always emitted a raw icmp -- so `<`/`>`/`<=`/`>=` on
+                    // text compared ALLOCATION ADDRESSES, giving
+                    // address-dependent, non-alphabetical answers, while `==`
+                    // on the very same operands stayed correct. The Cranelift
+                    // arm (codegen/instr/core.rs) fixed exactly this in
+                    // 2026-08-01 by routing the statically-unknown case through
+                    // rt_native_cmp, the ordering counterpart of rt_native_eq,
+                    // which returns a strcmp-style signed result; the LLVM arm
+                    // was never brought along. Same source, two different
+                    // answers per backend.
+                    //
+                    // Gated on `native_scalar_eq` exactly as Eq/NotEq are, so a
+                    // genuine integer comparison keeps the inline icmp and pays
+                    // no call; only the statically-unknown case dispatches.
+                    // Cross-platform correctness fix, not Windows-specific.
+                    // doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md
+                    BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+                        let pred = match op {
+                            BinOp::Lt => IntPredicate::SLT,
+                            BinOp::LtEq => IntPredicate::SLE,
+                            BinOp::Gt => IntPredicate::SGT,
+                            _ => IntPredicate::SGE,
+                        };
+                        let cmp = if native_scalar_eq {
+                            builder
+                                .build_int_compare(pred, l, r, "cmp")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
+                        } else {
+                            let rt_func = module.get_function("rt_native_cmp").unwrap_or_else(|| {
+                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                                module.add_function("rt_native_cmp", fn_type, None)
+                            });
+                            let call_site = builder
+                                .build_call(rt_func, &[l.into(), r.into()], "ncmp")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_cmp", &e))?;
+                            let raw = call_site
+                                .try_as_basic_value()
+                                .left()
+                                .unwrap_or_else(|| i64_type.const_int(0, false).into())
+                                .into_int_value();
+                            builder
+                                .build_int_compare(pred, raw, i64_type.const_zero(), "ncmp_bool")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
+                        };
                         self.tagged_bool_from_i1(cmp, builder)?
                     }
                     BinOp::Mod => builder
