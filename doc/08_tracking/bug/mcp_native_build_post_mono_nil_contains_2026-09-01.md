@@ -360,3 +360,59 @@ stale `bin/release/x86_64-pc-windows-msvc/simple_mcp_server.exe.disabled`
 (2,657,280 bytes, dated Apr 23) was deliberately NOT renamed into place: both
 wrappers would then execute a months-old binary, which would look like success
 while proving nothing about this lane.
+
+### The silence was ALREADY explained — no new logging is needed
+
+`lower_to_mir_with_target_context`
+(`src/compiler/80.driver/driver_pipeline_lowering.spl:196`) already emits a
+per-module receipt, but it is gated:
+
+```
+direct_idx = direct_idx + 1
+if direct_idx % 64 == 0 or direct_idx == self.ctx.sources.len():
+    log_build_progress("mir", "modules", direct_idx, ...)      # :300-303
+```
+
+With ~100 sources the FIRST `mir` receipt cannot appear until module **64**. So
+30+ minutes of stdout silence in this phase is the expected appearance of
+lowering fewer than 64 modules — it is NOT evidence of a loop, and the earlier
+"non-allocating tight loop" reading should be treated as unsupported.
+
+There is also a genuine per-module marker one line earlier —
+`log_phase("aot:lower_to_mir:module:done idx={..} module={..} functions={..}")`
+(`:286`) — gated behind `driver_phase_trace_enabled()`
+(`driver_log_helpers.spl:21`), i.e. **`SIMPLE_COMPILER_PHASE_PROFILE=1`** or
+`SIMPLE_COMPILER_TRACE=1`. `log_phase` prints to BOTH stderr and stdout
+(`:111,116`) precisely so it survives the native-build worker's capture chain.
+
+So the observability this record earlier proposed building already exists and
+just needed switching on. Turning it on is the correct next measurement, not a
+code change.
+
+### run4: detached, traced, in flight
+Launched 2026-09-02 ~19:20 with `SIMPLE_COMPILER_PHASE_PROFILE=1` (plus
+`SIMPLE_INTERP_OOB_DEBUG=1`, `SIMPLE_DUMP_COMPILE_ERRORS=1`,
+`SIMPLE_CACHE_SCOPE=run4`), started via `Start-Process -WindowStyle Hidden` so
+it is NOT a child of the agent harness and cannot be reaped like run2/run3.
+
+```
+launcher : <scratchpad>/mcp/run4.cmd     (cmd PID 9236)
+stdout   : <scratchpad>/mcp/run4.out
+stderr   : <scratchpad>/mcp/run4.err
+exit code: <scratchpad>/mcp/run4.rc      (written only on exit)
+scratchpad = C:\Users\ormas\AppData\Local\Temp\claude\
+             C--Users-ormas-dev-simple\9199c2f5-882d-4ada-9b3a-b9e6bc05af76\scratchpad
+```
+
+Confirmed alive and already emitting `[BOOTSTRAP-PHASE]` markers 45 s in.
+
+**How to harvest the answer** (no rerun needed):
+```
+grep -c 'aot:lower_to_mir:module:done' run4.out     # modules lowered so far
+grep    'aot:lower_to_mir:module:done' run4.out | tail -3
+```
+Modules advancing ⇒ the phase is merely SLOW (look to the CoW-alias quadratic
+class, `.claude/rules/code-style.md`; `src/compiler` carries 297 open findings).
+Stuck at one idx ⇒ a real loop, and that line names the module.
+A categorizer for the eventual error listing is at
+`<scratchpad>/mcp/categorize.sh` (`sh categorize.sh run4.out run4.err`).
