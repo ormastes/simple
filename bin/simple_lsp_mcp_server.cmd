@@ -31,14 +31,17 @@ if not "%SIMPLE_LSP_MCP_PREFER_NATIVE%"=="1" goto :source
 set "EXE=%~dp0release\x86_64-pc-windows-msvc\simple_lsp_mcp_server.exe"
 if exist "%EXE%" (
     "%EXE%" %*
-    exit /b %ERRORLEVEL%
+    goto :done
 )
 call "%~dp0release\x86_64-pc-windows-msvc\simple_lsp_mcp_server.cmd" %*
-exit /b %ERRORLEVEL%
+goto :done
 
 :source
 if "%SIMPLE_LIB%"=="" set "SIMPLE_LIB=%~dp0..\src"
 if "%SIMPLE_LOG%"=="" set "SIMPLE_LOG=error"
 if "%RUST_LOG%"=="" set "RUST_LOG=error"
+if "%SIMPLE_EXECUTION_MODE%"=="" set "SIMPLE_EXECUTION_MODE=interpreter"
 call "%~dp0simple.cmd" run "%~dp0..\src\app\simple_lsp_mcp\main.spl" %*
+
+:done
 exit /b %ERRORLEVEL%
