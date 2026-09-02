@@ -101,6 +101,14 @@ Four mechanisms, in increasing breadth:
 4. **Per project** — `[lints] windows_portability = "off"` in `simple.sdn`, via
    the code→rule-name mapping in `_LintMain/config_and_model.spl`.
 
+Mechanism 3 is deliberately textual and therefore BROADER than "defines": a file
+that merely *mentions* `fn to_native_path` in a string or comment is exempt too.
+Acceptable at warning tier, and it is why the rule module does not flag itself.
+
+Both specs for this rule are offenders of it — their comments and fixtures carry
+the very shape they detect — and each declares an explicit file-level
+`# lint-allow: PATH-WIN-001`, mechanism 2 used as designed.
+
 ## Existing debt
 
 Measured 2026-09-02 across the tree: **439** `.spl` offender files of 42,611,
@@ -147,4 +155,13 @@ Fixtures were written byte-exactly (verified: `pos_path.spl` 50 bytes with 2
 backslashes; `pos_crlf.spl` 25 bytes with 2 CRs) precisely because the lexer
 hazard above makes an eyeballed fixture untrustworthy.
 
-Specs: 17 cases, 17 passing.
+Specs: 17 cases, 17 passing. The neighbouring `cow_alias_hotpath_spec.spl`
+(12 cases) still passes, confirming the insertion into the shared `lint_source`
+path is not a regression.
+
+**Environment note:** this checkout has `core.autocrlf=true`, yet a committed
+repo file (`cow_alias_hotpath.spl`) lints with **zero** EOL-CRLF-001 findings —
+the working tree is LF on disk, so the rule does not warn on every file. Also
+note that `bin/simple.exe lint` SEGVs on any `*_spec.spl` (rc=139) — verified
+pre-existing, it reproduces on `cow_alias_hotpath_spec.spl` and is unrelated to
+this rule.
