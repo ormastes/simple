@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+map=$root/scripts/check/kernel-phase5-backend-relocations.tsv
+report=$root/build/review/final_phase5_misplaced_backends.txt
+tmp=${TMPDIR:-/tmp}/simple-phase5-relocation-audit.$$
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+
+mkdir -p "$(dirname "$report")"
+: >"$tmp"
+failed=0
+while IFS="$(printf '\t')" read -r old_path new_path extra; do
+  [ -n "$old_path" ] && [ -n "$new_path" ] && [ -z "${extra:-}" ] || {
+    echo 'FAIL — malformed Phase5 relocation map entry' >&2
+    failed=1
+    continue
+  }
+  case "$old_path:$new_path" in
+    src/compiler/70.backend/backend/*:src/plugins/backend_*/*) ;;
+    *)
+      echo "FAIL — relocation escapes Phase5 ownership: $old_path -> $new_path" >&2
+      failed=1
+      continue
+      ;;
+  esac
+  if [ -e "$root/$old_path" ] || [ -L "$root/$old_path" ]; then
+    echo "FAIL — compiler-owned backend copy remains: $old_path" >&2
+    failed=1
+  fi
+  if [ ! -f "$root/$new_path" ] || [ -L "$root/$new_path" ]; then
+    echo "FAIL — canonical plugin backend is missing or a symlink: $new_path" >&2
+    failed=1
+  fi
+  printf '%s\n' "$old_path" >>"$tmp"
+done <"$map"
+
+[ "$failed" -eq 0 ] || exit 1
+[ "$(LC_ALL=C sort "$tmp" | uniq -d | wc -l | tr -d ' ')" -eq 0 ] || {
+  echo 'FAIL — relocation audit contains duplicate compiler-owned paths' >&2
+  exit 1
+}
+mv "$tmp" "$report"
+trap - EXIT HUP INT TERM
+echo "PASS — generated Phase5 relocation audit for $(wc -l <"$report" | tr -d ' ') canonical plugin backends"
