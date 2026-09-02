@@ -22,12 +22,16 @@ Drop-in contract: `NandEmu` exposes the exact same public seam as
 `fil_nand_device.NandDevice` / `fil_nand.Nand`
 (`program / read_page / erase_block / erase_count / inject_prog_fail /
 inject_erase_fail / inject_read_bitflip / corrupt_page_data / set_bad`),
-returning the shared `fil_nand.NandRead`. It is an API-compatible drop-in and is
-verified at the device level (fil_nand_emu_check.spl); it is NOT wired as the
-default backend and end-to-end fil/ftl has NOT been exercised on it, because
-`fil.spl` currently hardcodes `NandDevice` with no backend-selection seam (adding
-that seam is out of scope here — `fil.spl`/`ftl*.spl` must stay untouched). Once a
-seam exists this backend is selected explicitly by a test that wants the physics.
+returning the shared `fil_nand.NandRead`. It is an API-compatible drop-in,
+verified at the device level (fil_nand_emu_check.spl) AND end to end through
+fil/ftl (fil_nand_emu_e2e_check.spl).
+
+It is not the DEFAULT backend — `fil_new()` / `ftl_new()` still build
+`NandDevice` — but a backend-selection seam does exist and this backend is
+selected explicitly through it by a test that wants the physics:
+  `ftl.spl:ftl_new_emu()` -> `fil.spl:fil_new_emu()` -> `fil_fmc.spl:fmc_new_emu()`
+Callers today: fil_nand_emu_e2e_check, rel_ladder_check, rel_wiring_check,
+rel_seams_check.
 
 Two honest divergences from `fil_nand_device`, both because this backend is
 *real-NAND faithful* rather than a placeholder:
@@ -43,11 +47,37 @@ Two honest divergences from `fil_nand_device`, both because this backend is
      the written intent), so it is caught via the bit-error path — a 3+bit silent
      corrupt now correctly FAILs instead of risking a syndrome mis-correction.
 
-Geometry: the firmware addresses a 64-block × 64-page space (nvme_types), while
-the S1 emulator backs 8 blocks × 4 pages. Firmware addresses are folded into the
-S1 window (block mod 8, page mod 4); distinct (block<8, page<4) addresses map
-1:1 and round-trip exactly. Addresses beyond the window alias — the documented
-S1 shrink behaviour (doc §4), acceptable for an opt-in physics backend.
+Geometry — RECONCILED, and checked at construction (was a silent divergence,
+doc/08_tracking/bug/payload_widening_did_not_reach_emu_backend_2026-09-01.md §2):
+
+    firmware page  =  PAGE_BYTES 4096  +  OOB_BYTES 128  =  4224 bytes
+    NeProfile.S3   =  page_bytes 4224  (8 x 528-byte sectors, spare included)
+    ----------------------------------------------------------------------
+    4096 + 128 == 4224  ->  S3 is the EXACT fit, so the profile is S3.
+
+S1/S2 (528 B) cannot hold a 4096-byte page at all; that is why this backend used
+to store one byte. `emu_geometry_ok` asserts the identity above at construction
+and `nand_emu_new` fails closed (returns a device whose every op is a bad block)
+rather than silently narrowing if the profile is ever changed.
+
+Column map inside the 4224-byte page:
+    columns    0 .. 4095   main area — PageData word i occupies columns 8i..8i+7,
+                           little-endian (byte k of word i at column 8i+k)
+    columns 4096 .. 4223   spare area — left erased (FFh). OOB (lba / seq / ecc)
+                           stays in the side arrays below, exactly as
+                           fil_nand_device keeps it out of `page_data`.
+
+Address shrink: the firmware addresses a 64-block × 64-page space (nvme_types)
+while S3 backs 16 blocks × 8 pages. Firmware addresses fold (block mod 16, page
+mod 8); distinct (block<16, page<8) addresses map 1:1 and round-trip exactly.
+Addresses beyond the window alias — the documented shrink behaviour (doc §4).
+
+Payload width: `program_page` / `read_page_data` carry a REAL 4096-byte PageData
+through the pin handshake (4096 data_in / data_out cycles), so every column is
+backed by Vt cells and wear / retention / read-retry act on the whole page. The
+scalar `program` / `read_page.data` seam is deliberately UNCHANGED — it still
+programs and senses column 0 only, leaving the rest of the page erased — because
+the FIL scalar ECC and every existing emu check are written against that byte.
 
 Test seam (for FTL fault-injection tests): `inject` / `advance_time_s` /
 `set_vref_offset` forward to the NeChip, and `set_block_wear` seeds a block's
@@ -57,6 +87,7 @@ seeding it is identical to having cycled the block that many times).
 """
 
 use nvme_types.*
+use nvme_payload.*   # PageData + PAGE_BYTES / PAGE_WORDS / OOB_BYTES
 use fil_nand.*   # NandRead (shared FIL read result {data, lba, seq, ecc, err})
 use fil_ecc.*
 use std.hardware.nand_emu.chip.{NeChip, ne_chip_new}
@@ -131,6 +162,81 @@ fn emu_latch_addr3(chip: NeChip, row: i64) -> NeChip:
     c = c.addr((row >> 16) & 0x3)
     c
 
+fn emu_geometry_ok(geo: NeGeometry) -> bool:
+    """The checked page-geometry identity: the emulated page must hold the whole
+    firmware page plus its spare area, i.e. page_bytes == PAGE_BYTES + OOB_BYTES
+    (4224 == 4096 + 128, NeProfile.S3). False for S1/S2 (528 B), which physically
+    cannot store a 4096-byte page."""
+    geo.page_bytes == PAGE_BYTES + OOB_BYTES
+
+fn emu_page_byte(p: PageData, col: i64) -> i64:
+    """Byte at main-area column `col` of a page: byte (col mod 8) of word col/8,
+    little-endian."""
+    val w: i64 = page_word(p, col / 8)
+    (w >> ((col % 8) * 8)) & 0xFF
+
+fn emu_bytes_to_page(bytes: [i64]) -> PageData:
+    """Assemble PAGE_WORDS little-endian words from PAGE_BYTES sensed bytes."""
+    var w: [i64] = []
+    var i: i64 = 0
+    while i < PAGE_WORDS:
+        var acc: i64 = 0
+        var k: i64 = 0
+        while k < 8:
+            acc = acc | ((bytes[i * 8 + k] & 0xFF) << (k * 8))
+            k = k + 1
+        w.push(acc)
+        i = i + 1
+    PageData(words: w)
+
+fn emu_page_erased() -> PageData:
+    """The intent page of a never-programmed (erased) page: every main-area byte
+    FFh. Words are all-ones, so `emu_page_byte` yields 0xFF at every column —
+    the page-wide generalisation of the old scalar `shadow` preset 0xFF."""
+    page_fill(-1)
+
+fn emu_page_bit_errors(sensed: PageData, intent: PageData) -> i64:
+    """Raw bit-error count over the WHOLE main area: sum over all PAGE_BYTES
+    columns of popcount(sensed XOR intent). The page-wide generalisation of the
+    old column-0-only `popcount8(sensed ^ shadow)`."""
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < PAGE_WORDS:
+        val x: i64 = page_word(sensed, i) ^ page_word(intent, i)
+        var k: i64 = 0
+        while k < 8:
+            total = total + emu_popcount8(x >> (k * 8))
+            k = k + 1
+        i = i + 1
+    total
+
+fn emu_codeword_bit_errors(sensed: PageData, intent: PageData, cw: i64) -> i64:
+    """Raw bit-error count inside ONE 1024-byte ECC codeword. This is the unit a
+    real controller reports corrected-bit telemetry in, and the unit SEC-DED can
+    actually act on: one bad bit per codeword is correctable even when four
+    codewords each carry one, which a page-summed count could never express."""
+    val s: CodewordSpan = codeword_span(cw)
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < s.word_count:
+        val x: i64 = page_word(sensed, s.page_word_off + i) ^ page_word(intent, s.page_word_off + i)
+        var k: i64 = 0
+        while k < 8:
+            total = total + emu_popcount8(x >> (k * 8))
+            k = k + 1
+        i = i + 1
+    total
+
+# One sense, reported at three widths. `rd` is the unchanged scalar NandRead seam
+# (column-0 byte + OOB + the column-0 `err`); `page` is the real 4096-byte main
+# area; `err_page` and `err_cw_max` are the PAGE-WIDE error telemetry that the
+# column-0 `err` alone could not express.
+struct EmuSense:
+    page:       PageData
+    rd:         NandRead
+    err_page:   i64   # raw bit errors across the whole main area
+    err_cw_max: i64   # raw bit errors in the WORST 1024-byte ECC codeword
+
 # ── NandEmu: the physics-backed drop-in device ────────────────────────────────
 struct NandEmu:
     """A NAND device backed by the Vt-physics NeChip emulator. Composition, not
@@ -143,10 +249,26 @@ struct NandEmu:
     oob_ecc:    [i64]   # S1 total_pages, spare-area ECC stored at program time
     programmed: [i64]   # S1 total_pages, 1 = page holds data (no overwrite w/o erase)
     injected:   [i64]   # S1 total_pages, injected read bit-flip count (adds to err)
-    shadow:     [i64]   # S1 total_pages, last-written payload byte (0xFF = erased);
-                        #   read_page derives the PHYSICS bit-error count as
-                        #   popcount(sensed XOR shadow) so retention/disturb drift
-                        #   surfaces a real corrected-bit count, not only injection.
+    shadow:     [i64]   # total_pages, last-written COLUMN-0 byte (0xFF = erased).
+                        #   Kept as the SCALAR seam feeding NandRead.err, which the
+                        #   landed byte-scoped oracles (rel_seams_check "exactly ONE
+                        #   programmed cell in column 0") are written against.
+    shadow_page: [PageData]  # total_pages, last-written INTENT for the WHOLE main
+                        #   area (erased = all-FFh). `sense_read` derives the
+                        #   page-wide bit-error count as popcount(sensed XOR this)
+                        #   over all PAGE_BYTES columns, and the per-codeword count
+                        #   SEC-DED can actually act on. This is the widening the
+                        #   old note here deferred: `err` reporting is no longer
+                        #   column-0 scoped, only `NandRead.err` is (deliberately).
+    oob_par:    [i64]   # total_pages * CODEWORDS_PER_PAGE, the REAL per-codeword
+                        #   SEC-DED parity (fil_ecc ecc_page_compute) stored at
+                        #   program_page time — the emu's equivalent of
+                        #   NandDevice.read_page_parity, so the widened ECC decode
+                        #   in fil.decode_read runs on this backend too.
+    par_valid:  [i64]   # total_pages, 1 = oob_par holds a real widened parity set.
+                        #   A page written through the SCALAR program path has none
+                        #   (only column 0 was driven), so it stays 0 and the
+                        #   widened decode fails closed to the legacy verdict.
     bad_block:  [i64]   # S1 blocks, 1 = block retired
     blk_erase:  [i64]   # S1 blocks, cumulative erase count
     prog_fail:  [i64]   # S1 blocks, 1 = next program to this block fails (one-shot)
@@ -156,22 +278,39 @@ fn nand_emu_new() -> NandEmu:
     """Construct a fresh S1-backed emulated device: an idle NeChip plus empty OOB
     and per-block state. The Vt array itself is allocated lazily by the NeChip on
     its first operation (erased distribution), so a never-programmed page reads FFh."""
-    val chip = ne_chip_new(NeProfile.S1)
+    val chip = ne_chip_new(NeProfile.S3)
     val geo = chip.geometry
+    # Fail closed rather than narrow silently: if the profile ever stops matching
+    # PAGE_BYTES + OOB_BYTES the device is built with zero backed pages/blocks, so
+    # every op returns NAND_BAD_BLOCK instead of storing a truncated page.
+    var backed_pages:  i64 = geo.total_pages
+    var backed_blocks: i64 = geo.blocks
+    if not emu_geometry_ok(geo):
+        backed_pages = 0
+        backed_blocks = 0
     var oob_lba:    [i64] = []
     var oob_seq:    [i64] = []
     var oob_ecc:    [i64] = []
     var programmed: [i64] = []
     var injected:   [i64] = []
     var shadow:     [i64] = []
+    var shadow_page: [PageData] = []
+    var oob_par:    [i64] = []
+    var par_valid:  [i64] = []
     var i: i64 = 0
-    while i < geo.total_pages:
+    while i < backed_pages:
         oob_lba.push(UNMAP)
         oob_seq.push(0)
         oob_ecc.push(0)
         programmed.push(0)
         injected.push(0)
         shadow.push(0xFF)          # erased pages sense FFh -> zero physics error
+        shadow_page.push(emu_page_erased())
+        par_valid.push(0)
+        var pi: i64 = 0
+        while pi < CODEWORDS_PER_PAGE:
+            oob_par.push(0)
+            pi = pi + 1
         i = i + 1
 
     var bad_block:  [i64] = []
@@ -179,14 +318,14 @@ fn nand_emu_new() -> NandEmu:
     var prog_fail:  [i64] = []
     var erase_fail: [i64] = []
     i = 0
-    while i < geo.blocks:
+    while i < backed_blocks:
         bad_block.push(0)
         blk_erase.push(0)
         prog_fail.push(0)
         erase_fail.push(0)
         i = i + 1
 
-    NandEmu(chip: chip, oob_lba: oob_lba, oob_seq: oob_seq, oob_ecc: oob_ecc, programmed: programmed, injected: injected, shadow: shadow, bad_block: bad_block, blk_erase: blk_erase, prog_fail: prog_fail, erase_fail: erase_fail)
+    NandEmu(chip: chip, oob_lba: oob_lba, oob_seq: oob_seq, oob_ecc: oob_ecc, programmed: programmed, injected: injected, shadow: shadow, shadow_page: shadow_page, oob_par: oob_par, par_valid: par_valid, bad_block: bad_block, blk_erase: blk_erase, prog_fail: prog_fail, erase_fail: erase_fail)
 
 impl NandEmu:
     # ── High-level FIL seam (drop-in for fil_nand_device.NandDevice) ───────────
@@ -226,7 +365,110 @@ impl NandEmu:
         me.oob_ecc[row] = ecc_compute(data, lba, seq)
         me.programmed[row] = 1
         me.shadow[row] = data & 0xFF     # record intent for the physics err count
+        # Page-wide intent for the SCALAR path: only column 0 was driven, so every
+        # other column is still at the erased FFh preset. Recorded truthfully so
+        # the page-wide err count of a scalar-programmed page is 0, not 4095 bytes
+        # of phantom error. No widened parity is stored (par_valid stays 0) —
+        # nothing computed parity over columns this path never wrote.
+        var sp: PageData = emu_page_erased()
+        sp.words[0] = (sp.words[0] & (0 - 256)) | (data & 0xFF)
+        me.shadow_page[row] = sp
+        me.par_valid[row] = 0
         NAND_OK
+
+    me program_page(ppn: i64, lba: i64, seq: i64, data: PageData) -> i64:
+        """Program a REAL 4096-byte page (main area + OOB) via the ONFI pin
+        handshake — the widened seam, drop-in for fil_nand_device.program_page.
+        Identical guard order and return codes to the scalar `program` above; the
+        only difference is that all PAGE_BYTES columns are driven through data_in
+        (word i little-endian at columns 8i..8i+7) instead of column 0 alone, so
+        every payload bit is backed by real Vt cells. The spare columns
+        (PAGE_BYTES..page_bytes) are left at the FFh preset — OOB lives in the side
+        arrays, exactly as fil_nand_device keeps it out of `page_data`.
+        The stored ECC stays the fil_ecc scalar over the COLUMN-0 byte, matching
+        what `read_page` returns as `data`; page-wide integrity is carried by the
+        page-wide bit-error count `err`, not by this scalar."""
+        if not ppn_in_range(ppn):
+            return NAND_BAD_BLOCK
+        val geo = me.chip.geometry
+        if not emu_geometry_ok(geo):
+            return NAND_BAD_BLOCK
+        val row: i64 = emu_fold_row(ppn, geo)
+        val ne_blk: i64 = row / geo.pages_per_block
+        if ne_blk >= me.bad_block.len():
+            return NAND_BAD_BLOCK
+        if me.bad_block[ne_blk] != 0:
+            return NAND_BAD_BLOCK
+        if me.prog_fail[ne_blk] != 0:
+            me.prog_fail[ne_blk] = 0
+            return NAND_PROG_FAIL
+        if row >= me.programmed.len():
+            return NAND_BAD_BLOCK
+        if me.programmed[row] != 0:
+            return NAND_PROG_FAIL
+        var c = me.chip
+        c = c.cmd(EMU_PROG_1ST)          # presets page register to FFh, opens load
+        c = emu_latch_addr5(c, row)      # -> ProgLoad, cur_row = row, col_counter = 0
+        var col: i64 = 0
+        while col < PAGE_BYTES:
+            c = c.data_in(emu_page_byte(data, col))
+            col = col + 1
+        c = c.cmd(EMU_PROG_2ND)          # execute (MODEL busy) -> status.pass set
+        me.chip = c
+        if (me.chip.read_status() & EMU_STATUS_FAIL) == EMU_STATUS_FAIL:
+            return NAND_PROG_FAIL
+        val byte0: i64 = emu_page_byte(data, 0)
+        me.oob_lba[row] = lba
+        me.oob_seq[row] = seq
+        me.oob_ecc[row] = ecc_compute(byte0, lba, seq)
+        me.programmed[row] = 1
+        me.shadow[row] = byte0
+        # Page-wide intent: ecc_page_clone, never `= data`, because on the current
+        # Rust seed `var q: PageData = p` ALIASES the nested words array
+        # (doc/08_tracking/bug/struct_nested_array_assign_aliases_not_cow_2026-09-01.md)
+        # and the caller's page would then be mutated by any later media write.
+        me.shadow_page[row] = ecc_page_clone(data)
+        # REAL per-codeword SEC-DED parity over all 512 words — the same
+        # ecc_page_compute the behavioural NandDevice backend stores. This is what
+        # lets fil.decode_read run its widened decode on the emu backend.
+        val par: [i64] = ecc_page_compute(data, lba, seq)
+        var ci: i64 = 0
+        while ci < CODEWORDS_PER_PAGE:
+            me.oob_par[row * CODEWORDS_PER_PAGE + ci] = par[ci]
+            ci = ci + 1
+        me.par_valid[row] = 1
+        NAND_OK
+
+    me sense_page(ppn: i64) -> PageData:
+        """Sense the whole main area of a page through the ONFI handshake and
+        reassemble it into a PageData: 00h , <col 0,row> , 30h , then PAGE_BYTES
+        data_out cycles. Every returned bit comes out of the Vt cells, so retention
+        / read-disturb drift and the current Vref offset apply to the whole page.
+        Mutating (`me`): a sense advances the emulated clock and materialises lazy
+        drift, exactly as read_page does."""
+        if not ppn_in_range(ppn):
+            return page_zero()
+        val geo = me.chip.geometry
+        if not emu_geometry_ok(geo):
+            return page_zero()
+        val row: i64 = emu_fold_row(ppn, geo)
+        var c = me.chip
+        c = c.cmd(EMU_READ_1ST)
+        c = emu_latch_addr5(c, row)
+        c = c.cmd(EMU_READ_2ND)
+        var bytes: [i64] = []
+        var col: i64 = 0
+        while col < PAGE_BYTES:
+            bytes.push(c.data_out())
+            col = col + 1
+        me.chip = c
+        emu_bytes_to_page(bytes)
+
+    me read_page_data(ppn: i64) -> PageData:
+        """The widened read seam (drop-in for fil_nand_device.read_page_data): the
+        REAL 4096-byte main area as sensed from the cells. An out-of-range or
+        unbacked page returns the zero placeholder the behavioural backend uses."""
+        me.sense_page(ppn)
 
     me read_page(ppn: i64) -> NandRead:
         """Read one page via the ONFI handshake. `data` is the byte sensed from the
@@ -238,7 +480,9 @@ impl NandEmu:
             return NandRead(data: 0, lba: UNMAP, seq: 0, ecc: 0, err: 2)
         val geo = me.chip.geometry
         val row: i64 = emu_fold_row(ppn, geo)
-        # Pin sequence: 00h , <col=0,row> , 30h , data_out .
+        # Pin sequence: 00h , <col=0,row> , 30h , data_out . Only column 0 is
+        # streamed here: this is the SCALAR seam (see the `shadow` field note).
+        # The widened seam is read_page_data, which streams all PAGE_BYTES columns.
         var c = me.chip
         c = c.cmd(EMU_READ_1ST)
         c = emu_latch_addr5(c, row)      # -> AddrLatch(00h,5), cur_row = row, col 0
@@ -257,6 +501,82 @@ impl NandEmu:
         val phys: i64 = emu_popcount8(databyte ^ (me.shadow[row] & 0xFF))
         val err: i64 = phys + inj
         NandRead(data: databyte, lba: me.oob_lba[row], seq: me.oob_seq[row], ecc: me.oob_ecc[row], err: err)
+
+    me read_page_parity(ppn: i64) -> [i64]:
+        """The widened per-codeword SEC-DED parity stored for this page, or an
+        EMPTY array when this page carries none (never programmed, erased, or
+        written through the scalar column-0 program path). Drop-in for
+        fil_nand_device.read_page_parity, so `fil.decode_read` can run the same
+        widened ECC decode on the Vt-physics backend as on the behavioural one.
+
+        Fails CLOSED by returning []: ecc_page_decode treats a short parity set as
+        uncorrectable, and fil.decode_read skips the widened decode entirely, so an
+        absent parity set can never be mistaken for a page that verified."""
+        var none: [i64] = []
+        if not ppn_in_range(ppn):
+            return none
+        val geo = me.chip.geometry
+        if not emu_geometry_ok(geo):
+            return none
+        val row: i64 = emu_fold_row(ppn, geo)
+        if row >= me.par_valid.len():
+            return none
+        if me.par_valid[row] == 0:
+            return none
+        var out: [i64] = []
+        var i: i64 = 0
+        while i < CODEWORDS_PER_PAGE:
+            out.push(me.oob_par[row * CODEWORDS_PER_PAGE + i])
+            i = i + 1
+        out
+
+    me sense_read(ppn: i64) -> EmuSense:
+        """ONE sense of the page, reported at three widths.
+
+        This replaces the read path's previous TWO independent senses
+        (`read_page` for the scalar seam + `read_page_data` for the page), which
+        advanced the emulated clock twice per logical read and could in principle
+        disagree with each other. Here `rd.data` is literally word 0 of the same
+        sensed `page`, so the scalar and widened views cannot drift.
+
+        Error telemetry, no longer column-0 scoped:
+          * `rd.err`      — popcount(sensed XOR intent) at COLUMN 0 only. Kept
+                            byte-scoped on purpose: it feeds the scalar fil_ecc
+                            decoder, whose oracle is a single column-0 cell.
+          * `err_page`    — the same popcount over ALL 4096 main-area columns.
+          * `err_cw_max`  — the worst single 1024-byte ECC CODEWORD's count. This,
+                            not the page sum, is the scalar SEC-DED can act on:
+                            four codewords each carrying one bad bit are all
+                            correctable, while two bad bits in ONE codeword are
+                            not. Feeding the page SUM to ecc_page_decode would
+                            declare that first, fully-recoverable page dead.
+        Injected fault-injection flips are modelled at column 0 (that is where
+        `inject_read_flips` acts), so they add to codeword 0 and to the page total.
+        """
+        if not ppn_in_range(ppn):
+            return EmuSense(page: page_zero(), rd: NandRead(data: 0, lba: UNMAP, seq: 0, ecc: 0, err: 2), err_page: 0, err_cw_max: 2)
+        val geo = me.chip.geometry
+        if not emu_geometry_ok(geo):
+            return EmuSense(page: page_zero(), rd: NandRead(data: 0, lba: UNMAP, seq: 0, ecc: 0, err: 2), err_page: 0, err_cw_max: 2)
+        val row: i64 = emu_fold_row(ppn, geo)
+        val sensed: PageData = me.sense_page(ppn)
+        val intent: PageData = me.shadow_page[row]
+        var inj: i64 = me.injected[row]
+        if inj < 0:
+            inj = 0
+        val databyte: i64 = emu_page_byte(sensed, 0)
+        val err0: i64 = emu_popcount8(databyte ^ (me.shadow[row] & 0xFF)) + inj
+        val ep: i64 = emu_page_bit_errors(sensed, intent) + inj
+        var cwmax: i64 = 0
+        var ci: i64 = 0
+        while ci < CODEWORDS_PER_PAGE:
+            var c: i64 = emu_codeword_bit_errors(sensed, intent, ci)
+            if ci == 0:
+                c = c + inj
+            if c > cwmax:
+                cwmax = c
+            ci = ci + 1
+        EmuSense(page: sensed, rd: NandRead(data: databyte, lba: me.oob_lba[row], seq: me.oob_seq[row], ecc: me.oob_ecc[row], err: err0), err_page: ep, err_cw_max: cwmax)
 
     me read_at_vref(ppn: i64, offset: i64) -> NandRead:
         """Read one page at a shifted read reference (read-retry ladder primitive).
@@ -309,6 +629,12 @@ impl NandEmu:
             me.programmed[r] = 0
             me.injected[r] = 0
             me.shadow[r] = 0xFF          # back to the erased state
+            me.shadow_page[r] = emu_page_erased()
+            me.par_valid[r] = 0
+            var ce: i64 = 0
+            while ce < CODEWORDS_PER_PAGE:
+                me.oob_par[r * CODEWORDS_PER_PAGE + ce] = 0
+                ce = ce + 1
             pg = pg + 1
         me.blk_erase[ne_blk] = emu_erase_counter_next(me.blk_erase[ne_blk])
         NAND_OK

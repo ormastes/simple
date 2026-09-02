@@ -1,0 +1,44 @@
+"""
+ecc_perf_probe — the D4 ECC cost delta, MEASURED (not asserted).
+
+Encodes and decodes {N} synthetic 4096-byte pages. `MODE` below selects which
+path runs, so the delta is read from two whole-process wall times (the fw tree
+has no in-process clock to call):
+
+  MODE = 0 : legacy scalar path — ECC over page word 0 only
+  MODE = 1 : widened path       — 4 codewords x 128 words = all 512 words
+
+Run BOTH from the REPO ROOT and subtract the ~0.25s interpreter startup that
+`nd_types_check.spl` measures as the floor:
+  time bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/ecc_perf_probe.spl
+"""
+
+use nvme_types.*
+use nvme_payload.*
+use fil_ecc.*
+
+val PROBE_PAGES: i64 = 4000
+val MODE: i64 = 1
+
+fn probe_page(k: i64) -> PageData:
+    var p = page_zero()
+    var i: i64 = 0
+    while i < PAGE_WORDS:
+        p.words[i] = ((i + k) * 0x9E3779B97F4A7C15) ^ (i << 13) ^ k
+        i = i + 1
+    p
+
+fn main() -> ():
+    var sink: i64 = 0
+    var k: i64 = 0
+    while k < PROBE_PAGES:
+        val p: PageData = probe_page(k)
+        if MODE == 0:
+            val e: i64 = ecc_compute(page_word(p, 0), k, 1)
+            sink = sink + ecc_decode(page_word(p, 0), k, 1, e, 0).code
+        else:
+            val par: [i64] = ecc_page_compute(p, k, 1)
+            sink = sink + ecc_page_decode(p, k, 1, par, 0).code
+        k = k + 1
+    print "mode=1 pages={PROBE_PAGES} sink={sink}"
+    return ()

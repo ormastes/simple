@@ -1,0 +1,193 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# plan: doc/03_plan/hardware/nvme_emu_first_increment_plan.md ; hardening: doc/03_plan/hardware/nvme_ssd_firmware_hardening_design_plan.md ; emulator: doc/03_plan/hardware/simpleemu_unified_emulator_nvme_riscv_test_infra_plan.md
+
+# @tag: system, nvme, media, emulation, reliability, recovery, media-error
+# @req REQ-SSPEC-SYSTEM NFR-NVME-EMU-001 NFR-NVME-EMU-002 NFR-NVME-EMU-003
+"""
+NVMe fault and recovery behaviour over emulated media with real Vt physics.
+
+`nvme_emu_media_slice_b_spec` proves one recovery path: retention drift the
+read-retry ladder absorbs. This scenario set covers the rest of what a storage
+device is actually judged on when its flash decays.
+
+The decisive scenario is the LAST one. Every other check here asks "does the
+firmware still return my data?" — a device that answers yes is doing its job.
+But the failure mode that matters most is the one where it cannot: a drive that
+hands back wrong bytes while reporting success is far worse than one that
+reports an error. Nothing previously proved this firmware fails loudly. This
+scenario degrades a page past the 7-rung Vref ladder's reach and requires the
+host to receive SC_MEDIA_ERR (0x281), no payload, and a SMART media-error count.
+
+Every recovery scenario carries a non-vacuity witness: a raw device read that
+bypasses the recovery ladder and must sense the damage / fail ECC. Degrading
+media and then observing correct data proves nothing unless the degradation
+really happened.
+
+Fault injection uses the typed `emu_*` seam exclusively — `emu_set_block_wear`
+and `emu_advance_time_s`. No media backing array is touched, no `.nandram` word
+is poked.
+
+SUBMISSION IS NOT HOST-EQUIVALENT. The driving checks submit commands by
+calling the controller directly, which is a FIRMWARE-level entry point. A real
+host driver writes an SQE into submission-queue memory, rings a doorbell, and
+polls the completion queue for a phase-tagged CQE; `fw/hil_queue.spl`'s rings
+are struct fields rather than memory, there are no doorbell registers, and
+`fw/host_transport.spl` does not exist yet. Do not read these as host tests.
+Each driving check funnels every submission through one `submit_io` helper so
+that swapping in the real host transport is a one-function change.
+
+READ DISTURB IS ABSENT BY DESIGN, AND THAT IS A FINDING, not an omission. The
+typed seam exposes no disturb injector, and the S1 physics needs ~400,000
+neighbour senses to flip one erased cell — measured infeasible under the 10s
+example cap. A read-disturb assertion here could not fail, so instead a
+feasibility probe records the measurement and the gap is filed at
+doc/08_tracking/bug/nvme_emu_typed_seam_has_no_read_disturb_injector_2026-09-01.md
+The probe's verdict is asserted below, so the finding cannot rot silently.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val CHECK: text = "examples/09_embedded/simpleos_nvme_fw/fw/nvme_emu_recovery_check.spl"
+val PROBE: text = "examples/09_embedded/simpleos_nvme_fw/fw/nvme_emu_read_disturb_probe_check.spl"
+
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+describe "NVMe firmware fault and recovery over Vt-physics emulated media":
+
+    # @manual scenario evidence
+    it "should keep serving correct data from a heavily cycled block, and show the recovery in health":
+        # @req REQ-SSPEC-SYSTEM
+        step("should keep serving correct data from a heavily cycled block, and show the recovery in health")
+
+        step("Run the recovery check through the full NVMe controller")
+        val (out, err, rc) = _run("bin/simple run " + CHECK + " 2>&1")
+        val log: text = out + err
+
+        step("Confirm the run reached a verdict rather than dying early")
+        # A silent exit with no verdict line is INCONCLUSIVE, not a pass, and
+        # `bin/simple run` exit codes are garbage for `fn main() -> ()`
+        # (doc/08_tracking/bug/simple_run_exit_code_garbage_for_unit_main_2026-09-01.md),
+        # so the verdict token is the only sound signal.
+        expect(log).to_contain("NVME EMU RECOVERY OK")
+
+        step("Positive control: the page reads back its own pattern while healthy")
+        expect(log).to_contain("fresh page reads back correctly (positive control)")
+        expect(log).to_contain("fresh read completes SC_SUCCESS")
+
+        step("After heavy wear plus dwell the host still gets correct data")
+        expect(log).to_contain("worn+aged page STILL returns correct data through NVMe read")
+        expect(log).to_contain("worn+aged read completes SC_SUCCESS")
+
+        step("The recovery is visible in the reliability health sink")
+        expect(log).to_contain("clean block needed no retry rungs before wear")
+        expect(log).to_contain("health sink records how deep the ladder had to go")
+        expect(log).to_contain("health sink tags the block for error-triggered refresh (DEAR)")
+
+    # @manual scenario evidence
+    it "should prove the damage the firmware absorbed was real, and that the ladder absorbed it":
+        # @req REQ-SSPEC-SYSTEM
+        step("should prove the damage the firmware absorbed was real, and that the ladder absorbed it")
+
+        step("Run the recovery check")
+        val (out, err, rc) = _run("bin/simple run " + CHECK + " 2>&1")
+        val log: text = out + err
+        expect(log).to_contain("NVME EMU RECOVERY OK")
+
+        step("Non-vacuity: a raw ladder-bypassing read must sense the damage")
+        expect(log).to_contain("raw ladder-bypassing read senses drifted bits (damage is real)")
+        expect(log).to_contain("raw ladder-bypassing read FAILS ECC")
+
+        step("The ladder persisted a calibrated Vref offset — recovery, not luck")
+        expect(log).to_contain("ladder persisted a calibrated Vref offset for the block")
+
+        step("Control: an undamaged block has no calibration, so that oracle discriminates")
+        expect(log).to_contain("control: an undamaged block has no calibrated offset")
+
+    # @manual scenario evidence
+    it "should return an NVMe media error, never silently wrong data, when damage exceeds the ladder":
+        # @req REQ-SSPEC-SYSTEM
+        step("should return an NVMe media error, never silently wrong data, when damage exceeds the ladder")
+
+        step("Run the recovery check")
+        val (out, err, rc) = _run("bin/simple run " + CHECK + " 2>&1")
+        val log: text = out + err
+        expect(log).to_contain("NVME EMU RECOVERY OK")
+
+        step("Positive control: the same LBA reads correctly before it is destroyed")
+        expect(log).to_contain("positive control: lba3 reads its pattern while healthy")
+        expect(log).to_contain("positive control: healthy read is SC_SUCCESS")
+        expect(log).to_contain("no media errors counted while healthy")
+
+        step("The unrecoverable read fails LOUDLY with a proper NVMe status")
+        expect(log).to_contain("unrecoverable page returns SC_MEDIA_ERR to the host")
+        expect(log).to_contain("the failed read does NOT hand back data claimed to be the payload")
+        expect(log).to_contain("error completion still carries its own cid")
+
+        step("The failure is accounted for in SMART and the error log")
+        expect(log).to_contain("SMART media_errors counts the unrecovered read")
+        expect(log).to_contain("error log records the media error")
+
+        step("Non-vacuity: the page really is unreadable, not merely rejected")
+        expect(log).to_contain("raw read confirms the page is unreadable, not merely rejected")
+
+        step("Control: the controller has not wedged — a healthy LBA still works")
+        expect(log).to_contain("control: a healthy LBA still reads SC_SUCCESS after the media error")
+        expect(log).to_contain("control: the healthy LBA returns its own pattern")
+
+    # @manual scenario evidence
+    it "should record that read-disturb recovery is untestable through the current typed seam":
+        # @req REQ-SSPEC-SYSTEM
+        step("should record that read-disturb recovery is untestable through the current typed seam")
+
+        step("Run the read-disturb feasibility probe over the ordinary NVMe path")
+        val (out, err, rc) = _run("bin/simple run " + PROBE + " 2>&1")
+        val log: text = out + err
+
+        step("The hammering was not vacuous: hammer and victim share a block")
+        # If they were in different blocks the probe says so and stops; asserting
+        # the adjacency path keeps that from being mistaken for the real result.
+        expect(log).to_contain("victim ppn=0 blk=0 page=0")
+        expect(log).to_contain("hammer ppn=1 blk=0 page=1")
+
+        step("The probe reached a verdict, and the verdict is that the oracle cannot move")
+        expect(log).to_contain("READ DISTURB PROBE DID NOT MOVE")
+
+        step("The gap is filed rather than faked")
+        val (bug, berr, brc) = _run("if [ -f doc/08_tracking/bug/nvme_emu_typed_seam_has_no_read_disturb_injector_2026-09-01.md ]; then echo DISTURB_BUG_FILED; else echo DISTURB_BUG_MISSING; fi")
+        expect(bug).to_contain("DISTURB_BUG_FILED")
+
+    # @manual scenario evidence
+    it "should route all fault injection through the typed seam, never raw media state":
+        # @req REQ-SSPEC-SYSTEM
+        step("should route all fault injection through the typed seam, never raw media state")
+
+        step("Read the recovery check source")
+        val (src, serr, src_rc) = _run("cat " + CHECK)
+        val body: text = src + serr
+
+        step("Confirm wear and ageing go through the typed emu_* test-control seam")
+        expect(body).to_contain("emu_set_block_wear")
+        expect(body).to_contain("emu_advance_time_s")
+
+        step("Confirm no raw .nandram word poking leaked into the media path")
+        # A distinct token rather than a count: to_contain("0") would also be
+        # satisfied by "10", which would make this assertion unfalsifiable.
+        val (hits, herr, hrc) = _run("if grep -q '_nand_ram_load\\|_nand_ram_store\\|_nandram_start' " + CHECK + " " + PROBE + "; then echo RAW_POKING_PRESENT; else echo RAW_POKING_ABSENT; fi")
+        expect(hits).to_contain("RAW_POKING_ABSENT")
+
+        step("Control: the same probe must detect raw poking where it does exist")
+        # Absence of evidence is only evidence of absence if the probe can find
+        # something (.claude/rules/testing.md). entry.spl is full of raw pokes.
+        val (ctl, cerr, crc) = _run("if grep -q '_nand_ram_load\\|_nand_ram_store\\|_nandram_start' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl; then echo RAW_POKING_PRESENT; else echo RAW_POKING_ABSENT; fi")
+        expect(ctl).to_contain("RAW_POKING_PRESENT")
+
+        step("Every submission funnels through the single transport seam, ready for a real host driver")
+        # If a scenario ever calls process_one_io inline, swapping in the real
+        # SQE/doorbell/CQ transport stops being a one-function change.
+        val (seam, seerr, serc) = _run("if [ \"$(grep -c 'process_one_io' " + CHECK + ")\" = \"1\" ]; then echo SINGLE_SUBMISSION_SEAM; else echo SUBMISSION_SCATTERED; fi")
+        expect(seam).to_contain("SINGLE_SUBMISSION_SEAM")

@@ -32,41 +32,10 @@ use std.db.dbfs_engine.superblock.{
     dbfs_superblock_validate
 }
 use std.fs_driver.nvfs_driver.{NvfsDriver}
-use std.fs_driver.error.{FsError}
 
 pub val NVFS_BOOT_ARENA_BASE_LBA_V1: i64 = DBFS_BOOT_ARENA_BASE_LBA_V1
 pub val NVFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1: u64 = DBFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1
 pub val NVFS_BOOT_DBFS_BACKED_PROVIDER_V1: text = "nvfs-dbfs-backed-v1"
-
-fn _nvfs_boot_fs_error_code_v1(err: FsError) -> i64:
-    """Classify a backend error as a stable integer.
-
-    Deliberately i64 and not text: under the freestanding cranelift build a
-    match over FsError returning text literals evaluates to EMPTY string
-    (measured 2026-09-01, see
-    doc/08_tracking/bug/freestanding_match_over_fserror_yields_default_2026-09-01.md),
-    while integer interpolation is correct. Codes:
-    1 unsupported, 2 transient, 3 corrupt, 4 no-space, 5 permission,
-    6 not-found, 7 already-exists, 8 busy, 9 io-error, 10 interrupted,
-    11 too-large, 12 read-only, 13 invalid-arg, 14 stale-handle,
-    15 path-traversal.
-    """
-    match err:
-        case FsError.Unsupported:   1
-        case FsError.Transient(_):  2
-        case FsError.Corrupt:       3
-        case FsError.NoSpace:       4
-        case FsError.Permission:    5
-        case FsError.NotFound:      6
-        case FsError.AlreadyExists: 7
-        case FsError.Busy:          8
-        case FsError.IoError(_):    9
-        case FsError.Interrupted:   10
-        case FsError.TooLarge:      11
-        case FsError.ReadOnly:      12
-        case FsError.InvalidArg:    13
-        case FsError.StaleHandle:   14
-        case FsError.PathTraversal: 15
 
 fn _nvfs_boot_magic_present_v1(bytes: [u8]) -> bool:
     if bytes.len() < 4: return false
@@ -143,12 +112,7 @@ pub fn boot_nvfs_root_mount_transaction_v1(
         NVFS_BOOT_DBFS_BACKED_PROVIDER_V1, dev,
         NVFS_BOOT_ARENA_BASE_LBA_V1, backing_sb.block_count.to_i64())
     if opened.is_err():
-        # Never collapse a typed backend error into a constant: the reason a
-        # root refused to open is the only thing that makes a RED gate
-        # actionable, and it was previously discarded here.
-        val open_err = opened.unwrap_err()
-        val open_err_code = _nvfs_boot_fs_error_code_v1(open_err)
-        return Err("nvfs-root: driver-open-failed:code={open_err_code}:base={NVFS_BOOT_ARENA_BASE_LBA_V1}:blocks={backing_sb.block_count}")
+        return Err("nvfs-root: driver-open-failed")
     val staged = vfs_nvfs_root_mount_stage_v1(opened.unwrap())
     if staged.is_err():
         return Err("nvfs-root: " + staged.unwrap_err())

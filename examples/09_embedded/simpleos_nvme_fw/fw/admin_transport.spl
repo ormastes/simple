@@ -1,0 +1,428 @@
+"""
+admin_transport — the ADMIN queue pair (qid 0) on the same memory + doorbell
+model the I/O pair already uses.
+
+Before this module the only host-reachable entry point was `Hil.submit`, which
+handles I/O opcodes only, so NOT ONE admin command ever travelled the
+SQE-in-memory -> doorbell -> phase-tagged-CQE path. They were reachable only by
+direct dispatch (`NvmeController.admin_submit`), which no real host driver does.
+
+  host                          memory                        device
+  ----                          ------                        ------
+  submit_asqe(cmd)     --->  ASQ[tail] = 64 bytes
+  ring_admin_doorbell() --->  MMIO[SQ0TDBL] = tail   ----->  fetch, admin_exec
+  poll_acq()            <---  ACQ[head] phase bit    <-----  CQE + phase toggle
+  (poll advances)       --->  MMIO[CQ0HDBL] = head
+
+WRAP, DO NOT REIMPLEMENT: every admin opcode is executed by the EXISTING
+`NvmeController.admin_submit`/`admin_process`/`admin_reap` dispatch. This module
+adds only the transport: decode an admin SQE out of queue memory, hand it to
+that dispatch, and post the completion back into CQ memory with a phase tag.
+The 64-byte submission frame is `nvme_mmio.asqe_encode`/`asqe_decode` — the same
+layout module the I/O path uses, extended, not forked.
+
+TWO QUEUE PAIRS, ONE MEMORY ARRAY. Both regions and both doorbell dwords come
+from `nvme_transport_profiles.sdn` (`admin_emu` = qid 0, `admin_emu_io` = qid 1),
+disjoint by construction the way a real controller's BAR is. Traffic on one pair
+cannot consume the other's slots or move the other's phase.
+
+SCOPE / HONEST NARROWING:
+  * Queue bases and doorbell offsets are read from the SDN config seam, NOT from
+    a controller register file (CAP/CC/CSTS/AQA/ASQ/ACQ). That register file is
+    being built separately (`fw/nvme_reg*.spl`); when it lands, `admin_open()` is
+    the single place that changes — nothing else in this module reads config.
+  * Identify still returns its 4 KiB structure via `ctrl.last_identify()` rather
+    than DMA into a host buffer, exactly the PRP1 "carried, not honored"
+    narrowing `nvme_mmio.spl` already documents for the I/O path.
+  * Async Event Request completes with `post: false` (held outstanding). It has
+    no doorbell to trigger its later completion, so `device_pump()` exists to let
+    the host drain a device-initiated CQE after `raise_async_event`.
+
+MDSOC tier: HOST (service-class), same dimension as `nvme_host_driver`.
+"""
+
+use nvme_types.*
+use nvme_admin_types.*
+use nvme_admin.*
+use nvme_mmio.*
+use nvme_transport_config.*
+use nvme_host_driver.*
+use nvme_controller.*
+
+val ADMIN_PROFILE:    text = "admin_emu"
+val ADMIN_IO_PROFILE: text = "admin_emu_io"
+
+# qid of the single I/O pair this transport brings up (qid 0 is admin per NVMe).
+val XPORT_IO_QID: i64 = 1
+
+struct HostAdminNvme:
+    acfg:      TransportProfile   # qid 0 — admin SQ/CQ + admin doorbell dwords
+    icfg:      TransportProfile   # qid 1 — I/O SQ/CQ + I/O doorbell dwords
+    mem:       [i64]              # THE single owner of both queue regions
+    attached:  bool
+    # host shadows, admin pair
+    asq_tail:  i64
+    acq_head:  i64
+    acq_phase: i64
+    # device shadows, admin pair
+    dev_asq_head:  i64
+    dev_acq_tail:  i64
+    dev_acq_phase: i64
+    admin_serviced: i64   # admin SQEs the device has FETCHED (non-vacuity witness)
+    # host shadows, I/O pair
+    isq_tail:  i64
+    icq_head:  i64
+    icq_phase: i64
+    # device shadows, I/O pair
+    dev_isq_head:  i64
+    dev_icq_tail:  i64
+    dev_icq_phase: i64
+    io_serviced:   i64
+    ctrl:      NvmeController     # the EXISTING admin + I/O dispatch, wrapped
+
+"""Open both queue pairs out of the SDN config seam. Does not attach."""
+fn admin_open() -> HostAdminNvme:
+    val a = transport_profile_load(ADMIN_PROFILE)
+    val i = transport_profile_load(ADMIN_IO_PROFILE)
+    var n: i64 = a.mem_size
+    if i.mem_size > n:
+        n = i.mem_size
+    if n < 0:
+        n = 0
+    var mem: [i64] = []
+    var k: i64 = 0
+    while k < n:
+        mem.push(0)
+        k = k + 1
+    HostAdminNvme(acfg: a, icfg: i, mem: mem, attached: false, asq_tail: 0, acq_head: 0, acq_phase: 1, dev_asq_head: 0, dev_acq_tail: 0, dev_acq_phase: 1, admin_serviced: 0, isq_tail: 0, icq_head: 0, icq_phase: 1, dev_isq_head: 0, dev_icq_tail: 0, dev_icq_phase: 1, io_serviced: 0, ctrl: nvme_controller_new())
+
+"""True when [lo, lo+len) and [hi, hi+len2) do not overlap."""
+fn regions_disjoint(a_lo: i64, a_len: i64, b_lo: i64, b_len: i64) -> bool:
+    a_lo + a_len <= b_lo or b_lo + b_len <= a_lo
+
+impl HostAdminNvme:
+    # ── Addressing (all derived from the SDN profiles, never hardcoded) ───────
+    me asq_db_addr() -> i64:
+        me.acfg.doorbell_base
+
+    me acq_db_addr() -> i64:
+        me.acfg.doorbell_base + me.acfg.doorbell_stride
+
+    me isq_db_addr() -> i64:
+        me.icfg.doorbell_base
+
+    me icq_db_addr() -> i64:
+        me.icfg.doorbell_base + me.icfg.doorbell_stride
+
+    me asq_entry_addr(idx: i64) -> i64:
+        me.acfg.sq_base + idx * SQE_BYTES
+
+    me acq_entry_addr(idx: i64) -> i64:
+        me.acfg.cq_base + idx * CQE_BYTES
+
+    me isq_entry_addr(idx: i64) -> i64:
+        me.icfg.sq_base + idx * SQE_BYTES
+
+    me icq_entry_addr(idx: i64) -> i64:
+        me.icfg.cq_base + idx * CQE_BYTES
+
+    """A single little-endian store into memory-mapped space. Fails closed."""
+    me poke(w: MemWrite):
+        var k: i64 = 0
+        while k < w.width:
+            val a: i64 = w.addr + k
+            if a >= 0 and a < me.mem.len():
+                me.mem[a] = (w.value >> (k * 8)) & 0xFF
+            k = k + 1
+
+    me peek32(addr: i64) -> i64:
+        mmio_rd32(me.mem, addr)
+
+    """Bind both pairs. Fails closed when either profile is absent or unbound."""
+    me attach() -> bool:
+        if me.acfg.valid != 1 or me.icfg.valid != 1:
+            return false
+        if me.acfg.bound != 1 or me.icfg.bound != 1:
+            return false
+        if me.acfg.backend != BACKEND_EMU or me.icfg.backend != BACKEND_EMU:
+            return false
+        if me.acfg.queue_depth <= 0 or me.icfg.queue_depth <= 0:
+            return false
+        if not me.layout_ok():
+            return false
+        me.attached = true
+        true
+
+    """Every region and doorbell dword must fit in memory and not overlap."""
+    me layout_ok() -> bool:
+        val n: i64 = me.mem.len()
+        val asq_len: i64 = me.acfg.queue_depth * SQE_BYTES
+        val acq_len: i64 = me.acfg.queue_depth * CQE_BYTES
+        val isq_len: i64 = me.icfg.queue_depth * SQE_BYTES
+        val icq_len: i64 = me.icfg.queue_depth * CQE_BYTES
+        if me.acfg.sq_base + asq_len > n or me.acfg.cq_base + acq_len > n:
+            return false
+        if me.icfg.sq_base + isq_len > n or me.icfg.cq_base + icq_len > n:
+            return false
+        if me.acq_db_addr() + 4 > n or me.icq_db_addr() + 4 > n:
+            return false
+        if not regions_disjoint(me.acfg.sq_base, asq_len, me.acfg.cq_base, acq_len):
+            return false
+        if not regions_disjoint(me.acfg.sq_base, asq_len, me.icfg.sq_base, isq_len):
+            return false
+        if not regions_disjoint(me.acfg.cq_base, acq_len, me.icfg.cq_base, icq_len):
+            return false
+        if not regions_disjoint(me.icfg.sq_base, isq_len, me.icfg.cq_base, icq_len):
+            return false
+        if me.acfg.doorbell_base == me.icfg.doorbell_base:
+            return false
+        true
+
+    """Why attach() refused — operator-visible verdict, not control flow."""
+    me attach_reason() -> text:
+        if me.acfg.valid != 1:
+            return "admin profile '" + ADMIN_PROFILE + "' not found in SDN"
+        if me.icfg.valid != 1:
+            return "io profile '" + ADMIN_IO_PROFILE + "' not found in SDN"
+        if me.acfg.bound != 1 or me.icfg.bound != 1:
+            return "a profile is declared but UNBOUND (no substrate wired)"
+        if not me.layout_ok():
+            return "queue regions overlap or do not fit in the mapped window"
+        "attached"
+
+    # ── ADMIN host submission path: MEMORY WRITE, then DOORBELL ───────────────
+    """Write a 64-byte admin SQE into ASQ memory at the shadow tail.
+
+    This does NOT notify the device — a real host must ring the admin doorbell.
+    """
+    me submit_asqe(c: AdminCmd) -> bool:
+        if not me.attached:
+            return false
+        if not cid_valid(c.cid):
+            return false
+        val depth: i64 = me.acfg.queue_depth
+        val base: i64 = me.acfg.sq_base + me.asq_tail * SQE_BYTES
+        if base < 0 or base + SQE_BYTES > me.mem.len():
+            return false
+        val bytes = asqe_encode(c)
+        var k: i64 = 0
+        while k < SQE_BYTES:
+            me.mem[base + k] = bytes[k]
+            k = k + 1
+        val nt: i64 = me.asq_tail + 1
+        me.asq_tail = nt % depth
+        true
+
+    """Write the shadow tail to the ADMIN SQ0TDBL. On emu this IS the notify."""
+    me ring_admin_doorbell() -> i64:
+        if not me.attached:
+            return 0
+        me.poke(MemWrite(addr: me.acfg.doorbell_base, width: 4, value: me.asq_tail))
+        me.admin_device_service()
+
+    """Fetch every admin SQE up to the doorbell value and run the EXISTING dispatch."""
+    me admin_device_service() -> i64:
+        val depth: i64 = me.acfg.queue_depth
+        if depth <= 0:
+            return 0
+        val want: i64 = mmio_rd32(me.mem, me.acfg.doorbell_base) % depth
+        var done: i64 = 0
+        var guard: i64 = 0
+        while me.dev_asq_head != want and guard < depth:
+            val base: i64 = me.acfg.sq_base + me.dev_asq_head * SQE_BYTES
+            val cmd: AdminCmd = asqe_decode(me.mem, base)
+            me.ctrl.admin_submit(cmd)
+            me.ctrl.admin_process()
+            while me.ctrl.admin_completions() > 0:
+                me.post_admin_cqe(me.ctrl.admin_reap())
+            val nh: i64 = me.dev_asq_head + 1
+            me.dev_asq_head = nh % depth
+            me.admin_serviced = me.admin_serviced + 1
+            done = done + 1
+            guard = guard + 1
+        done
+
+    """Drain a completion the device produced with no host doorbell (e.g. an AER)."""
+    me device_pump() -> i64:
+        var n: i64 = 0
+        me.ctrl.admin_process()
+        while me.ctrl.admin_completions() > 0:
+            me.post_admin_cqe(me.ctrl.admin_reap())
+            n = n + 1
+        n
+
+    """Write one CQE into ACQ memory with the DEVICE's phase; wrap toggles it."""
+    me post_admin_cqe(p: NvmeCpl):
+        val depth: i64 = me.acfg.queue_depth
+        if depth <= 0:
+            return ()
+        val base: i64 = me.acfg.cq_base + me.dev_acq_tail * CQE_BYTES
+        if base < 0 or base + CQE_BYTES > me.mem.len():
+            return ()
+        val bytes = cqe_encode(p, me.dev_acq_phase, me.dev_asq_head)
+        var k: i64 = 0
+        while k < CQE_BYTES:
+            me.mem[base + k] = bytes[k]
+            k = k + 1
+        val nt: i64 = me.dev_acq_tail + 1
+        me.dev_acq_tail = nt % depth
+        if me.dev_acq_tail == 0:
+            me.dev_acq_phase = 1 - me.dev_acq_phase
+
+    # ── ADMIN host completion path: PHASE-TAG POLL ────────────────────────────
+    me acq_ready() -> bool:
+        if not me.attached:
+            return false
+        val base: i64 = me.acfg.cq_base + me.acq_head * CQE_BYTES
+        if base < 0 or base + CQE_BYTES > me.mem.len():
+            return false
+        cqe_phase_of(me.mem, base) == me.acq_phase
+
+    """Consume ACQ[head] iff its phase tag matches. A stale entry is refused and
+    head/phase/doorbell are left untouched."""
+    me poll_acq() -> NvmeCpl:
+        if not me.acq_ready():
+            return cqe_none()
+        val depth: i64 = me.acfg.queue_depth
+        val base: i64 = me.acfg.cq_base + me.acq_head * CQE_BYTES
+        val p = cqe_decode(me.mem, base)
+        val nh: i64 = me.acq_head + 1
+        me.acq_head = nh % depth
+        if me.acq_head == 0:
+            me.acq_phase = 1 - me.acq_phase
+        me.poke(MemWrite(addr: me.acq_db_addr(), width: 4, value: me.acq_head))
+        p
+
+    """One full admin round-trip: memory write -> doorbell -> phase-tagged poll.
+
+    THIS is the shared admin submission path. Every one of the 13 admin opcodes
+    reaches the device through it; the opcode-specific logic is untouched and
+    still lives in `NvmeController.admin_exec`.
+    """
+    me exec_admin(c: AdminCmd) -> NvmeCpl:
+        if not me.submit_asqe(c):
+            return cqe_none()
+        me.ring_admin_doorbell()
+        me.poll_acq()
+
+    # ── I/O pair (qid 1), same model, its own memory and its own doorbells ────
+    me submit_iosqe(c: NvmeCmd) -> bool:
+        if not me.attached:
+            return false
+        if not cid_valid(c.cid):
+            return false
+        val depth: i64 = me.icfg.queue_depth
+        val base: i64 = me.icfg.sq_base + me.isq_tail * SQE_BYTES
+        if base < 0 or base + SQE_BYTES > me.mem.len():
+            return false
+        val bytes = sqe_encode(c)
+        var k: i64 = 0
+        while k < SQE_BYTES:
+            me.mem[base + k] = bytes[k]
+            k = k + 1
+        val nt: i64 = me.isq_tail + 1
+        me.isq_tail = nt % depth
+        true
+
+    me ring_io_doorbell() -> i64:
+        if not me.attached:
+            return 0
+        me.poke(MemWrite(addr: me.icfg.doorbell_base, width: 4, value: me.isq_tail))
+        me.io_device_service()
+
+    me io_device_service() -> i64:
+        val depth: i64 = me.icfg.queue_depth
+        if depth <= 0:
+            return 0
+        val want: i64 = mmio_rd32(me.mem, me.icfg.doorbell_base) % depth
+        var done: i64 = 0
+        var guard: i64 = 0
+        while me.dev_isq_head != want and guard < depth:
+            val base: i64 = me.icfg.sq_base + me.dev_isq_head * SQE_BYTES
+            val cmd: NvmeCmd = sqe_decode(me.mem, base)
+            me.ctrl.io_submit(XPORT_IO_QID, cmd)
+            me.ctrl.io_process()
+            while me.ctrl.io_completions(XPORT_IO_QID) > 0:
+                me.post_io_cqe(me.ctrl.io_reap(XPORT_IO_QID))
+            val nh: i64 = me.dev_isq_head + 1
+            me.dev_isq_head = nh % depth
+            me.io_serviced = me.io_serviced + 1
+            done = done + 1
+            guard = guard + 1
+        done
+
+    me post_io_cqe(p: NvmeCpl):
+        val depth: i64 = me.icfg.queue_depth
+        if depth <= 0:
+            return ()
+        val base: i64 = me.icfg.cq_base + me.dev_icq_tail * CQE_BYTES
+        if base < 0 or base + CQE_BYTES > me.mem.len():
+            return ()
+        val bytes = cqe_encode(p, me.dev_icq_phase, me.dev_isq_head)
+        var k: i64 = 0
+        while k < CQE_BYTES:
+            me.mem[base + k] = bytes[k]
+            k = k + 1
+        val nt: i64 = me.dev_icq_tail + 1
+        me.dev_icq_tail = nt % depth
+        if me.dev_icq_tail == 0:
+            me.dev_icq_phase = 1 - me.dev_icq_phase
+
+    me icq_ready() -> bool:
+        if not me.attached:
+            return false
+        val base: i64 = me.icfg.cq_base + me.icq_head * CQE_BYTES
+        if base < 0 or base + CQE_BYTES > me.mem.len():
+            return false
+        cqe_phase_of(me.mem, base) == me.icq_phase
+
+    me poll_icq() -> NvmeCpl:
+        if not me.icq_ready():
+            return cqe_none()
+        val depth: i64 = me.icfg.queue_depth
+        val base: i64 = me.icfg.cq_base + me.icq_head * CQE_BYTES
+        val p = cqe_decode(me.mem, base)
+        val nh: i64 = me.icq_head + 1
+        me.icq_head = nh % depth
+        if me.icq_head == 0:
+            me.icq_phase = 1 - me.icq_phase
+        me.poke(MemWrite(addr: me.icq_db_addr(), width: 4, value: me.icq_head))
+        p
+
+    me exec_io(c: NvmeCmd) -> NvmeCpl:
+        if not me.submit_iosqe(c):
+            return cqe_none()
+        me.ring_io_doorbell()
+        me.poll_icq()
+
+    # ── Vertical slice: bring the I/O pair up THROUGH the admin transport ─────
+    """Create CQ then SQ for `XPORT_IO_QID` by driving two real admin commands
+    over the doorbell path. Returns SC_SUCCESS only if both completed clean."""
+    me bring_up_io_queue(size: i64) -> i64:
+        val cq = me.exec_admin(admin_create_cq_cmd(1, XPORT_IO_QID, size))
+        if cq.status != SC_SUCCESS:
+            return cq.status
+        val sq = me.exec_admin(admin_create_sq_cmd(2, XPORT_IO_QID, size, XPORT_IO_QID))
+        sq.status
+
+    # Read-through accessors for results the CQE does not carry (see docstring).
+    me last_identify() -> IdentifyData:
+        me.ctrl.last_identify()
+
+    me last_smart() -> SmartLog:
+        me.ctrl.last_smart()
+
+    me raise_async_event(evt: i64):
+        me.ctrl.raise_async_event(evt)
+
+fn admin_transport_selftest() -> i64:
+    var f: i64 = 0
+    f = f + expect_eq(bool_to_int(regions_disjoint(0, 4096, 4096, 1024)), 1, "adjacent regions are disjoint")
+    f = f + expect_eq(bool_to_int(regions_disjoint(0, 4097, 4096, 1024)), 0, "overlapping regions are not disjoint")
+    var h = admin_open()
+    f = f + expect_eq(h.acfg.valid, 1, "admin profile loads from SDN")
+    f = f + expect_eq(h.icfg.valid, 1, "io profile loads from SDN")
+    f = f + expect_eq(bool_to_int(h.attach()), 1, "admin transport attaches")
+    f = f + expect_eq(bool_to_int(h.layout_ok()), 1, "admin and io regions are disjoint and mapped")
+    f = f + expect_eq(bool_to_int(h.asq_db_addr() == h.isq_db_addr()), 0, "admin and io doorbells are distinct dwords")
+    f

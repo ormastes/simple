@@ -1,0 +1,195 @@
+#!/bin/sh
+# check-hw-ir-no-duplicate-literals.shs — fail-closed ratchet on hand-written
+# hardware aperture literals (workstream G, deliverable 2).
+#
+# The Cosmos+ NFC aperture 0x43C00000 and the PCIe aperture 0x83C00000 are each
+# hand-written in many files across three languages. RegisterIR
+# (spec/hw/cosmos_nfc/register_ir.sdn) is the single source they must migrate
+# onto. This gate freezes the current population and fails when it GROWS. It
+# also fails when the count SHRINKS without the baseline being updated — a
+# baseline that no longer describes the tree is how a ratchet silently stops
+# ratcheting.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> file(s) checked, <k> occurrence(s) (baseline <b>)   exit 0
+#   FAIL  — ...                                                      exit 1
+#   ERROR — nothing was checked                                      exit 2
+#
+# Comment-only mentions of a literal are NOT counted (a header's provenance
+# comment is documentation, not a duplicated fact). --selftest runs first,
+# unconditionally, and is fatal.
+
+set -u
+
+ROOT="${ROOT:-$(cd "$(dirname "$0")/../.." && pwd -P)}"
+BASELINE_FILE="$ROOT/scripts/check/hw_ir_aperture_literal_baseline.txt"
+SCAN_DIRS="src examples test scripts"
+
+# scan_root <root> <literal>  ->  prints "<occurrences> <files_with_hits> <files_scanned>"
+scan_root() {
+    _root="$1"
+    _lit="$2"
+    _list=""
+    for d in $SCAN_DIRS; do
+        if [ -d "$_root/$d" ]; then
+            _list="$_list $_root/$d"
+        fi
+    done
+    if [ -z "$_list" ]; then
+        echo "0 0 0"
+        return 0
+    fi
+    # shellcheck disable=SC2086
+    find $_list -type f \
+        \( -name '*.c' -o -name '*.h' -o -name '*.spl' -o -name '*.shs' \) \
+        ! -name 'check-hw-ir-no-duplicate-literals.shs' \
+        2>/dev/null | sort | tr '\n' '\0' | xargs -0 -r awk -v lit="$_lit" '
+        FNR == 1 { scanned++ }
+        {
+            line = $0
+            s = line
+            sub(/^[ \t]+/, "", s)
+            is_spl = (FILENAME ~ /\.(spl|shs)$/)
+            if (is_spl) {
+                if (substr(s, 1, 1) == "#") next
+            } else {
+                if (substr(s, 1, 1) == "*") next
+                if (substr(s, 1, 2) == "//") next
+                if (substr(s, 1, 2) == "/*") next
+            }
+            t = toupper(line)
+            L = toupper(lit)
+            n = 0
+            while ((p = index(t, L)) > 0) {
+                n++
+                t = substr(t, p + length(L))
+            }
+            if (n > 0) { occ += n; hit[FILENAME] = 1 }
+        }
+        END {
+            nf = 0
+            for (k in hit) nf++
+            print occ + 0, nf + 0, scanned + 0
+        }
+    ' | awk '{ o += $1; f += $2; s += $3 } END { print o + 0, f + 0, s + 0 }'
+}
+
+selftest() {
+    tmp="${TMPDIR:-/tmp}/hwir-lit-selftest.$$"
+    rm -rf "$tmp"
+    mkdir -p "$tmp/clean/src" "$tmp/added/src" "$tmp/comment/src" "$tmp/empty/src"
+
+    # fixture 1: clean — two code occurrences
+    printf '#define A 0x43C00000U\n#define B 0x43C00000U\n' > "$tmp/clean/src/a.h"
+    # fixture 2: same plus one NEW duplicate literal
+    cp "$tmp/clean/src/a.h" "$tmp/added/src/a.h"
+    printf 'val X: u64 = 0x43C00000\n' > "$tmp/added/src/b.spl"
+    # fixture 3: same as clean plus comment-only mentions in both languages
+    cp "$tmp/clean/src/a.h" "$tmp/comment/src/a.h"
+    printf '/*\n * aperture at 0x43c00000..0x43c7ffff\n */\n// see 0x43C00000\n' \
+        > "$tmp/comment/src/c.h"
+    printf '# aperture 0x43C00000 lives in the PL\n' > "$tmp/comment/src/d.spl"
+    # fixture 4: empty tree
+
+    fail=0
+
+    set -- "clean 2" "added 3" "comment 2"
+    for row in "$@"; do
+        name=$(echo "$row" | cut -d' ' -f1)
+        want=$(echo "$row" | cut -d' ' -f2)
+        got=$(scan_root "$tmp/$name" "0x43C00000" | cut -d' ' -f1)
+        if [ "$got" != "$want" ]; then
+            echo "selftest: fixture '$name' expected $want occurrence(s), got $got"
+            fail=1
+        fi
+    done
+
+    # the 'added' fixture must exceed the 'clean' baseline -> RED
+    clean_n=$(scan_root "$tmp/clean" "0x43C00000" | cut -d' ' -f1)
+    added_n=$(scan_root "$tmp/added" "0x43C00000" | cut -d' ' -f1)
+    if [ "$added_n" -le "$clean_n" ]; then
+        echo "selftest: adding a duplicate literal did not raise the count ($clean_n -> $added_n)"
+        fail=1
+    fi
+
+    # the 'comment' fixture must NOT exceed the 'clean' baseline -> stays GREEN
+    comment_n=$(scan_root "$tmp/comment" "0x43C00000" | cut -d' ' -f1)
+    if [ "$comment_n" -ne "$clean_n" ]; then
+        echo "selftest: comment-only mentions changed the count ($clean_n -> $comment_n)"
+        fail=1
+    fi
+
+    # empty tree must scan zero files so the caller is forced to ERROR
+    empty_scanned=$(scan_root "$tmp/empty" "0x43C00000" | cut -d' ' -f3)
+    if [ "$empty_scanned" -ne 0 ]; then
+        echo "selftest: empty fixture scanned $empty_scanned file(s), expected 0"
+        fail=1
+    fi
+
+    rm -rf "$tmp"
+    if [ "$fail" -ne 0 ]; then
+        echo "selftest: FAILED"
+        return 1
+    fi
+    echo "selftest: 6 fixture assertion(s) passed"
+    return 0
+}
+
+selftest
+st=$?
+if [ "$st" -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — selftest only, 6 fixture assertion(s) passed (baseline not evaluated)"
+    exit 0
+fi
+
+if [ ! -f "$BASELINE_FILE" ]; then
+    echo "ERROR — nothing was checked (missing baseline $BASELINE_FILE)"
+    exit 2
+fi
+
+total_scanned=0
+total_occ=0
+total_base=0
+offenders=""
+stale=""
+
+while read -r lit base; do
+    case "$lit" in
+        ''|\#*) continue ;;
+    esac
+    row=$(scan_root "$ROOT" "$lit")
+    occ=$(echo "$row" | cut -d' ' -f1)
+    scanned=$(echo "$row" | cut -d' ' -f3)
+    total_scanned="$scanned"
+    total_occ=$((total_occ + occ))
+    total_base=$((total_base + base))
+    if [ "$occ" -gt "$base" ]; then
+        offenders="$offenders $lit($occ>$base)"
+    fi
+    if [ "$occ" -lt "$base" ]; then
+        stale="$stale $lit($occ<$base)"
+    fi
+done < "$BASELINE_FILE"
+
+if [ "$total_scanned" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 files scanned under $ROOT)"
+    exit 2
+fi
+
+if [ -n "$offenders" ]; then
+    echo "FAIL — $total_scanned file(s) checked, $total_occ occurrence(s) (baseline $total_base); new duplicate literal(s):$offenders"
+    exit 1
+fi
+
+if [ -n "$stale" ]; then
+    echo "FAIL — $total_scanned file(s) checked, $total_occ occurrence(s) (baseline $total_base); stale baseline, ratchet must be lowered:$stale"
+    exit 1
+fi
+
+echo "PASS — $total_scanned file(s) checked, $total_occ occurrence(s) (baseline $total_base)"
+exit 0

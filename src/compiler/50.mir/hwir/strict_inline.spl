@@ -1,0 +1,259 @@
+# Strict MIR call inlining for the HWIR combinational boundary.
+#
+# A circuit has no call stack, so a `Call` instruction can only reach hardware if
+# the callee is folded into the caller's dataflow.  This pass does exactly that,
+# and ONLY for callees that are themselves already accepted by the strict
+# MIR->HWIR lowering: admission is decided by running
+# `lower_strict_mir_function_to_hwir` on the callee, never by re-deriving its
+# shape here.  That keeps "we inline what is provably synthesizable" a fact
+# rather than a comment.
+#
+# The pass is deliberately one level deep: a callee that itself contains a
+# `Call` fails its own strict lowering and is therefore refused as an inline
+# target.  Nothing in the ECC lane needs more, and depth handling would widen
+# the accepted set past what the equivalence gate executes.
+
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.mir_data.*
+use compiler.mir.hwir.mir_to_hwir.{HwirStrictLowerResult, lower_strict_mir_function_to_hwir}
+
+fn inline_same_type(left: MirType, right: MirType) -> bool:
+    """Scalar type identity, restricted to the kinds the strict boundary admits."""
+    match left.kind:
+        case Bool:
+            match right.kind:
+                case Bool: true
+                case _: false
+        case I32:
+            match right.kind:
+                case I32: true
+                case _: false
+        case U32:
+            match right.kind:
+                case U32: true
+                case _: false
+        case I64:
+            match right.kind:
+                case I64: true
+                case _: false
+        case U64:
+            match right.kind:
+                case U64: true
+                case _: false
+        case Bits(left_width, left_signed):
+            match right.kind:
+                case Bits(right_width, right_signed): left_width == right_width and left_signed == right_signed
+                case _: false
+        case _: false
+
+fn inline_local(func: MirFunction, id: LocalId) -> MirLocal?:
+    for local in func.locals:
+        if local.id.id == id.id:
+            return Some(local)
+    nil
+
+fn inline_callee_name(operand: MirOperand) -> text:
+    """The callee's symbol name, or "" when the operand is not a direct callee."""
+    match operand.kind:
+        case Const(constant, _):
+            match constant:
+                case Str(symbol): symbol
+                case _: ""
+        case _: ""
+
+fn inline_copy_local(operand: MirOperand) -> LocalId?:
+    match operand.kind:
+        case Copy(local): Some(local)
+        case _: nil
+
+fn inline_instruction_destination(instruction: MirInst) -> LocalId?:
+    match instruction.kind:
+        case Const(destination, _, _): Some(destination)
+        case BinOp(destination, _, _, _): Some(destination)
+        case _: nil
+
+fn inline_lookup(sources: [i64], targets: [i64], id: i64) -> i64:
+    var index = 0
+    while index < sources.len():
+        if sources[index] == id:
+            return targets[index]
+        index = index + 1
+    -1
+
+fn inline_remap_operand(sources: [i64], targets: [i64], operand: MirOperand) -> MirOperand:
+    match operand.kind:
+        case Copy(local):
+            val mapped = inline_lookup(sources, targets, local.id)
+            if mapped < 0:
+                return operand
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: mapped)))
+        case _: operand
+
+pub fn inline_strict_mir_calls(func: MirFunction, callees: [MirFunction], config: CoreConfig) -> Result<MirFunction, text>:
+    """Fold every direct call in `func` whose target is strict-lowerable.
+
+    Returns `func` unchanged when it contains no call. Any call that cannot be
+    folded is an error naming the exact obstruction, so a rejection is
+    actionable rather than a bare "unsupported instruction".
+    """
+    if func.blocks.len() != 1:
+        return Err("HWIR-E-INLINE-CFG: strict call inlining requires one entry block")
+    val block = func.blocks[0]
+    var has_call = false
+    for instruction in block.instructions:
+        match instruction.kind:
+            case Call(_, _, _): has_call = true
+            case _: ()
+    if not has_call:
+        return Ok(func)
+
+    var locals = func.locals
+    var next_id = 0
+    for local in func.locals:
+        if local.id.id >= next_id:
+            next_id = local.id.id + 1
+    var instructions: [MirInst] = []
+    var site = 0
+
+    for instruction in block.instructions:
+        match instruction.kind:
+            case Call(destination, callee_operand, arguments):
+                if destination == nil:
+                    return Err("HWIR-E-INLINE-RESULT: strict call inlining requires a call that binds its result")
+                val call_destination = destination.unwrap()
+                val callee_name = inline_callee_name(callee_operand)
+                if callee_name == "":
+                    return Err("HWIR-E-INLINE-TARGET: strict call inlining requires a directly named callee")
+                var callee_index = -1
+                var search = 0
+                while search < callees.len():
+                    if callees[search].name == callee_name:
+                        callee_index = search
+                    search = search + 1
+                if callee_index < 0:
+                    return Err("HWIR-E-INLINE-TARGET: strict call inlining has no MIR body for callee '" + callee_name + "'")
+                val callee = callees[callee_index]
+                # Admission: the callee must lower on its own. This is what makes
+                # inlining safe — anything folded in was already proven emittable.
+                val admission = lower_strict_mir_function_to_hwir(callee, config)
+                if not admission.is_success():
+                    return Err("HWIR-E-INLINE-CALLEE: callee '" + callee_name + "' is not strict-lowerable: " + admission.diagnostic)
+                if callee.signature.params.len() != arguments.len():
+                    return Err("HWIR-E-INLINE-ARITY: callee '" + callee_name + "' expects " + callee.signature.params.len().to_text() + " argument(s), the call site passes " + arguments.len().to_text())
+                val destination_local = inline_local(func, call_destination)
+                if destination_local == nil:
+                    return Err("HWIR-E-INLINE-RESULT: strict call inlining references an unknown result local")
+                if not inline_same_type(destination_local.unwrap().type_, callee.signature.return_type):
+                    return Err("HWIR-E-INLINE-TYPE: callee '" + callee_name + "' return type does not match the call site result local")
+
+                val callee_block = callee.blocks[0]
+                var returned_id = -1
+                match callee_block.terminator:
+                    case Ret(Some(returned_operand)):
+                        val returned_local = inline_copy_local(returned_operand)
+                        if returned_local != nil:
+                            returned_id = returned_local.unwrap().id
+                    case _: ()
+                if returned_id < 0:
+                    return Err("HWIR-E-INLINE-RETURN: callee '" + callee_name + "' must return a copied local")
+
+                # Build the local substitution: callee args map onto the caller's
+                # argument locals, the callee's returned local onto the call's
+                # result local, and every other callee local onto a fresh,
+                # site-prefixed clone.
+                var sources: [i64] = []
+                var targets: [i64] = []
+                var argument_ids: [i64] = []
+                var argument_index = 0
+                while argument_index < arguments.len():
+                    val argument_local = inline_copy_local(arguments[argument_index])
+                    if argument_local == nil:
+                        return Err("HWIR-E-INLINE-OPERAND: strict call inlining requires copy arguments")
+                    val caller_local = inline_local(func, argument_local.unwrap())
+                    if caller_local == nil:
+                        return Err("HWIR-E-INLINE-OPERAND: strict call inlining references an unknown argument local")
+                    if not inline_same_type(caller_local.unwrap().type_, callee.signature.params[argument_index]):
+                        return Err("HWIR-E-INLINE-TYPE: callee '" + callee_name + "' parameter " + argument_index.to_text() + " does not match the call site argument type")
+                    argument_ids.push(argument_local.unwrap().id)
+                    argument_index = argument_index + 1
+
+                val prefix = callee_name + "_" + site.to_text() + "_"
+                for callee_local in callee.locals:
+                    match callee_local.kind:
+                        case Arg(index):
+                            if index >= argument_ids.len():
+                                return Err("HWIR-E-INLINE-ARITY: callee '" + callee_name + "' declares an argument local outside its signature")
+                            sources.push(callee_local.id.id)
+                            targets.push(argument_ids[index])
+                        case Return: ()
+                        case _:
+                            if callee_local.id.id == returned_id:
+                                sources.push(callee_local.id.id)
+                                targets.push(call_destination.id)
+                            else:
+                                sources.push(callee_local.id.id)
+                                targets.push(next_id)
+                                val original = callee_local.name ?? "value_" + callee_local.id.id.to_text()
+                                locals.push(MirLocal(id: LocalId(id: next_id), name: Some(prefix + original),
+                                    type_: callee_local.type_, kind: LocalKind.Temp))
+                                next_id = next_id + 1
+
+                # Substituting arguments in place is only sound when the callee
+                # never assigns them; otherwise the fold would clobber a caller
+                # local. Checked, not assumed.
+                var definitions_of_return = 0
+                for callee_instruction in callee_block.instructions:
+                    val defined = inline_instruction_destination(callee_instruction)
+                    if defined == nil:
+                        return Err("HWIR-E-INLINE-BODY: callee '" + callee_name + "' body must be constants and binary operations only")
+                    val defined_id = defined.unwrap().id
+                    if defined_id == returned_id:
+                        definitions_of_return = definitions_of_return + 1
+                    var scan = 0
+                    while scan < argument_ids.len():
+                        if inline_lookup(sources, targets, defined_id) == argument_ids[scan]:
+                            return Err("HWIR-E-INLINE-ARGWRITE: callee '" + callee_name + "' assigns one of its own parameters")
+                        scan = scan + 1
+                if definitions_of_return != 1:
+                    return Err("HWIR-E-INLINE-RETURN: callee '" + callee_name + "' must define its returned local exactly once")
+
+                for callee_instruction in callee_block.instructions:
+                    match callee_instruction.kind:
+                        # The inner binding is NOT named `value`: that shadows the
+                        # matched constant payload and feeds the name text where
+                        # the i64 belongs (fixed once already, do not reintroduce).
+                        case Const(constant_destination, constant_payload, constant_type):
+                            val mapped = inline_lookup(sources, targets, constant_destination.id)
+                            if mapped < 0:
+                                return Err("HWIR-E-INLINE-BODY: callee '" + callee_name + "' writes an undeclared local")
+                            instructions.push(MirInst(kind: MirInstKind.Const(LocalId(id: mapped), constant_payload, constant_type), span: nil))
+                        case BinOp(binary_destination, operation, left, right):
+                            val mapped = inline_lookup(sources, targets, binary_destination.id)
+                            if mapped < 0:
+                                return Err("HWIR-E-INLINE-BODY: callee '" + callee_name + "' writes an undeclared local")
+                            instructions.push(MirInst(kind: MirInstKind.BinOp(LocalId(id: mapped), operation,
+                                inline_remap_operand(sources, targets, left),
+                                inline_remap_operand(sources, targets, right)), span: nil))
+                        case _:
+                            return Err("HWIR-E-INLINE-BODY: callee '" + callee_name + "' body must be constants and binary operations only")
+                site = site + 1
+            case _:
+                instructions.push(instruction)
+
+    val inlined_block = MirBlock(id: block.id, label: block.label, instructions: instructions,
+        terminator: block.terminator)
+    var result = func
+    result.locals = locals
+    result.blocks = [inlined_block]
+    Ok(result)
+
+pub fn lower_strict_mir_function_with_callees(func: MirFunction, callees: [MirFunction], config: CoreConfig) -> HwirStrictLowerResult:
+    """Strict lowering with direct calls folded first.
+
+    `lower_strict_mir_function_to_hwir` is unchanged and remains the single
+    definition of what a legal combinational graph is; this entry point only
+    removes calls before handing the function over.
+    """
+    match inline_strict_mir_calls(func, callees, config):
+        case Ok(flattened): lower_strict_mir_function_to_hwir(flattened, config)
+        case Err(diagnostic): HwirStrictLowerResult.rejected(diagnostic)

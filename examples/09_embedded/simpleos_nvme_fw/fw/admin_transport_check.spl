@@ -1,0 +1,226 @@
+"""
+admin_transport_check — proof that ADMIN commands reach the device through
+MEMORY + ADMIN DOORBELL + PHASE-TAGGED ADMIN CQ POLL, not through a direct
+dispatch call, and that the admin pair (qid 0) and the I/O pair (qid 1) are
+independent.
+
+Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/admin_transport_check.spl
+
+Verdict token on the last line: ADMIN TRANSPORT OK | ADMIN TRANSPORT FAIL (n)
+(Do NOT assert on the process exit code: bug
+ doc/08_tracking/bug/simple_run_exit_code_garbage_for_unit_main_2026-09-01.md.)
+"""
+
+use nvme_types.*
+use nvme_admin_types.*
+use nvme_admin.*
+use nvme_mmio.*
+use nvme_transport_config.*
+use nvme_host_driver.*
+use nvme_controller.*
+use admin_transport.*
+
+# One admin opcode driven over the transport. Returns the failure count.
+# `d` is passed as `var` and returned by the caller's own handle: this is `me`
+# work on a single owner, never a temporary alias (fw/CONVENTIONS.md COW rule).
+fn main():
+    var fail: i64 = 0
+
+    print "-- module selftests --"
+    fail = fail + nvme_mmio_selftest()
+    fail = fail + admin_transport_selftest()
+
+    print "-- A. attach both queue pairs from the SDN config seam --"
+    var h = admin_open()
+    fail = fail + expect_eq(bool_to_int(h.attach()), 1, "admin transport attaches")
+    print "  INFO: attach_reason = {h.attach_reason()}"
+    print "  INFO: ASQ@{h.asq_entry_addr(0)} ACQ@{h.acq_entry_addr(0)} IOSQ@{h.isq_entry_addr(0)} IOCQ@{h.icq_entry_addr(0)}"
+    print "  INFO: admin SQ0TDBL@{h.asq_db_addr()} CQ0HDBL@{h.acq_db_addr()} io SQ1TDBL@{h.isq_db_addr()} CQ1HDBL@{h.icq_db_addr()}"
+    fail = fail + expect_eq(bool_to_int(h.acq_ready()), 0, "zeroed ACQ slot 0 is phase-0: not ready when the host expects phase 1")
+
+    print "-- B. admin submission is a MEMORY WRITE, not a call --"
+    val idc = admin_identify_cmd(10, CNS_CONTROLLER)
+    val asq0: i64 = h.asq_entry_addr(0)
+    fail = fail + expect_eq(h.peek32(asq0), 0, "ASQ slot 0 is zero before submit")
+    fail = fail + expect_eq(bool_to_int(h.submit_asqe(idc)), 1, "submit_asqe writes the admin SQE")
+    fail = fail + expect_eq(h.peek32(asq0) & 0xFF, ADMIN_IDENTIFY, "ASQ memory CDW0[7:0] holds the Identify opcode")
+    fail = fail + expect_eq((h.peek32(asq0) >> 16) & 0xFFFF, 10, "ASQ memory CDW0[31:16] holds the CID")
+    fail = fail + expect_eq(mmio_rd32(h.mem, asq0 + ASQE_OFF_CDW10), CNS_CONTROLLER, "ASQ memory +40 holds CDW10 (CNS)")
+    # THE NON-VACUITY WITNESS. If submission were a call, the device would
+    # already have the command here.
+    fail = fail + expect_eq(h.admin_serviced, 0, "device has NOT seen the admin command before the doorbell")
+    fail = fail + expect_eq(bool_to_int(h.acq_ready()), 0, "no admin completion before the doorbell")
+    fail = fail + expect_eq(h.last_identify().kind, NULL_IDX, "no Identify data produced before the doorbell")
+
+    print "-- C. the ADMIN doorbell is the notification --"
+    fail = fail + expect_eq(h.peek32(h.asq_db_addr()), 0, "admin SQ0TDBL reads 0 before the ring")
+    val svc: i64 = h.ring_admin_doorbell()
+    fail = fail + expect_eq(h.peek32(h.asq_db_addr()), 1, "admin SQ0TDBL now holds the shadow tail")
+    fail = fail + expect_eq(svc, 1, "the doorbell write fetched exactly one admin SQE")
+    fail = fail + expect_eq(h.admin_serviced, 1, "device serviced the admin command only after the doorbell")
+
+    print "-- D. Identify returns a PHASE-TAGGED admin CQE and real data --"
+    fail = fail + expect_eq(cqe_phase_of(h.mem, h.acq_entry_addr(0)), 1, "ACQ slot 0 now carries phase 1")
+    fail = fail + expect_eq(bool_to_int(h.acq_ready()), 1, "ACQ head is ready after the doorbell")
+    val idcpl = h.poll_acq()
+    fail = fail + expect_eq(idcpl.cid, 10, "Identify CQE cid")
+    fail = fail + expect_eq(idcpl.status, SC_SUCCESS, "Identify CQE status is success")
+    fail = fail + expect_eq(h.peek32(h.acq_db_addr()), 1, "polling wrote the admin CQ head doorbell")
+    val idd = h.last_identify()
+    fail = fail + expect_eq(idd.kind, CNS_CONTROLLER, "Identify produced a CONTROLLER structure")
+    fail = fail + expect_eq(bool_to_int(idd.vid > 0), 1, "Identify data carries a nonzero vendor id")
+    fail = fail + expect_eq(bool_to_int(idd.num_ns > 0), 1, "Identify data carries a nonzero namespace count")
+    fail = fail + expect_eq(idd.mdts, MDTS_BLOCKS, "Identify data carries the advertised MDTS")
+    fail = fail + expect_eq(bool_to_int(idd.max_queues > 0), 1, "Identify data carries a nonzero max queue count")
+    print "  NOTE: Identify data is read back through the controller, not DMA'd to a host"
+    print "  NOTE: buffer -- the same PRP1 'carried, not honored' narrowing the I/O path has."
+
+    print "-- E. a stale / wrong-phase admin CQE is REFUSED --"
+    val head_before: i64 = h.acq_head
+    val phase_before: i64 = h.acq_phase
+    val stale_slot: i64 = h.acq_entry_addr(h.acq_head)
+    # Forge a completion at the head with the phase the host is NOT expecting.
+    val wrong_phase: i64 = 1 - h.acq_phase
+    val forged: i64 = (0x00AB & 0xFFFF) | ((wrong_phase & 1) << CQE_PHASE_SHIFT) | ((SC_SUCCESS & 0x7FFF) << CQE_STATUS_SHIFT)
+    h.poke(MemWrite(addr: stale_slot + CQE_OFF_DW3, width: 4, value: forged))
+    fail = fail + expect_eq(cqe_phase_of(h.mem, stale_slot), wrong_phase, "the forged entry really carries the wrong phase")
+    fail = fail + expect_eq(bool_to_int(h.acq_ready()), 0, "wrong-phase admin CQE is not ready")
+    val refused = h.poll_acq()
+    fail = fail + expect_eq(bool_to_int(cqe_is_none(refused)), 1, "poll_acq refuses the wrong-phase entry")
+    fail = fail + expect_eq(h.acq_head, head_before, "refused poll did NOT advance the admin CQ head")
+    fail = fail + expect_eq(h.acq_phase, phase_before, "refused poll did NOT toggle the admin phase")
+    # Restore the slot so the next real completion lands on clean ground.
+    h.poke(MemWrite(addr: stale_slot + CQE_OFF_DW3, width: 4, value: 0))
+
+    print "-- F. negative: an unsupported admin opcode returns an NVMe error status --"
+    val bogus = admin_cmd_make(31, 0x7F, 0, 0, 0, 0)
+    val bogus_cpl = h.exec_admin(bogus)
+    fail = fail + expect_eq(bogus_cpl.cid, 31, "unsupported opcode still completes with its own cid")
+    fail = fail + expect_eq(bogus_cpl.status, SC_INVALID_OPCODE, "unsupported opcode -> SC_INVALID_OPCODE, never silent success")
+    fail = fail + expect_eq(bool_to_int(bogus_cpl.status == SC_SUCCESS), 0, "the error case is NOT success")
+
+    print "-- G. bring the I/O pair up THROUGH the admin transport --"
+    val admin_before_bringup: i64 = h.admin_serviced
+    val bring: i64 = h.bring_up_io_queue(MAX_QUEUE_SIZE)
+    fail = fail + expect_eq(bring, SC_SUCCESS, "Create CQ + Create SQ for qid 1 succeeded over the doorbell path")
+    fail = fail + expect_eq(h.admin_serviced - admin_before_bringup, 2, "queue bring-up cost exactly two admin doorbell round-trips")
+
+    print "-- H. admin and I/O queues are INDEPENDENT --"
+    # H1: I/O traffic must not touch admin state.
+    val a_serviced: i64 = h.admin_serviced
+    val a_tail: i64 = h.asq_tail
+    val a_head: i64 = h.acq_head
+    val a_phase: i64 = h.acq_phase
+    val a_devtail: i64 = h.dev_acq_tail
+    val w = cmd_make(40, OP_WRITE, 8, 1, 0x77)
+    val wc = h.exec_io(w)
+    fail = fail + expect_eq(wc.cid, 40, "I/O write CQE cid over the I/O doorbell")
+    fail = fail + expect_eq(wc.status, SC_SUCCESS, "I/O write CQE status")
+    val r = cmd_make(41, OP_READ, 8, 1, 0)
+    val rc = h.exec_io(r)
+    fail = fail + expect_eq(rc.cid, 41, "I/O read CQE cid")
+    fail = fail + expect_eq(rc.data, 0x77, "I/O read returns the written payload")
+    fail = fail + expect_eq(h.admin_serviced, a_serviced, "I/O traffic did not advance the admin serviced count")
+    fail = fail + expect_eq(h.asq_tail, a_tail, "I/O traffic did not consume an admin SQ slot")
+    fail = fail + expect_eq(h.acq_head, a_head, "I/O traffic did not advance the admin CQ head")
+    fail = fail + expect_eq(h.acq_phase, a_phase, "I/O traffic did not toggle the admin phase")
+    fail = fail + expect_eq(h.dev_acq_tail, a_devtail, "I/O traffic did not post into the admin CQ")
+    fail = fail + expect_eq(h.peek32(h.asq_db_addr()), a_tail, "I/O traffic did not touch the admin SQ doorbell")
+
+    # H2: admin traffic must not touch I/O state or I/O queue memory.
+    val i_serviced: i64 = h.io_serviced
+    val i_tail: i64 = h.isq_tail
+    val i_head: i64 = h.icq_head
+    val i_phase: i64 = h.icq_phase
+    val i_devtail: i64 = h.dev_icq_tail
+    val io_sq_word: i64 = h.peek32(h.isq_entry_addr(0))
+    val io_cq_word: i64 = h.peek32(h.icq_entry_addr(0))
+    val smart_cpl = h.exec_admin(admin_get_log_cmd(42, LOG_SMART))
+    fail = fail + expect_eq(smart_cpl.cid, 42, "Get Log Page (SMART) travelled the admin path")
+    fail = fail + expect_eq(smart_cpl.status, SC_SUCCESS, "Get Log Page (SMART) status")
+    fail = fail + expect_eq(h.io_serviced, i_serviced, "admin traffic did not advance the I/O serviced count")
+    fail = fail + expect_eq(h.isq_tail, i_tail, "admin traffic did not consume an I/O SQ slot")
+    fail = fail + expect_eq(h.icq_head, i_head, "admin traffic did not advance the I/O CQ head")
+    fail = fail + expect_eq(h.icq_phase, i_phase, "admin traffic did not toggle the I/O phase")
+    fail = fail + expect_eq(h.dev_icq_tail, i_devtail, "admin traffic did not post into the I/O CQ")
+    fail = fail + expect_eq(h.peek32(h.isq_entry_addr(0)), io_sq_word, "admin traffic did not corrupt I/O SQ memory")
+    fail = fail + expect_eq(h.peek32(h.icq_entry_addr(0)), io_cq_word, "admin traffic did not corrupt I/O CQ memory")
+    fail = fail + expect_eq(h.peek32(h.isq_db_addr()), i_tail, "admin traffic did not touch the I/O SQ doorbell")
+
+    print "-- I. ALL 13 admin opcodes travel the doorbell transport --"
+    # Every opcode goes through the SAME exec_admin path; the opcode-specific
+    # logic is the untouched NvmeController.admin_exec dispatch.
+    var routed: i64 = 0
+    val base_serviced: i64 = h.admin_serviced
+
+    val c1 = h.exec_admin(admin_identify_cmd(50, CNS_CONTROLLER))
+    fail = fail + expect_eq(c1.cid, 50, "opcode 0x06 Identify routed")
+    routed = routed + 1
+    val c2 = h.exec_admin(admin_create_cq_cmd(51, 2, MAX_QUEUE_SIZE))
+    fail = fail + expect_eq(c2.cid, 51, "opcode 0x05 Create I/O CQ routed")
+    fail = fail + expect_eq(c2.status, SC_SUCCESS, "Create I/O CQ (qid 2) succeeded")
+    routed = routed + 1
+    val c3 = h.exec_admin(admin_create_sq_cmd(52, 2, MAX_QUEUE_SIZE, 2))
+    fail = fail + expect_eq(c3.cid, 52, "opcode 0x01 Create I/O SQ routed")
+    fail = fail + expect_eq(c3.status, SC_SUCCESS, "Create I/O SQ (qid 2) succeeded")
+    routed = routed + 1
+    val c4 = h.exec_admin(admin_set_feature_cmd(53, FEAT_NUM_QUEUES, 4))
+    fail = fail + expect_eq(c4.cid, 53, "opcode 0x09 Set Features routed")
+    fail = fail + expect_eq(c4.status, SC_SUCCESS, "Set Features (num queues) succeeded")
+    routed = routed + 1
+    val c5 = h.exec_admin(admin_get_feature_cmd(54, FEAT_NUM_QUEUES))
+    fail = fail + expect_eq(c5.cid, 54, "opcode 0x0A Get Features routed")
+    fail = fail + expect_eq(c5.data, 4, "Get Features read back the value Set Features stored")
+    routed = routed + 1
+    val c6 = h.exec_admin(admin_get_log_cmd(55, LOG_ERROR))
+    fail = fail + expect_eq(c6.cid, 55, "opcode 0x02 Get Log Page (error log) routed")
+    routed = routed + 1
+    val c7 = h.exec_admin(admin_abort_cmd(56, 1, 40))
+    fail = fail + expect_eq(c7.cid, 56, "opcode 0x08 Abort routed")
+    routed = routed + 1
+    val c8 = h.exec_admin(admin_fw_download_cmd(57, 16, 0))
+    fail = fail + expect_eq(c8.cid, 57, "opcode 0x11 Firmware Image Download routed")
+    routed = routed + 1
+    val c9 = h.exec_admin(admin_fw_commit_cmd(58, 1, 1))
+    fail = fail + expect_eq(c9.cid, 58, "opcode 0x10 Firmware Commit routed")
+    routed = routed + 1
+    val c10 = h.exec_admin(admin_format_cmd(59, 1))
+    fail = fail + expect_eq(c10.cid, 59, "opcode 0x80 Format NVM routed")
+    routed = routed + 1
+    val c11 = h.exec_admin(admin_delete_sq_cmd(60, 2))
+    fail = fail + expect_eq(c11.cid, 60, "opcode 0x00 Delete I/O SQ routed")
+    fail = fail + expect_eq(c11.status, SC_SUCCESS, "Delete I/O SQ (qid 2) succeeded")
+    routed = routed + 1
+    val c12 = h.exec_admin(admin_delete_cq_cmd(61, 2))
+    fail = fail + expect_eq(c12.cid, 61, "opcode 0x04 Delete I/O CQ routed")
+    fail = fail + expect_eq(c12.status, SC_SUCCESS, "Delete I/O CQ (qid 2) succeeded")
+    routed = routed + 1
+
+    # Async Event Request is the 13th. It is held outstanding (no completion) by
+    # design, so its CQE arrives only after an event is raised and the device is
+    # pumped -- there is no host doorbell that can trigger it.
+    val aer = h.exec_admin(admin_async_event_cmd(62))
+    fail = fail + expect_eq(bool_to_int(cqe_is_none(aer)), 1, "opcode 0x0C AER routed and held outstanding (no immediate CQE)")
+    routed = routed + 1
+    h.raise_async_event(AER_SMART_HEALTH)
+    val pumped: i64 = h.device_pump()
+    fail = fail + expect_eq(pumped, 1, "raising the event produced one device-initiated admin CQE")
+    val aer_cpl = h.poll_acq()
+    fail = fail + expect_eq(aer_cpl.cid, 62, "the held AER completes with its original cid")
+    fail = fail + expect_eq(aer_cpl.data, AER_SMART_HEALTH, "the AER completion carries the event type")
+
+    fail = fail + expect_eq(routed, 13, "all 13 admin opcodes travelled exec_admin")
+    fail = fail + expect_eq(h.admin_serviced - base_serviced, 13, "the device fetched exactly 13 admin SQEs from memory")
+
+    print "-- J. scope note --"
+    print "  NOTE: queue bases and doorbell offsets come from the SDN config seam"
+    print "  NOTE: (nvme_transport_profiles.sdn: admin_emu / admin_emu_io), NOT from a"
+    print "  NOTE: CAP/CC/CSTS/AQA/ASQ/ACQ register file. That register file is owned by"
+    print "  NOTE: another lane (fw/nvme_reg*.spl); admin_open() is the single seam that"
+    print "  NOTE: changes when it lands. Nothing else here reads configuration."
+
+    if fail == 0:
+        print "ADMIN TRANSPORT OK"
+    else:
+        print "ADMIN TRANSPORT FAIL ({fail})"
+    return ()

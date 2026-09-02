@@ -1,0 +1,177 @@
+"""
+nvme_payload — real payload widths for the SimpleOS NVMe firmware (workstream D).
+
+Prerequisite zero of
+`doc/03_plan/hardware/nvme_command_set_and_payload_completeness_plan.md`: the
+firmware advertises a 4096-byte logical block (`nvme_admin.spl` Identify
+Namespace `lba_bytes`) while its media stores ONE i64 per page. This module
+holds the honest widths and the payload/OOB carrier types, so the widening can
+proceed bottom-up one layer per commit (plan §1.5, table D1..D11).
+
+Deliberately a LEAF: it imports nothing, so any layer may `use nvme_payload.*`
+next to `use nvme_types.*` without an import cycle. It defines no `expect_eq` —
+that name belongs to `nvme_types.spl`.
+
+Scope of this file today (D1-D3):
+  * profile constants (§1.1)
+  * `PageData` / `OobData` / `CodewordSpan` / `MetadataLayout` (§1.2)
+  * NO compat shim — D11 deleted it (§1.5)
+
+The shim is DEBT WITH AN OWNER: commit D11 deletes both functions, and a grep
+for them returning nothing is the completion test for the whole workstream. Do
+not add new callers above the layer currently being migrated.
+"""
+
+# ── Profile constants (plan §1.1) ─────────────────────────────────────────────
+# These are the widths the tree already half-asserts in three independent
+# places: `nvme_admin.spl` Identify `lba_bytes: 4096`, `dram.spl`
+# `WRITE_BUFFER_ENTRY_BYTES = 4096`, and the Identify assertion in
+# `nvme_admin.spl`'s selftest. Declared ONCE here; those sites derive from them.
+val LBA_BYTES:              i64 = 4096   # logical block size — MUST equal Identify lba_bytes
+val PAGE_BYTES:             i64 = 4096   # NAND page main area
+val LBAS_PER_PAGE:          i64 = 1      # 1:1 for this profile; the only ratio P0-P2 support
+val WORD_BYTES:             i64 = 8
+val PAGE_WORDS:             i64 = 512    # PAGE_BYTES / WORD_BYTES
+val OOB_BYTES:              i64 = 128    # spare area: metadata + ECC parity
+val CODEWORD_BYTES:         i64 = 1024   # 4 codewords per page
+val CODEWORDS_PER_PAGE:     i64 = 4
+val CODEWORD_WORDS:         i64 = 128    # CODEWORD_BYTES / WORD_BYTES
+val PARITY_BYTES_PER_CODEWORD: i64 = 16
+val OOB_META_WORDS:         i64 = 4      # host metadata / DIF-PI region, in words
+
+# Metadata / protection-information settings (P3 territory; declared so the
+# shape exists, not yet driven by any command path).
+val PI_TYPE_NONE: i64 = 0
+val PI_TYPE_1:    i64 = 1
+val PI_TYPE_2:    i64 = 2
+val PI_TYPE_3:    i64 = 3
+
+# ── PageData: the main area of one NAND page ──────────────────────────────────
+struct PageData:
+    words: [i64]   # length PAGE_WORDS
+
+# ── OobData: the spare area ───────────────────────────────────────────────────
+# NOT a new invention. `fil_nand.spl` and `fil_nand_device.spl` already carry
+# `oob_lba` / `oob_seq` / `oob_ecc` as three loose parallel arrays indexed by
+# ppn; this is that existing state folded into one named record, plus the
+# host-metadata region the parallel-array form had nowhere to put.
+struct OobData:
+    lba:    i64      # was Nand.oob_lba
+    seq:    i64      # was Nand.oob_seq
+    parity: [i64]    # was Nand.oob_ecc. D4 LAYOUT, 1 + CODEWORDS_PER_PAGE = 5:
+                     #   [0]     legacy scalar Hamming word (word-0 only). Kept
+                     #           because NandRead.ecc / FmcResult.ecc are i64 and
+                     #           both live in files this workstream may not edit.
+                     #   [1..4]  the REAL per-codeword SEC-DED parity, one per
+                     #           1024-byte codeword (fil_ecc ecc_page_compute).
+                     # Budget: PARITY_BYTES_PER_CODEWORD = 16 B = 128 bits each;
+                     # the SEC-DED word uses 26 of them.
+    meta:   [i64]    # host metadata / DIF-PI region, MetadataLayout-shaped
+
+# ── CodewordSpan: the ECC unit — a slice of PageData plus its parity slot ─────
+# The type workstream A's ECC offload needs: a fixed-size, DMA-able window.
+struct CodewordSpan:
+    page_word_off: i64   # 0, 128, 256, 384 for CODEWORD_BYTES = 1024
+    word_count:    i64
+    parity_index:  i64   # index into OobData.parity
+
+# ── MetadataLayout: declares what OobData.meta MEANS, per namespace ───────────
+struct MetadataLayout:
+    ms_bytes:  i64    # Identify NS "metadata size"; 0 = disabled
+    pi_type:   i64    # PI_TYPE_NONE, or 1/2/3 for DIF/PI types (P3)
+    pi_first:  bool   # PI in the first (true) or last (false) 8 bytes of meta
+
+fn metadata_layout_disabled() -> MetadataLayout:
+    MetadataLayout(ms_bytes: 0, pi_type: PI_TYPE_NONE, pi_first: false)
+
+# ── PageData constructors / accessors ─────────────────────────────────────────
+# NAND's erased state is all-ones; a *placeholder* zeroed page is what the
+# behavioural backends have always returned, so both are named explicitly
+# rather than one being assumed.
+fn page_zero() -> PageData:
+    var w: [i64] = []
+    var i: i64 = 0
+    while i < PAGE_WORDS:
+        w.push(0)
+        i = i + 1
+    PageData(words: w)
+
+fn page_fill(v: i64) -> PageData:
+    var w: [i64] = []
+    var i: i64 = 0
+    while i < PAGE_WORDS:
+        w.push(v)
+        i = i + 1
+    PageData(words: w)
+
+fn page_word_count(p: PageData) -> i64:
+    p.words.len()
+
+# Bounds-safe read. Out-of-range reads 0 rather than trapping, matching the
+# fail-soft convention the FIL layer uses for an unready page.
+fn page_word(p: PageData, i: i64) -> i64:
+    if i < 0:
+        return 0
+    if i >= p.words.len():
+        return 0
+    p.words[i]
+
+fn page_is_well_formed(p: PageData) -> bool:
+    p.words.len() == PAGE_WORDS
+
+fn page_eq(a: PageData, b: PageData) -> bool:
+    if a.words.len() != b.words.len():
+        return false
+    var i: i64 = 0
+    while i < a.words.len():
+        if a.words[i] != b.words[i]:
+            return false
+        i = i + 1
+    true
+
+# ── OobData constructors ──────────────────────────────────────────────────────
+val OOB_PARITY_SLOTS: i64 = 5   # 1 legacy scalar + CODEWORDS_PER_PAGE
+
+fn oob_erased() -> OobData:
+    var par: [i64] = []
+    var pi: i64 = 0
+    while pi < OOB_PARITY_SLOTS:
+        par.push(0)
+        pi = pi + 1
+    var meta: [i64] = []
+    var i: i64 = 0
+    while i < OOB_META_WORDS:
+        meta.push(0)
+        i = i + 1
+    # UNMAP is -1 (nvme_types.spl "index-handle law"); spelled as a literal here
+    # only because this module is a leaf and must not import nvme_types.
+    OobData(lba: -1, seq: 0, parity: par, meta: meta)
+
+fn oob_parity0(o: OobData) -> i64:
+    if o.parity.len() == 0:
+        return 0
+    o.parity[0]
+
+# ── CodewordSpan enumeration ──────────────────────────────────────────────────
+fn codeword_span(idx: i64) -> CodewordSpan:
+    CodewordSpan(page_word_off: idx * CODEWORD_WORDS, word_count: CODEWORD_WORDS, parity_index: idx)
+
+fn codeword_span_in_range(s: CodewordSpan) -> bool:
+    s.page_word_off >= 0 and s.word_count > 0 and s.page_word_off + s.word_count <= PAGE_WORDS
+
+# ── Compat shim (plan §1.5) — DELETED IN D11 ──────────────────────────────────
+# The one-word narrowing shim that used to close this file is GONE, and a grep
+# for its two names returning nothing is D11's completion test.
+#
+# Where it went:
+#   * the page -> word direction was never a shim at all — every call site was
+#     literally `page_word(p, 0)`, the general accessor above, and now says so;
+#   * the word -> page direction survives ONLY inside the legacy scalar entry
+#     points that still take an `i64` (Fil/Nand/NandDevice `program`,
+#     `corrupt_page_data`, `Ftl.write`, `Dram.stage`, `fmc_cmd`, `cmd_make*`,
+#     `cpl_make`, `host_write_page`'s PRP-walk stand-in). Each of those now
+#     builds its zero page inline, at the seam, with a comment naming it a
+#     residual word-0 derivation. Deliberately NOT re-extracted into a helper:
+#     an importable narrowing function is exactly what let the debt spread, and
+#     the remaining scalar seams are the `data: i64` FIELDS themselves, which a
+#     later plan step removes.

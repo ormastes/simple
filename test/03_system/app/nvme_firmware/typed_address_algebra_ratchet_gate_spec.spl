@@ -1,0 +1,135 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# plan: doc/03_plan/hardware/nvme_ssd_firmware_hardening_design_plan.md
+
+# @tag: system, nvme, firmware, typed-address, ratchet, gate
+# @req REQ-SSPEC-SYSTEM
+"""
+Addresses in the firmware must stop being bare integers.
+
+An LBA, a physical page address, a DMA host address and a byte offset are all
+`i64` today, which means the type system will happily let any one of them be
+passed where another is expected. `scripts/check/check-typed-address-algebra.shs`
+is the ratchet that stops that population growing while the migration to typed
+address structs proceeds: it counts bare-`i64` address parameters under the
+firmware tree and fails anything above the recorded baseline of 202.
+
+KNOWN RED, DELIBERATELY NOT PAPERED OVER. Against the WORKING TREE this gate is
+currently failing — `FAIL — 76 file(s) scanned, 208 bare-i64 address param(s), 6
+above baseline 202`, exit 1 — because of in-flight edits that have added six new
+bare-`i64` address parameters. That red is real and must stay visible: this
+scenario does NOT tune the gate, rebaseline it, or skip it.
+
+What the scenario asserts instead is the gate's CONTRACT, which holds in both
+states: that its verdict is a well-formed last line naming both a scanned count
+and the baseline it was held to; that it refuses with ERROR/exit 2 rather than
+passing when handed an empty tree; and that its fatal selftest — which carries
+the sabotage fixture proving the gate can turn red — passes.
+
+The one pass/fail assertion the scenario makes is explicitly scoped to git-HEAD
+content, materialised with `git archive HEAD` into a temp directory and scanned
+with `--root`. At HEAD the gate PASSes at exactly 202. The working tree differs
+from HEAD by the uncommitted in-flight edits described above; that difference is
+the whole reason the two are scoped separately here rather than conflated.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val GATE: text = "scripts/check/check-typed-address-algebra.shs"
+val FW: text = "examples/09_embedded/simpleos_nvme_fw/fw"
+
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+describe "Typed address algebra ratchet gate":
+
+    # @manual scenario evidence
+    it "should emit a well-formed verdict naming a non-zero scanned count and its baseline":
+        # @req REQ-SSPEC-SYSTEM
+        step("should emit a well-formed verdict naming a non-zero scanned count and its baseline")
+
+        step("Run the gate over the working tree, whatever state it is in")
+        # No pass/fail claim is made here on purpose — see the docstring. Only
+        # the verdict GRAMMAR is pinned, and that grammar holds red or green.
+        val (out, err, rc) = _run("out=$(sh " + GATE + " 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"; printf '%s\\n' \"$last\" | grep -Eq '^(PASS|FAIL|ERROR) —' && printf 'SHAPE WELLFORMED\\n' || printf 'SHAPE MALFORMED\\n'; printf '%s\\n' \"$last\" | grep -Eq '[1-9][0-9]* file\\(s\\) scanned' && printf 'COUNT NONZERO\\n' || printf 'COUNT VACUOUS\\n'; printf '%s\\n' \"$last\" | grep -q 'baseline' && printf 'BASELINE NAMED\\n' || printf 'BASELINE MISSING\\n'")
+        val log: text = out + err
+
+        step("The last line of stdout is one of the three declared verdicts")
+        expect(log).to_contain("SHAPE WELLFORMED")
+
+        step("It states a NON-ZERO scanned count, so a vacuous run cannot pass for a real one")
+        expect(log).to_contain("COUNT NONZERO")
+
+        step("It names the baseline the count was held to")
+        expect(log).to_contain("BASELINE NAMED")
+
+        step("It names the unit being ratcheted, so the number is interpretable")
+        expect(log).to_contain("bare-i64 address param(s)")
+
+    # @manual scenario evidence
+    it "should PASS at exactly the recorded baseline against git-HEAD content":
+        # @req REQ-SSPEC-SYSTEM
+        step("should PASS at exactly the recorded baseline against git-HEAD content")
+
+        step("Materialise the firmware tree from git HEAD, not the working copy")
+        # Scoped to committed content deliberately: the working tree carries
+        # uncommitted in-flight edits that push the count to 208 and turn the
+        # gate red. That red is genuine and is left visible, not asserted away.
+        val (out, err, rc) = _run("T=$(mktemp -d) && git archive HEAD " + FW + " | tar -x -C $T && out=$(sh " + GATE + " --root $T/" + FW + " 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'HEAD_VERDICT %s\\n' \"$last\"; printf 'HEAD_RC %s\\n' \"$rc\"; rm -rf $T")
+        val log: text = out + err
+
+        step("Committed content sits exactly on the baseline")
+        expect(log).to_contain("HEAD_VERDICT PASS")
+        expect(log).to_contain("202 bare-i64 address param(s) (baseline 202)")
+        expect(log).to_contain("HEAD_RC 0")
+
+    # @manual scenario evidence
+    it "should refuse with ERROR and exit 2 when there is nothing to check":
+        # @req REQ-SSPEC-SYSTEM
+        step("should refuse with ERROR and exit 2 when there is nothing to check")
+
+        step("Point the gate at a directory that does not exist")
+        val (out, err, rc) = _run("out=$(sh " + GATE + " --root /nonexistent/simple-gate-probe 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"")
+        val log: text = out + err
+
+        step("The verdict is ERROR — nothing was checked, never PASS")
+        expect(log).to_contain("VERDICT ERROR — nothing was checked")
+
+        step("And the exit code is 2")
+        expect(log).to_contain("GATE_RC 2")
+
+        step("An empty (rather than missing) tree is also an ERROR, not a clean pass")
+        val (eout, eerr, erc) = _run("T=$(mktemp -d) && out=$(sh " + GATE + " --root $T 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'EMPTY %s\\n' \"$last\"; printf 'EMPTY_RC %s\\n' \"$rc\"; rmdir $T")
+        val elog: text = eout + eerr
+        expect(elog).to_contain("EMPTY ERROR — nothing was checked")
+        expect(elog).to_contain("EMPTY_RC 2")
+
+    # @manual scenario evidence
+    it "should run its fatal selftest unconditionally and prove it can turn RED":
+        # @req REQ-SSPEC-SYSTEM
+        step("should run its fatal selftest unconditionally and prove it can turn RED")
+
+        step("--selftest reports its fixture count and scans no tree")
+        val (sout, serr, src) = _run("out=$(sh " + GATE + " --selftest 2>&1); rc=$?; printf '%s\\n' \"$out\"; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"")
+        val slog: text = sout + serr
+        expect(slog).to_contain("selftest: 5 fixture(s) passed")
+        expect(slog).to_contain("VERDICT PASS — 5 fixture(s) scanned, selftest only")
+        expect(slog).to_contain("GATE_RC 0")
+
+        step("The selftest also runs on the ERROR path, so it is not opt-in")
+        val (eout, eerr, erc) = _run("sh " + GATE + " --root /nonexistent/simple-gate-probe 2>&1")
+        expect(eout + eerr).to_contain("selftest: 5 fixture(s) passed")
+
+        step("Fixture 2 is the mutation: an added bare-i64 address param MUST be counted")
+        # The gate is thus shown capable of red without sabotaging any tracked
+        # file — and fixture 3 (a commented-out signature that must NOT count)
+        # keeps that capability from being mere over-counting.
+        val (fout, ferr, frc) = _run("if grep -q 'one added bare-i64 address param must be counted' " + GATE + " && grep -q 'a commented-out signature must NOT be counted' " + GATE + "; then echo MUTATION_FIXTURES_PRESENT; else echo MUTATION_FIXTURES_ABSENT; fi")
+        expect(fout + ferr).to_contain("MUTATION_FIXTURES_PRESENT")
+
+        step("A failed selftest is fatal — it downgrades the run to ERROR, never a pass")
+        val (gout, gerr, grc) = _run("if grep -q 'ERROR — nothing was checked (selftest failed)' " + GATE + "; then echo SELFTEST_FATAL; else echo SELFTEST_ADVISORY; fi")
+        expect(gout + gerr).to_contain("SELFTEST_FATAL")

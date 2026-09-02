@@ -1,0 +1,69 @@
+#!/bin/sh
+# check-hw-ir-register-header-identity.shs — workstream G, deliverable 1 gate.
+#
+# Regenerates src/os/kernel/arch/arm32/cosmos/cosmos_nfc_regs.h from the
+# RegisterIR definition spec/hw/cosmos_nfc/register_ir.sdn and requires
+# BYTE-IDENTITY with the committed hand-written header. It never writes the
+# committed file — output goes to a temp path and is compared with cmp.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — 1 header regenerated, byte-identical to <path>   exit 0
+#   FAIL — ...                                              exit 1
+#   ERROR — nothing was checked                             exit 2
+
+set -u
+
+ROOT="${ROOT:-$(cd "$(dirname "$0")/../.." && pwd -P)}"
+SPEC="$ROOT/spec/hw/cosmos_nfc/register_ir.sdn"
+GEN="$ROOT/src/hardware/ir/register_ir_gen.spl"
+TARGET="$ROOT/src/os/kernel/arch/arm32/cosmos/cosmos_nfc_regs.h"
+SIMPLE="${SIMPLE:-$ROOT/bin/simple}"
+
+for f in "$SPEC" "$GEN" "$TARGET"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR — nothing was checked (missing $f)"
+        exit 2
+    fi
+done
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR — nothing was checked (no runnable compiler at $SIMPLE)"
+    exit 2
+fi
+
+out="${TMPDIR:-/tmp}/hwir-cosmos-nfc-regs.$$.h"
+rm -f "$out"
+
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd $ROOT)"; exit 2; }
+"$SIMPLE" run "$GEN" --spec "$SPEC" --emit "$out" > "$out.log" 2>&1
+gen_status=$?
+
+# The Rust seed returns a nonsense exit code for any `fn main() -> ()` script
+# (a two-line hello world exits 193), so `run`'s status cannot be trusted here.
+# Success is proven by the generator's own GEN-OK sentinel plus a non-empty
+# output file; gen_status is reported for diagnosis only.
+grep -q '^GEN-OK ' "$out.log"
+sentinel_status=$?
+
+if [ "$sentinel_status" -ne 0 ] || [ ! -s "$out" ]; then
+    echo "generator output (exit status was $gen_status):"
+    cat "$out.log"
+    rm -f "$out" "$out.log"
+    echo "ERROR — nothing was checked (generator printed no GEN-OK sentinel / produced no output)"
+    exit 2
+fi
+
+cmp -s "$out" "$TARGET"
+cmp_status=$?
+
+if [ "$cmp_status" -eq 0 ]; then
+    bytes=$(wc -c < "$out")
+    rm -f "$out" "$out.log"
+    echo "PASS — 1 header regenerated from RegisterIR, byte-identical to $TARGET ($bytes bytes)"
+    exit 0
+fi
+
+echo "first difference:"
+diff -u "$TARGET" "$out" | head -40
+rm -f "$out" "$out.log"
+echo "FAIL — generated header differs from committed $TARGET"
+exit 1

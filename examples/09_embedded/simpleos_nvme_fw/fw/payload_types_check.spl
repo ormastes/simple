@@ -1,0 +1,130 @@
+"""
+payload_types_check — gate for commit D1 of
+`doc/03_plan/hardware/nvme_command_set_and_payload_completeness_plan.md`.
+
+Oracles for `nvme_payload.spl`: the profile constants are ARITHMETICALLY
+consistent (not three independent hand-written 4096s), the payload carriers hold
+the widths they claim, and — since D11 deleted the one-word compat shim — the
+residual word-0 derivation left inside the LEGACY SCALAR entry points (exercised
+here through the real `cmd_make` constructor) still round-trips losslessly in the
+direction upper layers depend on, and is still lossy the other way.
+
+Also a module-boundary gate: every struct below is built HERE and passed into
+`nvme_payload.spl` functions, so a cross-module struct decay would surface.
+
+Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/payload_types_check.spl
+Gate: prints "PAYLOAD TYPES OK" and exits 0.
+"""
+
+use nvme_types.*     # expect_eq, bool_to_int, LBA_COUNT, NUM_PAGES, UNMAP
+use nvme_payload.*
+
+fn main():
+    var fail: i64 = 0
+
+    print("A. profile constants are derived, not three independent literals")
+    fail = fail + expect_eq(PAGE_BYTES / WORD_BYTES, PAGE_WORDS, "PAGE_WORDS == PAGE_BYTES / WORD_BYTES")
+    fail = fail + expect_eq(CODEWORD_BYTES / WORD_BYTES, CODEWORD_WORDS, "CODEWORD_WORDS == CODEWORD_BYTES / WORD_BYTES")
+    fail = fail + expect_eq(CODEWORD_BYTES * CODEWORDS_PER_PAGE, PAGE_BYTES, "codewords tile the page exactly")
+    fail = fail + expect_eq(LBA_BYTES * LBAS_PER_PAGE, PAGE_BYTES, "one LBA per page for this profile")
+    # The spare area must hold the parity it promises, with room left for meta.
+    fail = fail + expect_eq(bool_to_int(PARITY_BYTES_PER_CODEWORD * CODEWORDS_PER_PAGE < OOB_BYTES), 1, "parity fits inside OOB with metadata room left")
+    fail = fail + expect_eq(bool_to_int(OOB_META_WORDS * WORD_BYTES <= OOB_BYTES), 1, "metadata region fits inside OOB")
+
+    print("B. the widening is what makes the Identify claim honest")
+    # LBA_COUNT surfaced LBAs at LBA_BYTES each must fit the NUM_PAGES media.
+    fail = fail + expect_eq(bool_to_int(LBA_COUNT * LBA_BYTES <= NUM_PAGES * PAGE_BYTES), 1, "advertised capacity fits the physical media")
+
+    print("C. PageData carries a real page, not a word")
+    var p = page_zero()
+    fail = fail + expect_eq(page_word_count(p), PAGE_WORDS, "page_zero is PAGE_WORDS wide")
+    fail = fail + expect_eq(bool_to_int(page_is_well_formed(p)), 1, "page_zero is well formed")
+    fail = fail + expect_eq(page_word(p, 0), 0, "page_zero word 0 is zero")
+    fail = fail + expect_eq(page_word(p, PAGE_WORDS - 1), 0, "page_zero last word is zero")
+    # Out-of-range reads fail soft, matching the FIL unready-page convention.
+    fail = fail + expect_eq(page_word(p, PAGE_WORDS), 0, "out-of-range word reads 0, not a trap")
+    fail = fail + expect_eq(page_word(p, -1), 0, "negative word index reads 0")
+
+    var f = page_fill(0xFF)
+    fail = fail + expect_eq(page_word(f, 0), 0xFF, "page_fill sets word 0")
+    fail = fail + expect_eq(page_word(f, PAGE_WORDS - 1), 0xFF, "page_fill sets the LAST word too (whole page, not a prefix)")
+    fail = fail + expect_eq(bool_to_int(page_eq(f, page_fill(0xFF))), 1, "page_eq: equal fills compare equal")
+    fail = fail + expect_eq(bool_to_int(page_eq(f, p)), 0, "page_eq: different fills compare unequal")
+
+    print("D. mutating a page touches ONE word, not the whole page")
+    var m = page_zero()
+    m.words[7] = 0xDEAD
+    fail = fail + expect_eq(page_word(m, 7), 0xDEAD, "written word reads back")
+    fail = fail + expect_eq(page_word(m, 6), 0, "neighbour word below untouched")
+    fail = fail + expect_eq(page_word(m, 8), 0, "neighbour word above untouched")
+    fail = fail + expect_eq(page_word_count(m), PAGE_WORDS, "width preserved across mutation")
+
+    print("E. OobData is the existing oob_lba/oob_seq/oob_ecc fold")
+    var o = oob_erased()
+    fail = fail + expect_eq(o.lba, UNMAP, "erased OOB lba == UNMAP (same sentinel the parallel arrays used)")
+    fail = fail + expect_eq(o.seq, 0, "erased OOB seq == 0")
+    fail = fail + expect_eq(oob_parity0(o), 0, "erased OOB parity slot 0 == 0")
+    fail = fail + expect_eq(o.meta.len(), OOB_META_WORDS, "OOB metadata region is OOB_META_WORDS wide")
+    # D4 widened parity: slot 0 is the legacy scalar, slots 1..4 the real
+    # per-codeword SEC-DED words. Erased means every slot is 0.
+    fail = fail + expect_eq(o.parity.len(), OOB_PARITY_SLOTS, "parity holds the legacy slot plus one per codeword")
+    fail = fail + expect_eq(o.parity.len(), 1 + CODEWORDS_PER_PAGE, "parity width tracks CODEWORDS_PER_PAGE")
+    var pz: i64 = 0
+    var pk: i64 = 0
+    while pk < o.parity.len():
+        if o.parity[pk] != 0:
+            pz = pz + 1
+        pk = pk + 1
+    fail = fail + expect_eq(pz, 0, "every erased parity slot is 0")
+
+    print("F. CodewordSpans tile the page with no gap and no overlap")
+    var covered: i64 = 0
+    var prev_end: i64 = 0
+    var i: i64 = 0
+    while i < CODEWORDS_PER_PAGE:
+        var s = codeword_span(i)
+        fail = fail + expect_eq(bool_to_int(codeword_span_in_range(s)), 1, "codeword span in range")
+        fail = fail + expect_eq(s.page_word_off, prev_end, "span starts exactly where the previous ended")
+        fail = fail + expect_eq(s.parity_index, i, "span parity_index tracks the codeword index")
+        covered = covered + s.word_count
+        prev_end = s.page_word_off + s.word_count
+        i = i + 1
+    fail = fail + expect_eq(covered, PAGE_WORDS, "spans cover the whole page")
+    fail = fail + expect_eq(prev_end, PAGE_WORDS, "last span ends at the page end")
+
+    print("G. metadata layout defaults to DISABLED (honest, not a fake PI claim)")
+    var ml = metadata_layout_disabled()
+    fail = fail + expect_eq(ml.ms_bytes, 0, "metadata size 0 == disabled")
+    fail = fail + expect_eq(ml.pi_type, PI_TYPE_NONE, "no protection information modelled yet")
+    fail = fail + expect_eq(bool_to_int(ml.pi_first), 0, "pi_first false while PI is disabled")
+
+    # D11 DELETED the one-word compat shim. The old H and I sections
+    # pinned that shim's round trip. The property the surviving legacy scalar
+    # entry points actually depend on is unchanged and is pinned here instead,
+    # over the page-wide primitives that replaced the shim: page_zero() plus an
+    # explicit word-0 store, read back with page_word(p, 0). Same assertion
+    # count, same properties, no importable narrowing helper.
+    print("H. the residual word-0 derivation round-trips in the direction upper layers depend on")
+    fail = fail + expect_eq(page_word(cmd_make(1, 0, 0, 1, 0xAB).page, 0), 0xAB, "word -> page -> word preserves 0xAB")
+    fail = fail + expect_eq(page_word(cmd_make(1, 0, 0, 1, 0).page, 0), 0, "word -> page -> word preserves 0")
+    fail = fail + expect_eq(page_word(cmd_make(1, 0, 0, 1, UNMAP).page, 0), UNMAP, "word -> page -> word preserves a negative sentinel")
+    fail = fail + expect_eq(page_word(cmd_make(1, 0, 0, 1, FW_SAFE_I64_LIMIT).page, 0), FW_SAFE_I64_LIMIT, "word -> page -> word preserves a large value")
+    var derived: PageData = cmd_make(1, 0, 0, 1, 0xAB).page
+    fail = fail + expect_eq(page_word_count(derived), PAGE_WORDS, "derived page is a FULL page, not a one-word stub")
+    fail = fail + expect_eq(page_word(derived, 1), 0, "the derivation zero-fills the rest of the page")
+    fail = fail + expect_eq(page_word(derived, PAGE_WORDS - 1), 0, "the derivation zero-fills to the page end")
+
+    print("I. non-vacuity: a word-0 projection is LOSSY, which is why the scalar seams are debt")
+    var wide = page_zero()
+    wide.words[0] = 1
+    wide.words[300] = 0xC0DE
+    var narrowed: PageData = cmd_make(1, 0, 0, 1, page_word(wide, 0)).page
+    fail = fail + expect_eq(page_word(narrowed, 0), 1, "word 0 survives the narrowing")
+    fail = fail + expect_eq(page_word(narrowed, 300), 0, "word 300 is DESTROYED by the narrowing (the projection is lossy)")
+    fail = fail + expect_eq(bool_to_int(page_eq(wide, narrowed)), 0, "a real page does not survive a round trip through a word")
+
+    if fail == 0:
+        print("PAYLOAD TYPES OK")
+    else:
+        print("PAYLOAD TYPES FAIL")
+    return ()

@@ -1,0 +1,134 @@
+"""
+text_norm — normalization helpers for PDF-extracted specification text.
+
+PDF text extraction produces trailing spaces, doubled inter-word spaces (from
+justified typesetting), and hard-wrapped sentences. Every downstream scan in
+this app operates on NORMALIZED lines produced here, never on raw ones.
+
+No specification prose ever leaves this module into a repo file: callers use
+these helpers to classify and to compute line numbers, not to copy text.
+"""
+
+"""Collapse runs of whitespace to one space and trim both ends."""
+fn norm_line(s: text) -> text:
+    var out: text = ""
+    var prev_sp: bool = true
+    var i: i64 = 0
+    val n: i64 = s.len()
+    while i < n:
+        val c: text = s[i]
+        if c == " " or c == "\t" or c == "\r":
+            if not prev_sp:
+                out = out + " "
+            prev_sp = true
+        else:
+            out = out + c
+            prev_sp = false
+        i = i + 1
+    out.trim()
+
+fn is_digit_ch(c: text) -> bool:
+    c >= "0" and c <= "9"
+
+fn is_upper_ch(c: text) -> bool:
+    c >= "A" and c <= "Z"
+
+fn is_hex_ch(c: text) -> bool:
+    is_digit_ch(c) or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
+
+"""True when every character is a digit and there is at least one."""
+fn all_digits(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i: i64 = 0
+    while i < s.len():
+        if not is_digit_ch(s[i]):
+            return false
+        i = i + 1
+    true
+
+"""A dotted section number such as `3.1.4` (1..4 components). Empty when not."""
+fn leading_section_number(s: text) -> text:
+    var i: i64 = 0
+    var out: text = ""
+    while i < s.len():
+        val c: text = s[i]
+        if is_digit_ch(c) or c == ".":
+            out = out + c
+        else:
+            break
+        i = i + 1
+    if out.len() == 0:
+        return ""
+    if out[out.len() - 1] == ".":
+        out = out.substring(0, out.len() - 1)
+    if not section_number_shape(out):
+        return ""
+    out
+
+"""`N`, `N.N`, `N.N.N`, `N.N.N.N` with no empty component."""
+fn section_number_shape(s: text) -> bool:
+    val parts = s.split(".")
+    if parts.len() < 1 or parts.len() > 4:
+        return false
+    var i: i64 = 0
+    while i < parts.len():
+        if not all_digits(parts[i]):
+            return false
+        i = i + 1
+    true
+
+"""Text after the leading section number, trimmed."""
+fn after_section_number(s: text, num: text) -> text:
+    if num.len() == 0:
+        return s
+    if s.len() <= num.len():
+        return ""
+    s.substring(num.len(), s.len()).trim()
+
+"""A table-of-contents row: title, dot leader, page number."""
+fn is_toc_line(s: text) -> bool:
+    s.contains(".....")
+
+"""Whole-word containment, so `shall` does not match `shallow`."""
+fn has_word(hay: text, needle: text) -> bool:
+    (" " + hay + " ").contains(" " + needle + " ")
+
+"""Whole-word containment ignoring a trailing comma or period."""
+fn has_word_loose(hay: text, needle: text) -> bool:
+    val padded: text = " " + hay + " "
+    padded.contains(" " + needle + " ") or padded.contains(" " + needle + ",") or padded.contains(" " + needle + ".")
+
+"""Count non-overlapping occurrences of `needle` in `hay`."""
+fn count_occurrences(hay: text, needle: text) -> i64:
+    if needle.len() == 0:
+        return 0
+    var n: i64 = 0
+    var from: i64 = 0
+    while from <= hay.len() - needle.len():
+        val rest: text = hay.substring(from, hay.len())
+        val at: i64 = rest.index_of(needle)
+        if at < 0:
+            break
+        n = n + 1
+        from = from + at + needle.len()
+    n
+
+"""Escape a value for a double-quoted SDN scalar. Rejects nothing silently."""
+fn sdn_escape(s: text) -> text:
+    var out: text = ""
+    var i: i64 = 0
+    while i < s.len():
+        val c: text = s[i]
+        if c == "\"":
+            out = out + "'"
+        elif c == "\n" or c == "\r" or c == "\t":
+            out = out + " "
+        else:
+            out = out + c
+        i = i + 1
+    out
+
+export norm_line, is_digit_ch, is_upper_ch, is_hex_ch, all_digits
+export leading_section_number, section_number_shape, after_section_number
+export is_toc_line, has_word, has_word_loose, count_occurrences, sdn_escape

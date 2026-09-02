@@ -25,6 +25,13 @@ response.** `nvme_admin.spl:109` hand-writes:
 ```
 
 and `nvme_admin.spl:612` asserts it (`"identify-namespace block size 4096"`).
+
+> **Resolved 2026-09-01 (with D1-D3).** Both literals now read `LBA_BYTES` from
+> `nvme_payload.spl`, and the selftest gained two anti-drift oracles tying the
+> advertised block size to the real media width
+> (`ins.lba_bytes == PAGE_BYTES / LBAS_PER_PAGE` and
+> `PAGE_WORDS * WORD_BYTES == ins.lba_bytes`). The 512x over-claim is gone: the
+> media genuinely stores `PAGE_BYTES` per page as of D3.
 The device advertises a **4096-byte** logical block while its media stores
 **8 bytes** per page. That is a 512x over-claim, and it is exactly the failure
 mode §6.1 forbids: *"Unsupported commands and features must be reported
@@ -246,9 +253,9 @@ final commit deletes both functions, and a grep for them is the completion test.
 
 | # | Commit | Widens | Gate that must stay green |
 |---|---|---|---|
-| D1 | `nvme_payload.spl` + profile constants, no callers | new types only | new `payload_types_check.spl` |
-| D2 | OOB fold | `fil_nand.spl:67` three arrays → `OobData` | `fil_nand.spl` selftest, `nd_types_check.spl` |
-| D3 | NAND media | `fil_nand.spl:18,79,92,101,105,119,157`; `fil_nand_device.spl:246,317` | `fil_nand_emu_check.spl`, `fil_nand_emu_e2e_check.spl` |
+| D1 | **LANDED 2026-09-01.** `nvme_payload.spl` + profile constants, no callers | new types only | new `payload_types_check.spl` — green |
+| D2 | **LANDED 2026-09-01.** OOB fold, in BOTH behavioural backends | `fil_nand.spl` three arrays → `oob: [OobData]`; same fold in `fil_nand_device.spl` (`fil_nand_emu.spl` untouched — physics backend, own geometry) | `fil_nand.spl` selftest via `test_fw.spl`, `nd_types_check.spl` — green |
+| D3 | **LANDED 2026-09-01.** NAND media stores real page bytes | `fil_nand.Nand.data:[i64]` → `page:[PageData]`; `fil_nand_device.page_data` + the ONFI `din`/`dout` latches → `PageData`. i64 seams (`program`/`read_page`/`corrupt_page_data`/`data_in`/`data_out`) preserved via the shim; page-wide `program_page`/`read_page_data`/`corrupt_page`/`data_in_page`/`data_out_page` added for D4/D5 | `fil_nand_emu_check.spl`, `fil_nand_emu_e2e_check.spl`, `nvme_emu_media_check.spl`, `test_fw.spl` — all green; cost recorded in `doc/08_tracking/bug/nvme_fw_payload_widening_d3_cost_and_silent_field_assign_2026-09-01.md` |
 | D4 | ECC | `fil_ecc.spl:13,33,68,73,81,114` → `CodewordSpan` | `ecc_check.spl` — **unblocks workstream A** |
 | D5 | FIL/FMC | `fil.spl:28,62,104,129,275`; `fil_fmc.spl:38,46,89` | `fil.spl:316+` selftest, `fil_fmc.spl:300` |
 | D6 | RAIN | `rain.spl:32,37,53,59` — parity over pages | `rain_check.spl`, `rain_ftl_check.spl` |
