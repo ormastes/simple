@@ -825,7 +825,7 @@ fn tcp_fd_read_bytes_or_empty(fd: i64, count: i32) -> text:
             rt_io_tcp_read(fd, remaining)
         if chunk == nil or chunk!.len() == 0:
             return ""
-        buf = buf + chunk!
+        val _copied = io_append_chunk(buf, chunk!)
         remaining = remaining - chunk!.len()
     bytes_to_text(buf)
 
@@ -839,13 +839,21 @@ fn tcp_fd_read_text_or_empty(fd: i64, count: i32) -> text:
     """
     if fd < 0 or count <= 0:
         return ""
-    var out = ""
-    while out.len() < count:
+    # Collect the lines and join once. `out = out + chunk` rebuilt the whole
+    # retained body on every line read, which is O(n^2) characters copied for
+    # a body delivered in n lines -- the same accumulator shape converted in
+    # this file's byte readers (see byte_append.spl) and in http_server's body
+    # accumulator. Bytes returned and the break condition are unchanged.
+    var chunks: [text] = []
+    var total = 0
+    val limit = count.to_i64()
+    while total < limit:
         val chunk = tcp_fd_read_line_or_empty(fd)
         if chunk == "":
             break
-        out = out + chunk
-    out
+        chunks.push(chunk)
+        total = total + chunk.len()
+    chunks.join("")
 
 fn tcp_fd_close(fd: i64) -> bool:
     if fd < 0:
