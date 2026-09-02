@@ -232,12 +232,7 @@ void     rt_dir_list_free(const char** entries, int64_t count);
 
 /* ===== File Locking ===== */
 
-/* ABI: rt_file_lock IS in text_arg_indices (calls.rs:2672 `Some(&[0])`), so
- * `text` splits into a raw (ptr, len) pair -- the OPPOSITE of rt_mmap above.
- * Confirmed by the codegen spec (runtime_sffi.rs:323 = [I64,I64,I64] -> [I64])
- * and the Rust runtime (file_ops.rs:679). platform_win.h:276 already had the
- * correct shape; this declaration was the stale one. */
-int64_t  rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
+int64_t  rt_file_lock(const char* path, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
 
 /* ===== Offset-based File I/O ===== */
