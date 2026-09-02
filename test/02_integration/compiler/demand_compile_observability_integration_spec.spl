@@ -1,0 +1,43 @@
+use app.spipe.testing.*
+use app.perf.demand_compile_receipt.{
+    demand_compile_receipt_create_v1, demand_compile_receipt_validate_v1
+}
+use compiler.driver.perf.demand_compile_counters.{
+    demand_compile_counter_action_completed_v1,
+    demand_compile_counter_action_scheduled_v1,
+    demand_compile_counter_cache_hit_v1,
+    demand_compile_counter_cache_miss_v1,
+    demand_compile_counter_section_read_v1,
+    demand_compile_counter_source_open_v1,
+    demand_compile_counters_empty_v1,
+    demand_compile_counters_validate_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "demand compile production observability integration":
+    it "counts only explicit owner events and seals their receipt":
+        var counters = demand_compile_counters_empty_v1()
+        demand_compile_counter_source_open_v1(&mut counters)
+        demand_compile_counter_section_read_v1(&mut counters)
+        demand_compile_counter_cache_hit_v1(&mut counters)
+        demand_compile_counter_cache_miss_v1(&mut counters)
+        demand_compile_counter_action_scheduled_v1(&mut counters)
+        demand_compile_counter_action_completed_v1(&mut counters)
+        expect(demand_compile_counters_validate_v1(counters)).to_equal("ok")
+        expect(counters.source_open_count).to_equal(1)
+        expect(counters.section_read_count).to_equal(1)
+        expect(counters.cache_hit_count).to_equal(1)
+        expect(counters.cache_miss_count).to_equal(1)
+        val receipt = demand_compile_receipt_create_v1(
+            sha256_text("actual-snapshot"), sha256_text("actual-binary"),
+            sha256_text("actual-host"), sha256_text("actual-command"),
+            sha256_text("actual-fixture"), counters)
+        expect(receipt.is_ok()).to_equal(true)
+        expect(demand_compile_receipt_validate_v1(receipt.unwrap())).to_equal("ok")
+
+    it "refuses missing production authority instead of fabricating it":
+        val receipt = demand_compile_receipt_create_v1(
+            "", sha256_text("binary"), sha256_text("host"),
+            sha256_text("command"), sha256_text("fixture"),
+            demand_compile_counters_empty_v1())
+        expect(receipt.is_err()).to_equal(true)

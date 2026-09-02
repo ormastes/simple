@@ -1,0 +1,359 @@
+#!/bin/sh
+set -eu
+
+[ "$#" -eq 8 ] || {
+  echo "usage: $0 POLICY MODE BACKEND STAGE2_LOG STAGE3_LOG STAGE2_TRANSCRIPT STAGE3_TRANSCRIPT OUTPUT" >&2
+  exit 2
+}
+policy=$1
+mode=$2
+backend=$3
+stage2_log=$4
+stage3_log=$5
+stage2_transcript=$6
+stage3_transcript=$7
+output=$8
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+closure_manifest=$repo_root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+[ -f "$closure_manifest" ] || {
+  echo "error: kernel closure manifest is unavailable" >&2
+  exit 2
+}
+authority_value() {
+  key=$1
+  awk -v key="$key" '
+    $1 == key ":" { count++; value=$2 }
+    END { if (count != 1 || value == "") exit 1; print value }
+  ' "$closure_manifest"
+}
+authority_k1=$(authority_value k1_policy) || exit 2
+authority_abi=$(authority_value simple_abi_policy) || exit 2
+authority_manifest=$(authority_value plugin_manifest_policy) || exit 2
+authority_coverage=$(authority_value coverage_cutover_policy) || exit 2
+authority_coverage_implementation=$(authority_value coverage_implementation) || exit 2
+authority_performance_mode=$(authority_value performance_threshold_mode) || exit 2
+authority_performance_status=$(authority_value performance_threshold_status) || exit 2
+authority_performance_scope=$(authority_value performance_baseline_scope) || exit 2
+authority_steady_percent=$(authority_value performance_steady_rss_percent) || exit 2
+authority_growth_percent=$(authority_value performance_growth_percent) || exit 2
+authority_warm_requests=$(authority_value performance_warm_request_count) || exit 2
+[ "$authority_k1" = llvm-cranelift ] && [ "$authority_abi" = v1 ] &&
+  [ "$authority_manifest" = simple-sdn ] &&
+  [ "$authority_coverage" = atomic-apk-only ] &&
+  [ "$authority_coverage_implementation" = apk-only ] &&
+  [ "$authority_performance_mode" = baseline-relative-10-percent ] &&
+  [ "$authority_performance_status" = selected ] &&
+  [ "$authority_performance_scope" = admitted-per-architecture-receipt ] &&
+  [ "$authority_steady_percent" = 110 ] && [ "$authority_growth_percent" = 10 ] &&
+  [ "$authority_warm_requests" = 20 ] || {
+    echo "error: kernel policy authority drifted" >&2
+    exit 2
+  }
+[ "$policy" = "$authority_k1" ] || {
+  echo "error: K1 policy '$policy' drifts from '$authority_k1'" >&2
+  exit 2
+}
+k1_policy=${SIMPLE_KERNEL_K1_POLICY:-unselected}
+[ "$k1_policy" = "$authority_k1" ] || {
+  echo "error: SIMPLE_KERNEL_K1_POLICY '$k1_policy' drifts from '$authority_k1'" >&2
+  exit 2
+}
+case "$mode" in dynload|one-binary) ;; *) exit 2 ;; esac
+case "$backend" in llvm|llvm-lib|cranelift) ;; *) exit 2 ;; esac
+abi_policy=${SIMPLE_ABI_POLICY:-unselected}
+case "$abi_policy" in
+  v1) abi_version=1; abi_deferred=0 ;;
+  *) echo "error: unknown SIMPLE_ABI_POLICY '$abi_policy'" >&2; exit 2 ;;
+esac
+[ "$abi_policy" = "$authority_abi" ] || exit 2
+manifest_policy=${SIMPLE_PLUGIN_MANIFEST_POLICY:-unselected}
+case "$manifest_policy" in
+  simple-sdn) ;;
+  *) echo "error: unknown SIMPLE_PLUGIN_MANIFEST_POLICY '$manifest_policy'" >&2; exit 2 ;;
+esac
+[ "$manifest_policy" = "$authority_manifest" ] || exit 2
+coverage_policy=${SIMPLE_COVERAGE_CUTOVER_STATE:-unselected}
+[ "$coverage_policy" = "$authority_coverage" ] || {
+  echo "error: coverage cutover policy '$coverage_policy' drifts from '$authority_coverage'" >&2
+  exit 2
+}
+expected_composition_sha256=${SIMPLE_K1_COMPOSITION_SHA256_BEFORE:-}
+[ -n "$expected_composition_sha256" ] || {
+  echo "error: missing pre-build K1 composition digest" >&2
+  exit 2
+}
+[ -s "$stage2_log" ] && [ -s "$stage3_log" ] || {
+  echo "error: Stage2/3 dependency logs are unavailable" >&2
+  exit 2
+}
+[ ! -L "$stage2_log" ] && [ ! -L "$stage3_log" ] || {
+  echo "error: Stage2/3 dependency logs must not be symlinks" >&2
+  exit 2
+}
+[ -s "$stage2_transcript" ] && [ -s "$stage3_transcript" ] && \
+  [ ! -L "$stage2_transcript" ] && [ ! -L "$stage3_transcript" ] || {
+  echo "error: Stage2/3 command transcripts are unavailable or symlinks" >&2
+  exit 2
+}
+[ ! -e "$output" ] && [ ! -L "$output" ] || {
+  echo "error: K1 composition receipt already exists" >&2
+  exit 2
+}
+
+tmp=$output.tmp.$$
+stage2_paths=$output.stage2-paths.tmp.$$
+stage3_paths=$output.stage3-paths.tmp.$$
+paths=$output.paths.tmp.$$
+rules=$output.rules.tmp.$$
+trap 'rm -f "$tmp" "$stage2_paths" "$stage3_paths" "$paths" "$rules"' EXIT HUP INT TERM
+mkdir -p "$(dirname "$output")"
+awk '/^[[:space:]]*- class:/ { class_name=$3 } /^[[:space:]]*path:/ { print class_name "\t" $2 }' \
+  "$closure_manifest" >"$rules"
+[ -s "$rules" ] || {
+  echo "error: kernel closure manifest has no rules" >&2
+  exit 2
+}
+
+extract_paths() {
+  input=$1
+  destination=$2
+  raw=$destination.raw.$$
+  awk '
+    {
+      marker = "phase1:load_sources:closure:scan path="
+      start = index($0, marker)
+      if (start == 0) next
+      rest = substr($0, start + length(marker))
+      end = index(rest, " imports=")
+      if (end == 0) {
+        malformed = 1
+        next
+      }
+      path = substr(rest, 1, end - 1)
+      suffix = substr(rest, end + 1)
+      if (path == "" || path ~ /[[:space:]]/ ||
+          suffix !~ /^imports=[0-9]+ content_len=[0-9]+$/) {
+        malformed = 1
+        next
+      }
+      print path
+      count++
+    }
+    END {
+      if (malformed || count == 0) exit 1
+    }
+  ' "$input" >"$raw" || {
+    rm -f "$raw"
+    echo "error: malformed or absent dependency-closure trace in $input" >&2
+    exit 1
+  }
+  LC_ALL=C sort -u "$raw" >"$destination"
+  rm -f "$raw"
+}
+
+extract_paths "$stage2_log" "$stage2_paths"
+extract_paths "$stage3_log" "$stage3_paths"
+cat "$stage2_paths" "$stage3_paths" | LC_ALL=C sort -u >"$paths"
+
+classify_path() {
+  target=$1
+  while IFS="	" read -r class_name pattern; do
+    [ -n "$class_name" ] || continue
+    case "$target" in $pattern) printf '%s\n' "$class_name"; return 0 ;; esac
+  done <"$rules"
+  return 1
+}
+
+verify_stage_kernel_closure() {
+  stage_name=$1
+  stage_paths_file=$2
+  while IFS= read -r dependency_path; do
+    case "$dependency_path" in
+      "$repo_root"/*) relative_path=${dependency_path#"$repo_root"/} ;;
+      ./*) relative_path=${dependency_path#./} ;;
+      src/*) relative_path=$dependency_path ;;
+      *) continue ;;
+    esac
+    case "$relative_path" in
+      src/plugins/*)
+        echo "error: $stage_name kernel closure contains plugin source: $relative_path" >&2
+        exit 1
+        ;;
+      src/compiler/*)
+        owner=$(classify_path "$relative_path" || true)
+        case "$owner" in
+          K0|K1) ;;
+          *)
+            echo "error: $stage_name kernel closure contains non-kernel compiler source: $relative_path" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    esac
+  done <"$stage_paths_file"
+}
+
+verify_stage_kernel_closure Stage2 "$stage2_paths"
+verify_stage_kernel_closure Stage3 "$stage3_paths"
+
+compatibility_path='src/compiler/80.driver/bootstrap_k1_selected.spl'
+selected_path='src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl'
+selected_file=$repo_root/$selected_path
+[ -f "$selected_file" ] && [ ! -L "$selected_file" ] || {
+  echo "error: selected K1 composition is missing or a symlink" >&2
+  exit 1
+}
+selected_sha256=$(shasum -a 256 "$selected_file" | awk '{print $1}')
+[ "$selected_sha256" = "$expected_composition_sha256" ] || {
+  echo "error: selected K1 composition changed during Stage2/3" >&2
+  exit 1
+}
+selected_source_root=$(dirname "$(dirname "$(dirname "$selected_file")")")
+
+transcript_explicit_env_value() {
+  transcript=$1
+  key=$2
+  awk -v wanted="$key=" '
+    /^explicit-env:[0-9]+:/ {
+      declared=$0; sub(/^explicit-env:/, "", declared); sub(/:.*/, "", declared)
+      payload=$0; sub(/^explicit-env:[0-9]+:/, "", payload)
+      if (length(payload) != declared) exit 2
+      if (index(payload, wanted) == 1) { print substr(payload, length(wanted)+1); found++ }
+    }
+    END { if (found != 1) exit 1 }
+  ' "$transcript"
+}
+
+transcript_argv_value_after() {
+  transcript=$1
+  option=$2
+  awk -v wanted="$option" '
+    /^argv:[0-9]+:/ {
+      declared=$0; sub(/^argv:/, "", declared); sub(/:.*/, "", declared)
+      payload=$0; sub(/^argv:[0-9]+:/, "", payload)
+      if (length(payload) != declared) exit 2
+      if (waiting) { print payload; waiting=0; found++; next }
+      if (payload == wanted) waiting=1
+    }
+    END { if (waiting || found != 1) exit 1 }
+  ' "$transcript"
+}
+
+transcript_source_count() {
+  transcript=$1
+  wanted_source=$2
+  awk -v wanted="$wanted_source" '
+    /^argv:[0-9]+:/ {
+      declared=$0; sub(/^argv:/, "", declared); sub(/:.*/, "", declared)
+      payload=$0; sub(/^argv:[0-9]+:/, "", payload)
+      if (length(payload) != declared) exit 2
+      if (previous == "--source" && payload == wanted) found++
+      previous=payload
+    }
+    END { print found+0 }
+  ' "$transcript"
+}
+
+verify_stage_command() {
+  stage_name=$1
+  transcript=$2
+  [ "$(grep -Fxc 'schema=simple-bootstrap-command-transcript-v2' "$transcript")" -eq 1 ] || {
+    echo "error: $stage_name command transcript schema is invalid" >&2
+    exit 1
+  }
+  [ "$(transcript_argv_value_after "$transcript" --backend)" = "$backend" ] && \
+    [ "$(transcript_argv_value_after "$transcript" --mode)" = "$mode" ] && \
+    [ "$(transcript_explicit_env_value "$transcript" SIMPLE_ABI_POLICY)" = "$abi_policy" ] && \
+    [ "$(transcript_explicit_env_value "$transcript" SIMPLE_PLUGIN_MANIFEST_POLICY)" = "$manifest_policy" ] && \
+    [ "$(transcript_explicit_env_value "$transcript" SIMPLE_KERNEL_K1_POLICY)" = "$policy" ] && \
+    [ "$(transcript_explicit_env_value "$transcript" SIMPLE_COVERAGE_CUTOVER_STATE)" = "$coverage_policy" ] && \
+    [ "$(transcript_explicit_env_value "$transcript" SIMPLE_K1_COMPOSITION_SHA256_BEFORE)" = "$expected_composition_sha256" ] && \
+    [ "$(transcript_source_count "$transcript" "$selected_source_root")" -eq 1 ] || {
+    echo "error: $stage_name command transcript does not bind backend, mode, policies, and selected composition" >&2
+    exit 1
+  }
+}
+
+verify_stage_command Stage2 "$stage2_transcript"
+verify_stage_command Stage3 "$stage3_transcript"
+
+verify_stage_composition() {
+  stage_name=$1
+  stage_paths=$2
+  selected_count=$(awk -v suffix="$selected_path" '$0 == suffix || substr($0, length($0)-length(suffix), 1) == "/" && substr($0, length($0)-length(suffix)+1) == suffix { n++ } END { print n+0 }' "$stage_paths")
+  compatibility_count=$(awk -v suffix="$compatibility_path" '$0 == suffix || substr($0, length($0)-length(suffix), 1) == "/" && substr($0, length($0)-length(suffix)+1) == suffix { n++ } END { print n+0 }' "$stage_paths")
+  [ "$selected_count" -eq 1 ] && [ "$compatibility_count" -eq 0 ] || {
+    echo "error: $stage_name did not uniquely select the $policy composition root" >&2
+    exit 1
+  }
+}
+
+verify_stage_composition Stage2 "$stage2_paths"
+verify_stage_composition Stage3 "$stage3_paths"
+
+verify_stage_backend_closure() {
+  stage_name=$1
+  stage_paths=$2
+  llvm_paths=$(grep -Ei '/([^/]*llvm[^/]*)\.spl$|/([^/]*llvm[^/]*)/(mod|__init__)\.spl$' "$stage_paths" || true)
+  cranelift_paths=$(grep -Ei '/cranelift_codegen_adapter\.spl$' "$stage_paths" || true)
+  [ -n "$cranelift_paths" ] || {
+    echo "error: $stage_name omits the Cranelift adapter" >&2
+    exit 1
+  }
+  if [ -z "$llvm_paths" ]; then
+    echo "error: $stage_name LLVM+Cranelift closure omits LLVM implementation modules" >&2
+    exit 1
+  fi
+}
+
+verify_stage_backend_closure Stage2 "$stage2_paths"
+verify_stage_backend_closure Stage3 "$stage3_paths"
+llvm_paths=$(grep -Ei '/([^/]*llvm[^/]*)\.spl$|/([^/]*llvm[^/]*)/(mod|__init__)\.spl$' "$paths" || true)
+
+{
+  echo 'schema=simple-bootstrap-k1-composition-receipt-v1'
+  echo "policy=$policy"
+  echo "build_mode=$mode"
+  echo "backend=$backend"
+  echo "simple_abi_policy=$abi_policy"
+  echo "simple_abi_version=$abi_version"
+  echo "simple_abi_deferred=$abi_deferred"
+  echo "plugin_manifest_policy=$manifest_policy"
+  echo "coverage_cutover_policy=$coverage_policy"
+  echo "coverage_implementation=$authority_coverage_implementation"
+  echo "performance_threshold_mode=$authority_performance_mode"
+  echo "performance_threshold_status=$authority_performance_status"
+  echo "performance_baseline_scope=$authority_performance_scope"
+  echo "performance_steady_rss_percent=$authority_steady_percent"
+  echo "performance_growth_percent=$authority_growth_percent"
+  echo "performance_warm_request_count=$authority_warm_requests"
+  echo 'policy_authority_path=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn'
+  echo "policy_authority_sha256=$(shasum -a 256 "$closure_manifest" | awk '{print $1}')"
+  echo "selected_composition_sha256=$selected_sha256"
+  echo "stage2_log=$stage2_log"
+  echo "stage2_log_sha256=$(shasum -a 256 "$stage2_log" | awk '{print $1}')"
+  echo "stage2_transcript=$stage2_transcript"
+  echo "stage2_transcript_sha256=$(shasum -a 256 "$stage2_transcript" | awk '{print $1}')"
+  echo "stage3_log=$stage3_log"
+  echo "stage3_log_sha256=$(shasum -a 256 "$stage3_log" | awk '{print $1}')"
+  echo "stage3_transcript=$stage3_transcript"
+  echo "stage3_transcript_sha256=$(shasum -a 256 "$stage3_transcript" | awk '{print $1}')"
+  echo "selected_composition_suffix=$selected_path"
+  echo "stage2_dependency_count=$(wc -l <"$stage2_paths" | tr -d ' ')"
+  echo "stage2_dependency_sha256=$(shasum -a 256 "$stage2_paths" | awk '{print $1}')"
+  echo "stage3_dependency_count=$(wc -l <"$stage3_paths" | tr -d ' ')"
+  echo "stage3_dependency_sha256=$(shasum -a 256 "$stage3_paths" | awk '{print $1}')"
+  echo "dependency_count=$(wc -l <"$paths" | tr -d ' ')"
+  echo "dependency_sha256=$(shasum -a 256 "$paths" | awk '{print $1}')"
+  echo "llvm_adapter_present=$([ -n "$llvm_paths" ] && echo 1 || echo 0)"
+  echo 'cranelift_adapter_present=1'
+  echo 'status=pass'
+  sed 's/^/dependency=/' "$paths"
+} >"$tmp"
+chmod 0444 "$tmp"
+ln "$tmp" "$output" || {
+  echo "error: K1 composition receipt publication collision" >&2
+  exit 1
+}
+echo "PASS — actual Stage2/3 dependency receipt matches $policy"

@@ -1,0 +1,206 @@
+#!/bin/sh
+set -eu
+
+root=${PHASE5_DISPATCH_ROOT:-.}
+
+fail() {
+  echo "FAIL — $1" >&2
+  exit 1
+}
+
+require() {
+  file=$1
+  pattern=$2
+  grep -Fq "$pattern" "$root/$file" || fail "$file missing: $pattern"
+}
+
+reject() {
+  file=$1
+  pattern=$2
+  if grep -E "$pattern" "$root/$file" >/dev/null 2>&1; then
+    fail "$file contains forbidden dispatch: $pattern"
+  fi
+}
+
+check_tree() {
+  factory=src/compiler/70.backend/backend/backend_factory_full.spl
+  registry=src/compiler/70.backend/backend/static_backend_registry.spl
+  codegen=src/compiler/70.backend/backend/codegen_factory.spl
+  plugin_registry=src/plugins/backend_registry/full_static_backend_registry.spl
+  plugin_ports=src/plugins/backend_registry/full_static_backend_ports.spl
+  interpreter_port=src/compiler/70.backend/backend/static_backend_interpreter_port.spl
+  cli=src/app/cli/_CliMain/main_and_help.spl
+  combined=src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl
+  compatibility=src/compiler/80.driver/bootstrap_k1_selected.spl
+  closure=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+  receipt=scripts/bootstrap/write-k1-composition-receipt.shs
+
+  for file in "$factory" "$registry" "$codegen" "$plugin_registry" \
+      "$plugin_ports" "$interpreter_port" "$cli" "$combined" "$compatibility" \
+      "$closure" "$receipt"; do
+    [ -f "$root/$file" ] || fail "missing $file"
+  done
+
+  create_specific=$(mktemp)
+  trap 'rm -f "$create_specific"' EXIT HUP INT TERM
+  awk '/static fn create_specific\(/ { capture=1 } capture { print } /static fn try_create\(/ { exit }' \
+    "$root/$factory" >"$create_specific"
+  grep -Fq 'CodegenFactory.create(kind, selected_options)' "$create_specific" ||
+    fail "BackendFactory.create_specific does not use the typed table adapter"
+  if grep -E 'match[[:space:]]+kind|[A-Za-z]+Backend\.create\(' "$create_specific" >/dev/null 2>&1; then
+    fail "BackendFactory.create_specific directly dispatches a backend constructor"
+  fi
+  require "$factory" 'match select_static_backend_v1(kind.to_text())'
+  require "$factory" 'for entry in active_static_backend_table_v1()'
+
+  require "$codegen" 'select_static_backend_v1(kind.to_text())'
+  reject "$registry" 'use[[:space:]]+compiler\.backend\.(llvm|cranelift)_codegen_adapter'
+  require "$registry" 'install_k1_static_backend_table_v1'
+  require "$registry" '_k1_static_backend_policy_v1 != policy'
+  reject "$registry" 'policy == "cranelift-only"'
+  reject "$plugin_registry" 'BackendKind\.Llvm([^A-Za-z]|$)'
+  reject "$plugin_registry" 'BackendLinkClass\.KernelLinked'
+  reject "$plugin_ports" '(LlvmCodegenAdapter|CraneliftCodegenAdapter|InterpreterCodegenAdapter)'
+  reject "$plugin_registry" 'BackendKind\.Interpreter'
+  require "$interpreter_port" 'interpreter_backend_port_v1() -> BackendPortV1:'
+  [ ! -e "$root/src/compiler/70.backend/backend/static_backend_ports.spl" ] ||
+    fail "legacy combined K1 backend port module remains reachable"
+
+  require "$combined" '"llvm-cranelift"'
+  require "$combined" 'static_backend_cranelift_port'
+  require "$combined" 'static_backend_interpreter_port'
+  require "$combined" 'BackendKind.Interpreter'
+  require "$combined" 'static_backend_llvm_port'
+  require "$closure" 'k1_policy: llvm-cranelift'
+  require "$closure" 'simple_abi_policy: v1'
+  require "$closure" 'plugin_manifest_policy: simple-sdn'
+  require "$closure" 'coverage_cutover_policy: atomic-apk-only'
+  require "$closure" 'coverage_implementation: apk-only'
+  [ ! -e "$root/src/compositions/kernel_cranelift_only" ] ||
+    fail "unselected Cranelift-only composition remains"
+
+  require "$compatibility" 'selected_k1_backend_policy_v1() -> text: "unselected"'
+  require "$compatibility" 'install_selected_k1_backend_table_v1() -> bool: false'
+  reject "$compatibility" 'use[[:space:]]+compiler\.driver\.driver_bootstrap'
+
+  require "$cli" 'install_selected_k1_backend_table_v1()'
+  require "$cli" 'install_full_static_backends_for_k1_policy_v1(selected_k1_policy)'
+  reject "$cli" 'install_full_static_backends_v1'
+  k1_line=$(grep -nF 'install_selected_k1_backend_table_v1()' "$root/$cli" | tail -1 | cut -d: -f1)
+  full_line=$(grep -nF 'install_full_static_backends_for_k1_policy_v1(selected_k1_policy)' "$root/$cli" | tail -1 | cut -d: -f1)
+  [ "$k1_line" -lt "$full_line" ] || fail "plugin table installs before committed K1 authority"
+
+  if find "$root/src/compiler" -type f -name '*.spl' -exec grep -El \
+      '^[[:space:]]*(export[[:space:]]+)?use[[:space:]]+plugins\.' {} + | grep . >/dev/null 2>&1; then
+    fail "compiler kernel imports a plugin implementation"
+  fi
+
+  require "$receipt" 'schema=simple-bootstrap-k1-composition-receipt-v1'
+  require "$receipt" 'policy=$policy'
+  require "$receipt" 'backend=$backend'
+  require "$receipt" 'simple_abi_policy=$abi_policy'
+  require "$receipt" 'plugin_manifest_policy=$manifest_policy'
+  require "$receipt" 'coverage_cutover_policy=$coverage_policy'
+  require "$receipt" 'coverage_implementation=$authority_coverage_implementation'
+  require "$receipt" 'policy_authority_path=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn'
+  require "$receipt" 'policy_authority_sha256=$(shasum -a 256 "$closure_manifest"'
+  require "$receipt" 'selected_composition_sha256=$selected_sha256'
+  require "$receipt" 'SIMPLE_K1_COMPOSITION_SHA256_BEFORE'
+
+  rm -f "$create_specific"
+  trap - EXIT HUP INT TERM
+  echo "PASS — Phase 5 dispatch is composition-selected, policy-bound, table-routed, and compiler-to-plugin closed"
+}
+
+selftest() {
+  fixture=$(mktemp -d)
+  trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+  for file in "$factory" "$registry" "$codegen" "$plugin_registry" \
+      "$plugin_ports" "$interpreter_port" "$cli" "$combined" "$compatibility" \
+      "$closure" "$receipt"; do
+    mkdir -p "$fixture/$(dirname "$file")"
+    cp "$root/$file" "$fixture/$file"
+  done
+
+  PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null
+
+  cp "$fixture/$factory" "$fixture/$factory.clean"
+  awk '{ print } /val codegen = CodegenFactory.create/ { print "        match kind:"; print "            case BackendKind.Llvm: LlvmBackend.create(target, options)" }' \
+    "$fixture/$factory.clean" >"$fixture/$factory"
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
+    fail "selftest admitted direct backend construction"
+  fi
+  mv "$fixture/$factory.clean" "$fixture/$factory"
+
+  cp "$fixture/$plugin_registry" "$fixture/$plugin_registry.clean"
+  printf '\nfn forbidden_llvm_entry(): BackendKind: BackendKind.Llvm\n' >>"$fixture/$plugin_registry"
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
+    fail "selftest admitted LLVM through the Cranelift-only plugin extension"
+  fi
+  mv "$fixture/$plugin_registry.clean" "$fixture/$plugin_registry"
+
+  cp "$fixture/$plugin_registry" "$fixture/$plugin_registry.clean"
+  awk '{ print } /BackendKind\.IrTc/ { print "        _entry(BackendKind.Interpreter, interpreter_backend_port_v1(), CodegenOutputKind.InterpretedResult)," }' \
+    "$fixture/$plugin_registry.clean" >"$fixture/$plugin_registry"
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
+    fail "selftest admitted the K1 interpreter through the P-static table"
+  fi
+  mv "$fixture/$plugin_registry.clean" "$fixture/$plugin_registry"
+
+  cp "$fixture/$plugin_registry" "$fixture/$plugin_registry.clean"
+  sed 's/BackendLinkClass.PluginStatic/BackendLinkClass.KernelLinked/' \
+    "$fixture/$plugin_registry.clean" >"$fixture/$plugin_registry"
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
+    fail "selftest admitted a non-bootstrap provider into K1"
+  fi
+  mv "$fixture/$plugin_registry.clean" "$fixture/$plugin_registry"
+
+  cp "$fixture/$combined" "$fixture/$combined.clean"
+  sed 's/"llvm-cranelift"/"cranelift-only"/' \
+    "$fixture/$combined.clean" >"$fixture/$combined"
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
+    fail "selftest admitted a composition policy that drifted from authority"
+  fi
+  mv "$fixture/$combined.clean" "$fixture/$combined"
+
+  cp "$fixture/$closure" "$fixture/$closure.clean"
+  sed 's/coverage_implementation: apk-only/coverage_implementation: dual/' \
+    "$fixture/$closure.clean" >"$fixture/$closure"
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
+    fail "selftest admitted coverage implementation authority drift"
+  fi
+  mv "$fixture/$closure.clean" "$fixture/$closure"
+
+  printf '\nuse plugins.backend_wasm.*\n' >>"$fixture/src/compiler/80.driver/forbidden_plugin.spl"
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
+    fail "selftest admitted compiler-to-plugin import"
+  fi
+  rm -f "$fixture/src/compiler/80.driver/forbidden_plugin.spl"
+
+  cp "$fixture/$compatibility" "$fixture/$compatibility.clean"
+  printf '\nuse compiler.driver.driver_bootstrap.*\n' >>"$fixture/$compatibility"
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
+    fail "selftest admitted compatibility composition fallback"
+  fi
+  mv "$fixture/$compatibility.clean" "$fixture/$compatibility"
+
+  echo "PASS — Phase 5 dispatch checker rejected 8/8 bypass mutations"
+}
+
+factory=src/compiler/70.backend/backend/backend_factory_full.spl
+registry=src/compiler/70.backend/backend/static_backend_registry.spl
+codegen=src/compiler/70.backend/backend/codegen_factory.spl
+plugin_registry=src/plugins/backend_registry/full_static_backend_registry.spl
+plugin_ports=src/plugins/backend_registry/full_static_backend_ports.spl
+interpreter_port=src/compiler/70.backend/backend/static_backend_interpreter_port.spl
+cli=src/app/cli/_CliMain/main_and_help.spl
+combined=src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl
+compatibility=src/compiler/80.driver/bootstrap_k1_selected.spl
+closure=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+receipt=scripts/bootstrap/write-k1-composition-receipt.shs
+
+case "${1:-}" in
+  --selftest) selftest ;;
+  '') check_tree ;;
+  *) echo "usage: $0 [--selftest]" >&2; exit 2 ;;
+esac

@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+CAS="$ROOT/src/compiler/80.driver/cache/cas_store.spl"
+ROUTER="$ROOT/src/compiler/80.driver/cache/tier_router/tier_router.spl"
+POLICY="$ROOT/src/compiler/80.driver/cache/cache_root.spl"
+LIMITS="$ROOT/src/compiler/80.driver/cache/metadata/cache_limits.spl"
+GC="$ROOT/src/compiler/80.driver/cache/gc/fast_gc.spl"
+LEASE="$ROOT/src/compiler/80.driver/cache/lease/lease.spl"
+BOOTSTRAP="$ROOT/scripts/bootstrap/bootstrap-from-scratch.sh"
+BOOTSTRAP_POLICY="$ROOT/scripts/bootstrap/lib/host-shared-cache.shs"
+
+fail() { echo "FAIL — $1"; exit 1; }
+
+test -f "$POLICY" || fail missing-cache-root-policy
+grep -Fq 'SIMPLE_HOST_CACHE_ROOT' "$POLICY" || fail missing-host-root-override
+grep -Fq 'SIMPLE_CACHE_PROJECT' "$POLICY" || fail missing-project-namespace
+grep -Fq 'sha256_text("simple-cache-project-v1' "$POLICY" || fail namespace-not-content-addressed
+grep -Fq 'machine_cache_root()' "$CAS" || fail cas-not-shared
+grep -Fq 'machine_cache_root()' "$ROUTER" || fail l2-not-shared
+grep -Fq 'val project_path = "{root}/PROJECT"' "$CAS" || fail missing-project-provenance
+grep -Fq 'stored_project.trim() != project_namespace' "$CAS" || fail provenance-not-fail-closed
+if grep -Eq 'build/cache_cas|\.simple/machine-cache' "$CAS" "$ROUTER"; then
+  fail worktree-local-machine-cache-remains
+fi
+grep -Fq 'DEFAULT_MAX_BYTES: i64' "$LIMITS" || fail missing-size-bound
+grep -Fq 'cache_limits_low_watermark_bytes' "$GC" || fail missing-bounded-gc
+grep -Fq 'cache_limits_high_watermark_bytes' "$GC" || fail missing-90-percent-trigger
+grep -Fq 'lease_list_active(root)' "$GC" || fail gc-not-lease-safe
+grep -Fq 'LEASE_STALE_TIMEOUT_SECS' "$LEASE" || fail missing-cross-process-lease-schema
+if grep -A4 'fn lease_is_reclaimable' "$LEASE" | grep -Eq 'age_secs|LEASE_STALE_TIMEOUT_SECS'; then
+  fail live-lease-can-expire-by-wall-clock
+fi
+grep -A3 'fn lease_is_reclaimable' "$LEASE" | grep -Fq 'not lease_process_exists_raw' || fail dead-owner-proof-missing
+grep -Fq 'gc_run_if_needed(l2, cache_limits_load())' "$ROUTER" || fail bounded-gc-has-no-production-call-site
+grep -Fq '"{root}/cas"' "$GC" || fail bounded-gc-does-not-reclaim-cas-blobs
+grep -Fq 'file_lock("{root}/gc.lock", 1)' "$GC" || fail missing-cross-process-gc-lock
+grep -Fq 'gc_reachable_blob_paths(root, active_leases)' "$GC" || fail cas-reachability-not-enforced
+grep -Fq 'move_to_trash(root, victim)' "$GC" || fail deletion-not-crash-safe
+grep -Fq 'if not cas_open(l2)' "$ROUTER" || fail lifecycle-provenance-not-fail-closed
+grep -Fq 'simple_host_cache_configure' "$BOOTSTRAP" || fail bootstrap-not-shared
+grep -Fq 'SIMPLE_CACHE_PROJECT' "$BOOTSTRAP_POLICY" || fail bootstrap-missing-project-provenance
+grep -Fq 'never migrates' "$BOOTSTRAP_POLICY" || fail bootstrap-migration-policy-missing
+
+echo "PASS — host-shared project namespace, CAS routing, active-lease safety, and bounded GC are wired"

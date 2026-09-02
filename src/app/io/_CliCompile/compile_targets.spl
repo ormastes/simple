@@ -32,6 +32,26 @@ use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compile_result_errors, compileoptions_normalize_mir_optimization, driver_output_format_both, driver_output_format_native)
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
+use app.build.targets.action_identity.{
+    NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
+    darwin_target_identity_digest_v1, publish_current_native_action_input_v1,
+    load_current_native_action_input_v1, darwin_macho_slice_error_v1,
+    canonical_darwin_target_triple_v1, canonical_darwin_deployment_target_v1,
+    canonical_darwin_cpu_features_v1, darwin_sdk_identity_v1,
+    darwin_link_tool_identity_v1
+}
+use app.build.targets.artifact_receipt.{
+    ImportedClosureInputV1, digest_is_sha256,
+    publish_dependency_manifest_layer_v1, publish_imported_closure_layer_v1,
+    target_cache_namespace_v1, target_action_key_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.darwin_runtime_provider_manifest.{
+    darwin_runtime_provider_manifest_content_identity_v1
+}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.platform.{host_os, host_arch}
+use std.io_runtime.{cwd}
 
 use std.io_runtime.{read_file_text}
 extern fn rt_path_absolute(path: text) -> text
@@ -59,6 +79,129 @@ fn _cli_file_remove_impl(path: text) -> bool:
 
 fn _cli_file_rename_impl(source: text, destination: text) -> bool:
     rename(source, destination)
+
+fn _native_build_relative_identity_path(repo_root: text, path: text) -> text:
+    val prefix = repo_root + "/"
+    if path.starts_with(prefix):
+        return path[prefix.len():]
+    path
+
+fn _native_build_provider_identity(cache_dir: text, backend: text) -> [text]:
+    val path = cache_dir + "/native_provider_identity.receipt"
+    if not _cli_file_exists_impl(path):
+        return []
+    val lines = read_file_text(path).trim().split("\n")
+    if lines.len() != 3 or lines[0] != "simple-native-provider-identity-v1" or
+            lines[1] != "backend=" + backend or
+            not lines[2].starts_with("provider="):
+        return []
+    val provider = lines[2][9:]
+    if not digest_is_sha256(provider): return []
+    [provider]
+
+fn _native_build_runtime_manifest_identity(cache_dir: text, architecture: text) -> text:
+    darwin_runtime_provider_manifest_content_identity_v1(
+        cache_dir + "/native_runtime_provider_manifest.receipt", architecture
+    )
+
+fn _publish_and_admit_darwin_native_action_v1(
+    cache_dir: text, output: text, entry_point: text, native_inputs: [text], backend: text,
+    native_target: text, opt_level: i64, release: bool, artifact_kind: text
+) -> text:
+    val os_name = host_os()
+    var target_triple = native_target
+    if target_triple == "" and (os_name == "macos" or os_name == "darwin"):
+        val architecture = if host_arch() == "arm64": "aarch64" else: host_arch()
+        target_triple = architecture + "-apple-darwin"
+    target_triple = canonical_darwin_target_triple_v1(target_triple)
+    if target_triple == "":
+        return ""
+    val architecture = target_triple.split("-")[0]
+    val cpu = env_get("SIMPLE_NATIVE_CPU") ?? ""
+    val cpu_features = canonical_darwin_cpu_features_v1(cpu)
+    val artifact_error = darwin_macho_slice_error_v1(output, architecture)
+    if artifact_error != "": return artifact_error
+    val deployment_target = canonical_darwin_deployment_target_v1(
+        env_get("MACOSX_DEPLOYMENT_TARGET") ?? ""
+    )
+    val sdk_root = env_get("SDKROOT") ?? ""
+    if deployment_target == "" or sdk_root == "":
+        return "target-identity-error: darwin-deployment-or-sdk-missing"
+    val sdk_identity = darwin_sdk_identity_v1(sdk_root)
+    if sdk_identity == "":
+        return "target-identity-error: sdk-settings-evidence-missing-or-unreadable"
+    val provider_evidence = _native_build_provider_identity(cache_dir, backend)
+    if provider_evidence.len() != 1:
+        return "target-identity-error: native-provider-identity-missing"
+    val exact_provider_receipt = provider_evidence[0]
+    val runtime_artifact_digest = _native_build_runtime_manifest_identity(
+        cache_dir, architecture
+    )
+    if runtime_artifact_digest == "":
+        return "target-identity-error: runtime-provider-manifest-missing-or-invalid"
+    val linker_tool_identity = darwin_link_tool_identity_v1(cache_dir)
+    if linker_tool_identity == "":
+        return "target-identity-error: linker-tool-identity-missing-or-invalid"
+    val repo_root = rt_path_absolute(".")
+    val entry = _native_build_relative_identity_path(repo_root, entry_point)
+    var closure_inputs: [ImportedClosureInputV1] = []
+    for input_path in native_inputs:
+        val relative = _native_build_relative_identity_path(repo_root, input_path)
+        if relative.starts_with("/") or not _cli_file_exists_impl(input_path):
+            return "target-identity-error: native-input-not-repo-relative"
+        closure_inputs.push(ImportedClosureInputV1(relative, file_hash_sha256(input_path)))
+    val dependencies = publish_dependency_manifest_layer_v1(
+        repo_root, cache_dir, entry, []
+    )
+    if not digest_is_sha256(dependencies): return dependencies
+    val tool_path = _native_build_relative_identity_path(repo_root, cli_current_exe_path())
+    if not _cli_file_exists_impl(tool_path):
+        return "target-identity-error: current-tool-artifact-missing"
+    val tool_artifact = file_hash_sha256(tool_path)
+    val closure = publish_imported_closure_layer_v1(
+        repo_root, cache_dir, entry, entry, tool_artifact, dependencies, closure_inputs
+    )
+    if not digest_is_sha256(closure): return closure
+    val optimization = "opt=" + opt_level.to_text() + "|release=" + release.to_text()
+    val target_identity = darwin_target_identity_digest_v1(
+        target_triple, architecture, cpu_features, deployment_target, sdk_identity, backend,
+        optimization, "mach-o", "darwin-dead-strip-v1",
+        linker_tool_identity, exact_provider_receipt, runtime_artifact_digest
+    )
+    val producer_abi = sha256_text("simple-native-action-producer-v1|" + tool_artifact)
+    val cache_namespace = target_cache_namespace_v1(
+        producer_abi, target_identity, if release: "release" else: "debug", artifact_kind
+    )
+    val action_key = target_action_key_v1(
+        entry, "native-build", "native", backend, cache_namespace,
+        dependencies, closure, tool_artifact, artifact_kind
+    )
+    val identity = NativeActionInputIdentityV1(
+        producer: NATIVE_ACTION_INPUT_PRODUCER_V1, target: entry,
+        action: "native-build", entry: entry, tool_path: tool_path,
+        tool_artifact_digest: tool_artifact, tool_behavior_digest: tool_artifact,
+        producer_abi_digest: producer_abi, target_identity_digest: target_identity,
+        profile: if release: "release" else: "debug",
+        dependency_manifest_digest: dependencies, imported_closure_digest: closure,
+        target_triple: target_triple, architecture: architecture,
+        cpu_features: cpu_features,
+        deployment_target: deployment_target, sdk_identity: sdk_identity,
+        backend: backend, optimization: optimization, object_format: "mach-o",
+        linker_policy: "darwin-dead-strip-v1",
+        linker_tool_identity: linker_tool_identity,
+        runtime_provider_receipt: exact_provider_receipt,
+        runtime_artifact_digest: runtime_artifact_digest,
+        action_key: action_key, errors: []
+    )
+    val publish_error = publish_current_native_action_input_v1(cache_dir, identity)
+    if publish_error != "": return publish_error
+    val admitted = load_current_native_action_input_v1(
+        repo_root, cache_dir, entry, "native", backend, entry, artifact_kind,
+        tool_artifact, target_triple, architecture, deployment_target,
+        sdk_identity, exact_provider_receipt, runtime_artifact_digest,
+        sdk_root, cpu
+    )
+    if admitted.errors.len() > 0: admitted.errors[0] else: ""
 
 # Stem (filename without extension) computed with rfind + `>= 0`/`> 0` checks,
 # NOT std.path.stem/extension: those match rfind's raw i64 result against
@@ -960,6 +1103,7 @@ fn cli_native_build(args: [text]) -> i64:
         val _nb_target_opt_ctx = target_opt_context_default()
         driver_entry_scan_cache_reset()
 
+        val native_action_inputs = _native_build_entry_closure(entry_point, source_dirs)
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file
             use compiler.driver.driver_types (CompileOptions, CompileMode)
@@ -1116,6 +1260,44 @@ fn cli_native_build(args: [text]) -> i64:
                     if native_threads > 0:
                         env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
                     _cli_eprint("Error: failed to update launch metadata sidecar: {metadata_path}")
+                    return 1
+                val native_action_artifact_kind = if emit_object:
+                    "object"
+                elif emit_archive:
+                    "archive"
+                elif emit_shared:
+                    "shared"
+                else:
+                    "binary"
+                val native_identity_error = _publish_and_admit_darwin_native_action_v1(
+                    cache_dir, output, entry_point, native_action_inputs, backend,
+                    native_target, opt_level, release, native_action_artifact_kind
+                )
+                if native_identity_error != "":
+                    _cli_dir_create_impl(cache_dir + "/inputs", true)
+                    _cli_file_write_impl(
+                        cache_dir + "/inputs/admission-failure.receipt",
+                        "simple-native-action-admission-failure-v1\nreason=" +
+                            native_identity_error + "\n"
+                    )
+                    env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+                    env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                    env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
+                    env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
+                    env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_native_entry_closure)
+                    env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+                    env_set("SIMPLE_CORE_RUNTIME_PATH", old_core_runtime_path)
+                    if runtime_bundle_explicit:
+                        env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_native_runtime_bundle)
+                    if set_native_target:
+                        env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+                    if set_native_cpu:
+                        env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
+                    if native_threads > 0:
+                        env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+                    _cli_eprint("error: native-build Darwin identity admission failed: {native_identity_error}")
                     return 1
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)

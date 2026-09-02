@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+[ "$#" -eq 2 ] || exit 64
+generation_dir=$(CDPATH= cd -- "$1" && pwd -P)
+operation=$2
+case "$operation" in publication|rollback) ;; *) exit 64 ;; esac
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$repo_root
+STAGE4_PROVENANCE_HELPER_PATH="$repo_root/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+
+acceptance="$generation_dir/authority.stage3-acceptance.env"
+provenance="$generation_dir/authority.stage4-provenance.env"
+candidate="$generation_dir/simple"
+[ -f "$candidate" ] || candidate="$generation_dir/simple.exe"
+for path in "$acceptance" "$provenance" "$candidate"; do
+  [ -f "$path" ] && [ ! -L "$path" ] || exit 1
+done
+[ "$(bootstrap_stage3_manifest_value schema "$acceptance")" = simple-bootstrap-stage3-current-acceptance-v1 ]
+[ "$(bootstrap_stage3_manifest_value status "$acceptance")" = verified ]
+[ "$(bootstrap_stage3_manifest_value stage4_candidate_sha256 "$acceptance")" = "$(bootstrap_stage3_hash_file "$candidate")" ]
+[ "$(bootstrap_stage3_manifest_value stage4_provenance_sha256 "$acceptance")" = "$(bootstrap_stage3_hash_file "$provenance")" ]
+
+source_candidate=$(bootstrap_stage3_manifest_value output_path "$provenance")
+source_provenance="${source_candidate}.provenance.env"
+[ "$(bootstrap_stage3_hash_file "$source_candidate")" = "$(bootstrap_stage3_hash_file "$candidate")" ]
+[ "$(bootstrap_stage3_hash_file "$source_provenance")" = "$(bootstrap_stage3_hash_file "$provenance")" ]
+stage4_verify_candidate_provenance "$source_provenance" "$source_candidate" "$repo_root"
+
+stage3_manifest=$(bootstrap_stage3_manifest_value stage3_provenance_path "$acceptance")
+parent_compiler=$(bootstrap_stage3_manifest_value parent_compiler_path "$provenance")
+bootstrap_stage3_verify_manifest "$stage3_manifest" "$repo_root" "$parent_compiler"

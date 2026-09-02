@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+driver=src/compiler/80.driver/driver_source_pipeline_loading.spl
+router=src/compiler/80.driver/cache/package_index_route.spl
+
+grep -q 'package_index_route_current_v1' "$driver"
+grep -q 'SIMPLE_PACKAGE_INDEX_COLD_INIT' "$driver"
+grep -q 'if not package_index_cold_init:' "$driver"
+if grep -q 'if not package_index_cold_init and' "$driver"; then
+    echo "package index routing must not be bypassed by zero-input builds" >&2
+    exit 1
+fi
+grep -q 'not package_index_routed' "$driver"
+grep -q 'invalidation.dirty_packages.contains(entry.package_identity)' "$router"
+grep -q 'persistent package index admission failed' "$driver"
+grep -q 'not package_index_routed' "$driver"
+grep -q 'package_module_index_read_current_v1' "$router"
+grep -q 'package_module_index_invalidate_v1' "$router"
+if grep -q 'selected_modules = invalidation.dirty_modules' "$router"; then
+    echo 'package invalidation must compile complete dirty packages' >&2
+    exit 1
+fi
+grep -q 'scv-inventory-mismatch' "$router"
+grep -q 'SIMPLE_SCV_SNAPSHOT_ROOT' "$driver"
+grep -q 'phase_compatibility_existing_artifact_io_v1' "$router"
+grep -q 'indexed-source-{source_admission.reason}' "$router"
+grep -q 'index-producer-mismatch' "$router"
+grep -q 'index-root-generation-mismatch' "$router"
+grep -q 'SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST' "$driver"
+grep -q 'SIMPLE_PACKAGE_INDEX_ROOT_GENERATION' "$driver"
+grep -q 'invalidation.package_schedule' "$router"
+grep -q 'SIMPLE_PACKAGE_INDEX_PACKAGE_SCHEDULE' "$driver"
+
+grep -q 'unsupported-schema' src/compiler/80.driver/cache/package_module_index.spl
+grep -q 'corrupt-header' src/compiler/80.driver/cache/package_module_index.spl
+grep -q 'reverse_dependents' src/compiler/80.driver/cache/package_module_index.spl
+
+if grep -n 'package_index_routed.*_driver_collect_sources_via_find' "$driver" >/dev/null 2>&1; then
+    echo 'package-index route retains hidden recursive scan fallback' >&2
+    exit 1
+fi
+if grep -n 'package_index_routed.*_driver_collect_sources(' "$driver" >/dev/null 2>&1; then
+    echo 'package-index route retains hidden bulk-scan fallback' >&2
+    exit 1
+fi
+
+echo 'package-index-driver-cutover-contract: PASS'

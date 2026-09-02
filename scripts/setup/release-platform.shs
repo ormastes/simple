@@ -1,0 +1,54 @@
+#!/bin/sh
+
+simple_release_platform_dir() {
+  [ "$#" -eq 1 ] || return 1
+  case "$1" in
+    aarch64-apple-darwin|x86_64-apple-darwin)
+      printf '%s-macho\n' "$1"
+      ;;
+    *-apple-darwin-macho|*-unknown-linux-gnu|*-unknown-freebsd-elf|*-pc-windows-gnu|*-pc-windows-msvc|test-platform)
+      printf '%s\n' "$1"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+simple_release_write_generation_launcher() {
+  [ "$#" -eq 3 ] || return 1
+  output=$1
+  program=$2
+  version=$3
+  case "$program" in simple|simple.exe|simple_seed|simple_seed.exe|simple_ui_backend|simple_ui_backend.exe|simple_mcp_server|simple_mcp_server.exe|simple_lsp_mcp_server|simple_lsp_mcp_server.exe) ;; *) return 1 ;; esac
+  case "$version" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  cat >"$output" <<EOF
+#!/bin/sh
+set -eu
+generation_dir=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd -P)
+exec "\$generation_dir/$program" "\$@"
+EOF
+  chmod 755 "$output"
+}
+
+simple_release_bind_generation_launchers() {
+  [ "$#" -eq 3 ] || return 1
+  repo_root=$1
+  platform=$2
+  suffix=$3
+  bin_dir="$repo_root/bin"
+  mkdir -p "$bin_dir" || return 1
+  for pair in \
+    "simple:launcher.simple${suffix}" \
+    "simple_seed:launcher.simple_seed${suffix}" \
+    "simple_ui_backend:launcher.simple_ui_backend${suffix}" \
+    "simple_mcp_server:launcher.simple_mcp_server${suffix}" \
+    "simple_lsp_mcp_server:launcher.simple_lsp_mcp_server${suffix}"; do
+    stable=${pair%%:*}
+    launcher=${pair#*:}
+    target="release/$platform/$launcher"
+    tmp="$bin_dir/.${stable}.launcher.$$"
+    ln -s "$target" "$tmp" || return 1
+    mv -f "$tmp" "$bin_dir/$stable" || return 1
+  done
+}

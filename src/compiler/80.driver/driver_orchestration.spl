@@ -30,6 +30,9 @@ use compiler.common.attributes.{
 use compiler.frontend.parser_types.{ParserModule, ParserFunction}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit, compiler_mcdc_obligation_manifest_emit}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1
+}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
@@ -89,6 +92,14 @@ impl CompilerDriver:
             eprint("[vhdl-driver] captured-metadata={metadata_rows.len()}")
 
     me compile() -> CompileResult:
+        if not reverse_reference_owner_begin_v1():
+            return CompileResult.RuntimeError(
+                "reverse-reference owner already active in this process")
+        val result = self.compile_with_reverse_reference_owner_v1()
+        reverse_reference_owner_end_v1()
+        result
+
+    me compile_with_reverse_reference_owner_v1() -> CompileResult:
         val log = self.ctx.logger
         if self.ctx.config.contains_key("mcdc_config_error"):
             val mcdc_config_error = self.ctx.config["mcdc_config_error"] ?? "invalid MC/DC configuration"
@@ -292,13 +303,6 @@ impl CompilerDriver:
             log_error("phase 3 FAILED (no readable diagnostics; recorded error_count={phase3_recorded_count}; per-module root causes were emitted above as [hir-fatal])")
             return CompileResult.TypeError([])
         log_debug("phase 3 done")
-        # SIMPLE_RESOLVE_METHODS=1 (default OFF): quiet method-resolution
-        # experiment over the assembled HIR modules. Placed HERE — after
-        # phase 3 on both the streaming and non-streaming branches, before
-        # monomorphization — so both lowering paths are covered and the HIR
-        # cache (written inside the lowering loops) stays flag-agnostic.
-        if (rt_env_get("SIMPLE_RESOLVE_METHODS") ?? "") == "1":
-            self.run_resolve_methods_quiet_gated()
         log_phase("phase3:hir_typecheck:done")
         log_build_progress("hir", "modules", -1, -1,
             "complete", 3, 6, 0, 0, "running")

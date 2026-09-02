@@ -31,11 +31,7 @@ use compiler.frontend.core.aop_predicate_parser.{
 }
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_log_helpers.{log_debug, log_build_progress}
-use std.io_runtime.{env_get_opt}
-
-fn driver_aop_env_bool(key: text) -> bool:
-    val value = (env_get_opt(key) ?? "").to_lower()
-    value == "1" or value == "true" or value == "yes" or value == "on"
+use common.plugin.aspect_params.{AspectParamsV1, aspect_coverage_cutover_state_v1, aspect_log_level_to_text}
 
 impl CompilerDriver:
     me weave_aop():
@@ -45,6 +41,9 @@ impl CompilerDriver:
         self.weave_aop_with_policy(false)
 
     me weave_aop_with_policy(allow_ambient_log_rules: bool):
+        self.weave_aop_with_params(allow_ambient_log_rules, self.ctx.options.aspect_params)
+
+    me weave_aop_with_params(allow_ambient_log_rules: bool, aspect_params: AspectParamsV1):
         var all_advices: [HirAopAdvice] = []
         for name in self.ctx.hir_modules.keys():
             val hir_mod = self.ctx.hir_modules[name]
@@ -67,17 +66,21 @@ impl CompilerDriver:
         var config = weavingconfig_from_hir_advices(all_advices)
         if allow_ambient_log_rules:
             var log_config = AopLogInstrumentationConfig.for_debug(
-                driver_aop_env_bool("SIMPLE_AOP_LOG_CALLS"),
-                driver_aop_env_bool("SIMPLE_AOP_LOG_ASSIGNMENTS")
+                aspect_params.log_calls,
+                aspect_params.log_assignments
             )
             log_config = aop_log_with_compile_level(
                 log_config,
-                env_get_opt("SIMPLE_AOP_COMPILE_LOG_LEVEL") ?? "debug"
+                aspect_log_level_to_text(aspect_params.compile_log_level)
             )
             log_config = aop_log_with_runtime_level(
                 log_config,
-                env_get_opt("SIMPLE_AOP_RUNTIME_LOG_LEVEL") ?? "debug"
+                aspect_log_level_to_text(aspect_params.runtime_log_level)
             )
+            val cutover = aspect_coverage_cutover_state_v1(aspect_params)
+            if cutover != "atomic-apk-only":
+                self.ctx.add_error("PLUG-E-COVERAGE-POLICY: selected coverage policy is atomic APK-only")
+                return
             val log_rules = aop_log_weaving_rules(log_config)
             if log_rules.len() > 0:
                 var combined_rules = weavingconfig_all_rules(config)

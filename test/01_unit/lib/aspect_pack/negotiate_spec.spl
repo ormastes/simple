@@ -1,0 +1,72 @@
+# @req KPM-REQ-004 KPM-REQ-006 KPM-REQ-009 KPM-REQ-011 KPM-NFR-003 KPM-NFR-005
+use std.spec.*
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1}
+use std.common.aspect_pack.{
+    ApkModuleSourceV2, ApkCatalogEntryV2, apk_build_pack_v2,
+    apk_build_catalog_v2, apk_loader_new, apk_loader_register_pack,
+    apk_loader_set_host_offer_v1, apk_load_facet,
+    apk_loader_generation, apk_loader_last_error, apk_try_facet,
+    APK_ENTRY_FACET, APK_ACT_LAZY_FACET
+}
+
+fn pack_bytes(digest: text) -> [u8]:
+    apk_build_pack_v2([ApkModuleSourceV2(
+        module_id: "trace.core", aspect_id: "simple.aspect.Trace",
+        module_abi_hash: digest, required_core_public_abi_hash: "core-v1",
+        variant_fingerprint: "default", payload: [1u8, 2u8])]).bytes
+
+fn catalog_bytes() -> [u8]:
+    apk_build_catalog_v2([ApkCatalogEntryV2(
+        facet_key: "trace/Traceable", pack_path: "aspect/trace.apk",
+        module_id: "trace.core", entry_kind: APK_ENTRY_FACET,
+        activation: APK_ACT_LAZY_FACET, abi_hash: "sha256:trace-v1")]).bytes
+
+fn host(major: i64, accepted: [text]) -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true, "fixture",
+        [IfaceId("trace/Traceable", major, 3, "sha256:trace-v3")],
+        accepted, [], [])
+
+fn loader(digest: text, offer: HostOfferV1) -> i64:
+    val ld = apk_loader_new()
+    expect(apk_loader_register_pack(ld, "aspect/trace.apk", pack_bytes(digest))).to_equal(true)
+    apk_loader_set_host_offer_v1(ld, offer)
+    ld
+
+describe "aspect-pack dynamic negotiation":
+    # KPM-NFR-003: incompatible identity fails closed before publication.
+    it "cannot publish when mandatory host negotiation is absent":
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/trace.apk",
+            pack_bytes("sha256:trace-v1"))).to_equal(true)
+        val got = apk_load_facet(ld, catalog_bytes(), "trace/Traceable")
+        expect(got.error_code).to_equal("PLUG-E-NAME")
+        expect(apk_loader_generation(ld)).to_equal(0)
+        expect(apk_try_facet(ld, "trace/Traceable").found).to_equal(false)
+
+    it "accepts an older digest explicitly listed by the host":
+        val got = apk_load_facet(loader("sha256:trace-v1", host(1, ["sha256:trace-v1"])),
+            catalog_bytes(), "trace/Traceable")
+        expect(got.ok).to_equal(true)
+
+    it "refuses host-policy replacement after facet publication":
+        val ld = loader("sha256:trace-v1", host(1, ["sha256:trace-v1"]))
+        expect(apk_load_facet(ld, catalog_bytes(), "trace/Traceable").ok).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, host(2, ["sha256:trace-v1"]))
+        expect(apk_loader_last_error(ld)).to_contain("PLUG-E-STATE")
+
+    it "refuses a different major with PLUG-E-MAJOR":
+        val ld = loader("sha256:trace-v1", host(2, ["sha256:trace-v1"]))
+        val got = apk_load_facet(ld,
+            catalog_bytes(), "trace/Traceable")
+        expect(got.error_code).to_equal("PLUG-E-MAJOR")
+        expect(apk_loader_generation(ld)).to_equal(0)
+        expect(apk_try_facet(ld, "trace/Traceable").found).to_equal(false)
+
+    it "mutation-red refuses a load when digest acceptance is skipped":
+        val ld = loader("sha256:mutated", host(1, []))
+        val got = apk_load_facet(ld,
+            catalog_bytes(), "trace/Traceable")
+        expect(got.error_code).to_equal("PLUG-E-DIGEST")
+        expect(apk_loader_generation(ld)).to_equal(0)
+        expect(apk_try_facet(ld, "trace/Traceable").found).to_equal(false)

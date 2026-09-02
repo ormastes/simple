@@ -1,0 +1,123 @@
+# @req KPM-REQ-004 KPM-REQ-006 KPM-REQ-009 KPM-REQ-011 KPM-NFR-003 KPM-NFR-005
+use std.spec.*
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1}
+use std.sffi.dynamic_versioned.{VersionedDynLib, MultiVersionLoader}
+
+extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+val FIXTURE_SOURCE = "test/fixtures/sffi/plugin_entry_v1_fixture.c"
+val FIXTURE_DIR = "build/test-phase6-sffi"
+
+fn host() -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true, "fixture",
+        [IfaceId("simple.sffi.Image", 1, 4, "sha256:image-v4")],
+        ["sha256:image-v2"], ["image.decode"], [])
+
+fn host_without_capability() -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true, "fixture",
+        [IfaceId("simple.sffi.Image", 1, 4, "sha256:image-v4")],
+        ["sha256:image-v2"], [], [])
+
+fn host_abi(version: i64) -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), version, false, "fixture",
+        [IfaceId("simple.sffi.Image", 1, 4, "sha256:image-v4")],
+        ["sha256:image-v2"], ["image.decode"], [])
+
+fn malformed_host() -> HostOfferV1:
+    HostOfferV1(ParamHeader("HostOfferV1", 1, 0, 0), 0, true, "fixture",
+        [IfaceId("simple.sffi.Image", 1, 4, "sha256:image-v4")],
+        ["sha256:image-v2"], ["image.decode"], [])
+
+fn build_fixture(name: text, defines: text) -> text:
+    val path = "{FIXTURE_DIR}/{name}.dylib"
+    val command = ("mkdir -p '" + FIXTURE_DIR + "' && "
+        + "case \"$(uname -s)\" in Darwin) shared=-dynamiclib;; *) shared=-shared;; esac && "
+        + "cc $shared -fPIC " + defines + " '" + FIXTURE_SOURCE + "' -o '" + path + "'")
+    val (_out, err, code) = rt_process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(0)
+    expect(err).to_equal("")
+    path
+
+fn refusal_closes(name: text, defines: text, expected_code: text):
+    val marker = "{FIXTURE_DIR}/{name}.closed"
+    rt_file_delete(marker)
+    expect(rt_env_set("SIMPLE_PHASE6_UNLOAD_MARKER", marker)).to_equal(true)
+    val loaded = VersionedDynLib.load_plugin_path(
+        build_fixture(name, defines), "fixture", host())
+    expect(loaded.is_err()).to_equal(true)
+    expect(loaded.unwrap_err().code()).to_equal(expected_code)
+    expect(rt_file_exists(marker)).to_equal(true)
+    expect(rt_env_set("SIMPLE_PHASE6_UNLOAD_MARKER", "")).to_equal(true)
+
+describe "versioned SFFI real plugin entry negotiation":
+    it "returns a handle only after accepting the full older descriptor":
+        val path = build_fixture("accepted", "")
+        val loaded = MultiVersionLoader.instance().load_path(path, "fixture", host())
+        expect(loaded.is_ok()).to_equal(true)
+        expect(loaded.unwrap().negotiation_code).to_equal("OK-ABI-DEFERRED")
+        val product_result = unsafe(capabilities: [ffi, raw_ptr]):
+            loaded.unwrap().lib.call0("fixture_product_symbol")
+        expect(product_result).to_equal(73)
+
+    it "does not let a malformed host reuse a previously negotiated handle":
+        val path = build_fixture("schema-cache", "")
+        expect(MultiVersionLoader.instance().load_path(path, "schema-cache", host()).is_ok()).to_equal(true)
+        val refused = MultiVersionLoader.instance().load_path(path, "schema-cache", malformed_host())
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err().code()).to_equal("PLUG-E-SCHEMA")
+
+    it "returns no handle for a different major":
+        val loaded = VersionedDynLib.load_plugin_path(
+            build_fixture("major", "-DPLUGIN_MAJOR=2"), "fixture", host())
+        expect(loaded.is_err()).to_equal(true)
+        expect(loaded.unwrap_err().code()).to_equal("PLUG-E-MAJOR")
+
+    it "accepts an older compatible minor":
+        val loaded = VersionedDynLib.load_plugin_path(
+            build_fixture("older-minor", "-DPLUGIN_MINOR=1"), "fixture", host())
+        expect(loaded.is_ok()).to_equal(true)
+        var library = loaded.unwrap()
+        unsafe(capabilities: [ffi]):
+            library.lib.close()
+
+    it "returns no handle when any full digest byte differs":
+        val before = MultiVersionLoader.instance().loaded_keys().len()
+        val loaded = VersionedDynLib.load_plugin_path(
+            build_fixture("digest", "-DPLUGIN_DIGEST='\"sha256:image-v2-mutated\"'"),
+            "fixture", host())
+        expect(loaded.is_err()).to_equal(true)
+        expect(loaded.unwrap_err().code()).to_equal("PLUG-E-DIGEST")
+        expect(MultiVersionLoader.instance().loaded_keys().len()).to_equal(before)
+
+    it "refuses a missing capability before cache publication":
+        val path = build_fixture("capability", "")
+        val before = MultiVersionLoader.instance().loaded_keys().len()
+        val loaded = MultiVersionLoader.instance().load_path(
+            path, "fixture-capability", host_without_capability())
+        expect(loaded.is_err()).to_equal(true)
+        expect(loaded.unwrap_err().code()).to_equal("PLUG-E-CAP")
+        expect(MultiVersionLoader.instance().loaded_keys().len()).to_equal(before)
+
+    it "refuses a different concrete Simple ABI before cache publication":
+        val path = build_fixture("abi", "-DPLUGIN_ABI=2 -DPLUGIN_DEFERRED=0")
+        val before = MultiVersionLoader.instance().loaded_keys().len()
+        val loaded = MultiVersionLoader.instance().load_path(path, "fixture-abi", host_abi(1))
+        expect(loaded.is_err()).to_equal(true)
+        expect(loaded.unwrap_err().code()).to_equal("PLUG-E-ABI")
+        expect(MultiVersionLoader.instance().loaded_keys().len()).to_equal(before)
+
+    it "returns no handle for a corrupt descriptor":
+        val loaded = VersionedDynLib.load_plugin_path(
+            build_fixture("corrupt", "-DPLUGIN_MAGIC_0=88"), "fixture", host())
+        expect(loaded.is_err()).to_equal(true)
+        expect(loaded.unwrap_err().code()).to_equal("PLUG-E-ENTRY")
+
+    it "closes the provider on every pre-publication refusal branch":
+        refusal_closes("missing-entry", "-DOMIT_PLUGIN_ENTRY=1", "PLUG-E-ENTRY")
+        refusal_closes("null-entry", "-DPLUGIN_NULL_ENTRY=1", "PLUG-E-ENTRY")
+        refusal_closes("corrupt-entry", "-DPLUGIN_MAGIC_0=88", "PLUG-E-ENTRY")
+        refusal_closes("refused-entry", "-DPLUGIN_MAJOR=2", "PLUG-E-MAJOR")

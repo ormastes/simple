@@ -1,0 +1,132 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+work=${TMPDIR:-/tmp}/simple-k1-receipt-test.$$
+mkdir -p "$work"
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+cranelift='phase1:load_sources:closure:scan path=src/compiler/70.backend/backend/cranelift_codegen_adapter.spl imports=1 content_len=1'
+interpreter='phase1:load_sources:closure:scan path=src/compiler/70.backend/backend/interpreter_codegen_adapter.spl imports=1 content_len=1'
+llvm='phase1:load_sources:closure:scan path=src/compiler/70.backend/backend/llvm_codegen_adapter.spl imports=1 content_len=1'
+combined_root='phase1:load_sources:closure:scan path=src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl imports=1 content_len=1'
+compatibility_root='phase1:load_sources:closure:scan path=src/compiler/80.driver/bootstrap_k1_selected.spl imports=1 content_len=1'
+plugin_source='phase1:load_sources:closure:scan path=src/plugins/backend_wasm/wasm_backend.spl imports=1 content_len=1'
+composition_source="$root/src/compositions/kernel_llvm_cranelift"
+
+write_transcript() {
+  destination=$1
+  backend=$2
+  abi=${3:-v1}
+  manifest=${4:-simple-sdn}
+  k1=${5:-llvm-cranelift}
+  coverage=${6:-atomic-apk-only}
+  {
+    echo 'schema=simple-bootstrap-command-transcript-v2'
+    for entry in \
+      "SIMPLE_ABI_POLICY=$abi" \
+      "SIMPLE_PLUGIN_MANIFEST_POLICY=$manifest" \
+      "SIMPLE_KERNEL_K1_POLICY=$k1" \
+      "SIMPLE_COVERAGE_CUTOVER_STATE=$coverage" \
+      "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${SIMPLE_K1_COMPOSITION_SHA256_BEFORE}"; do
+      printf 'explicit-env:%s:%s\n' "${#entry}" "$entry"
+    done
+    for argument in simple native-build --backend "$backend" --mode one-binary \
+        --source "$composition_source"; do
+      printf 'argv:%s:%s\n' "${#argument}" "$argument"
+    done
+  } >"$destination"
+}
+
+write_logs() {
+  printf '%s\n' "$combined_root" "$cranelift" "$interpreter" "$llvm" \
+    >"$work/stage2.log"
+  cp "$work/stage2.log" "$work/stage3.log"
+}
+
+write_receipt() {
+  output=$1
+  stage2_transcript=${2:-$work/stage2.transcript}
+  stage3_transcript=${3:-$work/stage3.transcript}
+  sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+    llvm-cranelift one-binary llvm "$work/stage2.log" "$work/stage3.log" \
+    "$stage2_transcript" "$stage3_transcript" "$output"
+}
+
+SIMPLE_ABI_POLICY=v1
+SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn
+SIMPLE_KERNEL_K1_POLICY=llvm-cranelift
+SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only
+SIMPLE_K1_COMPOSITION_SHA256_BEFORE=$(shasum -a 256 \
+  "$composition_source/compiler/driver/bootstrap_k1_selected.spl" | awk '{print $1}')
+export SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY
+export SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE
+
+write_logs
+write_transcript "$work/stage2.transcript" llvm
+write_transcript "$work/stage3.transcript" llvm
+write_receipt "$work/pass.env" >/dev/null
+for row in \
+    'policy=llvm-cranelift' \
+    'backend=llvm' \
+    'simple_abi_policy=v1' \
+    'simple_abi_version=1' \
+    'simple_abi_deferred=0' \
+    'plugin_manifest_policy=simple-sdn' \
+    'coverage_cutover_policy=atomic-apk-only' \
+    'coverage_implementation=apk-only' \
+    'performance_threshold_mode=baseline-relative-10-percent' \
+    'performance_threshold_status=selected' \
+    'performance_baseline_scope=admitted-per-architecture-receipt' \
+    'performance_steady_rss_percent=110' \
+    'performance_growth_percent=10' \
+    'performance_warm_request_count=20' \
+    'policy_authority_path=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn' \
+    'llvm_adapter_present=1' \
+    'cranelift_adapter_present=1' \
+    'status=pass'; do
+  grep -Fxq "$row" "$work/pass.env"
+done
+authority_sha256=$(shasum -a 256 \
+  "$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn" | awk '{print $1}')
+grep -Fxq "policy_authority_sha256=$authority_sha256" "$work/pass.env"
+[ "$(stat -f '%Lp' "$work/pass.env" 2>/dev/null || stat -c '%a' "$work/pass.env")" = 444 ]
+
+if write_receipt "$work/pass.env" >/dev/null 2>&1; then
+  echo 'FAIL — existing receipt was overwritten' >&2
+  exit 1
+fi
+
+for mutation in abi manifest k1 coverage transcript compatibility plugin missing-llvm malformed; do
+  write_logs
+  write_transcript "$work/stage2-$mutation.transcript" llvm
+  write_transcript "$work/stage3-$mutation.transcript" llvm
+  SIMPLE_ABI_POLICY=v1
+  SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn
+  SIMPLE_KERNEL_K1_POLICY=llvm-cranelift
+  SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only
+  case "$mutation" in
+    abi) SIMPLE_ABI_POLICY=deferred ;;
+    manifest) SIMPLE_PLUGIN_MANIFEST_POLICY=plugin-sdn ;;
+    k1) SIMPLE_KERNEL_K1_POLICY=cranelift-only ;;
+    coverage) SIMPLE_COVERAGE_CUTOVER_STATE=dual ;;
+    transcript)
+      write_transcript "$work/stage2-$mutation.transcript" cranelift
+      ;;
+    compatibility) printf '%s\n' "$compatibility_root" >>"$work/stage2.log" ;;
+    plugin) printf '%s\n' "$plugin_source" >>"$work/stage2.log" ;;
+    missing-llvm) grep -v 'llvm_codegen_adapter' "$work/stage2.log" >"$work/mutated"; mv "$work/mutated" "$work/stage2.log" ;;
+    malformed) printf '%s\n' 'phase1:load_sources:closure:scan path=broken' >>"$work/stage3.log" ;;
+  esac
+  export SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY
+  export SIMPLE_COVERAGE_CUTOVER_STATE
+  if write_receipt "$work/rejected-$mutation.env" \
+      "$work/stage2-$mutation.transcript" "$work/stage3-$mutation.transcript" \
+      >/dev/null 2>&1; then
+    echo "FAIL — $mutation policy/evidence mutation was admitted" >&2
+    exit 1
+  fi
+  [ ! -e "$work/rejected-$mutation.env" ]
+done
+
+echo 'PASS — selected K1, ABI, manifest, and atomic APK-only policies are receipt-bound; 9/9 mutations rejected'
