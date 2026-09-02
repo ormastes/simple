@@ -314,3 +314,49 @@ this phase stops being unobservable. That single change converts "silent for 30
 minutes, cause unknown" into either a visible per-module rate or an exact module
 id where it stops. It is a much better investment than another blind 45-minute
 run.
+
+### Correction: BOTH verification runs were killed EXTERNALLY, not by the build
+
+run3's `rc=1` above is the harness's exit code, not a build verdict — the task
+harness stopped the background job at ~19:06 while it was still inside
+`lower_to_mir`. run2 was stopped the same way. So neither run is evidence of a
+build FAILURE:
+
+- run3 stderr contains **0** lines matching `^error` and **0** `[mnf-debug]` /
+  `[mnf-expr]` lines;
+- the last receipts written were `hir ... complete step 3/6` and
+  `monomorphize ... complete step 4/6`, with `[mono] generic_fns=0 call_sites=0
+  specializations=0 unresolved=0`.
+
+The correct reading is: **the build got further than ever before and was cut
+off, twice, by the harness's background-job limit — not by a compiler error.**
+Whether `lower_to_mir` terminates on this input is still unmeasured, and the
+30-minute silent-CPU observation above stands as the only data on it.
+
+Practical consequence for the next attempt: this build needs a runner that will
+not be reaped (a detached process writing to a file, or a machine-level `nohup`
+lane), because the phase now under test outlives the harness's tolerance.
+
+### Protocol re-verified after the change (2026-09-02)
+The compiler change is in MIR lowering and the deployed MCP server still
+interprets source, so no MCP behaviour was expected to move; verified anyway
+rather than assumed, through the real `bin/simple_mcp_server.cmd` wrapper:
+
+- `initialize` -> `{"protocolVersion":"2025-06-18", ...,
+  "serverInfo":{"name":"simple-mcp-full","version":"4.0.0"}}`;
+- `tools/call simple_symbols` on
+  `test/01_unit/compiler/50.mir/mir_lowering_global_maps_initialized_spec.spl`
+  returned symbols whose ranges are CORRECT, not merely non-empty: `h` at
+  0-based lines 79/83/87 character 12, which are exactly the three
+  `        var h = Holder.initialized()` bindings (1-based 80/84/88) with `h` in
+  column 12.
+
+### Tasks not reachable this session
+Re-enabling the native `simple_mcp_server` artifact and re-measuring startup /
+peak RSS against the interpreted baseline (4.3-5.0 s, 248-261 MB) were
+conditional on the native build COMPLETING. It did not, so no artifact was
+produced, nothing was re-enabled, and no startup/RSS number is reported. The
+stale `bin/release/x86_64-pc-windows-msvc/simple_mcp_server.exe.disabled`
+(2,657,280 bytes, dated Apr 23) was deliberately NOT renamed into place: both
+wrappers would then execute a months-old binary, which would look like success
+while proving nothing about this lane.
