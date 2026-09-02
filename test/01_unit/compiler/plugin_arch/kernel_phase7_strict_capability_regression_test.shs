@@ -4,48 +4,15 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../../.." && pwd)
 cd "$ROOT"
 
-compiler=${SIMPLE_STRICT_CAPABILITY_COMPILER:-}
-if test -z "$compiler"; then
-    for candidate in \
-        src/compiler_rust/target/bootstrap/simple \
-        /Users/ormastes/simple/src/compiler_rust/target/bootstrap/simple
-    do
-        if test -x "$candidate"; then
-            compiler=$candidate
-            break
-        fi
-    done
+set +e
+cargo test --quiet \
+    --manifest-path src/compiler_rust/compiler/Cargo.toml \
+    --test kernel_phase7_strict_capability -- --nocapture
+status=$?
+set -e
+printf 'KERNEL_PHASE7_STRICT_CAPABILITY_CARGO_STATUS=%s\n' "$status"
+if test "$status" -ne 0; then
+    echo "BLOCKED — one or more strict parse/HIR capability checks failed"
+    exit "$status"
 fi
-test -n "$compiler" && test -x "$compiler" || {
-    echo "FAIL — strict capability compiler unavailable"
-    exit 1
-}
-
-files='src/compiler/80.driver/action_graph/demand_compile_integration.spl
-src/compiler/80.driver/demand_mir_evidence_builder.spl
-src/compiler/80.driver/smf/runtime_std_package_set.spl
-src/compiler/80.driver/action_graph/artifact_service_bridge.spl
-src/compiler/80.driver/driver_aot_native_output.spl
-src/compiler/80.driver/driver_aot_smf_output.spl
-src/compiler/80.driver/driver_pipeline_lowering.spl
-src/compiler/80.driver/driver_source_pipeline_loading.spl'
-
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase7-capability.XXXXXX")
-trap 'rm -rf "$temporary"' EXIT HUP INT TERM
-
-count=0
-for file in $files; do
-    count=$((count + 1))
-    stem=$(printf '%s' "$file" | tr '/.' '__')
-    log="$temporary/$stem.log"
-    SIMPLE_LIB=src "$compiler" compile "$file" \
-        -o "$temporary/$stem.smf" >"$log" 2>&1 || true
-    if grep -F 'Capability error:' "$log" >/dev/null; then
-        echo "FAIL — strict capability violation remains in $file"
-        grep -F 'Capability error:' "$log"
-        exit 1
-    fi
-done
-
-test "$count" -eq 8
 echo "KERNEL_PHASE7_STRICT_CAPABILITY_PASS"
