@@ -1,0 +1,74 @@
+# Generalization spec for the `is_dir` shell-dependency defect.
+#
+# Probes the adjacent path forms and the sibling predicates that share the same
+# `/bin/sh` shell-out pattern. Separator handling is deliberately NOT hardcoded:
+# the native separator is recovered from `dir_walk_native` (which joins with the
+# platform separator) rather than written as a literal, because
+#   (a) a backslash is a legal character in a POSIX filename, so no code here
+#       may split or rewrite on it, and
+#   (b) the Simple lexer currently DROPS `\` in a string literal
+#       ("C:\Users" lexes as "C:Users", measured 2026-09-02) -- a separate
+#       defect that would silently make any literal backslash fixture vacuous.
+#
+# Bug: doc/08_tracking/bug/is_dir_always_false_shell_dependency_2026-09-02.md
+# @req REQ-IO-IS-DIR-002
+
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_walk, dir_walk_native, dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+
+fn _native_sep() -> text:
+    # A walked entry is `<dir><sep><name>`; recover <sep> from a known 2-char
+    # leaf name rather than from a literal escape.
+    val base = cwd() + "/build/is_dir_gen/leaf"
+    dir_create_all(base)
+    val f = base + "/ab"
+    file_write(f, "x")
+    val w = dir_walk_native(base)
+    var sep = "/"
+    if w.len() > 0:
+        val s = w[0]
+        if s.len() >= 3:
+            sep = s.substring(s.len() - 3, s.len() - 2)
+    file_delete(f)
+    sep
+
+describe "is_dir across path forms":
+
+    it "accepts an absolute path":
+        assert_true(is_dir(cwd()))
+
+    it "accepts a relative path":
+        assert_true(is_dir("src"))
+
+    it "accepts a trailing separator":
+        """`test -d 'x/'` and `Path::is_dir` must not disagree on a trailing
+        slash -- callers build paths by concatenation all the time."""
+        assert_true(is_dir("src/"))
+        assert_true(is_dir(cwd() + "/"))
+
+    it "accepts the platform's native separator":
+        val sep = _native_sep()
+        val p = cwd() + sep + "src"
+        assert_true(is_dir(p))
+        dir_remove_all(cwd() + "/build/is_dir_gen")
+
+    it "rejects a nonexistent path in every form":
+        assert_false(is_dir("__nope_9199__"))
+        assert_false(is_dir("./__nope_9199__"))
+        assert_false(is_dir(cwd() + "/__nope_9199__/"))
+
+    it "stays consistent under repeated calls":
+        """A shell-backed predicate can flake on spawn pressure; a stat-backed
+        one cannot. Same answer every time is part of the contract."""
+        var i = 0
+        while i < 8:
+            assert_true(is_dir("src"))
+            assert_false(is_dir("__nope_9199__"))
+            i = i + 1
+
+    it "agrees with dir_walk wherever dir_walk finds files":
+        val d = cwd() + "/src/lib"
+        if dir_walk(d).len() > 0:
+            assert_true(is_dir(d))
+        assert_true(is_dir(d))

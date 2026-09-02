@@ -1,0 +1,52 @@
+# Reproducing spec for: is_dir returns FALSE for every path, repo root included.
+#
+# Before the fix, `is_dir` was `_dir_shell_bool("test -d '{path}'")` -- it
+# required `/bin/sh` to be spawnable. Under the tree-walk interpreter (which
+# `bin/simple test` hard-defaults to) `rt_process_run` returns the -1
+# execution-failure sentinel on Windows for EVERY command, so this whole spec
+# was false-for-everything: the repo root was "not a directory", and every
+# `is_dir`-guarded branch in every tool was a latent no-op.
+#
+# `dir_walk` kept working on the identical string only because the interpreter
+# substitutes the native `rt_dir_walk` extern for it. There is no `rt_is_dir`,
+# so `is_dir` fell through to the dead shell body. The two now agree.
+#
+# Bug: doc/08_tracking/bug/is_dir_always_false_shell_dependency_2026-09-02.md
+# @req REQ-IO-IS-DIR-001
+
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_walk, dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+
+describe "is_dir agrees with the filesystem":
+
+    it "reports the repository root as a directory":
+        """A directory that plainly exists must be reported as a directory."""
+        val root = cwd()
+        assert_true(is_dir(root))
+
+    it "reports the current directory as a directory":
+        assert_true(is_dir("."))
+
+    it "does not report a regular file as a directory":
+        """The predicate must discriminate, not just answer true."""
+        val base = cwd() + "/build/is_dir_repro"
+        dir_create_all(base)
+        val f = base + "/marker.txt"
+        file_write(f, "x")
+        assert_true(is_dir(base))
+        assert_false(is_dir(f))
+        file_delete(f)
+        dir_remove_all(base)
+
+    it "does not report a nonexistent path as a directory":
+        assert_false(is_dir(cwd() + "/__no_such_directory_9199__"))
+
+    it "agrees with dir_walk on the same string":
+        """dir_walk succeeding while is_dir denies the same path was the
+        original symptom: machinery that reports plausibly and does nothing."""
+        val src = cwd() + "/src"
+        val walked = dir_walk(src)
+        if walked.len() > 0:
+            assert_true(is_dir(src))
+        assert_true(is_dir(src))

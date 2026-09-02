@@ -11,6 +11,8 @@ extern fn rt_dir_remove(path: text, recursive: bool) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
 @unsafe(reason: "legacy directory-walk ABI cannot distinguish an empty directory from provider failure", capabilities: [ffi])
 extern fn rt_dir_walk(path: text) -> [text]
+@unsafe(reason: "raw directory-predicate ABI; false is the not-a-directory or unreadable status", capabilities: [ffi])
+extern fn rt_dir_exists(path: text) -> bool
 use std.io_runtime.{process_run}
 
 @always_inline
@@ -75,8 +77,29 @@ fn dir_walk_native(path: text) -> [text]:
 fn dir_remove_all(path: text) -> bool:
     _dir_remove_all_raw(path)
 
+## True when `path` names a directory, following symlinks -- the same
+## predicate as POSIX `test -d`, but WITHOUT a shell.
+##
+## This used to be `_dir_shell_bool("test -d '{path}'")`, which made the
+## answer depend on `/bin/sh` being spawnable and on the shell being able to
+## parse the path. Both fail on Windows: the interpreter's `rt_process_run`
+## returns the -1 execution-failure sentinel for every command (so `is_dir`
+## was FALSE for every path, repo root included), and even under the JIT --
+## where `/bin/sh` does resolve via Git Bash -- `test -d` rejects any native
+## backslash path. `dir_walk` appeared to work only because the interpreter
+## substitutes the native `rt_dir_walk` extern for it; there is no `rt_is_dir`,
+## so `is_dir` fell through to the dead shell body.
+##
+## `rt_dir_exists` is `Path::new(s).is_dir()` (metadata.rs:297) and is
+## registered in BOTH engines -- interpreter_extern/mod.rs:1296 and
+## codegen/runtime_sffi.rs:1984. It performs NO separator rewriting, so POSIX
+## behaviour is byte-identical to `test -d` (a backslash stays a legal
+## filename character on Unix).
+##
+## Bug: doc/08_tracking/bug/is_dir_always_false_shell_dependency_2026-09-02.md
 fn is_dir(path: text) -> bool:
-    _dir_shell_bool("test -d '{path}'")
+    unsafe(capabilities: [ffi]):
+        rt_dir_exists(path)
 
 fn dir_list(path: text) -> [text]:
     _dir_shell_lines("ls -1 '{path}' 2>/dev/null")
