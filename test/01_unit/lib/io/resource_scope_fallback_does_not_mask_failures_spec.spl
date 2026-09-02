@@ -1,0 +1,69 @@
+# GENERALIZATION: the observed-ABI fallback must not become a failure-swallower.
+#
+# Sibling of resource_scope_observed_abi_fallback_spec.spl. That spec proves the
+# fallback RUNS the child; this one probes the adjacent risk the fix introduces —
+# that re-attempting through process_run_bounded could launder a genuine spawn
+# failure into a green result, or run a side-effecting child twice.
+#
+# The distinction the fix relies on:
+#   * "ABI unavailable" is proved by the provider's own receipt: lifecycle_error
+#     ENOTSUP AND pid == 0 AND start_identity == 0 AND reaped == 0 AND zero bytes
+#     seen (_receipt_shows_no_child). Nothing was spawned, so re-attempting is
+#     safe and cannot duplicate a side effect.
+#   * A genuine spawn failure is NOT swallowed: the fallback executes the command
+#     for real and reports the bounded facade's own verdict, so a command that
+#     cannot be launched still comes back as a failure with the provider reason
+#     carried in runtime_error.
+#
+# See src/lib/nogc_sync_mut/io/resource_scope.spl (_legacy_bounded_fallback,
+# _receipt_shows_no_child) and the empty-diagnostic twin fixed at
+# src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:1092 /
+# src/app/test_runner_new/test_runner_execute.spl:595.
+
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
+use std.io.{file_exists}
+use std.common.perf.execution_metrics.{TerminationCause, ResourceEvidenceQuality}
+
+fn _self_binary() -> text:
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    "bin/simple"
+
+describe "the observed-ABI fallback never masks a genuine failure":
+
+    it "still fails when the command cannot be launched at all":
+        # An unlaunchable command must remain a failure on every host: the
+        # fallback re-attempts the spawn, it does not invent success.
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 30000, 4096)
+        val result = run_in_execution_resource_scope(scope, "no_such_executable_resource_scope_spec", [])
+        assert_true(result.process.usage.exit_code != 0)
+
+    it "does not report a failed launch as a normal exit":
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 30000, 4096)
+        val result = run_in_execution_resource_scope(scope, "no_such_executable_resource_scope_spec", [])
+        assert_true(result.process.usage.termination != TerminationCause.Exited)
+
+    it "still reports a genuinely failing child as a failure":
+        # The whole point of the fix is that resource evidence is optional but
+        # the VERDICT is not. A child that runs and fails must fail: a fallback
+        # that turned real failures green would be a worse defect than the one
+        # it replaced.
+        val missing = "target/definitely_missing_child_for_scope_spec.spl"
+        assert_false(file_exists(missing))
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 60000, 65536)
+        val result = run_in_execution_resource_scope(scope, _self_binary(), ["run", missing])
+        assert_true(result.process.usage.exit_code != 0)
+
+    it "never claims resource evidence the fallback could not have collected":
+        # The legacy bounded facade collects no resource evidence at all. A
+        # scope that fell back must SAY so rather than dressing zeroes up as a
+        # measurement -- a fabricated ExactTree reading would be worse than an
+        # honest Unavailable. Stated as an implication so the assertion holds
+        # unchanged on a host where the observed ABI works and the numbers are
+        # real.
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 60000, 65536)
+        val result = run_in_execution_resource_scope(scope, _self_binary(), ["--version"])
+        val usage = result.process.usage
+        val no_numbers = usage.peak_tree_charge_bytes == 0 and usage.user_cpu_ms == 0 and usage.system_cpu_ms == 0
+        if no_numbers:
+            assert_true(usage.evidence_quality == ResourceEvidenceQuality.Unavailable)

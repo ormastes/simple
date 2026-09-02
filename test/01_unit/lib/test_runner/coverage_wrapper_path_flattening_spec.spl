@@ -1,0 +1,84 @@
+# REPRODUCTION: the coverage wrapper's temp path must flatten EVERY path
+# separator, not just "/".
+#
+# Defect (Windows, 2026-09-02), found only once the observed-ABI fix let the
+# compile actually run and emit a real diagnostic:
+#
+#   error: compile failed (C:\Users\...\Temp/simple_cov_test_00_formal_verification\
+#   compiler\proof_reference_spec_spec.spl): io: Cannot read "..."
+#   The system cannot find the path specified. (os error 3)
+#
+# build_coverage_wrapper built its temp FILENAME with
+# `file_path.replace("/", "_")`. A DIRECTORY target on Windows yields
+# backslash-separated spec paths, so the backslashes survived and the "filename"
+# became a nested path under the temp dir whose intermediate directories are
+# never created. Every spec under a subdirectory therefore failed, while the
+# same specs named as explicit files (forward slashes) passed.
+#
+# Fix: src/app/test_runner_new/test_executor_parsing.spl and
+# src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl now flatten
+# "/", "\" and ":" -- the same rule the .smf artifact path already used
+# (test_runner_execute.spl, smf_path).
+#
+# This spec pins the MECHANISM, not the rule text: a name that still carries a
+# separator is not writable in a flat temp dir; a flattened one is.
+
+use std.io.{file_exists, file_write, file_delete}
+use std.io.{env_get}
+
+fn _sep() -> text:
+    "\\"
+
+fn _temp_dir() -> text:
+    val tmpdir = env_get("TMPDIR") ?? ""
+    if tmpdir != "":
+        return tmpdir
+    val tmp = env_get("TMP") ?? ""
+    if tmp != "":
+        return tmp
+    "/tmp"
+
+fn _flatten(path: text) -> text:
+    path.replace("/", "_").replace(_sep(), "_").replace(":", "_")
+
+fn _windows_host() -> bool:
+    # POSIX treats "\" as an ordinary filename character, so the negative half
+    # of this spec is meaningful only where "\" actually separates directories.
+    _temp_dir().contains(_sep())
+
+fn _windows_style() -> text:
+    "test" + _sep() + "00_formal_verification" + _sep() + "compiler" + _sep() + "probe_spec.spl"
+
+describe "coverage wrapper temp paths are flat filenames":
+    """A wrapper file is written into one temp DIRECTORY. Anything the runner
+    treats as a filename must therefore contain no path separator at all."""
+
+    it "leaves no separator in a flattened Windows directory-target path":
+        val flat = _flatten(_windows_style())
+        assert_false(flat.contains(_sep()))
+        assert_false(flat.contains("/"))
+        assert_false(flat.contains(":"))
+
+    it "leaves no separator in a flattened POSIX directory-target path":
+        val flat = _flatten("test/00_formal_verification/compiler/probe_spec.spl")
+        assert_false(flat.contains(_sep()))
+        assert_false(flat.contains("/"))
+
+    it "cannot create the wrapper file under an UNFLATTENED Windows name":
+        # This is the defect itself: the unflattened name designates a nested
+        # directory under the temp dir that nothing ever creates, so the wrapper
+        # write produced no file and the later compile reported "os error 3".
+        if not _windows_host():
+            return
+        val unflat = _temp_dir() + "/simple_cov_" + _windows_style()
+        file_write(unflat, "# probe")
+        assert_false(file_exists(unflat))
+
+    it "can create the wrapper file under the flattened name":
+        val target = _temp_dir() + "/simple_cov_" + _flatten(_windows_style())
+        if file_exists(target):
+            file_delete(target)
+        file_write(target, "# wrapper flattening probe")
+        assert_true(file_exists(target))
+        file_delete(target)
+        assert_false(file_exists(target))

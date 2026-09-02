@@ -1,0 +1,60 @@
+# REPRODUCTION: run_in_execution_resource_scope must actually run the child on a
+# host whose owned-process *observed* ABI provider is not implemented.
+#
+# Defect (Windows, 2026-09-02): the non-unix provider stub in
+# src/runtime/runtime_process_owned.c returns a well-formed 30-field record with
+# lifecycle_error = ENOTSUP. MSVC spells ENOTSUP 129, but
+# process_run_observed_bounded only recognised 95 (Linux), 45 (macOS/BSD) and
+# 10045 (WSA), so it fell through to the normal decode path and reported
+# exit_code = -1 with empty stdout and stderr in 1-3 ms without ever spawning.
+#
+# Blast radius: `simple test <DIRECTORY>` enables MC/DC, which forces the native
+# compile path, which spawns `simple compile` through this scope. Every spec in
+# the directory therefore "failed" with an empty "Compilation failed:" message,
+# while the very same specs passed when named as explicit files. Measured on
+# test/00_formal_verification: 23/23 failed as a directory, 171/174 passed as
+# files.
+#
+# Measured provider record (bin/simple.exe md5 d52d770724a9f8797e98ac7819709ab9):
+#   len=30 f0=1 f19=2 f18=129 f3=0 f5=0 f6=0 f7=0 f10=-1 f15=0 f29=129
+# i.e. the record is NOT malformed; lifecycle_error 129 was the firing path.
+#
+# Fix: src/lib/nogc_sync_mut/io/resource_scope.spl — _legacy_bounded_fallback,
+# reached for lifecycle_error 129 when _receipt_shows_no_child proves nothing
+# was spawned, and for a malformed record with both streams empty.
+
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
+use std.io.{file_exists}
+use std.common.perf.execution_metrics.{TerminationCause}
+
+fn _self_binary() -> text:
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    "bin/simple"
+
+describe "run_in_execution_resource_scope survives an unimplemented observed ABI":
+    """The scope is a resource-evidence wrapper, never a gate on execution. When
+    the host cannot supply resource evidence the child must still RUN and its
+    real verdict must still reach the caller."""
+
+    it "runs a succeeding child and reports its real exit code, not -1":
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 60000, 65536)
+        val result = run_in_execution_resource_scope(scope, _self_binary(), ["--version"])
+        # The defect returned -1 with both streams empty in a few milliseconds.
+        expect(result.process.usage.exit_code).to_equal(0)
+        val combined = result.process.stdout + result.process.stderr
+        assert_true(combined.len() > 0)
+
+    it "classifies a completed child as Exited, never InfrastructureFailure":
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 60000, 65536)
+        val result = run_in_execution_resource_scope(scope, _self_binary(), ["--version"])
+        assert_true(result.process.usage.termination == TerminationCause.Exited)
+
+    it "preserves a child's nonzero exit status instead of collapsing it to -1":
+        # -1 is the scope's own "nothing ran" sentinel. A child that ran and
+        # exited nonzero must be distinguishable from it, or the caller cannot
+        # tell a real failure from an infrastructure gap.
+        val scope = execution_resource_scope(ExecutionResourceClass.Tiny, 60000, 65536)
+        val result = run_in_execution_resource_scope(scope, _self_binary(), ["run", "no_such_file_for_scope_spec.spl"])
+        assert_true(result.process.usage.exit_code != 0)
+        assert_true(result.process.usage.exit_code != -1)
