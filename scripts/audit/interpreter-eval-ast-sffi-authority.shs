@@ -1,17 +1,43 @@
 #!/bin/sh
 # Static lexical-boundary guard for the interpreter AST proof-of-concept.
 # It proves no artifact admission, signature, or native provider safety.
-set -eu
+#
+# Verdict is the LAST line on stdout (.claude/rules/vcs.md):
+#   PASS  — <n> assertion(s) checked ...   exit 0
+#   FAIL  — <what failed, expected vs actual>  exit 1
+#   ERROR — nothing was checked (<reason>)     exit 2
+set -u
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 binding="$root/src/app/interpreter/ffi/ast_ffi.spl"
 consumer="$root/src/app/interpreter/ffi/eval_slice.spl"
 provider="$root/src/compiler_rust/compiler/src/interpreter_extern/ast_sffi.rs"
 
-test "$(grep -c '^@unsafe(' "$binding")" -eq 29
-test "$(grep -c '^extern fn rt_ast_' "$binding")" -eq 29
-grep -q 'pub fn rt_ast_expr_tag' "$provider"
-grep -q 'pub fn rt_ast_expr_free' "$provider"
+checked=0
+failures=''
+
+fail() { failures="${failures}${failures:+; }$1"; }
+
+for f in "$binding" "$consumer" "$provider"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR — nothing was checked (missing audited file: $f)"
+        exit 2
+    fi
+done
+
+expect_count() {
+    _label=$1; _actual=$2; _want=$3
+    checked=$((checked + 1))
+    [ "$_actual" -eq "$_want" ] || fail "$_label expected $_want, got $_actual"
+}
+
+expect_count 'unsafe_tagged_declarations' "$(grep -c '^@unsafe(' "$binding")" 29
+expect_count 'raw_ast_extern_declarations' "$(grep -c '^extern fn rt_ast_' "$binding")" 29
+
+for sym in rt_ast_expr_tag rt_ast_expr_free; do
+    checked=$((checked + 1))
+    grep -q "pub fn $sym" "$provider" || fail "provider missing 'pub fn $sym' in $provider"
+done
 
 raw_calls=$(awk '
     /unsafe\(capabilities: \[ffi\]\):/ { pending=1; next }
@@ -19,6 +45,15 @@ raw_calls=$(awk '
     pending { pending=0 }
     END { print count + 0 }
 ' "$consumer")
-test "$raw_calls" -eq 14
+expect_count 'lexical_raw_calls' "$raw_calls" 14
 
-echo 'Interpreter AST SFFI authority: PASS raw_declarations=29 lexical_raw_calls=14 direct_calls_unchanged=1 artifact_admission=absent'
+if [ "$checked" -eq 0 ]; then
+    echo 'ERROR — nothing was checked (no assertions evaluated)'
+    exit 2
+fi
+if [ -n "$failures" ]; then
+    echo "FAIL — $checked assertion(s) checked, interpreter AST SFFI authority: $failures"
+    exit 1
+fi
+echo "PASS — $checked assertion(s) checked, interpreter AST SFFI authority: raw_declarations=29 unsafe_tagged=29 lexical_raw_calls=14 artifact_admission=absent"
+exit 0
