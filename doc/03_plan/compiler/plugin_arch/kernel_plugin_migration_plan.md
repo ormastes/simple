@@ -10,14 +10,14 @@ AND fails under an injected bug (mutation-red), per
 Architecture: `doc/04_architecture/compiler/plugin_arch/kernel_pluggable_partition.md`.
 Design: `doc/05_design/compiler/plugin_arch/versioned_param_objects_and_interfaces.md`.
 
-REQ-009/NFR-006 phase coverage is indexed by
-`scripts/check/kernel-plugin-migration-evidence-matrix.tsv` and enforced by
-`scripts/check/check-kernel-plugin-migration-evidence-matrix.shs`. The checker
-requires exactly phases 0 through 8, distinct positive and injected-defect
-contracts, and `blocked-required` runtime authority for every row. Its selftest
-removes each phase's mutation marker independently and forges runtime PASS;
-all ten mutations must fail. This is structural test-integrity evidence only
-and does not convert blocked SPipe, bootstrap, startup, or native rows to PASS.
+REQ-009/NFR-006 structural coverage is enforced by
+`scripts/check/check-kernel-plugin-migration-evidence-matrix.shs`. It executes
+one production-seam probe for every phase 0 through 8, then injects a defect
+into that phase's implementation or selected-policy input and requires the
+same probe to fail. Phase 7 additionally executes the non-native matrix row,
+requires `BLOCKED` plus deployment denial, and verifies that the native
+admission consumer binds candidate and Stage4 provenance digests. This does
+not convert blocked SPipe, bootstrap, startup, or native rows to PASS.
 
 Documentation reconciliation (2026-09-02): final requirements are recorded in
 `doc/02_requirements/feature/kernel_plugin_migration.md` and

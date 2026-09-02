@@ -1,71 +1,156 @@
 #!/bin/sh
 set -eu
 
-ROOT=${KPM_ROOT_DIR:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}
-MATRIX=${KPM_EVIDENCE_MATRIX:-$ROOT/scripts/check/kernel-plugin-migration-evidence-matrix.tsv}
+REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+ROOT=${KPM_ROOT_DIR:-$REPO_ROOT}
 
-fail() {
-    echo "FAIL: $1" >&2
-    exit 1
+fail() { echo "FAIL: $1" >&2; exit 1; }
+
+require_file() {
+    [ -f "$ROOT/$1" ] && [ ! -L "$ROOT/$1" ] || fail "phase $phase missing regular implementation seam: $1"
 }
 
-check_relative_file() {
-    case "$1" in
-        ''|/*|*..*) fail "unsafe evidence path: $1" ;;
+require_text() {
+    grep -Fq -- "$2" "$ROOT/$1" || fail "phase $phase implementation invariant failed: $2"
+}
+
+probe_phase() {
+    phase=$1
+    case "$phase" in
+        0)
+            seam=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+            require_file "$seam"
+            require_text "$seam" 'k1_policy: llvm-cranelift'
+            require_text "$seam" 'plugin_manifest_policy: simple-sdn'
+            require_text "$seam" 'coverage_implementation: apk-only'
+            ;;
+        1)
+            seam=src/compiler/20.hir/abi_interface.spl
+            require_file "$seam"
+            require_text "$seam" 'HIR_ABI_INTERFACE_DOMAIN_V1 = "simple/abi-interface/v1"'
+            require_text "$seam" 'canon_field("type", self.type_identity(field.type_))'
+            require_text "$seam" 'pub fn hir_abi_interface_digest_v1'
+            ;;
+        2)
+            seam=src/lib/common/plugin/aspect_params.spl
+            require_file "$seam"
+            require_text "$seam" 'pub const ASPECT_PARAM_LOG_CALLS = 0'
+            require_text "$seam" 'pub const ASPECT_PARAM_LOG_ASSIGNMENTS = 1'
+            require_text "$seam" 'pub const ASPECT_PARAM_MCDC_MANIFEST_SHA256 = 5'
+            require_text "$seam" 'hdr: ParamHeader'
+            require_text "$seam" 'ext: [ParamExt]'
+            ;;
+        3)
+            seam=src/compiler/80.driver/watcher/smf_manifest.spl
+            require_file "$seam"
+            require_text "$seam" 'if manifest.version != SMF_MANIFEST_VERSION_CURRENT:'
+            require_text "$seam" 'if entry.abi_digest != expected_abi_digest:'
+            require_text "$seam" 'return SmfManifestGateVerdict.AbiDigestMismatch'
+            ;;
+        4)
+            seam=src/compiler/90.tools/lint/static_rules.spl
+            require_file "$seam"
+            require_text "$seam" 'if rule_iface.major != params.host_iface.major:'
+            require_text "$seam" 'if rule_iface.abi_digest != lint_rule_provider_digest_v1(rule_id):'
+            require_text "$seam" 'for finding in rule.check(params, unit):'
+            ;;
+        5)
+            seam=src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl
+            require_file "$seam"
+            require_text "$seam" '"llvm-cranelift"'
+            require_text "$seam" 'static_backend_entry_v1(BackendKind.Cranelift'
+            require_text "$seam" 'static_backend_entry_v1(BackendKind.Llvm'
+            ;;
+        6)
+            seam=src/lib/common/plugin/negotiation.spl
+            require_file "$seam"
+            require_text "$seam" 'if host_iface.major != answer.implements.major:'
+            require_text "$seam" 'answer.implements.abi_digest != host_iface.abi_digest and'
+            require_text "$seam" 'return NegotiateVerdict.DigestUnaccepted(answer.implements.abi_digest)'
+            ;;
+        7)
+            seam=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+            require_file "$seam"
+            require_text "$seam" 'coverage_cutover_policy: atomic-apk-only'
+            require_text "$seam" 'coverage_implementation: apk-only'
+            consumer=scripts/check/check-kernel-phase7-deployment-prerequisite.shs
+            [ -f "$REPO_ROOT/$consumer" ] && [ ! -L "$REPO_ROOT/$consumer" ] || fail 'phase 7 deployment verifier missing'
+            grep -Fq 'candidate_sha256' "$REPO_ROOT/$consumer" || fail 'phase 7 native receipt lacks candidate digest binding'
+            grep -Fq 'stage4_provenance_sha256' "$REPO_ROOT/$consumer" || fail 'phase 7 native receipt lacks Stage4 provenance binding'
+            receipt_dir=${TMPDIR:-/tmp}/kpm-phase7-blocked.$$
+            rm -rf "$receipt_dir"; mkdir -p "$receipt_dir"
+            SIMPLE_PHASE7_RECEIPT_DIR="$receipt_dir" sh "$REPO_ROOT/scripts/check/check-kernel-phase7-matrix.shs" \
+                --policy=llvm-cranelift --coverage=atomic-apk-only --mode=one-binary \
+                --abi=v1 --manifest=simple-sdn > "$receipt_dir/output"
+            grep -Fq 'STATUS: BLOCKED' "$receipt_dir/output" || { rm -rf "$receipt_dir"; fail 'phase 7 unauthenticated runtime evidence was not BLOCKED'; }
+            grep -Fq 'deployment_authorization=DENY' "$receipt_dir"/*.env || { rm -rf "$receipt_dir"; fail 'phase 7 BLOCKED receipt did not deny deployment'; }
+            rm -rf "$receipt_dir"
+            ;;
+        8)
+            seam=src/app/pkg/requires_range.spl
+            require_file "$seam"
+            require_text "$seam" 'if manifest_policy != "simple-sdn":'
+            require_text "$seam" 'if abi_policy != "v1":'
+            require_text "$seam" 'case Ok(base): satisfies_caret(version, base)'
+            require_text "$seam" 'case Ok(base): satisfies_tilde(version, base)'
+            ;;
+        *) fail "unknown phase: $phase" ;;
     esac
-    [ -f "$ROOT/$1" ] && [ ! -L "$ROOT/$1" ] || fail "missing regular evidence owner: $1"
 }
 
-check_matrix() {
-    [ -f "$MATRIX" ] && [ ! -L "$MATRIX" ] || fail "missing regular matrix: $MATRIX"
-    header=$(sed -n '1p' "$MATRIX")
-    expected_header=$(printf 'phase\tpositive_path\tpositive_marker\tmutation_path\tmutation_marker\tevidence_class\truntime_authority')
-    [ "$header" = "$expected_header" ] || fail "matrix header drift"
+probe_all() {
+    current=0
+    while [ "$current" -le 8 ]; do probe_phase "$current"; current=$((current + 1)); done
+    echo 'PASS: phases 0-8 executable structural probes passed; native/runtime evidence remains BLOCKED unless provenance-bound admission verifies it'
+}
 
-    rows=0
-    expected_phase=0
-    while IFS="$(printf '\t')" read -r phase positive_path positive_marker mutation_path mutation_marker evidence_class runtime_authority extra; do
-        [ "$phase" = phase ] && continue
-        [ -n "$phase" ] || fail "blank matrix row"
-        [ -z "${extra:-}" ] || fail "phase $phase has extra fields"
-        [ "$phase" = "$expected_phase" ] || fail "expected phase $expected_phase, found $phase"
-        [ "$evidence_class" = structural-contract ] || fail "phase $phase fabricates non-structural evidence"
-        [ "$runtime_authority" = blocked-required ] || fail "phase $phase fabricates runtime authority"
-        [ -n "$positive_marker" ] && [ -n "$mutation_marker" ] || fail "phase $phase has an empty evidence marker"
-        [ "$positive_marker" != "$mutation_marker" ] || fail "phase $phase reuses one marker for positive and mutation evidence"
-        check_relative_file "$positive_path"
-        check_relative_file "$mutation_path"
-        grep -Fq -- "$positive_marker" "$ROOT/$positive_path" || fail "phase $phase positive marker is absent"
-        grep -Fq -- "$mutation_marker" "$ROOT/$mutation_path" || fail "phase $phase mutation marker is absent"
-        rows=$((rows + 1))
-        expected_phase=$((expected_phase + 1))
-    done < "$MATRIX"
+phase_seam() {
+    case "$1" in
+        0|7) echo doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn ;;
+        1) echo src/compiler/20.hir/abi_interface.spl ;;
+        2) echo src/lib/common/plugin/aspect_params.spl ;;
+        3) echo src/compiler/80.driver/watcher/smf_manifest.spl ;;
+        4) echo src/compiler/90.tools/lint/static_rules.spl ;;
+        5) echo src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl ;;
+        6) echo src/lib/common/plugin/negotiation.spl ;;
+        8) echo src/app/pkg/requires_range.spl ;;
+    esac
+}
 
-    [ "$rows" -eq 9 ] && [ "$expected_phase" -eq 9 ] || fail "expected exactly phases 0 through 8"
-    echo "PASS: phases 0-8 have distinct positive and injected-defect contracts; runtime/native authority remains blocked-required"
+mutate_phase() {
+    case "$1" in
+        0) sed 's/k1_policy: llvm-cranelift/k1_policy: llvm-only/' ;;
+        1) sed 's#simple/abi-interface/v1#simple/abi-interface/mutant#' ;;
+        2) sed 's/ASPECT_PARAM_LOG_ASSIGNMENTS = 1/ASPECT_PARAM_LOG_ASSIGNMENTS = 0/' ;;
+        3) sed 's/entry.abi_digest != expected_abi_digest/entry.abi_digest == expected_abi_digest/' ;;
+        4) sed 's/rule_iface.abi_digest != lint_rule_provider_digest_v1(rule_id)/rule_iface.abi_digest == lint_rule_provider_digest_v1(rule_id)/' ;;
+        5) sed 's/"llvm-cranelift"/"llvm-only"/' ;;
+        6) sed 's/answer.implements.abi_digest != host_iface.abi_digest and/answer.implements.abi_digest == host_iface.abi_digest and/' ;;
+        7) sed 's/coverage_implementation: apk-only/coverage_implementation: dual/' ;;
+        8) sed 's/manifest_policy != "simple-sdn"/manifest_policy == "simple-sdn"/' ;;
+    esac
 }
 
 selftest() {
-    tmp=${TMPDIR:-/tmp}/kpm-evidence-matrix.$$
+    tmp=${TMPDIR:-/tmp}/kpm-evidence-seams.$$
     trap 'rm -rf "$tmp"' EXIT HUP INT TERM
     mkdir -p "$tmp"
-    phase=0
-    while [ "$phase" -le 8 ]; do
-        awk -F '\t' -v OFS='\t' -v target="$phase" 'NR == 1 { print; next } $1 == target { $5 = "missing-mutation-marker-" target } { print }' "$MATRIX" > "$tmp/mutant.tsv"
-        if KPM_EVIDENCE_MATRIX="$tmp/mutant.tsv" "$0" >/dev/null 2>&1; then
-            fail "phase $phase missing mutation evidence was accepted"
+    current=0
+    while [ "$current" -le 8 ]; do
+        seam=$(phase_seam "$current")
+        rm -rf "$tmp/root"; mkdir -p "$tmp/root/$(dirname "$seam")"
+        mutate_phase "$current" < "$REPO_ROOT/$seam" > "$tmp/root/$seam"
+        if KPM_ROOT_DIR="$tmp/root" "$0" --phase "$current" >/dev/null 2>&1; then
+            fail "phase $current implementation/input mutation was accepted"
         fi
-        phase=$((phase + 1))
+        current=$((current + 1))
     done
-    awk -F '\t' -v OFS='\t' 'NR == 1 { print; next } $1 == 7 { $7 = "native-pass" } { print }' "$MATRIX" > "$tmp/runtime-forgery.tsv"
-    if KPM_EVIDENCE_MATRIX="$tmp/runtime-forgery.tsv" "$0" >/dev/null 2>&1; then
-        fail "runtime PASS forgery was accepted"
-    fi
-    echo "PASS: 9/9 phase mutations and runtime-authority forgery were rejected"
+    echo 'PASS: 9/9 implementation/input seam mutations made the same phase probe fail'
 }
 
 case "${1:-}" in
-    '') check_matrix ;;
-    --selftest) check_matrix >/dev/null; selftest ;;
-    *) echo "usage: $0 [--selftest]" >&2; exit 2 ;;
+    '') probe_all ;;
+    --phase) [ "$#" -eq 2 ] || fail '--phase requires one phase number'; probe_phase "$2" ;;
+    --selftest) probe_all >/dev/null; selftest ;;
+    *) echo 'usage: check-kernel-plugin-migration-evidence-matrix.shs [--phase N|--selftest]' >&2; exit 2 ;;
 esac
