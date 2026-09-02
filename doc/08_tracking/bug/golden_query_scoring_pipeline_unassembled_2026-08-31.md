@@ -1,6 +1,16 @@
 # Golden query→score pipeline is not yet assembled (P11)
 
-**Filed:** 2026-08-31 · **Status:** OPEN · **Severity:** informational (scope gap, not a defect)
+**Filed:** 2026-08-31 · **Status:** RESOLVED (2026-09-02) · **Severity:** informational (scope gap, not a defect)
+
+> **RESOLVED 2026-09-02 — the header was stale, not the body.** This record's own
+> "Update 2026-08-31 (later same day) — CLOSED" section (below) already describes
+> the landed orchestrator; only the status line still said OPEN.
+> Re-verified by source inspection of `origin/main` @ `1b76db1d6c3`:
+> `src/lib/common/search/query_exec.spl:300` defines `pub fn run_query_v1(...)`;
+> `src/lib/common/search/index_engine.spl:43` defines the additive `documents()`
+> accessor; `test/02_integration/spipe/search_golden_query_parity_spec.spl` is
+> present and asserts the golden `score_milli`/`explanation_hash` parity.
+> Nothing in the unblock condition remains unmet.
 
 ## Summary
 
