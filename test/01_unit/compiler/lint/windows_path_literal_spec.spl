@@ -1,0 +1,123 @@
+"""
+## Purpose and audience
+Purpose: Prove PATH-WIN-001 catches Windows-style native path literals at
+authoring time, with the exact semantics of the push-time ratchet
+`scripts/check/check-no-windows-style-paths.shs`.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-LINT-002 — stable requirement identity for this spec.
+
+# Windows Native Path Literal Lint Specification (PATH-WIN-001)
+#
+# POLICY (user, 2026-09-02): "code should not have c:\ style path. only mingw /
+# linux style, and lib path/file convert it for system."
+#
+# The acceptance cases are lifted from the ratchet's selftest fixtures so the
+# authoring-time lint and the push-time guard cannot disagree.
+#
+# EVERY backslash in this spec is produced by `winport_backslash()`
+# (`char_from_code(92)`), NEVER by a literal escape: the lexer silently DROPS
+# `\` inside a string literal, so `"c:\\x"` would lex to `c:x` and this spec
+# would pass while testing nothing. See
+# doc/08_tracking/bug/lexer_drops_backslash_escape_in_string_literal_2026-09-02.md.
+# Group 0 asserts the BYTE LENGTH of the constructed character for exactly that
+# reason — a pattern that collapsed to empty must fail loudly, not look green.
+#
+# Rule doc: doc/07_guide/tooling/lint/windows_portability_rule.md
+
+use std.spec.*
+use compiler.semantics.lint.windows_portability.{
+    WinPortFinding,
+    winport_backslash,
+    check_windows_path_literals
+}
+
+
+# ============================================================================
+# Test Group 0: the pattern character is non-empty (anti-vacuity)
+# ============================================================================
+
+describe "PATH-WIN-001: the matched character is a real backslash":
+    """
+    ## Anti-Vacuity
+
+    A rule whose pattern silently compiled to the empty string matches nothing
+    and still reports "clean". Assert the byte length, never the appearance.
+    """
+
+    context "when the backslash is built with char_from_code(92)":
+        """
+        ### Scenario: byte-length proof
+        """
+
+        it "is exactly one byte long":
+            step("Verify: winport_backslash() has length 1")
+            # @req: REQ-COMPILER-LINT-002
+            expect(winport_backslash().len()).to_equal(1)  # oracle: 1 — one byte, not zero
+
+        it "is not the empty string":
+            step("Verify: a literal-escape spelling would have been empty")
+            expect(winport_backslash() == "").to_equal(false)  # oracle: false
+
+
+# ============================================================================
+# Test Group 1: PATH-WIN-001 fires on a native drive-letter path
+# ============================================================================
+
+describe "PATH-WIN-001: Windows native path literal":
+    """
+    ## Reproducing Case
+
+    A drive letter, a colon, then a backslash — the ratchet's `[A-Za-z]:\\`.
+    """
+
+    context "when a .spl file carries a c:\\ literal":
+        """
+        ### Scenario: the ratchet's positive fixture
+        """
+
+        it "flags the offending line":
+            step("Verify: flags the line with PATH-WIN-001")
+            # @req: REQ-COMPILER-LINT-002
+            val bs = winport_backslash()
+            val source = "fn a():\n    val p = \"c:{bs}Users{bs}ormas\"\n"
+            val findings = check_windows_path_literals(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — one offending line
+            expect(findings[0].code).to_equal("PATH-WIN-001")
+            expect(findings[0].line_num).to_equal(2)  # oracle: 2 — the literal's line
+
+        it "flags an uppercase drive letter too":
+            step("Verify: D:\\ is the same defect as c:\\")
+            val bs = winport_backslash()
+            val source = "val p = \"D:{bs}tmp\"\n"
+            val findings = check_windows_path_literals(source, "src/x/a.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1
+
+    context "when the file is a .shs or .sdn":
+        """
+        ### Scenario: extension coverage beyond .spl
+
+        These two extensions are the novel part of this rule: no AST-based lint
+        can see a shell script or a data file, so the text pass must.
+        """
+
+        it "flags a .shs script":
+            step("Verify: PATH-WIN-001 applies to .shs")
+            val bs = winport_backslash()
+            val findings = check_windows_path_literals(
+                "echo \"c:{bs}Windows\"\n", "scripts/x.shs")
+            expect(findings.len()).to_equal(1)  # oracle: 1
+
+        it "flags a .sdn data file":
+            step("Verify: PATH-WIN-001 applies to .sdn")
+            val bs = winport_backslash()
+            val findings = check_windows_path_literals(
+                "root: \"d:{bs}data\"\n", "config/x.sdn")
+            expect(findings.len()).to_equal(1)  # oracle: 1
+
+        it "ignores an out-of-scope extension":
+            step("Verify: .cmd is excluded — native paths are correct there")
+            val bs = winport_backslash()
+            val findings = check_windows_path_literals(
+                "set P=c:{bs}Windows\n", "tools/x.cmd")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — cmd.exe needs native form

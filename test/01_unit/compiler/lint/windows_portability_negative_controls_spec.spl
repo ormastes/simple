@@ -1,0 +1,189 @@
+"""
+## Purpose and audience
+Purpose: Generalize PATH-WIN-001 and EOL-CRLF-001 across every negative control
+the push-time ratchet `scripts/check/check-no-windows-style-paths.shs` carries,
+so the two cannot drift, and pin the cross-platform contract.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-LINT-002 — stable requirement identity for this spec.
+
+# Windows-Portability Lint — Negative Controls and CRLF (EOL-CRLF-001)
+#
+# The four negative controls are the ratchet's own, verbatim:
+#   - MinGW form `/c/Users/ormas`        — no colon before a separator
+#   - a bare drive mention `"C:"`        — no backslash follows
+#   - a legal POSIX filename with a `\`  — no drive letter + colon prefix
+#   - an LF file                         — never reported as CRLF
+#
+# CROSS-PLATFORM CONTRACT: the linter runs on Unix, where a backslash is an
+# ORDINARY filename character. The third control above is the load-bearing one:
+# flagging it would make the linter unusable on POSIX. Nothing in the rule
+# inspects the host platform, so the verdict for a byte sequence is identical on
+# every OS.
+#
+# Every backslash and CR here is built with `winport_backslash()` /
+# `winport_cr()` (`char_from_code(92)` / `char_from_code(13)`) and its byte
+# length is asserted — a literal escape would be silently dropped by the lexer
+# and this spec would pass while testing nothing. See
+# doc/08_tracking/bug/lexer_drops_backslash_escape_in_string_literal_2026-09-02.md.
+#
+# Rule doc: doc/07_guide/tooling/lint/windows_portability_rule.md
+
+use std.spec.*
+use compiler.semantics.lint.windows_portability.{
+    WinPortFinding,
+    winport_backslash,
+    winport_cr,
+    check_windows_path_literals,
+    check_windows_line_endings_bytes
+}
+
+
+fn _lf_bytes() -> [u8]:
+    # "a\nb\n" as raw bytes — 97 10 98 10.
+    [97u8, 10u8, 98u8, 10u8]
+
+fn _crlf_bytes() -> [u8]:
+    # "a\r\nb\r\n" as raw bytes — 97 13 10 98 13 10.
+    [97u8, 13u8, 10u8, 98u8, 13u8, 10u8]
+
+
+# ============================================================================
+# Test Group 1: PATH-WIN-001 negative controls
+# ============================================================================
+
+describe "PATH-WIN-001: negative controls":
+    """
+    ## Generalizing Case
+
+    Three shapes that look Windows-ish and are not the defect.
+    """
+
+    context "when the path is in MinGW form":
+        """
+        ### Scenario: `/c/Users/ormas` — the form the policy REQUIRES
+        """
+
+        it "does not flag it":
+            step("Verify: the compliant form is clean")
+            # @req: REQ-COMPILER-LINT-002
+            val findings = check_windows_path_literals(
+                "val p = \"/c/Users/ormas\"\n", "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — this is the target form
+
+    context "when only a drive letter is mentioned":
+        """
+        ### Scenario: `"C:"` with no separator after it
+        """
+
+        it "does not flag a bare drive mention":
+            step("Verify: a drive letter without a following backslash is clean")
+            val findings = check_windows_path_literals(
+                "val d = \"C:\"\n", "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — no path separator
+
+    context "when a POSIX filename legally contains a backslash":
+        """
+        ### Scenario: cross-platform contract
+
+        `\\` is an ordinary character in a POSIX filename. Flagging it would
+        make the linter unusable on Unix, which is a standing user constraint.
+        """
+
+        it "does not flag a backslash without a drive prefix":
+            step("Verify: a bare backslash is a legal POSIX filename character")
+            val bs = winport_backslash()
+            expect(bs.len()).to_equal(1)  # oracle: 1 — anti-vacuity, the char is real
+            val findings = check_windows_path_literals(
+                "val f = \"weird{bs}name.txt\"\n", "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — POSIX filenames may contain \
+
+    context "when the offending line carries a suppression marker":
+        """
+        ### Scenario: the documented escape for regex text and conversion specs
+        """
+
+        it "respects a per-line lint-allow comment":
+            step("Verify: `# lint-allow: PATH-WIN-001` suppresses that line")
+            val bs = winport_backslash()
+            val findings = check_windows_path_literals(
+                "val p = \"c:{bs}x\"  # lint-allow: PATH-WIN-001\n", "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — suppressed
+
+        it "exempts the path-conversion layer":
+            step("Verify: a file defining to_native_path is doing its job")
+            val bs = winport_backslash()
+            val source = "fn to_native_path(p: text) -> text:\n    \"c:{bs}x\"\n"
+            val findings = check_windows_path_literals(source, "src/lib/x/host_path.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — the boundary layer
+
+
+# ============================================================================
+# Test Group 2: EOL-CRLF-001
+# ============================================================================
+
+describe "EOL-CRLF-001: Windows line endings":
+    """
+    ## CRLF Detection
+
+    `file_read` normalizes CRLF to LF before any lint rule sees text (measured
+    2026-09-02: a 6-byte `a\\r\\nb\\r\\n` file reads back as 4 chars, zero CRs),
+    so this rule is fed the file's RAW bytes instead.
+    """
+
+    context "when the character constants are built":
+        """
+        ### Scenario: anti-vacuity
+        """
+
+        it "produces a one-byte carriage return":
+            step("Verify: winport_cr() has length 1")
+            # @req: REQ-COMPILER-LINT-002
+            expect(winport_cr().len()).to_equal(1)  # oracle: 1 — one byte, not zero
+
+    context "when the file uses CRLF":
+        """
+        ### Scenario: the reproducing case
+        """
+
+        it "reports one finding for the file, at the first CRLF line":
+            step("Verify: EOL-CRLF-001 fires once, at line 1")
+            val findings = check_windows_line_endings_bytes(
+                _crlf_bytes(), "a\nb\n", "src/x/a.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — one finding per FILE, not per line
+            expect(findings[0].code).to_equal("EOL-CRLF-001")
+            expect(findings[0].line_num).to_equal(1)  # oracle: 1 — the first CR-terminated line
+
+    context "when the file uses LF":
+        """
+        ### Scenario: the ratchet's negative control — an LF file is never CRLF
+        """
+
+        it "does not flag an LF file":
+            step("Verify: LF is clean")
+            val findings = check_windows_line_endings_bytes(
+                _lf_bytes(), "a\nb\n", "src/x/a.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — LF is the required form
+
+    context "when the file is a .cmd or .bat":
+        """
+        ### Scenario: cmd.exe misparses an LF-only batch file, so CRLF is
+        REQUIRED there and the extension is excluded from both rules.
+        """
+
+        it "does not flag CRLF in a .cmd file":
+            step("Verify: .cmd is excluded from EOL-CRLF-001")
+            val findings = check_windows_line_endings_bytes(
+                _crlf_bytes(), "a\nb\n", "tools/x.cmd")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — CRLF is correct in cmd.exe scripts
+
+    context "when the file is vendored":
+        """
+        ### Scenario: CLAUDE.md Owned-Code Scope
+        """
+
+        it "does not flag a vendored file":
+            step("Verify: vendored trees are out of scope")
+            val findings = check_windows_line_endings_bytes(
+                _crlf_bytes(), "a\nb\n", "src/runtime/vendor/x.sdn")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — third-party code
