@@ -11,7 +11,7 @@ use compiler.tools.lint._LintMain.nonexistent_type_lints.{lint_nonexistent_types
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
 
 # I/O imports
-use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_write)
+use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_write, file_read_bytes)
 use std.nogc_sync_mut.io.dir_ops (is_dir)
 use app.io.cli_ops (get_args)
 
@@ -29,6 +29,7 @@ use compiler.semantics.lint.param_tag.{check_param_tag}
 use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
 use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access_with_allowlist, raw_rt_lexical_code_lines, raw_rt_wrapper_replacement}
 use compiler.semantics.lint.cow_alias_hotpath.{check_cow_alias_hotpath}
+use compiler.semantics.lint.windows_portability.{check_windows_path_literals, check_windows_line_endings_bytes}
 use compiler.semantics.lint.silent_default.{check_silent_default}
 use compiler.semantics.lint.dynamic_capability_acquire.{check_dynamic_capability_acquire}
 use std.critical.capability_manifest.{load_critical_mode_config}
@@ -249,7 +250,8 @@ impl Linter:
             critical_dynamic_acquire_loaded: false,
             critical_dynamic_acquire_mode: "allow",
             manifest_dir_cache: {}, manifest_dir_cache_count: 0,
-            prepared_config_path: "")
+            prepared_config_path: "",
+            last_error_count: 0, last_warning_count: 0)
     
     # Lint a source buffer while RETAINING the combined lexical view that
     # `lint_source` otherwise releases on exit. `entry_and_fixes` calls this so
@@ -300,6 +302,7 @@ impl Linter:
         self.check_nonexistent_types(path, content)
         self.check_module_init_literal_spl(path, content)
         self.check_cow_alias_hotpath_spl(path, content)
+        self.check_windows_portability(path, content)
         self.check_raw_rt_access_spl(path, content)
         self.check_dynamic_capability_acquire_spl(path, content)
         self.check_silent_default_spl(path, content)
@@ -426,6 +429,23 @@ impl Linter:
             val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Warning, finding.message)
                 .with_fix(finding.hint)
             self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
+
+    # PATH-WIN-001 / EOL-CRLF-001 — Windows-style native path literals and
+    # CRLF line endings in .spl/.shs/.sdn. Warnings only; see
+    # doc/07_guide/tooling/lint/windows_portability_rule.md
+    me check_windows_portability(path: String, content: String):
+        for finding in check_windows_path_literals(content, path):
+            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Warning, finding.message)
+                .with_fix(finding.hint)
+            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
+        # `content` has already had CRLF normalized away by `file_read`, so the
+        # EOL rule must be fed the file's RAW bytes.
+        if file_exists(path):
+            val raw = file_read_bytes(path)
+            for finding in check_windows_line_endings_bytes(raw, content, path):
+                val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Warning, finding.message)
+                    .with_fix(finding.hint)
+                self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
 
     me check_module_init_literal_spl(path: String, content: String):
         val warnings = check_module_init_literal(content, path)

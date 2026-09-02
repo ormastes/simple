@@ -1,0 +1,235 @@
+# Windows-Portability Lint — native path literals and CRLF line endings
+#
+# POLICY (user, 2026-09-02):
+#   "code should not have c:\ style path. only mingw / linux style, and
+#    lib path/file convert it for system."
+#   "lint windows style newline in spl shs sdn."
+#
+# Product code carries only MinGW/POSIX path form (`/c/Users/...`). The native
+# `c:\Users\...` spelling belongs exclusively to the library boundary layer
+# (`to_native_path`, `to_backslash`, `_msys_drive_path`,
+# `src/lib/nogc_sync_mut/fs/host_path.spl`) whose job is producing it. Line
+# endings are LF everywhere except `.cmd`/`.bat`, which genuinely require CRLF
+# because cmd.exe misparses LF-only batch files.
+#
+# PATH-WIN-001: Windows drive-letter path literal                        WARNING
+#               a letter, a colon, then a backslash — `c:\`, `D:\tmp`
+# EOL-CRLF-001: file uses CRLF line endings                              WARNING
+#               one finding per file, at the first CR-terminated line
+#
+# Detection semantics are deliberately identical to the ratchet
+# `scripts/check/check-no-windows-style-paths.shs` (ERE `[A-Za-z]:\\`, plus a
+# trailing-CR test) so the two cannot drift. Its four negative controls hold
+# here too, and are covered by the specs:
+#   - MinGW form `/c/Users/ormas`            — no colon before a separator
+#   - a bare drive mention `"C:"`            — no backslash follows
+#   - a legal POSIX filename with a `\`      — no drive letter + colon prefix
+#   - an LF file                             — never reported as CRLF
+#
+# CROSS-PLATFORM: the linter runs on Unix too. A backslash is an ORDINARY
+# character in a POSIX filename, so PATH-WIN-001 requires the drive-letter and
+# colon prefix and never fires on a bare backslash. Nothing in this rule
+# rewrites separators or inspects the host platform; the verdict for a given
+# byte sequence is identical on every OS.
+#
+# Severity is WARNING, never Deny: the tree already carries a large population
+# (measured 2026-09-02: 439 `.spl` and 75 `.shs` offender files, 0 `.sdn`), and
+# the precedent (PERF-COW-00x, RAW-RT-00x, LEADOP001) is that a rule is not
+# escalated before its population is converted.
+#
+# IMPLEMENTATION HAZARD: the lexer silently DROPS `\` inside a string literal
+# (`"C:\\Users"` lexes to `C:Users`) — see
+# doc/08_tracking/bug/lexer_drops_backslash_escape_in_string_literal_2026-09-02.md.
+# Every character this rule matches on is therefore built with
+# `char_from_code`, never written as a literal escape, and the specs assert
+# BYTE LENGTH rather than appearance so a pattern that silently collapsed to
+# empty could not pass.
+#
+# Analysis is line-based text (no AST dependency), one linear pass, so it runs
+# in interpreter-mode specs and applies to `.shs` and `.sdn` — neither of which
+# any AST-based lint can see.
+
+use std.common.string_core.{char_from_code}
+
+# ============================================================================
+# Finding Struct
+# ============================================================================
+
+pub struct WinPortFinding:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message} — {self.hint}"
+
+# ============================================================================
+# Characters (never written as escapes — see IMPLEMENTATION HAZARD above)
+# ============================================================================
+
+pub fn winport_backslash() -> text:
+    """One literal backslash. `char_from_code(92)`, because a `"\\"` literal
+    lexes to the empty string on this compiler."""
+    char_from_code(92)
+
+pub fn winport_cr() -> text:
+    """One carriage return, `char_from_code(13)`."""
+    char_from_code(13)
+
+fn _winport_is_drive_letter(ch: text) -> bool:
+    if ch >= "a" and ch <= "z": return true
+    if ch >= "A" and ch <= "Z": return true
+    false
+
+# ============================================================================
+# Scope
+# ============================================================================
+
+pub fn winport_extension_in_scope(path: text) -> bool:
+    """`.spl`, `.shs`, `.sdn` only.
+
+    `.cmd`/`.bat` are excluded from BOTH rules: native paths are correct in a
+    cmd.exe script, and cmd.exe misparses an LF-only batch file, so CRLF is
+    required there rather than merely tolerated."""
+    if path.ends_with(".cmd") or path.ends_with(".bat"):
+        return false
+    path.ends_with(".spl") or path.ends_with(".shs") or path.ends_with(".sdn")
+
+pub fn winport_path_excluded(path: text) -> bool:
+    """Vendored / third-party trees, per CLAUDE.md Owned-Code Scope."""
+    if path.contains("/vendor/") or path.contains("vendor/"): return true
+    if path.contains("/node_modules/"): return true
+    if path.ends_with("miniaudio.h") or path.ends_with("stb_image.h"): return true
+    if path.ends_with("stb_truetype.h"): return true
+    false
+
+# ============================================================================
+# Suppression
+# ============================================================================
+#
+# Three mechanisms, in increasing breadth:
+#   1. per line   — a trailing `# lint-allow: PATH-WIN-001` comment
+#   2. per file   — the same marker anywhere in the file suppresses that code
+#                   for the whole file (this is how a CRLF-required fixture or
+#                   a spec that deliberately asserts `/d/foo` -> `d:\foo` opts
+#                   out)
+#   3. per file, automatic — the conversion layer itself. A file that DEFINES
+#                   `to_native_path` / `to_backslash` / `_msys_drive_path`, or
+#                   is `host_path.spl`, is producing native paths as its job
+#                   and is never flagged by PATH-WIN-001.
+#   4. per project — `[lints] windows_portability = "off"` in `simple.sdn`,
+#                   via the code -> rule-name mapping in
+#                   `_LintMain/config_and_model.spl`.
+
+pub fn winport_line_suppressed(line: text, code: text) -> bool:
+    line.contains("lint-allow: {code}")
+
+pub fn winport_file_suppressed(content: text, code: text) -> bool:
+    content.contains("lint-allow: {code}")
+
+pub fn winport_is_conversion_layer(path: text, content: text) -> bool:
+    """The path-conversion boundary. Producing native paths is its job."""
+    if path.ends_with("host_path.spl"): return true
+    if content.contains("fn to_native_path"): return true
+    if content.contains("fn to_backslash"): return true
+    if content.contains("fn _msys_drive_path"): return true
+    false
+
+# ============================================================================
+# PATH-WIN-001 — Windows drive-letter path literal
+# ============================================================================
+
+pub fn winport_line_has_drive_path(line: text) -> bool:
+    """True when the line contains a drive letter, a colon, and a backslash,
+    in that order and adjacent — the ratchet's `[A-Za-z]:\\`.
+
+    Does NOT match `/c/Users/ormas` (no colon), `"C:"` (no backslash), or a
+    POSIX filename containing a backslash (no drive-letter-and-colon prefix)."""
+    val bs = winport_backslash()
+    val n = line.len()
+    if n < 3: return false
+    var i = 1
+    while i + 1 < n:
+        if line.substring(i, i + 1) == ":":
+            if line.substring(i + 1, i + 2) == bs:
+                if _winport_is_drive_letter(line.substring(i - 1, i)):
+                    return true
+        i = i + 1
+    false
+
+pub fn check_windows_path_literals(content: text, file_path: text) -> [WinPortFinding]:
+    """Report PATH-WIN-001 for every line carrying a native drive-letter path."""
+    var findings: [WinPortFinding] = []
+    if not winport_extension_in_scope(file_path): return findings
+    if winport_path_excluded(file_path): return findings
+    if winport_is_conversion_layer(file_path, content): return findings
+    if winport_file_suppressed(content, "PATH-WIN-001"): return findings
+
+    var line_num = 1
+    for line in content.split("\n"):
+        if winport_line_has_drive_path(line) and not winport_line_suppressed(line, "PATH-WIN-001"):
+            findings.push(WinPortFinding(
+                "PATH-WIN-001",
+                "warning",
+                "Windows-style native path literal (drive letter + colon + backslash)",
+                "Use MinGW/POSIX form (/c/Users/...); convert to native form only in the lib path layer",
+                line_num,
+                file_path))
+        line_num = line_num + 1
+    findings
+
+# ============================================================================
+# EOL-CRLF-001 — Windows line endings
+# ============================================================================
+#
+# This one CANNOT read the linter's `content`: `file_read` normalizes CRLF to
+# LF (measured 2026-09-02 — a 6-byte `a\r\nb\r\n` file reads back as 4 chars,
+# zero CRs), so by the time text reaches a lint rule every CR is already gone.
+# The caller therefore hands over the file's raw BYTES and this stays a pure
+# function over them.
+
+pub fn winport_crlf_first_line(bytes: [u8], out_count: bool) -> i64:
+    """First 1-based line number ending in CR when `out_count` is false;
+    the total number of such lines when it is true. 0 / 0 when there are none."""
+    var line = 1
+    var count = 0
+    var first = 0
+    var i = 0
+    val n = bytes.len()
+    while i < n:
+        if bytes[i] == 10u8:
+            if i > 0 and bytes[i - 1] == 13u8:
+                count = count + 1
+                if first == 0:
+                    first = line
+            line = line + 1
+        i = i + 1
+    if out_count: return count
+    first
+
+pub fn check_windows_line_endings_bytes(
+    bytes: [u8], content: text, file_path: text
+) -> [WinPortFinding]:
+    """Report EOL-CRLF-001 once per file, at the first CR-terminated line.
+
+    One finding per file rather than per line: a converted 2,000-line file
+    would otherwise contribute 2,000 warnings and drown every other rule."""
+    var findings: [WinPortFinding] = []
+    if not winport_extension_in_scope(file_path): return findings
+    if winport_path_excluded(file_path): return findings
+    if winport_file_suppressed(content, "EOL-CRLF-001"): return findings
+
+    val first = winport_crlf_first_line(bytes, false)
+    if first == 0: return findings
+    val total = winport_crlf_first_line(bytes, true)
+    findings.push(WinPortFinding(
+        "EOL-CRLF-001",
+        "warning",
+        "Windows (CRLF) line endings — {total} line(s); .spl/.shs/.sdn must be LF",
+        "Convert to LF. Only .cmd/.bat require CRLF (cmd.exe misparses LF-only scripts)",
+        first,
+        file_path))
+    findings
