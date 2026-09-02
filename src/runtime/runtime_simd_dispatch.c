@@ -52,7 +52,7 @@ static bool rt_msvc_x86_os_avx_enabled(void) {
 #endif
 
 bool rt_simd_has_sse(void) {
-#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     __builtin_cpu_init();
     return __builtin_cpu_supports("sse") != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -65,7 +65,7 @@ bool rt_simd_has_sse(void) {
 }
 
 bool rt_simd_has_avx(void) {
-#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     __builtin_cpu_init();
     return __builtin_cpu_supports("avx") != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -76,7 +76,7 @@ bool rt_simd_has_avx(void) {
 }
 
 bool rt_simd_has_avx2(void) {
-#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     __builtin_cpu_init();
     return __builtin_cpu_supports("avx2") != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
