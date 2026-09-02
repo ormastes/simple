@@ -6,6 +6,9 @@ use std.env.types.{rt_process_run}
 use std.env.variables.{env_set}
 use std.env.validation.{validate_var_name}
 
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
 # ============================================================================
 # Export Formats
 # ============================================================================
@@ -225,18 +228,24 @@ fn file_read_text(path: text) -> text:
 
     Internal helper.
     """
-    # Try to run cat command
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "cat " + path])
-    if code == 0:
-        stdout
-    else:
-        ""
+    # NO-SHELL (2026-09-02): was `rt_process_run("/bin/sh", ["-c", "cat " + path])`,
+    # which cannot work on a bare Windows host (no /bin/sh), broke on any path
+    # containing a space or a shell metacharacter (the path was never quoted),
+    # and returned the -1 process_run sentinel under the interpreter -- so this
+    # helper read "" for EVERY file. `rt_file_read_text` is the cross-platform
+    # native primitive and returns "" for a missing file, matching the old
+    # non-zero-exit branch exactly.
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
 
 fn file_write_text(path: text, content: text):
     """Write text file (simple implementation).
 
     Internal helper.
     """
-    # Use echo to write file
-    val escaped = content.replace("'", "'\\''")
-    rt_process_run("/bin/sh", ["-c", "echo '" + escaped + "' > " + path])
+    # NO-SHELL (2026-09-02): was `rt_process_run("/bin/sh", ["-c", "echo ... > path"])`.
+    # Besides needing /bin/sh, that form appended the newline `echo` adds, mangled
+    # backslashes in some shells, and could not write a path containing a space.
+    # `rt_file_write_text` writes the bytes exactly, on every platform.
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text(path, content)
