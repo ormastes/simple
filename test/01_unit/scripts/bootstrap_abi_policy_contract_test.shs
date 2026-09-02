@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+runtime_compiler=$root/src/compiler/70.backend/backend/runtime_compiler.spl
+bootstrap=$root/scripts/bootstrap/bootstrap-from-scratch.sh
+matrix=$root/scripts/check/check-kernel-phase7-matrix.shs
+
+for required in \
+  'SIMPLE_ABI_VERSION=1' \
+  'SIMPLE_ABI_VERSION_DEFERRED=0' \
+  'abi_policy={abi_policy}'; do
+  grep -Fq "$required" "$runtime_compiler" || {
+    echo "FAIL — runtime compiler lacks ABI binding: $required" >&2
+    exit 1
+  }
+done
+
+grep -Fq 'SIMPLE_ABI_POLICY=${simple_abi_policy}' "$bootstrap"
+grep -Fq 'simple_abi_policy=' "$root/scripts/bootstrap/write-k1-composition-receipt.shs"
+grep -Fq 'simple_abi_policy=' "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+
+if grep -R -F '${SIMPLE_ABI_POLICY:-compat-deferred}' \
+    "$runtime_compiler" "$root/scripts/bootstrap" "$root/scripts/check/lib/bootstrap-stage3"; then
+  echo 'FAIL — production ABI policy silently defaults to compat-deferred' >&2
+  exit 1
+fi
+
+if sh "$matrix" --policy=llvm-cranelift --coverage=atomic-apk-only \
+    --mode=one-binary --abi=deferred --manifest=simple-sdn >/dev/null 2>&1; then
+  echo 'FAIL — qualification accepted an unselected ABI policy' >&2
+  exit 1
+fi
+if sh "$matrix" --policy=llvm-cranelift --coverage=atomic-apk-only \
+    --mode=one-binary --abi=v1 --manifest=plugin-sdn >/dev/null 2>&1; then
+  echo 'FAIL — qualification accepted an unselected manifest policy' >&2
+  exit 1
+fi
+
+echo 'PASS — ABI macros, cache identity, receipts, and qualification selector are fail-closed'

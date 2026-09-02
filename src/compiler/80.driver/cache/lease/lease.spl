@@ -7,13 +7,10 @@
 # `gc.lease.reclaim_rule`: "only after proving the owning process/session is
 # dead, or after a conservative timeout PLUS a generation check." This
 # implementation checks liveness via rt_process_exists (kill -0 semantics);
-# a dead process's lease reclaims immediately. A live process whose lease is
-# merely stale (no heartbeat) is reclaimed only past LEASE_STALE_TIMEOUT_SECS
-# AND a heartbeat-generation check (the recorded generation must not have
-# advanced since the reclaim check started reading it).
-# ponytail: LEASE_STALE_TIMEOUT_SECS is a conservative ceiling, not measured
-# against a real build's longest single action; revisit if a legitimate lease
-# is ever reclaimed while its process is still alive but slow.
+# a dead process's lease reclaims immediately. A live process is always
+# authoritative: elapsed wall time alone can never prove that its cache roots
+# are unused. This deliberately prefers retaining bytes over deleting an
+# artifact still owned by a long-running bootstrap or compiler process.
 
 @unsafe(reason: "raw cache lease process-liveness ABI", capabilities: [ffi])
 extern fn rt_process_exists(pid: i64) -> bool
@@ -167,13 +164,11 @@ fn lease_read(root: text, lease_id: text) -> CacheLease?:
     lease_parse(maybe_content.unwrap())
 
 # A lease is reclaimable (safe to delete without violating gc_reachability_safe)
-# only if the owning process is provably dead, or the heartbeat generation has
-# not advanced past a conservative staleness timeout.
+# only if the owning process is provably dead. PID reuse is conservative: a
+# reused live PID retains the lease until an owner/session identity mechanism
+# can prove otherwise.
 fn lease_is_reclaimable(lease: CacheLease, now_unix_micros: i64) -> bool:
-    if not lease_process_exists_raw(lease.process_id):
-        return true
-    val age_secs = (now_unix_micros - lease.created_at) / 1000000
-    age_secs >= LEASE_STALE_TIMEOUT_SECS
+    not lease_process_exists_raw(lease.process_id)
 
 # All non-reclaimable leases in root, i.e. the GC roots this module contributes.
 fn lease_list_active(root: text) -> [CacheLease]:

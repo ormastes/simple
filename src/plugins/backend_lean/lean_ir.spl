@@ -1,0 +1,171 @@
+# Typed Lean IR v1.
+#
+# Semantic producers construct these nodes after type-directed lowering. The
+# printer contains no unknown-operator, guessed-type, raw-term, or `sorry`
+# escape hatch.
+
+enum LeanTypeIR:
+    Prop
+    Bool
+    Unit
+    Empty
+    BitVec(width: i64)
+    Array(element: LeanTypeIR)
+    Vector(element: LeanTypeIR, length: i64)
+    Product(elements: [LeanTypeIR])
+    Named(name: text)
+
+impl LeanTypeIR:
+    fn diagnostic() -> text:
+        match self:
+            case BitVec(width):
+                if width <= 0: "LEANIR-E-WIDTH: BitVec width must be positive" else: ""
+            case Array(element): element.diagnostic()
+            case Vector(element, length):
+                if length < 0: return "LEANIR-E-LENGTH: Vector length cannot be negative"
+                element.diagnostic()
+            case Product(elements):
+                if elements.len() < 2: return "LEANIR-E-PRODUCT: product requires at least two elements"
+                for element in elements:
+                    val error = element.diagnostic()
+                    if error != "": return error
+                ""
+            case Named(name):
+                if name == "": "LEANIR-E-TYPE-NAME: named type cannot be empty" else: ""
+            case Prop | Bool | Unit | Empty: ""
+
+    fn render() -> text:
+        match self:
+            case Prop: "Prop"
+            case Bool: "Bool"
+            case Unit: "Unit"
+            case Empty: "Empty"
+            case BitVec(width): "BitVec {width}"
+            case Array(element): "Array (" + element.render() + ")"
+            case Vector(element, length): "Vector (" + element.render() + ") {length}"
+            case Product(elements):
+                var rendered: [text] = []
+                for element in elements: rendered = rendered.push(element.render())
+                "(" + rendered.join(" × ") + ")"
+            case Named(name): name
+
+enum LeanBinaryOpIR:
+    BitVecAdd
+    BitVecSub
+    BitVecMul
+    BitAnd
+    BitOr
+    BitXor
+    ShiftLeft
+    Equal
+    And
+    Or
+
+impl LeanBinaryOpIR:
+    fn render() -> text:
+        match self:
+            case BitVecAdd: "+"
+            case BitVecSub: "-"
+            case BitVecMul: "*"
+            case BitAnd: "&&&"
+            case BitOr: "|||"
+            case BitXor: "^^^"
+            case ShiftLeft: "<<<"
+            case Equal: "="
+            case And: "∧"
+            case Or: "∨"
+
+struct LeanBinderIR:
+    name: text
+    type_: LeanTypeIR
+
+impl LeanBinderIR:
+    fn diagnostic() -> text:
+        if self.name == "": return "LEANIR-E-BINDER: binder name cannot be empty"
+        self.type_.diagnostic()
+
+enum LeanTermIR:
+    Var(name: text)
+    BoolLiteral(value: bool)
+    BitVecLiteral(value: i64, width: i64)
+    TrueProp
+    FalseProp
+    Apply(function_name: text, arguments: [LeanTermIR])
+    Binary(op: LeanBinaryOpIR, left: LeanTermIR, right: LeanTermIR)
+    Let(binder: LeanBinderIR, value: LeanTermIR, body: LeanTermIR)
+    Imply(premise: LeanTermIR, conclusion: LeanTermIR)
+    Forall(binders: [LeanBinderIR], body: LeanTermIR)
+
+impl LeanTermIR:
+    fn diagnostic() -> text:
+        match self:
+            case Var(name):
+                if name == "": "LEANIR-E-VAR: variable name cannot be empty" else: ""
+            case BoolLiteral(_): ""
+            case BitVecLiteral(_, width):
+                if width <= 0: "LEANIR-E-LITERAL-WIDTH: bit-vector literal width must be positive" else: ""
+            case TrueProp | FalseProp: ""
+            case Apply(function_name, arguments):
+                if function_name == "": return "LEANIR-E-APPLY: function name cannot be empty"
+                for argument in arguments:
+                    val error = argument.diagnostic()
+                    if error != "": return error
+                ""
+            case Binary(_, left, right):
+                val left_error = left.diagnostic()
+                if left_error != "": return left_error
+                right.diagnostic()
+            case Let(binder, value, body):
+                val binder_error = binder.diagnostic()
+                if binder_error != "": return binder_error
+                val value_error = value.diagnostic()
+                if value_error != "": return value_error
+                body.diagnostic()
+            case Imply(premise, conclusion):
+                val premise_error = premise.diagnostic()
+                if premise_error != "": return premise_error
+                conclusion.diagnostic()
+            case Forall(binders, body):
+                if binders.is_empty(): return "LEANIR-E-FORALL: quantified term requires at least one binder"
+                for binder in binders:
+                    val error = binder.diagnostic()
+                    if error != "": return error
+                body.diagnostic()
+
+    fn render() -> Result<text, text>:
+        val error = self.diagnostic()
+        if error != "": return Err(error)
+        match self:
+            case Var(name): Ok(name)
+            case BoolLiteral(value): Ok(if value: "true" else: "false")
+            case BitVecLiteral(value, width): Ok("({value} : BitVec {width})")
+            case TrueProp: Ok("True")
+            case FalseProp: Ok("False")
+            case Apply(function_name, arguments):
+                var args: [text] = []
+                for argument in arguments: args = args.push(argument.render()?)
+                if args.is_empty(): Ok(function_name) else: Ok(function_name + " " + args.join(" "))
+            case Binary(op, left, right): Ok("(" + left.render()? + " " + op.render() + " " + right.render()? + ")")
+            case Let(binder, value, body):
+                Ok("let " + binder.name + " : " + binder.type_.render() + " := " + value.render()? + "; " + body.render()?)
+            case Imply(premise, conclusion): Ok("(" + premise.render()? + " → " + conclusion.render()? + ")")
+            case Forall(binders, body):
+                var rendered: [text] = []
+                for binder in binders: rendered = rendered.push("(" + binder.name + " : " + binder.type_.render() + ")")
+                Ok("∀ " + rendered.join(" ") + ", " + body.render()?)
+
+struct LeanTheoremIR:
+    name: text
+    statement: LeanTermIR
+    proof_reference: text
+
+impl LeanTheoremIR:
+    fn diagnostic() -> text:
+        if self.name == "": return "LEANIR-E-THEOREM: theorem name cannot be empty"
+        if self.proof_reference == "": return "LEANIR-E-PROOF: explicit proof reference is required"
+        self.statement.diagnostic()
+
+    fn render() -> Result<text, text>:
+        val error = self.diagnostic()
+        if error != "": return Err(error)
+        Ok("theorem " + self.name + " : " + self.statement.render()? + " := " + self.proof_reference)

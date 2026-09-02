@@ -11461,6 +11461,90 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     return ok;
 }
 
+int rt_file_copy_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        return 0;
+    }
+    int output = open(dst,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (output < 0) { close(input); return 0; }
+    int ok = 1;
+    unsigned char buffer[65536];
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            ok = 0; break;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(output, buffer + offset,
+                (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) { ok = 0; break; }
+            offset += written;
+        }
+        if (!ok) break;
+    }
+    if (ok && fsync(output) != 0) ok = 0;
+    if (close(output) != 0) ok = 0;
+    if (close(input) != 0) ok = 0;
+    if (!ok) unlink(dst);
+    return ok;
+#endif
+}
+
+int rt_file_link_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        return 0;
+    }
+    int ok = link(src, dst) == 0;
+    struct stat destination_stat;
+    if (ok && (lstat(dst, &destination_stat) != 0 ||
+            !S_ISREG(destination_stat.st_mode) ||
+            destination_stat.st_dev != source_stat.st_dev ||
+            destination_stat.st_ino != source_stat.st_ino)) {
+        unlink(dst);
+        ok = 0;
+    }
+    close(input);
+    return ok;
+#endif
+}
+
 /* Lower-case hex SHA-256 of the file's bytes as a runtime string; nil when
  * the file cannot be read (Rust: `format!("{:x}", digest)`). Streams the file
  * through the same compressor rt_tls13_sha256 uses. */

@@ -1,113 +1,66 @@
 """
 ## Purpose and audience
-Purpose: retains a known-good backup and atomically publishes scoped deployment evidence
-Audience: compiler and tooling engineers who maintain this spec
+Purpose: proves compiler and companion deployment use one provenance-bound transaction
+Audience: compiler and tooling engineers who maintain bootstrap deployment
 """
 
 # @req: REQ-CHECK-BootDeplRollCont-001
 
 use std.io.{file_read}
-use std.io_runtime.{process_run}
 use app.io.mod.{process_run_timeout}
 use std.spec.*
 
 val DEPLOY = "scripts/bootstrap/bootstrap-from-scratch.sh"
+val TRANSACTION = "scripts/bootstrap/bootstrap-deploy-transaction.shs"
 val ROLLBACK = "scripts/bootstrap/rollback-bootstrap-deploy.shs"
-
-fn step_bootstrap_deploy_rollback() -> (text, text):
-    step("Inspect durable bootstrap deployment rollback contracts")
-    (file_read(DEPLOY), file_read(ROLLBACK))
-
-fn step_run_rollback_fixture(tamper_backup: bool) -> (text, text, i64):
-    step("Run rollback against an isolated compiler deployment fixture")
-    val tamper = if tamper_backup: "printf tampered >> bin/release/test-platform/simple.pre_deploy; " else: ""
-    val command =
-        "set -eu; root=/tmp/bootstrap-rollback-contract-$$; " +
-        "trap 'rm -rf \"$root\"' EXIT; mkdir -p \"$root/scripts/bootstrap\" \"$root/scripts/setup\" \"$root/scripts/check/lib\" \"$root/bin/release/test-platform\" \"$root/src/compiler\" \"$root/src/app\" \"$root/src/lib\" \"$root/src/runtime\" \"$root/examples/10_tooling\"; " +
-        "cp " + ROLLBACK + " \"$root/scripts/bootstrap/rollback-bootstrap-deploy.shs\"; " +
-        "cp scripts/check/lib/bootstrap-stage3-provenance.shs \"$root/scripts/check/lib/bootstrap-stage3-provenance.shs\"; cp -R scripts/check/lib/bootstrap-stage3 \"$root/scripts/check/lib/bootstrap-stage3\"; cp scripts/check/lib/stage4-candidate-provenance.shs \"$root/scripts/check/lib/stage4-candidate-provenance.shs\"; " +
-        "printf '%s\\n' '#!/bin/sh' 'exit 0' > \"$root/scripts/bootstrap/bootstrap-from-scratch.sh\"; chmod 755 \"$root/scripts/bootstrap/bootstrap-from-scratch.sh\"; " +
-        "printf '%s\\n' '#!/bin/sh' 'exit 0' > \"$root/scripts/setup/setup.shs\"; chmod 755 \"$root/scripts/setup/setup.shs\"; " +
-        "for source_root in src/compiler src/app src/lib src/runtime examples/10_tooling; do printf '%s\\n' fixture > \"$root/$source_root/input.spl\"; done; printf '%s\\n' 'bin/' > \"$root/.gitignore\"; cd \"$root\"; git init -q; git add .; git -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture; " +
-        "printf '%s\\n' '#!/bin/sh' '# enum construction: unregistered enum' '# current-generation' 'echo 2' > \"$root/bin/release/test-platform/simple\"; " +
-        "printf '%s\\n' '#!/bin/sh' '# enum construction: unregistered enum' '# backup-generation' 'echo 2' > \"$root/bin/release/test-platform/simple.pre_deploy\"; " +
-        "cp \"$root/bin/release/test-platform/simple\" \"$root/bin/stage4-simple\"; chmod 755 \"$root/bin/release/test-platform/simple\" \"$root/bin/release/test-platform/simple.pre_deploy\" \"$root/bin/stage4-simple\"; " +
-        "if command -v sha256sum >/dev/null 2>&1; then hash='sha256sum'; elif command -v shasum >/dev/null 2>&1; then hash='shasum -a 256'; else hash='sha256 -q'; fi; " +
-        "cur=$(eval $hash bin/release/test-platform/simple | awk '{print $1}'); back=$(eval $hash bin/release/test-platform/simple.pre_deploy | awk '{print $1}'); " +
-        "export BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs STAGE4_PROVENANCE_HELPER_PATH=$root/scripts/check/lib/stage4-candidate-provenance.shs; . $BOOTSTRAP_STAGE3_FACADE_PATH; . $STAGE4_PROVENANCE_HELPER_PATH; stage4_write_current_tree_identity $root/bin/current-tree.env $root; field() { bootstrap_stage3_manifest_value \"$1\" $root/bin/current-tree.env; }; " +
-        "producer=$root/scripts/bootstrap/bootstrap-from-scratch.sh; producer_sha=$(eval $hash $producer | awk '{print $1}'); printf '%s\\n' source_snapshot_sha256=$(field stage3_source_snapshot_sha256) git_state_sha256=$(field git_state_sha256) git_head=$(field git_head) git_dirty_fingerprint=$(field git_dirty_fingerprint) bootstrap_script_path=$producer bootstrap_script_sha256=$producer_sha > $root/bin/stage3.env; stage3_sha=$(eval $hash $root/bin/stage3.env | awk '{print $1}'); " +
-        "printf '%s\\n' schema=simple-bootstrap-stage4-provenance-v1 output_path=$root/bin/stage4-simple output_sha256=$cur repository_root=$root source_revision_kind=content-sha256 source_revision=$(field source_revision) source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling stage3_source_snapshot_sha256=$(field stage3_source_snapshot_sha256) git_state_sha256=$(field git_state_sha256) git_head=$(field git_head) git_dirty_fingerprint=$(field git_dirty_fingerprint) stage3_producer_path=$producer stage3_producer_sha256=$producer_sha stage3_provenance_path=$root/bin/stage3.env stage3_provenance_sha256=$stage3_sha > $root/bin/stage4.env; stage4_provenance_sha=$(eval $hash $root/bin/stage4.env | awk '{print $1}'); " +
-        "printf '%s\\n' status=verified stage4_candidate_sha256=$cur stage4_provenance_sha256=$stage4_provenance_sha repository_root=$root source_revision_kind=content-sha256 source_revision=$(field source_revision) source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling stage3_source_snapshot_sha256=$(field stage3_source_snapshot_sha256) git_state_sha256=$(field git_state_sha256) git_head=$(field git_head) git_dirty_fingerprint=$(field git_dirty_fingerprint) stage3_producer_path=$producer stage3_producer_sha256=$producer_sha > $root/bin/stage3-acceptance.env; acceptance_sha=$(eval $hash $root/bin/stage3-acceptance.env | awk '{print $1}'); " +
-        "printf '%s\\n' schema=bootstrap-deploy-receipt-v1 platform=test-platform current_path=bin/release/test-platform/simple current_sha256=$cur stage4_candidate_path=$root/bin/stage4-simple stage4_candidate_sha256=$cur stage4_provenance_path=$root/bin/stage4.env stage4_provenance_sha256=$stage4_provenance_sha backup_path=bin/release/test-platform/simple.pre_deploy backup_sha256=$back deployment_status=pass stage3_current_acceptance_status=verified stage3_current_acceptance_receipt=$root/bin/stage3-acceptance.env stage3_current_acceptance_receipt_sha256=$acceptance_sha repository_root=$root source_revision_kind=content-sha256 source_revision=$(field source_revision) source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling stage3_source_snapshot_sha256=$(field stage3_source_snapshot_sha256) git_state_sha256=$(field git_state_sha256) git_head=$(field git_head) git_dirty_fingerprint=$(field git_dirty_fingerprint) stage3_producer_path=$producer stage3_producer_sha256=$producer_sha > bin/release/test-platform/bootstrap-deploy-receipt.env; " +
-        tamper + "set +e; sh scripts/bootstrap/rollback-bootstrap-deploy.shs test-platform; rc=$?; set -e; " +
-        "if grep -q backup-generation bin/release/test-platform/simple; then echo active_generation=backup; else echo active_generation=current; fi; " +
-        "if grep -q current-generation bin/release/test-platform/simple.pre_deploy; then echo backup_generation=current; else echo backup_generation=backup; fi; exit $rc"
-    val wrapped = command.replace(
-        "set +e; sh scripts/bootstrap/rollback-bootstrap-deploy.shs test-platform; rc=$?; set -e;",
-        "set +e; sh scripts/bootstrap/rollback-bootstrap-deploy.shs test-platform >rollback.out 2>rollback.err; rc=$?; set -e; cat rollback.out; cat rollback.err >&2;"
-    )
-    process_run_timeout("/bin/sh", ["-c", wrapped], 20000)
+val SETUP = "scripts/setup/setup.shs"
+val MUTATIONS = "test/01_unit/scripts/bootstrap_deploy_transaction_test.shs"
 
 describe "Bootstrap deployment rollback contract":
-    it "retains a known-good backup and atomically publishes scoped deployment evidence":
-        step("Verify: retains a known-good backup and atomically publishes scoped deployment evidence")
-        # @req: REQ-CHECK-BootDeplRollCont-001
-        val (deploy, _rollback) = step_bootstrap_deploy_rollback()
-        expect(deploy).to_contain("bootstrap-deploy-receipt-v1")
-        expect(deploy).to_contain("mv \"${receipt_tmp}\" \"${deploy_receipt}\"")
-        expect(deploy).to_contain("platform_acceptance_claimed=false")
-        expect(deploy).to_contain("stage3_current_acceptance_receipt_sha256")
-        expect(deploy).to_contain("git_dirty_fingerprint")
-        expect(deploy).to_contain("backup_created=0")
-        expect(deploy).to_contain("else\n    rm -f \"${prev_bin}\"")
-        expect(deploy).to_contain("[ \"${backup_created}\" -eq 1 ]")
+    it "publishes compiler MCP LSP and authority as one v3 generation":
+        step("Verify: deployment seals one immutable generation before one pointer swap")
+        val deploy = file_read(DEPLOY)
+        expect(deploy).to_contain("bootstrap_deploy_tx_begin")
+        expect(deploy).to_contain("bootstrap_deploy_tx_add simple")
+        expect(deploy).to_contain("simple_mcp_server simple_lsp_mcp_server")
+        expect(deploy).to_contain("authority.phase7.env")
+        expect(deploy).to_contain("bootstrap_deploy_tx_seal")
+        expect(deploy).to_contain("bootstrap_deploy_tx_apply")
+        expect(deploy).to_contain("schema=bootstrap-deploy-receipt-v3")
+        expect(deploy).to_contain("transaction_entries_sha256")
 
-    it "rejects unconfined paths symlinks and tampered hashes before swapping":
-        step("Verify: rejects unconfined paths symlinks and tampered hashes before swapping")
-        # @req: REQ-CHECK-BootDeplRollCont-001
-        val (_deploy, rollback) = step_bootstrap_deploy_rollback()
-        expect(rollback).to_contain("fail_receipt current_path")
-        expect(rollback).to_contain("fail_receipt backup_path")
-        expect(rollback).to_contain("[ ! -L \"${backup}\" ]")
-        expect(rollback).to_contain("fail_receipt current_hash")
-        expect(rollback).to_contain("fail_receipt backup_hash")
-        expect(rollback).to_contain("fail_receipt stale_current_tree")
-        expect(rollback).to_contain("fail_receipt current_worktree")
+    it "recovers or rolls back the exact provenance-bound generation":
+        step("Verify: recovery and rollback use a CAS-protected generation pointer")
+        val transaction = file_read(TRANSACTION)
+        val rollback = file_read(ROLLBACK)
+        expect(transaction).to_contain("bootstrap_deploy_tx_recover")
+        expect(transaction).to_contain("bootstrap_deploy_tx_pointer_swap")
+        expect(transaction).to_contain("bootstrap_deploy_tx_write_receipt_entries")
+        expect(transaction).to_contain("bootstrap-deploy-receipt-v3")
+        expect(transaction).to_contain("bootstrap_deploy_tx_validate_generation")
+        expect(rollback).to_contain("bootstrap_deploy_tx_rollback_generation")
 
-    it "prevalidates the backup and restores the old compiler when setup fails":
-        step("Verify: prevalidates the backup and restores the old compiler when setup fails")
-        # @req: REQ-CHECK-BootDeplRollCont-001
-        val (_deploy, rollback) = step_bootstrap_deploy_rollback()
-        expect(rollback).to_contain("bounded_smoke \"${candidate}\"")
-        expect(rollback).to_contain("mv \"${candidate}\" \"${current}\"")
-        expect(rollback).to_contain("mv \"${old}\" \"${current}\"")
-        expect(rollback).to_contain("fail_receipt rollback_smoke")
-        expect(rollback).to_contain("rollback_status=pass")
-        expect(rollback).to_contain("platform_acceptance_claimed=false")
+    it "reverifies locked Stage 4 and requires canonical Phase 7 authority":
+        step("Verify: no pre-lock or unselected policy receipt can authorize deployment")
+        val deploy = file_read(DEPLOY)
+        expect(deploy).to_contain("locked_stage4_output_sha")
+        expect(deploy).to_contain("stage4_verify_candidate_provenance")
+        expect(deploy).to_contain("simple-kernel-phase7-qualification-v2")
+        expect(deploy).to_contain("performance_baseline_receipt_sha256")
+        expect(deploy).to_contain("performance_measurement_receipt_sha256")
 
-    it "executes a valid confined rollback and publishes scoped evidence":
-        step("Verify: executes a valid confined rollback and publishes scoped evidence")
-        # @req: REQ-CHECK-BootDeplRollCont-001
-        val (stdout, stderr, code) = step_run_rollback_fixture(false)
-        expect(code).to_equal(0)  # oracle: value fixed by the spec contract
-        expect(stderr).to_equal("")
-        expect(stdout).to_contain("rollback_status=pass")
-        expect(stdout).to_contain("active_generation=backup")
-        expect(stdout).to_contain("backup_generation=current")
+    it "uses only the canonical macOS Simple-native release directory":
+        step("Verify: setup cannot silently prefer a stale three-part macOS binary")
+        val setup = file_read(SETUP)
+        expect(setup).to_contain("simple_release_platform_dir")
+        expect(setup).to_contain("candidate=\"${release_dir}/simple_mcp_server\"")
+        expect(setup).to_contain("candidate=\"${release_dir}/simple_lsp_mcp_server\"")
 
-    it "rejects a tampered backup without replacing the active compiler":
-        step("Verify: rejects a tampered backup without replacing the active compiler")
-        # @req: REQ-CHECK-BootDeplRollCont-001
-        val (stdout, stderr, code) = step_run_rollback_fixture(true)
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
-        expect(stderr).to_contain("rollback failed: backup_hash")
-        expect(stdout).to_contain("active_generation=current")
-        expect(stdout).to_contain("backup_generation=backup")
-
-    it "rejects parent-directory platform traversal before touching deployment state":
-        step("Verify: rejects parent-directory platform traversal before touching deployment state")
-        # @req: REQ-CHECK-BootDeplRollCont-001
-        val (stdout, stderr, code) = process_run("/bin/sh", [ROLLBACK, ".."])
-        expect(code).to_equal(2)  # oracle: value fixed by the spec contract
-        expect(stdout).to_equal("")
-        expect(stderr).to_contain("invalid platform")
+    it "rejects symlinks digest drift partial swaps and stale receipts":
+        step("Run: adversarial transaction mutation matrix")
+        val (_stdout, _stderr, status) = process_run_timeout(
+            "/bin/sh",
+            [MUTATIONS],
+            30000
+        )
+        expect(status).to_equal(0)

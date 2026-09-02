@@ -15,6 +15,7 @@ use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_note_hit, front
 use compiler.frontend.desugar.desugar_async.{desugar_module}
 use compiler.common.diagnostics.span.{Span}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.env.{env_get}
 # @cfg/@when conditional-compilation preprocessor. Delegate to the real
 # implementation under a UNIQUE name: a local `preprocess_conditionals` that
 # collided with a same-name `use` import previously shadowed the real one,
@@ -83,13 +84,20 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
         if cached_module != nil:
             val hit = cached_module.unwrap()
             frontend_parse_cache_note_hit()
+            if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
+                print "[M4 parse] module={file_path} work=0 imports={hit.imports.len()}"
             return hit
         frontend_parse_cache_note_miss()
         flat_pool_capture_arm()
         val fresh = parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
+        if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
+            print "[M4 parse] module={file_path} work=1 imports={fresh.imports.len()}"
         val _stored = frontend_parse_cache_store(key, flat_pool_capture_take())
         return fresh
-    parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
+    val uncached = parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
+    if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
+        print "[M4 parse] module={file_path} work=1 imports={uncached.imports.len()}"
+    uncached
 
 fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: text, log: Logger, streaming_scope: bool) -> ParserModule:
     val preprocessed = preprocess_conditionals(source)

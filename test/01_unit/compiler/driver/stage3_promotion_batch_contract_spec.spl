@@ -1,78 +1,130 @@
 use std.io.{file_read}
 use std.spec.{describe, it, expect}
 
-val DRIVER = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
-val LOG_HELPERS = "src/compiler/80.driver/driver_log_helpers.spl"
-val CORE_RUNTIME = "src/runtime/runtime_native.c"
+val REGISTRY = "src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+val DRIVER = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
 val RUNTIME_HEADER = "src/runtime/runtime.h"
 val RUST_RUNTIME = "src/compiler_rust/runtime/src/value/collections.rs"
 val RUST_INTERPRETER = "src/compiler_rust/compiler/src/interpreter_extern/memory.rs"
-val RUNTIME_SYMBOLS = "src/compiler_rust/common/src/runtime_symbols.rs"
 
-describe "Stage3 promotion batch source and ABI contract":
-    it "unions frozen retained roots and commits before detach and scope end":
-        val driver = file_read(DRIVER)
-        val log_helpers = file_read(LOG_HELPERS)
-        val core_runtime = file_read(CORE_RUNTIME)
+describe "Stage3 pure-Simple promotion batch ownership":
+    it "promotes one local root graph and shallow-frees only its carrier":
+        val registry = file_read(REGISTRY)
+        val helper_start = registry.index_of("fn module_surface_promote_roots(")
+        val helper_end = registry.index_of("impl ModuleSurfacesByName:", helper_start)
+        val helper = registry.substring(helper_start, helper_end)
+        val promote = helper.index_of("rt_transient_heap_promote(roots)")
+        val release = helper.index_of("rt_array_free(roots)")
+        expect(helper_start).to_be_greater_than(-1)
+        expect(helper.split("rt_transient_heap_promote(").len()).to_equal(2)
+        expect(promote).to_be_greater_than(-1)
+        expect(release).to_be_greater_than(promote)
+
         val runtime_header = file_read(RUNTIME_HEADER)
+        expect(runtime_header).to_contain(
+            "rt_array_free(SplArray* array);  /* shallow: preserves element handles */")
+
+    it "batches every per-file retained owner exactly once":
+        val registry = file_read(REGISTRY)
+        val start = registry.index_of("pub fn module_surface_promote(")
+        val end = registry.index_of("pub fn module_surfaces_promote(", start)
+        val body = registry.substring(start, end)
+        expect(start).to_be_greater_than(-1)
+        for root in [
+            "surface.imports",
+            "surface.exports",
+            "surface.composite_names",
+            "surface.enum_names",
+            "surface.trait_names",
+            "surface.callable_names",
+            "surface.type_alias_names",
+            "surface.constant_names",
+            "surface.import_item_offsets",
+            "surface.import_item_names",
+            "surface.import_item_aliases",
+            "surface.import_item_has_alias",
+            "surface.callable_values",
+            "surface.composite_values",
+            "surface.enum_values",
+            "surface.trait_values",
+            "surface.type_alias_values",
+            "surface.constant_values",
+            "surface.impls",
+            "origin_index.names",
+            "origin_index.owner_modules",
+            "origin_index.source_names",
+            "origin_index.resolution_kinds",
+            "surface"
+        ]:
+            expect(body.split("roots.push(" + root + ")").len()).to_equal(2)
+        expect(body.contains("rt_transient_heap_promote(")).to_equal(false)
+        expect(body.split("module_surface_promote_roots(roots)").len()).to_equal(2)
+
+    it "batches every freeze-time route owner and the registry exactly once":
+        val registry = file_read(REGISTRY)
+        val start = registry.index_of("pub fn module_surfaces_promote(")
+        val end = registry.index_of(
+            "pub fn module_surfaces_retained_alignment(", start)
+        val body = registry.substring(start, end)
+        expect(start).to_be_greater_than(-1)
+        expect(body).to_contain("var roots: [Any] = []")
+        for root in [
+            "surface.composite_names",
+            "surface.enum_names",
+            "surface.trait_names",
+            "surface.callable_names",
+            "surface.type_alias_names",
+            "surface.constant_names",
+            "surface.composite_values",
+            "surface.enum_values",
+            "surface.trait_values",
+            "surface.callable_values",
+            "surface.type_alias_values",
+            "surface.constant_values",
+            "surface.import_target_indices",
+            "surface.import_target_names",
+            "surface.import_resolution_traces",
+            "surface.import_item_offsets",
+            "surface.import_item_names",
+            "surface.import_item_aliases",
+            "surface.import_item_has_alias",
+            "surface.export_route_sources",
+            "surface.export_route_locals",
+            "surface.export_route_target_indices",
+            "surface.export_route_target_names",
+            "surface.export_route_is_glob",
+            "registry"
+        ]:
+            expect(body.split("roots.push(" + root + ")").len()).to_equal(2)
+        expect(body.contains("rt_transient_heap_promote(")).to_equal(false)
+        expect(body.split("module_surface_promote_roots(roots)").len()).to_equal(2)
+
+    it "keeps production callers unique with no direct promotion bypass":
+        val driver = file_read(DRIVER)
+        expect(driver.split("module_surface_promote(surface)").len()).to_equal(2)
+        expect(driver.split("module_surfaces_promote(retained_surfaces)").len()).to_equal(2)
+        expect(driver.contains("rt_transient_heap_promote(surface)")).to_equal(false)
+        expect(driver.contains("rt_transient_heap_promote(retained_surfaces)")).to_equal(false)
+
+        val pause = driver.index_of(
+            "if not _sffi_transient_array_scope_pause():")
+        val promote = driver.index_of(
+            "if not module_surfaces_promote(retained_surfaces):", pause)
+        val scope_end = driver.index_of(
+            "if not _sffi_transient_array_scope_end():", promote)
+        expect(pause).to_be_greater_than(-1)
+        expect(promote).to_be_greater_than(pause)
+        expect(scope_end).to_be_greater_than(promote)
+
+    it "keeps module-surface batching out of the Rust seed":
         val rust_runtime = file_read(RUST_RUNTIME)
         val rust_interpreter = file_read(RUST_INTERPRETER)
-        val runtime_symbols = file_read(RUNTIME_SYMBOLS)
-        val start = driver.index_of("me lower_streaming_surface_source")
-        val end = driver.index_of("me lower_and_check_streaming_surfaces_impl")
-        val body = driver.substring(start, end)
-        val pause = body.index_of("rt_transient_array_scope_pause()")
-        val batch_begin = body.index_of(
-            "rt_transient_heap_promotion_batch_begin()", pause)
-        val hir_root = body.index_of("rt_transient_heap_promote(hir_module)", batch_begin)
-        val lowering_roots = body.index_of(
-            "lowering.promote_transient_compilation_roots()", hir_root)
-        val bootstrap_roots = body.index_of(
-            "bootstrap_hir_modules_promote_transient_roots()", lowering_roots)
-        val frontend_roots = body.index_of(
-            "frontend_promote_compilation_registries()", bootstrap_roots)
-        val commit = body.index_of(
-            "rt_transient_heap_promotion_batch_commit()", frontend_roots)
-        val abort = body.index_of(
-            "rt_transient_heap_promotion_batch_abort()", commit)
-        val detach = body.index_of("lowering.detach_transient_module_scratch()", commit)
-        val scope_end = body.last_index_of("driver_end_transient_parse_scope()")
-        expect(batch_begin).to_be_greater_than(pause)
-        expect(hir_root).to_be_greater_than(batch_begin)
-        expect(lowering_roots).to_be_greater_than(hir_root)
-        expect(bootstrap_roots).to_be_greater_than(lowering_roots)
-        expect(frontend_roots).to_be_greater_than(bootstrap_roots)
-        expect(commit).to_be_greater_than(frontend_roots)
-        expect(abort).to_be_greater_than(commit)
-        expect(detach).to_be_greater_than(commit)
-        expect(scope_end).to_be_greater_than(detach)
-
-        for symbol in [
+        for forbidden in [
+            "module_surface_promote_roots",
+            "module_surfaces_promote",
+            "TransientPromotionBatch",
             "rt_transient_heap_promotion_batch_begin",
-            "rt_transient_heap_promotion_batch_commit",
-            "rt_transient_heap_promotion_batch_abort",
-            "rt_transient_heap_promotion_last_roots",
-            "rt_transient_heap_promotion_last_unique_heap",
-            "rt_transient_heap_promotion_last_unique_raw",
-            "rt_transient_heap_promotion_last_duplicates",
-            "rt_transient_heap_promotion_last_workspace_peak_lower_bound_bytes",
-            "rt_transient_heap_promotion_last_status"
+            "rt_transient_heap_promotion_batch_commit"
         ]:
-            expect(runtime_header).to_contain(symbol)
-            expect(runtime_symbols).to_contain(symbol)
-        expect(core_runtime).to_contain("static _Thread_local RtCoreTransientPlan")
-        expect(core_runtime).to_contain("rt_core_transient_plan_validate")
-        expect(core_runtime).to_contain(
-            "RT_CORE_TRANSIENT_PROMOTION_SCOPE_ENDED_ACTIVE")
-        expect(rust_runtime).to_contain("TransientPromotionBatch")
-        expect(rust_runtime).to_contain("validate_transient_promotion")
-        expect(rust_runtime).to_contain(
-            "transient_heap_promotion_note_interpreter_root")
-        expect(rust_interpreter).to_contain(
-            "transient_heap_promotion_note_interpreter_root")
-        expect(log_helpers).to_contain("promotion_status={{promotion_status}}")
-        expect(log_helpers).to_contain("promotion_roots={{promotion_roots}}")
-        expect(log_helpers).to_contain(
-            "promotion_receipt_valid={{promotion_receipt_valid}}")
-        expect(log_helpers).to_contain(
-            "promotion_status == 1 and promotion_roots > 0")
+            expect(rust_runtime.contains(forbidden)).to_equal(false)
+            expect(rust_interpreter.contains(forbidden)).to_equal(false)

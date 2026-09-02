@@ -1,0 +1,223 @@
+# Filesystem-backed M3 path admission. The manifest validator remains pure;
+# production readers and writers use this boundary before touching artifacts.
+
+@unsafe(reason: "canonical filesystem path resolution", capabilities: [ffi])
+extern fn rt_path_absolute(path: text) -> text
+@unsafe(reason: "filesystem path classification", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "filesystem path classification", capabilities: [ffi])
+extern fn rt_dir_exists(path: text) -> bool
+@unsafe(reason: "no-follow regular-file classification", capabilities: [ffi])
+extern fn rt_file_is_regular_no_follow(path: text) -> bool
+@unsafe(reason: "single-descriptor bounded no-follow manifest read", capabilities: [ffi])
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+@unsafe(reason: "filesystem file-size classification", capabilities: [ffi])
+extern fn rt_file_size(path: text) -> i64
+@unsafe(reason: "exclusive no-follow binary staging copy", capabilities: [ffi])
+extern fn rt_file_copy_create_excl_no_follow(source: text, destination: text) -> bool
+@unsafe(reason: "atomic no-replace publication of a staged regular file", capabilities: [ffi])
+extern fn rt_file_link_create_excl_no_follow(source: text, destination: text) -> bool
+@unsafe(reason: "host path separator classification", capabilities: [ffi])
+extern fn rt_path_separator() -> text
+
+struct PhaseCompatibilityPathAdmissionV1:
+    valid: bool
+    reason: text
+    canonical_root: text
+    canonical_path: text
+
+struct PhaseCompatibilityManifestReadV1:
+    valid: bool
+    reason: text
+    canonical_path: text
+    content: text
+
+struct PhaseCompatibilityArtifactReadV1:
+    valid: bool
+    reason: text
+    canonical_path: text
+    content: text
+
+fn phase_compatibility_path_reject_io_v1(reason: text) -> PhaseCompatibilityPathAdmissionV1:
+    PhaseCompatibilityPathAdmissionV1(false, reason, "", "")
+
+fn phase_compatibility_manifest_reject_io_v1(reason: text) -> PhaseCompatibilityManifestReadV1:
+    PhaseCompatibilityManifestReadV1(false, reason, "", "")
+
+fn phase_compatibility_artifact_reject_io_v1(reason: text) -> PhaseCompatibilityArtifactReadV1:
+    PhaseCompatibilityArtifactReadV1(false, reason, "", "")
+
+fn phase_compatibility_path_parent_io_v1(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash < 0:
+        return ""
+    if slash == 0:
+        return "/"
+    path.substring(0, slash)
+
+fn phase_compatibility_path_contained_io_v1(path: text, root: text) -> bool:
+    val prefix = if root == "/": "/" else: root + "/"
+    path == root or path.starts_with(prefix)
+
+fn phase_compatibility_canonical_directory_io_v1(
+    root: text
+) -> PhaseCompatibilityPathAdmissionV1:
+    if rt_path_separator() != "/":
+        return phase_compatibility_path_reject_io_v1("unsupported-host")
+    if root == "" or not rt_dir_exists(root):
+        return phase_compatibility_path_reject_io_v1("root-unavailable")
+    val canonical_root = rt_path_absolute(root) ?? ""
+    if canonical_root == "":
+        return phase_compatibility_path_reject_io_v1("root-unresolved")
+    if root != canonical_root:
+        return phase_compatibility_path_reject_io_v1("root-not-canonical")
+    PhaseCompatibilityPathAdmissionV1(true, "ok", canonical_root, canonical_root)
+
+fn phase_compatibility_existing_artifact_io_v1(
+    root: text, path: text
+) -> PhaseCompatibilityPathAdmissionV1:
+    val root_admission = phase_compatibility_canonical_directory_io_v1(root)
+    if not root_admission.valid:
+        return root_admission
+    if path == "" or not rt_file_exists(path):
+        return phase_compatibility_path_reject_io_v1("artifact-unavailable")
+    if not rt_file_is_regular_no_follow(path):
+        return phase_compatibility_path_reject_io_v1("artifact-not-regular-no-follow")
+    val canonical_path = rt_path_absolute(path) ?? ""
+    if canonical_path == "":
+        return phase_compatibility_path_reject_io_v1("artifact-unresolved")
+    if path != canonical_path:
+        return phase_compatibility_path_reject_io_v1("artifact-not-canonical")
+    if not phase_compatibility_path_contained_io_v1(
+            canonical_path, root_admission.canonical_root):
+        return phase_compatibility_path_reject_io_v1("artifact-outside-root")
+    PhaseCompatibilityPathAdmissionV1(
+        true, "ok", root_admission.canonical_root, canonical_path)
+
+fn phase_compatibility_destination_io_v1(
+    root: text, path: text
+) -> PhaseCompatibilityPathAdmissionV1:
+    val root_admission = phase_compatibility_canonical_directory_io_v1(root)
+    if not root_admission.valid:
+        return root_admission
+    val parent = phase_compatibility_path_parent_io_v1(path)
+    if parent == "" or not rt_dir_exists(parent):
+        return phase_compatibility_path_reject_io_v1("destination-parent-unavailable")
+    val canonical_parent = rt_path_absolute(parent) ?? ""
+    if canonical_parent == "" or parent != canonical_parent:
+        return phase_compatibility_path_reject_io_v1("destination-parent-not-canonical")
+    if not phase_compatibility_path_contained_io_v1(
+            canonical_parent, root_admission.canonical_root):
+        return phase_compatibility_path_reject_io_v1("destination-parent-outside-root")
+    if rt_file_exists(path):
+        return phase_compatibility_path_reject_io_v1("destination-already-exists")
+    PhaseCompatibilityPathAdmissionV1(
+        true, "ok", root_admission.canonical_root, path)
+
+fn phase_compatibility_existing_manifest_io_v1(
+    path: text
+) -> PhaseCompatibilityPathAdmissionV1:
+    if rt_path_separator() != "/":
+        return phase_compatibility_path_reject_io_v1("unsupported-host")
+    if path == "" or not rt_file_exists(path):
+        return phase_compatibility_path_reject_io_v1("manifest-unavailable")
+    if not rt_file_is_regular_no_follow(path):
+        return phase_compatibility_path_reject_io_v1("manifest-not-regular-no-follow")
+    val canonical_path = rt_path_absolute(path) ?? ""
+    if canonical_path == "":
+        return phase_compatibility_path_reject_io_v1("manifest-unresolved")
+    if path != canonical_path:
+        return phase_compatibility_path_reject_io_v1("manifest-not-canonical")
+    PhaseCompatibilityPathAdmissionV1(true, "ok", "", canonical_path)
+
+fn phase_compatibility_read_manifest_io_v1(path: text) -> PhaseCompatibilityManifestReadV1:
+    val before = phase_compatibility_existing_manifest_io_v1(path)
+    if not before.valid:
+        return phase_compatibility_manifest_reject_io_v1(before.reason)
+    val extent = rt_file_size(before.canonical_path)
+    if extent <= 0:
+        return phase_compatibility_manifest_reject_io_v1("manifest-empty-or-unreadable")
+    val content = rt_file_read_regular_no_follow_bounded(
+        before.canonical_path, extent)
+    if not content.?:
+        return phase_compatibility_manifest_reject_io_v1("manifest-read-failed")
+    val after = phase_compatibility_existing_manifest_io_v1(path)
+    if not after.valid or after.canonical_path != before.canonical_path:
+        return phase_compatibility_manifest_reject_io_v1("manifest-path-changed")
+    if content.unwrap().len() != extent:
+        return phase_compatibility_manifest_reject_io_v1("manifest-extent-changed")
+    PhaseCompatibilityManifestReadV1(
+        true, "ok", before.canonical_path, content.unwrap())
+
+fn phase_compatibility_read_artifact_io_v1(
+    root: text, path: text
+) -> PhaseCompatibilityArtifactReadV1:
+    val before = phase_compatibility_existing_artifact_io_v1(root, path)
+    if not before.valid:
+        return phase_compatibility_artifact_reject_io_v1(before.reason)
+    val extent = rt_file_size(before.canonical_path)
+    if extent <= 0:
+        return phase_compatibility_artifact_reject_io_v1("artifact-empty-or-unreadable")
+    val content = rt_file_read_regular_no_follow_bounded(
+        before.canonical_path, extent)
+    if not content.?:
+        return phase_compatibility_artifact_reject_io_v1("artifact-read-failed")
+    val after = phase_compatibility_existing_artifact_io_v1(root, path)
+    if not after.valid or after.canonical_path != before.canonical_path:
+        return phase_compatibility_artifact_reject_io_v1("artifact-path-changed")
+    if content.unwrap().len() != extent:
+        return phase_compatibility_artifact_reject_io_v1("artifact-extent-changed")
+    PhaseCompatibilityArtifactReadV1(
+        true, "ok", before.canonical_path, content.unwrap())
+
+fn phase_compatibility_stage_artifact_io_v1(
+    source_root: text, source: text, destination_root: text, staging: text
+) -> text:
+    val source_admission = phase_compatibility_existing_artifact_io_v1(
+        source_root, source)
+    if not source_admission.valid:
+        return "source-" + source_admission.reason
+    val staging_admission = phase_compatibility_destination_io_v1(
+        destination_root, staging)
+    if not staging_admission.valid:
+        return "staging-" + staging_admission.reason
+    if not rt_file_copy_create_excl_no_follow(
+            source_admission.canonical_path, staging_admission.canonical_path):
+        return "staging-copy-failed"
+    val published_staging = phase_compatibility_existing_artifact_io_v1(
+        destination_root, staging)
+    if not published_staging.valid:
+        return "staging-" + published_staging.reason
+    "ok"
+
+fn phase_compatibility_publish_staged_io_v1(
+    root: text, staging: text, destination: text
+) -> text:
+    val staging_admission = phase_compatibility_existing_artifact_io_v1(
+        root, staging)
+    if not staging_admission.valid:
+        return "staging-" + staging_admission.reason
+    val destination_admission = phase_compatibility_destination_io_v1(
+        root, destination)
+    if not destination_admission.valid:
+        return "destination-" + destination_admission.reason
+    if not rt_file_link_create_excl_no_follow(
+            staging_admission.canonical_path, destination_admission.canonical_path):
+        return "destination-publish-raced"
+    val published = phase_compatibility_existing_artifact_io_v1(
+        root, destination)
+    if not published.valid:
+        return "destination-" + published.reason
+    "ok"
+
+export PhaseCompatibilityPathAdmissionV1
+export PhaseCompatibilityManifestReadV1
+export PhaseCompatibilityArtifactReadV1
+export phase_compatibility_canonical_directory_io_v1
+export phase_compatibility_existing_artifact_io_v1
+export phase_compatibility_destination_io_v1
+export phase_compatibility_existing_manifest_io_v1
+export phase_compatibility_read_manifest_io_v1
+export phase_compatibility_read_artifact_io_v1
+export phase_compatibility_stage_artifact_io_v1
+export phase_compatibility_publish_staged_io_v1
