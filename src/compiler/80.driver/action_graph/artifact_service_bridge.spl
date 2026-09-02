@@ -1,7 +1,8 @@
 use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
 use compiler.driver.action_graph.coordinator.{
-    BuildActionClaimV1, coordinator_cancel_v1, coordinator_claim_v1,
-    coordinator_commit_v1
+    BuildActionClaimTransferV1, BuildActionClaimV1,
+    BuildActionCommitTransferV1, coordinator_cancel_v1,
+    coordinator_claim_v1, coordinator_commit_v1
 }
 use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
 use lib.compiler_artifact_service.profile.{
@@ -67,7 +68,9 @@ fn demand_artifact_claim_v1(
         return BuildActionClaimV1(false, "artifact-service-not-ready", nil, "")
     var execution = route.execution
     var coordinator = execution.coordinator!
-    val claim = coordinator_claim_v1(&mut coordinator, action_id, lease!.lease_id)
+    val claim_transfer = coordinator_claim_v1(coordinator, action_id, lease!.lease_id)
+    coordinator = claim_transfer.coordinator
+    val claim = claim_transfer.claim
     execution.coordinator = Some(coordinator)
     route.execution = execution
     route.service = service
@@ -83,7 +86,11 @@ fn demand_artifact_commit_v1(
         return false
     var execution = route.execution
     var coordinator = execution.coordinator!
-    val committed = coordinator_commit_v1(&mut coordinator, lease!.lease_id, result)
+    val commit_transfer = coordinator_commit_v1(coordinator, lease!.lease_id, result)
+    coordinator = commit_transfer.coordinator
+    val committed = commit_transfer.commit
+    execution.coordinator = Some(coordinator)
+    route.execution = execution
     if not committed.accepted:
         return false
     val artifact_result = ArtifactResultV1(
@@ -96,7 +103,6 @@ fn demand_artifact_commit_v1(
     if not artifact_service_result_is_authoritative_v1(
             service, result.action_id, result.success, result.output_identity):
         return false
-    execution.coordinator = Some(coordinator)
     route.execution = execution
     route.service = service
     true

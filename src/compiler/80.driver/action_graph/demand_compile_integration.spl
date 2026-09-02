@@ -2,6 +2,7 @@ use compiler.driver.action_graph.build_action_v1.{
     BuildActionPoolV1, BuildActionResultV1, BuildActionV1
 }
 use compiler.driver.action_graph.coordinator.{
+    BuildActionClaimTransferV1, BuildActionCommitTransferV1,
     BuildActionCoordinatorV1, BuildPoolBudgetV1, coordinator_claim_v1,
     coordinator_commit_v1, coordinator_diagnostics_v1, coordinator_new_v1
 }
@@ -163,14 +164,19 @@ fn demand_compile_complete_action_v1(
             execution.mir_admission_digest == "":
         return false
     var coordinator = execution.coordinator!
-    val claim = coordinator_claim_v1(&mut coordinator, action_id, owner_token)
+    val claim_transfer = coordinator_claim_v1(coordinator, action_id, owner_token)
+    coordinator = claim_transfer.coordinator
+    val claim = claim_transfer.claim
     if not claim.valid or claim.action == nil:
+        execution.coordinator = Some(coordinator)
         return false
-    val committed = coordinator_commit_v1(
-        &mut coordinator, owner_token, BuildActionResultV1(
+    val commit_transfer = coordinator_commit_v1(
+        coordinator, owner_token, BuildActionResultV1(
             action_id, claim.action!.snapshot_revision, success, false,
             output_identity, claim.action!.restat_identity,
             diagnostics, memory_peak_bytes))
+    coordinator = commit_transfer.coordinator
+    val committed = commit_transfer.commit
     execution.coordinator = Some(coordinator)
     if committed.accepted:
         var counters = execution.counters
@@ -183,10 +189,17 @@ fn demand_compile_source_open_v1(execution: &mut DemandCompileExecutionV1):
     counters.source_open_count = counters.source_open_count + 1
     execution.counters = counters
 
-fn demand_compile_section_read_v1(execution: &mut DemandCompileExecutionV1):
-    var counters = execution.counters
-    counters.section_read_count = counters.section_read_count + 1
-    execution.counters = counters
+fn demand_compile_section_reads_v1(
+    execution: DemandCompileExecutionV1, count: i64
+) -> DemandCompileExecutionV1:
+    var owned = execution
+    var remaining = count
+    while remaining > 0:
+        var counters = owned.counters
+        counters.section_read_count = counters.section_read_count + 1
+        owned.counters = counters
+        remaining = remaining - 1
+    owned
 
 fn demand_compile_phase_finish_v1(
     execution: &mut DemandCompileExecutionV1, phase: text, started_ns: i64
@@ -278,6 +291,6 @@ export demand_compile_bind_mir_admission_v1
 export demand_compile_diagnostics_v1
 export demand_compile_complete_scc_outputs_v1
 export demand_compile_source_open_v1
-export demand_compile_section_read_v1
+export demand_compile_section_reads_v1
 export demand_compile_phase_begin_v1, demand_compile_phase_finish_v1
 export demand_compile_finalize_baseline_v1

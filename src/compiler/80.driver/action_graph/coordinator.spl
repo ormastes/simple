@@ -35,6 +35,14 @@ struct BuildActionCommitV1:
     reason: text
     restat_unchanged: bool
 
+struct BuildActionClaimTransferV1:
+    coordinator: BuildActionCoordinatorV1
+    claim: BuildActionClaimV1
+
+struct BuildActionCommitTransferV1:
+    coordinator: BuildActionCoordinatorV1
+    commit: BuildActionCommitV1
+
 fn coordinator_action_v1(graph: PersistedBuildGraphV1, action_id: text) -> BuildActionV1?:
     for action in graph.actions:
         if action.action_id == action_id:
@@ -133,37 +141,39 @@ fn coordinator_ready_actions_v1(coordinator: BuildActionCoordinatorV1) -> [text]
         ready.remove(selected)
     result
 
-fn coordinator_claim_v1(coordinator: &mut BuildActionCoordinatorV1, action_id: text, owner_token: text) -> BuildActionClaimV1:
-    if coordinator.cancelled:
-        return BuildActionClaimV1(false, "cancelled", nil, "")
-    val action = coordinator_action_v1(coordinator.graph, action_id)
-    val index = coordinator_runtime_index_v1(coordinator, action_id)
+fn coordinator_claim_v1(coordinator: BuildActionCoordinatorV1, action_id: text, owner_token: text) -> BuildActionClaimTransferV1:
+    var owned = coordinator
+    if owned.cancelled:
+        return BuildActionClaimTransferV1(owned, BuildActionClaimV1(false, "cancelled", nil, ""))
+    val action = coordinator_action_v1(owned.graph, action_id)
+    val index = coordinator_runtime_index_v1(owned, action_id)
     if action == nil or index < 0 or owner_token == "":
-        return BuildActionClaimV1(false, "claim-invalid", nil, "")
-    if coordinator.runtime[index].state == BuildActionStateV1.running:
-        return BuildActionClaimV1(false, "single-flight", nil, "")
-    if coordinator.runtime[index].state != BuildActionStateV1.pending or not coordinator_dependencies_done_v1(coordinator, action!) or not coordinator_pool_available_v1(coordinator, action!):
-        return BuildActionClaimV1(false, "not-ready", nil, "")
-    coordinator.runtime[index] = BuildActionRuntimeV1(action_id, BuildActionStateV1.running, owner_token, action!.memory_budget_bytes, nil)
-    BuildActionClaimV1(true, "ok", action, owner_token)
+        return BuildActionClaimTransferV1(owned, BuildActionClaimV1(false, "claim-invalid", nil, ""))
+    if owned.runtime[index].state == BuildActionStateV1.running:
+        return BuildActionClaimTransferV1(owned, BuildActionClaimV1(false, "single-flight", nil, ""))
+    if owned.runtime[index].state != BuildActionStateV1.pending or not coordinator_dependencies_done_v1(owned, action!) or not coordinator_pool_available_v1(owned, action!):
+        return BuildActionClaimTransferV1(owned, BuildActionClaimV1(false, "not-ready", nil, ""))
+    owned.runtime[index] = BuildActionRuntimeV1(action_id, BuildActionStateV1.running, owner_token, action!.memory_budget_bytes, nil)
+    BuildActionClaimTransferV1(owned, BuildActionClaimV1(true, "ok", action, owner_token))
 
-fn coordinator_commit_v1(coordinator: &mut BuildActionCoordinatorV1, owner_token: text, result: BuildActionResultV1) -> BuildActionCommitV1:
-    val index = coordinator_runtime_index_v1(coordinator, result.action_id)
-    val action = coordinator_action_v1(coordinator.graph, result.action_id)
+fn coordinator_commit_v1(coordinator: BuildActionCoordinatorV1, owner_token: text, result: BuildActionResultV1) -> BuildActionCommitTransferV1:
+    var owned = coordinator
+    val index = coordinator_runtime_index_v1(owned, result.action_id)
+    val action = coordinator_action_v1(owned.graph, result.action_id)
     if index < 0 or action == nil:
-        return BuildActionCommitV1(false, "action-missing", false)
-    val current = coordinator.runtime[index]
+        return BuildActionCommitTransferV1(owned, BuildActionCommitV1(false, "action-missing", false))
+    val current = owned.runtime[index]
     if current.state != BuildActionStateV1.running or current.owner_token != owner_token:
-        return BuildActionCommitV1(false, "owner-mismatch", false)
-    if coordinator.cancelled and not result.cancelled:
-        return BuildActionCommitV1(false, "cancelled-result-required", false)
+        return BuildActionCommitTransferV1(owned, BuildActionCommitV1(false, "owner-mismatch", false))
+    if owned.cancelled and not result.cancelled:
+        return BuildActionCommitTransferV1(owned, BuildActionCommitV1(false, "cancelled-result-required", false))
     val validity = build_action_result_validate_v1(action!, result)
     if validity != "ok":
-        return BuildActionCommitV1(false, validity, false)
+        return BuildActionCommitTransferV1(owned, BuildActionCommitV1(false, validity, false))
     val restat_unchanged = result.success and action!.restat_identity != "" and result.restat_identity == action!.restat_identity
     val next_state = if result.cancelled: BuildActionStateV1.cancelled else: if result.success: BuildActionStateV1.succeeded else: BuildActionStateV1.failed
-    coordinator.runtime[index] = BuildActionRuntimeV1(result.action_id, next_state, "", 0, Some(result))
-    BuildActionCommitV1(true, "ok", restat_unchanged)
+    owned.runtime[index] = BuildActionRuntimeV1(result.action_id, next_state, "", 0, Some(result))
+    BuildActionCommitTransferV1(owned, BuildActionCommitV1(true, "ok", restat_unchanged))
 
 fn coordinator_cancel_v1(coordinator: &mut BuildActionCoordinatorV1):
     coordinator.cancelled = true
@@ -187,6 +197,7 @@ fn coordinator_diagnostics_v1(coordinator: BuildActionCoordinatorV1) -> [BuildDi
 
 export BuildPoolBudgetV1, BuildActionRuntimeV1, BuildDiagnosticFrameV1
 export BuildActionCoordinatorV1, BuildActionClaimV1, BuildActionCommitV1
+export BuildActionClaimTransferV1, BuildActionCommitTransferV1
 export coordinator_new_v1, coordinator_ready_actions_v1
 export coordinator_claim_v1, coordinator_commit_v1, coordinator_cancel_v1
 export coordinator_diagnostics_v1
