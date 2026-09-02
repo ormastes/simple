@@ -3,8 +3,8 @@
 # Integrates with Microsoft Visual C++ linker (link.exe) for Windows builds.
 # Auto-detects Visual Studio installation via vswhere.exe.
 
-use std.platform (is_windows, normalize_path, join_path, to_native_path)
-use std.io_runtime.{process_run, file_exists, env_get_opt, file_read_nullable}
+use std.platform (is_windows, normalize_path, join_path)
+use std.io_runtime.{process_run, file_exists, env_get_opt, file_write}
 use compiler.backend.linker.link (LinkConfig, LinkError, LinkErrorKind, Linker)
 
 struct MsvcShellResult:
@@ -19,8 +19,27 @@ struct MsvcShellResult:
 # other on load ("last write wins") and previously also caused a bogus
 # `extern fn shell` declared here to shadow ANY same-named local function
 # in ANY module, anywhere in the program (see msvc_shell_naming bug).
+#
+# WARNING -- the `cmd` string passed here MUST NOT CONTAIN A DOUBLE QUOTE.
+# The runtime's Windows argv builder (win_cmd_build_line,
+# src/runtime/platform/windows_command_line_private.h) applies
+# CommandLineToArgvW quoting, escaping every embedded `"` as `\"`. cmd.exe
+# parses its own command line and does not honour `\"`, so such a string is
+# mangled: cmd prints "The filename, directory name, or volume label syntax
+# is incorrect" and exits 1 without running anything. Measured 2026-09-02
+# with a standalone CreateProcessA harness over the real win_cmd_build_line.
+# Only quote-free probes (`where <tool> 2>nul`) are safe on this helper;
+# anything needing a quoted path must use msvc_run_argv below.
 fn msvc_shell(cmd: text) -> MsvcShellResult:
     val (stdout, stderr, code) = process_run("cmd", ["/C", cmd])
+    MsvcShellResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+# Direct argv invocation of a native tool -- no shell, so no cmd.exe parsing
+# and no quoting ambiguity. CommandLineToArgvW quoting is exactly what
+# link.exe / lld-link (ordinary CRT programs) parse, so this is the correct
+# route for any path that may contain spaces.
+fn msvc_run_argv(exe: text, args: [text]) -> MsvcShellResult:
+    val (stdout, stderr, code) = process_run(exe, args)
     MsvcShellResult(stdout: stdout, stderr: stderr, exit_code: code)
 
 # ===========================================================================
@@ -127,38 +146,37 @@ impl MsvcLinker:
 
         # Build arguments
         val args = self.config.build_args(output, object_files)
-        val args_str = args.join(" ")
 
-        # Execute linker. The linker's own bytes are written to a file BY
-        # cmd.exe (`> log 2>&1`), never carried out of the child through a
-        # captured `text` handle: the captured handles on this path have been
-        # observed to render as `<invalid-heap:0x...>`, which destroyed the
-        # only diagnostic for the Stage 2 receiver gate. Reading the file back
-        # is a different code path from process capture, and the raw dump below
-        # goes to stdout regardless of whether the returned Err message
-        # survives. Windows-only file; no other platform links through this
-        # module, so Unix behaviour is unchanged.
-        val link_log = "{output}.link.log"
-        val cmd = "\"{link_exe}\" {args_str}"
-        # The redirect target MUST be backslash-form: cmd.exe rejects a
-        # forward-slash path in a redirection with "The syntax of the command
-        # is incorrect" and exits 1 WITHOUT running the linker -- measured
-        # 2026-09-02, which is why the first tee produced an unreadable log and
-        # a bare "linker exited 1". to_native_path is the identity off Windows.
-        val link_log_native = to_native_path(link_log)
-        val result = msvc_shell("{cmd} > \"{link_log_native}\" 2>&1")
+        # Invoke link.exe DIRECTLY through process_run -- never through
+        # cmd.exe. MEASURED 2026-09-02 (standalone CreateProcessA harness over
+        # the real win_cmd_build_line): the runtime's argv builder applies
+        # CommandLineToArgvW quoting, so a shell string containing quotes came
+        # out as
+        #   cmd /C "\"C:\Program Files\...\link.exe\" ... > \"D:\...\log\" 2>&1"
+        # and cmd.exe does NOT honour backslash-escaped quotes. cmd printed
+        # "The filename, directory name, or volume label syntax is incorrect",
+        # exited 1 WITHOUT running the linker, and never created the log --
+        # which is exactly the `[msvc-link] FAILED exit=1` plus
+        # `<link log unreadable>` this lane kept reporting. The previous
+        # comment here blamed corrupted captured handles; that was a
+        # misdiagnosis of the `{e}`-interpolates-a-struct defect, and process
+        # capture is demonstrably fine (see _cc_verify_compiles' stderr dump
+        # and the C-runtime compile path, both of which capture normally).
+        # CommandLineToArgvW quoting is precisely what link.exe/lld-link parse,
+        # so passing argv directly is the correct route, not a workaround; it
+        # also removes the unquoted args.join(" ") hazard for any object path
+        # containing a space. Windows-only module; Unix is unaffected.
+        val result = msvc_run_argv(link_exe, args)
+        val cmd = "\"{link_exe}\" {args.join(' ')}"
 
         if result.exit_code != 0:
             # link.exe / lld-link report LNK errors on STDOUT, not stderr, so
-            # reporting stderr alone threw half the diagnosis away. Both
-            # streams are now merged into link_log by cmd.exe itself and read
-            # back from disk, and the full command is carried so a failed link
-            # is reproducible by hand.
-            var log_body = "<link log unreadable: {link_log}>"
-            if val body = file_read_nullable(link_log):
-                log_body = body
-            # Print the recovered bytes IMMEDIATELY. If the Err message is
-            # corrupted downstream, this dump is still in the build log.
+            # reporting stderr alone throws half the diagnosis away: merge
+            # both. Persist them next to the output as well, so a failure is
+            # still diagnosable after the build log is rotated.
+            val log_body = "{result.stdout}{result.stderr}"
+            val link_log = "{output}.link.log"
+            file_write(link_log, log_body)
             print "[msvc-link] FAILED exit={result.exit_code}"
             print "[msvc-link] command: {cmd}"
             print "[msvc-link] log: {link_log}"
@@ -345,32 +363,22 @@ impl LldLinkLinker:
 
         # Build arguments (same as MSVC)
         val args = self.config.build_args(output, object_files)
-        val args_str = args.join(" ")
 
-        # Execute linker -- same file-tee capture as MsvcLinker.link above,
-        # for the same reason (captured stdout/stderr handles can arrive
-        # corrupted and take the diagnostic with them). Windows-only.
-        val link_log = "{output}.link.log"
-        val cmd = "\"{lld_link}\" {args_str}"
-        # The redirect target MUST be backslash-form: cmd.exe rejects a
-        # forward-slash path in a redirection with "The syntax of the command
-        # is incorrect" and exits 1 WITHOUT running the linker -- measured
-        # 2026-09-02, which is why the first tee produced an unreadable log and
-        # a bare "linker exited 1". to_native_path is the identity off Windows.
-        val link_log_native = to_native_path(link_log)
-        val result = msvc_shell("{cmd} > \"{link_log_native}\" 2>&1")
+        # Direct argv invocation, same rationale as MsvcLinker.link above:
+        # routing a quoted command string through cmd.exe was mangled by the
+        # runtime's CommandLineToArgvW quoting and never ran the linker.
+        # Windows-only module; Unix is unaffected.
+        val result = msvc_run_argv(lld_link, args)
+        val cmd = "\"{lld_link}\" {args.join(' ')}"
 
         if result.exit_code != 0:
             # link.exe / lld-link report LNK errors on STDOUT, not stderr, so
-            # reporting stderr alone threw half the diagnosis away. Both
-            # streams are now merged into link_log by cmd.exe itself and read
-            # back from disk, and the full command is carried so a failed link
-            # is reproducible by hand.
-            var log_body = "<link log unreadable: {link_log}>"
-            if val body = file_read_nullable(link_log):
-                log_body = body
-            # Print the recovered bytes IMMEDIATELY. If the Err message is
-            # corrupted downstream, this dump is still in the build log.
+            # reporting stderr alone throws half the diagnosis away: merge
+            # both, and persist them next to the output so a failure stays
+            # diagnosable after the build log is rotated.
+            val log_body = "{result.stdout}{result.stderr}"
+            val link_log = "{output}.link.log"
+            file_write(link_log, log_body)
             print "[msvc-link] FAILED exit={result.exit_code}"
             print "[msvc-link] command: {cmd}"
             print "[msvc-link] log: {link_log}"

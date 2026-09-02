@@ -219,7 +219,21 @@ fn _cc_verify_compiles(cc: text) -> bool:
     shadowing MSYS2's), and the llc bug this lane started from was the same
     exists-but-never-executed probe shape. Never assume; execute."""
     val tmp = _get_temp_dir()
-    val pid = rt_getpid()
+    # getpid(), NOT the bare extern rt_getpid(): `rt_getpid` is not declared
+    # `extern fn` anywhere in this file, so under native codegen `{pid}`
+    # interpolated an opaque handle as the literal text `<value:0x34d4>`.
+    # `<` and `>` are ILLEGAL in a Windows filename, so rt_file_write_text
+    # below failed for EVERY candidate, _cc_verify_compiles returned false
+    # four times, and find_c_compiler() returned "" -- the real
+    # `reason=stage2-struct-receiver-failed` on the MSVC lane (measured
+    # 2026-09-02). The typed wrapper was already imported at the top of this
+    # file and simply unused. Third instance of the undeclared-extern
+    # silent-value class; see
+    # doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md.
+    # CROSS-PLATFORM: on Unix `<value:0x...>` is a legal filename, so the
+    # probe worked there; the numeric name is strictly cleaner with no
+    # behaviour change.
+    val pid = getpid()
     # Staging names, not durable artifacts: the write-temp-then-rename idiom's
     # temp half. Nothing here is ever reused across runs -- the probe MUST
     # execute every time (a cached verdict would call a compiler healthy after
@@ -233,8 +247,12 @@ fn _cc_verify_compiles(cc: text) -> bool:
     val src = "{tmp}/simple-cc-verify.{pid}.tmp.c"
     val obj = "{tmp}/simple-cc-verify.{pid}.tmp.o"
     if not rt_file_write_text(src, "int main(void) { return 0; }\n"):
-        if runtime_compile_trace_enabled():
-            print "[CC-VERIFY] {cc}: could not write probe source {src}"
+        # UNGATED, exactly like the REJECTED branch below and for the same
+        # reason its own comment already gives: gating this behind
+        # SIMPLE_COMPILER_TRACE meant the only lane that ever hits it never
+        # printed it. The resulting silence was read as "every `where` probe
+        # failed" and cost a full diagnosis cycle on 2026-09-02.
+        print "[CC-VERIFY] {cc}: REJECTED could not write probe source {src}"
         return false
     var args: [text] = []
     if _is_msvc_cc(cc):
