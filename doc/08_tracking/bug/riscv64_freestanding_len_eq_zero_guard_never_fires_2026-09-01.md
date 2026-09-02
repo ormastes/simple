@@ -64,3 +64,71 @@ either as the cause until the actual returned value has been printed.
 Print the raw 64-bit value that `.len()` returns in-guest, alongside the encoded
 literal `0` it is compared to, and instrument `baremetal_stubs.c`'s `rt_len`
 rather than the `.inc.c` copy.
+
+---
+
+# ROW 2 MEASUREMENT (2026-09-01, fourth session) — a live minimal trigger
+
+Row 2 (`buildrun_sanity_entry.spl`) did NOT reboot-loop for the reason the row-2
+summary assumed. Measured under real OpenSBI v1.4 `-bios fw_payload`:
+
+- The OpenSBI banner appears **ONCE**. The `[buildrun]` banner appears 67 times.
+  So the machine never resets; the GUEST re-enters `spl_start` repeatedly.
+- The cause is now named on serial: `[rv64] FATAL bump heap exhausted (low half)
+  - rv_alloc returned NULL`, i.e. `baremetal_stubs.c`'s half of
+  `__heap_start..__heap_end` is consumed and the caller stores through NULL.
+- It was SILENT before because the exhaustion report lived in `malloc()`, which
+  `rt_alloc`/`calloc`/`realloc` and every in-TU `rv_alloc(...)` call site bypass.
+  Moved to `rv_alloc()` in `arch/common/baremetal_bump_heap.h` behind
+  `RV_HEAP_EXHAUSTED_REPORT()` (default no-op for other includers).
+
+## It is a runaway, not a sizing problem
+
+Growing the heap 64M -> 384M (`__heap_size` in `arch/riscv64/linker.ld`, with
+`DEFINED(__heap_size) ? ... : 64M` in the common script so riscv32 is untouched)
+only cut the restarts 67 -> 10. 192 MiB is consumed parsing an 8-line program.
+
+With the program reduced to `fn main():\n    print "..."\n`, the WHOLE row runs
+green in-guest — frontend, `MirLowering.lower_module`, and
+`interpret_hir_module` — printing `BUILDRUN_SIMPLEOS_RISCV64_OK sum=42
+nonce=<nonce>` and `[buildrun] build-and-run row exited rc=0`, with **zero**
+16 MiB heap ticks. So MIR lowering in-guest is fine.
+
+## The trigger, bisected in-guest over 4 boots
+
+Successive `parse_and_build_module` calls on variants, in one boot each:
+
+| variant | result |
+|---|---|
+| `fn main():\n    print "x"\n` | ok |
+| `fn f(a):\n    print "x"\n` | ok |
+| `fn f(a: i64):\n    print "x"\n` | ok |
+| `fn f(a: i64, b: i64):\n    print "x"\n` | ok |
+| `fn f() -> i64:\n    print "x"\n` | ok |
+| `fn f(a: i64) -> i64:\n    print "x"\n` | ok |
+| `fn f():\n    1\n` | ok |
+| `fn f():\n    1 + 2\n` | ok |
+| `fn f() -> i64:\n    1\n` | ok |
+| **`fn f(a):\n    a\n`** | **never returns; consumes the whole arena** |
+| `fn f(a: i64) -> i64:\n    a\n` | never returns |
+
+Type annotations, return types, parameter count and arithmetic bodies are all
+INNOCENT. The single discriminating construct is a **statement that is a bare
+identifier expression**. `1` as a body is fine; `a` is not.
+
+This is freestanding-only: the same frontend parses bare identifiers constantly
+on the host.
+
+## Why this record
+
+A parse loop that never advances, allocating per iteration, is exactly the shape
+this record's fail-open predicts: `while i < toks.len()` and `toks.len() == 0`
+disagreeing lets a zero-progress branch repeat forever. That is a HYPOTHESIS,
+not yet measured — the guilty loop has not been located.
+
+## Reproduce
+
+`examples/09_embedded/simple_os/arch/riscv64/buildrun_sanity_entry.spl`, call
+`parse_and_build_module(_pp_preprocess_conditionals("fn f(a):\n    a\n"), p)`
+and boot row 2. Fast cycle: entry-only `native-build` ~60s, fw_payload + boot
+~4 min.
