@@ -1,0 +1,133 @@
+# @tag:in-development
+# WARNING: `@tag:in-development` is NOT honored at this tree — grep finds the
+# tag string only in a COMMENT (src/lib/nogc_sync_mut/test_runner/test_runner_types.spl:196);
+# nothing parses it and nothing sets the `in_development` counter. So this file
+# currently REDS a whole-suite run (7 examples, 4 failures). That is stated here
+# rather than hidden: the failures are the real, open interpreter defect in
+# doc/08_tracking/bug/self_rooted_chain_val_binding_clobbers_receiver_2026-09-01.md,
+# not a broken spec. Do not "fix" them by asserting the buggy behavior.
+"""
+Generalization spec — member access on `self` after a chain rooted at `self`,
+across return kinds and receiver depths.
+
+Sibling of test/01_unit/compiler/hir_self_chain_writeback_spec.spl (2026-09-01).
+
+Defect class: a call chain whose ROOT is `self` and whose tail returns a
+SCALAR STATUS (bool / i64 / text) can leave the frame's `self` bound to that
+scalar, turning every later `self.<field>` into
+
+    undefined field 'X': cannot access field on value of type 'bool'
+
+The fixed instance returned bool. This spec sweeps the neighbours the fix did
+not touch — other tail return types, a three-hop chain, a chain used directly
+in an `if` condition, a chain as a bare trailing return expression, and a
+chain inside a loop — because every one of those forms exists verbatim in
+src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl
+(lines 538, 581, 789, 888 use the `if <chain>:` form).
+
+MEASURED 2026-09-01 on seed md5 286f66b8615dce0e0da788f0550c4008: 7 examples,
+4 FAILURES. `val x = self.<field>.<call>().<call>()` clobbers `self` with the
+tail value — the error names the tail RETURN TYPE:
+    tail bool -> "cannot access field on value of type 'bool'"
+    tail i64  -> "cannot access field on value of type 'i64'"
+    tail text -> "unknown property or method 'marker' on String"
+The same chain used directly as an `if` condition, as a bare trailing return
+expression, or inside a loop does NOT clobber — the write-back is tied to
+binding the chain result to a `val`. That is why the .spl-level fix only had
+to split the three `val already_bound = ...` sites and left the four
+`if <chain>:` sites alone.
+
+Tagged @tag:in-development: these examples encode the CORRECT contract and are
+expected to fail until the interpreter defect is fixed. The production
+workaround is the split binding.
+
+Records:
+  doc/08_tracking/bug/mcp_native_build_hir_entry_env_get_nil_len_fatal_2026-09-01.md
+  doc/08_tracking/bug/self_rooted_chain_val_binding_clobbers_receiver_2026-09-01.md
+"""
+
+use std.spec.{describe, it, expect}
+
+class Leaf:
+    var n: i64 = 7
+    var label: text = "leaf"
+
+    me value() -> i64:
+        self.n
+
+    me name() -> text:
+        self.label
+
+    me positive() -> bool:
+        self.n > 0
+
+class Mid:
+    var leaf: Leaf = Leaf()
+
+    me get_leaf() -> Leaf:
+        self.leaf
+
+class Root:
+    var mid: Mid = Mid()
+    var marker: text = "root"
+    var count: i64 = 0
+
+    me tail_bool() -> text:
+        val flag = self.mid.get_leaf().positive()
+        return self.marker
+
+    me tail_int() -> text:
+        val v = self.mid.get_leaf().value()
+        return self.marker
+
+    me tail_text() -> text:
+        val t = self.mid.get_leaf().name()
+        return self.marker
+
+    me in_condition() -> text:
+        if self.mid.get_leaf().positive():
+            return self.marker
+        "unreached"
+
+    me trailing_expression() -> bool:
+        self.mid.get_leaf().positive()
+
+    me in_loop() -> i64:
+        var i = 0
+        while i < 4:
+            if self.mid.get_leaf().positive():
+                self.count = self.count + 1
+            i = i + 1
+        self.count
+
+describe "self stays a record after a self-rooted chain, whatever the tail returns":
+
+    it "tail returns bool (the fixed shape)":
+        var r = Root()
+        expect(r.tail_bool()).to_equal("root")
+
+    it "tail returns i64":
+        var r = Root()
+        expect(r.tail_int()).to_equal("root")
+
+    it "tail returns text":
+        var r = Root()
+        expect(r.tail_text()).to_equal("root")
+
+    it "chain used directly as an if condition":
+        var r = Root()
+        expect(r.in_condition()).to_equal("root")
+
+    it "chain as a bare trailing return expression":
+        var r = Root()
+        expect(r.trailing_expression()).to_equal(true)
+
+    it "chain re-evaluated in a loop, with a self mutation between hops":
+        var r = Root()
+        expect(r.in_loop()).to_equal(4)
+
+    it "the receiver is still usable from the caller afterwards":
+        var r = Root()
+        val ignored = r.tail_bool()
+        expect(r.marker).to_equal("root")
+        expect(r.mid.leaf.n).to_equal(7)
