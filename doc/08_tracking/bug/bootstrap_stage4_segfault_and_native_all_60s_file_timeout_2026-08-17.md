@@ -1,6 +1,31 @@
 # Stage 4 segfaults in load_sources; native_all's embedded CLI defaults per-file timeout to 60s (2026-08-17)
 
-Status: OPEN (P1)
+Status: OPEN (P1) for defects 1 and 3. **Defect 2 (the 60s per-file timeout) is
+RESOLVED — re-verified 2026-09-02 against `origin/main` @ `1b76db1d6c3`.**
+
+### Defect 2 closure evidence (2026-09-02, source inspection)
+
+The record's own recommended fix ("align native_all's default with the
+library's 300s, *or have it inherit rather than re-declare*") is exactly what
+landed — the re-declaration is gone and there is now a single shared constant:
+
+- `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:443` —
+  `pub const DEFAULT_NATIVE_FILE_TIMEOUT_SECS: u64 = 300;` (sole definition;
+  `/usr/bin/grep -rn "const DEFAULT_NATIVE_FILE_TIMEOUT_SECS" src/compiler_rust/`
+  returns this one line)
+- `mod.rs:451` — the library config default is `DEFAULT_NATIVE_FILE_TIMEOUT_SECS`
+- `src/compiler_rust/native_all/src/lib.rs:177` — `let mut timeout =
+  DEFAULT_NATIVE_FILE_TIMEOUT_SECS;` (was the hardcoded `let mut timeout: u64 =
+  60;` this record names), and `:218` prints the same constant in `--help`
+
+A stage-2/stage-3 binary linking `libsimple_native_all.a` therefore now gets
+300s, not 60s. The bootstrap trap ("a 60s default that only the self-hosted lane
+ever sees") is closed at the source level.
+
+Not re-measured end to end: proving it on a live stage-3 `native-build` needs a
+bootstrap cycle, out of scope for this pass. Defects 1 (stage-4 `load_sources`
+SIGSEGV) and 3 (valid comparison parsed as a generic argument list) are
+untouched and need that same cycle.
 
 First end-to-end hand-driven bootstrap of seed -> stage2 -> stage3 -> stage4 in
 an isolated worktree (`/mnt/data/worktrees/simple-phase2`, detached at
