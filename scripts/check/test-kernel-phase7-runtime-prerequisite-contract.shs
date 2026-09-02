@@ -130,6 +130,7 @@ grep -Fq fixture-output "$work/captured.env"
 }
 
 for trigger in scripts/check/prepare-kernel-phase7-runtime.shs \
+  scripts/check/prepare-kernel-phase7-llvm-toolchain.shs \
   scripts/check/run-kernel-phase7-runtime-prerequisite.shs \
   scripts/check/lib/kernel-phase7-runtime-bootstrap-commands.shs \
   scripts/check/test-kernel-phase7-runtime-prerequisite-contract.shs \
@@ -138,4 +139,37 @@ for trigger in scripts/check/prepare-kernel-phase7-runtime.shs \
   scripts/check/lib/bootstrap-stage3-provenance.shs; do
   grep -Fq -- "- '$trigger'" "$root/.github/workflows/kernel-phase7-qualification.yml"
 done
+
+llvm_fixture=$work/llvm
+mkdir -p "$llvm_fixture/bin" "$llvm_fixture/lib" "$work/fake-bin"
+cat >"$llvm_fixture/bin/llvm-config" <<EOF
+#!/bin/sh
+case "\${1:-}" in
+  --version) echo 18.1.8 ;;
+  --prefix) echo "$llvm_fixture" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$llvm_fixture/bin/llvm-config"
+: >"$llvm_fixture/lib/libLLVM.dylib"
+cat >"$work/fake-bin/brew" <<EOF
+#!/bin/sh
+[ "\${1:-}" = --prefix ] && [ "\${2:-}" = llvm@18 ] || exit 1
+echo "$llvm_fixture"
+EOF
+chmod +x "$work/fake-bin/brew"
+llvm_receipt=$work/llvm.env
+llvm_exports=$work/llvm.github-env
+PATH="$work/fake-bin:$PATH" sh "$root/scripts/check/prepare-kernel-phase7-llvm-toolchain.shs" \
+  "$llvm_receipt" "$llvm_exports" >/dev/null
+grep -Fxq llvm_major=18 "$llvm_receipt"
+grep -Fxq LLVM_VERSIONS=18 "$llvm_exports"
+sed 's/echo 18\.1\.8/echo 19.1.0/' "$llvm_fixture/bin/llvm-config" >"$work/llvm-config-wrong"
+mv "$work/llvm-config-wrong" "$llvm_fixture/bin/llvm-config"
+chmod +x "$llvm_fixture/bin/llvm-config"
+if PATH="$work/fake-bin:$PATH" sh "$root/scripts/check/prepare-kernel-phase7-llvm-toolchain.shs" \
+    "$work/wrong-llvm.env" "$work/wrong-llvm.github-env" >/dev/null 2>&1; then
+  echo 'FAIL: wrong LLVM version admitted' >&2
+  exit 1
+fi
 echo KERNEL_PHASE7_RUNTIME_PREREQUISITE_MUTATION_PASS
