@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
 . "$root/scripts/check/lib/kernel-phase7-runtime-admission.shs"
+. "$root/scripts/check/lib/kernel-phase7-runtime-bootstrap-commands.shs"
 work=$(mktemp -d "${TMPDIR:-/tmp}/phase7-runtime-contract.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 runtime=$work/simple
@@ -76,7 +77,61 @@ KERNEL_PHASE7_REQUIRED_TOOLS=phase7-tool-that-does-not-exist reject admit
 rm -f "$provenance"
 reject admit
 
+command_log=$work/commands.log
+fake_runner=$work/fake-runner
+cat >"$fake_runner" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$KERNEL_PHASE7_COMMAND_LOG"
+EOF
+chmod +x "$fake_runner"
+KERNEL_PHASE7_COMMAND_LOG=$command_log
+export KERNEL_PHASE7_COMMAND_LOG
+kernel_phase7_bootstrap_stage2 "$fake_runner" "$root" "$work/output"
+kernel_phase7_produce_stage4_admission "$fake_runner" "$root" "$work/output" \
+  "$work/output/stage2/host/simple" "$work/stage4.env"
+kernel_phase7_bootstrap_stage4 "$fake_runner" "$root" "$work/output" "$work/stage4.env"
+grep -Fq -- '--stop-after-stage2' "$command_log"
+grep -Fq -- '--output='"$work/output" "$command_log"
+grep -Fq -- '--target=//bootstrap:stage4' "$command_log"
+grep -Fq -- '--reason=self-host-convergence-check' "$command_log"
+grep -Fq -- '--bootstrap-output='"$work/output" "$command_log"
+grep -Fq -- '--bootstrap-receipt='"$work/stage4.env" "$command_log"
+grep -Fq -- '--full-cli' "$command_log"
+if grep -Fq -- '--output-dir=' "$command_log"; then
+  echo 'FAIL: obsolete bootstrap option constructed' >&2
+  exit 1
+fi
+
+wrapper_fixture=$work/wrapper
+mkdir -p "$wrapper_fixture/scripts/check"
+cp "$root/scripts/check/run-kernel-phase7-runtime-prerequisite.shs" \
+  "$wrapper_fixture/scripts/check/"
+cat >"$wrapper_fixture/scripts/check/prepare-kernel-phase7-runtime.shs" <<'EOF'
+#!/bin/sh
+echo fixture-output
+exit 23
+EOF
+chmod +x "$wrapper_fixture/scripts/check/prepare-kernel-phase7-runtime.shs"
+: >"$work/github-env"
+set +e
+GITHUB_ENV=$work/github-env sh \
+  "$wrapper_fixture/scripts/check/run-kernel-phase7-runtime-prerequisite.shs" \
+  ignored ignored "$work/captured.env" >"$work/wrapper.out" 2>&1
+wrapper_rc=$?
+set -e
+[ "$wrapper_rc" -eq 23 ] || {
+  echo "FAIL: prerequisite wrapper masked exit 23 as $wrapper_rc" >&2
+  exit 1
+}
+grep -Fq fixture-output "$work/captured.env"
+[ ! -s "$work/github-env" ] || {
+  echo 'FAIL: failed prerequisite polluted GITHUB_ENV' >&2
+  exit 1
+}
+
 for trigger in scripts/check/prepare-kernel-phase7-runtime.shs \
+  scripts/check/run-kernel-phase7-runtime-prerequisite.shs \
+  scripts/check/lib/kernel-phase7-runtime-bootstrap-commands.shs \
   scripts/check/test-kernel-phase7-runtime-prerequisite-contract.shs \
   scripts/check/lib/kernel-phase7-runtime-admission.shs \
   scripts/check/lib/stage4-candidate-provenance.shs \
