@@ -1,0 +1,108 @@
+# Reproducing spec for the Windows MSVC Stage 2 LNK2019 regression (2026-09-02).
+#
+# `7b876e89edd` generated thin `std.nogc_sync_mut.sffi.*` wrappers from every
+# `class: same` row of scripts/check/rt_alias_map.sdn. Five of those rows named a
+# symbol that has NO native definition -- it exists only as an interpreter extern
+# (`fn(&[Value])` in src/compiler_rust/compiler/src/interpreter_extern/), or only
+# in baremetal kernel C -- so the generated `extern fn rt_X` in platform.spl was
+# undefined at link time. lld tolerates undefined symbols; MSVC link.exe emits
+# LNK2019 + LNK1120 and Stage 2 never produces simple.exe.
+#
+# The invariant this pins: a wrapper that is actually EMITTED must name a symbol
+# that is actually LINKABLE. `class: missing` rows generate no wrapper and are
+# therefore exempt -- that is the whole point of reclassifying the five.
+
+use std.test.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+val RT: text = "rt" + "_"
+
+# The five symbols that produced LNK2019 in
+# build/bootstrap/logs/x86_64-pc-windows-msvc/stage2-native-build.log:1392-1397.
+fn regressed_symbols() -> [text]:
+    [
+        RT + "host_wm_client_poll_event",
+        RT + "host_wm_client_request",
+        RT + "mem_attr_report",
+        RT + "mem_harden_check",
+        RT + "mem_read_u8",
+    ]
+
+fn alias_map() -> text:
+    rt_file_read_text("scripts/check/rt_alias_map.sdn") ?? ""
+
+fn platform_wrappers() -> text:
+    rt_file_read_text("src/lib/nogc_sync_mut/sffi/platform.spl") ?? ""
+
+# The class recorded for `sym` in the alias map, or "" when the row is absent.
+fn class_of(map_text: text, sym: text) -> text:
+    var cls: text = ""
+    var in_entry: bool = false
+    for line in map_text.split("\n"):
+        if line == "    " + sym + ":":
+            in_entry = true
+        else:
+            if line.starts_with("    ") and not line.starts_with("     "):
+                in_entry = false
+            if in_entry and line.starts_with("      class: "):
+                if cls == "":
+                    cls = line.replace("      class: ", "")
+    cls
+
+describe "rt_alias_map: the five LNK2019 symbols are no longer class: same":
+    it "records each regressed symbol as missing, not same":
+        val map_text = alias_map()
+        expect(map_text.len() > 0).to_equal(true)
+        for sym in regressed_symbols():
+            expect(class_of(map_text, sym)).to_equal("missing")
+
+    it "keeps the genuinely backed neighbours as same":
+        val map_text = alias_map()
+        # rt_mem_harden_check_native IS defined (src/runtime/runtime_memory.c:250)
+        # and rt_mem_attr_set_owner / rt_mem_attr_enabled are real exports, so the
+        # reclassification must not have been applied bluntly to the whole family.
+        expect(class_of(map_text, RT + "mem_harden_check_native")).to_equal("same")
+        expect(class_of(map_text, RT + "mem_attr_set_owner")).to_equal("same")
+
+describe "sffi platform wrappers declare no unbacked extern":
+    it "no longer declares an extern for any of the five phantom symbols":
+        val src = platform_wrappers()
+        expect(src.len() > 0).to_equal(true)
+        for sym in regressed_symbols():
+            expect(src.contains("extern fn " + sym + "(")).to_equal(false)
+
+    it "still declares the backed memory externs it is supposed to provide":
+        val src = platform_wrappers()
+        expect(src).to_contain("extern fn " + RT + "mem_harden_check_native() -> i64")
+        expect(src).to_contain("extern fn " + RT + "mem_attr_enabled() -> i64")
+
+describe "the phantom symbols are interpreter-only or baremetal-only":
+    it "shows host_wm and mem_attr_report exist only as interpreter externs":
+        val host_wm = rt_file_read_text("src/compiler_rust/compiler/src/interpreter_extern/host_wm_bridge.rs") ?? ""
+        val memory = rt_file_read_text("src/compiler_rust/compiler/src/interpreter_extern/memory.rs") ?? ""
+        # Interpreter registration shape: `pub fn rt_x(args: &[Value])` -- NOT an
+        # `extern "C"` export, so it contributes no linkable symbol.
+        expect(host_wm).to_contain("pub fn " + RT + "host_wm_client_poll_event(args: &[Value])")
+        expect(host_wm).to_contain("pub fn " + RT + "host_wm_client_request(args: &[Value])")
+        expect(memory).to_contain("pub fn " + RT + "mem_attr_report(args: &[Value])")
+        expect(memory).to_contain("pub fn " + RT + "mem_harden_check(args: &[Value])")
+        expect(host_wm.contains("extern \"C\" fn " + RT + "host_wm_client_request")).to_equal(false)
+        expect(memory.contains("extern \"C\" fn " + RT + "mem_harden_check(")).to_equal(false)
+
+    it "shows the runtime exports differently-named, differently-shaped functions":
+        val heap = rt_file_read_text("src/compiler_rust/runtime/src/value/heap.rs") ?? ""
+        val mem_c = rt_file_read_text("src/runtime/runtime_memory.c") ?? ""
+        # rt_mem_attr_report_print is NOT a rename of rt_mem_attr_report:
+        # (i64) -> unit versus (i64) -> text. A `class: same` alias is impossible.
+        expect(heap).to_contain("pub extern \"C\" fn " + RT + "mem_attr_report_print(n: i64) {")
+        expect(heap.contains("pub extern \"C\" fn " + RT + "mem_attr_report(")).to_equal(false)
+        # rt_mem_harden_check_native IS the real symbol; the un-suffixed name is not.
+        expect(mem_c).to_contain("int64_t " + RT + "mem_harden_check_native(void) {")
+
+    it "shows rt_mem_read_u8 defined only in baremetal kernel C":
+        val starfive = rt_file_read_text("src/os/kernel/arch/riscv64/starfive/boot/starfive_runtime.c") ?? ""
+        expect(starfive).to_contain(RT + "mem_read_u8(spl_u64 address)")
+        # Nothing in the hosted runtime defines it, so a hosted wrapper cannot link.
+        val mem_c = rt_file_read_text("src/runtime/runtime_memory.c") ?? ""
+        expect(mem_c.contains(RT + "mem_read_u8")).to_equal(false)

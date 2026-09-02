@@ -1,0 +1,154 @@
+# Generalizing spec: a `class: same` alias-map row that names a symbol with no
+# native definition must be DETECTED, whatever the symbol is.
+#
+# The reproducing spec next door pins the five specific rows that broke Windows
+# MSVC Stage 2 (LNK2019/LNK1120). This one pins the RULE, so the next bulk
+# rewrite of scripts/check/rt_alias_map.sdn cannot reintroduce the class of
+# defect under different names. It is hermetic: it runs the classifier over
+# fixture text, never over the repository, so it fails for one reason only.
+#
+# Symbol universe definition (the discriminator that the original --map-verify
+# 488/0 got wrong): a symbol is NATIVELY BACKED iff it is exported as
+# `extern "C" fn rt_X` from the Rust runtime, or defined in src/runtime C.
+# An interpreter registration (`pub fn rt_X(args: &[Value])`) is NOT backing --
+# it never reaches the linker. Nor is a baremetal-only kernel C definition.
+
+use std.test.*
+
+val RT: text = "rt" + "_"
+
+# --- the classifier under test -------------------------------------------
+
+# Symbols an alias map declares `class: same`, in file order.
+fn same_class_symbols(map_text: text) -> [text]:
+    var out: [text] = []
+    var current: text = ""
+    for line in map_text.split("\n"):
+        if line.starts_with("    ") and not line.starts_with("     ") and line.ends_with(":"):
+            current = line.trim()
+            current = current.replace(":", "")
+        if line == "      class: same" and current != "":
+            out.push(current)
+    out
+
+# Native-linkable symbols extracted from runtime sources.
+fn native_universe(rust_src: text, c_src: text) -> [text]:
+    var out: [text] = []
+    for line in rust_src.split("\n"):
+        val marker = "extern \"C\" fn " + RT
+        if line.contains(marker):
+            val tail = line.split(marker)[1]
+            out.push(RT + tail.split("(")[0])
+    for line in c_src.split("\n"):
+        if line.contains(RT) and line.ends_with("{"):
+            val tail = line.split(RT)[1]
+            out.push(RT + tail.split("(")[0])
+    out
+
+# Every `class: same` symbol absent from the universe -- the latent LNK2019 set.
+fn unbacked_same_entries(map_text: text, universe: [text]) -> [text]:
+    var out: [text] = []
+    for sym in same_class_symbols(map_text):
+        var found: bool = false
+        for known in universe:
+            if known == sym:
+                found = true
+        if not found:
+            out.push(sym)
+    out
+
+# --- fixtures -------------------------------------------------------------
+
+fn joined(lines: [text]) -> text:
+    lines.join("\n") + "\n"
+
+# Two backed rows, one deliberately wrong row (a symbol that exists only as an
+# interpreter extern), and one `missing` row that must be ignored.
+fn fixture_map() -> text:
+    joined([
+        "rt_alias_map:",
+        "  schema: rt-alias-map/1",
+        "  entries:",
+        "    " + RT + "good_rust:",
+        "      sites: 4",
+        "      class: same",
+        "      module: std.nogc_sync_mut.sffi.platform",
+        "      fn: good_rust",
+        "      decl: \"() -> i64\"",
+        "    " + RT + "good_c:",
+        "      sites: 7",
+        "      class: same",
+        "      module: std.nogc_sync_mut.sffi.platform",
+        "      fn: good_c",
+        "      decl: \"() -> i64\"",
+        "    " + RT + "phantom:",
+        "      sites: 13",
+        "      class: same",
+        "      module: std.nogc_sync_mut.sffi.platform",
+        "      fn: phantom",
+        "      decl: \"() -> i64\"",
+        "    " + RT + "already_missing:",
+        "      sites: 5",
+        "      class: missing",
+        "      note: \"no alias could be generated\"",
+        "    " + RT + "a_provider:",
+        "      sites: 9",
+        "      class: provider",
+        "      reason: \"device/MMIO primitive\"",
+    ])
+
+fn fixture_rust() -> text:
+    joined([
+        "#[no_mangle]",
+        "pub extern \"C\" fn " + RT + "good_rust() -> i64 { 0 }",
+        "// An interpreter registration is NOT a linkable export:",
+        "pub fn " + RT + "phantom(args: &[Value]) -> Result<Value, CompileError> { todo!() }",
+    ])
+
+fn fixture_c() -> text:
+    joined([
+        "int64_t " + RT + "good_c(void) {",
+        "    return 0;",
+        "}",
+    ])
+
+# --- the contract ---------------------------------------------------------
+
+describe "alias-map backing check: universe extraction":
+    it "counts an extern \"C\" export and a C definition, but not an interpreter fn":
+        val u = native_universe(fixture_rust(), fixture_c())
+        expect(u.len()).to_equal(2)
+        expect(u.contains(RT + "good_rust")).to_equal(true)
+        expect(u.contains(RT + "good_c")).to_equal(true)
+        expect(u.contains(RT + "phantom")).to_equal(false)
+
+describe "alias-map backing check: class selection":
+    it "considers only class: same rows":
+        val syms = same_class_symbols(fixture_map())
+        expect(syms.len()).to_equal(3)
+        expect(syms.contains(RT + "already_missing")).to_equal(false)
+        expect(syms.contains(RT + "a_provider")).to_equal(false)
+
+describe "alias-map backing check: detection":
+    it "flags a deliberately wrong class: same entry and nothing else":
+        val bad = unbacked_same_entries(fixture_map(), native_universe(fixture_rust(), fixture_c()))
+        expect(bad.len()).to_equal(1)
+        expect(bad[0]).to_equal(RT + "phantom")
+
+    it "reports clean when every class: same entry is natively backed":
+        val fixed = fixture_map().replace(
+            "    " + RT + "phantom:\n      sites: 13\n      class: same",
+            "    " + RT + "phantom:\n      sites: 13\n      class: missing")
+        val bad = unbacked_same_entries(fixed, native_universe(fixture_rust(), fixture_c()))
+        expect(bad.len()).to_equal(0)
+
+    it "an interpreter-only symbol never counts as backing, however many times it appears":
+        # This is exactly how the real regression hid: the symbol was findable by
+        # grep in src/compiler_rust and therefore looked present.
+        val rust = fixture_rust() + joined([
+            "// " + RT + "phantom is mentioned again here, and registered:",
+            "    (\"" + RT + "phantom\", memory::" + RT + "phantom),",
+        ])
+        val bad = unbacked_same_entries(fixture_map(), native_universe(rust, fixture_c()))
+        expect(bad.len()).to_equal(1)
+        expect(bad[0]).to_equal(RT + "phantom")
