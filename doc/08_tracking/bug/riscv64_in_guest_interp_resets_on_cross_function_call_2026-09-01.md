@@ -1,5 +1,21 @@
 # riscv64 in-guest: the guest RESETS while executing a cross-function call
 
+> **RESOLVED 2026-09-02 — this record's own defect is fixed.** The "reset" was
+> never a reset and, once the trap vector landed, was measured as an S-mode
+> `scause=0x5` load access fault. Root cause: the riscv64 freestanding
+> `rt_unwrap_or_trap` never unwrapped, so `.unwrap()` handed
+> `call_hir_function` an `Option` WRAPPER instead of the `HirFunction` payload.
+> Fixed in `b655e343cdb`; pinned by
+> `scripts/check/check-rv64-unwrap-or-trap-unwraps.shs` (RED against that fix's
+> own parent, GREEN after). Verified in the real `kernel.elf` by `nm` +
+> `llvm-objdump`, and in-guest by the fault DISAPPEARING from the serial log.
+>
+> **The gate row is still RED for a DIFFERENT, newly-exposed reason**
+> (`invalid operands for +`), tracked in the handoff section at the end of this
+> file. Do not read that red as evidence against the fix above: the row now
+> executes the callee's body, which the fault previously made unreachable.
+
+
 - Status: **OPEN** — the current blocker for goal item 1 row 2.
 - Date: 2026-09-01
 - Lane: `scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`
@@ -433,3 +449,55 @@ the same family as the six already fixed on this branch. The cheapest
 discriminator is to print the RAW 64-bit words of both operands at the point `+`
 rejects them — raw hex, never a comparison result, and never an integer
 interpolated into Simple text.
+
+## HANDOFF — the next row-2 blocker: `invalid operands for +`
+
+Bounded static pass done; NOT decisive, so it is written up rather than guessed
+at. The next lane should run the probe below before changing anything.
+
+**Where the error comes from.** `src/compiler/70.backend/backend/interpreter_binop.spl:27-54`,
+the `HirBinOp.Add` arm. It matches `left` against `Value.Int` / `Value.Float` /
+`Value.String` and falls through to `Err("invalid operands for +")` at `:53` for
+anything else (and at `:38`/`:46`/`:52` when `left` matched but `right` did not).
+The message is the SAME string in all four places, so **the serial line does not
+say which operand was wrong, or whether either matched at all.** That ambiguity
+must be resolved first — do not assume both operands are bad.
+
+**What is already known.** The program is `add(40, 2)` with `a + b` as the body,
+so both operands should be `Value.Int`. The values reach the body via
+`call_hir_function`'s parameter binding (`interpreter_calls.spl:202-213`:
+`ctx.env.define(param.name, args[i])`) and are read back by name from the env.
+
+**What was ruled out, and why it matters.** This is NOT a general failure of
+`Value` enum matching in-guest: row 1 is green and evaluates `print` over
+`Value.String`, and `interpret_hir_module` successfully matches `Ok(_)` on its
+result. So a global construct-vs-match discriminant mismatch (the defect family
+of the `rt_unwrap_or_trap` fix, where ordinal `Some=0` and the 32-bit hash
+`4053299545` are both live encodings) would have broken row 1 too. Whatever this
+is, it is specific to values that travelled the ARGUMENT + env-binding path.
+
+**Candidates, not yet discriminated:**
+1. the argument `Value`s are constructed by the caller
+   (`interpreter_expr.spl:311` region) in a form the callee's match rejects;
+2. `ctx.env.define` / lookup returns the value ANY-erased, so field/variant
+   resolution picks the wrong index — the hazard `interpreter.spl:150-178` and
+   `interpreter_calls.spl:211-212` both document by name for other paths and
+   cure with a typed local rebind (`val v: Value = ...`);
+3. a freestanding-runtime arm missing in the same family as the seven already
+   fixed on this branch.
+
+**The probe that separates them, and its constraints.** Print, at the moment the
+Add arm is entered, the RAW 64-bit word of BOTH operands plus which of the four
+error sites fired. Constraints learned the hard way in this lane:
+raw hex only, never a boolean comparison result (comparisons have lied on this
+target); never interpolate an integer into Simple text in a freestanding entry
+file (that emits `rt_raw_i64_to_string`, which this image does not provide, and
+the link dies) — print via a C helper reusing the trap vector's nibble loop.
+`itrace` probes already exist in this arm (`[EBO] Add left=Int {l}`) but are
+level-gated AND interpolate, so they are not usable as-is here.
+
+Decode the raw words with this TU's tags: low 3 bits `0`=int (`>>3`),
+`1`=heap (then `hdr.type` at offset 0: 1=string, 2=array, 7=enum, 11=dict),
+`3`=special (`3`=nil). An operand that reads as a `HEAP_ENUM` when `Value.Int`
+was expected is candidate 1 or 2; a raw `TAG_INT` word that still fails to match
+is candidate 3.
