@@ -107,4 +107,86 @@ for transferred_owner in $owners; do
 done
 test "$owner_count" -eq 25
 
+consumers='src/compiler/35.semantics/layer_call_wiring.spl
+src/compiler/35.semantics/interface/compile_interface.spl
+src/compiler/35.semantics/interface/module_identity.spl
+src/compiler/70.backend/backend/static_backend_registry.spl
+src/compiler/80.driver/action_graph/artifact_service_bridge.spl
+src/compiler/80.driver/action_graph/demand_compile_integration.spl
+src/compiler/80.driver/action_graph/scc_publication_ownership.spl
+src/compiler/80.driver/cache/package_index_route.spl
+src/compiler/80.driver/cache/package_archive_cache.spl
+src/compiler/80.driver/demand_mir_evidence_builder.spl
+src/compiler/80.driver/demand_mir_integration.spl
+src/compiler/80.driver/driver_api_project_build.spl
+src/compiler/80.driver/driver_source_pipeline_loading.spl
+src/compiler/80.driver/perf/demand_compile_counters.spl
+src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl'
+
+resolve_repo_module() {
+    imported_module=$1
+    case "$imported_module" in
+        std.*|lib.*)
+            module_relative="src/lib/$(printf '%s' "$imported_module" | cut -d. -f2- | tr . /)"
+            ;;
+        common.*)
+            module_relative="src/lib/common/$(printf '%s' "$imported_module" | cut -d. -f2- | tr . /)"
+            ;;
+        compiler.*)
+            module_rest=$(printf '%s' "$imported_module" | cut -d. -f2-)
+            module_layer=$(printf '%s' "$module_rest" | cut -d. -f1)
+            module_tail=$(printf '%s' "$module_rest" | cut -d. -f2- -s | tr . /)
+            module_directory=
+            for module_candidate in src/compiler/[0-9][0-9]."$module_layer" src/compiler/"$module_layer"; do
+                if test -d "$module_candidate"; then
+                    module_directory=$module_candidate
+                    break
+                fi
+            done
+            test -n "$module_directory" || return 1
+            module_relative="$module_directory${module_tail:+/$module_tail}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    for module_owner_candidate in \
+        "$module_relative.spl" \
+        "$module_relative/__init__.spl" \
+        "$module_relative/mod.spl"
+    do
+        if test -f "$module_owner_candidate"; then
+            printf '%s\n' "$module_owner_candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+consumer_count=0
+for consumer in $consumers; do
+    test -f "$consumer"
+    consumer_count=$((consumer_count + 1))
+    sed -n 's/^[[:space:]]*\(export[[:space:]]*\)\?use[[:space:]]*\(lazy[[:space:]]*\)\?\([A-Za-z0-9_.]*\).*/\3/p' "$consumer" |
+        sed 's/\.$//' |
+        while IFS= read -r imported_module; do
+            imported_owner=$(resolve_repo_module "$imported_module" 2>/dev/null || true)
+            if test -z "$imported_owner"; then
+                imported_parent=${imported_module%.*}
+                test "$imported_parent" != "$imported_module" &&
+                    imported_owner=$(resolve_repo_module "$imported_parent" 2>/dev/null || true)
+            fi
+            test -n "$imported_owner" && test -f "$imported_owner" || {
+                echo "FAIL — unresolved consumer import $imported_module in $consumer"
+                exit 1
+            }
+        done
+done
+test "$consumer_count" -eq 15
+
+cargo test --quiet \
+    --manifest-path src/compiler_rust/parser/Cargo.toml \
+    --test kernel_relocation_consumers_strict_parse
+
 echo "KERNEL_RELOCATION_MODULE_RESOLUTION_PASS"
