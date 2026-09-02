@@ -30,11 +30,15 @@ the real value or a controlled failure. Simple's nil sentinel is raw `3`, not
 
 Fixed in PR #291 (branch `work/stage3-segv-unwrap`, commit `bb2f1c380ee`,
 "fix(mir): stolen `unwrap` segfaults record_external_layout_reference — the
-real Stage-3 blocker") by replacing the bare `unwrap()` with an explicit
-`.?` presence guard (`if not symbol_info.?: return`) followed by `.unwrap()`
-only after the guard, and a `match` on Some/nil at the second call site in the
-same function. `.?` presence tests are immune to the stolen-unwrap defect
-because they never go through the hijacked binding.
+real Stage-3 blocker") by replacing the bare `unwrap()` entirely: an initial
+`.?` presence guard (`if not symbol_info.?: return`) is followed not by
+`.unwrap()` but by a `match` on `Some`/`nil`, dispatching the resolved value
+to a new `record_external_layout_reference_resolved` helper without ever
+calling `unwrap`. Calling no `unwrap()` at all — guard or no guard — is what
+makes the fix safe: the vulnerable pattern earlier in this record is a `.?`
+guard *followed by* `.unwrap()`, which the stolen binding still intercepts
+regardless of the guard. `match`/`case Some` is immune because it dispatches
+no method name, so there is nothing for the stolen `unwrap` binding to hijack.
 
 **Confirmed, not assumed:** subsequent Stage-3 runs on the fixed tree exit with
 status **1** (a normal, attributable failure/success code), not 255, and
