@@ -19,11 +19,16 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Vec<HirExpr>> {
-        let mut out = Vec::with_capacity(args.len());
-        for arg in args {
-            out.push(self.lower_expr(&arg.value, ctx)?);
-        }
-        Ok(out)
+        let capability_checkpoint = self.capability_env.clone();
+        let result = (|| {
+            let mut out = Vec::with_capacity(args.len());
+            for arg in args {
+                out.push(self.lower_expr(&arg.value, ctx)?);
+            }
+            Ok(out)
+        })();
+        self.capability_env = capability_checkpoint;
+        result
     }
 
     /// Helper to lower builtin function calls with consistent handling

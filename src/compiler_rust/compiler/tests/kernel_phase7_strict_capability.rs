@@ -12,6 +12,21 @@ const FILES: [&str; 6] = [
     "src/compiler/80.driver/driver_source_pipeline_loading.spl",
 ];
 
+fn lower_source(source: &str) -> Result<(), String> {
+    let ast = Parser::new(source).parse().map_err(|error| format!("parse: {error:?}"))?;
+    hir::lower(&ast).map(|_| ()).map_err(|error| format!("hir: {error:?}"))
+}
+
+#[test]
+fn call_scoped_exclusive_loans_end_at_the_call_boundary() {
+    let sequential = "fn mutate(value: &mut i64):\n    value = value + 1\n\nfn probe():\n    var value = 0\n    mutate(&mut value)\n    mutate(&mut value)\n";
+    assert!(lower_source(sequential).is_ok(), "sequential call-scoped loans must not alias");
+
+    let overlapping = "fn pair(left: &mut i64, right: &mut i64):\n    pass\n\nfn probe():\n    var value = 0\n    pair(&mut value, &mut value)\n";
+    let error = lower_source(overlapping).expect_err("same-call exclusive aliases must fail closed");
+    assert!(error.contains("AliasingViolation"), "same-call failure must reach capability checking: {error}");
+}
+
 #[test]
 fn phase7_units_pass_strict_capability_lowering() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
