@@ -600,6 +600,17 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 # spl_dlsym/spl_dlclose. Compile runtime_native.c's per-lane
                 # fallback copies out so exactly ONE definition ships.
                 comp_args.push("/DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
+                # This composition sets SIMPLE_CORE_C_STANDALONE but does NOT
+                # include runtime_legacy_core.c (see include_stage4_legacy_compat
+                # below), and legacy_core.c is the sole owner of
+                # spl_thread_cpu_count under that define -- so without this the
+                # link fails with `runtime_thread.obj : error LNK2019:
+                # unresolved external symbol spl_thread_cpu_count referenced in
+                # function rt_pool_get_parallelism` (measured 2026-09-02). State
+                # the ownership explicitly rather than letting runtime_thread.c
+                # guess from the platform.
+                if not include_stage4_legacy_compat:
+                    comp_args.push("/DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1")
         else:
             # GCC/Clang flags (-fPIC only on Unix, not needed on Windows)
             # -ffunction-sections -fdata-sections: emit each function/data in its own
@@ -623,6 +634,10 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 # spl_dlsym/spl_dlclose. Compile runtime_native.c's per-lane
                 # fallback copies out so exactly ONE definition ships.
                 comp_args.push("-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
+                # Same ownership statement as the MSVC branch above. Inert
+                # wherever runtime_legacy_core.c IS in the list.
+                if not include_stage4_legacy_compat:
+                    comp_args.push("-DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1")
             if target.starts_with("aarch64-") or (target == "host" and host_arch() == "aarch64"):
                 comp_args.push("-mno-outline-atomics")
             # Explicit opt-in: the resulting binary requires an RVV-capable CPU.
