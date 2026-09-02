@@ -1,9 +1,36 @@
-# Stage 3 stalls in a quadratic `rt_transient_heap_promote`, not a hang
+# Stage 3 stalls in `rt_transient_heap_promote` — one enormous scan, NOT quadratic
+
+> **CORRECTION 2026-09-02 (same day, before any fix was attempted).** This record
+> originally claimed the cost was O(n^2) because `rt_transient_heap_promote` was
+> "called once per module surface". **That is wrong.** There is exactly ONE call
+> site — `driver_source_pipeline_parsing.spl:510` — inside
+> `parse_all_streaming_surfaces_in_place_impl`, which by its own name and its two
+> callers (`:549`, `:554`, the second a retry) runs ONCE over the whole file set,
+> not per module. The Simple side already batches correctly: it collects ~24
+> arrays per surface into one `roots` array and makes a single
+> `module_surface_promote_roots(roots)` call (`module_surface_registry.spl:15-18`).
+>
+> The measured facts are unchanged and still stand: zero object progress across
+> two separate 90s/100s windows, 45+ minutes of worker CPU, and `sample` showing
+> the hot leaf as `Vec::retain` (130 samples vs 19 for promote, 18 for
+> module_surfaces_promote). What is corrected is the CAUSE attributed to them.
+>
+> Best current characterisation: a SINGLE `scope.objects.retain(...)` pass over
+> the transient scope accumulated for all 760 modules, plus the `Drop` of every
+> element it removes. That is O(n) in a very large n with real deallocation work
+> per element — slow, possibly legitimately so, and it should terminate. It is not
+> a quadratic blowup and it is not proven to be a defect at all.
+>
+> **What is still unknown and must not be asserted:** the actual length of
+> `scope.objects`, whether the time is dominated by the scan or by element drops,
+> and therefore whether this is a bug or simply expensive-but-correct work. Those
+> need instrumentation, not another stack sample.
 
 **Status:** OPEN
 **Filed:** 2026-09-02
 **Severity:** P1 — blocks Stage-3 self-host on aarch64-apple-darwin. The stage does not
-error and does not deadlock; it burns CPU indefinitely in an O(n^2) loop.
+error and does not deadlock; it burns CPU for a very long time in one large scan.
+(Severity retained: whatever the cause, Stage 3 does not complete here.)
 
 ## Symptom
 

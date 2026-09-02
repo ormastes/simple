@@ -2917,7 +2917,15 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     fi
     if [ "${stage3_status}" -eq 0 ]; then
       echo "  warning: stage3 self-host produced no executable; Stage 4 unavailable"
-    elif [ "${stage3_status}" -gt 128 ]; then
+    elif [ "${stage3_status}" -eq 255 ]; then
+      # 255 is NOT a signal death. It is the conventional shell rendering of an
+      # exit(-1), and the old `-gt 128` arm below claimed "KILLED by signal 127"
+      # -- a signal that does not exist (POSIX tops out near 64). That phantom
+      # sent one investigation chasing an OOM kill for four runs before the real
+      # cause (a SIGSEGV, and separately a worker exit(-1)) was found. See
+      # doc/08_tracking/bug/bootstrap_exit_255_misreported_as_signal_127_2026-09-02.md
+      echo "  warning: stage3 self-host exited 255 (exit(-1) or an unhandled abort -- NOT a signal death; do not read this as OOM); Stage 4 unavailable"
+    elif [ "${stage3_status}" -gt 128 ] && [ "${stage3_status}" -le 192 ]; then
       # A signal death is not a compile failure. earlyoom(1) is userspace, so an
       # out-of-memory kill leaves nothing in dmesg and used to surface here as a
       # bare "failed (exit 143)" -- which reads as a compiler defect. Name it.
