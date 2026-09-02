@@ -55,3 +55,45 @@ POSIX was **not** testable on this host.
 Lives in the escape-processing path of the Simple lexer
 (`src/compiler/10.frontend/**` and its seed counterpart in
 `src/compiler_rust/`). Needs a seed rebuild to verify the seed-side half.
+
+## Correction + widening, measured 2026-09-02 (windows-path `.spl` lane)
+
+(Re-applied: a parallel session restored this file over these findings once
+already. Same host and binary, md5 `d52d770724a9f8797e98ac7819709ab9`.)
+All figures are BYTE LENGTHS via `.len()`, never appearance — the assertion
+formatter itself mangles backslashes, so a printed value proves nothing.
+
+**1. The escaped form `\` is NOT uniformly broken.** The report above concerns a
+SINGLE backslash, and that half reproduces exactly (`"C:\Users\ormas".len()`
+measures 12, not 14; `"a\b".len()` measures 2). An author-escaped `\` mostly
+works, so the widely-repeated restatement "the lexer silently drops `\`" is
+false and must not be used to justify a rewrite.
+
+**2. The two engines DISAGREE — contradicting "Same result under both engines".**
+
+| literal | expected | `run` (JIT) | `test` (interpreter) |
+|---|---|---|---|
+| `"a\b"` | 3 | **3** | **2** |
+| `"C:\Temp"` | 7 | **7** | **6** |
+| `"C:\Windows\System32"` | 20 | **19** | **17** |
+| `"C:\a\b.txt"` | 10 | 10 | 10 |
+| `"C:\Users\ormas"` | 14 | 14 | — |
+| `"C:\simple"` / `"C:\windows"` / `"C:\LLVM\bin\clang-cl"` / `"C:\Simple\simple.exe"` / `"C:\MissingDir"` | 9/10/20/20/13 | — | all correct |
+
+The loss is engine-specific AND content-dependent. A positional rule of thumb
+("embedded `\` is dropped, trailing is fine") does not survive
+`"C:\a\b.txt"`, correct at 10 on both. On `"C:\Windows\System32"` — the
+literal that was live in `src/compiler/70.backend/linker/link_deps.spl:159-160`
+— **both** engines are wrong, by different amounts, so neither can serve as an
+oracle for the other.
+
+**3. Consequences.** `"C:\Temp"` was live product code in `_get_temp_dir`'s
+Windows fallback and measured 6 bytes under the engine that runs the test suite.
+Those sites have since been converted to forward-slash form, which sidesteps the
+defect entirely.
+
+**4. Writing a regression spec here.** Do not build a backslash from an escaped
+literal. Two engine-independent routes exist: `char_from_code(92)` (used by
+`test/01_unit/lib/common/windows_path_*_spec.spl`), and a RAW string —
+`r"C:\Users\name"` — which `test/01_unit/lib/common/string_literals_spec.spl:68`
+already relies on and which is unaffected by this defect.

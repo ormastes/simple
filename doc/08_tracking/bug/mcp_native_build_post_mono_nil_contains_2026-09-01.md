@@ -265,3 +265,52 @@ field with no default that no constructor argument names is silently nil, and
 NOTHING in the tree reports it — not construction, not the type checker. The
 audit above is a two-command diff and should be re-run whenever a field is added
 to this struct.
+
+## Verification 2026-09-02: the blocker IS cleared; a NEW frontier is MIR lowering itself
+
+Two builds were run with the fix applied (`module_lowering.spl`, content later
+committed as `ae4ea13e847`; base HEAD `c80479229e2`, seed md5
+`286f66b8615dce0e0da788f0550c4008`).
+
+**The `contains`-on-nil failure is gone.** Neither run produced any
+`[mnf-debug]`/`[mnf-expr]` line or any `error:` line. Both got strictly further
+than every previous build:
+
+| run | instrumentation | reached | outcome |
+|---|---|---|---|
+| run2 | `SIMPLE_INTERP_OOB_DEBUG=1` + `SIMPLE_DEBUG_FIELD_ACCESS=1` | `monomorphize ... complete step 4/6` | silent ~37 min in the next phase, then killed by the harness |
+| run3 | `SIMPLE_INTERP_OOB_DEBUG=1` only (no per-call stack snapshot) | `monomorphize ... complete step 4/6` | silent **>30 min** and still running at the time of writing |
+
+**What the silent phase is.** `driver_orchestration.spl:291` emits the
+`monomorphize ... complete step 4/6` receipt and then falls directly into
+phase 5's mode dispatch, which for this build is `self.aot_compile()` ->
+`lower_to_mir`. That matches the run1 `[mnf-debug-spl]` stack exactly
+(`... -> aot_compile -> lower_to_mir -> lower_module -> ...`). **`lower_to_mir`
+emits no progress logging whatsoever**, so total stdout silence is its normal
+appearance, not evidence of a hang by itself. This phase had never been entered
+before this fix.
+
+**Observed characteristics of the silent phase (run3, uninstrumented):**
+- CPU advances ~60 s per 60 s wall — a steady ~100% of one core, so it is not
+  blocked on I/O or a lock;
+- RSS is pinned at **3,312,380 K ± 20 K** across 30+ minutes;
+- stdout frozen at 243,698 bytes, stderr at 39,563 bytes.
+
+Steady CPU with RSS flat to within 20 KB is the signature of a **non-allocating
+tight loop**, which is suspicious — but it is NOT proof: the interpreter pools
+memory, `lower_to_mir` is silent by construction, and this input has no
+baseline for the phase because no build has ever reached it. Slow-but-
+terminating and looping are both consistent with the evidence gathered so far.
+Stated as undetermined rather than guessed.
+
+**Therefore the MIR error count is still NOT produced, and the last real
+full-build number remains 133.** No count from this lane supersedes it. In
+particular no entry count (`[bootstrap-error-count] count=0`) should be reported
+in its place — that is a different quantity and has misled before.
+
+**Next step for whoever picks this up:** `lower_to_mir` needs a progress receipt
+per module (the same `log_build_progress` the other five phases already emit) so
+this phase stops being unobservable. That single change converts "silent for 30
+minutes, cause unknown" into either a visible per-module rate or an exact module
+id where it stops. It is a much better investment than another blind 45-minute
+run.

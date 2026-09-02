@@ -2,14 +2,12 @@ use std.io_runtime.{env_get}
 use std.io_runtime.{process_run}
 
 use nogc_sync_mut.path.{normalize_path, is_absolute_path, join_path}
-use nogc_sync_mut.fs.host_path.{host_path_native}
 use nogc_sync_mut.platform.config.{PlatformConfig, host_config, make_config, network_config, needs_swap, same_platform}
 use nogc_sync_mut.platform.convert.{send_u16, send_u32, send_u64, recv_u16, recv_u32, recv_u64, send_text, recv_text, send_bytes_u32, recv_bytes_u32}
 use nogc_sync_mut.platform.linker.{SystemLinker, auto_detect_linker, get_linker_info}
 use nogc_sync_mut.platform.newline.{TextMode, translate_write, translate_read}
 use nogc_sync_mut.platform.text_io.{text_file_write, text_file_write_local, text_file_read, text_file_read_local}
 use nogc_sync_mut.platform.wire.{WireWriter, WireReader, wire_writer_new, wire_writer_network, wire_writer_le, wire_reader_new}
-use std.nogc_sync_mut.env.platform.{is_windows as platform_is_windows}
 
 fn shell_output_trim(command: text) -> text:
     val result = process_run("/bin/sh", ["-c", command])
@@ -20,12 +18,12 @@ fn shell_output_trim(command: text) -> text:
     else:
         ""
 
-# FAIL-OPEN FIX (2026-09-02): read ONLY `OS` and returned false when unset --
-# a silent "not Windows" under a stripped environment (where a bootstrap runs).
-# Delegate to the single resolver in std.nogc_sync_mut.env.platform, which
-# consults the in-process rt_platform_name() primitive first.
 fn is_windows_env() -> bool:
-    platform_is_windows()
+    val os_env = env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
 
 fn get_host_os() -> text:
     if is_windows_env():
@@ -87,40 +85,6 @@ fn dir_sep() -> text:
         "\\"
     else:
         "/"
-
-# Convert a canonical forward-slash path to this platform's NATIVE form.
-#
-# THE single conversion point for Windows separator variation. Call it at the
-# boundary where a native path is genuinely required -- handing a path to a
-# spawned process (argv) or to a native tool's response file -- and nowhere
-# else. Filesystem I/O does NOT need it.
-#
-# Boundary evidence, measured by EXECUTION on Windows 11 (2026-09-01), one file,
-# two forms:
-#   Win32 file API in-process : backslash form OK, forward-slash form OK
-#   spawned cmd.exe /c type   : backslash form -> exit 0 + file contents;
-#                               forward-slash form -> exit 1, "The syntax of the
-#                               command is incorrect."  <- the fails-mute class.
-#
-# CROSS-PLATFORM IMPACT: off Windows this is the IDENTITY function, returning
-# its argument byte-for-byte unchanged. Deliberate, not a shortcut: a backslash
-# is a LEGAL character in a POSIX filename, so a "\" -> "/" rewrite off Windows
-# would silently corrupt a real path. A dead helper in fs/path.spl used to do
-# exactly that on its Unix branch; it had zero callers and has been deleted.
-#
-# Apply ONLY to a value already known to be a filesystem path -- a URL, a CLI
-# switch and a regex also contain "/" and would be mangled.
-#
-# IMPLEMENTATION: a thin alias for std.nogc_sync_mut.fs.host_path
-# host_path_native, THE single boundary converter. This copy SHADOWS the one in
-# platform.spl, so both had to be folded -- two shadowing copies of a boundary
-# rule is exactly how the two-mechanism collision arose. host_path_native is a
-# superset (it also handles the MinGW /d/foo -> d:\foo drive form) and is
-# cheaper (is_windows() -> get_host_os() spawns `/bin/sh -c "uname -s"` on every
-# non-Windows call; host_path_native caches its decision and returns its
-# argument off Windows).
-fn to_native_path(path: text) -> text:
-    host_path_native(path)
 
 fn path_sep() -> text:
     if is_windows():
