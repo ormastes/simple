@@ -1,7 +1,10 @@
 # MSVC: `__attribute__((weak))` in runtime_native.c is a fatal LNK1227
 
 - **Filed:** 2026-09-02
-- **Status:** OPEN — this is the current blocker for Windows MSVC Stage 2 admission
+- **Status:** RESOLVED 2026-09-02 (`1e2479cf0d8`). Windows MSVC Stage 2 is
+  ADMITTED: `stage2-admitted/admission.env`, candidate sha256
+  `4a8dd3eb3887b9cb61608dd6cc668dafa18bbd75bd0d98326328df48c6d54db5`, 5/5
+  admission checks PASS.
 - **Lane:** Windows MSVC bootstrap, Stage 2 receiver probe (probe 2, the
   positional pure-Simple Stage-3 route)
 
@@ -46,7 +49,24 @@ PE/COFF weak external never resolves cross-TU. That carve-out was made for one
 symbol; the same platform reality applies to the whole group, and the MSVC/COFF
 half of it is a *different and fatal* failure rather than an unresolved symbol.
 
-## Fix directions (not yet chosen)
+## Fix chosen
+
+**Neither of the two directions below, as originally written.** Direction 2 was
+tried first and is WRONG: compiling runtime_native.c's copies out under
+`SIMPLE_CORE_C_STANDALONE` leaves only a WEAK definition, and a weak archive
+member is never pulled in to satisfy a reference on PE/COFF (the hazard already
+documented at the `rt_set_args` carve-out). The frontend-smoke lane then failed
+with `simple_runtime.lib(runtime_native.obj) : error LNK2019: unresolved
+external symbol rt_cli_get_args`.
+
+What landed instead: **runtime.c drops the weak attribute on `_WIN32` only**
+(`SPL_CLI_ARGS_WEAK`). Exactly one weak external then remains
+(runtime_native.c's), and a weak external resolves against a strong definition
+normally. Verified by symbol table with clang-cl 18.1.8 on the real bundle
+flags: `runtime.obj` exports `T rt_cli_get_args` with no `.weak.` default,
+`runtime_native.obj` keeps `w rt_cli_get_args`.
+
+## Original fix directions (superseded, kept for the reasoning)
 
 1. Extend the `_WIN32` non-weak treatment from `rt_set_args` to the whole
    duplicated group. Cheap, matches existing precedent, but leaves ~40 duplicate
