@@ -2924,7 +2924,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # sent one investigation chasing an OOM kill for four runs before the real
       # cause (a SIGSEGV, and separately a worker exit(-1)) was found. See
       # doc/08_tracking/bug/bootstrap_exit_255_misreported_as_signal_127_2026-09-02.md
-      echo "  warning: stage3 self-host exited 255 (exit(-1) or an unhandled abort -- NOT a signal death; do not read this as OOM); Stage 4 unavailable"
+      # CORRECTED 2026-09-03. An earlier revision of this arm asserted 255 was
+      # "NOT a signal death". That is backwards. 255 here is the shell rendering
+      # of the -1 returned by runtime_process.c's waitpid loop, and that -1 is
+      # returned ONLY on the !WIFEXITED path -- i.e. the child WAS killed by a
+      # signal, and WTERMSIG was being discarded. The runtime now reports
+      # -(128+signo) so the number survives; a bare 255 means an older runtime
+      # or a genuine wait failure.
+      echo "  warning: stage3 self-host worker was KILLED (reaped without a normal exit; the signal number was discarded by an older runtime -- rebuild to get -(128+signo)); NOT a compile failure; Stage 4 unavailable"
     elif [ "${stage3_status}" -gt 128 ] && [ "${stage3_status}" -le 192 ]; then
       # A signal death is not a compile failure. earlyoom(1) is userspace, so an
       # out-of-memory kill leaves nothing in dmesg and used to surface here as a
