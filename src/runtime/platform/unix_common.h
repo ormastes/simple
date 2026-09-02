@@ -175,8 +175,13 @@ bool rt_dir_remove_all_cpath(const char* path) {
  * File Locking
  * ---------------------------------------------------------------- */
 
-int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
-    if (!path) return -1;
+int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
+    /* Raw (ptr, len) `text` ABI per runtime.h: rt_file_lock IS in
+     * text_arg_indices, so the caller splits `text` into two words. */
+    if (!path_ptr || path_len == 0 || path_len >= 4096) return -1;
+    char path[4096];
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = 0;  /* NUL-terminate */
 
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd < 0) return -1;

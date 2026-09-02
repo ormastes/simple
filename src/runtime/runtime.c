@@ -54,8 +54,32 @@
 #include <io.h>
 #include <time.h>
 #include <sys/types.h>
+/* MSVC/clang-cl only (clang-cl also defines _MSC_VER). MinGW already supplies
+ * alloca, ssize_t and the S_IS* macros, so its arm is left untouched, and the
+ * whole block sits inside #ifdef _WIN32 -- zero effect on any Unix build. */
+#ifdef _MSC_VER
+#include <malloc.h>          /* _alloca */
+#include <basetsd.h>         /* SSIZE_T */
+#ifndef alloca
+#define alloca _alloca
+#endif
+#ifndef _SSIZE_T_DEFINED
+typedef SSIZE_T ssize_t;
+#define _SSIZE_T_DEFINED
+#endif
+#endif
 #endif
 #include <sys/stat.h>
+/* The MS CRT <sys/stat.h> defines _S_IFMT/_S_IFDIR but not the POSIX S_IS*
+ * macros. Defined here, after that header, for MSVC/clang-cl only. */
+#ifdef _MSC_VER
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#endif
 #ifndef _WIN32
 #include <dirent.h>
 #endif
