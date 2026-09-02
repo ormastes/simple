@@ -501,3 +501,20 @@ Decode the raw words with this TU's tags: low 3 bits `0`=int (`>>3`),
 `3`=special (`3`=nil). An operand that reads as a `HEAP_ENUM` when `Value.Int`
 was expected is candidate 1 or 2; a raw `TAG_INT` word that still fails to match
 is candidate 3.
+
+### Gate verdict of record (2026-09-02)
+
+```
+[rv64-interp] selftest OK (23 fixtures)
+FAIL — 2 row(s) checked in-guest under real OpenSBI v1.4 firmware
+(nonce 2a6b2c81217ecb3f), offender(s): build-and-run row: the program was not
+built and run to a correct result
+(log: build/os/riscv64_interp/run/buildrun-serial.log)
+```
+
+Same verdict SHAPE as before this lane (`FAIL — 2 row(s) checked`, offender =
+build-and-run row) and the same 23 selftest fixtures — the gate was not weakened,
+and its offender count did not move. What changed is entirely inside the row: the
+`scause=0x5` trap frame is gone and the failure is now a clean interpreter-level
+error from inside the callee's body. The row stays RED until the `+` defect above
+is fixed.
