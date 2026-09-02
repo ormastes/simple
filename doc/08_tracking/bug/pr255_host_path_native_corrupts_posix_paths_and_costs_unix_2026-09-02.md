@@ -116,3 +116,105 @@ The five marked corrupt are **broken today, independent of PR #255** — a trail
 `C:Temp`; `"C:\Windows\System32"` -> 17 bytes `C:WindowsSystem32`). Under the
 user's rule ("no `c:\` style path in code; only mingw/linux style") all seven are
 violations regardless.
+
+---
+
+## RESOLUTION 2026-09-02 — all five fixed on the current tree, not on the PR branch
+
+Landing model: PR #255 is BEHIND main and its converter is defective, so the
+FIXED converter was authored on the current tree at the PR's exact path
+(`src/lib/nogc_sync_mut/fs/host_path.spl`). When the PR rebases, main's version
+wins that conflict. The PR's own wiring (file_ops, process_ops, io_runtime, the
+lexer work, `system_location.spl`) was deliberately NOT recreated here — it is
+correct and belongs to the PR.
+
+Commits, one per defect, on top of `a95e877484a` (detached HEAD, not pushed);
+the tip is also at `refs/wip/pr255-host-path-fixes`:
+
+| sha | defect |
+|---|---|
+| `3f3a52ca37e` | baseline: PR #255 converter imported verbatim, so each fix is an isolated diff |
+| `74ce8a6269c` | D1 — platform guard first; POSIX identity |
+| `d3f9c1c348c` | D2 — cached bool, first-statement identity return |
+| `bbb9f897277` | D3 — lower-case MinGW drive letter; preserve an existing one |
+| `dc101ee1fd3` | D4 — compact `c/rest` rule removed |
+| `2e8eb2dfa6d` | collision — `to_native_path` folded into `host_path` |
+| `47796bfef23` | D5 — converter spec + corrected D2 figures |
+
+### D1 — fixed, with a byte-level proof and a negative control
+
+`host_path_native_for` now opens with `if not _host_is_windows(platform): return path`;
+the `\` -> `/` canonicalisation moved inside the Windows branch.
+`host_path_canonical` gained a `host_path_canonical_for` seam with the same
+identity contract. Measured through the injected `"linux"` / `"macos"` /
+`"freebsd"` seam:
+
+| input | before | after |
+|---|---|---|
+| `/home/a\b.txt` (13 B) | `/home/a/b.txt` (13 B) | `/home/a\b.txt` (13 B) |
+
+NEGATIVE CONTROL (executed, not asserted): re-introducing the pre-fix ordering
+turns the new spec RED with `assert_equal failed: expected /home/a\b.txt, got
+/home/a/b.txt`. The spec is not vacuous.
+
+### D2 — re-measured on this box
+
+Cached process-lifetime bool (`host_is_windows_host`, backed by a one-cell
+module `var`), then a first-statement identity return. `_host_is_windows` also
+grew an exact-match fast arm for the three names the runtime emits, so even the
+uncached seam avoids the `.lower()` allocation. Min-of-3, 5,000,000 iterations,
+JIT lane, both variants forced onto the non-Windows branch:
+
+| variant | min wall |
+|---|---|
+| PR #255 shape (`.replace()` then `.lower()` + 4x `.contains()`) | **9,473 ms** |
+| bare call, no conversion | 36 ms |
+| **cached bool + first-statement identity return** | **76 ms** |
+
+~125x off the pre-fix shape; ~1.9 us/call down to ~15 ns/call. The absolute
+numbers differ from the original harness above (36 ms for a bare call indicates
+the JIT elides part of the loop) — the RATIO is the claim, not the microsecond.
+
+### D3 — DECISION: lower-case for the MinGW form, case-PRESERVING otherwise
+
+`/d/foo/bar` -> `d:\foo\bar`, matching the specified conversion. Input that
+already carries a drive letter falls through untouched, so `C:/tmp/probe.txt` ->
+`C:\tmp\probe.txt`. That case-preserving idempotence is a PREREQUISITE for the
+fold: `test/01_unit/lib/common/path_native_separator_boundary_spec.spl:60`
+asserts exactly that pair, and a lower-casing converter would break it. The
+redundant third branch that re-`upper()`ed an existing drive letter is deleted.
+
+### D4 — DECISION: removed from the universal boundary, not conditioned
+
+`c/foo` -> `c\foo` (separator conversion only), was `C:\foo`. The rule belongs in
+`{sys:...}` desugaring, where the input is known to be a system-location
+template and a single-letter first segment cannot be an ordinary relative
+directory. That desugaring exists only in PR #255, so this tree removes the rule
+and the PR author relocates it.
+
+### D5 — `test/01_unit/lib/nogc_sync_mut/fs/host_path_spec.spl`, 7/7 green
+
+Every assertion checks bytes AND `.len()`. Backslashes are built from a
+standalone `"\\"` literal — the lexer silently drops an embedded backslash
+escape, so the obvious spelling cannot be used (see the related record).
+
+### Collision — RESOLVED in favour of `host_path`
+
+`platform.to_native_path` (zero product callers, duplicated across
+`platform.spl:127` and the SHADOWING `platform/__init__.spl:111`) is now a thin
+alias for `host_path_native` in BOTH copies. Rationale in order: host_path is
+the mechanism that is actually wired; it is a strict SUPERSET (it also handles
+`/d/foo`, which `to_native_path` never did, so no existing caller changes
+behaviour); and it is cheaper — `is_windows()` -> `host_os()` SPAWNS
+`/bin/sh -c "uname -s"` on every non-Windows call, which the fold silently
+removes from that path. The names are kept, not deleted: they are the documented
+public spelling and they have specs. Both existing path specs stay green
+(3/3 and 6/6).
+
+### Not fixed here
+
+- The five genuinely corrupt `c:\` literals (`link_deps.spl:159-160`,
+  `msvc.spl:236,323`, `test_runner_async.spl:46`) are untouched — `70.backend`
+  and `scripts/` are owned by other live sessions this session was told to avoid.
+- No POSIX execution was possible on this host (Windows 11). Every Unix claim
+  above is asserted through the explicit-platform seam, and says so.
