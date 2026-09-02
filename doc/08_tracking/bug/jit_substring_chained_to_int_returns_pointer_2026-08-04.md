@@ -172,3 +172,29 @@ via `bin/simple run`, are the real gate.
 
 Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
 CORE-P1 sweep. Fix present in current source. `src/compiler_rust/compiler/src/codegen/instr/methods.rs:150` now has the missing STRING branch: `if from_ty == TypeId::STRING && (to_is_int || F32/F64) { let helper = if to_is_int { "rt_string_to_int" } ... }`, with a comment naming this bug doc and the old behaviour ("simply handed back the string HEAP POINTER as a successful integer"). Root cause was NOT unknown receiver type -- the type was known; there are two duplicate method dispatchers and only the sibling in `closures_structs.rs::try_compile_builtin_method_call` had the STRING branch, so this one fell through to a bit-cast.
+
+---
+
+## Triage 2026-09-02 (aarch64-apple-darwin) — STAYS OPEN, not re-verifiable on this host
+
+The JIT lane cannot be exercised here at all, so no verdict about it was
+formed. Evidence, not inference: every program compiled by
+`src/compiler_rust/target/release/simple` (Rust seed, 37,291,896 B,
+2026-09-01 09:24) on this host — including a three-line hello world — prints
+
+```
+[jit-fallback] unresolved external symbol 'rt_struct_alloc': whole module
+dropped to the interpreter (expect ~100-1000x slowdown).
+[INFO] JIT compilation failed, falling back to interpreter: Cranelift JIT
+compile: Module error: unresolved external symbol 'rt_struct_alloc' would
+NULL-jump in JIT; deferring to interpreter
+```
+
+so the module under test always runs on the tree-walk interpreter. A clean run
+on this host is therefore evidence about the INTERPRETER, never about the JIT,
+and reporting one as "not reproducible" would be a false close. `bin/simple`
+here is the BOOTSTRAP cli (`simple-bootstrap 1.0.0-beta`) and has no `run`
+command at all, so it is not an alternative lane.
+
+Status unchanged. Closing this row needs a host where the seed's Cranelift JIT
+resolves `rt_struct_alloc`.
