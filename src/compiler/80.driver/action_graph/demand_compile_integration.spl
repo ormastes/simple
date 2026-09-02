@@ -1,10 +1,9 @@
 use compiler.driver.action_graph.build_action_v1.{
-    BuildActionPoolV1, BuildActionResultV1, BuildActionV1
+    BuildActionPoolV1, BuildActionV1
 }
 use compiler.driver.action_graph.coordinator.{
-    BuildActionClaimTransferV1, BuildActionCommitTransferV1,
-    BuildActionCoordinatorV1, BuildPoolBudgetV1, coordinator_claim_v1,
-    coordinator_commit_v1, coordinator_diagnostics_v1, coordinator_new_v1
+    BuildActionCoordinatorV1, BuildPoolBudgetV1,
+    coordinator_complete_v1, coordinator_diagnostics_v1, coordinator_new_v1
 }
 use compiler.driver.action_graph.persisted_graph.{
     PersistedBuildGraphV1, persisted_graph_digest_v1
@@ -46,6 +45,15 @@ struct DemandCompileExecutionV1:
     mir_admission_digest: text
     total_started_ns: i64
     baseline_started_ns: i64
+
+struct DemandCompileCompletionV1:
+    execution: DemandCompileExecutionV1
+    accepted: bool
+    reason: text
+
+struct DemandCompileFinalizeV1:
+    execution: DemandCompileExecutionV1
+    accepted: bool
 
 fn demand_archive_action_id_v1(package_identity: text) -> text:
     "archive:{package_identity}"
@@ -154,35 +162,26 @@ fn demand_compile_bind_mir_admission_v1(
     true
 
 fn demand_compile_complete_action_v1(
-    execution: &mut DemandCompileExecutionV1, action_id: text,
-    owner_token: text, success: bool, output_identity: text,
+    execution: DemandCompileExecutionV1, action_id: text,
+    owner_token: text, success: bool, cancelled: bool, output_identity: text,
     diagnostics: [text], memory_peak_bytes: i64
-) -> bool:
-    if not execution.valid or execution.coordinator == nil:
-        return false
-    if action_id == execution.baseline_action_id and
-            execution.mir_admission_digest == "":
-        return false
-    var coordinator = execution.coordinator!
-    val claim_transfer = coordinator_claim_v1(coordinator, action_id, owner_token)
-    coordinator = claim_transfer.coordinator
-    val claim = claim_transfer.claim
-    if not claim.valid or claim.action == nil:
-        execution.coordinator = Some(coordinator)
-        return false
-    val commit_transfer = coordinator_commit_v1(
-        coordinator, owner_token, BuildActionResultV1(
-            action_id, claim.action!.snapshot_revision, success, false,
-            output_identity, claim.action!.restat_identity,
-            diagnostics, memory_peak_bytes))
-    coordinator = commit_transfer.coordinator
-    val committed = commit_transfer.commit
-    execution.coordinator = Some(coordinator)
-    if committed.accepted:
-        var counters = execution.counters
+) -> DemandCompileCompletionV1:
+    var owned = execution
+    if not owned.valid or owned.coordinator == nil:
+        return DemandCompileCompletionV1(owned, false, "execution-invalid")
+    if (action_id == owned.baseline_action_id and
+            owned.mir_admission_digest == ""):
+        return DemandCompileCompletionV1(owned, false, "mir-admission-required")
+    val transfer = coordinator_complete_v1(
+        owned.coordinator!, action_id, owner_token, success, cancelled,
+        output_identity, diagnostics, memory_peak_bytes)
+    owned.coordinator = Some(transfer.coordinator)
+    if transfer.commit.accepted:
+        var counters = owned.counters
         counters.action_completed_count = counters.action_completed_count + 1
-        execution.counters = counters
-    committed.accepted
+        owned.counters = counters
+    DemandCompileCompletionV1(
+        owned, transfer.commit.accepted, transfer.commit.reason)
 
 fn demand_compile_source_open_v1(execution: &mut DemandCompileExecutionV1):
     var counters = execution.counters
@@ -214,29 +213,32 @@ fn demand_compile_phase_begin_v1() -> i64:
     demand_compile_counter_now_ns_v1()
 
 fn demand_compile_finalize_baseline_v1(
-    execution: &mut DemandCompileExecutionV1, success: bool,
+    execution: DemandCompileExecutionV1, success: bool,
     output_identity: text
-) -> bool:
-    if execution.baseline_started_ns <= 0:
-        return false
-    val baseline_action_id = execution.baseline_action_id
-    val baseline_started_ns = execution.baseline_started_ns
-    val total_started_ns = execution.total_started_ns
+) -> DemandCompileFinalizeV1:
+    var owned = execution
+    if owned.baseline_started_ns <= 0:
+        return DemandCompileFinalizeV1(owned, false)
+    val baseline_action_id = owned.baseline_action_id
+    val baseline_started_ns = owned.baseline_started_ns
+    val total_started_ns = owned.total_started_ns
     if success:
-        if execution.mir_admission_digest == "":
-            return false
-        if not demand_compile_complete_action_v1(
-                execution, baseline_action_id,
-                "driver-baseline-owner", true, output_identity, [], 0):
-            return false
-    var counters = execution.counters
+        if owned.mir_admission_digest == "":
+            return DemandCompileFinalizeV1(owned, false)
+        val completion = demand_compile_complete_action_v1(
+            owned, baseline_action_id, "driver-baseline-owner",
+            true, false, output_identity, [], 0)
+        owned = completion.execution
+        if not completion.accepted:
+            return DemandCompileFinalizeV1(owned, false)
+    var counters = owned.counters
     _ = demand_compile_counter_add_phase_v1(
         &mut counters, "baseline-backend", baseline_started_ns)
     _ = demand_compile_counter_add_phase_v1(
         &mut counters, "total", total_started_ns)
-    execution.counters = counters
-    execution.baseline_started_ns = 0
-    true
+    owned.counters = counters
+    owned.baseline_started_ns = 0
+    DemandCompileFinalizeV1(owned, true)
 
 fn demand_compile_diagnostics_v1(execution: DemandCompileExecutionV1) -> [text]:
     if execution.coordinator == nil:
@@ -284,7 +286,8 @@ fn demand_compile_complete_scc_outputs_v1(
         return true
     false
 
-export DemandCompileExecutionV1
+export DemandCompileExecutionV1, DemandCompileCompletionV1
+export DemandCompileFinalizeV1
 export demand_archive_action_id_v1, demand_source_action_id_v1
 export demand_compile_begin_v1, demand_compile_complete_action_v1
 export demand_compile_bind_mir_admission_v1

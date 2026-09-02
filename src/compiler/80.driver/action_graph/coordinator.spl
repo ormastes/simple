@@ -43,6 +43,10 @@ struct BuildActionCommitTransferV1:
     coordinator: BuildActionCoordinatorV1
     commit: BuildActionCommitV1
 
+struct BuildActionCompletionTransferV1:
+    coordinator: BuildActionCoordinatorV1
+    commit: BuildActionCommitV1
+
 fn coordinator_action_v1(graph: PersistedBuildGraphV1, action_id: text) -> BuildActionV1?:
     for action in graph.actions:
         if action.action_id == action_id:
@@ -175,6 +179,36 @@ fn coordinator_commit_v1(coordinator: BuildActionCoordinatorV1, owner_token: tex
     owned.runtime[index] = BuildActionRuntimeV1(result.action_id, next_state, "", 0, Some(result))
     BuildActionCommitTransferV1(owned, BuildActionCommitV1(true, "ok", restat_unchanged))
 
+fn coordinator_complete_v1(
+    coordinator: BuildActionCoordinatorV1, action_id: text,
+    owner_token: text, success: bool, cancelled: bool,
+    output_identity: text, diagnostics: [text], memory_peak_bytes: i64
+) -> BuildActionCompletionTransferV1:
+    var owned = coordinator
+    val index = coordinator_runtime_index_v1(owned, action_id)
+    val action = coordinator_action_v1(owned.graph, action_id)
+    if index < 0 or action == nil or owner_token == "":
+        return BuildActionCompletionTransferV1(
+            owned, BuildActionCommitV1(false, "claim-invalid", false))
+    if owned.runtime[index].state == BuildActionStateV1.running:
+        if owned.runtime[index].owner_token != owner_token:
+            return BuildActionCompletionTransferV1(
+                owned, BuildActionCommitV1(false, "owner-mismatch", false))
+    else:
+        val claim_transfer = coordinator_claim_v1(owned, action_id, owner_token)
+        owned = claim_transfer.coordinator
+        if not claim_transfer.claim.valid:
+            return BuildActionCompletionTransferV1(
+                owned, BuildActionCommitV1(
+                    false, claim_transfer.claim.reason, false))
+    val commit_transfer = coordinator_commit_v1(
+        owned, owner_token, BuildActionResultV1(
+            action_id, action!.snapshot_revision, success, cancelled,
+            output_identity, action!.restat_identity,
+            diagnostics, memory_peak_bytes))
+    BuildActionCompletionTransferV1(
+        commit_transfer.coordinator, commit_transfer.commit)
+
 fn coordinator_cancel_v1(coordinator: &mut BuildActionCoordinatorV1):
     coordinator.cancelled = true
     var index = 0
@@ -198,6 +232,8 @@ fn coordinator_diagnostics_v1(coordinator: BuildActionCoordinatorV1) -> [BuildDi
 export BuildPoolBudgetV1, BuildActionRuntimeV1, BuildDiagnosticFrameV1
 export BuildActionCoordinatorV1, BuildActionClaimV1, BuildActionCommitV1
 export BuildActionClaimTransferV1, BuildActionCommitTransferV1
+export BuildActionCompletionTransferV1
 export coordinator_new_v1, coordinator_ready_actions_v1
 export coordinator_claim_v1, coordinator_commit_v1, coordinator_cancel_v1
+export coordinator_complete_v1
 export coordinator_diagnostics_v1

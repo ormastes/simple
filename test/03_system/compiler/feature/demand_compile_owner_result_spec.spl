@@ -1,0 +1,120 @@
+use std.spec.*
+use compiler.driver.action_graph.build_action_v1.{
+    BuildActionPoolV1, BuildActionStateV1, BuildActionV1
+}
+use compiler.driver.action_graph.coordinator.{
+    BuildActionCoordinatorV1, BuildPoolBudgetV1, coordinator_cancel_v1,
+    coordinator_claim_v1, coordinator_complete_v1, coordinator_new_v1
+}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+
+fn action(action_id: text, dependencies: [text], memory: i64) -> BuildActionV1:
+    BuildActionV1(
+        action_id, "compile:{action_id}", [], dependencies, ["{action_id}.out"],
+        BuildActionPoolV1.semantic, 1, "snapshot-1", memory, "")
+
+fn coordinator(actions: [BuildActionV1], max_running: i64, memory: i64) -> BuildActionCoordinatorV1:
+    coordinator_new_v1(
+        PersistedBuildGraphV1("generation-1", "", "snapshot-1", actions),
+        [BuildPoolBudgetV1(BuildActionPoolV1.semantic, max_running, memory)])
+
+describe "Demand compile owner-result completion":
+    it "should preserve a running reservation and its owner after validation failure":
+        step("Claim an action for its original owner")
+        val claimed = coordinator_claim_v1(
+            coordinator([action("compile", [], 64)], 1, 64),
+            "compile", "owner-a")
+        step("Submit an invalid result that exceeds the reserved memory")
+        val rejected = coordinator_complete_v1(
+            claimed.coordinator, "compile", "owner-a", true, false,
+            "artifact", [], 65)
+        expect(rejected.commit.accepted).to_equal(false)
+        expect(rejected.commit.reason).to_equal("memory-budget-exceeded")
+        expect(rejected.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.running)
+        expect(rejected.coordinator.runtime[0].owner_token).to_equal("owner-a")
+        expect(rejected.coordinator.runtime[0].memory_reserved_bytes).to_equal(64)
+
+    it "should let the original running owner retry and complete exactly once":
+        step("Leave the action running after a rejected completion")
+        val claimed = coordinator_claim_v1(
+            coordinator([action("compile", [], 64)], 1, 64),
+            "compile", "owner-a")
+        val rejected = coordinator_complete_v1(
+            claimed.coordinator, "compile", "owner-a", true, false,
+            "artifact", [], 65)
+        step("Retry with a valid result using the same owner")
+        val completed = coordinator_complete_v1(
+            rejected.coordinator, "compile", "owner-a", true, false,
+            "artifact", [], 64)
+        expect(completed.commit.accepted).to_equal(true)
+        expect(completed.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.succeeded)
+        expect(completed.coordinator.runtime[0].memory_reserved_bytes).to_equal(0)
+        step("Reject a duplicate completion after the terminal commit")
+        val duplicate = coordinator_complete_v1(
+            completed.coordinator, "compile", "owner-a", true, false,
+            "artifact", [], 64)
+        expect(duplicate.commit.accepted).to_equal(false)
+        expect(duplicate.commit.reason).to_equal("not-ready")
+        expect(duplicate.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.succeeded)
+
+    it "should preserve dependency and pool admission rejection":
+        step("Try to complete an action whose dependency is unfinished")
+        val dependency_rejected = coordinator_complete_v1(
+            coordinator([
+                action("dependency", [], 32),
+                action("dependent", ["dependency"], 32)], 2, 64),
+            "dependent", "owner-a", true, false, "artifact", [], 32)
+        expect(dependency_rejected.commit.accepted).to_equal(false)
+        expect(dependency_rejected.commit.reason).to_equal("not-ready")
+        expect(dependency_rejected.coordinator.runtime[1].state)
+            .to_equal(BuildActionStateV1.pending)
+        step("Fill the pool and verify another action remains pending")
+        val first = coordinator_claim_v1(
+            coordinator([action("first", [], 32), action("second", [], 32)], 1, 64),
+            "first", "owner-a")
+        val pool_rejected = coordinator_complete_v1(
+            first.coordinator, "second", "owner-b", true, false,
+            "artifact", [], 32)
+        expect(pool_rejected.commit.accepted).to_equal(false)
+        expect(pool_rejected.commit.reason).to_equal("not-ready")
+        expect(pool_rejected.coordinator.runtime[1].state)
+            .to_equal(BuildActionStateV1.pending)
+
+    it "should require cancellation parity and accept the running owners cancellation":
+        step("Claim an action and cancel the coordinator")
+        val claimed = coordinator_claim_v1(
+            coordinator([action("compile", [], 64)], 1, 64),
+            "compile", "owner-a")
+        var cancelled_owner = claimed.coordinator
+        coordinator_cancel_v1(&mut cancelled_owner)
+        step("Reject a non-cancelled result without losing the reservation")
+        val mismatch = coordinator_complete_v1(
+            cancelled_owner, "compile", "owner-a", false, false,
+            "", [], 32)
+        expect(mismatch.commit.reason).to_equal("cancelled-result-required")
+        expect(mismatch.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.running)
+        expect(mismatch.coordinator.runtime[0].owner_token).to_equal("owner-a")
+        step("Accept a cancellation result from that same owner")
+        val cancelled = coordinator_complete_v1(
+            mismatch.coordinator, "compile", "owner-a", false, true,
+            "", [], 32)
+        expect(cancelled.commit.accepted).to_equal(true)
+        expect(cancelled.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.cancelled)
+
+    it "should reject a different owner without changing the running owner":
+        step("Claim an action for one owner and submit from another")
+        val claimed = coordinator_claim_v1(
+            coordinator([action("compile", [], 64)], 1, 64),
+            "compile", "owner-a")
+        val rejected = coordinator_complete_v1(
+            claimed.coordinator, "compile", "owner-b", true, false,
+            "artifact", [], 32)
+        expect(rejected.commit.reason).to_equal("owner-mismatch")
+        expect(rejected.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.running)
+        expect(rejected.coordinator.runtime[0].owner_token).to_equal("owner-a")
