@@ -48,6 +48,10 @@ fn _sffi_hir_type_discriminant(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
+fn _mir_tag_probe_enabled() -> bool:
+    """Two-sided HirType tag probe, off unless SIMPLE_MIR_TAG_PROBE=1."""
+    (env_get("SIMPLE_MIR_TAG_PROBE") ?? "") == "1"
+
 # Cached [mir-optional-inner] trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_optional_inner_trace_state: i64 = -1
 
@@ -216,6 +220,33 @@ impl MirLowering:
             elif gpu_kernel_target == "cuda":
                 self.lower_cuda_kernel_param_type(fn_.params[pmi])
             else:
+                # TWO-SIDED TAG PROBE (2026-09-02, OFF unless
+                # SIMPLE_MIR_TAG_PROBE=1; zero cost and zero reads when unset).
+                # This is the crossing E-MIR-TYPE-ZeroKind is suspected to be
+                # minted at: a HirType read out of an ARRAY ELEMENT and passed
+                # BY VALUE into a method -- the exact shape
+                # mir_lowering_types.spl:574-580 documents as unsafe under the
+                # admitted Stage 2 native ABI.
+                # Reading the discriminant HERE and comparing with what
+                # lower_type sees separates the two candidate roots that have
+                # opposite fixes:
+                #   caller non-zero, callee 0  -> dead copy MINTED IN FLIGHT
+                #                                 (repair the ABI crossing)
+                #   caller 0 too               -> already dead upstream
+                #                                 (the producer is earlier)
+                # Deliberately reads only the discriminant of the SAME field
+                # lower_type is about to read -- no extra fields, no `.span`.
+                # A previous "diagnostic-only" round that read five extra
+                # fields off `.span` was NOT behaviour-neutral (see :1112), so
+                # this stays minimal and default-off.
+                # SCOPED to the suspect functions. An unscoped probe printed one
+                # line per parameter per function across all 760 modules and drove
+                # RSS to 10 GB in 3 minutes on a host whose swap is already
+                # committed -- it would have OOM-killed the run and taught us
+                # nothing. Only the ZeroKind victims matter here.
+                if _mir_tag_probe_enabled() and fn_.name.contains("compile_specialized_template"):
+                    val probe_disc = _sffi_hir_type_discriminant(fn_.params[pmi].type_)
+                    eprint("[mir-tag-probe] fn={fn_.name} param={pmi} caller_disc={probe_disc}")
                 self.lower_type(fn_.params[pmi].type_)
             params = params.push(lowered_param)
             pmi = pmi + 1
