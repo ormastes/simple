@@ -213,7 +213,7 @@ impl Lowerer {
         // Regular function call
         let func_hir = Box::new(self.lower_expr(callee, ctx)?);
         let ret_ty = self.call_return_type(callee, func_hir.ty);
-        let proven_nonescaping = matches!(callee, Expr::Identifier(name) if self.pure_functions.contains(name))
+        let proven_nonescaping = matches!(callee, Expr::Identifier(name) if self.proven_nonescaping_functions.contains(name))
             && !self.is_reference_type(ret_ty);
         let mut args_hir = if proven_nonescaping {
             self.lower_nonescaping_call_args(args, ctx)?

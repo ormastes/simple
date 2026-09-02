@@ -19,7 +19,7 @@ fn lower_source(source: &str) -> Result<(), String> {
 
 #[test]
 fn call_scoped_exclusive_loans_end_at_the_call_boundary() {
-    let sequential = "@pure\nfn inspect(value: &mut i64) -> i64:\n    value\n\nfn probe():\n    var value = 0\n    inspect(&mut value)\n    inspect(&mut value)\n";
+    let sequential = "fn inspect(value: &mut i64) -> i64:\n    pass\n\nfn probe():\n    var value = 0\n    inspect(&mut value)\n    inspect(&mut value)\n";
     assert!(lower_source(sequential).is_ok(), "sequential call-scoped loans must not alias");
 
     let overlapping = "fn pair(left: &mut i64, right: &mut i64):\n    pass\n\nfn probe():\n    var value = 0\n    pair(&mut value, &mut value)\n";
@@ -29,10 +29,16 @@ fn call_scoped_exclusive_loans_end_at_the_call_boundary() {
     let returned = "fn retain(value: &mut i64) -> &mut i64:\n    value\n\nfn probe():\n    var value = 0\n    val retained = retain(&mut value)\n    retain(&mut value)\n";
     assert!(lower_source(returned).expect_err("returned exclusive loan must survive the call").contains("AliasingViolation"));
 
-    let stored = "fn store(value: &mut i64):\n    pass\n\nfn probe():\n    var value = 0\n    store(&mut value)\n    store(&mut value)\n";
+    let stored = "fn store(value: &mut i64):\n    val capture = fn(): value\n\nfn probe():\n    var value = 0\n    store(&mut value)\n    store(&mut value)\n";
     assert!(lower_source(stored).expect_err("unrestricted store/capture call must conservatively retain its loan").contains("AliasingViolation"));
 
-    let nested_error = "@pure\nfn inspect(value: &mut i64) -> i64:\n    value\n\nfn probe():\n    var value = 0\n    inspect(&mut value)\n    unknown(&mut value)\n    inspect(&mut value)\n";
+    let forged_pure = "@pure\nfn store(value: &mut i64):\n    val capture = fn(): value\n\nfn probe():\n    var value = 0\n    store(&mut value)\n    store(&mut value)\n";
+    assert!(lower_source(forged_pure).expect_err("@pure must not forge noescape authority").contains("AliasingViolation"));
+
+    let unresolved_pure = "@pure\nfn probe(store: any):\n    var value = 0\n    store(&mut value)\n    store(&mut value)\n";
+    assert!(lower_source(unresolved_pure).expect_err("unresolved pure signatures remain escaping").contains("AliasingViolation"));
+
+    let nested_error = "fn inspect(value: &mut i64) -> i64:\n    pass\n\nfn probe():\n    var value = 0\n    inspect(&mut value)\n    unknown(&mut value)\n    inspect(&mut value)\n";
     assert!(lower_source(nested_error).is_err(), "error paths must fail closed without discarding persistent loans");
 }
 
