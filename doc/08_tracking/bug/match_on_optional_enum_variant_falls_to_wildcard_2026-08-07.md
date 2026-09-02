@@ -88,3 +88,29 @@ persist, the defect is in the interpreter/JIT's match-on-`Option<enum>`
 lowering (likely `Option` flattening not applying when matched against bare
 enum-variant patterns) and needs a fix in the compiler's match desugaring,
 not in caller code.
+
+---
+
+## Re-verified 2026-09-02 (aarch64-apple-darwin) — STILL REPRODUCES, second architecture
+
+Binary: `src/compiler_rust/target/release/simple` (Rust seed, 37,291,896 B,
+2026-09-01 09:24). Program: `enum Ev: Action(name: text) / Other`,
+`fn mk() -> Ev?: Ev.Action(name: "go")`, matched with an `Ev.Action(n)` arm and
+a `_` arm.
+
+```
+ARM-WILDCARD
+```
+
+Wrong: the value is `Ev.Action`, so the variant arm must be selected. This
+confirms the 2026-08-17 re-attribution on a different architecture and a
+newer seed — the tree-walk interpreter still falls through to the wildcard.
+
+The JIT half of the 2026-08-17 comparison could NOT be re-run here: on this
+host every module drops to the interpreter with `unresolved external symbol
+'rt_struct_alloc'`, so no JIT verdict was formed.
+
+Not fixed here: the defect is in the Rust seed's interpreter match/pattern
+path (`src/compiler_rust/**`), and fixing it needs a seed rebuild that this
+lane must not perform while a bootstrap is in flight. Stays OPEN with fresh
+evidence.

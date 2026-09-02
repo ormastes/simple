@@ -1,7 +1,64 @@
 # `.?` yields `T?`, but 25 `-> bool` functions return it directly
 
-Status: OPEN (P2)
+Status: OPEN (P2) — **re-verified 2026-09-02 by EXECUTION. Still reproduces, in
+both directions, with a control that discriminates.**
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
+## Re-reproduction 2026-09-02 (aarch64-apple-darwin)
+
+Binary identity: `bin/release/aarch64-apple-darwin/simple`, 29,315,096 bytes,
+mtime 2026-07-25 14:15:52, sha256 prefix `f2c216a660da83da1a253d2e8191a305`,
+`--version` -> `Simple v1.0.0-beta`; prints the Rust-seed banner on `run`/`test`,
+so this attributes to the **seed** engine, interpreter mode.
+
+Fixture, run as `simple test <spec> --no-cover-check`. It deliberately carries
+BOTH forms of the same predicate so the run cannot be vacuous — `!= nil` is the
+control, `.?` is the defect:
+
+```simple
+struct Holder:
+    payload: text?
+
+impl Holder:
+    fn has_payload() -> bool:
+        self.payload.?          # the defect
+    fn has_payload_fixed() -> bool:
+        self.payload != nil     # the control
+
+describe "probes":
+    it "sanity struct works":
+        expect(Holder(payload: Some("glue")).has_payload_fixed()).to_equal(true)
+    it "sanity absent":
+        expect(Holder(payload: nil).has_payload_fixed()).to_equal(false)
+    it "P31 dotq present leaks payload":
+        expect(Holder(payload: Some("glue")).has_payload()).to_equal(true)
+    it "P31 dotq absent leaks nil":
+        expect(Holder(payload: nil).has_payload()).to_equal(false)
+```
+
+Observed: `Results: 4 total, 2 passed, 2 failed` — the two `!= nil` control
+cases pass and both `.?` cases fail. So (a) the defect is live, (b) the harness
+discriminates on this exact shape, and (c) the `!= nil` rewrite used at
+`wasm_backend.spl:694` is confirmed correct on this host. A run where all four
+passed, or all four failed, would have been worthless; this one is neither.
+
+Note `self.` is required in this fixture on this binary — the implicit-receiver
+form (`payload.?`) fails with `semantic: variable 'payload' not found`, which is
+a property of this vintage binary, not of the defect.
+
+## Why this pass did NOT sweep the 24 remaining sites
+
+This record's own "Open questions" forbid it: *"This needs a language-owner
+ruling before the sweep. Do not sweep first."* and the 2026-08-17 addendum
+states the durable repair is the single `EXPR_EXISTS_CHECK` site at
+`src/compiler/10.frontend/core/interpreter/eval.spl:443-450` — *"Fixing that one
+site retires both docs; patching the 29 call sites individually does not."*
+Both remain true. Additionally the compiler is compiled into the binary rather
+than read as source, so an `eval.spl` change cannot be executed on this host
+without a bootstrap.
+
+Reason for leaving open: **needs a language-owner ruling, then a bootstrap** —
+not lack of a reproduction. The reproduction now exists and is above.
 
 **Filed:** 2026-08-09 (stream F3)
 **Found via:** `feature/usage/wasm_compile` — row 27 of

@@ -1,0 +1,96 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Every function-return lowering path that can hand back a `T?` must box it
+#
+# Regression guard for doc/08_tracking/bug/native_option_bool_eq_against_raw_literal_2026-08-08.md
+#
+# DEFECT. The pure-Simple compiler has TWO distinct paths by which a function
+# hands a value back to its caller:
+#
+#   1. explicit `return v`  -> _MirLoweringExpr/expr_dispatch.spl,
+#                              lower_return_expr
+#   2. implicit tail `v`    -> _MirLowering/function_lowering.spl,
+#                              lower_function's tail-return arm
+#
+# Path 1 boxed a bare value into the canonical Option handle
+# (`ensure_option_handle`) when the declared return type was `T?`. Path 2 did
+# not. The same declared type therefore produced two different PHYSICAL
+# representations depending on which syntax the author used, and every consumer
+# that decodes through the Option box saw a raw scalar from path 2:
+# `f(true) == true` answered `false` under native-build, and an `f64?` implicit
+# tail failed the build outright with "unsupported LLVM value conversion from
+# double to ptr".
+#
+# WHY A SOURCE SCAN. A spec body runs INTERPRETED, and the interpreter is the
+# Rust seed, which never executes src/compiler/**.spl. The runtime oracle for
+# this defect is scripts/check/check-native-option-bool-eq-vs-literal.shs,
+# which builds test/fixtures/native_option_bool_eq_vs_literal/main.spl through
+# native-build and hard-asserts all 13 rows including the implicit-tail class.
+# That gate is the fail-before/pass-after evidence. This spec is the cheap
+# structural guard that runs in the ordinary suite: it asserts BOTH return
+# paths still carry their boxing, so removing either one is caught here rather
+# than by a silent wrong answer in a compiled binary.
+#
+# OUT OF SCOPE. Whether the boxing is CORRECT for every payload shape — that
+# is the .shs gate's job. This spec only asserts that neither path lost it.
+
+use std.spec.step
+
+use std.spec.*
+
+use std.io_runtime.{process_run}
+
+val RETURN_EXPR_FILE: text = "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"
+val FUNCTION_FILE: text = "src/compiler/50.mir/_MirLowering/function_lowering.spl"
+
+# Grep one file and return matching "line:text" lines. `grep` exits 1 with
+# empty stdout when there are no matches, which is the failing case here;
+# stdout is the whole oracle, so no exit code is read through a pipe.
+fn grep_file(pattern: text, path: text) -> text:
+    val cmd = "/usr/bin/grep -n -- '" + pattern + "' " + path + " || true"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "both function-return lowering paths box an Optional result":
+    # @manual scenario evidence
+
+    it "boxes an explicit `return v` in a `-> T?` function":
+        # @req REQ-SSPEC-COMPILER
+        step("boxes an explicit `return v` in a `-> T?` function")
+        step("lower_return_expr must promote the payload through ensure_option_handle")
+        val hits = grep_file("ensure_option_handle(result, found_return)", RETURN_EXPR_FILE)
+
+        step("Without this the explicit-return path hands back a raw scalar for a declared T?")
+        expect(hits).to_contain("ensure_option_handle")
+
+    it "boxes an implicit tail-expression return in a `-> T?` function":
+        # @req REQ-SSPEC-COMPILER
+        step("boxes an implicit tail-expression return in a `-> T?` function")
+        step("lower_function's tail-return arm must promote the payload the same way")
+        val hits = grep_file("ensure_option_handle(tail_local, fn_.return_type)", FUNCTION_FILE)
+
+        step("This is the path that was missing, and the one that produced `f(true) == true` -> false")
+        expect(hits).to_contain("ensure_option_handle")
+
+    it "keeps the implicit-tail boxing gated on positive scalar evidence":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the implicit-tail boxing gated on positive scalar evidence")
+        step("An `if flag: 7 else: nil` tail merges into a local with no recorded HIR type and is not in nil_locals")
+        val hits = grep_file("tail_is_bare_scalar", FUNCTION_FILE)
+
+        step("Boxing that merged tail blind turns the None word 3 into Some(3), so `?? -1` prints 3 -- the gate must stay")
+        expect(hits).to_contain("tail_is_bare_scalar")
+
+    it "proves the scan is live and would actually catch a removal":
+        # @req REQ-SSPEC-COMPILER
+        step("proves the scan is live and would actually catch a removal")
+        # Non-vacuity control: a real, load-bearing symbol in the same file
+        # must be found. If this comes back empty the scan itself is broken
+        # (wrong path, grep missing, wrong cwd) and every green above is
+        # meaningless.
+        val control = grep_file("me lower_function", FUNCTION_FILE)
+
+        step("A green suite above is only meaningful if this control is non-empty")
+        expect(control).to_contain("lower_function")

@@ -52,13 +52,19 @@ impl HirLowering:
         # 1. Explicit @bits(N) takes precedence
         # 2. For reserved fields, use explicit bits
         # 3. For typed fields, infer from type
-        val bit_width = if f.bits.?:
-            f.bits.unwrap()
+        # `if val` binds directly; a bare `.unwrap()` here can be STOLEN by any
+        # module publishing its own `unwrap` and return raw 0 (see the explainer
+        # at _Expressions/expression_core.spl:50) -> silently wrong bit_width.
+        # Statement form, not `val x = if val ...:` -- if-val as an assignment RHS
+        # does not survive the bootstrap flat-AST bridge (tag=18 parse error).
+        var bit_width = 0
+        if val explicit_bits = f.bits:
+            bit_width = explicit_bits
         elif f.is_reserved:
-            0  # Reserved without explicit bits = 0
+            bit_width = 0  # Reserved without explicit bits = 0
         else:
             # Infer from type (use default primitive widths)
-            self.infer_bit_width(f.type_)
+            bit_width = self.infer_bit_width(f.type_)
 
         val ftype = if f.type_.?: self.lower_type(f.type_) else: nil
         HirBitfieldField(
@@ -72,19 +78,22 @@ impl HirLowering:
         )
 
     fn infer_bit_width(type_: Type?) -> i64:
-        if not type_.?:
-            return 0
-
-        val t = type_.unwrap()
-        match t.kind:
-            case Named(name, _):
-                if name == "bool":
-                    return 1
-                val primitive_bits = primitive_integer_bit_width_from_name(name)
-                if primitive_bits > 0:
-                    return primitive_bits
-                custom_primitive_integer_bit_width_by_name(name)
-            case _: 0  # Complex types require explicit @bits
+        # `if val` binds directly; a bare `.unwrap()` here can be STOLEN by any
+        # module publishing its own `unwrap` and return raw 0, so `t.kind` read
+        # a zero discriminant (E-MIR-TYPE-ZeroKind / SEGV). See the explainer at
+        # _Expressions/expression_core.spl:50.
+        if val t = type_:
+            match t.kind:
+                case Named(name, _):
+                    if name == "bool":
+                        return 1
+                    val primitive_bits = primitive_integer_bit_width_from_name(name)
+                    if primitive_bits > 0:
+                        return primitive_bits
+                    custom_primitive_integer_bit_width_by_name(name)
+                case _: 0  # Complex types require explicit @bits
+        else:
+            0
 
     me lower_trait(trait_: ParserTrait) -> HirTrait:
         val symbol = self.symbols.lookup_or_invalid(trait_.name)

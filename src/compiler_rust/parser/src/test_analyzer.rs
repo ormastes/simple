@@ -345,9 +345,10 @@ fn may_exit_block_early(node: &Node) -> bool {
                     .elif_branches
                     .iter()
                     .any(|(_, _, block)| block.statements.iter().any(returns_anywhere))
-                || if_stmt.else_block.as_ref().is_some_and(|block| {
-                    block.statements.iter().any(returns_anywhere)
-                })
+                || if_stmt
+                    .else_block
+                    .as_ref()
+                    .is_some_and(|block| block.statements.iter().any(returns_anywhere))
         }
         Node::Match(match_stmt) => match_stmt
             .arms
