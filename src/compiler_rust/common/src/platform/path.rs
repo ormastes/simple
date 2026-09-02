@@ -157,6 +157,35 @@ pub fn to_native_arg(path: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Borrowed(path)
 }
 
+/// Owned-in, owned-out variant for call sites that already hold a `String`
+/// (env-var reads, for example).
+///
+/// This exists so such call sites cost NOTHING on Unix. Writing
+/// `to_native_arg(&s).into_owned()` would allocate a fresh `String` and
+/// memcpy on every call even though the Unix conversion is the identity —
+/// the `to_owned()` clone survives inlining even after the conversion body
+/// itself is optimized away. Here the Unix build simply moves the `String`
+/// straight back out.
+#[cfg(not(windows))]
+#[inline(always)]
+pub fn to_native_owned(s: String) -> String {
+    s
+}
+
+/// Windows implementation. See the `#[cfg(not(windows))]` twin for contract.
+#[cfg(windows)]
+pub fn to_native_owned(s: String) -> String {
+    // Two steps so the borrow of `s` ends before `s` is moved out.
+    let converted = match to_native_arg(&s) {
+        std::borrow::Cow::Borrowed(_) => None,
+        std::borrow::Cow::Owned(o) => Some(o),
+    };
+    match converted {
+        Some(o) => o,
+        None => s,
+    }
+}
+
 /// `Path`-flavoured convenience over [`to_native_arg`].
 ///
 /// On Unix this borrows the input unchanged and allocates nothing.
