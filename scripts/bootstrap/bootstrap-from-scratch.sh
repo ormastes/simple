@@ -2682,29 +2682,34 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "${stage3_provenance_dir}/runtime-before-stage2.txt" || exit 1
   stage2_native_log="$(absolute_path "${log_dir}/stage2-native-build.log")"
   bootstrap_run_stage2_native() {
+    set -- \
+      "RUST_LOG=${stage_build_rust_log}" \
+      "LIBRARY_PATH=${bootstrap_link_library_path}" \
+      "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
+      SIMPLE_BOOTSTRAP=1 \
+      "SIMPLE_ABI_POLICY=${simple_abi_policy}" \
+      "SIMPLE_PLUGIN_MANIFEST_POLICY=${SIMPLE_PLUGIN_MANIFEST_POLICY}" \
+      "SIMPLE_KERNEL_K1_POLICY=${SIMPLE_KERNEL_K1_POLICY}" \
+      "SIMPLE_COVERAGE_CUTOVER_STATE=${SIMPLE_COVERAGE_CUTOVER_STATE}" \
+      "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
+      SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+      SIMPLE_NATIVE_BUILD_RUST=1 \
+      SIMPLE_NO_STUB_FALLBACK=1 \
+      "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
+      SIMPLE_FRONTEND_CACHE=1 \
+      "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      ${bootstrap_windows_abi_env} \
+      "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
+      "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
+      "SIMPLE_BINARY=${stage2_seed_absolute}"
+    stage2_env_names=$(bootstrap_stage3_env_assignment_names "$@") || return 1
+    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}") || return 1
+    [ "${stage2_env_names}" = "${stage2_expected_env_names}" ] || return 1
     bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage2_command_transcript}")" "${repo_root}" \
     "${stage2_native_log}" \
     "${stage2_home_absolute}" "${stage2_tmp_absolute}" "${stage_build_path}" \
-    RUST_LOG="${stage_build_rust_log}" \
-    LIBRARY_PATH="${bootstrap_link_library_path}" \
-    SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
-    SIMPLE_BOOTSTRAP=1 \
-    SIMPLE_ABI_POLICY="${simple_abi_policy}" \
-    SIMPLE_PLUGIN_MANIFEST_POLICY="${SIMPLE_PLUGIN_MANIFEST_POLICY}" \
-    SIMPLE_KERNEL_K1_POLICY="${SIMPLE_KERNEL_K1_POLICY}" \
-    SIMPLE_COVERAGE_CUTOVER_STATE="${SIMPLE_COVERAGE_CUTOVER_STATE}" \
-    SIMPLE_K1_COMPOSITION_SHA256_BEFORE="${k1_composition_sha256_before}" \
-    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-    SIMPLE_NATIVE_BUILD_RUST=1 \
-    SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
-    SIMPLE_FRONTEND_CACHE=1 \
-    SIMPLE_FRONTEND_CACHE_DIR="${stage2_cache_absolute}/frontend" \
-    ${bootstrap_windows_abi_env} \
-    SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE="${stage2_compatibility_manifest_absolute}" \
-    SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT="${stage3_cache_absolute}" \
-    SIMPLE_BINARY="${stage2_seed_absolute}" -- \
+    "$@" -- \
     "${stage2_seed_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
