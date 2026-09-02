@@ -79,8 +79,10 @@ green Stage 2 build is not evidence the runtime compiles.
 
 ## Unblock condition
 
-1. Reconcile the Windows runtime signatures with `src/runtime/runtime.h` (start
-   with `rt_mmap`, then the C4028 sites at 276/492/498/509).
+1. **Fix `runtime.h:250`, NOT `platform_win.h`** (direction verified against the
+   caller — see "Which side is canonical" below). The C4028 sites at
+   276/492/498/509 are warnings, not part of the minimal unblock: file, do not
+   fix them in the same change.
 2. Add `/std:c11` (or route this path to clang-cl, matching the outer link) to
    the runtime-compile invocation.
 3. Re-run the receiver probe; Stage 2 admission should then proceed.
@@ -93,3 +95,40 @@ again reported as UNDIAGNOSABLE.
 
 None on Unix. `unix_common.h` already matches the prototype and is untouched by
 the proposed change; `/std:c11` applies only to the MSVC invocation.
+
+## Which side is canonical — the caller decides (verified 2026-09-02)
+
+An earlier draft of this record proposed reconciling `platform_win.h` TO
+`runtime.h`. **That direction is wrong** and would have compiled clean while
+breaking at runtime. C2040 proves the two sides disagree; it does not say which
+is right. The caller does:
+
+```
+src/lib/nogc_sync_mut/io/file_ops.spl:24
+  extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: i64) -> i64
+src/lib/nogc_sync_mut/io/file_ops.spl:250
+  rt_mmap(path, size, offset, if readonly: 1 else: 0)
+```
+
+The extern returns **i64**, not `void*`, and its `path: text` parameter lowers
+to the **(ptr, len)** pair. That is exactly `platform_win.h:457`'s
+`int64_t rt_mmap(const uint8_t*, uint64_t, int64_t, int64_t, int64_t)`.
+
+So `platform_win.h` is CORRECT and its comment is accurate; the stale side is
+the `runtime.h:250` prototype (and, on its own terms,
+`unix_common.h:304`, which still has the old `void*`/`const char*` form).
+
+**Do not simply rewrite `runtime.h:250` globally** — that would make
+`unix_common.h` mismatch and break the Unix build. Whoever picks this up must
+first establish how the `text` extern is marshalled on Unix (whether Unix is
+latently wrong here but never exercised on the bootstrap path). The
+lowest-risk unblock for the Windows lane alone is a `#ifdef _WIN32` prototype
+in `runtime.h` matching `platform_win.h`, leaving every Unix declaration and
+definition byte-identical.
+
+## Not mid-lane skew — present at the newer sha too
+
+Checked against `b7b4ef8e060` (the later head of the same session lane): the
+divergence is IDENTICAL there (`runtime.h:250` still `void*`/`const char*`,
+`platform_win.h:457` still `(ptr,len)`/`int64_t`). This is a standing defect,
+not a half-landed change, and building the newer sha would not avoid it.
