@@ -1,0 +1,144 @@
+# E-MIR-TYPE-ZeroKind: the last Stage-3 producer is the tree's only remaining omitted-Optional struct field
+
+- **Filed:** 2026-09-03
+- **Status:** FIX LANDED, UNVERIFIED ON THIS HOST (no runnable compiler here — see Verification)
+- **Supersedes the "source-edit avenue is CLOSED" conclusion of**
+  `zerokind_roams_between_victims_avoidance_edits_are_not_fixes_2026-09-02.md`
+- **Related:** PR #274 (`a387009e6c7`), PR #295, PR #291,
+  `self_hosted_symbol_table_hirtype_garbage_at_rest_2026-08-31.md`
+
+## Symptom
+
+Stage 3 completes `phase1:load_sources` -> `phase3:hir` (760/760, hir-fatals=0)
+-> `hir_typecheck` -> `streaming_source_reclaim` -> `phase4:monomorphize` ->
+`phase5:mode_dispatch`, then exits 1 with exactly TWO:
+
+```
+error: bootstrap MIR lowering: E-MIR-TYPE-ZeroKind: lower_type received a
+well-formed HirType whose `kind` field is raw 0 (never written) while lowering
+'scope-tail:compiler.driver.pipeline_fn.compile_specialized_template'
+```
+
+`scope-tail:` is a fixed tail label of an installed `current_function_names`
+array (`function_lowering.spl:1144-1152` documents this) and names no victim.
+
+## The producer
+
+`src/compiler/80.driver/driver_vhdl_artifact_build.spl:146` constructs
+`VhdlArtifactInput(...)` and omits exactly one declared field:
+`assurance_policy: VhdlArtifactAssurancePolicySnapshot?`
+(`driver_vhdl_artifacts.spl:100`). The module is in the compiler's own closure
+(`driver_aot_vhdl_output.spl:16` imports it).
+
+An omitted Optional field does not lower as "absent". It routes through
+`lower_struct_construct`'s fill path
+(`switch_operators_calls.spl:3697-3702`), which calls
+`ensure_option_handle(raw_nil, field_hir_types[fi])` -- a `HirType` read out of
+an ARRAY ELEMENT held in a `Dict<text, [HirType]>` and passed as an AGGREGATE BY
+VALUE across a method boundary -- and then on into `remember_local_hir_type`
+(`mir_lowering_types.spl:559`), by value again. That is the exact shape the
+neighbouring `copy_local_hir_type_metadata` documents as unsafe under the
+admitted Stage 2 native ABI ("Keep both method arguments scalar and copy the
+aggregate only while it remains an element of this owner's aligned local
+arrays"). The callee receives a zero-filled `HirType`: a well-formed heap object
+whose `kind` slot was never written. The `!= nil` guards on that path cannot
+screen it, because the nil sentinel in this runtime is raw **3**, not 0.
+
+This is byte-for-byte the mechanism PR #274 identified and fixed for
+`CompiledUnit.entry_point`. #274 cleared 4 of the original 6 occurrences; this
+is the same defect at the one remaining site.
+
+Fix: name the field explicitly (`assurance_policy: nil`), which keeps it off the
+fill path entirely. That is #274's fix verbatim, not an avoidance edit: it
+repairs the construction that feeds the crossing, changes no type, deletes no
+use, and adds no consumer-side guard. `input.assurance_policy == nil`
+(`driver_vhdl_artifacts.spl:529`) reads identically either way, so behaviour is
+unchanged.
+
+## Why this is the only candidate left (the negative results)
+
+All sweeps ran against `origin/main` @ `dcb322dc971`, over `src/**` excluding
+vendored trees, with balanced-paren parsing (not line greps) and a control count
+for every zero.
+
+1. **No source construction mints kind 0.** All **364** `HirType(...)`
+   constructions in `src/compiler` supply `kind:`. The only two that do not are
+   positional pattern matches (`mir_lowering_stmts.spl:237,241`), which bind
+   `kind`. Of the 364, only **13** supply a non-literal `kind:` expression, and
+   every one resolves through a helper that terminates in a defended arm
+   (`HirTypeKind.Error` / `.Unit` / `.Infer(0,0)`): `lower_named_kind`
+   (`types.spl:732`, tail `HirTypeKind.Error`),
+   `hir_type_kind_from_simple_name` (`lowering_helpers.spl:515`, `case _:
+   HirTypeKind.Unit`), `hc_dec_hir_type_kind` (unknown tag raises via
+   `hc_bad_tag`, no fallthrough), and the already-fixed `prim_kind_v`.
+   **Zero** `kind:` expressions derive from a bare `.unwrap()`, directly or one
+   assignment hop away.
+
+2. **Only one omitted-Optional struct literal remains.** Sweeping every
+   keyword-style literal of every optional-bearing struct/class type in `src/`:
+   **1,177 checked, 1 offender** — the `VhdlArtifactInput` site above.
+
+3. **The `expr_dispatch.spl` rows carried forward as "known-open" are the wrong
+   defect.** `:282`, `:4664/4666/4668`, `:4832/4834/4835`, `:4851/4853/4854`
+   unwrap `LocalId` / unwind-target / unwind-payload / global-static optionals.
+   None of them can construct or return a `HirType`, so none can mint this
+   symptom. They are the same stolen-unwrap *class* as PR #291/#295, tracked
+   there; they are not this bug.
+
+4. **`substitute_type`'s dict reads were considered and dropped.** The victims
+   (a stub with no generics, plus two wrappers) do not sit on the
+   monomorphization substitution path, and an unconditionally corrupt
+   struct-valued bracket read would fatal on essentially every specialization,
+   not exactly twice.
+
+## One fatal, two occurrences
+
+One omission, more than one fatal, is the established ratio: #274's single
+omitted `entry_point` produced **six** ZeroKind raises. `ensure_option_handle`
+stores the corrupted aggregate via `remember_local_hir_type`, and every later
+`lower_type` that retrieves it raises again. Two occurrences from one omitted
+field is consistent with that and does not imply two sites. The evidence
+supports **one site, hit twice**.
+
+## The experiment, repaired
+
+`function_lowering.spl:247` held the only built discriminating instrument: a
+two-sided tag probe that reads the caller-side `HirType` discriminant
+immediately before `lower_type(fn_.params[pmi].type_)`, separating "dead copy
+minted in flight" (caller non-zero, callee 0) from "already dead upstream"
+(caller 0 too).
+
+It was scoped `fn_.name.contains("compile_specialized_template")` — that is,
+scoped by the ZeroKind fatal's reported name, which lines 1144-1152 of the same
+file declare is a fixed tail label and explicitly "NOT the function being
+lowered". The probe could therefore only ever fire if the producer happened to
+live inside those three wrappers, which is exactly the reading runs B–F of the
+`zerokind_roams` record refuted five times.
+
+The real constraint the name filter was solving is output volume (an unscoped
+per-parameter print drove RSS to 10 GB in 3 minutes). This change keeps that
+bound and drops the false premise: the probe now reads the discriminant for
+every parameter (a cheap SFFI call, no output) and prints **only when the caller
+side is already anomalous** — `_sffi_hir_type_discriminant` returns `-1` for a
+non-enum kind, which is what a raw-0 or nil `kind` yields. Print count is
+bounded by the number of fatals, not by 760 modules. Still default-off behind
+`SIMPLE_MIR_TAG_PROBE=1`, and it still reads only the discriminant of the same
+field `lower_type` is about to read, so the `:1112` round-2 hazard (reading
+further fields off the corrupt object) is not reintroduced.
+
+Run it with `SIMPLE_MIR_TAG_PROBE=1`. If the fix above is correct the probe
+prints nothing and Stage 3 proceeds. If ZeroKind persists, the probe now names
+the real module, function, parameter index and parameter name in ONE run.
+
+## Verification
+
+**What was verified:** every claim above about tree content, by balanced-paren
+parsing of `origin/main` @ `dcb322dc971`, each zero paired with a control count.
+
+**What was NOT verified: the fix was not executed.** No proof was possible on
+this host. All five tracked `bootstrap/*/simple` binaries are the same 126 KB
+stub (a fixture referencing `NoSuchTypeXYZ` exits 0); `bin/simple` is the
+bootstrap CLI and exposes neither `test` nor `lint`; and
+`bin/release/aarch64-apple-darwin/simple` cannot parse the current stdlib
+(`always_inline`). No bootstrap was run, per instruction. The next Stage-3 run
+is the verification, and the repaired probe is the instrument if it fails.
