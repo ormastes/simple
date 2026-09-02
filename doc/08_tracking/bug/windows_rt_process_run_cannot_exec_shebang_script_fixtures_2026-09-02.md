@@ -40,8 +40,16 @@ fails, and it fails silently: no stderr explains why.
 
 137 caret spec files run as explicit files, interpreter mode, sequentially:
 `1260 total, 1033 passed, 227 failed` across 42 files. Bucketing the failure
-messages, the `-1` signature and its empty-string downstream dominate the
-live-tree failures, e.g. `claude_cli_spec.spl` 50/85 failed,
+messages and counting assertion lines only (many failures print no `expected`
+line at all): **25** failed assertions across **7** files quote the literal `-1`
+signature — `claude_cli_spec`, `config_spec`, `provider_spec`, `tools_spec`,
+`llm_caret_claude_cli_stream_spec`,
+`llm_caret_claude_cli_full_parity_implementation_spec`, and the stale mirror
+`test/unit/app/llm_caret/provider_spec`. A further **40** assertions compare
+against an **empty** actual value, the expected downstream shape of a failed
+spawn, though not independently proven to share this cause. Total `expected`
+lines across the whole sweep: 105. Worst-hit files:
+`claude_cli_spec.spl` 50/85 failed,
 `provider_spec.spl` 9/42, `llm_caret_installed_claude_cli_spec.spl` 6/6,
 `llm_caret_tui_pty_spec.spl` 10/10.
 
@@ -62,3 +70,30 @@ correct result. **Must be Windows-only** — the POSIX branch already works via
 This lives in `src/runtime` process spawn, the same area another session is
 already working on for the Windows test-runner `process_run_observed_bounded`
 defect. Coordinate before editing; do not land two competing spawn fixes.
+
+## Class-(b) proof: identical on a pristine `origin/main` worktree
+
+`origin/main` (`1b76db1d6c3`) was materialised into a separate worktree and the
+same specs run there with the **same** binary (`bin/simple.exe`, md5
+`d52d770724a9f8797e98ac7819709ab9`), same flags, repo-relative paths. The run
+was confirmed to read the worktree's own sources (`…/main-wt/src/lib` appears in
+its diagnostics, 25 occurrences), not the working checkout's:
+
+| spec | working checkout | `origin/main` worktree |
+|---|---|---|
+| `test/01_unit/app/llm_caret/provider_spec.spl` | 42 total, 33 passed, 9 failed | 42 total, 33 passed, 9 failed |
+| `test/01_unit/app/llm_caret/types_spec.spl` | 25 total, 24 passed, 1 failed | 25 total, 24 passed, 1 failed |
+| `test/01_unit/app/llm_caret/chat_spec.spl` | 24 total, 0 passed, 24 failed | 24 total, 0 passed, 24 failed |
+
+Byte-identical counts. Nothing in the current working tree contributes.
+
+## Stale mirror trees are a separate, already-baselined bucket
+
+Of the 227 failures, **57 across 6 files** are in the legacy mirror trees
+`test/unit/**` and `test/system/**`, which are stale copies of the live
+`test/01_unit/**` / `test/03_system/**` specs. Example:
+`test/01_unit/app/llm_caret/json_helpers_spec.spl` runs **49 total, 49 passed,
+0 failed**, while its mirror `test/unit/app/llm_caret/json_helpers_spec.spl`
+runs **47 total, 7 passed, 40 failed** — an older API surface, not a defect.
+`scripts/check/test_tree_divergence_baseline.txt` already carries 9 `llm_caret`
+entries. The live trees account for the other **170 failures across 36 files**.
