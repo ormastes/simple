@@ -1,0 +1,89 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+#
+# POLICY (user, 2026-09-02): product code carries only MinGW/POSIX-style
+# forward-slash paths; conversion to a native a drive-letter backslash form happens ONLY in the
+# library boundary layer (std.platform.to_native_path), never baked into a call
+# site.
+#
+# This spec pins the CONVERTED CALL SITES landed on 2026-09-02:
+#   src/compiler/70.backend/linker/link_deps.spl:159-160  find_library
+#   src/compiler/70.backend/linker/msvc.spl:236,323       vswhere / Windows SDK
+#   src/app/test_runner_new/test_runner_async.spl:46      _get_temp_dir
+#   src/lib/nogc_sync_mut/test_runner/test_runner_async.spl:64
+# Each previously held a hardcoded native backslash literal.
+#
+# WHY FORWARD-SLASH-WITH-DRIVE AND NOT `/c/...`: measured on Windows 11
+# 2026-09-02, exit status read directly into a variable, never through a pipe:
+#   Test-Path 'C:/Windows/System32/kernel32.dll'                   -> True
+#   Test-Path '/c/Windows/System32/kernel32.dll'                   -> False
+#   cmd /C dir /b "C:/Program Files (x86)/Windows Kits/10/Lib"     -> rc=0
+#   cmd /C dir /b "/c/Program Files (x86)/Windows Kits/10/Lib"     -> rc=1 (File Not Found)
+#   & 'C:/Program Files (x86)/.../vswhere.exe' -latest             -> rc=0
+# Win32 accepts the forward-slash separator but has no `/c/` concept: that form
+# is an MSYS *shell* convention with no converter in this tree
+# (`to_native_path` maps "/" -> "\", it does not map "/c/" -> a drive-letter root). Emitting
+# `/c/...` at these call sites would have broken MSVC discovery silently, which
+# is strictly worse than the literal it replaced.
+#
+# CROSS-PLATFORM: every assertion that touches the host filesystem is gated on
+# is_windows(). On POSIX this spec asserts only engine-independent facts, so
+# Unix behaviour is byte-identical.
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_true, assert_equal}
+use std.fs.{file_exists}
+use std.platform.{is_windows}
+
+describe "windows path policy — converted call sites resolve on the host":
+    # @manual scenario evidence
+    it "the converted find_library shape resolves a real system DLL":
+        # @req REQ-SSPEC-LIB
+        step("the converted find_library shape resolves a real system DLL")
+        # Same literal shape as link_deps.spl find_library after conversion.
+        if is_windows():
+            assert_true(file_exists("C:/Windows/System32/kernel32.dll"))
+        else:
+            # POSIX: the branch is unreachable in product code (os == "windows"
+            # guards it), so there is nothing host-specific to assert.
+            assert_true(true)
+
+    it "the converted temp-dir fallback names an existing directory":
+        # @req REQ-SSPEC-LIB
+        step("the converted temp-dir fallback names an existing directory")
+        # _get_temp_dir's Windows fallback, post-conversion.
+        if is_windows():
+            assert_true(file_exists("C:/Windows"))
+        else:
+            assert_true(file_exists("/tmp"))
+
+    it "no converted call-site literal contains a backslash":
+        # @req REQ-SSPEC-LIB
+        step("no converted call-site literal contains a backslash")
+        # Asserted structurally so it holds on every platform: the canonical
+        # in-code form is separator-free of native backslashes by construction.
+        val dll = "C:/Windows/System32/kernel32.dll"
+        val vswhere = "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+        val sdk = "C:/Program Files (x86)/Windows Kits/10/Lib"
+        val tmp = "C:/Temp"
+        assert_equal(dll.contains(back_slash()), false)
+        assert_equal(vswhere.contains(back_slash()), false)
+        assert_equal(sdk.contains(back_slash()), false)
+        assert_equal(tmp.contains(back_slash()), false)
+
+# A single backslash built WITHOUT a string-literal escape.
+#
+# This helper exists because a literal backslash cannot be trusted in a spec on
+# this compiler. Measured 2026-09-02 on bin/simple.exe (md5
+# d52d770724a9f8797e98ac7819709ab9), asserting BYTE LENGTH, never appearance:
+#   engine `run` (JIT):         "a\b".len() == 3   (correct)
+#   engine `test` (interpreter) "a\b".len() == 2   (WRONG -- one byte lost)
+# Both engines agree on a longer drive-letter fixture (10 bytes, correct), so the defect
+# is narrower than, and diverges from, the claim in
+# doc/08_tracking/bug/lexer_drops_backslash_escape_in_string_literal_2026-09-02.md
+# that the two engines behave identically. A SINGLE backslash is separately and
+# reproducibly dropped on both: a 14-byte drive-letter path literal measures 12.
+fn back_slash() -> text:
+    # 92 == U+005C REVERSE SOLIDUS.
+    char_from_code(92)

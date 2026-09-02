@@ -1,0 +1,77 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+#
+# Generalizes windows_path_policy_call_site_spec.spl from the specific converted
+# call sites to the RULE: a canonical forward-slash path authored in product code
+# reaches a native consumer correctly, and the ONLY place a native backslash form
+# is produced is the boundary helper std.platform.to_native_path.
+#
+# to_native_path is the documented single conversion point. Note for whoever
+# lands the next boundary change: measured 2026-09-02 it had ZERO call sites in
+# product code (three grep hits, all comments), so the seam is designed but not
+# yet exercised in production. This spec is its first executable pin.
+#
+# CROSS-PLATFORM (standing user constraint, absolute): on every non-Windows
+# platform to_native_path is the IDENTITY function, because a backslash is a
+# LEGAL POSIX filename character and rewriting it would corrupt a real path.
+# That identity property is asserted unconditionally below, so Unix behaviour is
+# pinned as byte-identical rather than merely untested.
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_true, assert_equal}
+use std.fs.{file_exists}
+use std.platform.{to_native_path, is_windows}
+
+# A single backslash built WITHOUT a string-literal escape -- see the note in
+# windows_path_policy_call_site_spec.spl for the measured reason a literal
+# backslash cannot be trusted here (engine divergence: "a\b".len() is 3 under
+# `run` and 2 under `test`).
+fn back_slash() -> text:
+    char_from_code(92)
+
+describe "windows path boundary — canonical forward-slash in, native out":
+    # @manual scenario evidence
+    it "converts separators only at the boundary, and only on Windows":
+        # @req REQ-SSPEC-LIB
+        step("converts separators only at the boundary, and only on Windows")
+        val canonical = "C:/tmp/a.txt"
+        val native = to_native_path(canonical)
+        # Length is preserved either way: this is a separator SUBSTITUTION, not
+        # a re-rooting. Asserted by byte count, never by appearance.
+        assert_equal(native.len(), canonical.len())
+        if is_windows():
+            assert_equal(native.contains("/"), false)
+            assert_equal(native.contains(back_slash()), true)
+        else:
+            # POSIX: strict identity. A backslash is a legal filename byte here.
+            assert_equal(native, canonical)
+            assert_equal(native.contains(back_slash()), false)
+
+    it "is the identity on a POSIX path containing a legal backslash byte":
+        # @req REQ-SSPEC-LIB
+        step("is the identity on a POSIX path containing a legal backslash byte")
+        # A Unix file may legitimately be named with a backslash. Off Windows
+        # the boundary MUST NOT touch it. (On Windows this input is not a
+        # meaningful path, so only the non-Windows branch is asserted.)
+        val weird = "/tmp/a" + back_slash() + "b"
+        assert_equal(weird.len(), 8)   # "/tmp/a" (6) + one backslash byte + "b"
+        if is_windows():
+            assert_true(true)
+        else:
+            assert_equal(to_native_path(weird), weird)
+
+    it "a canonical forward-slash path reaches the native filesystem consumer":
+        # @req REQ-SSPEC-LIB
+        step("a canonical forward-slash path reaches the native filesystem consumer")
+        # The end-to-end claim: product code holds forward slashes, and the
+        # native consumer resolves them. On Windows this is the non-obvious
+        # half -- Win32 accepts "/" as a separator, which is exactly why the
+        # policy is implementable without touching every call site.
+        if is_windows():
+            assert_true(file_exists("C:/Windows/System32/kernel32.dll"))
+            # ...and the boundary-converted form resolves identically.
+            assert_true(file_exists(to_native_path("C:/Windows/System32/kernel32.dll")))
+        else:
+            assert_true(file_exists("/tmp"))
+            assert_true(file_exists(to_native_path("/tmp")))
