@@ -5407,6 +5407,32 @@ int64_t rt_string_to_int(int64_t value) {
     return result;
 }
 
+/* Receiver-dispatched `.to_i64()` / `.to_int()` for the LLVM native lane when
+ * the receiver TYPE WAS ERASED.
+ *
+ * `pipeline/native_project/mangle.rs` deliberately leaves `to_i64`/`to_int`
+ * BARE in that case, on the contract that codegen routes bare string builtins
+ * through its redirect table (-> rt_string_to_int). The LLVM arm broke that
+ * contract: an unconditional integer-cast block matched `to_i64` FIRST and
+ * emitted an identity coercion, so `text.to_i64()` evaluated to the receiver's
+ * own tagged word. Measured live: the Windows MSVC Stage 2 candidate compiled
+ * `(value.to_i64() ?? 0) > 0` to `test %rsi,%rsi; setle` on the text handle,
+ * which made `--threads 1` "not a positive integer" while `--threads 0` WAS
+ * accepted. See
+ * doc/08_tracking/bug/windows_msvc_stage2_rejected_struct_receiver_route_threads_2026-09-01.md.
+ *
+ * Routing bare `to_i64` unconditionally to rt_string_to_int is NOT a fix: that
+ * returns 0 for a non-string, which would silently zero every erased NUMERIC
+ * `.to_i64()`. So dispatch on the receiver, with an IDENTITY fallback that is
+ * byte-identical to the cast block's existing behaviour for everything that is
+ * not a registry-validated string. The guard is rt_core_as_string() for the
+ * reason documented at rt_value_as_int: a bare TAG_HEAP bit test would
+ * misclassify every odd RAW i64 that pure-Simple call sites legitimately pass. */
+int64_t rt_to_int_dynamic(int64_t value) {
+    if (rt_core_as_string(value)) return rt_string_to_int(value);
+    return value;
+}
+
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
  * lowering (switch_operators_calls.spl). rt_string_to_int above requires an
  * ALREADY-tagged receiver (rt_core_as_string-checked, 0 otherwise) -- the
@@ -5598,6 +5624,42 @@ __attribute__((weak)) SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
+/* rt_cli_get_args / rt_cli_arg_count / rt_cli_arg_at are ALSO defined, and
+ * also weak, in runtime.c (lines 2276/2284/2288). On ELF and Mach-O two weak
+ * definitions of the same name are simply resolved to one and nothing is
+ * reported. On COFF they are not: clang-cl lowers `__attribute__((weak))` to a
+ * weak EXTERNAL carrying a default-resolution symbol whose name is derived
+ * from the object it lives in, so the two translation units declare the same
+ * weak external with DIFFERENT defaults and link.exe fails
+ *
+ *   fatal error LNK1227: conflicting weak extern definition for
+ *   'rt_cli_get_args'. new default '.weak.rt_cli_get_args.default.
+ *   rt_random_hex' conflicts with previous default '.weak.rt_cli_get_args.
+ *   default.rt_dir_create_cpath' (in ..._runtime.obj)
+ *
+ * measured 2026-09-02 on the MSVC Stage 2 receiver probe, link.exe 14.44,
+ * exit 1227. `/FORCE:MULTIPLE` does NOT cover this: it downgrades duplicate
+ * STRONG definitions to LNK4006 warnings (about 40 of those are emitted on the
+ * same link and are tolerated), but conflicting weak-external defaults are a
+ * separate, unforceable rule. LNK1227 is fatal at the first conflict, so all
+ * three must be guarded together or the next one simply takes its place.
+ *
+ * Guarded on `_WIN32 && SIMPLE_CORE_C_STANDALONE`, i.e. exactly the standalone
+ * core-C bundle where runtime.c is guaranteed to be linked in and therefore
+ * guaranteed to supply these three. That is the same suppression mechanism
+ * runtime_compiler.spl already describes for this define ("compile
+ * runtime_native.c's per-lane fallback copies out so exactly ONE definition
+ * ships"); this group was simply never covered by it.
+ *
+ * CROSS-PLATFORM: `_WIN32` is half the condition precisely so that no
+ * Linux/macOS/FreeBSD lane changes. SIMPLE_CORE_C_STANDALONE alone would NOT
+ * be inert -- runtime_compiler.spl passes it on the GCC/clang branch too --
+ * and the weak-ness of these definitions is load-bearing off Windows, for the
+ * same Stage4 dual-capsule reason spelled out at the rt_set_args carve-out a
+ * hundred lines above. The mingw lane is unaffected in practice as well: it
+ * takes the GNU branch of that same bundle, and this guard removes nothing it
+ * relies on that runtime.c does not also define. */
+#if !(defined(_WIN32) && defined(SIMPLE_CORE_C_STANDALONE))
 __attribute__((weak)) SplArray* rt_cli_get_args(void) {
     int64_t argc = spl_arg_count();
     SplArray* args = rt_array_new(argc);
@@ -5622,6 +5684,7 @@ __attribute__((weak)) int64_t rt_cli_arg_at(int64_t index) {
     if (!arg) arg = "";
     return rt_string_new((const uint8_t*)arg, (uint64_t)strlen(arg));
 }
+#endif /* !(_WIN32 && SIMPLE_CORE_C_STANDALONE) -- see LNK1227 note above */
 
 int64_t rt_file_preload_pages(int64_t path_value) {
 #if defined(_WIN32)
