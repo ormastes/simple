@@ -1,7 +1,11 @@
 # Windows: 35 tracked symlinks under `src/` materialize as path TEXT and fail to parse
 
-**Status:** OPEN 2026-09-02 — blocks `check-main-test-runnable-push.shs` entirely
-on Windows, and breaks any fresh materialization of committed content.
+**Status:** FIXED 2026-09-02 — see "Investigation and fix 2026-09-02" below.
+Verified by execution on a fresh worktree (`BEFORE_check_rc=1` ->
+`AFTER_check_rc=0`) and by two passing specs; the `--selftest` verdict of
+`check-main-test-runnable-push.shs` is recorded in that section.
+Originally: OPEN — blocked `check-main-test-runnable-push.shs` entirely on
+Windows, and broke any fresh materialization of committed content.
 **Severity:** Blocking — a push-tier gate cannot run at all; a fresh Windows
 clone cannot compile its own startup path.
 **Affected:** 35 paths, `git ls-files -s src | awk '$1=="120000"'`
@@ -170,3 +174,34 @@ this host; stated rather than claimed.
 `TMPDIR` (`core.longpaths` is unset). The guard uses `mktemp -d`, so on a Windows
 host with a long temp path it errors before reaching any symlink. Worked around
 in verification by pointing `TMPDIR` at a short path.
+
+### Gate verdict — the blocked selftest now passes
+
+BEFORE (as filed at the top of this record):
+
+```
+SELFTEST FAIL: C1 — the clean worktree already fails with a parse diagnostic
+  (fail:rc=1: error: compile failed: parse: in ".../src/app/debug/coordinator.spl":
+   Unexpected token: expected expression, found Slash), so injecting one proves nothing
+check-main-test-runnable-push.shs: FAIL — selftest failed; no scan was run
+```
+
+AFTER, same host, same seed (`bin/simple.exe` md5
+`d52d770724a9f8797e98ac7819709ab9`), exit status read directly into a variable:
+
+```
+$ TMPDIR=/c/gt sh scripts/check/check-main-test-runnable-push.shs --selftest ; rc=$?
+materialize-symlinks-windows: created=100 already_ok=0 skipped_pending=16 failed=0 strict_missing=1
+materialize-symlinks-windows: created=100 already_ok=0 skipped_pending=16 failed=0 strict_missing=1
+check-main-test-runnable-push.shs: PASS — 7 selftest fixture(s) checked, scan not requested
+GATE_SELFTEST_rc=0
+```
+
+Two `created=100` lines — one per worktree the selftest builds (the C and F
+fixtures), which is the wiring being exercised, not asserted. Observed mid-run
+inside the gate's own C worktree: `src/app/debug/coordinator.spl` went from
+`nlink=1 size=45` (the 45-byte target path) to `nlink=2 size=521` (a hard link to
+the real module).
+
+`TMPDIR` had to be pointed at a short path for the run — see the
+`Filename too long` note above; that is a separate, still-open Windows issue.
