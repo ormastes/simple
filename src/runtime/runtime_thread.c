@@ -1921,8 +1921,33 @@ void spl_condvar_destroy(spl_condvar_handle handle) {
  * once the Stage 2 sanity gate's Windows-ABI-env bug was fixed and it could
  * finally exercise the MSVC/clang-cl lane instead of silently falling back to
  * GNU). Restored to the single, unconditional guard below; legacy_core.c is
- * the sole owner on every platform whenever SIMPLE_CORE_C_STANDALONE is set. */
-#if !defined(SIMPLE_CORE_C_STANDALONE)
+ * the sole owner on every platform whenever SIMPLE_CORE_C_STANDALONE is set.
+ *
+ * AMENDED 2026-09-02. "Every caller that defines SIMPLE_CORE_C_STANDALONE puts
+ * runtime_legacy_core.c in the SAME unconditional input list" is true of the
+ * two callers it names -- both are Rust/seed-side -- and FALSE of the
+ * pure-Simple one. compile_runtime_objects
+ * (src/compiler/70.backend/backend/runtime_compiler.spl) pushes
+ * runtime_legacy_core only when include_stage4_legacy_compat is set, while it
+ * passes -DSIMPLE_CORE_C_STANDALONE=1 whenever include_dynload is set. The
+ * core-c-bootstrap bundle used by the Stage 2 receiver probe sets the second
+ * and not the first, so NOBODY owned this symbol and the link failed with
+ * `runtime_thread.obj : error LNK2019: unresolved external symbol
+ * spl_thread_cpu_count referenced in function rt_pool_get_parallelism`
+ * -> LNK1120 (measured 2026-09-02, clang-cl/link.exe 14.44). Another instance
+ * of the self-hosted-vs-seed source-list divergence recorded in
+ * doc/08_tracking/bug/c_runtime_source_list_divergence_2026-08-30.md.
+ *
+ * Rather than guess from the platform -- which is what produced the reverted
+ * _WIN32 exception above -- ownership is now stated by the only component that
+ * actually knows the source list: a caller that sets SIMPLE_CORE_C_STANDALONE
+ * WITHOUT including runtime_legacy_core.c defines
+ * SIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1 and gets the definition here.
+ * CROSS-PLATFORM: every existing caller leaves the new macro undefined, so the
+ * condition is byte-identical to before on all of them, Unix and Windows
+ * alike; the LNK2005 collision the paragraph above describes cannot return,
+ * because the lanes that ship legacy_core.c never define it. */
+#if !defined(SIMPLE_CORE_C_STANDALONE) ||     defined(SIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER)
 int64_t spl_thread_cpu_count(void) {
 #ifdef SPL_THREAD_PTHREAD
     #if defined(__APPLE__) || defined(__MACH__)
