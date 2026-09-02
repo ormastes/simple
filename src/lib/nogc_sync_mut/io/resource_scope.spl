@@ -461,6 +461,41 @@ fn _unavailable_usage(wall_ms: i64, exit_code: i64) -> ResourceUsage:
         exit_code: exit_code
     )
 
+fn _receipt_shows_no_child(fields: [i64]) -> bool:
+    """True only when the owned-process receipt proves no child was ever started.
+
+    fields[3]=pid, fields[5]=start_identity, fields[6]/[7]=stdout/stderr bytes
+    seen, fields[15]=reaped. All zero means the provider refused before spawning,
+    so re-running through the legacy facade cannot repeat a side effect.
+    """
+    fields[3] == 0 and fields[5] == 0 and fields[6] == 0 and fields[7] == 0 and fields[15] == 0
+
+fn _legacy_bounded_fallback(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64, lifecycle_error: i64) -> ObservedProcessResult:
+    """Re-run through the established bounded facade when the observed ABI is unavailable.
+
+    This does not swallow failures: the command is genuinely executed again and
+    the legacy facade's own verdict is reported. A real spawn failure still
+    surfaces as exit -1 with `runtime_error` carrying the provider reason.
+    """
+    val legacy_started = time_now_unix_micros()
+    val (legacy_stdout, legacy_stderr, legacy_exit) = process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
+    val legacy_ended = time_now_unix_micros()
+    val legacy_wall_ms = if legacy_ended >= legacy_started: (legacy_ended - legacy_started) / 1000 else: 0
+    val legacy_timed_out = process_bounded_timed_out(legacy_exit, legacy_stderr)
+    val legacy_signal = process_bounded_kill_signal(legacy_exit)
+    val legacy_usage = ResourceUsage(
+        wall_ms: legacy_wall_ms, user_cpu_ms: 0, system_cpu_ms: 0,
+        peak_tree_charge_bytes: 0, peak_direct_child_rss_bytes: 0,
+        heap_live_end_bytes: 0, heap_peak_bytes: 0,
+        io_read_bytes: 0, io_write_bytes: 0, pids_peak: 0,
+        evidence_quality: ResourceEvidenceQuality.Unavailable,
+        termination: if legacy_timed_out: TerminationCause.WallTimeout elif legacy_signal > 0: TerminationCause.Signal elif legacy_exit == -1: TerminationCause.InfrastructureFailure else: TerminationCause.Exited,
+        signal: legacy_signal, exit_code: legacy_exit)
+    ObservedProcessResult(
+        stdout: legacy_stdout, stderr: legacy_stderr, usage: legacy_usage,
+        stdout_truncated: false, stderr_truncated: false,
+        runtime_error: if legacy_exit == -1 and not legacy_timed_out: lifecycle_error else: 0)
+
 fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ObservedProcessResult:
     val started = time_now_unix_micros()
     proc_slot_acquire()
@@ -468,7 +503,15 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
     proc_slot_release()
     val ended = time_now_unix_micros()
     val wall_ms = if ended >= started: (ended - started) / 1000 else: 0
+    # A record that is not the expected 30-field, receipt-v1 / observation-v2
+    # shape carries no trustworthy verdict at all. When it is ALSO empty on both
+    # streams the provider demonstrably produced nothing, so no child can have
+    # run and re-attempting through the legacy bounded facade cannot duplicate a
+    # side effect. Anything else keeps the historical unavailable verdict rather
+    # than risking a second execution.
     if fields.len() != 30 or fields[0] != 1 or fields[19] != 2:
+        if stdout == "" and stderr == "":
+            return _legacy_bounded_fallback(cmd, args, timeout_ms, max_output_bytes, -1)
         return ObservedProcessResult(
             stdout: stdout,
             stderr: stderr,
@@ -488,24 +531,15 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
     # observed ABI. Preserve execution through the established bounded facade
     # while reporting resource evidence as unavailable.
     if lifecycle_error == 95 or lifecycle_error == 45 or lifecycle_error == 10045:
-        val legacy_started = time_now_unix_micros()
-        val (legacy_stdout, legacy_stderr, legacy_exit) = process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
-        val legacy_ended = time_now_unix_micros()
-        val legacy_wall_ms = if legacy_ended >= legacy_started: (legacy_ended - legacy_started) / 1000 else: 0
-        val legacy_timed_out = process_bounded_timed_out(legacy_exit, legacy_stderr)
-        val legacy_signal = process_bounded_kill_signal(legacy_exit)
-        val legacy_usage = ResourceUsage(
-            wall_ms: legacy_wall_ms, user_cpu_ms: 0, system_cpu_ms: 0,
-            peak_tree_charge_bytes: 0, peak_direct_child_rss_bytes: 0,
-            heap_live_end_bytes: 0, heap_peak_bytes: 0,
-            io_read_bytes: 0, io_write_bytes: 0, pids_peak: 0,
-            evidence_quality: ResourceEvidenceQuality.Unavailable,
-            termination: if legacy_timed_out: TerminationCause.WallTimeout elif legacy_signal > 0: TerminationCause.Signal elif legacy_exit == -1: TerminationCause.InfrastructureFailure else: TerminationCause.Exited,
-            signal: legacy_signal, exit_code: legacy_exit)
-        return ObservedProcessResult(
-            stdout: legacy_stdout, stderr: legacy_stderr, usage: legacy_usage,
-            stdout_truncated: false, stderr_truncated: false,
-            runtime_error: if legacy_exit == -1 and not legacy_timed_out: lifecycle_error else: 0)
+        return _legacy_bounded_fallback(cmd, args, timeout_ms, max_output_bytes, lifecycle_error)
+    # Windows/MSVC spells ENOTSUP 129, which the three values above miss. The
+    # non-unix provider stub reports exactly that with an all-zero receipt, so
+    # this arm is admitted ONLY when the receipt itself proves no child was ever
+    # started (no pid, no start identity, never reaped, no bytes observed). That
+    # keeps a genuine spawn failure on a working provider out of the fallback,
+    # and makes double execution impossible.
+    if lifecycle_error == 129 and _receipt_shows_no_child(fields):
+        return _legacy_bounded_fallback(cmd, args, timeout_ms, max_output_bytes, lifecycle_error)
     val has_tree = (evidence_flags & 2) != 0
     val has_sampled_tree = (evidence_flags & 8) != 0
     val has_direct = (evidence_flags & 1) != 0
