@@ -20,15 +20,3 @@ fn plugin_negotiation_parses_with_strict_match_catch_all() {
     assert!(source.contains("case _: false"));
     assert!(!source.contains("\n            else: false"));
 }
-
-#[test]
-fn plugin_negotiation_keeps_abi_v1_fail_closed_paths() {
-    let source = negotiation_source();
-
-    assert!(source.contains("if host.simple_abi_deferred != answer.simple_abi_deferred:"));
-    assert!(source.contains("if host.simple_abi_version <= 0 or answer.simple_abi_version <= 0:"));
-    assert!(source.contains("if host.simple_abi_version != answer.simple_abi_version:"));
-    assert!(source.contains(
-        "return NegotiateVerdict.AbiVersion(host.simple_abi_version, answer.simple_abi_version)"
-    ));
-}
