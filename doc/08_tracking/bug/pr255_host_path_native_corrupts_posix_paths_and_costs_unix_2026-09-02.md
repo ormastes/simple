@@ -218,3 +218,33 @@ public spelling and they have specs. Both existing path specs stay green
   and `scripts/` are owned by other live sessions this session was told to avoid.
 - No POSIX execution was possible on this host (Windows 11). Every Unix claim
   above is asserted through the explicit-platform seam, and says so.
+
+### Addendum — the fix chain is NOT contiguous; one foreign commit is interleaved
+
+The table above says "one per defect, on top of `a95e877484a`", which implies a
+contiguous chain. It is not one. Another session committed on the same shared
+detached HEAD mid-sequence, so `77fa84919c4`
+("fix(check): strict pattern — 6,617 hits were mostly escape sequences") sits
+between D4 (`dc101ee1fd3`) and the fold (`2e8eb2dfa6d`), and every later commit
+here is parented on it.
+
+That commit is not inert with respect to this work: it touches
+`scripts/check/check-no-windows-style-paths.shs` (+7/-1) **and DELETES
+`src/lib/nogc_sync_mut/fs/host_path.spl` outright (-111 lines)** — i.e. it
+removed the converter this record is about. The file was restored by the D5
+commit `47796bfef23` and is intact at the tip (113 lines; guard-first at :41 and
+:75, lower-case drive at :65, cached bool at :86). Verified with
+`git cat-file -p HEAD:src/lib/nogc_sync_mut/fs/host_path.spl`.
+
+**Landing instruction.** Cherry-pick exactly these eight, in order, and EXCLUDE
+`77fa84919c4` (it is another session's work and would re-delete the converter if
+replayed out of order):
+
+```
+3f3a52ca37e  74ce8a6269c  d3f9c1c348c  bbb9f897277
+dc101ee1fd3  2e8eb2dfa6d  47796bfef23  5e9a0abd2e3
+```
+
+The whole tip is also reachable at `refs/wip/pr255-host-path-fixes`, but that ref
+carries `77fa84919c4` too — do not land the ref wholesale without deciding about
+that commit separately with its author.
