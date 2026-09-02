@@ -77,9 +77,13 @@ between re-clobbers.
 3. at minimum, make the error message name the mutated file and say which stage rewrote
    it, so the operator does not rebuild Stage 2 for nothing.
 
-## Scope note (honest)
+## Scope note — RESOLVED 2026-09-02
 
-The "only the trust-root branch writes parent receipts" claim rests on a `scripts/`-wide
-grep plus reading the coordinator/gate files (which only READ the receipt). A `src/`-wide
-grep was attempted and did not complete on this host. The workaround above does not
-depend on that claim.
+The "only the trust-root branch writes parent receipts" claim was initially filed with a
+caveat: a `src/`-wide grep had not completed on this starved host. That grep has since
+finished. **`stage2-sanity.receipt` appears in exactly six `scripts/` files and has ZERO
+hits under `src/`** — no Simple-side code writes or refreshes it. The sole writer is
+confirmed to be the trust-root branch of `bootstrap-from-scratch.sh:2864-2890`.
+
+(The workaround above never depended on this claim, but the claim is now established
+rather than assumed.)
