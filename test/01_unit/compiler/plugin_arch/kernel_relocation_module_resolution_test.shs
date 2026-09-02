@@ -18,4 +18,93 @@ if grep -Fqx "$stale" "$production" || grep -Fqx "$stale" "$spec"; then
     exit 1
 fi
 
+owners='src/compiler/00.common/api_surface_contract.spl
+src/compiler/70.backend/backend/static_backend_types.spl
+src/lib/compiler_artifact_service/profile.spl
+src/lib/compiler_artifact_service/protocol.spl
+src/lib/compiler_artifact_service/service.spl
+src/compiler/80.driver/backend/native_promotion_queue.spl
+src/compiler/50.mir/admission/mir_admission_v1.spl
+src/compiler/80.driver/cache/dirty_module_record.spl
+src/compiler/80.driver/cache/pinned_archive_capability.spl
+src/compiler/20.hir/import_materialization/state.spl
+src/compiler/20.hir/import_materialization/materializer.spl
+src/lib/common/io/file_read_policy.spl
+src/lib/common/io/read_only_file_view.spl
+src/lib/common/io/file_view_buffered.spl
+src/compiler/80.driver/cache/cas_batch_transaction.spl
+src/compiler/00.common/shared_lib_flags.spl
+src/compiler/80.driver/cache/route_capability_scope.spl
+src/compiler/20.hir/archive/interface_action_archive.spl
+src/compiler/80.driver/smf/runtime_std_package_set.spl
+src/compiler/80.driver/smf/package_image_v1.spl
+src/compiler/10.frontend/lexer/lexical_scan_runtime.spl
+src/compiler/10.frontend/lexer/lexical_scan_capability.spl
+src/compiler/10.frontend/lexer/lexical_scan_simd.spl
+src/compiler/70.backend/backend/static_backend_cranelift_port.spl
+src/compiler/70.backend/backend/static_backend_llvm_port.spl'
+
+resolve_module() {
+    case "$1" in
+        common.plugin.iface_id) echo src/lib/common/plugin/iface_id.spl ;;
+        compiler.backend.backend.backend_types) echo src/compiler/70.backend/backend/backend_types.spl ;;
+        compiler.backend.backend_port) echo src/compiler/70.backend/backend_port.spl ;;
+        compiler.backend.codegen_types) echo src/compiler/70.backend/backend/codegen_types.spl ;;
+        compiler.backend.cranelift_codegen_adapter) echo src/compiler/70.backend/backend/cranelift_codegen_adapter.spl ;;
+        compiler.backend.llvm_codegen_adapter) echo src/compiler/70.backend/backend/llvm_codegen_adapter.spl ;;
+        compiler.common.cache.phase_compatibility_path_io) echo src/compiler/00.common/cache/phase_compatibility_path_io.spl ;;
+        compiler.driver.action_graph.build_action_v1) echo src/compiler/80.driver/action_graph/build_action_v1.spl ;;
+        compiler.driver.backend.demand_backend_plan) echo src/compiler/80.driver/backend/demand_backend_plan.spl ;;
+        compiler.driver.cache.cas_batch_transaction) echo src/compiler/80.driver/cache/cas_batch_transaction.spl ;;
+        compiler.driver.cache.cas_store) echo src/compiler/80.driver/cache/cas_store.spl ;;
+        compiler.driver.cache.package_archive_cache) echo src/compiler/80.driver/cache/package_archive_cache.spl ;;
+        compiler.driver.cache.package_archive_types) echo src/compiler/80.driver/cache/package_archive_types.spl ;;
+        compiler.driver.cache.package_module_index) echo src/compiler/80.driver/cache/package_module_index.spl ;;
+        compiler.driver.cache.package_tldr_metadata) echo src/compiler/80.driver/cache/package_tldr_metadata.spl ;;
+        compiler.driver.cache.pinned_archive_capability) echo src/compiler/80.driver/cache/pinned_archive_capability.spl ;;
+        compiler.driver.smf.package_image_v1) echo src/compiler/80.driver/smf/package_image_v1.spl ;;
+        compiler.frontend.lexer.lexical_scan_capability) echo src/compiler/10.frontend/lexer/lexical_scan_capability.spl ;;
+        compiler.frontend.lexer.lexical_scan_simd) echo src/compiler/10.frontend/lexer/lexical_scan_simd.spl ;;
+        compiler.hir.import_materialization.state) echo src/compiler/20.hir/import_materialization/state.spl ;;
+        compiler.mir.mir_instructions) echo src/compiler/50.mir/mir_instructions.spl ;;
+        lib.compiler_artifact_service.profile) echo src/lib/compiler_artifact_service/profile.spl ;;
+        lib.compiler_artifact_service.protocol) echo src/lib/compiler_artifact_service/protocol.spl ;;
+        std.async.cancellation) echo src/lib/nogc_async_mut/async/cancellation.spl ;;
+        std.async.future) echo src/lib/nogc_async_mut/async/future.spl ;;
+        std.async.runtime) echo src/lib/nogc_async_mut/async/runtime.spl ;;
+        std.common.crypto.sha256) echo src/lib/common/crypto/sha256.spl ;;
+        std.common.io.file_read_policy) echo src/lib/common/io/file_read_policy.spl ;;
+        std.common.io.file_view_buffered) echo src/lib/common/io/file_view_buffered.spl ;;
+        std.common.io.read_only_file_view) echo src/lib/common/io/read_only_file_view.spl ;;
+        std.io) echo src/lib/nogc_sync_mut/io.spl ;;
+        std.io_runtime) echo src/lib/nogc_sync_mut/io_runtime.spl ;;
+        std.nogc_sync_mut.atomic) echo src/lib/nogc_sync_mut/atomic.spl ;;
+        std.nogc_sync_mut.concurrent.thread) echo src/lib/nogc_sync_mut/concurrent/thread.spl ;;
+        std.nogc_sync_mut.io_runtime) echo src/lib/nogc_sync_mut/io_runtime.spl ;;
+        std.nogc_sync_mut.sffi.fs) echo src/lib/nogc_sync_mut/sffi/fs.spl ;;
+        std.platform) echo src/lib/platform.spl ;;
+        std.string_core) echo src/lib/string_core.spl ;;
+        *) return 1 ;;
+    esac
+}
+
+owner_count=0
+for transferred_owner in $owners; do
+    test -f "$transferred_owner"
+    owner_count=$((owner_count + 1))
+    sed -n 's/^[[:space:]]*use[[:space:]]\([^.{]*\(\.[A-Za-z0-9_]*\)*\).*/\1/p' "$transferred_owner" |
+        sed 's/\.$//' |
+        while IFS= read -r imported_module; do
+            imported_owner=$(resolve_module "$imported_module") || {
+                echo "FAIL — unresolved direct import $imported_module in $transferred_owner"
+                exit 1
+            }
+            test -f "$imported_owner" || {
+                echo "FAIL — missing direct owner $imported_owner for $imported_module"
+                exit 1
+            }
+        done
+done
+test "$owner_count" -eq 25
+
 echo "KERNEL_RELOCATION_MODULE_RESOLUTION_PASS"

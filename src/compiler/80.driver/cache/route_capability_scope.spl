@@ -1,0 +1,138 @@
+use compiler.driver.cache.pinned_archive_capability.{
+    PinnedArchiveCapability, PinnedArchiveErrorV1,
+    pinned_archive_close_v1, pinned_archive_read_member_v1
+}
+
+enum RouteCapabilityScopeErrorV1:
+    already_closed
+    duplicate_capability
+    invalid_transfer
+    close_failed
+
+struct RouteCapabilityTransferV1:
+    capability: PinnedArchiveCapability
+    descriptor: i64
+
+struct RouteCapabilityCloseReceiptV1:
+    registered_count: i64
+    transferred_count: i64
+    closed_count: i64
+    consumed_bytes: u64
+    close_failures: [i64]
+
+class RouteCapabilityScope:
+    capabilities: [PinnedArchiveCapability]
+    transferred_descriptors: [i64]
+    max_consumption_bytes: u64
+    consumed_bytes: u64
+    registered_count: i64
+    closed: bool
+    close_receipt: RouteCapabilityCloseReceiptV1?
+
+fn route_capability_scope_new_v1(max_consumption_bytes: u64) -> RouteCapabilityScope:
+    RouteCapabilityScope([], [], max_consumption_bytes, 0, 0, false, nil)
+
+fn route_capability_scope_has_descriptor_v1(
+    scope: &RouteCapabilityScope, descriptor: i64
+) -> bool:
+    if scope.transferred_descriptors.contains(descriptor):
+        return true
+    for capability in scope.capabilities:
+        if capability.descriptor == descriptor:
+            return true
+    false
+
+fn route_capability_scope_register_v1(
+    scope: &RouteCapabilityScope, capability: PinnedArchiveCapability
+) -> Result[i64, RouteCapabilityScopeErrorV1]:
+    if scope.closed:
+        return Err(RouteCapabilityScopeErrorV1.already_closed)
+    if capability.descriptor < 0 or not capability.open:
+        return Err(RouteCapabilityScopeErrorV1.invalid_transfer)
+    if route_capability_scope_has_descriptor_v1(scope, capability.descriptor):
+        return Err(RouteCapabilityScopeErrorV1.duplicate_capability)
+    val descriptor = capability.descriptor
+    scope.capabilities.push(capability)
+    scope.registered_count = scope.registered_count + 1
+    Ok(descriptor)
+
+fn route_capability_scope_read_member_v1(
+    scope: &RouteCapabilityScope, descriptor: i64, member_name: text,
+    maximum_bytes: u64
+) -> Result[[u8], RouteCapabilityScopeErrorV1]:
+    if scope.closed:
+        return Err(RouteCapabilityScopeErrorV1.already_closed)
+    if maximum_bytes > scope.max_consumption_bytes - scope.consumed_bytes:
+        return Err(RouteCapabilityScopeErrorV1.invalid_transfer)
+    var index = 0
+    while index < scope.capabilities.len():
+        if scope.capabilities[index].descriptor == descriptor:
+            val result = pinned_archive_read_member_v1(
+                &scope.capabilities[index], member_name)
+            if result.is_err():
+                return Err(RouteCapabilityScopeErrorV1.invalid_transfer)
+            val payload = result.unwrap()
+            if payload.len().to_u64() > maximum_bytes or
+                    payload.len().to_u64() > scope.max_consumption_bytes - scope.consumed_bytes:
+                return Err(RouteCapabilityScopeErrorV1.invalid_transfer)
+            scope.consumed_bytes = scope.consumed_bytes + payload.len().to_u64()
+            return Ok(payload)
+        index = index + 1
+    Err(RouteCapabilityScopeErrorV1.invalid_transfer)
+
+fn route_capability_scope_transfer_last_v1(
+    scope: &RouteCapabilityScope, descriptor: i64
+) -> Result[RouteCapabilityTransferV1, RouteCapabilityScopeErrorV1]:
+    if scope.closed:
+        return Err(RouteCapabilityScopeErrorV1.already_closed)
+    if scope.capabilities.len() == 0 or
+            scope.capabilities[scope.capabilities.len() - 1].descriptor != descriptor:
+        return Err(RouteCapabilityScopeErrorV1.invalid_transfer)
+    val capability = scope.capabilities.pop().unwrap()
+    scope.transferred_descriptors.push(descriptor)
+    Ok(RouteCapabilityTransferV1(capability, descriptor))
+
+fn route_capability_scope_close_all_v1(
+    scope: &RouteCapabilityScope
+) -> Result[RouteCapabilityCloseReceiptV1, RouteCapabilityScopeErrorV1]:
+    if scope.close_receipt != nil:
+        if scope.close_receipt!.close_failures.len() > 0:
+            return Err(RouteCapabilityScopeErrorV1.close_failed)
+        return Ok(scope.close_receipt!)
+    if scope.closed:
+        return Err(RouteCapabilityScopeErrorV1.already_closed)
+    scope.closed = true
+    var closed_count = 0
+    var close_failures: [i64] = []
+    while scope.capabilities.len() > 0:
+        val capability = scope.capabilities.pop().unwrap()
+        val descriptor = capability.descriptor
+        if pinned_archive_close_v1(capability).is_err():
+            close_failures.push(descriptor)
+        else:
+            closed_count = closed_count + 1
+    val receipt = RouteCapabilityCloseReceiptV1(
+        scope.registered_count, scope.transferred_descriptors.len(),
+        closed_count, scope.consumed_bytes, close_failures)
+    scope.close_receipt = Some(receipt)
+    if close_failures.len() > 0:
+        return Err(RouteCapabilityScopeErrorV1.close_failed)
+    Ok(receipt)
+
+fn route_capability_scope_cancel_v1(
+    scope: &RouteCapabilityScope
+) -> Result[RouteCapabilityCloseReceiptV1, RouteCapabilityScopeErrorV1]:
+    route_capability_scope_close_all_v1(scope)
+
+fn route_capability_scope_timeout_v1(
+    scope: &RouteCapabilityScope
+) -> Result[RouteCapabilityCloseReceiptV1, RouteCapabilityScopeErrorV1]:
+    route_capability_scope_close_all_v1(scope)
+
+export RouteCapabilityScopeErrorV1, RouteCapabilityTransferV1
+export RouteCapabilityCloseReceiptV1, RouteCapabilityScope
+export route_capability_scope_new_v1, route_capability_scope_register_v1
+export route_capability_scope_read_member_v1
+export route_capability_scope_transfer_last_v1
+export route_capability_scope_close_all_v1
+export route_capability_scope_cancel_v1, route_capability_scope_timeout_v1
