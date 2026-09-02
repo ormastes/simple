@@ -47,10 +47,59 @@ assert_spec_scenarios() {
     [ "$_actual" -eq "$_expected" ]
 }
 
+# Guard against gate-count drift: every `run_spec <path> <n>` expectation in
+# this script must equal the number of `it "` scenarios in that spec file.
+# Landed after the provider_spec 36 -> 42 correction was applied to the
+# --self-test scenario table but NOT to the local-torch lane's run_spec line,
+# which would have failed the gate on a fully green suite.
+expectations_match_scenarios() {
+    _script=$1
+    _base=$2
+    _bad=""
+    _seen=0
+    _rows=$(grep -oE 'run'_'spec [^ ]+ [0-9]+' "$_script" | sed 's/^run_spec //')
+    for _row in $(printf '%s\n' "$_rows" | tr ' ' ':'); do
+        [ -n "$_row" ] || continue
+        _p=${_row%:*}
+        _declared=${_row##*:}
+        _seen=$((_seen + 1))
+        if [ -f "$_base/$_p" ]; then
+            _actual=$(grep -Ec '^[[:space:]]*it "' "$_base/$_p" || true)
+        else
+            _actual=-1
+        fi
+        [ "$_declared" -eq "$_actual" ] || _bad="$_bad $_p(declared=$_declared,it=$_actual)"
+    done
+    [ "$_seen" -gt 0 ] || { echo "vacuous" >&2; return 1; }
+    [ -z "$_bad" ] || { echo "drift:$_bad" >&2; return 1; }
+    return 0
+}
+
+self_test_run_spec_expectation_parity() {
+    # (1) Reproducing: the exact 36-vs-42 drift shape must be DETECTED, and the
+    #     aligned twin must pass — a detector that fails everything proves nothing.
+    _drift_tmp=$(mktemp -d) || return 2
+    mkdir -p "$_drift_tmp/spec"
+    printf '    it "a" {\n    it "b" {\n' > "$_drift_tmp/spec/two_it_spec.spl"
+    printf 'run'_'spec spec/two_it_spec.spl 1 || exit 1\n' > "$_drift_tmp/drifted.shs"
+    printf 'run'_'spec spec/two_it_spec.spl 2 || exit 1\n' > "$_drift_tmp/aligned.shs"
+    printf 'echo no expectations here\n' > "$_drift_tmp/empty.shs"
+    printf 'run'_'spec spec/absent_spec.spl 3 || exit 1\n' > "$_drift_tmp/missing.shs"
+    ! expectations_match_scenarios "$_drift_tmp/drifted.shs" "$_drift_tmp" 2>/dev/null || { rm -rf "$_drift_tmp"; return 1; }
+    expectations_match_scenarios "$_drift_tmp/aligned.shs" "$_drift_tmp" 2>/dev/null || { rm -rf "$_drift_tmp"; return 1; }
+    ! expectations_match_scenarios "$_drift_tmp/empty.shs" "$_drift_tmp" 2>/dev/null || { rm -rf "$_drift_tmp"; return 1; }
+    ! expectations_match_scenarios "$_drift_tmp/missing.shs" "$_drift_tmp" 2>/dev/null || { rm -rf "$_drift_tmp"; return 1; }
+    rm -rf "$_drift_tmp"
+    # (2) Generalizing: EVERY run_spec expectation in this gate, across all four
+    #     lanes (local-torch, provider-wrappers, agent-primitives, multi-manager).
+    expectations_match_scenarios "$0" "$ROOT" || return 1
+}
+
 case "${1:-}" in
     --gate) GATE=${2:-}; shift 2 ;;
     --self-test)
         self_test_results_parser || { echo "STATUS: FAIL caret-suite results-parser"; exit 1; }
+        self_test_run_spec_expectation_parity || { echo "STATUS: FAIL caret-suite run-spec-expectation-parity"; exit 1; }
         for path in \
             src/app/llm_caret/main.spl \
             src/app/llm_caret/local_torch.spl \
@@ -69,7 +118,7 @@ case "${1:-}" in
         for spec_count in \
             test/01_unit/app/llm_caret/main_spec.spl:64 \
             test/01_unit/app/llm_caret/local_torch_spec.spl:9 \
-            test/01_unit/app/llm_caret/provider_spec.spl:36 \
+            test/01_unit/app/llm_caret/provider_spec.spl:42 \
             test/01_unit/app/llm_caret/server_spec.spl:22 \
             test/01_unit/app/llm_caret/agent_runtime_provider_spec.spl:5 \
             test/03_system/llm_caret_agent_backends_spec.spl:6 \
@@ -125,7 +174,7 @@ case "$GATE" in
         verify_stage4_binding || exit 1
         run_spec test/01_unit/app/llm_caret/main_spec.spl 64 || exit 1
         run_spec test/01_unit/app/llm_caret/local_torch_spec.spl 9 || exit 1
-        run_spec test/01_unit/app/llm_caret/provider_spec.spl 36 || exit 1
+        run_spec test/01_unit/app/llm_caret/provider_spec.spl 42 || exit 1
         run_spec test/01_unit/app/llm_caret/server_spec.spl 22 || exit 1
         echo "STATUS: PASS caret-local-torch-launch"
         ;;
