@@ -3,8 +3,8 @@
 # Integrates with Microsoft Visual C++ linker (link.exe) for Windows builds.
 # Auto-detects Visual Studio installation via vswhere.exe.
 
-use std.platform (is_windows, normalize_path, join_path)
-use std.io_runtime.{process_run, file_exists, env_get_opt}
+use std.platform (is_windows, normalize_path, join_path, to_native_path)
+use std.io_runtime.{process_run, file_exists, env_get_opt, file_read_nullable}
 use compiler.backend.linker.link (LinkConfig, LinkError, LinkErrorKind, Linker)
 
 struct MsvcShellResult:
@@ -129,12 +129,44 @@ impl MsvcLinker:
         val args = self.config.build_args(output, object_files)
         val args_str = args.join(" ")
 
-        # Execute linker
+        # Execute linker. The linker's own bytes are written to a file BY
+        # cmd.exe (`> log 2>&1`), never carried out of the child through a
+        # captured `text` handle: the captured handles on this path have been
+        # observed to render as `<invalid-heap:0x...>`, which destroyed the
+        # only diagnostic for the Stage 2 receiver gate. Reading the file back
+        # is a different code path from process capture, and the raw dump below
+        # goes to stdout regardless of whether the returned Err message
+        # survives. Windows-only file; no other platform links through this
+        # module, so Unix behaviour is unchanged.
+        val link_log = "{output}.link.log"
         val cmd = "\"{link_exe}\" {args_str}"
-        val result = msvc_shell(cmd)
+        # The redirect target MUST be backslash-form: cmd.exe rejects a
+        # forward-slash path in a redirection with "The syntax of the command
+        # is incorrect" and exits 1 WITHOUT running the linker -- measured
+        # 2026-09-02, which is why the first tee produced an unreadable log and
+        # a bare "linker exited 1". to_native_path is the identity off Windows.
+        val link_log_native = to_native_path(link_log)
+        val result = msvc_shell("{cmd} > \"{link_log_native}\" 2>&1")
 
         if result.exit_code != 0:
-            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: result.stderr, symbol: nil, location: nil))
+            # link.exe / lld-link report LNK errors on STDOUT, not stderr, so
+            # reporting stderr alone threw half the diagnosis away. Both
+            # streams are now merged into link_log by cmd.exe itself and read
+            # back from disk, and the full command is carried so a failed link
+            # is reproducible by hand.
+            var log_body = "<link log unreadable: {link_log}>"
+            if val body = file_read_nullable(link_log):
+                log_body = body
+            # Print the recovered bytes IMMEDIATELY. If the Err message is
+            # corrupted downstream, this dump is still in the build log.
+            print "[msvc-link] FAILED exit={result.exit_code}"
+            print "[msvc-link] command: {cmd}"
+            print "[msvc-link] log: {link_log}"
+            print "[msvc-link] output-begin"
+            print log_body
+            print "[msvc-link] output-end"
+            val diag = "linker exited {result.exit_code} | command: {cmd} | log: {link_log} | output: {log_body}"
+            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: diag, symbol: nil, location: nil))
 
         Ok(())
 
@@ -223,12 +255,23 @@ fn find_link_exe() -> text?:
         case nil:
             pass
 
-    # Try to find in PATH
+    # Try to find in PATH.
+    #
+    # `where` prints ONE LINE PER MATCH and there are routinely several:
+    # measured 2026-09-02 in the MSVC bootstrap lane, `where link.exe` returned
+    # 3 lines -- MSVC's linker first, then Git-for-Windows' coreutils `link.exe`
+    # twice. Trimming the whole multi-line blob and calling file_exists on it
+    # therefore ALWAYS failed, and this function returned nil with the linker
+    # sitting first on PATH. That produced "MSVC link.exe not found", which was
+    # the Stage 2 receiver gate's real (previously unprintable) error.
+    # Iterate the lines and take the first that is an existing file, exactly as
+    # the Visual Studio branch above already does.
     val path_result = msvc_shell("where link.exe 2>nul")
     if path_result.exit_code == 0:
-        val link_path = path_result.stdout.trim()
-        if link_path != "" and file_exists(link_path):
-            return Some(link_path)
+        for path_line in path_result.stdout.split("\n"):
+            val candidate = path_line.trim()
+            if candidate.ends_with("link.exe") and file_exists(candidate):
+                return Some(candidate)
 
     nil
 
@@ -304,12 +347,38 @@ impl LldLinkLinker:
         val args = self.config.build_args(output, object_files)
         val args_str = args.join(" ")
 
-        # Execute linker
+        # Execute linker -- same file-tee capture as MsvcLinker.link above,
+        # for the same reason (captured stdout/stderr handles can arrive
+        # corrupted and take the diagnostic with them). Windows-only.
+        val link_log = "{output}.link.log"
         val cmd = "\"{lld_link}\" {args_str}"
-        val result = msvc_shell(cmd)
+        # The redirect target MUST be backslash-form: cmd.exe rejects a
+        # forward-slash path in a redirection with "The syntax of the command
+        # is incorrect" and exits 1 WITHOUT running the linker -- measured
+        # 2026-09-02, which is why the first tee produced an unreadable log and
+        # a bare "linker exited 1". to_native_path is the identity off Windows.
+        val link_log_native = to_native_path(link_log)
+        val result = msvc_shell("{cmd} > \"{link_log_native}\" 2>&1")
 
         if result.exit_code != 0:
-            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: result.stderr, symbol: nil, location: nil))
+            # link.exe / lld-link report LNK errors on STDOUT, not stderr, so
+            # reporting stderr alone threw half the diagnosis away. Both
+            # streams are now merged into link_log by cmd.exe itself and read
+            # back from disk, and the full command is carried so a failed link
+            # is reproducible by hand.
+            var log_body = "<link log unreadable: {link_log}>"
+            if val body = file_read_nullable(link_log):
+                log_body = body
+            # Print the recovered bytes IMMEDIATELY. If the Err message is
+            # corrupted downstream, this dump is still in the build log.
+            print "[msvc-link] FAILED exit={result.exit_code}"
+            print "[msvc-link] command: {cmd}"
+            print "[msvc-link] log: {link_log}"
+            print "[msvc-link] output-begin"
+            print log_body
+            print "[msvc-link] output-end"
+            val diag = "linker exited {result.exit_code} | command: {cmd} | log: {link_log} | output: {log_body}"
+            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: diag, symbol: nil, location: nil))
 
         Ok(())
 

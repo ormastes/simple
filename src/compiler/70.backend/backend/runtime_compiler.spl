@@ -47,16 +47,53 @@ fn _is_mingw() -> bool:
     val msystem = env_get_nullable("MSYSTEM")
     msystem != "" and msystem != nil
 
+fn _msys_drive_path(p: text) -> text:
+    """On Windows, rewrite an MSYS/Cygwin '/d/foo' path to native 'd:/foo'.
+
+    TMPDIR/TMP/TEMP under Git Bash / MSYS2 hold POSIX-form paths. Every
+    consumer below hands the result to a NATIVE Windows tool via
+    rt_process_run (no shell, so no MSYS argv conversion happens), and such a
+    tool cannot open '/d/...' at all.
+
+    Measured 2026-09-02 on the MSVC bootstrap lane, clang-cl 18.1.8, same
+    probe source, argv differing only in path form:
+      clang-cl /nologo /c /Fo/d/.../ccprobe.o /d/.../ccprobe.c
+        -> "no such file or directory: '/d/.../ccprobe.c'", rc=1
+      clang-cl /nologo /c /Fod:\...\ccprobe.o d:\...\ccprobe.c
+        -> rc=0, 753-byte object
+    This is why _cc_verify_compiles rejected EVERY candidate and
+    find_c_compiler() returned "", producing "No C compiler found. Install
+    clang or gcc." from llvm_native_link_orchestrator.spl:125 — the Stage 2
+    receiver gate's real failure.
+
+    Drive letters are case-insensitive on Windows, so no case folding is
+    needed. CROSS-PLATFORM IMPACT: guarded by _is_windows(); on every other
+    platform this returns its argument unchanged, and '/d/foo' is a perfectly
+    ordinary POSIX path that must NOT be rewritten.
+    """
+    if not _is_windows():
+        return p
+    if p.len() < 3:
+        return p
+    if not p.starts_with("/"):
+        return p
+    if p.substring(2, 3) != "/":
+        return p
+    val drive = p.substring(1, 2)
+    if drive == "/" or drive == "":
+        return p
+    "{drive}:{p.substring(2)}"
+
 fn _get_temp_dir() -> text:
     val tmpdir = env_get_nullable("TMPDIR")
     if tmpdir != "" and tmpdir != nil:
-        return tmpdir
+        return _msys_drive_path(tmpdir)
     val tmp = env_get_nullable("TMP")
     if tmp != "" and tmp != nil:
-        return tmp
+        return _msys_drive_path(tmp)
     val temp = env_get_nullable("TEMP")
     if temp != "" and temp != nil:
-        return temp
+        return _msys_drive_path(temp)
     if _is_windows():
         return "C:/Windows/Temp"
     "/tmp"
@@ -208,6 +245,11 @@ fn _cc_verify_compiles(cc: text) -> bool:
     val ok = code == 0 and rt_file_exists(obj)
     if runtime_compile_trace_enabled():
         print "[CC-VERIFY] {cc}: exit={code} obj_exists={ok}"
+    elif not ok:
+        # A failing probe is the thing worth reporting, and gating it behind a
+        # trace flag meant the only lane that ever hits it never printed it.
+        print "[CC-VERIFY] {cc}: REJECTED exit={code} src={src} obj={obj}"
+        print "[CC-VERIFY] {cc}: stderr={err}"
     rt_file_delete(src)
     rt_file_delete(obj)
     ok
@@ -225,17 +267,38 @@ fn _find_c_compiler_windows() -> text:
             if code == 0 and _cc_verify_compiles(candidate):
                 return candidate
 
-    # MSVC: try cl.exe (available in VS Developer Command Prompt)
-    val (cl_out, cl_err, cl_code) = backend_shell_tuple("where cl.exe 2>nul")
-    if cl_code == 0 and _cc_verify_compiles("cl.exe"):
-        return "cl.exe"
+    # clang-cl BEFORE cl.exe on the MSVC lane. cl.exe passes the trivial
+    # _cc_verify_compiles probe and then cannot compile the C runtime at all:
+    # measured 2026-09-01 on cl.exe 19.44.35228, src/runtime/runtime.c yields
+    # C1189 ("C atomic support is not enabled" — stdatomic needs BOTH /std:c11
+    # and /experimental:c11atomics), then C2099 non-constant initializers, then
+    # C2143/C2091 on the GNU `__attribute__(...)` the runtime uses throughout.
+    # clang-cl compiles the same file clean with the flags below. clang-cl is
+    # also the compiler the stage-2 candidate itself was built with, so probing
+    # the candidate with a DIFFERENT compiler than built it is its own defect.
+    # Windows-only ordering change: the MinGW branch above and the Unix path in
+    # find_c_compiler are untouched.
+    val msvc_candidates = ["clang-cl", "cl.exe"]
+    for candidate in msvc_candidates:
+        val (mout, merr, mcode) = backend_shell_tuple("where {candidate} 2>nul")
+        if mcode == 0 and _cc_verify_compiles(candidate):
+            return candidate
 
     # Try clang/gcc on PATH (works in both MSVC and MinGW)
-    val candidates = ["clang-cl", "clang", "gcc"]
+    val candidates = ["clang", "gcc"]
     for candidate in candidates:
         val (out, err, code) = backend_shell_tuple("where {candidate} 2>nul")
         if code == 0 and _cc_verify_compiles(candidate):
             return candidate
+
+    # Returning "" here yields the bare message "No C compiler found. Install
+    # clang or gcc." at two DIFFERENT call sites with identical text, and names
+    # neither the candidates tried nor the temp dir the probe used. That cost a
+    # full bootstrap cycle to re-diagnose. Always say what was attempted.
+    print "[cc-detect] no C compiler verified on Windows."
+    print "[cc-detect] temp dir: {_get_temp_dir()}"
+    print "[cc-detect] tried: clang-cl, cl.exe, clang, gcc (each `where` + a real compile)"
+    print "[cc-detect] set SIMPLE_CC to override, or SIMPLE_COMPILER_TRACE=1 for per-candidate exit codes"
     ""
 
 # ============================================================================
@@ -503,7 +566,10 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         if use_msvc:
             # MSVC cl.exe flags (/Gy enables function-level linking for /OPT:REF)
             val msvc_opt = if opt_level <= 0: "/Od" elif opt_level == 1: "/O1" elif opt_level == 2: "/O2" else: "/Ox"
-            comp_args = ["/c", msvc_opt, "/Gy", "/MD", "/I", rt_dir, "/I", "{rt_dir}/platform", "/Fo{obj_path}", src_path]
+            # /std:c11 is required: the runtime uses <stdatomic.h>, which the MS
+            # CRT header guards behind C11 (fatal C1189 otherwise). clang-cl
+            # accepts it and it matches the -std=gnu11 the clang branch passes.
+            comp_args = ["/c", msvc_opt, "/Gy", "/MD", "/std:c11", "/I", rt_dir, "/I", "{rt_dir}/platform", "/Fo{obj_path}", src_path]
             # runtime_memory.c is always in this bundle and canonically owns
             # the overlapping allocator/pointer ABI, including native-all.
             comp_args.push("/DSIMPLE_RUNTIME_MEMORY_OWNER=1")
