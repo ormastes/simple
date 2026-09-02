@@ -416,3 +416,38 @@ class, `.claude/rules/code-style.md`; `src/compiler` carries 297 open findings).
 Stuck at one idx ⇒ a real loop, and that line names the module.
 A categorizer for the eventual error listing is at
 `<scratchpad>/mcp/categorize.sh` (`sh categorize.sh run4.out run4.err`).
+
+### run4 corrected launch (supersedes the PID/paths above)
+
+The first two run4 launches failed for launcher reasons, not compiler ones, and
+both are worth recording because each is a Windows trap:
+
+1. **Backslash `.spl` ARGUMENTS break the source closure.** Invoking
+   `simple.exe run src\app\cli\native_build_worker.spl src\app\mcp\main.spl`
+   dies in ~200 ms with
+
+   ```
+   [BOOTSTRAP-PHASE] +211ms phase1:load_sources:closure:scan path=src\app\mcp\main.spl imports=10 content_len=18179
+   error: semantic: cannot iterate over this type: Nil
+   ```
+
+   The file IS found and scanned (`imports=10`, `content_len=18179`), so this is
+   not "file not found" — something downstream of the scan returns nil for a
+   backslash path and the diagnostic does not mention paths at all. Same
+   unhelpful shape as
+   `doc/08_tracking/bug/lint_cannot_iterate_nil_mcp_sdk_app_2026-08-28.md`.
+   Forward slashes work. Worth filing separately if anyone hits it again.
+2. **cmd.exe will not launch an EXE named with forward slashes**
+   (`'src' is not recognized...`, rc=9009).
+
+So the working invocation on Windows needs BOTH conventions at once — a
+backslash executable path and forward-slash arguments:
+
+```
+src\compiler_rust\target\release\simple.exe run src/app/cli/native_build_worker.spl src/app/mcp/main.spl
+```
+
+Relaunched on that form and confirmed progressing (`parse 18/100` at 50 s),
+detached, cmd PID **5016**. Output paths are unchanged (`run4.out` / `run4.err`
+/ `run4.rc` in the scratchpad `mcp/` directory listed above), as is the harvest
+recipe.
