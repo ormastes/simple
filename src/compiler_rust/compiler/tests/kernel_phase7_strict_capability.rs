@@ -19,12 +19,21 @@ fn lower_source(source: &str) -> Result<(), String> {
 
 #[test]
 fn call_scoped_exclusive_loans_end_at_the_call_boundary() {
-    let sequential = "fn mutate(value: &mut i64):\n    value = value + 1\n\nfn probe():\n    var value = 0\n    mutate(&mut value)\n    mutate(&mut value)\n";
+    let sequential = "@pure\nfn inspect(value: &mut i64) -> i64:\n    value\n\nfn probe():\n    var value = 0\n    inspect(&mut value)\n    inspect(&mut value)\n";
     assert!(lower_source(sequential).is_ok(), "sequential call-scoped loans must not alias");
 
     let overlapping = "fn pair(left: &mut i64, right: &mut i64):\n    pass\n\nfn probe():\n    var value = 0\n    pair(&mut value, &mut value)\n";
     let error = lower_source(overlapping).expect_err("same-call exclusive aliases must fail closed");
     assert!(error.contains("AliasingViolation"), "same-call failure must reach capability checking: {error}");
+
+    let returned = "fn retain(value: &mut i64) -> &mut i64:\n    value\n\nfn probe():\n    var value = 0\n    val retained = retain(&mut value)\n    retain(&mut value)\n";
+    assert!(lower_source(returned).expect_err("returned exclusive loan must survive the call").contains("AliasingViolation"));
+
+    let stored = "fn store(value: &mut i64):\n    pass\n\nfn probe():\n    var value = 0\n    store(&mut value)\n    store(&mut value)\n";
+    assert!(lower_source(stored).expect_err("unrestricted store/capture call must conservatively retain its loan").contains("AliasingViolation"));
+
+    let nested_error = "@pure\nfn inspect(value: &mut i64) -> i64:\n    value\n\nfn probe():\n    var value = 0\n    inspect(&mut value)\n    unknown(&mut value)\n    inspect(&mut value)\n";
+    assert!(lower_source(nested_error).is_err(), "error paths must fail closed without discarding persistent loans");
 }
 
 #[test]

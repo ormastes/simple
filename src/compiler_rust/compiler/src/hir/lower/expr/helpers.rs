@@ -19,14 +19,20 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Vec<HirExpr>> {
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            out.push(self.lower_expr(&arg.value, ctx)?);
+        }
+        Ok(out)
+    }
+
+    pub(in crate::hir::lower) fn lower_nonescaping_call_args(
+        &mut self,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirExpr>> {
         let capability_checkpoint = self.capability_env.clone();
-        let result = (|| {
-            let mut out = Vec::with_capacity(args.len());
-            for arg in args {
-                out.push(self.lower_expr(&arg.value, ctx)?);
-            }
-            Ok(out)
-        })();
+        let result = self.lower_call_args(args, ctx);
         self.capability_env = capability_checkpoint;
         result
     }
