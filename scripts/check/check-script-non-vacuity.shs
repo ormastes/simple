@@ -1,0 +1,248 @@
+#!/bin/sh
+# Frozen-baseline ratchet for the check-script NON-VACUITY convention.
+#
+# Requirements: doc/02_requirements/feature/check_script_non_vacuity_ratchet.md
+# Research:     doc/01_research/compiler/silent_failure_taxonomy_2026-09-01.md
+# Model:        scripts/check/check-unbacked-extern-ratchet.shs (same two-direction rule)
+#
+# WHAT IT GATES
+# -------------
+# A check script that can print PASS after examining ZERO items is the same
+# defect class the push guards exist to catch, one level up — and it has bitten
+# twice (guards that "failed open on the working directory" printed `nothing to
+# push` and exited 0 without checking anything). The repo's convention is:
+#     PASS — <n> item(s) checked   (n > 0)     exit 0
+#     FAIL — ...                                exit 1
+#     ERROR — nothing was checked                exit 2
+# This meta-guard freezes today's convention-less population and FAILs the day
+# a NEW PASS-printing check script lands without the convention.
+#
+# CLASSIFIER (textual — documented per the spec's acceptance criteria)
+# --------------------------------------------------------------------
+# Population: every *.shs under scripts/check/ (recursive), EXCEPT:
+#   * bootstrap-stage scripts — any path containing "bootstrap" (case-
+#     insensitive) is EXEMPT. Chicken-and-egg tolerance is load-bearing: a
+#     stage guard may legitimately find no artifact before the stage exists.
+#     Exempt scripts are counted and reported, never classified as debt.
+# Categories, first match wins:
+#   1. builder     — basename matches build-* or produce-*: prints PASS only as
+#                    build progress, emits no verdict over discovered items.
+#                    Reported under non-verdict, never counted as debt.
+#   2. convention  — grep -E 'nothing was checked|EV_CHECKED' hits: the script
+#                    carries the non-vacuity convention.
+#   3. offender    — grep -E '"?PASS' hits without the convention: PASS-capable
+#                    with no zero-count guard. THIS is the frozen/ratcheted set.
+#   4. non-verdict — no uppercase PASS text at all.
+# Known limits, stated rather than papered over:
+#   * The scan is textual. It cannot judge whether a script's predicate ENTAILS
+#     its verdict (P2 in the taxonomy) — that stays per-guard engineering, and
+#     this guard makes no claim about it.
+#   * Lowercase verdicts (`status=pass`, `[ "$status" = "pass" ]`) are NOT
+#     matched, so such scripts land in non-verdict: the offender count is a
+#     LOWER bound and non-verdict is an upper bound. A false non-verdict is
+#     acceptable; a false convention-carrying is not (none observed, see below).
+#
+# FP-RATE: 0/12 (0%) on 12 hand-adjudicated conv+offender classifications
+#   (6 convention-carrying: all 6 hits are executable ERROR emissions, not
+#   comments; 6 offender-class: all 6 print a PASS verdict and lack any
+#   zero-guard — one was a build-* script, now routed to the builder category),
+#   measured 2026-09-01. The non-verdict class was sampled separately (6): 3/6
+#   are semantically pass-capable via lowercase verdicts, so the FULL offender
+#   population (353 at freeze) is a classification whose members were NOT all
+#   adjudicated — treat the baseline count as an UPPER BOUND on true
+#   verdict-guard debt (it contains data-pattern PASS text) and a LOWER bound
+#   on pass-capable scripts (lowercase verdicts escape it).
+#
+# RULES (mirrors check-unbacked-extern-ratchet.shs)
+#   * any offender NOT in the baseline                     -> FAIL (new debt)
+#   * any baselined script that is no longer an offender   -> FAIL (stale
+#     baseline: it gained the convention, was deleted, or became exempt; a
+#     baseline that no longer describes the tree is how a ratchet silently
+#     stops ratcheting)
+#   * 0 scripts scanned                                    -> ERROR, never a pass
+#
+# Usage:
+#   sh scripts/check/check-script-non-vacuity.shs                      # scan
+#   sh scripts/check/check-script-non-vacuity.shs --root DIR           # scan DIR
+#   sh scripts/check/check-script-non-vacuity.shs --generate-baseline
+#   sh scripts/check/check-script-non-vacuity.shs --selftest           # fixtures only
+#
+# --generate-baseline is for DELIBERATE, REVIEWED baseline updates only. Do not
+# use it to make a FAIL go away: a FAIL naming new scripts means real new debt,
+# and a FAIL naming stale rows means the baseline must shrink, not regrow.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+
+BASELINE="${BASELINE:-scripts/check/non_vacuity_baseline.txt}"
+SCAN_ROOT="scripts/check"
+W=$(mktemp -d); trap 'rm -rf "$W"' EXIT INT TERM
+
+# --- classification ---------------------------------------------------------
+# $1 = scan root, $2 = offenders out. Sets C_TOTAL/C_CONV/C_OFF/C_NONV/C_EXEMPT.
+# Batched (grep -l over the whole list, not per-file) — a per-file loop costs
+# minutes under Windows process-spawn overhead.
+classify() {
+  dir=$1; out=$2
+  find "$dir" -name '*.shs' -type f 2>/dev/null | LC_ALL=C sort > "$W/all.txt"
+  grep -i 'bootstrap' "$W/all.txt" > "$W/exempt.txt" || :
+  grep -vi 'bootstrap' "$W/all.txt" > "$W/scan.txt" || :
+  grep -E '(^|/)(build-|produce-)[^/]*$' "$W/scan.txt" > "$W/builders.txt" || :
+  grep -vE '(^|/)(build-|produce-)[^/]*$' "$W/scan.txt" > "$W/rest.txt" || :
+  : > "$W/conv.txt"; : > "$W/pass.txt"
+  if [ -s "$W/rest.txt" ]; then
+    tr '\n' '\0' < "$W/rest.txt" | xargs -0 grep -lE 'nothing was checked|EV_CHECKED' \
+      2>/dev/null | LC_ALL=C sort -u > "$W/conv.txt" || :
+    tr '\n' '\0' < "$W/rest.txt" | xargs -0 grep -lE '"?PASS' \
+      2>/dev/null | LC_ALL=C sort -u > "$W/pass.txt" || :
+  fi
+  LC_ALL=C comm -23 "$W/pass.txt" "$W/conv.txt" > "$out"
+  C_EXEMPT=$(wc -l < "$W/exempt.txt" | tr -d ' ')
+  C_TOTAL=$(wc -l < "$W/scan.txt" | tr -d ' ')
+  C_CONV=$(wc -l < "$W/conv.txt" | tr -d ' ')
+  C_OFF=$(wc -l < "$out" | tr -d ' ')
+  C_NONV=$((C_TOTAL - C_CONV - C_OFF))
+}
+
+read_baseline() { # $1 = baseline file, $2 = out
+  if [ -r "$1" ]; then
+    sed -e 's/#.*$//' -e 's/[[:space:]]*$//' "$1" | grep -v '^$' | LC_ALL=C sort -u > "$2"
+  else
+    : > "$2"
+  fi
+}
+
+# Pure comparison. Sets EV_CHECKED / EV_NEW / EV_STALE / EV_VERDICT / EV_RC.
+# $1 = current offender list, $2 = baseline list, $3 = scripts scanned.
+compare() {
+  cur=$1; base=$2; scanned=$3
+  LC_ALL=C comm -23 "$cur" "$base" > "$W/new.txt"
+  LC_ALL=C comm -13 "$cur" "$base" > "$W/stale.txt"
+  EV_CHECKED=$scanned
+  EV_NEW=$(wc -l < "$W/new.txt" | tr -d ' ')
+  EV_STALE=$(wc -l < "$W/stale.txt" | tr -d ' ')
+  if [ "$EV_CHECKED" -eq 0 ]; then
+    EV_VERDICT="ERROR — nothing was checked: 0 check scripts scanned"
+    EV_RC=2
+    return 0
+  fi
+  if [ "$EV_NEW" -gt 0 ] || [ "$EV_STALE" -gt 0 ]; then
+    msg="FAIL — $EV_CHECKED script(s) checked"
+    if [ "$EV_NEW" -gt 0 ]; then
+      msg="$msg, $EV_NEW new script(s) print PASS without the non-vacuity convention (add 'ERROR — nothing was checked' + exit 2 on a zero-count scan, see .claude/rules/vcs.md): $(tr '\n' ' ' < "$W/new.txt" | sed 's/ $//')"
+    fi
+    if [ "$EV_STALE" -gt 0 ]; then
+      msg="$msg, $EV_STALE baselined script(s) no longer offenders (stale baseline — remove the row(s)): $(tr '\n' ' ' < "$W/stale.txt" | sed 's/ $//')"
+    fi
+    EV_VERDICT="$msg"
+    EV_RC=1
+    return 0
+  fi
+  EV_VERDICT="PASS — $EV_CHECKED script(s) checked, 0 new, 0 stale ($C_CONV convention-carrying, $C_OFF baselined offender(s), $C_NONV non-verdict, $C_EXEMPT bootstrap-exempt)"
+  EV_RC=0
+}
+
+# --- selftest ---------------------------------------------------------------
+# Fatal, runs before every scan. Real fixture scripts probed by the real
+# classifier and the real comparison — no mocks.
+selftest() {
+  fail=0
+  F="$W/st"; mkdir -p "$F/d1"
+
+  cat > "$F/d1/check-conv.shs" <<'EOF'
+#!/bin/sh
+[ "$n" -eq 0 ] && { echo "ERROR — nothing was checked"; exit 2; }
+echo "PASS — $n item(s) checked"
+EOF
+  printf '#!/bin/sh\necho PASS\n' > "$F/d1/check-off.shs"
+  printf '#!/bin/sh\necho PASS built\n' > "$F/d1/build-x.shs"
+  printf '#!/bin/sh\necho done\n' > "$F/d1/check-quiet.shs"
+  printf '#!/bin/sh\necho PASS anyway\n' > "$F/d1/check-bootstrap-stage9.shs"
+  printf '%s/d1/check-off.shs\n' "$F" > "$F/b1.txt"
+
+  # 1. clean tree against a matching baseline must PASS
+  classify "$F/d1" "$F/u1.txt"; read_baseline "$F/b1.txt" "$F/rb1.txt"
+  compare "$F/u1.txt" "$F/rb1.txt" "$C_TOTAL"; rc=$EV_RC
+  if [ "$rc" -ne 0 ] || [ "$EV_CHECKED" -ne 4 ] || [ "$C_EXEMPT" -ne 1 ]; then
+    echo "selftest FIXTURE 1 (clean must PASS) failed: rc=$rc checked=$EV_CHECKED exempt=$C_EXEMPT [$EV_VERDICT]" >&2; fail=1
+  fi
+
+  # 2. a NEW non-conforming PASS script must FAIL naming it
+  printf '#!/bin/sh\necho PASS\n' > "$F/d1/check-newoff.shs"
+  classify "$F/d1" "$F/u2.txt"
+  compare "$F/u2.txt" "$F/rb1.txt" "$C_TOTAL"; rc=$EV_RC
+  case "$EV_VERDICT" in *check-newoff.shs*) hit=1 ;; *) hit=0 ;; esac
+  if [ "$rc" -ne 1 ] || [ "$hit" -ne 1 ]; then
+    echo "selftest FIXTURE 2 (new offender must FAIL naming it) failed: rc=$rc [$EV_VERDICT]" >&2; fail=1
+  fi
+  rm -f "$F/d1/check-newoff.shs"
+
+  # 3. a baselined script that now carries the convention must FAIL as stale
+  printf '%s/d1/check-off.shs\n%s/d1/check-conv.shs\n' "$F" "$F" > "$F/b3.txt"
+  classify "$F/d1" "$F/u3.txt"; read_baseline "$F/b3.txt" "$F/rb3.txt"
+  compare "$F/u3.txt" "$F/rb3.txt" "$C_TOTAL"; rc=$EV_RC
+  case "$EV_VERDICT" in *"stale baseline"*check-conv.shs*) hit=1 ;; *) hit=0 ;; esac
+  if [ "$rc" -ne 1 ] || [ "$hit" -ne 1 ]; then
+    echo "selftest FIXTURE 3 (repaired baselined script must FAIL stale) failed: rc=$rc [$EV_VERDICT]" >&2; fail=1
+  fi
+
+  # 4. an empty scan must force ERROR (never a vacuous pass)
+  mkdir -p "$F/d4"
+  classify "$F/d4" "$F/u4.txt"; read_baseline "$F/b4-missing.txt" "$F/rb4.txt"
+  compare "$F/u4.txt" "$F/rb4.txt" "$C_TOTAL"; rc=$EV_RC
+  if [ "$rc" -ne 2 ] || [ "$EV_CHECKED" -ne 0 ]; then
+    echo "selftest FIXTURE 4 (empty scan must ERROR) failed: rc=$rc [$EV_VERDICT]" >&2; fail=1
+  fi
+
+  if [ "$fail" -ne 0 ]; then
+    echo "ERROR — nothing was checked: selftest failed, guard is untrustworthy" >&2
+    echo "ERROR — nothing was checked: selftest failed, guard is untrustworthy"
+    exit 2
+  fi
+  echo "selftest: 4/4 fixtures OK" >&2
+}
+
+# --- argument parsing -------------------------------------------------------
+MODE=scan
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest)          MODE=selftest ;;
+    --generate-baseline) MODE=generate ;;
+    --root)              shift; SCAN_ROOT="${1:-}" ;;
+    --baseline)          shift; BASELINE="${1:-}" ;;
+    -h|--help)           sed -n '1,80p' "$0"; exit 0 ;;
+    *) echo "ERROR — nothing was checked: unknown argument '$1'"; exit 2 ;;
+  esac
+  shift
+done
+
+selftest
+if [ "$MODE" = selftest ]; then
+  echo "PASS — 4 selftest fixture(s) checked, 0 failures"
+  exit 0
+fi
+
+classify "$SCAN_ROOT" "$W/cur.txt"
+
+if [ "$MODE" = generate ]; then
+  if [ "$C_TOTAL" -eq 0 ]; then
+    echo "ERROR — nothing was checked: 0 check scripts scanned; refusing to write a baseline"
+    exit 2
+  fi
+  n=$(wc -l < "$W/cur.txt" | tr -d ' ')
+  {
+    echo "# Frozen baseline: check scripts that print PASS WITHOUT the non-vacuity"
+    echo "# convention ('PASS — <n> checked' / 'ERROR — nothing was checked' exit 2)."
+    echo "# Generated by: sh scripts/check/check-script-non-vacuity.shs --generate-baseline"
+    echo "# DELIBERATE, REVIEWED updates only — do not regenerate to hide a FAIL."
+    echo "# Repairing a listed script requires REMOVING its row (stale-baseline rule)."
+    cat "$W/cur.txt"
+  } > "$BASELINE"
+  echo "PASS — $C_TOTAL script(s) checked, baseline of $n offender(s) written to $BASELINE"
+  exit 0
+fi
+
+read_baseline "$BASELINE" "$W/base.txt"
+compare "$W/cur.txt" "$W/base.txt" "$C_TOTAL"
+echo "$EV_VERDICT"
+exit "$EV_RC"

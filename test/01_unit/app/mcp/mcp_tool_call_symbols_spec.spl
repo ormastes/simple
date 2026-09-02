@@ -1,0 +1,47 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-FEATURE
+"""
+# MCP tools/call returns a CORRECT result, not merely a non-empty one
+
+Pins the 2026-09-01 Windows fix in `_mcp_find_simple_binary`
+(`src/app/mcp/main_lazy_query_tools.spl`): the probe order tried Unix
+artifact paths first, so a stale `release/x86_64-unknown-linux-gnu/simple`
+won on Windows and every child invocation died with "cannot execute binary
+file" — `simple_symbols` answered `isError:true` for every file. The
+assertions require the two known symbols of the fixture to come back by
+name, so an empty `[]` or an error payload fails.
+"""
+
+use std.spec.step
+use app.io.mod (file_write, shell, is_windows_platform)
+
+describe "simple-mcp tools/call":
+    it "simple_symbols returns the fixture's real symbols":
+        # @req REQ-SSPEC-FEATURE
+        step("write a fixture with two known functions")
+        val fixture = "fn spec_probe_add(a: i64, b: i64) -> i64:\n    return a + b\n\nfn spec_probe_main():\n    print(spec_probe_add(2, 3))\n"
+        file_write("mcp_symbols_spec_fixture_tmp.spl", fixture)
+
+        step("initialize, then call simple_symbols on it")
+        val req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"0\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_symbols\",\"arguments\":{\"path\":\"mcp_symbols_spec_fixture_tmp.spl\"}}}\n"
+        file_write("mcp_symbols_spec_req_tmp.txt", req)
+        val launch = if is_windows_platform():
+            "bin\\simple.cmd run src\\app\\mcp\\main.spl < mcp_symbols_spec_req_tmp.txt 2>nul"
+        else:
+            "bin/simple run src/app/mcp/main.spl < mcp_symbols_spec_req_tmp.txt 2>/dev/null"
+        val result = shell(launch)
+        val output = result.stdout ?? ""
+        val exit_code = result.exit_code ?? 1
+        shell(if is_windows_platform(): "del mcp_symbols_spec_fixture_tmp.spl mcp_symbols_spec_req_tmp.txt" else: "rm -f mcp_symbols_spec_fixture_tmp.spl mcp_symbols_spec_req_tmp.txt")
+
+        step("clean exit with a result for the call id")
+        expect(exit_code).to_equal(0)
+        expect(output).to_contain("\"id\":2")
+        expect(output).to_contain("\"result\"")
+
+        step("the result names BOTH fixture symbols — correctness, not non-emptiness")
+        expect(output).to_contain("spec_probe_add")
+        expect(output).to_contain("spec_probe_main")
+        step("and it is not a tool error")
+        assert_false(output.contains("isError"))
+        assert_false(output.contains("Could not list symbols"))

@@ -1035,6 +1035,7 @@ mod ptr_read_u8_tests {
         assert!(rt_page_size(&[Value::Int(1)]).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn maps_protects_and_unmaps_host_memory() {
         let mapped = rt_mmap_raw(&[

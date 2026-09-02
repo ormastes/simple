@@ -1,21 +1,71 @@
 #!/bin/sh
 # Cache admission may not spread raw filesystem/directory contracts.
-set -eu
+set -u
+
+_checked=0
+_fails=""
+_fail() { _fails="${_fails}${_fails:+; }$1"; }
+chk() { # chk <label> <expected> <actual>
+    _checked=$((_checked + 1))
+    [ "$2" = "$3" ] || _fail "$1 (expected $2, actual $3)"
+}
+chk_grep() { # chk_grep <label> <pattern> <file>
+    _checked=$((_checked + 1))
+    grep -q -- "$2" "$3"
+    rc=$?
+    [ "$rc" -eq 0 ] || _fail "$1 (pattern absent: $2)"
+}
+chk_ngrep() { # chk_ngrep <label> <pattern> <file>
+    _checked=$((_checked + 1))
+    grep -q -- "$2" "$3"
+    rc=$?
+    [ "$rc" -ne 0 ] || _fail "$1 (forbidden pattern present: $2)"
+}
+chk_le() { # chk_le <label> <ceiling> <actual>
+    _checked=$((_checked + 1))
+    [ "$3" -le "$2" ] || _fail "$1 (ceiling $2, actual $3)"
+}
+require_module() {
+    [ -f "$1" ] || { echo "ERROR — nothing was checked (audited module missing: $1)"; exit 2; }
+}
+verdict() { # verdict <summary>
+    if [ "$_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    if [ -n "$_fails" ]; then
+        echo "FAIL — $_fails"
+        exit 1
+    fi
+    echo "PASS — $_checked assertion(s) checked${1:+; $1}"
+    exit 0
+}
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 module="$root/src/compiler/80.driver/cache/gc/admission.spl"
+require_module "$module"
 
-test "$(grep -c '^extern fn rt_' "$module")" -eq 4
+owners=$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")
+externs=$(grep -c '^extern fn rt_' "$module")
 tagged=$(awk '/^@unsafe\(.*capabilities: \[ffi\]\)$/ { tagged=1; next }
     /^extern fn rt_/ { if (tagged) count++ }
     { tagged=0 }
     END { print count + 0 }' "$module")
-test "$tagged" -eq 4
-test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 4
-test "$(grep -Ec '^        rt_' "$module")" -eq 4
-grep -q '^use std.nogc_sync_mut.io_runtime.{file_read_nullable}$' "$module"
-! grep -q '^extern fn rt_file_read_text' "$module"
-! grep -q 'file_read_nullable(path) ?? ""' "$module"
-grep -q 'E-SFFI-CACHE-PINS-READ' "$module"
+# Every unsafe(ffi) block must wrap exactly one call on the next line. This is
+# the stable invariant: the raw-owner count is unchanged when a direct rt_*
+# extern is migrated to a typed std alias (commit 1b0172a392a). Counting
+# '^extern fn rt_' instead made this audit fail on a legitimate migration.
+wrapped=$(awk '/unsafe\(capabilities: \[ffi\]\):/ { want=1; next }
+    want { if ($0 ~ /^        [A-Za-z_][A-Za-z_0-9]*\(/) count++; want=0 }
+    END { print count + 0 }' "$module")
 
-echo 'cache admission SFFI authority: PASS (four inlined raw owners; nullable pin reads)'
+chk "raw-owner unsafe(ffi) block count" 4 "$owners"
+chk "each unsafe(ffi) block wraps exactly one call" "$owners" "$wrapped"
+chk "every 'extern fn rt_' carries an @unsafe(capabilities: [ffi]) tag" "$externs" "$tagged"
+chk_le "raw rt_* extern declarations (ratchet ceiling; migration may only lower it)" 4 "$externs"
+chk_grep "canonical nullable-read facade imported" '^use std.nogc_sync_mut.io_runtime.{file_read_nullable}$' "$module"
+chk_ngrep "no duplicate raw text-read binding" '^extern fn rt_file_read_text' "$module"
+chk_ngrep "pin read must not swallow errors with ?? \"\"" 'file_read_nullable(path) ?? ""' "$module"
+chk_grep "pin read sentinel-failure code present" 'E-SFFI-CACHE-PINS-READ' "$module"
+
+verdict "four inlined raw owners; nullable pin reads"
